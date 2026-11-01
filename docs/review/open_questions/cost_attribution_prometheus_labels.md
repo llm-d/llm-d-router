@@ -5,14 +5,8 @@ description: "Whether tenant, workload, and user cost-attribution identifiers be
 tags: [observability, "open-question", "unr-08"]
 status: draft
 sources:
-  - id: "pr-2834"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2834"
-    author: "human:simanadler"
-    last_modified: "2026-09-14T07:55:53Z"
-  - id: "pr-2834-r4032724626"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2834#discussion_r4032724626"
-    author: "human:gyliu513"
-    last_modified: "2026-09-17T03:07:51Z"
+  - { id: "pr-2834", resource: "https://github.com/llm-d/llm-d-router/pull/2834", author: "human:simanadler", last_modified: "2026-09-14T07:55:53Z" }
+  - { id: "pr-2834-r4032724626", resource: "https://github.com/llm-d/llm-d-router/pull/2834#discussion_r4032724626", author: "human:gyliu513", last_modified: "2026-09-17T03:07:51Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

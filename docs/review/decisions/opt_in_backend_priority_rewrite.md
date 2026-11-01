@@ -5,14 +5,8 @@ description: "Overwriting or stripping client-supplied priority fields on forwar
 tags: ["maintainer-vs-maintainer", "mvm-24"]
 status: stable
 sources:
-  - id: "pr-2265-r3825571633"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2265#discussion_r3825571633"
-    author: "human:zetxqx"
-    last_modified: "2026-08-20T21:40:45Z"
-  - id: "pr-2265-r3906042639"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2265#discussion_r3906042639"
-    author: "human:ahg-g"
-    last_modified: "2026-09-01T16:11:13Z"
+  - { id: "pr-2265-r3825571633", resource: "https://github.com/llm-d/llm-d-router/pull/2265#discussion_r3825571633", author: "human:zetxqx", last_modified: "2026-08-20T21:40:45Z" }
+  - { id: "pr-2265-r3906042639", resource: "https://github.com/llm-d/llm-d-router/pull/2265#discussion_r3906042639", author: "human:ahg-g", last_modified: "2026-09-01T16:11:13Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

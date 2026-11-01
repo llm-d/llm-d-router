@@ -5,14 +5,8 @@ description: "End-user deployments ship through config/charts Helm charts while 
 tags: ["maintainer-vs-maintainer", "mvm-09"]
 status: stable
 sources:
-  - id: "issue-1177"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1177"
-    author: "human:ahg-g"
-    last_modified: "2026-05-17T21:01:28Z"
-  - id: "issue-1177-ic-4478503514"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1177#issuecomment-4478503514"
-    author: "human:shmuelk"
-    last_modified: "2026-05-18T14:08:19Z"
+  - { id: "issue-1177", resource: "https://github.com/llm-d/llm-d-router/issues/1177", author: "human:ahg-g", last_modified: "2026-05-17T21:01:28Z" }
+  - { id: "issue-1177-ic-4478503514", resource: "https://github.com/llm-d/llm-d-router/issues/1177#issuecomment-4478503514", author: "human:shmuelk", last_modified: "2026-05-18T14:08:19Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

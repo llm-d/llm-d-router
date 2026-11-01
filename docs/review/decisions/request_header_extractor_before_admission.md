@@ -5,14 +5,8 @@ description: "Caller identity headers are extracted into request attributes befo
 tags: ["maintainer-vs-maintainer", "mvm-16"]
 status: stable
 sources:
-  - id: "issue-1450-ic-4604976814"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1450#issuecomment-4604976814"
-    author: "human:liu-cong"
-    last_modified: "2026-06-02T17:14:08Z"
-  - id: "issue-1450-ic-4701681953"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1450#issuecomment-4701681953"
-    author: "human:elevran"
-    last_modified: "2026-06-14T12:03:03Z"
+  - { id: "issue-1450-ic-4604976814", resource: "https://github.com/llm-d/llm-d-router/issues/1450#issuecomment-4604976814", author: "human:liu-cong", last_modified: "2026-06-02T17:14:08Z" }
+  - { id: "issue-1450-ic-4701681953", resource: "https://github.com/llm-d/llm-d-router/issues/1450#issuecomment-4701681953", author: "human:elevran", last_modified: "2026-06-14T12:03:03Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

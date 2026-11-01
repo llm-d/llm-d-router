@@ -5,14 +5,8 @@ description: "Core identity fields live on EndpointMetadata while optional per-e
 tags: ["maintainer-vs-maintainer", "mvm-06"]
 status: stable
 sources:
-  - id: "pr-1106-ic-4478669785"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1106#issuecomment-4478669785"
-    author: "human:elevran"
-    last_modified: "2026-05-18T14:27:01Z"
-  - id: "pr-1106-r3271256891"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1106#discussion_r3271256891"
-    author: "human:ahg-g"
-    last_modified: "2026-05-20T04:41:17Z"
+  - { id: "pr-1106-ic-4478669785", resource: "https://github.com/llm-d/llm-d-router/pull/1106#issuecomment-4478669785", author: "human:elevran", last_modified: "2026-05-18T14:27:01Z" }
+  - { id: "pr-1106-r3271256891", resource: "https://github.com/llm-d/llm-d-router/pull/1106#discussion_r3271256891", author: "human:ahg-g", last_modified: "2026-05-20T04:41:17Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

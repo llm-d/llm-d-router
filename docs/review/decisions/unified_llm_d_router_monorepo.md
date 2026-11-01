@@ -5,14 +5,8 @@ description: "Endpoint Picker, Coordinator, and disaggregation sidecar ship from
 tags: ["maintainer-vs-maintainer", "mvm-04"]
 status: stable
 sources:
-  - id: "issue-929-ic-4421203934"
-    resource: "https://github.com/llm-d/llm-d-router/issues/929#issuecomment-4421203934"
-    author: "human:ahg-g"
-    last_modified: "2026-05-11T13:35:44Z"
-  - id: "issue-929-ic-4428488249"
-    resource: "https://github.com/llm-d/llm-d-router/issues/929#issuecomment-4428488249"
-    author: "human:vMaroon"
-    last_modified: "2026-05-12T08:00:51Z"
+  - { id: "issue-929-ic-4421203934", resource: "https://github.com/llm-d/llm-d-router/issues/929#issuecomment-4421203934", author: "human:ahg-g", last_modified: "2026-05-11T13:35:44Z" }
+  - { id: "issue-929-ic-4428488249", resource: "https://github.com/llm-d/llm-d-router/issues/929#issuecomment-4428488249", author: "human:vMaroon", last_modified: "2026-05-12T08:00:51Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

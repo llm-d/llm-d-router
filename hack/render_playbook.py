@@ -19,6 +19,10 @@ GENERATED_HEADER = (
 )
 
 
+MAX_REPRESENTATIVE_THREADS = 3
+MAX_CITATIONS_PER_RULE = 8
+
+
 def unquote_yaml(val: str) -> str:
     val = val.strip()
     if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
@@ -26,6 +30,20 @@ def unquote_yaml(val: str) -> str:
     if len(val) >= 2 and val[0] == "'" and val[-1] == "'":
         return val[1:-1].replace("''", "'")
     return val
+
+
+def parse_flow_mapping(flow_str: str) -> Dict[str, str]:
+    """Parses a flat YAML flow mapping '{ k1: v1, k2: v2 }' into a dict."""
+    inner = flow_str.strip()[1:-1].strip()
+    mapping: Dict[str, str] = {}
+    if not inner:
+        return mapping
+    for part in re.findall(r'(?:[^,"]|"(?:\\.|[^"])*")+?(?=,|$)', inner):
+        chunk = part.strip()
+        if ":" in chunk:
+            mk, mv = chunk.split(":", 1)
+            mapping[mk.strip()] = unquote_yaml(mv)
+    return mapping
 
 
 def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
@@ -64,9 +82,11 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
                 if sline.startswith("- "):
                     if cur:
                         items.append(cur)
-                    cur = {}
+                        cur = {}
                     kv = sline[2:].strip()
-                    if ":" in kv:
+                    if kv.startswith("{") and kv.endswith("}"):
+                        items.append(parse_flow_mapping(kv))
+                    elif ":" in kv:
                         ik, iv = kv.split(":", 1)
                         cur[ik.strip()] = unquote_yaml(iv)
                 elif ":" in sline:
@@ -81,14 +101,7 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
             inner = rest[1:-1].strip()
             fm[key] = [unquote_yaml(x) for x in inner.split(",")] if inner else []
         elif rest.startswith("{") and rest.endswith("}"):
-            inner = rest[1:-1].strip()
-            mapping: Dict[str, str] = {}
-            if inner:
-                for part in inner.split(","):
-                    if ":" in part:
-                        mk, mv = part.split(":", 1)
-                        mapping[mk.strip()] = unquote_yaml(mv)
-            fm[key] = mapping
+            fm[key] = parse_flow_mapping(rest)
         else:
             fm[key] = unquote_yaml(rest)
         i += 1
@@ -374,11 +387,40 @@ def validate_bundle(bundle_dir: pathlib.Path, repo_root: pathlib.Path) -> List[s
             if fm.get("status", "stable") not in {"draft", "stable", "deprecated"}:
                 errs.append(f"{rel}: invalid status {fm.get('status')!r}")
             sids = {str(s.get("id")) for s in (fm.get("sources") or []) if isinstance(s, dict)}
-            fn_refs = set(re.findall(r"\[\^([a-zA-Z0-9_.-]+)\](?!:)", body))
+            body_without_defs = "\n".join(
+                ln for ln in body.splitlines() if not re.match(r"^\[\^[a-zA-Z0-9_.-]+\]:\s+", ln)
+            )
+            fn_refs = set(re.findall(r"\[\^([a-zA-Z0-9_.-]+)\](?!:)", body_without_defs))
             if fn_refs - sids:
                 errs.append(
                     f"{rel}: footnotes missing from frontmatter sources: {sorted(fn_refs - sids)}"
                 )
+            if sids - fn_refs:
+                errs.append(
+                    f"{rel}: unused source entry in frontmatter sources: {sorted(sids - fn_refs)}"
+                )
+            if md.parent.name == "rules":
+                for rtitle, subs in parse_rule_blocks(body_without_defs):
+                    ev_text = subs.get("Evidence", "")
+                    m_rep = re.search(
+                        r"Representative review threads:((?:\[\^[a-zA-Z0-9_.-]+\])+)", ev_text
+                    )
+                    rep_ids = (
+                        re.findall(r"\[\^([a-zA-Z0-9_.-]+)\]", m_rep.group(1)) if m_rep else []
+                    )
+                    if len(rep_ids) > MAX_REPRESENTATIVE_THREADS:
+                        errs.append(
+                            f"{rel} ({rtitle}): Representative review threads has {len(rep_ids)} "
+                            f"citations (max {MAX_REPRESENTATIVE_THREADS})"
+                        )
+                    rule_refs = set(
+                        re.findall(r"\[\^([a-zA-Z0-9_.-]+)\](?!:)", "\n".join(subs.values()))
+                    )
+                    if len(rule_refs) > MAX_CITATIONS_PER_RULE:
+                        errs.append(
+                            f"{rel} ({rtitle}): rule subsection has {len(rule_refs)} distinct "
+                            f"citations (max {MAX_CITATIONS_PER_RULE})"
+                        )
             idx = md.parent / "index.md"
             if not idx.is_file() or f"({md.name})" not in idx.read_text(encoding="utf-8"):
                 errs.append(f"{rel}: not listed in {idx.relative_to(bundle_abs).as_posix()}")

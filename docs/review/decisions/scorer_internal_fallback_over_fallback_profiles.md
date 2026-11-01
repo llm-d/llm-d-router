@@ -5,14 +5,8 @@ description: "Missing telemetry fallbacks are handled inside individual scorers 
 tags: ["maintainer-vs-maintainer", "mvm-07"]
 status: stable
 sources:
-  - id: "issue-1139"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1139"
-    author: "human:kaushikmitr"
-    last_modified: "2026-05-14T19:10:53Z"
-  - id: "issue-1139-ic-4601790080"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1139#issuecomment-4601790080"
-    author: "human:elevran"
-    last_modified: "2026-06-02T11:11:13Z"
+  - { id: "issue-1139", resource: "https://github.com/llm-d/llm-d-router/issues/1139", author: "human:kaushikmitr", last_modified: "2026-05-14T19:10:53Z" }
+  - { id: "issue-1139-ic-4601790080", resource: "https://github.com/llm-d/llm-d-router/issues/1139#issuecomment-4601790080", author: "human:elevran", last_modified: "2026-06-02T11:11:13Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

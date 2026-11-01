@@ -6,110 +6,27 @@ tags: ["configuration-helm-and-compatibility", "failure-class", "mvm-11", "apw-1
 status: stable
 stale_after: "2027-04-26T00:00:00Z"
 sources:
-  - id: "pr-820-ic-4395649694"
-    resource: "https://github.com/llm-d/llm-d-router/pull/820#issuecomment-4395649694"
-    author: "human:elevran"
-    last_modified: "2026-05-07T08:56:21Z"
-  - id: "pr-842-r3180806498"
-    resource: "https://github.com/llm-d/llm-d-router/pull/842#discussion_r3180806498"
-    author: "human:ahg-g"
-    last_modified: "2026-05-04T10:14:01Z"
-  - id: "pr-905-ic-4351689606"
-    resource: "https://github.com/llm-d/llm-d-router/pull/905#issuecomment-4351689606"
-    author: "human:elevran"
-    last_modified: "2026-04-30T10:29:29Z"
-  - id: "pr-922-ic-4352132975"
-    resource: "https://github.com/llm-d/llm-d-router/pull/922#issuecomment-4352132975"
-    author: "human:elevran"
-    last_modified: "2026-04-30T11:38:54Z"
-  - id: "pr-894-r3151838341"
-    resource: "https://github.com/llm-d/llm-d-router/pull/894#discussion_r3151838341"
-    author: "human:ahg-g"
-    last_modified: "2026-04-28T05:49:19Z"
-  - id: "pr-1254-ic-4512813466"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1254#issuecomment-4512813466"
-    author: "human:ahg-g"
-    last_modified: "2026-05-21T21:12:06Z"
-  - id: "pr-2365-r4241052101"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2365#discussion_r4241052101"
-    author: "human:roytman"
-    last_modified: "2026-10-11T09:26:35Z"
-  - id: "pr-3511-r4379506333"
-    resource: "https://github.com/llm-d/llm-d-router/pull/3511#discussion_r4379506333"
-    author: "human:sagearc"
-    last_modified: "2026-10-26T16:04:27Z"
-  - id: "pr-683-r3143157150"
-    resource: "https://github.com/llm-d/llm-d-router/pull/683#discussion_r3143157150"
-    author: "human:elevran"
-    last_modified: "2026-04-26T07:36:32Z"
-  - id: "pr-707-r3190715413"
-    resource: "https://github.com/llm-d/llm-d-router/pull/707#discussion_r3190715413"
-    author: "human:roytman"
-    last_modified: "2026-05-05T18:33:46Z"
-  - id: "pr-919-r3161391196"
-    resource: "https://github.com/llm-d/llm-d-router/pull/919#discussion_r3161391196"
-    author: "human:hexfusion"
-    last_modified: "2026-04-29T13:35:16Z"
-  - id: "pr-933-r3195228231"
-    resource: "https://github.com/llm-d/llm-d-router/pull/933#discussion_r3195228231"
-    author: "human:shmuelk"
-    last_modified: "2026-05-06T12:00:12Z"
-  - id: "pr-1029-r3243916222"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1029#discussion_r3243916222"
-    author: "human:ahg-g"
-    last_modified: "2026-05-14T19:55:42Z"
-  - id: "pr-1156-r3454102412"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1156#discussion_r3454102412"
-    author: "human:bongwoobak"
-    last_modified: "2026-06-22T17:11:01Z"
-  - id: "issue-1187-ic-5139243431"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1187#issuecomment-5139243431"
-    author: "human:LukeAVanDrie"
-    last_modified: "2026-07-31T04:24:09Z"
-  - id: "issue-1220-ic-4506123176"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1220#issuecomment-4506123176"
-    author: "human:elevran"
-    last_modified: "2026-05-21T08:11:27Z"
-  - id: "issue-924"
-    resource: "https://github.com/llm-d/llm-d-router/issues/924"
-    author: "human:bongwoobak"
-    last_modified: "2026-04-29T18:21:03Z"
-  - id: "pr-1040-ic-4415659669"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1040#issuecomment-4415659669"
-    author: "human:ahg-g"
-    last_modified: "2026-05-10T15:32:51Z"
-  - id: "issue-1042"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1042"
-    author: "human:ahg-g"
-    last_modified: "2026-05-10T15:38:03Z"
-  - id: "pr-1275-r3294949972"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1275#discussion_r3294949972"
-    author: "human:elevran"
-    last_modified: "2026-05-24T16:20:04Z"
-  - id: "pr-1275-r3294998818"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1275#discussion_r3294998818"
-    author: "human:ahg-g"
-    last_modified: "2026-05-24T16:54:32Z"
-  - id: "pr-2961-r4069441791"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2961#discussion_r4069441791"
-    author: "human:yankay"
-    last_modified: "2026-09-22T07:43:50Z"
-  - id: "pr-972-r3178415392"
-    resource: "https://github.com/llm-d/llm-d-router/pull/972#discussion_r3178415392"
-    author: "human:roytman"
-    last_modified: "2026-05-03T16:33:29Z"
-  - id: "pr-2925-r4144921130"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2925#discussion_r4144921130"
-    author: "human:ahg-g"
-    last_modified: "2026-09-30T13:09:45Z"
-  - id: "pr-2925-r4155389367"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2925#discussion_r4155389367"
-    author: "human:hexfusion"
-    last_modified: "2026-10-01T12:34:46Z"
-  - id: "pr-2925-ic-5749511075"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2925#issuecomment-5749511075"
-    author: "human:ahg-g"
-    last_modified: "2026-09-20T11:28:41Z"
+  - { id: "pr-820-ic-4395649694", resource: "https://github.com/llm-d/llm-d-router/pull/820#issuecomment-4395649694", author: "human:elevran", last_modified: "2026-05-07T08:56:21Z" }
+  - { id: "pr-842-r3180806498", resource: "https://github.com/llm-d/llm-d-router/pull/842#discussion_r3180806498", author: "human:ahg-g", last_modified: "2026-05-04T10:14:01Z" }
+  - { id: "pr-905-ic-4351689606", resource: "https://github.com/llm-d/llm-d-router/pull/905#issuecomment-4351689606", author: "human:elevran", last_modified: "2026-04-30T10:29:29Z" }
+  - { id: "pr-894-r3151838341", resource: "https://github.com/llm-d/llm-d-router/pull/894#discussion_r3151838341", author: "human:ahg-g", last_modified: "2026-04-28T05:49:19Z" }
+  - { id: "pr-1254-ic-4512813466", resource: "https://github.com/llm-d/llm-d-router/pull/1254#issuecomment-4512813466", author: "human:ahg-g", last_modified: "2026-05-21T21:12:06Z" }
+  - { id: "pr-2365-r4241052101", resource: "https://github.com/llm-d/llm-d-router/pull/2365#discussion_r4241052101", author: "human:roytman", last_modified: "2026-10-11T09:26:35Z" }
+  - { id: "pr-3511-r4379506333", resource: "https://github.com/llm-d/llm-d-router/pull/3511#discussion_r4379506333", author: "human:sagearc", last_modified: "2026-10-26T16:04:27Z" }
+  - { id: "pr-683-r3143157150", resource: "https://github.com/llm-d/llm-d-router/pull/683#discussion_r3143157150", author: "human:elevran", last_modified: "2026-04-26T07:36:32Z" }
+  - { id: "pr-707-r3190715413", resource: "https://github.com/llm-d/llm-d-router/pull/707#discussion_r3190715413", author: "human:roytman", last_modified: "2026-05-05T18:33:46Z" }
+  - { id: "pr-919-r3161391196", resource: "https://github.com/llm-d/llm-d-router/pull/919#discussion_r3161391196", author: "human:hexfusion", last_modified: "2026-04-29T13:35:16Z" }
+  - { id: "pr-1029-r3243916222", resource: "https://github.com/llm-d/llm-d-router/pull/1029#discussion_r3243916222", author: "human:ahg-g", last_modified: "2026-05-14T19:55:42Z" }
+  - { id: "pr-1156-r3454102412", resource: "https://github.com/llm-d/llm-d-router/pull/1156#discussion_r3454102412", author: "human:bongwoobak", last_modified: "2026-06-22T17:11:01Z" }
+  - { id: "issue-1187-ic-5139243431", resource: "https://github.com/llm-d/llm-d-router/issues/1187#issuecomment-5139243431", author: "human:LukeAVanDrie", last_modified: "2026-07-31T04:24:09Z" }
+  - { id: "issue-924", resource: "https://github.com/llm-d/llm-d-router/issues/924", author: "human:bongwoobak", last_modified: "2026-04-29T18:21:03Z" }
+  - { id: "pr-1040-ic-4415659669", resource: "https://github.com/llm-d/llm-d-router/pull/1040#issuecomment-4415659669", author: "human:ahg-g", last_modified: "2026-05-10T15:32:51Z" }
+  - { id: "pr-1275-r3294949972", resource: "https://github.com/llm-d/llm-d-router/pull/1275#discussion_r3294949972", author: "human:elevran", last_modified: "2026-05-24T16:20:04Z" }
+  - { id: "pr-1275-r3294998818", resource: "https://github.com/llm-d/llm-d-router/pull/1275#discussion_r3294998818", author: "human:ahg-g", last_modified: "2026-05-24T16:54:32Z" }
+  - { id: "pr-2961-r4069441791", resource: "https://github.com/llm-d/llm-d-router/pull/2961#discussion_r4069441791", author: "human:yankay", last_modified: "2026-09-22T07:43:50Z" }
+  - { id: "pr-972-r3178415392", resource: "https://github.com/llm-d/llm-d-router/pull/972#discussion_r3178415392", author: "human:roytman", last_modified: "2026-05-03T16:33:29Z" }
+  - { id: "pr-2925-r4144921130", resource: "https://github.com/llm-d/llm-d-router/pull/2925#discussion_r4144921130", author: "human:ahg-g", last_modified: "2026-09-30T13:09:45Z" }
+  - { id: "pr-2925-r4155389367", resource: "https://github.com/llm-d/llm-d-router/pull/2925#discussion_r4155389367", author: "human:hexfusion", last_modified: "2026-10-01T12:34:46Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
@@ -137,7 +54,7 @@ Renaming or removing unshipped configuration keys, unreleased Helm charts, and i
 
 Observed across 72 pull requests and 12 maintainers in the 2026-04-26 to 2026-10-26 review corpus.
 
-Representative review threads:[^pr-820-ic-4395649694][^pr-842-r3180806498][^pr-905-ic-4351689606][^pr-922-ic-4352132975]
+Representative review threads:[^pr-820-ic-4395649694][^pr-842-r3180806498][^pr-905-ic-4351689606]
 
 ## Decode configuration with strict unknown-field rejection and startup validation
 
@@ -155,7 +72,7 @@ Seed configuration structs from canonical default constructors, decode plugin an
 
 Observed across 65 pull requests and 12 maintainers in the 2026-04-26 to 2026-10-26 review corpus.
 
-Representative review threads:[^pr-683-r3143157150][^pr-707-r3190715413][^pr-919-r3161391196][^pr-933-r3195228231]
+Representative review threads:[^pr-683-r3143157150][^pr-707-r3190715413][^pr-919-r3161391196]
 
 ## Ship safe out-of-the-box defaults and gate workload-sensitive features behind opt-in config
 
@@ -173,7 +90,7 @@ Choose defaults that run within standard memory and CPU budgets without external
 
 Observed across 35 pull requests and 9 maintainers in the 2026-04-26 to 2026-10-26 review corpus.
 
-Representative review threads:[^pr-1029-r3243916222][^pr-1156-r3454102412][^issue-1187-ic-5139243431][^issue-1220-ic-4506123176]
+Representative review threads:[^pr-1029-r3243916222][^pr-1156-r3454102412][^issue-1187-ic-5139243431]
 
 ## Deduplicate Helm chart defaults through shared library templates
 
@@ -194,7 +111,7 @@ Repeating graduated stable Kubernetes API group literals directly in Helm templa
 
 Observed across 52 pull requests and 15 maintainers in the 2026-04-26 to 2026-10-26 review corpus.
 
-Representative review threads:[^issue-924][^pr-1040-ic-4415659669][^issue-1042][^pr-1275-r3294949972]
+Representative review threads:[^issue-924][^pr-1040-ic-4415659669][^pr-1275-r3294949972]
 
 ## Preserve lossless conversion across multi-version CRDs
 
@@ -211,12 +128,11 @@ Serve multi-version CRDs through lossless conversion under a single storage vers
 
 Observed across 13 pull requests and 7 maintainers in the 2026-04-26 to 2026-10-26 review corpus.
 
-Representative review threads:[^pr-972-r3178415392][^pr-2925-r4144921130][^pr-2925-r4155389367][^pr-2925-ic-5749511075]
+Representative review threads:[^pr-972-r3178415392][^pr-2925-r4144921130][^pr-2925-r4155389367]
 
 [^pr-820-ic-4395649694]: [#820](https://github.com/llm-d/llm-d-router/pull/820#issuecomment-4395649694) (human:elevran)
 [^pr-842-r3180806498]: [#842](https://github.com/llm-d/llm-d-router/pull/842#discussion_r3180806498) (human:ahg-g)
 [^pr-905-ic-4351689606]: [#905](https://github.com/llm-d/llm-d-router/pull/905#issuecomment-4351689606) (human:elevran)
-[^pr-922-ic-4352132975]: [#922](https://github.com/llm-d/llm-d-router/pull/922#issuecomment-4352132975) (human:elevran)
 [^pr-894-r3151838341]: [#894](https://github.com/llm-d/llm-d-router/pull/894#discussion_r3151838341) (human:ahg-g)
 [^pr-1254-ic-4512813466]: [#1254](https://github.com/llm-d/llm-d-router/pull/1254#issuecomment-4512813466) (human:ahg-g)
 [^pr-2365-r4241052101]: [#2365](https://github.com/llm-d/llm-d-router/pull/2365#discussion_r4241052101) (human:roytman)
@@ -224,18 +140,14 @@ Representative review threads:[^pr-972-r3178415392][^pr-2925-r4144921130][^pr-29
 [^pr-683-r3143157150]: [#683](https://github.com/llm-d/llm-d-router/pull/683#discussion_r3143157150) (human:elevran)
 [^pr-707-r3190715413]: [#707](https://github.com/llm-d/llm-d-router/pull/707#discussion_r3190715413) (human:roytman)
 [^pr-919-r3161391196]: [#919](https://github.com/llm-d/llm-d-router/pull/919#discussion_r3161391196) (human:hexfusion)
-[^pr-933-r3195228231]: [#933](https://github.com/llm-d/llm-d-router/pull/933#discussion_r3195228231) (human:shmuelk)
 [^pr-1029-r3243916222]: [#1029](https://github.com/llm-d/llm-d-router/pull/1029#discussion_r3243916222) (human:ahg-g)
 [^pr-1156-r3454102412]: [#1156](https://github.com/llm-d/llm-d-router/pull/1156#discussion_r3454102412) (human:bongwoobak)
 [^issue-1187-ic-5139243431]: [#1187](https://github.com/llm-d/llm-d-router/issues/1187#issuecomment-5139243431) (human:LukeAVanDrie)
-[^issue-1220-ic-4506123176]: [#1220](https://github.com/llm-d/llm-d-router/issues/1220#issuecomment-4506123176) (human:elevran)
 [^issue-924]: [#924](https://github.com/llm-d/llm-d-router/issues/924) (human:bongwoobak)
 [^pr-1040-ic-4415659669]: [#1040](https://github.com/llm-d/llm-d-router/pull/1040#issuecomment-4415659669) (human:ahg-g)
-[^issue-1042]: [#1042](https://github.com/llm-d/llm-d-router/issues/1042) (human:ahg-g)
 [^pr-1275-r3294949972]: [#1275](https://github.com/llm-d/llm-d-router/pull/1275#discussion_r3294949972) (human:elevran)
 [^pr-1275-r3294998818]: [#1275](https://github.com/llm-d/llm-d-router/pull/1275#discussion_r3294998818) (human:ahg-g)
 [^pr-2961-r4069441791]: [#2961](https://github.com/llm-d/llm-d-router/pull/2961#discussion_r4069441791) (human:yankay)
 [^pr-972-r3178415392]: [#972](https://github.com/llm-d/llm-d-router/pull/972#discussion_r3178415392) (human:roytman)
 [^pr-2925-r4144921130]: [#2925](https://github.com/llm-d/llm-d-router/pull/2925#discussion_r4144921130) (human:ahg-g)
 [^pr-2925-r4155389367]: [#2925](https://github.com/llm-d/llm-d-router/pull/2925#discussion_r4155389367) (human:hexfusion)
-[^pr-2925-ic-5749511075]: [#2925](https://github.com/llm-d/llm-d-router/pull/2925#issuecomment-5749511075) (human:ahg-g)

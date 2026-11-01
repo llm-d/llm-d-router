@@ -5,14 +5,8 @@ description: "The disaggregation sidecar exposes Prometheus /metrics on its exis
 tags: ["maintainer-vs-maintainer", "mvm-20"]
 status: stable
 sources:
-  - id: "pr-1677-ic-4743512723"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1677#issuecomment-4743512723"
-    author: "human:gyliu513"
-    last_modified: "2026-06-18T15:26:22Z"
-  - id: "pr-1677-ic-4742031723"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1677#issuecomment-4742031723"
-    author: "human:shmuelk"
-    last_modified: "2026-06-18T12:42:12Z"
+  - { id: "pr-1677-ic-4743512723", resource: "https://github.com/llm-d/llm-d-router/pull/1677#issuecomment-4743512723", author: "human:gyliu513", last_modified: "2026-06-18T15:26:22Z" }
+  - { id: "pr-1677-ic-4742031723", resource: "https://github.com/llm-d/llm-d-router/pull/1677#issuecomment-4742031723", author: "human:shmuelk", last_modified: "2026-06-18T12:42:12Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

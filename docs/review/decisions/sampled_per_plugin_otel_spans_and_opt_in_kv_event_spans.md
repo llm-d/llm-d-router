@@ -5,14 +5,8 @@ description: "Request-path filter and scorer OpenTelemetry spans run under ratio
 tags: ["maintainer-vs-maintainer", "mvm-21"]
 status: stable
 sources:
-  - id: "pr-1834-ic-5092454943"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1834#issuecomment-5092454943"
-    author: "human:elevran"
-    last_modified: "2026-07-27T14:14:52Z"
-  - id: "pr-1834-ic-5096359788"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1834#issuecomment-5096359788"
-    author: "human:gyliu513"
-    last_modified: "2026-07-27T20:18:31Z"
+  - { id: "pr-1834-ic-5092454943", resource: "https://github.com/llm-d/llm-d-router/pull/1834#issuecomment-5092454943", author: "human:elevran", last_modified: "2026-07-27T14:14:52Z" }
+  - { id: "pr-1834-ic-5096359788", resource: "https://github.com/llm-d/llm-d-router/pull/1834#issuecomment-5096359788", author: "human:gyliu513", last_modified: "2026-07-27T20:18:31Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

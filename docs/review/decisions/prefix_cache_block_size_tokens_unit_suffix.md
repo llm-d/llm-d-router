@@ -5,14 +5,8 @@ description: "Prefix-cache scorer configuration names the block-size field block
 tags: ["maintainer-vs-maintainer", "mvm-01"]
 status: stable
 sources:
-  - id: "issue-747-ic-4326491096"
-    resource: "https://github.com/llm-d/llm-d-router/issues/747#issuecomment-4326491096"
-    author: "human:roytman"
-    last_modified: "2026-04-27T11:13:27Z"
-  - id: "issue-747-ic-4344420419"
-    resource: "https://github.com/llm-d/llm-d-router/issues/747#issuecomment-4344420419"
-    author: "human:ahg-g"
-    last_modified: "2026-04-29T13:58:46Z"
+  - { id: "issue-747-ic-4326491096", resource: "https://github.com/llm-d/llm-d-router/issues/747#issuecomment-4326491096", author: "human:roytman", last_modified: "2026-04-27T11:13:27Z" }
+  - { id: "issue-747-ic-4344420419", resource: "https://github.com/llm-d/llm-d-router/issues/747#issuecomment-4344420419", author: "human:ahg-g", last_modified: "2026-04-29T13:58:46Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

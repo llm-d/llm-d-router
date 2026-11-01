@@ -5,14 +5,8 @@ description: "Dynamic InferenceObjective priority bands provision off the hot pa
 tags: ["maintainer-vs-maintainer", "mvm-10"]
 status: stable
 sources:
-  - id: "issue-1184"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1184"
-    author: "human:LukeAVanDrie"
-    last_modified: "2026-05-18T06:13:38Z"
-  - id: "issue-1184-ic-4477880575"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1184#issuecomment-4477880575"
-    author: "human:shmuelk"
-    last_modified: "2026-05-18T12:55:40Z"
+  - { id: "issue-1184", resource: "https://github.com/llm-d/llm-d-router/issues/1184", author: "human:LukeAVanDrie", last_modified: "2026-05-18T06:13:38Z" }
+  - { id: "issue-1184-ic-4477880575", resource: "https://github.com/llm-d/llm-d-router/issues/1184#issuecomment-4477880575", author: "human:shmuelk", last_modified: "2026-05-18T12:55:40Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

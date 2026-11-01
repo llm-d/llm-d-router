@@ -5,14 +5,8 @@ description: "Fast byte-length and tokenized prompt estimates live inside token-
 tags: ["maintainer-vs-maintainer", "mvm-15"]
 status: stable
 sources:
-  - id: "pr-1438-r3340589325"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1438#discussion_r3340589325"
-    author: "human:ahg-g"
-    last_modified: "2026-06-02T10:47:20Z"
-  - id: "pr-1438-r3340290186"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1438#discussion_r3340290186"
-    author: "human:vMaroon"
-    last_modified: "2026-06-02T09:56:40Z"
+  - { id: "pr-1438-r3340589325", resource: "https://github.com/llm-d/llm-d-router/pull/1438#discussion_r3340589325", author: "human:ahg-g", last_modified: "2026-06-02T10:47:20Z" }
+  - { id: "pr-1438-r3340290186", resource: "https://github.com/llm-d/llm-d-router/pull/1438#discussion_r3340290186", author: "human:vMaroon", last_modified: "2026-06-02T09:56:40Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

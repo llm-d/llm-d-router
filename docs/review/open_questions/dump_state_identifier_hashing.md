@@ -5,14 +5,8 @@ description: Whether stateful plugin DumpState endpoints hash tenant and program
 tags: ["security-and-trust-boundaries", "open-question", "unr-05"]
 status: draft
 sources:
-  - id: "pr-2008-rev-4759516825"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2008#pullrequestreview-4759516825"
-    author: "human:LukeAVanDrie"
-    last_modified: "2026-07-22T23:07:12Z"
-  - id: "pr-2008-ic-5073212799"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2008#issuecomment-5073212799"
-    author: "human:liu-cong"
-    last_modified: "2026-07-24T18:33:04Z"
+  - { id: "pr-2008-rev-4759516825", resource: "https://github.com/llm-d/llm-d-router/pull/2008#pullrequestreview-4759516825", author: "human:LukeAVanDrie", last_modified: "2026-07-22T23:07:12Z" }
+  - { id: "pr-2008-ic-5073212799", resource: "https://github.com/llm-d/llm-d-router/pull/2008#issuecomment-5073212799", author: "human:liu-cong", last_modified: "2026-07-24T18:33:04Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

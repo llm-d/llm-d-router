@@ -5,14 +5,8 @@ description: "Published container images retain the llm-d-router-* prefix under 
 tags: ["maintainer-vs-maintainer", "mvm-05"]
 status: stable
 sources:
-  - id: "pr-1098-r3242055232"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1098#discussion_r3242055232"
-    author: "human:hexfusion"
-    last_modified: "2026-05-14T14:31:10Z"
-  - id: "pr-1098-r3242552188"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1098#discussion_r3242552188"
-    author: "human:elevran"
-    last_modified: "2026-05-14T15:49:16Z"
+  - { id: "pr-1098-r3242055232", resource: "https://github.com/llm-d/llm-d-router/pull/1098#discussion_r3242055232", author: "human:hexfusion", last_modified: "2026-05-14T14:31:10Z" }
+  - { id: "pr-1098-r3242552188", resource: "https://github.com/llm-d/llm-d-router/pull/1098#discussion_r3242552188", author: "human:elevran", last_modified: "2026-05-14T15:49:16Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

@@ -5,14 +5,8 @@ description: "Whether platforms serving both REST and gRPC inference routes use 
 tags: ["protocol-parsing-and-wire-fidelity", parsers, "unr-11"]
 status: draft
 sources:
-  - id: "pr-3479-r4301544118"
-    resource: "https://github.com/llm-d/llm-d-router/pull/3479#discussion_r4301544118"
-    author: "human:kaushikmitr"
-    last_modified: "2026-10-17T05:24:39Z"
-  - id: "pr-3479-rev-5574188230"
-    resource: "https://github.com/llm-d/llm-d-router/pull/3479#pullrequestreview-5574188230"
-    author: "human:zetxqx"
-    last_modified: "2026-10-19T16:21:55Z"
+  - { id: "pr-3479-r4301544118", resource: "https://github.com/llm-d/llm-d-router/pull/3479#discussion_r4301544118", author: "human:kaushikmitr", last_modified: "2026-10-17T05:24:39Z" }
+  - { id: "pr-3479-rev-5574188230", resource: "https://github.com/llm-d/llm-d-router/pull/3479#pullrequestreview-5574188230", author: "human:zetxqx", last_modified: "2026-10-19T16:21:55Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

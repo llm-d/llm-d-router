@@ -5,14 +5,8 @@ description: "Whether accepted design proposals belong in an in-repo proposals d
 tags: ["scope-and-process", "open-question", "unr-07"]
 status: draft
 sources:
-  - id: "pr-2376-r3832021146"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2376#discussion_r3832021146"
-    author: "human:ahg-g"
-    last_modified: "2026-08-21T16:42:09Z"
-  - id: "pr-2376-r3837894575"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2376#discussion_r3837894575"
-    author: "human:elevran"
-    last_modified: "2026-08-23T06:44:56Z"
+  - { id: "pr-2376-r3832021146", resource: "https://github.com/llm-d/llm-d-router/pull/2376#discussion_r3832021146", author: "human:ahg-g", last_modified: "2026-08-21T16:42:09Z" }
+  - { id: "pr-2376-r3837894575", resource: "https://github.com/llm-d/llm-d-router/pull/2376#discussion_r3837894575", author: "human:elevran", last_modified: "2026-08-23T06:44:56Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

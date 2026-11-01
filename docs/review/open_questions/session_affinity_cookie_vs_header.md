@@ -5,14 +5,8 @@ description: "Whether session affinity state is carried by standard HTTP Set-Coo
 tags: ["security-and-trust-boundaries", "open-question", "unr-01"]
 status: draft
 sources:
-  - id: "issue-28"
-    resource: "https://github.com/llm-d/llm-d-router/issues/28"
-    author: "human:elevran"
-    last_modified: "2025-05-07T17:56:35Z"
-  - id: "pr-600-r3156539950"
-    resource: "https://github.com/llm-d/llm-d-router/pull/600#discussion_r3156539950"
-    author: "human:zetxqx"
-    last_modified: "2026-04-28T19:04:29Z"
+  - { id: "issue-28", resource: "https://github.com/llm-d/llm-d-router/issues/28", author: "human:elevran", last_modified: "2025-05-07T17:56:35Z" }
+  - { id: "pr-600-r3156539950", resource: "https://github.com/llm-d/llm-d-router/pull/600#discussion_r3156539950", author: "human:zetxqx", last_modified: "2026-04-28T19:04:29Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

@@ -5,14 +5,8 @@ description: Whether unmodified upstream Gateway API and GIE CRDs used by verifi
 tags: ["project-direction", "open-question", "unr-03"]
 status: draft
 sources:
-  - id: "pr-1482-ic-4633716490"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1482#issuecomment-4633716490"
-    author: "human:liu-cong"
-    last_modified: "2026-06-05T16:59:52Z"
-  - id: "pr-1482-ic-4661288603"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1482#issuecomment-4661288603"
-    author: "human:elevran"
-    last_modified: "2026-06-09T15:23:11Z"
+  - { id: "pr-1482-ic-4633716490", resource: "https://github.com/llm-d/llm-d-router/pull/1482#issuecomment-4633716490", author: "human:liu-cong", last_modified: "2026-06-05T16:59:52Z" }
+  - { id: "pr-1482-ic-4661288603", resource: "https://github.com/llm-d/llm-d-router/pull/1482#issuecomment-4661288603", author: "human:elevran", last_modified: "2026-06-09T15:23:11Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

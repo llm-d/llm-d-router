@@ -5,18 +5,9 @@ description: "Whether the EPP plugin framework wraps extension-point calls in re
 tags: ["error-handling-and-boundaries", "open-question", "unr-06"]
 status: draft
 sources:
-  - id: "issue-2105"
-    resource: "https://github.com/llm-d/llm-d-router/issues/2105"
-    author: "human:LukeAVanDrie"
-    last_modified: "2026-07-21T00:25:41Z"
-  - id: "issue-2098-ic-5032265086"
-    resource: "https://github.com/llm-d/llm-d-router/issues/2098#issuecomment-5032265086"
-    author: "human:shmuelk"
-    last_modified: "2026-07-21T09:21:03Z"
-  - id: "issue-2098-ic-5028980468"
-    resource: "https://github.com/llm-d/llm-d-router/issues/2098#issuecomment-5028980468"
-    author: "human:LukeAVanDrie"
-    last_modified: "2026-07-21T00:57:58Z"
+  - { id: "issue-2105", resource: "https://github.com/llm-d/llm-d-router/issues/2105", author: "human:LukeAVanDrie", last_modified: "2026-07-21T00:25:41Z" }
+  - { id: "issue-2098-ic-5032265086", resource: "https://github.com/llm-d/llm-d-router/issues/2098#issuecomment-5032265086", author: "human:shmuelk", last_modified: "2026-07-21T09:21:03Z" }
+  - { id: "issue-2098-ic-5028980468", resource: "https://github.com/llm-d/llm-d-router/issues/2098#issuecomment-5028980468", author: "human:LukeAVanDrie", last_modified: "2026-07-21T00:57:58Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

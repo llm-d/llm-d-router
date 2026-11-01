@@ -5,14 +5,8 @@ description: "EPP answers GET /v1/models through the optional models-responder p
 tags: ["maintainer-vs-maintainer", "mvm-22"]
 status: stable
 sources:
-  - id: "issue-1878-ic-4864624197"
-    resource: "https://github.com/llm-d/llm-d-router/issues/1878#issuecomment-4864624197"
-    author: "human:shmuelk"
-    last_modified: "2026-07-02T10:16:39Z"
-  - id: "pr-2308-rev-5453802061"
-    resource: "https://github.com/llm-d/llm-d-router/pull/2308#pullrequestreview-5453802061"
-    author: "human:elevran"
-    last_modified: "2026-10-08T09:12:13Z"
+  - { id: "issue-1878-ic-4864624197", resource: "https://github.com/llm-d/llm-d-router/issues/1878#issuecomment-4864624197", author: "human:shmuelk", last_modified: "2026-07-02T10:16:39Z" }
+  - { id: "pr-2308-rev-5453802061", resource: "https://github.com/llm-d/llm-d-router/pull/2308#pullrequestreview-5453802061", author: "human:elevran", last_modified: "2026-10-08T09:12:13Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

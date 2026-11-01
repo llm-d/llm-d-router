@@ -5,14 +5,8 @@ description: "Whether every decode pod disaggregation sidecar should watch Infer
 tags: ["project-direction", "open-question", "mvm-08"]
 status: draft
 sources:
-  - id: "pr-1145-ic-4479522771"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4479522771"
-    author: "human:elevran"
-    last_modified: "2026-05-18T16:05:58Z"
-  - id: "pr-1145-ic-4489027953"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4489027953"
-    author: "human:ahg-g"
-    last_modified: "2026-05-19T14:55:39Z"
+  - { id: "pr-1145-ic-4479522771", resource: "https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4479522771", author: "human:elevran", last_modified: "2026-05-18T16:05:58Z" }
+  - { id: "pr-1145-ic-4489027953", resource: "https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4489027953", author: "human:ahg-g", last_modified: "2026-05-19T14:55:39Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

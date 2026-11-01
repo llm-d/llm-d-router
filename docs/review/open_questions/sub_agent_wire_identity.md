@@ -5,14 +5,8 @@ description: "How parallel sub-agents supply distinct wire-level identifiers so 
 tags: ["project-direction", "session-state", "unr-10"]
 status: draft
 sources:
-  - id: "pr-3451-ic-6229313371"
-    resource: "https://github.com/llm-d/llm-d-router/pull/3451#issuecomment-6229313371"
-    author: "human:kaushikmitr"
-    last_modified: "2026-10-17T03:54:53Z"
-  - id: "pr-3451-ic-6463413681"
-    resource: "https://github.com/llm-d/llm-d-router/pull/3451#issuecomment-6463413681"
-    author: "human:sudoalok"
-    last_modified: "2026-10-28T07:36:41Z"
+  - { id: "pr-3451-ic-6229313371", resource: "https://github.com/llm-d/llm-d-router/pull/3451#issuecomment-6229313371", author: "human:kaushikmitr", last_modified: "2026-10-17T03:54:53Z" }
+  - { id: "pr-3451-ic-6463413681", resource: "https://github.com/llm-d/llm-d-router/pull/3451#issuecomment-6463413681", author: "human:sudoalok", last_modified: "2026-10-28T07:36:41Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

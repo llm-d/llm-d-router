@@ -5,14 +5,8 @@ description: "Pull request E2E workflows build and run local :dev images rather 
 tags: ["maintainer-vs-maintainer", "mvm-19"]
 status: stable
 sources:
-  - id: "pr-1579-r3409481145"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1579#discussion_r3409481145"
-    author: "human:ahg-g"
-    last_modified: "2026-06-14T11:48:00Z"
-  - id: "pr-1579-r3409523851"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1579#discussion_r3409523851"
-    author: "human:elevran"
-    last_modified: "2026-06-14T12:24:09Z"
+  - { id: "pr-1579-r3409481145", resource: "https://github.com/llm-d/llm-d-router/pull/1579#discussion_r3409481145", author: "human:ahg-g", last_modified: "2026-06-14T11:48:00Z" }
+  - { id: "pr-1579-r3409523851", resource: "https://github.com/llm-d/llm-d-router/pull/1579#discussion_r3409523851", author: "human:elevran", last_modified: "2026-06-14T12:24:09Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

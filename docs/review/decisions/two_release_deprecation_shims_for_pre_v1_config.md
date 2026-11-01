@@ -5,14 +5,8 @@ description: "Shipped user-facing configuration formats preserve backward-compat
 tags: ["maintainer-vs-maintainer", "mvm-11"]
 status: stable
 sources:
-  - id: "pr-1247"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1247"
-    author: "human:ahg-g"
-    last_modified: "2026-05-21T08:51:43Z"
-  - id: "pr-1247-ic-4529235883"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1247#issuecomment-4529235883"
-    author: "human:elevran"
-    last_modified: "2026-05-24T15:54:07Z"
+  - { id: "pr-1247", resource: "https://github.com/llm-d/llm-d-router/pull/1247", author: "human:ahg-g", last_modified: "2026-05-21T08:51:43Z" }
+  - { id: "pr-1247-ic-4529235883", resource: "https://github.com/llm-d/llm-d-router/pull/1247#issuecomment-4529235883", author: "human:elevran", last_modified: "2026-05-24T15:54:07Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

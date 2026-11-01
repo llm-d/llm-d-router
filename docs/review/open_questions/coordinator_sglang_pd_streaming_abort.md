@@ -5,14 +5,8 @@ description: "How the Coordinator scopes SGLang disaggregated /generate routing,
 tags: ["project-direction", coordinator, sglang, "unr-13"]
 status: draft
 sources:
-  - id: "pr-3511"
-    resource: "https://github.com/llm-d/llm-d-router/pull/3511"
-    author: "human:sagearc"
-    last_modified: "2026-10-19T14:33:13Z"
-  - id: "pr-3511-r4377231436"
-    resource: "https://github.com/llm-d/llm-d-router/pull/3511#discussion_r4377231436"
-    author: "human:roytman"
-    last_modified: "2026-10-26T12:32:59Z"
+  - { id: "pr-3511", resource: "https://github.com/llm-d/llm-d-router/pull/3511", author: "human:sagearc", last_modified: "2026-10-19T14:33:13Z" }
+  - { id: "pr-3511-r4377231436", resource: "https://github.com/llm-d/llm-d-router/pull/3511#discussion_r4377231436", author: "human:roytman", last_modified: "2026-10-26T12:32:59Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

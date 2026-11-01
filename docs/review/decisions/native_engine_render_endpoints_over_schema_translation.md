@@ -5,14 +5,8 @@ description: "New inference API integrations target native engine /render routes
 tags: ["maintainer-vs-maintainer", "mvm-14"]
 status: stable
 sources:
-  - id: "pr-1896-rev-4657668118"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1896#pullrequestreview-4657668118"
-    author: "human:sagearc"
-    last_modified: "2026-07-08T20:25:23Z"
-  - id: "pr-1896-ic-4924616643"
-    resource: "https://github.com/llm-d/llm-d-router/pull/1896#issuecomment-4924616643"
-    author: "human:vMaroon"
-    last_modified: "2026-07-09T11:33:43Z"
+  - { id: "pr-1896-rev-4657668118", resource: "https://github.com/llm-d/llm-d-router/pull/1896#pullrequestreview-4657668118", author: "human:sagearc", last_modified: "2026-07-08T20:25:23Z" }
+  - { id: "pr-1896-ic-4924616643", resource: "https://github.com/llm-d/llm-d-router/pull/1896#issuecomment-4924616643", author: "human:vMaroon", last_modified: "2026-07-09T11:33:43Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 

@@ -5,14 +5,8 @@ description: "Cross-plugin data-layer typing uses typed Slot[T] and DataKey hand
 tags: ["maintainer-vs-maintainer", "mvm-03"]
 status: stable
 sources:
-  - id: "pr-883"
-    resource: "https://github.com/llm-d/llm-d-router/pull/883"
-    author: "human:hexfusion"
-    last_modified: "2026-04-24T20:08:42Z"
-  - id: "pr-883-ic-4321888471"
-    resource: "https://github.com/llm-d/llm-d-router/pull/883#issuecomment-4321888471"
-    author: "human:shmuelk"
-    last_modified: "2026-04-26T11:11:52Z"
+  - { id: "pr-883", resource: "https://github.com/llm-d/llm-d-router/pull/883", author: "human:hexfusion", last_modified: "2026-04-24T20:08:42Z" }
+  - { id: "pr-883-ic-4321888471", resource: "https://github.com/llm-d/llm-d-router/pull/883#issuecomment-4321888471", author: "human:shmuelk", last_modified: "2026-04-26T11:11:52Z" }
 generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
