@@ -135,6 +135,14 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 // ParseResponse parses the response body and returns a ParsedResponse
 func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
 	logger := log.FromContext(ctx)
+
+	// The handler calls the parser once more with an empty body when a gRPC
+	// stream ends on its trailer. There is no frame to read, so report no usage
+	// rather than a parse error that would be logged on every completed stream.
+	if len(body) == 0 {
+		return &fwkrh.ParsedResponse{}, nil
+	}
+
 	resp := &pb.GenerateResponse{}
 
 	// Try to parse as GenerateResponse first. If it fails or the response field is nil,

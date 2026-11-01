@@ -31,6 +31,9 @@ func TestLLMDAttributeCompatibility(t *testing.T) {
 	boolValue := true
 	tests := []struct{ got, want attribute.KeyValue }{
 		{LLMDEPPAPISurface("messages"), attribute.Key("llm_d.epp.api_surface").String("messages")},
+		{LLMDEPPAdmissionDecision("admitted"), attribute.Key("llm_d.epp.admission.decision").String("admitted")},
+		{LLMDEPPAdmissionQueueDurationMs(floatValue), attribute.Key("llm_d.epp.admission.queue_duration_ms").Float64(1.25)},
+		{LLMDEPPAdmissionReason("rejected-ttl-expired"), attribute.Key("llm_d.epp.admission.reason").String("rejected-ttl-expired")},
 		{LLMDToolCallingAPISurfaceKey.String("chat_completions"), attribute.Key("llm_d.tool_calling.api_surface").String("chat_completions")},
 		{LLMDToolCallingPresentKey.Bool(true), attribute.Key("llm_d.tool_calling.present").Bool(true)},
 		{LLMDToolCallingToolChoiceKey.String("auto"), attribute.Key("llm_d.tool_calling.tool_choice").String("auto")},

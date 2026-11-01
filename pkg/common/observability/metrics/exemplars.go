@@ -50,11 +50,40 @@ func ObserveWithTraceExemplar(ctx context.Context, observer prometheus.Observer,
 		return
 	}
 
+	labels, ok := traceExemplarLabels(ctx)
+	if !ok {
+		observer.Observe(value)
+		return
+	}
+	exemplarObserver.ObserveWithExemplar(value, labels)
+}
+
+// AddWithTraceExemplar adds to a counter and attaches the request's trace as a
+// Prometheus exemplar, so a jump on an error-rate graph links to a failing
+// request's trace. The exemplar follows the same rules as
+// ObserveWithTraceExemplar.
+func AddWithTraceExemplar(ctx context.Context, counter prometheus.Counter, value float64) {
+	exemplarAdder, ok := counter.(prometheus.ExemplarAdder)
+	if !ok {
+		counter.Add(value)
+		return
+	}
+
+	labels, ok := traceExemplarLabels(ctx)
+	if !ok {
+		counter.Add(value)
+		return
+	}
+	exemplarAdder.AddWithExemplar(value, labels)
+}
+
+// traceExemplarLabels returns the exemplar labels for the span in ctx, or false
+// when the span is not sampled.
+func traceExemplarLabels(ctx context.Context) (prometheus.Labels, bool) {
 	span := trace.SpanFromContext(ctx)
 	spanCtx := span.SpanContext()
 	if !spanCtx.IsSampled() {
-		observer.Observe(value)
-		return
+		return nil, false
 	}
 
 	// trace_id + span_id is 63 runes, under OpenMetrics' 128-rune exemplar limit.
@@ -62,5 +91,5 @@ func ObserveWithTraceExemplar(ctx context.Context, observer prometheus.Observer,
 	if span.IsRecording() {
 		labels[ExemplarSpanIDLabel] = spanCtx.SpanID().String()
 	}
-	exemplarObserver.ObserveWithExemplar(value, labels)
+	return labels, true
 }

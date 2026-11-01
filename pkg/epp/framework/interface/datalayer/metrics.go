@@ -31,6 +31,7 @@ type Metrics struct {
 	// Not useful until vLLM replaces it with a residency signal.
 	WaitingModels map[string]int
 	// MaxActiveModels is the maximum number of adapters the model server can load (max_lora).
+	// It is 0 until the model server has reported it.
 	MaxActiveModels         int
 	RunningRequestsSize     int
 	WaitingQueueSize        int

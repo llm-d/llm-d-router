@@ -132,13 +132,14 @@ func TestProcessRequestMetricsByAPISurface(t *testing.T) {
 func TestProcessCountsModelServerErrorFromResponseStatus(t *testing.T) {
 	tests := []struct {
 		name      string
-		key       string
-		value     string
+		header    *configPb.HeaderValue
 		wantCount float64
 	}{
-		{name: "Envoy pseudo-header with an error status", key: ":status", value: "502", wantCount: 1},
-		{name: "Envoy pseudo-header with 200", key: ":status", value: "200", wantCount: 0},
-		{name: "plain status header with an error status", key: "status", value: "502", wantCount: 1},
+		{name: "Envoy pseudo-header with an error status", header: &configPb.HeaderValue{Key: ":status", RawValue: []byte("502")}, wantCount: 1},
+		{name: "Envoy pseudo-header with 200", header: &configPb.HeaderValue{Key: ":status", RawValue: []byte("200")}, wantCount: 0},
+		{name: "plain status header with an error status", header: &configPb.HeaderValue{Key: "status", RawValue: []byte("502")}, wantCount: 1},
+		{name: "pseudo-header in Value with an error status", header: &configPb.HeaderValue{Key: ":status", Value: "502"}, wantCount: 1},
+		{name: "pseudo-header in Value with 200", header: &configPb.HeaderValue{Key: ":status", Value: "200"}, wantCount: 0},
 	}
 
 	for _, tt := range tests {
@@ -152,9 +153,7 @@ func TestProcessCountsModelServerErrorFromResponseStatus(t *testing.T) {
 				reqs: []*extProcPb.ProcessingRequest{{
 					Request: &extProcPb.ProcessingRequest_ResponseHeaders{
 						ResponseHeaders: &extProcPb.HttpHeaders{
-							Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
-								{Key: tt.key, RawValue: []byte(tt.value)},
-							}},
+							Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{tt.header}},
 						},
 					},
 				}},

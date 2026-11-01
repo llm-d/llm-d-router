@@ -270,9 +270,37 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 		return []byte(body.Embeddings.Input.PlainText()), nil
 	case body.Generate != nil && body.Generate.Text != "":
 		return []byte(body.Generate.Text), nil
+	case body.Images != nil:
+		return []byte(imageGenerationText(body.Images)), nil
+	case body.AudioGenerate != nil:
+		return []byte(audioGenerateText(body.AudioGenerate)), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}
+}
+
+// imageGenerationText joins an images-generations/edits request's prompt with
+// its negative prompt: both are encoded through the same text path for
+// classifier-free guidance, so both carry real input cost. A blank negative
+// prompt is treated as absent, matching how diffusion pipelines skip
+// classifier-free guidance entirely when it carries no text.
+func imageGenerationText(r *fwkrh.ImagesGenerationsRequest) string {
+	if strings.TrimSpace(r.NegativePrompt) == "" {
+		return r.Prompt
+	}
+	return r.Prompt + "\n" + r.NegativePrompt
+}
+
+// audioGenerateText joins an audio-generate request's prompt with its
+// negative prompt: both are encoded through the same text path for
+// classifier-free guidance, so both carry real input cost. A blank negative
+// prompt is treated as absent, matching how diffusion pipelines skip
+// classifier-free guidance entirely when it carries no text.
+func audioGenerateText(r *fwkrh.AudioGenerateRequest) string {
+	if strings.TrimSpace(r.NegativePrompt) == "" {
+		return r.Input
+	}
+	return r.Input + "\n" + r.NegativePrompt
 }
 
 // chatCompletionsBytes flattens roles + text into pseudo-token bytes, folding

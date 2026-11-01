@@ -158,15 +158,17 @@ func (s *SessionIDHeader) Consumes() plugin.DataDependencies {
 	return plugin.DataDependencies{Optional: optional}
 }
 
-// boundPodPresence records, for one request, whether the session's bound pod
-// was present in the candidate set scored. PreRequest reads this so it can
-// tell a genuine absence from the picker merely choosing a different pod.
+// boundPodPresence records, for one request, which pod the session was bound
+// to and whether it was present in the candidate set scored. PreRequest reads
+// this so it can tell a genuine absence from the picker merely choosing a
+// different pod, and ignore an absence of a pod the session has since left.
 type boundPodPresence struct {
+	podName string
 	present bool
 }
 
 func (b *boundPodPresence) Clone() plugin.StateData {
-	return &boundPodPresence{present: b.present}
+	return &boundPodPresence{podName: b.podName, present: b.present}
 }
 
 // NewSessionIDHeader builds the shared session_id strategy implementation and
@@ -264,7 +266,7 @@ func (s *SessionIDHeader) Choose(ctx context.Context, request *scheduling.Infere
 	}
 
 	if podName != "" {
-		s.pluginState.Write(request.RequestID, s.pluginKey, &boundPodPresence{present: target != nil})
+		s.pluginState.Write(request.RequestID, s.pluginKey, &boundPodPresence{podName: podName, present: target != nil})
 	}
 
 	if target == nil {
@@ -323,11 +325,12 @@ func (s *SessionIDHeader) PreRequest(ctx context.Context, request *scheduling.In
 		return
 	}
 
-	// Migrate only on a confirmed absence recorded by this request's own Choose
-	// call. A missing record (e.g. a concurrent first-bind race) is not treated
-	// as absence, so it never forces a migration.
+	// Migrate only on a confirmed absence of the currently bound pod, recorded by
+	// this request's own Choose call. A missing record (e.g. a concurrent
+	// first-bind race) is not treated as absence, and neither is a record about
+	// a pod a concurrent request has already migrated the session away from.
 	present, err := plugin.ReadPluginStateKey[*boundPodPresence](s.pluginState, request.RequestID, s.pluginKey)
-	if err != nil || present == nil || present.present {
+	if err != nil || present == nil || present.present || present.podName != existing.podName {
 		return
 	}
 

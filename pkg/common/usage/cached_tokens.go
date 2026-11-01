@@ -30,12 +30,28 @@ import (
 )
 
 type cachedTokensUsageRewriter struct {
-	header       http.Header
-	cachedTokens int
-	wroteHeader  bool
-	streaming    bool
-	streamBuffer []byte
-	jsonBuffer   []byte
+	header        http.Header
+	cachedTokens  *int
+	onUsage       func(block map[string]any)
+	dropUsageOnly bool
+	wroteHeader   bool
+	streaming     bool
+	streamBuffer  []byte
+	jsonBuffer    []byte
+}
+
+// Options selects what the response writer does with the usage blocks it sees.
+type Options struct {
+	// CachedTokens, when set, is written into every usage block as its
+	// cached-token count (see NewCachedTokensResponseWriter).
+	CachedTokens *int
+	// OnUsage is called with each usage block the response carries, decoded,
+	// before any rewrite. Streamed responses can carry more than one.
+	OnUsage func(block map[string]any)
+	// DropUsageOnlyFrame drops a streamed chat or completions chunk that
+	// carries usage and no choices, for a stream whose include_usage the
+	// coordinator added itself so the client never asked for that frame.
+	DropUsageOnlyFrame bool
 }
 
 // usageKey is the JSON key that must be present before a frame can carry usage.
@@ -57,10 +73,20 @@ var usageKey = []byte(`"` + reqcommon.FieldUsage + `"`)
 func NewCachedTokensResponseWriter(
 	w http.ResponseWriter, cachedTokens int, streaming bool,
 ) (http.ResponseWriter, func() error) {
+	return NewResponseWriter(w, Options{CachedTokens: &cachedTokens}, streaming)
+}
+
+// NewResponseWriter wraps w according to opts. See NewCachedTokensResponseWriter
+// for the streaming flag and the returned flush function.
+func NewResponseWriter(
+	w http.ResponseWriter, opts Options, streaming bool,
+) (http.ResponseWriter, func() error) {
 	rewriter := &cachedTokensUsageRewriter{
-		header:       w.Header(),
-		cachedTokens: cachedTokens,
-		streaming:    streaming,
+		header:        w.Header(),
+		cachedTokens:  opts.CachedTokens,
+		onUsage:       opts.OnUsage,
+		dropUsageOnly: opts.DropUsageOnlyFrame,
+		streaming:     streaming,
 	}
 	// httpsnoop preserves optional ResponseWriter interfaces such as
 	// http.Flusher, http.Hijacker, http.Pusher, and io.ReaderFrom.
@@ -99,27 +125,12 @@ func (r *cachedTokensUsageRewriter) writeHeader(next httpsnoop.WriteHeaderFunc, 
 
 func (r *cachedTokensUsageRewriter) write(next httpsnoop.WriteFunc, body []byte) (int, error) {
 	if !r.streaming {
-		return r.writeJSON(next, body)
-	}
-	updated := r.rewriteSSEChunk(body)
-	if !r.wroteHeader {
-		r.header.Del("Content-Length")
-	}
-	n, err := next(updated)
-	if err != nil {
-		return n, err
-	}
-	return len(body), nil
-}
-
-func (r *cachedTokensUsageRewriter) writeJSON(next httpsnoop.WriteFunc, body []byte) (int, error) {
-	// ReverseProxy may split one JSON document across multiple Write calls.
-	r.jsonBuffer = append(r.jsonBuffer, body...)
-	updated, ok := replaceCachedTokensJSON(r.jsonBuffer, r.cachedTokens)
-	if !ok {
+		// ReverseProxy may split one JSON document across many Write calls; it is
+		// parsed once, by flushJSONBuffer.
+		r.jsonBuffer = append(r.jsonBuffer, body...)
 		return len(body), nil
 	}
-	r.jsonBuffer = nil
+	updated := r.rewriteSSEChunk(body)
 	if !r.wroteHeader {
 		r.header.Del("Content-Length")
 	}
@@ -151,8 +162,8 @@ func (r *cachedTokensUsageRewriter) readFrom(next httpsnoop.WriteFunc, src io.Re
 	if err != nil {
 		return 0, err
 	}
-	_, err = r.write(next, body)
-	if err != nil {
+	r.jsonBuffer = append(r.jsonBuffer, body...)
+	if err := r.flushJSONBuffer(next); err != nil {
 		return 0, err
 	}
 	return int64(len(body)), nil
@@ -177,8 +188,10 @@ func (r *cachedTokensUsageRewriter) rewriteSSEChunk(body []byte) []byte {
 		}
 		// Upstream may split chunks mid-event; only rewrite complete SSE lines.
 		line := r.streamBuffer[:lineEnd+1]
-		replacedLine, _ := replaceCachedTokensSSELine(line, r.cachedTokens)
-		updated = append(updated, replacedLine...)
+		replacedLine, _, drop := r.processSSELine(line)
+		if !drop {
+			updated = append(updated, replacedLine...)
+		}
 		r.streamBuffer = r.streamBuffer[lineEnd+1:]
 	}
 	return updated
@@ -190,8 +203,11 @@ func (r *cachedTokensUsageRewriter) flushSSEBuffer(next httpsnoop.WriteFunc) err
 	}
 	// EOF without a final newline is malformed SSE, but forward it rather than
 	// dropping bytes. If it is a data line, still try to apply the usage rewrite.
-	replacedLine, _ := replaceCachedTokensSSELine(r.streamBuffer, r.cachedTokens)
+	replacedLine, _, drop := r.processSSELine(r.streamBuffer)
 	r.streamBuffer = nil
+	if drop {
+		return nil
+	}
 	_, err := next(replacedLine)
 	return err
 }
@@ -200,7 +216,7 @@ func (r *cachedTokensUsageRewriter) flushJSONBuffer(next httpsnoop.WriteFunc) er
 	if len(r.jsonBuffer) == 0 {
 		return nil
 	}
-	updated := replaceCachedTokens(r.jsonBuffer, r.cachedTokens)
+	updated := r.process(r.jsonBuffer)
 	r.jsonBuffer = nil
 	if !r.wroteHeader {
 		r.header.Del("Content-Length")
@@ -253,36 +269,50 @@ func intValue(value any) (int, bool) {
 	}
 }
 
+// The replaceCachedTokens* functions are the cached-token rewrite alone, with
+// no observer and no frame dropping.
 func replaceCachedTokens(body []byte, cachedTokens int) []byte {
+	return (&cachedTokensUsageRewriter{cachedTokens: &cachedTokens}).process(body)
+}
+
+func replaceCachedTokensSSELine(line []byte, cachedTokens int) ([]byte, bool) {
+	updated, isData, _ := (&cachedTokensUsageRewriter{cachedTokens: &cachedTokens}).processSSELine(line)
+	return updated, isData
+}
+
+// process applies the rewriter to a complete body: a JSON document first,
+// otherwise SSE lines.
+func (r *cachedTokensUsageRewriter) process(body []byte) []byte {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
-	// Prefer full JSON first; streamed responses are handled line-by-line below.
-	if updated, ok := replaceCachedTokensJSON(body, cachedTokens); ok {
+	if updated, ok := r.processJSON(body); ok {
 		return updated
 	}
-	if updated, ok := replaceCachedTokensSSE(body, cachedTokens); ok {
+	if updated, ok := r.processSSE(body); ok {
 		return updated
 	}
 	return body
 }
 
-func replaceCachedTokensJSON(body []byte, cachedTokens int) ([]byte, bool) {
-	var response map[string]any
-	if err := json.Unmarshal(body, &response); err != nil {
+// processJSON handles one JSON document. Only the usage block is decoded: the
+// rest of the document is passed through as raw JSON, so values outside usage
+// keep the key order and number formatting the worker sent. The block is
+// reported to the observer, then rewritten if a cached-token count is set.
+// ok is false when body is not a JSON object.
+func (r *cachedTokensUsageRewriter) processJSON(body []byte) ([]byte, bool) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil || response == nil {
 		return nil, false
 	}
-	if !setCachedTokens(response, cachedTokens) {
+	block, wrapper := r.observe(response)
+	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
 		return body, true
 	}
-	updated, err := json.Marshal(response)
-	if err != nil {
-		return body, true
-	}
-	return updated, true
+	return marshalWithUsage(response, wrapper, block, body), true
 }
 
-func replaceCachedTokensSSE(body []byte, cachedTokens int) ([]byte, bool) {
+func (r *cachedTokensUsageRewriter) processSSE(body []byte) ([]byte, bool) {
 	lines := bytes.SplitAfter(body, []byte("\n"))
 	updated := make([]byte, 0, len(body))
 	changed := false
@@ -292,12 +322,16 @@ func replaceCachedTokensSSE(body []byte, cachedTokens int) ([]byte, bool) {
 		if len(line) == 0 {
 			continue
 		}
-		replacedLine, ok := replaceCachedTokensSSELine(line, cachedTokens)
-		if !ok {
+		replacedLine, isData, drop := r.processSSELine(line)
+		if !isData {
 			updated = append(updated, replacedLine...)
 			continue
 		}
 		processed = true
+		if drop {
+			changed = true
+			continue
+		}
 		if !bytes.Equal(replacedLine, line) {
 			changed = true
 		}
@@ -313,35 +347,128 @@ func replaceCachedTokensSSE(body []byte, cachedTokens int) ([]byte, bool) {
 	return updated, true
 }
 
-func replaceCachedTokensSSELine(line []byte, cachedTokens int) ([]byte, bool) {
+// processSSELine handles one SSE line. isData is true for a data: line, which
+// is the only kind that can carry usage. drop is true when the line is a
+// usage-only chunk the coordinator asked for itself and the client should not
+// see; the returned line is then meaningless.
+func (r *cachedTokensUsageRewriter) processSSELine(line []byte) (out []byte, isData bool, drop bool) {
 	trimmedLine := bytes.TrimRight(line, "\r\n")
 	lineEnding := line[len(trimmedLine):]
 	data, ok := bytes.CutPrefix(trimmedLine, []byte(reqcommon.SSEDataPrefix))
 	if !ok {
-		return line, false
+		return line, false, false
 	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte(reqcommon.SSEDoneMarker)) {
-		return line, true
+		return line, true, false
 	}
 	if !bytes.Contains(data, usageKey) {
 		// No usage in this frame, so unmarshalling it could not change anything.
-		return line, true
+		return line, true, false
 	}
 	// Only JSON data frames can carry usage; other SSE frames pass through.
-	replacedData, isJSON := replaceCachedTokensJSON(data, cachedTokens)
-	if !isJSON {
-		return line, true
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(data, &response); err != nil || response == nil {
+		return line, true, false
+	}
+	block, wrapper := r.observe(response)
+	if r.dropUsageOnly && block != nil && wrapper == "" && hasEmptyChoices(response) {
+		return nil, true, true
+	}
+	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
+		return line, true, false
 	}
 	updated := make([]byte, 0, len(line))
 	updated = append(updated, []byte(reqcommon.SSEDataPrefix)...)
-	updated = append(updated, replacedData...)
+	updated = append(updated, marshalWithUsage(response, wrapper, block, data)...)
 	updated = append(updated, lineEnding...)
-	return updated, true
+	return updated, true, false
 }
 
-func setCachedTokens(response map[string]any, cachedTokens int) bool {
-	block, ok := response[reqcommon.FieldUsage].(map[string]any)
+// observe decodes the usage block a response carries and reports it to the
+// observer. It is the top-level "usage" for chat, completions, generate and
+// the final Responses and Messages objects; "response.usage" for Responses
+// stream events; "message.usage" for the Messages message_start event. wrapper
+// names the object that holds a nested block and is empty for a top-level one.
+// A null usage, which Responses sends on its early events, counts as absent.
+func (r *cachedTokensUsageRewriter) observe(response map[string]json.RawMessage) (block map[string]any, wrapper string) {
+	if raw, ok := response[reqcommon.FieldUsage]; ok {
+		if err := json.Unmarshal(raw, &block); err != nil {
+			block = nil
+		}
+	}
+	if block == nil {
+		for _, key := range []string{fieldResponse, fieldMessage} {
+			raw, ok := response[key]
+			if !ok {
+				continue
+			}
+			var inner map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &inner); err != nil {
+				continue
+			}
+			var nested map[string]any
+			if err := json.Unmarshal(inner[reqcommon.FieldUsage], &nested); err == nil && nested != nil {
+				block, wrapper = nested, key
+				break
+			}
+		}
+	}
+	if block != nil && r.onUsage != nil {
+		r.onUsage(block)
+	}
+	return block, wrapper
+}
+
+// rewritable reports whether the cached-token rewrite applies to a usage block
+// found under wrapper: the top-level block, and response.usage on Responses
+// stream events such as response.completed.
+func rewritable(wrapper string) bool {
+	return wrapper == "" || wrapper == fieldResponse
+}
+
+// marshalWithUsage re-encodes response with block as its usage, or as the
+// usage of response[wrapper] when wrapper is set, leaving every other value as
+// the raw JSON it arrived as. On an encoding error the original bytes are
+// returned unchanged.
+func marshalWithUsage(response map[string]json.RawMessage, wrapper string, block map[string]any, original []byte) []byte {
+	usage, err := json.Marshal(block)
+	if err != nil {
+		return original
+	}
+	if wrapper != "" {
+		var inner map[string]json.RawMessage
+		if err := json.Unmarshal(response[wrapper], &inner); err != nil {
+			return original
+		}
+		inner[reqcommon.FieldUsage] = usage
+		if usage, err = json.Marshal(inner); err != nil {
+			return original
+		}
+		response[wrapper] = usage
+	} else {
+		response[reqcommon.FieldUsage] = usage
+	}
+	updated, err := json.Marshal(response)
+	if err != nil {
+		return original
+	}
+	return updated
+}
+
+// hasEmptyChoices reports whether a streamed chat or completions chunk is the
+// trailing usage frame vLLM sends for stream_options.include_usage: an empty
+// choices list beside the usage block.
+func hasEmptyChoices(response map[string]json.RawMessage) bool {
+	raw, ok := response[fieldChoices]
 	if !ok {
+		return false
+	}
+	var choices []json.RawMessage
+	return json.Unmarshal(raw, &choices) == nil && len(choices) == 0
+}
+
+func setCachedTokens(block map[string]any, cachedTokens int) bool {
+	if block == nil {
 		return false
 	}
 	details, ok := tokenDetails(block)

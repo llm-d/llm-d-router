@@ -72,17 +72,18 @@ func TestForwardedHeaders_RequestIDDoesNotDuplicateOnRestamp(t *testing.T) {
 func TestForwardedHeaders_ExcludesHopByHopAndContentHeaders(t *testing.T) {
 	rc := &RequestContext{
 		OriginalHeaders: http.Header{
-			"Connection":     {"keep-alive"},
-			"Content-Length": {"42"},
-			"Host":           {"example.com"},
-			"Content-Type":   {"application/json"},
-			"X-Request-Id":   {"abc-123"},
+			"Connection":      {"keep-alive"},
+			"Content-Length":  {"42"},
+			"Host":            {"example.com"},
+			"Content-Type":    {"application/json"},
+			"Accept-Encoding": {"gzip, deflate, br"},
+			"X-Request-Id":    {"abc-123"},
 		},
 	}
 
 	out := rc.ForwardedHeaders()
 
-	for _, excluded := range []string{"connection", "content-length", "host", "content-type"} {
+	for _, excluded := range []string{"connection", "content-length", "host", "content-type", "accept-encoding"} {
 		if _, ok := out[excluded]; ok {
 			t.Errorf("header %q should be excluded from forwarded headers", excluded)
 		}

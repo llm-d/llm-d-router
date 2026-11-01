@@ -32,6 +32,12 @@ const (
 	LLMDECProxyEncoderCandidatesKey = attribute.Key("llm_d.ec_proxy.encoder_candidates")
 	// LLMDECProxyEncoderCountKey: Allowed encoder count in EC proxy.
 	LLMDECProxyEncoderCountKey = attribute.Key("llm_d.ec_proxy.encoder_count")
+	// LLMDEPPAdmissionDecisionKey: The admission decision: admitted or rejected; absent if the request failed before admission.
+	LLMDEPPAdmissionDecisionKey = attribute.Key("llm_d.epp.admission.decision")
+	// LLMDEPPAdmissionQueueDurationMsKey: The Flow Control queue time in milliseconds of a dispatched request.
+	LLMDEPPAdmissionQueueDurationMsKey = attribute.Key("llm_d.epp.admission.queue_duration_ms")
+	// LLMDEPPAdmissionReasonKey: The rejection's dropped-reason header value, else its error code.
+	LLMDEPPAdmissionReasonKey = attribute.Key("llm_d.epp.admission.reason")
 	// LLMDEPPAPISurfaceKey: The external inference API.
 	LLMDEPPAPISurfaceKey = attribute.Key("llm_d.epp.api_surface")
 	// LLMDEPPDisaggReasonKey: Disaggregation reason.
@@ -299,6 +305,21 @@ func LLMDECProxyEncoderCandidates(value int) attribute.KeyValue {
 // LLMDECProxyEncoderCount: Allowed encoder count in EC proxy.
 func LLMDECProxyEncoderCount(value int) attribute.KeyValue {
 	return LLMDECProxyEncoderCountKey.Int(value)
+}
+
+// LLMDEPPAdmissionDecision: The admission decision: admitted or rejected; absent if the request failed before admission.
+func LLMDEPPAdmissionDecision(value string) attribute.KeyValue {
+	return LLMDEPPAdmissionDecisionKey.String(value)
+}
+
+// LLMDEPPAdmissionQueueDurationMs: The Flow Control queue time in milliseconds of a dispatched request.
+func LLMDEPPAdmissionQueueDurationMs(value float64) attribute.KeyValue {
+	return LLMDEPPAdmissionQueueDurationMsKey.Float64(value)
+}
+
+// LLMDEPPAdmissionReason: The rejection's dropped-reason header value, else its error code.
+func LLMDEPPAdmissionReason(value string) attribute.KeyValue {
+	return LLMDEPPAdmissionReasonKey.String(value)
 }
 
 // LLMDEPPAPISurface: The external inference API.

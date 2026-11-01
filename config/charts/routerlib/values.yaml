@@ -36,6 +36,17 @@ epp:
   # Container-level securityContext for the EPP container.
   securityContext: {}
 
+  # Container lifecycle for the EPP container, rendered verbatim. When unset
+  # or null, the chart renders a preStop sleep of 5 seconds on Kubernetes
+  # >= 1.30 so endpoint removal propagates before SIGTERM. Set to override
+  # the hook. The EPP image is distroless, so an exec hook requires an image
+  # that ships a shell. Set to an empty map ({}) to disable the hook and
+  # render no lifecycle at all.
+  # lifecycle:
+  #   preStop:
+  #     exec:
+  #       command: ["/bin/sh", "-c", "drain.sh"]
+
   # Overrides the EPP Deployment's spec.strategy. All-active mode and autoscaling
   # default to RollingUpdate (maxUnavailable: 0, maxSurge: 1); otherwise Recreate.
   #
@@ -52,10 +63,12 @@ epp:
   #     maxUnavailable: 1
   #     maxSurge: 0
 
-  # PodDisruptionBudget for the EPP Deployment. Disabled while unset; enabling it without a
+  # PodDisruptionBudget for EPP pods. Disabled while unset; enabling it without a
   # disruption field, or with both, fails the render, and minAvailable >= 1 with fewer than 2
-  # effective replicas (replicas, or autoscaling.minReplicas when autoscaled) also fails: a
-  # single-replica Deployment with minAvailable: 1 can never satisfy its budget, so every
+  # effective replicas (replicas, autoscaling.minReplicas when autoscaled,
+  # preferredReplicas + defaultReplicas with GKE preferredBackends, or
+  # primaryReplicas + standbyReplicas with priorityRouting) also fails: a
+  # single-replica workload with minAvailable: 1 can never satisfy its budget, so every
   # voluntary disruption -- node drains above all -- blocks until the timeout. The EPP pod in
   # sidecar proxy mode is governed by THIS budget alone; the proxy needs no separate one.
   #
@@ -160,6 +173,21 @@ proxy:
   #   enabled: true
   #   minAvailable: 1
 
+  # Container lifecycle for the proxy container, rendered verbatim in both
+  # sidecar and service mode. When unset or null, the chart renders a
+  # preStop sleep of 5 seconds on Kubernetes >= 1.30 so endpoint removal
+  # propagates before SIGTERM. Set to override the hook, for example an
+  # httpGet hook that fails Envoy's health check via its admin endpoint and
+  # lets active connections drain (requires an admin listener configured in
+  # the Envoy config and its port exposed in proxy.ports). The Envoy image is
+  # distroless, so an exec hook requires an image that ships a shell. Set to
+  # an empty map ({}) to disable the hook and render no lifecycle at all.
+  # lifecycle:
+  #   preStop:
+  #     httpGet:
+  #       path: /healthcheck/fail
+  #       port: admin
+
 # Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` (Python) or
 # `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and
 # `/v1/chat/completions/render` over loopback HTTP to EPP. modelName is passed as the first
@@ -174,7 +202,7 @@ tokenizer:
   image:
     registry: docker.io
     repository: vllm/vllm-openai-cpu
-    tag: v0.19.1
+    tag: v0.31.0
     pullPolicy: IfNotPresent
   port: 8000
   command: []

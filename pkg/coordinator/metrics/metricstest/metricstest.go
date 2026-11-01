@@ -72,6 +72,27 @@ func RequireHistogramAbsent(t *testing.T, reg *prometheus.Registry, name string,
 		"expected no %s series for %v: the label set was never observed", name, labels)
 }
 
+// HistogramExemplarLabels returns the labels of the exemplars attached to the
+// buckets of the histogram series matching name and labels, one map per
+// exemplar. A series without exemplars returns nothing.
+func HistogramExemplarLabels(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) []map[string]string {
+	t.Helper()
+	var found []map[string]string
+	for _, m := range histogramSeriesAll(t, reg, name, labels) {
+		for _, bucket := range m.GetHistogram().GetBucket() {
+			if bucket.Exemplar == nil {
+				continue
+			}
+			set := map[string]string{}
+			for _, l := range bucket.Exemplar.GetLabel() {
+				set[l.GetName()] = l.GetValue()
+			}
+			found = append(found, set)
+		}
+	}
+	return found
+}
+
 func histogramSeriesAll(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string) []*dto.Metric {
 	t.Helper()
 	mfs, err := reg.Gather()

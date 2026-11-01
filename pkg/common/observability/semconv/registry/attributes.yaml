@@ -34,6 +34,26 @@ groups:
         stability: development
         annotations:
           go.name: LLMDECProxyEncoderCount
+      - id: llm_d.epp.admission.decision
+        type: string
+        brief: "The admission decision: admitted or rejected; absent if the request failed before admission."
+        stability: development
+        examples: ["admitted"]
+        annotations:
+          go.name: LLMDEPPAdmissionDecision
+      - id: llm_d.epp.admission.queue_duration_ms
+        type: double
+        brief: "The Flow Control queue time in milliseconds of a dispatched request."
+        stability: development
+        annotations:
+          go.name: LLMDEPPAdmissionQueueDurationMs
+      - id: llm_d.epp.admission.reason
+        type: string
+        brief: "The rejection's dropped-reason header value, else its error code."
+        stability: development
+        examples: ["rejected-ttl-expired"]
+        annotations:
+          go.name: LLMDEPPAdmissionReason
       - id: llm_d.epp.api_surface
         type: string
         brief: "The external inference API."

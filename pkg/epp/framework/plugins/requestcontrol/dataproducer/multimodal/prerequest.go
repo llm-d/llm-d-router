@@ -226,3 +226,9 @@ func (p *Producer) targetEncodeEndpoints(ctx context.Context, schedulingResult *
 	}
 	return nil
 }
+
+// RequestAbandoned releases the per-request state when the request is abandoned
+// before reaching PreRequest.
+func (p *Producer) RequestAbandoned(_ context.Context, request *scheduling.InferenceRequest) {
+	p.pluginState.Delete(request.RequestID)
+}

@@ -88,6 +88,11 @@ The endpoint serves plain HTTP by default. Pass `--metrics-cert-dir` with a dire
 metrics listener does not fall back to HTTP. The metrics TLS setting is independent of
 `--secure-serving` and `--cert-path`, which apply to the sidecar data-plane listener.
 
+The endpoint negotiates OpenMetrics, the only exposition format that can carry exemplars. A
+scraper that does not ask for it keeps receiving the classic text format. No series is renamed,
+since every sidecar counter already ends in `_total`; see [Exemplars](#exemplars) for what the
+format change means for a scrape.
+
 Configuring the metrics listener controls scraping; field checks and trace attributes do not
 require that listener.
 
@@ -104,6 +109,7 @@ The `fairness_id` label, populated from the `x-llm-d-inference-fairness-id` head
 identity, has a cap that defaults to 1000 distinct values. Configure it with
 `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id` to `other`. Caps
 apply over the lifetime of the process. Once a cap is reached, new values are reported as `other`.
+`default-flow`, the ID given to requests that have none, keeps its own label unless the limit is 0.
 These bounds apply whether or not the `flowControl` feature gate is enabled. When Flow Control is
 enabled, its series for a `fairness_id` are removed when the corresponding flow is garbage collected.
 
@@ -115,7 +121,8 @@ lifecycle handled by the router.
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests processed after successful parsing and scheduling. |
-| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. |
+| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_outcome_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `outcome`, `reason` | Requests by how they ended. See [Request outcomes](#request-outcomes). |
 | `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | End-to-end request latency on response completion. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Request body size. |
 | `llm_d_epp_response_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Response body size. |
@@ -209,16 +216,66 @@ Longer ladders increase series cardinality and can affect rolling-upgrade query 
   time, so a query window spanning both can combine two bucket layouts until the rollout
   finishes.
 
+#### Request outcomes
+
+`llm_d_epp_request_outcome_total` counts each request once, when its stream ends. It covers requests
+whose body reached the EPP and whose ending the EPP observes.
+
+| `outcome` | Meaning | `reason` |
+|---|---|---|
+| `completed` | The model server answered with status 200 and the response finished. | empty |
+| `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated`. |
+| `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
+| `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
+| `failed` | Any other error, before or after dispatch, including a response status other than 200 or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
+
+When more than one applies, `evicted` wins over the error that ends the stream, and an error or a
+non-200 status wins over `cancelled`, unless the error only says the client left while queued.
+
+Routes that skip response processing, such as `/render`, are not counted because the EPP stops
+observing them once they are routed. `llm_d_epp_request_total` still counts them, but it does not
+count requests that fail or are rejected before dispatch, so compare outcomes with each other rather
+than with `llm_d_epp_request_total`.
+
+Flow Control uses "evicted" for requests removed from its queue before dispatch. Those requests end
+as `rejected` here, with a reason such as `rejected-ttl-expired`, unless the client left while queued,
+which ends as `cancelled`.
+
+With the disaggregation coordinator, each phase is a separate EPP request and is counted on its own,
+except phases on routes that skip response processing.
+
+#### Per-tenant view
+
+Every request metric carries `fairness_id`, so per-tenant load can be read from existing series.
+Scope these queries to one pool, for example by its scrape `job`.
+
+```promql
+# Requests in flight per tenant (dispatched, plus queued when Flow Control is enabled).
+sum by (fairness_id) (llm_d_epp_request_running)
+sum by (fairness_id) (llm_d_epp_flow_control_queue_size)
+
+# Each tenant's share of in-flight requests. Sums across EPP replicas before dividing.
+sum by (fairness_id) (llm_d_epp_request_running) / scalar(sum(llm_d_epp_request_running))
+
+# Token rate per tenant. Recorded only when a response reports usage, so cancelled or evicted
+# streams may add nothing; a missing observation is not zero usage.
+sum by (fairness_id) (rate(llm_d_epp_request_input_tokens_sum[5m]))
+sum by (fairness_id) (rate(llm_d_epp_request_output_tokens_sum[5m]))
+
+# How each tenant's requests ended.
+sum by (fairness_id, outcome) (rate(llm_d_epp_request_outcome_total[5m]))
+```
+
 #### Exemplars
 
-Latency histograms whose notes say they carry a trace exemplar attach the request's
-trace context to each observation as a Prometheus exemplar, so a point on a latency
-graph can be opened as the trace behind it.
+Metrics whose notes say they carry a trace exemplar attach the request's trace context
+to each observation as a Prometheus exemplar, so a point on a latency graph, or a jump
+in the error rate, can be opened as the trace behind it.
 
 | Exemplar label | Present when |
 |---|---|
 | `trace_id` | The request's trace is sampled. |
-| `span_id` | EPP tracing is on. With it off, only `trace_id` is attached. |
+| `span_id` | The observing component's tracing is on. With it off, only `trace_id` is attached. |
 
 Two things are needed to see them:
 
@@ -534,7 +591,8 @@ A request whose render call fails is routed without a tokenized prompt, so prefi
 skipped for it. A saturated render endpoint shows as a rising `timeout` rate with durations at the
 render budget, while a render endpoint that is down shows `connection` failures with short
 durations. The plugin also logs render failures at error level with the elapsed time and the
-configured timeout, at most once every 10 seconds per plugin instance.
+configured timeout, at most once every 10 seconds per plugin instance. Each line carries
+`suppressed`, the number of failures since the previous line that were not logged.
 
 ### Multimodal encoder cache
 
@@ -549,6 +607,67 @@ cache lookups.
 | `llm_d_epp_encoder_cache_queries_total` | Counter | `plugin_type`, `plugin_name`, `modality` | Encoder-cache lookups. |
 | `llm_d_epp_encoder_cache_hits_total` | Counter | `plugin_type`, `plugin_name`, `pod`, `modality` | Encoder-cache hits. |
 | `llm_d_epp_encoder_cache_hit_ratio` | Histogram | `plugin_type`, `plugin_name` | Hit ratio. |
+
+### Fairness ID resolution
+
+These counters record the fairness ID the EPP resolved for each request and where it came from.
+They count when the ID is resolved, before admission, so requests that admission rejects are
+included. Requests that fail earlier, such as a body that cannot be parsed, are not.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_fairness_id_resolved_total` | Counter | `fairness_id`, `source`, `inference_pool` | Requests by resolved fairness ID and its source. |
+| `llm_d_epp_fairness_id_overflow_total` | Counter | `source`, `inference_pool` | Requests whose `fairness_id` label was folded to `other` by the cap. Created at 0 for every source on startup. |
+
+`source` is one of:
+
+- `header`: the `x-llm-d-inference-fairness-id` header, or its deprecated name
+  `x-gateway-inference-fairness-id`.
+- `agent_identity`: no header, and the agent identity plugin supplied an ID.
+- `default`: neither, so the request uses `default-flow`.
+
+`inference_pool` is the pool the EPP serves, the same value as the `name` label on the inference
+pool metrics. Flow Control metrics leave `inference_pool` empty when the EPP runs without
+`--pool-name`, so the two do not join in that case.
+
+The current header name is read first. If it is present, even with an empty value, the deprecated
+name is ignored, and an empty value falls back to agent identity or `default-flow`. A gateway in
+front of the EPP should set the fairness ID itself and overwrite any client-supplied value under
+both header names.
+
+The `fairness_id` label uses the shared cap described in [Metrics catalog](#metrics-catalog).
+Scheduling and Flow Control always use the original ID; only the label is folded. Per replica:
+
+- `fairness_id` takes at most cap + 2 values (`default-flow` and `other` on top of the cap).
+  `llm_d_epp_fairness_id_resolved_total` has about cap + 3 series, and at most 2 × cap + 5 when
+  the same IDs arrive from both the header and agent identity.
+- Cap slots are not freed until the EPP restarts. Short-lived agent session IDs can fill the cap,
+  after which new header IDs are folded too.
+- A client that sends `default-flow` or `other` as its ID is counted with `source="header"`. A
+  literal `other` takes a cap slot like any new ID, and counts as overflow once the cap is full.
+
+```promql
+# Share of requests per source. A high default share means callers are not sending an ID.
+sum by (inference_pool, source) (rate(llm_d_epp_fairness_id_resolved_total[5m]))
+  / ignoring(source) group_left sum by (inference_pool) (rate(llm_d_epp_fairness_id_resolved_total[5m]))
+
+# Requests whose ID was folded by the cap.
+sum by (inference_pool, source) (rate(llm_d_epp_fairness_id_overflow_total[5m]))
+```
+
+[`rules/fairness-id-rules.yaml`](rules/fairness-id-rules.yaml) has recording rules that count
+distinct fairness IDs per pool, deduplicated across EPP replicas:
+
+| Rule | Value |
+|---|---|
+| `llm_d:epp_named_fairness_ids:count5m` | Header IDs that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
+| `llm_d:epp_named_fairness_ids:incomplete5m` | 1 when header IDs were folded in the same window, so the count is a lower bound; otherwise 0. |
+| `llm_d:epp_agent_sessions:count5m` | Agent identity IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source="agent_identity"}` increases. |
+
+The rules group by `namespace` and `inference_pool`, so the scrape must attach a `namespace`
+label. Change `5m` for a different window. An ID is missed when all of its requests went to a
+replica that was removed before Prometheus scraped it. To check the rules after editing them, run
+`promtool test rules hack/testdata/fairness-id-rules-test.yaml`.
 
 ### Program-aware fairness
 
@@ -846,6 +965,9 @@ These metrics are owned by the EPP ext_proc server.
 
 These metrics belong to `inflight-load-producer`. They are registered only when the producer is
 configured. The producer updates the per-endpoint gauges when requests are admitted and released.
+
+Endpoint removal prunes its series. Late releases do not recreate deleted series or change the
+load reported for a replacement endpoint with the same labels.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|

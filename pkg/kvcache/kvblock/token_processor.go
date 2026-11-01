@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"strconv"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/fxamacker/cbor/v2"
@@ -93,6 +94,13 @@ type TokenProcessor interface {
 	// It returns a slice of generated Keys.
 	TokensToKVBlockKeys(
 		parentKey BlockHash, tokens []uint32, modelName string,
+		extraFeatures []*BlockExtraFeatures,
+	) ([]BlockHash, error)
+
+	// TokensToBigramKVBlockKeys hashes overlapping pages of blockSize+1 raw
+	// tokens, representing blockSize cached positions and one lookahead token.
+	TokensToBigramKVBlockKeys(
+		parentKey BlockHash, tokens []uint32, blockSize int, modelName string,
 		extraFeatures []*BlockExtraFeatures,
 	) ([]BlockHash, error)
 
@@ -333,6 +341,36 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 	extraFeatures []*BlockExtraFeatures,
 ) ([]BlockHash, error) {
 	chunks := db.chunkTokens(tokens)
+	keys, err := db.chunksToKVBlockKeys(parentKey, chunks, modelName, extraFeatures, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%w (blockSizeTokens=%d, tokens=%d)", err, db.BlockSizeTokens, len(tokens))
+	}
+	return keys, nil
+}
+
+// TokensToBigramKVBlockKeys hashes complete SGLang bigram pages.
+func (db *chunkedTokenDatabase) TokensToBigramKVBlockKeys(
+	parentKey BlockHash, tokens []uint32, blockSize int, modelName string,
+	extraFeatures []*BlockExtraFeatures,
+) ([]BlockHash, error) {
+	if blockSize <= 0 {
+		return nil, fmt.Errorf("bigram block size must be greater than 0, got %d", blockSize)
+	}
+	chunks := make([][]uint32, 0, max(0, (len(tokens)-1)/blockSize))
+	for i := 0; blockSize < len(tokens)-i; i += blockSize {
+		chunks = append(chunks, tokens[i:i+blockSize+1])
+	}
+	keys, err := db.chunksToKVBlockKeys(parentKey, chunks, modelName, extraFeatures, blockSize)
+	if err != nil {
+		return nil, fmt.Errorf("%w (blockSizeTokens=%d, tokens=%d)", err, blockSize, len(tokens))
+	}
+	return keys, nil
+}
+
+func (db *chunkedTokenDatabase) chunksToKVBlockKeys(
+	parentKey BlockHash, chunks [][]uint32, modelName string,
+	extraFeatures []*BlockExtraFeatures, bigramBlockSize int,
+) ([]BlockHash, error) {
 	if len(chunks) == 0 {
 		return nil, nil
 	}
@@ -347,13 +385,21 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 		currentParentHash = uint64(parentKey)
 	} else {
 		currentParentHash = db.getInitHash(modelName, digest)
+		if bigramBlockSize > 0 {
+			// Separate bigram pages from plain blocks and other page geometries.
+			format := []*BlockExtraFeatures{{MMHashes: []MMHash{
+				{Hash: "sglang-bigram"},
+				{Hash: strconv.Itoa(bigramBlockSize)},
+			}}}
+			currentParentHash = db.prefixHashes(currentParentHash, [][]uint32{nil}, format, digest)[0]
+		}
 	}
 
 	if extraFeatures == nil {
 		extraFeatures = make([]*BlockExtraFeatures, len(chunks))
 	} else if len(extraFeatures) != len(chunks) {
-		return nil, fmt.Errorf("extraFeatures length %d does not match token chunk count %d (blockSizeTokens=%d, tokens=%d)",
-			len(extraFeatures), len(chunks), db.BlockSizeTokens, len(tokens))
+		return nil, fmt.Errorf("extraFeatures length %d does not match token chunk count %d",
+			len(extraFeatures), len(chunks))
 	}
 
 	ph := db.prefixHashes(currentParentHash, chunks, extraFeatures, digest)

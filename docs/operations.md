@@ -84,9 +84,10 @@ before receiving each other's updates; this does not provide an atomic
 cluster-wide admission quota. Request-level `GetOrSet` coordination does not
 reserve capacity across different requests.
 
-During a Redis outage, EPP can start and continue scheduling with cached peer
-state until it expires, then with local load only. Request-level coordination
-calls return Redis errors. Set `stateTTL` above the observed interval between
+During a Redis outage, EPP can start, and it keeps scheduling with the last peer
+state it read, plus its own live load, until Redis is reachable again. An EPP
+that has not read peer state yet uses local load only. Request-level
+coordination calls return Redis errors. Set `stateTTL` above the observed interval between
 successful endpoint refreshes, including latency variation; see the
 [Redis syncer README](../pkg/epp/framework/plugins/datalayer/cross_plugin/redis/README.md)
 for transport restrictions and publisher timing.

@@ -37,6 +37,9 @@ Custom llm-d router trace attributes.
 | `llm_d.ec_proxy.encode_disaggregation_used` | `boolean` | Whether encode disaggregation was used. | `LLMDECProxyEncodeDisaggregationUsed` |
 | `llm_d.ec_proxy.encoder_candidates` | `int` | Candidate encoder count in EC proxy. | `LLMDECProxyEncoderCandidates` |
 | `llm_d.ec_proxy.encoder_count` | `int` | Allowed encoder count in EC proxy. | `LLMDECProxyEncoderCount` |
+| `llm_d.epp.admission.decision` | `string` | The admission decision: admitted or rejected; absent if the request failed before admission. | `LLMDEPPAdmissionDecision` |
+| `llm_d.epp.admission.queue_duration_ms` | `double` | The Flow Control queue time in milliseconds of a dispatched request. | `LLMDEPPAdmissionQueueDurationMs` |
+| `llm_d.epp.admission.reason` | `string` | The rejection's dropped-reason header value, else its error code. | `LLMDEPPAdmissionReason` |
 | `llm_d.epp.api_surface` | `string` | The external inference API. | `LLMDEPPAPISurface` |
 | `llm_d.epp.disagg.reason` | `string` | Disaggregation reason. | `LLMDEPPDisaggReason` |
 | `llm_d.epp.encode.disaggregation_used` | `boolean` | Whether encode disaggregation was used. | `LLMDEPPEncodeDisaggregationUsed` |

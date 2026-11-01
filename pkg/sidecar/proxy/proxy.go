@@ -254,7 +254,7 @@ func (c Config) String() string {
 // absent); the APIType selects the fields that cap the prefill request.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
 
-type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType)
 
 // Server is the reverse proxy server
 type Server struct {
@@ -604,14 +604,17 @@ func (s *Server) createProxyHandler(
 	urlPrefix string,
 	insecureSkipVerify bool,
 ) (http.Handler, error) {
+	// Backward compatible behavior: trim `http:` prefix. Trim before the cache
+	// lookup so a scheme-prefixed value and its bare form share one cache entry;
+	// looking up the untrimmed value would miss every time and build a new
+	// handler and connection per request.
+	hostPort, _ = strings.CutPrefix(hostPort, "http://")
+
 	// Check cache first
 	proxy, exists := cache.Get(hostPort)
 	if exists {
 		return proxy, nil
 	}
-
-	// Backward compatible behavior: trim `http:` prefix
-	hostPort, _ = strings.CutPrefix(hostPort, "http://")
 
 	u, err := url.Parse(urlPrefix + hostPort)
 	if err != nil {

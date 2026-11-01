@@ -135,8 +135,8 @@ type Options struct {
 	MetricsCertDir             string   // Directory with the metrics server certificates that enables metrics TLS.
 	EnableGRPCStreamMetrics    bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
 	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
-	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. Bounds metric cardinality in
-	// deployments with many distinct fairness IDs.
+	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. default-flow does not count
+	// against the cap. Bounds metric cardinality in deployments with many distinct fairness IDs.
 	FairnessIDMetricLabelLimit int
 	//
 	// Configuration.
@@ -269,7 +269,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Enables ext_proc gRPC stream metrics (in-flight gauge, hold-duration histogram, completions counter by code).")
 	fs.IntVar(&opts.FairnessIDMetricLabelLimit, "fairness-id-metric-label-limit", opts.FairnessIDMetricLabelLimit,
 		"Caps the number of distinct fairness_id label values recorded on metrics; values beyond the cap collapse to a "+
-			"single overflow series, and 0 collapses all of them. Bounds metric cardinality with many distinct fairness IDs.")
+			"single overflow series, and 0 collapses all of them. default-flow does not count against the cap. "+
+			"Bounds metric cardinality with many distinct fairness IDs.")
 	fs.BoolVar(&opts.SecureServing, "secure-serving", opts.SecureServing, "Serve the listener over TLS.")
 	fs.StringVar(&opts.TLSMinVersion, "tls-min-version", opts.TLSMinVersion,
 		"Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13). Empty uses VersionTLS12.")

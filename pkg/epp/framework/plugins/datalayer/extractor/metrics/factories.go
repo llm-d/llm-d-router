@@ -134,7 +134,8 @@ var defaultEngineConfigs = []engineConfigParams{
 		RunningRequestsSpec: "atom:requests_running",
 		KVUsageSpec:         "atom:kv_cache_usage_ratio",
 		LoRASpec:            "",
-		CacheInfoSpec:       "atom:cache_config_info",
+		// ATOM exports no cache_config_info family and no block-size gauge.
+		CacheInfoSpec: "",
 	},
 	{
 		Name:                "trtllm-serve",
@@ -179,9 +180,11 @@ var defaultEngineConfigs = []engineConfigParams{
 	// - "trtllm-serve" is for TensorRT-LLM's standalone C++ server orchestrator, which exposes similar
 	//   LLM-specific metrics under different names.
 	{
-		Name:                "triton",
-		QueuedRequestsSpec:  "nv_inference_pending_request_count",
-		RunningRequestsSpec: "nv_inference_exec_count",
+		Name:               "triton",
+		QueuedRequestsSpec: "nv_inference_pending_request_count",
+		// Triton has no gauge of executing requests; nv_inference_exec_count is a
+		// lifetime counter of batch executions, not a running-request count.
+		RunningRequestsSpec: "",
 		KVUsageSpec:         "",
 		LoRASpec:            "",
 		CacheInfoSpec:       "",
