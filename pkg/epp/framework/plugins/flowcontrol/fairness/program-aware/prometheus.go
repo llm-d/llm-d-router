@@ -50,7 +50,7 @@ func GetCollectors() []prometheus.Collector {
 // setProgramGauge sets a per-program gauge under the shared fairness-ID label cap. Programs past
 // the cap are skipped: one overflow series would only hold whichever program wrote last.
 func setProgramGauge(vec *prometheus.GaugeVec, id string, v float64) {
-	if label := metricsutil.BoundFairnessID(id); label != metricsutil.OverflowValue {
+	if label, overflow := metricsutil.BoundFairnessIDWithOverflow(id); !overflow {
 		vec.WithLabelValues(label).Set(v)
 	}
 }
