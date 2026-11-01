@@ -387,6 +387,7 @@ def validate_bundle(bundle_dir: pathlib.Path, repo_root: pathlib.Path) -> List[s
             if fm.get("status", "stable") not in {"draft", "stable", "deprecated"}:
                 errs.append(f"{rel}: invalid status {fm.get('status')!r}")
             sids = {str(s.get("id")) for s in (fm.get("sources") or []) if isinstance(s, dict)}
+            fn_defs = set(re.findall(r"^\[\^([a-zA-Z0-9_.-]+)\]:\s+", body, re.MULTILINE))
             body_without_defs = "\n".join(
                 ln for ln in body.splitlines() if not re.match(r"^\[\^[a-zA-Z0-9_.-]+\]:\s+", ln)
             )
@@ -398,6 +399,10 @@ def validate_bundle(bundle_dir: pathlib.Path, repo_root: pathlib.Path) -> List[s
             if sids - fn_refs:
                 errs.append(
                     f"{rel}: unused source entry in frontmatter sources: {sorted(sids - fn_refs)}"
+                )
+            if fn_defs - fn_refs:
+                errs.append(
+                    f"{rel}: unused footnote definition in body: {sorted(fn_defs - fn_refs)}"
                 )
             if md.parent.name == "rules":
                 for rtitle, subs in parse_rule_blocks(body_without_defs):
