@@ -99,6 +99,21 @@ data:
                         - name: vllm-${NAMESPACE}
                           domains: ["*"]
                           routes:
+                            - match:
+                                path: "/generate"
+                                headers:
+                                  - name: x-llm-d-epp-profile
+                                    string_match:
+                                      exact: prefill
+                              route:
+                                cluster: original_destination_cluster
+                                timeout: 0s
+                                idle_timeout: 86400s
+                              response_headers_to_add:
+                                - header:
+                                    key: x-llm-d-prefiller-host-port
+                                    value: "%UPSTREAM_HOST%"
+                                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
                             # e-p-d pool — any x-llm-d-epp-profile value. The single EPP picks the
                             # scheduling profile named by the header (encode/prefill/decode).
                             - match:
@@ -149,11 +164,9 @@ data:
                       - name: envoy.filters.http.ext_proc
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
-                          # Default ext_proc target — the per-route override above sends
-                          # every x-llm-d-epp-profile request to the single EPP. A request without
-                          # an x-llm-d-epp-profile header matches the default route to the
-                          # coordinator, which disables ext_proc, so this default is only
-                          # used as a wiring fallback.
+                          # The prefill route uses this EPP target. Other phase routes
+                          # override it with the same service. The coordinator route
+                          # disables ext_proc.
                           grpc_service:
                             envoy_grpc:
                               cluster_name: ext_proc_epd
