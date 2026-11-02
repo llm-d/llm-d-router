@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -83,7 +83,7 @@ func (p *chainProducer) Produce(ctx context.Context, _ *fwksched.InferenceReques
 }
 
 func newDirectorWithProducers(producers ...*chainProducer) *Director {
-	plugins := make([]fwkrc.DataProducer, len(producers))
+	plugins := make([]fwkrh.DataProducer, len(producers))
 	for i, p := range producers {
 		plugins[i] = p
 	}
@@ -92,7 +92,7 @@ func newDirectorWithProducers(producers ...*chainProducer) *Director {
 
 // runSchedulingProducers runs d's Scheduling-phase producers on an empty request.
 func runSchedulingProducers(ctx context.Context, d *Director) error {
-	return d.runDataProducers(ctx, fwkrc.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
+	return d.runDataProducers(ctx, fwkrh.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
 		&fwksched.InferenceRequest{}, nil, map[string]struct{}{})
 }
 

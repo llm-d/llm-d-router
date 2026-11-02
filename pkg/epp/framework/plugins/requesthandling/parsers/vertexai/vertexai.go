@@ -26,6 +26,7 @@ import (
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
@@ -124,8 +125,8 @@ func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers 
 
 	default:
 		return &fwkrh.ParseResult{
-			Body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload(body),
+			Body: &fwkrequest.InferenceRequestBody{
+				Payload: fwkrequest.RawPayload(body),
 			},
 			SkipResponseProcessing: true,
 		}, nil
@@ -220,6 +221,6 @@ func (p *VertexAIParser) parseVertexRequest(ctx context.Context, body []byte, he
 	}
 
 	inferenceRequestBody := parseResult.Body
-	inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
+	inferenceRequestBody.Payload = fwkrequest.PayloadProto{Message: req}
 	return &fwkrh.ParseResult{Body: inferenceRequestBody, SkipResponseProcessing: parseResult.SkipResponseProcessing}, nil
 }

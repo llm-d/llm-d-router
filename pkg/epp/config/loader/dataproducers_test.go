@@ -26,7 +26,7 @@ import (
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -108,9 +108,9 @@ func TestBuildDataProducerPhases(t *testing.T) {
 
 	phases, err := buildDataProducerPhases([]configapiv1.DataProducerConfig{{PluginRef: "tokenizer"}, {PluginRef: "prefix"}}, handle)
 	require.NoError(t, err)
-	assert.Equal(t, map[string]fwkrc.DataProducerPhase{
-		"tokenizer": fwkrc.DataProducerPhaseRequestHandling,
-		"prefix":    fwkrc.DataProducerPhaseRequestHandling,
+	assert.Equal(t, map[string]fwkrh.DataProducerPhase{
+		"tokenizer": fwkrh.DataProducerPhaseRequestHandling,
+		"prefix":    fwkrh.DataProducerPhaseRequestHandling,
 	}, phases)
 
 	_, err = buildDataProducerPhases([]configapiv1.DataProducerConfig{{PluginRef: "scorer"}}, handle)

@@ -93,8 +93,8 @@ func (p *SystemOneParser) ParseRequest(_ context.Context, body []byte, headers m
 		return nil, errors.New("invalid systemone request: questions must be a JSON object")
 	}
 
-	result := &fwkrh.InferenceRequestBody{
-		Payload: fwkrh.PayloadMap(bodyMap),
+	result := &request.InferenceRequestBody{
+		Payload: request.PayloadMap(bodyMap),
 		RawBody: body,
 		// The engine renders one prompt per question, which the router cannot reproduce.
 		RenderRequest: true,
@@ -106,8 +106,8 @@ func (p *SystemOneParser) ParseRequest(_ context.Context, body []byte, headers m
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
-func (p *SystemOneParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
+func (p *SystemOneParser) RewriteModelName(payload request.MarshalablePayload, model string) (request.MarshalablePayload, error) {
+	m, ok := payload.(request.PayloadMap)
 	if !ok {
 		return payload, nil
 	}
@@ -116,7 +116,7 @@ func (p *SystemOneParser) RewriteModelName(payload fwkrh.MarshalablePayload, mod
 }
 
 // RewritePriority delegates to parsers.RewritePriority; the request declares a top-level priority.
-func (p *SystemOneParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+func (p *SystemOneParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload request.MarshalablePayload, priority int) (request.MarshalablePayload, bool, error) {
 	return parsers.RewritePriority(ctx, payload, priority)
 }
 
@@ -138,7 +138,7 @@ func (p *SystemOneParser) ParseResponse(_ context.Context, body []byte, _ map[st
 	if response.Usage == nil {
 		return nil, nil //nolint:nilnil
 	}
-	return &fwkrh.ParsedResponse{Usage: &fwkrh.Usage{
+	return &fwkrh.ParsedResponse{Usage: &request.Usage{
 		PromptTokens:     response.Usage.InputTokens,
 		CompletionTokens: response.Usage.OutputTokens,
 		TotalTokens:      response.Usage.InputTokens + response.Usage.OutputTokens,

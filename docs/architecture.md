@@ -97,7 +97,7 @@ so their per-endpoint work grows with the candidates the screeners remove.
 For example, `disaggregatedset-rollout-screener` with `revisionGating.affinity.prefixCache` consumes
 `PrefixCacheMatchInfo`, so `approx-prefix-cache-producer` and the `token-producer` it consumes run in
 step 3 with no `dataProducers` entry; see its
-[producer setup](../pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout/README.md#producer-setup).
+[producer setup](../pkg/epp/framework/plugins/requesthandling/screener/disaggregatedsetrollout/README.md#producer-setup).
 
 #### Scheduling
 

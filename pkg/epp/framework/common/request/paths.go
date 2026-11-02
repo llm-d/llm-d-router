@@ -16,7 +16,7 @@ limitations under the License.
 
 package request
 
-// Path suffixes, for MatchPathSuffix, that parsers claim and request-control
+// Path suffixes, for MatchPathSuffix, that parsers claim and request-handling
 // plugins also match on.
 const (
 	// SystemOnePathSuffix identifies the System One decisions API.

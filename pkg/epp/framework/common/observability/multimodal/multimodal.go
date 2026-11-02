@@ -25,7 +25,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -66,11 +66,11 @@ func Summary(req *scheduling.InferenceRequest) (modality string, hashCount int) 
 	return strings.Join(modalities, ","), len(features)
 }
 
-func requestMMFeatures(req *scheduling.InferenceRequest) []fwkrh.MultiModalFeature {
+func requestMMFeatures(req *scheduling.InferenceRequest) []fwkrequest.MultiModalFeature {
 	if req == nil || req.Body == nil || req.Body.TokenizedRequest == nil {
 		return nil
 	}
-	var features []fwkrh.MultiModalFeature
+	var features []fwkrequest.MultiModalFeature
 	for _, p := range req.Body.TokenizedRequest.Prompts {
 		features = append(features, p.MultiModalFeatures...)
 	}
