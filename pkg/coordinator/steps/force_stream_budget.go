@@ -48,9 +48,13 @@ func newForceStreamBudget(maxBytes, perRequestMax int64) *forceStreamBudget {
 // tryReserve adds n to the live total if it stays within max, reporting whether
 // it did. The compare-and-swap retries only against a competing reservation, so
 // a caller that loses the race re-reads the total instead of over-committing.
-// n must be positive; a value above max is refused like any other that does not fit.
-// current stays in [0, max], so max-current never underflows an int64.
+// A value that is not positive is refused, so an overflowed sum cannot grow the
+// budget; a value above max is refused like any other that does not fit. current
+// stays in [0, max], so max-current never underflows an int64.
 func (b *forceStreamBudget) tryReserve(n int64) bool {
+	if n <= 0 {
+		return false
+	}
 	for {
 		cur := b.current.Load()
 		if n > b.max-cur {

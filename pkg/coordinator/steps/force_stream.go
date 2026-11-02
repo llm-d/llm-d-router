@@ -249,7 +249,8 @@ func parseForceStreamPerRequest(params map[string]any, budgetMax int64) (int64, 
 // reservation either way. ok is false when the estimate exceeds the per-request
 // cap, so one request never claims more than its share of the shared budget: a
 // declared limit's n completions, or with no limit an n whose per-choice envelopes
-// alone would not fit. The estimate reserves n completions, each tokenLimit
+// alone would not fit. The estimate covers the generated reply only; a Responses
+// request adds its echoed body on top (see responsesEchoBytes). The estimate reserves n completions, each tokenLimit
 // tokens, plus the reply envelope; over-reserving only sends more requests to the
 // pass-through, never past the budget.
 func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64, bool) {

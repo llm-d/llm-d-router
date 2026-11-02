@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -2311,6 +2312,134 @@ func TestForceStream_Responses_EchoBudgetFull_FallsBack(t *testing.T) {
 	require.NoError(t, step.Execute(context.Background(), reqCtx))
 	require.Equal(t, []any{false}, streams, "no forced attempt; the pass-through serves the request once")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackBudget), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
+}
+
+// TestResponsesEchoBytes verifies only the Responses shape reserves its body
+// size; the shapes that reassemble the reply from deltas echo nothing back.
+func TestResponsesEchoBytes(t *testing.T) {
+	body := []byte(`{"model":"m","instructions":"long"}`)
+	require.EqualValues(t, len(body), responsesEchoBytes(sseShapeResponses, body))
+	for _, shape := range []sseShape{sseShapeChat, sseShapeText, sseShapeGenerate, sseShapeMessages} {
+		require.Zero(t, responsesEchoBytes(shape, body), "shape %d", shape)
+	}
+}
+
+// TestForceStreamBudget_TryReserveRejectsNonPositive verifies a zero or negative
+// reservation is refused and leaves the live total untouched, so a sum that
+// overflowed cannot drive the total negative and let later requests past max.
+func TestForceStreamBudget_TryReserveRejectsNonPositive(t *testing.T) {
+	b := newForceStreamBudget(1<<30, 256<<10)
+	for _, n := range []int64{0, -1, math.MinInt64} {
+		require.False(t, b.tryReserve(n), "n=%d", n)
+		require.Zero(t, b.current.Load(), "n=%d must not change the total", n)
+	}
+	require.True(t, b.tryReserve(1))
+}
+
+// TestForceStream_Responses_EchoOutsidePerRequestCap pins how the two parts of a
+// Responses reservation are bounded. The per-request cap applies to the generated
+// part only: a declared limit over the cap is still refused (fallback_unbounded),
+// however small the body. The echoed body counts only against the shared budget:
+// with a per-request cap far below the body size, the request is still forced and
+// the reservation covers the body.
+func TestForceStream_Responses_EchoOutsidePerRequestCap(t *testing.T) {
+	newStep := func(t *testing.T, serverURL string) (*DecodeStep, *prometheus.Registry) {
+		t.Helper()
+		reg := prometheus.NewRegistry()
+		require.NoError(t, coordmetrics.Register(reg))
+		coordmetrics.Reset()
+		step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: serverURL}), map[string]any{
+			ParamForceStream:               true,
+			ParamForceStreamBufferSize:     "1GiB",
+			ParamForceStreamMaxRequestSize: "8KiB",
+		})
+		require.NoError(t, err)
+		return step.(*DecodeStep), reg
+	}
+
+	t.Run("generated over the cap is refused", func(t *testing.T) {
+		var streams []any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			var parsed map[string]any
+			_ = json.Unmarshal(raw, &parsed)
+			streams = append(streams, parsed["stream"])
+			_, _ = w.Write([]byte(`{"id":"resp-1","status":"completed","output":[]}`))
+		}))
+		defer server.Close()
+		step, reg := newStep(t, server.URL)
+		reqCtx := &pipeline.RequestContext{
+			RequestID: "req-resp-gen-over-cap", OriginalPath: reqcommon.PathResponses, Model: "m",
+			KVTransferParams: map[string]any{},
+			Body:             map[string]any{"model": "m", "stream": false, "max_output_tokens": 100000, "input": "hi"},
+			ResponseWriter:   httptest.NewRecorder(),
+		}
+		require.NoError(t, step.Execute(context.Background(), reqCtx))
+		require.Equal(t, []any{false}, streams)
+		require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnbounded), 1e-9)
+	})
+
+	t.Run("echo over the cap is still forced", func(t *testing.T) {
+		instructions := strings.Repeat("x", 64<<10)
+		var gaugeDuringRequest float64
+		var reg *prometheus.Registry
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			gaugeDuringRequest = forceStreamGauge(t, reg)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "data: %s\n\n", fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","instructions":%q,"output":[]}}`, instructions))
+		}))
+		defer server.Close()
+		var step *DecodeStep
+		step, reg = newStep(t, server.URL)
+		reqCtx := &pipeline.RequestContext{
+			RequestID: "req-resp-echo-over-cap", OriginalPath: reqcommon.PathResponses, Model: "m",
+			KVTransferParams: map[string]any{},
+			Body:             map[string]any{"model": "m", "stream": false, "max_output_tokens": 16, "input": "hi", "instructions": instructions},
+			ResponseWriter:   httptest.NewRecorder(),
+		}
+		require.NoError(t, step.Execute(context.Background(), reqCtx))
+		require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9,
+			"a body 8x the per-request cap is still forced")
+		require.Greater(t, gaugeDuringRequest, float64(len(instructions)), "the reservation covers the body")
+		require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
+	})
+}
+
+// TestForceStream_Responses_TerminalPastEchoAllowance_FallsBack verifies the
+// terminal frame is bounded by what was reserved: a frame larger than the
+// generated reservation plus the echoed body falls back as fallback_oversize, so
+// the frame the coordinator holds can never exceed its reservation.
+func TestForceStream_Responses_TerminalPastEchoAllowance_FallsBack(t *testing.T) {
+	const passthroughReply = `{"id":"resp-1","status":"completed","output":[]}`
+	var streams []any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(raw, &parsed)
+		streams = append(streams, parsed["stream"])
+		if parsed["stream"] != true {
+			_, _ = w.Write([]byte(passthroughReply))
+			return
+		}
+		// The pod echoes far more than the request carried.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: %s\n\n", fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","instructions":%q,"output":[]}}`, strings.Repeat("x", 512<<10)))
+	}))
+	defer server.Close()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-resp-past-echo", OriginalPath: reqcommon.PathResponses, Model: "m",
+		KVTransferParams: map[string]any{},
+		Body:             map[string]any{"model": "m", "stream": false, "max_output_tokens": 16, "input": "hi", "instructions": strings.Repeat("x", 4<<10)},
+		ResponseWriter:   httptest.NewRecorder(),
+	}
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	require.Equal(t, []any{true, false}, streams, "a forced attempt, then the pass-through")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackOversize), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
 }
 
