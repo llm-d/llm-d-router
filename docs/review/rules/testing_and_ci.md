@@ -100,7 +100,7 @@ Representative review threads:[^pr-1048-rev-4310234203][^pr-1481-r3372638867][^p
 
 ### Rule
 
-Wire every new linter, protobuf generator, and security check into `make presubmit` inside the version-pinned builder container so local runs match CI across architectures. `make presubmit` runs the format, lint, security, vulnerability, image-tag, and boilerplate checks; `make test-unit`, `test-integration-hermetic`, and `verify-helm-charts` run as separate CI jobs. Pin third-party container image tags in manifests and workflows rather than using `:latest` (`scripts/check-latest-tags.sh` lets images in the llm-d-owned `ghcr.io` and `quay.io` namespaces track `:latest` on `main` so cross-component regressions surface early), keep local developer tool configs out of version control, and hold dependency updates that introduce unfixed upstream regressions.
+Wire every new linter, protobuf generator, and security check into `make presubmit` inside the version-pinned builder container so local runs match CI across architectures. `make presubmit` runs the format, lint, security, vulnerability, image-tag, boilerplate, telemetry, and review-playbook checks; `make test-unit`, `test-integration-hermetic`, and `verify-helm-charts` run as separate CI jobs. Pin third-party container image tags in manifests and workflows rather than using `:latest` (`scripts/check-latest-tags.sh` lets images in the llm-d-owned `ghcr.io` and `quay.io` namespaces track `:latest` on `main` so cross-component regressions surface early), keep local developer tool configs out of version control, and hold dependency updates that introduce unfixed upstream regressions.
 
 ### Scope and consequence
 

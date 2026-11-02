@@ -35,7 +35,7 @@ Register metrics under the component's canonical subsystem constant (`LLMDRouter
 
 ### Scope and consequence
 
-- **Applies to**: `pkg/*/metrics/**`, `pkg/common/observability/**`, `config/observability/**`, `docs/metrics*.md`; see [Failure classes](../references/failure_classes.md).
+- **Applies to**: `pkg/*/metrics/**`, `pkg/common/observability/**`, `config/observability/**`, `docs/metrics*.md`, `docs/telemetry.md`; see [Failure classes](../references/failure_classes.md).
 - **Consequence if violated**: Unbounded label values, duplicate terminal request observations, or unguarded per-endpoint debug logs exhaust Prometheus series limits and skew latency percentiles.
 - **Related decisions**: [Disaggregation sidecar serves /metrics on its existing HTTP listener mux](../decisions/sidecar_metrics_on_shared_http_mux.md).
 
@@ -61,7 +61,7 @@ Emit at most one terminal outcome observation per request across early-return, b
 
 ### Scope and consequence
 
-- **Applies to**: `pkg/*/metrics/**`, `pkg/common/observability/**`, `config/observability/**`, `docs/metrics*.md`; see [Failure classes](../references/failure_classes.md).
+- **Applies to**: `pkg/*/metrics/**`, `pkg/common/observability/**`, `config/observability/**`, `docs/metrics*.md`, `docs/telemetry.md`; see [Failure classes](../references/failure_classes.md).
 - **Consequence if violated**: Unbounded label values, duplicate terminal request observations, or unguarded per-endpoint debug logs exhaust Prometheus series limits and skew latency percentiles.
 
 ### Evidence
@@ -74,11 +74,11 @@ Representative review threads:[^issue-1553][^pr-1658-r3618566988][^pr-1677-r3852
 
 ### Rule
 
-Acquire OpenTelemetry tracers via `tracing.Tracer(TracerScope)` using a package-scoped `TracerScope` constant (`llm-d.ai/...`), standard semantic-convention attribute keys, and route templates rather than raw URLs. Extract inbound W3C trace context at ingress and propagate spans across all outbound HTTP and gRPC calls.
+Acquire OpenTelemetry tracers via `tracing.Tracer(TracerScope)` using a package-scoped `TracerScope` constant (`llm-d.ai/...`), standard semantic-convention attribute keys (see [docs/telemetry.md](../../telemetry.md)), and route templates rather than raw URLs. Extract inbound W3C trace context at ingress and propagate spans across all outbound HTTP and gRPC calls.
 
 ### Scope and consequence
 
-- **Applies to**: `pkg/*/metrics/**`, `pkg/common/observability/**`, `config/observability/**`, `docs/metrics*.md` (referenced symbols: `tracing.Tracer(TracerScope)`, `llm-d.ai/...`); see [Failure classes](../references/failure_classes.md).
+- **Applies to**: `pkg/*/metrics/**`, `pkg/common/observability/**`, `config/observability/**`, `docs/metrics*.md`, `docs/telemetry.md` (referenced symbols: `tracing.Tracer(TracerScope)`, `llm-d.ai/...`); see [Failure classes](../references/failure_classes.md).
 - **Consequence if violated**: Unbounded label values, duplicate terminal request observations, or unguarded per-endpoint debug logs exhaust Prometheus series limits and skew latency percentiles.
 - **Related decisions**: [Ratio-sampled per-plugin OpenTelemetry spans with high-overhead KV-event spans gated off](../decisions/sampled_per_plugin_otel_spans_and_opt_in_kv_event_spans.md).
 
@@ -96,7 +96,7 @@ Follow the `go-logr` verbosity conventions in [AGENTS.md](../../../AGENTS.md#log
 
 ### Scope and consequence
 
-- **Applies to**: `pkg/*/metrics/**`, `pkg/common/observability/**`, `config/observability/**`, `docs/metrics*.md` (referenced symbols: `v.Enabled()`); see [Failure classes](../references/failure_classes.md).
+- **Applies to**: `pkg/*/metrics/**`, `pkg/common/observability/**`, `config/observability/**`, `docs/metrics*.md`, `docs/telemetry.md` (referenced symbols: `v.Enabled()`); see [Failure classes](../references/failure_classes.md).
 - **Consequence if violated**: Unbounded label values, duplicate terminal request observations, or unguarded per-endpoint debug logs exhaust Prometheus series limits and skew latency percentiles.
 - **Conflict audit references**: `NVC-13`.
 
