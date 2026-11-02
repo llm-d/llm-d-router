@@ -607,6 +607,26 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
+			name:       "Success - composeFairnessIDs defaults off",
+			configText: successSchedulerConfigText,
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.False(t, rawCfg.RequestHandler.ComposeFairnessIDs)
+				require.False(t, cfg.ComposeFairnessIDs)
+			},
+		},
+		{
+			name:       "Success - composeFairnessIDs enabled",
+			configText: successSchedulerConfigText + "\nrequestHandler:\n  composeFairnessIDs: true\n",
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.True(t, rawCfg.RequestHandler.ComposeFairnessIDs)
+				require.True(t, cfg.ComposeFairnessIDs)
+			},
+		},
+		{
 			name:       "Success - Default Scorer Weight",
 			configText: successWithNoWeightText,
 			wantErr:    false,

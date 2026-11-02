@@ -188,6 +188,7 @@ func InstantiateAndConfigure(
 		FlowControlConfig:  flowControlConfig,
 		ParserRegistry:     parserRegistry,
 		PropagatePriority:  rawConfig.RequestHandler.PropagatePriority,
+		ComposeFairnessIDs: rawConfig.RequestHandler.ComposeFairnessIDs,
 		DataProducerPhases: dataProducerPhases,
 	}, nil
 }
