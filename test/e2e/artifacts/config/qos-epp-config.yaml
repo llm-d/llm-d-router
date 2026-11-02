@@ -1,8 +1,8 @@
 # EPP configuration for per-team QoS classes on flow control.
 #
-# qos-admission maps each team to a class (a priority band), enforces its size
-# caps, and moves traffic above its commits (concurrency and daily token budget)
-# one class down. program-aware-fairness shares each band between teams by least
+# qos-admission maps each team to a class (a priority band), and moves traffic
+# outside its contract (size limits, concurrency and daily token budget) one
+# class down. program-aware-fairness shares each band between teams by least
 # attained service.
 # latency-reporter records TTFT/TPOT for the critical class by prompt bucket and path.
 apiVersion: llm-d.ai/v1
