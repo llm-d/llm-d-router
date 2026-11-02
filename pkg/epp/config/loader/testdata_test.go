@@ -126,6 +126,36 @@ plugins:
     detectors: [decode-concurrency, prefill-queue]
 `
 
+// cacheAwareAdmitterBeforeDetectorText lists the prefix-cache-aware admitter before the detector it
+// references; the loader must instantiate the detector first.
+const cacheAwareAdmitterBeforeDetectorText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: shed
+  type: prefix-cache-aware-admitter
+  parameters:
+    saturationDetectorRef: pool-concurrency
+    shedThreshold: 0.8
+- name: pool-concurrency
+  type: concurrency-detector
+  parameters:
+    concurrencyMode: hybrid
+    maxConcurrency: 4
+    maxTokenConcurrency: 1000
+`
+
+// cacheAwareAdmitterMissingDetectorText references a detector that is not configured.
+const cacheAwareAdmitterMissingDetectorText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: shed
+  type: prefix-cache-aware-admitter
+  parameters:
+    saturationDetectorRef: nowhere
+`
+
 // maxSaturationDetectorStageScopedText represents a valid config with a composite saturation
 // detector whose children are restricted to pipeline stages
 const maxSaturationDetectorStageScopedText = `
