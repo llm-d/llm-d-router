@@ -4,17 +4,16 @@
 **Interfaces:** `requesthandling.RequestHeaderProcessor`, `requesthandling.ResponseHeaderProcessor`, `requesthandling.ResponseBodyProcessor`
 **Stability:** Alpha
 
-Enforces per-team QoS contracts ahead of flow control. Each team is committed to a service class, and each class is a flow-control priority band. A team's commits are its concurrency (`maxConcurrency`) and its daily weighted-token budget (`dailyTokens`). Traffic within the commits is served at the team's class. Traffic above either commit moves one class down, and is rejected with `429` when no lower class exists.
+Enforces per-team QoS contracts ahead of flow control. Each team is committed to a service class, and each class is a flow-control priority band. A team's contract is its size limits (`maxPromptTokens`, `maxOutputTokens`) and its commits: its concurrency (`maxConcurrency`) and its daily weighted-token budget (`dailyTokens`). Traffic within the contract is served at the team's class. Traffic outside it moves one class down, and is rejected when no lower class exists: `400` above a size limit, `429` above a commit.
 
 ## What It Does
 
 The plugin runs in the RequestHeader phase, before flow control queues the request. For each request it:
 
 1. Resolves the team from `teamHeader` (default: the fairness ID header). A missing or unlisted team uses `defaultTeam`.
-2. Rejects with `400` a prompt larger than `maxPromptTokens`, or an output cap larger than `maxOutputTokens`.
-3. Checks the commits. A request is within them when the team has a free `maxConcurrency` slot and the reservation `input + outputTokenWeight * maxOutput` fits in what is left of `dailyTokens`. Such a request takes a slot, held from admission, queueing included, to completion, and is charged the reservation against the daily budget.
-4. Moves a request above either commit to the next lower class, without taking a slot or a charge. In the lowest class it is rejected with `429`.
-5. Sets the request priority to the served class and sets the fairness ID to the team when no fairness ID was supplied.
+2. Checks the contract. A request is within it when its prompt is at most `maxPromptTokens`, its output cap is at most `maxOutputTokens`, the team has a free `maxConcurrency` slot, and the reservation `input + outputTokenWeight * maxOutput` fits in what is left of `dailyTokens`. Such a request takes a slot, held from admission, queueing included, to completion, and is charged the reservation against the daily budget.
+3. Moves a request outside the contract to the next lower class, without taking a slot or a charge. In the lowest class it is rejected: with `400` when it is above a size limit, else with `429`.
+4. Sets the request priority to the served class and sets the fairness ID to the team when no fairness ID was supplied.
 
 At end of stream the reservation of a committed request is settled against the reported usage: unused tokens are refunded to the daily budget, and usage above the reservation is charged to it. A response with no usage block keeps the reservation as the charge. A request that ends without a response body (a flow-control rejection, a scheduling failure, a client disconnect) is refunded in full when its stream ends.
 
@@ -31,7 +30,7 @@ Successful responses carry:
 
 The concurrency header is present only for a team with a `maxConcurrency` commit.
 
-A `429` adds `retry-after` (seconds: `1` for concurrency, until the next UTC day for the daily budget) and `x-llm-d-request-dropped-reason: rejected-over-quota`, and reports the team's committed class in `x-llm-d-qos-class`. A `400` reports `rejected-size-limit`.
+A `429` adds `retry-after` (seconds: `1` for concurrency, until the next UTC day for the daily budget) and `x-llm-d-request-dropped-reason: rejected-over-quota`, and reports the team's committed class in `x-llm-d-qos-class`. A `400` reports `rejected-size-limit` and the team's committed class.
 
 ## Shadow Mode
 
@@ -74,8 +73,8 @@ plugins:
 | `teams[].id` | required | Team ID, matched against `teamHeader`. |
 | `teams[].class` | required | Class the team's committed traffic is served at. |
 | `teams[].maxConcurrency` | `0` | Committed concurrent requests, queued or running. `0` is unlimited. |
-| `teams[].maxPromptTokens` | `0` | Estimated prompt tokens above which a request is rejected. `0` is unlimited. |
-| `teams[].maxOutputTokens` | `0` | Output cap above which a request is rejected, and the default reservation. `0` is unlimited. |
+| `teams[].maxPromptTokens` | `0` | Estimated prompt tokens above which a request moves one class down. `0` is unlimited. |
+| `teams[].maxOutputTokens` | `0` | Output cap above which a request moves one class down, and the default reservation. `0` is unlimited. |
 | `teams[].dailyTokens` | `0` | Committed weighted-token budget per UTC day. `0` is unlimited. |
 
 Configure a flow-control priority band for each class priority, or rely on dynamic band provisioning from the default band templates.
