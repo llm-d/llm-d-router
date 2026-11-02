@@ -387,6 +387,15 @@ type RequestHandlerConfig struct {
 	PropagatePriority bool `json:"propagatePriority,omitempty"`
 
 	// +optional
+	// ComposeFairnessIDs, when true, lets the EPP combine a request's
+	// fairness-ID header (the tenant identity) with its agent-identity attribute
+	// (the session identity) into a single "<tenant>/<session>" flow key. It is
+	// off by default: the fairness-ID header wins and the session identity does
+	// not key the flow. When enabled, "%" and "/" in the header are
+	// percent-encoded so the tenant part stays unambiguous.
+	ComposeFairnessIDs bool `json:"composeFairnessIDs,omitempty"`
+
+	// +optional
 	// DataProducers lists DataProducer plugins that run during request
 	// handling, on the located endpoints before screeners. A DataProducer not
 	// listed runs on the screened endpoints before admission and scheduling,
@@ -421,6 +430,9 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.PropagatePriority {
 		parts = append(parts, "PropagatePriority: true")
+	}
+	if rhc.ComposeFairnessIDs {
+		parts = append(parts, "ComposeFairnessIDs: true")
 	}
 	if len(rhc.DataProducers) > 0 {
 		producerStrs := make([]string, len(rhc.DataProducers))

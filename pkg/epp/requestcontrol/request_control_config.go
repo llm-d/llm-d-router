@@ -54,12 +54,30 @@ type Config struct {
 	// propagatePriority gates whether the director injects the resolved priority
 	// into the outbound request body. Off by default so the body is untouched.
 	propagatePriority bool
+
+	// composeFairnessIDs gates whether the director composes the fairness-ID
+	// header with the agent identity into "<tenant>/<session>". Off by default:
+	// the fairness-ID header keys the flow on its own.
+	composeFairnessIDs bool
 }
 
 // WithPropagatePriority enables or disables injecting the resolved request
 // priority into the outbound request body.
 func (c *Config) WithPropagatePriority(propagatePriority bool) *Config {
 	c.propagatePriority = propagatePriority
+	return c
+}
+
+// ComposeFairnessIDs reports whether the director composes the fairness-ID header
+// with the agent identity into "<tenant>/<session>".
+func (c *Config) ComposeFairnessIDs() bool {
+	return c.composeFairnessIDs
+}
+
+// WithComposeFairnessIDs enables or disables composing the fairness-ID header
+// with the agent identity into "<tenant>/<session>".
+func (c *Config) WithComposeFairnessIDs(composeFairnessIDs bool) *Config {
+	c.composeFairnessIDs = composeFairnessIDs
 	return c
 }
 

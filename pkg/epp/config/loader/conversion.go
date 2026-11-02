@@ -199,7 +199,10 @@ func convertRequestHandler(in *configapiv1alpha1.RequestHandlerConfig) *configap
 		return nil
 	}
 
-	out := &configapiv1.RequestHandlerConfig{PropagatePriority: in.PropagatePriority}
+	out := &configapiv1.RequestHandlerConfig{
+		PropagatePriority:  in.PropagatePriority,
+		ComposeFairnessIDs: in.ComposeFairnessIDs,
+	}
 	if in.Parsers != nil {
 		out.Parsers = make([]configapiv1.ParserConfig, len(in.Parsers))
 		for i, parser := range in.Parsers {

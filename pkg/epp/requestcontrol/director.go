@@ -270,16 +270,36 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
-	// Derive FairnessID from agent identity when no explicit header supplied it.
+	// Derive the FairnessID from the fairness-ID header (tenant identity) and the
+	// agent-identity attribute (program/session identity). Composition is opt-in
+	// through requestHandler.composeFairnessIDs. When enabled, the tenant is
+	// percent-encoded and joined with the session as "<tenant>/<session>", so flow
+	// control keys one queue per session while the tenant stays visible for
+	// isolation and metric labels. Encoding "%" and "/" keeps the first segment
+	// exactly the tenant, so a tenant carrying either character cannot collide
+	// with another tenant's composed key, and session IDs stay free to contain
+	// the separator. When disabled, the fairness-ID header keys the flow as sent
+	// and the session identity is not part of it. A request carrying neither
+	// identity falls back to the default flow.
 	source := tracing.AttributionSourceHeader
-	if reqCtx.SchedulingRequest.FairnessID == "" {
-		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey); ok && agentID != "" {
-			reqCtx.SchedulingRequest.FairnessID = agentID
-			source = tracing.AttributionSourceAgentIdentity
+	tenantID := reqCtx.SchedulingRequest.FairnessID
+	agentID, _ := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey)
+	switch {
+	case tenantID != "" && d.requestControlPlugins.ComposeFairnessIDs():
+		tenantID = escapeFairnessTenant(tenantID)
+		if agentID != "" {
+			reqCtx.SchedulingRequest.FairnessID = tenantID + metadata.FairnessIDTenantSeparator + agentID
 		} else {
-			reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultFairnessID
-			source = tracing.AttributionSourceDefault
+			reqCtx.SchedulingRequest.FairnessID = tenantID
 		}
+	case tenantID != "":
+		// Header-only traffic keys the flow on the tenant fairness ID as sent.
+	case agentID != "":
+		reqCtx.SchedulingRequest.FairnessID = agentID
+		source = tracing.AttributionSourceAgentIdentity
+	default:
+		reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultFairnessID
+		source = tracing.AttributionSourceDefault
 	}
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)
@@ -405,6 +425,17 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		return reqCtx, err
 	}
 	return reqCtx, nil
+}
+
+// escapeFairnessTenant percent-encodes the characters that would otherwise make
+// the tenant/session split ambiguous: "%" and the separator. A tenant with
+// neither is returned unchanged without allocating.
+func escapeFairnessTenant(id string) string {
+	if !strings.ContainsAny(id, "%"+metadata.FairnessIDTenantSeparator) {
+		return id
+	}
+	id = strings.ReplaceAll(id, "%", "%25")
+	return strings.ReplaceAll(id, metadata.FairnessIDTenantSeparator, "%2F")
 }
 
 // modelRewriteIfNeeded rewrites the model name in the payload when the resolved target
