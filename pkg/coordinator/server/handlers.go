@@ -136,7 +136,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		model = m
 	}
 	if v, present := parsed[reqcommon.FieldStream]; present {
-		s, isBool := v.(bool)
+		b, isBool := v.(bool)
 		if !isBool {
 			// A non-bool stream is re-marshalled into the worker body unchanged,
 			// and a worker that coerces it to true would stream while the
@@ -147,7 +147,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 			rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "stream must be a boolean")
 			return
 		}
-		stream = s
+		stream = b
 	}
 	if model != inflightModel {
 		coordmetrics.DecRequestRunning(inflightModel)
