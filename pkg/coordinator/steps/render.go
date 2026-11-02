@@ -107,7 +107,9 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 	}
 	switch mmPayload {
 	case "":
-		mmPayload = pipeline.MMPayloadNone
+		// none is opt-in: its content_parts form fails any model whose
+		// placeholder span is not one repeated token (see checkUniformSpan).
+		mmPayload = pipeline.MMPayloadTensors
 	case pipeline.MMPayloadTensors, pipeline.MMPayloadNone:
 	default:
 		return nil, fmt.Errorf("mm_payload must be %q or %q, got %q",

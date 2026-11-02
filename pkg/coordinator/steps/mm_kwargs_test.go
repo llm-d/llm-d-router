@@ -112,12 +112,12 @@ func TestRenderStep_MMPayload(t *testing.T) {
 	require.NotContains(t, reqCtx.Body, "mm_payload", "the field must not leak into the client body forwarded downstream")
 	require.NotContains(t, reqCtx.Body, "return_mm_kwargs")
 
-	// An unset param asks the renderer to omit the tensors like an explicit
-	// none.
+	// An unset param keeps the tensors like an explicit tensors.
+	got = any("unset")
 	reqCtx = runRender(t, map[string]any{}, &got)
-	require.Equal(t, pipeline.MMPayloadNone, got, "the default must ask vLLM to omit tensors")
-	require.Equal(t, pipeline.MMPayloadNone, reqCtx.MMPayload)
-	require.Empty(t, reqCtx.MultimodalEntries[0].KwargsData)
+	require.Nil(t, got, "the default must send the render request without mm_payload")
+	require.Empty(t, reqCtx.MMPayload)
+	require.Equal(t, "aW1n", reqCtx.MultimodalEntries[0].KwargsData)
 
 	got = any("unset")
 	reqCtx = runRender(t, map[string]any{"mm_payload": pipeline.MMPayloadTensors}, &got)

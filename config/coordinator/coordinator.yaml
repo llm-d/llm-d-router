@@ -409,8 +409,11 @@ pipeline:
         # the tensors path. A body that sets mm_processor_kwargs or
         # media_io_kwargs is rendered with the tensors either way: the
         # content_parts path preprocesses media at the deployment defaults.
-        # Default none.
-        # mm_payload: tensors
+        # none requires every placeholder span to be one repeated token
+        # (Qwen-VL images); models that interleave other tokens in the span
+        # (Gemma3, Pixtral, Idefics3, Qwen3-VL video) fail the request.
+        # Default tensors.
+        # mm_payload: none
 
     # -------------------------------------------------------------------
     # conditional-decode: optional shortcut for text-only chats. When

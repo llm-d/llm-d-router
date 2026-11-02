@@ -70,9 +70,7 @@ var coordinatorConfigNIXLGenerate = mustReplace(
 	coordinatorConfigNIXL, "use_openai_format: true", "use_openai_format: false")
 
 // coordinatorConfigNIXLGenerateMMPayload is coordinatorConfigNIXLGenerate with
-// the render step asking the renderer for no tensors (mm_payload: none), stated
-// explicitly rather than left to the step's default so the spec keeps requesting
-// it if the default changes.
+// the render step asking the renderer for no tensors (mm_payload: none).
 var coordinatorConfigNIXLGenerateMMPayload = mustReplace(
 	coordinatorConfigNIXLGenerate, "timeout: 60s\n    - type: encode",
 	"timeout: 60s\n        mm_payload: none\n    - type: encode")
