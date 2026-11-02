@@ -149,8 +149,6 @@ func NewWithForwardResponseHeaders(steps []Step, headers []string) (*Pipeline, e
 
 // Execute runs all steps in order. Any error aborts immediately.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	logger := log.FromContext(ctx)
 
 	ctx, span := tracing.Tracer(TracerScope).Start(ctx, pipelineSpanName,
