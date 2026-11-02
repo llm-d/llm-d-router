@@ -45,6 +45,9 @@ const (
 	responseFieldDelta   = "delta"
 
 	roleAssistant = "assistant"
+
+	requestFieldStructuredOutputs = "structured_outputs"
+	responseFormatText            = "text"
 )
 
 // dispatchDecode routes a fully-prepared decode request to either chunked
@@ -593,7 +596,7 @@ func requestMayCallTools(body map[string]any) bool {
 // requestUsesStructuredOutput reports whether the request sets structured_outputs, or a
 // response_format with a type other than text. Both fields arrive as json.RawMessage.
 func requestUsesStructuredOutput(body map[string]any) bool {
-	if raw, ok := body[reqcommon.FieldStructuredOutputs].(json.RawMessage); ok && string(raw) != "null" {
+	if raw, ok := body[requestFieldStructuredOutputs].(json.RawMessage); ok && string(raw) != "null" {
 		return true
 	}
 	raw, ok := body[reqcommon.FieldResponseFormat].(json.RawMessage)
@@ -603,5 +606,5 @@ func requestUsesStructuredOutput(body map[string]any) bool {
 	var format struct {
 		Type string `json:"type"`
 	}
-	return json.Unmarshal(raw, &format) != nil || format.Type != reqcommon.ResponseFormatText
+	return json.Unmarshal(raw, &format) != nil || format.Type != responseFormatText
 }
