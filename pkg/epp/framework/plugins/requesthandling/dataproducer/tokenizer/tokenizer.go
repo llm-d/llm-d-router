@@ -72,6 +72,9 @@ const (
 // distinguishing it from a span missing attributes for any other reason.
 const resultSkippedNoTokens = "skipped_no_tokens"
 
+// resultSkippedCircuitOpen marks a tokenize span whose render call the circuit breaker skipped.
+const resultSkippedCircuitOpen = "skipped_circuit_open"
+
 var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
 
 // tokenizerPluginConfig holds the configuration for the tokenizer plugin.
@@ -301,6 +304,9 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		renderer.pluginName = name
 		registerRenderMetrics()
+		if renderer.breaker != nil {
+			renderCircuitOpen.WithLabelValues(PluginType, name).Set(0)
+		}
 		legacyMessages, err := configureLegacyMessages(ctx, name, cfg.MessagesRenderMode)
 		if err != nil {
 			return nil, err
@@ -451,6 +457,14 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	}
 
 	tp, err := p.backend.produce(ctx, request.Body)
+	if errors.Is(err, errRenderCircuitOpen) {
+		// Returning no tokens instead of an error lets producers that require
+		// the tokenized prompt run and take their no-token path.
+		if tracingActive {
+			span.SetAttributes(semconv.LLMDEPPTokenProducerResult(resultSkippedCircuitOpen))
+		}
+		return nil
+	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
