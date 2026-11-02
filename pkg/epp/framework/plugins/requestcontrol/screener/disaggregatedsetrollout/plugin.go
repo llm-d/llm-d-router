@@ -33,7 +33,9 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 	podutil "github.com/llm-d/llm-d-router/pkg/epp/util/pod"
 )
 
@@ -60,6 +62,12 @@ type Screener struct {
 	localRevisionDecisions   *fwkplugin.PluginState
 	overflowGuard            fwksched.Filter
 
+	// prefixCache, prefixMatchDataKey, and selections are set only when
+	// affinity.prefixCache is configured.
+	prefixCache        *RevisionPrefixCache
+	prefixMatchDataKey fwkplugin.DataKey
+	selections         *selectionFractions
+
 	mu           sync.RWMutex
 	pods         map[types.NamespacedName]podInfo
 	distribution revisionDistribution
@@ -79,6 +87,7 @@ type revisionDistribution struct {
 
 var (
 	_ fwkplugin.Plugin              = (*Screener)(nil)
+	_ fwkplugin.ConsumerPlugin      = (*Screener)(nil)
 	_ fwkrc.Screener                = (*Screener)(nil)
 	_ fwkrc.ResponseHeaderProcessor = (*Screener)(nil)
 	_ fwkdl.Registrant              = (*Screener)(nil)
@@ -147,10 +156,30 @@ func newScreener(name string, config Config, scope labels.Selector, handle fwkpl
 		localRevisionDecisions:   fwkplugin.NewPluginState(handle.Context()),
 		pods:                     make(map[types.NamespacedName]podInfo),
 	}
+	if config.RevisionGating.affinityMode() == AffinityModePrefix && config.RevisionGating.Affinity.PrefixCache != nil {
+		screener.prefixCache = config.RevisionGating.Affinity.PrefixCache
+		screener.prefixMatchDataKey = attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(screener.prefixCache.ProducerName)
+		screener.selections = newSelectionFractions()
+	}
 	return screener
 }
 
 func (c *Screener) TypedName() fwkplugin.TypedName { return c.typedName }
+
+// Consumes declares the request attributes named by affinity sources when
+// prefix affinity is enabled, and requires PrefixCacheMatchInfo when
+// affinity.prefixCache is set, so the prefix cache producer and the tokenizer
+// it needs run during request handling, before this Screener.
+func (c *Screener) Consumes() fwkplugin.DataDependencies {
+	if c.config.RevisionGating.affinityMode() != AffinityModePrefix {
+		return fwkplugin.DataDependencies{}
+	}
+	deps := sessionaffinity.SourcesConsumes(c.config.RevisionGating.Affinity.Sources)
+	if c.prefixCache != nil {
+		deps.Required = map[fwkplugin.DataKey]any{c.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}}
+	}
+	return deps
+}
 
 // RegisterDependencies requests the framework-owned core/v1 Pod notification
 // source. No controller-runtime Manager or Kubernetes client enters the plugin.

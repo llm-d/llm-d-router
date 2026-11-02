@@ -1,0 +1,56 @@
+groups:
+  - id: span.llm_d.epp.run_scheduler_profile
+    type: span
+    brief: Runs one named scheduler profile.
+    stability: development
+    span_kind: internal
+    annotations:
+      span.name: run_scheduler_profile
+      go.name: LLMDEPPSpanRunSchedulerProfile
+    attributes:
+      - ref: llm_d.epp.scheduling.profile.name
+        requirement_level: required
+  - id: span.llm_d.epp.filter_endpoints
+    type: span
+    brief: Applies the filter chain to candidate endpoints.
+    stability: development
+    span_kind: internal
+    annotations:
+      span.name: filter_endpoints
+      go.name: LLMDEPPSpanFilterEndpoints
+    attributes:
+      - ref: llm_d.epp.filter.candidate_endpoints
+        requirement_level: required
+      - ref: llm_d.epp.filter.filtered_endpoints
+        requirement_level:
+          conditionally_required: When the filter chain returns normally.
+  - id: span.llm_d.epp.scoring
+    type: span
+    brief: Combines weighted scores from the configured scorers.
+    stability: development
+    span_kind: internal
+    annotations:
+      span.name: scoring
+      go.name: LLMDEPPSpanScoring
+    attributes:
+      - ref: llm_d.epp.scorer.count
+        requirement_level: required
+      - ref: llm_d.epp.scoring.candidate_endpoints
+        requirement_level: required
+  - id: span.llm_d.epp.pick_endpoints
+    type: span
+    brief: Selects an endpoint from the scored candidates.
+    stability: development
+    span_kind: internal
+    annotations:
+      span.name: pick_endpoints
+      go.name: LLMDEPPSpanPickEndpoints
+    attributes:
+      - ref: llm_d.epp.picker.candidate_endpoints
+        requirement_level: required
+      - ref: llm_d.epp.picker.top_endpoints
+        requirement_level:
+          conditionally_required: When at least one scored endpoint is available.
+      - ref: llm_d.epp.picker.top_scores
+        requirement_level:
+          conditionally_required: When at least one scored endpoint is available.

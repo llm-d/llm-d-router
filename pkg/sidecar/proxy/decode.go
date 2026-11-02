@@ -40,8 +40,6 @@ const (
 	// finishReasonLength is the finish reason when max_tokens was reached.
 	finishReasonLength = "length"
 
-	requestFieldN = "n"
-
 	responseFieldMessage = "message"
 	responseFieldIndex   = "index"
 	responseFieldDelta   = "delta"
@@ -129,7 +127,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Each chunk continues the first choice's text for every choice, and the budget counts the tokens of all choices.
-	if n, ok := toInt(body[requestFieldN]); ok && n > 1 {
+	if n, ok := toInt(body[reqcommon.FieldN]); ok && n > 1 {
 		logger.V(logging.DEBUG).Info("chunked decode: several choices requested, using regular decode", "n", n)
 		regularDecode()
 		return
@@ -287,7 +285,21 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			if streamingEnabled && chunkIndex > 0 {
 				// The status went out with the first chunk, so the error is sent the
 				// way vLLM reports a failure in a stream: as a data event before [DONE].
-				fmt.Fprintf(w, "%s%s\n\n%s\n\n", reqcommon.SSEDataPrefix, bw.bodyBytes(), reqcommon.SSEDone)
+				errorBody := bw.bodyBytes()
+				var flatError errorResponse
+				if json.Unmarshal(errorBody, &flatError) == nil && flatError.Object == "error" {
+					var err error
+					errorBody, err = json.Marshal(reqcommon.OpenAIErrorResponse{Error: reqcommon.OpenAIError{
+						Message: flatError.Message,
+						Type:    flatError.Type,
+						Code:    flatError.Code,
+					}})
+					if err != nil {
+						logger.Error(err, "failed to marshal SSE error")
+						return
+					}
+				}
+				fmt.Fprintf(w, "%s%s\n\n%s\n\n", reqcommon.SSEDataPrefix, errorBody, reqcommon.SSEDone)
 				return
 			}
 			WriteAll(w, bw.bodyBytes())

@@ -353,6 +353,29 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 	}
 }
 
+func TestVideoRawPayloadIsForwardedUnchanged(t *testing.T) {
+	raw := []byte("--test\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nalias\r\n" +
+		"--test\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\na cat\r\n--test--\r\n")
+	parser := openai.NewOpenAIParser()
+	parsed, err := parser.ParseRequest(context.Background(), raw, map[string]string{
+		":path": "/v1/videos", "content-type": "multipart/form-data; boundary=test",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "alias", parsed.Body.Model)
+	require.IsType(t, fwkrh.RawPayload(nil), parsed.Body.Payload)
+
+	reqCtx := &handlers.RequestContext{
+		Request: &handlers.Request{RawBody: raw}, Parser: parser,
+		IncomingModelName: "alias", TargetModelName: "backend",
+	}
+	director := &Director{}
+	require.NoError(t, director.modelRewriteIfNeeded(context.Background(), reqCtx, parsed.Body))
+	require.False(t, parsed.Body.Mutated)
+	require.NoError(t, director.repackage(context.Background(), reqCtx, parsed.Body))
+	require.Equal(t, raw, reqCtx.Request.RawBody)
+	require.Equal(t, len(raw), reqCtx.RequestSize)
+}
+
 // --- Mocks ---
 
 type mockAdmissionController struct {
@@ -534,6 +557,10 @@ type mockRequestHeaderPlugin struct {
 
 func (m *mockRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Name: m.name, Type: "mock-request-header"}
+}
+
+func (m *mockRequestHeaderPlugin) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{m.attributeKey: ""}
 }
 
 func (m *mockRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
@@ -796,6 +823,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		wantMutatedBody         map[string]any
 		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap.
 		propagatePriority       bool   // If true, enable requestHandler.propagatePriority on the director.
+		composeFairnessIDs      bool   // If true, enable requestHandler.composeFairnessIDs on the director.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		wantSpanFairnessID      string // If non-empty, asserted against request_orchestration span fairness ID.
@@ -971,7 +999,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantSource:         tracing.AttributionSourceAgentIdentity,
 		},
 		{
-			name: "explicit fairness header takes precedence over agent-identity attribute",
+			name: "fairness header and agent-identity attribute compose into a tenant-prefixed fairness ID",
 			reqBodyMap: map[string]any{
 				"model":  model,
 				"prompt": "critical prompt",
@@ -982,14 +1010,164 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			initialTargetModelName: model,
 			inferenceObjectiveName: objectiveName,
-			fairnessIDHeader:       "explicit-id",
+			fairnessIDHeader:       "tenant-1",
+			composeFairnessIDs:     true,
 			requestHeaderPlugin: &mockRequestHeaderPlugin{
 				name:           "agent-identity",
 				attributeKey:   agentidentity.AgentIdentityKey,
 				attributeValue: "session-abc",
 			},
-			wantFairnessID:     "explicit-id",
-			wantSpanFairnessID: "explicit-id",
+			wantFairnessID:     "tenant-1/session-abc",
+			wantSpanFairnessID: "tenant-1/session-abc",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "fairness header wins when composition is disabled",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1",
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-identity",
+				attributeKey:   agentidentity.AgentIdentityKey,
+				attributeValue: "session-abc",
+			},
+			wantFairnessID:     "tenant-1",
+			wantSpanFairnessID: "tenant-1",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "tenant fairness ID containing the separator is escaped when composing",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1/eu",
+			composeFairnessIDs:     true,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-identity",
+				attributeKey:   agentidentity.AgentIdentityKey,
+				attributeValue: "session-abc",
+			},
+			wantFairnessID:     "tenant-1%2Feu/session-abc",
+			wantSpanFairnessID: "tenant-1%2Feu/session-abc",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "tenant fairness ID containing a percent sign is escaped when composing",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1%2F",
+			composeFairnessIDs:     true,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-identity",
+				attributeKey:   agentidentity.AgentIdentityKey,
+				attributeValue: "session-abc",
+			},
+			wantFairnessID:     "tenant-1%252F/session-abc",
+			wantSpanFairnessID: "tenant-1%252F/session-abc",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "header-only tenant fairness ID is escaped when composing",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1/eu",
+			composeFairnessIDs:     true,
+			wantFairnessID:         "tenant-1%2Feu",
+			wantSpanFairnessID:     "tenant-1%2Feu",
+			wantSource:             tracing.AttributionSourceHeader,
+		},
+		{
+			name: "header-only tenant fairness ID is sent verbatim when composition is disabled",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1/eu",
+			wantFairnessID:         "tenant-1/eu",
+			wantSpanFairnessID:     "tenant-1/eu",
+			wantSource:             tracing.AttributionSourceHeader,
+		},
+		{
+			name: "agent identity containing the separator is composed",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1",
+			composeFairnessIDs:     true,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-identity",
+				attributeKey:   agentidentity.AgentIdentityKey,
+				attributeValue: "org/session-abc",
+			},
+			wantFairnessID:     "tenant-1/org/session-abc",
+			wantSpanFairnessID: "tenant-1/org/session-abc",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "empty agent-identity attribute composes the escaped tenant alone",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1/eu",
+			composeFairnessIDs:     true,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-identity",
+				attributeKey:   agentidentity.AgentIdentityKey,
+				attributeValue: "",
+			},
+			wantFairnessID:     "tenant-1%2Feu",
+			wantSpanFairnessID: "tenant-1%2Feu",
 			wantSource:         tracing.AttributionSourceHeader,
 		},
 		{
@@ -1727,6 +1905,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
 				if test.propagatePriority {
 					config = config.WithPropagatePriority(true)
+				}
+				if test.composeFairnessIDs {
+					config = config.WithComposeFairnessIDs(true)
 				}
 
 				endpointCandidates := NewDatastoreEndpointCandidates(ds)
@@ -3174,6 +3355,28 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 			var e errcommon.Error
 			require.ErrorAs(t, err, &e)
 			assert.Equal(t, tt.wantErrCode, e.Code)
+		})
+	}
+}
+
+func TestEscapeFairnessTenant(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "no special characters", in: "tenant-1", want: "tenant-1"},
+		{name: "separator", in: "tenant-1/eu", want: "tenant-1%2Feu"},
+		{name: "percent sign", in: "tenant-1%2F", want: "tenant-1%252F"},
+		{name: "separator and percent sign", in: "a%/b", want: "a%25%2Fb"},
+		{name: "multiple separators", in: "a/b/c", want: "a%2Fb%2Fc"},
+		{name: "leading separator", in: "/tenant", want: "%2Ftenant"},
+		{name: "empty", in: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, escapeFairnessTenant(tt.in))
 		})
 	}
 }

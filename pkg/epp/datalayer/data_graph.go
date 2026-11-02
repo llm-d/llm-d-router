@@ -35,10 +35,30 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/util"
 )
 
+// ValidateOption configures ValidateAndOrderDataDependencies.
+type ValidateOption func(*validateOptions)
+
+type validateOptions struct {
+	producerPhases map[string]fwkrc.DataProducerPhase
+}
+
+// WithDataProducerPhases places each DataProducer, keyed by plugin name, in
+// its phase. A DataProducer absent from phases runs in
+// DataProducerPhaseScheduling.
+func WithDataProducerPhases(phases map[string]fwkrc.DataProducerPhase) ValidateOption {
+	return func(o *validateOptions) {
+		o.producerPhases = phases
+	}
+}
+
 // ValidateAndOrderDataDependencies validates that the data dependencies among the given plugins are acyclic
 // and returns a topologically sorted order of plugin names based on their data dependencies.
 // Further, it validates that the plugins are ordered in a way that respects the layer execution order.
-func ValidateAndOrderDataDependencies(plugins []plugin.Plugin) ([]string, error) {
+func ValidateAndOrderDataDependencies(plugins []plugin.Plugin, opts ...ValidateOption) ([]string, error) {
+	var options validateOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	pluginMap := make(map[string]plugin.Plugin)
 	for _, p := range plugins {
 		pluginMap[p.TypedName().String()] = p
@@ -67,7 +87,7 @@ func ValidateAndOrderDataDependencies(plugins []plugin.Plugin) ([]string, error)
 			return nil, err
 		}
 	}
-	dag, err := buildDAG(producers, consumers)
+	dag, err := buildDAG(producers, consumers, options.producerPhases)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +126,9 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 	// same producer created on every round.
 	attempted := make(map[string]bool)
 
+	configured := handle.GetAllPlugins()
+	defaulted := make(map[string]defaultedKey)
+
 	for {
 		producedKeys := producedKeySet(handle)
 
@@ -130,6 +153,7 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 			if !ok {
 				return fmt.Errorf("%w %v, consumed by %v", ErrNoDefaultProducer, key, consumerName)
 			}
+			defaulted[key] = defaultedKey{producer: defaultProducerNameOrType, consumer: consumerName}
 			if handle.Plugin(defaultProducerNameOrType) != nil || attempted[defaultProducerNameOrType] {
 				// Already created. This can happen when a producer produces multiple data keys.
 				continue
@@ -181,7 +205,55 @@ func CreateMissingDataProducers(ctx context.Context, defaultProducerRegistry map
 		}
 	}
 
+	// Warn about configured producers whose key no other plugin reads while a consumer of
+	// the same data type reads an auto-created default. A default key's producer name is
+	// its registry type, so the configured key with that producer name equals the default
+	// key only when the data types match.
+	for _, p := range configured {
+		producer, ok := p.(plugin.ProducerPlugin)
+		if !ok {
+			continue
+		}
+		for key := range producer.Produces() {
+			if consumedByOther(handle, p, key) {
+				continue
+			}
+			for defaultKey, d := range defaulted {
+				if key.WithNonEmptyProducerName(d.producer).String() == defaultKey {
+					logger.Info("Warning: configured producer's data key has no consumer, a consumer of the same data type reads an auto-created default producer",
+						"producer", p.TypedName().String(), "dataKey", key.String(),
+						"defaultProducer", d.producer, "consumer", d.consumer)
+				}
+			}
+		}
+	}
+
 	return nil
+}
+
+// defaultedKey records the default producer that serves a missing data key and a consumer of that key.
+type defaultedKey struct {
+	producer string
+	consumer string
+}
+
+// consumedByOther reports whether a plugin other than p declares key as Required or Optional.
+func consumedByOther(handle plugin.Handle, p plugin.Plugin, key plugin.DataKey) bool {
+	for _, other := range handle.GetAllPlugins() {
+		if other.TypedName() == p.TypedName() {
+			continue
+		}
+		if consumer, ok := other.(plugin.ConsumerPlugin); ok {
+			deps := consumer.Consumes()
+			if _, ok := deps.Required[key]; ok {
+				return true
+			}
+			if _, ok := deps.Optional[key]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // producedKeySet returns the set of data-key strings produced by the plugins
@@ -200,13 +272,17 @@ func producedKeySet(handle plugin.Handle) map[string]bool {
 
 // Define constants for layer execution order. Lower value means earlier execution.
 const (
-	FlowControlLayer    = 0
-	RequestControlLayer = 1
-	SchedulingLayer     = 2
+	FlowControlLayer = 0
+	// RequestHandlingProducerLayer holds DataProducers in DataProducerPhaseRequestHandling.
+	RequestHandlingProducerLayer = 1
+	// ScreenerLayer holds screeners, which run between the two DataProducer phases.
+	ScreenerLayer       = 2
+	RequestControlLayer = 3
+	SchedulingLayer     = 4
 	DefaultLayer        = -1 // For plugins that don't fit into a known layer
 )
 
-func pluginToLayerExecutionOrder(plugin plugin.Plugin) int {
+func pluginToLayerExecutionOrder(plugin plugin.Plugin, producerPhases map[string]fwkrc.DataProducerPhase) int {
 	// Flow control plugins
 	if _, ok := plugin.(fwkfc.FairnessPolicy); ok {
 		return FlowControlLayer
@@ -217,7 +293,15 @@ func pluginToLayerExecutionOrder(plugin plugin.Plugin) int {
 
 	// Request control plugins
 	if _, ok := plugin.(fwkrc.DataProducer); ok {
+		if producerPhases[plugin.TypedName().Name] == fwkrc.DataProducerPhaseRequestHandling {
+			return RequestHandlingProducerLayer
+		}
 		return RequestControlLayer
+	}
+	// A screener reads data in Screen, ahead of any other request control
+	// extension point it implements.
+	if _, ok := plugin.(fwkrc.Screener); ok {
+		return ScreenerLayer
 	}
 	if _, ok := plugin.(fwkrc.Admitter); ok {
 		return RequestControlLayer
@@ -249,7 +333,8 @@ func pluginToLayerExecutionOrder(plugin plugin.Plugin) int {
 
 // buildDAG builds a dependency graph among data preparation plugins based on their
 // produced and consumed data keys.
-func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]plugin.ConsumerPlugin) (map[string][]string, error) {
+func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]plugin.ConsumerPlugin,
+	producerPhases map[string]fwkrc.DataProducerPhase) (map[string][]string, error) {
 	dag := make(map[string][]string)
 	// Create dependency graph as a DAG.
 	for _, producer := range producers {
@@ -279,8 +364,14 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 						if producedType != nil && consumedType != nil && reflect.TypeOf(producedType) != reflect.TypeOf(consumedType) {
 							return nil, errors.New("data type mismatch between produced and consumed data for key: " + producedKey.String())
 						}
-						if pluginToLayerExecutionOrder(producer) > pluginToLayerExecutionOrder(consumer) {
-							return nil, errors.New("invalid plugin layer execution order: producer " + pName + " needs to be executed before consumer " + cName)
+						producerLayer := pluginToLayerExecutionOrder(producer, producerPhases)
+						consumerLayer := pluginToLayerExecutionOrder(consumer, producerPhases)
+						if producerLayer > consumerLayer {
+							msg := "invalid plugin layer execution order: producer " + pName + " needs to be executed before consumer " + cName
+							if _, ok := producer.(fwkrc.DataProducer); ok && (consumerLayer == RequestHandlingProducerLayer || consumerLayer == ScreenerLayer) {
+								msg += "; run the producer in the " + string(fwkrc.DataProducerPhaseRequestHandling) + " phase"
+							}
+							return nil, errors.New(msg)
 						}
 						// Consumer depends on producer, so add an edge from consumer to producer.
 						dag[cName] = append(dag[cName], pName)

@@ -209,6 +209,36 @@ func TestHandleECMooncakeRewritesChat(t *testing.T) {
 	}, ec[ecMooncakeFieldItems], "ec_items follow the media parts' order")
 }
 
+func TestHandleECMooncakeUntypedMedia(t *testing.T) {
+	img1, img2 := "https://example.com/a.jpg", "https://example.com/b.jpg"
+	body := `{"model":"m","messages":[{"role":"user","content":[` +
+		`{"image_url":"` + img1 + `"},` +
+		`{"type":"image_url","image_url":{"url":"` + img2 + `"},"uuid":"client-uuid"}]}]}`
+
+	h, rec := runECMooncake(t, reqcommon.PathChatCompletions, reqcommon.APITypeChatCompletions, body, func(part map[string]any) string {
+		return `{"engine-` + part[partFieldUUID].(string) + `":{"metadata":{"image_grid_thw":[[1,4,6]]},"item_indices":[0]}}`
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, h.calls, 2)
+
+	content := prefillContent(t, h.prefillBody)
+	require.Len(t, content, 2)
+	ec := h.prefillBody[reqcommon.FieldECTransferParams].(map[string]any)
+	transferItems, ok := ec[ecMooncakeFieldItems].([]any)
+	require.True(t, ok)
+	require.Len(t, transferItems, 2)
+	for idx, img := range []string{img1, img2} {
+		call := h.callFor(t, img)
+		part := content[idx].(map[string]any)
+		assert.Equal(t, "image_embeds", part[reqcommon.FieldType])
+		assert.Equal(t, call.part[partFieldUUID], part[partFieldUUID])
+		assert.Equal(t, map[string]any{
+			"mm_hash":     "engine-" + call.part[partFieldUUID].(string),
+			"transfer_id": call.transferIDs[0],
+		}, transferItems[idx])
+	}
+}
+
 // TestHandleECMooncakeNoMetadataKeepsMedia pins that a part the encoder
 // reported no metadata for keeps its media and gets no ec_items entry.
 func TestHandleECMooncakeNoMetadataKeepsMedia(t *testing.T) {

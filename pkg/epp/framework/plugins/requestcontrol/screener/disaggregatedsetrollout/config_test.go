@@ -18,8 +18,11 @@ package disaggregatedsetrollout
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 func validConfig() Config {
@@ -201,6 +204,110 @@ func TestValidate_LeavesHeaderNameAloneOnInCodeConstruction(t *testing.T) {
 	}
 	if cfg.RevisionGating.RevisionHeaderName != "X-LLM-D-Disagg-Revision" {
 		t.Fatalf("Validate mutated RevisionHeaderName: got %q", cfg.RevisionGating.RevisionHeaderName)
+	}
+}
+
+func TestRevisionGating_UnmarshalJSON_Affinity(t *testing.T) {
+	raw := []byte(`{"mode":"sum","requiredRoles":["prefill","decode"],"affinity":{"mode":"prefix","sources":[{"header":"X-Session-ID"},{"attribute":"agent-identity"}]}}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if gating.affinityMode() != AffinityModePrefix {
+		t.Fatalf("affinity mode = %q, want %q", gating.affinityMode(), AffinityModePrefix)
+	}
+	want := []sessionaffinity.SessionIDSource{{Header: "X-Session-ID"}, {Attribute: "agent-identity"}}
+	if !slices.Equal(gating.Affinity.Sources, want) {
+		t.Fatalf("sources = %+v, want %+v", gating.Affinity.Sources, want)
+	}
+
+	unknown := []byte(`{"mode":"sum","requiredRoles":["prefill"],"affinity":{"mode":"prefix","sessionHeader":"x"}}`)
+	if err := json.Unmarshal(unknown, &gating); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("want unknown field error, got %v", err)
+	}
+}
+
+func TestValidate_Affinity(t *testing.T) {
+	cfg := validConfig()
+	if cfg.RevisionGating.affinityMode() != AffinityModeNone {
+		t.Fatalf("affinity should default to %q", AffinityModeNone)
+	}
+	for _, affinity := range []RevisionAffinity{
+		{},
+		{Mode: AffinityModeNone},
+		{Mode: AffinityModePrefix},
+		{Mode: AffinityModePrefix, Sources: []sessionaffinity.SessionIDSource{{Header: "x-session-id"}, {Attribute: "agent-identity"}}},
+	} {
+		cfg := validConfig()
+		cfg.RevisionGating.Affinity = &affinity
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("affinity %+v rejected: %v", affinity, err)
+		}
+	}
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Mode: "sticky"}
+	assertValidateError(t, cfg, "revisionGating.affinity.mode")
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Sources: []sessionaffinity.SessionIDSource{{Header: "x-session-id"}}}
+	assertValidateError(t, cfg, "revisionGating.affinity.sources requires")
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Mode: AffinityModePrefix, Sources: []sessionaffinity.SessionIDSource{{Header: "x", Attribute: "y"}}}
+	assertValidateError(t, cfg, "revisionGating.affinity.sources[0]")
+}
+
+func TestRevisionGating_UnmarshalJSON_PrefixCache(t *testing.T) {
+	raw := []byte(`{"mode":"sum","requiredRoles":["prefill","decode"],"affinity":{"mode":"prefix",` +
+		`"prefixCache":{"producerName":"my-prefix","minLeadBlocks":4,"shareSlack":0}}}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	prefixCache := gating.Affinity.PrefixCache
+	if prefixCache == nil || prefixCache.ProducerName != "my-prefix" || prefixCache.MinLeadBlocks != 4 ||
+		prefixCache.ShareSlack == nil || *prefixCache.ShareSlack != 0 {
+		t.Fatalf("prefixCache = %+v", prefixCache)
+	}
+
+	unknown := []byte(`{"mode":"sum","requiredRoles":["prefill"],"affinity":{"mode":"prefix","prefixCache":{"minLead":2}}}`)
+	if err := json.Unmarshal(unknown, &gating); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("want unknown field error, got %v", err)
+	}
+}
+
+func TestValidate_PrefixCache(t *testing.T) {
+	cfg := prefixCacheConfig(RevisionPrefixCache{})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	prefixCache := cfg.RevisionGating.Affinity.PrefixCache
+	if prefixCache.MinLeadBlocks != DefaultPrefixCacheMinLeadBlocks {
+		t.Fatalf("minLeadBlocks = %d, want default %d", prefixCache.MinLeadBlocks, DefaultPrefixCacheMinLeadBlocks)
+	}
+	if prefixCache.ShareSlack == nil || *prefixCache.ShareSlack != DefaultPrefixCacheShareSlack {
+		t.Fatalf("shareSlack = %v, want default %v", prefixCache.ShareSlack, DefaultPrefixCacheShareSlack)
+	}
+
+	zero := 0.0
+	cfg = prefixCacheConfig(RevisionPrefixCache{MinLeadBlocks: 1, ShareSlack: &zero})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := cfg.RevisionGating.Affinity.PrefixCache; got.MinLeadBlocks != 1 || *got.ShareSlack != 0 {
+		t.Fatalf("explicit values overwritten: %+v", got)
+	}
+
+	cfg = validConfig()
+	cfg.RevisionGating.Affinity = &RevisionAffinity{PrefixCache: &RevisionPrefixCache{}}
+	assertValidateError(t, cfg, "revisionGating.affinity.prefixCache requires revisionGating.affinity.mode=prefix")
+
+	cfg = prefixCacheConfig(RevisionPrefixCache{})
+	cfg.RevisionGating.Mode = GatingModeDisabled
+	assertValidateError(t, cfg, "revisionGating.affinity.prefixCache requires revisionGating.mode")
+
+	assertValidateError(t, prefixCacheConfig(RevisionPrefixCache{MinLeadBlocks: -1}), "minLeadBlocks must be positive")
+
+	for _, slack := range []float64{-0.1, 1.1} {
+		assertValidateError(t, prefixCacheConfig(RevisionPrefixCache{ShareSlack: &slack}), "shareSlack must be between 0 and 1")
 	}
 }
 

@@ -247,7 +247,7 @@ retryLoop:
 	}
 
 	prefillDuration := time.Since(prefillStart)
-	metrics.RecordPrefillDuration(prefillDuration)
+	observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
@@ -262,7 +262,7 @@ retryLoop:
 	}
 
 	if prefillErr == nil && isHTTPError(pw.statusCode) {
-		metrics.RecordError(metrics.StagePrefill)
+		observeStageError(r.Context(), metrics.StagePrefill)
 		logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
 			logBodyBytesKey, pw.buffer.Len())
@@ -289,7 +289,7 @@ retryLoop:
 		}
 	}
 	if prefillErr != nil {
-		metrics.RecordError(metrics.StagePrefill)
+		observeStageError(r.Context(), metrics.StagePrefill)
 		logger.Error(jsonErrorForLog(prefillErr), "prefill request failed",
 			"request_id", uuidStr,
 			"status", pw.statusCode,
@@ -459,7 +459,7 @@ retryLoop:
 	statusWriter, decodeStatus := captureResponseStatus(w)
 	decodeWriter, finalizeDecodeWriter := decodeResponseWriter(statusWriter, pCachedTokens, rewriteCachedTokens, streamingEnabled)
 	decodeReturned := false
-	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq, func() {
 		toolFields.compareValidatedDispatchedForSpan(dbody, decodeSpan)
 	})
@@ -472,17 +472,17 @@ retryLoop:
 	}
 	decodeReturned = true
 	if err := finalizeDecodeWriter(); err != nil {
-		metrics.RecordDecodeDuration(time.Since(decodeStart))
-		metrics.RecordError(metrics.StageDecode)
+		observeStageDuration(r.Context(), metrics.StageDecode, time.Since(decodeStart))
+		observeStageError(r.Context(), metrics.StageDecode)
 		logger.Error(err, "failed to flush cached token response writer")
 		decodeSpan.SetStatus(codes.Error, "failed to flush cached token response writer")
 		return
 	}
 
 	decodeDuration := time.Since(decodeStart)
-	metrics.RecordDecodeDuration(decodeDuration)
+	observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
 	if decodeStatus.failed() {
-		metrics.RecordError(metrics.StageDecode)
+		observeStageError(r.Context(), metrics.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())))
@@ -772,7 +772,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		prefillHandler.ServeHTTP(pw, preq)
 		prefillResp = pw
 		prefillDuration := time.Since(prefillStartedAt)
-		metrics.RecordPrefillDuration(prefillDuration)
+		observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
 		prefillSpan.SetAttributes(
 			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
@@ -865,7 +865,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			// Prefill failed: abort decode and return the prefill error verbatim.
 			cancel()
 			dcw.abort()
-			metrics.RecordError(metrics.StagePrefill)
+			observeStageError(r.Context(), metrics.StagePrefill)
 			status := http.StatusBadGateway
 			if prefillResp != nil {
 				status = prefillResp.statusCode
@@ -895,7 +895,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			dcw.abort()
 			// Counted here rather than from prefill's own outcome: the cancelled
 			// prefill may still come back 2xx if it completed as the timer fired.
-			metrics.RecordError(metrics.StagePrefill)
+			observeStageError(r.Context(), metrics.StagePrefill)
 			decodeTimedOut = true
 			logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
 				"request_id", uuidStr, "timeout", waitTimeout.String())
@@ -920,12 +920,12 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// and the failure is counted as a prefill error. Decode duration is also
 	// sampled on the KV-wait timeout, where decode waited the full timeout.
 	if !clientResponded {
-		metrics.RecordDecodeDuration(decodeDuration)
+		observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
 		if decodeAborted.Load() || dcw.failed() {
-			metrics.RecordError(metrics.StageDecode)
+			observeStageError(r.Context(), metrics.StageDecode)
 		}
 	} else if decodeTimedOut {
-		metrics.RecordDecodeDuration(decodeDuration)
+		observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
 	}
 
 	if currentSpan := trace.SpanFromContext(parentCtx); currentSpan.SpanContext().IsValid() {

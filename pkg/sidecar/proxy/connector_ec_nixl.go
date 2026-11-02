@@ -131,7 +131,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		encodeStart := time.Now()
 		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
-			metrics.RecordError(metrics.StageEncode)
+			observeStageError(r.Context(), metrics.StageEncode)
 			logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
 				logger.Error(err, "failed to send error response to client")
@@ -141,7 +141,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		// total == 0 means there was no multimodal input to encode, so no
 		// encoder was invoked and the duration is not sampled.
 		if total > 0 {
-			metrics.RecordEncodeDuration(time.Since(encodeStart))
+			observeStageDuration(r.Context(), metrics.StageEncode, time.Since(encodeStart))
 			// All-missing degrades silently to primer-mode; warn so the
 			// operator sees the regression.
 			if contributed == 0 {

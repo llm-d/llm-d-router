@@ -450,6 +450,7 @@ func RecordResponseProcessingLatency(apiSurface reqcommon.APISurface, duration t
 
 // RecordSchedulerAttempt records a scheduling attempt with status and endpoint information.
 func RecordSchedulerAttempt(err error, targetModelName string, result *fwksched.SchedulingResult) {
+	targetModelName = boundModel(targetModelName)
 	if err != nil {
 		llmdSchedulerAttemptsTotal.WithLabelValues(SchedulerStatusFailure, targetModelName, "", "", "").Inc()
 		return

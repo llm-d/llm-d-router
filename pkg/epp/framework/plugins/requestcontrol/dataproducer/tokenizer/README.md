@@ -7,8 +7,14 @@
 `InferenceRequestBody.TokenizedRequest` for downstream consumers (scorers,
 filters, other data producers).
 
-Implements `requestcontrol.DataProducer` and runs in the `PrepareRequestData`
-phase, before filters and scorers. The plugin is idempotent: if
+Implements `requestcontrol.DataProducer`. By default it runs after screeners,
+before admission, filters, and scorers. It runs during request handling,
+before screeners, when listed under `requestHandler.dataProducers` or when a
+screener or another request handling producer consumes `TokenizedPrompt`, for
+example an `approx-prefix-cache-producer` that feeds
+`disaggregatedset-rollout-screener`; see
+[Request Control](../../../../../../../docs/architecture.md#request-control).
+The plugin is idempotent: if
 `InferenceRequestBody.TokenizedRequest` is already populated by an earlier
 producer, tokenization is skipped. Multi-modal features are flattened into the
 upstream list shape, sorted by placeholder offset.
@@ -242,6 +248,13 @@ per 40ms of audio (`tokensPerSecond: 25`), Qwen3-Omni's encoder 13 per 1s chunk
 | `estimate.audio.defaultBytesPerSecond`          | `16000`   | Byte rate used for a non-WAV payload when the request does not declare one (~128kbps). |
 | `estimate.audio.defaultDuration`                | `10`      | Clip length in seconds when neither the header nor a payload supplies one.    |
 | `estimate.audio.maxAudioTokens`                 | –         | Cap on the tower's tokens for a clip, before `overheadTokens`; use the model's own limit, e.g. 750 for gemma4 (0 = uncapped). |
+
+Image sizes and the video and audio headers are declared by the client, so the
+backend bounds what they can add: placeholders stop growing a request once its
+estimated stream reaches 1,048,576 (2^20) tokens, and any further image, video,
+or audio part keeps a single placeholder. This bound applies after the
+per-modality caps above and sits above the context window of current
+multimodal models.
 
 ## Failure mode
 
@@ -514,7 +527,7 @@ client sent for either field are overridden. vLLM versions without these fields
 ignore them and return the tensors. The option is false by default and works
 with `vllm.url` and `vllm.endpointDiscovery`.
 
-A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`deploy/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../deploy/config/sim-epp-tokenizer-vllm-http-config.yaml).
+A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml).
 
 ## Live verification
 

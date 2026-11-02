@@ -46,6 +46,8 @@ const (
 	HeaderContentType = "content-type"
 	// ContentTypeJSON is the media type of JSON bodies.
 	ContentTypeJSON = "application/json"
+	// MediaTypeEventStream is the SSE media type without optional parameters.
+	MediaTypeEventStream = "text/event-stream"
 	// HeaderContentTypeOptions names the HTTP header that controls MIME sniffing of a body.
 	HeaderContentTypeOptions = "x-content-type-options"
 	// ContentTypeOptionsNoSniff disables MIME sniffing; http.Error sets it on every body it writes.
@@ -67,6 +69,7 @@ const (
 	FieldTools                = "tools"
 	FieldToolChoice           = "tool_choice"
 	FieldSamplingParams       = "sampling_params"
+	FieldN                    = "n"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
@@ -86,6 +89,7 @@ const (
 	FieldMessages             = "messages"
 	FieldModel                = "model"
 	FieldRole                 = "role"
+	FieldText                 = "text"
 	FieldType                 = "type"
 	FieldURL                  = "url"
 	FieldImageURL             = "image_url"
@@ -141,6 +145,9 @@ const ToolChoiceNone = "none"
 // part is still collected and primed. FieldFileID on an input_image, input_file
 // or computer_screenshot names a Files API upload the serving engine must fetch.
 const (
+	PartTypeText               = "text"
+	PartTypeInputText          = "input_text"
+	PartTypeOutputText         = "output_text"
 	PartTypeImageURL           = "image_url"
 	PartTypeAudioURL           = "audio_url"
 	PartTypeVideoURL           = "video_url"
@@ -149,6 +156,10 @@ const (
 	PartTypeInputFile          = "input_file"
 	PartTypeComputerScreenshot = "computer_screenshot"
 )
+
+// ResponsesItemTypeMessage is the Responses input item type of a role-tagged
+// message. An item that omits FieldType is a message too.
+const ResponsesItemTypeMessage = "message"
 
 // Anthropic Messages block types. An image block holds its image in a
 // FieldSource object; a tool_result block holds the tool's output under

@@ -105,13 +105,17 @@ Client-derived label values are cardinality-bounded on EPP metrics that use them
 `target_model_name` from the request body share a cap of 1000 distinct values. Model names configured
 through InferenceModelRewrite rules never fold to `other`.
 
-The `fairness_id` label, populated from the `x-llm-d-inference-fairness-id` header or an agent
-identity, has a cap that defaults to 1000 distinct values. Configure it with
+The `fairness_id` label, populated from the `x-llm-d-inference-fairness-id` header, an agent
+identity, or their composition `<tenant>/<session>` when `requestHandler.composeFairnessIDs` is
+enabled and a request carries both, has a cap that defaults to 1000 distinct values. Configure it with
 `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id` to `other`. Caps
 apply over the lifetime of the process. Once a cap is reached, new values are reported as `other`.
 `default-flow`, the ID given to requests that have none, keeps its own label unless the limit is 0.
 These bounds apply whether or not the `flowControl` feature gate is enabled. When Flow Control is
 enabled, its series for a `fairness_id` are removed when the corresponding flow is garbage collected.
+Composed IDs make the label session-granular for tenant-stamped traffic, so a pool that enables
+`requestHandler.composeFairnessIDs` should size the cap for its session churn rather than its
+tenant count.
 
 ### Request and latency
 
@@ -621,8 +625,10 @@ included. Requests that fail earlier, such as a body that cannot be parsed, are 
 
 `source` is one of:
 
-- `header`: the `x-llm-d-inference-fairness-id` header, or its deprecated name
-  `x-gateway-inference-fairness-id`.
+- `header`: the `x-llm-d-inference-fairness-id` header, its deprecated name
+  `x-gateway-inference-fairness-id`, or the ID derived from it (percent-encoded, and
+  composed with the agent identity when present) when `requestHandler.composeFairnessIDs`
+  is enabled.
 - `agent_identity`: no header, and the agent identity plugin supplied an ID.
 - `default`: neither, so the request uses `default-flow`.
 
@@ -634,6 +640,13 @@ The current header name is read first. If it is present, even with an empty valu
 name is ignored, and an empty value falls back to agent identity or `default-flow`. A gateway in
 front of the EPP should set the fairness ID itself and overwrite any client-supplied value under
 both header names.
+
+When `requestHandler.composeFairnessIDs` is enabled, a request carrying both the header and an
+agent identity is recorded under the composed `<tenant>/<session>` ID with `source="header"`. The
+tenant part is percent-encoded (`%` to `%25`, `/` to `%2F`), so the first segment is always the
+whole tenant. On such a pool, `llm_d:epp_named_fairness_ids:count5m` counts distinct composed IDs,
+which are sessions rather than tenants, and `llm_d:epp_agent_sessions:count5m` does not count
+tenant-stamped sessions because those requests resolve with `source="header"`.
 
 The `fairness_id` label uses the shared cap described in [Metrics catalog](#metrics-catalog).
 Scheduling and Flow Control always use the original ID; only the label is folded. Per replica:
@@ -660,9 +673,9 @@ distinct fairness IDs per pool, deduplicated across EPP replicas:
 
 | Rule | Value |
 |---|---|
-| `llm_d:epp_named_fairness_ids:count5m` | Header IDs that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
+| `llm_d:epp_named_fairness_ids:count5m` | Header IDs, including composed `<tenant>/<session>` IDs, that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
 | `llm_d:epp_named_fairness_ids:incomplete5m` | 1 when header IDs were folded in the same window, so the count is a lower bound; otherwise 0. |
-| `llm_d:epp_agent_sessions:count5m` | Agent identity IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source="agent_identity"}` increases. |
+| `llm_d:epp_agent_sessions:count5m` | Agent identity IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source="agent_identity"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
 
 The rules group by `namespace` and `inference_pool`, so the scrape must attach a `namespace`
 label. Change `5m` for a different window. An ID is missed when all of its requests went to a
@@ -1005,7 +1018,7 @@ load reported for a replacement endpoint with the same labels.
 These metrics belong to the precise-prefix-cache pipeline. Set
 `indexerConfig.kvBlockIndexConfig.enableMetrics` to `true` on the
 `precise-prefix-cache-producer` parameters. The option defaults to `false`, and shipped sample
-configs (e.g. [`deploy/config/sim-epp-kvcache-config.yaml`](../deploy/config/sim-epp-kvcache-config.yaml))
+configs (e.g. [`test/e2e/artifacts/config/sim-epp-kvcache-config.yaml`](../test/e2e/artifacts/config/sim-epp-kvcache-config.yaml))
 leave it off, so these series are absent until an operator opts in. The embedded llm-d-kv-cache
 index and KV-event pool register these metrics in the router pod's EPP registry, so they are
 available from the existing EPP `/metrics` endpoint. Index metrics are unlabeled. KV-event metrics

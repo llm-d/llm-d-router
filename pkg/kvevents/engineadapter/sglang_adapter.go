@@ -47,6 +47,8 @@ var sglangBlockStoredFieldDecoders = []eventFieldDecoder{
 	{"lora_id", decodeLoraID},
 	{"medium", decodeMedium},
 	{"cache_salt", decodeSGLangCacheSalt},
+	{"session_id", func(dec *msgpack.Decoder, _ *typedEventFields) error { return skipValue(dec) }},
+	{"lora_name", decodeLoraName},
 }
 
 var sglangBlockRemovedFieldDecoders = []eventFieldDecoder{

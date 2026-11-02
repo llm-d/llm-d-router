@@ -307,6 +307,42 @@ func TestSGLangBlockStored_FullFields(t *testing.T) {
 	assert.Nil(t, blockStored.ExtraKeys)
 }
 
+// TestSGLangBlockStored_WithLoraName tests decoding a 9-field array event carrying lora_name
+// after cache_salt and session_id (sgl-project/sglang#42455).
+func TestSGLangBlockStored_WithLoraName(t *testing.T) {
+	event := []any{
+		"BlockStored",
+		[]any{uint64(100), uint64(101)},
+		uint64(99),
+		[]uint32{1, 2, 3},
+		16,
+		nil,
+		"gpu",
+		"salt-1",
+		"session-1",
+		"sql-lora",
+	}
+
+	rawBytes, err := msgpack.Marshal(event)
+	require.NoError(t, err)
+
+	result, err := decodeSGLangEvent(rawBytes)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	blockStored, ok := result.(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	assert.Equal(t, []uint64{100, 101}, blockStored.BlockHashes)
+	assert.Equal(t, uint64(99), blockStored.ParentHash)
+	assert.Equal(t, []uint32{1, 2, 3}, blockStored.Tokens)
+	assert.Equal(t, 16, blockStored.BlockSize)
+	assert.Equal(t, "gpu", blockStored.DeviceTier)
+	assert.Nil(t, blockStored.LoraID)
+	require.NotNil(t, blockStored.LoraName)
+	assert.Equal(t, "sql-lora", *blockStored.LoraName)
+	assert.Nil(t, blockStored.ExtraKeys)
+}
+
 // TestSGLangBlockStoredNegativeHashPreservesBits verifies the signed hash
 // representation emitted by SGLang survives adapter conversion.
 func TestSGLangBlockStoredNegativeHashPreservesBits(t *testing.T) {
@@ -514,6 +550,40 @@ func TestSGLangParseMessage_MapEncodedBlockStored(t *testing.T) {
 	assert.Equal(t, "GPU", blockStored.DeviceTier)
 	assert.Nil(t, blockStored.LoraID)
 	assert.Nil(t, blockStored.ExtraKeys)
+}
+
+// TestSGLangParseMessage_MapEncodedBlockStored_WithLoraName verifies map-encoded
+// BlockStored carrying lora_name decodes LoraName.
+func TestSGLangParseMessage_MapEncodedBlockStored_WithLoraName(t *testing.T) {
+	adapter := NewSGLangAdapter()
+
+	blockStoredEvent := map[string]any{
+		"type":              "BlockStored",
+		"block_hashes":      []any{uint64(100), uint64(101)},
+		"parent_block_hash": uint64(99),
+		"token_ids":         []uint32{1, 2, 3},
+		"block_size":        16,
+		"lora_id":           nil,
+		"medium":            "GPU",
+		"cache_salt":        "some-salt",
+		"session_id":        "some-session",
+		"lora_name":         "sql-lora",
+	}
+	payload, err := msgpack.Marshal([]any{1234567890.0, []any{blockStoredEvent}, 3})
+	require.NoError(t, err)
+
+	_, _, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{
+		Topic:   "kv@pod-1@llama-2-7b",
+		Payload: payload,
+	})
+	require.NoError(t, err)
+	require.Len(t, eventBatch.Events, 1)
+
+	blockStored, ok := eventBatch.Events[0].(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+	assert.Nil(t, blockStored.LoraID)
+	require.NotNil(t, blockStored.LoraName)
+	assert.Equal(t, "sql-lora", *blockStored.LoraName)
 }
 
 // TestSGLangParseMessage_MapEncodedBlockStored_CacheSaltAtRoot verifies that a
@@ -744,11 +814,11 @@ func decodeSGLangEvent(payload []byte) (kvevents.GenericEvent, error) {
 func TestSGLangParseMessage_EngineSchema(t *testing.T) {
 	stored := []any{eventTagBlockStored, []uint64{1}, nil, []uint32{2}, 1, nil, "GPU"}
 	for name, event := range map[string]any{
-		"array trailing fields": append(stored, nil, 42, "unused", -1),
+		"array trailing fields": append(stored, nil, 42, nil, "unused", -1),
 		"map engine fields": map[string]any{
 			"type": eventTagBlockStored, "block_hashes": []uint64{1},
 			"token_ids": []uint32{2}, "block_size": 1, "medium": "GPU",
-			"lora_name": 42, "extra_keys": "unused", "group_idx": -1,
+			"extra_keys": "unused", "group_idx": -1,
 			"session_id": "session",
 		},
 	} {
@@ -842,11 +912,11 @@ func TestSGLangParseMessage_MapTagOrder(t *testing.T) {
 		require.NoError(t, encoder.EncodeFloat64(1))
 		require.NoError(t, encoder.EncodeArrayLen(1))
 		require.NoError(t, encoder.EncodeMapLen(5))
-		names := []string{"block_hashes", "token_ids", "block_size", "lora_name", "type"}
+		names := []string{"block_hashes", "token_ids", "block_size", "extra_keys", "type"}
 		if tagFirst {
-			names = []string{"type", "block_hashes", "token_ids", "block_size", "lora_name"}
+			names = []string{"type", "block_hashes", "token_ids", "block_size", "extra_keys"}
 		}
-		values := map[string]any{"type": eventTagBlockStored, "block_hashes": []uint64{1}, "token_ids": []uint32{2}, "block_size": 1, "lora_name": 42}
+		values := map[string]any{"type": eventTagBlockStored, "block_hashes": []uint64{1}, "token_ids": []uint32{2}, "block_size": 1, "extra_keys": 42}
 		for _, name := range names {
 			require.NoError(t, encoder.EncodeString(name))
 			require.NoError(t, encoder.Encode(values[name]))

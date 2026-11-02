@@ -357,6 +357,15 @@ type RequestHandlerConfig struct {
 	// backend's native priority scheduler can consume it. It is off by default:
 	// when disabled the request body is forwarded unchanged.
 	PropagatePriority bool `json:"propagatePriority,omitempty"`
+
+	// +optional
+	// ComposeFairnessIDs, when true, lets the EPP combine a request's
+	// fairness-ID header (the tenant identity) with its agent-identity attribute
+	// (the session identity) into a single "<tenant>/<session>" flow key. It is
+	// off by default: the fairness-ID header wins and the session identity does
+	// not key the flow. When enabled, "%" and "/" in the header are
+	// percent-encoded so the tenant part stays unambiguous.
+	ComposeFairnessIDs bool `json:"composeFairnessIDs,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -373,6 +382,9 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.PropagatePriority {
 		parts = append(parts, "PropagatePriority: true")
+	}
+	if rhc.ComposeFairnessIDs {
+		parts = append(parts, "ComposeFairnessIDs: true")
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
