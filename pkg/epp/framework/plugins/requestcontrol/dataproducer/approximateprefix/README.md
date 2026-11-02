@@ -2,7 +2,9 @@
 
 **Type:** `approx-prefix-cache-producer`
 
-Prepares per-endpoint prefix cache match data consumed by the `prefix-cache-affinity-filter` and `prefix-cache-scorer`. Runs in the request handling's `DataProducer` phase before scheduling.
+Prepares per-endpoint prefix cache match data consumed by the `prefix-cache-affinity-filter`, `prefix-cache-scorer`, and `disaggregatedset-rollout-screener` (with `revisionGating.affinity.prefixCache`).
+
+**When it runs.** By default the producer runs after screeners, on the screened endpoints, before admission and scheduling. When a screener consumes `PrefixCacheMatchInfo`, or the producer is listed under `requestHandler.dataProducers`, it runs during request handling instead, on every located endpoint before screeners, and its `token-producer` moves with it. It runs once per request either way: in request handling, filters and scorers read the match info it wrote there. Running during request handling matches more endpoints per request, so per-endpoint work grows with the candidates the screeners remove. See [Request Control](../../../../../../../docs/architecture.md#request-control).
 
 For each request, the plugin consumes `request.Body.TokenizedPrompt` (token IDs), hashes the token IDs into fixed-size blocks, and looks up which endpoints have recently served requests with a matching prefix. It writes a `PrefixCacheMatchInfo` attribute onto each candidate endpoint, then records the selected endpoint(s) in the index after scheduling completes (via `PreRequest`).
 
@@ -60,6 +62,7 @@ plugins:
 ## Related Documentation
 - [Prefix Cache Scorer](../../../scheduling/scorer/prefix/README.md)
 - [Prefix Cache Affinity Filter](../../../scheduling/filter/prefixcacheaffinity/README.md)
+- [DisaggregatedSet Rollout Screener: Prefix Cache Affinity](../../screener/disaggregatedsetrollout/README.md#prefix-cache-affinity)
 
 ## Multi-cluster support
 

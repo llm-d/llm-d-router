@@ -468,10 +468,9 @@ longest cached prefix of the request, as reported by `PrefixCacheMatchInfo`:
 ```
 
 - The Screener requires `PrefixCacheMatchInfo`, so the prefix cache producer
-  and the tokenizer it consumes are created when not configured, and run during
-  request handling on every located endpoint, before the Screener. No
-  `requestHandler.dataProducers` entry is needed. Scorers that read the same
-  producer reuse its output.
+  and the tokenizer it consumes run during request handling, before the
+  Screener, and are created when not configured; see
+  [Producer Setup](#producer-setup).
 - The selection order is a strict revision header, a coordinated decision, a
   session identifier from `sources`, the text conversation prefix, the prefix
   cache, then the weighted random draw. Requests keyed today keep rendezvous
@@ -493,6 +492,88 @@ longest cached prefix of the request, as reported by `PrefixCacheMatchInfo`:
   the decision ID.
 - Each EPP replica reads its own prefix cache index, so replicas can choose
   different revisions for the same request.
+
+#### Producer Setup
+
+The match info must cover the endpoints of every revision, so the prefix cache
+producer runs during request handling, on the located endpoints before
+screeners, rather than after screening as it does by default. See
+[Request Control](../../../../../../../docs/architecture.md#request-control)
+for the phases.
+
+**Minimal.** Configure only the Screener with `prefixCache: {}`. At startup the
+EPP creates an `approx-prefix-cache-producer` and a `token-producer` with the
+tokenizer-free `estimate` backend, and runs both during request handling.
+
+**Explicit producers.** Configure the producers to set their parameters, for
+example to tokenize with the vLLM render backend, or to share one prefix index
+with `prefix-cache-scorer` (abbreviated):
+
+```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    vllm:
+      url: "http://vllm-render.default.svc.cluster.local:8000"
+- type: approx-prefix-cache-producer
+  name: prefix-producer
+- type: disaggregatedset-rollout-screener
+  name: rollout-screener
+  parameters:
+    scope:
+      labelSelector: "disaggregatedset.x-k8s.io/name=my-set"
+    revisionGating:
+      mode: max-role
+      requiredRoles: [prefill, decode]
+      affinity:
+        mode: prefix
+        prefixCache:
+          producerName: prefix-producer
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: prefix-producer
+- type: max-score-picker
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: prefix-cache-scorer
+    weight: 1
+  - pluginRef: max-score-picker
+```
+
+- `prefix-producer` runs during request handling because the Screener consumes
+  its data, and `token-producer` follows because `prefix-producer` consumes
+  its tokens. A `requestHandler.dataProducers` entry is not needed; listing
+  either producer there has the same effect.
+- A producer runs once per request. `prefix-cache-scorer` reads the match info
+  that `prefix-producer` wrote during request handling, on the endpoints that
+  survive screening.
+- `producerName` and `prefixMatchInfoProducerName` must name the producer when
+  it has a `name`. Leave them empty for an unnamed `approx-prefix-cache-producer`
+  or the auto-created one.
+- Pre-tokenized requests carry their token IDs, which the prefix producer
+  hashes; see the [token producer](../../dataproducer/tokenizer/README.md)
+  for which requests still need rendering.
+- Producers that run during request handling match every located endpoint,
+  about twice the per-endpoint lookups during a two-revision rollout, and run
+  even for requests the screeners reject.
+
+**Verify the wiring.**
+
+- At startup, the EPP logs `DataProducer runs before screeners` with
+  `phase=RequestHandling` for each such producer, here `prefix-producer` and
+  `token-producer`.
+- Startup fails when `producerName` names no configured producer: `no default
+  producer found for missing data key PrefixCacheMatchInfoDataKey/<name>`.
+- `llm_d_router_endpoint_picker_plugin_duration_seconds{extension_point="RequestHandlingDataProducer"}`
+  records the latency of producers that run during request handling.
+- A rising `outcome="missing_match_info"` on
+  `llm_d_router_endpoint_picker_disaggregatedset_revision_cache_affinity_total`
+  means match info does not reach the Screener, for example because the
+  producer fails or times out.
 
 ## DisaggregatedSet Slice Affinity
 
