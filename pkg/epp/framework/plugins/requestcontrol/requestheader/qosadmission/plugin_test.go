@@ -50,7 +50,7 @@ func testParams() Parameters {
 	p.DefaultTeam = TeamConfig{Class: "standard"}
 	p.Teams = []TeamConfig{
 		{ID: "team-a", Class: "critical", MaxConcurrency: 2, MaxPromptTokens: 1000, MaxOutputTokens: 100},
-		{ID: "team-b", Class: "batch", MaxConcurrency: 1},
+		{ID: "team-b", Class: "batch", MaxConcurrency: 1, MaxPromptTokens: 1000, MaxOutputTokens: 100},
 		{ID: "team-d", Class: "batch", DailyTokens: 500},
 	}
 	return p
@@ -180,17 +180,38 @@ func TestRequestHeader_ExplicitFairnessIDIsKept(t *testing.T) {
 	assert.Equal(t, "session-42", req.FairnessID)
 }
 
-func TestRequestHeader_SizeCaps(t *testing.T) {
+func TestRequestHeader_OverSizeLimitDowngradesOneClass(t *testing.T) {
 	p, _ := newTestPlugin(t, nil)
 
-	err := p.RequestHeader(t.Context(), newRequest("team-a", 2000, 10))
-	e := requireCode(t, err, errcommon.BadRequest)
+	for name, req := range map[string]*fwksched.InferenceRequest{
+		"prompt": newRequest("team-a", 2000, 10),
+		"output": newRequest("team-a", 10, 500),
+	} {
+		require.NoError(t, p.RequestHeader(t.Context(), req), name)
+		assert.Equal(t, 10, req.Objectives.Priority, "%s above the size limit moves to the next class", name)
+
+		resp := &fwkrc.Response{Headers: map[string]string{}}
+		p.ResponseHeader(t.Context(), req, resp, nil)
+		assert.Equal(t, "standard", resp.Headers[ClassHeader], name)
+		complete(p, req, 10, 10)
+	}
+
+	inflight, daily := usage(p, "team-a")
+	assert.Equal(t, 0, inflight, "an oversized request holds no slot")
+	assert.InDelta(t, 0, daily, 1e-9, "an oversized request is not charged to the budget")
+}
+
+func TestRequestHeader_LowestClassOverSizeLimitRejects(t *testing.T) {
+	p, _ := newTestPlugin(t, nil)
+
+	e := requireCode(t, p.RequestHeader(t.Context(), newRequest("team-b", 2000, 10)), errcommon.BadRequest)
 	assert.Equal(t, string(errcommon.RequestDroppedReasonSizeLimit), e.Headers[errcommon.RequestDroppedReasonHeaderKey])
+	assert.Equal(t, "batch", e.Headers[ClassHeader])
 
-	err = p.RequestHeader(t.Context(), newRequest("team-a", 10, 500))
-	_ = requireCode(t, err, errcommon.BadRequest)
+	_ = requireCode(t, p.RequestHeader(t.Context(), newRequest("team-b", 10, 500)), errcommon.BadRequest)
 
-	assert.Equal(t, 0, p.teams["team-a"].inflight, "a rejected request holds no slot")
+	inflight, _ := usage(p, "team-b")
+	assert.Equal(t, 0, inflight, "a rejected request holds no slot")
 }
 
 func TestRequestHeader_MissingOutputCapReservesTeamMax(t *testing.T) {

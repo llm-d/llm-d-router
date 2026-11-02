@@ -15,9 +15,9 @@ limitations under the License.
 */
 
 // Package qosadmission provides a RequestHeaderProcessor plugin that enforces per-team QoS
-// contracts before flow control: it maps a team to a service class (a priority band), applies
-// size caps, and moves traffic above the team's commits (concurrency and a daily budget) to the
-// next lower class.
+// contracts before flow control: it maps a team to a service class (a priority band), and moves
+// traffic outside the team's contract (size limits, concurrency and a daily budget) to the next
+// lower class.
 package qosadmission
 
 import (
@@ -82,7 +82,7 @@ type admission struct {
 	team        *teamState
 	servedClass string
 	reserved    float64
-	// committed is true when the request was admitted within the commits and so holds a
+	// committed is true when the request was admitted within the contract and so holds a
 	// concurrency slot and a daily-budget charge.
 	committed bool
 	stop      func() bool
@@ -181,9 +181,9 @@ func (p *Plugin) estimateCost(request *scheduling.InferenceRequest, cfg TeamConf
 	return prompt, float64(prompt) + p.outputWeight*float64(output)
 }
 
-// RequestHeader decides the request's class. A request within the team's commits is served at
-// the committed class and charged; a request above them moves one class down without a charge,
-// and is rejected in the lowest class.
+// RequestHeader decides the request's class. A request within the team's contract (its size
+// limits and its commits) is served at the committed class and charged; a request outside it
+// moves one class down without a charge, and is rejected in the lowest class.
 func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.InferenceRequest) error {
 	if request == nil {
 		return nil
@@ -191,18 +191,8 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	teamID, team := p.lookupTeam(request)
 	committed := p.classes[team.classIndex]
 	prompt, cost := p.estimateCost(request, team.cfg)
-
-	if (team.cfg.MaxPromptTokens > 0 && prompt > team.cfg.MaxPromptTokens) ||
-		(team.cfg.MaxOutputTokens > 0 && request.Body != nil && request.Body.MaxOutputTokens != nil && *request.Body.MaxOutputTokens > team.cfg.MaxOutputTokens) {
-		return p.reject(team, committed.Name, decisionRejectedSize, errcommon.Error{
-			Code: errcommon.BadRequest,
-			Msg:  fmt.Sprintf("request exceeds the size limits of team %q: max prompt tokens %d, max output tokens %d", team.cfg.ID, team.cfg.MaxPromptTokens, team.cfg.MaxOutputTokens),
-			Headers: map[string]string{
-				errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSizeLimit),
-				ClassHeader:                             committed.Name,
-			},
-		})
-	}
+	overSize := (team.cfg.MaxPromptTokens > 0 && prompt > team.cfg.MaxPromptTokens) ||
+		(team.cfg.MaxOutputTokens > 0 && request.Body != nil && request.Body.MaxOutputTokens != nil && *request.Body.MaxOutputTokens > team.cfg.MaxOutputTokens)
 
 	now := p.now()
 	team.mu.Lock()
@@ -211,14 +201,17 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	}
 	overDaily := team.cfg.DailyTokens > 0 && team.dailyUsed+cost > team.cfg.DailyTokens
 	overConcurrency := team.cfg.MaxConcurrency > 0 && team.inflight >= team.cfg.MaxConcurrency
-	served, decision, withinCommit := committed, decisionAdmitted, !overDaily && !overConcurrency
+	served, decision, withinContract := committed, decisionAdmitted, !overSize && !overDaily && !overConcurrency
 	switch {
-	case withinCommit:
+	case withinContract:
 		team.inflight++
 		team.dailyUsed += cost
 		inflightRequests.WithLabelValues(team.label).Set(float64(team.inflight))
 	case team.classIndex+1 < len(p.classes):
 		served, decision = p.classes[team.classIndex+1], decisionDowngraded
+	case overSize:
+		team.mu.Unlock()
+		return p.reject(team, committed.Name, decisionRejectedSize, p.sizeError(team, committed.Name))
 	case overDaily:
 		team.mu.Unlock()
 		return p.reject(team, committed.Name, decisionRejectedDaily, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
@@ -229,7 +222,7 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	team.mu.Unlock()
 
 	admissionDecisions.WithLabelValues(team.label, committed.Name, served.Name, decision, p.mode()).Inc()
-	rec := &admission{team: team, servedClass: served.Name, reserved: cost, committed: withinCommit}
+	rec := &admission{team: team, servedClass: served.Name, reserved: cost, committed: withinContract}
 	p.admissions.Store(request.RequestID, rec)
 	// A request that never reaches end of stream (flow-control rejection, scheduling failure)
 	// is released in full when its stream ends.
@@ -317,6 +310,17 @@ func (p *Plugin) reject(team *teamState, class, decision string, err errcommon.E
 		return nil
 	}
 	return err
+}
+
+func (p *Plugin) sizeError(team *teamState, class string) errcommon.Error {
+	return errcommon.Error{
+		Code: errcommon.BadRequest,
+		Msg:  fmt.Sprintf("request exceeds the size limits of team %q: max prompt tokens %d, max output tokens %d", team.cfg.ID, team.cfg.MaxPromptTokens, team.cfg.MaxOutputTokens),
+		Headers: map[string]string{
+			errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSizeLimit),
+			ClassHeader:                             class,
+		},
+	}
 }
 
 func (p *Plugin) quotaError(team *teamState, class string, retryAfter time.Duration, reason string) errcommon.Error {

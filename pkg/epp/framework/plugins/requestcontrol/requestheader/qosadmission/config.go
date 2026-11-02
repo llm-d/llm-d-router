@@ -39,8 +39,8 @@ type ClassConfig struct {
 }
 
 // TeamConfig is one team's QoS contract. Zero-valued limits are unenforced. MaxConcurrency and
-// DailyTokens are the team's commits: traffic above either moves one class down, and is rejected
-// in the lowest class.
+// DailyTokens are the team's commits, and MaxPromptTokens and MaxOutputTokens its size limits:
+// traffic outside any of them moves one class down, and is rejected in the lowest class.
 type TeamConfig struct {
 	ID string `json:"id"`
 	// Class is the name of the class the team's committed traffic is served at.
@@ -48,10 +48,12 @@ type TeamConfig struct {
 	// MaxConcurrency is the committed number of requests from admission to completion. 0 is
 	// unlimited.
 	MaxConcurrency int `json:"maxConcurrency,omitempty"`
-	// MaxPromptTokens rejects larger prompts with 400. 0 is unlimited.
+	// MaxPromptTokens is the largest prompt served at the team's class. Larger prompts move one
+	// class down, or get 400 in the lowest class. 0 is unlimited.
 	MaxPromptTokens int64 `json:"maxPromptTokens,omitempty"`
-	// MaxOutputTokens rejects larger output caps with 400, and is the reservation for a request
-	// that sets no output cap. 0 is unlimited.
+	// MaxOutputTokens is the largest output cap served at the team's class. Larger caps move one
+	// class down, or get 400 in the lowest class. It is also the reservation for a request that
+	// sets no output cap. 0 is unlimited.
 	MaxOutputTokens int64 `json:"maxOutputTokens,omitempty"`
 	// DailyTokens is the committed weighted-token budget per UTC day. 0 is unlimited.
 	DailyTokens float64 `json:"dailyTokens,omitempty"`
@@ -69,7 +71,8 @@ type Parameters struct {
 	// DefaultOutputReservation is the output tokens reserved for a request that sets no output
 	// cap and whose team sets no MaxOutputTokens.
 	DefaultOutputReservation int64 `json:"defaultOutputReservation,omitempty"`
-	// Classes are ordered from highest to lowest. Over-commit traffic moves to the next class.
+	// Classes are ordered from highest to lowest. Traffic outside the contract moves to the next
+	// class.
 	Classes []ClassConfig `json:"classes"`
 	// DefaultTeam applies to requests whose team is absent or not listed.
 	DefaultTeam TeamConfig `json:"defaultTeam"`
