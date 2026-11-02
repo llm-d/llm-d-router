@@ -73,20 +73,23 @@ func TestCostAwareIndexSize(t *testing.T) {
 	err = index.Add(ctx, []BlockHash{engineKey2}, []BlockHash{requestKey2}, []PodEntry{{PodIdentifier: "pod2", DeviceTier: "gpu"}})
 	require.NoError(t, err)
 
-	// Add third key - should evict the first one due to LRU
+	// Add third key to exceed configured size
 	engineKey3 := BlockHash(96187092)
 	requestKey3 := BlockHash(56789012)
 	err = index.Add(ctx, []BlockHash{engineKey3}, []BlockHash{requestKey3}, []PodEntry{{PodIdentifier: "pod3", DeviceTier: "cpu"}})
 	require.NoError(t, err)
 
-	// Lookup should only return the last two keys
-	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1, requestKey2, requestKey3}, nil)
-	require.NoError(t, err)
-
-	assert.Len(t, podsPerKey, 1) // Only requestKey3 should be present
-	assert.Len(t, podsPerKey[requestKey3], 1)
-
-	assert.Contains(t, podsPerKey[requestKey3], PodEntry{PodIdentifier: "pod3", DeviceTier: "cpu"})
+	// cfg.Size bounds the index to one key. Ristretto eviction or rejection
+	// bounds the live set to exactly one key.
+	var retainedKeys []BlockHash
+	for _, key := range []BlockHash{requestKey1, requestKey2, requestKey3} {
+		res, err := index.Lookup(ctx, []BlockHash{key}, nil)
+		require.NoError(t, err)
+		if len(res[key]) > 0 {
+			retainedKeys = append(retainedKeys, key)
+		}
+	}
+	assert.Len(t, retainedKeys, 1)
 }
 
 func TestSizeHumanize(t *testing.T) {

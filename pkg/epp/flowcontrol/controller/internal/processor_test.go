@@ -42,6 +42,8 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -67,7 +69,9 @@ func TestMain(m *testing.M) {
 
 type mockSaturationDetector struct {
 	flowcontrol.SaturationDetector
-	SaturationFunc func(ctx context.Context, candidatePods []fwkdl.Endpoint) float64
+	SaturationFunc      func(ctx context.Context, candidatePods []fwkdl.Endpoint) float64
+	ReserveDispatchFunc func(requestID string) bool
+	ReleaseDispatchFunc func(requestID string) bool
 }
 
 func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods []fwkdl.Endpoint) float64 {
@@ -75,6 +79,20 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods [
 		return m.SaturationFunc(ctx, candidatePods)
 	}
 	return 0.0
+}
+
+func (m *mockSaturationDetector) ReserveDispatch(requestID string) bool {
+	if m.ReserveDispatchFunc != nil {
+		return m.ReserveDispatchFunc(requestID)
+	}
+	return false
+}
+
+func (m *mockSaturationDetector) ReleaseDispatch(requestID string) bool {
+	if m.ReleaseDispatchFunc != nil {
+		return m.ReleaseDispatchFunc(requestID)
+	}
+	return false
 }
 
 // testHarness provides a unified, mock-based testing environment for the Processor. It centralizes all mock state
@@ -144,6 +162,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		h.saturationDetector,
 		h.endpointCandidates,
 		usagelimits.DefaultPolicy(),
+		bandselection.DefaultPolicy(),
 		h.clock,
 		testNoEndpointTTL,
 		expiryCleanupInterval,
@@ -200,7 +219,7 @@ func (h *testHarness) waitForFinalization(item *FlowItem) (types.QueueOutcome, e
 func (h *testHarness) newTestItem(id string, key flowcontrol.FlowKey, ttl time.Duration) *FlowItem {
 	h.t.Helper()
 	req := fwkfcmocks.NewMockFlowControlRequest(100, id, key)
-	return NewItem(req, ttl, h.clock.Now(), logr.Discard())
+	return NewItem(context.Background(), req, ttl, h.clock.Now(), logr.Discard())
 }
 
 // addQueue centrally registers a new mock queue for a given flow, ensuring all harness components are aware of it.
@@ -907,7 +926,7 @@ func TestProcessor(t *testing.T) {
 					t.Parallel()
 					h := newTestHarness(t, testCleanupTick)
 					h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) { return tc.snapshot, nil }
-					hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, tc.itemByteSize)
+					hasCap, _, err := h.processor.hasCapacity(&fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow}, tc.itemByteSize)
 					require.NoError(t, err, "hasCapacity should not fail when the snapshot read succeeds")
 					assert.Equal(t, tc.expectHasCap, hasCap, "Capacity check result should match expected value")
 				})
@@ -919,7 +938,7 @@ func TestProcessor(t *testing.T) {
 				h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
 					return contracts.CapacitySnapshot{}, contracts.ErrPriorityBandNotFound
 				}
-				hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, 1)
+				hasCap, _, err := h.processor.hasCapacity(&fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow}, 1)
 				require.ErrorIs(t, err, contracts.ErrPriorityBandNotFound, "The lookup error should be propagated")
 				assert.False(t, hasCap, "A failed capacity read should never report available capacity")
 			})
@@ -1097,6 +1116,113 @@ func TestProcessor(t *testing.T) {
 					require.True(t, dispatched, "Expected a low-priority dispatch on cycle %d", i+1)
 				}
 				assert.Equal(t, 0, qLow.Len(), "Low-priority queue should be empty")
+			})
+
+			t.Run("should honor the band selection policy", func(t *testing.T) {
+				t.Parallel()
+
+				keyHigh := flowcontrol.FlowKey{ID: "flow-high", Priority: 20}
+				keyLow := flowcontrol.FlowKey{ID: "flow-low", Priority: 10}
+
+				// setup stocks both bands and returns the item queued in each.
+				setup := func(h *testHarness) (high, low *FlowItem) {
+					qHigh := h.addQueue(keyHigh)
+					qLow := h.addQueue(keyLow)
+					high = h.newTestItem("item-high", keyHigh, testTTL)
+					low = h.newTestItem("item-low", keyLow, testTTL)
+					require.NoError(t, qHigh.Add(high))
+					require.NoError(t, qLow.Add(low))
+					return high, low
+				}
+
+				t.Run("should dispatch in the ranked order", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					high, low := setup(h)
+
+					policy := &fakeBandSelectionPolicy{order: []int{1, 0}}
+					h.processor.bandSelectionPolicy = policy
+
+					require.True(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Equal(t, types.QueueOutcomeDispatched, low.FinalState().Outcome,
+						"the band ranked first should dispatch")
+					assert.Nil(t, high.FinalState(), "the band ranked second should not be reached")
+				})
+
+				t.Run("should report the dispatched priority", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					setup(h)
+
+					policy := &fakeBandSelectionPolicy{order: []int{1, 0}}
+					h.processor.bandSelectionPolicy = policy
+
+					require.True(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Equal(t, []int{keyLow.Priority}, policy.dispatched,
+						"RecordDispatch should report the priority that actually dispatched")
+				})
+
+				t.Run("should not record a dispatch on an empty cycle", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					h.addQueue(keyHigh) // Provision the band but queue nothing.
+
+					policy := &fakeBandSelectionPolicy{}
+					h.processor.bandSelectionPolicy = policy
+
+					require.False(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Empty(t, policy.dispatched, "a cycle that dispatches nothing must not record one")
+				})
+
+				t.Run("should skip a gated band wherever it is ranked", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					high, low := setup(h)
+
+					h.saturationDetector.SaturationFunc = func(_ context.Context, _ []fwkdl.Endpoint) float64 {
+						return 0.6
+					}
+					// Monotone ceilings that gate the low band only: 0.6 < 1.0 but 0.6 >= 0.5.
+					h.processor.usageLimitPolicy = usagelimits.NewPolicyFunc("test-ceilings",
+						func(_ context.Context, _ float64, priorities []int, ceilings []float64) {
+							for i, priority := range priorities {
+								if priority == keyLow.Priority {
+									ceilings[i] = 0.5
+									continue
+								}
+								ceilings[i] = 1.0
+							}
+						})
+
+					// Rank the gated band first; it must be skipped rather than ending the cycle.
+					policy := &fakeBandSelectionPolicy{order: []int{1, 0}}
+					h.processor.bandSelectionPolicy = policy
+
+					require.True(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Equal(t, types.QueueOutcomeDispatched, high.FinalState().Outcome,
+						"the ungated band should dispatch even when ranked behind a gated one")
+					assert.Nil(t, low.FinalState(), "the gated band must not dispatch")
+					assert.Equal(t, []int{keyHigh.Priority}, policy.dispatched)
+				})
+
+				t.Run("should fall back to strict order when the policy ranks nothing", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					high, low := setup(h)
+
+					// A policy that leaves the pre-filled buffer alone gets strict highest-first order.
+					h.processor.bandSelectionPolicy = &fakeBandSelectionPolicy{}
+
+					require.True(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Equal(t, types.QueueOutcomeDispatched, high.FinalState().Outcome,
+						"an unwritten order buffer should dispatch the highest priority band")
+					assert.Nil(t, low.FinalState(), "the lower band should not be reached")
+				})
 			})
 		})
 
@@ -1299,7 +1425,47 @@ func TestProcessor(t *testing.T) {
 						}
 					}
 				}
-				assert.Equal(t, []string{"decode"}, stages, "only the decode series should remain")
+				// Only this test writes to "unpartitioned-series-test", so asserting
+				// absence of "" is race-free across parallel tests.
+				assert.NotContains(t, stages, "", "unpartitioned series should have been deleted")
+			})
+
+			t.Run("should drop unpartitioned stale-endpoints series once stages are evaluated", func(t *testing.T) {
+				t.Parallel()
+				metrics.Register()
+				h := newTestHarness(t, testCleanupTick)
+				const detector = "unpartitioned-stale-test"
+
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, _ []fwkdl.Endpoint) float64 {
+					metrics.RecordFlowControlStaleEndpoints(detector, flowcontrol.SaturationStageFromContext(ctx), 1)
+					return 1.0
+				}
+
+				// Empty pool: the detector is evaluated without a stage.
+				h.endpointCandidates.Candidates = nil
+				h.processor.dispatchCycle(context.Background())
+
+				h.endpointCandidates.Candidates = []fwkdl.Endpoint{makeEndpoint(bylabel.RoleDecode)}
+				h.processor.dispatchCycle(context.Background())
+
+				families, err := ctrlmetrics.Registry.Gather()
+				require.NoError(t, err)
+				var stages []string
+				for _, mf := range families {
+					if mf.GetName() != "llm_d_epp_flow_control_stale_endpoints" {
+						continue
+					}
+					for _, m := range mf.GetMetric() {
+						labels := map[string]string{}
+						for _, lp := range m.GetLabel() {
+							labels[lp.GetName()] = lp.GetValue()
+						}
+						if labels["detector"] == detector {
+							stages = append(stages, labels["stage"])
+						}
+					}
+				}
+				assert.NotContains(t, stages, "", "unpartitioned series should have been deleted")
 			})
 
 			t.Run("should include interleaved endpoints in both stage pools", func(t *testing.T) {
@@ -1422,6 +1588,50 @@ func TestProcessor(t *testing.T) {
 					"The item's final outcome should be RejectedOther")
 				assert.ErrorContains(t, finalState.Err, "already done",
 					"The error should be the one from the first Finalize call")
+			})
+
+			t.Run("should reserve before finalizing dispatch", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+				item := h.newTestItem("req-reserved", testFlow, testTTL)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(item))
+
+				var reserved bool
+				h.saturationDetector.ReserveDispatchFunc = func(requestID string) bool {
+					require.Equal(t, "req-reserved", requestID)
+					require.Nil(t, item.FinalState(), "reservation must precede dispatch finalization")
+					reserved = true
+					return true
+				}
+
+				require.NoError(t, h.processor.dispatchItem(item))
+				require.True(t, reserved)
+				require.Equal(t, types.QueueOutcomeDispatched, item.FinalState().Outcome)
+			})
+
+			t.Run("should release the reservation when the item is finalized during reserve", func(t *testing.T) {
+				t.Parallel()
+				h := newTestHarness(t, testCleanupTick)
+				item := h.newTestItem("req-finalized-during-reserve", testFlow, testTTL)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(item))
+
+				h.saturationDetector.ReserveDispatchFunc = func(string) bool {
+					item.FinalizeWithError(fmt.Errorf("%w: finalized during reserve", types.ErrRejected))
+					return true
+				}
+				var released []string
+				h.saturationDetector.ReleaseDispatchFunc = func(requestID string) bool {
+					released = append(released, requestID)
+					return true
+				}
+
+				require.NoError(t, h.processor.dispatchItem(item))
+				assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
+					"The outcome set during reserve should be preserved")
+				assert.Equal(t, []string{"req-finalized-during-reserve"}, released,
+					"The reservation should be released exactly once")
 			})
 		})
 
@@ -1919,7 +2129,7 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 					regimeSince = base.Add(tc.regimeAfter)
 				}
 
-				item := NewItem(fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, logr.Discard())
+				item := NewItem(context.Background(), fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, logr.Discard())
 				regime := &regimeSample{empty: tc.poolEmpty, since: regimeSince}
 				expired := isExpired(item, base.Add(tc.elapsed), regime, noEndpoint)
 
@@ -2029,4 +2239,26 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 		assert.Equal(t, scaledDown, h.processor.regime.Load().since,
 			"an unchanged regime must not restart the budget")
 	})
+}
+
+// fakeBandSelectionPolicy ranks bands in a fixed order and records the priorities reported back to it.
+// An empty order leaves the framework's pre-filled identity permutation in place.
+type fakeBandSelectionPolicy struct {
+	order      []int
+	dispatched []int
+}
+
+func (f *fakeBandSelectionPolicy) TypedName() plugin.TypedName {
+	return plugin.TypedName{Type: "fake-band-selection-policy", Name: "fake"}
+}
+
+func (f *fakeBandSelectionPolicy) Rank(_ context.Context, _ flowcontrol.BandSelectionParameters, order []int) {
+	if len(f.order) != len(order) {
+		return
+	}
+	copy(order, f.order)
+}
+
+func (f *fakeBandSelectionPolicy) RecordDispatch(_ context.Context, priority int) {
+	f.dispatched = append(f.dispatched, priority)
 }

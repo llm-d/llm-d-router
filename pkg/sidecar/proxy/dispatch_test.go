@@ -74,6 +74,50 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 			expectedPrefillHostPorts: []string{"a"},
 		},
 		{
+			// An EPP that predates the rename sends only the legacy spelling.
+			name: "legacy prefill header still routes",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// An upgraded EPP writes both spellings with the same value.
+			name: "both spellings present routes to that value",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"a"},
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// An EPP that predates the rename forwards a client-supplied canonical
+			// name untouched. It must not override the target EPP itself set (#3087).
+			name: "canonical spelling does not override the legacy target",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader):       []string{"attacker"},
+				http.CanonicalHeaderKey(routing.LegacyPrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
+			// The canonical spelling alone still routes, which is what a release
+			// that has dropped the alias sends.
+			name: "canonical spelling alone routes",
+			r: &http.Request{Header: http.Header{
+				http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a"},
+			}},
+
+			expectedCode:             200,
+			expectedPrefillHostPorts: []string{"a"},
+		},
+		{
 			name:     "sample from comma delimited header",
 			r:        &http.Request{Header: http.Header{http.CanonicalHeaderKey(routing.PrefillEndpointHeader): []string{"a,b"}}},
 			sampling: true,
@@ -178,8 +222,11 @@ func testPrefillHeaderRouting(t *testing.T, apiType reqcommon.APIType) {
 					}
 				}
 				if capturedReq != nil {
-					if v := capturedReq.Header.Get(routing.PrefillEndpointHeader); v != "" {
-						t.Errorf("PrefillEndpointHeader should be stripped before forwarding, got %q", v)
+					// Both spellings must go, or a worker sees a routing header.
+					for _, name := range routing.HeaderNames(routing.PrefillEndpointHeader) {
+						if v := capturedReq.Header.Get(name); v != "" {
+							t.Errorf("%s should be stripped before forwarding, got %q", name, v)
+						}
 					}
 				}
 			})
@@ -193,6 +240,92 @@ func TestServer_chatCompletionsHandler(t *testing.T) {
 
 func TestServer_responsesHandler(t *testing.T) {
 	testPrefillHeaderRouting(t, reqcommon.APITypeResponses)
+}
+
+func TestServer_createRoutes(t *testing.T) {
+	decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Forwarded-URI", r.URL.RequestURI())
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer decoder.Close()
+	decoderURL, err := url.Parse(decoder.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, apiType := range []reqcommon.APIType{
+		reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions,
+		reqcommon.APITypeMessages, reqcommon.APITypeResponses,
+		reqcommon.APITypeVLLMGenerate, reqcommon.APITypeSGLangGenerate,
+	} {
+		for _, tt := range []struct {
+			name    string
+			method  string
+			suffix  string
+			prefill bool
+		}{
+			{name: "canonical", method: http.MethodPost, prefill: true},
+			{name: "trailing_slash", method: http.MethodPost, suffix: "/", prefill: true},
+			{name: "subpath", method: http.MethodPost, suffix: "/extra"},
+			{name: "subpath_trailing_slash", method: http.MethodPost, suffix: "/extra/"},
+			{name: "get", method: http.MethodGet},
+			{name: "get_trailing_slash", method: http.MethodGet, suffix: "/"},
+		} {
+			t.Run(apiType.String()+"/"+tt.name, func(t *testing.T) {
+				s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL})
+				s.allowlistValidator = &AllowlistValidator{}
+				s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, hostPort string, _ string, gotAPI reqcommon.APIType) {
+					if gotAPI != apiType || hostPort != "127.0.0.1:9000" {
+						t.Errorf("connector received API %v and host %q, want %v and 127.0.0.1:9000", gotAPI, hostPort, apiType)
+					}
+					if r.URL.Path != apiType.Path() || r.URL.RawPath != "" || r.URL.RawQuery != "request=1" {
+						t.Errorf("connector received URL %v, want %s?request=1", r.URL, apiType.Path())
+					}
+					body, err := io.ReadAll(r.Body)
+					if err != nil || string(body) != "{}" {
+						t.Errorf("connector received body %q and error %v, want {}", body, err)
+					}
+					w.WriteHeader(http.StatusNoContent)
+				}
+
+				uri := apiType.Path() + tt.suffix + "?request=1"
+				req := httptest.NewRequest(tt.method, uri, strings.NewReader("{}"))
+				req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+				recorder := httptest.NewRecorder()
+				s.createRoutes().ServeHTTP(recorder, req)
+
+				if tt.prefill {
+					if recorder.Code != http.StatusNoContent {
+						t.Errorf("expected prefill connector, got status %d: %s", recorder.Code, recorder.Body.String())
+					}
+				} else {
+					if recorder.Code != http.StatusAccepted {
+						t.Errorf("expected decoder passthrough, got status %d: %s", recorder.Code, recorder.Body.String())
+					}
+					if got := recorder.Header().Get("X-Forwarded-URI"); got != uri {
+						t.Errorf("decoder received URI %q, want %q", got, uri)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestServer_createRoutesResponsesRejectsStatefulFields(t *testing.T) {
+	for _, suffix := range []string{"", "/"} {
+		t.Run("path"+suffix, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000", DecoderURL: &url.URL{Scheme: "http", Host: "127.0.0.1:1"}})
+			s.allowlistValidator = &AllowlistValidator{}
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathResponses+suffix, strings.NewReader(statefulResponsesTestBody))
+			recorder := httptest.NewRecorder()
+
+			s.createRoutes().ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Errorf("expected stateful fields to be rejected, got status %d: %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
 }
 
 // The plain decoder passthrough: no prefill, encoder, P2P or data-parallel
@@ -245,6 +378,98 @@ func TestServer_ResponsesDecoderOnlyPassthroughForwardsTheBody(t *testing.T) {
 	}
 	if contentLength != int64(len(body)) {
 		t.Errorf("ContentLength = %d, want %d", contentLength, len(body))
+	}
+}
+
+// TestServer_createRoutesDocumentedPaths covers the docs/api-routing.md sidecar
+// rows that TestServer_createRoutes does not: sub-resources, other APIs and
+// methods, path forms the ServeMux redirects, and the sidecar's own route.
+func TestServer_createRoutesDocumentedPaths(t *testing.T) {
+	decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Forwarded-URI", r.URL.RequestURI())
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer decoder.Close()
+	decoderURL, err := url.Parse(decoder.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		method       string
+		target       string
+		wantStatus   int
+		wantLocation string
+	}{
+		{http.MethodPost, "/v1/chat/completions/render", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/chat/completions/chatcmpl_123", http.StatusAccepted, ""},
+		{http.MethodDelete, "/v1/chat/completions/chatcmpl_123", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/chat/completions/chatcmpl_123/messages", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/completions/render", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/messages/count_tokens", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/messages/batches", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/messages/batches/mb_123/results", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/responses/input_tokens", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/responses/compact", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/responses/resp_123/cancel", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/responses/resp_123", http.StatusAccepted, ""},
+		{http.MethodDelete, "/v1/responses/resp_123", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/responses/resp_123/input_items", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/conversations", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/conversations/conv_1", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/conversations/conv_1/items", http.StatusAccepted, ""},
+		{http.MethodDelete, "/v1/conversations/conv_1/items/item_1", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/embeddings", http.StatusAccepted, ""},
+		{http.MethodPost, "/v1/files", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/files/file_1", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/models", http.StatusAccepted, ""},
+		{http.MethodGet, "/healthz", http.StatusAccepted, ""},
+		{http.MethodGet, "/readyz", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/requests/req_1", http.StatusAccepted, ""},
+		{http.MethodOptions, "/v1/chat/completions", http.StatusAccepted, ""},
+		{http.MethodHead, "/v1/messages", http.StatusAccepted, ""},
+		{http.MethodPut, "/generate", http.StatusAccepted, ""},
+		{http.MethodGet, "/v1/files/a%2Fb", http.StatusAccepted, ""},
+		{http.MethodPost, "//v1/responses", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/chat//completions", http.StatusTemporaryRedirect, "/v1/chat/completions"},
+		{http.MethodPost, "/v1/./responses", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/responses/..", http.StatusTemporaryRedirect, "/v1"},
+		{http.MethodPost, "/v1%2Fresponses", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/responses%2F?x=1", http.StatusTemporaryRedirect, "/v1/responses?x=1"},
+		{http.MethodPost, "/v1/messages%2F", http.StatusTemporaryRedirect, "/v1/messages"},
+		{http.MethodPost, "/v1/respons%65s", http.StatusTemporaryRedirect, "/v1/responses"},
+		{http.MethodPost, "/v1/chat/completion%73", http.StatusTemporaryRedirect, "/v1/chat/completions"},
+		{http.MethodGet, "/v1%2Fresponses", http.StatusAccepted, ""},
+		{http.MethodOptions, "/v1%2Fchat%2Fcompletions", http.StatusAccepted, ""},
+		{http.MethodGet, "/health", http.StatusOK, ""},
+		{http.MethodHead, "/health", http.StatusOK, ""},
+	} {
+		t.Run(tt.method+" "+tt.target, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {
+				t.Errorf("prefill connector called for %s %s", tt.method, tt.target)
+			}
+			req := httptest.NewRequest(tt.method, tt.target, strings.NewReader("{}"))
+			req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+			recorder := httptest.NewRecorder()
+
+			s.createRoutes().ServeHTTP(recorder, req)
+
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("got status %d, want %d: %s", recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+			switch tt.wantStatus {
+			case http.StatusAccepted:
+				if got := recorder.Header().Get("X-Forwarded-URI"); got != tt.target {
+					t.Errorf("decoder received URI %q, want %q", got, tt.target)
+				}
+			case http.StatusTemporaryRedirect:
+				if got := recorder.Header().Get("Location"); got != tt.wantLocation {
+					t.Errorf("redirect to %q, want %q", got, tt.wantLocation)
+				}
+			}
+		})
 	}
 }
 
@@ -365,7 +590,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 				},
 				URL: &url.URL{Path: "/v1/chat/completions"},
 			},
-			allowedHosts:        []string{"other-host"},
+			allowedHosts:        []string{"other-host:8000"},
 			epdConfigured:       true,
 			expectedPassthrough: true,
 		},
@@ -377,7 +602,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 				},
 				URL: &url.URL{Path: "/v1/chat/completions"},
 			},
-			allowedHosts:        []string{"enc1"},
+			allowedHosts:        []string{"enc1:8000"},
 			epdConfigured:       true,
 			expectedEPD:         true,
 			expectedEPDEncoders: []string{"enc1:8000"},
@@ -392,7 +617,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 				},
 				URL: &url.URL{Path: "/v1/chat/completions"},
 			},
-			allowedHosts:   []string{"prefill1"},
+			allowedHosts:   []string{"prefill1:8000"},
 			epdConfigured:  true,
 			expectedPD:     true,
 			expectedPDHost: "prefill1:8000",
@@ -446,7 +671,7 @@ func TestServer_encoderEndpointRouting(t *testing.T) {
 			var epdEncoders []string
 			var capturedReq *http.Request
 			if tt.epdConfigured {
-				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string, _ reqcommon.APIType) {
+				s.handleECConnector = func(_ http.ResponseWriter, r *http.Request, prefillHost string, encoders []string, _ string, _ reqcommon.APIType) {
 					epdCalled = true
 					epdPrefill = prefillHost
 					epdEncoders = encoders

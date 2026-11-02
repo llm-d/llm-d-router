@@ -66,6 +66,10 @@ type flowController interface {
 	EnqueueAndWait(ctx context.Context, req flowcontrol.FlowControlRequest) (types.QueueOutcome, error)
 }
 
+type dispatchReservationReleaser interface {
+	ReleaseDispatchReservation(requestID string)
+}
+
 // rejectIfSheddableAndSaturated checks if a request should be immediately rejected.
 func rejectIfSheddableAndSaturated(
 	ctx context.Context,
@@ -80,8 +84,9 @@ func rejectIfSheddableAndSaturated(
 			logger.V(logutil.TRACE).Info("Request rejected: system saturated and request is sheddable",
 				"requestID", reqCtx.SchedulingRequest.RequestID)
 			return errcommon.Error{
-				Code: errcommon.ResourceExhausted,
-				Msg:  "system saturated, sheddable request dropped",
+				Code:    errcommon.ResourceExhausted,
+				Msg:     "system saturated, sheddable request dropped",
+				Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
 			}
 		}
 	}
@@ -207,6 +212,14 @@ func (fcac *FlowControlAdmissionController) Admit(
 	// mapping consults it: a TTL expiry whose regime is not already established by ErrNoEndpoints.
 	poolEmpty := func() bool { return len(fcac.endpointCandidates.Locate(ctx, nil)) == 0 }
 	return translateFlowControlError(err, poolEmpty)
+}
+
+// ReleaseDispatchReservation forwards completion of the post-admission accounting window when
+// the configured flow controller supports dispatch reservations.
+func (fcac *FlowControlAdmissionController) ReleaseDispatchReservation(requestID string) {
+	if releaser, ok := fcac.flowController.(dispatchReservationReleaser); ok {
+		releaser.ReleaseDispatchReservation(requestID)
+	}
 }
 
 // flowControlRequest is an adapter that implements the FlowControlRequest interface.

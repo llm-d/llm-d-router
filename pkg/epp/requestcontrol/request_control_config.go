@@ -27,29 +27,38 @@ import (
 // NewConfig creates a new Config object and returns its pointer.
 func NewConfig() *Config {
 	return &Config{
-		requestHeaderPlugins:     []fwkrc.RequestHeaderProcessor{},
-		screeners:                []fwkrc.Screener{},
-		admissionPlugins:         []fwkrc.Admitter{},
-		dataProducerPlugins:      []fwkrc.DataProducer{},
-		preRequestPlugins:        []fwkrc.PreRequest{},
-		responseReceivedPlugins:  []fwkrc.ResponseHeaderProcessor{},
-		responseStreamingPlugins: []fwkrc.ResponseBodyProcessor{},
+		requestHeaderPlugins:         []fwkrc.RequestHeaderProcessor{},
+		responders:                   []fwkrc.Responder{},
+		screeners:                    []fwkrc.Screener{},
+		admissionPlugins:             []fwkrc.Admitter{},
+		requestHandlingDataProducers: []fwkrc.DataProducer{},
+		dataProducerPlugins:          []fwkrc.DataProducer{},
+		preRequestPlugins:            []fwkrc.PreRequest{},
+		responseReceivedPlugins:      []fwkrc.ResponseHeaderProcessor{},
+		responseStreamingPlugins:     []fwkrc.ResponseBodyProcessor{},
 	}
 }
 
 // Config provides a configuration for the requestcontrol plugins.
 type Config struct {
-	requestHeaderPlugins     []fwkrc.RequestHeaderProcessor
-	screeners                []fwkrc.Screener
-	admissionPlugins         []fwkrc.Admitter
-	dataProducerPlugins      []fwkrc.DataProducer
-	preRequestPlugins        []fwkrc.PreRequest
-	responseReceivedPlugins  []fwkrc.ResponseHeaderProcessor
-	responseStreamingPlugins []fwkrc.ResponseBodyProcessor
+	requestHeaderPlugins         []fwkrc.RequestHeaderProcessor
+	responders                   []fwkrc.Responder
+	screeners                    []fwkrc.Screener
+	admissionPlugins             []fwkrc.Admitter
+	requestHandlingDataProducers []fwkrc.DataProducer
+	dataProducerPlugins          []fwkrc.DataProducer
+	preRequestPlugins            []fwkrc.PreRequest
+	responseReceivedPlugins      []fwkrc.ResponseHeaderProcessor
+	responseStreamingPlugins     []fwkrc.ResponseBodyProcessor
 
 	// propagatePriority gates whether the director injects the resolved priority
 	// into the outbound request body. Off by default so the body is untouched.
 	propagatePriority bool
+
+	// composeFairnessIDs gates whether the director composes the fairness-ID
+	// header with the agent identity into "<tenant>/<session>". Off by default:
+	// the fairness-ID header keys the flow on its own.
+	composeFairnessIDs bool
 }
 
 // WithPropagatePriority enables or disables injecting the resolved request
@@ -59,14 +68,39 @@ func (c *Config) WithPropagatePriority(propagatePriority bool) *Config {
 	return c
 }
 
+// ComposeFairnessIDs reports whether the director composes the fairness-ID header
+// with the agent identity into "<tenant>/<session>".
+func (c *Config) ComposeFairnessIDs() bool {
+	return c.composeFairnessIDs
+}
+
+// WithComposeFairnessIDs enables or disables composing the fairness-ID header
+// with the agent identity into "<tenant>/<session>".
+func (c *Config) WithComposeFairnessIDs(composeFairnessIDs bool) *Config {
+	c.composeFairnessIDs = composeFairnessIDs
+	return c
+}
+
 // WithRequestHeaderPlugins sets the given plugins as the RequestHeaderProcessor plugins.
 func (c *Config) WithRequestHeaderPlugins(plugins ...fwkrc.RequestHeaderProcessor) *Config {
 	c.requestHeaderPlugins = plugins
 	return c
 }
 
-// WithScreeners sets the screeners that narrow candidates before request data
-// production and scheduling.
+// Responders returns the plugins that may answer a request instead of routing it. The
+// ext-proc server offers each request to them before endpoint selection.
+func (c *Config) Responders() []fwkrc.Responder {
+	return c.responders
+}
+
+// WithResponders sets the given plugins as the Responder plugins.
+func (c *Config) WithResponders(plugins ...fwkrc.Responder) *Config {
+	c.responders = plugins
+	return c
+}
+
+// WithScreeners sets the screeners that narrow candidates after RequestHandling data
+// production and before Scheduling data production and scheduling.
 func (c *Config) WithScreeners(screeners ...fwkrc.Screener) *Config {
 	c.screeners = screeners
 	return c
@@ -93,10 +127,33 @@ func (c *Config) WithResponseStreamingPlugins(plugins ...fwkrc.ResponseBodyProce
 	return c
 }
 
-// WithDataProducerPlugins sets the given plugins as the DataProducer plugins.
+// WithDataProducerPlugins sets the given plugins as the DataProducer plugins
+// that run in fwkrc.DataProducerPhaseScheduling.
 func (c *Config) WithDataProducerPlugins(plugins ...fwkrc.DataProducer) *Config {
 	c.dataProducerPlugins = plugins
 	return c
+}
+
+// WithRequestHandlingDataProducers sets the given plugins as the DataProducer
+// plugins that run in fwkrc.DataProducerPhaseRequestHandling.
+func (c *Config) WithRequestHandlingDataProducers(plugins ...fwkrc.DataProducer) *Config {
+	c.requestHandlingDataProducers = plugins
+	return c
+}
+
+// ApplyDataProducerPhases moves every DataProducer whose phase, keyed by
+// plugin name, is fwkrc.DataProducerPhaseRequestHandling from the Scheduling phase
+// to the RequestHandling phase. Call it after AddPlugins and before OrderPlugins.
+func (c *Config) ApplyDataProducerPhases(phases map[string]fwkrc.DataProducerPhase) {
+	scheduling := make([]fwkrc.DataProducer, 0, len(c.dataProducerPlugins))
+	for _, p := range c.dataProducerPlugins {
+		if phases[p.TypedName().Name] == fwkrc.DataProducerPhaseRequestHandling {
+			c.requestHandlingDataProducers = append(c.requestHandlingDataProducers, p)
+			continue
+		}
+		scheduling = append(scheduling, p)
+	}
+	c.dataProducerPlugins = scheduling
 }
 
 // WithAdmissionPlugins sets the given plugins as the Admit plugins.
@@ -112,6 +169,9 @@ func (c *Config) AddPlugins(pluginObjects ...plugin.Plugin) {
 	for _, plugin := range pluginObjects {
 		if requestHeaderProcessor, ok := plugin.(fwkrc.RequestHeaderProcessor); ok {
 			c.requestHeaderPlugins = append(c.requestHeaderPlugins, requestHeaderProcessor)
+		}
+		if responder, ok := plugin.(fwkrc.Responder); ok {
+			c.responders = append(c.responders, responder)
 		}
 		if screener, ok := plugin.(fwkrc.Screener); ok {
 			c.screeners = append(c.screeners, screener)
@@ -148,8 +208,10 @@ func (c *Config) OrderPlugins(sortedPluginNames []string) {
 	c.requestHeaderPlugins = orderByName(c.requestHeaderPlugins, rank)
 	c.screeners = orderByName(c.screeners, rank)
 	c.admissionPlugins = orderByName(c.admissionPlugins, rank)
+	c.requestHandlingDataProducers = orderByName(c.requestHandlingDataProducers, rank)
 	c.dataProducerPlugins = orderByName(c.dataProducerPlugins, rank)
 	c.preRequestPlugins = orderByName(c.preRequestPlugins, rank)
+	c.responders = orderByName(c.responders, rank)
 	c.responseReceivedPlugins = orderByName(c.responseReceivedPlugins, rank)
 	c.responseStreamingPlugins = orderByName(c.responseStreamingPlugins, rank)
 }

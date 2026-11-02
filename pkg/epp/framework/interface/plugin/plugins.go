@@ -17,7 +17,11 @@ limitations under the License.
 
 package plugin
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+)
 
 // Plugin defines the interface for a plugin.
 // This interface should be embedded in all plugins across the code.
@@ -85,6 +89,95 @@ type ProducerPlugin interface {
 	Plugin
 	// Produces returns data produced by the producer.
 	// This is a map from DataKey produced to
-	// the data type of the key (represented as data with default value casted as any field).
+	// the data type of the key (represented as data with default value casted as any field,
+	// or wrapped in ProducedData to advertise Level-2 configuration attributes).
 	Produces() map[DataKey]any
+}
+
+// ProducedData optionally wraps a produced value-type witness with Level-2
+// attributes derived from the producer's configuration.
+// Plugins with no attributes may return the bare value-type witness directly.
+type ProducedData struct {
+	// Type is the zero-value Go type witness for Level-1 type checking (e.g., fwkrh.TokenizedRequest{}).
+	Type any
+
+	// Attributes holds key-value metadata describing the produced data (e.g., {"backend": "vllm"}).
+	Attributes map[string]string
+
+	// AllAttributes explicitly declares that this producer dynamically produces any attribute
+	// requested by consumers, bypassing specific attribute key/value matching.
+	// Must be set explicitly; an empty Attributes map with AllAttributes == false does NOT match all.
+	AllAttributes bool
+}
+
+// ConsumedData optionally wraps a consumed value-type witness with a Level-2
+// attribute matcher function.
+// Plugins that accept any producer of the DataKey may return the bare value-type witness directly.
+type ConsumedData struct {
+	// Type is the zero-value Go type witness for Level-1 type checking.
+	Type any
+
+	// Matches validates the producer's published Attributes at startup.
+	// Returning a non-nil error fails startup validation with a descriptive message.
+	// If nil, any producer of the DataKey (regardless of its Attributes) is accepted.
+	Matches func(attrs map[string]string) error
+}
+
+// UnwrapDataType returns the underlying Go value-type witness from v,
+// unwrapping ProducedData or ConsumedData (or pointers to them) when present.
+func UnwrapDataType(v any) any {
+	switch d := v.(type) {
+	case ProducedData:
+		return d.Type
+	case *ProducedData:
+		if d == nil {
+			return nil
+		}
+		return d.Type
+	case ConsumedData:
+		return d.Type
+	case *ConsumedData:
+		if d == nil {
+			return nil
+		}
+		return d.Type
+	default:
+		return v
+	}
+}
+
+// MatchKeys returns a Level-2 matcher that verifies all requiredKeys are present
+// in the producer's Attributes map.
+func MatchKeys(requiredKeys ...string) func(attrs map[string]string) error {
+	return func(attrs map[string]string) error {
+		for _, k := range requiredKeys {
+			if _, ok := attrs[k]; !ok {
+				return fmt.Errorf("producer does not declare required attribute key %q", k)
+			}
+		}
+		return nil
+	}
+}
+
+// MatchKeyValues returns a Level-2 matcher that verifies all expected key-value
+// pairs are present and equal in the producer's Attributes map.
+func MatchKeyValues(expected map[string]string) func(attrs map[string]string) error {
+	keys := make([]string, 0, len(expected))
+	for k := range expected {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return func(attrs map[string]string) error {
+		for _, k := range keys {
+			want := expected[k]
+			got, ok := attrs[k]
+			if !ok {
+				return fmt.Errorf("producer does not declare required attribute %q=%q", k, want)
+			}
+			if got != want {
+				return fmt.Errorf("producer attribute %q=%q does not match required %q", k, got, want)
+			}
+		}
+		return nil
+	}
 }

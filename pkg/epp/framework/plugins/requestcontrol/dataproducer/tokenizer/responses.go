@@ -18,20 +18,32 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 )
 
-// responsesItemTypeMessage is the Input item "type" discriminator this code
-// converts; other discriminators (function_call, function_call_output,
-// reasoning, and so on) are left for a follow-up.
-const responsesItemTypeMessage = "message"
+// Input item "type" discriminators the legacy translation converts.
+const (
+	responsesItemTypeMessage            = "message"
+	responsesItemTypeFunctionCall       = "function_call"
+	responsesItemTypeFunctionCallOutput = "function_call_output"
+	responsesItemTypeReasoning          = "reasoning"
+)
+
+// Chat roles the translation writes itself; every other role comes from the input.
+const (
+	roleAssistant = "assistant"
+	roleTool      = "tool"
+)
 
 const (
 	responsesRenderModeAuto   = "auto"
@@ -93,7 +105,8 @@ func (m *legacyResponsesMode) useLegacy(ctx context.Context, tk tokenizer, model
 	}
 	if m.mode == "" {
 		mode := responsesRenderModeNative
-		tokens, _, err := tk.RenderResponses(ctx, fwkrh.PayloadMap{
+		probeCtx := withUnobservedRender(ctx)
+		tokens, _, err := tk.RenderResponses(probeCtx, fwkrh.PayloadMap{
 			"model": model, "max_output_tokens": 1, "input": "warmup",
 		})
 		if err != nil {
@@ -113,7 +126,7 @@ func (m *legacyResponsesMode) useLegacy(ctx context.Context, tk tokenizer, model
 			}
 			legacyProbe["model"] = model
 			legacyProbe["max_tokens"] = 1
-			tokens, _, err = tk.RenderChat(ctx, legacyProbe)
+			tokens, _, err = tk.RenderChat(probeCtx, legacyProbe)
 			if err != nil {
 				return false, fmt.Errorf("discover legacy Responses rendering: %w", err)
 			}
@@ -135,10 +148,15 @@ func (m *legacyResponsesMode) useLegacy(ctx context.Context, tk tokenizer, model
 // messages, and Instructions as a leading system message; other Input item
 // kinds (for example function_call, function_call_output, reasoning) are
 // left for a follow-up rather than tokenized incorrectly here.
-func (b renderBackend) renderLegacyResponses(ctx context.Context, r *fwkrh.ResponsesRequest) (*fwkrh.TokenizedRequest, error) {
-	payload, err := responsesPayload(r)
+func (b renderBackend) renderLegacyResponses(ctx context.Context, body *fwkrh.InferenceRequestBody) (*fwkrh.TokenizedRequest, error) {
+	payload, err := responsesPayload(body.Responses)
 	if err != nil {
 		return nil, err
+	}
+	if toolcalling.TelemetryEnabled(ctx) {
+		if baseline := prepareLegacyResponsesToolFields(body); baseline != nil {
+			ctx = context.WithValue(ctx, renderToolBaselineCtxKey{}, baseline)
+		}
 	}
 	payload["model"] = b.modelName
 	tokenIDs, mmFeatures, err := b.tk.RenderChat(ctx, payload)
@@ -149,6 +167,56 @@ func (b renderBackend) renderLegacyResponses(ctx context.Context, r *fwkrh.Respo
 		TokenIDs:           tokenIDs,
 		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 	}}}, nil
+}
+
+func prepareLegacyResponsesToolFields(body *fwkrh.InferenceRequestBody) *renderToolBaseline {
+	var raw []byte
+	switch source := body.WirePayload().(type) {
+	case fwkrh.RawPayload:
+		raw = source
+	case fwkrh.Marshaler:
+		var err error
+		raw, err = source.Marshal()
+		if err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(raw, &envelope) != nil {
+		return nil
+	}
+	source, err := toolcalling.CaptureValidatedRequestJSON(reqcommon.APITypeResponses, raw)
+	if err != nil {
+		return nil
+	}
+	expected := fwkrh.PayloadMap{}
+	if value, ok := envelope[string(toolcalling.FieldTools)]; ok {
+		var tools []any
+		switch {
+		case json.Unmarshal(value, &tools) != nil:
+			expected[string(toolcalling.FieldTools)] = value
+		case tools != nil && len(tools) == 0:
+			expected[string(toolcalling.FieldTools)] = []any{}
+		default:
+			expected[string(toolcalling.FieldTools)] = convertResponsesTools(tools)
+		}
+	}
+	for _, field := range []toolcalling.Field{toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls} {
+		if value, ok := envelope[string(field)]; ok {
+			expected[string(field)] = value
+		}
+	}
+	normalized, err := expected.Marshal()
+	if err != nil {
+		return nil
+	}
+	comparison, err := toolcalling.CaptureRequestJSON(reqcommon.APITypeChatCompletions, normalized)
+	if err != nil {
+		return nil
+	}
+	return &renderToolBaseline{source: source, comparison: comparison}
 }
 
 func responsesPayload(r *fwkrh.ResponsesRequest) (fwkrh.PayloadMap, error) {
@@ -186,12 +254,11 @@ func responsesToConversation(r *fwkrh.ResponsesRequest) ([]tokenizerTypes.Conver
 }
 
 // responsesInputToConversation converts the Input field. Input is a plain
-// string, or an array of items; every item must be a simple chat message
-// (see simpleResponsesMessage) or the conversion fails. A partial
-// conversion would tokenize a prompt shorter than the one vLLM serves,
-// which corrupts prefix-cache and context-length decisions downstream, so
-// an item this code cannot represent fails the whole request rather than
-// being dropped from it.
+// string, or an array of items converted one by one by appendResponsesItem.
+// A partial conversion would tokenize a prompt shorter than the one vLLM
+// serves, which corrupts prefix-cache and context-length decisions
+// downstream, so an item this code cannot represent fails the whole request
+// rather than being dropped from it.
 func responsesInputToConversation(input any) ([]tokenizerTypes.Conversation, error) {
 	switch v := input.(type) {
 	case nil:
@@ -204,11 +271,10 @@ func responsesInputToConversation(input any) ([]tokenizerTypes.Conversation, err
 	case []any:
 		out := make([]tokenizerTypes.Conversation, 0, len(v))
 		for _, item := range v {
-			conv, err := simpleResponsesMessage(item)
-			if err != nil {
+			var err error
+			if out, err = appendResponsesItem(out, item); err != nil {
 				return nil, err
 			}
-			out = append(out, conv)
 		}
 		return out, nil
 	default:
@@ -216,13 +282,136 @@ func responsesInputToConversation(input any) ([]tokenizerTypes.Conversation, err
 	}
 }
 
+// appendResponsesItem converts one Input item the way vLLM's Responses
+// serving builds chat messages from them (vllm/entrypoints/openai/responses/
+// utils.py, construct_chat_messages_with_tool_call): a function_call joins
+// the tool_calls of the assistant message directly before it, and a
+// reasoning item or an assistant message fills the reasoning or content that
+// message still lacks, so a turn spelled as reasoning, message and
+// function_call items renders as the single assistant message vLLM serves.
+// A function_call_output becomes a tool message. A plain message converts
+// through simpleResponsesMessage, and any other item type fails the
+// conversion.
+func appendResponsesItem(conversation []tokenizerTypes.Conversation, item any) ([]tokenizerTypes.Conversation, error) {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("responses input item of type %T is not supported by legacy translation", item)
+	}
+	var prev *tokenizerTypes.Conversation
+	if n := len(conversation); n > 0 && conversation[n-1].Role == roleAssistant {
+		prev = &conversation[n-1]
+	}
+	switch t, _ := m["type"].(string); t {
+	case responsesItemTypeFunctionCall:
+		call, err := responsesToolCall(m)
+		if err != nil {
+			return nil, err
+		}
+		if prev != nil {
+			prev.ToolCalls = append(prev.ToolCalls, call)
+			return conversation, nil
+		}
+		return append(conversation, tokenizerTypes.Conversation{Role: roleAssistant, ToolCalls: []any{call}}), nil
+	case responsesItemTypeReasoning:
+		text, err := responsesReasoningText(m)
+		if err != nil {
+			return nil, err
+		}
+		// Reasoning text is never empty, so an empty prev.Reasoning matches
+		// vLLM's check that the message has no reasoning yet.
+		if prev != nil && prev.Reasoning == "" {
+			prev.Reasoning = text
+			return conversation, nil
+		}
+		return append(conversation, tokenizerTypes.Conversation{Role: roleAssistant, Reasoning: text}), nil
+	case responsesItemTypeFunctionCallOutput:
+		conv, err := responsesToolMessage(m)
+		if err != nil {
+			return nil, err
+		}
+		return append(conversation, conv), nil
+	}
+	conv, err := simpleResponsesMessage(m)
+	if err != nil {
+		return nil, err
+	}
+	if conv.Role == roleAssistant && prev != nil && prev.Content == nil {
+		prev.Content = conv.Content
+		return conversation, nil
+	}
+	return append(conversation, conv), nil
+}
+
+// responsesToolCall converts a function_call item into the tool_calls entry
+// vLLM builds from it. The Responses API requires all three fields, so an
+// item missing one fails the conversion; a namespaced call renders under a
+// flattened name this code does not derive, so it fails too. vLLM writes
+// "namespace": null on every call it returns, so null is not a namespace.
+func responsesToolCall(m map[string]any) (map[string]any, error) {
+	if ns, ok := m["namespace"]; ok && ns != nil {
+		return nil, fmt.Errorf("responses input item type %q with a namespace is not supported by legacy translation", responsesItemTypeFunctionCall)
+	}
+	callID, _ := m["call_id"].(string)
+	name, _ := m["name"].(string)
+	arguments, hasArguments := m["arguments"].(string)
+	if callID == "" || name == "" || !hasArguments {
+		return nil, fmt.Errorf("responses input item type %q needs call_id, name and arguments", responsesItemTypeFunctionCall)
+	}
+	return map[string]any{
+		"id":       callID,
+		"type":     "function",
+		"function": map[string]any{"name": name, "arguments": arguments},
+	}, nil
+}
+
+// responsesReasoningText returns the text vLLM takes from a reasoning item:
+// the first content part, else the first summary part. Encrypted content
+// cannot be rendered, so it fails the conversion. Empty text fails too:
+// vLLM keeps an empty reasoning as an assistant message of its own, which
+// Conversation cannot express. vLLM never returns an empty reasoning item.
+func responsesReasoningText(m map[string]any) (string, error) {
+	if encrypted, _ := m["encrypted_content"].(string); encrypted != "" {
+		return "", fmt.Errorf("responses input item type %q with encrypted_content is not supported by legacy translation", responsesItemTypeReasoning)
+	}
+	for _, field := range []string{"content", "summary"} {
+		parts, _ := m[field].([]any)
+		if len(parts) == 0 {
+			continue
+		}
+		part, _ := parts[0].(map[string]any)
+		text, ok := part["text"].(string)
+		if !ok {
+			return "", fmt.Errorf("responses input item type %q %s part has no text field", responsesItemTypeReasoning, field)
+		}
+		if text == "" {
+			break
+		}
+		return text, nil
+	}
+	return "", fmt.Errorf("responses input item type %q with empty text is not supported by legacy translation", responsesItemTypeReasoning)
+}
+
+// responsesToolMessage converts a function_call_output item into the tool
+// message vLLM builds from it. The output is a string or an array of content
+// parts, converted like a message's content.
+func responsesToolMessage(m map[string]any) (tokenizerTypes.Conversation, error) {
+	callID, _ := m["call_id"].(string)
+	if callID == "" {
+		return tokenizerTypes.Conversation{}, fmt.Errorf("responses input item type %q has no call_id", responsesItemTypeFunctionCallOutput)
+	}
+	content, err := responsesContent(m["output"])
+	if err != nil {
+		return tokenizerTypes.Conversation{}, err
+	}
+	return tokenizerTypes.Conversation{Role: roleTool, Content: content, ToolCallID: callID}, nil
+}
+
 // simpleResponsesMessage recognizes a Responses input item shaped like a plain
 // chat message: {"role": ..., "content": ...}, with an optional
 // "type": "message". Content is either a string or an array of content
-// parts; only text parts convert, using their "text" field. An item
-// carrying any other "type" (function_call, function_call_output, reasoning,
-// and so on), or whose content this code cannot represent, fails the
-// conversion rather than being guessed at or dropped.
+// parts converted by responsesContent. An item carrying any other "type", or
+// whose content this code cannot represent, fails the conversion rather than
+// being guessed at or dropped.
 func simpleResponsesMessage(item any) (tokenizerTypes.Conversation, error) {
 	m, ok := item.(map[string]any)
 	if !ok {
@@ -243,9 +432,10 @@ func simpleResponsesMessage(item any) (tokenizerTypes.Conversation, error) {
 }
 
 // responsesContentTextTypes are the Responses content-part "type" values
-// this code converts to a chat-completions text block. A part of any other
-// type (input_image, refusal, and so on) fails the conversion rather than
-// being guessed at or dropped.
+// this code converts to a chat-completions text block. input_image converts
+// separately (see responsesContentPart); a part of any other type (refusal,
+// input_audio, and so on) fails the conversion rather than being guessed at
+// or dropped.
 var responsesContentTextTypes = map[string]bool{
 	"input_text":  true,
 	"output_text": true,
@@ -254,10 +444,10 @@ var responsesContentTextTypes = map[string]bool{
 
 // responsesContent converts a Responses input item's "content" field into
 // chat-completions Content. A plain string passes through as Raw. An array
-// of parts converts every part; a single resulting text part collapses to
-// Raw, matching the plain-string case. A part this code cannot represent as
-// text fails the conversion: dropping it would tokenize a prompt shorter
-// than the one vLLM serves.
+// of parts converts every part (see responsesContentPart); a single
+// resulting text part collapses to Raw, matching the plain-string case. A
+// part this code cannot represent fails the conversion: dropping it would
+// tokenize a prompt shorter than the one vLLM serves.
 func responsesContent(raw any) (*tokenizerTypes.Content, error) {
 	switch v := raw.(type) {
 	case string:
@@ -272,22 +462,44 @@ func responsesContent(raw any) (*tokenizerTypes.Content, error) {
 			if !ok {
 				return nil, fmt.Errorf("responses content part of type %T is not supported by legacy translation", part)
 			}
-			partType, _ := p["type"].(string)
-			if !responsesContentTextTypes[partType] {
-				return nil, fmt.Errorf("responses content part type %q is not supported by legacy translation", partType)
+			block, err := responsesContentPart(p)
+			if err != nil {
+				return nil, err
 			}
-			text, ok := p["text"].(string)
-			if !ok {
-				return nil, fmt.Errorf("responses content part type %q has no text field", partType)
-			}
-			blocks = append(blocks, tokenizerTypes.ContentBlock{Type: blockTypeText, Text: text})
+			blocks = append(blocks, block)
 		}
-		if len(blocks) == 1 {
+		if len(blocks) == 1 && blocks[0].Type == blockTypeText {
 			return &tokenizerTypes.Content{Raw: blocks[0].Text}, nil
 		}
 		return &tokenizerTypes.Content{Structured: blocks}, nil
 	default:
 		return nil, fmt.Errorf("responses content of type %T is not supported by legacy translation", raw)
+	}
+}
+
+// responsesContentPart converts one content part. input_text/output_text
+// parts convert to a text block using their "text" field. input_image parts
+// convert to an image block using their "image_url" field, which carries
+// the URL as a bare string, unlike chat completions' nested
+// {"image_url": {"url": ...}} shape. Any other type fails the conversion
+// rather than being guessed at or dropped.
+func responsesContentPart(p map[string]any) (tokenizerTypes.ContentBlock, error) {
+	partType, _ := p["type"].(string)
+	switch {
+	case responsesContentTextTypes[partType]:
+		text, ok := p["text"].(string)
+		if !ok {
+			return tokenizerTypes.ContentBlock{}, fmt.Errorf("responses content part type %q has no text field", partType)
+		}
+		return tokenizerTypes.ContentBlock{Type: blockTypeText, Text: text}, nil
+	case partType == "input_image":
+		url, ok := p["image_url"].(string)
+		if !ok || url == "" {
+			return tokenizerTypes.ContentBlock{}, fmt.Errorf("responses content part type %q has no image_url field", partType)
+		}
+		return tokenizerTypes.ContentBlock{Type: blockTypeImageURL, ImageURL: tokenizerTypes.ImageBlock{URL: url}}, nil
+	default:
+		return tokenizerTypes.ContentBlock{}, fmt.Errorf("responses content part type %q is not supported by legacy translation", partType)
 	}
 }
 

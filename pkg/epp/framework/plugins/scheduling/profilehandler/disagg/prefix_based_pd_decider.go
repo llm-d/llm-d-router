@@ -72,6 +72,7 @@ var (
 	_ deciderPlugin           = &PrefixBasedPDDecider{}
 	_ fwkrc.PreRequest        = &PrefixBasedPDDecider{}
 	_ plugin.ConsumerPlugin   = &PrefixBasedPDDecider{}
+	_ plugin.ProducerPlugin   = &PrefixBasedPDDecider{}
 	_ prefixMatchInfoConsumer = &PrefixBasedPDDecider{}
 )
 
@@ -157,6 +158,17 @@ func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 	return d
 }
 
+// Produces declares the request attributes the plugin writes: the
+// conditional-decode ownership marker the director reads to decide whether the
+// "Prefer: if-available" header was evaluated, and the memoized remote-prefill
+// outcome this plugin reads back in PreRequest.
+func (d *PrefixBasedPDDecider) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		fwkrc.ConditionalDecodeHandledAttributeKey: false,
+		remotePrefillDecisionAttributeKey:          remotePrefillDecision{},
+	}
+}
+
 // Consumes declares the request- and endpoint-scoped data the plugin reads
 // when evaluating the gate. Required so operators opting into the plugin
 // standalone (not just as a disagg-profile-handler decider) get startup
@@ -192,7 +204,7 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	}
 	logger := log.FromContext(ctx)
 	debugLogger := logger.V(logging.DEBUG)
-	endpoint := primaryDecodeEndpoint(schedulingResult)
+	endpoint := schedulingResult.PrimaryEndpoint()
 	if endpoint == nil {
 		debugLogger.Info("conditional-decode: no primary decode endpoint, rejecting")
 		return errCondDecodeCacheMiss
@@ -208,20 +220,6 @@ func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduli
 	}
 	debugLogger.Info("conditional-decode: forwarding")
 	return nil
-}
-
-// primaryDecodeEndpoint returns the first endpoint chosen by the primary
-// profile, or nil when the scheduling result is missing, malformed, or the
-// primary profile produced no endpoint.
-func primaryDecodeEndpoint(result *scheduling.SchedulingResult) scheduling.Endpoint {
-	if result == nil || result.PrimaryProfileName == "" || result.ProfileResults == nil {
-		return nil
-	}
-	primary := result.ProfileResults[result.PrimaryProfileName]
-	if primary == nil || len(primary.TargetEndpoints) == 0 {
-		return nil
-	}
-	return primary.TargetEndpoints[0]
 }
 
 // disaggregate reports whether remote prefill should run for this request.

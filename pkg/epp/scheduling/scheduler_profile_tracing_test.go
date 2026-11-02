@@ -28,6 +28,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -131,7 +132,7 @@ func TestScheduleNestsFilterSpansUnderNamedProfiles(t *testing.T) {
 	))
 
 	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
-	_, err := scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", RequestID: "r1"}, endpoints)
+	_, err := scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", Headers: map[string]string{reqcommon.RequestIDHeaderKey: "r1"}}, endpoints)
 	root.End()
 	if err != nil {
 		t.Fatalf("Schedule returned error: %v", err)
@@ -183,7 +184,7 @@ func TestScheduleEndsProfileSpanWhenFilterPanics(t *testing.T) {
 	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
 	recovered := func() (value any) {
 		defer func() { value = recover() }()
-		_, _ = scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", RequestID: "r1"}, endpoints)
+		_, _ = scheduler.Schedule(ctx, &fwksched.InferenceRequest{TargetModel: "m1", Headers: map[string]string{reqcommon.RequestIDHeaderKey: "r1"}}, endpoints)
 		return nil
 	}()
 	root.End()
@@ -219,7 +220,7 @@ func TestRunFilterPluginsSingleSpan(t *testing.T) {
 	endpoints := newTestEndpoints("pod1", "pod2", "pod3")
 
 	ctx, root := otel.Tracer("test").Start(context.Background(), "root")
-	result := profile.runFilterPlugins(ctx, &fwksched.InferenceRequest{TargetModel: "m1", RequestID: "r1"}, endpoints)
+	result := profile.runFilterPlugins(ctx, &fwksched.InferenceRequest{TargetModel: "m1", Headers: map[string]string{reqcommon.RequestIDHeaderKey: "r1"}}, endpoints)
 	root.End()
 
 	if len(result) != 2 {
@@ -379,6 +380,6 @@ func TestRunFilterPluginsOmitsEmptyGenAI(t *testing.T) {
 		t.Errorf("%s set for empty TargetModel", semconv.GenAIRequestModelKey)
 	}
 	if _, ok := attrs[semconv.GenAIRequestIDKey]; ok {
-		t.Errorf("%s set for empty RequestID", semconv.GenAIRequestIDKey)
+		t.Errorf("%s set without x-request-id", semconv.GenAIRequestIDKey)
 	}
 }

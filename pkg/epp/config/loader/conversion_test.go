@@ -187,12 +187,14 @@ func requireNoZeroField(t *testing.T, v reflect.Value, path string) {
 
 func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 	band := configapiv1alpha1.PriorityBandConfig{
-		Priority:          10,
-		MaxBytes:          resource.NewQuantity(1024, resource.DecimalSI),
-		MaxRequests:       resource.NewQuantity(64, resource.DecimalSI),
-		DefaultRequestTTL: &metav1.Duration{Duration: 5 * time.Second},
-		FairnessPolicyRef: "fairness",
-		OrderingPolicyRef: "ordering",
+		MaxBytesPerFlow:    resource.NewQuantity(512, resource.DecimalSI),
+		MaxRequestsPerFlow: resource.NewQuantity(4, resource.DecimalSI),
+		Priority:           10,
+		MaxBytes:           resource.NewQuantity(1024, resource.DecimalSI),
+		MaxRequests:        resource.NewQuantity(64, resource.DecimalSI),
+		DefaultRequestTTL:  &metav1.Duration{Duration: 5 * time.Second},
+		FairnessPolicyRef:  "fairness",
+		OrderingPolicyRef:  "ordering",
 	}
 
 	return &configapiv1alpha1.EndpointPickerConfig{
@@ -215,27 +217,29 @@ func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 			Discovery: &configapiv1alpha1.DiscoveryConfig{
 				Endpoints: &configapiv1alpha1.EndpointDiscoveryConfig{PluginRef: "endpoints"},
 				Peers:     &configapiv1alpha1.PeerDiscoveryConfig{PluginRef: "peers"},
-				PluginRef: "bare-endpoints",
+				PluginRef: "bare-endpoints", //nolint:staticcheck // SA1019: exercising the deprecated field on purpose.
 			},
 			CrossReplicaSyncerPluginRef: "syncer",
 			CrossReplicaSyncInterval:    &metav1.Duration{Duration: 500 * time.Millisecond},
 			CrossReplicaPublishTimeout:  &metav1.Duration{Duration: 2 * time.Second},
 		},
 		FlowControl: &configapiv1alpha1.FlowControlConfig{
-			MaxBytes:                    resource.NewQuantity(2048, resource.DecimalSI),
-			MaxRequests:                 resource.NewQuantity(128, resource.DecimalSI),
-			DefaultRequestTTL:           &metav1.Duration{Duration: 30 * time.Second},
-			NoEndpointRequestTTL:        &metav1.Duration{Duration: 90 * time.Second},
-			DefaultPriorityBand:         &band,
-			DefaultNegativePriorityBand: &band,
-			PriorityBands:               []configapiv1alpha1.PriorityBandConfig{band},
-			UsageLimitPolicyPluginRef:   "usage-limit",
-			SaturationDetector:          &configapiv1alpha1.SaturationDetectorConfig{PluginRef: "detector"},
-			EnableEviction:              true,
+			MaxBytes:                     resource.NewQuantity(2048, resource.DecimalSI),
+			MaxRequests:                  resource.NewQuantity(128, resource.DecimalSI),
+			DefaultRequestTTL:            &metav1.Duration{Duration: 30 * time.Second},
+			NoEndpointRequestTTL:         &metav1.Duration{Duration: 90 * time.Second},
+			DefaultPriorityBand:          &band,
+			DefaultNegativePriorityBand:  &band,
+			PriorityBands:                []configapiv1alpha1.PriorityBandConfig{band},
+			UsageLimitPolicyPluginRef:    "usage-limit",
+			BandSelectionPolicyPluginRef: "band-selection",
+			SaturationDetector:           &configapiv1alpha1.SaturationDetectorConfig{PluginRef: "detector"},
+			EnableEviction:               true,
 		},
 		RequestHandler: &configapiv1alpha1.RequestHandlerConfig{
-			Parsers:           []configapiv1alpha1.ParserConfig{{PluginRef: "parser"}},
-			PropagatePriority: true,
+			Parsers:            []configapiv1alpha1.ParserConfig{{PluginRef: "parser"}},
+			PropagatePriority:  true,
+			ComposeFairnessIDs: true,
 		},
 	}
 }

@@ -31,7 +31,7 @@ var _ fwkplugin.ProducerPlugin = &ModelExtractor{}
 
 var _ fwkdl.PollingExtractor[*ModelResponse] = &ModelExtractor{}
 
-// ModelResponse is the response from /v1/models API.
+// ModelResponse is the OpenAI-compatible response from /v1/models API.
 type ModelResponse struct {
 	Object string                 `json:"object"`
 	Data   []attrmodels.ModelData `json:"data"`

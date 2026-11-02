@@ -12,6 +12,16 @@ linters:
   default: none
   enable:
     - gosec
+  exclusions:
+    rules:
+      # The gate protects new production code. Test code trips gosec on patterns
+      # that are deliberate in tests (unchecked errors on mock handlers, httptest
+      # URLs, weak RNG for fixtures), so annotating each one adds noise without
+      # adding safety. Covers _test.go, helpers under test/ that are not
+      # themselves _test.go, and test harnesses under pkg/.../tests/.
+      - path: (_test\.go|^test/|/tests/)
+        linters:
+          - gosec
 
 output:
   formats:

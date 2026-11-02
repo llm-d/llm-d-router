@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr/testr"
 	"github.com/google/go-cmp/cmp"
@@ -66,13 +67,14 @@ func completionsBody(prompt string) *fwkrh.InferenceRequestBody {
 
 // Tests the scheduler expected behavior.
 func TestPDSchedule(t *testing.T) {
+	scrapedAt := time.Now()
 	endpoint1 := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{
 			ID:      k8stypes.NamespacedName{Name: "endpoint1"},
 			Address: "1.2.3.4",
 			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
 		},
-		&fwkdl.Metrics{WaitingQueueSize: 0},
+		&fwkdl.Metrics{WaitingQueueSize: 0, UpdateTime: scrapedAt},
 		fwkdl.NewAttributes(),
 	)
 	endpoint2 := fwksched.NewEndpoint(
@@ -81,7 +83,7 @@ func TestPDSchedule(t *testing.T) {
 			Address: "5.6.7.8",
 			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
 		},
-		&fwkdl.Metrics{WaitingQueueSize: 0},
+		&fwkdl.Metrics{WaitingQueueSize: 0, UpdateTime: scrapedAt},
 		fwkdl.NewAttributes(),
 	)
 	noRoleEndpoint1 := fwksched.NewEndpoint(
@@ -89,7 +91,7 @@ func TestPDSchedule(t *testing.T) {
 			ID:      k8stypes.NamespacedName{Name: "noRoleEndpoint1"},
 			Address: "1.1.1.1",
 		},
-		&fwkdl.Metrics{WaitingQueueSize: 2},
+		&fwkdl.Metrics{WaitingQueueSize: 2, UpdateTime: scrapedAt},
 		fwkdl.NewAttributes(),
 	)
 
@@ -326,6 +328,7 @@ func TestPDSchedule(t *testing.T) {
 
 func TestPDSchedule_PrefillFirst(t *testing.T) {
 	ctx := context.Background()
+	scrapedAt := time.Now()
 
 	endpoint1 := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{
@@ -333,7 +336,7 @@ func TestPDSchedule_PrefillFirst(t *testing.T) {
 			Address: "1.2.3.4",
 			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
 		},
-		&fwkdl.Metrics{WaitingQueueSize: 0},
+		&fwkdl.Metrics{WaitingQueueSize: 0, UpdateTime: scrapedAt},
 		fwkdl.NewAttributes(),
 	)
 	endpoint2 := fwksched.NewEndpoint(
@@ -342,7 +345,7 @@ func TestPDSchedule_PrefillFirst(t *testing.T) {
 			Address: "5.6.7.8",
 			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
 		},
-		&fwkdl.Metrics{WaitingQueueSize: 0},
+		&fwkdl.Metrics{WaitingQueueSize: 0, UpdateTime: scrapedAt},
 		fwkdl.NewAttributes(),
 	)
 

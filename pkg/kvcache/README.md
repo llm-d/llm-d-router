@@ -49,8 +49,7 @@ indexer owns block-key computation, index lookup, and prefix matching.
 | `MatchBlockKeys` / `PodMatch` | Block keys -> per-pod prefix match: weighted score, matched blocks, blocks per tier. |
 | `ComputeBlockKeysFromTokens` | Tokens -> block keys, without matching. |
 | `KVBlockIndex` | Accessor for the underlying `kvblock.Index`. |
-| `LongestPrefixScorer` | Deprecated `KVBlockScorer`; projects the matcher over a materialized lookup result. |
-| `Config` | Wires the block-index backend, scoring strategy, and per-tier backend weights. |
+| `Config` | Wires the block-index backend and per-tier backend weights. |
 
 ## Related Documentation
 

@@ -37,6 +37,7 @@ func main() {
 	roots, err := loader.LoadRoots(
 		"k8s.io/apimachinery/pkg/runtime/schema", // Needed to parse generated register functions.
 		"github.com/llm-d/llm-d-router/apix/v1alpha2",
+		"github.com/llm-d/llm-d-router/apix/v1",
 	)
 	if err != nil {
 		log.Fatalf("failed to load package roots: %s", err)

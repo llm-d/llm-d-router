@@ -30,11 +30,12 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
@@ -217,6 +218,8 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 var (
 	_ scheduling.ProfileHandler = &Handler{}
 	_ requestcontrol.PreRequest = &Handler{}
+	_ plugin.ProducerPlugin     = &Handler{}
+	_ plugin.ConsumerPlugin     = &Handler{}
 )
 
 // Handler is the unified disaggregation profile handler.
@@ -256,7 +259,36 @@ func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
 	return h
 }
 
-// Consumes defines data types consumed by this plugin (through the PD decider).
+// Produces declares the request attributes the handler publishes for later
+// scheduling phases and for its own ProcessResults, plus everything its
+// deciders write. Both live in the per-request store rather than on an
+// endpoint.
+//
+// The deciders run inside this handler's extension points, through the request
+// the handler was handed, so their keys are confined against this declaration
+// rather than their own.
+func (h *Handler) Produces() map[plugin.DataKey]any {
+	produced := map[plugin.DataKey]any{
+		// Endpoint is an interface; its zero value is the type witness the
+		// data graph compares against a consumer's declaration.
+		PeerEndpointAttributeKey:    scheduling.Endpoint(nil),
+		prefillDeclinedAttributeKey: false,
+	}
+	for _, decider := range []deciderPlugin{h.pdDecider, h.encodeDecider} {
+		producer, ok := decider.(plugin.ProducerPlugin)
+		if !ok {
+			continue
+		}
+		for key, witness := range producer.Produces() {
+			produced[key] = witness
+		}
+	}
+	return produced
+}
+
+// Consumes declares the prefix match info and tokenized prompt the handler
+// requires for P/D, plus everything its deciders declare. The deciders' reads
+// are confined against this declaration for the reason given on Produces.
 func (h *Handler) Consumes() plugin.DataDependencies {
 	prefixMatchInfoDK := attrprefix.PrefixCacheMatchInfoDataKey
 	if h.pdDecider != nil {
@@ -264,12 +296,33 @@ func (h *Handler) Consumes() plugin.DataDependencies {
 			prefixMatchInfoDK = consumer.prefixMatchInfoDataKey()
 		}
 	}
-	return plugin.DataDependencies{
+	consumed := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			prefixMatchInfoDK:                    attrprefix.PrefixCacheMatchInfo{},
 			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
 		},
+		Optional: map[plugin.DataKey]any{},
 	}
+	deciders := []deciderPlugin{h.pdDecider, h.encodeDecider}
+	for _, decider := range deciders {
+		if consumer, ok := decider.(plugin.ConsumerPlugin); ok {
+			for key, witness := range consumer.Consumes().Required {
+				consumed.Required[key] = witness
+			}
+		}
+	}
+	// A key one decider requires stays required when the other lists it as
+	// optional.
+	for _, decider := range deciders {
+		if consumer, ok := decider.(plugin.ConsumerPlugin); ok {
+			for key, witness := range consumer.Consumes().Optional {
+				if _, required := consumed.Required[key]; !required {
+					consumed.Optional[key] = witness
+				}
+			}
+		}
+	}
+	return consumed
 }
 
 func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeProfile string, pdDecider, encodeDecider deciderPlugin) *Handler {
@@ -304,7 +357,9 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if request.TargetModel != "" {
 		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+	if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+		span.SetAttributes(semconv.GenAIRequestID(clientRequestID))
+	}
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	if h.stageOrder == StageOrderPrefillFirst {
@@ -368,13 +423,7 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	}
 
 	// ── All stages done: record routing decision ───────────────────────────
-	encodeUsed := profileResults[h.encodeProfile] != nil
-	prefillUsed := profileResults[h.prefillProfile] != nil
-
-	decision := DisaggDecisionType(encodeUsed, prefillUsed)
-	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_" + decision))
-
+	h.recordDecision(span, request, profileResults)
 	return map[string]scheduling.SchedulerProfile{}
 }
 
@@ -392,12 +441,7 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 			return map[string]scheduling.SchedulerProfile{}
 		}
 
-		encodeUsed := profileResults[h.encodeProfile] != nil
-		prefillUsed := profileResults[h.prefillProfile] != nil
-
-		decision := DisaggDecisionType(encodeUsed, prefillUsed)
-		RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
-		span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_" + decision))
+		h.recordDecision(span, request, profileResults)
 		return map[string]scheduling.SchedulerProfile{}
 	}
 
@@ -440,6 +484,35 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
 }
 
+// prefillRequiredButFailed reports whether the prefill profile was picked to
+// run and found no endpoint, as opposed to the PD decider declining it.
+func (h *Handler) prefillRequiredButFailed(request *scheduling.InferenceRequest, profileResults map[string]*scheduling.ProfileRunResult) bool {
+	prefillRes, ok := profileResults[h.prefillProfile]
+	if !ok || prefillRes != nil {
+		return false
+	}
+	declined, _ := scheduling.ReadRequestAttribute[bool](request, prefillDeclinedAttributeKey)
+	return !declined
+}
+
+// recordDecision records the routing decision once all stages are done.
+// Requests that ProcessResults rejects are not routed and are not counted.
+func (h *Handler) recordDecision(span trace.Span, request *scheduling.InferenceRequest, profileResults map[string]*scheduling.ProfileRunResult) {
+	if h.prefillRequiredButFailed(request, profileResults) {
+		span.SetAttributes(
+			semconv.LLMDEPPProfileHandlerDecision("complete"),
+			semconv.LLMDEPPProfileHandlerPrefillFailed(true),
+		)
+		return
+	}
+	encodeUsed := profileResults[h.encodeProfile] != nil
+	prefillUsed := profileResults[h.prefillProfile] != nil
+
+	decision := DisaggDecisionType(encodeUsed, prefillUsed)
+	RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, decision)
+	span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("complete_" + decision))
+}
+
 // ProcessResults implements scheduling.ProfileHandler.
 // Builds the final SchedulingResult from whichever stages ran successfully.
 func (h *Handler) ProcessResults(
@@ -460,16 +533,13 @@ func (h *Handler) ProcessResults(
 
 	updatedResults[h.decodeProfile] = decodeRunResults
 
-	if prefillRes, ok := profileResults[h.prefillProfile]; ok {
-		if prefillRes != nil {
-			updatedResults[h.prefillProfile] = prefillRes
-		} else if declined, _ := scheduling.ReadRequestAttribute[bool](request, prefillDeclinedAttributeKey); !declined {
-			// The PD decider picked the prefill profile to run and it found no
-			// endpoint, instead of the decider declining to run it at all.
-			// Completing decode-only here would silently run prefill work on a
-			// decode pod instead of failing the request.
-			return nil, fmt.Errorf("prefill profile %q was required but produced no result", h.prefillProfile)
-		}
+	if h.prefillRequiredButFailed(request, profileResults) {
+		// Completing decode-only here would silently run prefill work on a
+		// decode pod instead of failing the request.
+		return nil, fmt.Errorf("prefill profile %q was required but produced no result", h.prefillProfile)
+	}
+	if prefillRes := profileResults[h.prefillProfile]; prefillRes != nil {
+		updatedResults[h.prefillProfile] = prefillRes
 	}
 
 	if encodeRes, ok := profileResults[h.encodeProfile]; ok && encodeRes != nil {
@@ -513,11 +583,13 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	if request.TargetModel != "" {
 		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+	if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+		span.SetAttributes(semconv.GenAIRequestID(clientRequestID))
+	}
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	// Prefill header
-	delete(request.Headers, routing.PrefillEndpointHeader)
+	routing.DeleteRoutingHeader(request.Headers, routing.PrefillEndpointHeader)
 	prefillProfileRunResult := schedulingResult.ProfileResults[h.prefillProfile]
 	switch {
 	case prefillProfileRunResult == nil:
@@ -533,7 +605,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	default:
 		targetPod := prefillProfileRunResult.TargetEndpoints[0].GetMetadata()
 		prefillHostPort := net.JoinHostPort(targetPod.Address, targetPod.Port)
-		request.Headers[routing.PrefillEndpointHeader] = prefillHostPort
+		routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, prefillHostPort)
 		span.SetAttributes(
 			semconv.LLMDEPPPDDisaggregationUsed(true),
 			semconv.LLMDEPPPDPrefillPodAddress(targetPod.Address),
@@ -542,7 +614,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	}
 
 	// Encode header
-	delete(request.Headers, routing.EncoderEndpointsHeader)
+	routing.DeleteRoutingHeader(request.Headers, routing.EncoderEndpointsHeader)
 	encodeProfileRunResult := schedulingResult.ProfileResults[h.encodeProfile]
 	if encodeProfileRunResult == nil {
 		span.SetAttributes(
@@ -552,7 +624,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		return nil
 	}
 
-	var encodeHostPorts []string
+	encodeHostPorts := make([]string, 0, len(encodeProfileRunResult.TargetEndpoints))
 	for _, endpoint := range encodeProfileRunResult.TargetEndpoints {
 		targetEndpoint := endpoint.GetMetadata()
 		encodeHostPort := net.JoinHostPort(targetEndpoint.Address, targetEndpoint.Port)
@@ -566,7 +638,7 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 		return nil
 	}
 
-	request.Headers[routing.EncoderEndpointsHeader] = strings.Join(encodeHostPorts, ",")
+	routing.SetRoutingHeader(request.Headers, routing.EncoderEndpointsHeader, strings.Join(encodeHostPorts, ","))
 	span.SetAttributes(
 		semconv.LLMDEPPEncodeDisaggregationUsed(true),
 		semconv.LLMDEPPEncodeEndpoints(strings.Join(encodeHostPorts, ",")),

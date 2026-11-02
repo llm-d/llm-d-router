@@ -87,6 +87,39 @@ func TestPickDPRankSingleDP(t *testing.T) {
 	}
 }
 
+func TestFoldDPRankToLocal(t *testing.T) {
+	cases := []struct {
+		name        string
+		dpRank      int
+		dpSize      int
+		dpSizeLocal int
+		want        int
+	}{
+		{name: "multi-pod global rank", dpRank: 11, dpSize: 16, dpSizeLocal: 8, want: 3},
+		{name: "multi-pod local rank", dpRank: 7, dpSize: 16, dpSizeLocal: 8, want: 7},
+		{name: "single-pod fallback", dpRank: 11, dpSize: 16, dpSizeLocal: 0, want: 11},
+		{name: "unset sizes", dpRank: 0, dpSize: 0, dpSizeLocal: 0, want: 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := foldDPRankToLocal(c.dpRank, c.dpSize, c.dpSizeLocal); got != c.want {
+				t.Errorf("foldDPRankToLocal(%d, %d, %d) = %d; want %d",
+					c.dpRank, c.dpSize, c.dpSizeLocal, got, c.want)
+			}
+		})
+	}
+}
+
+func TestPickDPRanksSeparatesGlobalAndLocalRanks(t *testing.T) {
+	global, local := pickDPRanks("cmpl-foo-0", 16, 8)
+	if global != 13 {
+		t.Errorf("pickDPRanks global rank = %d; want 13", global)
+	}
+	if local != 5 {
+		t.Errorf("pickDPRanks local rank = %d; want 5", local)
+	}
+}
+
 // TestPickDPRankDeterministic verifies the core invariant: the same
 // requestID + dpSize always returns the same rank. Without this, the
 // prefill and decode requests of one disagg pair would land on different

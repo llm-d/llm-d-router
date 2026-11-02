@@ -83,7 +83,7 @@ func TestAsyncResultWaiterMultiplexesWaiters(t *testing.T) {
 func TestAsyncBrokerWaitNotifyDeliversResult(t *testing.T) {
 	step, rdb := newAsyncTestStep(t, map[string]any{"wakeup_mode": "notify"})
 	reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
-		"X-AP-Mode": "wait", "X-Team": "team-a",
+		defaultModeHeader: "wait", defaultTenantHeader: "team-a",
 	})
 	start := time.Now()
 	done := make(chan error, 1)

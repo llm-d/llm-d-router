@@ -102,6 +102,17 @@ func (e *MultiClusterMetricsExtractor) Extract(_ context.Context, in fwkdl.PollI
 	return errors.Join(errs...)
 }
 
+var _ sourcemetrics.FamilyReader = &MultiClusterMetricsExtractor{}
+
+// MetricFamilies lists the pool aggregate families.
+func (e *MultiClusterMetricsExtractor) MetricFamilies() []string {
+	names := make([]string, 0, len(e.metrics))
+	for _, m := range e.metrics {
+		names = append(names, m.spec.Name)
+	}
+	return names
+}
+
 var _ fwkplugin.ProducerPlugin = &MultiClusterMetricsExtractor{}
 
 // Produces advertises the pool attributes so the dependency graph can verify a

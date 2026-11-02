@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -62,20 +61,19 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 		Namespace: targetMetadata.ID.Namespace,
 	}
 
-	logger.V(logutil.TRACE).Info("request ID for SLO tracking", "requestID", request.Headers[reqcommon.RequestIDHeaderKey], "endpointName", endpointName)
-	if request.Headers[reqcommon.RequestIDHeaderKey] == "" {
-		logger.V(logutil.DEBUG).Error(errors.New("missing request ID"), "PredictedLatency.PreRequest: Request is missing request ID header")
+	logger.V(logutil.TRACE).Info("request ID for SLO tracking", "requestID", request.RequestID, "endpointName", endpointName)
+	if request.RequestID == "" {
+		logger.V(logutil.DEBUG).Error(errors.New("missing request ID"), "PredictedLatency.PreRequest: Request is missing request ID")
 		return nil
 	}
 
-	id := request.Headers[reqcommon.RequestIDHeaderKey]
+	id := request.RequestID
 
 	actual, _ := pl.runningRequestLists.LoadOrStore(endpointName, newRequestPriorityQueue())
 	endpointRequestList := actual.(*requestPriorityQueue)
 
 	predictedLatencyCtx, err := pl.getPredictedLatencyContextForRequest(request)
 	if err != nil {
-		id := request.Headers[reqcommon.RequestIDHeaderKey]
 		logger.V(logutil.DEBUG).Info("PredictedLatency.PreRequest: Failed to get SLO context for request", "error", err, "requestID", id)
 		return nil
 	}
@@ -141,10 +139,15 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 		return
 	}
 
+	// The handler synthesizes completion records for truncated streams.
+	// These callbacks carry no new data event and must not add a token.
+	completionOnly := response.EndOfStream &&
+		response.TerminationCause != "" &&
+		response.TerminationCause != requestcontrol.TerminationCauseNatural
 	now := time.Now()
 	predictedLatencyCtx, err := pl.getPredictedLatencyContextForRequest(request)
 	if err != nil {
-		id := request.Headers[reqcommon.RequestIDHeaderKey]
+		id := request.RequestID
 		logger.V(logutil.DEBUG).Info("PredictedLatency.ResponseBody: Failed to get SLO context", "error", err, "requestID", id)
 		return
 	}
@@ -153,12 +156,12 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 		if pl.config.StreamingMode && !response.EndOfStream {
 			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now)
 		}
-	} else {
+	} else if !completionOnly {
 		processTokenForLatencyPrediction(ctx, predictedLatencyCtx, now)
 	}
 
 	if response.EndOfStream {
-		if !pl.config.StreamingMode {
+		if !pl.config.StreamingMode && !completionOnly {
 			processFirstTokenForLatencyPrediction(ctx, pl.latencypredictor, pl.config.StreamingMode, pl.config.EndpointRoleLabel, predictedLatencyCtx, now)
 		}
 
@@ -173,7 +176,7 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 		}
 
 		if predictedLatencyCtx.ttft > 0 && predictedLatencyCtx.generatedTokenCount > 1 {
-			e2eMs := float64(now.Sub(predictedLatencyCtx.requestReceivedTimestamp).Milliseconds())
+			e2eMs := float64(predictedLatencyCtx.lastTokenTimestamp.Sub(predictedLatencyCtx.requestReceivedTimestamp).Milliseconds())
 			predictedLatencyCtx.avgTPOT = (e2eMs - predictedLatencyCtx.ttft) / float64(predictedLatencyCtx.generatedTokenCount-1)
 		}
 
@@ -198,17 +201,20 @@ func (pl *PredictedLatency) ResponseBody(ctx context.Context, request *fwksched.
 					0,
 					0,
 					0,
+					trainingEntryOptions{PredictedTPOT: predictedLatencyMSPtr(predictedLatencyCtx.avgPredictedTPOT)},
 				)
 				entry.PrefillTokensInFlight = predictedLatencyCtx.prefillTokensAtDispatch
 				entry.DecodeTokensInFlight = predictedLatencyCtx.decodeTokensAtDispatch
 				entry.NumRequestRunning = predictedLatencyCtx.requestsAtDispatch
+				// Request-average actual TPOT is paired with the scheduling-time
+				// selected decode/primary prediction (avgPredictedTPOT).
 				if err := pl.latencypredictor.AddTrainingDataBulk([]latencypredictor.TrainingEntry{entry}); err != nil {
 					logger.V(logutil.DEBUG).Error(err, "record TPOT training failed")
 				}
 			}
 		}
 
-		id := request.Headers[reqcommon.RequestIDHeaderKey]
+		id := request.RequestID
 		pl.removeRequestFromQueue(id, predictedLatencyCtx)
 		pl.deletePredictedLatencyContextForRequest(request)
 	}

@@ -25,12 +25,12 @@ import (
 	"sync"
 	"time"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const ProgramAwarePluginType = "program-aware-fairness"
@@ -96,9 +96,9 @@ var (
 	_ fwkrc.PreRequest            = &ProgramAwarePlugin{}
 	_ fwkrc.ResponseBodyProcessor = &ProgramAwarePlugin{}
 	_ plugin.StateDumper          = &ProgramAwarePlugin{}
+	_ plugin.ProducerPlugin       = &ProgramAwarePlugin{}
 )
 
-//nolint:revive // factory name matches sibling fairness plugins.
 func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := DefaultConfig()
 	if parameters != nil {
@@ -132,7 +132,6 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 	return p, nil
 }
 
-//nolint:revive
 type ProgramAwarePlugin struct {
 	name     string
 	strategy Strategy
@@ -142,6 +141,12 @@ type ProgramAwarePlugin struct {
 
 func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 	return plugin.TypedName{Type: ProgramAwarePluginType, Name: p.name}
+}
+
+// Produces declares the enqueue time Pick stashes on the request for this
+// plugin's own PreRequest to read back.
+func (p *ProgramAwarePlugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{enqueueTimeAttributeKey: time.Time{}}
 }
 
 // fairnessDumpState is the sanitized snapshot returned by DumpState. Program IDs
@@ -212,7 +217,7 @@ func (p *ProgramAwarePlugin) getOrCreateMetrics(programID string) *ProgramMetric
 
 func programIDFor(req *fwksched.InferenceRequest) string {
 	if req == nil || req.FairnessID == "" {
-		return metadata.DefaultFairnessID
+		return reqcommon.DefaultFairnessID
 	}
 	return req.FairnessID
 }

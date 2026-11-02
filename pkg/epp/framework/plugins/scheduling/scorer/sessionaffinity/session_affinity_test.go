@@ -20,15 +20,18 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionid"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
@@ -323,5 +326,29 @@ func TestSessionAffinity_FactoryValidation(t *testing.T) {
 				t.Fatal("expected a plugin instance")
 			}
 		})
+	}
+}
+
+// A session-id source naming a session-id-producer resolves to that producer's
+// typed SessionID key. The scorer accepts any string kind and declares the key
+// untyped, which the data graph must accept.
+func TestSessionIDSourceOnSessionIDProducerValidates(t *testing.T) {
+	handle := utils.NewTestHandle(utils.NewTestContext(t))
+	producer, err := sessionid.Factory("sid", json.NewDecoder(strings.NewReader(`{"headerName":"x-session-id"}`)), handle)
+	if err != nil {
+		t.Fatalf("session-id producer: %v", err)
+	}
+	scorer, err := sessionaffinity.Factory("affinity", json.NewDecoder(strings.NewReader(
+		`{"strategy":"session_id","sessionIdConfig":{"sources":[{"attribute":"SessionIDDataKey","producer":"sid"}]}}`)), handle)
+	if err != nil {
+		t.Fatalf("session-affinity scorer: %v", err)
+	}
+
+	ordered, err := datalayer.ValidateAndOrderDataDependencies([]plugin.Plugin{producer, scorer})
+	if err != nil {
+		t.Fatalf("ValidateAndOrderDataDependencies() error = %v", err)
+	}
+	if diff := cmp.Diff([]string{producer.TypedName().String(), scorer.TypedName().String()}, ordered); diff != "" {
+		t.Errorf("order mismatch (-want +got):\n%s", diff)
 	}
 }

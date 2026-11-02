@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
@@ -32,14 +33,30 @@ import (
 // default; disable via the featureGates config with "haPopulateNonLeaderDatastore=false".
 const HAPopulateNonLeaderDatastoreFeatureGate = "haPopulateNonLeaderDatastore"
 
-var inferenceAPIGV = schema.GroupVersion{Group: v1alpha2.GroupVersion.Group, Version: v1alpha2.GroupVersion.Version}
+var (
+	inferenceAPIGV           = schema.GroupVersion{Group: v1alpha2.GroupVersion.Group, Version: v1alpha2.GroupVersion.Version}
+	inferenceObjectiveV1GV   = schema.GroupVersion{Group: apixv1.GroupVersion.Group, Version: apixv1.GroupVersion.Version}
+	supportedObjectiveAPIGVs = []schema.GroupVersion{
+		inferenceObjectiveV1GV,
+		inferenceAPIGV,
+	}
+)
 
 type ControllerConfig struct {
-	startCrdReconcilers        bool
-	hasInferenceObjective      bool
-	hasInferenceModelRewrites  bool
-	InferenceObjectiveGV       schema.GroupVersion
-	InferenceModelRewriteGV    schema.GroupVersion
+	startCrdReconcilers       bool
+	hasInferenceObjective     bool
+	hasInferenceModelRewrites bool
+	InferenceObjectiveGV      schema.GroupVersion
+	InferenceModelRewriteGV   schema.GroupVersion
+	// hasV1InferenceObjective reports whether llm-d.ai/v1 is the served
+	// primary for InferenceObjective. The v1 source and the pool-label
+	// requeue watch are set up only then.
+	hasV1InferenceObjective bool
+	// SecondaryObjectiveGV is the other llm-d.ai InferenceObjective version
+	// when served alongside the primary, else empty. Dual serving without
+	// apiserver conversion prunes cross-version fields; operators must
+	// migrate instead of dual-writing one object.
+	SecondaryObjectiveGV       schema.GroupVersion
 	PopulateNonLeaderDatastore bool
 }
 
@@ -62,14 +79,29 @@ func (cc *ControllerConfig) PopulateControllerConfig(cfg *rest.Config) error {
 }
 
 func (cc *ControllerConfig) populateWithDiscovery(dc discovery.DiscoveryInterface) {
-	if gvkExists(dc, inferenceAPIGV.WithKind("InferenceObjective")) {
+	if gv, found := findGroupVersion(dc, "InferenceObjective", supportedObjectiveAPIGVs); found {
 		cc.hasInferenceObjective = true
-		cc.InferenceObjectiveGV = inferenceAPIGV
+		cc.InferenceObjectiveGV = gv
+		cc.hasV1InferenceObjective = gv == inferenceObjectiveV1GV
+		if gv == inferenceObjectiveV1GV {
+			if gvkExists(dc, inferenceAPIGV.WithKind("InferenceObjective")) {
+				cc.SecondaryObjectiveGV = inferenceAPIGV
+			}
+		}
 	}
 	if gvkExists(dc, inferenceAPIGV.WithKind("InferenceModelRewrite")) {
 		cc.hasInferenceModelRewrites = true
 		cc.InferenceModelRewriteGV = inferenceAPIGV
 	}
+}
+
+func findGroupVersion(dc discovery.DiscoveryInterface, kind string, groupVersions []schema.GroupVersion) (schema.GroupVersion, bool) {
+	for _, gv := range groupVersions {
+		if gvkExists(dc, gv.WithKind(kind)) {
+			return gv, true
+		}
+	}
+	return schema.GroupVersion{}, false
 }
 
 func gvkExists(dc discovery.DiscoveryInterface, gvk schema.GroupVersionKind) bool {

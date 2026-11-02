@@ -278,7 +278,7 @@ func serveMetrics(ctx context.Context, port int, certDir string, lis net.Listene
 	go func() {
 		defer close(shutdownDone)
 		<-shutdownCtx.Done()
-		graceCtx, cancelGrace := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+		graceCtx, cancelGrace := context.WithTimeout(context.WithoutCancel(ctx), metricsShutdownTimeout)
 		defer cancelGrace()
 		_ = srv.Shutdown(graceCtx)
 	}()

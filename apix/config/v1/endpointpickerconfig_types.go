@@ -63,6 +63,12 @@ type EndpointPickerConfig struct {
 	// +optional
 	// RequestHandler specifies the handling logic used by the EPP to process incoming requests.
 	RequestHandler *RequestHandlerConfig `json:"requestHandler,omitempty"`
+
+	// +optional
+	// Metrics configures the EPP's own metric collectors. These are process-wide
+	// and are built once at startup, so they are configured here rather than on a
+	// plugin.
+	Metrics *MetricsConfig `json:"metrics,omitempty"`
 }
 
 func (cfg EndpointPickerConfig) String() string {
@@ -84,6 +90,9 @@ func (cfg EndpointPickerConfig) String() string {
 	}
 	if cfg.RequestHandler != nil {
 		parts = append(parts, fmt.Sprintf("RequestHandler: %v", cfg.RequestHandler))
+	}
+	if cfg.Metrics != nil {
+		parts = append(parts, fmt.Sprintf("Metrics: %v", cfg.Metrics))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
@@ -246,8 +255,9 @@ type CrossReplicaConfig struct {
 	// the datalayer polling interval. If omitted, a default is used.
 	SyncInterval *metav1.Duration `json:"syncInterval,omitempty"`
 	// +optional
-	// PublishTimeout bounds one endpoint publish, including all concurrent
-	// contributor writes. If omitted, a default is used.
+	// PublishTimeout bounds one endpoint publish (shared by its concurrent
+	// contributor writes), or one batch chunk per contributor when the syncer
+	// supports batching. If omitted, a default is used.
 	PublishTimeout *metav1.Duration `json:"publishTimeout,omitempty"`
 }
 
@@ -375,6 +385,35 @@ type RequestHandlerConfig struct {
 	// backend's native priority scheduler can consume it. It is off by default:
 	// when disabled the request body is forwarded unchanged.
 	PropagatePriority bool `json:"propagatePriority,omitempty"`
+
+	// +optional
+	// ComposeFairnessIDs, when true, lets the EPP combine a request's
+	// fairness-ID header (the tenant identity) with its agent-identity attribute
+	// (the session identity) into a single "<tenant>/<session>" flow key. It is
+	// off by default: the fairness-ID header wins and the session identity does
+	// not key the flow. When enabled, "%" and "/" in the header are
+	// percent-encoded so the tenant part stays unambiguous.
+	ComposeFairnessIDs bool `json:"composeFairnessIDs,omitempty"`
+
+	// +optional
+	// DataProducers lists DataProducer plugins that run during request
+	// handling, on the located endpoints before screeners. A DataProducer not
+	// listed runs on the screened endpoints before admission and scheduling,
+	// unless a screener or a listed producer consumes its data, directly or
+	// through other producers; such a producer runs before screeners too.
+	//
+	// Each producer instance runs once per request, in one of the two phases;
+	// producers do not run per scheduling profile. Data a producer writes
+	// during request handling stays on the request and its endpoints, so
+	// screeners, the remaining producers, admitters, and scheduling profile
+	// plugins such as filters and scorers all read it from that one run, on the
+	// endpoints the screeners keep. To also produce the data after screening,
+	// configure a second instance under another name. That instance stays in
+	// the later phase only if its data key differs from the listed instance's,
+	// for example a key scoped by producer name as approx-prefix-cache-producer
+	// uses, because every producer of a key that a screener or a listed
+	// producer consumes runs before screeners.
+	DataProducers []DataProducerConfig `json:"dataProducers,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -392,6 +431,16 @@ func (rhc *RequestHandlerConfig) String() string {
 	if rhc.PropagatePriority {
 		parts = append(parts, "PropagatePriority: true")
 	}
+	if rhc.ComposeFairnessIDs {
+		parts = append(parts, "ComposeFairnessIDs: true")
+	}
+	if len(rhc.DataProducers) > 0 {
+		producerStrs := make([]string, len(rhc.DataProducers))
+		for i := range rhc.DataProducers {
+			producerStrs[i] = rhc.DataProducers[i].String()
+		}
+		parts = append(parts, fmt.Sprintf("DataProducers: [%s]", strings.Join(producerStrs, ", ")))
+	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
@@ -400,6 +449,54 @@ func (pc *ParserConfig) String() string {
 		return nilString
 	}
 	return fmt.Sprintf("{PluginRef: %s}", pc.PluginRef)
+}
+
+// MetricsConfig configures the EPP's own metrics. The histograms it covers are
+// process-wide singletons created once during metric registration, so the
+// settings here are read before that registration and cannot be changed later.
+type MetricsConfig struct {
+	// +optional
+	// RequestTPOTBuckets overrides the bucket edges, in seconds, of the
+	// request_streaming_tpot_seconds histogram. Omitted or empty keeps the
+	// built-in edges. Edges must be finite, positive and strictly increasing;
+	// the +Inf bucket is implicit. Every added edge is one more time series per
+	// label combination.
+	RequestTPOTBuckets []float64 `json:"requestTPOTBuckets,omitempty"`
+
+	// +optional
+	// RequestITLBuckets overrides the bucket edges, in seconds, of the
+	// request_streaming_itl_seconds histogram, under the same rules and the same
+	// cardinality cost as RequestTPOTBuckets.
+	RequestITLBuckets []float64 `json:"requestITLBuckets,omitempty"`
+}
+
+func (mc *MetricsConfig) String() string {
+	var parts []string
+	if len(mc.RequestTPOTBuckets) > 0 {
+		parts = append(parts, fmt.Sprintf("RequestTPOTBuckets: %v", mc.RequestTPOTBuckets))
+	}
+	if len(mc.RequestITLBuckets) > 0 {
+		parts = append(parts, fmt.Sprintf("RequestITLBuckets: %v", mc.RequestITLBuckets))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// DataProducerConfig names a DataProducer plugin that runs during request
+// handling, before screeners.
+type DataProducerConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef specifies a particular Plugin instance, by the name of an entry
+	// of the Plugins defined in the configuration's Plugins section. The plugin
+	// must implement DataProducer.
+	PluginRef string `json:"pluginRef"`
+}
+
+func (dpc *DataProducerConfig) String() string {
+	if dpc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", dpc.PluginRef)
 }
 
 // ParserConfig contains the configuration for a parser.
@@ -492,6 +589,13 @@ type FlowControlConfig struct {
 	UsageLimitPolicyPluginRef string `json:"usageLimitPolicyPluginRef,omitempty"`
 
 	// +optional
+	// BandSelectionPolicyPluginRef specifies the BandSelectionPolicy plugin that orders priority bands
+	// within a dispatch cycle.
+	// Must reference a named plugin instance defined in the top-level Plugins section.
+	// If omitted, bands are offered a dispatch opportunity from highest to lowest priority.
+	BandSelectionPolicyPluginRef string `json:"bandSelectionPolicyPluginRef,omitempty"`
+
+	// +optional
 	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
 	// Flow Control. If omitted, "utilization-detector" is used by default.
 	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
@@ -547,6 +651,10 @@ func (fcc *FlowControlConfig) String() string {
 		parts = append(parts, "UsageLimitPolicyRef: "+fcc.UsageLimitPolicyPluginRef)
 	}
 
+	if fcc.BandSelectionPolicyPluginRef != "" {
+		parts = append(parts, "BandSelectionPolicyRef: "+fcc.BandSelectionPolicyPluginRef)
+	}
+
 	if fcc.SaturationDetector != nil {
 		parts = append(parts, fmt.Sprintf("SaturationDetector: %v", fcc.SaturationDetector))
 	}
@@ -579,6 +687,16 @@ type PriorityBandConfig struct {
 	MaxRequests *resource.Quantity `json:"maxRequests,omitempty"`
 
 	// +optional
+	// MaxBytesPerFlow bounds the total queued request bytes for each flow in this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "1Mi"). Omitted or "0" disables this limit.
+	MaxBytesPerFlow *resource.Quantity `json:"maxBytesPerFlow,omitempty"`
+
+	// +optional
+	// MaxRequestsPerFlow bounds the queued request count for each flow in this priority band.
+	// Accepts standard Kubernetes resource quantities (e.g., "100"). Omitted or "0" disables this limit.
+	MaxRequestsPerFlow *resource.Quantity `json:"maxRequestsPerFlow,omitempty"`
+
+	// +optional
 	// DefaultRequestTTL replaces the global DefaultRequestTTL for this priority band: the queue-wait bound
 	// while the candidate pool has endpoints. NoEndpointRequestTTL is not band-scoped and still governs
 	// queue wait while the pool is empty. If omitted, the global DefaultRequestTTL is used; "0s" disables
@@ -606,6 +724,14 @@ func (pbc PriorityBandConfig) String() string {
 
 	if pbc.MaxRequests != nil {
 		parts = append(parts, fmt.Sprintf("MaxRequests: %d", pbc.MaxRequests.Value()))
+	}
+
+	if pbc.MaxBytesPerFlow != nil {
+		parts = append(parts, fmt.Sprintf("MaxBytesPerFlow: %d", pbc.MaxBytesPerFlow.Value()))
+	}
+
+	if pbc.MaxRequestsPerFlow != nil {
+		parts = append(parts, fmt.Sprintf("MaxRequestsPerFlow: %d", pbc.MaxRequestsPerFlow.Value()))
 	}
 
 	if pbc.DefaultRequestTTL != nil {

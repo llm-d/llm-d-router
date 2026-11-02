@@ -62,7 +62,7 @@ const HTTPBodyKey = "http_body"
 // NewLogger returns a logger with OpenTelemetry field names and severity
 // fields. Additional options customize the logger for each service.
 func NewLogger(serviceName string, opts ...crzap.Opts) logr.Logger {
-	defaultOpts := []crzap.Opts{
+	defaultOpts := []crzap.Opts{ //nolint:prealloc
 		crzap.WriteTo(os.Stdout),
 		crzap.Encoder(zapcore.NewJSONEncoder(EncoderConfig())),
 		crzap.RawZapOpts(

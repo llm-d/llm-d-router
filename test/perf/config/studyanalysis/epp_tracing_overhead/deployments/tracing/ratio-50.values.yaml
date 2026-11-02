@@ -1,0 +1,4 @@
+router:
+  tracing:
+    sampling:
+      samplerArg: "0.5"

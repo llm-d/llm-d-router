@@ -19,15 +19,24 @@ package predictedlatency
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr/funcr"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 )
 
 func TestProducesConsumes(t *testing.T) {
@@ -161,4 +170,117 @@ func TestProduce_LiveContextPublishes(t *testing.T) {
 
 	_, getErr := pl.getPredictedLatencyContextForRequest(request)
 	assert.NoError(t, getErr, "SLO context should be stored on the happy path")
+}
+
+func TestProduce_PredictionFailureObservability(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+
+	tests := []struct {
+		name       string
+		predictor  latencypredictor.PredictorInterface
+		wantReason string
+	}{
+		{
+			name:       "predictor unavailable",
+			predictor:  nil,
+			wantReason: predictionFailureReasonPredictorUnavailable,
+		},
+		{
+			name:       "request error",
+			predictor:  &mockPredictor{err: errors.New("connection refused")},
+			wantReason: predictionFailureReasonRequestError,
+		},
+		{
+			name:       "nil response",
+			predictor:  &mockPredictor{nilBulkResponse: true},
+			wantReason: predictionFailureReasonNilResponse,
+		},
+		{
+			name: "length mismatch",
+			predictor: &mockPredictor{
+				bulkPredictionsOverride: []latencypredictor.PredictionResponse{},
+			},
+			wantReason: predictionFailureReasonLengthMismatch,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pluginName := "test-" + tc.wantReason
+			pl := NewPredictedLatency(pluginName, DefaultConfig, tc.predictor)
+
+			var errorLogs []string
+			logger := funcr.New(func(prefix, args string) {
+				errorLogs = append(errorLogs, prefix+args)
+			}, funcr.Options{Verbosity: 0})
+			ctx := log.IntoContext(context.Background(), logger)
+
+			before := promtestutil.ToFloat64(llmdRequestPredictionFailures.WithLabelValues(pluginName, LatencyDataProviderPluginType, tc.wantReason))
+
+			endpoint := createTestEndpoint("pod-a", 0.1, 0, 0)
+			req1 := createTestInferenceRequest("req-1", 0, 0)
+			req2 := createTestInferenceRequest("req-2", 0, 0)
+
+			require.NoError(t, pl.Produce(ctx, req1, []fwksched.Endpoint{endpoint}))
+			require.NoError(t, pl.Produce(ctx, req2, []fwksched.Endpoint{endpoint}))
+
+			after := promtestutil.ToFloat64(llmdRequestPredictionFailures.WithLabelValues(pluginName, LatencyDataProviderPluginType, tc.wantReason))
+			assert.InDelta(t, 2.0, after-before, 1e-9, "every failed prediction must increment request_prediction_failures_total")
+			assert.Len(t, errorLogs, 1, "error log must fire on first failure and rate-limit rapid follow-up failures")
+		})
+	}
+
+	t.Run("context canceled ignored", func(t *testing.T) {
+		resetMetrics()
+		pl := NewPredictedLatency("test-canceled", DefaultConfig, &mockPredictor{err: context.Canceled})
+
+		var errorLogs []string
+		logger := funcr.New(func(prefix, args string) {
+			errorLogs = append(errorLogs, prefix+args)
+		}, funcr.Options{Verbosity: 0})
+		ctx := log.IntoContext(context.Background(), logger)
+
+		endpoint := createTestEndpoint("pod-a", 0.1, 0, 0)
+		req := createTestInferenceRequest("req-canceled", 0, 0)
+
+		require.NoError(t, pl.Produce(ctx, req, []fwksched.Endpoint{endpoint}))
+		assert.Equal(t, 0, promtestutil.CollectAndCount(llmdRequestPredictionFailures), "context cancellation must not increment request_prediction_failures_total")
+		assert.Empty(t, errorLogs, "context cancellation must not emit error log")
+	})
+
+	t.Run("coalesced HTTP length mismatch", func(t *testing.T) {
+		resetMetrics()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(latencypredictor.BulkPredictionResponse{
+				Predictions: []latencypredictor.PredictionResponse{},
+			})
+		}))
+		t.Cleanup(server.Close)
+
+		cfg := latencypredictor.DefaultConfig()
+		cfg.PredictionURLs = []string{server.URL}
+		cfg.TrainingURL = server.URL
+		cfg.CoalesceWindow = time.Millisecond
+
+		var errorLogs []string
+		logger := funcr.New(func(prefix, args string) {
+			errorLogs = append(errorLogs, prefix+args)
+		}, funcr.Options{Verbosity: 0})
+		ctx := log.IntoContext(context.Background(), logger)
+
+		predictor := latencypredictor.New(cfg, logger)
+		t.Cleanup(func() { predictor.Stop(context.Background()) })
+
+		pluginName := "test-coalesced-length-mismatch"
+		pl := NewPredictedLatency(pluginName, DefaultConfig, predictor)
+		endpoint := createTestEndpoint("pod-a", 0.1, 0, 0)
+		req := createTestInferenceRequest("req-coalesced", 0, 0)
+
+		require.NoError(t, pl.Produce(ctx, req, []fwksched.Endpoint{endpoint}))
+		after := promtestutil.ToFloat64(llmdRequestPredictionFailures.WithLabelValues(pluginName, LatencyDataProviderPluginType, predictionFailureReasonLengthMismatch))
+		assert.InDelta(t, 1.0, after, 1e-9, "coalesced length mismatch must increment length_mismatch counter")
+		assert.Len(t, errorLogs, 1)
+	})
 }

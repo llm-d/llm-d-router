@@ -105,6 +105,27 @@ func TestBuildRegistry_DuplicateKeyDifferentTypeFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "type")
 }
 
+func TestBuildRegistry_DuplicateKeyDifferentAttributesFails(t *testing.T) {
+	dk := plugin.NewDataKey("alpha", "reg")
+	p1 := &regProducer{
+		name: "p1",
+		produces: map[plugin.DataKey]any{
+			dk: plugin.ProducedData{Type: regValueA{}, Attributes: map[string]string{"backend": "estimate"}},
+		},
+	}
+	p2 := &regProducer{
+		name: "p2",
+		produces: map[plugin.DataKey]any{
+			dk: plugin.ProducedData{Type: regValueA{}, Attributes: map[string]string{"backend": "vllm"}},
+		},
+	}
+
+	_, err := BuildRegistry([]plugin.Plugin{p1, p2})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "already registered by")
+	assert.Contains(t, err.Error(), "attributes")
+}
+
 func TestBuildRegistry_NilPlaceholderTreatedAsUntyped(t *testing.T) {
 	dk := plugin.NewDataKey("alpha", "reg")
 	p := &regProducer{name: "p", produces: map[plugin.DataKey]any{dk: nil}}
@@ -210,4 +231,149 @@ func TestRegistry_NilSafe(t *testing.T) {
 	assert.Nil(t, r.TypeOf(plugin.NewDataKey("x", "y")))
 	assert.Nil(t, r.Keys())
 	assert.NoError(t, r.ValidateConsumer(&regConsumer{name: "c"}))
+}
+
+func TestValidateConsumer_Level2AttributeMatrix(t *testing.T) {
+	dk := plugin.NewDataKey("alpha", "reg")
+
+	tests := []struct {
+		name        string
+		producedVal any
+		consumedVal any
+		wantErr     string
+	}{
+		{
+			name:        "raw producer + raw consumer passes",
+			producedVal: regValueA{},
+			consumedVal: regValueA{},
+		},
+		{
+			name: "producer with attributes + consumer with nil Matches passes",
+			producedVal: plugin.ProducedData{
+				Type:       regValueA{},
+				Attributes: map[string]string{"backend": "estimate"},
+			},
+			consumedVal: plugin.ConsumedData{
+				Type: regValueA{},
+			},
+		},
+		{
+			name:        "raw producer (no attributes) + consumer requiring attributes fails",
+			producedVal: regValueA{},
+			consumedVal: plugin.ConsumedData{
+				Type:    regValueA{},
+				Matches: plugin.MatchKeyValues(map[string]string{"backend": "vllm"}),
+			},
+			wantErr: "declared no attributes",
+		},
+		{
+			name: "producer with empty attributes and AllAttributes=false + consumer requiring attributes fails",
+			producedVal: plugin.ProducedData{
+				Type: regValueA{},
+			},
+			consumedVal: plugin.ConsumedData{
+				Type:    regValueA{},
+				Matches: plugin.MatchKeys("GPUUtilization"),
+			},
+			wantErr: "declared no attributes",
+		},
+		{
+			name: "producer with matching key-values + consumer with MatchKeyValues passes",
+			producedVal: plugin.ProducedData{
+				Type:       regValueA{},
+				Attributes: map[string]string{"backend": "vllm"},
+			},
+			consumedVal: plugin.ConsumedData{
+				Type:    regValueA{},
+				Matches: plugin.MatchKeyValues(map[string]string{"backend": "vllm"}),
+			},
+		},
+		{
+			name: "producer with mismatched key-value + consumer with MatchKeyValues fails",
+			producedVal: plugin.ProducedData{
+				Type:       regValueA{},
+				Attributes: map[string]string{"backend": "estimate"},
+			},
+			consumedVal: plugin.ConsumedData{
+				Type:    regValueA{},
+				Matches: plugin.MatchKeyValues(map[string]string{"backend": "vllm"}),
+			},
+			wantErr: `producer attribute "backend"="estimate" does not match required "vllm"`,
+		},
+		{
+			name: "producer with matching keys + consumer with MatchKeys passes",
+			producedVal: plugin.ProducedData{
+				Type:       regValueA{},
+				Attributes: map[string]string{"GPUUtilization": "true", "GPUMemoryUsed": "true"},
+			},
+			consumedVal: plugin.ConsumedData{
+				Type:    regValueA{},
+				Matches: plugin.MatchKeys("GPUUtilization"),
+			},
+		},
+		{
+			name: "producer missing required key + consumer with MatchKeys fails",
+			producedVal: plugin.ProducedData{
+				Type:       regValueA{},
+				Attributes: map[string]string{"GPUMemoryUsed": "true"},
+			},
+			consumedVal: plugin.ConsumedData{
+				Type:    regValueA{},
+				Matches: plugin.MatchKeys("GPUUtilization"),
+			},
+			wantErr: `producer does not declare required attribute key "GPUUtilization"`,
+		},
+		{
+			name: "producer with AllAttributes=true + consumer requiring attributes passes",
+			producedVal: plugin.ProducedData{
+				Type:          regValueA{},
+				AllAttributes: true,
+			},
+			consumedVal: plugin.ConsumedData{
+				Type:    regValueA{},
+				Matches: plugin.MatchKeys("GPUUtilization", "CustomMetric"),
+			},
+		},
+		{
+			name: "pointer ProducedData and pointer ConsumedData are unwrapped and validated",
+			producedVal: &plugin.ProducedData{
+				Type:       regValueA{},
+				Attributes: map[string]string{"backend": "vllm"},
+			},
+			consumedVal: &plugin.ConsumedData{
+				Type:    regValueA{},
+				Matches: plugin.MatchKeyValues(map[string]string{"backend": "vllm"}),
+			},
+		},
+		{
+			name: "Level-1 type mismatch still fails even when Level-2 attributes match",
+			producedVal: plugin.ProducedData{
+				Type:       regValueA{},
+				Attributes: map[string]string{"backend": "vllm"},
+			},
+			consumedVal: plugin.ConsumedData{
+				Type:    regValueB{},
+				Matches: plugin.MatchKeyValues(map[string]string{"backend": "vllm"}),
+			},
+			wantErr: "type",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &regProducer{name: "p", produces: map[plugin.DataKey]any{dk: tc.producedVal}}
+			c := &regConsumer{name: "c", consumes: map[plugin.DataKey]any{dk: tc.consumedVal}}
+
+			r, err := BuildRegistry([]plugin.Plugin{p})
+			assert.NoError(t, err)
+
+			err = r.ValidateConsumer(c)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+		})
+	}
 }

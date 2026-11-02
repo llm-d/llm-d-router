@@ -36,6 +36,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
@@ -150,7 +151,7 @@ type dispatchResult struct {
 // scheduling under CI load. The returned release func cancels the queued requests' context,
 // drains their results, and asserts none was rejected for capacity.
 func (h *integrationHarness) fillQueue(
-	t *testing.T, key flowcontrol.FlowKey, n int, byteSize uint64, settled func() bool,
+	t *testing.T, key flowcontrol.FlowKey, n int, byteSize uint64, settled func() bool, //nolint:unparam // n matches each test's band capacity
 ) (release func()) {
 	t.Helper()
 	queuedCtx, queuedCancel := context.WithCancel(h.ctx)
@@ -330,10 +331,11 @@ func newHarness(t *testing.T, opts harnessOpts) *integrationHarness {
 	}
 
 	fc := controller.NewFlowController(ctx, "integration-test", controllerCfg, controller.Deps{
-		Registry:           reg,
-		SaturationDetector: opts.detector,
-		EndpointCandidates: endpointCandidates,
-		UsageLimitPolicy:   usageLimitPolicy,
+		Registry:            reg,
+		SaturationDetector:  opts.detector,
+		EndpointCandidates:  endpointCandidates,
+		UsageLimitPolicy:    usageLimitPolicy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
 	})
 
 	t.Cleanup(func() {

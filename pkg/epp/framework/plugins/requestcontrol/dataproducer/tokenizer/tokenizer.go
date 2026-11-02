@@ -36,12 +36,13 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	rcplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -61,10 +62,10 @@ const (
 	tokenizedPromptKeyID = "TokenizedPrompt"
 )
 
-// Backend identifiers reported on the tokenize span.
+// Backend identifiers reported on the tokenize span and returned by Plugin.Backend.
 const (
-	backendVLLM     = "vllm"
-	backendEstimate = "estimate"
+	BackendVLLM     = "vllm"
+	BackendEstimate = "estimate"
 )
 
 // resultSkippedNoTokens marks a tokenize span whose backend returned no tokens,
@@ -100,29 +101,29 @@ type estimateConfig struct {
 	Audio *audioEstimateConfig `json:"audio,omitempty"`
 }
 
-// audioEstimateConfig tunes how an audio's placeholder-token count is estimated.
+// audioEstimateConfig tunes how an audio's placeholder-token count is estimated:
+// min(durationSeconds*tokensPerSecond, maxAudioTokens) + overheadTokens. Clip
+// duration is resolved per clip rather than configured: the
+// x-llm-d-audio-duration-seconds header wins, then the payload itself, then
+// defaultDuration.
 type audioEstimateConfig struct {
-	// Mode selects "dynamic" (tokens-per-second * duration) or "static" (a constant count).
-	Mode string `json:"mode,omitempty"`
-	// Static configures the static (constant per-audio) mode.
-	Static *staticAudioConfig `json:"static,omitempty"`
-	// Dynamic configures the dynamic (tokens-per-second) mode.
-	Dynamic *dynamicAudioConfig `json:"dynamic,omitempty"`
-}
-
-// staticAudioConfig is the static-mode parameter.
-type staticAudioConfig struct {
-	// NumTokens is the per-audio placeholder count.
-	NumTokens int `json:"numTokens,omitempty"`
-}
-
-// dynamicAudioConfig is the dynamic-mode parameter.
-type dynamicAudioConfig struct {
-	// TokensPerSecond is the placeholder tokens per second of audio.
-	TokensPerSecond int `json:"tokensPerSecond,omitempty"`
+	// TokensPerSecond is the placeholder tokens per second of audio, 25 for
+	// gemma4 and 13 for Qwen3-Omni.
+	TokensPerSecond float64 `json:"tokensPerSecond,omitempty"`
 	// OverheadTokens is the fixed prompt template + text token overhead added
 	// to every audio estimate.
 	OverheadTokens int `json:"overheadTokens,omitempty"`
+	// DefaultBytesPerSecond converts a payload length to seconds when the clip is
+	// not PCM WAV, whose own header carries an exact byte rate, and the request
+	// does not carry an x-llm-d-audio-bytes-per-second header either.
+	DefaultBytesPerSecond int `json:"defaultBytesPerSecond,omitempty"`
+	// DefaultDuration is the clip length in seconds used when neither the header
+	// nor the payload provides one, as for a clip referenced by URL.
+	DefaultDuration float64 `json:"defaultDuration,omitempty"`
+	// MaxAudioTokens caps the audio tower's tokens for a clip, before the
+	// overhead is added, so it matches the model's own limit (750 for gemma4).
+	// Zero means uncapped.
+	MaxAudioTokens int `json:"maxAudioTokens,omitempty"`
 }
 
 // imageEstimateConfig tunes how an image's placeholder-token count is estimated.
@@ -298,6 +299,8 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize vLLM HTTP renderer for '%s' plugin - %w", PluginType, err)
 		}
+		renderer.pluginName = name
+		registerRenderMetrics()
 		legacyMessages, err := configureLegacyMessages(ctx, name, cfg.MessagesRenderMode)
 		if err != nil {
 			return nil, err
@@ -311,14 +314,14 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 			legacyMessages: legacyMessages, legacyResponses: legacyResponses,
 			warmupAuth: vllmWarmupAuthHeader(),
 		}
-		backendName = backendVLLM
+		backendName = BackendVLLM
 		endpointPicker, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
 		if endpointPicker != nil && endpointPicker.config.DiscoverModelLimits {
 			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
 		}
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate), aud: newAudioEstimator(config.Estimate)}
-		backendName = backendEstimate
+		backendName = BackendEstimate
 	}
 
 	typedName := plugin.TypedName{Type: PluginType, Name: name}
@@ -360,9 +363,21 @@ func (p *Plugin) TypedName() plugin.TypedName {
 	return p.typedName
 }
 
-// Produces returns the data keys this plugin produces.
+// Backend returns the configured backend identifier (BackendVLLM or BackendEstimate).
+func (p *Plugin) Backend() string {
+	return p.backendName
+}
+
+// Produces returns the data keys this plugin produces, along with the
+// configured tokenization backend attribute ("backend": BackendVLLM or BackendEstimate)
+// for Level-2 consumer dependency validation.
 func (p *Plugin) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: fwkrh.TokenizedRequest{}}
+	return map[plugin.DataKey]any{
+		p.dk: plugin.ProducedData{
+			Type:       fwkrh.TokenizedRequest{},
+			Attributes: map[string]string{"backend": p.backendName},
+		},
+	}
 }
 
 // RegisterDependencies wires discovery-backed renderers to endpoint lifecycle events.
@@ -429,8 +444,8 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		if request.TargetModel != "" {
 			attrs = append(attrs, semconv.GenAIRequestModel(request.TargetModel))
 		}
-		if request.RequestID != "" {
-			attrs = append(attrs, semconv.GenAIRequestID(request.RequestID))
+		if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+			attrs = append(attrs, semconv.GenAIRequestID(clientRequestID))
 		}
 		span.SetAttributes(attrs...)
 	}
@@ -477,7 +492,7 @@ func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) []fwkrh.M
 		}
 		for i := 0; i < n; i++ {
 			items = append(items, fwkrh.MultiModalFeature{
-				Modality: fwkrh.Modality(modality),
+				Modality: reqcommon.Modality(modality),
 				Hash:     hashes[i],
 				Offset:   ranges[i].Offset,
 				Length:   ranges[i].Length,

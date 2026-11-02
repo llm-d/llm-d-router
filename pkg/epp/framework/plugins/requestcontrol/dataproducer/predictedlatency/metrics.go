@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
@@ -27,6 +28,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/latencypredictorclient"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -40,6 +42,18 @@ const (
 	typePredictedTTFT          = "predicted_ttft"
 	typeTTFTPredictionDuration = "ttft_prediction_duration"
 	typeTTFTSLOViolation       = "ttft_slo_violation"
+
+	predictionFailureReasonRequestError         = "request_error"
+	predictionFailureReasonNilResponse          = "nil_response"
+	predictionFailureReasonLengthMismatch       = "length_mismatch"
+	predictionFailureReasonPredictorUnavailable = "predictor_unavailable"
+
+	predictionFailureLogInterval = 10 * time.Second
+)
+
+var (
+	errPredictorUnavailable  = errors.New("latency predictor unavailable")
+	errNilPredictionResponse = errors.New("bulk prediction returned nil result")
 )
 
 var (
@@ -50,9 +64,9 @@ var (
 	}
 
 	tpotBuckets = []float64{
-		0.0005, 0.00205, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.125, 0.15, 0.2,
-		0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.5, 2, 3, 4.5, 6, 12, 18, 24, 30, 36, 48, 60,
-		90, 120, 180, 270, 360,
+		0.0005, 0.00205, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05,
+		0.06, 0.08, 0.1, 0.125, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1, 1.5, 2, 3, 4.5, 6,
+		12, 18, 24, 30, 36, 48, 60, 90, 120, 180, 270, 360,
 	}
 
 	predictionLatencyBuckets = []float64{
@@ -118,6 +132,15 @@ var (
 		},
 		[]string{"plugin_name", "plugin_type", "model_name", "target_model_name", "type"},
 	)
+
+	llmdRequestPredictionFailures = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "request_prediction_failures_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of failed latency prediction attempts by reason.", compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_name", "plugin_type", "reason"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
@@ -131,6 +154,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		llmdRequestPredictedTPOT,
 		llmdRequestTPOTPredictionDuration,
 		llmdSloViolationCounter,
+		llmdRequestPredictionFailures,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -141,6 +165,21 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		}
 	}
 	return nil
+}
+
+func classifyPredictionError(err error) string {
+	switch {
+	case err == nil || errors.Is(err, context.Canceled):
+		return ""
+	case errors.Is(err, errPredictorUnavailable):
+		return predictionFailureReasonPredictorUnavailable
+	case errors.Is(err, errNilPredictionResponse):
+		return predictionFailureReasonNilResponse
+	case errors.Is(err, latencypredictor.ErrResponseLengthMismatch):
+		return predictionFailureReasonLengthMismatch
+	default:
+		return predictionFailureReasonRequestError
+	}
 }
 
 func recordRequestTPOT(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, tpot float64) bool {

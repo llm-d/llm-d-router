@@ -219,3 +219,37 @@ metadata:
   labels:
     llm-d.ai/context-length-range: "2048-8192"
 ```
+
+#### Static GPU and MIG capability ranges
+
+Use this plugin's configurable `label` to route by static accelerator profiles.
+A separate accelerator scorer would apply the same token-count signal twice.
+Configure one instance in a scheduling profile, using ranges measured for the
+model and accelerator configuration deployed on each endpoint.
+
+```yaml
+plugins:
+  - type: context-length-aware
+    name: accelerator-router
+    parameters:
+      label: llm-d.ai/accelerator-capability-range
+      enableFiltering: true
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: accelerator-router
+        weight: 3
+```
+
+For example, label a smaller MIG profile with
+`llm-d.ai/accelerator-capability-range: "0-2048"` and a larger profile with
+`llm-d.ai/accelerator-capability-range: "2049-8192"`. These ranges are inclusive
+and illustrative, not hardware memory limits. Unlabeled endpoints still pass
+filtering and receive a neutral score, so label every endpoint when the range
+must be enforced.
+
+This uses the token producer's prompt length, including any image-token
+estimates supplied by its backend. It does not inspect GPU model, MIG layout,
+free memory, or DCGM metrics, and a token estimate alone does not guarantee a
+request fits in accelerator memory. Use `enableFiltering: false` when the ranges
+express a preference instead of a strict eligibility rule.

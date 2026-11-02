@@ -68,6 +68,7 @@ type contextRange struct {
 
 var _ scheduling.Filter = &ContextLengthAware{} // validate interface conformance
 var _ scheduling.Scorer = &ContextLengthAware{} // validate interface conformance
+var _ plugin.ProducerPlugin = &ContextLengthAware{}
 
 // Factory defines the factory function for the ContextLengthAware plugin.
 func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
@@ -140,6 +141,12 @@ func (p *ContextLengthAware) WithName(name string) *ContextLengthAware {
 	p.typedName.Name = name
 	p.routingLengthDataKey = routingLengthDataKey.WithNonEmptyProducerName(name)
 	return p
+}
+
+// Produces declares the per-instance routing-length snapshot that Filter and
+// Score share on the request.
+func (p *ContextLengthAware) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{p.routingLengthDataKey: int(0)}
 }
 
 // Consumes declares the TokenizedRequest dependency and, when configured, the

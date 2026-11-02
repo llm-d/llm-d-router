@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
 
@@ -122,6 +124,14 @@ type Config struct {
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
 	MooncakeBootstrapPort int
 
+	// ECMooncakePort is the ec_port the Mooncake EC consumer listens on for
+	// control messages. Used with --ec-connector=ec-mooncake.
+	ECMooncakePort int
+
+	// ECMooncakePodIP is the local decoder's address as encoder pods reach
+	// it, named as the Mooncake EC consumer when a request has no prefiller.
+	ECMooncakePodIP string
+
 	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
 	// injected as remote_port on the decode request so the decoder can pull KV from it.
 	// With data parallelism it is the rank-0 port: rank r's tier listens on
@@ -150,6 +160,8 @@ type Config struct {
 
 	// Tracing enables OpenTelemetry tracing.
 	Tracing bool
+	// EnableToolCallingTelemetry enables tool-specific request observations.
+	EnableToolCallingTelemetry bool
 	// MoRIIOWriteMode enables MoRI-IO WRITE-mode: the sidecar populates the
 	// prefill request's kv_transfer_params so the prefill engine pushes KV to decode
 	// via RDMA Write. Only meaningful with --kv-connector=nixlv2.
@@ -238,18 +250,18 @@ func (c Config) String() string {
 }
 
 // pdConnectorHandler handles a P/D KV connector request. kvCacheSource is the
-// validated x-kv-cache-source-host-port peer to pull cached prefix from ("" when
+// validated x-llm-d-kv-cache-source-host-port peer to pull cached prefix from ("" when
 // absent); the APIType selects the fields that cap the prefill request.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
 
-type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType)
 
 // Server is the reverse proxy server
 type Server struct {
 	logger             logr.Logger
 	addr               net.Addr      // the proxy TCP address
 	readyCh            chan struct{} // closed once addr is set and server is listening
-	handler            http.Handler  // the handler function. either a Mux or a proxy
+	handler            http.Handler  // the routes built by createRoutes
 	allowlistValidator *AllowlistValidator
 	handlePDConnector  pdConnectorHandler // handles the Prefiller-Decoder connector request
 	handleECConnector  ecConnectorHandler // handles the Encoder disaggregation connector request.
@@ -263,7 +275,8 @@ type Server struct {
 	dataParallelProxies map[string]http.Handler               // Proxies to other vLLM servers
 	forwardDataParallel bool                                  // Use special Data Parallel work around
 
-	prefillSamplerFn func(n int) int // allow test override
+	prefillSamplerFn func(n int) int        // allow test override
+	nixlRequestIDFn  func() (string, error) // allow test override
 
 	// dpBasePort is the rank-0 proxy port. Rank clones override config.Port
 	// (data_parallel.go), so rank derivation from a routed endpoint's port
@@ -360,9 +373,9 @@ func (s *Server) currentDecodePodIP(ctx context.Context) string {
 
 // NewProxy creates a new routing reverse proxy from the given Config.
 func NewProxy(config Config) *Server {
-	prefillerCache, _ := lru.New[string, http.Handler](1024)         // nolint:errcheck
-	encoderCache, _ := lru.New[string, http.Handler](1024)           // nolint:errcheck
-	mooncakeEngineIDs, _ := lru.New[string, map[string]string](1024) // nolint:errcheck
+	prefillerCache, _ := lru.New[string, http.Handler](1024)
+	encoderCache, _ := lru.New[string, http.Handler](1024)
+	mooncakeEngineIDs, _ := lru.New[string, map[string]string](1024)
 
 	server := &Server{
 		readyCh:             make(chan struct{}),
@@ -375,6 +388,7 @@ func NewProxy(config Config) *Server {
 		dataParallelProxies: map[string]http.Handler{},
 		forwardDataParallel: true,
 		prefillSamplerFn:    rand.IntN,
+		nixlRequestIDFn:     newNIXLV2RequestID,
 	}
 	if basePort, err := strconv.Atoi(config.Port); err == nil {
 		server.dpBasePort = basePort
@@ -413,6 +427,20 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
+	if s.allowlistValidator.enabled {
+		defer s.allowlistValidator.Stop()
+		if err := s.allowlistValidator.Start(ctx); err != nil {
+			return err
+		}
+	} else {
+		s.logger.Info("warning: SSRF protection is disabled; targets taken from request headers are not checked against the InferencePool",
+			"flag", "--"+enableSSRFProtection,
+			"headers", slices.Concat(
+				routing.HeaderNames(routing.PrefillEndpointHeader),
+				routing.HeaderNames(routing.EncoderEndpointsHeader),
+				routing.HeaderNames(routing.KVCacheSourceHeader)))
+	}
+
 	// Configure handlers
 	s.handler = s.createRoutes()
 
@@ -431,18 +459,14 @@ func (s *Server) Start(ctx context.Context) error {
 	return grp.Wait()
 }
 
-// Clone returns a clone of the current Server struct.
-// Note: decoderURL and decoderProxy are intentionally not copied — callers (e.g. startDataParallel)
-// always set them explicitly after cloning.
-// HTTPListener is not copied; each instance owns its listener.
+// Clone returns a partially initialized Server that is not ready to serve requests.
+// Routes, connector handlers, decoderProxy, and listeners are not copied;
+// callers initialize them after setting the clone's serving and decoder addresses.
 func (s *Server) Clone() *Server {
 	return &Server{
 		addr:                s.addr,
 		readyCh:             make(chan struct{}),
-		handler:             s.handler,
 		allowlistValidator:  s.allowlistValidator,
-		handlePDConnector:   s.handlePDConnector,
-		handleECConnector:   s.handleECConnector,
 		prefillerURLPrefix:  s.prefillerURLPrefix,
 		encoderURLPrefix:    s.encoderURLPrefix,
 		prefillerProxies:    s.prefillerProxies,
@@ -451,6 +475,7 @@ func (s *Server) Clone() *Server {
 		dataParallelProxies: s.dataParallelProxies,
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
+		nixlRequestIDFn:     s.nixlRequestIDFn,
 		dpBasePort:          s.dpBasePort,
 		config:              s.config,
 	}
@@ -531,6 +556,8 @@ func (s *Server) setECConnector() {
 		s.handleECConnector = s.handleECSharedStorage
 	case constants.ECConnectorNIXL:
 		s.handleECConnector = s.handleECNIXL
+	case constants.ECConnectorMooncake:
+		s.handleECConnector = s.handleECMooncake
 	default:
 		// Unknown EC connector value, skip encoder stage. Validate() should
 		// have rejected this earlier; reaching here means the validation was
@@ -541,7 +568,7 @@ func (s *Server) setECConnector() {
 	}
 }
 
-func (s *Server) createRoutes() *http.ServeMux {
+func (s *Server) createRoutes() http.Handler {
 	// Configure handlers
 	mux := http.NewServeMux()
 
@@ -552,14 +579,21 @@ func (s *Server) createRoutes() *http.ServeMux {
 	// DetectAPIType owns the path-to-API mapping; deriving it here keeps the
 	// served routes from drifting away from it.
 	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
-		mux.HandleFunc("POST "+path, s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path)))
+		handler := s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path))
+		mux.HandleFunc("POST "+path, handler)
+		mux.HandleFunc("POST "+path+"/{$}", func(w http.ResponseWriter, r *http.Request) {
+			r = r.Clone(r.Context())
+			r.URL.Path = path
+			r.URL.RawPath = ""
+			handler(w, r)
+		})
 	}
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 
 	mux.Handle("/", s.decoderProxy)
 
-	return mux
+	return redirectEncodedInferencePath(mux)
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.
@@ -570,14 +604,17 @@ func (s *Server) createProxyHandler(
 	urlPrefix string,
 	insecureSkipVerify bool,
 ) (http.Handler, error) {
+	// Backward compatible behavior: trim `http:` prefix. Trim before the cache
+	// lookup so a scheme-prefixed value and its bare form share one cache entry;
+	// looking up the untrimmed value would miss every time and build a new
+	// handler and connection per request.
+	hostPort, _ = strings.CutPrefix(hostPort, "http://")
+
 	// Check cache first
 	proxy, exists := cache.Get(hostPort)
 	if exists {
 		return proxy, nil
 	}
-
-	// Backward compatible behavior: trim `http:` prefix
-	hostPort, _ = strings.CutPrefix(hostPort, "http://")
 
 	u, err := url.Parse(urlPrefix + hostPort)
 	if err != nil {

@@ -2,7 +2,7 @@
 # The handler takes no parameters; the picker is present only because a
 # scheduling profile needs one.
 # See ../README.md: this file must not be edited to fix a failing test.
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: single-profile-handler

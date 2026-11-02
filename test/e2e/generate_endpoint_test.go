@@ -28,7 +28,8 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
-	"github.com/llm-d/llm-d-router/test/e2e/utils"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/k8s"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/metrics"
 	"github.com/llm-d/llm-d-router/test/e2e/utils/standalone"
 )
 
@@ -79,7 +80,7 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate encode against en
 		createModelServersEncodeOnly(encodeReplicas)
 		standalone.Create(standaloneConfig(), generateEncodeConfig, 1, 8000)
 
-		encodePods := utils.GetPodNames(testConfig, encodeSelector, nsName)
+		encodePods := k8s.GetPodNames(testConfig, encodeSelector, nsName)
 		gomega.Expect(encodePods).Should(gomega.HaveLen(encodeReplicas))
 
 		for _, modality := range mmModalities {
@@ -110,7 +111,7 @@ var _ = ginkgo.Describe("Direct gateway /inference/v1/generate prefill against p
 		createModelServersPrefillOnly(prefillReplicas)
 		standalone.Create(standaloneConfig(), generatePrefillConfig, 1, 8000)
 
-		prefillPods := utils.GetPodNames(testConfig, prefillSelector, nsName)
+		prefillPods := k8s.GetPodNames(testConfig, prefillSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 
 		tokenIDs := []int{1, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 32000, 2345, 6789}
@@ -198,11 +199,16 @@ func prefillBody(modality string, tokenIDs []int, items []mmSpec) []byte {
 // doRequest POSTs body to <gateway><path>. Always sets Content-Type and a
 // fresh X-Request-ID. Returns the live *http.Response (its body is already
 // drained) and the raw response body.
-func doRequest(path string, body []byte) (*http.Response, []byte) {
+func doRequest(path string, body []byte, extraHeaders ...map[string]string) (*http.Response, []byte) {
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d%s", getPort(), path), bytes.NewReader(body))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "build POST request")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Request-ID", uuid.NewString())
+	for _, headers := range extraHeaders {
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+	}
 
 	client := &http.Client{Timeout: requestTimeout}
 	resp, err := client.Do(req)
@@ -267,11 +273,11 @@ var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via si
 		createModelServersPDSharedStorage(decodeReplicas)
 		standalone.Create(standaloneConfig(), pdConfig, 1, 8000)
 
-		prefillPods, decodePods := utils.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
+		prefillPods, decodePods := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, nsName)
 		gomega.Expect(prefillPods).Should(gomega.HaveLen(prefillReplicas))
 		gomega.Expect(decodePods).Should(gomega.HaveLen(decodeReplicas))
 
-		prefillCountBefore := utils.GetPodRequestCount(testConfig, nsName, prefillPods[0])
+		prefillCountBefore := metrics.GetPodRequestCount(testConfig, nsName, prefillPods[0])
 		ginkgo.By(fmt.Sprintf("prefill request count before test: %d", prefillCountBefore))
 
 		ginkgo.By("sending /inference/v1/generate through P/D EPP")
@@ -279,7 +285,7 @@ var _ = ginkgo.Describe("P/D gateway /inference/v1/generate disaggregates via si
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
 			"non-200 from gateway: status=%d body=%s", resp.StatusCode, string(raw))
 
-		prefillCountAfter := utils.GetPodRequestCount(testConfig, nsName, prefillPods[0])
+		prefillCountAfter := metrics.GetPodRequestCount(testConfig, nsName, prefillPods[0])
 		ginkgo.By(fmt.Sprintf("prefill request count after test: %d", prefillCountAfter))
 
 		gomega.Expect(prefillCountAfter).To(gomega.BeNumerically(">", prefillCountBefore),
@@ -300,7 +306,7 @@ func simpleTokenGenerateBody() []byte {
 		"model":     simModelName,
 		"token_ids": tokenIDs,
 		"sampling_params": map[string]any{
-			"max_tokens": 1,
+			"max_tokens": echoOutputTokens,
 		},
 	})
 }

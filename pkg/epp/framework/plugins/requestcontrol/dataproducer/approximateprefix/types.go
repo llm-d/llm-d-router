@@ -30,15 +30,16 @@ import (
 // indexerInterface maintains an LRU cache of prompt prefix hashes and the server(s) that might have that
 // prefix cached.
 type indexerInterface interface {
-	Get(hash blockHash) podSet
+	// MatchLongestPrefix returns, for each candidate, the number of leading
+	// blocks of hashes the candidate holds.
+	MatchLongestPrefix(hashes []blockHash, candidates []ServerID) []int
+	// Add records that server holds hashes. hashes must be a prompt's block
+	// hashes starting at block 0; MatchLongestPrefix relies on this.
 	Add(hashes []blockHash, server server)
 	RemovePod(server ServerID)
 	Pods() []ServerID
 	PodBlockCounts() map[ServerID]int
 }
-
-// podSet holds a set of pods that may have a specific prefix hash.
-type podSet map[ServerID]struct{}
 
 // blockHash is a hash of a block of request data. It aliases prefixhash.BlockHash
 // so this package and other prefix-aware producers share one block-hash type.
@@ -62,13 +63,18 @@ type SchedulingContextState struct {
 	// PerPromptHashes holds the prefix hashes for each prompt in the request,
 	// one inner slice per prompt. Single-prompt requests use a length-1 outer slice.
 	PerPromptHashes [][]blockHash
-	// A map of server to its longest prefix cache match length in blocks.
+	// A map of candidate server to its longest prefix cache match length in
+	// blocks, summed across prompts. Candidates without a match are absent.
 	PrefixCacheServers map[ServerID]int
 	// A map of server to the prompt tokens it is expected to serve from cache.
 	// Blocks are converted to tokens during Produce, which holds both the block
 	// size the hashes were derived at and each prompt's length; the conversion
 	// is bounded per prompt because a prompt's final block may be partial.
 	PredictedCachedTokens map[ServerID]int
+	// The highest PredictedCachedTokens across the request's candidate
+	// endpoints. Taken during Produce, the only stage that sees the candidates
+	// as they were before the scheduler's filters narrowed them.
+	BestAvailableCachedTokens int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
@@ -88,9 +94,10 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 	}
 
 	return &SchedulingContextState{
-		PerPromptHashes:       perPromptHashes,
-		PrefixCacheServers:    prefixCacheServers,
-		PredictedCachedTokens: predictedCachedTokens,
+		PerPromptHashes:           perPromptHashes,
+		PrefixCacheServers:        prefixCacheServers,
+		PredictedCachedTokens:     predictedCachedTokens,
+		BestAvailableCachedTokens: s.BestAvailableCachedTokens,
 	}
 }
 
@@ -107,8 +114,10 @@ const (
 	// podActiveCheckInterval is the interval at which we check if pods are still active.
 	podActiveCheckInterval = 2 * time.Minute
 
-	// defaultBlockSizeTokens is the default token block size (vLLM default is 16).
-	defaultBlockSizeTokens = 16
+	// defaultBlockSizeTokens is the default token block size. It equals
+	// minBlockSizeTokens so an unset value does not trigger the below-minimum
+	// override and its startup warning.
+	defaultBlockSizeTokens = 64
 
 	// defaultMaxPrefixBlocks is the fallback block cap, consulted only when
 	// MaxPrefixTokensToMatch is 0 and MaxPrefixBlocksToMatch is non-zero; the
@@ -135,12 +144,15 @@ const (
 	// The indexer is an approximation to the actual prefix LRU cache state on the model servers per server (pod).
 	// A small capacity ensures a high accuracy of cache hit on the model server, but it will
 	// increase the chance of false negatives. A high capacity does the opposite.
-	// To properly size this, consider the sum of the total number of cache entries on all model
-	// servers. Consider the llama3 8B model on a H100 80GB GPUs. The size of the model weight is
-	// about 16GB. The remaining HBM used for caching prefixes is 64GB. Each
-	// token is about 128KB in size, so we can cache 500K tokens. Using the default block size of 16
-	// in vLLM, we will have 500K / 16 = 31.25K blocks.
+	// Each entry is one router block, so at defaultBlockSizeTokens the default covers
+	// 31250 * 64 = 2,000,000 tokens per server.
 	defaultLRUCapacityPerServer = 31250
+
+	// defaultMaxSyncedTokens caps the recent-window published per endpoint when
+	// cross-replica sync is enabled. Sized to the default per-pod index
+	// (defaultLRUCapacityPerServer blocks × defaultBlockSizeTokens) so one
+	// replica can publish a full index's worth of recent hashes for an endpoint.
+	defaultMaxSyncedTokens = defaultLRUCapacityPerServer * defaultBlockSizeTokens
 )
 
 // config defines the configuration for the prefix cache plugins.
@@ -163,6 +175,14 @@ type config struct {
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
 	// Max capacity size of the LRU indexer in number of entries per server (pod).
 	LRUCapacityPerServer int `json:"lruCapacityPerServer"`
+	// SyncCrossReplicaState controls whether recent per-prompt prefix hashes are
+	// published through a configured CrossReplicaSyncer. Unset defaults to true.
+	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
+	// MaxSyncedTokens caps total tokens across prompts in each replica's
+	// per-endpoint recent window (converted to hashes via blockSizeTokens).
+	// Aggregate does not re-apply this cap to the union of replicas. Unset or
+	// <= 0 defaults to defaultMaxSyncedTokens.
+	MaxSyncedTokens int `json:"maxSyncedTokens,omitempty"`
 }
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.
@@ -173,4 +193,5 @@ var defaultConfig = config{
 	MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 	MaxPrefixTokensToMatch: defaultMaxPrefixTokens,
 	LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	MaxSyncedTokens:        defaultMaxSyncedTokens,
 }

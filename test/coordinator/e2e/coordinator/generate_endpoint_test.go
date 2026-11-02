@@ -54,19 +54,23 @@ const (
 var generateSteps = []string{"render", "prefill", "decode"}
 
 var _ = ginkgo.Describe("Coordinator pipeline - generate endpoint", func() {
-	ginkgo.It("routes a text-only generate end-to-end", func() {
-		runCoordinatorPipeline(reqcommon.PathVLLMGenerate,
-			generateBody(modelName, nil), generateSteps, 0, tokenLimits{min: generateMinTokens, max: generateMaxTokens})
-	})
+	ginkgo.When("the generate request is text-only", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("routes a text-only generate end-to-end", func() {
+			runCoordinatorPipeline(reqcommon.PathVLLMGenerate,
+				generateBody(modelName, nil), generateSteps, 0, tokenLimits{min: generateMinTokens, max: generateMaxTokens})
+		})
+	}))
 
-	ginkgo.It("routes a single-image generate end-to-end", func() {
-		images := []genImage{
-			{Hash: "e2e-gen-hash-0", Offset: 1, Length: 3},
-		}
-		runCoordinatorPipeline(reqcommon.PathVLLMGenerate,
-			generateBody(modelName, images), generateSteps, 0, tokenLimits{min: generateMinTokens, max: generateMaxTokens})
-		verifyEncodeSkipped(getNamespace())
-	})
+	ginkgo.When("the generate request carries one image", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("routes a single-image generate end-to-end", func() {
+			images := []genImage{
+				{Hash: "e2e-gen-hash-0", Offset: 1, Length: 3},
+			}
+			logs := runCoordinatorPipeline(reqcommon.PathVLLMGenerate,
+				generateBody(modelName, images), generateSteps, 0, tokenLimits{min: generateMinTokens, max: generateMaxTokens})
+			verifyEncodeSkipped(logs)
+		})
+	}))
 })
 
 // generateBody builds a native /inference/v1/generate request body. With no
@@ -119,8 +123,8 @@ func generateTokenIDs(images []genImage) []int {
 	// placeholderTokenID fills each image's placeholder span in the prompt. The
 	// real value is model-dependent (each multimodal model reserves its own
 	// image placeholder/pad token ID); this stand-in is arbitrary because the
-	// sim backend echoes and only the placeholder positions, not their token
-	// value, drive the coordinator's parse and encode fan-out.
+	// sim backend does not interpret token values, and only the placeholder
+	// positions drive the coordinator's parse and encode fan-out.
 	const placeholderTokenID = 32000
 	maxEnd := 1
 	for _, img := range images {

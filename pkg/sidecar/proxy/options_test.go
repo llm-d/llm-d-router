@@ -290,7 +290,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				ecConnector: constants.ECConnectorNIXL,
 			},
 			expected: func(o *Options) {
-				o.modelServerPort = defaultVLLMPort
+				o.modelServerPort = defaultModelServerPort
 				o.KVConnector = constants.KVConnectorNIXLV2
 				o.ECConnector = constants.ECConnectorNIXL
 			},
@@ -643,6 +643,27 @@ func TestNewOptionsWithEnvVars(t *testing.T) {
 	}
 }
 
+func TestToolCallingTelemetryOption(t *testing.T) {
+	opts := NewOptions()
+	require.False(t, opts.EnableToolCallingTelemetry)
+	enabled := true
+	opts.mergeYAMLConfiguration(yamlConfiguration{EnableToolCallingTelemetry: &enabled})
+	require.True(t, opts.EnableToolCallingTelemetry)
+
+	opts = NewOptions()
+	fs := pflag.NewFlagSet(t.Name(), pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--enable-tool-calling-telemetry=false"}))
+	opts.mergeYAMLConfiguration(yamlConfiguration{EnableToolCallingTelemetry: &enabled})
+	require.False(t, opts.EnableToolCallingTelemetry)
+
+	opts = NewOptions()
+	fs = pflag.NewFlagSet(t.Name()+"-enabled", pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--enable-tool-calling-telemetry"}))
+	require.True(t, opts.EnableToolCallingTelemetry)
+}
+
 func TestP2PConnectorPort(t *testing.T) {
 	t.Run("defaults to 7777", func(t *testing.T) {
 		opts := NewOptions()
@@ -664,6 +685,47 @@ func TestP2PConnectorPort(t *testing.T) {
 		opts.P2PConnectorPort = 70000
 		require.NoError(t, opts.Complete())
 		require.ErrorContains(t, opts.Validate(), "--p2p-connector-port must be between 1 and 65535")
+	})
+}
+
+func TestECMooncakeOptions(t *testing.T) {
+	t.Run("defaults to vLLM's ec_port and POD_IP", func(t *testing.T) {
+		t.Setenv("POD_IP", "10.0.0.9")
+		opts := NewOptions()
+		opts.ECConnector = constants.ECConnectorMooncake
+		require.NoError(t, opts.Complete())
+		require.NoError(t, opts.Validate())
+		require.Equal(t, defaultECMooncakePort, opts.ECMooncakePort)
+		require.Equal(t, "10.0.0.9", opts.ECMooncakePodIP)
+	})
+
+	t.Run("env var overrides default port", func(t *testing.T) {
+		t.Setenv(envECMooncakePort, "19019")
+		opts := NewOptions()
+		require.Equal(t, 19019, opts.ECMooncakePort)
+	})
+
+	t.Run("rejects out-of-range port", func(t *testing.T) {
+		opts := NewOptions()
+		opts.ECConnector = constants.ECConnectorMooncake
+		opts.ECMooncakePort = 70000
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "--ec-mooncake-port must be between 1 and 65535")
+	})
+
+	t.Run("rejects data-parallel-size > 1", func(t *testing.T) {
+		opts := NewOptions()
+		opts.ECConnector = constants.ECConnectorMooncake
+		opts.DataParallelSize = 2
+		require.NoError(t, opts.Complete())
+		require.ErrorContains(t, opts.Validate(), "does not support --data-parallel-size > 1")
+	})
+
+	t.Run("YAML sets port and local host", func(t *testing.T) {
+		opts := NewOptions()
+		opts.mergeYAMLConfiguration(yamlConfiguration{ECMooncakePort: 19019, ECMooncakePodIP: "decode.local"})
+		require.Equal(t, 19019, opts.ECMooncakePort)
+		require.Equal(t, "decode.local", opts.ECMooncakePodIP)
 	})
 }
 
@@ -1190,59 +1252,65 @@ func TestCompleteMoRIIOWriteModeGuards(t *testing.T) {
 	})
 }
 
-// TestModelServerPortMigration verifies that the deprecated vllm-port flag
-// migrates to model-server-port.
-// Remove when vllm-port is dropped in v0.12 (see issue 2172).
-func TestModelServerPortMigration(t *testing.T) {
+func TestModelServerPort(t *testing.T) {
 	tests := []struct {
-		name               string
-		modelServerPort    string
-		vllmPort           string
-		expectedDecoderURL string
+		name  string
+		flags []string
+		want  string
 	}{
-		{"model-server-port set", "9000", "", "http://localhost:9000"},
-		{"deprecated vllm-port migrated", "", "9001", "http://localhost:9001"},
-		{"model-server-port wins over vllm-port when both set", "9000", "9001", "http://localhost:9000"},
-		{"no model-server-port, default falls back to vllm-port default", "", defaultVLLMPort, "http://localhost:" + defaultVLLMPort},
+		{"default", nil, "http://localhost:8200"},
+		{"CLI", []string{"--model-server-port=9000"}, "http://localhost:9000"},
+		{"inline YAML", []string{"--configuration={model-server-port: 8203}"}, "http://localhost:8203"},
+		{"file YAML", []string{"--configuration-file=" + writeTempYAML(t, "port.yaml", "model-server-port: 8203")}, "http://localhost:8203"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts := NewOptions()
-			opts.modelServerPort = tt.modelServerPort
-			opts.vllmPort = tt.vllmPort
-
+			opts, fs := newTestOptions(t)
+			require.NoError(t, fs.Parse(tt.flags))
 			require.NoError(t, opts.Complete())
 			require.NoError(t, opts.Validate())
-			require.NotNil(t, opts.DecoderURL)
-			require.Equal(t, tt.expectedDecoderURL, opts.DecoderURL.String())
+			require.Equal(t, tt.want, opts.DecoderURL.String())
 		})
 	}
 }
 
-func TestModelServerPortYAML(t *testing.T) {
-	opts, testPFlagSet := newTestOptions(t)
-	yaml := "{model-server-port: 8203}"
-	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
-	require.NoError(t, testPFlagSet.Parse(nil))
-
-	require.NoError(t, opts.Complete())
-	require.NoError(t, opts.Validate())
-	require.Equal(t, "http://localhost:8203", opts.DecoderURL.String())
+func TestModelServerPortFlagBeatsYAML(t *testing.T) {
+	for _, value := range []string{"9000", "8200"} {
+		t.Run(value, func(t *testing.T) {
+			opts, fs := newTestOptions(t)
+			require.NoError(t, fs.Parse([]string{
+				"--model-server-port=" + value,
+				"--configuration={model-server-port: 8203}",
+			}))
+			require.NoError(t, opts.Complete())
+			require.NoError(t, opts.Validate())
+			require.Equal(t, "http://localhost:"+value, opts.DecoderURL.String())
+		})
+	}
 }
 
-// A CLI flag overrides YAML config, including the deprecated --vllm-port over a
-// model-server-port key.
-func TestModelServerPortFlagBeatsYAML(t *testing.T) {
-	opts, testPFlagSet := newTestOptions(t)
-	yaml := "{model-server-port: 8203}"
-	setFlag(t, testPFlagSet, inlineConfiguration, &yaml)
-	setFlag(t, testPFlagSet, vllmPort, "9001")
-	require.NoError(t, testPFlagSet.Parse(nil))
+func TestModelServerPortRejectsLegacyFlag(t *testing.T) {
+	_, fs := newTestOptions(t)
+	require.ErrorContains(t, fs.Parse([]string{"--vllm-port=9001"}), "unknown flag: --vllm-port")
+}
 
-	require.NoError(t, opts.Complete())
-	require.NoError(t, opts.Validate())
-	require.Equal(t, "http://localhost:9001", opts.DecoderURL.String())
+func TestModelServerPortRejectsLegacyYAML(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags []string
+	}{
+		{"inline", []string{"--configuration={vllm-port: 9001}"}},
+		{"file", []string{"--configuration-file=" + writeTempYAML(t, "legacy.yaml", "vllm-port: 9001")}},
+		{"mixed keys", []string{"--configuration={model-server-port: 8203, vllm-port: 9001}"}},
+		{"zero value", []string{"--configuration={vllm-port: 0}"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, fs := newTestOptions(t)
+			require.NoError(t, fs.Parse(tt.flags))
+			require.ErrorContains(t, opts.Complete(), "vllm-port")
+		})
+	}
 }
 
 func TestMetricsCertDirYAML(t *testing.T) {

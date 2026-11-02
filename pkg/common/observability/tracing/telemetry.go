@@ -80,10 +80,10 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 	opt := []sdktrace.TracerProviderOption{
 		sdktrace.WithSampler(sampler),
 		sdktrace.WithResource(res),
+		sdktrace.WithSpanProcessor(NewRequestAttributionProcessor()),
 	}
 
-	// "none" registers no span processor at all. Spans are still created and
-	// propagated, so instrumented code and context propagation are unaffected.
+	// "none" skips the exporter batcher. The attribution processor above still runs.
 	if exporterType == exporterTypeNone {
 		logger.Info("init OTel trace exporter", "type", exporterType)
 	} else {
@@ -380,6 +380,10 @@ const instrumentationName = "llm-d-router"
 // Tracer returns a tracer for the given instrumentation scope, defaulting to
 // "llm-d-router". Build version and commit SHA are attached so every span in a
 // trace carries consistent scope metadata.
+//
+// Spans started from a context carrying request attribution are enriched with the
+// attribution pair by the span processor InitTracing installs. See
+// BeginRequestAttribution.
 func Tracer(scope ...string) trace.Tracer {
 	name := instrumentationName
 	if len(scope) > 0 && scope[0] != "" {

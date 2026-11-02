@@ -13,8 +13,8 @@ LRU tracking is specific to cold requests only — a pod is added to the LRU whe
 > **Note:** Designed to work alongside a prefix cache scorer (such as `prefix-cache-scorer`). If no prefix cache state is available, all requests are treated as cold. The prefix-cache scorer should be defined first in the scheduling profile.
 
 **Parameters:**
-- `prefixPluginType` (string, optional, default: `"prefix-cache-scorer"`): Type of the prefix-cache scorer to read for cache-hit detection.
-- `prefixPluginName` (string, optional, default: `"prefix-cache-scorer"`): Name of the prefix-cache scorer to read for cache-hit detection.
+- `prefixMatchInfoProducerName` (string, optional, default: `"approx-prefix-cache-producer"`): Name of the prefix cache producer instance whose `PrefixCacheMatchInfo` the scorer reads for cache-hit detection. Set it to the producer the prefix-cache scorer reads; the [Prefix Cache Scorer](../prefix/) README describes what happens when it is unset.
+- `prefixPluginType`, `prefixPluginName` (string, optional): Deprecated and ignored. Accepted only for backward compatibility.
 - `lruSize` (int, optional, default: `1024`): Maximum number of pods tracked in the LRU.
 
 **Configuration Example:**
@@ -30,8 +30,7 @@ plugins:
   - type: no-hit-lru-scorer
     name: lru-scorer
     parameters:
-      prefixPluginType: "prefix-cache-scorer"
-      prefixPluginName: "cache-scorer"
+      prefixMatchInfoProducerName: precise-prefix-cache-producer
       lruSize: 1024
 
 schedulingProfiles:

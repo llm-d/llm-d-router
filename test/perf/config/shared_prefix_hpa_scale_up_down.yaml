@@ -1,0 +1,59 @@
+job:
+  image:
+    repository: quay.io/inference-perf/inference-perf
+    tag: 27375d0
+  serviceAccountName: inference-perf-sa
+
+  resources:
+     requests:
+       cpu: "10"
+       memory: "50Gi"
+
+logLevel: INFO
+
+token:
+  hfSecret:
+    name: hf-secret
+    key: token
+
+config:
+  load:
+    type: constant
+    stages:
+      - rate: 1
+        duration: 20
+      - rate: 12
+        duration: 90
+      - rate: 1
+        duration: 30
+    num_workers: 10
+    worker_max_concurrency: 100
+    worker_max_tcp_connections: 2500
+  api:
+    type: completion
+    streaming: true
+    session_token_header_key: "x-session-token"
+  server:
+    type: vllm
+    model_name: Qwen/Qwen3-8B
+    base_url: http://load-aware-session-affinity-hpa-epp:80
+  data:
+    type: shared_prefix
+    shared_prefix:
+      num_groups: 25
+      num_prompts_per_group: 5
+      system_prompt_len: 2000
+      question_len: 500
+      output_len: 200
+      enable_multi_turn_chat: true
+  metrics: null
+  report:
+    request_lifecycle:
+      summary: true
+      per_stage: true
+      per_request: false
+    prometheus: null
+
+  storage:
+    local_storage:
+      path: "./reports"

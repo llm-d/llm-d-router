@@ -1,0 +1,12 @@
+router:
+  epp:
+    env:
+      - name: OTEL_SERVICE_NAME
+        value: epp-tracing-overhead-epp
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: study=epp-tracing-overhead,component.role=epp
+  tracing:
+    enabled: true
+    otelExporterEndpoint: http://epp-tracing-otel-collector.epp-tracing-overhead.svc.cluster.local:4317
+    sampling:
+      sampler: parentbased_traceidratio

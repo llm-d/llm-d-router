@@ -33,11 +33,14 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -45,7 +48,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -65,7 +70,7 @@ const (
 // Datastore defines the interface required by the Director.
 type Datastore interface {
 	PoolGet() (*datalayer.EndpointPool, error)
-	ObjectiveGet(objectiveName string) *v1alpha2.InferenceObjective
+	ObjectiveGet(objectiveName string) *apixv1.InferenceObjective
 	PodList(predicate func(fwkdl.Endpoint) bool) []fwkdl.Endpoint
 	// ModelRewriteGet returns the highest-precedence rewrite rule for a given
 	// model name (prioritizing exact matches over generic wildcard rules) and
@@ -85,6 +90,7 @@ func NewDirectorWithConfig(
 	admissionController AdmissionController,
 	endpointCandidates contracts.EndpointCandidates,
 	config *Config,
+	poolName string,
 ) *Director {
 	return &Director{
 		datastore:             datastore,
@@ -93,6 +99,7 @@ func NewDirectorWithConfig(
 		endpointCandidates:    endpointCandidates,
 		requestControlPlugins: *config,
 		defaultPriority:       0, // define default priority explicitly
+		poolName:              poolName,
 	}
 }
 
@@ -170,18 +177,28 @@ type Director struct {
 	// requestEvictor, when set, tracks dispatched requests for demand-driven in-flight eviction.
 	// See docs/flow-control-eviction.md.
 	requestEvictor *eviction.RequestEvictor
+
+	// poolName is the inference_pool label on per-request metrics. It must match the name the
+	// runner passes to metrics.InitFairnessIDResolutionMetrics.
+	poolName string
 }
 
 // getInferenceObjective fetches the inferenceObjective from the datastore otherwise creates a new one based on reqCtx.
-func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.RequestContext) *v1alpha2.InferenceObjective {
+func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.RequestContext) *apixv1.InferenceObjective {
 	infObjective := d.datastore.ObjectiveGet(reqCtx.ObjectiveKey)
 	if infObjective == nil {
 		log.FromContext(ctx).V(logutil.VERBOSE).Info("No associated InferenceObjective found, using default", "objectiveKey", reqCtx.ObjectiveKey)
-		infObjective = &v1alpha2.InferenceObjective{
-			Spec: v1alpha2.InferenceObjectiveSpec{
+		infObjective = &apixv1.InferenceObjective{
+			Spec: apixv1.InferenceObjectiveSpec{
 				Priority: &d.defaultPriority,
 			},
 		}
+	} else if infObjective.Spec.Priority == nil {
+		// The API defines an unset priority as 0. Copy before defaulting:
+		// stored objectives are shared with concurrent readers.
+		copied := *infObjective
+		copied.Spec.Priority = ptr.To(int32(0))
+		infObjective = &copied
 	}
 	return infObjective
 }
@@ -191,10 +208,25 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
+	// An error while admitting (admission controller, candidate lookup, screeners, Admitter plugins)
+	// is the admission rejection. Later failures leave the decision as admitted.
+	admitting := false
+	// untypedDenier is the type of an Admitter whose untyped denial is returned as Internal.
+	var untypedDenier string
 	defer func() {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
+			if admitting && span.IsRecording() {
+				reason := admissionReason(err)
+				if untypedDenier != "" {
+					reason = "admitter:" + untypedDenier
+				}
+				span.SetAttributes(
+					semconv.LLMDEPPAdmissionDecision("rejected"),
+					semconv.LLMDEPPAdmissionReason(reason),
+				)
+			}
 		}
 		span.End()
 	}()
@@ -222,7 +254,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	// Prepare InferenceRequest (needed for both saturation detection and Scheduler)
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{
-		RequestID:        reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+		RequestID:        reqCtx.Request.ID,
 		TargetModel:      reqCtx.TargetModelName,
 		Body:             inferenceRequestBody,
 		Headers:          reqCtx.Request.Headers,
@@ -238,18 +270,60 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
-	// Derive FairnessID from agent-identity attribute if not already set by explicit header.
-	if reqCtx.SchedulingRequest.FairnessID == "" {
-		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey); ok && agentID != "" {
-			reqCtx.SchedulingRequest.FairnessID = agentID
+	// Derive the FairnessID from the fairness-ID header (tenant identity) and the
+	// agent-identity attribute (program/session identity). Composition is opt-in
+	// through requestHandler.composeFairnessIDs. When enabled, the tenant is
+	// percent-encoded and joined with the session as "<tenant>/<session>", so flow
+	// control keys one queue per session while the tenant stays visible for
+	// isolation and metric labels. Encoding "%" and "/" keeps the first segment
+	// exactly the tenant, so a tenant carrying either character cannot collide
+	// with another tenant's composed key, and session IDs stay free to contain
+	// the separator. When disabled, the fairness-ID header keys the flow as sent
+	// and the session identity is not part of it. A request carrying neither
+	// identity falls back to the default flow.
+	source := tracing.AttributionSourceHeader
+	tenantID := reqCtx.SchedulingRequest.FairnessID
+	agentID, _ := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey)
+	switch {
+	case tenantID != "" && d.requestControlPlugins.ComposeFairnessIDs():
+		tenantID = escapeFairnessTenant(tenantID)
+		if agentID != "" {
+			reqCtx.SchedulingRequest.FairnessID = tenantID + metadata.FairnessIDTenantSeparator + agentID
 		} else {
-			reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
+			reqCtx.SchedulingRequest.FairnessID = tenantID
 		}
+	case tenantID != "":
+		// Header-only traffic keys the flow on the tenant fairness ID as sent.
+	case agentID != "":
+		reqCtx.SchedulingRequest.FairnessID = agentID
+		source = tracing.AttributionSourceAgentIdentity
+	default:
+		reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultFairnessID
+		source = tracing.AttributionSourceDefault
 	}
+	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
+	tracing.AttributeRequest(ctx, span)
+	metrics.RecordFairnessIDResolution(d.poolName, reqCtx.SchedulingRequest.FairnessID, source)
 
+	admitting = true
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
+	}
+	// IsRecording guards keep the tracing-disabled path allocation-free.
+	if reqCtx.FlowControlAdmitted && span.IsRecording() {
+		// Fractional milliseconds: queue waits are often below 1ms.
+		span.SetAttributes(semconv.LLMDEPPAdmissionQueueDurationMs(float64(reqCtx.FlowControlQueueDuration) / float64(time.Millisecond)))
+	}
+	reservationPending := false
+	reservationReleaser, hasReservationReleaser := d.admissionController.(dispatchReservationReleaser)
+	if hasReservationReleaser {
+		reservationPending = true
+		defer func() {
+			if reservationPending {
+				reservationReleaser.ReleaseDispatchReservation(reqCtx.SchedulingRequest.RequestID)
+			}
+		}()
 	}
 
 	endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
@@ -261,7 +335,27 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 	}
 
+	// Producers may hold per-request state between Produce and PreRequest, where
+	// they normally release it. Release it here for every path that leaves
+	// HandleRequest without reaching PreRequest: screeners eliminating every
+	// candidate after RequestHandling producers ran, an Admitter denial, a scheduler
+	// error, or a prepareRequest failure.
+	reachedPreRequest := false
+	defer func() {
+		if !reachedPreRequest {
+			d.releaseProducerState(ctx, reqCtx.SchedulingRequest)
+		}
+	}()
+
 	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
+	// A producer whose RequestHandling run fails leaves its keys missing for the
+	// Scheduling phase too, so producers requiring them are skipped there.
+	missingKeys := map[string]struct{}{}
+	if err := d.runDataProducers(ctx, fwkrc.RequestHandlingDataProducerExtensionPoint, d.requestControlPlugins.requestHandlingDataProducers,
+		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
+		// Don't fail the request if DataProducer plugins fail.
+		logger.Error(err, "failed to prepare request handling data")
+	}
 	snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if len(snapshotOfCandidatePods) == 0 {
 		return reqCtx, errcommon.Error{
@@ -271,15 +365,29 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 	}
 	// Prepare per request data by running DataProducer plugins.
-	err = d.runDataProducerPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
-	if err != nil {
+	if err := d.runDataProducers(ctx, fwkrc.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
+		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
 		// Don't fail the request if DataProducer plugins fail.
 		logger.Error(err, "failed to prepare per request data")
 	}
 
 	// Run admit request plugins
-	if denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
+	if denier, denyReason := d.runAdmissionPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods); denyReason != nil {
+		// Preserve a typed errcommon.Error from the denying Admitter so the
+		// status code it chose (e.g. ResourceExhausted for a shed) and its
+		// headers (the x-llm-d-request-dropped-reason) reach Envoy intact.
+		// An untyped denial keeps collapsing to Internal, as before, so the
+		// span names the Admitter to tell it apart from an internal error.
+		var e errcommon.Error
+		if errors.As(denyReason, &e) {
+			return reqCtx, e
+		}
+		untypedDenier = denier.Type
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("request cannot be admitted: %w", denyReason).Error()}
+	}
+	admitting = false
+	if span.IsRecording() {
+		span.SetAttributes(semconv.LLMDEPPAdmissionDecision("admitted"))
 	}
 
 	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
@@ -305,6 +413,11 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err != nil {
 		return reqCtx, err
 	}
+	if reservationPending {
+		reservationReleaser.ReleaseDispatchReservation(reqCtx.SchedulingRequest.RequestID)
+		reservationPending = false
+	}
+	reachedPreRequest = true
 	if err := d.priorityRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
@@ -314,10 +427,24 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	return reqCtx, nil
 }
 
+// escapeFairnessTenant percent-encodes the characters that would otherwise make
+// the tenant/session split ambiguous: "%" and the separator. A tenant with
+// neither is returned unchanged without allocating.
+func escapeFairnessTenant(id string) string {
+	if !strings.ContainsAny(id, "%"+metadata.FairnessIDTenantSeparator) {
+		return id
+	}
+	id = strings.ReplaceAll(id, "%", "%25")
+	return strings.ReplaceAll(id, metadata.FairnessIDTenantSeparator, "%2F")
+}
+
 // modelRewriteIfNeeded rewrites the model name in the payload when the resolved target
 // differs from the model the parser read out of the body, marking the body Mutated so
 // repackage can skip re-marshaling when nothing changed.
 func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+	if reqCtx.TargetModelName == "" {
+		reqCtx.TargetModelName = reqCtx.IncomingModelName
+	}
 	logger := log.FromContext(ctx)
 	rewriter, ok := reqCtx.Parser.(fwkrh.ModelNameRewriter)
 	if !ok {
@@ -329,11 +456,9 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 		logger.Info("Warning: payload does not implement MarshalablePayload, skipping model rewrite")
 		return nil
 	}
-	if reqCtx.TargetModelName == "" {
-		reqCtx.TargetModelName = reqCtx.IncomingModelName
-	}
 	d.applyWeightedModelRewrite(ctx, reqCtx)
-	if reqCtx.TargetModelName == "" {
+	// Native generate APIs allow requests without a model.
+	if reqCtx.TargetModelName == "" && inferenceRequestBody.Generate == nil {
 		return errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
 	}
 	if reqCtx.TargetModelName == inferenceRequestBody.Model {
@@ -365,7 +490,10 @@ func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers
 		logger.V(logutil.DEBUG).Info("payload does not implement MarshalablePayload, skipping priority rewrite")
 		return nil
 	}
-	mutatedPayload, mutated, err := rewriter.RewritePriority(fwkrh.PriorityRewriteContext{TargetEndpoint: reqCtx.TargetPod}, payload, reqCtx.Priority)
+	mutatedPayload, mutated, err := rewriter.RewritePriority(fwkrh.PriorityRewriteContext{
+		TargetEndpoint: reqCtx.TargetPod,
+		RequestPath:    fwkrequest.GetRequestPath(reqCtx.Request.Headers),
+	}, payload, reqCtx.Priority)
 	if err != nil {
 		return err
 	}
@@ -432,10 +560,10 @@ func (d *Director) selectWeightedModel(ctx context.Context, models []v1alpha2.Ta
 
 	if totalWeight == 0 {
 		// If total weight is 0, distribute evenly
-		return models[rand.Intn(len(models))].ModelRewrite
+		return models[rand.Intn(len(models))].ModelRewrite //#nosec G404 -- model traffic split, not security-sensitive
 	}
 
-	randomNum := rand.Intn(int(totalWeight))
+	randomNum := rand.Intn(int(totalWeight)) //#nosec G404 -- model traffic split, not security-sensitive
 	var currentWeight int32
 	for _, model := range models {
 		if model.Weight != nil {
@@ -533,7 +661,7 @@ func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
 	result := make([]fwksched.Endpoint, len(endpoints))
 	for i, endpoint := range endpoints {
-		result[i] = fwksched.NewEndpoint(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
+		result[i] = fwksched.NewEndpointFromSnapshot(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())
 	}
 
 	return result
@@ -545,7 +673,7 @@ func (d *Director) HandleResponseHeader(ctx context.Context, reqCtx *handlers.Re
 		return reqCtx
 	}
 	response := &fwkrc.Response{
-		RequestID:   reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+		RequestID:   reqCtx.Request.ID,
 		Headers:     reqCtx.Response.Headers,
 		ReqMetadata: reqCtx.Request.Metadata,
 	}
@@ -577,7 +705,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	// registered, so this runs before the early return below.
 	if endOfStream && d.requestEvictor != nil {
 		d.requestEvictor.ResponseBody(ctx, reqCtx.SchedulingRequest, &fwkrc.Response{
-			RequestID:        reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+			RequestID:        reqCtx.Request.ID,
 			EndOfStream:      true,
 			TerminationCause: cause,
 		}, reqCtx.TargetPod)
@@ -590,7 +718,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	startOfStream := !reqCtx.ResponseBodyStarted
 	reqCtx.ResponseBodyStarted = true
 	response := &fwkrc.Response{
-		RequestID:      reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+		RequestID:      reqCtx.Request.ID,
 		Headers:        reqCtx.Response.Headers,
 		StartOfStream:  startOfStream,
 		EndOfStream:    endOfStream,
@@ -622,7 +750,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 			// Built here rather than at function entry: this path is per-chunk, and
 			// deriving a logger allocates whether or not anything is emitted.
 			log.FromContext(ctx).V(logutil.DEBUG).Info("Skipping response body chunk because the async queue is closed",
-				"stage", "bodyChunk", "requestID", reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey])
+				"stage", "bodyChunk", "requestID", reqCtx.Request.ID)
 		}
 	}
 	return reqCtx
@@ -646,7 +774,7 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	if len(pods) == 0 {
 		return nil
 	}
-	number := rand.Intn(len(pods))
+	number := rand.Intn(len(pods)) //#nosec G404 -- load spreading across pods, not security-sensitive
 	pod := pods[number]
 	return pod.GetMetadata()
 }
@@ -657,7 +785,8 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 // its side effects and the caller sees all failures.
 func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.InferenceRequest,
 	schedulingResult *fwksched.SchedulingResult) error {
-	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	logger := log.FromContext(ctx)
+	loggerDebug := logger.V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	var errs []error
 	for _, plugin := range d.requestControlPlugins.preRequestPlugins {
@@ -665,9 +794,13 @@ func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.I
 		if debugEnabled {
 			loggerDebug.Info("Running PreRequest plugin", "plugin", name)
 		}
+		scopedRequest, violations := datalayer.ScopeRequest(logger, fwkrc.PreRequestExtensionPoint, plugin, request)
 		before := time.Now()
-		err := plugin.PreRequest(ctx, request, schedulingResult)
+		err := plugin.PreRequest(ctx, scopedRequest, schedulingResult)
 		metrics.RecordPluginProcessingLatency(fwkrc.PreRequestExtensionPoint, name.Type, name.Name, time.Since(before))
+		if err == nil {
+			err = violations.Write()
+		}
 		if err != nil {
 			if debugEnabled {
 				loggerDebug.Info("PreRequest plugin failed", "plugin", name, "error", err.Error())
@@ -705,20 +838,60 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 	return nil
 }
 
-func (d *Director) runDataProducerPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	plugins := d.requestControlPlugins.dataProducerPlugins
+// runDataProducers runs one phase's producers. missing holds the keys of
+// producers that failed or were skipped, across phases.
+func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, plugins []fwkrc.DataProducer,
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint, missing map[string]struct{}) error {
 	if len(plugins) == 0 {
 		return nil
 	}
 	// Each producer runs under its own timeout so a slow one does not extend the
-	// budget of the others.
-	for _, p := range plugins {
-		if err := dataProducerPluginsWithTimeout(ctx, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
-			return err
+	// budget of the others. A failed producer does not stop the ones after it;
+	// only producers that require a key it would have produced are skipped, and
+	// their own keys count as missing in turn. The errors are returned joined.
+	// Once the request's context is done, no further producer is started.
+	var errs []error
+	markMissing := func(p fwkrc.DataProducer) {
+		for key := range p.Produces() {
+			missing[key.String()] = struct{}{}
 		}
 	}
-	return nil
+	for _, p := range plugins {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
+		if key, ok := missingRequiredInput(p, missing); ok {
+			errs = append(errs, fmt.Errorf("DataProducer %q skipped: required input %s was not produced", p.TypedName().String(), key))
+			markMissing(p)
+			continue
+		}
+		if err := dataProducerPluginsWithTimeout(ctx, extensionPoint, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
+			errs = append(errs, err)
+			if ctx.Err() != nil {
+				break
+			}
+			markMissing(p)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// missingRequiredInput returns a key that p requires and that is in missing.
+func missingRequiredInput(p fwkrc.DataProducer, missing map[string]struct{}) (string, bool) {
+	if len(missing) == 0 {
+		return "", false
+	}
+	consumer, ok := p.(fwkplugin.ConsumerPlugin)
+	if !ok {
+		return "", false
+	}
+	for key := range consumer.Consumes().Required {
+		if _, ok := missing[key.String()]; ok {
+			return key.String(), true
+		}
+	}
+	return "", false
 }
 
 func (d *Director) runScreeners(ctx context.Context,
@@ -755,7 +928,7 @@ func (d *Director) runScreeners(ctx context.Context,
 }
 
 func (d *Director) runAdmissionPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (fwkplugin.TypedName, error) {
 	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
@@ -770,13 +943,26 @@ func (d *Director) runAdmissionPlugins(ctx context.Context,
 			if debugEnabled {
 				loggerDebug.Info("Admit plugin denied the request", "plugin", name, "reason", denyReason.Error())
 			}
-			return denyReason
+			return name, denyReason
 		}
 		if debugEnabled {
 			loggerDebug.Info("Completed running Admit plugin successfully", "plugin", name)
 		}
 	}
-	return nil
+	return fwkplugin.TypedName{}, nil
+}
+
+// admissionReason returns the reason for an admission rejection: the dropped-reason header
+// when the rejecting component set one, otherwise the EPP error code.
+func admissionReason(err error) string {
+	var e errcommon.Error
+	if !errors.As(err, &e) {
+		return errcommon.Internal
+	}
+	if reason := e.Headers[errcommon.RequestDroppedReasonHeaderKey]; reason != "" {
+		return reason
+	}
+	return e.Code
 }
 
 func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {
@@ -792,6 +978,16 @@ func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksch
 		metrics.RecordPluginProcessingLatency(fwkrc.ResponseReceivedExtensionPoint, name.Type, name.Name, time.Since(before))
 		if debugEnabled {
 			loggerDebug.Info("Completed running ResponseReceived plugin successfully", "plugin", name)
+		}
+	}
+}
+
+func (d *Director) releaseProducerState(ctx context.Context, request *fwksched.InferenceRequest) {
+	for _, plugins := range [][]fwkrc.DataProducer{d.requestControlPlugins.requestHandlingDataProducers, d.requestControlPlugins.dataProducerPlugins} {
+		for _, p := range plugins {
+			if abandoner, ok := p.(fwkrc.RequestAbandoned); ok {
+				abandoner.RequestAbandoned(ctx, request)
+			}
 		}
 	}
 }

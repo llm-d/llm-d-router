@@ -120,6 +120,9 @@ func NewSessionAffinity(name, sessionHeader, profileName string) *SessionAffinit
 // session's candidate set is filtered, how a fresh pick is recorded, and what
 // (if anything) is written back to the client.
 type strategy interface {
+	// Consumes reports the request attributes the strategy reads, so the
+	// plugin's declaration follows its configuration.
+	Consumes() plugin.DataDependencies
 	filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint
 	preRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult)
 	responseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata)
@@ -143,6 +146,11 @@ type SessionAffinity struct {
 // TypedName returns the typed name of the plugin.
 func (s *SessionAffinity) TypedName() plugin.TypedName {
 	return s.typedName
+}
+
+// Consumes reports the request attributes the configured strategy reads.
+func (s *SessionAffinity) Consumes() plugin.DataDependencies {
+	return s.strategy.Consumes()
 }
 
 // Filter returns the endpoint running the session when it is among the

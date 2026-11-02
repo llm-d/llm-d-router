@@ -26,11 +26,12 @@ import (
 	envoyCorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 // Model name constants shared across test suites.
@@ -55,7 +56,7 @@ func buildEnvoyHeaders(headers map[string]string) []*envoyCorev3.HeaderValue {
 // This simulates the "Subset Load Balancing" flow where EPP picks a specific pod IP.
 func ReqSubset(prompt, model, target string, subsets ...string) []*extProcPb.ProcessingRequest {
 	// Uses the shared low-level generator which handles the metadata construction
-	return integration.GenerateStreamedRequestSet(logger, prompt, model, target, subsets)
+	return fwkepp.GenerateStreamedRequestSet(logger, prompt, model, target, subsets)
 }
 
 // ReqResponseOnly creates a sequence simulating only the response phase from Envoy.
@@ -148,7 +149,7 @@ func buildRouteResponse(endpoint, targetModel, prompt string, priority int, stre
 	}
 	j, _ := json.Marshal(bodyMap)
 
-	return integration.NewRequestBufferedResponse(
+	return fwkepp.NewRequestBufferedResponse(
 		endpoint, j,
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "hi", RawValue: []byte("mom")}},
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
@@ -159,9 +160,9 @@ func buildRouteResponse(endpoint, targetModel, prompt string, priority int, stre
 }
 
 func buildGRPCRouteResponse(endpoint, prompt, methodName string, stream bool) []*extProcPb.ProcessingResponse {
-	j, _ := integration.CreateGrpcPayload(integration.GRPCRequestProto(prompt, methodName, stream))
+	j, _ := fwkepp.CreateGrpcPayload(fwkepp.GRPCRequestProto(prompt, methodName, stream))
 
-	return integration.NewRequestBufferedResponse(
+	return fwkepp.NewRequestBufferedResponse(
 		endpoint, j,
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "hi", RawValue: []byte("mom")}},
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
@@ -186,7 +187,7 @@ func ExpectRouteToWithStream(endpoint, targetModel, prompt string, priority int)
 // ExpectPassthroughRouteTo asserts that the request was successfully routed to the specified endpoint and that the body was
 // not parsed.
 func ExpectPassthroughRouteTo(endpoint string, rawBytes []byte) []*extProcPb.ProcessingResponse {
-	return integration.NewRequestBufferedResponse(
+	return fwkepp.NewRequestBufferedResponse(
 		endpoint, rawBytes,
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "hi", RawValue: []byte("mom")}},
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
@@ -206,26 +207,114 @@ func ExpectGRPCRouteToWithStream(endpoint, prompt, method string) []*extProcPb.P
 	return buildGRPCRouteResponse(endpoint, prompt, method, true)
 }
 
-// ExpectReject asserts that the EPP immediately rejected the request with the given code and message.
+// ExpectReject asserts that the EPP immediately rejected the request with the given code and message,
+// serialized in the OpenAI error envelope.
 func ExpectReject(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
-	return integration.NewImmediateErrorResponse(code, msg)
+	return fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader())
 }
 
 // ExpectRejectWithDropReason asserts that the EPP immediately rejected the request with the given code
 // and message, and that the response carries the drop-reason header.
 func ExpectRejectWithDropReason(code envoyTypePb.StatusCode, msg string, reason errcommon.RequestDroppedReason) []*extProcPb.ProcessingResponse {
-	return integration.NewImmediateErrorResponse(code, msg, &envoyCorev3.HeaderValueOption{
+	return fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, msg), jsonContentTypeHeader(),
+		&envoyCorev3.HeaderValueOption{
+			Header: &envoyCorev3.HeaderValue{
+				Key:      errcommon.RequestDroppedReasonHeaderKey,
+				RawValue: []byte(reason),
+			},
+		})
+}
+
+// ExpectRejectNoEndpoints asserts that the EPP rejected the request because no endpoint can serve it.
+// The error message is left empty; set ignoreErrorMessage on the test case.
+func ExpectRejectNoEndpoints() []*extProcPb.ProcessingResponse {
+	code := envoyTypePb.StatusCode_ServiceUnavailable
+	return fwkepp.NewImmediateErrorResponse(code, openAIErrorBody(code, ""), jsonContentTypeHeader(),
+		&envoyCorev3.HeaderValueOption{
+			Header: &envoyCorev3.HeaderValue{
+				Key:      errcommon.RequestDroppedReasonHeaderKey,
+				RawValue: []byte(errcommon.RequestDroppedReasonNoEndpoints),
+			},
+		})
+}
+
+// errorBodyOption compares immediate response bodies without error.message, so the rest of the
+// error envelope is still asserted.
+func errorBodyOption(ignoreMessage bool) cmp.Option {
+	if !ignoreMessage {
+		return cmp.Options{}
+	}
+	strip := func(b []byte) map[string]any {
+		var m map[string]any
+		if json.Unmarshal(b, &m) != nil {
+			return nil
+		}
+		if e, ok := m["error"].(map[string]any); ok {
+			delete(e, "message")
+		}
+		return m
+	}
+	return protocmp.FilterField(&extProcPb.ImmediateResponse{}, "body",
+		cmp.Comparer(func(a, b []byte) bool { return cmp.Equal(strip(a), strip(b)) }))
+}
+
+// openAIErrorBody is the OpenAI error envelope the EPP answers with for the given status.
+func openAIErrorBody(code envoyTypePb.StatusCode, msg string) string {
+	errType := "server_error"
+	switch code {
+	case envoyTypePb.StatusCode_BadRequest:
+		errType = "invalid_request_error"
+	case envoyTypePb.StatusCode_TooManyRequests:
+		errType = "rate_limit_error"
+	}
+	body, _ := json.Marshal(struct {
+		Error openAIErrorFields `json:"error"`
+	}{Error: openAIErrorFields{Message: msg, Type: errType, Code: int(code)}})
+	return string(body)
+}
+
+type openAIErrorFields struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    int    `json:"code"`
+}
+
+// ExpectRejectAnthropic asserts that the EPP immediately rejected a Messages API request with the
+// given code and message, serialized in the Anthropic error envelope.
+func ExpectRejectAnthropic(code envoyTypePb.StatusCode, msg string) []*extProcPb.ProcessingResponse {
+	return fwkepp.NewImmediateErrorResponse(code, anthropicErrorBody(code, msg), jsonContentTypeHeader())
+}
+
+func anthropicErrorBody(code envoyTypePb.StatusCode, msg string) string {
+	errType := "api_error"
+	if code == envoyTypePb.StatusCode_BadRequest {
+		errType = "invalid_request_error"
+	}
+	body, _ := json.Marshal(struct {
+		Type  string             `json:"type"`
+		Error anthropicErrFields `json:"error"`
+	}{Type: "error", Error: anthropicErrFields{Type: errType, Message: msg}})
+	return string(body)
+}
+
+type anthropicErrFields struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+func jsonContentTypeHeader() *envoyCorev3.HeaderValueOption {
+	return &envoyCorev3.HeaderValueOption{
 		Header: &envoyCorev3.HeaderValue{
-			Key:      errcommon.RequestDroppedReasonHeaderKey,
-			RawValue: []byte(reason),
+			Key:      reqcommon.HeaderContentType,
+			RawValue: []byte(reqcommon.ContentTypeJSON),
 		},
-	})
+	}
 }
 
 // ExpectBufferResp asserts that the EPP buffers the response and rewrites the body.
 // This uses the shared primitive but adds EPP-specific headers we expect.
 func ExpectBufferResp(body string, contentType string) []*extProcPb.ProcessingResponse {
-	return integration.NewResponseBufferedResponse(
+	return fwkepp.NewResponseBufferedResponse(
 		body,
 		contentType != "application/grpc", // For gRPC, the EoS will not be set to true but it will return a trailer.
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
@@ -245,7 +334,7 @@ func ExpectBufferResp(body string, contentType string) []*extProcPb.ProcessingRe
 // 2. ResponseBody chunks (with EndOfStream=true on the final chunk)
 func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 	res := make([]*extProcPb.ProcessingResponse, 0, 1+len(chunks))
-	res = append(res, integration.NewResponseHeaders(
+	res = append(res, fwkepp.NewResponseHeaders(
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
@@ -259,7 +348,7 @@ func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 
 	// 2. The Body Chunk Frames
 	for i, chunk := range chunks {
-		res = append(res, integration.NewResponseStreamChunk(chunk, i == len(chunks)-1))
+		res = append(res, fwkepp.NewResponseStreamChunk(chunk, i == len(chunks)-1))
 	}
 	return res
 }
@@ -267,7 +356,7 @@ func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 // ExpectGRPCStreamResp asserts that the EPP streams the gRPC response chunks.
 func ExpectGRPCStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 	res := make([]*extProcPb.ProcessingResponse, 0, 1+len(chunks))
-	res = append(res, integration.NewResponseHeaders(
+	res = append(res, fwkepp.NewResponseHeaders(
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
 			Key:      "x-went-into-resp-headers",
 			RawValue: []byte("true"),
@@ -279,7 +368,7 @@ func ExpectGRPCStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 	))
 
 	for _, chunk := range chunks {
-		res = append(res, integration.NewResponseStreamChunk(chunk, false))
+		res = append(res, fwkepp.NewResponseStreamChunk(chunk, false))
 	}
 	return res
 }
@@ -300,6 +389,8 @@ type testCase struct {
 	requiresCRDs bool
 	// wantSpans lists the span names expected to be recorded (hermetic tests only).
 	wantSpans []string
+	// ignoreErrorMessage compares the immediate response body without its error message.
+	ignoreErrorMessage bool
 }
 
 // commonTestCases returns the test cases shared between the standard and data layer test suites.
@@ -308,7 +399,7 @@ func commonTestCases(prio func(int) int) []testCase {
 	return []testCase{
 		{
 			name:     "select lower queue and kv cache",
-			requests: integration.ReqLLM(logger, "test1", modelMyModel, modelMyModelTarget),
+			requests: fwkepp.ReqLLM(logger, "test1", modelMyModel, modelMyModelTarget),
 			pods: []PodState{
 				P(0, 3, 0.2),
 				P(1, 0, 0.1), // Winner (Low Queue, Low KV)
@@ -323,7 +414,7 @@ func commonTestCases(prio func(int) int) []testCase {
 		},
 		{
 			name:     "select active lora, low queue",
-			requests: integration.ReqLLM(logger, "test2", modelSQLLora, modelSQLLoraTarget),
+			requests: fwkepp.ReqLLM(logger, "test2", modelSQLLora, modelSQLLoraTarget),
 			pods: []PodState{
 				P(0, 0, 0.2, "foo", "bar"),
 				P(1, 0, 0.1, "foo", modelSQLLoraTarget), // Winner (Has LoRA)
@@ -335,20 +426,20 @@ func commonTestCases(prio func(int) int) []testCase {
 			},
 		},
 		{
-			name:     "no backend pods available",
-			requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
-			pods:     nil,
-			wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
-				"inference error: Internal - no pods available in datastore"),
+			name:               "no backend pods available",
+			requests:           fwkepp.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+			pods:               nil,
+			wantResponses:      ExpectRejectNoEndpoints(),
+			ignoreErrorMessage: true,
 		},
 		{
 			name: "request missing model field",
-			requests: integration.ReqRaw(
+			requests: fwkepp.ReqRaw(
 				map[string]string{"content-type": "application/json"},
 				`{"prompt":"hello world"}`,
 			),
 			wantResponses: ExpectReject(envoyTypePb.StatusCode_BadRequest,
-				"inference error: BadRequest - model not found in request body"),
+				"model not found in request body"),
 		},
 	}
 }
@@ -383,7 +474,7 @@ func metricReqTotal(model, target string, priority int) string {
     # HELP llm_d_epp_request_total [ALPHA] Total number of processed requests.
     # TYPE llm_d_epp_request_total counter
     llm_d_epp_request_total{%s} 1
-    `, labelsToString([]label{{"fairness_id", metadata.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+    `, labelsToString([]label{{"api_surface", reqcommon.APISurfaceUnknown.String()}, {"fairness_id", reqcommon.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
 }
 
 func metricReadyPods(count int) string {

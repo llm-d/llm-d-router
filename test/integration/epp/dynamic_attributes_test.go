@@ -26,7 +26,7 @@ import (
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 func TestDynamicAttributes_Concurrency(t *testing.T) {
@@ -47,10 +47,12 @@ plugins:
     concurrencyMode: requests
     headroom: 0.0
 - type: mock-metrics-source
+- type: core-metrics-extractor
 requestHandler:
   parsers:
   - pluginRef: passthrough-parser
 dataLayer:
+  injectDefaults: false
   sources:
   - pluginRef: mock-metrics-source
 schedulingProfiles:
@@ -88,7 +90,7 @@ flowControl:
 	require.NoError(t, err)
 
 	// Send Request 1 Headers
-	req1Headers := integration.ReqRaw(
+	req1Headers := fwkepp.ReqRaw(
 		map[string]string{
 			"hi":                         "mom",
 			metadata.ObjectiveKey:        modelMyModel,
@@ -130,7 +132,7 @@ flowControl:
 	require.NoError(t, err)
 
 	// Send Request 2 Headers
-	req2Headers := integration.ReqRaw(
+	req2Headers := fwkepp.ReqRaw(
 		map[string]string{
 			"hi":                         "mom",
 			metadata.ObjectiveKey:        modelMyModel,

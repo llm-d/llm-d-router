@@ -55,11 +55,12 @@ func (m *mockSaturationDetector) Saturation(ctx context.Context, candidatePods [
 }
 
 type mockFlowController struct {
-	outcome fctypes.QueueOutcome
-	err     error
-	called  bool
-	delay   time.Duration
-	request flowcontrol.FlowControlRequest
+	outcome           fctypes.QueueOutcome
+	err               error
+	called            bool
+	delay             time.Duration
+	request           flowcontrol.FlowControlRequest
+	releasedRequestID string
 }
 
 func (m *mockFlowController) EnqueueAndWait(
@@ -72,6 +73,20 @@ func (m *mockFlowController) EnqueueAndWait(
 	}
 	m.request = request
 	return m.outcome, m.err
+}
+
+func (m *mockFlowController) ReleaseDispatchReservation(requestID string) {
+	m.releasedRequestID = requestID
+}
+
+func TestFlowControlAdmissionController_ReleaseDispatchReservation(t *testing.T) {
+	t.Parallel()
+	fc := &mockFlowController{}
+	ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+
+	ac.ReleaseDispatchReservation("request-1")
+
+	require.Equal(t, "request-1", fc.releasedRequestID)
 }
 
 // --- Legacy Controller Tests ---
@@ -155,6 +170,8 @@ func TestLegacyAdmissionController_Admit(t *testing.T) {
 				if assert.ErrorAs(t, err, &e, "error should be of type errcommon.Error") {
 					assert.Equal(t, tc.expectErrCode, e.Code, "incorrect error code for scenario: %s", tc.name)
 					assert.Contains(t, e.Msg, tc.expectErrSubstr, "incorrect error message substring for scenario: %s", tc.name)
+					assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), e.Headers[errcommon.RequestDroppedReasonHeaderKey],
+						"a shed request must tell the client why it was dropped")
 				}
 			}
 		})

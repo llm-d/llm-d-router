@@ -21,8 +21,21 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
+
+// nixlFailureCounters pairs each NIXL failure counter attribute with the
+// descriptor it is exposed under.
+var nixlFailureCounters = []struct {
+	key  fwkplugin.DataKey
+	desc *prometheus.Desc
+}{
+	{attrmetrics.NixlFailedTransfersDataKey, eppmetrics.DescInferencePoolPerEndpointNixlFailedTransfers},
+	{attrmetrics.NixlFailedNotificationsDataKey, eppmetrics.DescInferencePoolPerEndpointNixlFailedNotifications},
+	{attrmetrics.NixlKVExpiredRequestsDataKey, eppmetrics.DescInferencePoolPerEndpointNixlKVExpiredRequests},
+}
 
 type inferencePoolMetricsCollector struct {
 	ds datastore.Datastore
@@ -42,6 +55,9 @@ func NewInferencePoolMetricsCollector(ds datastore.Datastore) prometheus.Collect
 // DescribeWithStability implements the prometheus.Collector interface.
 func (c *inferencePoolMetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- eppmetrics.DescInferencePoolPerEndpointQueueSize
+	for _, counter := range nixlFailureCounters {
+		ch <- counter.desc
+	}
 }
 
 // CollectWithStability implements the prometheus.Collector interface.
@@ -64,5 +80,19 @@ func (c *inferencePoolMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 			pool.Name,
 			pod.GetMetadata().ID.Name,
 		)
+		// An endpoint carries these attributes once its model server has reported the counters.
+		for _, counter := range nixlFailureCounters {
+			value, ok := attrmetrics.ReadScalarMetricValue(pod.GetAttributes(), counter.key)
+			if !ok {
+				continue
+			}
+			ch <- prometheus.MustNewConstMetric(
+				counter.desc,
+				prometheus.CounterValue,
+				float64(value),
+				pool.Name,
+				pod.GetMetadata().ID.Name,
+			)
+		}
 	}
 }

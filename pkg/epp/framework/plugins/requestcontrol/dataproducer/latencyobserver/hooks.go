@@ -115,12 +115,16 @@ func readInFlightRequests(endpoint fwksched.Endpoint, key fwkplugin.DataKey) int
 // Always returns nil: a returned error fails the request, and failing to record
 // an observation is never a reason to reject one.
 func (p *Observer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) error {
-	endpoint := primaryTarget(result)
-	if request == nil || request.RequestID == "" || endpoint == nil {
-		log.FromContext(ctx).V(logutil.DEBUG).Info("Skipping TTFT tracking: no request ID or no primary target")
+	// TTFT belongs to whichever endpoint produced the first token: the primary target.
+	var md *fwkdl.EndpointMetadata
+	if endpoint := result.PrimaryEndpoint(); endpoint != nil {
+		md = endpoint.GetMetadata()
+	}
+	if request == nil || request.RequestID == "" || md == nil {
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Skipping TTFT tracking: no request ID, no primary target, or no target metadata")
 		return nil
 	}
-	endpointID := endpoint.GetMetadata().ID.String()
+	endpointID := md.ID.String()
 	p.PluginState.Write(request.RequestID, dispatchStateKey, &dispatchInfo{
 		endpointID:   endpointID,
 		inflight:     p.pinnedInflight(request.RequestID, endpointID),
@@ -136,22 +140,6 @@ func (p *Observer) pinnedInflight(requestID, endpointID string) int64 {
 		return 0
 	}
 	return pinned[endpointID]
-}
-
-// primaryTarget returns the endpoint the primary profile selected, or nil. TTFT
-// belongs to whichever endpoint produced the first token.
-func primaryTarget(result *fwksched.SchedulingResult) fwksched.Endpoint {
-	if result == nil {
-		return nil
-	}
-	primary := result.ProfileResults[result.PrimaryProfileName]
-	if primary == nil || len(primary.TargetEndpoints) == 0 {
-		return nil
-	}
-	if endpoint := primary.TargetEndpoints[0]; endpoint != nil && endpoint.GetMetadata() != nil {
-		return endpoint
-	}
-	return nil
 }
 
 // ResponseBody turns the first response chunk into a TTFT observation and

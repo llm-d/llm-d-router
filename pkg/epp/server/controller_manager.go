@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -33,9 +34,19 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/common"
 )
+
+// objectiveType returns the Go type for a served llm-d.ai
+// InferenceObjective group version.
+func objectiveType(gv schema.GroupVersion) client.Object {
+	if gv == inferenceObjectiveV1GV {
+		return &apixv1.InferenceObjective{}
+	}
+	return &v1alpha2.InferenceObjective{}
+}
 
 // NewScheme creates a new runtime.Scheme and registers the types based on the config.
 func NewScheme(cfg ControllerConfig) *runtime.Scheme {
@@ -45,11 +56,27 @@ func NewScheme(cfg ControllerConfig) *runtime.Scheme {
 
 	if cfg.startCrdReconcilers {
 		if cfg.hasInferenceObjective {
-			s.AddKnownTypes(cfg.InferenceObjectiveGV,
-				&v1alpha2.InferenceObjective{},
-				&v1alpha2.InferenceObjectiveList{},
-			)
+			if cfg.InferenceObjectiveGV == inferenceObjectiveV1GV {
+				s.AddKnownTypes(cfg.InferenceObjectiveGV,
+					&apixv1.InferenceObjective{},
+					&apixv1.InferenceObjectiveList{},
+				)
+			} else {
+				s.AddKnownTypes(cfg.InferenceObjectiveGV,
+					&v1alpha2.InferenceObjective{},
+					&v1alpha2.InferenceObjectiveList{},
+				)
+			}
 			metav1.AddToGroupVersion(s, cfg.InferenceObjectiveGV)
+			// The secondary version is v1alpha2 whenever v1 is primary;
+			// v1 served always takes primary, so the reverse never occurs.
+			if cfg.SecondaryObjectiveGV == inferenceAPIGV {
+				s.AddKnownTypes(cfg.SecondaryObjectiveGV,
+					&v1alpha2.InferenceObjective{},
+					&v1alpha2.InferenceObjectiveList{},
+				)
+				metav1.AddToGroupVersion(s, cfg.SecondaryObjectiveGV)
+			}
 		}
 		if cfg.hasInferenceModelRewrites {
 			s.AddKnownTypes(cfg.InferenceModelRewriteGV,
@@ -79,9 +106,15 @@ func defaultManagerOptions(cfg ControllerConfig, gknn common.GKNN, metricsServer
 	}
 	if cfg.startCrdReconcilers {
 		if cfg.hasInferenceObjective {
-			opt.Cache.ByObject[&v1alpha2.InferenceObjective{}] = cache.ByObject{Namespaces: map[string]cache.Config{
+			obj := objectiveType(cfg.InferenceObjectiveGV)
+			opt.Cache.ByObject[obj] = cache.ByObject{Namespaces: map[string]cache.Config{
 				gknn.Namespace: {},
 			}}
+			if cfg.SecondaryObjectiveGV == inferenceAPIGV {
+				opt.Cache.ByObject[&v1alpha2.InferenceObjective{}] = cache.ByObject{Namespaces: map[string]cache.Config{
+					gknn.Namespace: {},
+				}}
+			}
 		} else {
 			ctrl.Log.WithName("controllerManager").Info("Warning: InferenceObjective GVK does not exist on the server. Skipping its reconciler/cache.")
 		}

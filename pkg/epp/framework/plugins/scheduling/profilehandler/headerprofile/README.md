@@ -52,7 +52,7 @@ and makes one separate scheduling call per profile.
 | Profiles per request | Exactly one, ever | Decode always, plus encode/prefill when their decider approves -- up to three |
 | Scheduling calls per request | One per profile (caller drives the cascade) | One cycle picks every stage the request needs |
 | Primary profile | Whichever profile the header named | Always decode |
-| `requestcontrol.PreRequest` | Not implemented -- nothing downstream reads pod addresses from headers | Implemented: stamps `x-prefiller-host-port` / `x-encoder-hosts-ports` for the decode sidecar |
+| `requestcontrol.PreRequest` | Not implemented -- nothing downstream reads pod addresses from headers | Implemented: stamps `x-llm-d-prefiller-host-port` / `x-llm-d-encoder-hosts-ports` for the decode sidecar |
 | Fits | The coordinator model, which tracks cross-profile state itself | The sidecar model (llm-d-router), where the decode sidecar orchestrates the remaining hops |
 
 ## Configuration
@@ -61,7 +61,7 @@ and makes one separate scheduling call per profile.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `headerName` | string | `EPP-Profile` | Request header whose value names the scheduling profile to run. Matched case-insensitively: the EPP lowercases every incoming header name, so this is normalized to lowercase regardless of how it's written here. |
+| `headerName` | string | `x-llm-d-epp-profile` | Request header whose value names the scheduling profile to run. Matched case-insensitively: the EPP lowercases every incoming header name, so this is normalized to lowercase regardless of how it's written here. |
 | `defaultProfile` | string | `decode` | Scheduling profile to run when the header is missing or blank and more than one profile is configured. Matched case-sensitively against `schedulingProfiles` names, like the header value itself. Ignored when only one profile is configured, since that profile always runs. |
 
 ### Example
@@ -84,8 +84,8 @@ schedulingProfiles:
   - pluginRef: decode-filter
 ```
 
-A request with `EPP-Profile: prefill` runs only the `prefill` profile. A request with no
-`EPP-Profile` header at all -- e.g. `GET /models` -- runs `decode`, the default.
+A request with `x-llm-d-epp-profile: prefill` runs only the `prefill` profile. A request with no
+`x-llm-d-epp-profile` header at all -- e.g. `GET /models` -- runs `decode`, the default.
 
 To use a different fallback than `decode`:
 

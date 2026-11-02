@@ -131,7 +131,10 @@ func MaxSaturationDetectorFactory(
 // data dependencies directly; re-declaring the union here would additionally subject those keys
 // to the data graph's layer-order check, which places a plugin implementing no scheduling or
 // requestcontrol interface before every producer and rejects the configuration.
-var _ flowcontrol.SaturationDetector = &detector{}
+var (
+	_ flowcontrol.SaturationDetector         = &detector{}
+	_ flowcontrol.DispatchReservationTracker = &detector{}
+)
 
 // detector combines child saturation detectors, reporting the maximum of their signals.
 type detector struct {
@@ -197,4 +200,29 @@ func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoin
 		evaluated = true
 	}
 	return maxSat
+}
+
+// ReserveDispatch forwards a flow-control dispatch reservation to every child that tracks
+// reservations. Flow control finds reservation trackers by asserting on the configured detector,
+// so a composite that did not forward would leave its children blind to dispatched requests
+// until the in-flight load producer publishes them.
+func (d *detector) ReserveDispatch(requestID string) bool {
+	reserved := false
+	for _, child := range d.children {
+		if tracker, ok := child.(flowcontrol.DispatchReservationTracker); ok && tracker.ReserveDispatch(requestID) {
+			reserved = true
+		}
+	}
+	return reserved
+}
+
+// ReleaseDispatch forwards the release to every child that tracks reservations.
+func (d *detector) ReleaseDispatch(requestID string) bool {
+	released := false
+	for _, child := range d.children {
+		if tracker, ok := child.(flowcontrol.DispatchReservationTracker); ok && tracker.ReleaseDispatch(requestID) {
+			released = true
+		}
+	}
+	return released
 }

@@ -24,10 +24,12 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 
 	"github.com/go-logr/logr/funcr"
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -160,7 +162,7 @@ var _ = Describe("readJSONBody", func() {
 	It("logs the refusal when the response cannot be written", func() {
 		logged := captureLogs(proxy, 0)
 
-		_, _, ok := proxy.readJSONBody(postBody(`null`), errWriter{})
+		_, _, ok := proxy.readJSONBody(withContextLogger(proxy, postBody(`null`)), errWriter{})
 
 		Expect(ok).To(BeFalse())
 		Expect(*logged).To(ContainElement(ContainSubstring("failed to send error response to client")))
@@ -171,7 +173,7 @@ var _ = Describe("readJSONBody", func() {
 		func(newRequest func() *http.Request, reason string) {
 			logged := captureLogs(proxy, logging.DEBUG)
 
-			_, _, ok := proxy.readJSONBody(newRequest(), httptest.NewRecorder())
+			_, _, ok := proxy.readJSONBody(withContextLogger(proxy, newRequest()), httptest.NewRecorder())
 
 			Expect(ok).To(BeFalse())
 			Expect(*logged).To(ContainElement(And(ContainSubstring("invalid request body"), ContainSubstring(reason))))
@@ -185,7 +187,7 @@ var _ = Describe("readJSONBody", func() {
 	It("does not log the refusal reason below debug level", func() {
 		logged := captureLogs(proxy, logging.VERBOSE)
 
-		_, _, ok := proxy.readJSONBody(postBody(`null`), httptest.NewRecorder())
+		_, _, ok := proxy.readJSONBody(withContextLogger(proxy, postBody(`null`)), httptest.NewRecorder())
 
 		Expect(ok).To(BeFalse())
 		Expect(*logged).ToNot(ContainElement(ContainSubstring("invalid request body")))
@@ -295,13 +297,69 @@ var _ = Describe("readJSONBody", func() {
 		logged := captureLogs(proxy, 0)
 
 		_, _, ok := proxy.readJSONBody(
-			httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody))), httptest.NewRecorder())
+			withContextLogger(proxy, httptest.NewRequest(http.MethodPost, reqcommon.PathResponses, bytes.NewReader([]byte(statefulBody)))), httptest.NewRecorder())
 
 		Expect(ok).To(BeFalse())
 		Expect(*logged).To(ContainElement(And(
 			ContainSubstring("rejecting unsupported responses field"),
 			ContainSubstring(reqcommon.FieldPreviousResponseID),
 		)))
+	})
+})
+
+var _ = Describe("createDecoderProxyHandler", func() {
+	It("labels the decoder-unavailable error body as JSON", func() {
+		decoder := httptest.NewServer(http.NotFoundHandler())
+		decoderURL, err := url.Parse(decoder.URL)
+		Expect(err).ToNot(HaveOccurred())
+		decoder.Close()
+
+		proxy := NewProxy(Config{Port: "0", DecoderURL: decoderURL, KVConnector: constants.KVConnectorNIXLV2})
+		w := httptest.NewRecorder()
+
+		proxy.createDecoderProxyHandler(decoderURL, false).ServeHTTP(w, postBody(`{"model":"m"}`))
+
+		resp := w.Result()
+		Expect(resp.StatusCode).To(Equal(http.StatusServiceUnavailable))
+		Expect(resp.Header.Get("Content-Type")).To(Equal("application/json"))
+	})
+
+	// The catch-all route reaches the decoder without the inference handler,
+	// so its requests carry no context logger.
+	It("logs a decoder failure through the proxy logger when the request has no context logger", func() {
+		decoder := httptest.NewServer(http.NotFoundHandler())
+		decoderURL, err := url.Parse(decoder.URL)
+		Expect(err).ToNot(HaveOccurred())
+		decoder.Close()
+
+		proxy := NewProxy(Config{Port: "0", DecoderURL: decoderURL})
+		logged := captureLogs(proxy, 0)
+
+		proxy.createDecoderProxyHandler(decoderURL, false).ServeHTTP(httptest.NewRecorder(),
+			httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+		Expect(*logged).To(ContainElement(ContainSubstring("failed to connect to vLLM decoder")))
+	})
+
+	It("logs a decoder failure through the request's context logger", func() {
+		decoder := httptest.NewServer(http.NotFoundHandler())
+		decoderURL, err := url.Parse(decoder.URL)
+		Expect(err).ToNot(HaveOccurred())
+		decoder.Close()
+
+		proxy := NewProxy(Config{Port: "0", DecoderURL: decoderURL})
+		proxyLogged := captureLogs(proxy, 0)
+		var requestLogged []string
+		requestLogger := funcr.New(func(prefix, args string) {
+			requestLogged = append(requestLogged, prefix+" "+args)
+		}, funcr.Options{})
+		r := postBody(`{"model":"m"}`)
+
+		proxy.createDecoderProxyHandler(decoderURL, false).ServeHTTP(httptest.NewRecorder(),
+			r.WithContext(log.IntoContext(r.Context(), requestLogger)))
+
+		Expect(requestLogged).To(ContainElement(ContainSubstring("failed to connect to vLLM decoder")))
+		Expect(*proxyLogged).To(BeEmpty())
 	})
 })
 
@@ -313,6 +371,13 @@ func captureLogs(proxy *Server, verbosity int) *[]string {
 		*logged = append(*logged, prefix+" "+args)
 	}, funcr.Options{Verbosity: verbosity})
 	return logged
+}
+
+// withContextLogger seeds the proxy's process-scoped logger into the request
+// context, standing in for disaggregatedPrefillHandler's seeding so captured
+// lines cover code that reads the logger from the context.
+func withContextLogger(proxy *Server, r *http.Request) *http.Request {
+	return r.WithContext(log.IntoContext(r.Context(), proxy.logger))
 }
 
 // expectErrorEnvelope asserts the vLLM error envelope a gateway unmarshals and

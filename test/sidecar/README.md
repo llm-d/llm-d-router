@@ -1,5 +1,7 @@
 # Testing
 
+Automated P/D coverage of the sidecar lives in `test/e2e` ("Running a PD configuration with nixlv2 connector and metrics validation") and `pkg/sidecar/proxy`. This directory holds manifests and steps for manual deployment.
+
 ## Testing the NIXLConnector
 
 The [nixl](config/overlays/llmd/nixl) directory contains the configuration files deploying
@@ -26,7 +28,7 @@ Send a request:
 ```
 $ curl http://localhost:8000/v1/completions \
       -H "Content-Type: application/json" \
-      -H "x-prefiller-url: http://qwen-prefiller:8000" \
+      -H "x-llm-d-prefiller-host-port: qwen-prefiller:8000" \
       -d '{"model": "Qwen/Qwen2-0.5B", "prompt": "Question: Greta worked 40 hours and was paid $12 per hour. Her friend Lisa earned $15 per hour at her job. How many hours would Lisa have to work to equal Gretas earnings for 40 hours?", "max_tokens": 200 }'
 ```
 

@@ -58,9 +58,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	eppServer "github.com/llm-d/llm-d-router/pkg/epp/server"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
-	"github.com/llm-d/llm-d-router/test/integration"
 )
 
 // Global State (Initialized in TestMain)
@@ -152,6 +152,7 @@ func WithEmitEndpointScores() HarnessOption {
 // metricsBackend abstracts how pod metrics are injected into the test environment.
 type metricsBackend interface {
 	SetPodMetrics(m map[types.NamespacedName]*fwkdl.Metrics)
+	SetPodPollErrors(errs map[types.NamespacedName]error)
 }
 
 // mockDataSourceBackend wraps the mock DataSource to implement metricsBackend.
@@ -161,6 +162,10 @@ type mockDataSourceBackend struct {
 
 func (b *mockDataSourceBackend) SetPodMetrics(m map[types.NamespacedName]*fwkdl.Metrics) {
 	b.mockDataSource.SetMetrics(m)
+}
+
+func (b *mockDataSourceBackend) SetPodPollErrors(errs map[types.NamespacedName]error) {
+	b.mockDataSource.SetErrors(errs)
 }
 
 // TestHarness encapsulates the environment for a single isolated EPP test run.
@@ -289,7 +294,7 @@ func NewTestHarness(ctx context.Context, t *testing.T, opts ...HarnessOption) *T
 		<-mgrDone
 	})
 
-	extProcClient, conn := integration.ExtProcServerClient(
+	extProcClient, conn := fwkepp.ExtProcServerClient(
 		mgrCtx,
 		t,
 		grpcPort,
@@ -370,6 +375,9 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 			KVCacheUsagePercent: p.kvCacheUsage,
 			ActiveModels:        activeModelsMap,
 			WaitingModels:       make(map[string]int),
+			// A pod that lists adapters has reported max_lora. Model it at
+			// capacity, so a pod without the requested adapter scores as full.
+			MaxActiveModels: len(activeModelsMap),
 		}
 	}
 	h.metricsBackend.SetPodMetrics(metricsMap)
@@ -378,7 +386,7 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 	for _, p := range pods {
 		name := fmt.Sprintf("pod-%d", p.index)
 
-		pod := testutil.MakePod(name).
+		pod := fwkk8s.MakePod(name).
 			Namespace(h.Namespace).
 			ReadyCondition(). // Sets Status.Conditions.
 			Labels(map[string]string{"app": testPoolName}).
@@ -399,6 +407,12 @@ func (h *TestHarness) WithPods(pods []PodState) *TestHarness {
 		require.NoError(h.t, k8sClient.Status().Update(h.ctx, pod), "failed to update status for pod %s", name)
 	}
 	return h
+}
+
+// SetPodPollErrors makes every metrics poll of the given endpoints fail with the
+// mapped error. A nil map makes every poll succeed.
+func (h *TestHarness) SetPodPollErrors(errs map[types.NamespacedName]error) {
+	h.metricsBackend.SetPodPollErrors(errs)
 }
 
 // WaitForReadyPodsMetric blocks until the prometheus metric 'llm_d_epp_ready_endpoints' matches the expected count.

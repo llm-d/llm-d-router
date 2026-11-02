@@ -39,12 +39,37 @@ upstream. No-op otherwise.
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
 to `vllm` when omitted.
 
+SGLang EAGLE/MTP events describe cached positions as overlapping token pairs.
+The index preserves their trailing lookahead and learns each pod's page size.
+Request matching hashes complete bigram pages using the same format.
+A page of `P` cached positions requires `P+1` matching request tokens.
+Bigram endpoints report `PrefixCacheMatchInfo` in token-sized blocks.
+This preserves cache-tier weights and exact cached-token counts across page sizes.
+Plain-token workers use `tokenProcessorConfig.blockSizeTokens`.
+
 Set `kvEventsConfig.tracing` to `true` to emit OpenTelemetry spans for the
 KV-event pipeline (`events_receive`, `events_process`, `events_decode`). It
 defaults to `false`: KV events arrive at many times the inference request rate,
 so with a shared head sampler always-on event spans crowd request traces out of
 the exported volume. The EPP `--tracing` flag gates tracing as a whole, so this
 field has no effect while that is off.
+
+Set `kvEventsConfig.podDiscoveryConfig.snapshotSocketPort` to the port where
+vLLM serves KV-event snapshots (offset by data-parallel rank like `socketPort`)
+to warm a pod's index from its current cache state. This is experimental: it
+requires a vLLM build with
+[vllm-project/vllm#57789](https://github.com/vllm-project/vllm/pull/57789),
+whose wire format can still change.
+
+A subscriber that joins mid-stream, or sees the engine restart, loads the
+snapshot instead of replaying buffered events, then follows live events after
+the snapshot's sequence number. A restart shows as a sequence that moves
+backwards or as a new publisher identity, which vLLM sends with every batch
+and snapshot. Without `replaySocketPort`, a gap in the event sequence reloads
+the snapshot as well. While the snapshot fails, is unavailable or comes from
+another publisher identity, the pod is indexed from live events alone, as it
+is with neither port set, and the load is retried after the replay cooldown.
+A snapshot that loads replaces that state.
 
 See [llm-d-kv-cache/docs/configuration.md](https://github.com/llm-d/llm-d-kv-cache/blob/main/docs/configuration.md)
 for nested parameter details.

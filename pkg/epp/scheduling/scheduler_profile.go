@@ -32,6 +32,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -53,9 +54,16 @@ func NewSchedulerProfile() *SchedulerProfile {
 
 // SchedulerProfile provides a profile configuration for the scheduler which influence routing decisions.
 type SchedulerProfile struct {
+	name    string
 	filters []fwksched.Filter
 	scorers []*WeightedScorer
 	picker  fwksched.Picker
+}
+
+// WithName sets the profile name that labels the profile's scheduler metrics.
+func (p *SchedulerProfile) WithName(name string) *SchedulerProfile {
+	p.name = name
+	return p
 }
 
 // WithFilters sets the given filter plugins as the Filter plugins.
@@ -158,7 +166,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		debug.Info("Before running filter plugins", "endpoints", filteredEndpoints)
 	}
 
-	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "filter_endpoints",
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanFilterEndpoints,
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
@@ -174,14 +182,21 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 			verbose.Info("Running filter plugin", "plugin", typedName)
 		}
 		// The violations are dropped: Filter has no error return, so a rejected
-		// write cannot fail the request here. Scope has already dropped the write,
-		// logged it, and counted it under plugin_data_scope_violations_total, which
-		// is where a misdeclared filter surfaces in production. Producers run under
-		// executePluginsAsDAG, which does fail the request on one.
-		scoped, _ := datalayer.Scope(logger, filterExtensionPoint, filter, filteredEndpoints)
+		// write cannot fail the request here. The scope has already dropped the
+		// write, logged it, and counted it under
+		// plugin_data_scope_violations_total, which is where a misdeclared filter
+		// surfaces in production. Producers run under executePluginsAsDAG, which
+		// does fail the request on one.
+		scopedRequest, scoped, _ := datalayer.ScopeInvocation(logger, filterExtensionPoint, filter, request, filteredEndpoints)
+		candidates := len(filteredEndpoints)
 		before := time.Now()
-		filteredEndpoints = datalayer.Unscope(filter.Filter(ctx, request, scoped))
+		filteredEndpoints = datalayer.Unscope(filter.Filter(ctx, scopedRequest, scoped))
 		metrics.RecordPluginProcessingLatency(filterExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
+		// A counter panics on a negative Add, and a filter may return more
+		// endpoints than it received.
+		if eliminated := candidates - len(filteredEndpoints); eliminated > 0 {
+			metrics.RecordSchedulerFilterEliminated(p.name, typedName.Type, typedName.Name, eliminated)
+		}
 		if debugEnabled {
 			debug.Info("Completed running filter plugin successfully", "plugin", typedName, "endpoints", filteredEndpoints)
 		}
@@ -224,7 +239,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	// The tracer is resolved once and threaded into runScorer so the per-scorer
 	// spans reuse it rather than rebuilding instrumentation options per scorer.
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "scoring", internalSpanKind)
+	ctx, span := tracer.Start(ctx, semconv.LLMDEPPSpanScoring, internalSpanKind)
 	defer span.End()
 	// On the default (tracing-disabled) path Start returns a non-recording span;
 	// skip all attribute and child-span construction so the scoring hot path
@@ -253,7 +268,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 			if debugEnabled {
 				debug.Info("Calculated score", "plugin", typedName, "endpoint", endpoint.GetMetadata().ID, "score", score)
 			}
-			weightedScorePerEndpoint[endpoint] += enforceScoreRange(score) * scorer.Weight()
+			weightedScorePerEndpoint[datalayer.UnscopeEndpoint(endpoint)] += enforceScoreRange(score) * scorer.Weight()
 		}
 		if debugEnabled {
 			debug.Info("Completed running scorer plugin successfully", "plugin", typedName)
@@ -267,6 +282,8 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 }
 
 // runScorer invokes a single weighted scorer and records its latency metric.
+// The returned map is the scorer's own, keyed by scoped endpoints; the caller
+// unwraps each key with datalayer.UnscopeEndpoint.
 // When tracing is active it wraps the call in a scorer.<type> span
 // annotated with the scorer's identity, weight, candidate count, and aggregate
 // score signals; aggregates are derived from the returned score map only, with
@@ -279,11 +296,12 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 	// embeds the Scorer interface, which does not carry Produces/Consumes, so
 	// scoping the wrapper would hide every declaration the scorer makes.
 	logger := log.FromContext(ctx)
-	scoped, _ := datalayer.Scope(logger, scorerExtensionPoint, scorer.Scorer, endpoints) // violations dropped: Score has no error return, see runFilterPlugins
+	// violations dropped: Score has no error return, see runFilterPlugins
+	scopedRequest, scoped, _ := datalayer.ScopeInvocation(logger, scorerExtensionPoint, scorer.Scorer, request, endpoints)
 
 	if !tracingActive {
 		before := time.Now()
-		scores := datalayer.UnscopeScores(scorer.Score(ctx, request, scoped))
+		scores := scorer.Score(ctx, scopedRequest, scoped)
 		metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
 		return scores
 	}
@@ -298,7 +316,7 @@ func runScorer(ctx context.Context, tracer trace.Tracer, tracingActive bool, sco
 	)
 
 	before := time.Now()
-	scores := datalayer.UnscopeScores(scorer.Score(ctx, request, scoped))
+	scores := scorer.Score(ctx, scopedRequest, scoped)
 	metrics.RecordPluginProcessingLatency(scorerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
 
 	if len(scores) > 0 {
@@ -329,8 +347,8 @@ func requestSpanAttributes(request *fwksched.InferenceRequest) []attribute.KeyVa
 	if request.TargetModel != "" {
 		attributes = append(attributes, semconv.GenAIRequestModel(request.TargetModel))
 	}
-	if request.RequestID != "" {
-		attributes = append(attributes, semconv.GenAIRequestID(request.RequestID))
+	if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+		attributes = append(attributes, semconv.GenAIRequestID(clientRequestID))
 	}
 	return attributes
 }
@@ -363,7 +381,7 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 		debug.Info("Candidate pods for picking", "endpoints-weighted-score", scoredEndpoints)
 	}
 
-	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "pick_endpoints",
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanPickEndpoints,
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()

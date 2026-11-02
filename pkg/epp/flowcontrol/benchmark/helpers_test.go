@@ -39,6 +39,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/globalstrict"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
@@ -301,10 +302,11 @@ func setupBenchmarkHarness(
 	}
 
 	fc := controller.NewFlowController(ctx, "benchmark", cfg, controller.Deps{
-		Registry:           reg,
-		SaturationDetector: detector,
-		EndpointCandidates: &mocks.MockEndpointCandidates{},
-		UsageLimitPolicy:   usagelimits.DefaultPolicy()},
+		Registry:            reg,
+		SaturationDetector:  detector,
+		EndpointCandidates:  &mocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
+		BandSelectionPolicy: bandselection.DefaultPolicy()},
 	)
 
 	return fc, detector
@@ -367,10 +369,11 @@ func setupFullPathBenchmark(ctx context.Context, b *testing.B, name string, numP
 		ExpiryCleanupInterval:    1 * time.Hour,
 		EnqueueChannelBufferSize: 2000,
 	}, controller.Deps{
-		Registry:           reg,
-		SaturationDetector: realDetector,
-		EndpointCandidates: &mocks.MockEndpointCandidates{Candidates: []fwkdl.Endpoint{ep}},
-		UsageLimitPolicy:   usagelimits.DefaultPolicy(),
+		Registry:            reg,
+		SaturationDetector:  realDetector,
+		EndpointCandidates:  &mocks.MockEndpointCandidates{Candidates: []fwkdl.Endpoint{ep}},
+		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
 	})
 
 	schedEp := scheduling.NewEndpoint(epMeta, fwkdl.NewMetrics(), nil)

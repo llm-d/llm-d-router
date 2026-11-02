@@ -192,6 +192,36 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 			},
 		},
 		{
+			name:    "generate request with trailing slash",
+			headers: map[string]string{":path": "/inference/v1/generate/"},
+			body: map[string]any{
+				"token_ids": []any{1, 2, 3},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: []uint32{1, 2, 3},
+				},
+				Payload: fwkrh.PayloadMap{
+					"token_ids": json.RawMessage(`[1,2,3]`),
+				},
+			},
+		},
+		{
+			name:    "generate request with trailing slash and query",
+			headers: map[string]string{":path": "/inference/v1/generate/?request_id=123"},
+			body: map[string]any{
+				"token_ids": []any{1, 2, 3},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				Generate: &fwkrh.GenerateRequest{
+					TokenIDs: []uint32{1, 2, 3},
+				},
+				Payload: fwkrh.PayloadMap{
+					"token_ids": json.RawMessage(`[1,2,3]`),
+				},
+			},
+		},
+		{
 			name:    "generate request with token_ids and cache_salt",
 			headers: map[string]string{":path": "/inference/v1/generate"},
 			body: map[string]any{
@@ -383,15 +413,24 @@ func TestVllmHTTPParser_ParseRequest_GenerateErrorPaths(t *testing.T) {
 func TestVllmHTTPParser_RejectsNonGeneratePaths(t *testing.T) {
 	parser := NewVllmHTTPParser()
 
-	body, _ := json.Marshal(map[string]any{
-		"prompt": "hello world",
-	})
-	_, err := parser.ParseRequest(context.Background(), body, map[string]string{":path": "/v1/completions"})
-	if err == nil {
-		t.Fatal("ParseRequest() expected error for non-generate path, got nil")
-	}
-	if !strings.Contains(err.Error(), "unsupported path") {
-		t.Errorf("expected error to contain 'unsupported path', got: %v", err)
+	body := []byte(`{"token_ids":[1,2,3]}`)
+	for _, path := range []string{
+		"/v1/completions",
+		"/inference/v1/generate/bad",
+		"/inference/v1/generate/bad/",
+	} {
+		t.Run(path, func(t *testing.T) {
+			got, err := parser.ParseRequest(context.Background(), body, map[string]string{":path": path})
+			if err == nil {
+				t.Fatal("ParseRequest() expected error for non-generate path, got nil")
+			}
+			if !strings.Contains(err.Error(), "unsupported path") {
+				t.Errorf("expected error to contain 'unsupported path', got: %v", err)
+			}
+			if got != nil {
+				t.Errorf("ParseRequest() result = %v, want nil", got)
+			}
+		})
 	}
 }
 

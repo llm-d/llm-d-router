@@ -52,6 +52,19 @@ func (s *lruStore) Peek(key BlockHash) (*PodCache, bool) {
 	return s.lru.Peek(key)
 }
 
+// PeekInto appends each key's cache, or nil when absent, to out[:0] under one
+// shared acquisition, without touching recency.
+func (s *lruStore) PeekInto(keys []BlockHash, out []*PodCache) []*PodCache {
+	out = out[:0]
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, key := range keys {
+		pc, _ := s.lru.Peek(key)
+		out = append(out, pc)
+	}
+	return out
+}
+
 // Promote marks keys most recently used in order, so the last key ends up
 // the most recent, under one acquisition. Absent keys are skipped.
 func (s *lruStore) Promote(keys []BlockHash) {

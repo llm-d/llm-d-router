@@ -48,25 +48,22 @@ const (
 	ErrorCodeUpstream5xx       = "upstream_5xx"
 	ErrorCodeUpstreamTransport = "upstream_transport"
 	ErrorCodeInternal          = "internal"
+	// ErrorCodePromptTokenMismatch is recorded on step_errors_total by the
+	// decode step when prompt_token_parity is "error" and the decode worker
+	// reported a prompt token count different from the rendered one.
+	ErrorCodePromptTokenMismatch = "prompt_token_mismatch"
 )
 
 // Upstream label values for the upstream_request_* metrics. Step names come
 // from each step file's own StepName constant (pkg/coordinator/steps/*.go).
 const (
+	UpstreamAsyncBroker       = "async-broker"
 	UpstreamRender            = "render"
 	UpstreamReplaceMediaURLs  = "replace-media-urls"
 	UpstreamEncode            = "encode"
 	UpstreamPrefill           = "prefill"
 	UpstreamConditionalDecode = "conditional-decode"
 	UpstreamDecode            = "decode"
-)
-
-// Path label values for execution_path_total. Encode always implies prefill,
-// so encode-decode is not a reachable path.
-const (
-	PathDecodeOnly          = "decode-only"
-	PathPrefillDecode       = "prefill-decode"
-	PathEncodePrefillDecode = "encode-prefill-decode"
 )
 
 // Result label values for conditional_decode_probes_total. Served covers 2xx/3xx
@@ -83,10 +80,55 @@ const (
 	ProbeResultTransportError = "transport_error"
 )
 
+// Route label values for orchestration_overhead_seconds. These name the
+// coordinator's registered inference routes, not the raw URL path.
+const (
+	RouteChatCompletions = "chat_completions"
+	RouteCompletions     = "completions"
+	RouteResponses       = "responses"
+	RouteMessages        = "messages"
+	RouteGenerate        = "generate"
+	RouteUnknown         = "unknown"
+)
+
+// MediaType label values for media_items. The coordinator currently
+// inventories image parts only; any other type is collapsed to other so the
+// label set stays bounded.
+const (
+	MediaTypeImage = "image"
+	MediaTypeOther = "other"
+)
+
+// Download result label values for media_download_duration_seconds.
+const (
+	DownloadResultSuccess   = "success"
+	DownloadResultError     = "error"
+	DownloadResultCancelled = "cancelled"
+)
+
+// Stream label values for response_size_bytes. Fixed boolean-like strings, not
+// the request's raw stream field.
+const (
+	StreamTrue  = "true"
+	StreamFalse = "false"
+)
+
+// CountBuckets is a small-integer histogram ladder for per-request counts
+// (encode fan-out, media item inventory).
+var CountBuckets = []float64{0, 1, 2, 4, 8, 16, 32, 64, 128, 256}
+
 var (
-	modelLabel    = []string{"model_name"}
-	stepLabel     = []string{"step"}
-	upstreamLabel = []string{"upstream"}
+	modelLabel     = []string{"model_name"}
+	stepLabel      = []string{"step"}
+	upstreamLabel  = []string{"upstream"}
+	routeLabel     = []string{"route"}
+	mediaTypeLabel = []string{"media_type"}
+	resultLabel    = []string{"result"}
+	streamLabel    = []string{"stream"}
+	// parityLabels are model_name, the client's api type and whether the
+	// decode leg carried the rendered token IDs (so a mismatch means the
+	// worker ignored them) or rendered the prompt itself (renderer drift).
+	parityLabels = []string{"model_name", "api_type", "ids_forwarded"}
 )
 
 // withLabel returns a fresh slice of base followed by extra. It allocates a
@@ -125,6 +167,12 @@ func allCollectors() []resettableCollector {
 		upstreamRequestDuration,
 		executionPathTotal,
 		conditionalDecodeProbesTotal,
+		encodeSubrequests,
+		orchestrationOverhead,
+		mediaItems,
+		mediaDownloadDuration,
+		responseSize,
+		promptTokenMismatchTotal,
 	}
 }
 

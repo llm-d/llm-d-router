@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/leaderelection"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -42,9 +43,13 @@ import (
 )
 
 const (
-	DefaultGrpcPort           = 9002
-	DefaultPoolNamespace      = "default"        // default when pool namespace is empty (CLI flag default is empty)
-	DefaultDrainTimeout       = 30 * time.Second // graceful shutdown drain window
+	DefaultGrpcPort      = 9002
+	DefaultPoolNamespace = "default"        // default when pool namespace is empty (CLI flag default is empty)
+	DefaultDrainTimeout  = 30 * time.Second // graceful shutdown drain window
+	// Leader election timings; these are the controller-runtime defaults.
+	DefaultLeaseDuration      = 15 * time.Second
+	DefaultRenewDeadline      = 10 * time.Second
+	DefaultRetryPeriod        = 2 * time.Second
 	MinRefreshMetricsInterval = 50 * time.Millisecond
 )
 
@@ -71,11 +76,17 @@ type Options struct {
 	//
 	GRPCPort              uint16        // gRPC port used for communicating with Envoy proxy.
 	EnableLeaderElection  bool          // Enables leader election for high availability
+	LeaseName             string        // Leader election Lease name; empty derives epp-<pool-namespace>-<pool-name>.llm-d.ai.
+	LeaseDuration         time.Duration // How long a standby waits after the last renewal before it takes the lease.
+	RenewDeadline         time.Duration // How long the leader retries a failed renewal before it gives up leadership.
+	RetryPeriod           time.Duration // Wait between attempts to acquire or renew the lease.
 	DrainTimeout          time.Duration // Graceful shutdown drain window; ext_proc keeps serving this long after SIGTERM.
 	GRPCMaxRecvMsgSize    int           // Maximum size of a gRPC message to receive (parsed bytes).
 	GRPCMaxSendMsgSize    int           // Maximum size of a gRPC message to send (parsed bytes).
 	GRPCMaxRecvMsgSizeStr string        // Raw string value from CLI flag for receive limit.
 	GRPCMaxSendMsgSizeStr string        // Raw string value from CLI flag for send limit.
+	MaxRequestBodySize    int           // Maximum request body size in bytes; 0 means unlimited.
+	MaxRequestBodySizeStr string        // Raw string value from CLI flag for the request body limit.
 	//
 	// InferencePool.
 	//
@@ -107,33 +118,35 @@ type Options struct {
 	//
 	// Diagnostics.
 	//
-	logging.LoggingOptions           // Logging configuration.
-	Tracing                 bool     // Enables emitting traces.
-	HealthChecking          bool     // Enables health checking.
-	MetricsPort             uint16   // The metrics port exposed by EPP.
-	GRPCHealthPort          uint16   // The port used for gRPC liveness and readiness probes.
-	EnablePprof             bool     // Enables pprof handlers.
-	CertPath                string   // The path to the certificate for secure serving.
-	EnableCertReload        bool     // Enables certificate reloading of the certificates specified in --cert-path.
-	SecureServing           bool     // Enables secure serving.
-	TLSMinVersion           string   // Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13).
-	TLSCipherSuites         []string // TLS cipher suites (Go crypto/tls names). Only effective for TLS 1.2 and below.
-	tlsMinVersionValue      uint16   // Parsed TLS min version value.
-	tlsCipherSuiteValues    []uint16 // Parsed TLS cipher suite values.
-	MetricsEndpointAuth     bool     // Enables authentication and authorization of the metrics endpoint.
-	MetricsClientCAFile     string   // PEM CA that requires a verified client cert on the metrics endpoint.
-	MetricsCertDir          string   // Directory with the metrics server certificates that enables metrics TLS.
-	EnableGRPCStreamMetrics bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
+	logging.LoggingOptions              // Logging configuration.
+	Tracing                    bool     // Enables emitting traces.
+	EnableToolCallingTelemetry bool     // Enables tool-calling request and response telemetry.
+	HealthChecking             bool     // Enables health checking.
+	MetricsPort                uint16   // The metrics port exposed by EPP.
+	GRPCHealthPort             uint16   // The port used for gRPC liveness and readiness probes.
+	EnablePprof                bool     // Enables pprof handlers.
+	CertPath                   string   // The path to the certificate for secure serving.
+	EnableCertReload           bool     // Enables certificate reloading of the certificates specified in --cert-path.
+	SecureServing              bool     // Enables secure serving.
+	TLSMinVersion              string   // Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13).
+	TLSCipherSuites            []string // TLS cipher suites (Go crypto/tls names). Only effective for TLS 1.2 and below.
+	tlsMinVersionValue         uint16   // Parsed TLS min version value.
+	tlsCipherSuiteValues       []uint16 // Parsed TLS cipher suite values.
+	MetricsEndpointAuth        bool     // Enables authentication and authorization of the metrics endpoint.
+	MetricsClientCAFile        string   // PEM CA that requires a verified client cert on the metrics endpoint.
+	MetricsCertDir             string   // Directory with the metrics server certificates that enables metrics TLS.
+	EnableGRPCStreamMetrics    bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
 	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
-	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. Bounds metric cardinality in
-	// deployments with many distinct fairness IDs.
+	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. default-flow does not count
+	// against the cap. Bounds metric cardinality in deployments with many distinct fairness IDs.
 	FairnessIDMetricLabelLimit int
 	//
 	// Configuration.
 	//
-	ConfigFile   string   // The path to the configuration file.
-	ConfigText   string   // The configuration specified as text, in lieu of a file.
-	FeatureGates []string // Feature gates applied on top of the configuration's featureGates.
+	ConfigFile     string   // The path to the configuration file.
+	ConfigText     string   // The configuration specified as text, in lieu of a file.
+	ObjectivesFile string   // Objectives (name, priority) loaded in file-discovery mode.
+	FeatureGates   []string // Feature gates applied on top of the configuration's featureGates.
 
 	AllowExperimentalPlugins bool // Allows loading of experimental Alpha plugins.
 
@@ -147,6 +160,9 @@ func NewOptions() *Options {
 	return &Options{ // "zero" values are no explicitly set
 		GRPCPort:                         DefaultGrpcPort,
 		DrainTimeout:                     DefaultDrainTimeout,
+		LeaseDuration:                    DefaultLeaseDuration,
+		RenewDeadline:                    DefaultRenewDeadline,
+		RetryPeriod:                      DefaultRetryPeriod,
 		PoolGroup:                        routing.InferencePoolAPIGroup,
 		EndpointTargetPorts:              []int{},
 		DisableEndpointSubsetFilter:      false,
@@ -180,15 +196,28 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.Uint16Var(&opts.GRPCPort, "grpc-port", opts.GRPCPort, "gRPC port used for communicating with Envoy proxy.")
 	fs.BoolVar(&opts.EnableLeaderElection, "ha-enable-leader-election", opts.EnableLeaderElection,
 		"Enables leader election for high availability. When enabled, readiness probes will only pass on the leader.")
+	fs.StringVar(&opts.LeaseName, "ha-lease-name", opts.LeaseName,
+		"Leader election: name of the Lease in the pool namespace. Defaults to epp-<pool-namespace>-<pool-name>.llm-d.ai. "+
+			"A second EPP deployment for the same pool with its own lease can hold leadership while traffic moves to it.")
+	fs.DurationVar(&opts.LeaseDuration, "ha-lease-duration", opts.LeaseDuration,
+		"Leader election: how long a standby waits after the leader's last renewal before it takes the lease.")
+	fs.DurationVar(&opts.RenewDeadline, "ha-renew-deadline", opts.RenewDeadline,
+		"Leader election: how long the leader retries a failed lease renewal, for example against a slow API server, "+
+			"before it gives up leadership. Must be shorter than ha-lease-duration.")
+	fs.DurationVar(&opts.RetryPeriod, "ha-retry-period", opts.RetryPeriod,
+		"Leader election: wait between attempts to acquire or renew the lease.")
 	fs.DurationVar(&opts.DrainTimeout, "drain-timeout", opts.DrainTimeout,
 		"Graceful shutdown drain window. On SIGTERM the EPP goes NotServing and releases its leader lease "+
 			"immediately, then keeps serving ext_proc for this duration so in-flight and pre-DNS-refresh requests "+
 			"are not rejected.")
 	fs.StringVar(&opts.GRPCMaxRecvMsgSizeStr, "grpc-max-recv-msg-size", opts.GRPCMaxRecvMsgSizeStr, "Maximum size of a gRPC message to receive (e.g., 10MiB, 25MB).")
 	fs.StringVar(&opts.GRPCMaxSendMsgSizeStr, "grpc-max-send-msg-size", opts.GRPCMaxSendMsgSizeStr, "Maximum size of a gRPC message to send (e.g., 10MiB, 25MB).")
+	fs.StringVar(&opts.MaxRequestBodySizeStr, "max-request-body-size", opts.MaxRequestBodySizeStr,
+		"Maximum size of a request body (e.g., 64MiB, 100MB). A larger body is rejected with 413 as soon as the "+
+			"buffered chunks exceed it. Empty or 0 means unlimited.")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,
 		"Kubernetes resource group of the InferencePool this Endpoint Picker is associated with. "+
-			"Only `inference.networking.k8s.io` is currently supported (`inference.networking.x-k8s.io` is deprecated but still accepted).")
+			"Only `inference.networking.k8s.io` is currently supported.")
 	fs.StringVar(&opts.PoolNamespace, "pool-namespace", opts.PoolNamespace,
 		"Namespace of the InferencePool this Endpoint Picker is associated with.")
 	fs.StringVar(&opts.PoolName, "pool-name", opts.PoolName, "Name of the InferencePool this Endpoint Picker is associated with.")
@@ -230,6 +259,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	opts.LoggingOptions.AddFlags(fs) // Add logging flags.
 
 	fs.BoolVar(&opts.Tracing, "tracing", opts.Tracing, "Enables emitting traces.")
+	fs.BoolVar(&opts.EnableToolCallingTelemetry, "enable-tool-calling-telemetry", opts.EnableToolCallingTelemetry, "Enable tool-calling request and response telemetry.")
 	fs.BoolVar(&opts.HealthChecking, "health-checking", opts.HealthChecking, "Enables health checking.")
 	fs.Uint16Var(&opts.MetricsPort, "metrics-port", opts.MetricsPort, "The metrics port exposed by EPP.")
 	fs.Uint16Var(&opts.GRPCHealthPort, "grpc-health-port", opts.GRPCHealthPort,
@@ -244,7 +274,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Enables ext_proc gRPC stream metrics (in-flight gauge, hold-duration histogram, completions counter by code).")
 	fs.IntVar(&opts.FairnessIDMetricLabelLimit, "fairness-id-metric-label-limit", opts.FairnessIDMetricLabelLimit,
 		"Caps the number of distinct fairness_id label values recorded on metrics; values beyond the cap collapse to a "+
-			"single overflow series, and 0 collapses all of them. Bounds metric cardinality with many distinct fairness IDs.")
+			"single overflow series, and 0 collapses all of them. default-flow does not count against the cap. "+
+			"Bounds metric cardinality with many distinct fairness IDs.")
 	fs.BoolVar(&opts.SecureServing, "secure-serving", opts.SecureServing, "Serve the listener over TLS.")
 	fs.StringVar(&opts.TLSMinVersion, "tls-min-version", opts.TLSMinVersion,
 		"Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13). Empty uses VersionTLS12.")
@@ -258,6 +289,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
 	fs.StringVar(&opts.ConfigText, "config-text", opts.ConfigText, "The configuration specified as text, in lieu of a file.")
+	fs.StringVar(&opts.ObjectivesFile, "objectives-file", opts.ObjectivesFile,
+		"YAML file of objectives (name, priority) loaded at startup. File-discovery mode only.")
 	fs.StringSliceVar(&opts.FeatureGates, "feature-gates", opts.FeatureGates,
 		"Comma-separated list of feature gates to enable or disable, in kubelet style "+
 			"(e.g., 'flowControl=true'). A bare name enables the gate. Applied after the "+
@@ -312,6 +345,24 @@ func (opts *Options) Complete() error {
 			return fmt.Errorf("grpc-max-send-msg-size overflows int: %d", val)
 		}
 		opts.GRPCMaxSendMsgSize = int(val)
+	}
+	if opts.MaxRequestBodySizeStr != "" {
+		s := sanitizeSizeString(opts.MaxRequestBodySizeStr)
+		q, err := resource.ParseQuantity(s)
+		if err != nil {
+			return fmt.Errorf("invalid max-request-body-size: %w", err)
+		}
+		val, ok := q.AsInt64()
+		if !ok {
+			return fmt.Errorf("max-request-body-size overflows maximum supported size: %s", s)
+		}
+		if val < 0 {
+			return fmt.Errorf("max-request-body-size must be non-negative, got %d", val)
+		}
+		if val > int64(math.MaxInt) {
+			return fmt.Errorf("max-request-body-size overflows int: %d", val)
+		}
+		opts.MaxRequestBodySize = int(val)
 	}
 
 	if opts.MetricsClientCAFile != "" {
@@ -389,9 +440,8 @@ func ConfigureMetricsTLS(opts *Options, mo *metricsserver.Options) error {
 }
 
 func (opts *Options) Validate() error {
-	if (opts.PoolName != "" && opts.EndpointSelector != nil) || (opts.PoolName == "" && opts.EndpointSelector == nil) {
-		return errors.New("either pool-name or endpoint-selector must be set")
-	}
+	// pool-name and endpoint-selector are checked on the Kubernetes discovery
+	// path only; file discovery reads neither.
 	if opts.EndpointSelector != nil {
 		if len(opts.EndpointTargetPorts) == 0 || len(opts.EndpointTargetPorts) > 8 {
 			return fmt.Errorf("flag %q should have length from 1 to 8", "endpoint-target-ports")
@@ -419,6 +469,20 @@ func (opts *Options) Validate() error {
 			"requested", opts.RefreshMetricsInterval, "effective", MinRefreshMetricsInterval)
 		opts.RefreshMetricsInterval = MinRefreshMetricsInterval
 	}
+	// client-go's leader elector rejects these at startup; report them as flag errors instead.
+	if opts.EnableLeaderElection {
+		if opts.RetryPeriod <= 0 {
+			return fmt.Errorf("ha-retry-period must be positive, got %s", opts.RetryPeriod)
+		}
+		if opts.RenewDeadline <= time.Duration(leaderelection.JitterFactor*float64(opts.RetryPeriod)) {
+			return fmt.Errorf("ha-renew-deadline (%s) must be greater than %.1f x ha-retry-period (%s)",
+				opts.RenewDeadline, leaderelection.JitterFactor, opts.RetryPeriod)
+		}
+		if opts.LeaseDuration <= opts.RenewDeadline {
+			return fmt.Errorf("ha-lease-duration (%s) must be greater than ha-renew-deadline (%s)",
+				opts.LeaseDuration, opts.RenewDeadline)
+		}
+	}
 	if opts.RefreshPrometheusMetricsInterval <= 0 {
 		return fmt.Errorf("refresh-prometheus-metrics-interval must be positive, got %v", opts.RefreshPrometheusMetricsInterval)
 	}
@@ -428,6 +492,9 @@ func (opts *Options) Validate() error {
 	if opts.GRPCMaxSendMsgSize < 0 {
 		return fmt.Errorf("grpc-max-send-msg-size must be non-negative, got %d", opts.GRPCMaxSendMsgSize)
 	}
+	if opts.MaxRequestBodySize < 0 {
+		return fmt.Errorf("max-request-body-size must be non-negative, got %d", opts.MaxRequestBodySize)
+	}
 	if opts.FairnessIDMetricLabelLimit < 0 {
 		return fmt.Errorf("fairness-id-metric-label-limit must be non-negative, got %d", opts.FairnessIDMetricLabelLimit)
 	}
@@ -435,8 +502,8 @@ func (opts *Options) Validate() error {
 	if opts.PluginStateStalenessThreshold <= 0 {
 		return fmt.Errorf("plugin-state-staleness-threshold must be positive, got %v", opts.PluginStateStalenessThreshold)
 	}
-	if opts.PoolGroup != routing.InferencePoolAPIGroup && opts.PoolGroup != "inference.networking.x-k8s.io" {
-		return fmt.Errorf("pool-group must be %q or the deprecated %q, got %q", routing.InferencePoolAPIGroup, "inference.networking.x-k8s.io", opts.PoolGroup)
+	if opts.PoolGroup != routing.InferencePoolAPIGroup {
+		return fmt.Errorf("pool-group must be %q, got %q", routing.InferencePoolAPIGroup, opts.PoolGroup)
 	}
 	if opts.MetricsStalenessThreshold <= 0 {
 		return fmt.Errorf("metrics-staleness-threshold must be positive, got %v", opts.MetricsStalenessThreshold)
@@ -503,9 +570,6 @@ func parseCipherSuites(names []string) ([]uint16, error) {
 	for _, cs := range tls.CipherSuites() {
 		byName[cs.Name] = cs.ID
 	}
-	for _, cs := range tls.InsecureCipherSuites() {
-		byName[cs.Name] = cs.ID
-	}
 	ids := make([]uint16, 0, len(names))
 	for _, name := range names {
 		name = strings.TrimSpace(name)
@@ -519,4 +583,19 @@ func parseCipherSuites(names []string) ([]uint16, error) {
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+// LeaderElectionOverride returns a controller manager option override that applies the lease
+// name and timings. It is a no-op on the manager options when leader election is disabled.
+func (opts *Options) LeaderElectionOverride() func(*ctrl.Options) {
+	return func(o *ctrl.Options) {
+		if !o.LeaderElection {
+			return
+		}
+		if opts.LeaseName != "" {
+			o.LeaderElectionID = opts.LeaseName
+		}
+		leaseDuration, renewDeadline, retryPeriod := opts.LeaseDuration, opts.RenewDeadline, opts.RetryPeriod
+		o.LeaseDuration, o.RenewDeadline, o.RetryPeriod = &leaseDuration, &renewDeadline, &retryPeriod
+	}
 }

@@ -128,13 +128,13 @@ func TestPrefixCacheMatchInfo_MM(t *testing.T) {
 		},
 		{
 			name:      "WithMM attaches non-zero",
-			info:      NewPrefixCacheMatchInfo(5, 10, 16).WithMM(MMMatchInfo{MatchBlocks: 2}),
-			wantMatch: 5, wantTotal: 10, wantBlock: 16, wantMM: &MMMatchInfo{MatchBlocks: 2},
+			info:      NewPrefixCacheMatchInfo(5, 10, 16).WithMM(MMMatchInfo{MatchBlocks: 2, MatchTokens: 24}),
+			wantMatch: 5, wantTotal: 10, wantBlock: 16, wantMM: &MMMatchInfo{MatchBlocks: 2, MatchTokens: 24},
 		},
 		{
 			name:      "WithMM(zero) attaches present-but-zero",
-			info:      NewPrefixCacheMatchInfo(5, 10, 16).WithMM(MMMatchInfo{MatchBlocks: 0}),
-			wantMatch: 5, wantTotal: 10, wantBlock: 16, wantMM: &MMMatchInfo{MatchBlocks: 0},
+			info:      NewPrefixCacheMatchInfo(5, 10, 16).WithMM(MMMatchInfo{}),
+			wantMatch: 5, wantTotal: 10, wantBlock: 16, wantMM: &MMMatchInfo{},
 		},
 		{
 			name:      "clone preserves nil mm",
@@ -143,8 +143,8 @@ func TestPrefixCacheMatchInfo_MM(t *testing.T) {
 		},
 		{
 			name:      "clone preserves mm",
-			info:      NewPrefixCacheMatchInfo(7, 12, 64).WithMM(MMMatchInfo{MatchBlocks: 3}).Clone().(*PrefixCacheMatchInfo),
-			wantMatch: 7, wantTotal: 12, wantBlock: 64, wantMM: &MMMatchInfo{MatchBlocks: 3},
+			info:      NewPrefixCacheMatchInfo(7, 12, 64).WithMM(MMMatchInfo{MatchBlocks: 3, MatchTokens: 180}).Clone().(*PrefixCacheMatchInfo),
+			wantMatch: 7, wantTotal: 12, wantBlock: 64, wantMM: &MMMatchInfo{MatchBlocks: 3, MatchTokens: 180},
 		},
 	}
 

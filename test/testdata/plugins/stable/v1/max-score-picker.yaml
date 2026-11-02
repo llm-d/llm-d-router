@@ -1,6 +1,6 @@
 # Frozen configuration surface of the max-score-picker plugin.
 # See ../README.md: this file must not be edited to fix a failing test.
-apiVersion: llm-d.ai/v1alpha1
+apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - type: single-profile-handler

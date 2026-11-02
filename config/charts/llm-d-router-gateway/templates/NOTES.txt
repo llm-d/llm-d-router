@@ -1,1 +1,2 @@
 llm-d-router-gateway {{ .Release.Name }} deployed.
+{{ include "llm-d-router.crossReplica.notes" . }}

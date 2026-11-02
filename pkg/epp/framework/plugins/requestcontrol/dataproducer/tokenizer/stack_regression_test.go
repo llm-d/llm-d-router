@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -49,7 +50,7 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 	framed := make([]byte, 5+len(msg))
 	binary.BigEndian.PutUint32(framed[1:5], uint32(len(msg))) //#nosec G115 -- test fixture, small proto messages
 	copy(framed[5:], msg)
-	features := []fwkrh.MultiModalFeature{{Modality: fwkrh.ModalityImage, Hash: "image-hash", Offset: 1, Length: 2}}
+	features := []fwkrh.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "image-hash", Offset: 1, Length: 2}}
 	for _, tc := range []struct {
 		name, path, salt string
 		parser           fwkrh.Parser
@@ -58,7 +59,7 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 	}{
 		{
 			name: "sglang", path: "/generate", salt: "tenant-a", parser: sglanghttp.NewSGLangHTTPParser(),
-			body: []byte(`{"input_ids":[1,2,3],"extra_key":"tenant-a","sampling_params":{"max_new_tokens":1}}`),
+			body: []byte(`{"input_ids":[1,2,3],"cache_salt":"tenant-a","sampling_params":{"max_new_tokens":1}}`),
 		},
 		{
 			name: "vllm HTTP", path: "/inference/v1/generate", salt: "tenant-a", parser: vllmhttp.NewVllmHTTPParser(),
@@ -70,7 +71,7 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 			body: framed, features: features,
 		},
 	} {
-		for _, backend := range []string{backendVLLM, backendEstimate} {
+		for _, backend := range []string{BackendVLLM, BackendEstimate} {
 			t.Run(tc.name+"/"+backend, func(t *testing.T) {
 				parsed, err := tc.parser.ParseRequest(context.Background(), tc.body, map[string]string{":path": tc.path})
 				require.NoError(t, err)
@@ -78,9 +79,9 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 				require.NoError(t, err)
 				existing := parsed.Body.TokenizedRequest
 				p := newTestPlugin(&mockTokenizer{})
-				if backend == backendEstimate {
+				if backend == BackendEstimate {
 					p.backend = estimateBackend{}
-					p.backendName = backendEstimate
+					p.backendName = BackendEstimate
 				}
 				req := &scheduling.InferenceRequest{Body: parsed.Body}
 				require.NoError(t, p.Produce(context.Background(), req, nil))

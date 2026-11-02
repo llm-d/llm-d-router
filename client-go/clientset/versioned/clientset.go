@@ -6,6 +6,7 @@ import (
 	fmt "fmt"
 	http "net/http"
 
+	xinferencev1 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1"
 	xinferencev1alpha2 "github.com/llm-d/llm-d-router/client-go/clientset/versioned/typed/apix/v1alpha2"
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
@@ -14,13 +15,20 @@ import (
 
 type Interface interface {
 	Discovery() discovery.DiscoveryInterface
+	XInferenceV1() xinferencev1.XInferenceV1Interface
 	XInferenceV1alpha2() xinferencev1alpha2.XInferenceV1alpha2Interface
 }
 
 // Clientset contains the clients for groups.
 type Clientset struct {
 	*discovery.DiscoveryClient
+	xInferenceV1       *xinferencev1.XInferenceV1Client
 	xInferenceV1alpha2 *xinferencev1alpha2.XInferenceV1alpha2Client
+}
+
+// XInferenceV1 retrieves the XInferenceV1Client
+func (c *Clientset) XInferenceV1() xinferencev1.XInferenceV1Interface {
+	return c.xInferenceV1
 }
 
 // XInferenceV1alpha2 retrieves the XInferenceV1alpha2Client
@@ -72,6 +80,10 @@ func NewForConfigAndClient(c *rest.Config, httpClient *http.Client) (*Clientset,
 
 	var cs Clientset
 	var err error
+	cs.xInferenceV1, err = xinferencev1.NewForConfigAndClient(&configShallowCopy, httpClient)
+	if err != nil {
+		return nil, err
+	}
 	cs.xInferenceV1alpha2, err = xinferencev1alpha2.NewForConfigAndClient(&configShallowCopy, httpClient)
 	if err != nil {
 		return nil, err
@@ -97,6 +109,7 @@ func NewForConfigOrDie(c *rest.Config) *Clientset {
 // New creates a new Clientset for the given RESTClient.
 func New(c rest.Interface) *Clientset {
 	var cs Clientset
+	cs.xInferenceV1 = xinferencev1.New(c)
 	cs.xInferenceV1alpha2 = xinferencev1alpha2.New(c)
 
 	cs.DiscoveryClient = discovery.NewDiscoveryClient(c)

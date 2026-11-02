@@ -100,7 +100,7 @@ func (cc *ChatCompletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	defer r.Body.Close() //nolint:errcheck
+	defer r.Body.Close()
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest) // TODO: check FastAPI error code when failing to read body

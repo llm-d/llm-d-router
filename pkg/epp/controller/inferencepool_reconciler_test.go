@@ -25,6 +25,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,11 +36,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
 var endpointPoolCmpOpts = []cmp.Option{
@@ -59,24 +62,24 @@ var (
 	selectorV2 = map[string]string{"app": "vllm_v2"}
 	pods       = []*corev1.Pod{
 		// Two ready pods matching pool1
-		testutil.MakePod("pod1").
+		fwkk8s.MakePod("pod1").
 			Namespace("pool1-ns").
 			Labels(selectorV1).ReadyCondition().ObjRef(),
-		testutil.MakePod("pod2").
+		fwkk8s.MakePod("pod2").
 			Namespace("pool1-ns").
 			Labels(selectorV1).
 			ReadyCondition().ObjRef(),
 		// A not ready pod matching pool1
-		testutil.MakePod("pod3").
+		fwkk8s.MakePod("pod3").
 			Namespace("pool1-ns").
 			Labels(selectorV1).ObjRef(),
 		// A pod not matching pool1 namespace
-		testutil.MakePod("pod4").
+		fwkk8s.MakePod("pod4").
 			Namespace("pool2-ns").
 			Labels(selectorV1).
 			ReadyCondition().ObjRef(),
 		// A ready pod matching pool1 with a new selector
-		testutil.MakePod("pod5").
+		fwkk8s.MakePod("pod5").
 			Namespace("pool1-ns").
 			Labels(selectorV2).
 			ReadyCondition().ObjRef(),
@@ -91,13 +94,13 @@ func TestInferencePoolReconciler(t *testing.T) {
 		Version: v1.GroupVersion.Version,
 		Kind:    "InferencePool",
 	}
-	pool1 := testutil.MakeInferencePool("pool1").
+	pool1 := fwkgaie.MakeInferencePool("pool1").
 		Namespace("pool1-ns").
 		Selector(selectorV1).
 		TargetPorts(8080).
 		EndpointPickerRef("epp-service").ObjRef()
 	pool1.SetGroupVersionKind(gvk)
-	pool2 := testutil.MakeInferencePool("pool2").Namespace("pool2-ns").EndpointPickerRef("epp-service").ObjRef()
+	pool2 := fwkgaie.MakeInferencePool("pool2").Namespace("pool2-ns").EndpointPickerRef("epp-service").ObjRef()
 	pool2.SetGroupVersionKind(gvk)
 
 	period := time.Second
@@ -190,7 +193,7 @@ func TestInferencePoolReconciler(t *testing.T) {
 type diffStoreParams struct {
 	wantPool       *datalayer.EndpointPool
 	wantEndpoints  []string
-	wantObjectives []*v1alpha2.InferenceObjective
+	wantObjectives []*apixv1.InferenceObjective
 }
 
 func diffStore(store datastore.Datastore, params diffStoreParams) string {
@@ -213,12 +216,15 @@ func diffStore(store datastore.Datastore, params diffStoreParams) string {
 
 	// Default wantModels if not set because ModelGetAll returns an empty slice when empty.
 	if params.wantObjectives == nil {
-		params.wantObjectives = []*v1alpha2.InferenceObjective{}
+		params.wantObjectives = []*apixv1.InferenceObjective{}
 	}
 
-	if diff := cmp.Diff(params.wantObjectives, store.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *v1alpha2.InferenceObjective) bool {
+	if diff := cmp.Diff(params.wantObjectives, store.ObjectiveGetAll(), cmpopts.SortSlices(func(a, b *apixv1.InferenceObjective) bool {
 		return a.Name < b.Name
-	}), cmpopts.IgnoreFields(v1alpha2.InferenceObjective{}, "ObjectMeta.ResourceVersion")); diff != "" {
+	}),
+		// The fake client stamps ResourceVersion on stored objects. It is
+		// apiserver bookkeeping, not reconciled behavior.
+		cmpopts.IgnoreFields(metav1.ObjectMeta{}, "ResourceVersion")); diff != "" {
 		return "models:" + diff
 	}
 	return ""

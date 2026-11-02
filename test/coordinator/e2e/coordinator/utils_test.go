@@ -82,12 +82,12 @@ func podIPs(labels map[string]string) map[string]bool {
 }
 
 // podsInDeploymentsReady waits until every Deployment named in objects reports
-// all replicas ready. Non-Deployment entries are ignored.
-func podsInDeploymentsReady(objects []string) {
+// all replicas ready in nsName. Non-Deployment entries are ignored.
+func podsInDeploymentsReady(nsName string, objects []string) {
 	isDeploymentReady := func(deploymentName string) bool {
 		var deployment appsv1.Deployment
 		err := testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Namespace: getNamespace(), Name: deploymentName}, &deployment)
+			types.NamespacedName{Namespace: nsName, Name: deploymentName}, &deployment)
 		if err != nil || deployment.Spec.Replicas == nil {
 			return false
 		}

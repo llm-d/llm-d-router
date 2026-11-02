@@ -35,17 +35,15 @@ import (
 // The configuration cover the different components found in the Indexer
 // module.
 type Config struct {
-	KVBlockIndexConfig  *kvblock.IndexConfig    `json:"kvBlockIndexConfig"`
-	KVBlockScorerConfig *KVBlockScorerConfig    // not exported
-	BackendConfigs      []*KVCacheBackendConfig `json:"kvCacheBackendConfigs"`
+	KVBlockIndexConfig *kvblock.IndexConfig    `json:"kvBlockIndexConfig"`
+	BackendConfigs     []*KVCacheBackendConfig `json:"kvCacheBackendConfigs"`
 }
 
 // NewDefaultConfig returns a default configuration for the Indexer module.
 func NewDefaultConfig() (*Config, error) {
 	return &Config{
-		KVBlockIndexConfig:  kvblock.DefaultIndexConfig(),
-		KVBlockScorerConfig: DefaultKVBlockScorerConfig(),
-		BackendConfigs:      DefaultKVCacheBackendConfig(),
+		KVBlockIndexConfig: kvblock.DefaultIndexConfig(),
+		BackendConfigs:     DefaultKVCacheBackendConfig(),
 	}, nil
 }
 
@@ -57,6 +55,7 @@ type Indexer struct {
 	kvBlockIndex   kvblock.Index          // looks up pods for block keys
 	keyWalker      kvblock.KeyWalker      // kvBlockIndex's walk capability; nil without one
 	tierWeights    map[string]float64     // device tier -> weight for the prefix matcher
+	cacheFormats   *kvblock.CacheFormatCatalog
 	// recordHits enables the contiguous-chain hit metrics, under the same
 	// option that instruments the index.
 	recordHits bool
@@ -80,12 +79,6 @@ func NewKVCacheIndexer(ctx context.Context, config *Config, tokenProcessor kvblo
 	// Wrap index with tracing instrumentation.
 	// When tracing is not configured, the tracer is a no-op implementation.
 	kvBlockIndex = kvblock.NewTracedIndex(kvBlockIndex)
-
-	// override backend configs with the ones from the config, if the defaults are not used.
-	config.KVBlockScorerConfig.BackendConfigs = config.BackendConfigs
-	if strategy := config.KVBlockScorerConfig.ScoringStrategy; strategy != LongestPrefixMatch {
-		return nil, fmt.Errorf("unsupported scoring strategy: %s", strategy)
-	}
 
 	// A nil index config selects kvblock's defaults, metrics off included.
 	recordHits := config.KVBlockIndexConfig != nil && config.KVBlockIndexConfig.EnableMetrics
@@ -117,6 +110,34 @@ func (k *Indexer) Run(ctx context.Context) {
 // KVBlockIndex returns the kvblock.Index used by the Indexer.
 func (k *Indexer) KVBlockIndex() kvblock.Index {
 	return k.kvBlockIndex
+}
+
+// SetCacheFormats connects event metadata before request processing starts.
+func (k *Indexer) SetCacheFormats(formats *kvblock.CacheFormatCatalog) {
+	k.cacheFormats = formats
+}
+
+// CacheFormat returns the learned pod format, or the canonical plain format.
+func (k *Indexer) CacheFormat(podID string) kvblock.CacheFormat {
+	if format, ok := k.cacheFormats.Get(podID); ok && format.Bigram {
+		return format
+	}
+	return kvblock.CacheFormat{BlockSize: k.tokenProcessor.BlockSize()}
+}
+
+// ComputeBlockKeysForFormat hashes a prompt using the pod's cache format.
+func (k *Indexer) ComputeBlockKeysForFormat(ctx context.Context, tokens []uint32, modelName string,
+	extraFeatures []*kvblock.BlockExtraFeatures, format kvblock.CacheFormat,
+) ([]kvblock.BlockHash, error) {
+	if !format.Bigram {
+		return k.ComputeBlockKeysFromTokens(ctx, tokens, modelName, extraFeatures)
+	}
+	keys, err := k.tokenProcessor.TokensToBigramKVBlockKeys(
+		kvblock.EmptyBlockHash, tokens, format.BlockSize, modelName, extraFeatures)
+	if err != nil {
+		return nil, fmt.Errorf("blockKey conversion failed: %w", err)
+	}
+	return keys, nil
 }
 
 // ComputeBlockKeysFromTokens computes the KV-block keys for a pre-tokenized

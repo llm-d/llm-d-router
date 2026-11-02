@@ -21,10 +21,12 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -186,6 +188,30 @@ func TestRoutingLengthSnapshotIgnoresLateReusableTokens(t *testing.T) {
 		ReusableTokensProducerName: producerName,
 	})
 	assert.Equal(t, 40, otherPlugin.getContextLength(request))
+}
+
+// Filter and Score each receive a request confined to the plugin's
+// declarations, so the snapshot must survive that scope for both to agree.
+func TestRoutingLengthSnapshotSurvivesRequestScope(t *testing.T) {
+	producerName := testReusableTokensProducerName
+	plugin := NewContextLengthAware("scoped-cache-aware", &contextLengthAwareParameters{
+		Label:                      testPrefillWorkRangeLabel,
+		ReusableTokensProducerName: producerName,
+	})
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{plugin})
+	request := createHundredTokenRequest()
+
+	filterRequest, filterViolations := datalayer.ScopeRequest(logr.Discard(), "Filter", plugin, request)
+	assert.Equal(t, 100, plugin.getContextLength(filterRequest))
+	require.NoError(t, filterViolations.Write())
+
+	request.PutAttribute(
+		attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
+		attrprefix.ReusablePrefixTokens(60),
+	)
+	scoreRequest, scoreViolations := datalayer.ScopeRequest(logr.Discard(), "Score", plugin, request)
+	assert.Equal(t, 100, plugin.getContextLength(scoreRequest))
+	require.NoError(t, scoreViolations.Write())
 }
 
 func TestReusableTokensFilter(t *testing.T) {
@@ -560,4 +586,23 @@ func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "matching-range", filteredEndpoints[0].GetMetadata().ID.Name)
+}
+
+func TestAcceleratorRangeUsesConfiguredLabel(t *testing.T) {
+	const label = "llm-d.ai/accelerator-capability-range"
+	created, err := Factory("accelerator-router", fwkplugin.StrictDecoder([]byte(
+		`{"label":"llm-d.ai/accelerator-capability-range","enableFiltering":true}`)), nil)
+	require.NoError(t, err)
+	configured := created.(*ContextLengthAware)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Name: "small"}, "10.0.0.1", map[string]string{label: "0-100", DefaultContextLengthLabel: "101-200"}),
+		createEndpoint(k8stypes.NamespacedName{Name: "large"}, "10.0.0.2", map[string]string{label: "101-200", DefaultContextLengthLabel: "0-100"}),
+		createEndpoint(k8stypes.NamespacedName{Name: "unlabeled"}, "10.0.0.3", nil),
+	}
+	request := createHundredTokenRequest()
+	ctx := logr.NewContext(t.Context(), logr.Discard())
+	assert.Equal(t, []scheduling.Endpoint{endpoints[0], endpoints[2]}, configured.Filter(ctx, request, endpoints))
+	scores := configured.Score(ctx, request, endpoints)
+	assert.Greater(t, scores[endpoints[0]], scores[endpoints[1]])
+	assert.Equal(t, 0.5, scores[endpoints[2]])
 }

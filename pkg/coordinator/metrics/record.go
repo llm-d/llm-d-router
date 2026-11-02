@@ -16,7 +16,13 @@ limitations under the License.
 
 package metrics
 
-import "time"
+import (
+	"context"
+	"strconv"
+	"time"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+)
 
 // IncRequestTotal increments request_total for the given model.
 func IncRequestTotal(modelName string) {
@@ -50,9 +56,11 @@ func DecRequestRunning(modelName string) {
 	requestRunning.WithLabelValues(boundModel(modelName)).Dec()
 }
 
-// RecordStepDuration observes the wall-time latency of one pipeline step.
-func RecordStepDuration(step string, d time.Duration) {
-	stepDuration.WithLabelValues(step).Observe(d.Seconds())
+// RecordStepDuration observes the wall-time latency of one pipeline step and
+// attaches the step's trace as an exemplar, so a point on a step latency graph
+// links to the span that produced it.
+func RecordStepDuration(ctx context.Context, step string, d time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, stepDuration.WithLabelValues(step), d.Seconds())
 }
 
 // IncStepErrorTotal increments step_errors_total for the given step and
@@ -89,7 +97,8 @@ func RecordRequestInputTokens(modelName string, tokens int) {
 }
 
 // IncExecutionPath increments execution_path_total for the given model and
-// path (decode-only, prefill-decode, or encode-prefill-decode).
+// path (decode-only, prefill-decode, or encode-prefill-decode). Encode always
+// implies prefill, so encode-decode is not a reachable path.
 func IncExecutionPath(modelName, path string) {
 	executionPathTotal.WithLabelValues(boundModel(modelName), path).Inc()
 }
@@ -98,4 +107,54 @@ func IncExecutionPath(modelName, path string) {
 // one probe outcome ("served", "deferred", "error", or "transport_error").
 func IncConditionalDecodeProbes(result string) {
 	conditionalDecodeProbesTotal.WithLabelValues(result).Inc()
+}
+
+// RecordEncodeSubrequests observes the number of Encode subrequests for one
+// client request, including zero when Encode does not run.
+func RecordEncodeSubrequests(route string, n int) {
+	encodeSubrequests.WithLabelValues(boundRoute(route)).Observe(float64(n))
+}
+
+// RecordOrchestrationOverhead observes coordinator wall time outside parse
+// and pipeline step execution for one client request. Negative values are
+// recorded as zero so clock-resolution jitter cannot emit a negative sample.
+func RecordOrchestrationOverhead(route string, d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	orchestrationOverhead.WithLabelValues(boundRoute(route)).Observe(d.Seconds())
+}
+
+// RecordMediaItems observes the number of media items of one type found in
+// one client request.
+func RecordMediaItems(mediaType string, n int) {
+	mediaItems.WithLabelValues(boundMediaType(mediaType)).Observe(float64(n))
+}
+
+// RecordMediaDownloadDuration observes the duration of one media download
+// attempt.
+func RecordMediaDownloadDuration(result string, d time.Duration) {
+	mediaDownloadDuration.WithLabelValues(boundDownloadResult(result)).Observe(d.Seconds())
+}
+
+// RecordResponseSize observes the number of bytes written to the client for
+// one request. stream must be a bounded StreamTrue / StreamFalse value.
+func RecordResponseSize(stream bool, bytes int) {
+	responseSize.WithLabelValues(streamLabelValue(stream)).Observe(float64(bytes))
+}
+
+func streamLabelValue(stream bool) string {
+	if stream {
+		return StreamTrue
+	}
+	return StreamFalse
+}
+
+// IncPromptTokenMismatch increments prompt_token_mismatch_total for one decode
+// response whose usage.prompt_tokens (or input_tokens) did not equal the
+// rendered token count. idsForwarded says whether the decode leg carried the
+// rendered IDs, in which case the worker ignored them, or rendered the prompt
+// itself, in which case the renderers disagree.
+func IncPromptTokenMismatch(modelName, apiType string, idsForwarded bool) {
+	promptTokenMismatchTotal.WithLabelValues(boundModel(modelName), apiType, strconv.FormatBool(idsForwarded)).Inc()
 }

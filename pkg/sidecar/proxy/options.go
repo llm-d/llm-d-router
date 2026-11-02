@@ -57,11 +57,12 @@ const (
 	// Flags
 	port                      = "port"
 	modelServerPort           = "model-server-port"
-	vllmPort                  = "vllm-port"
 	dataParallelSize          = "data-parallel-size"
 	kvConnector               = "kv-connector"
 	ecConnector               = "ec-connector"
 	mooncakeBootstrapPortFlag = "mooncake-bootstrap-port"
+	ecMooncakePortFlag        = "ec-mooncake-port"
+	ecMooncakePodIPFlag       = "ec-mooncake-pod-ip"
 	p2pConnectorPortFlag      = "p2p-connector-port"
 	enableP2PPull             = "enable-p2p-pull"
 	enableSSRFProtection      = "enable-ssrf-protection"
@@ -82,6 +83,7 @@ const (
 	inlineConfiguration       = "configuration"
 	configurationFile         = "configuration-file"
 	tracingFlag               = "tracing"
+	toolCallingTelemetryFlag  = "enable-tool-calling-telemetry"
 	metricsPort               = "metrics-port"
 	metricsCertDir            = "metrics-cert-dir"
 
@@ -89,14 +91,17 @@ const (
 	envInferencePool           = "INFERENCE_POOL"
 	envEnablePrefillerSampling = "ENABLE_PREFILLER_SAMPLING"
 	envMooncakeBootstrapPort   = "MOONCAKE_BOOTSTRAP_PORT"
+	envECMooncakePort          = "EC_MOONCAKE_PORT"
 	envP2PConnectorPort        = "P2P_CONNECTOR_PORT"
 
 	// Defaults
 	defaultPort                  = "8000"
-	defaultVLLMPort              = "8200"
+	defaultModelServerPort       = "8200"
 	defaultDataParallelSize      = 1
 	defaultMooncakeBootstrapPort = 8998
-	defaultP2PConnectorPort      = 7777
+	// defaultECMooncakePort matches the ec_port default of vLLM's ECTransferConfig.
+	defaultECMooncakePort   = 14579
+	defaultP2PConnectorPort = 7777
 
 	// defaultMoRIIOParallelDecodeWaitTimeout backstops the parallel WRITE
 	// dispatch: it bounds how long the decode request waits on the prefill outcome
@@ -113,33 +118,35 @@ const (
 
 // yamlConfiguration represents structure of YAML configuration for sidecar proxy
 type yamlConfiguration struct {
-	Port                    int      `json:"port,omitempty"`
-	ModelServerPort         int      `json:"model-server-port,omitempty"`
-	VLLMPort                int      `json:"vllm-port,omitempty"`
-	MooncakeBootstrapPort   int      `json:"mooncake-bootstrap-port,omitempty"`
-	P2PConnectorPort        int      `json:"p2p-connector-port,omitempty"`
-	DataParallelSize        int      `json:"data-parallel-size,omitempty"`
-	KVConnector             string   `json:"kv-connector,omitempty"`
-	ECConnector             string   `json:"ec-connector,omitempty"`
-	EnableSSRFProtection    *bool    `json:"enable-ssrf-protection,omitempty"`
-	EnablePrefillerSampling *bool    `json:"enable-prefiller-sampling,omitempty"`
-	EnableP2PPull           *bool    `json:"enable-p2p-pull,omitempty"`
-	SecureServing           *bool    `json:"secure-serving,omitempty"`
-	SecureProxy             *bool    `json:"secure-proxy,omitempty"`
-	CertPath                string   `json:"cert-path,omitempty"`
-	EnableTLS               []string `json:"enable-tls,omitempty"`
-	TLSInsecureSkipVerify   []string `json:"tls-insecure-skip-verify,omitempty"`
-	TLSMinVersion           string   `json:"tls-min-version,omitempty"`
-	TLSCipherSuites         []string `json:"tls-cipher-suites,omitempty"`
-	InferencePool           string   `json:"inference-pool,omitempty"`
-	PoolGroup               string   `json:"pool-group,omitempty"`
-	MaxIdleConnsPerHost     int      `json:"max-idle-conns-per-host,omitempty"`
-	PrefillMaxRetries       *int     `json:"prefill-max-retries,omitempty"`
-	PrefillRetryBackoff     string   `json:"prefill-retry-backoff,omitempty"`
-	DecodeChunkSize         int      `json:"decode-chunk-size,omitempty"`
-	Tracing                 *bool    `json:"tracing,omitempty"`
-	MetricsPort             int      `json:"metrics-port,omitempty"`
-	MetricsCertDir          string   `json:"metrics-cert-dir,omitempty"`
+	Port                       int      `json:"port,omitempty"`
+	ModelServerPort            int      `json:"model-server-port,omitempty"`
+	MooncakeBootstrapPort      int      `json:"mooncake-bootstrap-port,omitempty"`
+	ECMooncakePort             int      `json:"ec-mooncake-port,omitempty"`
+	ECMooncakePodIP            string   `json:"ec-mooncake-pod-ip,omitempty"`
+	P2PConnectorPort           int      `json:"p2p-connector-port,omitempty"`
+	DataParallelSize           int      `json:"data-parallel-size,omitempty"`
+	KVConnector                string   `json:"kv-connector,omitempty"`
+	ECConnector                string   `json:"ec-connector,omitempty"`
+	EnableSSRFProtection       *bool    `json:"enable-ssrf-protection,omitempty"`
+	EnablePrefillerSampling    *bool    `json:"enable-prefiller-sampling,omitempty"`
+	EnableP2PPull              *bool    `json:"enable-p2p-pull,omitempty"`
+	SecureServing              *bool    `json:"secure-serving,omitempty"`
+	SecureProxy                *bool    `json:"secure-proxy,omitempty"`
+	CertPath                   string   `json:"cert-path,omitempty"`
+	EnableTLS                  []string `json:"enable-tls,omitempty"`
+	TLSInsecureSkipVerify      []string `json:"tls-insecure-skip-verify,omitempty"`
+	TLSMinVersion              string   `json:"tls-min-version,omitempty"`
+	TLSCipherSuites            []string `json:"tls-cipher-suites,omitempty"`
+	InferencePool              string   `json:"inference-pool,omitempty"`
+	PoolGroup                  string   `json:"pool-group,omitempty"`
+	MaxIdleConnsPerHost        int      `json:"max-idle-conns-per-host,omitempty"`
+	PrefillMaxRetries          *int     `json:"prefill-max-retries,omitempty"`
+	PrefillRetryBackoff        string   `json:"prefill-retry-backoff,omitempty"`
+	DecodeChunkSize            int      `json:"decode-chunk-size,omitempty"`
+	Tracing                    *bool    `json:"tracing,omitempty"`
+	EnableToolCallingTelemetry *bool    `json:"enable-tool-calling-telemetry,omitempty"`
+	MetricsPort                int      `json:"metrics-port,omitempty"`
+	MetricsCertDir             string   `json:"metrics-cert-dir,omitempty"`
 }
 
 // Options holds the CLI-facing configuration for the pd-sidecar proxy.
@@ -153,8 +160,6 @@ type Options struct {
 
 	// modelServerPort is the port the model server (vLLM, SGLang, etc.) is listening on; used to compute Config.DecoderURL in Complete().
 	modelServerPort string
-	// vllmPort is the deprecated alias for modelServerPort; migrated in Complete().
-	vllmPort string
 	// enableTLS is the list of stages to enable TLS for; used to compute Config.UseTLSFor* in Complete().
 	enableTLS []string
 	// tlsInsecureSkipVerify is the list of stages to skip TLS verification for; used to compute Config.InsecureSkipVerifyFor* in Complete().
@@ -182,8 +187,9 @@ var (
 
 	// supportedECConnectors defines all valid E/P EC connector types
 	supportedECConnectors = map[string]struct{}{
-		constants.ECExampleConnector: {},
-		constants.ECConnectorNIXL:    {},
+		constants.ECExampleConnector:  {},
+		constants.ECConnectorNIXL:     {},
+		constants.ECConnectorMooncake: {},
 	}
 
 	// supportedTLSStages defines all valid stages for TLS configuration
@@ -194,7 +200,7 @@ var (
 	}
 
 	supportedKVConnectorNamesStr = strings.Join([]string{constants.KVConnectorNIXLV2, constants.KVConnectorSharedStorage, constants.KVConnectorSGLang, constants.KVConnectorMooncake, constants.KVConnectorOffloading}, ", ")
-	supportedECConnectorNamesStr = strings.Join([]string{constants.ECExampleConnector, constants.ECConnectorNIXL}, ", ")
+	supportedECConnectorNamesStr = strings.Join([]string{constants.ECExampleConnector, constants.ECConnectorNIXL, constants.ECConnectorMooncake}, ", ")
 
 	supportedTLSStageNamesStr = strings.Join([]string{prefillStage, decodeStage, encodeStage}, ", ")
 )
@@ -210,6 +216,13 @@ func NewOptions() *Options {
 	if portStr := os.Getenv(envMooncakeBootstrapPort); portStr != "" {
 		if port, err := strconv.Atoi(portStr); err == nil {
 			mooncakeBootstrapPort = port
+		}
+	}
+
+	ecMooncakePort := defaultECMooncakePort
+	if portStr := os.Getenv(envECMooncakePort); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			ecMooncakePort = port
 		}
 	}
 
@@ -231,6 +244,8 @@ func NewOptions() *Options {
 			PrefillMaxRetries:       0,
 			PrefillRetryBackoff:     200 * time.Millisecond,
 			MooncakeBootstrapPort:   mooncakeBootstrapPort,
+			ECMooncakePort:          ecMooncakePort,
+			ECMooncakePodIP:         os.Getenv("POD_IP"),
 			P2PConnectorPort:        p2pConnectorPort,
 			PoolGroup:               routing.InferencePoolAPIGroup,
 			DecodeChunkSize:         0,
@@ -253,8 +268,8 @@ func NewOptions() *Options {
 			MoRIIODPSizeLocal: 0,
 			MoRIIODecodeHosts: nil,
 		},
-		vllmPort:      defaultVLLMPort,
-		inferencePool: os.Getenv(envInferencePool),
+		modelServerPort: defaultModelServerPort,
+		inferencePool:   os.Getenv(envInferencePool),
 	}
 }
 
@@ -271,9 +286,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.AddGoFlagSet(goFlagSet)
 	fs.StringVar(&opts.Port, port, opts.Port, "the port the sidecar is listening on")
 	fs.StringVar(&opts.modelServerPort, modelServerPort, opts.modelServerPort,
-		fmt.Sprintf("the port the model server is listening on (default %s)", defaultVLLMPort))
-	fs.StringVar(&opts.vllmPort, vllmPort, opts.vllmPort, "the port the model server is listening on")
-	_ = fs.MarkDeprecated(vllmPort, "use --model-server-port instead; --vllm-port will be removed after the deprecation period")
+		fmt.Sprintf("the port the model server is listening on (default %s)", defaultModelServerPort))
 	fs.IntVar(&opts.DataParallelSize, dataParallelSize, opts.DataParallelSize, "the model server's data-parallel size")
 	fs.StringVar(&opts.KVConnector, kvConnector, opts.KVConnector,
 		"the KV protocol between prefiller and decoder. Supported: "+supportedKVConnectorNamesStr)
@@ -281,6 +294,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the EC protocol between encoder and prefiller (for EPD mode). Supported: "+supportedECConnectorNamesStr+". Leave empty to skip encoder stage.")
 	fs.IntVar(&opts.MooncakeBootstrapPort, mooncakeBootstrapPortFlag, opts.MooncakeBootstrapPort,
 		"the port used to query the Mooncake bootstrap endpoint on prefill pods (only used with --kv-connector=mooncake)")
+	fs.IntVar(&opts.ECMooncakePort, ecMooncakePortFlag, opts.ECMooncakePort,
+		"the ec_port the EC consumer (prefiller, or the local decoder without a prefiller) listens on for Mooncake EC control (only used with --ec-connector=ec-mooncake)")
+	fs.StringVar(&opts.ECMooncakePodIP, ecMooncakePodIPFlag, opts.ECMooncakePodIP,
+		"the local decoder's address reachable from encoder pods, named to encoders as the EC consumer when a request has no prefiller. Defaults to the POD_IP env var (only used with --ec-connector=ec-mooncake)")
 	fs.IntVar(&opts.P2PConnectorPort, p2pConnectorPortFlag, opts.P2PConnectorPort,
 		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode request; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
@@ -291,9 +308,12 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.CertPath, certPath, opts.CertPath, "Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing.")
 	fs.BoolVar(&opts.EnableSSRFProtection, enableSSRFProtection, opts.EnableSSRFProtection, "enable SSRF protection using InferencePool allowlisting")
 	fs.BoolVar(&opts.EnablePrefillerSampling, enablePrefillerSampling, opts.EnablePrefillerSampling, "if true, the target prefill instance will be selected randomly from among the provided prefill host values")
-	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup, "group of the InferencePool this Endpoint Picker is associated with.")
+	fs.StringVar(&opts.PoolGroup, poolGroup, opts.PoolGroup,
+		"Kubernetes resource group of the InferencePool this sidecar is associated with. "+
+			"Only `inference.networking.k8s.io` is currently supported.")
 	fs.IntVar(&opts.DecodeChunkSize, decodeChunkSize, opts.DecodeChunkSize, "enables chunked decode mode when > 0; value is the token budget per chunk. For best performance should be a multiple of the block size.")
 	fs.BoolVar(&opts.Tracing, tracingFlag, opts.Tracing, "Enable OpenTelemetry tracing")
+	fs.BoolVar(&opts.EnableToolCallingTelemetry, toolCallingTelemetryFlag, opts.EnableToolCallingTelemetry, "Enable tool-calling request telemetry")
 	fs.IntVar(&opts.MetricsPort, metricsPort, opts.MetricsPort, "Port for the Prometheus /metrics endpoint (exposes the moriio_dns_* and llm_d_disagg_sidecar_* counters). 0 (the default) disables it. Takes precedence over the MORIIO_METRICS_ADDR env var.")
 	fs.StringVar(&opts.MetricsCertDir, metricsCertDir, opts.MetricsCertDir, "Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 
@@ -394,9 +414,6 @@ func parseCipherSuites(names []string) ([]uint16, error) {
 	for _, cipherSuite := range tls.CipherSuites() {
 		byName[cipherSuite.Name] = cipherSuite.ID
 	}
-	for _, cipherSuite := range tls.InsecureCipherSuites() {
-		byName[cipherSuite.Name] = cipherSuite.ID
-	}
 
 	values := make([]uint16, 0, len(names))
 	for _, name := range names {
@@ -420,13 +437,6 @@ func parseCipherSuites(names []string) ([]uint16, error) {
 func (opts *Options) Complete() error {
 	if err := opts.extractYAMLConfiguration(); err != nil {
 		return err
-	}
-
-	// Resolve the effective model server port with flag-over-config precedence:
-	//   --model-server-port flag > --vllm-port flag > model-server-port YAML > vllm-port YAML > default.
-	// The deprecated --vllm-port flag must still override a YAML model-server-port.
-	if (opts.isFlagSet(vllmPort) && !opts.isFlagSet(modelServerPort)) || opts.modelServerPort == "" {
-		opts.modelServerPort = opts.vllmPort
 	}
 
 	// Parse inferencePool field (namespace/name or just name) into Config.
@@ -660,9 +670,6 @@ func (opts *Options) Validate() error {
 	}
 
 	portFlagName := "--" + modelServerPort
-	if opts.isFlagSet(vllmPort) && !opts.isFlagSet(modelServerPort) {
-		portFlagName = "--" + vllmPort
-	}
 	msPort, err := strconv.Atoi(opts.modelServerPort)
 	if err != nil {
 		return fmt.Errorf("%s must be a valid integer, got %q", portFlagName, opts.modelServerPort)
@@ -717,6 +724,18 @@ func (opts *Options) Validate() error {
 	// Validate mooncake bootstrap port
 	if opts.MooncakeBootstrapPort < 1 || opts.MooncakeBootstrapPort > 65535 {
 		return fmt.Errorf("--mooncake-bootstrap-port must be between 1 and 65535, got %d", opts.MooncakeBootstrapPort)
+	}
+
+	if opts.ECConnector == constants.ECConnectorMooncake {
+		if opts.ECMooncakePort < 1 || opts.ECMooncakePort > 65535 {
+			return fmt.Errorf("--ec-mooncake-port must be between 1 and 65535, got %d", opts.ECMooncakePort)
+		}
+		// vLLM offsets each DP rank's control port by data_parallel_index *
+		// tensor_parallel_size, which the sidecar cannot derive.
+		if opts.DataParallelSize > 1 {
+			return fmt.Errorf("--ec-connector=%s does not support --data-parallel-size > 1, got %d",
+				constants.ECConnectorMooncake, opts.DataParallelSize)
+		}
 	}
 
 	// Validate P2P connector port
@@ -815,15 +834,17 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	if cfg.Port != 0 && !opts.isFlagSet(port) {
 		opts.Port = strconv.Itoa(cfg.Port)
 	}
-	// If both keys may be present, Complete() resolves precedence: modelServerPort wins.
 	if cfg.ModelServerPort != 0 && !opts.isFlagSet(modelServerPort) {
 		opts.modelServerPort = strconv.Itoa(cfg.ModelServerPort)
 	}
-	if cfg.VLLMPort != 0 && !opts.isFlagSet(vllmPort) {
-		opts.vllmPort = strconv.Itoa(cfg.VLLMPort)
-	}
 	if cfg.MooncakeBootstrapPort != 0 && !opts.isFlagSet(mooncakeBootstrapPortFlag) {
 		opts.MooncakeBootstrapPort = cfg.MooncakeBootstrapPort
+	}
+	if cfg.ECMooncakePort != 0 && !opts.isFlagSet(ecMooncakePortFlag) {
+		opts.ECMooncakePort = cfg.ECMooncakePort
+	}
+	if cfg.ECMooncakePodIP != "" && !opts.isFlagSet(ecMooncakePodIPFlag) {
+		opts.ECMooncakePodIP = cfg.ECMooncakePodIP
 	}
 	if cfg.P2PConnectorPort != 0 && !opts.isFlagSet(p2pConnectorPortFlag) {
 		opts.P2PConnectorPort = cfg.P2PConnectorPort
@@ -906,6 +927,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.Tracing != nil && !opts.isFlagSet(tracingFlag) {
 		opts.Tracing = *cfg.Tracing
+	}
+	if cfg.EnableToolCallingTelemetry != nil && !opts.isFlagSet(toolCallingTelemetryFlag) {
+		opts.EnableToolCallingTelemetry = *cfg.EnableToolCallingTelemetry
 	}
 }
 

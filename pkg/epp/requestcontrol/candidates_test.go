@@ -19,12 +19,9 @@ package requestcontrol
 
 import (
 	"context"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -150,177 +147,7 @@ func TestDatastoreEndpointCandidates_Locate(t *testing.T) {
 	}
 }
 
-// --- CachedEndpointCandidates Tests ---
-
-func TestCachedEndpointCandidates_CachingBehavior(t *testing.T) {
-	t.Parallel()
-
-	mockDelegate := &mockEndpointCandidates{
-		result: []fwkdl.Endpoint{makeMockEndpoint("p1", "1.1.1.1")},
-	}
-
-	// Use a short TTL for testing.
-	ttl := 20 * time.Millisecond
-	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, ttl)
-	meta := makeMetadataWithSubset([]any{"1.1.1.1:80"})
-
-	// 1. First Call: Should hit delegate
-	res1 := cached.Locate(context.Background(), meta)
-	require.Len(t, res1, 1)
-	assert.Equal(t, 1, mockDelegate.callCount(), "Expected delegate to be called on first access")
-
-	// 2. Second Call (Immediate): Should hit cache
-	res2 := cached.Locate(context.Background(), meta)
-	require.Len(t, res2, 1)
-	assert.Equal(t, 1, mockDelegate.callCount(), "Expected delegate NOT to be called again (cache hit)")
-
-	// 3. Wait for Expiry
-	time.Sleep(ttl * 2)
-
-	// 4. Third Call (Expired): Should hit delegate again
-	res3 := cached.Locate(context.Background(), meta)
-	require.Len(t, res3, 1)
-	assert.Equal(t, 2, mockDelegate.callCount(), "Expected delegate to be called after TTL expiry")
-}
-
-func TestCachedEndpointCandidates_CacheKeyDeterminism(t *testing.T) {
-	t.Parallel()
-
-	mockDelegate := &mockEndpointCandidates{}
-	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, time.Minute)
-
-	// Scenario: subset [A, B] should generate same cache key as [B, A].
-	metaOrder1 := makeMetadataWithSubset([]any{"10.0.0.1:80", "10.0.0.2:80"})
-	metaOrder2 := makeMetadataWithSubset([]any{"10.0.0.2:80", "10.0.0.1:80"})
-
-	cached.Locate(context.Background(), metaOrder1)
-	assert.Equal(t, 1, mockDelegate.callCount(), "Initial call")
-
-	cached.Locate(context.Background(), metaOrder2)
-	assert.Equal(t, 1, mockDelegate.callCount(), "Different order of subset endpoints should hit the same cache entry")
-}
-
-func TestCachedEndpointCandidates_Concurrency_ThunderingHerd(t *testing.T) {
-	t.Parallel()
-
-	// Simulate a slow delegate to exacerbate race conditions.
-	mockDelegate := &mockEndpointCandidates{
-		delay: 10 * time.Millisecond,
-		result: []fwkdl.Endpoint{
-			makeMockEndpoint("p1", "1.1.1.1"),
-		},
-	}
-
-	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, 100*time.Millisecond)
-	meta := makeMetadataWithSubset([]any{"1.1.1.1:80"})
-
-	concurrency := 50
-	var wg sync.WaitGroup
-	wg.Add(concurrency)
-
-	start := make(chan struct{})
-
-	// Spawn N routines trying to Locate simultaneously.
-	for range concurrency {
-		go func() {
-			defer wg.Done()
-			<-start // Synchronize start.
-			res := cached.Locate(context.Background(), meta)
-			assert.Len(t, res, 1)
-		}()
-	}
-
-	close(start) // Release the hounds.
-	wg.Wait()
-
-	// Ideally, the delegate should be called exactly once.
-	// However, due to double-checked locking, strict 'once' is guaranteed.
-	assert.Equal(t, 1, mockDelegate.callCount(), "Delegate should be called exactly once despite concurrent access")
-}
-
-func TestCachedEndpointCandidates_DifferentSubsetsAreIsolated(t *testing.T) {
-	t.Parallel()
-
-	mockDelegate := &mockEndpointCandidates{}
-	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, time.Minute)
-
-	metaA := makeMetadataWithSubset([]any{"10.0.0.1:80"})
-	metaB := makeMetadataWithSubset([]any{"10.0.0.2:80"})
-
-	cached.Locate(context.Background(), metaA)
-	assert.Equal(t, 1, mockDelegate.callCount())
-
-	cached.Locate(context.Background(), metaB)
-	assert.Equal(t, 2, mockDelegate.callCount(), "Different subsets must trigger distinct delegate calls")
-}
-
-func TestCachedEndpointCandidates_CacheIsolation_EmptyVsDefault(t *testing.T) {
-	t.Parallel()
-
-	mockDelegate := &mockEndpointCandidates{
-		result: []fwkdl.Endpoint{makeMockEndpoint("p1", "1.1.1.1")},
-	}
-	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, time.Minute)
-
-	// 1. Request All Pods (No Metadata)
-	res1 := cached.Locate(context.Background(), nil)
-	assert.NotEmpty(t, res1)
-	assert.Equal(t, 1, mockDelegate.callCount())
-
-	// 2. Request Empty Subset (Should be distinct key)
-	// We expect the delegate to be called AGAIN because "__explicit_empty__" is not "__default__".
-	metaEmpty := makeMetadataWithSubset([]any{})
-	_ = cached.Locate(context.Background(), metaEmpty)
-	assert.Equal(t, 2, mockDelegate.callCount(), "Empty subset should not hit the default cache key")
-}
-
-func TestCachedEndpointCandidates_CacheIsolation_MalformedVsDefault(t *testing.T) {
-	t.Parallel()
-
-	ep := makeMockEndpoint("p1", "1.1.1.1")
-	mockDelegate := &mockEndpointCandidates{}
-	cached := NewCachedEndpointCandidates(context.Background(), mockDelegate, time.Minute)
-
-	// The delegate drops non-string entries, so a single malformed entry resolves to no endpoints.
-	_ = cached.Locate(context.Background(), makeMetadataWithSubset([]any{42}))
-
-	mockDelegate.mu.Lock()
-	mockDelegate.result = []fwkdl.Endpoint{ep}
-	mockDelegate.mu.Unlock()
-
-	res := cached.Locate(context.Background(), nil)
-	assert.Equal(t, []fwkdl.Endpoint{ep}, res, "A malformed subset must not populate the default cache key")
-	assert.Equal(t, 2, mockDelegate.callCount())
-}
-
 // --- Helpers & Mocks ---
-
-// mockEndpointCandidates implements contracts.EndpointCandidates.
-type mockEndpointCandidates struct {
-	mu     sync.Mutex
-	calls  int
-	delay  time.Duration
-	result []fwkdl.Endpoint
-}
-
-func (m *mockEndpointCandidates) Locate(ctx context.Context, _ map[string]any) []fwkdl.Endpoint {
-	m.mu.Lock()
-	m.calls++
-	delay := m.delay
-	result := m.result
-	m.mu.Unlock()
-
-	if delay > 0 {
-		time.Sleep(delay)
-	}
-	return result
-}
-
-func (m *mockEndpointCandidates) callCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.calls
-}
 
 func makeMockEndpoint(name, ip string) fwkdl.Endpoint {
 	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
@@ -334,5 +161,57 @@ func makeMetadataWithSubset(endpoints []any) map[string]any {
 		metadata.SubsetFilterNamespace: map[string]any{
 			metadata.SubsetFilterKey: endpoints,
 		},
+	}
+}
+
+func TestDatastoreEndpointCandidates_IPv6Subset(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		ip        string
+		subset    string
+		wantMatch bool
+	}{
+		{"IPv4 with port", "10.0.0.1", "10.0.0.1:8080", true},
+		{"IPv4 without port", "10.0.0.1", "10.0.0.1", true},
+		{"bracketed IPv6 with port", "2001:db8::1", "[2001:db8::1]:8080", true},
+		{"IPv6 without port", "2001:db8::1", "2001:db8::1", true},
+		{"noncanonical IPv6 with port", "2001:db8::1", "[2001:DB8:0::1]:8080", true},
+		{"noncanonical IPv6 without port", "2001:db8::1", "2001:0db8:0:0:0:0:0:1", true},
+		{"bracketed IPv6 without port", "2001:db8::1", "[2001:db8::1]", true},
+		{"IPv6 zone with port", "fe80::1%eth0", "[FE80:0::1%eth0]:8080", true},
+		{"IPv6 zone without port", "fe80::1%eth0", "fe80::1%eth0", true},
+		{"bracketed IPv6 zone without port", "fe80::1%eth0", "[fe80::1%eth0]", true},
+		{"IPv6 nonnumeric port keeps existing behavior", "2001:db8::1", "[2001:db8::1]:invalid", true},
+		{"IPv6 empty port keeps existing behavior", "2001:db8::1", "[2001:db8::1]:", true},
+		{"IPv6 final hextet stays address", "2001:db8::1:8080", "2001:db8::1:8080", true},
+		{"hostname with port", "worker.example", "worker.example:8080", true},
+		{"hostname without port", "worker.example", "worker.example", true},
+		{"nonnumeric port keeps existing behavior", "10.0.0.1", "10.0.0.1:invalid", true},
+		{"empty port keeps existing behavior", "10.0.0.1", "10.0.0.1:", true},
+		{"extra colon stays unmatched", "10.0.0.1", "10.0.0.1:8080:invalid", false},
+		{"bracketed hostname stays unmatched", "worker.example", "[worker.example]:8080", false},
+		{"bracketed bare hostname stays unmatched", "worker.example", "[worker.example]", false},
+		{"missing IPv6 closing bracket stays unmatched", "2001:db8::1", "[2001:db8::1", false},
+		{"missing IPv6 opening bracket stays unmatched", "2001:db8::1", "2001:db8::1]", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ep := makeMockEndpoint("target", tc.ip)
+			other := makeMockEndpoint("other", "10.0.0.99")
+			candidates := NewDatastoreEndpointCandidates(&mockDatastore{pods: []fwkdl.Endpoint{ep, other}})
+			got := candidates.Locate(context.Background(), makeMetadataWithSubset([]any{tc.subset}))
+			if !tc.wantMatch {
+				if len(got) != 0 {
+					t.Fatalf("subset %q should remain unmatched, got %v", tc.subset, got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].GetMetadata().GetIPAddress() != tc.ip {
+				t.Fatalf("subset %q should retain exactly endpoint %q, got %v", tc.subset, tc.ip, got)
+			}
+		})
 	}
 }

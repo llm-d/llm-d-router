@@ -30,6 +30,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
@@ -75,6 +76,7 @@ type Processor struct {
 	saturationDetector   flowcontrol.SaturationDetector
 	endpointCandidates   contracts.EndpointCandidates
 	usageLimitPolicy     flowcontrol.UsageLimitPolicy
+	bandSelectionPolicy  flowcontrol.BandSelectionPolicy
 	clock                clock.WithTicker
 	noEndpointRequestTTL time.Duration
 	cleanupSweepInterval time.Duration
@@ -101,6 +103,11 @@ type Processor struct {
 	// avoiding a per-cycle allocation. Only accessed from the Run goroutine, so it needs no
 	// synchronization.
 	ceilings []float64
+
+	// order is the reusable output buffer handed to the BandSelectionPolicy each dispatch cycle, holding
+	// the sequence in which bands are offered a dispatch opportunity as indices into the priority slice.
+	// Only accessed from the Run goroutine, so it needs no synchronization.
+	order []int
 
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
@@ -131,6 +138,7 @@ func NewProcessor(
 	saturationDetector flowcontrol.SaturationDetector,
 	endpointCandidates contracts.EndpointCandidates,
 	usageLimitPolicy flowcontrol.UsageLimitPolicy,
+	bandSelectionPolicy flowcontrol.BandSelectionPolicy,
 	clock clock.WithTicker,
 	noEndpointRequestTTL time.Duration,
 	cleanupSweepInterval time.Duration,
@@ -145,6 +153,7 @@ func NewProcessor(
 		saturationDetector:   saturationDetector,
 		endpointCandidates:   endpointCandidates,
 		usageLimitPolicy:     usageLimitPolicy,
+		bandSelectionPolicy:  bandSelectionPolicy,
 		clock:                clock,
 		noEndpointRequestTTL: noEndpointRequestTTL,
 		cleanupSweepInterval: cleanupSweepInterval,
@@ -327,7 +336,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 
 	// --- Capacity Check ---
 	// This check is safe because it is performed by the single-writer Run goroutine.
-	ok, stats, err := p.hasCapacity(key.Priority, req.ByteSize())
+	ok, stats, err := p.hasCapacity(managedQ.FlowQueueAccessor(), req.ByteSize())
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %v", key.Priority, err)
 		p.logger.Error(finalErr, "Rejecting request, capacity lookup failed", "flowKey", key, "requestID", req.ID())
@@ -370,13 +379,13 @@ func (p *Processor) enqueue(item *FlowItem) {
 		"flowKey", key, "requestID", req.ID())
 }
 
-// hasCapacity checks if the global limits and the specific priority band have enough capacity.
+// hasCapacity checks the global, priority-band, and per-flow queue limits.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
 // A non-nil error means the capacity could not be read (the priority band is not configured), not that capacity is
 // exhausted.
-func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.CapacitySnapshot, error) {
-	snapshot, err := p.registry.CapacitySnapshot(priority)
+func (p *Processor) hasCapacity(flowQueue flowcontrol.FlowQueueAccessor, itemByteSize uint64) (bool, contracts.CapacitySnapshot, error) {
+	snapshot, err := p.registry.CapacitySnapshot(flowQueue.FlowKey().Priority)
 	if err != nil {
 		return false, snapshot, err
 	}
@@ -393,6 +402,17 @@ func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contra
 	if band.CapacityRequests > 0 && band.Len+1 > band.CapacityRequests {
 		return false, snapshot, nil
 	}
+	if snapshot.MaxRequestsPerFlow > 0 && clamp.Uint64(flowQueue.Len()) >= snapshot.MaxRequestsPerFlow {
+		return false, snapshot, nil
+	}
+	if limit := snapshot.MaxBytesPerFlow; limit > 0 {
+		used := flowQueue.ByteSize()
+		// Subtract from the limit to avoid overflowing on an oversized request.
+		if used > limit || itemByteSize > limit-used {
+			return false, snapshot, nil
+		}
+	}
+
 	return true, snapshot, nil
 }
 
@@ -436,17 +456,18 @@ func (p *Processor) recordCapacityUtilization() {
 	}
 }
 
-// dispatchCycle attempts to dispatch a single item by iterating through priority bands from highest to lowest.
-// It applies the configured policies for each band to select an item and then attempts to dispatch it.
-// It returns true if an item was successfully dispatched, and false otherwise.
-// It enforces Head-of-Line (HoL) blocking if the selected item is saturated.
+// dispatchCycle attempts to dispatch a single item by offering priority bands a dispatch opportunity in the
+// order chosen by the BandSelectionPolicy. It applies the configured policies for each band to select an item
+// and then attempts to dispatch it. It returns true if an item was successfully dispatched, and false
+// otherwise. It enforces Head-of-Line (HoL) blocking for bands the UsageLimitPolicy gates.
 //
 // # Work Conservation and Head-of-Line (HoL) Blocking
 //
 // The cycle attempts to be work-conserving by skipping bands where selection fails.
-// However, if a selected item is saturated (cannot be scheduled), the cycle stops immediately. This enforces HoL
-// blocking to respect the policy's decision and prevent priority inversion, where dispatching lower-priority work might
-// exacerbate the saturation affecting the high-priority item.
+// A band gated by its usage ceiling is skipped for the same reason: dispatching it would exacerbate the
+// saturation holding back higher-priority work. Ceilings are monotonically non-increasing across descending
+// priority, so gated bands form a contiguous tail and a skip under strict order only ever reaches further
+// gated bands.
 func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	dispatchCycleStart := time.Now()
 	defer func() {
@@ -478,6 +499,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		if len(part.endpoints) == 0 {
 			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
 			metrics.DeleteFlowControlDetectorSaturationStage(part.name)
+			metrics.DeleteFlowControlStaleEndpointsStage(part.name)
 			continue
 		}
 		stageSat := p.saturationDetector.Saturation(flowcontrol.WithSaturationStage(ctx, part.name), part.endpoints)
@@ -491,6 +513,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	} else {
 		// Drop series recorded by an earlier unpartitioned evaluation (e.g. an empty pool at startup).
 		metrics.DeleteFlowControlDetectorSaturationStage("")
+		metrics.DeleteFlowControlStaleEndpointsStage("")
 	}
 
 	metrics.RecordFlowControlPoolSaturation(p.poolName, "effective", saturation)
@@ -502,19 +525,29 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	ceilings := p.ceilingsBuffer(len(priorities))
 	p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities, ceilings)
 
-	for i, priority := range priorities {
-		// --- Viability Check (Saturation/HoL Blocking) ---
-		// Check before selecting an item: if we are already saturated for this priority, stop immediately.
-		usageLimit := ceilings[i]
-		if saturation >= usageLimit {
-			p.logger.V(logutil.DEBUG).Info("Priority band is saturated; enforcing HoL blocking.",
-				"priority", priority, "saturation", saturation, "usageLimit", usageLimit)
-			if p.reclamation != nil {
-				p.maybeReclaim(ctx, saturation, priorities, ceilings, i)
-			}
-			// Stop the dispatch cycle entirely to respect strict policy decision and prevent priority inversion where
-			// lower-priority work might exacerbate the saturation affecting high-priority work.
-			return false
+	// --- Viability Check (Saturation/HoL Blocking) ---
+	// Ceilings are monotonically non-increasing per the UsageLimitPolicy contract, so the gated bands form a
+	// contiguous tail of priorities and the first of them marks the head-of-line break.
+	breakIdx := len(priorities)
+	for i := range priorities {
+		if saturation >= ceilings[i] {
+			breakIdx = i
+			break
+		}
+	}
+
+	order := p.orderBuffer(len(priorities))
+	p.bandSelectionPolicy.Rank(ctx, flowcontrol.BandSelectionParameters{
+		Saturation: saturation,
+		Priorities: priorities,
+		Ceilings:   ceilings,
+	}, order)
+
+	for _, i := range order {
+		priority := priorities[i]
+		// Gating is per band, so a gated band is skipped wherever it is ranked rather than ending the cycle.
+		if saturation >= ceilings[i] {
+			continue
 		}
 
 		originalBand, err := p.registry.PriorityBandAccessor(priority)
@@ -540,7 +573,18 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 				"flowKey", req.FlowKey(), "requestID", req.ID())
 			continue // Continue to the next band to maximize work conservation.
 		}
+		p.bandSelectionPolicy.RecordDispatch(ctx, priority)
 		return true
+	}
+
+	// The cycle dispatched nothing. When a band is gated, the break is where head-of-line blocking bit, and
+	// reclamation is evaluated there to recover capacity for the work it holds back.
+	if breakIdx < len(priorities) {
+		p.logger.V(logutil.DEBUG).Info("Priority band is saturated; enforcing HoL blocking.",
+			"priority", priorities[breakIdx], "saturation", saturation, "usageLimit", ceilings[breakIdx])
+		if p.reclamation != nil {
+			p.maybeReclaim(ctx, saturation, priorities, ceilings, breakIdx)
+		}
 	}
 	return false
 }
@@ -555,6 +599,20 @@ func (p *Processor) ceilingsBuffer(n int) []float64 {
 	buf := p.ceilings[:n]
 	for i := range buf {
 		buf[i] = 1.0
+	}
+	return buf
+}
+
+// orderBuffer returns the reusable band order buffer sized to n, reset to the identity permutation.
+// Pre-filling with strict highest-to-lowest order guarantees that a policy which writes nothing falls
+// back to strict dispatch rather than replaying the previous cycle's order.
+func (p *Processor) orderBuffer(n int) []int {
+	if cap(p.order) < n {
+		p.order = make([]int, n)
+	}
+	buf := p.order[:n]
+	for i := range buf {
+		buf[i] = i
 	}
 	return buf
 }
@@ -638,8 +696,19 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 		// Nothing to finalize on an unknown type; surface the error so the cycle moves to the next band.
 		return fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
 	}
+	// The request can be finalized asynchronously while it is being removed. Do not create a
+	// reservation for work that will not proceed past flow control.
+	if removedItem.FinalState() != nil {
+		return nil
+	}
+
+	reservationTracker, tracksReservations := p.saturationDetector.(flowcontrol.DispatchReservationTracker)
+	reserved := tracksReservations && reservationTracker.ReserveDispatch(req.ID())
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithError(nil)
+	if reserved && removedItem.FinalState().Outcome != types.QueueOutcomeDispatched {
+		reservationTracker.ReleaseDispatch(req.ID())
+	}
 	return nil
 }
 

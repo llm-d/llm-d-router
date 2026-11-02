@@ -217,3 +217,45 @@ func TestAdmit(t *testing.T) {
 		})
 	}
 }
+
+func TestAdmitNonFiniteSLOHeaders(t *testing.T) {
+	plugin := NewLatencyAdmission(LatencyAdmissionDefaultConfig)
+
+	for _, value := range []string{"NaN", "+Inf", "-Inf", "Infinity", "inf"} {
+		for _, tt := range []struct {
+			name    string
+			request *fwksched.InferenceRequest
+			wantErr bool
+		}{
+			{
+				name:    "TTFT only",
+				request: makeSheddableRequest(value, ""),
+			},
+			{
+				name:    "TPOT only",
+				request: makeSheddableRequest("", value),
+			},
+			{
+				name:    "valid TPOT",
+				request: makeSheddableRequest(value, "30"),
+				wantErr: true,
+			},
+			{
+				name:    "valid TTFT",
+				request: makeSheddableRequest("100", value),
+				wantErr: true,
+			},
+		} {
+			t.Run(value+"/"+tt.name, func(t *testing.T) {
+				endpoint := makeLatencyAdmissionEndpoint("pod1", 0.5, 5)
+				endpoint.Put(attrlatency.LatencyPredictionInfoDataKey,
+					attrlatency.NewLatencyPredictionInfo(false, false, -150, -40, 150, 40, 0))
+
+				err := plugin.Admit(context.Background(), tt.request, []fwksched.Endpoint{endpoint})
+				if (err != nil) != tt.wantErr {
+					t.Errorf("Admit() error = %v, wantErr %v", err, tt.wantErr)
+				}
+			})
+		}
+	}
+}

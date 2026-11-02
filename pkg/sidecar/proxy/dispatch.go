@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -49,21 +50,24 @@ func openAIAPIAttr(apiType reqcommon.APIType) attribute.KeyValue {
 func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestStart := time.Now()
+		w, status := captureResponseStatus(w)
 		metrics.RecordRequest(apiType.String())
 		tracer := tracing.Tracer(tracerScope)
 		ctx, span := tracer.Start(r.Context(), "forward_request",
 			trace.WithSpanKind(trace.SpanKindServer),
 		)
 		defer span.End()
+		ctx = context.WithValue(ctx, toolCallingRequestSpanKey, span)
+		ctx = context.WithValue(ctx, toolCallingTelemetryEnabledKey{}, s.config.EnableToolCallingTelemetry)
 
 		// Tag this handler's log lines with the trace they belong to. The proxy
-		// logger is process-scoped, so seed it into the context first. Connectors
-		// reached from here still log through s.logger and stay uncorrelated;
-		// the request context carries the correlated logger for them to adopt.
+		// logger is process-scoped, so seed it into the context, where the
+		// connectors this handler dispatches to read it.
 		ctx = tracing.LoggerWithSpanContext(log.IntoContext(ctx, s.logger), span)
 		logger := log.FromContext(ctx)
 
 		ctx = context.WithValue(ctx, requestStartTimeKey, requestStart)
+		ctx, summary := withRequestSummary(ctx)
 		r = r.WithContext(ctx)
 
 		requestPath := ""
@@ -78,8 +82,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			openAIAPIAttr(apiType),
 		)
 
-		prefillHostPorts := r.Header.Values(routing.PrefillEndpointHeader)
-		r.Header.Del(routing.PrefillEndpointHeader)
+		prefillHostPorts := routing.TakeRoutingHeaderValues(r.Header, routing.PrefillEndpointHeader)
 
 		if len(prefillHostPorts) == 1 {
 			prefillHostPorts = strings.Split(prefillHostPorts[0], ",")
@@ -94,6 +97,18 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				prefillHostPort = strings.TrimSpace(prefillHostPorts[0])
 			}
 		}
+
+		// Every request ends with one line at the default level; per-stage
+		// lines stay at debug.
+		route := requestRoute{path: metricsutil.DisaggPathDecodeOnly}
+		if s.config.DecoderURL != nil {
+			route.decoder = s.config.DecoderURL.Host
+		}
+		if prefillHostPort != "" {
+			route.path = metricsutil.DisaggPathPrefillDecode
+			route.prefiller = prefillHostPort
+		}
+		defer func() { summary.log(logger, route, status, time.Since(requestStart)) }()
 
 		if len(prefillHostPort) == 0 {
 			logger.V(logging.DEBUG).Info("skip disaggregated prefill", "api", apiType.String())
@@ -127,8 +142,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			logger.V(logging.DEBUG).Info("SSRF protection: prefill target allowed", "target", prefillHostPort)
 		}
 
-		kvCacheSource := strings.TrimSpace(r.Header.Get(routing.KVCacheSourceHeader))
-		r.Header.Del(routing.KVCacheSourceHeader)
+		kvCacheSource := strings.TrimSpace(routing.TakeRoutingHeaderValue(r.Header, routing.KVCacheSourceHeader))
 		if kvCacheSource != "" {
 			switch {
 			case !s.p2pPullAvailable():
@@ -148,8 +162,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			span.SetAttributes(semconv.LLMDPDProxyKVCacheSource(kvCacheSource))
 		}
 
-		encoderHostPorts := r.Header.Values(routing.EncoderEndpointsHeader)
-		r.Header.Del(routing.EncoderEndpointsHeader)
+		encoderHostPorts := routing.TakeRoutingHeaderValues(r.Header, routing.EncoderEndpointsHeader)
 		if len(encoderHostPorts) == 1 {
 			encoderHostPorts = strings.Split(encoderHostPorts[0], ",")
 		}
@@ -182,12 +195,13 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
 				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
 			)
+			route.path = metricsutil.DisaggPathEncodeDecode
 			if len(prefillHostPort) > 0 {
-				metrics.RecordDisagg(metrics.DisaggTypeEPD)
-			} else {
-				metrics.RecordDisagg(metrics.DisaggTypeED)
+				route.path = metricsutil.DisaggPathEncodePrefillDecode
 			}
-			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, apiType)
+			route.encoders = len(allowedEncoders)
+			metrics.RecordDisagg(route.path)
+			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, kvCacheSource, apiType)
 			return
 		}
 
@@ -202,7 +216,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 
 		if len(prefillHostPort) > 0 {
 			logger.V(logging.DEBUG).Info("using P/D protocol")
-			metrics.RecordDisagg(metrics.DisaggTypePD)
+			metrics.RecordDisagg(metricsutil.DisaggPathPrefillDecode)
 			s.handlePDConnector(w, r, prefillHostPort, kvCacheSource, apiType)
 			return
 		}
@@ -219,7 +233,9 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			}
 			r = cloneRequestWithBody(r.Context(), r, raw)
 		}
-		if !s.forwardDataParallel || !s.dataParallelHandler(w, r) {
+		if !s.forwardDataParallel || !s.dataParallelHandler(w, r, func() {
+			observeToolCallingPassthrough(r, apiType)
+		}) {
 			if kvCacheSource != "" {
 				s.decodeWithP2PSource(w, r, kvCacheSource)
 				return
@@ -228,6 +244,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				s.runChunkedDecode(w, r)
 				return
 			}
+			observeToolCallingPassthrough(r, apiType)
 			s.decoderProxy.ServeHTTP(w, r)
 		}
 	}

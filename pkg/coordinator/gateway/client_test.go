@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 )
@@ -184,8 +186,8 @@ func TestRedactBody(t *testing.T) {
 func TestClient_RequestReturnsReadableBody(t *testing.T) {
 	const want = `{"ok":true}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(ContentTypeHeader) != ContentTypeJSON {
-			t.Errorf("content-type = %q, want %q", r.Header.Get(ContentTypeHeader), ContentTypeJSON)
+		if r.Header.Get(ContentTypeHeader) != reqcommon.ContentTypeJSON {
+			t.Errorf("content-type = %q, want %q", r.Header.Get(ContentTypeHeader), reqcommon.ContentTypeJSON)
 		}
 		if got := r.Header.Get("X-Custom"); got != "v" {
 			t.Errorf("custom header not forwarded, got %q", got)
@@ -257,6 +259,34 @@ func TestClient_RequestBuffersBodyOnlyAtTrace(t *testing.T) {
 			t.Errorf("body = %q, want %q", got, want)
 		}
 	})
+}
+
+// A declared Content-Length longer than the body ends the TRACE pre-read in
+// io.ErrUnexpectedEOF; the caller must still see the status and that error.
+func TestClient_RequestTraceReplaysInterruptedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "partial")
+	}))
+	defer srv.Close()
+
+	logger := funcr.NewJSON(func(string) {}, funcr.Options{Verbosity: logutil.TRACE})
+	resp, err := New(config.GatewayConfig{Address: srv.URL}).Post(log.IntoContext(context.Background(), logger), "/v1/chat/completions", []byte(`{}`), nil)
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	got, readErr := io.ReadAll(resp.Body)
+	if string(got) != "partial" {
+		t.Errorf("body = %q, want the bytes that arrived", got)
+	}
+	if !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		t.Errorf("read error = %v, want io.ErrUnexpectedEOF", readErr)
+	}
 }
 
 func TestClient_BaseURLAndTransport(t *testing.T) {

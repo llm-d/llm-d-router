@@ -10,8 +10,8 @@ Selects the endpoint(s) with the highest score calculated during the scoring pha
 ## What it does
 
 1. Receives a list of `ScoredEndpoint` candidates.
-2. Sorts candidates by score in descending order using stable sort.
-3. Rotates candidates within each equal-score tier up to `maxNumOfEndpoints` using round-robin rotation for deterministic tie-breaking.
+2. Sorts candidates by score in descending order, ordering equal scores by namespace/name.
+3. Rotates candidates within each equal-score tier up to `maxNumOfEndpoints` using round-robin rotation for deterministic tie-breaking. Each set of candidates keeps its own rotation, so profiles that share the picker (such as prefill and decode) each spread their ties evenly.
 4. Returns the top `maxNumOfEndpoints` candidates.
 
 ## Behavioral Intent

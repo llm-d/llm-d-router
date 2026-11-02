@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,14 +28,15 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
+	"sigs.k8s.io/yaml"
 )
 
 // stableConfigsGlob matches every frozen plugin config, across major versions.
 const stableConfigsGlob = "../../../test/testdata/plugins/stable/v*/*.yaml"
 
 // TestStablePluginConfigs loads every frozen config under test/testdata/plugins/stable/
-// and fails if one no longer parses, no longer instantiates its plugins, or pulls in a
-// plugin that is not at least Beta.
+// and fails if one no longer parses, no longer instantiates its plugins, references a
+// plugin that is not registered as Stable, or pulls in a plugin that is not at least Beta.
 //
 // These configs are the written-down form of the promise made when a plugin is promoted
 // to Stable: a configuration valid today stays valid for the whole major version. The
@@ -49,6 +51,13 @@ func TestStablePluginConfigs(t *testing.T) {
 		t.Run(testName(file), func(t *testing.T) {
 			configText, err := os.ReadFile(file)
 			require.NoError(t, err, "failed to read %s", file)
+
+			var header struct {
+				APIVersion string `json:"apiVersion"`
+			}
+			require.NoError(t, yaml.Unmarshal(configText, &header), "failed to parse apiVersion from %s", file)
+			require.Equal(t, "llm-d.ai/v1", header.APIVersion,
+				"stable config %s must use apiVersion llm-d.ai/v1", file)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -70,6 +79,12 @@ func TestStablePluginConfigs(t *testing.T) {
 
 			require.NoError(t, fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins),
 				"stable config %s references a plugin that is not at least Beta", file)
+
+			pluginType := strings.TrimSuffix(filepath.Base(file), ".yaml")
+			meta, ok := fwkplugin.RegistryMetadata[pluginType]
+			require.True(t, ok, "stable config %s covers plugin %s which is not in RegistryMetadata", file, pluginType)
+			require.Equal(t, fwkplugin.StabilityStable, meta.Stability,
+				"stable config %s covers plugin %s which is not registered as Stable", file, pluginType)
 		})
 	}
 }

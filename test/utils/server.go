@@ -35,18 +35,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
 )
 
 const bufSize = 1024 * 1024
 
 var testListener *bufconn.Listener
 
-func PrepareForTestStreamingServer(t *testing.T, objectives []*v1alpha2.InferenceObjective, pods []*corev1.Pod, poolName string, namespace string,
+func PrepareForTestStreamingServer(t *testing.T, objectives []*apixv1.InferenceObjective, pods []*corev1.Pod, poolName string, namespace string,
 	poolPort int32) (context.Context, context.CancelFunc, datastore.Datastore) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -68,12 +69,13 @@ func PrepareForTestStreamingServer(t *testing.T, objectives []*v1alpha2.Inferenc
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = v1alpha2.Install(scheme)
+	_ = apixv1.Install(scheme)
 	_ = v1.Install(scheme)
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(initObjs...).
 		Build()
-	pool := testutil.MakeInferencePool(poolName).Namespace(namespace).ObjRef()
+	pool := fwkgaie.MakeInferencePool(poolName).Namespace(namespace).ObjRef()
 	pool.Spec.TargetPorts = []v1.Port{{Number: v1.PortNumber(poolPort)}}
 	_ = ds.PoolSet(context.Background(), fakeClient, poolutil.InferencePoolToEndpointPool(pool))
 

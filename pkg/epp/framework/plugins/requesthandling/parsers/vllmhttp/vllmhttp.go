@@ -24,7 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -102,10 +101,10 @@ func (p *VllmHTTPParser) Claims() fwkrh.Claims {
 	}
 }
 
-// ParseRequest handles /inference/v1/generate locally and delegates everything
-// else to the embedded OpenAI parser.
+// ParseRequest handles /inference/v1/generate with an optional trailing slash
+// and rejects other paths.
 func (p *VllmHTTPParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
-	if strings.HasSuffix(request.GetRequestPath(headers), generatePathSuffix) {
+	if request.MatchPathSuffix(request.GetRequestPath(headers), generatePathSuffix) {
 		return p.parseGenerateRequest(body)
 	}
 	return nil, fmt.Errorf("unsupported path: %s", request.GetRequestPath(headers))

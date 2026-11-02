@@ -27,11 +27,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
-	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	k8slog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,7 +35,7 @@ import (
 
 	infextv1a2 "github.com/llm-d/llm-d-router/apix/v1alpha2"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/env"
-	"github.com/llm-d/llm-d-router/test/e2e/utils"
+	"github.com/llm-d/llm-d-router/test/e2e/utils/manifest"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -76,9 +72,9 @@ var (
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
-	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v0.10.2", ginkgo.GinkgoLogr)
+	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v1.0.0", ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
-	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", "vllm/vllm-openai-cpu:v0.21.0", ginkgo.GinkgoLogr)
+	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", vllmSimImage, ginkgo.GinkgoLogr)
 	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	loadRenderImage  = env.GetEnvBool("LOAD_VLLM_RENDER_IMAGE", true, ginkgo.GinkgoLogr)
 
@@ -118,7 +114,7 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() {
 	setupK8sClient()
 	createCRDs()
 	// If we are running tests in parallel, create the renderer in the "base namespace"
-	createdRendererNS = setupNameSpaceHelper(baseNsName)
+	createdRendererNS = testutils.SetupNamespace(testConfig, baseNsName)
 	renderObjects = createRender(baseNsName)
 }, func() {
 	if ginkgo.GinkgoParallelProcess() != 1 {
@@ -161,7 +157,7 @@ var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 			ginkgo.By("Deleting created Kubernetes objects")
 			testutils.DeleteObjects(testConfig, renderObjects, baseNsName)
 			if createdRendererNS {
-				deleteNameSpace(baseNsName)
+				testutils.DeleteNamespace(testConfig, baseNsName)
 			}
 			testutils.DeleteObjects(testConfig, crdObjects, "")
 		}
@@ -250,61 +246,45 @@ func setupK8sClient() {
 	k8slog.SetLogger(ginkgo.GinkgoLogr)
 }
 
-// setupNameSpace sets up the specified namespace if it doesn't exist
-func setupNameSpace() bool {
-	return setupNameSpaceHelper(getNamespace())
-}
-
-func setupNameSpaceHelper(nsName string) bool {
-	ginkgo.By("Setup namespace " + nsName)
-	_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
-	if err == nil {
-		return false
-	}
-	gomega.Expect(apierrors.IsNotFound(err)).To(gomega.BeTrue())
-
-	ginkgo.By("Creating namespace " + nsName)
-	namespace := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: nsName,
-		},
-	}
-	_, err = testConfig.KubeCli.CoreV1().Namespaces().Create(testConfig.Context, namespace, metav1.CreateOptions{})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	ginkgo.By("Ensuring namespace exists: " + nsName)
-	testutils.EventuallyExists(testConfig, func() error {
-		return testConfig.K8sClient.Get(testConfig.Context,
-			types.NamespacedName{Name: nsName}, &corev1.Namespace{})
-	})
-
-	return true
-}
-
-func deleteNameSpace(nsName string) {
-	ginkgo.By("Deleting namespace " + nsName)
-	err := testConfig.KubeCli.CoreV1().Namespaces().Delete(testConfig.Context, nsName, metav1.DeleteOptions{})
-	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-	gomega.Eventually(func() bool {
-		_, err := testConfig.KubeCli.CoreV1().Namespaces().Get(testConfig.Context, nsName, metav1.GetOptions{})
-		return apierrors.IsNotFound(err)
-	}, testConfig.ExistsTimeout, testConfig.Interval).Should(gomega.BeTrue())
-}
-
 // createCRDs creates the Inference Extension CRDs used for testing.
 func createCRDs() {
-	crds := utils.RunKustomize(crdKustomizePath)
+	crds := manifest.RunKustomize(crdKustomizePath)
 	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds, "")
 }
 
-// getPort returns the envoy service's NodePort for this process. See testutils.ProcessPort.
+// getPort returns the host port this process reaches the envoy service on,
+// derived from E2E_PORT. See testutils.ProcessPort.
 func getPort() int {
 	return testutils.ProcessPort(basePort)
 }
 
-// getMetricsPort returns the EPP's metrics NodePort for this process. See testutils.ProcessPort.
+// getMetricsPort returns the host port this process reaches the EPP's metrics
+// on, derived from E2E_METRICS_PORT. See testutils.ProcessPort.
 func getMetricsPort() int {
 	return testutils.ProcessPort(baseMetricsPort)
+}
+
+// getNodePort returns the envoy service's NodePort for this process. It derives
+// from defaultPort rather than basePort because it is the cluster-side port: it
+// must match the containerPort BuildExtraPortMappings maps to the host, and stay
+// inside the Kubernetes NodePort range whatever host port E2E_PORT asks for.
+// Against an existing cluster (K8S_CONTEXT set) clients use a port-forward, so
+// it returns 0 and the API server picks a NodePort the cluster has free.
+// See testutils.ProcessPort.
+func getNodePort() int {
+	if k8sContext != "" {
+		return 0
+	}
+	return testutils.ProcessPort(defaultPort)
+}
+
+// getMetricsNodePort returns the EPP's metrics NodePort for this process. See
+// getNodePort.
+func getMetricsNodePort() int {
+	if k8sContext != "" {
+		return 0
+	}
+	return testutils.ProcessPort(defaultMetricsPort)
 }
 
 // getNamespace returns the namespace being used by the current process. Each

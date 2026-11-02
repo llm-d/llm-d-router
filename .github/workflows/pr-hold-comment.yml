@@ -1,0 +1,57 @@
+# Applies or removes the `hold` label from a `/hold` or `/hold cancel` PR
+# comment, gated on the commenter being the PR author or having write access.
+# pr-hold-gate.yml blocks merge while the label is present.
+
+name: Hold comment
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  hold:
+    name: Apply or cancel hold label
+    if: >-
+      github.event.issue.pull_request &&
+      (github.event.comment.body == '/hold' || github.event.comment.body == '/hold cancel')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.issue.number }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Check commenter is PR author or has write access
+        id: check-access
+        env:
+          COMMENTER: ${{ github.event.comment.user.login }}
+          PR_AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          if [[ "$COMMENTER" == "$PR_AUTHOR" ]]; then
+            exit 0
+          fi
+          level=$(gh api "repos/$REPO/collaborators/$COMMENTER/permission" -q '.permission')
+          if [[ "$level" != "admin" && "$level" != "write" && "$level" != "maintain" ]]; then
+            echo "User $COMMENTER is not the PR author and does not have write access (got: $level). Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: React to comment
+        if: steps.check-access.outputs.skip != 'true'
+        run: |
+          gh api "repos/$REPO/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content='+1' --silent
+
+      - name: Add hold label
+        if: steps.check-access.outputs.skip != 'true' && github.event.comment.body == '/hold'
+        run: gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label hold
+
+      - name: Remove hold label
+        if: steps.check-access.outputs.skip != 'true' && github.event.comment.body == '/hold cancel'
+        run: gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label hold || true

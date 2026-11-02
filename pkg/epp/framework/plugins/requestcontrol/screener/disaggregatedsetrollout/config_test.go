@@ -214,3 +214,28 @@ func assertValidateError(t *testing.T, cfg Config, wantSubstring string) {
 		t.Fatalf("error %q does not contain %q", err.Error(), wantSubstring)
 	}
 }
+
+func TestValidate_Overflow(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating.Overflow = &RevisionOverflow{GuardPluginName: "prefill-guard"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("overflow rejected: %v", err)
+	}
+	if cfg.RevisionGating.Overflow.Role != DefaultOverflowRole {
+		t.Fatalf("overflow role defaults to %q, got %q", DefaultOverflowRole, cfg.RevisionGating.Overflow.Role)
+	}
+	for _, tc := range []struct {
+		mode     GatingMode
+		overflow RevisionOverflow
+		want     string
+	}{
+		{GatingModeSum, RevisionOverflow{}, "guardPluginName is required"},
+		{GatingModeSum, RevisionOverflow{GuardPluginName: "prefill-guard", Role: "encode"}, "must be one of revisionGating.requiredRoles"},
+		{GatingModeDisabled, RevisionOverflow{GuardPluginName: "prefill-guard"}, "revisionGating.overflow requires revisionGating.mode"},
+	} {
+		cfg := validConfig()
+		cfg.RevisionGating.Mode = tc.mode
+		cfg.RevisionGating.Overflow = &tc.overflow
+		assertValidateError(t, cfg, tc.want)
+	}
+}

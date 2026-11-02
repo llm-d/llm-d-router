@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -178,7 +179,7 @@ func TestECPipelineTokenLimits(t *testing.T) {
 		},
 	}
 
-	for _, connector := range []string{constants.ECExampleConnector, constants.ECConnectorNIXL} {
+	for _, connector := range []string{constants.ECExampleConnector, constants.ECConnectorNIXL, constants.ECConnectorMooncake} {
 		t.Run(connector, func(t *testing.T) {
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
@@ -340,21 +341,24 @@ func TestECPipelineResponsesImage(t *testing.T) {
 // client addressed the gateway, and which of the encoders behind it refused the
 // priming leg is not a distinction the client can act on.
 func TestHandleEC_EncoderErrorStatus(t *testing.T) {
-	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType){
+	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType){
 		"ec-nixl":           (*Server).handleECNIXL,
 		"ec-shared-storage": (*Server).handleECSharedStorage,
+		"ec-mooncake":       (*Server).handleECMooncake,
 	}
 	tests := []struct {
 		name        string
 		encoderCode int
 		wantClient  int
+		truncated   bool
 	}{
-		{"encoder rejects the body", http.StatusBadRequest, http.StatusBadGateway},
-		{"encoder finds the body unprocessable", http.StatusUnprocessableEntity, http.StatusBadGateway},
-		{"encoder does not serve the route", http.StatusNotFound, http.StatusBadGateway},
-		{"encoder is at capacity", http.StatusTooManyRequests, http.StatusBadGateway},
-		{"encoder is unavailable", http.StatusServiceUnavailable, http.StatusBadGateway},
-		{"encoder fails internally", http.StatusInternalServerError, http.StatusBadGateway},
+		{"encoder rejects the body", http.StatusBadRequest, http.StatusBadGateway, false},
+		{"encoder finds the body unprocessable", http.StatusUnprocessableEntity, http.StatusBadGateway, false},
+		{"encoder does not serve the route", http.StatusNotFound, http.StatusBadGateway, false},
+		{"encoder is at capacity", http.StatusTooManyRequests, http.StatusBadGateway, false},
+		{"encoder is unavailable", http.StatusServiceUnavailable, http.StatusBadGateway, false},
+		{"encoder fails internally", http.StatusInternalServerError, http.StatusBadGateway, false},
+		{"encoder response is truncated", http.StatusOK, http.StatusBadGateway, true},
 	}
 
 	for name, handle := range handlers {
@@ -362,6 +366,9 @@ func TestHandleEC_EncoderErrorStatus(t *testing.T) {
 			t.Run(name+"/"+tt.name, func(t *testing.T) {
 				encoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
+					if tt.truncated {
+						w.Header().Set("Content-Length", "100")
+					}
 					w.WriteHeader(tt.encoderCode)
 					_, _ = w.Write([]byte(`{"error":"nope"}`))
 				}))
@@ -376,17 +383,76 @@ func TestHandleEC_EncoderErrorStatus(t *testing.T) {
 				srv.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {
 					dispatched = true
 				}
+				srv.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+					dispatched = true
+				})
 
 				body, err := json.Marshal(userMessageRequest(imageURLItem("https://example.com/img.jpg")))
 				require.NoError(t, err)
 				req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(body))
+				req = req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{}))
 				rw := httptest.NewRecorder()
 
-				handle(srv, rw, req, "fake-prefiller:8000", []string{encoderURL.Host}, reqcommon.APITypeChatCompletions)
+				handle(srv, rw, req, "fake-prefiller:8000", []string{encoderURL.Host}, "", reqcommon.APITypeChatCompletions)
 
 				assert.False(t, dispatched, "a failed fanout must not reach the P/D connector")
 				assert.Equal(t, tt.wantClient, rw.Code, "body=%s", rw.Body.String())
 			})
 		}
 	}
+}
+
+func TestExtractMMItemsConvertsAnthropicImages(t *testing.T) {
+	messages, err := json.Marshal([]any{
+		map[string]any{"role": "system", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/system.png"}},
+		}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "look"},
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/a.png"}},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/chat.png"}},
+			map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": []any{
+				map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "aaaa"}},
+				map[string]any{"type": "image", "source": map[string]any{"media_type": "image/gif", "data": "bbbb"}},
+				map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "cccc"}},
+				map[string]any{"type": "image", "source": map[string]any{"url": "https://example.com/bare.png"}},
+				map[string]any{"type": "tool_result", "content": []any{
+					map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/deep.png"}},
+				}},
+			}},
+		}},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/assistant.png"}},
+			map[string]any{"type": "tool_result", "tool_use_id": "toolu_2", "content": []any{
+				map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/assistant-tool.png"}},
+			}},
+		}},
+	})
+	require.NoError(t, err)
+
+	items := extractMMItems(log.Log, map[string]any{"messages": json.RawMessage(messages)}, reqcommon.APITypeMessages)
+	urls := make([]any, 0, len(items))
+	for _, item := range items {
+		assert.Equal(t, reqcommon.PartTypeImageURL, item["type"])
+		urls = append(urls, item["image_url"])
+	}
+	// A user turn's tool_result images come before its own, the order vLLM
+	// renders them in.
+	assert.Equal(t, []any{
+		map[string]any{"url": "data:image/png;base64,aaaa"},
+		map[string]any{"url": "data:image/gif;base64,bbbb"},
+		map[string]any{"url": "data:image/jpeg;base64,cccc"},
+		map[string]any{"url": "https://example.com/bare.png"},
+		map[string]any{"url": "https://example.com/a.png"},
+		map[string]any{"url": "https://example.com/assistant.png"},
+	}, urls)
+
+	// A chat completion does not speak Anthropic image blocks.
+	chat, err := json.Marshal([]any{
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/a.png"}},
+		}},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, extractMMItems(log.Log, map[string]any{"messages": json.RawMessage(chat)}, reqcommon.APITypeChatCompletions))
 }

@@ -19,6 +19,8 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -27,28 +29,42 @@ import (
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
-func TestAnthropicParser_RewritePriority(t *testing.T) {
-	t.Run("strips client priority and writes resolved priority", func(t *testing.T) {
-		parser := NewAnthropicParser()
-		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"model": "test", "priority": 100}, 2)
-		require.NoError(t, err)
-		assert.True(t, mutated)
-		m := got.(fwkrh.PayloadMap)
-		assert.Equal(t, 2, m["priority"])
-	})
-	t.Run("writes priority when none supplied", func(t *testing.T) {
-		parser := NewAnthropicParser()
-		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrh.PayloadMap{"model": "test"}, 2)
-		require.NoError(t, err)
-		assert.True(t, mutated)
-		m := got.(fwkrh.PayloadMap)
-		assert.Equal(t, 2, m["priority"])
-	})
+func TestAnthropicParser_RequestFieldErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		body      string
+		wantField string
+	}{
+		{name: "tools type", body: `{"messages":[{"role":"user","content":"hello"}],"tools":{}}`, wantField: "tools"},
+		{name: "nested tool name type", body: `{"messages":[{"role":"user","content":"hello"}],"tools":[{"name":123}]}`, wantField: "tools"},
+		{name: "message role type", body: `{"messages":[{"role":123}],"tools":[]}`, wantField: "messages"},
+		{name: "missing messages", body: `{"tools":[]}`},
+		{name: "malformed JSON", body: `{"tools":[`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewAnthropicParser().ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": reqcommon.PathMessages})
+			require.Error(t, err)
+			var fieldErr *fwkrh.RequestFieldError
+			require.Equal(t, tt.wantField != "", errors.As(err, &fieldErr))
+			if tt.wantField != "" {
+				field, _, _ := strings.Cut(fieldErr.Field, ".")
+				require.Equal(t, tt.wantField, field)
+				require.ErrorIs(t, err, fieldErr.Err)
+			}
+		})
+	}
+}
+
+func TestAnthropicParser_NoPriorityRewrite(t *testing.T) {
+	// The Anthropic messages schema has no priority field and ignores extra keys.
+	var parser any = NewAnthropicParser()
+	_, ok := parser.(fwkrh.PriorityRewriter)
+	assert.False(t, ok, "anthropic-parser must not advertise PriorityRewriter")
 }
 
 func TestNewAnthropicParser(t *testing.T) {
@@ -237,11 +253,8 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 							Structured: []fwkrh.AnthropicContentBlock{
 								{
 									Type: "image",
-									Source: &fwkrh.AnthropicImageSource{
-										Type:      "base64",
-										MediaType: "image/png",
-										Data:      "iVBORw0KGgo=",
-									},
+									// The test body is built from a map, so json.Marshal writes its keys sorted.
+									Source: json.RawMessage(`{"data":"iVBORw0KGgo=","media_type":"image/png","type":"base64"}`),
 								},
 								{Type: "text", Text: "What is in this image?"},
 							},
@@ -399,6 +412,32 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name:    "trailing slash on messages path",
+			headers: map[string]string{":path": "/v1/messages/"},
+			body: map[string]any{
+				"model":      "claude-sonnet-4-6",
+				"max_tokens": float64(1024),
+				"messages": []any{
+					map[string]any{"role": "user", "content": "Hello, Claude"},
+				},
+			},
+			want: &fwkrh.InferenceRequestBody{
+				MaxOutputTokens: ptr.To(int64(1024)),
+				Messages: &fwkrh.MessagesRequest{
+					Messages: []fwkrh.AnthropicMessage{
+						{Role: "user", Content: fwkrh.AnthropicContent{Raw: "Hello, Claude"}},
+					},
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":      "claude-sonnet-4-6",
+					"max_tokens": json.Number("1024"),
+					"messages": []any{
+						map[string]any{"role": "user", "content": "Hello, Claude"},
+					},
+				},
+			},
+		},
+		{
 			name:    "empty messages array",
 			headers: map[string]string{":path": "/v1/messages"},
 			body: map[string]any{
@@ -519,7 +558,7 @@ func TestAnthropicParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
-			name: "usage with cache tokens",
+			name: "usage with cache read tokens",
 			body: []byte(`{
 				"id": "msg_123",
 				"type": "message",
@@ -531,12 +570,80 @@ func TestAnthropicParser_ParseResponse(t *testing.T) {
 			}`),
 			want: &fwkrh.ParsedResponse{
 				Usage: &fwkrh.Usage{
+					PromptTokens:     180,
+					CompletionTokens: 50,
+					TotalTokens:      230,
+					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+						CachedTokens: 80,
+					},
+				},
+			},
+		},
+		{
+			name: "usage with cache read and cache creation tokens",
+			body: []byte(`{
+				"id": "msg_123",
+				"type": "message",
+				"usage": {
+					"input_tokens": 50,
+					"output_tokens": 10,
+					"cache_read_input_tokens": 100000,
+					"cache_creation_input_tokens": 248
+				}
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     100298,
+					CompletionTokens: 10,
+					TotalTokens:      100308,
+					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+						CachedTokens: 100000,
+					},
+				},
+			},
+		},
+		{
+			// An explicit zero is a cache miss and has to reach the metrics layer
+			// as a zero observation, not as a missing count.
+			name: "usage with an explicit zero cache read tokens",
+			body: []byte(`{
+				"id": "msg_123",
+				"type": "message",
+				"usage": {
+					"input_tokens": 100,
+					"output_tokens": 50,
+					"cache_read_input_tokens": 0
+				}
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
 					PromptTokens:     100,
 					CompletionTokens: 50,
 					TotalTokens:      150,
 					PromptTokenDetails: &fwkrh.PromptTokenDetails{
-						CachedTokens: 80,
+						CachedTokens: 0,
 					},
+				},
+			},
+		},
+		{
+			// The cache fields are optional, so an absent field must stay absent
+			// rather than becoming a zero observation.
+			name: "usage without cache read tokens",
+			body: []byte(`{
+				"id": "msg_123",
+				"type": "message",
+				"usage": {
+					"input_tokens": 100,
+					"output_tokens": 50,
+					"cache_creation_input_tokens": 20
+				}
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     120,
+					CompletionTokens: 50,
+					TotalTokens:      170,
 				},
 			},
 		},
@@ -588,6 +695,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					PromptTokens: 25,
 					TotalTokens:  25,
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -598,6 +706,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 15,
 					TotalTokens:      15,
 				},
+				StreamedEvents: 1,
 			},
 		},
 		{
@@ -611,6 +720,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 15,
 					TotalTokens:      40,
 				},
+				StreamedEvents: 3,
 			},
 		},
 		{
@@ -619,41 +729,89 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":50}}"),
 			want: &fwkrh.ParsedResponse{
 				Usage: &fwkrh.Usage{
-					PromptTokens:     100,
+					PromptTokens:     180,
 					CompletionTokens: 50,
-					TotalTokens:      150,
+					TotalTokens:      230,
 					PromptTokenDetails: &fwkrh.PromptTokenDetails{
 						CachedTokens: 80,
 					},
 				},
+				StreamedEvents: 2,
+			},
+		},
+		{
+			name: "message_delta input tokens supersede message_start",
+			chunk: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2679,\"output_tokens\":3}}}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10682,\"output_tokens\":510}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     10682,
+					CompletionTokens: 510,
+					TotalTokens:      11192,
+				},
+				StreamedEvents: 2,
+			},
+		},
+		{
+			name: "message_delta placeholder zero keeps the earlier cache read",
+			chunk: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"cache_read_input_tokens\":2000}}}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":30,\"output_tokens\":15,\"cache_read_input_tokens\":0}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     30,
+					CompletionTokens: 15,
+					TotalTokens:      45,
+					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+						CachedTokens: 2000,
+					},
+				},
+				StreamedEvents: 2,
+			},
+		},
+		{
+			name:  "message_delta cache tokens",
+			chunk: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":50,\"cache_read_input_tokens\":100000,\"cache_creation_input_tokens\":248,\"output_tokens\":10}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     100298,
+					CompletionTokens: 10,
+					TotalTokens:      100308,
+					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+						CachedTokens: 100000,
+					},
+				},
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "content delta without usage",
 			chunk: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}"),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "content delta with usage text but no usage object",
 			chunk: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"usage\"}}"),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 		{
 			name:  "message_stop without usage",
 			chunk: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}"),
 			want: &fwkrh.ParsedResponse{
-				Usage: nil,
+				Usage:          nil,
+				StreamedEvents: 1,
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{request.HeaderContentType: request.MediaTypeEventStream}, true)
+			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}, true)
 			if err != nil {
 				t.Fatalf("ParseResponse() error = %v", err)
 			}
@@ -712,42 +870,86 @@ func TestAnthropicParser_ParseRequest_CountTokens(t *testing.T) {
 		name    string
 		headers map[string]string
 		body    []byte
+		want    *fwkrh.InferenceRequestBody
+		wantErr bool
 	}{
 		{
-			name:    "valid count_tokens body forwarded as raw payload",
+			name:    "model resolved for rewriting",
 			headers: map[string]string{":path": "/v1/messages/count_tokens"},
 			body: []byte(`{"model":"test-model",` +
 				`"system":"You are a helpful assistant.",` +
 				`"messages":[{"role":"user","content":"Hello"}]}`),
+			want: &fwkrh.InferenceRequestBody{
+				Model: "test-model",
+				Payload: fwkrh.PayloadMap{
+					"model":    "test-model",
+					"system":   json.RawMessage(`"You are a helpful assistant."`),
+					"messages": json.RawMessage(`[{"role":"user","content":"Hello"}]`),
+				},
+			},
 		},
 		{
-			name:    "empty body still forwarded",
-			headers: map[string]string{":path": "/v1/messages/count_tokens"},
-			body:    []byte{},
-		},
-		{
-			name:    "non-JSON body still forwarded",
-			headers: map[string]string{":path": "/v1/messages/count_tokens"},
-			body:    []byte("not-json"),
+			name:    "trailing slash",
+			headers: map[string]string{":path": "/v1/messages/count_tokens/"},
+			body:    []byte(`{"model":"test-model"}`),
+			want: &fwkrh.InferenceRequestBody{
+				Model:   "test-model",
+				Payload: fwkrh.PayloadMap{"model": "test-model"},
+			},
 		},
 		{
 			name:    "path read from x-original-path header",
 			headers: map[string]string{"x-original-path": "/v1/messages/count_tokens"},
-			body:    []byte(`{}`),
+			body:    []byte(`{"model":"test-model"}`),
+			want: &fwkrh.InferenceRequestBody{
+				Model:   "test-model",
+				Payload: fwkrh.PayloadMap{"model": "test-model"},
+			},
+		},
+		{
+			// A body that resolves no model reaches the director, which rejects it
+			// once the payload is marshalable, as it does on /v1/messages.
+			name:    "null body resolves no model",
+			headers: map[string]string{":path": "/v1/messages/count_tokens"},
+			body:    []byte(`null`),
+			want:    &fwkrh.InferenceRequestBody{Payload: fwkrh.PayloadMap{}},
+		},
+		{
+			name:    "body without model",
+			headers: map[string]string{":path": "/v1/messages/count_tokens"},
+			body:    []byte(`{"messages":[{"role":"user","content":"Hello"}]}`),
+			want: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.PayloadMap{"messages": json.RawMessage(`[{"role":"user","content":"Hello"}]`)},
+			},
+		},
+		{
+			name:    "empty body",
+			headers: map[string]string{":path": "/v1/messages/count_tokens"},
+			body:    []byte{},
+			wantErr: true,
+		},
+		{
+			name:    "non-JSON body",
+			headers: map[string]string{":path": "/v1/messages/count_tokens"},
+			body:    []byte("not-json"),
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parser.ParseRequest(context.Background(), tt.body, tt.headers)
-			if err != nil {
-				t.Fatalf("ParseRequest() error = %v", err)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseRequest() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
 			}
 			if !got.SkipResponseProcessing {
 				t.Errorf("ParseRequest() SkipResponseProcessing = false, want true")
 			}
-			want := &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(tt.body)}
-			if diff := cmp.Diff(want, got.Body); diff != "" {
+			tt.want.RawBody = tt.body
+			if diff := cmp.Diff(tt.want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() body mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -840,11 +1042,75 @@ func TestParseRequest_ToolBlocks(t *testing.T) {
 	require.Len(t, toolResult, 1)
 	assert.Equal(t, "tool_result", toolResult[0].Type)
 	assert.Equal(t, "toolu_01", toolResult[0].ToolUseID)
-	assert.Equal(t, "Sunny", toolResult[0].Content.Structured[0].Text)
+	assert.Equal(t, "Sunny", toolResult[0].ToolResultContent().Structured[0].Text)
 
 	tools := got.Body.Messages.Tools
 	require.Len(t, tools, 1)
 	assert.Equal(t, "get_weather", tools[0].Name)
 	assert.Equal(t, `{"type": "object", "properties": {"city": {"type": "string"}}}`, string(tools[0].InputSchema),
 		"input_schema must keep wire bytes for order-faithful re-serialization")
+}
+
+// Regression test for search_result blocks rejected with a 400: their "source"
+// is a URL string, not the object an image block uses. Block-level decoding is
+// covered in requesthandling's TestAnthropicContent_UnmarshalJSON.
+func TestParseRequest_SearchResultBlocks(t *testing.T) {
+	parser := NewAnthropicParser()
+	body := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 1024,
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "search_result", "source": "https://example.com/notes", "title": "Notes",
+				 "content": [{"type": "text", "text": "The code word is alpha."}]},
+				{"type": "text", "text": "Reply with the code word."}
+			]},
+			{"role": "assistant", "content": [
+				{"type": "tool_use", "id": "toolu_01", "name": "search", "input": {"q": "weather"}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "toolu_01", "content": [
+					{"type": "search_result", "source": "https://example.com/report", "title": "Report",
+					 "content": [{"type": "text", "text": "Sunny"}]}
+				]}
+			]}
+		]
+	}`
+
+	got, err := parser.ParseRequest(context.Background(), []byte(body), map[string]string{":path": "/v1/messages"})
+	require.NoError(t, err)
+	require.NotNil(t, got.Body.Messages)
+	assert.Equal(t, `"https://example.com/notes"`, string(got.Body.Messages.Messages[0].Content.Structured[0].Source))
+}
+
+// Regression test for server tool result blocks rejected with a 400: their
+// "content" is an object, not the string or array a tool_result carries.
+// Block-level decoding is covered in requesthandling's TestAnthropicContent_UnmarshalJSON.
+func TestParseRequest_ServerToolResultObjectContent(t *testing.T) {
+	parser := NewAnthropicParser()
+	body := `{
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 1024,
+		"messages": [
+			{"role": "user", "content": "Search and run it."},
+			{"role": "assistant", "content": [
+				{"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {"query": "weather"}},
+				{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_01",
+				 "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}},
+				{"type": "server_tool_use", "id": "srvtoolu_02", "name": "bash_code_execution", "input": {"command": "ls"}},
+				{"type": "bash_code_execution_tool_result", "tool_use_id": "srvtoolu_02",
+				 "content": {"type": "bash_code_execution_result", "stdout": "data.csv", "stderr": "", "return_code": 0, "content": []}},
+				{"type": "text", "text": "Done."}
+			]},
+			{"role": "user", "content": "Thanks."}
+		]
+	}`
+
+	got, err := parser.ParseRequest(context.Background(), []byte(body), map[string]string{":path": "/v1/messages"})
+	require.NoError(t, err)
+	require.NotNil(t, got.Body.Messages)
+	blocks := got.Body.Messages.Messages[1].Content.Structured
+	require.Len(t, blocks, 5)
+	assert.JSONEq(t, `{"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}`, string(blocks[1].Content))
+	assert.JSONEq(t, `{"type": "bash_code_execution_result", "stdout": "data.csv", "stderr": "", "return_code": 0, "content": []}`, string(blocks[3].Content))
 }

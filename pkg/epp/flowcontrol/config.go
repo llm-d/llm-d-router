@@ -31,9 +31,10 @@ const FeatureGate = "flowControl"
 // It embeds the configurations for the controller and the registry, providing a single point of entry for validation
 // and initialization.
 type Config struct {
-	Controller       *controller.Config
-	Registry         *registry.Config
-	UsageLimitPolicy flowcontrol.UsageLimitPolicy
+	Controller          *controller.Config
+	Registry            *registry.Config
+	UsageLimitPolicy    flowcontrol.UsageLimitPolicy
+	BandSelectionPolicy flowcontrol.BandSelectionPolicy
 }
 
 func (c *Config) String() string {
@@ -49,10 +50,16 @@ func (c *Config) String() string {
 
 // NewConfig constructs a Config from pre-resolved components.
 // All plugin resolution is performed by the config loader before calling this constructor.
-func NewConfig(ctrl *controller.Config, reg *registry.Config, ulp flowcontrol.UsageLimitPolicy) *Config {
+func NewConfig(
+	ctrl *controller.Config,
+	reg *registry.Config,
+	ulp flowcontrol.UsageLimitPolicy,
+	bsp flowcontrol.BandSelectionPolicy,
+) *Config {
 	return &Config{
-		Controller:       ctrl,
-		Registry:         reg,
-		UsageLimitPolicy: ulp,
+		Controller:          ctrl,
+		Registry:            reg,
+		UsageLimitPolicy:    ulp,
+		BandSelectionPolicy: bsp,
 	}
 }

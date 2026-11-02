@@ -43,6 +43,9 @@ const (
 	// outcomeNotApplicable: the filter had nothing to decide (a single
 	// candidate, or the affinity threshold disabled).
 	outcomeNotApplicable = "not_applicable"
+	// outcomeMissingSignal: Either side of the TTFT comparison lacked the configured attribute
+	// gate skipped and sticky set kept
+	outcomeMissingSignal = "missing_signal"
 )
 
 var filterDecisions = prometheus.NewCounterVec(

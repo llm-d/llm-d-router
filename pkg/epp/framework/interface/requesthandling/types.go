@@ -18,30 +18,22 @@ limitations under the License.
 package requesthandling
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	"google.golang.org/protobuf/proto"
 )
 
 const nilStr = "<nil>"
-
-// Modality identifies the type of multimodal content in a prompt.
-type Modality string
-
-// Modality values match the model-server's multimodal hash keys so labels agree
-// across backends.
-const (
-	ModalityImage Modality = "image"
-	ModalityAudio Modality = "audio"
-	ModalityVideo Modality = "video"
-)
 
 // RequestPayload represents a strongly-typed unmarshaled request payload or raw bytes.
 type RequestPayload interface {
@@ -92,7 +84,8 @@ func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
 // An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest,
-// TextToSpeechRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest, ImagesGenerationsRequest, or MessagesRequest.
+// TextToSpeechRequest, AudioGenerateRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest,
+// ImagesGenerationsRequest, VideoGenerationRequest, or MessagesRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -104,6 +97,8 @@ type InferenceRequestBody struct {
 	Responses *ResponsesRequest `json:"responses,omitempty"`
 	// TextToSpeechRequest is the representation of the OpenAI /v1/audio/speech request body.
 	TextToSpeech *TextToSpeechRequest `json:"text_to_speech,omitempty"`
+	// AudioGenerateRequest is the representation of the vLLM Omni /v1/audio/generate request body.
+	AudioGenerate *AudioGenerateRequest `json:"audio_generate,omitempty"`
 	// ConversationsRequest is the representation of the OpenAI /v1/conversations request body.
 	Conversations *ConversationsRequest `json:"conversations,omitempty"`
 	// EmbeddingsRequest is the representation of the OpenAI /v1/embeddings request body.
@@ -114,6 +109,9 @@ type InferenceRequestBody struct {
 	// ImagesGenerationsRequest is the representation of the OpenAI /v1/images/generations
 	// or /v1/images/edits request body.
 	Images *ImagesGenerationsRequest `json:"images,omitempty"`
+	// Videos is the representation of the OpenAI-compatible vLLM-Omni
+	// /v1/videos and /v1/videos/sync multipart request body.
+	Videos *VideoGenerationRequest `json:"videos,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -208,6 +206,12 @@ func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
 	return nil
 }
 
+// BytesPerToken is the average number of request bytes per prompt token, used
+// to estimate token counts without a tokenizer. The tokenizer's estimate
+// backend packs this many bytes into each pseudo-token, so its counts agree
+// with byte-based estimates.
+const BytesPerToken = 4
+
 // TokenizedRequest contains the result of tokenizing the request prompt.
 // It is consumed by scheduling and request-control plugins that benefit from
 // actual token data such as prefix-cache awareness.
@@ -253,10 +257,10 @@ func (tp *TokenizedRequest) TokenCount() int {
 
 // MultiModalFeature holds all data needed for prefix-cache scoring of a single
 // multimodal item. Items are ordered by token position within the prompt.
-// Currently only ModalityImage is supported.
+// Currently only reqcommon.ModalityImage is supported.
 type MultiModalFeature struct {
 	// Modality identifies the type of content.
-	Modality Modality
+	Modality reqcommon.Modality
 	// Hash is the content hash of the item, used for KV-cache reuse across requests.
 	Hash string
 	// Offset is the index of the first placeholder token for this item
@@ -486,6 +490,24 @@ func (r *TextToSpeechRequest) String() string {
 	return fmt.Sprintf("{InputLength: %d}", len(r.Input))
 }
 
+// AudioGenerateRequest represents the fields parsed from a vLLM Omni
+// /v1/audio/generate request: text-to-audio generation (e.g. Stable Audio),
+// distinct from /v1/audio/speech's text-to-speech.
+type AudioGenerateRequest struct {
+	// Input is the text prompt describing the audio to generate.
+	Input string `json:"input"`
+	// NegativePrompt describes what to avoid in the generated audio and is
+	// encoded alongside Input for classifier-free guidance.
+	NegativePrompt string `json:"negative_prompt,omitempty"`
+}
+
+func (r *AudioGenerateRequest) String() string {
+	if r == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{InputLength: %d, NegativePromptLength: %d}", len(r.Input), len(r.NegativePrompt))
+}
+
 // ConversationsRequest represents the OpenAI /v1/conversations request body structure
 type ConversationsRequest struct {
 	// Items is the array of conversation items (messages, files, etc.)
@@ -590,14 +612,76 @@ type ImagesGenerationsRequest struct {
 	Size string `json:"size,omitempty"`
 	// NumInferenceSteps is the number of denoising steps. Nil means the server default.
 	NumInferenceSteps *int64 `json:"num_inference_steps,omitempty"`
+	// NegativePrompt describes what to avoid in the generated image(s) and is
+	// encoded alongside Prompt for classifier-free guidance.
+	NegativePrompt string `json:"negative_prompt,omitempty"`
 }
 
 func (i *ImagesGenerationsRequest) String() string {
 	if i == nil {
 		return nilStr
 	}
-	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v}",
-		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps)
+	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v, NegativePromptLength: %d}",
+		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps, len(i.NegativePrompt))
+}
+
+// derefInt formats an optional integer pointer for logging without
+// dereferencing a nil, so String stays safe on a partially populated request.
+func derefInt(v *int64) string {
+	if v == nil {
+		return nilStr
+	}
+	return strconv.FormatInt(*v, 10)
+}
+
+// derefFloat formats an optional float pointer for logging without
+// dereferencing a nil, so String stays safe on a partially populated request.
+func derefFloat(v *float64) string {
+	if v == nil {
+		return nilStr
+	}
+	return strconv.FormatFloat(*v, 'g', -1, 64)
+}
+
+// VideoGenerationRequest represents the OpenAI-compatible vLLM-Omni
+// /v1/videos and /v1/videos/sync request body. Both endpoints are served by the
+// same handler and accept multipart/form-data, so they share this shape.
+// Omitted fields stay nil rather than defaulting to zero, except
+// NumOutputsPerPrompt, which the backend always fills with 1.
+type VideoGenerationRequest struct {
+	// Prompt is the text description of the desired video. Required.
+	Prompt string `json:"prompt"`
+	// NegativePrompt describes what to avoid in the generated video.
+	NegativePrompt string `json:"negative_prompt,omitempty"`
+	// Size is the requested output size as "WIDTHxHEIGHT" (e.g. "1280x720").
+	Size string `json:"size,omitempty"`
+	// Width and Height are the output dimensions in pixels.
+	Width  *int64 `json:"width,omitempty"`
+	Height *int64 `json:"height,omitempty"`
+	// NumFrames is the number of frames to generate. Nil means the backend
+	// derives it from the model default or from seconds and fps.
+	NumFrames *int64 `json:"num_frames,omitempty"`
+	// FPS is the output frame rate. Nil means the backend default of 24.
+	FPS *float64 `json:"fps,omitempty"`
+	// Seconds is the requested clip duration in seconds, as a string of digits.
+	Seconds string `json:"seconds,omitempty"`
+	// NumInferenceSteps is the number of diffusion steps. Nil means the model default.
+	NumInferenceSteps *int64 `json:"num_inference_steps,omitempty"`
+	// NumOutputsPerPrompt is the number of videos to generate. The backend form
+	// always supplies it, defaulting to 1.
+	NumOutputsPerPrompt *int64 `json:"num_outputs_per_prompt,omitempty"`
+	// Seed is the random seed for reproducibility.
+	Seed *int64 `json:"seed,omitempty"`
+}
+
+func (v *VideoGenerationRequest) String() string {
+	if v == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{PromptLength: %d, Size: %s, Width: %s, Height: %s, NumFrames: %s, FPS: %s, Steps: %s, N: %s}",
+		len(v.Prompt), v.Size, derefInt(v.Width), derefInt(v.Height),
+		derefInt(v.NumFrames), derefFloat(v.FPS),
+		derefInt(v.NumInferenceSteps), derefInt(v.NumOutputsPerPrompt))
 }
 
 // GenerateRequest holds pre-tokenized input for native generate endpoints
@@ -606,7 +690,9 @@ func (i *ImagesGenerationsRequest) String() string {
 // This struct includes fields usable for plugins and scheduling decisions.
 type GenerateRequest struct {
 	// TokenIDs are the pre-tokenized input token IDs.
-	TokenIDs []uint32 `json:"token_ids"`
+	TokenIDs []uint32 `json:"token_ids,omitempty"`
+	// Text is the prompt text when pre-tokenized token IDs are not provided.
+	Text string `json:"text,omitempty"`
 	// Features carries multimodal metadata (per-modality content hashes and
 	// placeholder ranges) parsed out of the wire `features` block. Populated
 	// by UnmarshalJSON; not itself a JSON-tagged field.
@@ -774,23 +860,76 @@ type VideoBlock struct {
 	URL string `json:"url,omitempty"`
 }
 
-// UnmarshalJSON allow use both format
-func (mc *Content) UnmarshalJSON(data []byte) error {
-	// Raw format
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
-		mc.Raw = str
-		return nil
+// UnmarshalJSON takes the type of a part without one from its media field, in
+// the order vLLM checks them, since vLLM serves parts such as {"image_url": "<url>"}.
+func (b *ContentBlock) UnmarshalJSON(data []byte) error {
+	type contentBlock ContentBlock
+	if err := json.Unmarshal(data, (*contentBlock)(b)); err != nil {
+		return err
 	}
+	if b.Type == "" {
+		switch {
+		case b.ImageURL.URL != "":
+			b.Type = reqcommon.PartTypeImageURL
+		case b.AudioURL.URL != "":
+			b.Type = reqcommon.PartTypeAudioURL
+		case b.InputAudio.Data != "":
+			b.Type = reqcommon.PartTypeInputAudio
+		case b.VideoURL.URL != "":
+			b.Type = reqcommon.PartTypeVideoURL
+		}
+	}
+	return nil
+}
 
-	// Block format
-	var blocks []ContentBlock
-	if err := json.Unmarshal(data, &blocks); err == nil {
+// UnmarshalJSON also accepts a bare URL string, which vLLM serves in a part without a type.
+func (b *ImageBlock) UnmarshalJSON(data []byte) error {
+	return unmarshalMediaURL(data, &b.URL)
+}
+
+// UnmarshalJSON also accepts a bare URL string, which vLLM serves in a part without a type.
+func (b *AudioURLBlock) UnmarshalJSON(data []byte) error {
+	return unmarshalMediaURL(data, &b.URL)
+}
+
+// UnmarshalJSON also accepts a bare URL string, which vLLM serves in a part without a type.
+func (b *VideoBlock) UnmarshalJSON(data []byte) error {
+	return unmarshalMediaURL(data, &b.URL)
+}
+
+func unmarshalMediaURL(data []byte, url *string) error {
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '"' {
+		return json.Unmarshal(data, url)
+	}
+	var obj struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	*url = obj.URL
+	return nil
+}
+
+// UnmarshalJSON accepts either a string or an array of content blocks. The first
+// byte selects the format because each json.Unmarshal rescans the whole value,
+// which is costly for content blocks carrying base64 media.
+func (mc *Content) UnmarshalJSON(data []byte) error {
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+		var blocks []ContentBlock
+		if err := json.Unmarshal(data, &blocks); err != nil {
+			return errors.New("content format not supported")
+		}
 		mc.Structured = blocks
 		return nil
 	}
 
-	return errors.New("content format not supported")
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return errors.New("content format not supported")
+	}
+	mc.Raw = str
+	return nil
 }
 
 func (mc Content) MarshalJSON() ([]byte, error) {
@@ -826,6 +965,8 @@ type Usage struct {
 }
 
 type PromptTokenDetails struct {
+	// CachedTokens is the prompt-cache read count, counted inside PromptTokens
+	// rather than added to it.
 	CachedTokens int `json:"cached_tokens"`
 }
 
@@ -878,20 +1019,24 @@ type AnthropicContent struct {
 	Structured []AnthropicContentBlock
 }
 
+// UnmarshalJSON accepts either a string or an array of content blocks. The first
+// byte selects the format, as in Content.UnmarshalJSON. A malformed block returns
+// its own decode error unwrapped, so nested content does not repeat a prefix.
 func (ac *AnthropicContent) UnmarshalJSON(data []byte) error {
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
-		ac.Raw = str
-		return nil
-	}
-
-	var blocks []AnthropicContentBlock
-	if err := json.Unmarshal(data, &blocks); err == nil {
+	if trimmed := bytes.TrimLeft(data, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+		var blocks []AnthropicContentBlock
+		if err := json.Unmarshal(data, &blocks); err != nil {
+			return err
+		}
 		ac.Structured = blocks
 		return nil
 	}
-
-	return errors.New("anthropic content: must be a string or an array of content blocks")
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil {
+		return errors.New("anthropic content: must be a string or an array of content blocks")
+	}
+	ac.Raw = str
+	return nil
 }
 
 func (ac AnthropicContent) MarshalJSON() ([]byte, error) {
@@ -923,15 +1068,22 @@ func (ac AnthropicContent) textLen() int {
 type AnthropicContentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
-	// image source fields (base64 or URL)
-	Source *AnthropicImageSource `json:"source,omitempty"`
+	// Source keeps raw JSON bytes because its shape depends on Type: an object
+	// for image and document blocks, a URL string for search_result blocks.
+	// Read an image block's source with ImageSource.
+	Source json.RawMessage `json:"source,omitempty"`
 	// tool_use fields (assistant messages): the model's request to call a tool.
 	ID    string          `json:"id,omitempty"`
 	Name  string          `json:"name,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
 	// tool_result fields (user messages): the outcome of a tool_use call.
-	ToolUseID string           `json:"tool_use_id,omitempty"`
-	Content   AnthropicContent `json:"content,omitempty"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	// Content keeps raw JSON bytes because its shape depends on Type: a string
+	// or an array of blocks on tool_result and mcp_tool_result, an object on
+	// the server tool results (web_search_tool_result_error,
+	// bash_code_execution_result). Read a tool_result block's content with
+	// ToolResultContent.
+	Content json.RawMessage `json:"content,omitempty"`
 	// thinking field (assistant messages): extended-thinking replay.
 	Thinking string `json:"thinking,omitempty"`
 }
@@ -941,4 +1093,34 @@ type AnthropicImageSource struct {
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
+}
+
+// ImageSource decodes the source of an image block. It returns nil for other
+// block types, and for an image block whose source is absent or is not an
+// image-source object. Each call decodes Source again, which can hold megabytes
+// of base64, so call it once per block rather than inside a loop.
+func (b AnthropicContentBlock) ImageSource() *AnthropicImageSource {
+	if b.Type != "image" {
+		return nil
+	}
+	var src *AnthropicImageSource
+	if err := json.Unmarshal(b.Source, &src); err != nil {
+		return nil
+	}
+	return src
+}
+
+// ToolResultContent decodes the content of a tool_result block, a string or
+// an array of blocks. It returns the zero value for other block types and for
+// a tool_result whose content is absent or does not decode. Each call decodes
+// Content again, so call it once per block.
+func (b AnthropicContentBlock) ToolResultContent() AnthropicContent {
+	if b.Type != reqcommon.BlockTypeToolResult {
+		return AnthropicContent{}
+	}
+	var content AnthropicContent
+	if err := json.Unmarshal(b.Content, &content); err != nil {
+		return AnthropicContent{}
+	}
+	return content
 }

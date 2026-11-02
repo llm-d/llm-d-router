@@ -191,6 +191,31 @@ func TestSessionIDHeader_PreRequest_HoldsPinWhenPresentButOutvoted(t *testing.T)
 	}
 }
 
+func TestSessionIDHeader_PreRequest_StaleAbsenceDoesNotMoveMigratedBinding(t *testing.T) {
+	s := newTestSessionIDHeader(t, nil)
+	endpointA := newTestEndpoint("pod-a")
+	endpointB := newTestEndpoint("pod-b")
+	endpointC := newTestEndpoint("pod-c")
+
+	// Bind s1 to pod-a.
+	s.PreRequest(context.Background(), requestWithSession("s1"), schedulingResultFor(endpointA))
+
+	// Two concurrent requests of s1 both run Choose while pod-a is absent.
+	req1 := requestWithSession("s1")
+	req2 := &scheduling.InferenceRequest{RequestID: "req-s1-2", Headers: req1.Headers}
+	s.Choose(context.Background(), req1, []scheduling.Endpoint{endpointB, endpointC})
+	s.Choose(context.Background(), req2, []scheduling.Endpoint{endpointB, endpointC})
+
+	// req1 migrates the session to pod-c. req2's absence record is about pod-a,
+	// so it must not move the binding off pod-c.
+	s.PreRequest(context.Background(), req1, schedulingResultFor(endpointC))
+	s.PreRequest(context.Background(), req2, schedulingResultFor(endpointB))
+
+	if got, want := s.boundPod("s1"), podKey("pod-c"); got != want {
+		t.Errorf("boundPod(s1) = %q, want %q (binding should stay where it migrated)", got, want)
+	}
+}
+
 func TestSessionIDHeader_PreRequest_FirstBindRaceKeepsSingleBinding(t *testing.T) {
 	// Two concurrent requests for the same never-before-seen session ID, each
 	// picking a DIFFERENT pod. Neither had Choose() write a presence record
@@ -573,6 +598,68 @@ func TestSessionIDConfig_Validate(t *testing.T) {
 			}
 			if !test.expectErr && err != nil {
 				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// Consumes must name every attribute source configured, so the runtime scope
+// lets the reads in resolveSessionID through. Header sources contribute
+// nothing: headers are not part of the attribute store.
+func TestSessionIDHeader_Consumes(t *testing.T) {
+	handle := utils.NewTestHandle(utils.NewTestContext(t))
+
+	tests := []struct {
+		name    string
+		sources []SessionIDSource
+		want    []plugin.DataKey
+	}{
+		{
+			name:    "header source only",
+			sources: []SessionIDSource{{Header: DefaultHeader}},
+		},
+		{
+			name:    "attribute with a named producer",
+			sources: []SessionIDSource{{Attribute: "session-id", Producer: "session-id-producer"}},
+			want:    []plugin.DataKey{plugin.NewDataKey("session-id", "session-id-producer")},
+		},
+		{
+			name:    "producer-agnostic attribute",
+			sources: []SessionIDSource{{Attribute: "agent-identity"}},
+			want:    []plugin.DataKey{plugin.NewDataKey("agent-identity", "")},
+		},
+		{
+			name: "header and attribute sources mixed",
+			sources: []SessionIDSource{
+				{Header: DefaultHeader},
+				{Attribute: "session-id", Producer: "session-id-producer"},
+				{Attribute: "agent-identity"},
+			},
+			want: []plugin.DataKey{
+				plugin.NewDataKey("session-id", "session-id-producer"),
+				plugin.NewDataKey("agent-identity", ""),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewSessionIDHeader(
+				SessionIDConfig{Sources: tt.sources, EvictionTTLSeconds: 300, EvictionSweepSeconds: 10},
+				"", testPluginKey, handle,
+			)
+
+			consumes := s.Consumes()
+			if len(consumes.Required) != 0 {
+				t.Errorf("Required = %v, want empty", consumes.Required)
+			}
+			if len(consumes.Optional) != len(tt.want) {
+				t.Fatalf("Optional = %v, want %d keys", consumes.Optional, len(tt.want))
+			}
+			for _, key := range tt.want {
+				if _, ok := consumes.Optional[key]; !ok {
+					t.Errorf("Optional is missing %v", key)
+				}
 			}
 		})
 	}

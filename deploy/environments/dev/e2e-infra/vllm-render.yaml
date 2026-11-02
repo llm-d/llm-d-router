@@ -22,7 +22,6 @@ spec:
         - "--model=${MODEL_NAME}"
         - "--port=${VLLM_RENDER_PORT}"
         - "--mode=echo"
-        - "--force-dummy-tokenizer"
         ports:
         - name: http
           containerPort: ${VLLM_RENDER_PORT}

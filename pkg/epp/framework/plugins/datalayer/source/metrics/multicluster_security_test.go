@@ -59,7 +59,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // A response larger than the cap is read only up to maxResponseBytes.
 func TestParseBoundedMetricsCapsResponse(t *testing.T) {
 	cr := &countingReader{n: maxResponseBytes + 4096}
-	_, err := parseBoundedMetrics(cr)
+	parse, _ := newMetricsParser(nil, maxResponseBytes)
+	_, err := parse(cr)
 	require.NoError(t, err)
 	require.LessOrEqual(t, cr.read, maxResponseBytes, "must not read past the cap")
 }

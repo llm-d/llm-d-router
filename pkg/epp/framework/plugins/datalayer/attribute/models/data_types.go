@@ -17,8 +17,10 @@ limitations under the License.
 package models
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -30,16 +32,44 @@ const (
 
 var ModelsAttributeKey = plugin.NewDataKey("/v1/models", ModelsExtractorType)
 
-// ModelDataCollection defines models' data returned from /v1/models API
+// ModelDataCollection contains model data reported by model-server endpoints.
 type ModelDataCollection []ModelData
 
-// ModelData defines model's data returned from /v1/models API
+// ModelData contains one model entry reported by a model server's /v1/models
+// API and its internal parent model identifier.
 type ModelData struct {
-	ID      string `json:"id"`
-	Object  string `json:"object,omitempty"`
-	Created int64  `json:"created,omitempty"`
-	OwnedBy string `json:"owned_by,omitempty"`
-	Parent  string `json:"parent,omitempty"`
+	ID           string `json:"id"`
+	Object       string `json:"object,omitempty"`
+	Created      int64  `json:"created,omitempty"`
+	OwnedBy      string `json:"owned_by,omitempty"`
+	ShutdownDate string `json:"shutdown_date,omitempty"`
+	Parent       string `json:"parent,omitempty"`
+}
+
+// UnmarshalJSON ignores invalid shutdown dates so one malformed field does not reject the model list.
+func (m *ModelData) UnmarshalJSON(data []byte) error {
+	*m = ModelData{}
+	type plain ModelData
+	decoded := struct {
+		*plain
+		ShutdownDate json.RawMessage `json:"shutdown_date"`
+	}{plain: (*plain)(m)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	if len(decoded.ShutdownDate) == 0 {
+		return nil
+	}
+	var shutdownDate string
+	if err := json.Unmarshal(decoded.ShutdownDate, &shutdownDate); err != nil {
+		return nil
+	}
+	if _, err := time.Parse(time.DateOnly, shutdownDate); err != nil {
+		return nil
+	}
+	m.ShutdownDate = shutdownDate
+	return nil
 }
 
 // String returns a string representation of the model info

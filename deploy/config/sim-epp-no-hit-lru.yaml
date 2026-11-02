@@ -3,6 +3,11 @@
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
+- type: token-producer
+  parameters:
+    modelName: ${MODEL_NAME}
+    vllm:
+      url: ${VLLM_RENDER_URL}  # substituted by kind-dev-env.sh envsubst (render Service)
 - type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
@@ -13,6 +18,7 @@ plugins:
 - type: no-hit-lru-scorer
   parameters:
     lruSize: 2048
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
 - type: decode-filter
 - type: max-score-picker
 - type: single-profile-handler

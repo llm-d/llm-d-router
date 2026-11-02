@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/discovery/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 )
 
@@ -48,6 +49,8 @@ func TestPopulateWithDiscovery(t *testing.T) {
 		wantInferenceModelRewrite   bool
 		wantInferenceObjectiveGV    schema.GroupVersion
 		wantInferenceModelRewriteGV schema.GroupVersion
+		wantV1InferenceObjective    bool
+		wantSecondaryObjectiveGV    schema.GroupVersion
 	}{
 		{
 			name: "Both resources exist in llm-d group",
@@ -93,6 +96,51 @@ func TestPopulateWithDiscovery(t *testing.T) {
 			wantInferenceObjectiveGV:    inferenceAPIGV,
 			wantInferenceModelRewriteGV: schema.GroupVersion{},
 		},
+		{
+			name: "v1 InferenceObjective served alongside v1alpha2",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: v1alpha2.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+					},
+				},
+				{
+					GroupVersion: apixv1.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+					},
+				},
+			},
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   false,
+			wantInferenceObjectiveGV:    inferenceObjectiveV1GV,
+			wantInferenceModelRewriteGV: schema.GroupVersion{},
+			wantV1InferenceObjective:    true,
+			wantSecondaryObjectiveGV:    inferenceAPIGV,
+		},
+		{
+			name: "v1 group present without InferenceObjective kind",
+			apiResourceLists: []*metav1.APIResourceList{
+				{
+					GroupVersion: v1alpha2.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceObjective"},
+					},
+				},
+				{
+					GroupVersion: apixv1.GroupVersion.String(),
+					APIResources: []metav1.APIResource{
+						{Kind: "InferenceModelRewrite"},
+					},
+				},
+			},
+			wantInferenceObjective:      true,
+			wantInferenceModelRewrite:   false,
+			wantInferenceObjectiveGV:    inferenceAPIGV,
+			wantInferenceModelRewriteGV: schema.GroupVersion{},
+			wantV1InferenceObjective:    false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -117,7 +165,26 @@ func TestPopulateWithDiscovery(t *testing.T) {
 			if cc.InferenceModelRewriteGV != tt.wantInferenceModelRewriteGV {
 				t.Errorf("populateWithDiscovery() InferenceModelRewriteGV = %v, want %v", cc.InferenceModelRewriteGV, tt.wantInferenceModelRewriteGV)
 			}
+			if cc.hasV1InferenceObjective != tt.wantV1InferenceObjective {
+				t.Errorf("populateWithDiscovery() hasV1InferenceObjective = %v, want %v", cc.hasV1InferenceObjective, tt.wantV1InferenceObjective)
+			}
+			if cc.SecondaryObjectiveGV != tt.wantSecondaryObjectiveGV {
+				t.Errorf("populateWithDiscovery() SecondaryObjectiveGV = %v, want %v", cc.SecondaryObjectiveGV, tt.wantSecondaryObjectiveGV)
+			}
 		})
+	}
+}
+
+func TestNewDefaultRunnerStaysV1Alpha2Staged(t *testing.T) {
+	r := NewDefaultExtProcServerRunner()
+	if r.ControllerCfg.InferenceObjectiveGV != inferenceAPIGV {
+		t.Errorf("default InferenceObjectiveGV = %v, want staged %v", r.ControllerCfg.InferenceObjectiveGV, inferenceAPIGV)
+	}
+	if r.ControllerCfg.hasV1InferenceObjective {
+		t.Error("default hasV1InferenceObjective = true, want false until serving PR")
+	}
+	if r.ControllerCfg.SecondaryObjectiveGV != (schema.GroupVersion{}) {
+		t.Errorf("default SecondaryObjectiveGV = %v, want empty", r.ControllerCfg.SecondaryObjectiveGV)
 	}
 }
 

@@ -46,7 +46,12 @@ const (
 const (
 	// defaultModeHeader selects the serving mode when mode_header is not
 	// configured.
-	defaultModeHeader = "X-AP-Mode"
+	defaultModeHeader = "x-llm-d-async-mode"
+	// defaultTenantHeader resolves the tenant when tenant_header is not configured.
+	defaultTenantHeader = "x-llm-d-tenant"
+	// defaultTimeoutHeader carries a per-request deadline when timeout_header is
+	// not configured.
+	defaultTimeoutHeader = "x-llm-d-request-timeout-seconds"
 
 	defaultAsyncTenant = "default"
 	// resultKeyPrefix scopes the per-request result keys the async processor
@@ -105,12 +110,12 @@ type asyncQuotaConfig struct {
 type asyncBrokerConfig struct {
 	RedisURL string `json:"redis_url"`
 
-	// ModeHeader selects the serving mode per request (default X-AP-Mode).
+	// ModeHeader selects the serving mode per request (default x-llm-d-async-mode).
 	ModeHeader string `json:"mode_header,omitempty"`
-	// TenantHeader names the header carrying the tenant key (default X-Team).
+	// TenantHeader names the header carrying the tenant key (default x-llm-d-tenant).
 	TenantHeader string `json:"tenant_header,omitempty"`
 	// TimeoutHeader lets clients request a deadline in seconds for the queued
-	// modes (default X-Request-Timeout-Seconds). Requested deadlines are
+	// modes (default x-llm-d-request-timeout-seconds). Requested deadlines are
 	// clamped by the mode's max_seconds.
 	TimeoutHeader string `json:"timeout_header,omitempty"`
 
@@ -168,10 +173,10 @@ func (c *asyncBrokerConfig) applyDefaults() {
 		c.ModeHeader = defaultModeHeader
 	}
 	if c.TenantHeader == "" {
-		c.TenantHeader = "X-Team"
+		c.TenantHeader = defaultTenantHeader
 	}
 	if c.TimeoutHeader == "" {
-		c.TimeoutHeader = "X-Request-Timeout-Seconds"
+		c.TimeoutHeader = defaultTimeoutHeader
 	}
 	if c.DefaultQueue == "" {
 		c.DefaultQueue = "request-sortedset"

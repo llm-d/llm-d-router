@@ -45,7 +45,7 @@ func drainOne(t *testing.T, pool *Pool) *RawMessage {
 func TestAddTask_EmitsReceiveSpanAndCarriesItsContext(t *testing.T) {
 	recorder := setupEventSpanRecorder(t)
 	pool := newTracingPool(t)
-	z := newZMQSubscriber(pool, "pod-1", "10.0.0.1:8003", "tcp://10.0.0.1:5557", "", "kv@", false)
+	z := newZMQSubscriber(pool, "pod-1", "10.0.0.1:8003", "tcp://10.0.0.1:5557", "", "", "kv@", false)
 
 	z.addTask(context.Background(), "kv@10.0.0.1:8000@test-model", 42, []byte{1, 2, 3})
 
@@ -69,7 +69,7 @@ func TestAddTask_ReceiveSpanParentsProcessSpan(t *testing.T) {
 	recorder := setupEventSpanRecorder(t)
 	pool := newTracingPool(t)
 	pool.adapter = &sourceEndpointAdapter{}
-	z := newZMQSubscriber(pool, "pod-1", "", "tcp://10.0.0.1:5557", "", "kv@", false)
+	z := newZMQSubscriber(pool, "pod-1", "", "tcp://10.0.0.1:5557", "", "", "kv@", false)
 
 	z.addTask(context.Background(), "kv@10.0.0.1:8000@test-model", 7, []byte{1})
 	pool.processRawMessage(context.Background(), drainOne(t, pool))

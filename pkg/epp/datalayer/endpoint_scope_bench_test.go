@@ -63,19 +63,22 @@ func BenchmarkScope(b *testing.B) {
 	}
 }
 
-func BenchmarkUnscopeScores(b *testing.B) {
+func BenchmarkUnscopeEndpoint(b *testing.B) {
 	for _, count := range []int{10, 100} {
 		b.Run(fmt.Sprintf("endpoints=%d", count), func(b *testing.B) {
 			endpoints, plugin := benchEndpoints(count), benchPlugin()
 			scoped, _ := Scope(testLogger(), "test-extension-point", plugin, endpoints)
 			scores := make(map[fwksched.Endpoint]float64, len(scoped))
+			totals := make(map[fwksched.Endpoint]float64, len(scoped))
 			for i, endpoint := range scoped {
 				scores[endpoint] = float64(i)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_ = UnscopeScores(scores)
+				for endpoint, score := range scores {
+					totals[UnscopeEndpoint(endpoint)] += score
+				}
 			}
 		})
 	}

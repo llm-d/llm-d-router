@@ -18,7 +18,7 @@ package prefixhash
 
 import (
 	"context"
-	"slices"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,54 +30,6 @@ import (
 // testMaxPrefixBlocks is a cap large enough not to truncate any prompt in
 // these tests.
 const testMaxPrefixBlocks = 2048
-
-func TestGetKVCacheBlocksFromTokens(t *testing.T) {
-	tests := []struct {
-		name            string
-		ids             []uint32
-		blockSizeTokens int
-		expected        []HashBlock
-	}{
-		{
-			name:            "EvenSplit",
-			ids:             []uint32{1, 2, 3, 4, 5, 6, 7, 8},
-			blockSizeTokens: 4,
-			expected: []HashBlock{
-				{Tokens: []uint32{1, 2, 3, 4}},
-				{Tokens: []uint32{5, 6, 7, 8}},
-			},
-		},
-		{
-			name:            "TrailingPartialBlock",
-			ids:             []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
-			blockSizeTokens: 4,
-			expected: []HashBlock{
-				{Tokens: []uint32{1, 2, 3, 4}},
-				{Tokens: []uint32{5, 6, 7, 8}},
-				{Tokens: []uint32{9, 10}},
-			},
-		},
-		{
-			name:            "EmptyTokens",
-			ids:             nil,
-			blockSizeTokens: 4,
-			expected:        nil,
-		},
-		{
-			name:            "NonPositiveBlockSize",
-			ids:             []uint32{1, 2, 3},
-			blockSizeTokens: 0,
-			expected:        nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			blocks := slices.Collect(getKVCacheBlocksFromTokens(tt.ids, tt.blockSizeTokens))
-			assert.Equal(t, tt.expected, blocks)
-		})
-	}
-}
 
 func TestGetBlockHashes(t *testing.T) {
 	tests := []struct {
@@ -97,6 +49,18 @@ func TestGetBlockHashes(t *testing.T) {
 			},
 			blockSizeTokens: 4,
 			expectedBlocks:  3,
+		},
+		{
+			name: "BlockSizeNearMaxInt",
+			request: &fwksched.InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					TokenizedRequest: &fwkrh.TokenizedRequest{
+						Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}},
+					},
+				},
+			},
+			blockSizeTokens: math.MaxInt,
+			expectedBlocks:  1,
 		},
 		{
 			name: "MissingTokenizedRequest",
@@ -155,6 +119,28 @@ func TestGetBlockHashesCacheSalt(t *testing.T) {
 
 	assert.Equal(t, len(noSalt), len(salted))
 	assert.NotEqual(t, noSalt, salted, "cache salt must change the block hashes")
+}
+
+// TestGetBlockHashes_ModelSaltBoundary covers (model, salt) pairs whose
+// concatenation is identical. The seed must still separate them.
+func TestGetBlockHashes_ModelSaltBoundary(t *testing.T) {
+	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+	hashesFor := func(model, salt string) [][]BlockHash {
+		return GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+			TargetModel: model,
+			Body: &fwkrh.InferenceRequestBody{
+				TokenizedRequest: &fwkrh.TokenizedRequest{
+					Prompts:   []fwkrh.PromptTokens{{TokenIDs: tokens}},
+					CacheSalt: salt,
+				},
+			},
+		}, 2, testMaxPrefixBlocks)
+	}
+
+	assert.NotEqual(t, hashesFor("ab", "c"), hashesFor("a", "bc"),
+		"model and salt must not collide when their concatenations match")
+	assert.NotEqual(t, hashesFor("llama-3-8b", ""), hashesFor("llama-3", "-8b"),
+		"empty salt must not collide with a same-length model split")
 }
 
 func TestGetBlockHashes_MultiPrompt(t *testing.T) {

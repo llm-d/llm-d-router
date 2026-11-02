@@ -1,24 +1,11 @@
 # Endpoint-attribute variant of optimized-baseline, for the #2059 item-1
 # benchmark. Differs from optimized-baseline.yaml in exactly one respect:
 # queue-scorer and kv-cache-utilization-scorer are replaced by two
-# endpoint-attribute-scorer instances configured to reproduce them. Every
-# other plugin, weight and setting is identical, so a difference in the
-# benchmark is attributable to the scorer swap and nothing else.
-#
-# Why the customMetrics block is not optional: the core metrics extractor
-# lands WaitingQueueSize and KVCacheUsagePercent on the Metrics struct
-# rather than on the attribute map (extractor.go, Produces()), so the
-# endpoint-attribute scorer cannot read them until they are republished as
-# attributes. That is what these two mappings do.
-#
-# Why the whole vllm engineConfig is restated: the merge is per engine, not
-# per list (factories.go, newCoreMetricsExtractorPlugin). Each built-in is
-# appended only if its name is absent from engineConfigs, so declaring vllm
-# to attach customMetrics suppresses the vllm built-in alone — sglang,
-# trtllm-serve and the triton configs still land. All five vllm specs are
-# carried over verbatim; drop one and the Metrics struct loses its source
-# for that signal, which would break the legacy scorers this is compared
-# against rather than the endpoint-attribute ones under test.
+# endpoint-attribute-scorer instances configured to reproduce them, reading
+# WaitingQueueSize and KVCacheUsagePercent directly from the attributes
+# published by the default core-metrics-extractor. Every other plugin, weight
+# and setting is identical, so a difference in the benchmark is attributable
+# to the scorer swap and nothing else.
 router:
   extraServicePorts:
     - name: http
@@ -42,20 +29,6 @@ router:
         apiVersion: llm-d.ai/v1
         kind: EndpointPickerConfig
         plugins:
-        - type: core-metrics-extractor
-          parameters:
-            engineConfigs:
-            - name: vllm
-              queuedRequestsSpec: "vllm:num_requests_waiting"
-              runningRequestsSpec: "vllm:num_requests_running"
-              kvUsageSpec: "vllm:kv_cache_usage_perc"
-              loraSpec: "vllm:lora_requests_info"
-              cacheInfoSpec: "vllm:cache_config_info"
-              customMetrics:
-              - attributeKey: WaitingQueueSize
-                metricSpec: "vllm:num_requests_waiting"
-              - attributeKey: KVCacheUsagePercent
-                metricSpec: "vllm:kv_cache_usage_perc"
         - type: endpoint-attribute-scorer
           name: ea-queue-scorer
           parameters:

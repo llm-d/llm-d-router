@@ -148,14 +148,15 @@ func convertFlowControl(in *configapiv1alpha1.FlowControlConfig) *configapiv1.Fl
 	}
 
 	out := &configapiv1.FlowControlConfig{
-		MaxBytes:                    copyQuantity(in.MaxBytes),
-		MaxRequests:                 copyQuantity(in.MaxRequests),
-		DefaultRequestTTL:           copyDuration(in.DefaultRequestTTL),
-		NoEndpointRequestTTL:        copyDuration(in.NoEndpointRequestTTL),
-		DefaultPriorityBand:         convertPriorityBandPtr(in.DefaultPriorityBand),
-		DefaultNegativePriorityBand: convertPriorityBandPtr(in.DefaultNegativePriorityBand),
-		UsageLimitPolicyPluginRef:   in.UsageLimitPolicyPluginRef,
-		EnableEviction:              in.EnableEviction,
+		MaxBytes:                     copyQuantity(in.MaxBytes),
+		MaxRequests:                  copyQuantity(in.MaxRequests),
+		DefaultRequestTTL:            copyDuration(in.DefaultRequestTTL),
+		NoEndpointRequestTTL:         copyDuration(in.NoEndpointRequestTTL),
+		DefaultPriorityBand:          convertPriorityBandPtr(in.DefaultPriorityBand),
+		DefaultNegativePriorityBand:  convertPriorityBandPtr(in.DefaultNegativePriorityBand),
+		UsageLimitPolicyPluginRef:    in.UsageLimitPolicyPluginRef,
+		BandSelectionPolicyPluginRef: in.BandSelectionPolicyPluginRef,
+		EnableEviction:               in.EnableEviction,
 	}
 
 	if in.PriorityBands != nil {
@@ -182,12 +183,14 @@ func convertPriorityBandPtr(in *configapiv1alpha1.PriorityBandConfig) *configapi
 
 func convertPriorityBand(in configapiv1alpha1.PriorityBandConfig) configapiv1.PriorityBandConfig {
 	return configapiv1.PriorityBandConfig{
-		Priority:          in.Priority,
-		MaxBytes:          copyQuantity(in.MaxBytes),
-		MaxRequests:       copyQuantity(in.MaxRequests),
-		DefaultRequestTTL: copyDuration(in.DefaultRequestTTL),
-		FairnessPolicyRef: in.FairnessPolicyRef,
-		OrderingPolicyRef: in.OrderingPolicyRef,
+		Priority:           in.Priority,
+		MaxBytes:           copyQuantity(in.MaxBytes),
+		MaxRequests:        copyQuantity(in.MaxRequests),
+		MaxBytesPerFlow:    copyQuantity(in.MaxBytesPerFlow),
+		MaxRequestsPerFlow: copyQuantity(in.MaxRequestsPerFlow),
+		DefaultRequestTTL:  copyDuration(in.DefaultRequestTTL),
+		FairnessPolicyRef:  in.FairnessPolicyRef,
+		OrderingPolicyRef:  in.OrderingPolicyRef,
 	}
 }
 
@@ -196,7 +199,10 @@ func convertRequestHandler(in *configapiv1alpha1.RequestHandlerConfig) *configap
 		return nil
 	}
 
-	out := &configapiv1.RequestHandlerConfig{PropagatePriority: in.PropagatePriority}
+	out := &configapiv1.RequestHandlerConfig{
+		PropagatePriority:  in.PropagatePriority,
+		ComposeFairnessIDs: in.ComposeFairnessIDs,
+	}
 	if in.Parsers != nil {
 		out.Parsers = make([]configapiv1.ParserConfig, len(in.Parsers))
 		for i, parser := range in.Parsers {

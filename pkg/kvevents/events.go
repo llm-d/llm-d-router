@@ -72,6 +72,8 @@ type RawMessage struct {
 	SourceEndpoint string
 	// reset clears the message's pod before later messages on the same queue.
 	reset bool
+	// retire marks a final reset: the source endpoint has no subscribers left.
+	retire bool
 	// SpanContext links processing back to the span that received the message,
 	// bridging the worker-queue boundary. Only the span identity crosses, never
 	// the subscriber's context: a subscriber reconnect cancels that context, and
@@ -100,12 +102,14 @@ type EngineAdapter interface {
 type BlockStoredEvent struct {
 	BlockHashes []uint64
 	Tokens      []uint32
-	ParentHash  uint64
-	BlockSize   int
-	DeviceTier  string
-	LoraID      *int
-	LoraName    *string
-	ExtraKeys   [][]any
+	// LookaheadToken completes the last bigram. Tokens contains only cached positions.
+	LookaheadToken *uint32
+	ParentHash     uint64
+	BlockSize      int
+	DeviceTier     string
+	LoraID         *int
+	LoraName       *string
+	ExtraKeys      [][]any
 	// GroupIdx identifies the vLLM KV cache group that emitted this event.
 	GroupIdx *int
 	// KVCacheSpecKind carries vLLM's semantic cache type for the group.

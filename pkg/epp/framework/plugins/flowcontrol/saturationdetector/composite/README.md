@@ -10,7 +10,9 @@ The plugin implements the `SaturationDetector` interface by delegating to a conf
 
 Each child's signal is also exported through the `flow_control_detector_saturation` gauge, labeled by the detector reference name and the pipeline stage (`prefill` or `decode`), so operators can tell which signal is driving `flow_control_pool_saturation` in each stage.
 
-The plugin implements only the `SaturationDetector` interface:
+The plugin also implements `DispatchReservationTracker` and forwards each dispatch reservation and release to every child that tracks reservations. Flow control finds the tracker on the configured detector, so forwarding keeps `concurrency-detector` children counting dispatched requests. Forwarding ignores `stages`: the destination is unknown at dispatch, so every tracking child counts the reservation until it is released.
+
+Beyond these two interfaces:
 
 - It does not implement the scheduling `Filter` extension point. The config loader auto-injects a gating detector into scheduling profiles only when it implements `Filter`, so per-endpoint filtering stays with the child detectors, which are listed in profiles explicitly.
 - It does not declare data dependencies of its own. The children are configured plugins, so the framework validates their data dependencies directly.

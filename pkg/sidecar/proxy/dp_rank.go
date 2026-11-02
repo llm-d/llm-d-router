@@ -50,16 +50,28 @@ func pickDPRank(requestID string, dpSize int) int {
 	return int(mod)
 }
 
-// resolveDecodeDPRank picks the DP rank for the decode request in serial WRITE
-// dispatch. It prefers the rank the prefill request returned in its
-// kv_transfer_params (remote_dp_rank), but only when that value is a valid
-// integer in [0, dpSize); otherwise it falls back to the deterministic hash of
-// the request id. The returned rank is therefore always in range, so the caller
-// can pin BOTH the x-data-parallel-rank header and the decode body's
-// remote_dp_rank to the same value and avoid the header/body targeting
-// different ranks (which would hang the KV transfer). The second return value
-// reports whether the prefill-returned rank was used (false = hash fallback,
-// including when it was omitted, non-numeric, or out of range).
+// pickDPRanks returns a deterministic global rank and its pod-local equivalent.
+func pickDPRanks(requestID string, dpSize, dpSizeLocal int) (global, local int) {
+	global = pickDPRank(requestID, dpSize)
+	return global, foldDPRankToLocal(global, dpSize, dpSizeLocal)
+}
+
+// foldDPRankToLocal converts a global DP rank to the range accepted by one
+// pod's API server. An unset local size preserves single-pod behavior.
+func foldDPRankToLocal(dpRank, dpSize, dpSizeLocal int) int {
+	if dpSizeLocal > 0 {
+		return dpRank % dpSizeLocal
+	}
+	if dpSize > 0 {
+		return dpRank % dpSize
+	}
+	return 0
+}
+
+// resolveDecodeDPRank prefers a valid prefill-returned global DP rank.
+// Missing or invalid values return a deterministic hash rank. The caller maps
+// that fallback to the selected prefill pod in multi-pod deployments.
+// usedReturned reports whether the prefill-provided rank was accepted.
 func resolveDecodeDPRank(prefillKV any, requestID string, dpSize int) (rank int, usedReturned bool) {
 	fallback := pickDPRank(requestID, dpSize)
 	if dpSize <= 1 {

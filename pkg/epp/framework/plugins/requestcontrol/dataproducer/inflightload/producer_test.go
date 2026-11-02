@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -76,6 +77,48 @@ func TestInFlightLoadProducer_Consumes(t *testing.T) {
 	// producer's key.
 	require.Contains(t, deps.Optional, attrprefix.PrefixCacheMatchInfoDataKey)
 	require.NotContains(t, deps.Required, attrprefix.PrefixCacheMatchInfoDataKey)
+}
+
+// Produce and PreRequest receive a request confined to the plugin's
+// declarations, so the outlen bucket must be readable through that scope.
+func TestInFlightLoadProducer_ReadsOutlenBucketThroughScope(t *testing.T) {
+	t.Parallel()
+
+	p := newTestProducer(t)
+	datagraph.RegisterScopeSpecs([]fwkplugin.Plugin{p})
+	scoped, violations := datagraph.ScopeRequest(logr.Discard(), requestcontrol.PreRequestExtensionPoint, p,
+		requestWithBucket(outlenbucket.Long, nil))
+
+	// LONG bucket estimates 4096; an unreadable bucket falls back to UNKNOWN.
+	require.Equal(t, int64(4096), p.tokenEstimator.EstimateOutputFromRequest(scoped))
+	require.NoError(t, violations.Write())
+}
+
+// The outlen-bucket plugin and this producer declare the bucket with the same
+// type, so the data graph links them and orders the bucket first.
+func TestInFlightLoadProducer_OrderedAfterOutlenBucket(t *testing.T) {
+	t.Parallel()
+
+	p := newTestProducer(t)
+	bucket, err := outlenbucket.PluginFactory("outlen-bucket", nil, nil)
+	require.NoError(t, err)
+	tokens := &tokenStubProducer{}
+
+	ordered, err := datagraph.ValidateAndOrderDataDependencies([]fwkplugin.Plugin{p, bucket, tokens})
+	require.NoError(t, err)
+	require.Less(t, slices.Index(ordered, bucket.TypedName().String()), slices.Index(ordered, p.TypedName().String()))
+}
+
+// tokenStubProducer satisfies the producer's required TokenizedRequest
+// dependency so the data graph validates.
+type tokenStubProducer struct{}
+
+func (*tokenStubProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "token-stub", Name: "token-stub"}
+}
+
+func (*tokenStubProducer) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwksched.TokenizedRequest{}}
 }
 
 // prefixMatchInfoProducerName selects which prefix producer (approximate or
@@ -1169,6 +1212,26 @@ func TestUncachedInputTokens_Overestimate(t *testing.T) {
 	// When the prefix cache says 4 tokens are definitely uncached in the indexed portion (8-4),
 	// we trust that over the smaller (approximate) estimate of 5.
 	require.Equal(t, int64(4), uncached, "should trust the prefix cache's uncached count (indexed-matched) over the smaller estimate")
+}
+
+func TestUncachedInputTokens_UsesCachedBlockCount(t *testing.T) {
+	t.Run("tier-weighted precise match", func(t *testing.T) {
+		// MatchBlocks is tier-weighted (1), CachedBlockCount is the literal count (4):
+		// 32 indexed tokens minus 4 cached blocks of 4.
+		endpoint := newStubSchedulingEndpoint("test-ep")
+		endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1, 8, 4).WithCachedBlockCount(4))
+
+		require.Equal(t, int64(16), uncachedInputTokens(endpoint, 32, attrprefix.PrefixCacheMatchInfoDataKey))
+	})
+
+	t.Run("match without a separate cached count", func(t *testing.T) {
+		// Approximate and burst prefix producers set only MatchBlocks, which
+		// CachedBlockCount defaults to, so their discount is unchanged.
+		endpoint := newStubSchedulingEndpoint("test-ep")
+		endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(2, 8, 4))
+
+		require.Equal(t, int64(24), uncachedInputTokens(endpoint, 32, attrprefix.PrefixCacheMatchInfoDataKey))
+	})
 }
 
 func TestInFlightLoadProducer_PanicSafety(t *testing.T) {

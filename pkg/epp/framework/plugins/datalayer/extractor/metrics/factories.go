@@ -71,6 +71,13 @@ type (
 		AttributeKey string `json:"attributeKey"`
 		// MetricSpec defines the source metric specification string.
 		MetricSpec string `json:"metricSpec"`
+		// Aggregation selects how matching series produce one value. Empty reads
+		// the latest matching series. "sum" adds the values of every matching
+		// series and is the only supported aggregation.
+		Aggregation metricAggregation `json:"aggregation,omitempty"`
+		// Optional skips the metric, without an extraction error, on a scrape
+		// where the endpoint does not report it.
+		Optional bool `json:"optional,omitempty"`
 	}
 
 	// modelServerExtractorParams holds the configuration parameters for the core metrics extractor plugin.
@@ -96,6 +103,20 @@ var defaultEngineConfigs = []engineConfigParams{
 		KVUsageSpec:         "vllm:kv_cache_usage_perc",
 		LoRASpec:            "vllm:lora_requests_info",
 		CacheInfoSpec:       "vllm:cache_config_info",
+		// vLLM reports the tiering counters only when it runs with TieringOffloadingSpec,
+		// and creates each series on its first event.
+		CustomMetrics: []customMetricConfigParams{
+			{AttributeKey: "tiering_chunk_hits", MetricSpec: `vllm:kv_offload_tiering_chunk_hits_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_chunk_queries", MetricSpec: `vllm:kv_offload_tiering_chunk_queries_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_read_bytes", MetricSpec: `vllm:kv_offload_tiering_read_bytes_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_read_time", MetricSpec: `vllm:kv_offload_tiering_read_time_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_promotion_failures", MetricSpec: `vllm:kv_offload_tiering_promotion_job_failures_total{tier!="0:primary"}`, Aggregation: metricAggregationSum, Optional: true},
+			{AttributeKey: "tiering_allocation_failures", MetricSpec: "vllm:kv_offload_tiering_promotion_allocation_failures_total", Aggregation: metricAggregationSum, Optional: true},
+			// vLLM reports these only when it runs with the NixlConnector.
+			{AttributeKey: attrmetrics.NixlFailedTransfersKey, MetricSpec: "vllm:nixl_num_failed_transfers_total", Optional: true},
+			{AttributeKey: attrmetrics.NixlFailedNotificationsKey, MetricSpec: "vllm:nixl_num_failed_notifications_total", Optional: true},
+			{AttributeKey: attrmetrics.NixlKVExpiredRequestsKey, MetricSpec: "vllm:nixl_num_kv_expired_reqs_total", Optional: true},
+		},
 	},
 	{
 		Name:                "sglang",
@@ -113,7 +134,8 @@ var defaultEngineConfigs = []engineConfigParams{
 		RunningRequestsSpec: "atom:requests_running",
 		KVUsageSpec:         "atom:kv_cache_usage_ratio",
 		LoRASpec:            "",
-		CacheInfoSpec:       "atom:cache_config_info",
+		// ATOM exports no cache_config_info family and no block-size gauge.
+		CacheInfoSpec: "",
 	},
 	{
 		Name:                "trtllm-serve",
@@ -158,9 +180,11 @@ var defaultEngineConfigs = []engineConfigParams{
 	// - "trtllm-serve" is for TensorRT-LLM's standalone C++ server orchestrator, which exposes similar
 	//   LLM-specific metrics under different names.
 	{
-		Name:                "triton",
-		QueuedRequestsSpec:  "nv_inference_pending_request_count",
-		RunningRequestsSpec: "nv_inference_exec_count",
+		Name:               "triton",
+		QueuedRequestsSpec: "nv_inference_pending_request_count",
+		// Triton has no gauge of executing requests; nv_inference_exec_count is a
+		// lifetime counter of batch executions, not a running-request count.
+		RunningRequestsSpec: "",
 		KVUsageSpec:         "",
 		LoRASpec:            "",
 		CacheInfoSpec:       "",
@@ -230,7 +254,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 			return nil, fmt.Errorf("engine config name cannot be %q (reserved)", DefaultEngineType)
 		}
 
-		customMetrics, customMetricErrs := customMetricConfigs(engineConfig.CustomMetrics)
+		customMetrics, customMetricErrs := parseCustomMetricConfigs(engineConfig.CustomMetrics)
 		if len(customMetricErrs) != 0 {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, errors.Join(customMetricErrs...))
 		}
@@ -280,21 +304,23 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 	return extractor, nil
 }
 
-func customMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []error) {
-	custom := make([]CustomMetric, 0, len(configs))
+func parseCustomMetricConfigs(configs []customMetricConfigParams) ([]CustomMetric, []error) {
+	metrics := make([]CustomMetric, 0, len(configs))
 	var errs []error
 	for _, cfg := range configs {
 		spec, err := parseStringToSpec(cfg.MetricSpec)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("custom metric %q: %w", cfg.AttributeKey, err))
+			errs = append(errs, fmt.Errorf("customMetrics entry %q metricSpec: %w", cfg.AttributeKey, err))
 			continue
 		}
-		custom = append(custom, CustomMetric{
+		metrics = append(metrics, CustomMetric{
 			AttributeKey: cfg.AttributeKey,
 			Spec:         spec,
+			Aggregation:  cfg.Aggregation,
+			Optional:     cfg.Optional,
 		})
 	}
-	return custom, errs
+	return metrics, errs
 }
 
 func defaultExtractorParams() *modelServerExtractorParams {

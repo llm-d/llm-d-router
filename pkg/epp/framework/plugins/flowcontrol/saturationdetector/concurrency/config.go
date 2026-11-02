@@ -78,6 +78,15 @@ type apiConfig struct {
 	// Defaults to 1000000 if unset.
 	MaxTokenConcurrency      *int64 `json:"maxTokenConcurrency,omitempty"`
 	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
+
+	// FailOpen controls the scheduling filter when every candidate endpoint is over its limit.
+	//
+	// When true, the filter returns all candidates and the scorers pick the least loaded one.
+	// When false, the filter returns no candidates, so the profile finds no endpoint and the
+	// request fails instead of overloading an endpoint.
+	//
+	// Defaults to true if unset.
+	FailOpen *bool `json:"failOpen,omitempty"`
 }
 
 // concurrencyMode is the concurrency detection mode.
@@ -101,6 +110,8 @@ const (
 	defaultConcurrencyMode = modeRequests
 	// defaultMaxTokenConcurrency is the default maximum number of tokens allowed per endpoint.
 	defaultMaxTokenConcurrency int64 = 1000000
+	// defaultFailOpen is used when FailOpen is unset.
+	defaultFailOpen = true
 )
 
 // config is the internal, fully-validated configuration used by the detector.
@@ -110,6 +121,8 @@ type config struct {
 	mode                     concurrencyMode
 	maxTokenConcurrency      int64
 	inFlightLoadProducerName string
+	// failClosed makes the filter return no endpoints when every candidate is over its limit.
+	failClosed bool
 }
 
 // buildConfig applies the configuration lifecycle (defaulting and validation) and translates the
@@ -133,6 +146,7 @@ func buildConfig(apiCfg *apiConfig) (*config, error) {
 		mode:                     *safeCfg.ConcurrencyMode,
 		maxTokenConcurrency:      *safeCfg.MaxTokenConcurrency,
 		inFlightLoadProducerName: safeCfg.InFlightLoadProducerName,
+		failClosed:               !*safeCfg.FailOpen,
 	}, nil
 }
 
@@ -149,6 +163,9 @@ func applyDefaults(cfg *apiConfig) {
 	}
 	if cfg.MaxTokenConcurrency == nil {
 		cfg.MaxTokenConcurrency = ptr.To(defaultMaxTokenConcurrency)
+	}
+	if cfg.FailOpen == nil {
+		cfg.FailOpen = ptr.To(defaultFailOpen)
 	}
 }
 

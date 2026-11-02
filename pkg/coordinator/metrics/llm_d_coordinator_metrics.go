@@ -169,3 +169,72 @@ var (
 		[]string{"result"},
 	)
 )
+
+// Per-request pipeline amplification, orchestration cost, media processing,
+// and outbound response size. Recorded once per client request except
+// media_download_duration_seconds, which is one observation per download
+// attempt.
+var (
+	encodeSubrequests = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "encode_subrequests",
+			Help:      metricsutil.HelpMsgWithStability("Number of Encode subrequests produced by one client request. Observed once per pipeline execution after fan-out is known; 0 when Encode does not run or is skipped. Unit: subrequests.", compbasemetrics.ALPHA),
+			Buckets:   CountBuckets,
+		},
+		routeLabel,
+	)
+
+	orchestrationOverhead = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "orchestration_overhead_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Coordinator wall time outside request parsing and pipeline step execution. Observed once per client request as max(0, total-parse-sum(steps)). Unit: seconds.", compbasemetrics.ALPHA),
+			Buckets:   metricsutil.GeneralLatencyBuckets,
+		},
+		routeLabel,
+	)
+
+	mediaItems = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "media_items",
+			Help:      metricsutil.HelpMsgWithStability("Number of media items of one type found in one client request. Observed once per type after the request's media inventory is known. Unit: items.", compbasemetrics.ALPHA),
+			Buckets:   CountBuckets,
+		},
+		mediaTypeLabel,
+	)
+
+	mediaDownloadDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "media_download_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Duration of one outbound media download attempt. Observed at the end of each HTTP fetch, including failed and cancelled attempts. Requests rejected before the dial (invalid URL, disallowed scheme, or host not in allowed_domains) and data URIs are not downloads. Unit: seconds.", compbasemetrics.ALPHA),
+			Buckets:   metricsutil.GeneralLatencyBuckets,
+		},
+		resultLabel,
+	)
+
+	responseSize = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "response_size_bytes",
+			Help:      metricsutil.HelpMsgWithStability("Total bytes written to the client for one request, including partial writes on cancellation or disconnect. Observed once per client request. Unit: bytes.", compbasemetrics.ALPHA),
+			Buckets:   metricsutil.ResponseSizeBuckets,
+		},
+		streamLabel,
+	)
+)
+
+// Prompt-token parity. Recorded by the decode step when the decode worker's
+// usage reports a prompt token count different from the number of token IDs
+// the render step produced and the coordinator sent to prefill. Compare
+// against upstream_request_total{upstream="decode"} for a rate.
+var promptTokenMismatchTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Subsystem: LLMDRouterCoordinatorSubsystem,
+		Name:      "prompt_token_mismatch_total",
+		Help:      metricsutil.HelpMsgWithStability("Total number of decode responses whose prompt token count differed from the rendered token count sent to prefill.", compbasemetrics.ALPHA),
+	},
+	parityLabels,
+)

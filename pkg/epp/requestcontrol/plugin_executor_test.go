@@ -131,6 +131,7 @@ func TestDataProducerPluginsWithTimeout_CancelsPluginContext(t *testing.T) {
 
 	err := dataProducerPluginsWithTimeout(
 		context.Background(),
+		fwkrc.DataProducerExtensionPoint,
 		20*time.Millisecond,
 		[]fwkrc.DataProducer{plugin},
 		&fwksched.InferenceRequest{},
@@ -157,6 +158,7 @@ func TestDataProducerPluginsWithTimeout_LateAttributeWriteIsSafe(t *testing.T) {
 
 	err := dataProducerPluginsWithTimeout(
 		context.Background(),
+		fwkrc.DataProducerExtensionPoint,
 		20*time.Millisecond,
 		[]fwkrc.DataProducer{plugin},
 		request,
@@ -185,6 +187,35 @@ func TestDataProducerPluginsWithTimeout_LateAttributeWriteIsSafe(t *testing.T) {
 	value, ok := fwksched.ReadRequestAttribute[int](request, plugin.key)
 	require.True(t, ok)
 	assert.Equal(t, 1, value)
+}
+
+// The director assigns request fields once the timeout path returns, while the
+// abandoned producer goroutine may still be running. Scoping copies the request,
+// so it must happen before the goroutine starts; -race reports the overlap
+// otherwise.
+func TestDataProducerPluginsWithTimeout_ScopesBeforeLaunch(t *testing.T) {
+	request := &fwksched.InferenceRequest{}
+	plugin := &lateAttributePlugin{
+		key:     fwkplugin.NewDataKey("late", "mock"),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+
+	err := dataProducerPluginsWithTimeout(
+		context.Background(),
+		fwkrc.DataProducerExtensionPoint,
+		20*time.Millisecond,
+		[]fwkrc.DataProducer{plugin},
+		request,
+		nil,
+	)
+	require.Error(t, err)
+	request.SchedulingResult = &fwksched.SchedulingResult{}
+
+	<-plugin.started
+	close(plugin.release)
+	<-plugin.done
 }
 
 func TestDataProducerPluginsWithTimeout(t *testing.T) {
@@ -269,7 +300,7 @@ func TestDataProducerPluginsWithTimeout(t *testing.T) {
 			ctx, cancel := tc.ctxFn()
 			defer cancel()
 
-			err := dataProducerPluginsWithTimeout(ctx, tc.timeout, tc.plugins, &fwksched.InferenceRequest{}, nil)
+			err := dataProducerPluginsWithTimeout(ctx, fwkrc.DataProducerExtensionPoint, tc.timeout, tc.plugins, &fwksched.InferenceRequest{}, nil)
 
 			if tc.expectSuccess {
 				assert.NoError(t, err)

@@ -28,6 +28,7 @@ import (
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
@@ -188,8 +189,8 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 					Prompts: []fwkrh.PromptTokens{{
 						TokenIDs: []uint32{101, 102, 103, 104, 105},
 						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
-							{Modality: fwkrh.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
+							{Modality: reqcommon.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
+							{Modality: reqcommon.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
 						},
 					}},
 				},
@@ -238,8 +239,8 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 					Prompts: []fwkrh.PromptTokens{{
 						TokenIDs: []uint32{201, 202, 203, 204},
 						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: fwkrh.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
-							{Modality: fwkrh.ModalityImage, Hash: "", Offset: 2, Length: 2},
+							{Modality: reqcommon.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
+							{Modality: reqcommon.ModalityImage, Hash: "", Offset: 2, Length: 2},
 						},
 					}},
 				},

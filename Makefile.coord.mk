@@ -9,7 +9,7 @@ IMAGE_REGISTRY ?= ghcr.io/llm-d
 
 # Image tags
 COORDINATOR_TAG      ?= dev
-VLLM_SIMULATOR_TAG   ?= v0.10.2
+VLLM_SIMULATOR_TAG   ?= v1.0.0
 EPP_TAG              ?= dev
 
 # Full image references (derived; override only if you need a non-standard repo)
@@ -18,7 +18,7 @@ VLLM_IMAGE           ?= $(IMAGE_REGISTRY)/llm-d-inference-sim:$(VLLM_SIMULATOR_T
 EPP_IMAGE            ?= $(IMAGE_REGISTRY)/llm-d-router-endpoint-picker:$(EPP_TAG)
 
 # vllm-render defaults to the same simulator image as the other vLLM roles,
-# matching the router e2e suite (test/scripts/test-e2e-router.sh).
+# matching the router e2e suite (Makefile, test-e2e-run).
 VLLM_RENDER_IMAGE    ?= $(VLLM_IMAGE)
 VLLM_RENDER_PORT     ?= 8082
 
@@ -120,9 +120,13 @@ else
 BUILDER_E2E_KUBECONFIG_FLAGS =
 endif
 
-# Env vars forwarded into the e2e test container.
+E2E_NUM_PROCS ?= 5
+
+# Env vars forwarded into the e2e test container. E2E_NUM_PROCS reaches both
+# `ginkgo --procs` (via the runner script) and the suite's numProcesses; the
+# suite fails fast if the two disagree.
 E2E_ENV_VARS = COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT \
-               E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE \
+               E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE E2E_NUM_PROCS EXISTS_TIMEOUT \
                E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME E2E_EPP_TOPOLOGY
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)

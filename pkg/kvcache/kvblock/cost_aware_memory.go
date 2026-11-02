@@ -297,36 +297,40 @@ func (m *CostAwareMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHa
 
 	for idx, key := range requestKeys {
 		keyStr := key.String()
-		if pods, found := m.data.Get(keyStr); found { //nolint:nestif // TODO: can this be optimized?
-			if pods == nil || pods.Len() == 0 {
-				traceLogger.Info("no pods found for key, cutting search", "key", key)
-				return podsPerKey, nil // early stop since prefix-chain breaks here
-			}
-
-			highestHitIdx = idx
-
-			if podIdentifierSet.Len() == 0 {
-				// If no pod identifiers are provided, return all pods
-				pods.cache.Range(func(k, value interface{}) bool {
-					if pod, ok := k.(PodEntry); ok {
-						podsPerKey[key] = append(podsPerKey[key], pod)
-					}
-					return true
-				})
-			} else {
-				// Filter pods based on the provided pod identifiers
-				pods.cache.Range(func(k, value interface{}) bool {
-					if pod, ok := k.(PodEntry); ok {
-						if podIdentifierSet.Has(pod.PodIdentifier) {
-							podsPerKey[key] = append(podsPerKey[key], pod)
-						}
-					}
-					return true
-				})
-			}
-		} else {
-			traceLogger.Info("key not found in index", "key", key)
+		pods, found := m.data.Get(keyStr)
+		if !found || pods == nil || pods.Len() == 0 {
+			traceLogger.Info("no pods found for key, cutting search", "key", key)
+			return podsPerKey, nil // early stop since prefix-chain breaks here
 		}
+
+		var filteredPods []PodEntry
+		if podIdentifierSet.Len() == 0 {
+			// If no pod identifiers are provided, return all pods
+			pods.cache.Range(func(k, value interface{}) bool {
+				if pod, ok := k.(PodEntry); ok {
+					filteredPods = append(filteredPods, pod)
+				}
+				return true
+			})
+		} else {
+			// Filter pods based on the provided pod identifiers
+			pods.cache.Range(func(k, value interface{}) bool {
+				if pod, ok := k.(PodEntry); ok {
+					if podIdentifierSet.Has(pod.PodIdentifier) {
+						filteredPods = append(filteredPods, pod)
+					}
+				}
+				return true
+			})
+		}
+
+		if len(filteredPods) == 0 {
+			traceLogger.Info("no pods found for key, cutting search", "key", key)
+			return podsPerKey, nil // early stop since prefix-chain breaks here
+		}
+
+		podsPerKey[key] = filteredPods
+		highestHitIdx = idx
 	}
 
 	traceLogger.Info("lookup completed", "highest-hit-index", highestHitIdx,
@@ -335,43 +339,48 @@ func (m *CostAwareMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHa
 	return podsPerKey, nil
 }
 
-// Evict removes a key and its associated pod entries from the index backend.
-// keyType indicates whether the key is an EngineKey (requires engine→request lookup)
-// or a RequestKey (used directly for speculative entries without engineKey mapping).
-func (m *CostAwareMemoryIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
+// Evict removes keys and their associated pod entries from the index backend.
+// keyType indicates whether the keys are EngineKeys (each resolved independently
+// via the engine→request mapping) or RequestKeys (used directly).
+// A non-nil error means the index is unchanged.
+func (m *CostAwareMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []BlockHash, entries []PodEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if len(entries) == 0 {
-		return fmt.Errorf("no entries provided for eviction from index")
+	if len(keys) == 0 || len(entries) == 0 {
+		return fmt.Errorf("no keys or entries provided for eviction from index")
 	}
 
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.CostAwareMemoryIndex.Evict")
 
 	switch keyType {
 	case EngineKey:
-		rks, found := m.requestKeys.Get(key)
-		if !found {
-			traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
-			return nil
-		}
-		for _, rk := range rks {
-			m.evictPodsFromRequestKey(rk, key, entries, traceLogger)
-		}
-		allEmpty := true
-		for _, rk := range rks {
-			if pc, found := m.data.Get(rk.String()); found && pc != nil && pc.Len() > 0 {
-				allEmpty = false
-				break
+		for _, key := range keys {
+			rks, found := m.requestKeys.Get(key)
+			if !found {
+				traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
+				continue
 			}
-		}
-		if allEmpty {
-			m.requestKeys.Remove(key)
+			for _, rk := range rks {
+				m.evictPodsFromRequestKey(rk, key, entries, traceLogger)
+			}
+			allEmpty := true
+			for _, rk := range rks {
+				if pc, found := m.data.Get(rk.String()); found && pc != nil && pc.Len() > 0 {
+					allEmpty = false
+					break
+				}
+			}
+			if allEmpty {
+				m.requestKeys.Remove(key)
+			}
 		}
 		m.data.Wait()
 		return nil
 	case RequestKey:
-		m.evictPodsFromRequestKey(key, EmptyBlockHash, entries, traceLogger)
+		for _, key := range keys {
+			m.evictPodsFromRequestKey(key, EmptyBlockHash, entries, traceLogger)
+		}
 		m.data.Wait()
 		return nil
 	default:

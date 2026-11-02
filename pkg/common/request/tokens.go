@@ -35,10 +35,12 @@ import (
 // min_tokens <= max_tokens=1 without raising the floor above the cap (vLLM's
 // SamplingParams rejects min_tokens > max_tokens).
 //
-// A Responses body also pins store to false: vLLM defaults it to true, so a
-// synthetic leg would leave behind a stored response object nothing reaps. The
-// other APIs define no store field, so setting it there would put an unknown
-// field on the wire.
+// A Responses body also pins store to false: the field defaults to true in the
+// Responses schema, so a synthetic leg would ask the worker to retain its
+// output. vLLM retains one only when VLLM_ENABLE_RESPONSES_API_STORE is set and
+// otherwise clears the field, so the pin matters on a store-enabled deployment.
+// The other APIs define no store field, so setting it there would put an
+// unknown field on the wire.
 //
 // body is rewritten in place, so the caller passes its own copy. A one-level
 // copy is enough: the generate sampling_params is always replaced with a map
@@ -69,6 +71,10 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 // and conversation reference a prior turn, background asks for an async job
 // the router cannot poll, and file_id is part of the Responses file
 // hydration API, referring to a file the router never stored.
+//
+// store is absent from that list: it asks the worker to retain a response
+// object rather than to resolve one the router never kept, so a request
+// carrying it is served rather than refused.
 //
 // body may hold its values decoded or as json.RawMessage, so a caller that
 // decodes only the fields it reads passes its body as-is. An input that reads
