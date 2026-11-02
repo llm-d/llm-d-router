@@ -408,6 +408,8 @@ Enable chunked decode via the pd-sidecar flag:
 >   choice for every choice.
 > - the request declares a non-empty `tools` array and does not set `tool_choice: none`, because a
 >   tool call cannot be reassembled across chunk boundaries.
+> - the request sets `structured_outputs`, or a `response_format` whose `type` is not `text`, because
+>   vLLM applies the constraint to each chunk's output separately.
 
 ---
 
