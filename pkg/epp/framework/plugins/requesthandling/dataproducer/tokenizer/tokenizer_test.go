@@ -174,7 +174,7 @@ func TestPluginFactory_Validation(t *testing.T) {
 			name:       "explicit estimate backend rejects vllm parameters",
 			params:     `{"backend":"estimate","vllm":{}}`,
 			expectErr:  true,
-			errContain: "'backend' is \"estimate\" but 'vllm' is set",
+			errContain: "'backend' is \"estimate\" but 'vllm' or 'modelName' is set",
 		},
 		{
 			name:       "unknown backend",
@@ -215,20 +215,30 @@ func TestPluginFactory_BackendSelection(t *testing.T) {
 	handle := plugin.NewEppHandle(ctx, nil)
 
 	tests := []struct {
-		name   string
-		params string
-		want   string
+		name    string
+		params  string
+		want    string
+		wantErr string
 	}{
 		{name: "zero config infers estimate", params: `{}`, want: BackendEstimate},
 		{name: "modelName alone infers vllm", params: `{"modelName":"m"}`, want: BackendVLLM},
 		{name: "estimate block infers estimate", params: `{"estimate":{}}`, want: BackendEstimate},
-		{name: "backend wins over modelName inference", params: `{"backend":"estimate","modelName":"m"}`, want: BackendEstimate},
+		{name: "explicit estimate", params: `{"backend":"estimate"}`, want: BackendEstimate},
+		{
+			name:    "explicit estimate rejects modelName",
+			params:  `{"backend":"estimate","modelName":"m"}`,
+			wantErr: "'backend' is \"estimate\" but 'vllm' or 'modelName' is set",
+		},
 		{name: "explicit vllm", params: `{"backend":"vllm","modelName":"m"}`, want: BackendVLLM},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p, err := PluginFactory("test-tokenizer", plugin.StrictDecoder(json.RawMessage(tt.params)), handle)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
 			require.NoError(t, err)
 			tp, ok := p.(*Plugin)
 			require.True(t, ok)

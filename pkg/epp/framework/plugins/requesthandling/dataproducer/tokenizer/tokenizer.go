@@ -82,8 +82,8 @@ var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
 // backend, `estimate` selects the tokenizer-free byte-packing backend, which is
 // also the zero-config default when neither is set.
 type tokenizerPluginConfig struct {
-	// Backend selects the backend: "vllm" or "estimate". It takes precedence
-	// over inference from the other fields, which then has to agree with it.
+	// Backend selects the backend ("vllm" or "estimate"); when set, all
+	// backend-specific fields must match it.
 	Backend string `json:"backend,omitempty"`
 	// VLLM configures the vLLM /render backend.
 	VLLM *vllmConfig `json:"vllm,omitempty"`
@@ -240,10 +240,9 @@ type framesStridedMode struct {
 	FrameStride int `json:"frameStride,omitempty"`
 }
 
-// resolveBackend returns the backend the configuration selects and validates
-// the combination. 'backend' wins when set; otherwise the backend is inferred
-// from the configuration, preserving the behavior of configs that predate the
-// field.
+// resolveBackend returns the configured backend and validates that all
+// backend-specific fields match it. When 'backend' is unset, the backend is
+// inferred from 'vllm', 'modelName', and 'estimate'.
 func (c *tokenizerPluginConfig) resolveBackend() (string, error) {
 	if c.Backend != "" {
 		switch c.Backend {
@@ -256,8 +255,8 @@ func (c *tokenizerPluginConfig) resolveBackend() (string, error) {
 			}
 			return BackendVLLM, nil
 		case BackendEstimate:
-			if c.VLLM != nil {
-				return "", fmt.Errorf("'backend' is %q but 'vllm' is set", BackendEstimate)
+			if c.VLLM != nil || c.ModelName != "" {
+				return "", fmt.Errorf("'backend' is %q but 'vllm' or 'modelName' is set", BackendEstimate)
 			}
 			return BackendEstimate, nil
 		default:
