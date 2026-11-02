@@ -201,8 +201,10 @@ func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
 	// only records request_cached_tokens when PromptTokenDetails is set, so
 	// dropping the zero leaves the misses out of the histogram and inflates the
 	// reported hit rate. A zero is only recorded while no count is known yet,
-	// so a later frame that serializes a placeholder zero cannot replace the
-	// count an earlier frame reported.
+	// so a later frame parsed into the same Usage cannot replace the count an
+	// earlier frame reported. Frames that arrive in separate response chunks
+	// are parsed into fresh Usage values; handlers.mergeUsage applies the same
+	// rule when it folds them together.
 	if hasRead && (read != 0 || usage.PromptTokenDetails == nil) {
 		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: read}
 	}
