@@ -32,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -215,14 +216,18 @@ func logSSELineDrop(ctx context.Context) {
 // block may carry only some of the fields, so a zero is read as "not reported" and
 // leaves the accumulated value alone. Parsers that emit usage once with every field
 // populated are unaffected.
-func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
+func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 	if src.PromptTokens != 0 {
 		dst.PromptTokens = src.PromptTokens
 	}
 	if src.CompletionTokens != 0 {
 		dst.CompletionTokens = src.CompletionTokens
 	}
-	if src.PromptTokenDetails != nil {
+	// Each response chunk is parsed into a fresh Usage, so a later frame that
+	// serializes a placeholder zero would otherwise replace a cache count an
+	// earlier chunk reported. A zero only fills in a count that is still unknown.
+	if src.PromptTokenDetails != nil &&
+		(src.PromptTokenDetails.CachedTokens != 0 || dst.PromptTokenDetails == nil) {
 		dst.PromptTokenDetails = src.PromptTokenDetails
 	}
 	// A block reporting both halves of the usage owns the total it came with; a partial

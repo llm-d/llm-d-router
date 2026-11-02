@@ -26,14 +26,14 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	concretedatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 )
 
 const (
@@ -55,7 +55,7 @@ func (p *tokenizedPromptTestProducer) TypedName() fwkplugin.TypedName {
 }
 
 func (p *tokenizedPromptTestProducer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}}
+	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{}}
 }
 
 func (p *tokenizedPromptTestProducer) Produce(_ context.Context, _ *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
@@ -178,9 +178,9 @@ func migrationTokenizedRequest(requestID string, tokenCount int) *scheduling.Inf
 	return &scheduling.InferenceRequest{
 		RequestID: requestID,
 		Headers:   map[string]string{},
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
 			},
 		},
 	}

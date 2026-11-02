@@ -28,7 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // tryRespondLocally offers the request to each configured Responder in order. The first one
@@ -47,7 +47,7 @@ func (s *StreamingServer) tryRespondLocally(ctx context.Context, reqCtx *Request
 	}
 
 	path, _, _ := strings.Cut(envoy.ExtractHeaderValue(req, ":path"), "?")
-	request := &fwkrc.RequestLine{
+	request := &fwkrh.RequestLine{
 		Method: http.MethodGet,
 		Path:   path,
 	}
@@ -74,7 +74,7 @@ func (s *StreamingServer) tryRespondLocally(ctx context.Context, reqCtx *Request
 }
 
 // immediateResponse renders a plugin response as the ext-proc message that ends the exchange.
-func immediateResponse(resp *fwkrc.LocalResponse) *extProcPb.ProcessingResponse {
+func immediateResponse(resp *fwkrh.LocalResponse) *extProcPb.ProcessingResponse {
 	statusCode := resp.StatusCode
 	if statusCode == 0 {
 		statusCode = http.StatusOK

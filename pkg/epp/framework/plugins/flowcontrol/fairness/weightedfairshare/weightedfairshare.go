@@ -36,7 +36,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -102,7 +102,7 @@ func (c Config) validate() error {
 
 var (
 	_ flowcontrol.FairnessPolicy  = &weightedFairShare{}
-	_ fwkrc.ResponseBodyProcessor = &weightedFairShare{}
+	_ fwkrh.ResponseBodyProcessor = &weightedFairShare{}
 )
 
 type weightedFairShare struct {
@@ -220,7 +220,7 @@ func (p *weightedFairShare) Pick(
 func (p *weightedFairShare) ResponseBody(
 	_ context.Context,
 	request *fwksched.InferenceRequest,
-	response *fwkrc.Response,
+	response *fwkrh.Response,
 	_ *datalayer.EndpointMetadata,
 ) {
 	if request == nil || response == nil || !response.EndOfStream {

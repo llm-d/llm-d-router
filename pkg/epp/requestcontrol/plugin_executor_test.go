@@ -30,7 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -40,7 +40,7 @@ var (
 	testKeyFail = fwkplugin.NewDataKey("keyFail", "producerFail")
 )
 
-var _ fwkrc.DataProducer = &executorMockDataProducerPlugin{}
+var _ fwkrh.DataProducer = &executorMockDataProducerPlugin{}
 
 type executorMockDataProducerPlugin struct {
 	name      string
@@ -131,9 +131,9 @@ func TestDataProducerPluginsWithTimeout_CancelsPluginContext(t *testing.T) {
 
 	err := dataProducerPluginsWithTimeout(
 		context.Background(),
-		fwkrc.DataProducerExtensionPoint,
+		fwkrh.DataProducerExtensionPoint,
 		20*time.Millisecond,
-		[]fwkrc.DataProducer{plugin},
+		[]fwkrh.DataProducer{plugin},
 		&fwksched.InferenceRequest{},
 		nil,
 	)
@@ -158,9 +158,9 @@ func TestDataProducerPluginsWithTimeout_LateAttributeWriteIsSafe(t *testing.T) {
 
 	err := dataProducerPluginsWithTimeout(
 		context.Background(),
-		fwkrc.DataProducerExtensionPoint,
+		fwkrh.DataProducerExtensionPoint,
 		20*time.Millisecond,
-		[]fwkrc.DataProducer{plugin},
+		[]fwkrh.DataProducer{plugin},
 		request,
 		nil,
 	)
@@ -204,9 +204,9 @@ func TestDataProducerPluginsWithTimeout_ScopesBeforeLaunch(t *testing.T) {
 
 	err := dataProducerPluginsWithTimeout(
 		context.Background(),
-		fwkrc.DataProducerExtensionPoint,
+		fwkrh.DataProducerExtensionPoint,
 		20*time.Millisecond,
-		[]fwkrc.DataProducer{plugin},
+		[]fwkrh.DataProducer{plugin},
 		request,
 		nil,
 	)
@@ -222,30 +222,30 @@ func TestDataProducerPluginsWithTimeout(t *testing.T) {
 	testCases := []struct {
 		name          string
 		timeout       time.Duration
-		plugins       []fwkrc.DataProducer
+		plugins       []fwkrh.DataProducer
 		ctxFn         func() (context.Context, context.CancelFunc)
 		expectErrStr  string
-		checkPlugins  func(t *testing.T, plugins []fwkrc.DataProducer)
+		checkPlugins  func(t *testing.T, plugins []fwkrh.DataProducer)
 		expectSuccess bool
 	}{
 		{
 			name:    "success with one plugin",
 			timeout: 100 * time.Millisecond,
-			plugins: []fwkrc.DataProducer{
+			plugins: []fwkrh.DataProducer{
 				&executorMockDataProducerPlugin{name: "p1"},
 			},
 			ctxFn: func() (context.Context, context.CancelFunc) {
 				return context.Background(), func() {}
 			},
 			expectSuccess: true,
-			checkPlugins: func(t *testing.T, plugins []fwkrc.DataProducer) {
+			checkPlugins: func(t *testing.T, plugins []fwkrh.DataProducer) {
 				assert.True(t, plugins[0].(*executorMockDataProducerPlugin).executed)
 			},
 		},
 		{
 			name:    "plugin returns error",
 			timeout: 100 * time.Millisecond,
-			plugins: []fwkrc.DataProducer{
+			plugins: []fwkrh.DataProducer{
 				&executorMockDataProducerPlugin{name: "p1", returnErr: errors.New("plugin failed")},
 			},
 			ctxFn: func() (context.Context, context.CancelFunc) {
@@ -256,7 +256,7 @@ func TestDataProducerPluginsWithTimeout(t *testing.T) {
 		{
 			name:    "plugins time out",
 			timeout: 50 * time.Millisecond,
-			plugins: []fwkrc.DataProducer{
+			plugins: []fwkrh.DataProducer{
 				&executorMockDataProducerPlugin{name: "p1", delay: 100 * time.Millisecond},
 			},
 			ctxFn: func() (context.Context, context.CancelFunc) {
@@ -267,7 +267,7 @@ func TestDataProducerPluginsWithTimeout(t *testing.T) {
 		{
 			name:    "context cancelled",
 			timeout: 200 * time.Millisecond,
-			plugins: []fwkrc.DataProducer{
+			plugins: []fwkrh.DataProducer{
 				&executorMockDataProducerPlugin{name: "p1", delay: 100 * time.Millisecond},
 			},
 			ctxFn: func() (context.Context, context.CancelFunc) {
@@ -280,7 +280,7 @@ func TestDataProducerPluginsWithTimeout(t *testing.T) {
 		{
 			name:    "multiple plugins success",
 			timeout: 100 * time.Millisecond,
-			plugins: []fwkrc.DataProducer{
+			plugins: []fwkrh.DataProducer{
 				&executorMockDataProducerPlugin{name: "p1"},
 				&executorMockDataProducerPlugin{name: "p2"},
 			},
@@ -288,7 +288,7 @@ func TestDataProducerPluginsWithTimeout(t *testing.T) {
 				return context.Background(), func() {}
 			},
 			expectSuccess: true,
-			checkPlugins: func(t *testing.T, plugins []fwkrc.DataProducer) {
+			checkPlugins: func(t *testing.T, plugins []fwkrh.DataProducer) {
 				assert.True(t, plugins[0].(*executorMockDataProducerPlugin).executed)
 				assert.True(t, plugins[1].(*executorMockDataProducerPlugin).executed)
 			},
@@ -300,7 +300,7 @@ func TestDataProducerPluginsWithTimeout(t *testing.T) {
 			ctx, cancel := tc.ctxFn()
 			defer cancel()
 
-			err := dataProducerPluginsWithTimeout(ctx, fwkrc.DataProducerExtensionPoint, tc.timeout, tc.plugins, &fwksched.InferenceRequest{}, nil)
+			err := dataProducerPluginsWithTimeout(ctx, fwkrh.DataProducerExtensionPoint, tc.timeout, tc.plugins, &fwksched.InferenceRequest{}, nil)
 
 			if tc.expectSuccess {
 				assert.NoError(t, err)
@@ -371,18 +371,18 @@ func TestExecutePluginsAsDAG(t *testing.T) {
 
 	testCases := []struct {
 		name      string
-		plugins   []fwkrc.DataProducer
+		plugins   []fwkrh.DataProducer
 		expectErr bool
-		checkFunc func(t *testing.T, plugins []fwkrc.DataProducer)
+		checkFunc func(t *testing.T, plugins []fwkrh.DataProducer)
 	}{
 		{
 			name:    "no plugins",
-			plugins: []fwkrc.DataProducer{},
+			plugins: []fwkrh.DataProducer{},
 		},
 		{
 			name:    "simple linear dependency (A -> B -> C)",
-			plugins: []fwkrc.DataProducer{pluginA, pluginB, pluginC},
-			checkFunc: func(t *testing.T, plugins []fwkrc.DataProducer) {
+			plugins: []fwkrh.DataProducer{pluginA, pluginB, pluginC},
+			checkFunc: func(t *testing.T, plugins []fwkrh.DataProducer) {
 				pA := plugins[0].(*dagTestPlugin)
 				pB := plugins[1].(*dagTestPlugin)
 				pC := plugins[2].(*dagTestPlugin)
@@ -397,8 +397,8 @@ func TestExecutePluginsAsDAG(t *testing.T) {
 		},
 		{
 			name:    "DAG with multiple dependencies (A -> B, A -> D) and one independent (E)",
-			plugins: []fwkrc.DataProducer{pluginA, pluginB, pluginD, pluginE},
-			checkFunc: func(t *testing.T, plugins []fwkrc.DataProducer) {
+			plugins: []fwkrh.DataProducer{pluginA, pluginB, pluginD, pluginE},
+			checkFunc: func(t *testing.T, plugins []fwkrh.DataProducer) {
 				pA := plugins[0].(*dagTestPlugin)
 				pB := plugins[1].(*dagTestPlugin)
 				pD := plugins[2].(*dagTestPlugin)
@@ -415,9 +415,9 @@ func TestExecutePluginsAsDAG(t *testing.T) {
 		},
 		{
 			name:      "dependency fails",
-			plugins:   []fwkrc.DataProducer{pluginFail, pluginDependsOnFail},
+			plugins:   []fwkrh.DataProducer{pluginFail, pluginDependsOnFail},
 			expectErr: true,
-			checkFunc: func(t *testing.T, plugins []fwkrc.DataProducer) {
+			checkFunc: func(t *testing.T, plugins []fwkrh.DataProducer) {
 				pF := plugins[0].(*dagTestPlugin)
 				pDOF := plugins[1].(*dagTestPlugin)
 
@@ -451,7 +451,7 @@ func TestExecutePluginsAsDAG(t *testing.T) {
 	}
 }
 
-var _ fwkrc.TimeoutAwareProducer = &timeoutAwareMockPlugin{}
+var _ fwkrh.TimeoutAwareProducer = &timeoutAwareMockPlugin{}
 
 // timeoutAwareMockPlugin is a DataProducer that declares its own timeout.
 type timeoutAwareMockPlugin struct {
@@ -464,7 +464,7 @@ func (p *timeoutAwareMockPlugin) ProduceTimeout() time.Duration { return p.timeo
 func TestProducerTimeout(t *testing.T) {
 	testCases := []struct {
 		name string
-		p    fwkrc.DataProducer
+		p    fwkrh.DataProducer
 		want time.Duration
 	}{
 		{
@@ -529,7 +529,7 @@ func TestExecutePluginsAsDAG_EnforcesProducesDeclaration(t *testing.T) {
 		producer := &writingProducer{name: "p", declares: map[fwkplugin.DataKey]any{declared: nil}, writes: declared}
 		datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{producer})
 
-		err := executePluginsAsDAG(context.Background(), []fwkrc.DataProducer{producer},
+		err := executePluginsAsDAG(context.Background(), []fwkrh.DataProducer{producer},
 			&fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})
 
 		require.NoError(t, err)
@@ -542,7 +542,7 @@ func TestExecutePluginsAsDAG_EnforcesProducesDeclaration(t *testing.T) {
 		producer := &writingProducer{name: "p", declares: map[fwkplugin.DataKey]any{declared: nil}, writes: undeclared}
 		datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{producer})
 
-		err := executePluginsAsDAG(context.Background(), []fwkrc.DataProducer{producer},
+		err := executePluginsAsDAG(context.Background(), []fwkrh.DataProducer{producer},
 			&fwksched.InferenceRequest{}, []fwksched.Endpoint{endpoint})
 
 		require.Error(t, err, "a write outside Produces() must fail the producer rather than be dropped silently")

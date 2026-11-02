@@ -32,7 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -83,7 +83,7 @@ func band(state *minVirtualService, queues ...flowcontrol.FlowQueueAccessor) *fw
 // complete reports a finished request for flow id, as the model server's usage block would.
 func complete(p *weightedFairShare, id string, priority, promptTokens, completionTokens int) {
 	req := &fwksched.InferenceRequest{FairnessID: id, Objectives: fwksched.RequestObjectives{Priority: priority}}
-	resp := &fwkrc.Response{EndOfStream: true}
+	resp := &fwkrh.Response{EndOfStream: true}
 	resp.Usage.PromptTokens = promptTokens
 	resp.Usage.CompletionTokens = completionTokens
 	p.ResponseBody(context.Background(), req, resp, nil)

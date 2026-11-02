@@ -49,7 +49,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
+	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
@@ -604,6 +604,26 @@ func TestInstantiateAndConfigure(t *testing.T) {
 
 				// 4. Verify SaturationDetector Defaulting
 				require.NotNil(t, cfg.SaturationDetector, "SaturationDetector should be defaulted if unspecified")
+			},
+		},
+		{
+			name:       "Success - composeFairnessIDs defaults off",
+			configText: successSchedulerConfigText,
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.False(t, rawCfg.RequestHandler.ComposeFairnessIDs)
+				require.False(t, cfg.ComposeFairnessIDs)
+			},
+		},
+		{
+			name:       "Success - composeFairnessIDs enabled",
+			configText: successSchedulerConfigText + "\nrequestHandler:\n  composeFairnessIDs: true\n",
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.True(t, rawCfg.RequestHandler.ComposeFairnessIDs)
+				require.True(t, cfg.ComposeFairnessIDs)
 			},
 		},
 		{

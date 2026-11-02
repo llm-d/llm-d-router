@@ -39,10 +39,10 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 )
 
 // ThunderAgentPluginType is the plugin type registered with the framework.
@@ -54,8 +54,8 @@ const ThunderAgentPluginType = "thunder-agent"
 var inflightEstimateKey = fwkplugin.NewDataKey("inflight-estimate", ThunderAgentPluginType)
 
 var (
-	_ fwkrc.PreRequest            = &ThunderAgent{}
-	_ fwkrc.ResponseBodyProcessor = &ThunderAgent{}
+	_ fwkrh.PreRequest            = &ThunderAgent{}
+	_ fwkrh.ResponseBodyProcessor = &ThunderAgent{}
 	_ fwkplugin.ConsumerPlugin    = &ThunderAgent{}
 	_ fwkplugin.StateDumper       = &ThunderAgent{}
 	_ fwkdl.Registrant            = &ThunderAgent{}

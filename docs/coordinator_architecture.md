@@ -286,7 +286,7 @@ pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
 request. Client-provided values of the coordinator-owned headers are discarded: EPP
 routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
 `x-llm-d-peer-topology`, and `x-llm-d-pin-host-port`
-(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requestcontrol/screener/endpointpin/README.md)),
+(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requesthandling/screener/endpointpin/README.md)),
 and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
 any other leg. The same headers are removed from the upstream response before it
 reaches the client. Both apply on the pipeline and on the passthrough.
@@ -330,7 +330,7 @@ each EPP call is single-phase scheduling.
 Each profile filters the shared pod pool down to its own role with a role
 filter (`encode-filter`/`prefill-filter`/`decode-filter`), the same
 `schedulingProfiles`/role-filter pattern used in
-[deploy/config/sim-e-p-d-epp-config.yaml](../deploy/config/sim-e-p-d-epp-config.yaml).
+[test/e2e/artifacts/config/sim-e-p-d-epp-config.yaml](../test/e2e/artifacts/config/sim-e-p-d-epp-config.yaml).
 That file targets the sidecar model, though, so it picks profiles via
 `disagg-profile-handler` deciders rather than the `x-llm-d-epp-profile` header; header-based
 selection swaps in `header-profile-handler` for that one plugin.
@@ -410,6 +410,14 @@ gate when configured. When no gate plugin is configured, the router still return
 default for any `Prefer: if-available` request so a missing gate surfaces as the coordinator's
 cache-miss fallback rather than a silent forward. See
 [disaggregation.md](disaggregation.md#prefix-based-pd-decider) for configuration.
+
+`conditional-decode` is not supported with `kv-sglang`. The step sends the decode
+request without bootstrap fields, and an SGLang decode server rejects such a request
+with HTTP 400 instead of serving it. When the router forwards the request (the gate
+does not answer 412), the client gets that error. The coordinator does not reject the
+combination at startup. When `kv_connector` is `kv-sglang`, leave the step out and keep
+the `prefill` step. Every request then runs remote prefill and a KV transfer, including
+short or already-cached prompts.
 
 ### KV and EC transfer protocols
 
