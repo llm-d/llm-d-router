@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 // DisaggregatedSet rollout protocol and operator label defaults.
@@ -57,7 +58,8 @@ type Scope struct {
 //  1. Coverage check: drop candidates whose revision has zero Ready pods
 //     for any role listed in RequiredRoles.
 //  2. Load shaping: when no revision header is present, weighted-random-pick
-//     one surviving revision and keep only its pods.
+//     one surviving revision and keep only its pods. Affinity can key that
+//     draw so related requests pick the same revision.
 //
 // A request carrying RevisionHeaderName always selects that revision strictly.
 // The selected endpoint's revision is stamped into the same response header.
@@ -69,6 +71,7 @@ type RevisionGating struct {
 	Mode                GatingMode        `json:"mode"`
 	RequiredRoles       []string          `json:"requiredRoles,omitempty"`
 	Overflow            *RevisionOverflow `json:"overflow,omitempty"`
+	Affinity            *RevisionAffinity `json:"affinity,omitempty"`
 }
 
 // RevisionOverflow sends a request to another revision when the guard admits
@@ -83,6 +86,60 @@ type RevisionOverflow struct {
 
 // DefaultOverflowRole is the role checked for room by default.
 const DefaultOverflowRole = "prefill"
+
+// RevisionAffinity controls how the weighted revision choice is keyed; see the
+// README's Revision Affinity.
+type RevisionAffinity struct {
+	Mode AffinityMode `json:"mode,omitempty"`
+	// Sources optionally resolve a session identifier, in priority order,
+	// that keys the revision choice ahead of the conversation prefix.
+	Sources []sessionaffinity.SessionIDSource `json:"sources,omitempty"`
+	// PrefixCache optionally selects the revision whose endpoints hold the
+	// longest cached prefix for requests that resolve no session identifier
+	// and no text conversation prefix, such as pre-tokenized requests.
+	PrefixCache *RevisionPrefixCache `json:"prefixCache,omitempty"`
+}
+
+// RevisionPrefixCache configures cache-aware revision selection from
+// PrefixCacheMatchInfo; see the README's Prefix Cache Affinity.
+type RevisionPrefixCache struct {
+	// ProducerName names the PrefixCacheMatchInfo producer, as in
+	// prefix-cache-scorer. Empty selects the default producer.
+	ProducerName string `json:"producerName,omitempty"`
+	// MinLeadBlocks is how many more matched blocks the best revision must
+	// hold than every other covered revision. Defaults to 2.
+	MinLeadBlocks int `json:"minLeadBlocks,omitempty"`
+	// ShareSlack is how far a revision's recent fraction of selections may
+	// run above its share before the cache step stops choosing it. Defaults
+	// to 0.1.
+	ShareSlack *float64 `json:"shareSlack,omitempty"`
+}
+
+// Prefix cache affinity defaults.
+const (
+	DefaultPrefixCacheMinLeadBlocks = 2
+	DefaultPrefixCacheShareSlack    = 0.1
+)
+
+// AffinityMode selects how the revision choice is keyed.
+type AffinityMode string
+
+const (
+	// AffinityModeNone draws every request independently at random.
+	AffinityModeNone AffinityMode = "none"
+	// AffinityModePrefix keys weighted rendezvous selection on the first
+	// session identifier resolved from Sources, else the text conversation
+	// prefix. Otherwise PrefixCache, when set, may pick the revision holding
+	// the request's cached prefix, falling back to a random draw.
+	AffinityModePrefix AffinityMode = "prefix"
+)
+
+func (g *RevisionGating) affinityMode() AffinityMode {
+	if g == nil || g.Affinity == nil || g.Affinity.Mode == "" {
+		return AffinityModeNone
+	}
+	return g.Affinity.Mode
+}
 
 // UnmarshalJSON normalizes RevisionHeaderName to lowercase because request
 // headers are lowercase in the scheduling request.
@@ -201,5 +258,51 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if affinity := c.RevisionGating.Affinity; affinity != nil {
+		switch affinity.Mode {
+		case "", AffinityModeNone:
+			if len(affinity.Sources) > 0 {
+				return fmt.Errorf("revisionGating.affinity.sources requires revisionGating.affinity.mode=%s", AffinityModePrefix)
+			}
+			if affinity.PrefixCache != nil {
+				return fmt.Errorf("revisionGating.affinity.prefixCache requires revisionGating.affinity.mode=%s", AffinityModePrefix)
+			}
+		case AffinityModePrefix:
+			if err := sessionaffinity.ValidateSources(affinity.Sources); err != nil {
+				return fmt.Errorf("revisionGating.affinity.%w", err)
+			}
+			if err := c.RevisionGating.validatePrefixCache(); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("revisionGating.affinity.mode %q must be one of none|prefix", affinity.Mode)
+		}
+	}
+
+	return nil
+}
+
+// validatePrefixCache checks affinity.prefixCache and fills in its defaults.
+func (g *RevisionGating) validatePrefixCache() error {
+	prefixCache := g.Affinity.PrefixCache
+	if prefixCache == nil {
+		return nil
+	}
+	if !g.Active() {
+		return fmt.Errorf("revisionGating.affinity.prefixCache requires revisionGating.mode %s or %s", GatingModeSum, GatingModeMaxRole)
+	}
+	switch {
+	case prefixCache.MinLeadBlocks < 0:
+		return fmt.Errorf("revisionGating.affinity.prefixCache.minLeadBlocks must be positive, got %d", prefixCache.MinLeadBlocks)
+	case prefixCache.MinLeadBlocks == 0:
+		prefixCache.MinLeadBlocks = DefaultPrefixCacheMinLeadBlocks
+	}
+	if prefixCache.ShareSlack == nil {
+		slack := DefaultPrefixCacheShareSlack
+		prefixCache.ShareSlack = &slack
+	}
+	if slack := *prefixCache.ShareSlack; slack < 0 || slack > 1 {
+		return fmt.Errorf("revisionGating.affinity.prefixCache.shareSlack must be between 0 and 1, got %v", slack)
+	}
 	return nil
 }

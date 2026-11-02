@@ -7,8 +7,14 @@
 `InferenceRequestBody.TokenizedRequest` for downstream consumers (scorers,
 filters, other data producers).
 
-Implements `requestcontrol.DataProducer` and runs in the `PrepareRequestData`
-phase, before filters and scorers. The plugin is idempotent: if
+Implements `requestcontrol.DataProducer`. By default it runs after screeners,
+before admission, filters, and scorers. It runs during request handling,
+before screeners, when listed under `requestHandler.dataProducers` or when a
+screener or another request handling producer consumes `TokenizedPrompt`, for
+example an `approx-prefix-cache-producer` that feeds
+`disaggregatedset-rollout-screener`; see
+[Request Control](../../../../../../../docs/architecture.md#request-control).
+The plugin is idempotent: if
 `InferenceRequestBody.TokenizedRequest` is already populated by an earlier
 producer, tokenization is skipped. Multi-modal features are flattened into the
 upstream list shape, sorted by placeholder offset.

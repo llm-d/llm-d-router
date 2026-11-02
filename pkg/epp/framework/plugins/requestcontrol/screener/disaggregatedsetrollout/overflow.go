@@ -47,10 +47,11 @@ func (c *Screener) resolveOverflowGuard() error {
 }
 
 // overflowRevision returns chosen, or, when overflow is configured and the
-// guard admits no endpoint of the overflow role in chosen, a revision where it
-// admits one. When no revision has room, chosen is kept: moving would not help.
+// guard admits no endpoint of the overflow role in chosen, the revision pick
+// selects among those where it admits one. When no revision has room, chosen
+// is kept: moving would not help.
 func (c *Screener) overflowRevision(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint,
-	shares map[string]float64, chosen string, draw float64) string {
+	shares map[string]float64, chosen string, pick func(withRoom map[string]float64) string) string {
 	if c.overflowGuard == nil || chosen == "" {
 		return chosen
 	}
@@ -77,7 +78,7 @@ func (c *Screener) overflowRevision(ctx context.Context, request *fwksched.Infer
 			withRoom[revision] = share
 		}
 	}
-	if next := pickWeightedRevision(withRoom, drawWithin(shares, chosen, draw)); next != "" {
+	if next := pick(withRoom); next != "" {
 		return next
 	}
 	return chosen
