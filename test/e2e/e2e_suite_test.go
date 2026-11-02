@@ -252,14 +252,39 @@ func createCRDs() {
 	crdObjects = testutils.CreateObjsFromYaml(testConfig, crds, "")
 }
 
-// getPort returns the envoy service's NodePort for this process. See testutils.ProcessPort.
+// getPort returns the host port this process reaches the envoy service on,
+// derived from E2E_PORT. See testutils.ProcessPort.
 func getPort() int {
 	return testutils.ProcessPort(basePort)
 }
 
-// getMetricsPort returns the EPP's metrics NodePort for this process. See testutils.ProcessPort.
+// getMetricsPort returns the host port this process reaches the EPP's metrics
+// on, derived from E2E_METRICS_PORT. See testutils.ProcessPort.
 func getMetricsPort() int {
 	return testutils.ProcessPort(baseMetricsPort)
+}
+
+// getNodePort returns the envoy service's NodePort for this process. It derives
+// from defaultPort rather than basePort because it is the cluster-side port: it
+// must match the containerPort BuildExtraPortMappings maps to the host, and stay
+// inside the Kubernetes NodePort range whatever host port E2E_PORT asks for.
+// Against an existing cluster (K8S_CONTEXT set) clients use a port-forward, so
+// it returns 0 and the API server picks a NodePort the cluster has free.
+// See testutils.ProcessPort.
+func getNodePort() int {
+	if k8sContext != "" {
+		return 0
+	}
+	return testutils.ProcessPort(defaultPort)
+}
+
+// getMetricsNodePort returns the EPP's metrics NodePort for this process. See
+// getNodePort.
+func getMetricsNodePort() int {
+	if k8sContext != "" {
+		return 0
+	}
+	return testutils.ProcessPort(defaultMetricsPort)
 }
 
 // getNamespace returns the namespace being used by the current process. Each

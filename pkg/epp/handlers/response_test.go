@@ -48,7 +48,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -835,7 +834,7 @@ func TestHandleResponseMetricsByAPISurface(t *testing.T) {
 					chunks = [][]byte{[]byte(`{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":1}}}`)}
 				}
 				if streaming {
-					contentType = fwkrequest.MediaTypeEventStream
+					contentType = reqcommon.MediaTypeEventStream
 					if apiType == reqcommon.APITypeMessages {
 						chunks = [][]byte{
 							[]byte("event: message_start\ndata: " + `{"type":"message_start","message":{"usage":{"input_tokens":2,"cache_read_input_tokens":1}}}` + "\n\n"),
@@ -991,6 +990,39 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 			assert.Equal(t, tc.wantUsage, reqCtx.Usage, "Usage data should match expected accumulation")
 		})
 	}
+}
+
+// A cache read reported by message_start must survive a later message_delta
+// that serializes a placeholder zero. Each chunk is parsed into a fresh Usage,
+// so this depends on mergeUsage applying the same "a zero never replaces a
+// known count" rule as the parser does within one Usage.
+func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		Response: &Response{
+			Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream},
+		},
+		Request:           &Request{Headers: map[string]string{":path": reqcommon.APITypeMessages.Path()}},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+
+	chunks := [][]byte{
+		[]byte("event: message_start\ndata: " + `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}` + "\n\n"),
+		[]byte("event: message_delta\ndata: " + `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}` + "\n\n"),
+		[]byte("event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"),
+	}
+	for i, chunk := range chunks {
+		server.HandleResponseBody(context.Background(), reqCtx, chunk, i == len(chunks)-1)
+	}
+
+	require.NotNil(t, reqCtx.Usage.PromptTokenDetails)
+	assert.Equal(t, 2000, reqCtx.Usage.PromptTokenDetails.CachedTokens,
+		"a delta placeholder zero must not replace the cache read from message_start")
 }
 
 // A large response.completed event split across chunks must still yield usage.

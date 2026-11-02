@@ -388,6 +388,64 @@ endpoints:
 	assert.NoError(t, <-done)
 }
 
+func TestStart_WatchFileReloadsAfterAtomicReplace(t *testing.T) {
+	path := writeTemp(t, validYAML)
+	fd := newFD(path, true)
+	notifier := &recordingNotifier{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- fd.Start(ctx, notifier) }()
+
+	upserted := func(name string) bool {
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		for _, m := range notifier.upserted {
+			if m.ID.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	endpointYAML := func(name string) []byte {
+		return []byte("endpoints:\n  - name: " + name + "\n    address: \"10.0.0.9\"\n    port: \"9000\"\n")
+	}
+
+	// An in-place write confirms the watcher is attached.
+	require.Eventually(t, func() bool {
+		if err := os.WriteFile(path, endpointYAML("in-place-1"), 0o600); err != nil {
+			return false
+		}
+		return upserted("in-place-1")
+	}, 2*time.Second, 50*time.Millisecond)
+
+	// Write a sibling file and rename it over the watched path, as editors
+	// and config tools do for atomic saves.
+	tmp := path + ".tmp"
+	require.Eventually(t, func() bool {
+		if err := os.WriteFile(tmp, endpointYAML("replaced"), 0o600); err != nil {
+			return false
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return false
+		}
+		return upserted("replaced")
+	}, 2*time.Second, 50*time.Millisecond, "reload missed after atomic replace")
+
+	// The watch must follow the new file, so later in-place writes still reload.
+	require.Eventually(t, func() bool {
+		if err := os.WriteFile(path, endpointYAML("in-place-2"), 0o600); err != nil {
+			return false
+		}
+		return upserted("in-place-2")
+	}, 2*time.Second, 50*time.Millisecond, "reload missed for in-place write after atomic replace")
+
+	cancel()
+	assert.NoError(t, <-done)
+}
+
 func TestDumpState(t *testing.T) {
 	f := &FileDiscovery{
 		endpoints: map[types.NamespacedName]struct{}{

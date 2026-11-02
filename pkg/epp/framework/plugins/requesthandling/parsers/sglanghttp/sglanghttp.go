@@ -288,7 +288,7 @@ func (p *SGLangHTTPParser) ParseResponse(_ context.Context, body []byte, headers
 func isEventStream(headers map[string]string) bool {
 	for key, value := range headers {
 		if strings.EqualFold(key, reqcommon.HeaderContentType) &&
-			strings.Contains(strings.ToLower(value), request.MediaTypeEventStream) {
+			strings.Contains(strings.ToLower(value), reqcommon.MediaTypeEventStream) {
 			return true
 		}
 	}

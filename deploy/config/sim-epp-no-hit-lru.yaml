@@ -18,6 +18,7 @@ plugins:
 - type: no-hit-lru-scorer
   parameters:
     lruSize: 2048
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
 - type: decode-filter
 - type: max-score-picker
 - type: single-profile-handler

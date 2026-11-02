@@ -89,8 +89,9 @@ latter carrying its URL as a bare string rather than chat completions'
 nested `{"image_url": {"url": ...}}` shape. An Input item or content part it
 cannot represent this way fails the conversion rather than tokenizing a
 prompt shorter than the one vLLM serves: `input_audio` parts, `reasoning`
-items with `encrypted_content`, namespaced `function_call` items, and item
-types such as `web_search_call`. The forwarded request is unchanged.
+items with `encrypted_content` or without text, namespaced `function_call`
+items, and item types such as `web_search_call`. The forwarded request is
+unchanged.
 
 The compatibility implementation and tests are contained in `responses.go`
 and `responses_test.go`. Its integration points are the
@@ -241,6 +242,13 @@ per 40ms of audio (`tokensPerSecond: 25`), Qwen3-Omni's encoder 13 per 1s chunk
 | `estimate.audio.defaultBytesPerSecond`          | `16000`   | Byte rate used for a non-WAV payload when the request does not declare one (~128kbps). |
 | `estimate.audio.defaultDuration`                | `10`      | Clip length in seconds when neither the header nor a payload supplies one.    |
 | `estimate.audio.maxAudioTokens`                 | –         | Cap on the tower's tokens for a clip, before `overheadTokens`; use the model's own limit, e.g. 750 for gemma4 (0 = uncapped). |
+
+Image sizes and the video and audio headers are declared by the client, so the
+backend bounds what they can add: placeholders stop growing a request once its
+estimated stream reaches 1,048,576 (2^20) tokens, and any further image, video,
+or audio part keeps a single placeholder. This bound applies after the
+per-modality caps above and sits above the context window of current
+multimodal models.
 
 ## Failure mode
 

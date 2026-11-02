@@ -36,7 +36,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 	received := time.Now()
 	record := func(surface reqcommon.APISurface) {
 		RecordRequestCounter("model", "target", surface, "", 0)
-		RecordRequestErrCounter("model", "target", surface, "", "0", "502")
+		RecordRequestErrCounter(context.Background(), "model", "target", surface, "", "0", "502")
 		require.True(t, RecordRequestLatencies(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second)))
 		RecordRequestSizes("model", "target", surface, "", "0", 100)
 		RecordResponseSizes("model", "target", surface, "", "0", 200)
@@ -49,6 +49,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 		require.True(t, RecordInterTokenLatency(context.Background(), "model", "target", surface, "", "0", 0.01))
 		IncRunningRequests("model", "target", surface, "", "0")
 		DecRunningRequests("model", "target", surface, "", "0")
+		RecordRequestOutcome("model", "target", surface, "", "0", "completed", "")
 		RecordRequestProcessingLatency(surface, time.Millisecond)
 		RecordResponseProcessingLatency(surface, time.Millisecond)
 	}
@@ -63,7 +64,7 @@ func TestRequestMetricsBoundAPISurface(t *testing.T) {
 		record(reqcommon.APISurface(1000 + i))
 	}
 	for _, collector := range []prometheus.Collector{
-		llmdRequestCounter, llmdRequestErrCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
+		llmdRequestCounter, llmdRequestErrCounter, llmdRequestOutcomeCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
 		llmdInputTokens, llmdOutputTokens, llmdPromptCachedTokens, llmdNormalizedTimePerOutputToken,
 		llmdRequestTTFT, llmdRequestTPOT, llmdInterTokenLatency, llmdRunningRequests,
 		llmdRequestProcessingLatency, llmdResponseProcessingLatency,
@@ -222,6 +223,26 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 		"100 distinct model names must collapse to cap+overflow series, not one series each")
 }
 
+// RecordSchedulerAttempt's target_model_name falls back to the request-body model when no
+// rewrite rule matches, so it must go through the model limiter like the other record functions.
+func TestSchedulerAttemptBoundsTargetModelLabel(t *testing.T) {
+	const testCap = 3
+	oldModels := modelLabelLimiter
+	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
+	llmdSchedulerAttemptsTotal.Reset()
+	t.Cleanup(func() {
+		modelLabelLimiter = oldModels
+		llmdSchedulerAttemptsTotal.Reset()
+	})
+
+	for i := 0; i < 100; i++ {
+		RecordSchedulerAttempt(nil, fmt.Sprintf("model-%d", i), nil)
+	}
+
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdSchedulerAttemptsTotal),
+		"100 distinct target models must collapse to cap+overflow series, not one series each")
+}
+
 // A client can choose the overflow value itself as its fairness ID; GC of that flow must not
 // delete the shared overflow series that aggregates every capped-out tenant.
 func TestDeleteFlowControlFlowSeriesPreservesOverflowSeries(t *testing.T) {
@@ -274,4 +295,48 @@ func TestFairnessIDLabelLimitAppliesToRecordedMetrics(t *testing.T) {
 			require.Equal(t, test.wantSeries, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration))
 		})
 	}
+}
+
+// Each resolution is counted under its bounded ID, and folded IDs also count as overflow
+// for their source.
+func TestRecordFairnessIDResolution(t *testing.T) {
+	resetFairnessLabelLimit(t)
+	metricsutil.SetFairnessIDLabelLimit(1)
+	llmdFairnessIDResolvedCounter.Reset()
+	llmdFairnessIDOverflowCounter.Reset()
+	t.Cleanup(func() {
+		llmdFairnessIDResolvedCounter.Reset()
+		llmdFairnessIDOverflowCounter.Reset()
+	})
+
+	InitFairnessIDResolutionMetrics("pool-a")
+	RecordFairnessIDResolution("pool-a", "team-a", "header")
+	RecordFairnessIDResolution("pool-a", "team-b", "header")
+	RecordFairnessIDResolution("pool-a", "session-1", "agent_identity")
+	RecordFairnessIDResolution("pool-a", "default-flow", "default")
+
+	resolved := func(id, source string) float64 {
+		return promtestutil.ToFloat64(llmdFairnessIDResolvedCounter.WithLabelValues(id, source, "pool-a"))
+	}
+	overflow := func(source string) float64 {
+		return promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues(source, "pool-a"))
+	}
+	require.Equal(t, 1.0, resolved("team-a", "header"))
+	require.Equal(t, 1.0, resolved(metricsutil.OverflowValue, "header"))
+	require.Equal(t, 1.0, resolved(metricsutil.OverflowValue, "agent_identity"))
+	require.Equal(t, 1.0, resolved("default-flow", "default"))
+	require.Equal(t, 1.0, overflow("header"))
+	require.Equal(t, 1.0, overflow("agent_identity"))
+	require.Equal(t, 0.0, overflow("default"))
+}
+
+// The overflow series exist at 0 before any request, so increase() sees the first overflow.
+func TestInitFairnessIDResolutionMetricsCreatesOverflowSeries(t *testing.T) {
+	llmdFairnessIDOverflowCounter.Reset()
+	t.Cleanup(llmdFairnessIDOverflowCounter.Reset)
+
+	InitFairnessIDResolutionMetrics("pool-a")
+
+	require.Equal(t, 3, promtestutil.CollectAndCount(llmdFairnessIDOverflowCounter))
+	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues("header", "pool-a")))
 }

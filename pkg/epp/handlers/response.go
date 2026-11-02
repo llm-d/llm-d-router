@@ -32,7 +32,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -124,7 +123,7 @@ const maxSSELineBytes = 4 << 20
 // isEventStream reports whether a content-type header value is text/event-stream.
 func isEventStream(contentType string) bool {
 	mediaType, _, _ := strings.Cut(contentType, ";")
-	return strings.EqualFold(strings.TrimSpace(mediaType), fwkrequest.MediaTypeEventStream)
+	return strings.EqualFold(strings.TrimSpace(mediaType), reqcommon.MediaTypeEventStream)
 }
 
 // completeSSELines returns only whole lines, carrying a partial last line to the next chunk.
@@ -223,7 +222,11 @@ func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
 	if src.CompletionTokens != 0 {
 		dst.CompletionTokens = src.CompletionTokens
 	}
-	if src.PromptTokenDetails != nil {
+	// Each response chunk is parsed into a fresh Usage, so a later frame that
+	// serializes a placeholder zero would otherwise replace a cache count an
+	// earlier chunk reported. A zero only fills in a count that is still unknown.
+	if src.PromptTokenDetails != nil &&
+		(src.PromptTokenDetails.CachedTokens != 0 || dst.PromptTokenDetails == nil) {
 		dst.PromptTokenDetails = src.PromptTokenDetails
 	}
 	// A block reporting both halves of the usage owns the total it came with; a partial

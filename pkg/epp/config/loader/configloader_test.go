@@ -1619,6 +1619,9 @@ schedulingProfiles:
 }
 
 func TestAllowExperimentalPluginsFlag(t *testing.T) {
+	// Not parallel because it modifies global plugin registry.
+	registerTestPlugins(t)
+
 	const alphaPluginType = "test-alpha-plugin"
 	fwkplugin.Register(alphaPluginType, fwkplugin.StabilityAlpha, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockPlugin{t: fwkplugin.TypedName{Name: name, Type: alphaPluginType}}, nil

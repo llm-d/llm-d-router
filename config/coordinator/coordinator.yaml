@@ -450,3 +450,22 @@ pipeline:
     - type: decode
       # params:
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+      #
+      #   prompt_token_parity compares the prompt token count the decode
+      #   worker reports in its usage block with the number of token IDs the
+      #   render step produced, which is what prefill ran on. A difference
+      #   means decode rendered a different prompt than prefill did: the
+      #   worker ignored forwarded token IDs, or the render service and the
+      #   worker disagree (tokenizer, chat template, processor version,
+      #   chat_template_kwargs). Prefill's KV cache then does not match and
+      #   decode recomputes the prompt; the request still succeeds. Streamed
+      #   chat and completions legs are asked for include_usage when the
+      #   client did not, and that trailing frame is dropped from the
+      #   client's stream; a client that set continuous_usage_stats is left
+      #   alone and not checked. On Messages the cached part of the prompt
+      #   (cache_read_input_tokens, cache_creation_input_tokens) counts
+      #   toward the prompt. The response is never changed otherwise.
+      #     off   - no check
+      #     warn  - count (prompt_token_mismatch_total) and log   (default)
+      #     error - also record a decode step error
+      #   prompt_token_parity: warn

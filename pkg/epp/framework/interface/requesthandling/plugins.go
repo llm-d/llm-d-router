@@ -80,6 +80,8 @@ type ModelNameRewriter interface {
 // when translating EPP priority semantics into backend wire fields.
 type PriorityRewriteContext struct {
 	TargetEndpoint *fwkdl.EndpointMetadata
+	// RequestPath is the request path without its query string.
+	RequestPath string
 }
 
 // PriorityRewriter is implemented by parsers whose forwarded body can carry a

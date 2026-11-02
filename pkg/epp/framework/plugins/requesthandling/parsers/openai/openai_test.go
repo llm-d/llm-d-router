@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"mime/multipart"
+	"net/textproto"
 	"slices"
 	"strings"
 	"testing"
@@ -148,6 +149,13 @@ func TestOpenAIParser_RewritePriority(t *testing.T) {
 			}},
 			want:        map[string]any{"model": "test", "priority": 2},
 			wantMutated: true,
+		},
+		{
+			name:        "leaves decisions request unchanged",
+			payload:     fwkrh.PayloadMap{"model": "test", "priority": 100},
+			ctx:         fwkrh.PriorityRewriteContext{RequestPath: "/v1/decisions"},
+			want:        map[string]any{"model": "test", "priority": 100},
+			wantMutated: false,
 		},
 	}
 
@@ -1057,6 +1065,94 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:    "audio generate request body",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model":           "stabilityai/stable-audio-open-1.0",
+				"input":           "a dog barking in the rain",
+				"audio_length":    5.0,
+				"response_format": "wav",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				AudioGenerate: &fwkrh.AudioGenerateRequest{
+					Input: "a dog barking in the rain",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "stabilityai/stable-audio-open-1.0",
+					"input":           "a dog barking in the rain",
+					"audio_length":    json.Number("5"),
+					"response_format": "wav",
+				},
+			},
+		},
+		{
+			name:    "audio generate request with stream_format is not treated as streaming",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model":         "stabilityai/stable-audio-open-1.0",
+				"input":         "a dog barking in the rain",
+				"stream_format": "audio",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				AudioGenerate: &fwkrh.AudioGenerateRequest{
+					Input: "a dog barking in the rain",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":         "stabilityai/stable-audio-open-1.0",
+					"input":         "a dog barking in the rain",
+					"stream_format": "audio",
+				},
+				Stream: false,
+			},
+		},
+		{
+			name:    "audio generate request missing input",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model": "test",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "audio generate request with non-string input",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model": "test",
+				"input": []any{"not", "supported"},
+			},
+			wantErr: true,
+		},
+		{
+			name:    "audio generate request with negative prompt",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model":           "stabilityai/stable-audio-open-1.0",
+				"input":           "a dog barking in the rain",
+				"negative_prompt": "silence",
+			},
+			want: &fwkrh.InferenceRequestBody{
+				AudioGenerate: &fwkrh.AudioGenerateRequest{
+					Input:          "a dog barking in the rain",
+					NegativePrompt: "silence",
+				},
+				Payload: fwkrh.PayloadMap{
+					"model":           "stabilityai/stable-audio-open-1.0",
+					"input":           "a dog barking in the rain",
+					"negative_prompt": "silence",
+				},
+			},
+		},
+		{
+			name:    "audio generate request with non-string negative prompt",
+			headers: map[string]string{":path": "/v1/audio/generate"},
+			body: map[string]any{
+				"model":           "test",
+				"input":           "hello",
+				"negative_prompt": 42,
+			},
+			wantErr: true,
+		},
 		// Path-based detection tests
 		{
 			name:    "conversations API via path",
@@ -1269,6 +1365,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 					N:                 ptr.To[int64](2),
 					Size:              "1024x1024",
 					NumInferenceSteps: ptr.To[int64](30),
+					NegativePrompt:    "blurry",
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":               "test-image-model",
@@ -1447,6 +1544,7 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				"n":                   "2",
 				"size":                "1024x1024",
 				"num_inference_steps": "30",
+				"negative_prompt":     "blurry",
 			},
 			wantModel: "test-image-model",
 			wantImages: &fwkrh.ImagesGenerationsRequest{
@@ -1454,6 +1552,7 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				N:                 ptr.To[int64](2),
 				Size:              "1024x1024",
 				NumInferenceSteps: ptr.To[int64](30),
+				NegativePrompt:    "blurry",
 			},
 		},
 		{
@@ -1629,6 +1728,24 @@ func TestOpenAIParser_RepackagePreservesLargeJSONInteger(t *testing.T) {
 	}
 	if string(got["seed"]) != seed.String() {
 		t.Errorf("repackaged seed = %s, want %s", got["seed"], seed)
+	}
+}
+
+func TestOpenAIParser_ResponsesWirePayloadKeepsClientBytes(t *testing.T) {
+	// Tool parameters are rendered into the prompt as JSON, so a reordered key changes the tokens.
+	body := []byte(`{"model":"test","input":"hi","tools":[{"type":"function","name":"lookup",` +
+		`"parameters":{"type":"object","required":["zip"],"properties":{"zip":{"type":"string"},"city":{"type":"string"}}}}]}`)
+
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body, map[string]string{":path": "/v1/responses"})
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+	got, err := benchWireBytes(result)
+	if err != nil {
+		t.Fatalf("wire bytes: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("WirePayload() =\n%s\nwant the client body\n%s", got, body)
 	}
 }
 
@@ -1838,6 +1955,33 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
+			name:        "Video response without usage headers",
+			body:        []byte{0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70},
+			headers:     map[string]string{reqcommon.HeaderContentType: "video/mp4"},
+			endOfStream: true,
+			want: &fwkrh.ParsedResponse{
+				Usage: nil,
+			},
+		},
+		{
+			name: "Video response with usage headers",
+			body: []byte{0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70},
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "video/mp4",
+				"X-Vllm-Omni-Input-Tokens":  "9",
+				"X-Vllm-Omni-Output-Tokens": "30",
+				"X-Vllm-Omni-Total-Tokens":  "39",
+			},
+			endOfStream: true,
+			want: &fwkrh.ParsedResponse{
+				Usage: &fwkrh.Usage{
+					PromptTokens:     9,
+					CompletionTokens: 30,
+					TotalTokens:      39,
+				},
+			},
+		},
+		{
 			name: "Octet-stream response with malformed usage headers",
 			body: []byte{0x00, 0x01, 0x02},
 			headers: map[string]string{
@@ -2038,7 +2182,7 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{reqcommon.HeaderContentType: request.MediaTypeEventStream}, true)
+			got, err := parser.ParseResponse(context.Background(), tt.chunk, map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}, true)
 			if err != nil {
 				t.Fatalf("ParseStreamResponse() error = %v", err)
 			}
@@ -2091,7 +2235,11 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			completionsAPI + "/render",
 			imagesGenerationsAPI,
 			imagesEditsAPI,
+			videosAPI,
+			videosSyncAPI,
 			audioSpeechAPI,
+			request.DecisionsPathSuffix,
+			audioGenerateAPI,
 		},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
@@ -2317,5 +2465,373 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+const videoFormFieldNumFrames = "num_frames"
+
+type videoFormPart struct {
+	name, value, filename, mediaType string
+}
+
+func buildVideoForm(tb testing.TB, parts ...videoFormPart) ([]byte, string) {
+	tb.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, part := range parts {
+		if part.filename == "" {
+			if err := writer.WriteField(part.name, part.value); err != nil {
+				tb.Fatal(err)
+			}
+			continue
+		}
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", "form-data; name=\""+part.name+"\"; filename=\""+part.filename+"\"")
+		header.Set("Content-Type", part.mediaType)
+		file, err := writer.CreatePart(header)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		if _, err := file.Write([]byte(part.value)); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		tb.Fatal(err)
+	}
+	return body.Bytes(), writer.FormDataContentType()
+}
+
+func TestOpenAIParser_ParseRequestVideos(t *testing.T) {
+	media := string([]byte{0, 1, 255, '\r', '\n', '-', '-', 137})
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "prompt", value: "a cinematic shot"},
+		videoFormPart{name: "model", value: "wan-t2v"},
+		videoFormPart{name: "negative_prompt", value: "blur"},
+		videoFormPart{name: "size", value: "832x480"},
+		videoFormPart{name: "seconds", value: "1"},
+		videoFormPart{name: "width", value: "832"},
+		videoFormPart{name: "height", value: "480"},
+		videoFormPart{name: videoFormFieldNumFrames, value: "9"},
+		videoFormPart{name: "fps", value: "16"},
+		videoFormPart{name: "num_inference_steps", value: "4"},
+		videoFormPart{name: "num_outputs_per_prompt", value: "2"},
+		videoFormPart{name: "seed", value: "17"},
+		videoFormPart{name: "input_reference", value: media, filename: "reference.mp4", mediaType: "video/mp4"},
+		videoFormPart{name: "extra_params", value: "{\"preencode_mp4\":true}"},
+	)
+	want := &fwkrh.VideoGenerationRequest{
+		Prompt: "a cinematic shot", NegativePrompt: "blur", Size: "832x480", Seconds: "1",
+		Width: ptr.To[int64](832), Height: ptr.To[int64](480), NumFrames: ptr.To[int64](9),
+		FPS: ptr.To(16.0), NumInferenceSteps: ptr.To[int64](4),
+		NumOutputsPerPrompt: ptr.To[int64](2), Seed: ptr.To[int64](17),
+	}
+	parser := NewOpenAIParser()
+	for _, path := range []string{"/v1/videos", "/v1/videos/sync"} {
+		t.Run(path, func(t *testing.T) {
+			result, err := parser.ParseRequest(context.Background(), body,
+				map[string]string{":path": path, reqcommon.HeaderContentType: ct})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Body.Model != "wan-t2v" {
+				t.Errorf("Model = %q, want wan-t2v", result.Body.Model)
+			}
+			if diff := cmp.Diff(want, result.Body.Videos); diff != "" {
+				t.Errorf("Videos mismatch (-want +got):\n%s", diff)
+			}
+			raw, ok := result.Body.Payload.(fwkrh.RawPayload)
+			if !ok {
+				t.Fatalf("Payload = %T, want RawPayload", result.Body.Payload)
+			}
+			if !bytes.Equal(raw, body) {
+				t.Error("forwarded multipart body differs from the received body")
+			}
+			if result.SkipResponseProcessing {
+				t.Error("video response processing was skipped")
+			}
+		})
+	}
+}
+
+// A request with message-array input, ordered questions, and extra top-level fields.
+const decisionsRequest = `{"model":"Qwen/Qwen3-0.6B",` +
+	`"input":[{"role":"user","content":[{"type":"input_text","text":"Charged twice"}]}],` +
+	`"questions":[{"type":"predicate","name":"urgent","instructions":"Is it urgent?"},` +
+	`{"type":"choice","name":"team","instructions":"Which team?","choices":[{"value":"billing"},{"value":true}]},` +
+	`{"type":"score","name":"tone","instructions":"How upset?","levels":[{"label":"calm"},{"label":"furious"}]}],` +
+	`"safety_identifier":"user-9007199254740993","cache_salt":"tenant-a"}`
+
+var decisionsHeaders = map[string]string{":path": "/v1/decisions"}
+
+func TestOpenAIParser_ParseDecisionsRequest(t *testing.T) {
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(decisionsRequest), decisionsHeaders)
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+	if result.SkipResponseProcessing || !result.JSONValidated {
+		t.Errorf("SkipResponseProcessing = %v, JSONValidated = %v, want false, true", result.SkipResponseProcessing, result.JSONValidated)
+	}
+	body := result.Body
+	if body.Model != "Qwen/Qwen3-0.6B" || !body.RenderRequest {
+		t.Errorf("body = {Model:%q RenderRequest:%v}, want model set and render request", body.Model, body.RenderRequest)
+	}
+	if !bytes.Equal(body.RawBody, []byte(decisionsRequest)) {
+		t.Errorf("RawBody = %s, want the request bytes", body.RawBody)
+	}
+}
+
+func TestOpenAIParser_ParseDecisionsRequest_StringInput(t *testing.T) {
+	body := `{"model":"m","input":"Charged \"twice\"","questions":[{"type":"predicate","instructions":"q"}]}`
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body), decisionsHeaders)
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+	if got := string(result.Body.Payload.(fwkrh.PayloadMap)[reqcommon.FieldInput].(json.RawMessage)); got != `"Charged \"twice\""` {
+		t.Errorf("input = %s, want it kept opaque", got)
+	}
+}
+
+func TestOpenAIParser_ParseDecisionsRequest_Errors(t *testing.T) {
+	for name, body := range map[string]string{
+		"invalid json":        `{"model":`,
+		"missing questions":   `{"model":"m","input":"s"}`,
+		"questions as object": `{"model":"m","input":"s","questions":{"q":{"type":"predicate"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body), decisionsHeaders); err == nil {
+				t.Error("ParseRequest() error = nil, want an error")
+			}
+		})
+	}
+}
+
+func TestOpenAIParser_ParseRequestVideosOptionalAndDuplicateFields(t *testing.T) {
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "model", value: "first"},
+		videoFormPart{name: "model", value: "uploaded bytes", filename: "model.mp4", mediaType: "video/mp4"},
+		videoFormPart{name: "prompt", value: "first prompt"},
+		videoFormPart{name: "model", value: "last"},
+		videoFormPart{name: "prompt", value: "海边日出"},
+	)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/videos", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Body.Model != "last" || result.Body.Videos.Prompt != "海边日出" {
+		t.Errorf("duplicate fields: Model=%q Prompt=%q", result.Body.Model, result.Body.Videos.Prompt)
+	}
+	want := &fwkrh.VideoGenerationRequest{Prompt: "海边日出", NumOutputsPerPrompt: ptr.To[int64](1)}
+	if diff := cmp.Diff(want, result.Body.Videos); diff != "" {
+		t.Errorf("Videos mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOpenAIParser_ParseRequestVideosInvalidForms(t *testing.T) {
+	parser := NewOpenAIParser()
+	for _, tc := range []struct {
+		name, field, value string
+	}{
+		{name: "missing prompt"},
+		{name: "invalid width", field: "width", value: "wide"},
+		{name: "integral float height", field: "height", value: "480.0"},
+		{name: "fractional frames", field: videoFormFieldNumFrames, value: "9.5"},
+		{name: "invalid fps", field: "fps", value: "fast"},
+		{name: "NaN fps", field: "fps", value: "NaN"},
+		{name: "Inf fps", field: "fps", value: "Inf"},
+		{name: "negative Inf fps", field: "fps", value: "-Inf"},
+		{name: "integral float steps", field: "num_inference_steps", value: "4.0"},
+		{name: "steps with whitespace", field: "num_inference_steps", value: " 4 "},
+		{name: "invalid outputs", field: "num_outputs_per_prompt", value: "two"},
+		{name: "seed overflow", field: "seed", value: "9223372036854775808"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parts := []videoFormPart{}
+			if tc.name != "missing prompt" {
+				parts = append(parts, videoFormPart{name: "prompt", value: "a cat"})
+			}
+			if tc.field != "" {
+				parts = append(parts, videoFormPart{name: tc.field, value: tc.value})
+			}
+			body, ct := buildVideoForm(t, parts...)
+			if _, err := parser.ParseRequest(context.Background(), body,
+				map[string]string{":path": "/v1/videos", reqcommon.HeaderContentType: ct}); err == nil {
+				t.Error("ParseRequest accepted invalid form")
+			}
+		})
+	}
+	body, ct := buildVideoForm(t, videoFormPart{name: "prompt", value: "a cat"})
+	for _, badCT := range []string{"application/json", "multipart/form-data"} {
+		if _, err := parser.ParseRequest(context.Background(), body,
+			map[string]string{":path": "/v1/videos", reqcommon.HeaderContentType: badCT}); err == nil {
+			t.Errorf("ParseRequest accepted content-type %q", badCT)
+		}
+	}
+	if _, err := parser.ParseRequest(context.Background(), body[:len(body)-20],
+		map[string]string{":path": "/v1/videos", reqcommon.HeaderContentType: ct}); err == nil {
+		t.Error("ParseRequest accepted a truncated form")
+	}
+}
+
+func TestOpenAIParser_ParseRequestVideosForwardsFieldBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		parts []videoFormPart
+		want  *fwkrh.VideoGenerationRequest
+	}{
+		{
+			name: "non-positive fields",
+			parts: []videoFormPart{
+				{name: "width", value: "0"},
+				{name: "height", value: "-1"},
+				{name: videoFormFieldNumFrames, value: "0"},
+				{name: "fps", value: "0"},
+				{name: "num_inference_steps", value: "0"},
+				{name: "num_outputs_per_prompt", value: "0"},
+				{name: "seed", value: "-1"},
+			},
+			want: &fwkrh.VideoGenerationRequest{
+				Prompt: "a cat", Width: ptr.To[int64](0), Height: ptr.To[int64](-1),
+				NumFrames: ptr.To[int64](0), FPS: ptr.To(0.0),
+				NumInferenceSteps: ptr.To[int64](0), NumOutputsPerPrompt: ptr.To[int64](0), Seed: ptr.To[int64](-1),
+			},
+		},
+		{
+			name: "fields above backend limits",
+			parts: []videoFormPart{
+				{name: "num_inference_steps", value: "201"},
+				{name: "num_outputs_per_prompt", value: "11"},
+			},
+			want: &fwkrh.VideoGenerationRequest{
+				Prompt: "a cat", NumInferenceSteps: ptr.To[int64](201), NumOutputsPerPrompt: ptr.To[int64](11),
+			},
+		},
+	} {
+		for _, path := range []string{"/v1/videos", "/v1/videos/sync"} {
+			t.Run(tc.name+path, func(t *testing.T) {
+				parts := append([]videoFormPart{{name: "prompt", value: "a cat"}}, tc.parts...)
+				body, ct := buildVideoForm(t, parts...)
+				result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+					map[string]string{":path": path, reqcommon.HeaderContentType: ct})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if diff := cmp.Diff(tc.want, result.Body.Videos); diff != "" {
+					t.Errorf("Videos mismatch (-want +got):\n%s", diff)
+				}
+				raw, ok := result.Body.Payload.(fwkrh.RawPayload)
+				if !ok || !bytes.Equal(raw, body) {
+					t.Errorf("Payload = %T, want unchanged RawPayload", result.Body.Payload)
+				}
+			})
+		}
+	}
+}
+
+func TestOpenAIParser_ImagesEditsSharesMultipartReader(t *testing.T) {
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "prompt", value: "add a hat"},
+		videoFormPart{name: "n", value: "2"},
+		videoFormPart{name: "image", value: string([]byte{0, 255, '\r', '\n'}), filename: "input.png", mediaType: "image/png"},
+	)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/images/edits", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &fwkrh.ImagesGenerationsRequest{Prompt: "add a hat", N: ptr.To[int64](2)}
+	if diff := cmp.Diff(want, result.Body.Images); diff != "" {
+		t.Errorf("Images mismatch (-want +got):\n%s", diff)
+	}
+	raw, ok := result.Body.Payload.(fwkrh.RawPayload)
+	if !ok || !bytes.Equal(raw, body) {
+		t.Errorf("Payload = %T, want unchanged RawPayload", result.Body.Payload)
+	}
+}
+
+func BenchmarkVideoParseRequest(b *testing.B) {
+	media := strings.Repeat("m", 1<<20)
+	for _, tc := range []struct {
+		name, path string
+		parts      []videoFormPart
+	}{
+		{name: "videos/1MiB-media", path: "/v1/videos", parts: []videoFormPart{
+			{name: "prompt", value: strings.Repeat("a cinematic shot ", 16)},
+			{name: "model", value: "wan-t2v"},
+			{name: "width", value: "1280"}, {name: "height", value: "720"},
+			{name: videoFormFieldNumFrames, value: "80"}, {name: "fps", value: "16"},
+			{name: "num_inference_steps", value: "40"},
+			{name: "input_reference", value: media, filename: "ref.mp4", mediaType: "video/mp4"},
+		}},
+		{name: "images-edits/1MiB-media", path: "/v1/images/edits", parts: []videoFormPart{
+			{name: "prompt", value: strings.Repeat("a cinematic shot ", 16)},
+			{name: "n", value: "2"},
+			{name: "image", value: media, filename: "in.png", mediaType: "image/png"},
+		}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			body, ct := buildVideoForm(b, tc.parts...)
+			headers := map[string]string{":path": tc.path, reqcommon.HeaderContentType: ct}
+			parser := NewOpenAIParser()
+			b.SetBytes(int64(len(body)))
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.ParseRequest(context.Background(), body, headers); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// The forwarded body keeps every field byte for byte when the router rewrites the model.
+func TestOpenAIParser_DecisionsRewriteModelNameRoundTrip(t *testing.T) {
+	parser := NewOpenAIParser()
+	result, err := parser.ParseRequest(context.Background(), []byte(decisionsRequest), decisionsHeaders)
+	if err != nil {
+		t.Fatalf("ParseRequest() error = %v", err)
+	}
+	rewritten, err := parser.RewriteModelName(result.Body.Payload.(fwkrh.MarshalablePayload), "served-model")
+	if err != nil {
+		t.Fatalf("RewriteModelName() error = %v", err)
+	}
+	out, err := rewritten.(fwkrh.Marshaler).Marshal()
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var got, want map[string]json.RawMessage
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(decisionsRequest), &want); err != nil {
+		t.Fatal(err)
+	}
+	if string(got["model"]) != `"served-model"` {
+		t.Errorf("model = %s, want \"served-model\"", got["model"])
+	}
+	delete(got, "model")
+	delete(want, "model")
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("forwarded fields mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestOpenAIParser_ParseDecisionsResponse(t *testing.T) {
+	body := `{"model":"m","answers":[{"type":"predicate","name":"urgent","probability":0.1}],` +
+		`"usage":{"input_tokens":254,"input_tokens_details":{"cached_tokens":200,"cache_write_tokens":0},` +
+		`"output_tokens":3,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":257}}`
+	got, err := NewOpenAIParser().ParseResponse(context.Background(), []byte(body), map[string]string{"content-type": "application/json"}, true)
+	if err != nil {
+		t.Fatalf("ParseResponse() error = %v", err)
+	}
+	want := &fwkrh.Usage{
+		PromptTokens:       254,
+		CompletionTokens:   3,
+		TotalTokens:        257,
+		PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: 200},
+	}
+	if diff := cmp.Diff(want, got.Usage); diff != "" {
+		t.Errorf("Usage mismatch (-want +got):\n%s", diff)
 	}
 }

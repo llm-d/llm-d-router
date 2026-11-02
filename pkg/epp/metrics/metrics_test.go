@@ -199,7 +199,7 @@ func TestRecordRequestErrorCounter(t *testing.T) {
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
 			for _, req := range scenario.reqs {
-				RecordRequestErrCounter(req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, "", "0", req.error)
+				RecordRequestErrCounter(context.Background(), req.modelName, req.targetModelName, reqcommon.APISurfaceUnknown, "", "0", req.error)
 			}
 
 			// Verify llm_d_epp metric.

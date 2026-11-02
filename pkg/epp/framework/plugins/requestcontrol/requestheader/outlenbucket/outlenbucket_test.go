@@ -26,6 +26,7 @@ import (
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 )
 
 // chatBody builds a request body with a chat-completions payload carrying the
@@ -528,6 +529,28 @@ func TestEstimateOutlen_ResponsesSignals(t *testing.T) {
 			want: Long,
 		},
 		{
+			name: "responses enable_thinking=true as decoded map -> LONG",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi", Tools: proofTool},
+				Payload: fwkrh.PayloadMap{
+					"chat_template_kwargs": map[string]any{"enable_thinking": true},
+					"reasoning":            map[string]any{"effort": "none"},
+				},
+			},
+			want: Long,
+		},
+		{
+			name: "responses enable_thinking=false as decoded map -> SHORT",
+			body: &fwkrh.InferenceRequestBody{
+				Responses: &fwkrh.ResponsesRequest{Input: "hi", Tools: proofTool},
+				Payload: fwkrh.PayloadMap{
+					"chat_template_kwargs": map[string]any{"enable_thinking": false},
+					"reasoning":            map[string]any{"effort": "high"},
+				},
+			},
+			want: Short,
+		},
+		{
 			name: "responses reasoning.effort=high + max_output=100 -> SHORT (ceiling vetoes LONG)",
 			body: &fwkrh.InferenceRequestBody{
 				Responses:       &fwkrh.ResponsesRequest{Input: "hi"},
@@ -599,6 +622,133 @@ func TestEstimateOutlen_ResponsesSignals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := EstimateOutlen(tc.body)
 			require.Equal(t, tc.want, got, "got %s want %s", got, tc.want)
+		})
+	}
+}
+
+func TestEstimateOutlen_ParsedThinkingSignals(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		payload string
+		want    Bucket
+	}{
+		{
+			name:    "responses explicit thinking with tools",
+			path:    "/v1/responses",
+			payload: `{"input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"chat_template_kwargs":{"enable_thinking":true}}`,
+			want:    Long,
+		},
+		{
+			name:    "responses explicit true overrides effort none",
+			path:    "/v1/responses",
+			payload: `{"input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"chat_template_kwargs":{"enable_thinking":true},"reasoning":{"effort":"none"}}`,
+			want:    Long,
+		},
+		{
+			name:    "responses explicit false overrides effort high",
+			path:    "/v1/responses",
+			payload: `{"input":"hi","chat_template_kwargs":{"enable_thinking":false},"reasoning":{"effort":"high"}}`,
+			want:    Unknown,
+		},
+		{
+			name:    "responses explicit false with tools overrides effort high",
+			path:    "/v1/responses",
+			payload: `{"input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"chat_template_kwargs":{"enable_thinking":false},"reasoning":{"effort":"high"}}`,
+			want:    Short,
+		},
+		{
+			name:    "responses absent explicit thinking falls back to effort",
+			path:    "/v1/responses",
+			payload: `{"input":"hi","chat_template_kwargs":{},"reasoning":{"effort":"high"}}`,
+			want:    Long,
+		},
+		{
+			name:    "responses explicit thinking with short cap",
+			path:    "/v1/responses",
+			payload: `{"input":"hi","chat_template_kwargs":{"enable_thinking":true},"max_output_tokens":100}`,
+			want:    Short,
+		},
+		{
+			name:    "responses explicit thinking with intermediate cap",
+			path:    "/v1/responses",
+			payload: `{"input":"hi","chat_template_kwargs":{"enable_thinking":true},"max_output_tokens":1500}`,
+			want:    Unknown,
+		},
+		{
+			name:    "chat effort high",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
+			want:    Long,
+		},
+		{
+			name:    "chat effort low",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low"}`,
+			want:    Long,
+		},
+		{
+			name:    "chat effort none overrides large thinking budget",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none","chat_template_kwargs":{"thinking_budget":8000}}`,
+			want:    Unknown,
+		},
+		{
+			name:    "chat empty effort preserves thinking budget",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"","chat_template_kwargs":{"thinking_budget":8000}}`,
+			want:    Long,
+		},
+		{
+			name:    "chat explicit true overrides effort none",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":{"enable_thinking":true},"reasoning_effort":"none"}`,
+			want:    Long,
+		},
+		{
+			name:    "chat explicit false overrides effort high",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":{"enable_thinking":false},"reasoning_effort":"high"}`,
+			want:    Unknown,
+		},
+		{
+			name:    "chat vendor disabled thinking overrides effort high",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":{"thinking":{"type":"disabled"}},"reasoning_effort":"high"}`,
+			want:    Unknown,
+		},
+		{
+			name:    "chat effort high with tools",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"reasoning_effort":"high"}`,
+			want:    Long,
+		},
+		{
+			name:    "chat effort high with short cap",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high","max_completion_tokens":100}`,
+			want:    Short,
+		},
+		{
+			name:    "chat effort high with intermediate cap",
+			path:    "/v1/chat/completions",
+			payload: `{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high","max_completion_tokens":1500}`,
+			want:    Unknown,
+		},
+		{
+			name:    "completions effort is not inspected",
+			path:    "/v1/completions",
+			payload: `{"prompt":"hi","reasoning_effort":"high"}`,
+			want:    Unknown,
+		},
+	}
+
+	parser := openai.NewOpenAIParser()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := parser.ParseRequest(context.Background(), []byte(tc.payload), map[string]string{":path": tc.path})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, EstimateOutlen(parsed.Body))
 		})
 	}
 }

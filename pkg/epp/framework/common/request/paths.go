@@ -21,4 +21,6 @@ package request
 const (
 	// SystemOnePathSuffix identifies the System One decisions API.
 	SystemOnePathSuffix = "systemone"
+	// DecisionsPathSuffix identifies the Decisions API.
+	DecisionsPathSuffix = "decisions"
 )

@@ -25,9 +25,9 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 )
 
 // Every producer instance calls Register, so repeated calls must not panic.

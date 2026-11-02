@@ -270,9 +270,37 @@ func estimateBytes(body *fwkrh.InferenceRequestBody) ([]byte, error) {
 		return []byte(body.Embeddings.Input.PlainText()), nil
 	case body.Generate != nil && body.Generate.Text != "":
 		return []byte(body.Generate.Text), nil
+	case body.Images != nil:
+		return []byte(imageGenerationText(body.Images)), nil
+	case body.AudioGenerate != nil:
+		return []byte(audioGenerateText(body.AudioGenerate)), nil
 	default:
 		return nil, errors.New("unsupported request body type, skipping estimation")
 	}
+}
+
+// imageGenerationText joins an images-generations/edits request's prompt with
+// its negative prompt: both are encoded through the same text path for
+// classifier-free guidance, so both carry real input cost. A blank negative
+// prompt is treated as absent, matching how diffusion pipelines skip
+// classifier-free guidance entirely when it carries no text.
+func imageGenerationText(r *fwkrh.ImagesGenerationsRequest) string {
+	if strings.TrimSpace(r.NegativePrompt) == "" {
+		return r.Prompt
+	}
+	return r.Prompt + "\n" + r.NegativePrompt
+}
+
+// audioGenerateText joins an audio-generate request's prompt with its
+// negative prompt: both are encoded through the same text path for
+// classifier-free guidance, so both carry real input cost. A blank negative
+// prompt is treated as absent, matching how diffusion pipelines skip
+// classifier-free guidance entirely when it carries no text.
+func audioGenerateText(r *fwkrh.AudioGenerateRequest) string {
+	if strings.TrimSpace(r.NegativePrompt) == "" {
+		return r.Input
+	}
+	return r.Input + "\n" + r.NegativePrompt
 }
 
 // chatCompletionsBytes flattens roles + text into pseudo-token bytes, folding
@@ -543,12 +571,23 @@ func (b estimateBackend) appendResponsesContentPart(out []byte, features []fwkrh
 	return out, features
 }
 
+// maxEstimatedPromptTokens bounds the token stream that multimodal placeholders
+// may grow a request to. Placeholder counts come from client-declared values
+// (image headers, x-llm-d-video-* and x-llm-d-audio-* headers), so without a
+// bound a request of a few bytes could ask for terabytes of placeholders. The
+// value is above the context window of current multimodal models, so it only
+// affects requests the model server would reject anyway.
+const maxEstimatedPromptTokens = 1 << 20
+
 // appendMMAsset aligns out to a token boundary, appends count placeholder
 // pseudo-tokens derived from a stable content hash, and records the matching
-// feature under modality so labels agree with the vllm backend.
+// feature under modality so labels agree with the vllm backend. count is
+// clamped so the stream stays within maxEstimatedPromptTokens, but every asset
+// keeps at least one placeholder so it still carries weight.
 func appendMMAsset(out []byte, features []fwkrh.MultiModalFeature, modality reqcommon.Modality, content string, count int) ([]byte, []fwkrh.MultiModalFeature) {
 	out = align(out)
 	offset := len(out) / fwkrh.BytesPerToken
+	count = max(min(count, maxEstimatedPromptTokens-offset), 1)
 
 	sum := xxhash.Sum64String(content)
 	token := make([]byte, fwkrh.BytesPerToken)

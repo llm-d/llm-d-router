@@ -38,11 +38,13 @@ plugins:
   - name: gpuPrefixProducer
     type: approx-prefix-cache-producer
     parameters:
-      blockSizeTokens: 16
+      autoTune: false
+      blockSizeTokens: 64
   - name: cpuPrefixProducer
     type: approx-prefix-cache-producer
     parameters:
-      blockSizeTokens: 64
+      autoTune: false
+      blockSizeTokens: 128
   - name: gpuPrefixScorer
     type: prefix-cache-scorer
     parameters:

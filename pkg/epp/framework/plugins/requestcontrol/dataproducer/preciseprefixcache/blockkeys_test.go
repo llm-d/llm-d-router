@@ -68,7 +68,7 @@ func TestComputeBlockKeys_PerPromptMMContent(t *testing.T) {
 		},
 	}
 
-	keys, mmContent, err := computeBlockKeys(ctx, idx, req, testBlockSize)
+	keys, mmContent, err := computeBlockKeys(ctx, idx, req, kvblock.CacheFormat{BlockSize: testBlockSize})
 	require.NoError(t, err)
 	require.Len(t, keys, 3, "the short prompt yields no keys and is skipped")
 	assert.Equal(t, []*mmPromptContent{

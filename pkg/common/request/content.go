@@ -18,6 +18,33 @@ package request
 
 import "fmt"
 
+// NormalizeChatPart infers an absent or null type in vLLM's media-field order
+// and wraps bare media URLs in objects. It mutates part in place and returns
+// the part's type. Explicit types are unchanged.
+func NormalizeChatPart(part map[string]any) string {
+	partType, _ := part[FieldType].(string)
+	if part[FieldType] != nil {
+		return partType
+	}
+	for _, mediaType := range []string{
+		PartTypeImageURL,
+		PartTypeAudioURL,
+		PartTypeInputAudio,
+		PartTypeVideoURL,
+	} {
+		media, exists := part[mediaType]
+		if !exists {
+			continue
+		}
+		part[FieldType] = mediaType
+		if url, ok := media.(string); ok && mediaType != PartTypeInputAudio {
+			part[mediaType] = map[string]any{FieldURL: url}
+		}
+		return mediaType
+	}
+	return partType
+}
+
 // MediaPartURLRef returns the URL a media content part references and a setter
 // that writes a replacement back to the field it came from. set is nil when
 // there is no readable URL: a part type that holds none, such as an inline

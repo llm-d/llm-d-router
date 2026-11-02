@@ -183,12 +183,14 @@ func convertPriorityBandPtr(in *configapiv1alpha1.PriorityBandConfig) *configapi
 
 func convertPriorityBand(in configapiv1alpha1.PriorityBandConfig) configapiv1.PriorityBandConfig {
 	return configapiv1.PriorityBandConfig{
-		Priority:          in.Priority,
-		MaxBytes:          copyQuantity(in.MaxBytes),
-		MaxRequests:       copyQuantity(in.MaxRequests),
-		DefaultRequestTTL: copyDuration(in.DefaultRequestTTL),
-		FairnessPolicyRef: in.FairnessPolicyRef,
-		OrderingPolicyRef: in.OrderingPolicyRef,
+		Priority:           in.Priority,
+		MaxBytes:           copyQuantity(in.MaxBytes),
+		MaxRequests:        copyQuantity(in.MaxRequests),
+		MaxBytesPerFlow:    copyQuantity(in.MaxBytesPerFlow),
+		MaxRequestsPerFlow: copyQuantity(in.MaxRequestsPerFlow),
+		DefaultRequestTTL:  copyDuration(in.DefaultRequestTTL),
+		FairnessPolicyRef:  in.FairnessPolicyRef,
+		OrderingPolicyRef:  in.OrderingPolicyRef,
 	}
 }
 

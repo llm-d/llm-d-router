@@ -475,6 +475,7 @@ func TestSelectiveKVPreRequestSkipsDecisionAPIs(t *testing.T) {
 		body   string
 		parser requesthandling.Parser
 	}{
+		{"/v1/decisions", `{"model":"m","input":"s","questions":[{"type":"predicate","instructions":"q"}]}`, openai.NewOpenAIParser()},
 		{"/v1/systemone", `{"model":"m","state":"s","questions":{"q":{"type":"noul"}}}`, systemone.NewSystemOneParser()},
 	} {
 		t.Run(tt.path, func(t *testing.T) {

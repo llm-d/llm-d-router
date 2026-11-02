@@ -19,6 +19,8 @@ package latency
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -362,5 +364,34 @@ func TestScoreHeadroomWithinUnitInterval(t *testing.T) {
 				t.Errorf("best endpoint should outscore the runner-up: best=%f, runner-up=%f", best, next)
 			}
 		})
+	}
+}
+
+func TestFactoryValidatesConfig(t *testing.T) {
+	valid := []string{
+		`{}`,
+		`{"headroomSelectionStrategy": "most"}`,
+		`{"headroomSelectionStrategy": "least", "ttftWeight": 1, "tpotWeight": 0}`,
+		`{"compositeKVWeight": 0, "compositeQueueWeight": 2, "compositePrefixWeight": 0}`,
+	}
+	for _, raw := range valid {
+		if _, err := Factory("latency", json.NewDecoder(strings.NewReader(raw)), nil); err != nil {
+			t.Errorf("Factory(%s) returned error %v, want nil", raw, err)
+		}
+	}
+
+	invalid := []string{
+		`{"headroomSelectionStrategy": "Most"}`,
+		`{"headroomSelectionStrategy": "fastest"}`,
+		`{"ttftWeight": -1}`,
+		`{"tpotWeight": -0.5}`,
+		`{"compositeKVWeight": -1}`,
+		`{"compositeQueueWeight": -1}`,
+		`{"compositePrefixWeight": -1}`,
+	}
+	for _, raw := range invalid {
+		if _, err := Factory("latency", json.NewDecoder(strings.NewReader(raw)), nil); err == nil {
+			t.Errorf("Factory(%s) returned nil error, want an invalid-parameter error", raw)
+		}
 	}
 }

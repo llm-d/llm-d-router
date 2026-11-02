@@ -265,7 +265,7 @@ func (p *Pipeline) runStep(
 	start := time.Now()
 	defer func() {
 		d := time.Since(start)
-		coordmetrics.RecordStepDuration(name, d)
+		coordmetrics.RecordStepDuration(ctx, name, d)
 		coordmetrics.DecStepRunning(name)
 		reqCtx.StepDuration += d
 		timings[idx] = stepTiming{name: name, duration: d}

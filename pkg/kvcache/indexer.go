@@ -55,6 +55,7 @@ type Indexer struct {
 	kvBlockIndex   kvblock.Index          // looks up pods for block keys
 	keyWalker      kvblock.KeyWalker      // kvBlockIndex's walk capability; nil without one
 	tierWeights    map[string]float64     // device tier -> weight for the prefix matcher
+	cacheFormats   *kvblock.CacheFormatCatalog
 	// recordHits enables the contiguous-chain hit metrics, under the same
 	// option that instruments the index.
 	recordHits bool
@@ -109,6 +110,34 @@ func (k *Indexer) Run(ctx context.Context) {
 // KVBlockIndex returns the kvblock.Index used by the Indexer.
 func (k *Indexer) KVBlockIndex() kvblock.Index {
 	return k.kvBlockIndex
+}
+
+// SetCacheFormats connects event metadata before request processing starts.
+func (k *Indexer) SetCacheFormats(formats *kvblock.CacheFormatCatalog) {
+	k.cacheFormats = formats
+}
+
+// CacheFormat returns the learned pod format, or the canonical plain format.
+func (k *Indexer) CacheFormat(podID string) kvblock.CacheFormat {
+	if format, ok := k.cacheFormats.Get(podID); ok && format.Bigram {
+		return format
+	}
+	return kvblock.CacheFormat{BlockSize: k.tokenProcessor.BlockSize()}
+}
+
+// ComputeBlockKeysForFormat hashes a prompt using the pod's cache format.
+func (k *Indexer) ComputeBlockKeysForFormat(ctx context.Context, tokens []uint32, modelName string,
+	extraFeatures []*kvblock.BlockExtraFeatures, format kvblock.CacheFormat,
+) ([]kvblock.BlockHash, error) {
+	if !format.Bigram {
+		return k.ComputeBlockKeysFromTokens(ctx, tokens, modelName, extraFeatures)
+	}
+	keys, err := k.tokenProcessor.TokensToBigramKVBlockKeys(
+		kvblock.EmptyBlockHash, tokens, format.BlockSize, modelName, extraFeatures)
+	if err != nil {
+		return nil, fmt.Errorf("blockKey conversion failed: %w", err)
+	}
+	return keys, nil
 }
 
 // ComputeBlockKeysFromTokens computes the KV-block keys for a pre-tokenized

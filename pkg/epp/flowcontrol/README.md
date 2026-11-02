@@ -62,6 +62,11 @@ Tuning knobs, all under the `flowControl:` config section:
 * Per-band `maxRequests` / `maxBytes` — the shedding knobs. Lower them to reject excess load at the
   queue boundary instead of buffering it (for example, to approximate the legacy immediate-shed
   behavior for sheddable traffic).
+* Per-band `maxRequestsPerFlow` / `maxBytesPerFlow` bound each flow's queued requests and bytes.
+  Each limit is disabled when omitted or zero. Both limits must permit admission, including at the
+  exact boundary; aggregate band and global limits still apply. Dispatch and cleanup release queue
+  capacity. Limits use Kubernetes resource quantities and can be set on `priorityBands`,
+  `defaultPriorityBand`, and `defaultNegativePriorityBand`.
 * `defaultRequestTTL` — the queue-wait budget against a pool that has endpoints, and the other way a
   request is shed. Keep it under the client or gateway deadline, and size it to the time-to-first-token
   budget you are willing to spend waiting on a saturated pool. Priority-band entries and templates
@@ -82,6 +87,19 @@ Tuning knobs, all under the `flowControl:` config section:
   admission ceiling for low-priority traffic as utilization rises, so that traffic waits in queue
   rather than being rejected; it sheds only by way of the two limits above. Configure it via
   `usageLimitPolicyPluginRef`.
+
+For example, limit each flow to 100 queued requests and 1 MiB within a band that holds up to
+1000 requests and 16 MiB:
+
+```yaml
+featureGates: ["flowControl"]
+flowControl:
+  defaultPriorityBand:
+    maxRequests: "1000"
+    maxBytes: "16Mi"
+    maxRequestsPerFlow: "100"
+    maxBytesPerFlow: "1Mi"
+```
 
 ### High Level Architecture
 

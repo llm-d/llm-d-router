@@ -625,6 +625,19 @@ func TestTextToSpeechRequest_String(t *testing.T) {
 	assert.Equal(t, nilStr, (*TextToSpeechRequest)(nil).String())
 }
 
+func TestAudioGenerateRequest_String(t *testing.T) {
+	assert.Equal(t, "{InputLength: 5, NegativePromptLength: 0}", (&AudioGenerateRequest{Input: "hello"}).String())
+	assert.Equal(t, "{InputLength: 5, NegativePromptLength: 6}", (&AudioGenerateRequest{Input: "hello", NegativePrompt: "silent"}).String())
+	assert.Equal(t, nilStr, (*AudioGenerateRequest)(nil).String())
+}
+
+func TestVideoGenerationRequest_String(t *testing.T) {
+	assert.Equal(t,
+		"{PromptLength: 5, Size: 1280x720, Width: <nil>, Height: <nil>, NumFrames: 33, FPS: 12.5, Steps: <nil>, N: 1}",
+		(&VideoGenerationRequest{Prompt: "a cat", Size: "1280x720", NumFrames: ptr.To[int64](33), FPS: ptr.To(12.5), NumOutputsPerPrompt: ptr.To[int64](1)}).String())
+	assert.Equal(t, nilStr, (*VideoGenerationRequest)(nil).String())
+}
+
 func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -27,6 +27,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -284,7 +285,7 @@ var _ = DescribeTable("p2pPortFor",
 			dpBasePort: dpBasePort,
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: dpSize},
 		}
-		Expect(s.p2pPortFor(target)).To(Equal(want))
+		Expect(s.p2pPortFor(log.Log, target)).To(Equal(want))
 	},
 	Entry("single DP uses the base port regardless of target", 1, 8000, "10.0.0.5:8003", 7777),
 	Entry("rank 0 target uses the base port", 4, 8000, "10.0.0.5:8000", 7777),
@@ -304,7 +305,7 @@ var _ = Describe("p2pSourceParams", func() {
 			dpBasePort: 8000,
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
-		params := s.p2pSourceParams("10.0.0.9:8002")
+		params := s.p2pSourceParams(log.Log, "10.0.0.9:8002")
 		Expect(params[reqcommon.FieldRemoteHost]).To(Equal("10.0.0.9"))
 		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
 		Expect(params[requestFieldKVRequestID]).ToNot(BeEmpty())
@@ -315,7 +316,7 @@ var _ = Describe("p2pSourceParams", func() {
 			dpBasePort: 8000,
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
-		params := s.Clone().p2pSourceParams("10.0.0.9:8002")
+		params := s.Clone().p2pSourceParams(log.Log, "10.0.0.9:8002")
 		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
 	})
 
@@ -324,7 +325,7 @@ var _ = Describe("p2pSourceParams", func() {
 			dpBasePort: 8000,
 			config:     Config{P2PConnectorPort: 7777, DataParallelSize: 4},
 		}
-		params := s.p2pSourceParams("http://10.0.0.9:8002")
+		params := s.p2pSourceParams(log.Log, "http://10.0.0.9:8002")
 		Expect(params[reqcommon.FieldRemoteHost]).To(Equal("10.0.0.9"))
 		Expect(params[reqcommon.FieldRemotePort]).To(Equal(7779))
 	})
@@ -338,7 +339,7 @@ var _ = Describe("addP2PPullToPrefill", func() {
 		}
 		params := map[string]any{}
 
-		s.addP2PPullToPrefill(params, "10.0.6.107:8003", "10.0.6.107:8007")
+		s.addP2PPullToPrefill(log.Log, params, "10.0.6.107:8003", "10.0.6.107:8007")
 
 		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
@@ -353,7 +354,7 @@ var _ = Describe("addP2PPullToPrefill", func() {
 		}
 		params := map[string]any{}
 
-		s.addP2PPullToPrefill(params, "10.0.6.107:8003", "10.0.6.107:8003")
+		s.addP2PPullToPrefill(log.Log, params, "10.0.6.107:8003", "10.0.6.107:8003")
 
 		Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
 	})
@@ -365,7 +366,7 @@ var _ = Describe("addP2PPullToPrefill", func() {
 		}
 		params := map[string]any{}
 
-		s.addP2PPullToPrefill(params, "https://10.0.6.107:8003", "10.0.6.107:8003")
+		s.addP2PPullToPrefill(log.Log, params, "https://10.0.6.107:8003", "10.0.6.107:8003")
 
 		Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
 	})
@@ -379,7 +380,7 @@ var _ = Describe("addP2PPullToPrefill", func() {
 
 		// https exercises the normalized passthrough: the injected params must
 		// derive from the bare host:port, not the scheme-qualified original.
-		s.addP2PPullToPrefill(params, "https://10.0.6.107:8003", "10.0.6.107:8007")
+		s.addP2PPullToPrefill(log.Log, params, "https://10.0.6.107:8003", "10.0.6.107:8007")
 
 		p2p, ok := params[requestFieldRemoteKVSource].(map[string]any)
 		Expect(ok).To(BeTrue())
@@ -393,7 +394,7 @@ var _ = Describe("addP2PPullToPrefill", func() {
 				config:     Config{P2PConnectorPort: 7777, DataParallelSize: 8},
 			}
 			params := map[string]any{}
-			s.addP2PPullToPrefill(params, source, prefiller)
+			s.addP2PPullToPrefill(log.Log, params, source, prefiller)
 			if !wantPull {
 				Expect(params).NotTo(HaveKey(requestFieldRemoteKVSource))
 				return

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -83,7 +84,8 @@ func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
 // An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest,
-// TextToSpeechRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest, ImagesGenerationsRequest, or MessagesRequest.
+// TextToSpeechRequest, AudioGenerateRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest,
+// ImagesGenerationsRequest, VideoGenerationRequest, or MessagesRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -95,6 +97,8 @@ type InferenceRequestBody struct {
 	Responses *ResponsesRequest `json:"responses,omitempty"`
 	// TextToSpeechRequest is the representation of the OpenAI /v1/audio/speech request body.
 	TextToSpeech *TextToSpeechRequest `json:"text_to_speech,omitempty"`
+	// AudioGenerateRequest is the representation of the vLLM Omni /v1/audio/generate request body.
+	AudioGenerate *AudioGenerateRequest `json:"audio_generate,omitempty"`
 	// ConversationsRequest is the representation of the OpenAI /v1/conversations request body.
 	Conversations *ConversationsRequest `json:"conversations,omitempty"`
 	// EmbeddingsRequest is the representation of the OpenAI /v1/embeddings request body.
@@ -105,6 +109,9 @@ type InferenceRequestBody struct {
 	// ImagesGenerationsRequest is the representation of the OpenAI /v1/images/generations
 	// or /v1/images/edits request body.
 	Images *ImagesGenerationsRequest `json:"images,omitempty"`
+	// Videos is the representation of the OpenAI-compatible vLLM-Omni
+	// /v1/videos and /v1/videos/sync multipart request body.
+	Videos *VideoGenerationRequest `json:"videos,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -483,6 +490,24 @@ func (r *TextToSpeechRequest) String() string {
 	return fmt.Sprintf("{InputLength: %d}", len(r.Input))
 }
 
+// AudioGenerateRequest represents the fields parsed from a vLLM Omni
+// /v1/audio/generate request: text-to-audio generation (e.g. Stable Audio),
+// distinct from /v1/audio/speech's text-to-speech.
+type AudioGenerateRequest struct {
+	// Input is the text prompt describing the audio to generate.
+	Input string `json:"input"`
+	// NegativePrompt describes what to avoid in the generated audio and is
+	// encoded alongside Input for classifier-free guidance.
+	NegativePrompt string `json:"negative_prompt,omitempty"`
+}
+
+func (r *AudioGenerateRequest) String() string {
+	if r == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{InputLength: %d, NegativePromptLength: %d}", len(r.Input), len(r.NegativePrompt))
+}
+
 // ConversationsRequest represents the OpenAI /v1/conversations request body structure
 type ConversationsRequest struct {
 	// Items is the array of conversation items (messages, files, etc.)
@@ -587,14 +612,76 @@ type ImagesGenerationsRequest struct {
 	Size string `json:"size,omitempty"`
 	// NumInferenceSteps is the number of denoising steps. Nil means the server default.
 	NumInferenceSteps *int64 `json:"num_inference_steps,omitempty"`
+	// NegativePrompt describes what to avoid in the generated image(s) and is
+	// encoded alongside Prompt for classifier-free guidance.
+	NegativePrompt string `json:"negative_prompt,omitempty"`
 }
 
 func (i *ImagesGenerationsRequest) String() string {
 	if i == nil {
 		return nilStr
 	}
-	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v}",
-		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps)
+	return fmt.Sprintf("{PromptLength: %d, Size: %s, N: %v, NumInferenceSteps: %v, NegativePromptLength: %d}",
+		len(i.Prompt), i.Size, i.N, i.NumInferenceSteps, len(i.NegativePrompt))
+}
+
+// derefInt formats an optional integer pointer for logging without
+// dereferencing a nil, so String stays safe on a partially populated request.
+func derefInt(v *int64) string {
+	if v == nil {
+		return nilStr
+	}
+	return strconv.FormatInt(*v, 10)
+}
+
+// derefFloat formats an optional float pointer for logging without
+// dereferencing a nil, so String stays safe on a partially populated request.
+func derefFloat(v *float64) string {
+	if v == nil {
+		return nilStr
+	}
+	return strconv.FormatFloat(*v, 'g', -1, 64)
+}
+
+// VideoGenerationRequest represents the OpenAI-compatible vLLM-Omni
+// /v1/videos and /v1/videos/sync request body. Both endpoints are served by the
+// same handler and accept multipart/form-data, so they share this shape.
+// Omitted fields stay nil rather than defaulting to zero, except
+// NumOutputsPerPrompt, which the backend always fills with 1.
+type VideoGenerationRequest struct {
+	// Prompt is the text description of the desired video. Required.
+	Prompt string `json:"prompt"`
+	// NegativePrompt describes what to avoid in the generated video.
+	NegativePrompt string `json:"negative_prompt,omitempty"`
+	// Size is the requested output size as "WIDTHxHEIGHT" (e.g. "1280x720").
+	Size string `json:"size,omitempty"`
+	// Width and Height are the output dimensions in pixels.
+	Width  *int64 `json:"width,omitempty"`
+	Height *int64 `json:"height,omitempty"`
+	// NumFrames is the number of frames to generate. Nil means the backend
+	// derives it from the model default or from seconds and fps.
+	NumFrames *int64 `json:"num_frames,omitempty"`
+	// FPS is the output frame rate. Nil means the backend default of 24.
+	FPS *float64 `json:"fps,omitempty"`
+	// Seconds is the requested clip duration in seconds, as a string of digits.
+	Seconds string `json:"seconds,omitempty"`
+	// NumInferenceSteps is the number of diffusion steps. Nil means the model default.
+	NumInferenceSteps *int64 `json:"num_inference_steps,omitempty"`
+	// NumOutputsPerPrompt is the number of videos to generate. The backend form
+	// always supplies it, defaulting to 1.
+	NumOutputsPerPrompt *int64 `json:"num_outputs_per_prompt,omitempty"`
+	// Seed is the random seed for reproducibility.
+	Seed *int64 `json:"seed,omitempty"`
+}
+
+func (v *VideoGenerationRequest) String() string {
+	if v == nil {
+		return nilStr
+	}
+	return fmt.Sprintf("{PromptLength: %d, Size: %s, Width: %s, Height: %s, NumFrames: %s, FPS: %s, Steps: %s, N: %s}",
+		len(v.Prompt), v.Size, derefInt(v.Width), derefInt(v.Height),
+		derefInt(v.NumFrames), derefFloat(v.FPS),
+		derefInt(v.NumInferenceSteps), derefInt(v.NumOutputsPerPrompt))
 }
 
 // GenerateRequest holds pre-tokenized input for native generate endpoints

@@ -144,11 +144,8 @@ const (
 	// The indexer is an approximation to the actual prefix LRU cache state on the model servers per server (pod).
 	// A small capacity ensures a high accuracy of cache hit on the model server, but it will
 	// increase the chance of false negatives. A high capacity does the opposite.
-	// To properly size this, consider the sum of the total number of cache entries on all model
-	// servers. Consider the llama3 8B model on a H100 80GB GPUs. The size of the model weight is
-	// about 16GB. The remaining HBM used for caching prefixes is 64GB. Each
-	// token is about 128KB in size, so we can cache 500K tokens. Using the default block size of 16
-	// in vLLM, we will have 500K / 16 = 31.25K blocks.
+	// Each entry is one router block, so at defaultBlockSizeTokens the default covers
+	// 31250 * 64 = 2,000,000 tokens per server.
 	defaultLRUCapacityPerServer = 31250
 
 	// defaultMaxSyncedTokens caps the recent-window published per endpoint when

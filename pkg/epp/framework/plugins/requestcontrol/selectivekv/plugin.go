@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
@@ -180,8 +181,7 @@ func (p *Plugin) Consumes() plugin.DataDependencies {
 		p.prefixMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
 	}
 	if p.maxWaitingRequests > 0 {
-		required[plugin.NewDataKey(extractormetrics.WaitingQueueSizeKey,
-			extractormetrics.MetricsExtractorType)] = int(0)
+		required[attrmetrics.ScalarMetricDataKey(extractormetrics.WaitingQueueSizeKey)] = attrmetrics.ScalarMetricValue(0)
 	}
 	return plugin.DataDependencies{Required: required}
 }
@@ -236,9 +236,11 @@ func (p *Plugin) PreRequest(ctx context.Context, request *scheduling.InferenceRe
 			"requestID", request.RequestID)
 		return nil
 	}
-	// Neither engine reads kv_transfer_params on /v1/systemone: vLLM forbids unknown
-	// fields and returns 400, while SGLang ignores them.
-	if path := fwkrequest.GetRequestPath(request.Headers); fwkrequest.MatchPathSuffix(path, fwkrequest.SystemOnePathSuffix) {
+	// Neither engine reads kv_transfer_params on /v1/systemone or /v1/decisions.
+	// vLLM forbids unknown fields on both paths and returns 400.
+	// SGLang ignores them on /v1/systemone and returns 400 on /v1/decisions.
+	if path := fwkrequest.GetRequestPath(request.Headers); fwkrequest.MatchPathSuffix(path, fwkrequest.SystemOnePathSuffix) ||
+		fwkrequest.MatchPathSuffix(path, fwkrequest.DecisionsPathSuffix) {
 		logger.Info("skipping selective KV policy: decision API does not use kv_transfer_params",
 			"requestID", request.RequestID, "path", path)
 		return nil
