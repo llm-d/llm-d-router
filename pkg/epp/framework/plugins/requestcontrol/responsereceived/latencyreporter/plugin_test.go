@@ -121,7 +121,7 @@ func TestFactory_NoParameters(t *testing.T) {
 	require.NoError(t, err)
 	p := got.(*Plugin)
 	assert.Equal(t, "all", p.bucket(50000))
-	assert.Equal(t, defaultPrefillProfile, p.prefillProfile)
+	assert.Equal(t, disagg.DefaultPrefillProfile, p.prefillProfile)
 }
 
 func TestBucketLabels(t *testing.T) {

@@ -35,13 +35,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 )
 
 const (
 	// PluginType is the registered plugin type.
 	PluginType = "latency-reporter"
-
-	defaultPrefillProfile = "prefill"
 
 	pathRemote = "remote"
 	pathLocal  = "local"
@@ -84,7 +83,7 @@ type Plugin struct {
 
 // PluginFactory builds the plugin from its parameters.
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
-	params := Parameters{PrefillProfileName: defaultPrefillProfile}
+	params := Parameters{PrefillProfileName: disagg.DefaultPrefillProfile}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&params); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' plugin - %w", PluginType, err)
@@ -107,7 +106,7 @@ func newPlugin(name string, params Parameters) (*Plugin, error) {
 		return nil, fmt.Errorf("%s plugin %q: promptBuckets must strictly increase", PluginType, name)
 	}
 	if params.PrefillProfileName == "" {
-		params.PrefillProfileName = defaultPrefillProfile
+		params.PrefillProfileName = disagg.DefaultPrefillProfile
 	}
 	labels := make([]string, 0, len(params.PromptBuckets)+1)
 	for _, b := range params.PromptBuckets {

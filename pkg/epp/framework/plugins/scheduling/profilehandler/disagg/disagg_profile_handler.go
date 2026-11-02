@@ -47,9 +47,11 @@ const (
 	// DisaggProfileHandlerType is the canonical type for the unified disaggregation profile handler.
 	DisaggProfileHandlerType = "disagg-profile-handler"
 
-	defaultDecodeProfile  = "decode"
-	defaultPrefillProfile = "prefill"
-	defaultEncodeProfile  = "encode"
+	// DefaultPrefillProfile is the prefill scheduling profile name used when none is configured.
+	DefaultPrefillProfile = "prefill"
+
+	defaultDecodeProfile = "decode"
+	defaultEncodeProfile = "encode"
 )
 
 // StageOrder defines the execution order of stages in the disaggregation profile handler.
@@ -193,7 +195,7 @@ func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, _ plugin.Hand
 		parameters.Profiles.Decode = defaultDecodeProfile
 	}
 	if parameters.Profiles.Prefill == "" {
-		parameters.Profiles.Prefill = defaultPrefillProfile
+		parameters.Profiles.Prefill = DefaultPrefillProfile
 	}
 	if parameters.Profiles.Encode == "" {
 		parameters.Profiles.Encode = defaultEncodeProfile
