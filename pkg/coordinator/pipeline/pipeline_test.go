@@ -186,7 +186,7 @@ func TestPipeline_AbortsOnError(t *testing.T) {
 	reqCtx := &RequestContext{}
 	steps := []Step{
 		&mockStep{name: "prefill", fn: func(_ context.Context, rc *RequestContext) error {
-			rc.PrefillDrain = NewPrefillDrain(func() { cancelled = true })
+			rc.PrefillDrain = &PrefillDrain{Cancel: func() { cancelled = true }}
 			return nil
 		}},
 		&mockStep{name: "a", fn: func(_ context.Context, _ *RequestContext) error {
@@ -225,7 +225,7 @@ func TestPipeline_PrefillDrainCleanup(t *testing.T) {
 			reqCtx := &RequestContext{}
 			p := New([]Step{
 				&mockStep{name: "prefill", fn: func(_ context.Context, rc *RequestContext) error {
-					rc.PrefillDrain = NewPrefillDrain(cancelPrefill)
+					rc.PrefillDrain = &PrefillDrain{Cancel: cancelPrefill}
 					return nil
 				}},
 				&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error {
@@ -257,20 +257,6 @@ func TestPipeline_PrefillDrainCleanup(t *testing.T) {
 			require.Nil(t, reqCtx.PrefillDrain)
 		})
 	}
-}
-
-func TestPrefillDrain_Completion(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	drain := NewPrefillDrain(cancel)
-	drain.Cancel()
-	drain.Cancel()
-	require.ErrorIs(t, ctx.Err(), context.Canceled)
-
-	want := errors.New("prefill drain failed")
-	go drain.Complete(want)
-	<-drain.Done()
-	require.ErrorIs(t, drain.Err(), want)
 }
 
 func TestPipeline_StopsOnErrPipelineDone(t *testing.T) {
