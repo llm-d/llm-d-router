@@ -31,7 +31,7 @@ install-k8s: check-kubectl check-envsubst ## Deploy resources to Kubernetes
 	kubectl create namespace $(NAMESPACE) 2>/dev/null || true
 	kubectl config set-context --current --namespace=$(NAMESPACE)
 	@echo "Deploying resources from test/e2e/artifacts/ ..."
-	# Build the kustomization from deploy, substitute variables, and apply the YAML
+	# Build the kustomization from test/e2e/artifacts, substitute variables, and apply the YAML
 	kubectl kustomize test/e2e/artifacts/environments/kubernetes-base | envsubst | kubectl apply -f -
 	@echo "Waiting for pod to become ready..."
 	sleep 5
@@ -57,7 +57,7 @@ install-openshift: check-kubectl check-envsubst ## Deploy resources to OpenShift
 	@echo "Creating namespace $(NAMESPACE)..."
 	kubectl create namespace $(NAMESPACE) 2>/dev/null || true
 	@echo "Deploying common resources from test/e2e/artifacts/ ..."
-	# Build and substitute the base manifests from deploy, then apply them
+	# Build and substitute the base manifests from test/e2e/artifacts, then apply them
 	kubectl kustomize test/e2e/artifacts/environments/kubernetes-base | envsubst '$$PROJECT_NAME $$NAMESPACE $$EPP_IMAGE $$VERSION' | kubectl apply -n $(NAMESPACE) -f -
 	@echo "Waiting for pod to become ready..."
 	sleep 5

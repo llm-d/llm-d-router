@@ -8,7 +8,7 @@ itself.
 
 1. The gateway HTTPRoute selects the backend, the coordinator or the
    InferencePool, before any llm-d code runs. It is deployment configuration.
-   [httproutes.yaml](../deploy/components/inference-gateway/httproutes.yaml)
+   [httproutes.yaml](../test/e2e/artifacts/components/inference-gateway/httproutes.yaml)
    sends every path to the InferencePool. The
    [coord-disaggregation guide](https://github.com/llm-d/llm-d/tree/main/guides/coord-disaggregation)
    sends `/v1/completions`, `/v1/chat/completions` and `/inference/v1/generate`
@@ -71,7 +71,7 @@ path. The sidecar forwards any other request to the decoder as sent.
 A gateway can normalize repeated slashes, dot segments and encoded slashes
 before the HTTPRoute, EPP and both components see the path. In Envoy these are
 the `merge_slashes`, `normalize_path` and `path_with_escaped_slashes_action`
-settings. [envoy.yaml](../deploy/environments/dev/coordinator-e2e-infra/envoy.yaml)
+settings. [envoy.yaml](../test/e2e/artifacts/environments/dev/coordinator-e2e-infra/envoy.yaml)
 sets all three for the coordinator e2e environment, with `UNESCAPE_AND_REDIRECT`
 answering an encoded slash with a redirect. Whether a gateway applies them
 depends on its configuration, and none of them removes a trailing slash.

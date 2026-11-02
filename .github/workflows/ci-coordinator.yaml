@@ -43,7 +43,6 @@ jobs:
               - hack/**
               - test/**
               - config/coordinator/**
-              - test/e2e/artifacts/**
               - .github/actions/docker-build-and-push/action.yml
               - .github/actions/e2e-runner-setup/action.yml
               - .github/workflows/ci-coordinator.yaml
@@ -52,7 +51,8 @@ jobs:
               - '!pkg/sidecar/**'
               - '!test/sidecar/**'
               - '!pkg/generator/**'
-              - '!test/e2e/**'
+              - '!test/e2e/*'
+              - '!test/e2e/utils/**'
               - '!test/integration/**'
               - '!test/profiling/**'
               - '!Makefile'
