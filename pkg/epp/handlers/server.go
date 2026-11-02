@@ -306,6 +306,15 @@ func (r *RequestContext) apiType() reqcommon.APIType {
 	return reqcommon.DetectAPIType(fwkrequest.GetRequestPath(headers))
 }
 
+// releaseRequestBody drops the request body once it has been forwarded, because
+// a streamed response can last for the whole generation.
+func (r *RequestContext) releaseRequestBody() {
+	r.Request.RawBody = nil
+	if r.SchedulingRequest != nil && r.SchedulingRequest.Body != nil {
+		r.SchedulingRequest.Body.ReleaseContent()
+	}
+}
+
 func toolCallingAPIForPath(path string) (reqcommon.APIType, bool) {
 	apiType, ok := reqcommon.MatchAPIType(path)
 	if !ok {
@@ -1086,6 +1095,7 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		r.requestRunning = true
 		// Dump the response so a new stream message can begin
 		r.reqBodyResp = nil
+		r.releaseRequestBody()
 	}
 	if r.requestState == responseReceived && r.respHeaderResp != nil {
 		loggerTrace.Info("Sending response header response", "obj", r.respHeaderResp)

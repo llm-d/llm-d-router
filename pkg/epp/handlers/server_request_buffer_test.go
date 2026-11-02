@@ -19,11 +19,13 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"runtime"
 	"runtime/debug"
 	"strings"
 	"testing"
+	"time"
 	"weak"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -148,6 +150,47 @@ func TestProcessReleasesRequestBufferAfterRequestPhase(t *testing.T) {
 			require.NoError(t, srv.finish())
 		})
 	}
+}
+
+// weakBodyDirector keeps the parsed body on the request, as the Director does for
+// scheduling, and records weak pointers to the request content.
+type weakBodyDirector struct {
+	mockDirector
+	body        *fwkrequest.InferenceRequestBody
+	rawBody     weak.Pointer[byte]
+	completions weak.Pointer[fwkrequest.CompletionsRequest]
+	prompt      weak.Pointer[byte]
+}
+
+func (d *weakBodyDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, body *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
+	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: body}
+	d.body = body
+	d.rawBody = weak.Make(&reqCtx.Request.RawBody[0])
+	d.completions = weak.Make(body.Completions)
+	prompt := body.Payload.(fwkrequest.PayloadMap)["prompt"].(json.RawMessage)
+	d.prompt = weak.Make(&prompt[0])
+	return reqCtx, nil
+}
+
+func TestProcessReleasesRequestContentAfterForwarding(t *testing.T) {
+	const prefix, suffix = `{"model":"m","stream":true,"max_tokens":16,"prompt":"`, `"}`
+	body := []byte(prefix + strings.Repeat("a", 64<<10) + suffix)
+	registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+	director := &weakBodyDirector{}
+	server := NewStreamingServer(nil, director, registry, 0)
+
+	srv := newInFlightProcessServer(requestMessages(reqcommon.PathCompletions, body, 16<<10))
+	srv.start(t, server)
+	require.Eventually(t, func() bool {
+		runtime.GC()
+		return director.rawBody.Value() == nil && director.completions.Value() == nil && director.prompt.Value() == nil
+	}, 5*time.Second, 10*time.Millisecond, "request content reachable while the stream waits for the response")
+	require.NoError(t, srv.finish())
+
+	require.True(t, director.body.Stream)
+	require.Equal(t, "m", director.body.Model)
+	require.NotNil(t, director.body.MaxOutputTokens)
+	require.Equal(t, int64(16), *director.body.MaxOutputTokens)
 }
 
 // retainingDirector keeps the parsed body on the request, as the Director does

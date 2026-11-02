@@ -169,6 +169,25 @@ func (b *InferenceRequestBody) MutatePayloadMap(fn func(PayloadMap)) {
 	b.Mutated = true
 }
 
+// ReleaseContent drops the request content once the body has been forwarded, so a
+// long response does not keep it in memory. It keeps TokenizedRequest and the
+// derived fields that response-phase plugins read.
+func (b *InferenceRequestBody) ReleaseContent() {
+	b.Completions = nil
+	b.ChatCompletions = nil
+	b.Messages = nil
+	b.Responses = nil
+	b.TextToSpeech = nil
+	b.AudioGenerate = nil
+	b.Conversations = nil
+	b.Embeddings = nil
+	b.Generate = nil
+	b.Images = nil
+	b.Videos = nil
+	b.Payload = nil
+	b.RawBody = nil
+}
+
 // MaxOutputTokensFromPayload returns the client-requested output-token cap read
 // from a decoded JSON request body. The keys are tried in order and the first one
 // holding a valid value wins, so callers express per-API precedence (e.g. chat
