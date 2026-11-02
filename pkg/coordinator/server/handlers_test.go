@@ -693,6 +693,48 @@ func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
 	}
 }
 
+func TestHandleInference_StripsClientRevisionRegardlessOfResponseHeaderConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		headers         []string
+		relayedRevision string
+	}{
+		{name: "disabled", headers: []string{}},
+		{name: "other headers", headers: []string{"x-route"}},
+		{name: "revision enabled", headers: []string{reqcommon.DisaggregatedRevisionHeaderKey}, relayedRevision: "server-revision"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := []pipeline.Step{
+				stubStep{name: "producer", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+					require.Empty(t, rc.OriginalHeaders.Values(reqcommon.DisaggregatedRevisionHeaderKey))
+					headers := rc.ForwardedHeaders()
+					require.NotContains(t, headers, reqcommon.DisaggregatedRevisionHeaderKey)
+					require.Equal(t, "keep-me", headers["x-user-data"])
+					responseHeaders := make(http.Header)
+					responseHeaders.Set(reqcommon.DisaggregatedRevisionHeaderKey, "server-revision")
+					rc.CaptureResponseHeaders(responseHeaders)
+					return nil
+				}},
+				stubStep{name: "consumer", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+					require.Equal(t, tc.relayedRevision, rc.ForwardedHeaders()[reqcommon.DisaggregatedRevisionHeaderKey])
+					return nil
+				}},
+			}
+			p, err := pipeline.NewWithForwardResponseHeaders(steps, tc.headers)
+			require.NoError(t, err)
+			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(`{"model":"m"}`))
+			req.Header.Add(reqcommon.DisaggregatedRevisionHeaderKey, "client-revision-a")
+			req.Header.Add(reqcommon.DisaggregatedRevisionHeaderKey, "client-revision-b")
+			req.Header.Set("x-user-data", "keep-me")
+			rec := httptest.NewRecorder()
+			srv.httpServer.Handler.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code)
+		})
+	}
+}
+
 func TestRoutesRegistered(t *testing.T) {
 	// With the NotFound passthrough in place, an unregistered path no longer
 	// returns 404 — it reverse-proxies to the stub gateway and returns 502.

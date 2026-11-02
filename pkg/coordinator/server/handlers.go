@@ -167,6 +167,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	headers := r.Header.Clone()
 	pipeline.StripInternalHeaders(headers)
+	headers.Del(reqcommon.DisaggregatedRevisionHeaderKey)
 
 	reqCtx = &pipeline.RequestContext{
 		RequestID:        requestID,
