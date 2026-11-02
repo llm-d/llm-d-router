@@ -295,6 +295,50 @@ func TestProcessReleaseKeepsBodyForStragglingProducer(t *testing.T) {
 	require.True(t, director.contentKept, "request content cleared under a producer that still reads it")
 }
 
+// rawBodyDirector records the RawBody that the Director receives.
+type rawBodyDirector struct {
+	mockDirector
+	rawBody []byte
+}
+
+func (d *rawBodyDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
+	d.rawBody = reqCtx.Request.RawBody
+	return reqCtx, nil
+}
+
+func TestProcessRawBodyUsesBufferAbovePoolCap(t *testing.T) {
+	const bufferCap = 64 << 10
+	body := []byte(`{"model":"m","prompt":"` + strings.Repeat("a", 40<<10) + `"}`)
+	tests := []struct {
+		name          string
+		poolCap       int
+		wantSharesBuf bool
+	}{
+		{name: "buffer within the pool cap is copied", poolCap: 2 * bufferCap},
+		{name: "pool without a cap copies", poolCap: 0},
+		{name: "buffer above the pool cap is taken over", poolCap: bufferCap / 2, wantSharesBuf: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+			director := &rawBodyDirector{}
+			server := NewStreamingServer(nil, director, registry, tt.poolCap)
+			var backing []byte
+			server.bufferPool.New = func() any {
+				backing = make([]byte, 0, bufferCap)
+				return bytes.NewBuffer(backing)
+			}
+
+			srv := newInFlightProcessServer(requestMessages(reqcommon.PathCompletions, body, 16<<10))
+			srv.start(t, server)
+			require.Equal(t, body, director.rawBody)
+			require.Equal(t, tt.wantSharesBuf, &director.rawBody[0] == &backing[:1][0],
+				"RawBody shares the request buffer's memory")
+			require.NoError(t, srv.finish())
+		})
+	}
+}
+
 // retainingDirector keeps the parsed body on the request, as the Director does
 // for scheduling.
 type retainingDirector struct{ mockDirector }
