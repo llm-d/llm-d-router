@@ -71,7 +71,6 @@ If absent, the value is taken from the `approximate-prefix` plugin's `BlockSizeT
 | --- | --- | --- |
 | vLLM | `vllm:cache_config_info` | `block_size` |
 | SGLang | `sglang:page_size` | — |
-| ATOM | `atom:cache_config_info` | `block_size` |
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=tokens_per}` | — |
 | trtllm-serve | `trtllm_kv_cache_tokens_per_block` | — |
 
@@ -87,7 +86,6 @@ If absent, the value is taken from the `approximate-prefix` plugin's `LRUCapacit
 | --- | --- | --- |
 | vLLM | `vllm:cache_config_info` | `num_gpu_blocks` |
 | SGLang | `sglang:num_pages` | — |
-| ATOM | `atom:cache_config_info` | `num_gpu_blocks` |
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}` | — |
 | trtllm-serve | `trtllm_kv_cache_max_blocks` | — |
 
@@ -121,6 +119,6 @@ The model server MUST expose the following LoRA adapter metrics via the same Pro
 **Required by:** `precise-prefix-cache-producer`, `prefix-cache-scorer`, `prefix-cache-affinity-filter`
 
 The EPP supports prefix cache optimized request scheduling via the
-[precise prefix cache producer](../pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/README.md).
+[precise prefix cache producer](../pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache/README.md).
 To benefit from optimal prefix-aware request scheduling, model servers SHOULD support prefix
 cache reuse, such as the [vllm automatic prefix caching](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching.html) feature.

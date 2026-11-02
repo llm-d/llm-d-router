@@ -36,11 +36,11 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
 	"github.com/llm-d/llm-d-router/pkg/epp/statesync"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
 func readyPeerPod(name, ns, ip string) *corev1.Pod {
-	return testutil.MakePod(name).
+	return fwkk8s.MakePod(name).
 		Namespace(ns).
 		ReadyCondition().
 		IP(ip).

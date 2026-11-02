@@ -20,6 +20,7 @@ GKE_GATEWAY_API_VERSION="${GKE_GATEWAY_API_VERSION:-v1.4.0}"
 GIE_VERSION="${GIE_VERSION:-v1.6.2}"
 HELM="${HELM:-${SCRIPT_ROOT}/bin/helm}"
 KUBECTL_VALIDATE="${KUBECTL_VALIDATE:-${SCRIPT_ROOT}/bin/kubectl-validate}"
+YQ="${YQ:-${SCRIPT_ROOT}/bin/yq}"
 TEMP_DIR=$(mktemp -d)
 
 make kubectl-validate
@@ -242,7 +243,13 @@ test_cases_llm_d_router_standalone["latency-predictor-service"]="--set router.la
 test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
+test_cases_llm_d_router_standalone["proxy-service-scheduling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.nodeSelector.pool=router --set router.proxy.nodeSelector.pool=router --set-json router.proxy.tolerations=[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}] --set-json router.proxy.affinity={\"podAntiAffinity\":{\"preferredDuringSchedulingIgnoredDuringExecution\":[{\"weight\":100,\"podAffinityTerm\":{\"topologyKey\":\"kubernetes.io/hostname\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}}]}}"
+test_cases_llm_d_router_standalone["proxy-service-pod-settings"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.podAnnotations.team=router --set router.proxy.podSecurityContext.runAsUser=65532"
+test_cases_llm_d_router_standalone["pod-placement"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.priorityClassName=router-critical --set router.proxy.priorityClassName=router-critical --set router.epp.podLabels.team=router --set router.proxy.podLabels.team=router --set-json router.epp.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-standalone\":\"release-name-epp\"}}}] --set-json router.proxy.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}]"
+test_cases_llm_d_router_standalone["pod-placement-statefulset"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.podLabels.team=router"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
+test_cases_llm_d_router_standalone["lifecycle-override"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.epp.lifecycle.preStop.exec.command[0]=/epp-drain --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
+test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
 test_cases_llm_d_router_standalone["proxy-autoscaling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.autoscaling.enabled=true --set router.proxy.autoscaling.minReplicas=2 --set router.proxy.autoscaling.maxReplicas=6 --set router.proxy.autoscaling.targetCPUUtilizationPercentage=70"
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
@@ -309,6 +316,54 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
       exit 1
     fi
   fi
+  if [ "${key}" == "lifecycle-override" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    for hook in /epp-drain /proxy-drain; do
+      if ! grep -q -- "${hook}" "${epp_yaml}"; then
+        echo "Validation failed: lifecycle hook ${hook} not found in rendered output for test: ${key}"
+        exit 1
+      fi
+    done
+    if grep -q "seconds: 5" "${epp_yaml}"; then
+      echo "Validation failed: default preStop sleep rendered alongside a lifecycle override for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "lifecycle-override-service" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q -- "/proxy-drain" "${epp_yaml}"; then
+      echo "Validation failed: proxy lifecycle override not found in service-mode render for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "proxy-service-scheduling" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if [ "$(grep -c "pool: router" "${epp_yaml}")" -ne 2 ] || ! grep -q "key: dedicated" "${epp_yaml}" || ! grep -q "podAntiAffinity:" "${epp_yaml}"; then
+      echo "Validation failed: EPP and proxy nodeSelector, or proxy tolerations or affinity, not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "proxy-service-pod-settings" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "team: router" "${epp_yaml}" || ! grep -q "runAsUser: 65532" "${epp_yaml}"; then
+      echo "Validation failed: proxy podAnnotations or podSecurityContext not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "pod-placement" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if [ "$(grep -c 'priorityClassName: "router-critical"' "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "team: router" "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "topologySpreadConstraints:" "${epp_yaml}")" -ne 2 ]; then
+      echo "Validation failed: EPP and proxy priorityClassName, podLabels or topologySpreadConstraints not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "pod-placement-statefulset" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "kind: StatefulSet" "${epp_yaml}" || ! grep -q "team: router" "${epp_yaml}"; then
+      echo "Validation failed: router.epp.podLabels not rendered on the EPP StatefulSet for test: ${key}"
+      exit 1
+    fi
+  fi
   if [ "${key}" == "proxy-autoscaling" ]; then
     if ! grep -q "name: release-name-proxy" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "kind: HorizontalPodAutoscaler" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
       echo "Validation failed: proxy HorizontalPodAutoscaler not found in rendered output for test: ${key}"
@@ -334,6 +389,23 @@ verify_pdb_validation_failure() {
     exit 1
   fi
 }
+verify_pdb_render() {
+  local chart="$1"
+  shift
+  local output
+  if ! output=$("${HELM}" template pdb-validation "${SCRIPT_ROOT}/config/charts/${chart}" \
+      --namespace pdb-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+      --set router.inferencePool.create=false --set router.epp.podDisruptionBudget.enabled=true \
+      --set router.epp.podDisruptionBudget.minAvailable=1 "$@" 2>&1); then
+    echo "${chart}: PDB rendering failed for $*: ${output}"
+    exit 1
+  fi
+  if ! grep -q "^kind: PodDisruptionBudget$" <<<"${output}" || \
+     ! grep -q "^  minAvailable: 1$" <<<"${output}"; then
+    echo "${chart}: PDB missing or incorrect minAvailable for $*: ${output}"
+    exit 1
+  fi
+}
 verify_pdb_validation_failure "minAvailable and maxUnavailable together" \
   --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true \
   --set router.epp.podDisruptionBudget.minAvailable=1 --set router.epp.podDisruptionBudget.maxUnavailable=1
@@ -341,6 +413,10 @@ verify_pdb_validation_failure "enabled without a disruption field" \
   --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true
 verify_pdb_validation_failure "minAvailable with a single replica" \
   --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1
+verify_pdb_render llm-d-router-gateway \
+  --set provider.name=gke --set provider.gke.preferredBackends.enabled=true
+verify_pdb_render llm-d-router-standalone \
+  --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true
 echo "PodDisruptionBudget validation checks passed."
 
 echo "Verifying leader-election RBAC..."
@@ -519,6 +595,51 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   echo "Metrics authentication RBAC checks passed for ${chart}."
 done
 
+echo "Verifying cluster RBAC names..."
+render_cluster_rbac_name() {
+  local chart="$1" release="$2" namespace="$3"
+  local output="${TEMP_DIR}/${chart}-cluster-rbac-name.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template "${release}" "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace "${namespace}" --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    --set router.monitoring.prometheus.auth.enabled=true "${args[@]}" > "${output}"; then
+    echo "Cluster RBAC rendering failed for ${chart}: ${release}/${namespace}"
+    exit 1
+  fi
+  cluster_rbac_name=$("${YQ}" 'select(.kind == "ClusterRole" and .metadata.name == "*-epp") | .metadata.name' "${output}")
+  local binding_name role_ref
+  binding_name=$("${YQ}" 'select(.kind == "ClusterRoleBinding" and .metadata.name == "*-epp") | .metadata.name' "${output}")
+  role_ref=$("${YQ}" 'select(.kind == "ClusterRoleBinding" and .metadata.name == "*-epp") | .roleRef.name' "${output}")
+  if [ -z "${cluster_rbac_name}" ] || [ "${binding_name}" != "${cluster_rbac_name}" ] || [ "${role_ref}" != "${cluster_rbac_name}" ]; then
+    echo "${chart}: ClusterRole '${cluster_rbac_name}', binding '${binding_name}' and roleRef '${role_ref}' must match for ${release}/${namespace}"
+    exit 1
+  fi
+}
+
+long_release=$(printf 'r%.0s' {1..40})
+long_namespace=$(printf 'n%.0s' {1..40})
+shared_prefix=llm-d-nightly-tiered-prefix-cache-gke-gpu
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  render_cluster_rbac_name "${chart}" short default
+  if [ "${cluster_rbac_name}" != "short-default-epp" ]; then
+    echo "${chart}: expected short-default-epp, got ${cluster_rbac_name}"
+    exit 1
+  fi
+
+  render_cluster_rbac_name "${chart}" "${long_release}" "${long_namespace}"
+
+  render_cluster_rbac_name "${chart}" tiered-prefix-cache "${shared_prefix}"
+  first_name="${cluster_rbac_name}"
+  render_cluster_rbac_name "${chart}" tiered-prefix-cache "${shared_prefix}-sglang"
+  if [ "${cluster_rbac_name}" == "${first_name}" ]; then
+    echo "${chart}: namespaces sharing their first 40 characters got the same ClusterRole name ${first_name}"
+    exit 1
+  fi
+done
+
 echo "Running llm-d-router-standalone negative validation tests..."
 missing_endpoint_selector_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.inferencePool.create=false --set router.modelServers.type=vllm --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
 echo "Executing: ${missing_endpoint_selector_command}"
@@ -597,6 +718,15 @@ if eval "${invalid_tokenizer_flavor_command}"; then
   exit 1
 fi
 
+for label_path in router.epp.podLabels.llm-d-router-standalone router.proxy.podLabels.llm-d-router-proxy; do
+  invalid_pod_labels_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set ${label_path}=override"
+  echo "Executing: ${invalid_pod_labels_command}"
+  if eval "${invalid_pod_labels_command}"; then
+    echo "Helm template unexpectedly succeeded for chart-owned label ${label_path}"
+    exit 1
+  fi
+done
+
 echo "Verifying llm-d-router-standalone extra flags render as --flag=value..."
 flag_render_output="${TEMP_DIR}/llm-d-router-standalone-flag-render.yaml"
 flag_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set-string router.epp.flags.secure-serving=false > ${flag_render_output}"
@@ -622,6 +752,29 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
     eval "${skip_verify_render_command}"
     if ! grep -Eq -- "^[[:space:]]+insecureSkipVerify: ${skip_verify_want}$" "${skip_verify_render_output}"; then
       echo "${chart} did not render insecureSkipVerify: ${skip_verify_want} for router.epp.metricsDataSource.insecureSkipVerify=${skip_verify_set}"
+      exit 1
+    fi
+  done
+done
+
+echo "Verifying GOMEMLIMIT follows router.epp.resources.limits.memory..."
+# Each case is name:GOMEMLIMIT entries:limits.memory references.
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  for gomemlimit_case in "default:1:1" "no-limit:0:0" "user-env:1:0"; do
+    IFS=: read -r gomemlimit_set gomemlimit_want_env gomemlimit_want_ref <<< "${gomemlimit_case}"
+    case "${gomemlimit_set}" in
+      default) gomemlimit_args="" ;;
+      no-limit) gomemlimit_args="--set router.epp.resources.limits.memory=null" ;;
+      user-env) gomemlimit_args="--set 'router.epp.env[0].name=GOMEMLIMIT' --set-string 'router.epp.env[0].value=1GiB'" ;;
+    esac
+    gomemlimit_render_output="${TEMP_DIR}/${chart}-gomemlimit-${gomemlimit_set}-render.yaml"
+    gomemlimit_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/${chart} --set router.modelServers.matchLabels.app=llm-instance-gateway ${gomemlimit_args} > ${gomemlimit_render_output}"
+    echo "Executing: ${gomemlimit_render_command}"
+    eval "${gomemlimit_render_command}"
+    gomemlimit_env=$(grep -c -- '- name: GOMEMLIMIT$' "${gomemlimit_render_output}" || true)
+    gomemlimit_ref=$(grep -c -- 'resource: limits.memory$' "${gomemlimit_render_output}" || true)
+    if [ "${gomemlimit_env}" != "${gomemlimit_want_env}" ] || [ "${gomemlimit_ref}" != "${gomemlimit_want_ref}" ]; then
+      echo "${chart} (${gomemlimit_set}): expected ${gomemlimit_want_env} GOMEMLIMIT and ${gomemlimit_want_ref} limits.memory reference, got ${gomemlimit_env} and ${gomemlimit_ref}"
       exit 1
     fi
   done
@@ -791,6 +944,13 @@ for header in x-llm-d-prefiller-host-port x-prefiller-host-port x-llm-d-encoder-
     exit 1
   fi
 done
+# Fail-open must not leave the ext_proc cluster in panic mode: with no healthy EPP host the
+# ext_proc stream has to fail before the body is sent, or the request loses its body.
+ext_proc_cluster=$(awk '/- name: ext_proc$/{c=1} c' "${proxy_service_render_output}" | head -40)
+if ! grep -A1 -- 'healthy_panic_threshold:' <<<"${ext_proc_cluster}" | grep -q -- 'value: 0$'; then
+  echo "Proxy service mode with fail-open did not disable panic mode on the ext_proc cluster"
+  exit 1
+fi
 
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."
 fail_closed_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fail-closed-render.yaml"
@@ -801,6 +961,21 @@ if grep -q -- 'inference_pool_fallback\|proxy-svc-epp-model-servers' "${fail_clo
 fi
 if ! grep -q -- 'remove: x-gateway-destination-endpoint' "${fail_closed_render_output}"; then
   echo "Destination header strip missing with router.proxy.failOpen=false"
+  exit 1
+fi
+if grep -q -- 'healthy_panic_threshold' "${fail_closed_render_output}"; then
+  echo "ext_proc panic mode changed with router.proxy.failOpen=false"
+  exit 1
+fi
+priority_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-priority-failopen-render.yaml"
+${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.replicas=2 > "${priority_render_output}"
+if ! grep -A1 -- 'healthy_panic_threshold:' "${priority_render_output}" | grep -q -- 'value: 0$'; then
+  echo "Priority routing with fail-open did not disable panic mode on the ext_proc cluster"
+  exit 1
+fi
+${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.replicas=2 --set router.proxy.failOpen=false > "${priority_render_output}"
+if ! grep -A1 -- 'healthy_panic_threshold:' "${priority_render_output}" | grep -q -- 'value: 10$'; then
+  echo "Priority routing with fail-open off did not keep router.proxy.priorityRouting.healthyPanicThreshold"
   exit 1
 fi
 fallback_port_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fallback-port-render.yaml"
@@ -879,6 +1054,42 @@ if ! grep -q -- 'agentgateway-config-template' "${agentgateway_service_mode_outp
   exit 1
 fi
 
+echo "Verifying llm-d-router-standalone Envoy tracing follows router.proxy.tracing..."
+for proxy_mode in sidecar service; do
+  envoy_tracing_off_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-off-${proxy_mode}-render.yaml"
+  ${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace trace-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=${proxy_mode} > "${envoy_tracing_off_output}"
+  if grep -q -- 'envoy.tracers.opentelemetry\|otel_collector' "${envoy_tracing_off_output}"; then
+    echo "Envoy tracing rendered in ${proxy_mode} mode without router.proxy.tracing.enabled"
+    exit 1
+  fi
+  envoy_tracing_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-${proxy_mode}-render.yaml"
+  ${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace trace-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=${proxy_mode} --set router.proxy.tracing.enabled=true --set router.tracing.otelExporterEndpoint=http://otel-collector.obs.svc:4317 > "${envoy_tracing_output}"
+  for expected in 'name: envoy.tracers.opentelemetry' 'cluster_name: otel_collector' '- name: otel_collector' 'address: "otel-collector.obs.svc"' 'value: 10$' 'service_name: "envoy-proxy"'; do
+    if ! grep -q -- "${expected}" "${envoy_tracing_output}"; then
+      echo "Envoy tracing in ${proxy_mode} mode did not render '${expected}'"
+      exit 1
+    fi
+  done
+done
+envoy_tracing_override_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-override-render.yaml"
+${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace trace-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.tracing.enabled=true --set router.proxy.tracing.collectorEndpoint=collector.example:4318 --set router.proxy.tracing.serviceName=edge --set router.proxy.tracing.samplingPercentage=50 > "${envoy_tracing_override_output}"
+for expected in 'address: "collector.example"' 'port_value: 4318' 'service_name: "edge"' 'value: 50$'; do
+  if ! grep -q -- "${expected}" "${envoy_tracing_override_output}"; then
+    echo "Envoy tracing overrides did not render '${expected}'"
+    exit 1
+  fi
+done
+if ${HELM} template proxy-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.tracing.enabled=true --set router.tracing.otelExporterEndpoint= >/dev/null 2>&1; then
+  echo "Helm template unexpectedly succeeded for Envoy tracing without a collector endpoint"
+  exit 1
+fi
+envoy_tracing_agentgateway_output="${TEMP_DIR}/llm-d-router-standalone-envoy-tracing-agentgateway-render.yaml"
+${HELM} template ag-trace ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.tracing.enabled=true > "${envoy_tracing_agentgateway_output}"
+if grep -q -- 'envoy.tracers.opentelemetry\|otel_collector' "${envoy_tracing_agentgateway_output}"; then
+  echo "Envoy tracing unexpectedly rendered for agentgateway"
+  exit 1
+fi
+
 echo "Verifying standalone proxy autoscaling (HPA) rendering and validations..."
 proxy_hpa_out="${TEMP_DIR}/proxy-hpa-render.yaml"
 proxy_hpa_deploy="${TEMP_DIR}/proxy-hpa-deployment.yaml"
@@ -938,3 +1149,22 @@ for v in 0 101; do
 done
 
 echo "Proxy autoscaling checks passed for llm-d-router-standalone."
+
+echo "Verifying llm-d-router-standalone proxy preset args..."
+arg_rendered() { if [ -z "$3" ]; then grep -q -- "- \"$2\"\$" "$1"; else grep -A1 -- "- \"$2\"\$" "$1" | grep -q -- "- \"$3\"\$"; fi; }
+envoy_default_output="${TEMP_DIR}/llm-d-router-standalone-envoy-default-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false > "${envoy_default_output}" || exit 1
+envoy_explicit_args_output="${TEMP_DIR}/llm-d-router-standalone-envoy-explicit-args-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.proxy.args={--concurrency,4,-c,/etc/envoy/envoy.yaml}' > "${envoy_explicit_args_output}" || exit 1
+# name:file:flag:value:want (1 = rendered, 0 = absent; empty value = flag alone)
+for c in "sidecar:${envoy_default_output}:--concurrency:8:1" "sidecar-cpuset:${envoy_default_output}:--cpuset-threads::0" \
+         "service:${proxy_service_render_output}:--concurrency:8:1" \
+         "agentgateway:${agentgateway_render_output}:--concurrency:8:0" "agentgateway-preset:${agentgateway_render_output}:-f:/config/config.yaml:1" \
+         "explicit:${envoy_explicit_args_output}:--concurrency:4:1" "explicit-preset:${envoy_explicit_args_output}:--concurrency:8:0"; do
+  IFS=: read -r name file flag value want <<< "${c}"
+  if arg_rendered "${file}" "${flag}" "${value}"; then got=1; else got=0; fi
+  if [ "${got}" != "${want}" ]; then
+    echo "Proxy args for ${name}: ${flag} ${value} rendered=${got}, want ${want}"
+    exit 1
+  fi
+done

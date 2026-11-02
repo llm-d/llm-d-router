@@ -20,9 +20,15 @@ Router deployment name
 Cluster RBAC unique name
 */}}
 {{- define "llm-d-router.cluster-rbac-name" -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 }}
-{{- $ns := .Release.Namespace | default "default" | lower | trim | trunc 40 }}
-{{- printf "%s-%s-epp" $base $ns | quote | trunc 84 }}
+{{- $release := .Release.Name | default "default-pool" | lower | trim }}
+{{- $ns := .Release.Namespace | default "default" | lower | trim }}
+{{- if and (le (len $release) 40) (le (len $ns) 40) }}
+{{- printf "%s-%s-epp" $release $ns | quote }}
+{{- else }}
+{{- /* Truncating alone would let two namespaces share one cluster-scoped name. */ -}}
+{{- $hash := printf "%s/%s" $release $ns | sha256sum | trunc 8 }}
+{{- printf "%s-%s-%s-epp" ($release | trunc 40) ($ns | trunc 40) $hash | quote }}
+{{- end }}
 {{- end -}}
 
 {{/*
@@ -204,6 +210,24 @@ entry of router.modelServers.targetPorts.
 {{- define "llm-d-router.proxy.fallbackPort" -}}
 {{- $ports := .Values.router.modelServers.targetPorts | default (list (dict "number" 8000)) -}}
 {{- (first $ports).number -}}
+{{- end -}}
+
+{{/*
+OTLP gRPC collector host and port for the Envoy tracer, from
+router.proxy.tracing.collectorEndpoint or router.tracing.otelExporterEndpoint.
+The port defaults to 4317.
+*/}}
+{{- define "llm-d-router.proxy.tracing.collector" -}}
+{{- $tracing := .Values.router.proxy.tracing | default dict -}}
+{{- $endpoint := $tracing.collectorEndpoint | default (dig "tracing" "otelExporterEndpoint" "" .Values.router) -}}
+{{- $hostPort := regexReplaceAll "^[a-zA-Z][a-zA-Z0-9+.-]*://" $endpoint "" | trimSuffix "/" -}}
+{{- $port := regexFind ":[0-9]+$" $hostPort -}}
+{{- $host := trimSuffix $port $hostPort | trimPrefix "[" | trimSuffix "]" -}}
+{{- if not $host -}}
+{{- fail "router.proxy.tracing.enabled requires router.proxy.tracing.collectorEndpoint or router.tracing.otelExporterEndpoint" -}}
+{{- end -}}
+host: {{ $host | quote }}
+port: {{ trimPrefix ":" $port | default "4317" }}
 {{- end -}}
 
 {{/*
@@ -484,6 +508,13 @@ Helper to retrieve GKE preferredBackends configuration safely across chart conte
 {{- index $gke "preferredBackends" | default dict | toYaml -}}
 {{- end -}}
 
+{{- define "llm-d-router.gkePreferredBackends.totalReplicas" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- $preferred := $gkePB.preferredReplicas | default 1 | int -}}
+{{- $default := $gkePB.defaultReplicas | default 1 | int -}}
+{{- add $preferred $default -}}
+{{- end -}}
+
 {{/*
 EPP generic validations
 */}}
@@ -536,6 +567,15 @@ Helper to check if priorityRouting is enabled across chart contexts.
 {{- $primary := include "llm-d-router.priorityRouting.primaryReplicas" . | int -}}
 {{- $standby := include "llm-d-router.priorityRouting.standbyReplicas" . | int -}}
 {{- add $primary $standby -}}
+{{- end -}}
+
+{{- define "llm-d-router.epp.statefulSetReplicas" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- if $gkePB.enabled -}}
+{{- include "llm-d-router.gkePreferredBackends.totalReplicas" . -}}
+{{- else if eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
+{{- include "llm-d-router.priorityRouting.totalReplicas" . -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "llm-d-router.validations.epp.autoscaling" -}}
@@ -593,6 +633,7 @@ Helper to check if priorityRouting is enabled across chart contexts.
 {{- include "llm-d-router.validations.epp.latencyPredictor" . }}
 {{- include "llm-d-router.validations.epp.preferredBackends" . }}
 {{- include "llm-d-router.validations.epp.autoscaling" . }}
+{{- include "llm-d-router.validations.epp.podLabels" . }}
 {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
 {{- if and $isPriorityRouting (ne (include "llm-d-router.proxyMode" .) "service") -}}
 {{- fail "priorityRouting is only supported when proxy mode is set to 'service' (router.proxy.mode=service)" -}}
@@ -627,6 +668,24 @@ Tokenizer validations: require modelName and valid flavor for the render sidecar
 {{- fail (printf ".Values.router.tokenizer.flavor must be one of [python, rust], got %q" (dig "flavor" "" $tokenizer)) }}
 {{- end }}
 {{- end }}
+{{- end -}}
+
+{{/*
+podLabels validations: a key that duplicates a chart-owned pod label breaks the selector match or the mode label.
+*/}}
+{{- define "llm-d-router.validations.epp.podLabels" -}}
+{{- $eppLabels := merge (include "llm-d-router.selectorLabels" . | fromYaml) (include "llm-d-router.modeLabels" . | fromYaml) -}}
+{{- range $k, $_ := .Values.router.epp.podLabels -}}
+{{- if hasKey $eppLabels $k -}}
+{{- fail (printf ".Values.router.epp.podLabels must not set chart-owned label %q" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- $proxyLabels := merge (include "llm-d-router.labels" . | fromYaml) (include "llm-d-router.proxySelectorLabels" . | fromYaml) -}}
+{{- range $k, $_ := dig "podLabels" dict (.Values.router.proxy | default dict) -}}
+{{- if hasKey $proxyLabels $k -}}
+{{- fail (printf ".Values.router.proxy.podLabels must not set chart-owned label %q" $k) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

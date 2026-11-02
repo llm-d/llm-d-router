@@ -37,15 +37,17 @@ import (
 // router helpers.
 func standaloneConfig() standalone.Config {
 	return standalone.Config{
-		TestConfig:    testConfig,
-		Namespace:     getNamespace(),
-		EPPImage:      eppImage,
-		HTTPPort:      getPort(),
-		MetricsPort:   getMetricsPort(),
-		K8sContext:    k8sContext,
-		PodSelector:   podSelector,
-		ReleaseName:   poolName,
-		KeepOnFailure: keepClusterOnFailure,
+		TestConfig:      testConfig,
+		Namespace:       getNamespace(),
+		EPPImage:        eppImage,
+		HTTPPort:        getPort(),
+		MetricsPort:     getMetricsPort(),
+		HTTPNodePort:    getNodePort(),
+		MetricsNodePort: getMetricsNodePort(),
+		K8sContext:      k8sContext,
+		PodSelector:     podSelector,
+		ReleaseName:     poolName,
+		KeepOnFailure:   keepClusterOnFailure,
 	}
 }
 
@@ -132,7 +134,7 @@ func createModelServersDecodeKV(replicas int) {
 }
 
 func createModelServersDecodeDP(replicas int) []string {
-	return createModelServersFromKustomize("../../deploy/components/vllm-decode", map[string]string{
+	return createModelServersFromKustomize("artifacts/components/vllm-decode", map[string]string{
 		"${VLLM_REPLICA_COUNT_D}":    strconv.Itoa(replicas),
 		"${VLLM_DATA_PARALLEL_SIZE}": "2",
 		"${DECODE_ROLE}":             "decode",

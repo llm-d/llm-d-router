@@ -124,7 +124,7 @@ const maxSSELineBytes = 4 << 20
 // isEventStream reports whether a content-type header value is text/event-stream.
 func isEventStream(contentType string) bool {
 	mediaType, _, _ := strings.Cut(contentType, ";")
-	return strings.EqualFold(strings.TrimSpace(mediaType), fwkrequest.MediaTypeEventStream)
+	return strings.EqualFold(strings.TrimSpace(mediaType), reqcommon.MediaTypeEventStream)
 }
 
 // completeSSELines returns only whole lines, carrying a partial last line to the next chunk.
@@ -216,14 +216,18 @@ func logSSELineDrop(ctx context.Context) {
 // block may carry only some of the fields, so a zero is read as "not reported" and
 // leaves the accumulated value alone. Parsers that emit usage once with every field
 // populated are unaffected.
-func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
+func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 	if src.PromptTokens != 0 {
 		dst.PromptTokens = src.PromptTokens
 	}
 	if src.CompletionTokens != 0 {
 		dst.CompletionTokens = src.CompletionTokens
 	}
-	if src.PromptTokenDetails != nil {
+	// Each response chunk is parsed into a fresh Usage, so a later frame that
+	// serializes a placeholder zero would otherwise replace a cache count an
+	// earlier chunk reported. A zero only fills in a count that is still unknown.
+	if src.PromptTokenDetails != nil &&
+		(src.PromptTokenDetails.CachedTokens != 0 || dst.PromptTokenDetails == nil) {
 		dst.PromptTokenDetails = src.PromptTokenDetails
 	}
 	// A block reporting both halves of the usage owns the total it came with; a partial

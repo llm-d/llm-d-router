@@ -225,7 +225,7 @@ func TestFactory_NilHandle(t *testing.T) {
 //   - The composite must not implement ConsumerPlugin. Its children are plugins in the
 //     configuration themselves, so their data dependencies are validated directly; declaring
 //     the union here would put the keys through the data graph's layer-order check, which
-//     places a plugin with no scheduling or requestcontrol interface before every producer
+//     places a plugin with no scheduling or requesthandling interface before every producer
 //     and rejects otherwise valid configurations.
 //   - The composite must not implement the scheduling Filter extension point: the config
 //     loader only auto-injects a gating detector into scheduling profiles when it implements

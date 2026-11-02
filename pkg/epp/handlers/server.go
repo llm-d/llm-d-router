@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -50,7 +51,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -96,14 +96,20 @@ func (s *StreamingServer) SetToolCallingTelemetryEnabled(enabled bool) {
 	s.toolCallingTelemetryEnabled = enabled
 }
 
+// SetMaxRequestBodySize caps the request body in bytes. A larger body is answered with 413.
+// Zero disables the cap.
+func (s *StreamingServer) SetMaxRequestBodySize(n int) {
+	s.maxRequestBodySize = n
+}
+
 // SetResponders sets the plugins that may answer a request instead of routing it. They are
 // asked in the given order.
-func (s *StreamingServer) SetResponders(responders []fwkrc.Responder) {
+func (s *StreamingServer) SetResponders(responders []fwkrh.Responder) {
 	s.responders = responders
 }
 
 type Director interface {
-	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
+	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
 	HandleResponseBody(ctx context.Context, reqCtx *RequestContext, endOfStream bool) *RequestContext
 	GetRandomEndpoint() *fwkdl.EndpointMetadata
@@ -127,8 +133,10 @@ type StreamingServer struct {
 	// dynamic metadata. Off by default; set via SetEmitEndpointScores.
 	emitEndpointScores          bool
 	toolCallingTelemetryEnabled bool
+	// maxRequestBodySize caps the buffered request body in bytes; 0 disables the cap.
+	maxRequestBodySize int
 	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
-	responders []fwkrc.Responder
+	responders []fwkrh.Responder
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -148,7 +156,7 @@ type RequestContext struct {
 	Priority                 int
 	RequestReceivedTimestamp time.Time
 	RequestSize              int
-	Usage                    fwkrh.Usage
+	Usage                    fwkrequest.Usage
 	StreamedEvents           int
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool
@@ -159,7 +167,7 @@ type RequestContext struct {
 
 	// TerminationCause is set only when the stream ends without completing; the end-of-stream
 	// response record defaults an unset cause to a natural completion.
-	TerminationCause fwkrc.TerminationCause
+	TerminationCause fwkrh.TerminationCause
 
 	// FlowControlAdmitted reports whether flow control processed this request. It gates emission of the
 	// FlowQueueDuration response header, distinguishing a genuine zero-wait dispatch from flow control
@@ -178,6 +186,8 @@ type RequestContext struct {
 	responseComplete           bool
 	responseStatusCode         string
 	requestRunning             bool
+	// bodyReceived is set once the full request body is buffered; only such requests get an outcome.
+	bodyReceived bool
 
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
@@ -277,6 +287,15 @@ func (s *StreamingServer) getOrResolveParser(reqCtx *RequestContext) (fwkrh.Pars
 	return parser, nil
 }
 
+// FirstTokenTimestamp returns when the first response body bytes were received; zero if none were.
+func (r *RequestContext) FirstTokenTimestamp() time.Time { return r.firstTokenTimestamp }
+
+// ResponseCompleteTimestamp returns when the response completed; zero until it does.
+func (r *RequestContext) ResponseCompleteTimestamp() time.Time { return r.responseCompleteTimestamp }
+
+// ModelServerStreaming reports whether the model server answered with an event stream.
+func (r *RequestContext) ModelServerStreaming() bool { return r.modelServerStreaming }
+
 // apiType classifies the request by its path. A request rejected before its
 // headers are copied has no path and classifies as chat completions.
 func (r *RequestContext) apiType() reqcommon.APIType {
@@ -341,18 +360,18 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 
 // terminationCause classifies a stream that ended without completing. ctxErr is the request
 // context's error, which is non-nil once Envoy has torn the stream down under the EPP.
-func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCause {
+func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCause {
 	switch {
 	case reqCtx.requestState == requestEvicted:
-		return fwkrc.TerminationCauseEvicted
+		return fwkrh.TerminationCauseEvicted
 	case ctxErr != nil:
-		return fwkrc.TerminationCauseClientDisconnect
+		return fwkrh.TerminationCauseClientDisconnect
 	default:
-		return fwkrc.TerminationCauseError
+		return fwkrh.TerminationCauseError
 	}
 }
 
-func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.TerminationCause {
+func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrh.TerminationCause {
 	if trailers == nil || trailers.GetTrailers() == nil {
 		return ""
 	}
@@ -360,12 +379,56 @@ func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.Te
 	for _, header := range trailers.GetTrailers().GetHeaders() {
 		if header.Key == "grpc-status" {
 			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != "0" {
-				return fwkrc.TerminationCauseError
+				return fwkrh.TerminationCauseError
 			}
 			return ""
 		}
 	}
 	return ""
+}
+
+// Values of the outcome label on llm_d_epp_request_outcome_total.
+const (
+	outcomeCompleted = "completed"
+	outcomeRejected  = "rejected"
+	outcomeEvicted   = "evicted"
+	outcomeCancelled = "cancelled"
+	outcomeFailed    = "failed"
+)
+
+// requestOutcome reports how a request ended. ok is false when the EPP did not
+// see the ending: no body was received, or the route skipped response processing.
+// A request dropped before dispatch carries a rejected-* reason header, so its
+// reason label matches what the client received.
+func requestOutcome(reqCtx *RequestContext, err, ctxErr error) (outcome, reason string, ok bool) {
+	if !reqCtx.bodyReceived || reqCtx.requestState == requestResponseProcessingSkipped {
+		return "", "", false
+	}
+	switch {
+	case reqCtx.requestState == requestEvicted:
+		return outcomeEvicted, string(reqCtx.requestDroppedReason), true
+	case err != nil:
+		if e, isErr := err.(errcommon.Error); isErr {
+			if dropped := e.Headers[errcommon.RequestDroppedReasonHeaderKey]; dropped != "" {
+				if dropped == string(errcommon.RequestDroppedReasonContextCancelled) {
+					return outcomeCancelled, dropped, true
+				}
+				return outcomeRejected, dropped, true
+			}
+		}
+		return outcomeFailed, errcommon.CanonicalCode(err), true
+	case reqCtx.responseStatusCode != "":
+		return outcomeFailed, reqCtx.responseStatusCode, true
+	case reqCtx.responseComplete:
+		if reqCtx.TerminationCause == fwkrh.TerminationCauseError {
+			return outcomeFailed, errcommon.ModelServerError, true
+		}
+		return outcomeCompleted, "", true
+	case ctxErr != nil:
+		return outcomeCancelled, "", true
+	default:
+		return outcomeFailed, errcommon.Unknown, true
+	}
 }
 
 func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
@@ -378,6 +441,13 @@ func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 	}
 	priority := strconv.Itoa(reqCtx.Priority)
 	return fairnessID, priority
+}
+
+func (s *StreamingServer) putBuffer(buf *bytes.Buffer) {
+	buf.Reset()
+	if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+		s.bufferPool.Put(buf)
+	}
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
@@ -439,13 +509,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 	}()
 
-	buf := s.bufferPool.Get().(*bytes.Buffer)
-	buf.Reset()
+	var buf *bytes.Buffer
 	defer func() {
-		buf.Reset()
-		// Return to pool if capacity is within limits.
-		if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
-			s.bufferPool.Put(buf)
+		if buf != nil {
+			s.putBuffer(buf)
 		}
 	}()
 	var respBody []byte
@@ -488,9 +555,12 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 		fairnessID, priority := extractFairnessAndPriority(reqCtx)
 		if reqCtx.responseStatusCode != "" {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.responseStatusCode)
+			metrics.RecordRequestErrCounter(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.responseStatusCode)
 		} else if err != nil {
-			metrics.RecordRequestErrCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, errcommon.CanonicalCode(err))
+			metrics.RecordRequestErrCounter(ctx, reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, errcommon.CanonicalCode(err))
+		}
+		if outcome, reason, ok := requestOutcome(reqCtx, err, ctx.Err()); ok {
+			metrics.RecordRequestOutcome(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, outcome, reason)
 		}
 		if span != nil {
 			if err != nil {
@@ -588,6 +658,17 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
 		case *extProcPb.ProcessingRequest_RequestBody:
 			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
+			if buf == nil {
+				buf = s.bufferPool.Get().(*bytes.Buffer)
+				buf.Reset()
+			}
+			if s.maxRequestBodySize > 0 && buf.Len()+len(v.RequestBody.Body) > s.maxRequestBodySize {
+				err = errcommon.Error{
+					Code: errcommon.PayloadTooLarge,
+					Msg:  fmt.Sprintf("request body exceeds the %d-byte limit", s.maxRequestBodySize),
+				}
+				break
+			}
 			// In the stream case, we can receive multiple request bodies.
 			buf.Write(v.RequestBody.Body)
 
@@ -603,6 +684,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 				// Body stream complete. Capture raw size for flow control.
 				reqCtx.RequestSize = buf.Len()
+				reqCtx.bodyReceived = true
 
 				parser, resolveErr := s.getOrResolveParser(reqCtx)
 				if resolveErr != nil {
@@ -679,7 +761,15 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 						span.SetAttributes(inboundToolSnapshot.SpanAttributes(statuses)...)
 					}
 				}
-				buf.Reset()
+				// The response phase can last for the whole generation, so return
+				// the buffer here unless the tool-calling snapshot in ctx still
+				// references its bytes.
+				if hasInboundToolSnapshot {
+					buf.Reset()
+				} else {
+					s.putBuffer(buf)
+					buf = nil
+				}
 
 				// After scheduling, look up the eviction channel for eviction support.
 				// Setting evictCh from nil to a real channel dynamically enables the
@@ -713,16 +803,13 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// served the request, and Envoy only reports that at the response phase.
 			reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 			respHeadersReceivedAt := time.Now()
-			// The traceEnabled guard is intentional: passing arguments to a disabled
-			// logger still boxes them into a heap-allocated slice, and this loop runs
-			// per header. string(header.RawValue) in the status comparison does not
-			// allocate; the content-type check runs at most once per response.
+			// Skip building trace-log args per header when tracing is off.
 			traceEnabled := loggerTrace.Enabled()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				if traceEnabled {
-					loggerTrace.Info("header", "key", header.Key, "value", string(header.RawValue))
+					loggerTrace.Info("header", "key", header.Key, "value", envoy.GetHeaderValue(header))
 				}
-				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && string(header.RawValue) != "200" {
+				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && envoy.GetHeaderValue(header) != "200" {
 					reqCtx.responseStatusCode = errcommon.ModelServerError
 				} else if header.Key == reqcommon.HeaderContentType {
 					if !isEventStream(envoy.GetHeaderValue(header)) {

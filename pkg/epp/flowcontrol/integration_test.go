@@ -37,10 +37,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fcTypes "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
@@ -52,7 +52,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -88,8 +88,8 @@ func TestConcurrentSaturationReads(t *testing.T) {
 			schedEp := fwksched.NewEndpoint(pd.epMeta, datalayer.NewMetrics(), nil)
 			req := &fwksched.InferenceRequest{
 				RequestID: fmt.Sprintf("req-%d", i),
-				Body: &fwkrh.InferenceRequestBody{
-					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
+				Body: &fwkrequest.InferenceRequestBody{
+					TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
 				},
 			}
 			result := &fwksched.SchedulingResult{
@@ -102,7 +102,7 @@ func TestConcurrentSaturationReads(t *testing.T) {
 			}
 			req.SchedulingResult = result
 			pd.producer.ResponseBody(ctx, req,
-				&requestcontrol.Response{EndOfStream: true}, pd.epMeta)
+				&fwkrh.Response{EndOfStream: true}, pd.epMeta)
 		}
 	}()
 
@@ -165,8 +165,8 @@ func TestSaturationFullLoop(t *testing.T) {
 		schedEp := fwksched.NewEndpoint(pd.epMeta, datalayer.NewMetrics(), nil)
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("prefill-%d", i),
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 			},
 		}
 		result := &fwksched.SchedulingResult{
@@ -454,8 +454,8 @@ func TestUsageLimitThresholdGatesDispatch(t *testing.T) {
 		schedEp := fwksched.NewEndpoint(pd.epMeta, datalayer.NewMetrics(), nil)
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("inflight-%d", i),
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
 			},
 		}
 		result := &fwksched.SchedulingResult{
@@ -701,7 +701,7 @@ func TestEvictionPipeline(t *testing.T) {
 
 	// Complete the protected request normally.
 	requestEvictor.ResponseBody(ctx, protectedReq,
-		&requestcontrol.Response{EndOfStream: true}, epMeta)
+		&fwkrh.Response{EndOfStream: true}, epMeta)
 
 	inFlight, evictable = requestEvictor.Stats()
 	require.Equal(t, 0, inFlight, "all requests should be cleaned up after eviction and completion")
@@ -983,8 +983,8 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	schedEp := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	oldReq := &fwksched.InferenceRequest{
 		RequestID: "old-req",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	oldResult := &fwksched.SchedulingResult{
@@ -1017,7 +1017,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	require.NotPanics(t, func() {
 		oldReq.SchedulingResult = oldResult
 		producer.ResponseBody(ctx, oldReq,
-			&requestcontrol.Response{EndOfStream: true}, epMeta)
+			&fwkrh.Response{EndOfStream: true}, epMeta)
 	})
 
 	// New tracker should still be at zero -- old request's cleanup must not
@@ -1039,8 +1039,8 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	newSchedEp := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	newReq := &fwksched.InferenceRequest{
 		RequestID: "new-req",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	newResult := &fwksched.SchedulingResult{
@@ -1054,7 +1054,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 
 	newReq.SchedulingResult = newResult
 	producer.ResponseBody(ctx, newReq,
-		&requestcontrol.Response{EndOfStream: true}, epMeta)
+		&fwkrh.Response{EndOfStream: true}, epMeta)
 	require.Equal(t, int64(0), producer.GetRequests(eid),
 		"counter must be exactly 0 after new request completes -- negative value indicates old OnEvicted corrupted the new tracker")
 }
@@ -1100,8 +1100,8 @@ func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 	schedEp := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	req := &fwksched.InferenceRequest{
 		RequestID: "new-pod-req",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	result := &fwksched.SchedulingResult{

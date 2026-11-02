@@ -326,3 +326,630 @@ func TestFilterReadsAttributeOfNamedProducer(t *testing.T) {
 	require.Len(t, kept, 1, "only the idle GPU endpoint should survive")
 	assert.Equal(t, endpoints[0], kept[0])
 }
+
+// ---------------------------------------------------------------------------
+// Factory validation tests for the new algorithms (range, topK, percentile)
+// ---------------------------------------------------------------------------
+
+func TestEndpointAttributeFilterFactoryNewAlgorithms(t *testing.T) {
+	tests := []struct {
+		name       string
+		parameters string
+		wantErr    string
+	}{
+		// range
+		{
+			name: "valid range",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "range",
+					"range": {"min": 0, "max": 100}}}`,
+		},
+		{
+			name: "range with equal min and max",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "range",
+					"range": {"min": 50, "max": 50}}}`,
+		},
+		{
+			name: "range missing block",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "range"}}`,
+			wantErr: "algorithm.range",
+		},
+		{
+			name: "range min greater than max",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "range",
+					"range": {"min": 100, "max": 0}}}`,
+			wantErr: "min <= max",
+		},
+		// topK
+		{
+			name: "valid topK higherIsBetter",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "topK",
+					"topK": {"k": 3, "higherIsBetter": true}}}`,
+		},
+		{
+			name: "valid topK lowerIsBetter",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "topK",
+					"topK": {"k": 2, "higherIsBetter": false}}}`,
+		},
+		{
+			name: "topK missing block",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "topK"}}`,
+			wantErr: "algorithm.topK",
+		},
+		{
+			name: "topK zero k",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "topK",
+					"topK": {"k": 0, "higherIsBetter": true}}}`,
+			wantErr: "positive integer",
+		},
+		{
+			name: "topK negative k",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "topK",
+					"topK": {"k": -1, "higherIsBetter": true}}}`,
+			wantErr: "positive integer",
+		},
+		{
+			// Guards the silent inversion: a plain bool decodes an omitted
+			// higherIsBetter to false, opposite of the documented default.
+			name: "topK missing higherIsBetter",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "topK",
+					"topK": {"k": 3}}}`,
+			wantErr: "topK.higherIsBetter is required",
+		},
+		// percentile
+		{
+			name: "valid percentile higherIsBetter",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "percentile",
+					"percentile": {"percentile": 25, "higherIsBetter": true}}}`,
+		},
+		{
+			name: "valid percentile lowerIsBetter",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "percentile",
+					"percentile": {"percentile": 75, "higherIsBetter": false}}}`,
+		},
+		{
+			name: "percentile missing block",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "percentile"}}`,
+			wantErr: "algorithm.percentile",
+		},
+		{
+			name: "percentile below zero",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "percentile",
+					"percentile": {"percentile": -1, "higherIsBetter": true}}}`,
+			wantErr: "[0, 100]",
+		},
+		{
+			name: "percentile above 100",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "percentile",
+					"percentile": {"percentile": 101, "higherIsBetter": true}}}`,
+			wantErr: "[0, 100]",
+		},
+		{
+			// Same silent-inversion guard as topK: higherIsBetter has no safe
+			// default under Go's bool zero value, so omission is rejected.
+			name: "percentile missing higherIsBetter",
+			parameters: `{"attribute": "num_requests_running",
+				"algorithm": {"type": "percentile",
+					"percentile": {"percentile": 25}}}`,
+			wantErr: "percentile.higherIsBetter is required",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decoder := json.NewDecoder(strings.NewReader(test.parameters))
+			_, err := EndpointAttributeFilterFactory("test-filter", decoder, nil)
+			if test.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Filter behavior tests for the new algorithms
+// ---------------------------------------------------------------------------
+
+func TestEndpointAttributeFilterRange(t *testing.T) {
+	tests := []struct {
+		name            string
+		min             float64
+		max             float64
+		onMissing       string
+		fallbackOnEmpty bool
+		endpoints       []scheduling.Endpoint
+		wantKept        []int
+	}{
+		{
+			name: "range keeps values within [10, 50]",
+			min:  10,
+			max:  50,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(5),
+				newEndpointWithValue(10), // boundary
+				newEndpointWithValue(30),
+				newEndpointWithValue(50), // boundary
+				newEndpointWithValue(80),
+			},
+			wantKept: []int{1, 2, 3},
+		},
+		{
+			name: "range with single-point [50, 50] keeps only matching value",
+			min:  50,
+			max:  50,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(30),
+				newEndpointWithValue(50),
+				newEndpointWithValue(70),
+			},
+			wantKept: []int{1},
+		},
+		{
+			name:      "range with onMissing Fail drops endpoints without attribute",
+			min:       10,
+			max:       50,
+			onMissing: onMissingFail,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(30),
+				newEndpointWithoutValue(),
+				newEndpointWithValue(80),
+			},
+			wantKept: []int{0},
+		},
+		{
+			name:            "range fallbackOnEmpty returns all when nothing matches",
+			min:             100,
+			max:             200,
+			fallbackOnEmpty: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(5),
+				newEndpointWithValue(50),
+			},
+			wantKept: []int{0, 1},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			filter, err := NewEndpointAttributeFilter("test-filter", parameters{
+				Attribute:       testAttribute,
+				OnMissing:       test.onMissing,
+				FallbackOnEmpty: test.fallbackOnEmpty,
+				Algorithm: algorithmParameters{
+					Type: algorithmRange,
+					Range: &rangeParameters{
+						Min: test.min,
+						Max: test.max,
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			got := filter.Filter(context.Background(), &scheduling.InferenceRequest{}, test.endpoints)
+
+			want := make([]scheduling.Endpoint, 0, len(test.wantKept))
+			for _, i := range test.wantKept {
+				want = append(want, test.endpoints[i])
+			}
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+func TestEndpointAttributeFilterTopK(t *testing.T) {
+	tests := []struct {
+		name            string
+		k               int
+		higherIsBetter  bool
+		onMissing       string
+		fallbackOnEmpty bool
+		endpoints       []scheduling.Endpoint
+		wantKept        []int
+	}{
+		{
+			name:           "topK 3 highest keeps the 3 largest values",
+			k:              3,
+			higherIsBetter: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10), // 0
+				newEndpointWithValue(50), // 1
+				newEndpointWithValue(30), // 2
+				newEndpointWithValue(80), // 3
+				newEndpointWithValue(20), // 4
+			},
+			wantKept: []int{1, 2, 3}, // 50, 30, 80
+		},
+		{
+			name:           "topK 2 lowest keeps the 2 smallest values",
+			k:              2,
+			higherIsBetter: false,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10), // 0
+				newEndpointWithValue(50), // 1
+				newEndpointWithValue(30), // 2
+				newEndpointWithValue(80), // 3
+			},
+			wantKept: []int{0, 2}, // 10, 30
+		},
+		{
+			name:           "topK larger than endpoint count keeps all",
+			k:              10,
+			higherIsBetter: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),
+				newEndpointWithValue(20),
+				newEndpointWithValue(30),
+			},
+			wantKept: []int{0, 1, 2},
+		},
+		{
+			// Branch boundary: len(ranked) == K takes the keep-all path.
+			name:           "topK equal to endpoint count keeps all",
+			k:              3,
+			higherIsBetter: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),
+				newEndpointWithValue(20),
+				newEndpointWithValue(30),
+			},
+			wantKept: []int{0, 1, 2},
+		},
+		{
+			// The cut actually happens (4 ranked > k=2) and the missing
+			// endpoint is appended after it, exercising the non-early-return path
+			// together with onMissing=Pass.
+			name:           "topK cut with onMissing Pass appends missing after the cut",
+			k:              2,
+			higherIsBetter: true,
+			onMissing:      onMissingPass,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),  // 0
+				newEndpointWithValue(50),  // 1
+				newEndpointWithValue(30),  // 2
+				newEndpointWithValue(80),  // 3
+				newEndpointWithoutValue(), // 4
+			},
+			wantKept: []int{1, 3, 4}, // top 2 values (50, 80) + the missing one
+		},
+		{
+			name:           "topK with onMissing Pass includes endpoints without attribute",
+			k:              2,
+			higherIsBetter: true,
+			onMissing:      onMissingPass,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),  // 0
+				newEndpointWithValue(50),  // 1
+				newEndpointWithoutValue(), // 2
+			},
+			wantKept: []int{0, 1, 2}, // 2 ranked + 1 missing (passed)
+		},
+		{
+			name:           "topK with onMissing Fail excludes endpoints without attribute",
+			k:              2,
+			higherIsBetter: true,
+			onMissing:      onMissingFail,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),  // 0
+				newEndpointWithValue(50),  // 1
+				newEndpointWithoutValue(), // 2
+			},
+			wantKept: []int{0, 1},
+		},
+		{
+			// k=2 on {10, 30, 30, 50}: cutoff = 2nd-highest value = 30, and
+			// the tie group straddles the K boundary, so 3 > k survive. An exact-K
+			// cut would keep {50, one arbitrary 30} and drop the other 30 by
+			// sort order — this case fails against the pre-tie-group code.
+			name:           "topK keeps every endpoint tied with the K-th value",
+			k:              2,
+			higherIsBetter: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10), // 0
+				newEndpointWithValue(30), // 1
+				newEndpointWithValue(30), // 2
+				newEndpointWithValue(50), // 3
+			},
+			wantKept: []int{1, 2, 3},
+		},
+		{
+			// All-idle scenario from the review: k=2 on queue length with every
+			// endpoint tied at 0 must not let the unstable sort drop the equally
+			// idle endpoints before the scorers can see them.
+			name:           "topK all-tied endpoints all survive",
+			k:              2,
+			higherIsBetter: false,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(0), // 0
+				newEndpointWithValue(0), // 1
+				newEndpointWithValue(0), // 2
+				newEndpointWithValue(0), // 3
+				newEndpointWithValue(0), // 4
+			},
+			wantKept: []int{0, 1, 2, 3, 4},
+		},
+		{
+			name:            "topK fallbackOnEmpty when all endpoints lack attribute",
+			k:               2,
+			higherIsBetter:  true,
+			fallbackOnEmpty: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithoutValue(),
+				newEndpointWithoutValue(),
+			},
+			wantKept: []int{0, 1},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			filter, err := NewEndpointAttributeFilter("test-filter", parameters{
+				Attribute:       testAttribute,
+				OnMissing:       test.onMissing,
+				FallbackOnEmpty: test.fallbackOnEmpty,
+				Algorithm: algorithmParameters{
+					Type: algorithmTopK,
+					TopK: &topKParameters{
+						K:              test.k,
+						HigherIsBetter: &test.higherIsBetter,
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			got := filter.Filter(context.Background(), &scheduling.InferenceRequest{}, test.endpoints)
+
+			// topK output order follows the sort; compare by set membership, not order.
+			assert.ElementsMatch(t, indexesToEndpoints(test.endpoints, test.wantKept), got)
+		})
+	}
+}
+
+func TestEndpointAttributeFilterPercentile(t *testing.T) {
+	tests := []struct {
+		name            string
+		percentile      float64
+		higherIsBetter  bool
+		onMissing       string
+		fallbackOnEmpty bool
+		endpoints       []scheduling.Endpoint
+		wantKept        []int
+	}{
+		{
+			// 10 endpoints with values 10,20,...,100.
+			// 25th percentile nearest-rank = ceil(0.25 * 10) = 3rd value = 30.
+			// higherIsBetter: keep values >= 30 → {30,40,...,100} (8 endpoints)
+			name:           "percentile 25 higherIsBetter keeps values >= 30",
+			percentile:     25,
+			higherIsBetter: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),  // 0
+				newEndpointWithValue(20),  // 1
+				newEndpointWithValue(30),  // 2
+				newEndpointWithValue(40),  // 3
+				newEndpointWithValue(50),  // 4
+				newEndpointWithValue(60),  // 5
+				newEndpointWithValue(70),  // 6
+				newEndpointWithValue(80),  // 7
+				newEndpointWithValue(90),  // 8
+				newEndpointWithValue(100), // 9
+			},
+			wantKept: []int{2, 3, 4, 5, 6, 7, 8, 9},
+		},
+		{
+			// 75th percentile nearest-rank = ceil(0.75 * 10) = 8th value = 80.
+			// higherIsBetter=false: keep values <= 80 → {10,...,80} (8 endpoints)
+			name:           "percentile 75 lowerIsBetter keeps values <= 80",
+			percentile:     75,
+			higherIsBetter: false,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),  // 0
+				newEndpointWithValue(20),  // 1
+				newEndpointWithValue(30),  // 2
+				newEndpointWithValue(40),  // 3
+				newEndpointWithValue(50),  // 4
+				newEndpointWithValue(60),  // 5
+				newEndpointWithValue(70),  // 6
+				newEndpointWithValue(80),  // 7
+				newEndpointWithValue(90),  // 8
+				newEndpointWithValue(100), // 9
+			},
+			wantKept: []int{0, 1, 2, 3, 4, 5, 6, 7},
+		},
+		{
+			// 50th percentile of 4 values = ceil(0.5 * 4) = 2nd value = 20.
+			// higherIsBetter: keep values >= 20 → {20, 30, 40} (3 endpoints)
+			name:           "percentile 50 higherIsBetter with 4 endpoints",
+			percentile:     50,
+			higherIsBetter: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10), // 0
+				newEndpointWithValue(20), // 1
+				newEndpointWithValue(30), // 2
+				newEndpointWithValue(40), // 3
+			},
+			wantKept: []int{1, 2, 3},
+		},
+		{
+			// Ties at the cutoff survive in both directions — the contract
+			// topK's tie-group retention is aligned with.
+			// rank = ceil(0.5 * 5) = 3 → cutoff = 3rd value = 20.
+			name:           "percentile keeps every endpoint tied with the cutoff",
+			percentile:     50,
+			higherIsBetter: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10), // 0
+				newEndpointWithValue(20), // 1
+				newEndpointWithValue(20), // 2
+				newEndpointWithValue(30), // 3
+				newEndpointWithValue(40), // 4
+			},
+			wantKept: []int{1, 2, 3, 4},
+		},
+		{
+			name:           "percentile lowerIsBetter keeps every endpoint tied with the cutoff",
+			percentile:     50,
+			higherIsBetter: false,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10), // 0
+				newEndpointWithValue(20), // 1
+				newEndpointWithValue(20), // 2
+				newEndpointWithValue(30), // 3
+				newEndpointWithValue(40), // 4
+			},
+			wantKept: []int{0, 1, 2},
+		},
+		{
+			name:           "percentile 0 higherIsBetter keeps all valued endpoints",
+			percentile:     0,
+			higherIsBetter: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),
+				newEndpointWithValue(20),
+				newEndpointWithValue(30),
+			},
+			wantKept: []int{0, 1, 2},
+		},
+		{
+			name:           "percentile 100 lowerIsBetter keeps all valued endpoints",
+			percentile:     100,
+			higherIsBetter: false,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),
+				newEndpointWithValue(20),
+				newEndpointWithValue(30),
+			},
+			wantKept: []int{0, 1, 2},
+		},
+		{
+			name:           "percentile with onMissing Fail drops endpoints without attribute",
+			percentile:     50,
+			higherIsBetter: true,
+			onMissing:      onMissingFail,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithValue(10),  // 0
+				newEndpointWithValue(20),  // 1
+				newEndpointWithValue(30),  // 2
+				newEndpointWithValue(40),  // 3
+				newEndpointWithoutValue(), // 4
+			},
+			wantKept: []int{1, 2, 3}, // values >= 20 (2nd of 4)
+		},
+		{
+			name:            "percentile fallbackOnEmpty when all lack attribute",
+			percentile:      50,
+			higherIsBetter:  true,
+			fallbackOnEmpty: true,
+			endpoints: []scheduling.Endpoint{
+				newEndpointWithoutValue(),
+				newEndpointWithoutValue(),
+			},
+			wantKept: []int{0, 1},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			filter, err := NewEndpointAttributeFilter("test-filter", parameters{
+				Attribute:       testAttribute,
+				OnMissing:       test.onMissing,
+				FallbackOnEmpty: test.fallbackOnEmpty,
+				Algorithm: algorithmParameters{
+					Type: algorithmPercentile,
+					Percentile: &percentileParameters{
+						Percentile:     test.percentile,
+						HigherIsBetter: &test.higherIsBetter,
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			got := filter.Filter(context.Background(), &scheduling.InferenceRequest{}, test.endpoints)
+
+			assert.ElementsMatch(t, indexesToEndpoints(test.endpoints, test.wantKept), got)
+		})
+	}
+}
+
+// TestPercentileRankFloatBoundary locks the nearest-rank computation against
+// float representation error at exact-integer products. 14% of 50 computes to
+// 7.0000000000000009 in float64 (a naive math.Ceil would return 8), and 29%
+// of 100 to 28.999999999999996 (plain int truncation would return 28). The
+// +0.999999 epsilon in filterPercentile keeps both at the mathematically
+// exact rank; verified against exact integer arithmetic for every integer
+// P in [0,100] x N in [1,200].
+func TestPercentileRankFloatBoundary(t *testing.T) {
+	tests := []struct {
+		name       string
+		percentile float64
+		n          int
+		wantRank   int // mathematically exact ceil(P/100 * N), 1-based
+	}{
+		{
+			name:       "P=14 N=50 stays rank 7 despite upward error (guards against math.Ceil)",
+			percentile: 14,
+			n:          50,
+			wantRank:   7,
+		},
+		{
+			name:       "P=29 N=100 stays rank 29 despite downward error (guards against truncation)",
+			percentile: 29,
+			n:          100,
+			wantRank:   29,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoints := make([]scheduling.Endpoint, test.n)
+			for i := range endpoints {
+				endpoints[i] = newEndpointWithValue(float64(i + 1)) // values 1..n
+			}
+
+			higherIsBetter := true
+			filter, err := NewEndpointAttributeFilter("test-filter", parameters{
+				Attribute: testAttribute,
+				Algorithm: algorithmParameters{
+					Type: algorithmPercentile,
+					Percentile: &percentileParameters{
+						Percentile:     test.percentile,
+						HigherIsBetter: &higherIsBetter,
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			kept := filter.Filter(context.Background(), &scheduling.InferenceRequest{}, endpoints)
+			// Cutoff is the value at wantRank, so every value >= it survives.
+			require.Len(t, kept, test.n-test.wantRank+1)
+			assert.Contains(t, kept, endpoints[test.wantRank-1],
+				"the endpoint holding the cutoff value itself must survive")
+		})
+	}
+}
+
+// indexesToEndpoints builds an endpoint slice from the given indexes for test
+// assertions.
+func indexesToEndpoints(endpoints []scheduling.Endpoint, indexes []int) []scheduling.Endpoint {
+	result := make([]scheduling.Endpoint, 0, len(indexes))
+	for _, i := range indexes {
+		result = append(result, endpoints[i])
+	}
+	return result
+}

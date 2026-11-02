@@ -32,7 +32,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -76,7 +76,7 @@ func failFrom(f *EndpointHealthFilter, name, address, served string) {
 		}}
 	}
 	f.ResponseHeader(context.Background(), nil,
-		&fwkrc.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: "502"}, ReqMetadata: reqMetadata},
+		&fwkrh.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: "502"}, ReqMetadata: reqMetadata},
 		&fwkdl.EndpointMetadata{ID: id(name), Address: address, Port: "8000"})
 }
 
@@ -105,7 +105,7 @@ func newTestFilter(t *testing.T, params parameters) (*EndpointHealthFilter, *tes
 
 func respond(f *EndpointHealthFilter, name string, status string) {
 	f.ResponseHeader(context.Background(), nil,
-		&fwkrc.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: status}},
+		&fwkrh.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: status}},
 		&fwkdl.EndpointMetadata{ID: id(name)})
 }
 
@@ -460,7 +460,7 @@ func TestResponseHealthDisabled(t *testing.T) {
 		respond(f, "b", "502")
 	}
 	f.ResponseHeader(context.Background(), nil, nil, &fwkdl.EndpointMetadata{ID: id("b")})
-	f.ResponseHeader(context.Background(), nil, &fwkrc.Response{}, nil)
+	f.ResponseHeader(context.Background(), nil, &fwkrh.Response{}, nil)
 	assert.Equal(t, []string{"a", "b"},
 		names(f.Filter(context.Background(), nil, []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)})))
 }
@@ -516,7 +516,7 @@ func TestTransitionsLogOnceAtInfo(t *testing.T) {
 	assert.Contains(t, lines[1], "polls recovered")
 
 	for range 8 {
-		f.ResponseHeader(ctx, nil, &fwkrc.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: "502"}},
+		f.ResponseHeader(ctx, nil, &fwkrh.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: "502"}},
 			&fwkdl.EndpointMetadata{ID: id("b")})
 	}
 	require.Len(t, lines, 3)

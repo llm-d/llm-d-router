@@ -166,6 +166,11 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("parser registry build failed: %w", err)
 	}
 
+	dataProducerPhases, err := buildDataProducerPhases(rawConfig.RequestHandler.DataProducers, handle)
+	if err != nil {
+		return nil, fmt.Errorf("data producer phases build failed: %w", err)
+	}
+
 	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.FlowControl.SaturationDetector.PluginRef]
 	if !ok {
 		return nil, fmt.Errorf("saturation detector plugin '%s' not found", rawConfig.FlowControl.SaturationDetector.PluginRef)
@@ -182,6 +187,8 @@ func InstantiateAndConfigure(
 		FlowControlConfig:  flowControlConfig,
 		ParserRegistry:     parserRegistry,
 		PropagatePriority:  rawConfig.RequestHandler.PropagatePriority,
+		ComposeFairnessIDs: rawConfig.RequestHandler.ComposeFairnessIDs,
+		DataProducerPhases: dataProducerPhases,
 	}, nil
 }
 
@@ -401,6 +408,25 @@ func loadFeatureConfig(gates configapiv1.FeatureGates) (map[string]bool, error) 
 		config[parts[0]] = value
 	}
 	return config, nil
+}
+
+// buildDataProducerPhases places each DataProducer listed in
+// requestHandler.dataProducers in fwkrh.DataProducerPhaseRequestHandling,
+// keyed by plugin name. datalayer.ResolveDataProducerPhases places the rest.
+func buildDataProducerPhases(rawConfigs []configapiv1.DataProducerConfig, handle fwkplugin.Handle) (map[string]fwkrh.DataProducerPhase, error) {
+	phases := make(map[string]fwkrh.DataProducerPhase, len(rawConfigs))
+	allPlugins := handle.GetAllPluginsWithNames()
+	for _, dp := range rawConfigs {
+		plugin, ok := allPlugins[dp.PluginRef]
+		if !ok {
+			return nil, fmt.Errorf("the configured data producer %q is not loaded", dp.PluginRef)
+		}
+		if _, ok := plugin.(fwkrh.DataProducer); !ok {
+			return nil, fmt.Errorf("the plugin %q is not a data producer plugin", dp.PluginRef)
+		}
+		phases[dp.PluginRef] = fwkrh.DataProducerPhaseRequestHandling
+	}
+	return phases, nil
 }
 
 func buildParserRegistry(rawParserConfigs []configapiv1.ParserConfig, handle fwkplugin.Handle, logger logr.Logger) (*handlers.ParserRegistry, error) {

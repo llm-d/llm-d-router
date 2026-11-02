@@ -31,6 +31,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -42,7 +43,7 @@ type apiSurfaceDirector struct {
 	rewritePath string
 }
 
-func (d *apiSurfaceDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (d *apiSurfaceDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	reqCtx.IncomingModelName = "m"
 	reqCtx.TargetModelName = "m"
 	if d.rewritePath != "" {
@@ -132,13 +133,14 @@ func TestProcessRequestMetricsByAPISurface(t *testing.T) {
 func TestProcessCountsModelServerErrorFromResponseStatus(t *testing.T) {
 	tests := []struct {
 		name      string
-		key       string
-		value     string
+		header    *configPb.HeaderValue
 		wantCount float64
 	}{
-		{name: "Envoy pseudo-header with an error status", key: ":status", value: "502", wantCount: 1},
-		{name: "Envoy pseudo-header with 200", key: ":status", value: "200", wantCount: 0},
-		{name: "plain status header with an error status", key: "status", value: "502", wantCount: 1},
+		{name: "Envoy pseudo-header with an error status", header: &configPb.HeaderValue{Key: ":status", RawValue: []byte("502")}, wantCount: 1},
+		{name: "Envoy pseudo-header with 200", header: &configPb.HeaderValue{Key: ":status", RawValue: []byte("200")}, wantCount: 0},
+		{name: "plain status header with an error status", header: &configPb.HeaderValue{Key: "status", RawValue: []byte("502")}, wantCount: 1},
+		{name: "pseudo-header in Value with an error status", header: &configPb.HeaderValue{Key: ":status", Value: "502"}, wantCount: 1},
+		{name: "pseudo-header in Value with 200", header: &configPb.HeaderValue{Key: ":status", Value: "200"}, wantCount: 0},
 	}
 
 	for _, tt := range tests {
@@ -152,9 +154,7 @@ func TestProcessCountsModelServerErrorFromResponseStatus(t *testing.T) {
 				reqs: []*extProcPb.ProcessingRequest{{
 					Request: &extProcPb.ProcessingRequest_ResponseHeaders{
 						ResponseHeaders: &extProcPb.HttpHeaders{
-							Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
-								{Key: tt.key, RawValue: []byte(tt.value)},
-							}},
+							Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{tt.header}},
 						},
 					},
 				}},

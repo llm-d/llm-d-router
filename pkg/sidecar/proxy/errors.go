@@ -29,6 +29,10 @@ var errInvalidJSON = errors.New("invalid JSON")
 // its response, leaving the caller to write a status on its behalf.
 var errDecodeAborted = errors.New("decode aborted before sending a response")
 
+// errPrefillAborted reports a prefill response whose body failed to arrive
+// after its status did.
+var errPrefillAborted = errors.New("prefill response interrupted")
+
 // JSON errors can contain payload values and client-supplied field paths.
 func jsonErrorForLog(err error) error {
 	var syntaxError *json.SyntaxError
