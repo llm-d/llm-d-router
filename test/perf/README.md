@@ -111,7 +111,9 @@ successful run of the same target, with the successful runs from the window
 before that previous run. Runs are comparable only when their target ID and
 digest match, so editing the target or the workload or simulator files starts a
 new baseline. Editing the router config keeps the baseline, so a config change
-that slows the EPP is compared against the runs before it. A metric regresses
+that slows the EPP is compared against the runs before it. When the router
+config hash of either run differs from any baseline run, the summary and issue
+show the old and new hashes. A metric regresses
 when both runs are worse than the baseline median by more than its threshold
 and worse than every baseline run. With fewer than the minimum number of
 baseline runs, nothing is compared.
@@ -120,8 +122,9 @@ The target's `trend` section sets the window (7 days), the minimum baseline
 runs (4) and the compared metrics. Each metric has a name, a dotted path into
 the run record, a direction (`lower` or `higher` is better), a threshold, and
 whether it opens issues (`alerts`) or is only reported. Unknown keys in either
-section are rejected. The `trend` section is not part of the digest, so tuning
-it keeps the baseline.
+section are rejected, as are a window or minimum baseline runs below 1, a
+negative threshold, and duplicate metric names. The `trend` section is not part
+of the digest, so tuning it keeps the baseline.
 
 ```bash
 python3 test/perf/trend.py \

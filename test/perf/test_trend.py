@@ -11,15 +11,17 @@ import trend
 TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "targets", "optimized-baseline-job1.yaml")
 CONFIG = trend.load_trend_config(TARGET)
 DIGEST = "digest-a"
+OLD_CONFIG = "a" * 64
+NEW_CONFIG = "b" * 64
 
 
-def run_record(day, status="SUCCESS", epp_peak_cpu=2000, p95=9.0, envoy_peak_cpu=2500, commit=None, target_id=CONFIG.target_id, digest=DIGEST):
+def run_record(day, status="SUCCESS", epp_peak_cpu=2000, p95=9.0, envoy_peak_cpu=2500, commit=None, target_id=CONFIG.target_id, digest=DIGEST, router_config=OLD_CONFIG):
     return {
         "schema_version": trend.RUN_RECORD_SCHEMA_VERSION,
         "test_name": target_id,
         "started_at": f"2026-10-{day:02d}T09:00:00Z",
         "status": status,
-        "target": {"id": target_id, "digest": digest, "setup": {}},
+        "target": {"id": target_id, "digest": digest, "router_config_sha256": router_config, "setup": {}},
         "provenance": {"epp_commit": commit or f"commit{day:02d}", "images": [], "image_ids": {}},
         "containers": {
             "epp": {"idle_cpu_m": 200, "idle_mem_mib": 25, "peak_cpu_m": epp_peak_cpu, "peak_mem_mib": 70},
@@ -66,11 +68,13 @@ class TrendConfigTests(unittest.TestCase):
             "direction": {"direction": "sideways"},
             "unknown key": {"max_threshold": 0.25},
             "quoted alerts": {"alerts": "false"},
+            "negative threshold": {"threshold": -0.1},
         }
         for case, fields in invalid.items():
             with self.subTest(case=case):
                 with self.assertRaises(ValueError):
                     trend.parse_metric({"name": "m", "path": "a.b", **fields})
+        self.assertEqual(trend.parse_metric({"name": "m", "path": "a.b", "threshold": 0}).threshold, 0)
 
     def load_config(self, trend_section):
         with tempfile.TemporaryDirectory() as directory:
@@ -83,12 +87,17 @@ class TrendConfigTests(unittest.TestCase):
         invalid = {
             "empty metrics": "{metrics: []}",
             "misspelled key": f"{{window_day: 14, metrics: [{metric}]}}",
+            "zero window": f"{{window_days: 0, metrics: [{metric}]}}",
+            "zero minimum baseline runs": f"{{min_baseline_runs: 0, metrics: [{metric}]}}",
+            "duplicate metric names": f"{{metrics: [{metric}, {{name: m, path: c.d}}]}}",
         }
         for case, section in invalid.items():
             with self.subTest(case=case):
                 with self.assertRaises(ValueError):
                     self.load_config(section)
         self.assertEqual(self.load_config(f"{{window_days: 14, metrics: [{metric}]}}").window_days, 14)
+        smallest = self.load_config(f"{{window_days: 1, min_baseline_runs: 1, metrics: [{metric}]}}")
+        self.assertEqual((smallest.window_days, smallest.min_baseline_runs), (1, 1))
 
 
 class BaselineSelectionTests(unittest.TestCase):
@@ -223,6 +232,52 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(verdict["range_base_commit"], "commit15")
         self.assertEqual(verdict["tonight"]["epp_commit"], "commit17")
 
+    def test_unchanged_router_config_is_not_flagged(self):
+        verdict = trend.evaluate(history(), CONFIG)
+        self.assertIsNone(verdict["router_config_change"])
+        self.assertNotIn("Router config changed", trend.render_summary(verdict))
+
+    def test_router_config_change_keeps_the_baseline_and_is_flagged(self):
+        change = {"from": OLD_CONFIG, "to": NEW_CONFIG}
+        edited = {"router_config": NEW_CONFIG}
+        cases = {
+            "tonight only": history(tonight=edited),
+            "previous and tonight": history(previous=edited, tonight=edited),
+        }
+        for case, records in cases.items():
+            with self.subTest(case=case):
+                verdict = trend.evaluate(records, CONFIG)
+                self.assertEqual(len(verdict["baseline_runs"]), 7)
+                self.assertEqual(verdict["router_config_change"], change)
+
+    def test_router_config_edit_inside_the_baseline_is_flagged(self):
+        records = [run_record(day) for day in range(9, 12)]
+        records += [run_record(day, router_config=NEW_CONFIG) for day in range(12, 18)]
+        self.assertEqual(trend.evaluate(records, CONFIG)["router_config_change"], {"from": OLD_CONFIG, "to": NEW_CONFIG})
+
+    def test_previous_run_is_compared_with_the_baseline_when_tonight_matches_it(self):
+        verdict = trend.evaluate(history(previous={"router_config": NEW_CONFIG}), CONFIG)
+        self.assertEqual(verdict["router_config_change"], {"from": OLD_CONFIG, "to": NEW_CONFIG})
+
+    def test_router_config_change_starts_from_a_baseline_hash(self):
+        third_config = "c" * 64
+        verdict = trend.evaluate(history(previous={"router_config": NEW_CONFIG}, tonight={"router_config": third_config}), CONFIG)
+        self.assertEqual(verdict["router_config_change"], {"from": OLD_CONFIG, "to": third_config})
+
+    def test_router_config_edit_flag_clears_when_the_baseline_has_only_the_new_config(self):
+        records = [run_record(day, router_config=NEW_CONFIG) for day in range(9, 18)]
+        records.insert(0, run_record(1))
+        self.assertIsNone(trend.evaluate(records, CONFIG)["router_config_change"])
+
+    def test_summary_shows_the_router_config_change(self):
+        edited = {"router_config": NEW_CONFIG}
+        summary = trend.render_summary(trend.evaluate(history(previous=edited, tonight=edited), CONFIG))
+        self.assertIn(f"Router config changed since the baseline ({OLD_CONFIG[:12]} -> {NEW_CONFIG[:12]})", summary)
+
+    def test_first_run_of_a_digest_is_insufficient_with_the_smallest_minimum(self):
+        verdict = trend.evaluate([run_record(17)], CONFIG._replace(min_baseline_runs=1))
+        self.assertEqual(verdict["status"], "insufficient_baseline")
+
 
 class IssueBodyTests(unittest.TestCase):
     def test_body_has_marker_regressed_metrics_and_compare_link(self):
@@ -242,6 +297,15 @@ class IssueBodyTests(unittest.TestCase):
         body = trend.render_issue_body(verdict, "llm-d/llm-d-router")
         self.assertNotIn("/compare/", body)
         self.assertIn("commit range is unavailable", body)
+
+    def test_body_shows_the_router_config_change(self):
+        records = lasting(epp_peak_cpu=2500)
+        body = trend.render_issue_body(trend.evaluate(records, CONFIG), "llm-d/llm-d-router")
+        self.assertNotIn("Router config changed", body)
+        for record in records[-2:]:
+            record["target"]["router_config_sha256"] = NEW_CONFIG
+        body = trend.render_issue_body(trend.evaluate(records, CONFIG), "llm-d/llm-d-router")
+        self.assertIn(f"Router config changed since the baseline ({OLD_CONFIG[:12]} -> {NEW_CONFIG[:12]})", body)
 
 
 class FileTests(unittest.TestCase):

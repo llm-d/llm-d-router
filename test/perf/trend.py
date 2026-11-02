@@ -14,6 +14,7 @@ DEFAULT_THRESHOLD = 0.10
 DEFAULT_WINDOW_DAYS = 7
 DEFAULT_MIN_BASELINE_RUNS = 4
 DEFAULT_REPOSITORY = "llm-d/llm-d-router"
+SHORT_HASH_LENGTH = 12
 DIRECTIONS = ("lower", "higher")
 TREND_KEYS = ("window_days", "min_baseline_runs", "metrics")
 METRIC_KEYS = ("name", "path", "direction", "threshold", "alerts")
@@ -38,11 +39,14 @@ def parse_metric(entry):
     alerts = entry.get("alerts", True)
     if not isinstance(alerts, bool):
         raise ValueError(f"{where}: alerts must be true or false, got {alerts!r}")
+    threshold = float(entry.get("threshold", DEFAULT_THRESHOLD))
+    if threshold < 0:
+        raise ValueError(f"{where}: threshold must be at least 0, got {threshold!r}")
     return Metric(
         name=entry["name"],
         path=tuple(entry["path"].split(".")),
         direction=direction,
-        threshold=float(entry.get("threshold", DEFAULT_THRESHOLD)),
+        threshold=threshold,
         alerts=alerts,
     )
 
@@ -53,10 +57,20 @@ def load_trend_config(target_path):
     metrics = [parse_metric(entry) for entry in trend.get("metrics") or []]
     if not metrics:
         raise ValueError(f"{target_path}: trend.metrics is empty")
+    names = [metric.name for metric in metrics]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"{target_path}: duplicate metric names {duplicates}")
+    window_days = int(trend.get("window_days", DEFAULT_WINDOW_DAYS))
+    if window_days < 1:
+        raise ValueError(f"{target_path}: trend.window_days must be at least 1, got {window_days}")
+    min_baseline_runs = int(trend.get("min_baseline_runs", DEFAULT_MIN_BASELINE_RUNS))
+    if min_baseline_runs < 1:
+        raise ValueError(f"{target_path}: trend.min_baseline_runs must be at least 1, got {min_baseline_runs}")
     return TrendConfig(
         target_id=target_id(target_path),
-        window_days=int(trend.get("window_days", DEFAULT_WINDOW_DAYS)),
-        min_baseline_runs=int(trend.get("min_baseline_runs", DEFAULT_MIN_BASELINE_RUNS)),
+        window_days=window_days,
+        min_baseline_runs=min_baseline_runs,
         metrics=metrics,
     )
 
@@ -182,8 +196,18 @@ def commit_of(record):
     return record.get("provenance", {}).get("epp_commit") or None
 
 
+def router_config_change(baseline, previous, tonight):
+    hashes = [record["target"].get("router_config_sha256") for record in reversed(baseline)]
+    for run in (tonight, previous):
+        new = run["target"].get("router_config_sha256")
+        old = next((value for value in hashes if value and value != new), None)
+        if old and new:
+            return {"from": old, "to": new}
+    return None
+
+
 def evaluate(records, config):
-    verdict = {"test_name": config.target_id, "window_days": config.window_days, "min_baseline_runs": config.min_baseline_runs, "metrics": []}
+    verdict = {"test_name": config.target_id, "window_days": config.window_days, "min_baseline_runs": config.min_baseline_runs, "metrics": [], "router_config_change": None}
     if not records:
         verdict["status"] = "no_runs"
         return verdict
@@ -200,6 +224,7 @@ def evaluate(records, config):
     if len(baseline) < config.min_baseline_runs:
         verdict["status"] = "insufficient_baseline"
         return verdict
+    verdict["router_config_change"] = router_config_change(baseline, previous, tonight)
     verdict["metrics"] = compare(baseline, tonight, config.metrics, config.min_baseline_runs)
     apply_previous_run(verdict["metrics"], compare(baseline, previous, config.metrics, config.min_baseline_runs))
     regressed = any(result["verdict"] == "regressed" for result in verdict["metrics"])
@@ -257,12 +282,18 @@ def rule_line(verdict):
     return RULE_TEXT.format(window_days=verdict["window_days"])
 
 
+def router_config_line(change):
+    return f"Router config changed since the baseline ({change['from'][:SHORT_HASH_LENGTH]} -> {change['to'][:SHORT_HASH_LENGTH]})"
+
+
 def render_summary(verdict):
     lines = [f"## Perf trend: {verdict['test_name']}", "", status_line(verdict), "", rule_line(verdict), ""]
     if "tonight" in verdict:
         lines.append(f"Tonight: {verdict['tonight']['started_at']} (EPP commit `{verdict['tonight']['epp_commit'] or 'unknown'}`)")
     if "baseline_runs" in verdict:
         lines.append(f"Baseline: {len(verdict['baseline_runs'])} comparable successful runs")
+    if verdict["router_config_change"]:
+        lines.append(router_config_line(verdict["router_config_change"]))
     if verdict["metrics"]:
         lines += ["", metrics_table(verdict["metrics"])]
     return "\n".join(lines) + "\n"
@@ -284,6 +315,8 @@ def render_issue_body(verdict, repository, run_url=None):
         metrics_table(regressed),
         "",
     ]
+    if verdict["router_config_change"]:
+        lines.append(router_config_line(verdict["router_config_change"]))
     link = compare_link(repository, verdict.get("range_base_commit"), verdict["tonight"]["epp_commit"])
     if link:
         lines.append(f"Changes since the last run before the regression: {link}")
