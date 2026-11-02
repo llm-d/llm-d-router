@@ -228,7 +228,7 @@ whose body reached the EPP and whose ending the EPP observes.
 | `outcome` | Meaning | `reason` |
 |---|---|---|
 | `completed` | The model server answered with status 200 and the response finished. | empty |
-| `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated`. |
+| `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated` or `rejected-flow-limit`. |
 | `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
 | `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
 | `failed` | Any other error, before or after dispatch, including a response status other than 200 or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
@@ -951,7 +951,9 @@ These metrics are owned by the EPP Flow Control layer.
     early rejections where no queue item is created (e.g. rejection during controller shutdown).
 *   **Actionability:**
     *   Rising `outcome="RejectedCapacity"`: queue limits too tight or backends persistently
-        saturated - tune `maxBytes`/`maxRequests` or scale backends.
+        saturated - tune `maxBytes`/`maxRequests` or scale backends. Per-flow limit refusals are counted
+        here too; split them out with `llm_d_epp_request_outcome_total{reason="rejected-flow-limit"}` and
+        tune `maxRequestsPerFlow`/`maxBytesPerFlow`.
     *   Rising `outcome="RejectedNoEndpoints"`: the pool scaled to zero or all endpoints unregistered
         - investigate pool health and scaling.
     *   Rising `outcome="EvictedTTL"`: requests waiting longer than their TTL - investigate backend

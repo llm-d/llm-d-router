@@ -290,6 +290,8 @@ func translateFlowControlError(err error, poolEmpty func() bool) error {
 			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
 		}
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
+	case errors.Is(err, types.ErrFlowAtCapacity):
+		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonFlowLimit)}}
 	case errors.Is(err, types.ErrQueueAtCapacity):
 		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
 	case errors.Is(err, types.ErrTTLExpired):
