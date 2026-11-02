@@ -10,6 +10,7 @@ Captures the current real-time load of an endpoint as tracked by the EPP.
 - **Fields**:
   - `Tokens`: Number of tokens currently in-flight.
   - `Requests`: Number of requests currently in-flight.
+  - `CompletionsPerSecond`: Requests per second that finished on this endpoint, over the last 30 s.
 
 ## Producers
 

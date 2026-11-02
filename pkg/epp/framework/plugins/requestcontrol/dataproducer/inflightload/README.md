@@ -6,7 +6,7 @@ Tracks real-time in-flight request and token counts per endpoint by hooking into
 - `token-load-scorer`: Scores endpoints based on in-flight tokens.
 - `active-request-scorer`: Scores endpoints based on in-flight requests.
 - `concurrency-detector`: Provides admission control based on in-flight requests/tokens.
-- `prefix-cache-affinity-filter`: Uses in-flight tokens as a load gate to break stickiness.
+- `prefix-cache-affinity-filter`: Uses in-flight tokens and the completion rate as a load gate to break stickiness.
 
 ## Behavior
 
@@ -15,6 +15,8 @@ Tracks real-time in-flight request and token counts per endpoint by hooking into
     - If `addEstimatedOutputTokens` is `false` (default): For streaming requests, all tokens are released as soon as the first chunk of the response is received (`StartOfStream`), as the prefill compute is complete. For non-streaming requests (or as a safety net), tokens are released when the response completes (`EndOfStream`).
     - If `addEstimatedOutputTokens` is `true`: The prompt portion is released at `StartOfStream` (for streaming) or `EndOfStream`, and the estimated output portion is released only when the response completes (`EndOfStream`).
 - **Request Release**: In-flight request counters are always released when the response completes (`EndOfStream`).
+- **Completion Rate**: `CompletionsPerSecond` is the number of requests that finished on the endpoint over the last 30 s, divided by 30. A prefill endpoint (profile `prefill`) finishes its part of a request at `StartOfStream`; every other endpoint at `EndOfStream`. An endpoint is counted once per request; one chosen by both the prefill profile and another profile is counted at `EndOfStream`.
+- **Cross-Replica State**: With a cross-replica syncer, `Tokens`, `Requests` and `CompletionsPerSecond` are summed across EPP replicas. Without it, each replica sees only its own completions, so its rate is lower than the endpoint's total.
 
 The producer hooks three lifecycle phases:
 - **Produce**: Writes current in-flight counts to each endpoint's attributes.
