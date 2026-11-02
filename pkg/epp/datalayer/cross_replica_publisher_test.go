@@ -18,6 +18,8 @@ package datalayer
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr/funcr"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,7 +35,9 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 )
 
 type fakeCloneable struct{ id string }
@@ -738,4 +743,118 @@ func TestReleaseEndpointDispatchesDeleteOutsidePublisherLock(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("endpoint delete event was dispatched while holding the publisher lock")
 	}
+}
+
+type backgroundMergeTestCache struct {
+	value     any
+	expiresAt time.Time
+}
+
+// backgroundMergeTestSyncer blocks cache reads while retaining production aggregation.
+type backgroundMergeTestSyncer struct {
+	fakeSyncer
+	cacheMu     sync.RWMutex
+	cache       map[string]backgroundMergeTestCache
+	window      *attrprefix.PrefixHashSet
+	stateTTL    time.Duration
+	getterStart chan struct{}
+	getterGate  <-chan struct{}
+	getterOnce  sync.Once
+}
+
+func (s *backgroundMergeTestSyncer) SetBatch(ctx context.Context, spec fwkdl.CrossReplicaSpec, ids []string, _ time.Duration) map[string]error {
+	s.cacheMu.RLock()
+	window := s.window
+	s.cacheMu.RUnlock()
+	cache := make(map[string]backgroundMergeTestCache, len(ids))
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return map[string]error{id: ctx.Err()}
+		}
+		cache[id] = backgroundMergeTestCache{
+			value:     spec.Aggregate([]any{window}),
+			expiresAt: time.Now().Add(s.stateTTL),
+		}
+	}
+	s.cacheMu.Lock()
+	s.cache = cache
+	s.cacheMu.Unlock()
+	return nil
+}
+
+func (s *backgroundMergeTestSyncer) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
+	if s.getterStart != nil {
+		s.getterOnce.Do(func() { close(s.getterStart) })
+		select {
+		case <-s.getterGate:
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		}
+	}
+	s.cacheMu.RLock()
+	entry, ok := s.cache[endpointID]
+	s.cacheMu.RUnlock()
+	values := []any{spec.Read(endpointID)}
+	if ok && time.Now().Before(entry.expiresAt) {
+		values = append(values, entry.value)
+	}
+	return spec.Aggregate(values), true, nil
+}
+
+func setupBackgroundMergePublisher(ctx context.Context, t *testing.T, trigger string, count int, syncer *backgroundMergeTestSyncer) *crossReplicaPublisher {
+	t.Helper()
+	handle := fwkplugin.NewEppHandle(ctx, nil, fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
+	params := json.RawMessage(fmt.Sprintf(`{"autoTune":false,"backgroundMerge":{"trigger":%q}}`, trigger))
+	producer, err := approximateprefix.ApproxPrefixCacheFactory("publisher-background-merge", fwkplugin.StrictDecoder(params), handle)
+	require.NoError(t, err)
+	handle.SetCrossReplicaSyncer(syncer)
+	pub := testCrossReplicaPublisher(syncer, producer.(fwkdl.CrossReplicaContributor))
+	for i := range count {
+		ep := testEndpoint(fmt.Sprintf("peer-%03d", i))
+		event := fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}
+		require.True(t, pub.registerEndpoint(ep.GetMetadata().GetID()))
+		require.NoError(t, producer.(fwkdl.EndpointExtractor).Extract(ctx, event))
+		pub.handleEndpointEvent(ctx, event, producer)
+	}
+	return pub
+}
+
+func TestCrossReplicaPublisher_DoesNotWaitForBackgroundMerge(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	release := make(chan struct{})
+	defer close(release)
+	syncer := &backgroundMergeTestSyncer{
+		window:      &attrprefix.PrefixHashSet{Prompts: [][]uint64{{1, 2, 3}}},
+		stateTTL:    2 * time.Second,
+		getterStart: make(chan struct{}),
+		getterGate:  release,
+	}
+	pub := setupBackgroundMergePublisher(ctx, t, "callback", 1, syncer)
+	publishDone := make(chan struct{})
+	go func() {
+		pub.publishAll(ctx)
+		close(publishDone)
+	}()
+	select {
+	case <-syncer.getterStart:
+	case <-time.After(time.Second):
+		t.Fatal("background merge did not reach the blocked getter")
+	}
+	select {
+	case <-publishDone:
+	case <-time.After(time.Second):
+		t.Fatal("publisher waited for the background merge")
+	}
+	secondPublishDone := make(chan struct{})
+	go func() {
+		pub.publishAll(ctx)
+		close(secondPublishDone)
+	}()
+	select {
+	case <-secondPublishDone:
+	case <-time.After(time.Second):
+		t.Fatal("the next publisher cycle waited for the background merge")
+	}
+	cancel()
 }

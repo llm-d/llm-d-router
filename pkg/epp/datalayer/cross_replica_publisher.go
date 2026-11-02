@@ -40,6 +40,26 @@ const (
 	publishFailureLogInterval         = 30 * time.Second
 )
 
+// CrossReplicaPublishObserver optionally consumes a contributor's refreshed peer
+// cache. Implementations must signal background work and return promptly; they run on
+// the publisher's goroutine and may overlap request handling and endpoint events.
+type CrossReplicaPublishObserver interface {
+	// AfterCrossReplicaPublish runs after this contributor's SetBatch returns,
+	// including partial failures, before waiting for other contributors or
+	// reconciling removals. Earlier chunks can have updated their cache before
+	// this callback. Without batching, it runs after the endpoint loop completes.
+	AfterCrossReplicaPublish(context.Context)
+}
+
+func notifyCrossReplicaPublished(ctx context.Context, contributor fwkdl.CrossReplicaContributor) {
+	if ctx.Err() != nil {
+		return
+	}
+	if observer, ok := contributor.(CrossReplicaPublishObserver); ok {
+		observer.AfterCrossReplicaPublish(ctx)
+	}
+}
+
 // crossReplicaPublisher owns cross-replica publishing and endpoint lifecycle
 // coordination. One shared ticker publishes every registered endpoint.
 type crossReplicaPublisher struct {
@@ -130,6 +150,11 @@ func (p *crossReplicaPublisher) publishAll(ctx context.Context) {
 		p.publish(dispatchCtx, endpointID)
 		cancel()
 	}
+	if len(snapshot) > 0 {
+		for _, contributor := range p.contributors {
+			notifyCrossReplicaPublished(ctx, contributor)
+		}
+	}
 }
 
 func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.CrossReplicaBatchSyncer, snapshot []types.NamespacedName) {
@@ -150,9 +175,11 @@ func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.C
 	}
 	logger := log.FromContext(ctx)
 	var wg sync.WaitGroup
-	for _, spec := range specs {
+	for i, spec := range specs {
+		contributor := p.contributors[i]
 		wg.Go(func() {
 			failures := syncer.SetBatch(ctx, spec, endpointIDs, p.publishTimeout)
+			notifyCrossReplicaPublished(ctx, contributor)
 			if len(failures) == 0 {
 				return
 			}
@@ -214,9 +241,12 @@ func (p *crossReplicaPublisher) reconcileRemoved(ctx context.Context, syncer fwk
 		return
 	}
 	var wg sync.WaitGroup
-	for _, spec := range specs {
+	for i, spec := range specs {
+		contributor := p.contributors[i]
 		wg.Go(func() {
-			for endpointID, err := range syncer.SetBatch(ctx, spec, revived, p.publishTimeout) {
+			failures := syncer.SetBatch(ctx, spec, revived, p.publishTimeout)
+			notifyCrossReplicaPublished(ctx, contributor)
+			for endpointID, err := range failures {
 				p.publishFailureLog.Do(func() {
 					logger.Error(err, "cross-replica batch republish failed", "key", spec.StateKey, "endpoint", endpointID)
 				})

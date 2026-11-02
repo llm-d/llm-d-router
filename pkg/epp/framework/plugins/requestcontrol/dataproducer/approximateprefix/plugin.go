@@ -78,9 +78,13 @@ type dataProducer struct {
 	syncHashDK            plugin.DataKey
 	syncCrossReplicaState bool
 	recent                *recentWindow
-	// registeredEndpoints maps endpointID to the Endpoint pointer last seen on
-	// AddOrUpdate so Extract can ignore stale deletes for a replaced object.
-	registeredEndpoints sync.Map
+	// registeredEndpoints maps endpointID to a registration with its own lock.
+	// Removing a registration also retires its lock; snapshots retain its identity.
+	registeredEndpoints    sync.Map
+	backgroundMergeCtx     context.Context
+	backgroundMergeOnce    sync.Once
+	backgroundMergeDone    chan struct{}
+	backgroundMergeSignals chan struct{}
 	// peerMerged tracks peer prompt keys already folded into the indexer per
 	// endpoint so a stable peer window does not re-Add (and LRU-touch) on every
 	// request. Each merge replaces the set with the active peer-only window so
@@ -197,6 +201,14 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
+	if config.BackgroundMerge.Trigger == "" {
+		config.BackgroundMerge.Trigger = backgroundMergeDisabled
+	}
+	switch config.BackgroundMerge.Trigger {
+	case backgroundMergeDisabled, backgroundMergeCallback:
+	default:
+		return nil, fmt.Errorf("backgroundMerge.trigger must be disabled or callback, got %q", config.BackgroundMerge.Trigger)
+	}
 	if err := registerMetrics(handle.Metrics()); err != nil {
 		return nil, err
 	}
@@ -235,9 +247,14 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 		syncHashDK:            attrprefix.PrefixHashSetDataKey.WithNonEmptyProducerName(name),
 		syncCrossReplicaState: syncCrossReplicaState,
 		recent:                newRecentWindow(maxSynced),
+		backgroundMergeCtx:    ctx,
 	}
 
+	if config.BackgroundMerge.Trigger == backgroundMergeCallback {
+		p.backgroundMergeSignals = make(chan struct{}, 1)
+	}
 	go p.CleanUpInactivePods(ctx, handle)
+	p.startBackgroundMerge()
 
 	return p, nil
 }
@@ -368,16 +385,16 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 // matches the last processed value, the pod is skipped without snapshot or
 // prompt-key work.
 func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
+	// Digest check, merge, and record use separate per-endpoint operations.
+	// Concurrent merges may repeat Add, preserving membership and updating LRU recency.
 	if !p.syncerActive() || p.indexerInst == nil {
 		return
 	}
 	for _, pod := range pods {
-		set, ok := peekPrefixHashSet(pod, p.syncHashDK)
-		if !ok || set == nil {
+		set, endpointID, digest := p.peerPrefixHashSet(pod)
+		if set == nil {
 			continue
 		}
-		endpointID := pod.GetMetadata().ID.String()
-		digest := set.ContentDigest()
 		if p.peerMergedDigestMatches(endpointID, digest) {
 			continue
 		}
@@ -386,22 +403,7 @@ func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 			p.rememberPeerMergedDigest(endpointID, digest)
 			continue
 		}
-		local := p.recent.snapshot(endpointID)
-		localSet := make(map[string]struct{}, len(local))
-		for _, prompt := range local {
-			localSet[promptKey(prompt)] = struct{}{}
-		}
-		active := make(map[string]struct{}, len(set.Prompts))
-		for _, prompt := range set.Prompts {
-			if len(prompt) == 0 {
-				continue
-			}
-			key := promptKeyUint64(prompt)
-			if _, ok := localSet[key]; ok {
-				continue
-			}
-			active[key] = struct{}{}
-		}
+		active := p.activePeerKeys(endpointID, set.Prompts)
 		if p.peerMergedCovers(endpointID, active) {
 			p.rememberPeerMergedDigest(endpointID, digest)
 			continue
@@ -424,6 +426,35 @@ func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 		}
 		p.rememberPeerMergedDigest(endpointID, digest)
 	}
+}
+
+// peerPrefixHashSet reads the immutable syncer view and its cached content digest.
+func (p *dataProducer) peerPrefixHashSet(pod fwksched.Endpoint) (*attrprefix.PrefixHashSet, string, uint64) {
+	set, ok := peekPrefixHashSet(pod, p.syncHashDK)
+	if !ok || set == nil {
+		return nil, "", 0
+	}
+	return set, pod.GetMetadata().ID.String(), set.ContentDigest()
+}
+
+func (p *dataProducer) activePeerKeys(endpointID string, prompts [][]uint64) map[string]struct{} {
+	local := p.recent.snapshot(endpointID)
+	localSet := make(map[string]struct{}, len(local))
+	for _, prompt := range local {
+		localSet[promptKey(prompt)] = struct{}{}
+	}
+	active := make(map[string]struct{}, len(prompts))
+	for _, prompt := range prompts {
+		if len(prompt) == 0 {
+			continue
+		}
+		key := promptKeyUint64(prompt)
+		if _, ok := localSet[key]; ok {
+			continue
+		}
+		active[key] = struct{}{}
+	}
+	return active
 }
 
 // peekPrefixHashSet returns the sync attribute without cloning when the
@@ -649,33 +680,43 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 		return nil
 	}
 	endpointID := event.Endpoint.GetMetadata().ID.String()
+	registration := p.lockEndpointRegistration(endpointID)
 	switch event.Type {
 	case datalayer.EventDelete:
 		// Same pointer-identity guard as inflightload: an out-of-order delete for
 		// a replaced endpoint must not clear the live recent window.
-		if registered, ok := p.registeredEndpoints.Load(endpointID); ok && registered != event.Endpoint {
+		if registration.endpoint != nil && registration.endpoint != event.Endpoint {
 			log.FromContext(ctx).V(logutil.DEFAULT).Info("Ignoring stale delete for replaced endpoint", "endpoint", endpointID)
+			registration.mu.Unlock()
 			return nil
 		}
-		p.registeredEndpoints.Delete(endpointID)
 		if p.recent != nil {
 			p.recent.forget(endpointID)
 		}
 		p.forgetPeerMerged(endpointID)
-		return nil
+		registration.endpoint = nil
+		p.registeredEndpoints.CompareAndDelete(endpointID, registration)
 	case datalayer.EventAddOrUpdate:
-		p.registeredEndpoints.Store(endpointID, event.Endpoint)
+		registration.endpoint = event.Endpoint
 		// Placeholder for the sync attribute only when a syncer will publish.
 		// Without a syncer, installing a local-only DynamicAttribute would make
 		// every Produce snapshot and skip the local window for no benefit.
-		if !p.syncerActive() {
-			return nil
+		if p.syncerActive() {
+			event.Endpoint.GetAttributes().Put(p.syncHashDK, &datalayer.DynamicAttribute{
+				Get: func() datalayer.Cloneable {
+					return p.CrossReplicaState().Read(endpointID)
+				},
+			})
 		}
-		event.Endpoint.GetAttributes().Put(p.syncHashDK, &datalayer.DynamicAttribute{
-			Get: func() datalayer.Cloneable {
-				return p.CrossReplicaState().Read(endpointID)
-			},
-		})
+	default:
+		if registration.endpoint == nil {
+			p.registeredEndpoints.CompareAndDelete(endpointID, registration)
+		}
+	}
+	registration.mu.Unlock()
+	if event.Type == datalayer.EventAddOrUpdate {
+		// The loader wires the syncer after constructing plugins.
+		p.startBackgroundMerge()
 	}
 	return nil
 }

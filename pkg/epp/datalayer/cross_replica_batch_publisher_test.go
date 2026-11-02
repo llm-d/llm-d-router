@@ -18,19 +18,25 @@ package datalayer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr/funcr"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
 )
 
 type batchSyncer struct {
@@ -393,3 +399,104 @@ func TestReregisterDuringCleanupRepublishes(t *testing.T) {
 type batchSpecContributor struct{ spec func() fwkdl.CrossReplicaSpec }
 
 func (c batchSpecContributor) CrossReplicaState() fwkdl.CrossReplicaSpec { return c.spec() }
+
+type observedContributor struct {
+	fakeContributor
+	afterPublish func(context.Context)
+}
+
+func (c observedContributor) AfterCrossReplicaPublish(ctx context.Context) { c.afterPublish(ctx) }
+
+func TestCrossReplicaPublisher_CallbackAfterOwnBatch(t *testing.T) {
+	for _, partialFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partialFailure=%t", partialFailure), func(t *testing.T) {
+			refreshed := make(chan struct{})
+			slowStarted := make(chan struct{})
+			releaseSlow := make(chan struct{})
+			callback := make(chan struct{})
+			syncer := &batchSyncer{onBatch: func(_ context.Context, spec fwkdl.CrossReplicaSpec, ids []string, _ time.Duration) map[string]error {
+				if spec.StateKey == "slow" {
+					close(slowStarted)
+					<-releaseSlow
+					return nil
+				}
+				close(refreshed)
+				if partialFailure {
+					return map[string]error{ids[0]: errors.New("partial refresh")}
+				}
+				return nil
+			}}
+			observer := observedContributor{fakeContributor: fakeContributor{key: "observed"}, afterPublish: func(context.Context) {
+				<-refreshed
+				close(callback)
+			}}
+			pub := testCrossReplicaPublisher(syncer, observer, fakeContributor{key: "slow"})
+			pub.registerEndpoint(testEndpoint("ep").GetMetadata().GetID())
+			done := make(chan struct{})
+			go func() { defer close(done); pub.publishAll(t.Context()) }()
+			<-slowStarted
+			select {
+			case <-callback:
+			case <-time.After(time.Second):
+				t.Fatal("callback waited for another contributor")
+			}
+			select {
+			case <-done:
+				t.Fatal("cycle finished before slow contributor returned")
+			default:
+			}
+			close(releaseSlow)
+			<-done
+		})
+	}
+}
+
+func TestCrossReplicaPublisher_CallbackAfterScalarCycle(t *testing.T) {
+	syncer := &fakeSyncer{}
+	calls := 0
+	observer := observedContributor{fakeContributor: fakeContributor{key: "observed"}, afterPublish: func(context.Context) {
+		require.Len(t, syncer.sets, 2)
+		calls++
+	}}
+	pub := testCrossReplicaPublisher(syncer, observer)
+	for _, name := range []string{"a", "b"} {
+		pub.registerEndpoint(testEndpoint(name).GetMetadata().GetID())
+	}
+	pub.publishAll(t.Context())
+	require.Equal(t, 1, calls)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	notifyCrossReplicaPublished(ctx, observer)
+	require.Equal(t, 1, calls, "cancelled publishers do not start another callback")
+}
+
+func TestCrossReplicaPublisher_WarmsApproximatePrefixWithoutRequests(t *testing.T) {
+	syncer := &fakeSyncer{getOK: true, getValue: &attrprefix.PrefixHashSet{Prompts: [][]uint64{{10, 20, 30}}}}
+	handle := fwkplugin.NewEppHandle(t.Context(), nil, fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
+	params := json.RawMessage(`{"backgroundMerge":{"trigger":"callback"}}`)
+	producer, err := approximateprefix.ApproxPrefixCacheFactory("peer-test", fwkplugin.StrictDecoder(params), handle)
+	require.NoError(t, err)
+	// Syncer wiring follows factory construction, as in the config loader.
+	handle.SetCrossReplicaSyncer(syncer)
+	contributor := producer.(fwkdl.CrossReplicaContributor)
+	require.Implements(t, (*CrossReplicaPublishObserver)(nil), producer)
+	pub := testCrossReplicaPublisher(syncer, contributor)
+	ep := testEndpoint("target")
+	event := fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}
+	require.True(t, pub.registerEndpoint(ep.GetMetadata().GetID()))
+	require.NoError(t, producer.(fwkdl.EndpointExtractor).Extract(t.Context(), event))
+	pub.handleEndpointEvent(t.Context(), event, producer)
+	pub.publishAll(t.Context())
+	require.Eventually(t, func() bool {
+		raw, err := producer.(fwkplugin.StateDumper).DumpState()
+		if err != nil {
+			return false
+		}
+		var state struct{ Pods []struct{ Blocks int } }
+		return json.Unmarshal(raw, &state) == nil && len(state.Pods) == 1 && state.Pods[0].Blocks == 3
+	}, time.Second, time.Millisecond)
+	syncer.mu.Lock()
+	defer syncer.mu.Unlock()
+	require.Len(t, syncer.sets, 1)
+	require.Empty(t, syncer.sets[0].value.(*attrprefix.PrefixHashSet).Prompts, "imported state is not echoed")
+}
