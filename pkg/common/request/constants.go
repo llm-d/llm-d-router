@@ -68,6 +68,7 @@ const (
 	FieldEcho                 = "echo"
 	FieldTools                = "tools"
 	FieldToolChoice           = "tool_choice"
+	FieldResponseFormat       = "response_format"
 	FieldSamplingParams       = "sampling_params"
 	FieldN                    = "n"
 	FieldDoRemotePrefill      = "do_remote_prefill"
