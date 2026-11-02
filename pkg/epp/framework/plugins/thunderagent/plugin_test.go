@@ -86,6 +86,7 @@ func TestDumpState(t *testing.T) {
 		RunningSessions: 1,
 		IdleSessions:    1,
 		PausedSessions:  1,
+		Lanes:           3, // one agent in each of the three sessions
 		Endpoints: map[string]endpointDump{
 			"default/pod-a": {WorkingSetTokens: 500, CapacityTokens: 1000},
 		},
@@ -107,7 +108,7 @@ func TestExtractEndpointDelete(t *testing.T) {
 	s, ok := sessionOf(a, "s1")
 	require.True(t, ok)
 	require.Nil(t, s.endpoint)
-	require.Equal(t, int64(300), s.committedTokens)
+	require.Equal(t, int64(300), s.committedTokens())
 }
 
 // Removing a pod through the datalayer runtime reaches the ledger.
@@ -127,12 +128,12 @@ func TestRuntimeReleaseEndpointRemovesEndpoint(t *testing.T) {
 	require.Equal(t, float64(-1), endpointTokens(a, "default/pod-a"))
 }
 
-// PreRequest stores each turn's estimate under inflightEstimateKey for its
-// later hooks. The data layer drops undeclared request-attribute writes and
-// fails the request, so the key must be declared.
-func TestProducesInflightEstimate(t *testing.T) {
+// PreRequest stores each turn's charge under turnChargeKey for its later
+// hooks. The data layer drops undeclared request-attribute writes and fails
+// the request, so the key must be declared.
+func TestProducesTurnCharge(t *testing.T) {
 	a := newTestAgent(testConfig())
-	produced, ok := a.Produces()[inflightEstimateKey]
+	produced, ok := a.Produces()[turnChargeKey]
 	require.True(t, ok)
-	require.IsType(t, int64(0), produced)
+	require.IsType(t, turnCharge{}, produced)
 }

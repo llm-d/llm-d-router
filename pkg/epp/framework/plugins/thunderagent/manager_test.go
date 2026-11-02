@@ -34,7 +34,7 @@ func TestBindMovesSession(t *testing.T) {
 	b := m.ensureEndpointLocked("default/ep-b", 1000, t0)
 
 	s := m.bindLocked("s1", a)
-	s.committedTokens = 300
+	s.lanes = []lane{{committed: 300}}
 	require.Same(t, s, m.bindLocked("s1", a))
 
 	require.Same(t, s, m.bindLocked("s1", b))
@@ -86,13 +86,13 @@ func TestSnapshot(t *testing.T) {
 	b := m.ensureEndpointLocked("default/ep-b", 2000, t0)
 
 	running := m.bindLocked("running", a)
-	running.inflightTokens = 100
+	running.lanes = []lane{{inflight: 100}}
 	running.lastActivity = t0
 	idle := m.bindLocked("idle", a)
-	idle.committedTokens = 300
+	idle.lanes = []lane{{committed: 300}}
 	idle.lastActivity = t0
 	other := m.bindLocked("other", b)
-	other.committedTokens = 50
+	other.lanes = []lane{{committed: 50}}
 	other.lastActivity = t0
 
 	snap := m.snapshot(t0)
@@ -142,9 +142,9 @@ func TestSessionClass(t *testing.T) {
 // The accounting rule: a live reservation counts its reserved size, a paused
 // session counts nothing, any other session its full size.
 func TestFootprint(t *testing.T) {
-	s := &session{committedTokens: 300, inflightTokens: 500, turnCount: 1}
+	s := &session{lanes: []lane{{committed: 300, inflight: 500}}, turnCount: 1}
 	require.Equal(t, float64(500), s.footprint(t0), "in-flight estimate above the committed total")
-	s.inflightTokens = 0
+	s.lanes[0].inflight = 0
 	require.Equal(t, float64(300), s.footprint(t0))
 
 	s.paused = true
@@ -159,7 +159,7 @@ func TestFootprint(t *testing.T) {
 func TestReclaimable(t *testing.T) {
 	m := newSessionManager(testConfig())
 	idle := func() *session {
-		return &session{committedTokens: 300, turnCount: 1, lastResponseAt: t0}
+		return &session{lanes: []lane{{committed: 300}}, turnCount: 1, lastResponseAt: t0}
 	}
 	later := t0.Add(time.Minute)
 	m.idleLease = time.Minute
@@ -169,7 +169,7 @@ func TestReclaimable(t *testing.T) {
 
 	m.idleLease = 0
 	s := idle()
-	s.inflightTokens = 100
+	s.lanes[0].inflight = 100
 	require.False(t, m.reclaimableLocked(s, later), "turn in flight")
 	s = idle()
 	s.paused = true
@@ -189,7 +189,7 @@ func TestIdleSessionsSkipQueued(t *testing.T) {
 	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
 	for id, tokens := range map[string]int64{"s1": 300, "s2": 200} {
 		s := m.bindLocked(id, ep)
-		s.committedTokens, s.turnCount, s.lastResponseAt = tokens, 1, t0
+		s.lanes, s.turnCount, s.lastResponseAt = []lane{{committed: tokens}}, 1, t0
 	}
 	later := t0.Add(time.Minute)
 
@@ -208,7 +208,7 @@ func TestReclaimLongestIdleFirst(t *testing.T) {
 	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
 	for id, idleFor := range map[string]time.Duration{"old": 3 * time.Minute, "mid": 2 * time.Minute, "new": time.Minute} {
 		s := m.bindLocked(id, ep)
-		s.committedTokens, s.turnCount = 300, 1
+		s.lanes, s.turnCount = []lane{{committed: 300}}, 1
 		s.lastResponseAt = t0.Add(-idleFor)
 	}
 
@@ -245,9 +245,9 @@ func TestSnapshotCountsPaused(t *testing.T) {
 	m := newSessionManager(testConfig())
 	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
 	idle := m.bindLocked("idle", ep)
-	idle.committedTokens, idle.turnCount, idle.lastActivity = 300, 1, t0
+	idle.lanes, idle.turnCount, idle.lastActivity = []lane{{committed: 300}}, 1, t0
 	paused := m.bindLocked("paused", ep)
-	paused.committedTokens, paused.turnCount, paused.lastActivity, paused.paused = 200, 1, t0, true
+	paused.lanes, paused.turnCount, paused.lastActivity, paused.paused = []lane{{committed: 200}}, 1, t0, true
 
 	snap := m.snapshot(t0)
 	require.Equal(t, 1, snap.idle)

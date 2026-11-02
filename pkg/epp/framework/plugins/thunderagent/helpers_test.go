@@ -18,6 +18,7 @@ package thunderagent
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -106,7 +107,11 @@ func sessionOf(a *ThunderAgent, id string) (session, bool) {
 	if !ok {
 		return session{}, false
 	}
-	return *s, true
+	// Clone the lanes: a shallow copy aliases the live slice, so a caller
+	// reading the snapshot after the lock is dropped would see later writes.
+	snapshot := *s
+	snapshot.lanes = slices.Clone(s.lanes)
+	return snapshot, true
 }
 
 func endpointTokens(a *ThunderAgent, id string) float64 {

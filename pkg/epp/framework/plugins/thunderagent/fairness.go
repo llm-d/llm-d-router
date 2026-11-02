@@ -179,7 +179,6 @@ func (a *ThunderAgent) roomLocked(p *endpointState, now time.Time) float64 {
 // their room. Returns false when the candidate must hold.
 func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpointState]float64) bool {
 	s := a.mgr.sessions[c.id]
-	var committed, inflight float64
 	switch {
 	case c.id == "":
 		// Anonymous traffic is not tracked and passes through.
@@ -189,14 +188,17 @@ func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpoint
 		c.class = classNew
 	default:
 		c.class = s.class()
-		committed = float64(s.committedTokens)
-		inflight = float64(s.inflightTokens)
 	}
 
-	// The new turn resends the whole history, so its estimate is the
-	// session's size from now on; committed tokens are the floor. PreRequest
-	// adds the estimate to the turns already in flight.
-	c.tokens = max(committed, inflight+float64(max(estimateTokens(c.sizeBytes), 1)))
+	// The new turn resends the whole history, so within its own lane the
+	// estimate is the session's size from now on and the lane's committed
+	// total is the floor. Lanes of other agents add to it.
+	estimate := max(estimateTokens(c.sizeBytes), 1)
+	if s != nil {
+		c.tokens = s.sizeWithNewTurn(estimate)
+	} else {
+		c.tokens = lane{inflight: estimate}.size()
+	}
 	if c.class == classAdmitted || len(rooms) == 0 {
 		return true
 	}

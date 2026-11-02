@@ -34,11 +34,31 @@ cannot drift apart:
 | `defaultPriorityBand.fairnessPolicyRef` | the admission gate |
 | request lifecycle (`PreRequest`, `ResponseBody`) | token accounting, pod binding |
 
-Ledger: each session's KV footprint is the larger of the
-`usage.total_tokens` of its last completed turn and the sum of the byte
-estimates of its turns in flight (each turn resends the history, so the two
-describe the same KV). Capacity is `block_size * num_gpu_blocks` scraped from the engine, with
-a configured fallback.
+Ledger: a session is accounted in lanes, one per agent. Within a lane the
+footprint is the larger of the `usage.total_tokens` of its last completed turn
+and the byte estimate of its turn in flight, because a turn resends the history
+the committed total already covers. The session's footprint is the sum of its
+lanes, because its agents hold separate histories on the pod. Capacity is
+`block_size * num_gpu_blocks` scraped from the engine, with a configured
+fallback.
+
+A session has more than one lane when a client runs sub-agents under the
+parent's session id: they work on their own histories in parallel, so a turn
+that overlaps another cannot belong to the same conversation and takes a lane of
+its own. Once nothing is in flight the lanes fold into one holding the largest
+total, because overlap is the only evidence the ledger has that a session
+carries several agents and that evidence is gone with it. Sequential turns
+therefore run in one lane, and an agent that compacts its history reports a
+smaller total and its footprint follows it down.
+
+What this costs. No client marks which agent sent a request, so while several
+turns are in flight their lanes add up even when they belong to one
+conversation, which a retry or a pipelining client produces; the footprint is
+then too large for as long as the turns overlap, and holds turns that would have
+fit. After the fold, a session with several resident sub-agents reports its
+largest history rather than their sum, so it is under-counted by the smaller
+agents. Reporting the sum needs an identifier for the agent behind each
+request, which no client sends today.
 
 When a pod leaves the pool, the plugin drops it from the ledger; its sessions
 keep their footprint and move to the pod that serves their next turn.
@@ -105,8 +125,9 @@ low utilization is the KV-thrashing signature),
 `endpoint_capacity_tokens{endpoint}`, `sessions{state}`, `releases_total{class}`,
 `delayed_dispatches_total{class}`, `pauses_total`, `resumes_total`,
 `starvation_promotions_total`. To verify the gate engaged during a run,
-`pauses_total` and `delayed_dispatches_total` must be greater than zero. Session counts
-and each pod's working set and capacity are also available from the
+`pauses_total` and `delayed_dispatches_total` must be greater than zero. Session
+counts, the number of agent lanes, and each pod's working set and capacity are
+also available from the
 `/debug/plugins/state` endpoint. Session ids never appear in metrics, state
 dumps or logs.
 
@@ -121,6 +142,9 @@ dumps or logs.
   its room or the idle TTL drops it, so the working set gauge overestimates
   by recently ended sessions. An end-of-session marker is a candidate
   follow-up once clients can send one reliably.
+- A session's footprint is the largest history among its agents, not their
+  sum, so a pod serving sessions with several resident sub-agents is
+  under-counted. Summing them needs a per-agent identifier from the client.
 - Prefill/decode disaggregation is not supported: every pod the flow
   controller reports enters one ledger, so a new session can be reserved
   onto a prefill pod.

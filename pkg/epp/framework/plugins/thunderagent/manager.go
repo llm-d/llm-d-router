@@ -62,15 +62,40 @@ func (c sessionClass) String() string {
 	}
 }
 
+// lane holds the accounting of one agent inside a session. Turns that overlap
+// in time belong to different agents, because a turn cannot start before the
+// previous turn of its own conversation answers, so a lane serves at most one
+// turn at a time and its totals are never shared between agents.
+type lane struct {
+	// committed is usage.total_tokens of the last turn settled in this lane.
+	committed int64
+	// inflight is the estimate of the turn in flight in this lane, zero when
+	// the lane is free.
+	inflight int64
+}
+
+// size is the lane's KV footprint in tokens. The turn in flight resends the
+// history the committed total already covers, so the larger of the two is
+// taken.
+func (l lane) size() float64 {
+	if f := float64(l.inflight); f > float64(l.committed) {
+		return f
+	}
+	return float64(l.committed)
+}
+
+func (l lane) free() bool {
+	return l.inflight == 0
+}
+
 // session is one agent trajectory, identified by its agent-identity session id.
 // All fields are guarded by sessionManager.mu.
 type session struct {
 	endpoint *endpointState
-	// committedTokens is usage.total_tokens of the last completed turn.
-	committedTokens int64
-	// inflightTokens is the sum of the estimates of the session's turns in
-	// flight.
-	inflightTokens int64
+	// lanes holds one entry per agent observed in this session: the main agent
+	// and any sub-agent that ran in parallel with it. Their count is bounded by
+	// the session's peak number of simultaneous turns.
+	lanes          []lane
 	lastActivity   time.Time
 	lastResponseAt time.Time
 	turnCount      int64
@@ -85,14 +110,122 @@ type session struct {
 	reservedUntil  time.Time
 }
 
-// size is the session's KV footprint in tokens. Each turn resends the whole
-// history, so the committed total and the in-flight estimates cover the same
-// KV and the larger one is taken.
+// size is the session's KV footprint in tokens: its agents hold separate
+// histories on the pod, so their lanes add up.
 func (s *session) size() float64 {
-	if f := float64(s.inflightTokens); f > float64(s.committedTokens) {
-		return f
+	var total float64
+	for _, l := range s.lanes {
+		total += l.size()
 	}
-	return float64(s.committedTokens)
+	return total
+}
+
+// sizeWithNewTurn is the footprint the session would have once a turn of the
+// given estimate is charged, which is what the admission gate weighs before
+// PreRequest picks the lane. Both read the same rule through this method.
+func (s *session) sizeWithNewTurn(estimate int64) float64 {
+	i := s.laneFor()
+	var total float64
+	for j, l := range s.lanes {
+		if j == i {
+			l.inflight += estimate
+		}
+		total += l.size()
+	}
+	if i == len(s.lanes) {
+		total += lane{inflight: estimate}.size()
+	}
+	return total
+}
+
+// laneFor returns the lane a turn takes: the first free one, or len(s.lanes)
+// when every lane is busy, which opens a lane for a turn that overlaps the
+// others and so belongs to another agent. Which free lane a turn reuses does
+// not matter, because collapse folds the free lanes together as soon as the
+// session falls quiet.
+func (s *session) laneFor() int {
+	for i, l := range s.lanes {
+		if l.free() {
+			return i
+		}
+	}
+	return len(s.lanes)
+}
+
+// collapse folds a quiet session's lanes into one holding the largest
+// committed total.
+//
+// Overlap is the only evidence the ledger has that a session carries several
+// agents, and it is gone once nothing is in flight. Keeping a lane past that
+// point would hold a history no later turn can be matched to, so a session
+// that opened lanes once would count them for as long as it stayed active:
+// its turns refresh lastActivity, so the idle sweep never reaches it. Folding
+// to the largest total keeps the biggest agent's history, which is the part
+// the engine is most likely still holding.
+func (s *session) collapse() {
+	if len(s.lanes) <= 1 {
+		return
+	}
+	var largest int64
+	for _, l := range s.lanes {
+		if !l.free() {
+			return
+		}
+		largest = max(largest, l.committed)
+	}
+	s.lanes = s.lanes[:1]
+	s.lanes[0] = lane{committed: largest}
+}
+
+// inflightTokens is the estimate of every turn the session has in flight.
+func (s *session) inflightTokens() int64 {
+	var total int64
+	for _, l := range s.lanes {
+		total += l.inflight
+	}
+	return total
+}
+
+// committedTokens is the settled total across the session's agents.
+func (s *session) committedTokens() int64 {
+	var total int64
+	for _, l := range s.lanes {
+		total += l.committed
+	}
+	return total
+}
+
+// charge adds a turn's estimate to its lane and returns the lane's index, so
+// the matching settle lands on the lane that was charged.
+func (s *session) charge(estimate int64) int {
+	i := s.laneFor()
+	if i == len(s.lanes) {
+		s.lanes = append(s.lanes, lane{})
+	}
+	s.lanes[i].inflight += estimate
+	return i
+}
+
+// settle removes a turn's estimate from its lane and replaces that lane's
+// committed total, keeping the replace semantics one agent needs: a compacted
+// history reports a smaller total and the footprint follows it down.
+//
+// Lanes are never removed, because turns in flight hold their lane index: a
+// free lane is a slot the session's next turn reuses, and the whole session is
+// dropped by the idle sweep.
+func (s *session) settle(index int, estimate, total int64) {
+	if index < 0 || index >= len(s.lanes) {
+		return
+	}
+	l := &s.lanes[index]
+	l.inflight = max(l.inflight-estimate, 0)
+	switch {
+	case total > 0:
+		l.committed = total
+	case estimate > l.committed:
+		l.committed = estimate
+	}
+	s.collapse()
 }
 
 // class ranks the session for admission. The order of the checks matters: a
@@ -143,7 +276,7 @@ func (p *endpointState) occupancy(now time.Time) float64 {
 // another turn: it is admitted and counted in full, has no turn in flight,
 // and has been idle for at least the idle lease since its last response.
 func (m *sessionManager) reclaimableLocked(s *session, now time.Time) bool {
-	return s.turnCount > 0 && !s.paused && !now.Before(s.reservedUntil) && s.inflightTokens == 0 &&
+	return s.turnCount > 0 && !s.paused && !now.Before(s.reservedUntil) && s.inflightTokens() == 0 &&
 		now.Sub(s.lastResponseAt) >= m.idleLease
 }
 
@@ -273,6 +406,9 @@ func estimateTokens(sizeBytes int) int64 {
 type gaugeSnapshot struct {
 	endpoints             map[string]endpointGauge
 	running, idle, paused int
+	// lanes is the total across sessions, so the state dump shows how many
+	// agents the ledger is tracking without naming any of them.
+	lanes int
 }
 
 type endpointGauge struct {
@@ -291,7 +427,7 @@ func (m *sessionManager) sweep(now time.Time) {
 		if now.Before(s.reservedUntil) {
 			continue
 		}
-		if s.inflightTokens > 0 {
+		if s.inflightTokens() > 0 {
 			continue
 		}
 		if now.Sub(s.lastActivity) <= m.ttl {
@@ -329,10 +465,11 @@ func (m *sessionManager) snapshot(now time.Time) gaugeSnapshot {
 
 	snap := gaugeSnapshot{endpoints: make(map[string]endpointGauge, len(m.endpoints))}
 	for _, s := range m.sessions {
+		snap.lanes += len(s.lanes)
 		switch {
 		case s.paused:
 			snap.paused++
-		case s.inflightTokens > 0:
+		case s.inflightTokens() > 0:
 			snap.running++
 		default:
 			snap.idle++
