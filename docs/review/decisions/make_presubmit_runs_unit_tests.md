@@ -4,7 +4,7 @@ title: make presubmit runs unit tests
 description: "The top-level make presubmit target includes unit test execution so local pre-merge verification covers behavioral regressions alongside static lints."
 tags: ["testing-and-ci", presubmit, "nvc-01"]
 status: stable
-verified: { by: "human:conliu", at: "2026-10-29T00:00:00Z" }
+verified: { by: "human:liu-cong", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Context

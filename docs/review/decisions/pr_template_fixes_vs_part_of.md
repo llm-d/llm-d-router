@@ -4,7 +4,7 @@ title: Pull request template distinguishes Fixes from Part of
 description: "The pull request template distinguishes auto-closing Fixes references for complete resolutions from non-closing Part of references for multi-PR work."
 tags: ["scope-and-process", "pull-requests", github]
 status: stable
-verified: { by: "human:conliu", at: "2026-10-29T00:00:00Z" }
+verified: { by: "human:liu-cong", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Context

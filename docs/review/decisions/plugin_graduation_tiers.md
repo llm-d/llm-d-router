@@ -4,7 +4,7 @@ title: "Plugin graduation path across Alpha, Beta, and Stable tiers"
 description: "Every new plugin starts at Alpha with no compatibility guarantee, graduates to Beta with two-minor-version compatibility, and reaches Stable with within-major compatibility."
 tags: ["plugin-framework-contracts", "configuration-helm-and-compatibility", lifecycle]
 status: stable
-verified: { by: "human:conliu", at: "2026-10-29T00:00:00Z" }
+verified: { by: "human:liu-cong", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Context

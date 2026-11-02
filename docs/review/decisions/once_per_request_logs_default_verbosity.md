@@ -4,7 +4,7 @@ title: "Once-per-request operational logs use V(logging.DEFAULT)"
 description: "Once-per-request operational log entries use logger.V(logging.DEFAULT).Info rather than bare logger.Info."
 tags: [observability, logging, "agents-md"]
 status: stable
-verified: { by: "human:conliu", at: "2026-10-29T00:00:00Z" }
+verified: { by: "human:liu-cong", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Context

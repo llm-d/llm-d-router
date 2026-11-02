@@ -4,7 +4,7 @@ title: GitHub CI checks are the source of truth for commit requirements
 description: "Enforced GitHub CI workflows define commit sign-off and formatting requirements rather than duplicate prose rules in contributor docs."
 tags: ["scope-and-process", ci, commits]
 status: stable
-verified: { by: "human:conliu", at: "2026-10-29T00:00:00Z" }
+verified: { by: "human:liu-cong", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Context
