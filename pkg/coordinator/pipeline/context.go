@@ -17,9 +17,9 @@ limitations under the License.
 package pipeline
 
 import (
+	"context"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -231,17 +231,14 @@ type RequestContext struct {
 // calls Cancel when decode has not recorded an outcome. The first of
 // Release and Cancel runs its callback and later calls do nothing.
 type PrefillDrain struct {
-	done    chan struct{}
-	err     error
-	release func()
-	cancel  func()
-
-	outcomeOnce sync.Once
+	done   chan struct{}
+	err    error
+	cancel context.CancelFunc
 }
 
-// NewPrefillDrain requires non-nil release and cancel callbacks.
-func NewPrefillDrain(release, cancel func()) *PrefillDrain {
-	return &PrefillDrain{done: make(chan struct{}), release: release, cancel: cancel}
+// NewPrefillDrain requires a non-nil context cancellation function.
+func NewPrefillDrain(cancel context.CancelFunc) *PrefillDrain {
+	return &PrefillDrain{done: make(chan struct{}), cancel: cancel}
 }
 
 // Done is closed when the drain ends.
@@ -250,13 +247,7 @@ func (d *PrefillDrain) Done() <-chan struct{} { return d.done }
 // Err returns the drain result. Callers must first receive from Done.
 func (d *PrefillDrain) Err() error { return d.err }
 
-func (d *PrefillDrain) Release() {
-	d.outcomeOnce.Do(d.release)
-}
-
-func (d *PrefillDrain) Cancel() {
-	d.outcomeOnce.Do(d.cancel)
-}
+func (d *PrefillDrain) Cancel() { d.cancel() }
 
 // Complete records the drain result. The drain worker must call it exactly once.
 func (d *PrefillDrain) Complete(err error) {

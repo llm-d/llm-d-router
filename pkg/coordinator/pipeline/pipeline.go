@@ -149,6 +149,12 @@ func NewWithForwardResponseHeaders(steps []Step, headers []string) (*Pipeline, e
 
 // Execute runs all steps in order. Any error aborts immediately.
 func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
+	defer func() {
+		if reqCtx.PrefillDrain != nil {
+			reqCtx.PrefillDrain.Cancel()
+			reqCtx.PrefillDrain = nil
+		}
+	}()
 	logger := log.FromContext(ctx)
 
 	ctx, span := tracing.Tracer(TracerScope).Start(ctx, pipelineSpanName,
@@ -219,10 +225,6 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		started[name] = true
 		logger.V(logutil.TRACE).Info("step starting", "step", name)
 		err := p.runStep(ctx, reqCtx, step, idx, timings)
-		if name == "prefill" && reqCtx.PrefillDrain != nil {
-			defer func() { reqCtx.PrefillDrain = nil }()
-			defer reqCtx.PrefillDrain.Cancel()
-		}
 		if err != nil {
 			if errors.Is(err, ErrPipelineDone) {
 				// Clean early exit (e.g. conditional-decode cache hit); not an error.
