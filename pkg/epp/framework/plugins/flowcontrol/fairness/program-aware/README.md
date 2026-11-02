@@ -20,14 +20,14 @@ Under `las`:
 Under `turn-priority`:
 
 * **Sessions are long and prefix reuse dominates cost**: Multi-turn sessions share a growing prefix, and dispatching the deepest ones keeps that prefix resident instead of re-prefilling it.
-* **Fairness IDs identify sessions**: Traffic carries a session header, so one fairness ID is one session — a bare session ID or a composed `<tenant>/<session>` ID. This strategy is not the right choice for a pool whose requests share a single ID.
+* **Fairness IDs identify sessions**: Traffic carries a session header, so one fairness ID is one session: a bare session ID or a composed `<tenant>/<session>` ID. This strategy is not the right choice for a pool whose requests share a single ID.
 
 ## What it does
 
 * **Identifies programs** via the fairness ID the Director derives for each request: the fairness ID header, the agent-identity attribute, or their composition when both are present and `requestHandler.composeFairnessIDs` is enabled.
 * **Tracks per-program metrics** through the request lifecycle: queue wait time, dispatched count, in-flight count, last completion time, and (LAS) attained service in weighted tokens.
 * **Selects a queue to dispatch from** using the configured strategy: `las` (Least Attained Service), where programs with the lowest accumulated service score highest, or `turn-priority`, which favors deeper sessions.
-* **Keys one queue per program**: every fairness ID is one queue, so a composed `<tenant>/<session>` ID schedules per session without changing the strategies. A bare ID is one queue, exactly as before.
+* **Keys one queue per program**: every fairness ID is one queue, so a composed `<tenant>/<session>` ID schedules per session without changing the strategies. A bare ID is one queue.
 * **Decays attained service** in wall-clock time so a long-idle program is not penalized indefinitely. Decay is applied lazily whenever a program's service is read or accumulated, so it does not depend on the program being visited by the dispatch loop. The rate is set by an explicit half-life.
 * **Evicts idle program state** on a periodic sweep so per-program memory and Prometheus label series do not accumulate forever.
 
@@ -65,7 +65,7 @@ The default of `120` leaves a margin over the longest gap observed within an act
 
 Under contention a prefix is evicted by capacity pressure while its program is still active, and ordering by turn depth is what keeps those prefixes resident. A low prefix-cache hit rate is therefore weak evidence for lowering this value.
 
-This strategy requires one fairness ID per session. It reads a program's dispatched count as the depth of a single conversation, which holds only when the ID identifies one session: a bare session ID (the `agent-identity` attribute that the request-header plugin derives from a session header), or a composed `<tenant>/<session>` ID when the request also carries a tenant fairness ID.
+This strategy requires one fairness ID per session. It reads a program's dispatched count as the depth of a single conversation, which holds only when the ID identifies one session: a per-session `x-llm-d-inference-fairness-id` header, the `agent-identity` attribute that the request-header plugin derives from a session header, or a composed `<tenant>/<session>` ID when `requestHandler.composeFairnessIDs` is enabled and the request also carries a tenant fairness ID. With composition disabled, a request carrying both resolves to the tenant header and its sessions share one count.
 
 Requests carrying neither share `default-flow`. Its dispatched count is the sum over unrelated clients, so it is not a session depth, it grows with total unlabeled traffic, and it rarely stays idle long enough for the inactivity reset to fire. Ordering it against real sessions by that count is not meaningful, and a pool that mixes labeled and unlabeled traffic gives `default-flow` a depth no single session can match. Route unlabeled traffic to a priority band on a different fairness policy.
 
@@ -77,11 +77,11 @@ Composition is opt-in. A pool that stamps each tenant with a fairness ID header,
 <tenant-fairness-id>/<agent-session-id>    e.g. acme/1f3b-...
 ```
 
-and flow control keys one queue per composed ID. Both strategies then run unchanged on those per-session queues: `las` accumulates attained service per session, and `turn-priority` counts dispatched requests per session, which is what makes a session's depth meaningful once tenants are stamped. The tenant prefix also keeps sessions from different tenants distinct — two tenants reusing the same session identifier do not share a flow — and stays visible in the `fairness_id` metric label.
+and flow control keys one queue per composed ID. Both strategies then run on those per-session queues: `las` accumulates attained service per session, and `turn-priority` counts dispatched requests per session, which is what makes a session's depth meaningful once tenants are stamped. The tenant prefix also keeps sessions from different tenants distinct, so two tenants that reuse the same session identifier do not share a flow, and it stays visible in the `fairness_id` metric label.
 
-Composition is off by default so tenant-stamped pools that do not need per-session flows keep header-wins behavior: the fairness-ID header keys the flow on its own and the session identity is not part of the flow key. Enable it only when the pool's fairness policy should treat a session as the scheduling unit; see [Why choose this policy?](#why-choose-this-policy).
+With composition off (the default), the fairness-ID header keys the flow on its own and the session identity is not part of the flow key. Enable it only when the pool's fairness policy should treat a session as the scheduling unit; see [Why choose this policy?](#why-choose-this-policy).
 
-Bare IDs need no migration: a request carrying only one identity keeps it as its fairness ID and is one queue, exactly as before. The separator is `/` (`metadata.FairnessIDTenantSeparator`). A fairness-ID header containing the separator is never composed, because the tenant/session split would be ambiguous; such a request keeps the header as its fairness ID. Tenant IDs must not contain the separator.
+A request carrying only one identity keeps it as its fairness ID and is one queue. The separator is `/` (`metadata.FairnessIDTenantSeparator`). In a composed ID the tenant part is percent-encoded: `%` becomes `%25` and `/` becomes `%2F`, so the first segment is always the whole tenant and two tenants cannot compose to the same key. Agent session IDs may contain the separator.
 
 The unit of scheduling is the session. There is no tenant-aggregate budgeting: a tenant running more concurrent sessions competes with more queues. If tenants must be treated as single competitors regardless of session count, that needs a hierarchical policy, which this plugin does not implement.
 

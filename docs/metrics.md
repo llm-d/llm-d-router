@@ -625,8 +625,10 @@ included. Requests that fail earlier, such as a body that cannot be parsed, are 
 
 `source` is one of:
 
-- `header`: the `x-llm-d-inference-fairness-id` header, or its deprecated name
-  `x-gateway-inference-fairness-id`.
+- `header`: the `x-llm-d-inference-fairness-id` header, its deprecated name
+  `x-gateway-inference-fairness-id`, or the ID derived from it (percent-encoded, and
+  composed with the agent identity when present) when `requestHandler.composeFairnessIDs`
+  is enabled.
 - `agent_identity`: no header, and the agent identity plugin supplied an ID.
 - `default`: neither, so the request uses `default-flow`.
 
@@ -638,6 +640,13 @@ The current header name is read first. If it is present, even with an empty valu
 name is ignored, and an empty value falls back to agent identity or `default-flow`. A gateway in
 front of the EPP should set the fairness ID itself and overwrite any client-supplied value under
 both header names.
+
+When `requestHandler.composeFairnessIDs` is enabled, a request carrying both the header and an
+agent identity is recorded under the composed `<tenant>/<session>` ID with `source="header"`. The
+tenant part is percent-encoded (`%` to `%25`, `/` to `%2F`), so the first segment is always the
+whole tenant. On such a pool, `llm_d:epp_named_fairness_ids:count5m` counts distinct composed IDs,
+which are sessions rather than tenants, and `llm_d:epp_agent_sessions:count5m` does not count
+tenant-stamped sessions because those requests resolve with `source="header"`.
 
 The `fairness_id` label uses the shared cap described in [Metrics catalog](#metrics-catalog).
 Scheduling and Flow Control always use the original ID; only the label is folded. Per replica:
@@ -664,9 +673,9 @@ distinct fairness IDs per pool, deduplicated across EPP replicas:
 
 | Rule | Value |
 |---|---|
-| `llm_d:epp_named_fairness_ids:count5m` | Header IDs that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
+| `llm_d:epp_named_fairness_ids:count5m` | Header IDs, including composed `<tenant>/<session>` IDs, that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
 | `llm_d:epp_named_fairness_ids:incomplete5m` | 1 when header IDs were folded in the same window, so the count is a lower bound; otherwise 0. |
-| `llm_d:epp_agent_sessions:count5m` | Agent identity IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source="agent_identity"}` increases. |
+| `llm_d:epp_agent_sessions:count5m` | Agent identity IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source="agent_identity"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
 
 The rules group by `namespace` and `inference_pool`, so the scrape must attach a `namespace`
 label. Change `5m` for a different window. An ID is missed when all of its requests went to a

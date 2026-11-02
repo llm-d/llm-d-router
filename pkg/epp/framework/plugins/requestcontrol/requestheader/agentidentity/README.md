@@ -3,7 +3,7 @@
 **Type:** `agent-identity`
 **Interfaces:** `requestcontrol.RequestHeaderProcessor`, `plugin.ProducerPlugin`
 
-Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. The Director then uses this attribute when deriving `FairnessID`, so every turn of an agent session lands in the same flow-control fairness queue — composed with the tenant fairness ID as `<tenant>/<session>` when the request also carries one.
+Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. The Director then uses this attribute when deriving `FairnessID`, so every turn of an agent session lands in the same flow-control fairness queue. When `requestHandler.composeFairnessIDs` is enabled (off by default) and the request also carries a tenant fairness ID, the Director composes the two into `<tenant>/<session>`.
 
 ## What It Does
 
@@ -21,12 +21,12 @@ The plugin stores the identity as a request attribute only — it does not set `
 2. If nothing matches, no attribute is stored — the Director falls through to `metadata.DefaultFairnessID`, so the request is still admitted, just into the shared default queue.
 
 After the plugin returns, the Director derives `FairnessID`:
-1. If `requestHandler.composeFairnessIDs` is enabled, both the `x-llm-d-inference-fairness-id` header and the `"agent-identity"` attribute are set, and the header does not contain `/` → compose them as `<fairness-header>/<agent-identity>`, so flow control keys one queue per session while the tenant stays part of the fairness ID and metric labels.
-2. Else if the `x-llm-d-inference-fairness-id` header is set → use it as FairnessID alone. This is also the path when composition is disabled or the header contains `/`.
-3. Else if the `"agent-identity"` attribute exists → copy it to FairnessID.
-4. Else → `"default-flow"`.
+1. If `requestHandler.composeFairnessIDs` is enabled and the `x-llm-d-inference-fairness-id` header is set, percent-encode `%` (`%25`) and `/` (`%2F`) in the header, then append `/<agent-identity>` when the attribute is non-empty. The first path segment is therefore always the whole tenant, and flow control keys one queue per session while the tenant stays part of the fairness ID and metric labels.
+2. Else if the `x-llm-d-inference-fairness-id` header is set (composition disabled), use it as FairnessID as sent.
+3. Else if the `"agent-identity"` attribute exists, copy it to FairnessID.
+4. Else, use `"default-flow"`.
 
-Composition is off by default. Tenant fairness IDs must not contain `/` (the composition separator); agent session IDs may.
+Agent session IDs may contain `/`.
 
 The plugin is stateless and safe under concurrent use.
 

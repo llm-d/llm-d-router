@@ -391,8 +391,8 @@ type RequestHandlerConfig struct {
 	// fairness-ID header (the tenant identity) with its agent-identity attribute
 	// (the session identity) into a single "<tenant>/<session>" flow key. It is
 	// off by default: the fairness-ID header wins and the session identity does
-	// not key the flow. A fairness-ID header containing "/" is never composed,
-	// because the tenant part would be ambiguous.
+	// not key the flow. When enabled, "%" and "/" in the header are
+	// percent-encoded so the tenant part stays unambiguous.
 	ComposeFairnessIDs bool `json:"composeFairnessIDs,omitempty"`
 
 	// +optional

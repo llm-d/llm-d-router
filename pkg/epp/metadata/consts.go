@@ -76,12 +76,13 @@ const (
 	FlowQueueDurationHeaderKey = "x-llm-d-flow-queue-duration-ms"
 	// FairnessIDTenantSeparator separates the tenant prefix from the program/session
 	// identity in a composed fairness ID: "<tenant>/<session>". The Director builds such
-	// IDs only when requestHandler.composeFairnessIDs is enabled, a request carries both
-	// a fairness-ID header (the tenant part) and an agent-identity attribute (the session
-	// part), and the header does not already contain the separator. Composition keeps
-	// the tenant visible for isolation and metric labels while flow control keys one
-	// queue per session. Session IDs may contain the separator; tenant IDs containing it
-	// are not composed, because the tenant/session split would be ambiguous.
+	// IDs when requestHandler.composeFairnessIDs is enabled and the request carries a
+	// fairness-ID header (the tenant part); the agent-identity attribute (the session
+	// part) is appended when present. Composition keeps the tenant visible for isolation
+	// and metric labels while flow control keys one queue per session. In a composed ID
+	// the tenant part is percent-encoded: "%" becomes "%25" and the separator becomes
+	// "%2F", so the first segment is always the whole tenant. Session IDs may contain
+	// the separator unencoded.
 	FairnessIDTenantSeparator = "/"
 )
 
