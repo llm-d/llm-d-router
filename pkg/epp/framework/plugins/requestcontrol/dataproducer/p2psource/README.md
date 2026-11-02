@@ -46,6 +46,7 @@ available.
 - `minCachedTokenDelta` (int, optional, default: `1`): Minimum cached-token advantage required to emit the source header. Must be `>= 1`. Higher values avoid transfers for prefixes that are cheap to recompute.
 - `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. If the profile has no target, the primary profile target is used.
 - `costModel` (object, optional): When set, the header is emitted only when the pull's gain exceeds its cost, evaluated after the `minCachedTokenDelta` floor. Omitted, the fixed-delta decision applies. See [Cost model](#cost-model).
+- `trackInFlightPulls` (bool, optional, default: `false`): Counts the pulls this producer has directed at each source endpoint and exports the count as the `llm_d_epp_p2p_inflight_pulls` gauge. See [In-flight pulls](#in-flight-pulls).
 
 ## Cost model
 
@@ -94,6 +95,10 @@ The [reusable prefix floor](#reusable-prefix-floor) is published in Produce from
         requeueMs: 400
         fleetWeight: 1
 ```
+
+## In-flight pulls
+
+With `trackInFlightPulls: true`, a pull counts against its source from the `PreRequest` that sets the source header until the request's first response chunk. The computing pod sends its first chunk after it has prefilled, so a streamed request stops counting once its pulled blocks are in use. A non-streaming response arrives as a single chunk, so its pull counts until the response ends. A request that ends without a response chunk (an error or a client disconnect after scheduling) is released at its end of stream. Each EPP replica counts only the pulls it directed. Source selection does not read the count.
 
 ## Configuration
 

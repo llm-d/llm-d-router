@@ -32,6 +32,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -69,6 +70,11 @@ type Config struct {
 	// pull saves against the transfer and the waits a pull pays on busy pods,
 	// after the MinCachedTokenDelta floor. Nil keeps the fixed-delta decision.
 	CostModel *CostModelConfig `json:"costModel,omitempty"`
+	// TrackInFlightPulls, when true, counts the pulls this producer has
+	// directed at each source endpoint and not yet released, and exports the
+	// count as the llm_d_epp_p2p_inflight_pulls gauge. Source selection does
+	// not read the count.
+	TrackInFlightPulls bool `json:"trackInFlightPulls,omitempty"`
 }
 
 // CostModelConfig holds the calibrated constants of the pull cost model. The
@@ -188,11 +194,14 @@ type Producer struct {
 	prefillProfile              string
 	attrKeyValue                plugin.DataKey
 	costModel                   *CostModelConfig
+	// pulls is nil unless TrackInFlightPulls is set.
+	pulls *pullTracker
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
-// Producer.
-func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
+// Producer, wrapped with the in-flight pull release hooks when
+// TrackInFlightPulls is set.
+func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := Config{MinCachedTokenDelta: defaultMinCachedTokenDelta}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&cfg); err != nil {
@@ -207,11 +216,27 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 			return nil, fmt.Errorf("%s: %w", PluginType, err)
 		}
 	}
-	return New(name, cfg), nil
+	p := New(name, cfg)
+	if cfg.TrackInFlightPulls {
+		if handle == nil {
+			return nil, fmt.Errorf("%s: trackInFlightPulls requires a plugin handle", PluginType)
+		}
+		if err := registerPullMetrics(handle.Metrics()); err != nil {
+			return nil, fmt.Errorf("%s: %w", PluginType, err)
+		}
+		ctx := handle.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		p.pulls = newPullTracker(ctx, name)
+		return &trackingProducer{Producer: p}, nil
+	}
+	return p, nil
 }
 
 // New constructs a p2p-source-producer bound to the configured
-// PrefixCacheMatchInfo producer name.
+// PrefixCacheMatchInfo producer name. TrackInFlightPulls needs the plugin
+// handle, so only PluginFactory applies it.
 func New(name string, cfg Config) *Producer {
 	prefillProfile := cfg.PrefillProfileName
 	if prefillProfile == "" {
@@ -265,6 +290,7 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 // endpoint. cachedTokens is the chosen peer's own count, which may be one
 // block below the pool maximum.
 type bestMatchPeer struct {
+	id           fwkdl.ID
 	hostPort     string
 	cachedTokens int
 	hasTierData  bool
@@ -373,6 +399,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			}
 			md := candidates[chosen].ep.GetMetadata()
 			best = bestMatchPeer{
+				id:           md.ID,
 				hostPort:     net.JoinHostPort(md.Address, md.Port),
 				cachedTokens: candidates[chosen].cached,
 				hasTierData:  candidates[chosen].hasTierData,
@@ -501,6 +528,9 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		request.Headers = map[string]string{}
 	}
 	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, best.hostPort)
+	if p.pulls != nil {
+		p.pulls.acquire(ctx, request.RequestID, best.id)
+	}
 	return nil
 }
 
