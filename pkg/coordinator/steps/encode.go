@@ -119,11 +119,11 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	for i, entry := range reqCtx.MultimodalEntries {
 		body, err := s.buildEncodeBody(reqCtx, entry, localIdx[i], format, partsByMod)
 		if err != nil {
-			// Every failure here is a coordinator bug rather than a bad request:
-			// either entries and parts got out of line upstream, or a format
-			// reached this fan-out that should never carry media. Fail rather than
-			// send the encoder a request known to be wrong; the wrapped err says
-			// which it was.
+			// No failure here is a bad request: entries and parts got out of
+			// line upstream, a format reached this fan-out that should never
+			// carry media, or mm_payload none met a model whose placeholder
+			// span is not one repeated token. Fail rather than send the encoder
+			// a request known to be wrong; the wrapped err says which it was.
 			err = fmt.Errorf("encode[%d]: %w", i, err)
 			logger.Error(err, "encode fanout build body",
 				"index", i, "modality", entry.Modality, "local_index", localIdx[i])
@@ -254,13 +254,13 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		// an input_audio format) come along without per-format copying.
 		return reqcommon.NewEncoderPrimingBody(reqCtx.Body, part, format), nil
 	case reqcommon.APITypeVLLMGenerate:
-		// Unlike the OpenAI formats, this body carries no image: the encoder
-		// preprocesses nothing, so the client's mm_processor_kwargs and
-		// media_io_kwargs have no effect here. Render already applied them and
-		// returned the result as entry.Hash and entry.KwargsData.
 		if reqCtx.MMPayload != "" {
 			return s.buildEncodeContentPartsBody(reqCtx, entry, localIdx, partsByMod)
 		}
+		// The features body carries no image: the encoder preprocesses
+		// nothing, so the client's mm_processor_kwargs and media_io_kwargs
+		// have no effect here. Render already applied them and returned the
+		// result as entry.Hash and entry.KwargsData.
 		tokenIDs, err := s.buildEncodeTokenIDs(reqCtx.TokenIDs, entry)
 		if err != nil {
 			return nil, err

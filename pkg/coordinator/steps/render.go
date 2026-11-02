@@ -388,11 +388,17 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	// per-modality, means a broken renderer and no entry trusts it — the
 	// whole map is dropped so a misfiled slice cannot leak into any modality.
 	// The request still succeeds: kwargs_data (validated just above) is on
-	// the same response. mm_hashes/mm_placeholders/kwargs_data stay strict
-	// because they have no fallback.
+	// the same response, or, with the tensors omitted, prefill rebuilds
+	// mm_metadata from the EC descriptors or sends content_parts.
+	// mm_hashes/mm_placeholders/kwargs_data stay strict because they have no
+	// fallback.
+	metadataFallback := "kwargs_data"
+	if omitted {
+		metadataFallback = "EC-rebuilt mm_metadata or content_parts"
+	}
 	if totalMetadata > 0 && totalMetadata != expected {
-		logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata; degrading to kwargs_data",
-			"got", totalMetadata, "expected", expected)
+		logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata; dropping it",
+			"got", totalMetadata, "expected", expected, "fallback", metadataFallback)
 		renderResp.Features.MMMetadata = nil
 	}
 	// Per-modality pairing, checked before any entry takes its slice: a
@@ -409,9 +415,9 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 			seenModality[mod] = true
 			metadata := renderResp.Features.MMMetadata[mod]
 			if len(metadata) != len(renderResp.Features.MMHashes[mod]) {
-				logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata for modality; degrading to kwargs_data",
+				logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata for modality; dropping it",
 					"modality", mod, "got", len(metadata),
-					"expected", len(renderResp.Features.MMHashes[mod]))
+					"expected", len(renderResp.Features.MMHashes[mod]), "fallback", metadataFallback)
 				renderResp.Features.MMMetadata = nil
 				break
 			}

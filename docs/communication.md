@@ -320,7 +320,7 @@ vLLM returns `token_ids`, `mm_hashes` and `mm_placeholders` unchanged and sets `
 
 The coordinator skips the `kwargs_data` length check, leaves every `KwargsData` empty, and records the configured `mm_payload` on the request context. Generate-format encode requests then carry the client's media as `content_parts` (see [Stage 4](#stage-4-encode-fan-out-one-per-media-entry)). The generate-format prefill request carries `features` with `mm_metadata` when every entry has metadata (from this response, or rebuilt from the encode response's EC descriptors) and EC coverage, and `content_parts` otherwise (see [Stage 5](#stage-5-prefill)). A renderer without the field ignores it and returns the tensors, and the request takes the `features` path.
 
-With `ec_connector: ec-shared-storage`, the encode response carries no EC descriptors, so `mm_metadata` cannot be rebuilt and every generate-format prefill request takes the `content_parts` form until the render response carries `mm_metadata` (vllm-project/vllm#64997).
+With `ec_connector: ec-shared-storage`, the encode response carries no EC descriptors, so `mm_metadata` cannot be rebuilt and every generate-format prefill request takes the `content_parts` form. vllm-project/vllm#64997 adds `mm_metadata` to the render response.
 
 Once the tensors are omitted, the encode and prefill workers' `/inference/v1/generate` must accept `content_parts` (vllm-project/vllm#51478) and key `ec_transfer_params` by the supplied `uuid`. A worker without `content_parts` support rejects the request: unlike a renderer without `mm_payload`, there is no fallback once render omits the tensors, so the renderer and the workers must run versions that agree.
 
@@ -897,7 +897,7 @@ x-llm-d-epp-profile: prefill
 
 #### Request when render omitted the tensors
 
-When the render step omits the tensors and prefill does not send `features` (see [2.A](#response-with-mm_payload-none)), the request carries one `content_parts` item per entry, in entry order, and no `features`. Each placeholder span in `token_ids` is collapsed to its first token; the worker re-expands the prompt to the token sequence render produced. The collapse relies on each span being a uniform run of one placeholder token, the shape the Qwen-VL family produces and the form validated here; a model whose parser interleaves other tokens inside a span (vLLM's `is_embed` mask, not yet carried by the render response; see vllm-project/vllm#54548) fails the request rather than sending a prompt the worker would expand differently. The `features` form keeps the expanded ids and is unaffected. `ec_transfer_params` from the encode stage is sent as in the `features` form:
+When the render step omits the tensors and prefill does not send `features` (see [2.A](#response-with-mm_payload-none)), the request carries one `content_parts` item per entry, in entry order, and no `features`. Each placeholder span in `token_ids` is collapsed to its first token; the worker re-expands the prompt to the token sequence render produced. The collapse relies on each span being a uniform run of one placeholder token, the shape the Qwen-VL family produces and the form validated here; a model whose parser interleaves other tokens inside a span (vLLM's `is_embed` mask, which the render response does not carry; see vllm-project/vllm#54548) fails the request rather than sending a prompt the worker would expand differently. The `features` form keeps the expanded ids and is unaffected. `ec_transfer_params` from the encode stage is sent as in the `features` form:
 
 ```json
 {

@@ -247,6 +247,8 @@ func TestEncodeAndPrefill_GenerateContentPartsWithMMPayloadNone(t *testing.T) {
 	byHash := map[string]map[string]any{}
 	for _, b := range encodeBodies {
 		require.NotContains(t, b, "features")
+		require.Equal(t, "m", b["model"])
+		require.Equal(t, float64(1), b[reqcommon.FieldSamplingParams].(map[string]any)["max_tokens"])
 		byHash[b["content_parts"].([]any)[0].(map[string]any)["uuid"].(string)] = b
 	}
 	require.Equal(t, []any{imagePart}, byHash["h-img"]["content_parts"])

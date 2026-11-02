@@ -478,7 +478,7 @@ func checkUniformSpan(tokenIDs []int, span pipeline.PlaceholderRange) error {
 	}
 	for i := span.Offset + 1; i < span.Offset+span.Length; i++ {
 		if tokenIDs[i] != tokenIDs[span.Offset] {
-			return fmt.Errorf("placeholder (offset %d, length %d) is not a uniform run of one token",
+			return fmt.Errorf("placeholder (offset %d, length %d) is not a uniform run of one token, which mm_payload none requires",
 				span.Offset, span.Length)
 		}
 	}

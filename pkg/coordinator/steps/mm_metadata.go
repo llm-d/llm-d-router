@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -53,11 +54,11 @@ var batchedInt64MetadataFields = map[string]struct{}{
 // vllm/v1/serial_utils.py: {field: {"data": [dtype, shape, raw bytes],
 // "field": ["batched", {"keep_on_cpu": true}]}}. Only a list of integers on a
 // batched keep_on_cpu field is encoded (image_grid_thw and video_grid_thw on
-// the Qwen-VL family); any other value returns ok false, so the caller sends
-// the media and lets the worker preprocess it.
-func mmMetadataFromEC(metadata map[string]any) (item string, ok bool) {
+// the Qwen-VL family); any other value returns an error naming the field, so
+// the caller sends the media and lets the worker preprocess it.
+func mmMetadataFromEC(metadata map[string]any) (string, error) {
 	if len(metadata) == 0 {
-		return "", false
+		return "", errors.New("descriptor carries no metadata")
 	}
 	keys := make([]string, 0, len(metadata))
 	for k := range metadata {
@@ -68,47 +69,48 @@ func mmMetadataFromEC(metadata map[string]any) (item string, ok bool) {
 	var buf bytes.Buffer
 	enc := msgpack.NewEncoder(&buf)
 	if err := enc.EncodeMapLen(len(keys)); err != nil {
-		return "", false
+		return "", err
 	}
 	for _, key := range keys {
 		if _, ok := batchedInt64MetadataFields[key]; !ok {
-			return "", false
+			return "", fmt.Errorf("metadata field %q has no known layout", key)
 		}
 		values, ok := int64Values(metadata[key])
 		if !ok {
-			return "", false
+			return "", fmt.Errorf("metadata field %q is not a non-empty list of int64", key)
 		}
 		if err := encodeBatchedInt64Field(enc, key, values); err != nil {
-			return "", false
+			return "", fmt.Errorf("encoding metadata field %q: %w", key, err)
 		}
 	}
-	return base64.StdEncoding.EncodeToString(buf.Bytes()), true
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
 // entriesWithECMetadata returns a copy of entries with MMMetadata set for every
 // entry, taking the metadata the render response carried when it has one and
-// rebuilding the rest from each entry's ec_transfer_params descriptor. ok is
-// false when any entry has no descriptor, or no metadata from either source:
-// vLLM's prefill needs either the tensors or the metadata for every item, and
-// the request has neither tensors nor a way to send part of its media.
-func entriesWithECMetadata(entries []pipeline.MultimodalEntry, ecParams map[string]any) ([]pipeline.MultimodalEntry, bool) {
+// rebuilding the rest from each entry's ec_transfer_params descriptor. It
+// fails, naming the entry, when any entry has no descriptor, or no metadata
+// from either source: vLLM's prefill needs either the tensors or the metadata
+// for every item, and the request has neither tensors nor a way to send part
+// of its media.
+func entriesWithECMetadata(entries []pipeline.MultimodalEntry, ecParams map[string]any) ([]pipeline.MultimodalEntry, error) {
 	out := make([]pipeline.MultimodalEntry, len(entries))
 	for i, entry := range entries {
 		desc, ok := ecDescriptor(ecParams, entry.Hash)
 		if !ok {
-			return nil, false
+			return nil, fmt.Errorf("entry %d (mm_hash %s): no ec_transfer_params descriptor", i, entry.Hash)
 		}
 		if entry.MMMetadata == "" {
 			metadata, _ := desc[reqcommon.FieldECDescriptorMetadata].(map[string]any)
-			item, ok := mmMetadataFromEC(metadata)
-			if !ok {
-				return nil, false
+			item, err := mmMetadataFromEC(metadata)
+			if err != nil {
+				return nil, fmt.Errorf("entry %d (mm_hash %s): %w", i, entry.Hash, err)
 			}
 			entry.MMMetadata = item
 		}
 		out[i] = entry
 	}
-	return out, true
+	return out, nil
 }
 
 // ecDescriptor returns the transfer descriptor ecParams carries for hash. ok

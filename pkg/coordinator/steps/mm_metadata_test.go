@@ -43,8 +43,8 @@ func gridThw(t, h, w float64) map[string]any {
 }
 
 func TestMMMetadataFromEC_MatchesVLLM(t *testing.T) {
-	got, ok := mmMetadataFromEC(gridThw(1, 68, 120))
-	require.True(t, ok)
+	got, err := mmMetadataFromEC(gridThw(1, 68, 120))
+	require.NoError(t, err)
 	require.Equal(t, vllmGridThwMetadata, got)
 }
 
@@ -54,11 +54,11 @@ func TestMMMetadataFromEC_MatchesVLLM(t *testing.T) {
 const vllmGridThwMetadataVideo = "gq5pbWFnZV9ncmlkX3Rod4KkZGF0YZOlaW50NjSRA8cYAwEAAAAAAAAARAAAAAAAAAB4AAAAAAAAAKVmaWVsZJKnYmF0Y2hlZIGra2VlcF9vbl9jcHXDrnZpZGVvX2dyaWRfdGh3gqRkYXRhk6VpbnQ2NJEDxxgDAQAAAAAAAABEAAAAAAAAAHgAAAAAAAAApWZpZWxkkqdiYXRjaGVkgatrZWVwX29uX2NwdcM="
 
 func TestMMMetadataFromEC_SortsKeysAcrossFields(t *testing.T) {
-	got, ok := mmMetadataFromEC(map[string]any{
+	got, err := mmMetadataFromEC(map[string]any{
 		"video_grid_thw": []any{float64(1), float64(68), float64(120)},
 		"image_grid_thw": []any{float64(1), float64(68), float64(120)},
 	})
-	require.True(t, ok)
+	require.NoError(t, err)
 	require.Equal(t, vllmGridThwMetadataVideo, got)
 }
 
@@ -75,8 +75,8 @@ func TestMMMetadataFromEC_RejectsUnsupportedValues(t *testing.T) {
 		"2^63":              {"image_grid_thw": []any{float64(1 << 63), float64(2), float64(2)}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, ok := mmMetadataFromEC(metadata)
-			require.False(t, ok)
+			_, err := mmMetadataFromEC(metadata)
+			require.Error(t, err)
 		})
 	}
 }
@@ -88,6 +88,9 @@ type ecServer struct {
 	encode   []map[string]any
 	prefill  map[string]any
 	metadata func(hash string) map[string]any
+	// noDescriptor, when set, makes the encode response for hash carry no
+	// descriptor, as ec-shared-storage does.
+	noDescriptor func(hash string) bool
 }
 
 func (e *ecServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +102,10 @@ func (e *ecServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get(reqcommon.EPPProfileHeaderKey) == gateway.PhaseEncode {
 		e.encode = append(e.encode, body)
 		hash := body["content_parts"].([]any)[0].(map[string]any)["uuid"].(string)
+		if e.noDescriptor != nil && e.noDescriptor(hash) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ec_transfer_params": map[string]any{}})
+			return
+		}
 		desc := map[string]any{"peer_port": 1}
 		if md := e.metadata(hash); md != nil {
 			desc["metadata"] = md
@@ -174,7 +181,9 @@ func TestEncodeAndPrefill_MMPayloadNoneFallsBackToContentParts(t *testing.T) {
 
 // mm_metadata the render response carried is sent as-is: the EC descriptor
 // needs no metadata for an entry render already described.
-func TestEncodeAndPrefill_RenderMetadataNeedsNoECMetadata(t *testing.T) {
+// renderWithMetadata renders a one-image request under mm_payload none against
+// a renderer that returns mm_metadata.
+func renderWithMetadata(t *testing.T) *pipeline.RequestContext {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token_ids": []int{1, 9, 9, 9, 2},
@@ -185,7 +194,7 @@ func TestEncodeAndPrefill_RenderMetadataNeedsNoECMetadata(t *testing.T) {
 			},
 		})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 	step, err := NewRenderStep(nil, map[string]any{"mm_payload": mmPayloadNone})
 	require.NoError(t, err)
 	step.(*RenderStep).SetServiceAddress(server.URL)
@@ -199,6 +208,11 @@ func TestEncodeAndPrefill_RenderMetadataNeedsNoECMetadata(t *testing.T) {
 	}
 	require.NoError(t, step.Execute(context.Background(), reqCtx))
 	require.Equal(t, vllmGridThwMetadata, reqCtx.MultimodalEntries[0].MMMetadata)
+	return reqCtx
+}
+
+func TestEncodeAndPrefill_RenderMetadataNeedsNoECMetadata(t *testing.T) {
+	reqCtx := renderWithMetadata(t)
 
 	srv := &ecServer{metadata: func(string) map[string]any { return nil }}
 	encodePrefill(t, srv, reqCtx)
@@ -208,4 +222,22 @@ func TestEncodeAndPrefill_RenderMetadataNeedsNoECMetadata(t *testing.T) {
 	features := body["features"].(map[string]any)
 	require.Equal(t, map[string]any{"image": []any{vllmGridThwMetadata}}, features["mm_metadata"])
 	require.Equal(t, map[string]any{"image": []any{nil}}, features["kwargs_data"])
+}
+
+// Render's mm_metadata does not stand in for EC coverage: an entry the encode
+// response published no descriptor for (ec-shared-storage) has no encoder
+// output for prefill to load, so the request falls back to content_parts.
+func TestEncodeAndPrefill_RenderMetadataWithoutDescriptorFallsBack(t *testing.T) {
+	reqCtx := renderWithMetadata(t)
+
+	srv := &ecServer{
+		metadata:     func(string) map[string]any { return nil },
+		noDescriptor: func(string) bool { return true },
+	}
+	encodePrefill(t, srv, reqCtx)
+
+	body := srv.prefill
+	require.NotContains(t, body, "features")
+	require.Len(t, body["content_parts"], 1)
+	require.Equal(t, []any{float64(1), float64(9), float64(2)}, body["token_ids"])
 }

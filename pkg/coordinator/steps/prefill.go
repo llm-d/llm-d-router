@@ -212,12 +212,13 @@ func (s *PrefillStep) applyGenerateMMInputs(ctx context.Context, reqCtx *pipelin
 		}
 		return nil
 	}
-	if withMetadata, ok := entriesWithECMetadata(entries, ecParams); ok {
+	withMetadata, err := entriesWithECMetadata(entries, ecParams)
+	if err == nil {
 		body["features"] = buildPrefillMMFeatures(withMetadata, ecParams)
 		return nil
 	}
 	log.FromContext(ctx).WithName(PrefillStepName).V(logutil.DEFAULT).Info(
-		"an entry has no EC coverage or no mm_metadata; sending media as content_parts")
+		"cannot send features with mm_metadata; sending media as content_parts", "reason", err.Error())
 	tokenIDs, err := collapsePlaceholders(reqCtx.TokenIDs, entries)
 	if err != nil {
 		return err
