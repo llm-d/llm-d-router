@@ -597,6 +597,27 @@ var (
 		},
 		[]string{"source_type", "extractor_type"},
 	)
+
+	// LlmdDataLayerPollsTotal records data-source polls per source type and outcome.
+	LlmdDataLayerPollsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_polls_total",
+			Help:      metricsutil.HelpMsgWithStability("Data-source polls per source type and outcome.", compbasemetrics.ALPHA),
+		},
+		[]string{"source_type", "outcome"},
+	)
+
+	// LlmdDataLayerPollDuration records data-source poll duration per source type.
+	LlmdDataLayerPollDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_poll_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Data-source poll duration per source type.", compbasemetrics.ALPHA),
+			Buckets:   prometheus.DefBuckets,
+		},
+		[]string{"source_type"},
+	)
 )
 
 // --- Tool-calling request field integrity metric ---

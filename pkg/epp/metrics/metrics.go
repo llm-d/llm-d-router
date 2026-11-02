@@ -133,6 +133,8 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
+		metrics.Registry.MustRegister(LlmdDataLayerPollsTotal)
+		metrics.Registry.MustRegister(LlmdDataLayerPollDuration)
 		metrics.Registry.MustRegister(llmdToolCallingFieldStatusTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -196,6 +198,8 @@ func Reset() {
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	LlmdDataLayerPollErrorsTotal.Reset()
 	LlmdDataLayerExtractErrorsTotal.Reset()
+	LlmdDataLayerPollsTotal.Reset()
+	LlmdDataLayerPollDuration.Reset()
 	llmdToolCallingFieldStatusTotal.Reset()
 }
 
@@ -723,6 +727,23 @@ func RecordDataLayerPollError(sourceType string) {
 // RecordDataLayerExtractError increments the extract error counter for a source/extractor type.
 func RecordDataLayerExtractError(sourceType, extractorType string) {
 	LlmdDataLayerExtractErrorsTotal.WithLabelValues(sourceType, extractorType).Inc()
+}
+
+// Outcome label values of LlmdDataLayerPollsTotal.
+const (
+	// DataLayerPollOutcomeSuccess: Dispatch returned nil before its deadline.
+	DataLayerPollOutcomeSuccess = "success"
+	// DataLayerPollOutcomeError: Dispatch returned an error before its deadline.
+	DataLayerPollOutcomeError = "error"
+	// DataLayerPollOutcomeTimeout: the poll deadline expired, whatever Dispatch returned.
+	DataLayerPollOutcomeTimeout = "timeout"
+)
+
+// RecordDataLayerPoll counts one poll under its outcome and observes its
+// duration for a source type.
+func RecordDataLayerPoll(sourceType, outcome string, duration time.Duration) {
+	LlmdDataLayerPollsTotal.WithLabelValues(sourceType, outcome).Inc()
+	LlmdDataLayerPollDuration.WithLabelValues(sourceType).Observe(duration.Seconds())
 }
 
 // RecordToolCallingFieldStatuses records outcomes only for fields present on at

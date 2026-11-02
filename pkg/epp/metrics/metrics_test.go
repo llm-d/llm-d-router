@@ -1474,3 +1474,41 @@ func TestRecordSchedulerFailure(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// TestRecordDataLayerPoll confirms both poll families reach the scrape with
+// their outcome and duration samples, and that Reset clears them.
+func TestRecordDataLayerPoll(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	polls := []struct {
+		sourceType, outcome string
+		duration            time.Duration
+	}{
+		{"http-type", DataLayerPollOutcomeSuccess, 250 * time.Millisecond},
+		{"http-type", DataLayerPollOutcomeSuccess, 125 * time.Millisecond},
+		{"http-type", DataLayerPollOutcomeError, 500 * time.Millisecond},
+		{"http-type", DataLayerPollOutcomeTimeout, time.Second},
+		{"dcgm-type", DataLayerPollOutcomeSuccess, 2 * time.Second},
+	}
+	for _, p := range polls {
+		RecordDataLayerPoll(p.sourceType, p.outcome, p.duration)
+	}
+
+	for _, tc := range []struct{ golden, family string }{
+		{"llm_d_datalayer_polls_total_metric", "llm_d_epp_datalayer_polls_total"},
+		{"llm_d_datalayer_poll_duration_seconds_metric", "llm_d_epp_datalayer_poll_duration_seconds"},
+	} {
+		t.Run(tc.family, func(t *testing.T) {
+			want, err := openGoldenFile(tc.golden)
+			require.NoError(t, err)
+			defer want.Close()
+			require.NoError(t, promtestutil.GatherAndCompare(metrics.Registry, want, tc.family))
+		})
+	}
+
+	Reset()
+	require.Zero(t, promtestutil.CollectAndCount(LlmdDataLayerPollsTotal))
+	require.Zero(t, promtestutil.CollectAndCount(LlmdDataLayerPollDuration))
+}

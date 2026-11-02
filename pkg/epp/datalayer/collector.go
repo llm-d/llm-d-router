@@ -146,20 +146,43 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, d
 					disp = interval.PollingDispatcher
 				}
 				dispCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
+				start := time.Now()
 				err := disp.Dispatch(dispCtx, ep)
+				end := time.Now()
+				// Observed right after Dispatch returns. cancel() leaves an
+				// expired context at DeadlineExceeded, so the order with
+				// cancel() is not what matters; reading early keeps the
+				// window for a later expiry to be charged to this poll small.
+				timedOut := errors.Is(dispCtx.Err(), context.DeadlineExceeded)
 				cancel()
 				// A poll cut short by Stop says nothing about the endpoint.
 				if ctx.Err() != nil {
 					return
 				}
+				tn := disp.TypedName()
+				metrics.RecordDataLayerPoll(tn.Type, pollOutcome(err, timedOut), end.Sub(start))
 				if err != nil {
-					tn := disp.TypedName()
 					metrics.RecordDataLayerPollError(tn.Type)
 					logger.V(logging.DEBUG).Info("dispatch failed", "source", tn, "err", err)
 				}
-				statuses[i].record(ep, err, time.Now())
+				statuses[i].record(ep, err, end)
 			}
 		}
+	}
+}
+
+// pollOutcome classifies a poll the parent context did not cancel. An expired
+// deadline takes precedence over the return value, so a nil or unrelated error
+// returned after the deadline counts as a timeout. The poll error counter and
+// PollStatus keep following the returned error alone.
+func pollOutcome(err error, timedOut bool) string {
+	switch {
+	case timedOut:
+		return metrics.DataLayerPollOutcomeTimeout
+	case err != nil:
+		return metrics.DataLayerPollOutcomeError
+	default:
+		return metrics.DataLayerPollOutcomeSuccess
 	}
 }
 
