@@ -16,33 +16,62 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:
-    name: Analyze (go)
+    name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+            packs: ''
+          - language: go
+            build-mode: manual
+            packs: codeql/go-queries:AlertSuppression.ql
+          - language: python
+            build-mode: none
+            packs: codeql/python-queries:AlertSuppression.ql
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
 
       - name: Set up Go
+        if: matrix.language == 'go'
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
-          languages: go
-          build-mode: autobuild
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          packs: ${{ matrix.packs }}
+
+      - name: Build Go packages
+        if: matrix.language == 'go'
+        run: go build ./...
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        id: analyze
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
-          category: '/language:go'
+          category: '/language:${{ matrix.language }}'
+
+      - name: Dismiss suppressed alerts
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && matrix.packs != '' && steps.analyze.outputs.sarif-id != ''
+        uses: advanced-security/dismiss-alerts@a18f986bdb40edba0dd7a74382c15d4a3d50a1c8 # v2.0.3
+        with:
+          sarif-id: ${{ steps.analyze.outputs.sarif-id }}
+          sarif-file: ${{ steps.analyze.outputs.sarif-output }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
