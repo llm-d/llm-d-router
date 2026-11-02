@@ -218,11 +218,10 @@ func (s *EncodeStep) buildEncodeTokenIDs(fullTokenIDs []int, entry pipeline.Mult
 	if len(fullTokenIDs) > 0 {
 		bos = fullTokenIDs[0]
 	}
-	// offset >= 0 is guaranteed for all paths, either by
-	// extractMultimodalEntries (generate) or by the trusted render-service
-	// response (chat/completions).
+	// The render response's spans reach here unvalidated, so check both
+	// signs and compare without adding, which could overflow.
 	span := entry.Placeholder
-	if span.Offset < 0 || span.Offset+span.Length > len(fullTokenIDs) {
+	if span.Offset < 0 || span.Length < 0 || span.Offset > len(fullTokenIDs) || span.Length > len(fullTokenIDs)-span.Offset {
 		return nil, fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
 			span.Offset, span.Length, len(fullTokenIDs))
 	}

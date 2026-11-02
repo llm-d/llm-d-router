@@ -72,6 +72,7 @@ func TestMMMetadataFromEC_RejectsUnsupportedValues(t *testing.T) {
 		"string element":    {"image_grid_thw": []any{"1"}},
 		"nested list":       {"timestamps": []any{[]any{0.5}}},
 		"non-grid int list": {"timestamps": []any{float64(1), float64(2)}},
+		"2^63":              {"image_grid_thw": []any{float64(1 << 63), float64(2), float64(2)}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, ok := mmMetadataFromEC(metadata)
@@ -111,8 +112,8 @@ func (e *ecServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func runEncodePrefill(t *testing.T, srv *ecServer) {
 	var got any
-	reqCtx := runRender(t, map[string]any{"mm_payload": pipeline.MMPayloadNone}, &got)
-	require.Equal(t, pipeline.MMPayloadNone, got)
+	reqCtx := runRender(t, map[string]any{"mm_payload": mmPayloadNone}, &got)
+	require.Equal(t, mmPayloadNone, got)
 	encodePrefill(t, srv, reqCtx)
 }
 
@@ -185,7 +186,7 @@ func TestEncodeAndPrefill_RenderMetadataNeedsNoECMetadata(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadNone})
+	step, err := NewRenderStep(nil, map[string]any{"mm_payload": mmPayloadNone})
 	require.NoError(t, err)
 	step.(*RenderStep).SetServiceAddress(server.URL)
 	reqCtx := &pipeline.RequestContext{

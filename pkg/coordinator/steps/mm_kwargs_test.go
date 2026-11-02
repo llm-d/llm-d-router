@@ -104,9 +104,9 @@ func runRenderBody(t *testing.T, params map[string]any, body map[string]any, got
 
 func TestRenderStep_MMPayload(t *testing.T) {
 	var got any
-	reqCtx := runRender(t, map[string]any{"mm_payload": pipeline.MMPayloadNone}, &got)
-	require.Equal(t, pipeline.MMPayloadNone, got, "render must ask vLLM to omit tensors")
-	require.Equal(t, pipeline.MMPayloadNone, reqCtx.MMPayload)
+	reqCtx := runRender(t, map[string]any{"mm_payload": mmPayloadNone}, &got)
+	require.Equal(t, mmPayloadNone, got, "render must ask vLLM to omit tensors")
+	require.Equal(t, mmPayloadNone, reqCtx.MMPayload)
 	require.Empty(t, reqCtx.MultimodalEntries[0].KwargsData)
 	require.Equal(t, "h-img", reqCtx.MultimodalEntries[0].Hash)
 	require.NotContains(t, reqCtx.Body, "mm_payload", "the field must not leak into the client body forwarded downstream")
@@ -120,7 +120,7 @@ func TestRenderStep_MMPayload(t *testing.T) {
 	require.Equal(t, "aW1n", reqCtx.MultimodalEntries[0].KwargsData)
 
 	got = any("unset")
-	reqCtx = runRender(t, map[string]any{"mm_payload": pipeline.MMPayloadTensors}, &got)
+	reqCtx = runRender(t, map[string]any{"mm_payload": mmPayloadTensors}, &got)
 	require.Nil(t, got, "mm_payload tensors sends the render request without the field")
 	require.Empty(t, reqCtx.MMPayload)
 	require.Equal(t, "aW1n", reqCtx.MultimodalEntries[0].KwargsData)
@@ -140,12 +140,35 @@ func TestRenderStep_ProcessorKwargsKeepTensors(t *testing.T) {
 			body := mmKwargsChatBody()
 			body[field] = map[string]any{"max_pixels": 100000}
 			var got any = "unset"
-			reqCtx := runRenderBody(t, map[string]any{"mm_payload": pipeline.MMPayloadNone}, body, &got)
+			reqCtx := runRenderBody(t, map[string]any{"mm_payload": mmPayloadNone}, body, &got)
 			require.Nil(t, got, "a body setting %s must not carry mm_payload", field)
 			require.Empty(t, reqCtx.MMPayload)
 			require.Equal(t, "aW1n", reqCtx.MultimodalEntries[0].KwargsData)
 		})
 	}
+}
+
+// The server keeps both kwargs fields as json.RawMessage, so an SDK that sends
+// an explicit null must not be read as setting them.
+func TestBodySetsProcessorKwargs(t *testing.T) {
+	for name, tc := range map[string]struct {
+		value any
+		want  bool
+	}{
+		"raw null":         {json.RawMessage("null"), false},
+		"raw null spaced":  {json.RawMessage(" null "), false},
+		"nil":              {nil, false},
+		"raw object":       {json.RawMessage(`{"max_pixels":100000}`), true},
+		"raw empty object": {json.RawMessage(`{}`), true},
+		"decoded object":   {map[string]any{"max_pixels": 100000}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, field := range []string{reqcommon.FieldMMProcessorKwargs, reqcommon.FieldMediaIOKwargs} {
+				require.Equal(t, tc.want, bodySetsProcessorKwargs(map[string]any{field: tc.value}), field)
+			}
+		})
+	}
+	require.False(t, bodySetsProcessorKwargs(map[string]any{}))
 }
 
 // A body that sets a preprocessing kwargs field asks for the tensors, so a
@@ -166,7 +189,7 @@ func TestRenderStep_ProcessorKwargsMissingKwargsFails(t *testing.T) {
 		})
 	}))
 	t.Cleanup(server.Close)
-	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadNone})
+	step, err := NewRenderStep(nil, map[string]any{"mm_payload": mmPayloadNone})
 	require.NoError(t, err)
 	step.(*RenderStep).SetServiceAddress(server.URL)
 	body := mmKwargsChatBody()
@@ -186,7 +209,7 @@ func TestRenderStep_ProcessorKwargsMissingKwargsFails(t *testing.T) {
 
 func TestEncodeAndPrefill_GenerateContentPartsWithMMPayloadNone(t *testing.T) {
 	var got any
-	reqCtx := runRender(t, map[string]any{"mm_payload": pipeline.MMPayloadNone}, &got)
+	reqCtx := runRender(t, map[string]any{"mm_payload": mmPayloadNone}, &got)
 
 	var mu sync.Mutex
 	var encodeBodies []map[string]any
@@ -258,7 +281,7 @@ func TestEncodeStep_ContentPartsRejectsNonUniformSpan(t *testing.T) {
 			map[string]any{"type": "image_url", "image_url": map[string]any{"url": testImageURL}},
 		}}}},
 		TokenIDs:  []int{1, 9, 8, 9, 2},
-		MMPayload: pipeline.MMPayloadNone,
+		MMPayload: mmPayloadNone,
 		MultimodalEntries: []pipeline.MultimodalEntry{{
 			Modality: reqcommon.ModalityImage, Hash: "h-img",
 			Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3},
@@ -307,7 +330,7 @@ func TestRenderStep_RendererIgnoringMMPayloadKeepsFeatures(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadNone})
+	step, err := NewRenderStep(nil, map[string]any{"mm_payload": mmPayloadNone})
 	require.NoError(t, err)
 	step.(*RenderStep).SetServiceAddress(server.URL)
 	reqCtx := &pipeline.RequestContext{
@@ -326,7 +349,7 @@ func TestRenderStep_TextOnlyLeavesMMPayloadUnset(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"token_ids": []int{1, 2}})
 	}))
 	defer server.Close()
-	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadNone})
+	step, err := NewRenderStep(nil, map[string]any{"mm_payload": mmPayloadNone})
 	require.NoError(t, err)
 	step.(*RenderStep).SetServiceAddress(server.URL)
 	reqCtx := &pipeline.RequestContext{
@@ -454,7 +477,7 @@ func TestPrefillStep_OpenAIFormatIgnoresMMPayload(t *testing.T) {
 		Body:              mmKwargsChatBody(),
 		TokenIDs:          []int{1, 9, 9, 9, 2},
 		MultimodalEntries: []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: "h", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}}},
-		MMPayload:         pipeline.MMPayloadNone,
+		MMPayload:         mmPayloadNone,
 	}
 	require.NoError(t, step.Execute(context.Background(), reqCtx))
 	require.NotContains(t, prefillBody, "content_parts")

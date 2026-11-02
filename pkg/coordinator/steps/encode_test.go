@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -1020,6 +1021,17 @@ func TestEncodeStep_BuildsTokenIDsFromSpan(t *testing.T) {
 	// A span past the end of token_ids fails the request.
 	reqCtx.TokenIDs = []int{1, 32000}
 	require.Error(t, step.Execute(context.Background(), reqCtx))
+
+	// A negative length or an offset+length that overflows int fails the
+	// request instead of panicking.
+	reqCtx.TokenIDs = []int{1, 32000, 32001, 32000, 2345}
+	for _, span := range []pipeline.PlaceholderRange{
+		{Offset: 4, Length: -2},
+		{Offset: 2, Length: math.MaxInt},
+	} {
+		reqCtx.MultimodalEntries[0].Placeholder = span
+		require.Error(t, step.Execute(context.Background(), reqCtx), "span %+v", span)
+	}
 }
 
 // TestEncodeStep_GenerateFormat_CapsSingleToken verifies the generate-format

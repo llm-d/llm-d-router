@@ -469,7 +469,7 @@ func generateContentPart(entry pipeline.MultimodalEntry, localIdx int, partsByMo
 // its first token: the worker would expand a different prompt than render
 // produced.
 func checkUniformSpan(tokenIDs []int, span pipeline.PlaceholderRange) error {
-	if span.Offset < 0 || span.Length < 1 || span.Offset+span.Length > len(tokenIDs) {
+	if span.Offset < 0 || span.Length < 1 || span.Offset > len(tokenIDs) || span.Length > len(tokenIDs)-span.Offset {
 		return fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
 			span.Offset, span.Length, len(tokenIDs))
 	}

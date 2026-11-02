@@ -39,6 +39,25 @@ import (
 
 const RenderStepName = "render"
 
+// Render request fields. fieldMMPayload selects what a vLLM render response
+// carries for each multimodal item; fieldReturnMMKwargs is its deprecated
+// boolean alias, the only one vLLM v0.32 reads.
+const (
+	fieldMMPayload      = "mm_payload"
+	fieldReturnMMKwargs = "return_mm_kwargs"
+)
+
+// Render step mm_payload values.
+const (
+	// mmPayloadTensors ships the processed tensors as kwargs_data.
+	mmPayloadTensors = "tensors"
+	// mmPayloadNone omits the tensors. Generate-format encode requests carry
+	// the client's media as content_parts, and prefill sends features with
+	// mm_metadata when it has metadata and EC coverage for every entry, else
+	// the client's media as content_parts.
+	mmPayloadNone = "none"
+)
+
 func init() {
 	pipeline.Register(RenderStepName, NewRenderStep)
 }
@@ -109,11 +128,11 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 	case "":
 		// none is opt-in: its content_parts form fails any model whose
 		// placeholder span is not one repeated token (see checkUniformSpan).
-		mmPayload = pipeline.MMPayloadTensors
-	case pipeline.MMPayloadTensors, pipeline.MMPayloadNone:
+		mmPayload = mmPayloadTensors
+	case mmPayloadTensors, mmPayloadNone:
 	default:
 		return nil, fmt.Errorf("mm_payload must be %q or %q, got %q",
-			pipeline.MMPayloadTensors, pipeline.MMPayloadNone, mmPayload)
+			mmPayloadTensors, mmPayloadNone, mmPayload)
 	}
 
 	transport := &http.Transport{
@@ -444,9 +463,17 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 // preprocessing kwargs field. Both change preprocessing and feed vLLM's
 // multimodal hash, so a request that sets them cannot run on the
 // content_parts path, which preprocesses media at the deployment defaults.
+// The server keeps both fields as json.RawMessage, so an explicit JSON null
+// arrives as the bytes "null" rather than a nil value.
 func bodySetsProcessorKwargs(body map[string]any) bool {
 	for _, field := range []string{reqcommon.FieldMMProcessorKwargs, reqcommon.FieldMediaIOKwargs} {
-		if v, ok := body[field]; ok && v != nil {
+		switch v := body[field].(type) {
+		case nil:
+		case json.RawMessage:
+			if !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+				return true
+			}
+		default:
 			return true
 		}
 	}
@@ -467,7 +494,7 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 
 	askedToOmit := false
 	renderBody := reqCtx.Body
-	if s.mmPayload != pipeline.MMPayloadTensors {
+	if s.mmPayload != mmPayloadTensors {
 		if bodySetsProcessorKwargs(reqCtx.Body) {
 			// The generate format's content_parts path preprocesses media at
 			// the deployment defaults, so the client's preprocessing kwargs
@@ -477,8 +504,8 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 		} else {
 			// vLLM has no metadata-only render payload; prefill rebuilds it.
 			renderBody = maps.Clone(reqCtx.Body)
-			renderBody[reqcommon.FieldReturnMMKwargs] = false
-			renderBody[reqcommon.FieldMMPayload] = pipeline.MMPayloadNone
+			renderBody[fieldReturnMMKwargs] = false
+			renderBody[fieldMMPayload] = mmPayloadNone
 			askedToOmit = true
 		}
 	}

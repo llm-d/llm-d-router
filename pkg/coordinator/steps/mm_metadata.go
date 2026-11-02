@@ -131,7 +131,7 @@ func int64Values(v any) ([]int64, bool) {
 	out := make([]int64, len(list))
 	for i, elem := range list {
 		f, ok := elem.(float64)
-		if !ok || f != math.Trunc(f) || f < math.MinInt64 || f > math.MaxInt64 {
+		if !ok || f != math.Trunc(f) || f < math.MinInt64 || f >= 1<<63 {
 			return nil, false
 		}
 		out[i] = int64(f)
