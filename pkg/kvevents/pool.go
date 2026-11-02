@@ -679,10 +679,16 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					meta.Kind == string(ev.KVCacheSpecKind) && meta.BlockSize > ev.BlockSize {
 					digestible, reason = false, "conflicting_block_size"
 				} else if hasExplicitKind {
+					window := ev.KVCacheSpecSlidingWindowSize
+					if window == nil && found && meta.Kind == string(ev.KVCacheSpecKind) {
+						// The window size is optional on a store; keep the one
+						// already learned for this group.
+						window = meta.SlidingWindowSize
+					}
 					p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
 						Kind:              string(ev.KVCacheSpecKind),
 						BlockSize:         ev.BlockSize,
-						SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
+						SlidingWindowSize: window,
 					})
 				}
 			}
@@ -873,7 +879,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			if ev.GroupIdx != nil {
 				groupIdx := kvblock.GroupID(*ev.GroupIdx)
 				meta, found := p.groupCatalog.Get(podIdentifier, groupIdx)
-				if p.windowIndex != nil && p.slidingWindowGroup(podIdentifier, ev.GroupIdx) {
+				if p.windowIndex != nil && found && meta.Kind == string(KVCacheSpecKindSlidingWindow) {
+					// By kind, not by a known window size: Evict of blocks the
+					// window index never stored is a no-op.
 					index = p.windowIndex
 				} else if !found || !isPrefixIndexableSpecKind(KVCacheSpecKind(meta.Kind)) {
 					reason := "unsupported_cache_kind"

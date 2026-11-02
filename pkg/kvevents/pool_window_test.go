@@ -159,3 +159,52 @@ func TestWindowIndex_ClearedWithPod(t *testing.T) {
 	process(ctx, pool, &AllBlocksClearedEvent{})
 	requireGroups(ctx, t, pool.WindowIndex(), keys)
 }
+
+// A store that leaves out the window size keeps the size already learned for
+// its group: the group's removals still evict from the window index, and the
+// store itself is indexed there.
+func TestWindowIndex_StoreWithoutWindowSize(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newWindowTestPool(t)
+	window := 128
+	tokens := makeTokens(128)
+	first, second := makeEngineKeys(4, 3400), makeEngineKeys(4, 3404)
+
+	process(ctx, pool, groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens[:64], first, 0))
+	firstKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens[:64], windowTestModel, nil)
+	require.NoError(t, err)
+	requireGroups(ctx, t, pool.WindowIndex(), firstKeys, 1)
+
+	group := 1
+	process(ctx, pool,
+		groupStore(1, KVCacheSpecKindSlidingWindow, nil, tokens[64:], second, first[3]),
+		&BlockRemovedEvent{BlockHashes: first, GroupIdx: &group})
+
+	secondKeys, err := tp.TokensToKVBlockKeys(firstKeys[3], tokens[64:], windowTestModel, nil)
+	require.NoError(t, err)
+	requireGroups(ctx, t, pool.WindowIndex(), firstKeys)
+	requireGroups(ctx, t, pool.WindowIndex(), secondKeys, 1)
+	requireGroups(ctx, t, idx, append(firstKeys, secondKeys...))
+}
+
+// Removals of a sliding-window group go to the window index by the group's
+// kind, even when the catalog has no window size for it.
+func TestWindowIndex_RemovalRoutedByKind(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, tp := newWindowTestPool(t)
+	window := 128
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 3500)
+
+	process(ctx, pool, groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens, engineKeys, 0))
+	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
+	require.NoError(t, err)
+	requireGroups(ctx, t, pool.WindowIndex(), keys, 1)
+
+	pool.GroupCatalog().Learn(windowTestPod, 1, kvblock.GroupMetadata{
+		Kind: string(KVCacheSpecKindSlidingWindow), BlockSize: 16,
+	})
+	group := 1
+	process(ctx, pool, &BlockRemovedEvent{BlockHashes: engineKeys, GroupIdx: &group})
+	requireGroups(ctx, t, pool.WindowIndex(), keys)
+}
