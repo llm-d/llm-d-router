@@ -3,7 +3,7 @@
 **Type:** `program-aware-fairness`
 **Interfaces:** `flowcontrol.FairnessPolicy`, `requestcontrol.PreRequest`, `requestcontrol.ResponseBodyProcessor`
 
-The program-aware fairness policy schedules per-program queues using aggregated per-program metrics rather than per-request attributes. Programs are identified by the fairness ID on each request, which the Director derives from the fairness ID header (`x-llm-d-inference-fairness-id`) and the agent-identity attribute resolved from session headers, allowing distinct workflows or tenants sharing an inference pool to compete on equal footing at the workflow level. When a request carries both a tenant fairness ID and a session identity, the Director composes them into a `<tenant>/<session>` ID so each session gets its own queue; see [Composed flow IDs](#composed-flow-ids-multi-tenant-pools).
+The program-aware fairness policy schedules per-program queues using aggregated per-program metrics rather than per-request attributes. Programs are identified by the fairness ID on each request, which the Director derives from the fairness ID header (`x-llm-d-inference-fairness-id`) and the agent-identity attribute resolved from session headers, allowing distinct workflows or tenants sharing an inference pool to compete on equal footing at the workflow level. When `requestHandler.composeFairnessIDs` is enabled and a request carries both a tenant fairness ID and a session identity, the Director composes them into a `<tenant>/<session>` ID so each session gets its own queue; see [Composed flow IDs](#composed-flow-ids-multi-tenant-pools).
 
 ## Why choose this policy?
 
@@ -24,7 +24,7 @@ Under `turn-priority`:
 
 ## What it does
 
-* **Identifies programs** via the fairness ID the Director derives for each request: the fairness ID header, the agent-identity attribute, or their composition when both are present.
+* **Identifies programs** via the fairness ID the Director derives for each request: the fairness ID header, the agent-identity attribute, or their composition when both are present and `requestHandler.composeFairnessIDs` is enabled.
 * **Tracks per-program metrics** through the request lifecycle: queue wait time, dispatched count, in-flight count, last completion time, and (LAS) attained service in weighted tokens.
 * **Selects a queue to dispatch from** using the configured strategy: `las` (Least Attained Service), where programs with the lowest accumulated service score highest, or `turn-priority`, which favors deeper sessions.
 * **Keys one queue per program**: every fairness ID is one queue, so a composed `<tenant>/<session>` ID schedules per session without changing the strategies. A bare ID is one queue, exactly as before.
@@ -71,7 +71,7 @@ Requests carrying neither share `default-flow`. Its dispatched count is the sum 
 
 ## Composed flow IDs (multi-tenant pools)
 
-A pool that stamps each tenant with a fairness ID header while its clients also send session headers gets one flow per session: the Director composes the two identities into
+Composition is opt-in. A pool that stamps each tenant with a fairness ID header, sets `requestHandler.composeFairnessIDs: true`, and whose clients also send session headers gets one flow per session: the Director composes the two identities into
 
 ```
 <tenant-fairness-id>/<agent-session-id>    e.g. acme/1f3b-...
@@ -79,7 +79,9 @@ A pool that stamps each tenant with a fairness ID header while its clients also 
 
 and flow control keys one queue per composed ID. Both strategies then run unchanged on those per-session queues: `las` accumulates attained service per session, and `turn-priority` counts dispatched requests per session, which is what makes a session's depth meaningful once tenants are stamped. The tenant prefix also keeps sessions from different tenants distinct — two tenants reusing the same session identifier do not share a flow — and stays visible in the `fairness_id` metric label.
 
-Bare IDs need no migration: a request carrying only one identity keeps it as its fairness ID and is one queue, exactly as before. The separator is `/` (`metadata.FairnessIDTenantSeparator`), and tenant fairness IDs must not contain it.
+Composition is off by default so tenant-stamped pools that do not need per-session flows keep header-wins behavior: the fairness-ID header keys the flow on its own and the session identity is not part of the flow key. Enable it only when the pool's fairness policy should treat a session as the scheduling unit; see [Why choose this policy?](#why-choose-this-policy).
+
+Bare IDs need no migration: a request carrying only one identity keeps it as its fairness ID and is one queue, exactly as before. The separator is `/` (`metadata.FairnessIDTenantSeparator`). A fairness-ID header containing the separator is never composed, because the tenant/session split would be ambiguous; such a request keeps the header as its fairness ID. Tenant IDs must not contain the separator.
 
 The unit of scheduling is the session. There is no tenant-aggregate budgeting: a tenant running more concurrent sessions competes with more queues. If tenants must be treated as single competitors regardless of session count, that needs a hierarchical policy, which this plugin does not implement.
 

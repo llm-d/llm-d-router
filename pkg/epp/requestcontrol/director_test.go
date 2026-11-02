@@ -796,6 +796,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 		wantMutatedBody         map[string]any
 		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap.
 		propagatePriority       bool   // If true, enable requestHandler.propagatePriority on the director.
+		composeFairnessIDs      bool   // If true, enable requestHandler.composeFairnessIDs on the director.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		wantSpanFairnessID      string // If non-empty, asserted against request_orchestration span fairness ID.
@@ -983,6 +984,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 			initialTargetModelName: model,
 			inferenceObjectiveName: objectiveName,
 			fairnessIDHeader:       "tenant-1",
+			composeFairnessIDs:     true,
 			requestHeaderPlugin: &mockRequestHeaderPlugin{
 				name:           "agent-identity",
 				attributeKey:   agentidentity.AgentIdentityKey,
@@ -990,6 +992,51 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			wantFairnessID:     "tenant-1/session-abc",
 			wantSpanFairnessID: "tenant-1/session-abc",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "fairness header wins when composition is disabled",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1",
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-identity",
+				attributeKey:   agentidentity.AgentIdentityKey,
+				attributeValue: "session-abc",
+			},
+			wantFairnessID:     "tenant-1",
+			wantSpanFairnessID: "tenant-1",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "fairness header containing the separator is not composed",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1/eu",
+			composeFairnessIDs:     true,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-identity",
+				attributeKey:   agentidentity.AgentIdentityKey,
+				attributeValue: "session-abc",
+			},
+			wantFairnessID:     "tenant-1/eu",
+			wantSpanFairnessID: "tenant-1/eu",
 			wantSource:         tracing.AttributionSourceHeader,
 		},
 		{
@@ -1749,6 +1796,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
 				if test.propagatePriority {
 					config = config.WithPropagatePriority(true)
+				}
+				if test.composeFairnessIDs {
+					config = config.WithComposeFairnessIDs(true)
 				}
 
 				endpointCandidates := NewDatastoreEndpointCandidates(ds)

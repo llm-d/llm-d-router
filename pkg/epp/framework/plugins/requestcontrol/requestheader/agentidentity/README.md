@@ -21,12 +21,12 @@ The plugin stores the identity as a request attribute only — it does not set `
 2. If nothing matches, no attribute is stored — the Director falls through to `metadata.DefaultFairnessID`, so the request is still admitted, just into the shared default queue.
 
 After the plugin returns, the Director derives `FairnessID`:
-1. If both the `x-llm-d-inference-fairness-id` header and the `"agent-identity"` attribute are set → compose them as `<fairness-header>/<agent-identity>`, so flow control keys one queue per session while the tenant stays part of the fairness ID and metric labels.
-2. Else if the `x-llm-d-inference-fairness-id` header is set → use it as FairnessID alone.
+1. If `requestHandler.composeFairnessIDs` is enabled, both the `x-llm-d-inference-fairness-id` header and the `"agent-identity"` attribute are set, and the header does not contain `/` → compose them as `<fairness-header>/<agent-identity>`, so flow control keys one queue per session while the tenant stays part of the fairness ID and metric labels.
+2. Else if the `x-llm-d-inference-fairness-id` header is set → use it as FairnessID alone. This is also the path when composition is disabled or the header contains `/`.
 3. Else if the `"agent-identity"` attribute exists → copy it to FairnessID.
 4. Else → `"default-flow"`.
 
-Tenant fairness IDs must not contain `/` (the composition separator); agent session IDs may.
+Composition is off by default. Tenant fairness IDs must not contain `/` (the composition separator); agent session IDs may.
 
 The plugin is stateless and safe under concurrent use.
 
