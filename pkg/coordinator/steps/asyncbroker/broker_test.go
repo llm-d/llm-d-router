@@ -339,6 +339,7 @@ func TestAsyncBrokerClientGone(t *testing.T) {
 		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
 		for _, line := range logged {
 			assert.NotContains(t, line, "failed to enqueue request")
+			assert.NotContains(t, line, "failed to cancel abandoned request")
 		}
 	})
 	t.Run("wait", func(t *testing.T) {
@@ -1022,6 +1023,30 @@ func TestAsyncBrokerRetryReattaches(t *testing.T) {
 		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(eid)).Result()
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), exists, "retry should clear the cancel marker")
+		assert.Equal(t, int64(1), queueLen(t, rdb))
+	})
+
+	t.Run("aborted retry leaves the live request queued", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		post(t, step, "enqueue", "job-r6")
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
+			defaultModeHeader: "enqueue", defaultTenantHeader: "team-a", "X-Request-Id": "job-r6",
+		})
+		reqCtx.RequestID = "job-r6"
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		var logged []string
+		logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
+
+		err := step.Execute(log.IntoContext(ctx, logger), reqCtx)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+		for _, line := range logged {
+			assert.NotContains(t, line, "retry state lookup failed")
+		}
+		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(envelopeID("team-a", "job-r6"))).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), exists, "the live request must not be cancelled")
 		assert.Equal(t, int64(1), queueLen(t, rdb))
 	})
 

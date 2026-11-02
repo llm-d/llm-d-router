@@ -300,6 +300,11 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 		RequestQueueName: queue,
 		ResultQueueName:  resultKey(tenant, reqCtx.RequestID),
 	}
+	// A client gone before the submit has nothing queued under this
+	// submission, and the cancel below could hit a live copy of a retried id.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s: enqueue: %w", StepName, err)
+	}
 	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamAsyncBroker)
 	err = s.sub.SubmitRequest(ctx, msg)
 	call.Done()
@@ -370,6 +375,9 @@ func (s *Step) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContex
 	id := reqCtx.RequestID
 	state, res, err := lookupResult(ctx, s.rdb, tenant, id)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s: reattach: %w", StepName, ctx.Err())
+		}
 		logger.Error(err, "retry state lookup failed, enqueueing fresh", "id", id)
 		return nil
 	}
