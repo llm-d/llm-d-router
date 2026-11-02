@@ -148,6 +148,42 @@ func TestRenderStep_ProcessorKwargsKeepTensors(t *testing.T) {
 	}
 }
 
+// A body that sets a preprocessing kwargs field asks for the tensors, so a
+// renderer that returns no kwargs_data anyway fails the length check instead
+// of silently taking the content_parts path, which preprocesses media at the
+// deployment defaults.
+func TestRenderStep_ProcessorKwargsMissingKwargsFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 9, 9, 3, 7, 8, 8, 2},
+			"features": map[string]any{
+				"mm_hashes": map[string]any{"image": []string{"h-img"}, "audio": []string{"h-aud"}},
+				"mm_placeholders": map[string]any{
+					"image": []any{map[string]any{"offset": 1, "length": 3}},
+					"audio": []any{map[string]any{"offset": 5, "length": 2}},
+				},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+	step, err := NewRenderStep(nil, map[string]any{"mm_payload": pipeline.MMPayloadNone})
+	require.NoError(t, err)
+	step.(*RenderStep).SetServiceAddress(server.URL)
+	body := mmKwargsChatBody()
+	body[reqcommon.FieldMMProcessorKwargs] = map[string]any{"max_pixels": 100000}
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Model:        "m",
+		Body:         body,
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage}, {Modality: reqcommon.ModalityAudio},
+		},
+	}
+	err = step.Execute(context.Background(), reqCtx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "kwargs_data")
+}
+
 func TestEncodeAndPrefill_GenerateContentPartsWithMMPayloadNone(t *testing.T) {
 	var got any
 	reqCtx := runRender(t, map[string]any{"mm_payload": pipeline.MMPayloadNone}, &got)
@@ -199,6 +235,39 @@ func TestEncodeAndPrefill_GenerateContentPartsWithMMPayloadNone(t *testing.T) {
 	require.Equal(t, []any{imagePart, audioPart}, prefillBody["content_parts"])
 	require.Equal(t, []any{float64(1), float64(9), float64(7), float64(8), float64(2)}, prefillBody["token_ids"])
 	require.Contains(t, prefillBody, reqcommon.FieldECTransferParams)
+}
+
+// A placeholder span that is not a uniform run of one token cannot collapse
+// for the content_parts form: the encoder would cache an embedding under the
+// render hash for a prompt the worker does not build.
+func TestEncodeStep_ContentPartsRejectsNonUniformSpan(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	encode, err := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false, ParamECConnector: ec.NIXL})
+	require.NoError(t, err)
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: reqcommon.PathChatCompletions,
+		Model:        "m",
+		Body: map[string]any{"model": "m", "messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": testImageURL}},
+		}}}},
+		TokenIDs:  []int{1, 9, 8, 9, 2},
+		MMPayload: pipeline.MMPayloadNone,
+		MultimodalEntries: []pipeline.MultimodalEntry{{
+			Modality: reqcommon.ModalityImage, Hash: "h-img",
+			Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3},
+		}},
+	}
+	err = encode.Execute(context.Background(), reqCtx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a uniform run")
+	require.Zero(t, requests, "the failing entry must not reach the encoder")
 }
 
 func TestCollapsePlaceholders(t *testing.T) {

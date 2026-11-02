@@ -296,6 +296,12 @@ func (s *EncodeStep) buildEncodeContentPartsBody(reqCtx *pipeline.RequestContext
 	if err != nil {
 		return nil, err
 	}
+	// The prompt collapses the span to one token, which the worker re-expands
+	// to the span length; a span that mixes tokens would make the encoder cache
+	// an embedding under the render hash for a prompt the worker never builds.
+	if err := checkUniformSpan(reqCtx.TokenIDs, entry.Placeholder); err != nil {
+		return nil, err
+	}
 	collapsed := entry
 	collapsed.Placeholder.Length = 1
 	tokenIDs, err := s.buildEncodeTokenIDs(reqCtx.TokenIDs, collapsed)

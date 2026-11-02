@@ -171,8 +171,8 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // reqCtx.TokenIDs and reqCtx.MultimodalEntries, the typed fields every
 // downstream step (encode/prefill/decode) reads instead of the raw body, and
 // enforces the generate-only bounds vLLM does not (validatePlaceholderBounds,
-// token/placeholder limits) before EncodeStep indexes token_ids[offset] and
-// allocates from length.
+// token/placeholder limits) so client-supplied span geometry fails as a bad
+// request at parse time.
 func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
@@ -246,7 +246,7 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 		// decode into a minimal struct so completions stays decoupled from the
 		// chat-completions response shape.
 		var renderResp []completionsRenderResponse
-		if err := s.postRender(ctx, reqCtx, reqcommon.PathCompletions, &renderResp); err != nil {
+		if _, err := s.postRender(ctx, reqCtx, reqcommon.PathCompletions, &renderResp); err != nil {
 			return err
 		}
 		if len(renderResp) != 1 {
@@ -313,15 +313,19 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 // own shape.
 func (s *RenderStep) executeRender(ctx context.Context, reqCtx *pipeline.RequestContext, path string) error {
 	var renderResp renderResponse
-	if err := s.postRender(ctx, reqCtx, path, &renderResp); err != nil {
+	askedToOmit, err := s.postRender(ctx, reqCtx, path, &renderResp)
+	if err != nil {
 		return err
 	}
-	return s.applyRenderResponse(ctx, reqCtx, renderResp)
+	return s.applyRenderResponse(ctx, reqCtx, renderResp, askedToOmit)
 }
 
 // applyRenderResponse stores a renderResponse's token_ids and reconciles its
-// per-image features onto reqCtx.MultimodalEntries.
-func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.RequestContext, renderResp renderResponse) error {
+// per-image features onto reqCtx.MultimodalEntries. askedToOmit is postRender's
+// report of whether the render request asked for the tensors to be omitted;
+// a body that sets preprocessing kwargs keeps the tensors form and asks for
+// nothing.
+func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.RequestContext, renderResp renderResponse, askedToOmit bool) error {
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
 	reqCtx.TokenIDs = renderResp.TokenIDs
@@ -346,7 +350,7 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 	expected := len(reqCtx.MultimodalEntries)
 	// A renderer without the mm_payload field ignores it and returns the
 	// tensors, which keep the features path.
-	omitted := s.mmPayload != pipeline.MMPayloadTensors && expected > 0 && totalKwargs == 0
+	omitted := askedToOmit && expected > 0 && totalKwargs == 0
 	if totalHashes != expected {
 		return fmt.Errorf("render returned %d mm_hashes but expected %d", totalHashes, expected)
 	}
@@ -448,15 +452,18 @@ func bodySetsProcessorKwargs(body map[string]any) bool {
 }
 
 // postRender marshals reqCtx.Body, asking for no tensors unless mm_payload is
-// tensors, POSTs it to <serviceAddress><basePath>/render, and decodes the JSON
-// response into out.
-func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestContext, basePath string, out any) error {
+// tensors or the body sets preprocessing kwargs, POSTs it to
+// <serviceAddress><basePath>/render, and decodes the JSON response into out.
+// The returned askedToOmit reports whether the request asked the renderer to
+// omit the tensors.
+func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestContext, basePath string, out any) (bool, error) {
 	if s.serviceAddress == "" {
-		return errors.New("render: service address not configured (set 'address' in render step params)")
+		return false, errors.New("render: service address not configured (set 'address' in render step params)")
 	}
 
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
+	askedToOmit := false
 	renderBody := reqCtx.Body
 	if s.mmPayload != pipeline.MMPayloadTensors {
 		if bodySetsProcessorKwargs(reqCtx.Body) {
@@ -470,11 +477,12 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 			renderBody = maps.Clone(reqCtx.Body)
 			renderBody[reqcommon.FieldReturnMMKwargs] = false
 			renderBody[reqcommon.FieldMMPayload] = pipeline.MMPayloadNone
+			askedToOmit = true
 		}
 	}
 	body, err := json.Marshal(renderBody)
 	if err != nil {
-		return fmt.Errorf("marshaling request for render: %w", err)
+		return false, fmt.Errorf("marshaling request for render: %w", err)
 	}
 
 	url := s.serviceAddress + basePath + "/render"
@@ -482,7 +490,7 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("creating render request: %w", err)
+		return false, fmt.Errorf("creating render request: %w", err)
 	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
@@ -494,18 +502,18 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 	resp, err := s.client.Do(req)
 	call.Done()
 	if err != nil {
-		return fmt.Errorf("render request failed: %w", err)
+		return false, fmt.Errorf("render request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if err := checkStatus(RenderStepName, resp); err != nil {
-		return err
+		return false, err
 	}
 	reqCtx.CaptureResponseHeaders(resp.Header)
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decoding render response: %w", err)
+		return false, fmt.Errorf("decoding render response: %w", err)
 	}
-	return nil
+	return askedToOmit, nil
 }
 
 type renderResponse struct {

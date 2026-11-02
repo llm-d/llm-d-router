@@ -322,6 +322,8 @@ The coordinator skips the `kwargs_data` length check, leaves every `KwargsData` 
 
 Once the tensors are omitted, the encode and prefill workers' `/inference/v1/generate` must accept `content_parts` (vllm-project/vllm#51478) and key `ec_transfer_params` by the supplied `uuid`. A worker without `content_parts` support rejects the request: unlike a renderer without `mm_payload`, there is no fallback once render omits the tensors, so the renderer and the workers must run versions that agree.
 
+The renderer and the workers must also agree on the multimodal processor configuration (`--mm-processor-kwargs` and the media IO defaults such as `max_pixels`). Under `tensors`, render's preprocessing decides the placeholder length in `token_ids` everywhere downstream. Under `none`, the encode worker, and the prefill worker on the `content_parts` form, preprocess the client's media again with their own configuration; a worker configured differently derives a different grid, so its expansion no longer matches the placeholder length in `token_ids`, and prefill fails or attends over a span of the wrong size.
+
 Measured with Qwen3-VL-32B and one 640x448 JPEG, the render response is 575,449 bytes with `mm_payload: tensors` and 1,641 bytes with the tensors omitted.
 
 ---

@@ -463,13 +463,29 @@ func generateContentPart(entry pipeline.MultimodalEntry, localIdx int, partsByMo
 	}, nil
 }
 
+// checkUniformSpan verifies span sits inside tokenIDs and is a run of one
+// repeated token, the shape the Qwen-VL family produces. A model whose parser
+// interleaves other tokens inside a range cannot have the span collapsed to
+// its first token: the worker would expand a different prompt than render
+// produced.
+func checkUniformSpan(tokenIDs []int, span pipeline.PlaceholderRange) error {
+	if span.Offset < 0 || span.Length < 1 || span.Offset+span.Length > len(tokenIDs) {
+		return fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
+			span.Offset, span.Length, len(tokenIDs))
+	}
+	for i := span.Offset + 1; i < span.Offset+span.Length; i++ {
+		if tokenIDs[i] != tokenIDs[span.Offset] {
+			return fmt.Errorf("placeholder (offset %d, length %d) is not a uniform run of one token",
+				span.Offset, span.Length)
+		}
+	}
+	return nil
+}
+
 // collapsePlaceholders shrinks every entry's placeholder span in tokenIDs to
 // its first token. A generate request that carries content_parts takes an
 // unexpanded prompt: the worker's multimodal processor expands each
-// placeholder itself. The span must be a uniform run of one token, the shape
-// the Qwen-VL family produces; a model whose parser interleaves other tokens
-// inside a range fails the request, since the worker would expand a different
-// prompt than render produced.
+// placeholder itself, so every span must pass checkUniformSpan.
 func collapsePlaceholders(tokenIDs []int, entries []pipeline.MultimodalEntry) ([]int, error) {
 	ranges := make([]pipeline.PlaceholderRange, len(entries))
 	for i, entry := range entries {
@@ -479,15 +495,12 @@ func collapsePlaceholders(tokenIDs []int, entries []pipeline.MultimodalEntry) ([
 	collapsed := make([]int, 0, len(tokenIDs))
 	pos := 0
 	for _, r := range ranges {
-		if r.Offset < pos || r.Length < 1 || r.Length > len(tokenIDs)-r.Offset {
-			return nil, fmt.Errorf("placeholder (offset %d, length %d) overlaps another or exceeds %d token_ids",
-				r.Offset, r.Length, len(tokenIDs))
+		if r.Offset < pos {
+			return nil, fmt.Errorf("placeholder (offset %d, length %d) overlaps another placeholder",
+				r.Offset, r.Length)
 		}
-		for i := r.Offset + 1; i < r.Offset+r.Length; i++ {
-			if tokenIDs[i] != tokenIDs[r.Offset] {
-				return nil, fmt.Errorf("placeholder (offset %d, length %d) is not a uniform run of one token",
-					r.Offset, r.Length)
-			}
+		if err := checkUniformSpan(tokenIDs, r); err != nil {
+			return nil, err
 		}
 		collapsed = append(collapsed, tokenIDs[pos:r.Offset+1]...)
 		pos = r.Offset + r.Length
@@ -737,11 +750,9 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 			if !ok {
 				return nil, fmt.Errorf("mm_placeholders[%s][%d] must be an object: %w", mod, i, pipeline.ErrBadRequest)
 			}
-			// The non-negative guarantee is load-bearing:
-			// EncodeStep.buildEncodeTokenIDs indexes fullTokenIDs[offset]
-			// (upper-bound guarded only) and allocates make([]int, 1+length),
-			// which panics on a negative. vLLM accepts negatives here, so this
-			// is deliberately stricter; do not relax it to a plain int parse.
+			// vLLM accepts negatives here; the coordinator does not, so a bad
+			// span fails as a 400 at parse time instead of resurfacing as a
+			// span error in encode. Do not relax this to a plain int parse.
 			offset, err := anyToNonNegativeInt(pMap["offset"])
 			if err != nil {
 				return nil, fmt.Errorf("mm_placeholders[%s][%d].offset: %v: %w", mod, i, err, pipeline.ErrBadRequest)
@@ -780,13 +791,12 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 
 // validatePlaceholderBounds checks that every placeholder span [offset,
 // offset+length) lies within a prompt of tokenCount tokens. It guards the
-// generate path, where the client supplies placeholder geometry directly:
-// EncodeStep.buildEncodeTokenIDs indexes token_ids[offset] and allocates
-// make([]int, 1+length), so an out-of-range offset reads the wrong token and an
-// unbounded length (a tiny request can claim billions) is a memory-exhaustion
-// vector. vLLM declares offset/length as plain unbounded ints on the generate
-// endpoint and does not enforce this, so the coordinator does. offset and
-// length are already guaranteed non-negative by extractMultimodalEntries.
+// generate path, where the client supplies placeholder geometry directly and a
+// bad span is a bad request: without it the same mistake surfaces later as a
+// span error in encode or prefill. vLLM declares offset/length as plain
+// unbounded ints on the generate endpoint and does not enforce this, so the
+// coordinator does. offset and length are already guaranteed non-negative by
+// extractMultimodalEntries.
 func validatePlaceholderBounds(entries []pipeline.MultimodalEntry, tokenCount int) error {
 	for i, e := range entries {
 		off := e.Placeholder.Offset
