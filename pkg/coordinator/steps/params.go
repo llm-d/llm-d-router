@@ -46,6 +46,12 @@ const (
 	// is smaller. A Responses request also reserves its own body size from the
 	// shared budget, outside this cap, for the request fields its reply echoes.
 	ParamForceStreamMaxRequestSize = "force_stream_max_request_size"
+	// ParamPromptTokenParity selects what the decode and conditional-decode
+	// steps do when the worker's usage reports a prompt token count different
+	// from the rendered one: "off" skips the check, "warn" (default) counts and
+	// logs it, "error" also records a step error. The response to the client
+	// is never changed.
+	ParamPromptTokenParity = "prompt_token_parity"
 )
 
 func buildKVConnector(params map[string]any) (kv.Connector, error) {

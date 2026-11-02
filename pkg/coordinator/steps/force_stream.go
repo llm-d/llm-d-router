@@ -396,7 +396,7 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 	}
 
 	// The client asked for a non-streaming reply, so no include_usage was injected.
-	writer, finalize := s.responseWriter(reqCtx, parity, false)
+	writer, finalize := parityResponseWriter(reqCtx, parity, false)
 	copyUpstreamHeaders(writer.Header(), upstreamHeader)
 	return writeForcedResponse(ctx, logger, reqCtx, writer, finalize, reassembler)
 }
