@@ -56,6 +56,46 @@ featureGates:
 	})
 }
 
+func TestDynamicPDFeatureGateDefaultsOffAndCanBeEnabled(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configText string
+		flags      []string
+		enabled    bool
+	}{
+		{
+			name:       "disabled by default",
+			configText: "apiVersion: llm-d.ai/v1\nkind: EndpointPickerConfig\n",
+		},
+		{
+			name: "enabled by config",
+			configText: `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+featureGates:
+- dynamicPD
+`,
+			enabled: true,
+		},
+		{
+			name:       "enabled by flag",
+			configText: "apiVersion: llm-d.ai/v1\nkind: EndpointPickerConfig\n",
+			flags:      []string{runserver.DynamicPDFeatureGate + "=true"},
+			enabled:    true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opts := runserver.NewOptions()
+			opts.ConfigText = test.configText
+			opts.FeatureGates = test.flags
+			runner := NewRunner()
+
+			_, err := runner.parseConfigurationPhaseOne(context.Background(), opts)
+			require.NoError(t, err)
+			require.Equal(t, test.enabled, runner.featureGates[runserver.DynamicPDFeatureGate])
+		})
+	}
+}
+
 // TestFlowControlFeatureGateAdmissionControlWiring exercises the flowControl feature gate through
 // the production config path (parseConfigurationPhaseOne -> parseConfigurationPhaseTwo ->
 // initAdmissionControl) in both directions:

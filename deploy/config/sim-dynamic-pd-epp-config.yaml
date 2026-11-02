@@ -1,0 +1,42 @@
+# Opt-in sample EPP configuration for testing dynamic P/D role assignment.
+# The default sim-pd-epp-config.yaml intentionally leaves dynamicPD disabled.
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+featureGates:
+- dynamicPD
+plugins:
+- type: approx-prefix-cache-producer
+  parameters:
+    blockSizeTokens: 16
+    autoTune: false
+    maxPrefixTokensToMatch: 16384
+    lruCapacityPerServer: 31250
+- type: prefix-cache-scorer
+- type: queue-scorer
+- type: prefill-filter
+- type: decode-filter
+- type: max-score-picker
+- type: prefix-based-pd-decider
+  parameters:
+    nonCachedTokens: 16
+- type: disagg-profile-handler
+  parameters:
+    deciders:
+      prefill: prefix-based-pd-decider
+schedulingProfiles:
+- name: prefill
+  plugins:
+  - pluginRef: prefill-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
+  - pluginRef: queue-scorer
+    weight: 1
+- name: decode
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
+  - pluginRef: queue-scorer
+    weight: 1

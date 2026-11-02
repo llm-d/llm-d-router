@@ -67,6 +67,11 @@ export MODEL_ID="${MODEL_NAME##*/}"
 # Safe model name for Kubernetes resources (lowercase, hyphenated)
 export MODEL_NAME_SAFE=$(echo "${MODEL_ID}" | tr '[:upper:]' '[:lower:]' | tr ' /_.' '-')
 
+# Dynamic P/D worker-shape identity. The default image is the simulator; real
+# accelerator deployments must set VLLM_ACCELERATOR_CLASS explicitly.
+export VLLM_ACCELERATOR_CLASS="${VLLM_ACCELERATOR_CLASS:-simulator}"
+export ROLE_TRANSFER_GROUP="${ROLE_TRANSFER_GROUP:-${MODEL_NAME_SAFE}-${VLLM_ACCELERATOR_CLASS}}"
+
 # Set the endpoint-picker to deploy
 export EPP_NAME="${EPP_NAME:-${MODEL_NAME_SAFE}-endpoint-picker}"
 
@@ -438,7 +443,8 @@ kubectl kustomize --enable-helm ${KUSTOMIZE_DIR} \
   ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${TARGET_PORTS} ${NAMESPACE} \
   ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE} \
   ${KV_CONNECTOR_TYPE} ${EC_CONNECTOR_TYPE} ${CONNECTOR_TYPE} ${KV_CACHE_ENABLED} ${HF_TOKEN} ${VLLM_SIM_MODE} \
-  ${DECODE_ROLE} ${VLLM_EXTRA_ARGS_E} ${VLLM_EXTRA_ARGS_P} ${VLLM_EXTRA_ARGS_D}' \
+  ${DECODE_ROLE} ${VLLM_EXTRA_ARGS_E} ${VLLM_EXTRA_ARGS_P} ${VLLM_EXTRA_ARGS_D} \
+  ${VLLM_ACCELERATOR_CLASS} ${ROLE_TRANSFER_GROUP}' \
   | awk '
     /^[[:space:]]*-[[:space:]]+".*"[[:space:]]*$/ {
       match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
