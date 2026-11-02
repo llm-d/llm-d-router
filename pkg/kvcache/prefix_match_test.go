@@ -820,6 +820,70 @@ func TestMatchBlockKeysRetrievalSpanGPURetainedWhenCPUPartial(t *testing.T) {
 	}, got)
 }
 
+// TestMatchBlockKeysRetrievalSpanMidUnitSpan1HoldKeepsUncredited covers the
+// case where a span-1 hold (e.g. speculative) appears while a multi-canonical
+// CPU unit is still in progress: earlier deferred keys must remain credit-able
+// when the unit completes.
+func TestMatchBlockKeysRetrievalSpanMidUnitSpan1HoldKeepsUncredited(t *testing.T) {
+	ctx := context.Background()
+	pod := "pod-cpu-spec"
+	keys := []kvblock.BlockHash{10, 20, 30, 40}
+
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	for i, key := range keys {
+		entries := []kvblock.PodEntry{{PodIdentifier: pod, DeviceTier: "cpu", RetrievalSpan: 4}}
+		if i == 2 {
+			// Intermediate span-1 speculative hold must not wipe deferred CPU weights.
+			entries = append(entries, kvblock.PodEntry{PodIdentifier: pod, DeviceTier: kvcache.SpeculativeTier})
+		}
+		require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{key}, entries))
+	}
+
+	got, err := indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			// Key 2 credits speculative weight 1.0 immediately; keys 0/1/3 flush
+			// at 0.8 each when the CPU unit completes (key 2 is not double-counted).
+			WeightedScore:   1.0 + 0.8*3,
+			MatchedBlocks:   4,
+			ConfirmedBlocks: 4, // cpu present on every key keeps the confirmed chain
+			// Speculative appears mid-chain, so BlocksByTier omits it (tiers must
+			// start on the first key); score/matched still credit the span-1 hold.
+			BlocksByTier: map[string]int{"cpu": 4},
+		},
+	}, got)
+}
+
+// TestMatchBlockKeysRetrievalSpanSpeculativeBreakKeepsConfirmed covers a
+// completed multi-canonical unit that must not resurrect ConfirmedBlocks when
+// every key in the unit was speculative (confirmedAlive never becomes true).
+func TestMatchBlockKeysRetrievalSpanSpeculativeBreakKeepsConfirmed(t *testing.T) {
+	ctx := context.Background()
+	pod := "pod-spec-unit"
+	keys := []kvblock.BlockHash{10, 20, 30, 40}
+
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	for _, key := range keys {
+		// Speculative:true routes under SpeculativeTier (no confirmedSeen) while
+		// RetrievalSpan still forms one multi-canonical unit.
+		require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{key}, []kvblock.PodEntry{
+			{PodIdentifier: pod, DeviceTier: "cpu", Speculative: true, RetrievalSpan: 4},
+		}))
+	}
+
+	got, err := indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			WeightedScore:   1.0 * 4,
+			MatchedBlocks:   4,
+			ConfirmedBlocks: 0, // must not jump to matched on unit completion
+			BlocksByTier:    map[string]int{kvcache.SpeculativeTier: 4},
+		},
+	}, got)
+}
+
 // normalizeZeroTier ensures a missing tier is present as 0 so assertPodMatches
 // can compare partial-credit cases where the matcher omits empty tiers.
 func normalizeZeroTier(got map[string]kvcache.PodMatch, tiers ...string) map[string]kvcache.PodMatch {

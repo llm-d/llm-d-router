@@ -652,43 +652,91 @@ func (a *prefixAccumulator) creditKey(s *matchSlot, first bool) {
 		}
 	}
 
+	// ConfirmedBlocks must stay a continuous non-speculative prefix. Update
+	// confirmedAlive for this key before any credit path so a completed
+	// multi-span unit cannot resurrect a chain that already broke.
+	keyConfirmed := s.confirmedSeen == a.keyStamp
+	if first {
+		s.confirmedAlive = keyConfirmed
+	} else if !keyConfirmed {
+		s.confirmedAlive = false
+	}
+
 	switch {
 	case s.keyHoldSpan1:
 		s.matched++
 		s.score += s.weight
-		s.uncredited = s.uncredited[:0]
-		if s.confirmedSeen == a.keyStamp {
-			if first || s.confirmedAlive {
-				s.confirmed++
-				s.confirmedAlive = true
+		if keyConfirmed && s.confirmedAlive {
+			s.confirmed++
+		}
+		if completedUnits > 0 {
+			// A multi-span unit completed on a key that also has a span-1 hold.
+			// The current key is already credited above; flush only deferred
+			// multi-only keys still sitting in uncredited.
+			a.flushUncredited(s)
+			if s.confirmedAlive {
+				s.confirmed = s.matched
 			}
-		} else if !first {
-			s.confirmedAlive = false
+		} else if !hasPendingMultiSpan(s) {
+			// Safe to drop stray deferred weights once no multi-span unit is
+			// still in flight. Never wipe while earlier multi-only keys are
+			// waiting for their unit to complete.
+			s.uncredited = s.uncredited[:0]
 		}
 	case completedUnits > 0:
 		s.uncredited = append(s.uncredited, s.weight)
-		start := len(s.uncredited) - completedUnits
-		if start < 0 {
-			start = 0
-		}
-		for _, w := range s.uncredited[start:] {
-			s.score += w
-		}
-		s.matched += len(s.uncredited) - start
-		s.uncredited = s.uncredited[:start]
-		if s.confirmedSeen == a.keyStamp {
+		a.flushCompletedUnit(s, completedUnits)
+		// Only catch ConfirmedBlocks up to MatchedBlocks when the confirmed
+		// chain stayed alive across every key of the unit.
+		if s.confirmedAlive {
 			s.confirmed = s.matched
-			s.confirmedAlive = true
 		}
 	default:
 		// Multi-span-only hold that has not completed a retrieval unit yet.
 		if s.keyHoldMulti {
 			s.uncredited = append(s.uncredited, s.weight)
 		}
-		if !first && s.confirmedAlive && s.confirmedSeen != a.keyStamp {
-			s.confirmedAlive = false
+	}
+}
+
+// hasPendingMultiSpan reports whether a multi-key retrieval unit is still
+// accumulating on this slot (deferred keys and/or in-progress tier pending).
+func hasPendingMultiSpan(s *matchSlot) bool {
+	if len(s.uncredited) > 0 || s.keyHoldMulti {
+		return true
+	}
+	for t := range s.tiers {
+		if s.tiers[t].pending > 0 {
+			return true
 		}
 	}
+	return false
+}
+
+// flushUncredited credits every deferred multi-only key weight into the score.
+func (a *prefixAccumulator) flushUncredited(s *matchSlot) {
+	if len(s.uncredited) == 0 {
+		return
+	}
+	for _, w := range s.uncredited {
+		s.score += w
+	}
+	s.matched += len(s.uncredited)
+	s.uncredited = s.uncredited[:0]
+}
+
+// flushCompletedUnit credits the trailing completedUnits entries of uncredited
+// (or all of them when some unit keys were already counted via span-1 holds).
+func (a *prefixAccumulator) flushCompletedUnit(s *matchSlot, completedUnits int) {
+	start := len(s.uncredited) - completedUnits
+	if start < 0 {
+		start = 0
+	}
+	for _, w := range s.uncredited[start:] {
+		s.score += w
+	}
+	s.matched += len(s.uncredited) - start
+	s.uncredited = s.uncredited[:start]
 }
 
 // result materializes the accumulated matches.
