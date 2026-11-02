@@ -21,8 +21,8 @@ Development images built from `main` use the same names with a `-dev` suffix
 Release images tagged `v0.10.0` and earlier carry neither an attestation nor
 an SBOM. The commands below report a missing attestation for them.
 
-The SBOM files attached to GitHub Releases are signed from the first release
-after this change. Earlier releases have the files but no attestation for them.
+SBOM files attached to GitHub Releases tagged `v1.0.0` and earlier have no
+attestation. The commands below report a missing attestation for them.
 
 ## Prerequisites
 
@@ -220,7 +220,7 @@ fails with `no attestations found`.
 | `Sigstore verification failed` (`gh`) or `failed to verify certificate identity` (`cosign`) | The signer identity names a calling workflow. Use `ci-build-images.yaml`. |
 | `gh` prints nothing and exits 0 | Output is redirected. The report goes to standard error. Test the exit status. |
 | `.SBOM` returns `{}` | The artifact carries no SBOM. See Coverage. |
-| `no attestations found` for a release SBOM file | The file was changed after download, or the release predates SBOM file signing. See Coverage. |
+| `no attestations found` for a release SBOM file | The file was changed after download, or the release is `v1.0.0` or earlier. See Coverage. |
 
 ## Related
 
