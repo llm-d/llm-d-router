@@ -59,7 +59,7 @@ saturation ≈ 0.34. This creates a dead zone at low load with a steep ramp at m
 
 ### Example Configuration
 
-See [`deploy/config/probabilistic-admitter-epp-config.yaml`](../../../../../../../deploy/config/probabilistic-admitter-epp-config.yaml) for the full EPP config. The
+See [`test/e2e/artifacts/config/probabilistic-admitter-epp-config.yaml`](../../../../../../../test/e2e/artifacts/config/probabilistic-admitter-epp-config.yaml) for the full EPP config. The
 key snippet:
 
 ```yaml
@@ -132,7 +132,7 @@ Deploy your `InferencePool` resource. The pool must exist before the EPP can con
 
 ### 3. Apply the EPP config
 
-Use `deploy/config/probabilistic-admitter-epp-config.yaml` as the `EndpointPickerConfig`
+Use `test/e2e/artifacts/config/probabilistic-admitter-epp-config.yaml` as the `EndpointPickerConfig`
 for your EPP deployment.
 
 The config disables the system-level saturation gate (by setting the `utilization-detector`

@@ -2,7 +2,7 @@
 
 Kustomize overlays for deploying vLLM inference in different disaggregation scenarios.
 Each scenario directory selects which atomic components to deploy and applies
-scenario-specific patches. The atomic components live in `deploy/components/`:
+scenario-specific patches. The atomic components live in `test/e2e/artifacts/components/`:
 
 | Component | Description |
 |-----------|-------------|
