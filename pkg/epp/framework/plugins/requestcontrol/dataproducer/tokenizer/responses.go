@@ -33,7 +33,6 @@ import (
 
 // Input item "type" discriminators the legacy translation converts.
 const (
-	responsesItemTypeMessage            = "message"
 	responsesItemTypeFunctionCall       = "function_call"
 	responsesItemTypeFunctionCallOutput = "function_call_output"
 	responsesItemTypeReasoning          = "reasoning"
@@ -417,7 +416,7 @@ func simpleResponsesMessage(item any) (tokenizerTypes.Conversation, error) {
 	if !ok {
 		return tokenizerTypes.Conversation{}, fmt.Errorf("responses input item of type %T is not supported by legacy translation", item)
 	}
-	if t, ok := m["type"].(string); ok && t != "" && t != responsesItemTypeMessage {
+	if t, ok := m["type"].(string); ok && t != "" && t != reqcommon.ResponsesItemTypeMessage {
 		return tokenizerTypes.Conversation{}, fmt.Errorf("responses input item type %q is not supported by legacy translation", t)
 	}
 	role, ok := m["role"].(string)
@@ -437,9 +436,9 @@ func simpleResponsesMessage(item any) (tokenizerTypes.Conversation, error) {
 // input_audio, and so on) fails the conversion rather than being guessed at
 // or dropped.
 var responsesContentTextTypes = map[string]bool{
-	"input_text":  true,
-	"output_text": true,
-	blockTypeText: true,
+	reqcommon.PartTypeInputText:  true,
+	reqcommon.PartTypeOutputText: true,
+	reqcommon.PartTypeText:       true,
 }
 
 // responsesContent converts a Responses input item's "content" field into
@@ -468,7 +467,7 @@ func responsesContent(raw any) (*tokenizerTypes.Content, error) {
 			}
 			blocks = append(blocks, block)
 		}
-		if len(blocks) == 1 && blocks[0].Type == blockTypeText {
+		if len(blocks) == 1 && blocks[0].Type == reqcommon.PartTypeText {
 			return &tokenizerTypes.Content{Raw: blocks[0].Text}, nil
 		}
 		return &tokenizerTypes.Content{Structured: blocks}, nil
@@ -491,7 +490,7 @@ func responsesContentPart(p map[string]any) (tokenizerTypes.ContentBlock, error)
 		if !ok {
 			return tokenizerTypes.ContentBlock{}, fmt.Errorf("responses content part type %q has no text field", partType)
 		}
-		return tokenizerTypes.ContentBlock{Type: blockTypeText, Text: text}, nil
+		return tokenizerTypes.ContentBlock{Type: reqcommon.PartTypeText, Text: text}, nil
 	case partType == "input_image":
 		url, ok := p["image_url"].(string)
 		if !ok || url == "" {
