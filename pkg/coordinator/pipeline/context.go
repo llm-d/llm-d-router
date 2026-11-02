@@ -17,7 +17,6 @@ limitations under the License.
 package pipeline
 
 import (
-	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -183,9 +182,9 @@ type RequestContext struct {
 	// decode step. Populated by PrefillStep; consumed by the KV connector when
 	// building the decode request.
 	KVTransferParams map[string]any
-	// PrefillDrain tracks the background drain of a streaming prefill
-	// response that overlaps later steps. Populated by PrefillStep.
-	PrefillDrain *PrefillDrain
+	// PrefillResult receives one error, or nil on success, from a streaming prefill.
+	// It is buffered so the reader can finish after decode returns.
+	PrefillResult <-chan error
 	// PrefillCachedTokens is the prompt-cache hit count the prefill worker
 	// reported, read from the details object its route documents:
 	// usage.prompt_tokens_details.cached_tokens, or
@@ -218,14 +217,6 @@ type RequestContext struct {
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
-}
-
-// PrefillDrain tracks a streaming prefill response until its reader finishes.
-type PrefillDrain struct {
-	// Result delivers one error, or nil on success, to the decode step.
-	// It must be buffered so the reader can finish after decode returns.
-	Result <-chan error
-	Cancel context.CancelFunc
 }
 
 // MultimodalEntry describes one multimodal item in the request and where it

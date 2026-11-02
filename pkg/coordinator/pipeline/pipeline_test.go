@@ -182,15 +182,8 @@ func TestNewWithForwardResponseHeaders_RejectsInvalidNames(t *testing.T) {
 
 func TestPipeline_AbortsOnError(t *testing.T) {
 	executed := map[string]bool{}
-	cancelled := false
-	reqCtx := &RequestContext{}
 	steps := []Step{
-		&mockStep{name: "prefill", fn: func(_ context.Context, rc *RequestContext) error {
-			rc.PrefillDrain = &PrefillDrain{Cancel: func() { cancelled = true }}
-			return nil
-		}},
 		&mockStep{name: "a", fn: func(_ context.Context, _ *RequestContext) error {
-			require.False(t, cancelled)
 			executed["a"] = true
 			return errors.New("step a failed")
 		}},
@@ -201,9 +194,7 @@ func TestPipeline_AbortsOnError(t *testing.T) {
 	}
 
 	p := New(steps)
-	err := p.Execute(context.Background(), reqCtx)
-	require.True(t, cancelled)
-	require.Nil(t, reqCtx.PrefillDrain)
+	err := p.Execute(context.Background(), &RequestContext{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -215,22 +206,27 @@ func TestPipeline_AbortsOnError(t *testing.T) {
 	}
 }
 
-func TestPipeline_PrefillDrainCleanup(t *testing.T) {
-	for _, outcome := range []string{"panic", "early exit", "success", "client cancellation"} {
+func TestPipeline_CancelsStepContextOnExit(t *testing.T) {
+	for _, outcome := range []string{"error", "panic", "early exit", "success", "client cancellation"} {
 		t.Run(outcome, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			prefillCtx, cancelPrefill := context.WithCancel(ctx)
-			defer cancelPrefill()
-			reqCtx := &RequestContext{}
+			var stepDone <-chan struct{}
+			stepErr := errors.New("decode failed")
 			p := New([]Step{
-				&mockStep{name: "prefill", fn: func(_ context.Context, rc *RequestContext) error {
-					rc.PrefillDrain = &PrefillDrain{Cancel: cancelPrefill}
+				&mockStep{name: "prefill", fn: func(ctx context.Context, _ *RequestContext) error {
+					stepDone = ctx.Done()
 					return nil
 				}},
 				&mockStep{name: "decode", fn: func(_ context.Context, _ *RequestContext) error {
-					require.NoError(t, prefillCtx.Err())
+					select {
+					case <-stepDone:
+						t.Fatal("step context canceled before pipeline completion")
+					default:
+					}
 					switch outcome {
+					case "error":
+						return stepErr
 					case "panic":
 						panic(http.ErrAbortHandler)
 					case "early exit":
@@ -244,17 +240,25 @@ func TestPipeline_PrefillDrainCleanup(t *testing.T) {
 				}},
 			})
 			switch outcome {
+			case "error":
+				require.ErrorIs(t, p.Execute(ctx, &RequestContext{}), stepErr)
 			case "panic":
 				require.PanicsWithValue(t, http.ErrAbortHandler, func() {
-					_ = p.Execute(ctx, reqCtx)
+					_ = p.Execute(ctx, &RequestContext{})
 				})
 			case "client cancellation":
-				require.ErrorIs(t, p.Execute(ctx, reqCtx), context.Canceled)
+				require.ErrorIs(t, p.Execute(ctx, &RequestContext{}), context.Canceled)
 			default:
-				require.NoError(t, p.Execute(ctx, reqCtx))
+				require.NoError(t, p.Execute(ctx, &RequestContext{}))
 			}
-			require.ErrorIs(t, prefillCtx.Err(), context.Canceled)
-			require.Nil(t, reqCtx.PrefillDrain)
+			select {
+			case <-stepDone:
+			default:
+				t.Fatal("pipeline did not cancel its step context")
+			}
+			if outcome != "client cancellation" {
+				require.NoError(t, ctx.Err(), "pipeline cleanup must leave its parent context active")
+			}
 		})
 	}
 }
