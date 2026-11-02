@@ -19,6 +19,7 @@ package kvblock
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -495,4 +496,13 @@ func (m *CostAwareMemoryIndex) GetRequestKey(ctx context.Context, engineKey Bloc
 		return EmptyBlockHash, fmt.Errorf("engine key not found: %s", engineKey.String())
 	}
 	return rks[len(rks)-1], nil
+}
+
+// GetRequestKeys returns every request key mapped to the given engineKey.
+func (m *CostAwareMemoryIndex) GetRequestKeys(ctx context.Context, engineKey BlockHash) ([]BlockHash, error) {
+	rks, found := m.requestKeys.Get(engineKey)
+	if !found || len(rks) == 0 {
+		return nil, fmt.Errorf("engine key not found: %s", engineKey.String())
+	}
+	return slices.Clone(rks), nil
 }
