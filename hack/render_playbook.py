@@ -6,12 +6,13 @@ gating CI via `make verify-review-playbook` (`python3 hack/render_playbook.py --
 """
 
 import argparse
+import datetime
 import difflib
 import pathlib
 import posixpath
 import re
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 GENERATED_HEADER = (
     "<!-- Generated from docs/review/ by hack/render_playbook.py. "
@@ -21,6 +22,26 @@ GENERATED_HEADER = (
 
 MAX_REPRESENTATIVE_THREADS = 3
 MAX_CITATIONS_PER_RULE = 8
+STALE_AFTER_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+STALE_AFTER_SHAPE = "YYYY-MM-DDTHH:MM:SSZ"
+MAINTENANCE_PLAYBOOK = "playbooks/maintain_review_bundle.md"
+ROUTING_TABLE_FILE = "playbooks/review_a_pull_request.md"
+ROUTING_TABLE_HEADER = "Touched repository paths"
+REPO_PATH_ROOTS = (
+    ".github",
+    "apix",
+    "client-go",
+    "cmd",
+    "config",
+    "deploy",
+    "docs",
+    "hack",
+    "internal",
+    "pkg",
+    "scripts",
+    "test",
+)
+GLOB_CHARS = frozenset("*?[")
 
 
 def unquote_yaml(val: str) -> str:
@@ -352,17 +373,122 @@ def collect_file_anchors(md_path: pathlib.Path) -> set[str]:
     return anchors
 
 
+def backticked_spans(text: str) -> List[str]:
+    """Returns inline code spans outside fenced code blocks."""
+    without_fences = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    return re.findall(r"`([^`\n]+)`", without_fences)
+
+
+def repo_path_claim(span: str) -> Optional[str]:
+    """Returns the repo-relative path or glob a backticked span names, or None.
+
+    A span is a path claim when it starts with a top-level repository root
+    followed by '/'. Spans with whitespace or '<placeholder>' segments are prose
+    or templates. Trailing ':line' and '#anchor' suffixes are dropped.
+    """
+    if re.search(r"[\s<>]", span):
+        return None
+    core = re.split(r"[:#]", span, maxsplit=1)[0]
+    if not core.startswith(tuple(f"{root}/" for root in REPO_PATH_ROOTS)):
+        return None
+    return core
+
+
+def applies_to_scopes(body: str) -> List[str]:
+    """Returns the backticked path globs on `**Applies to**:` lines.
+
+    Only the scope list before '(referenced symbols:' or ';' is read, so symbol
+    names and the trailing failure-class link are not treated as paths.
+    """
+    scopes: List[str] = []
+    for m in re.finditer(r"^- \*\*Applies to\*\*:\s*(.*)$", body, re.MULTILINE):
+        scope_text = re.split(r"\(referenced symbols:|;", m.group(1), maxsplit=1)[0]
+        scopes.extend(re.findall(r"`([^`]+)`", scope_text))
+    return scopes
+
+
+def routing_table_scopes(body: str) -> Optional[List[str]]:
+    """Returns the backticked path globs in the first column of the diff-path
+    routing table, or None when no table starts with ROUTING_TABLE_HEADER.
+    """
+    scopes: List[str] = []
+    found = False
+    in_table = False
+    for line in body.splitlines():
+        if not line.startswith("|"):
+            in_table = False
+            continue
+        first_cell = line.strip().strip("|").split("|", 1)[0].strip()
+        if first_cell == ROUTING_TABLE_HEADER:
+            found = True
+            in_table = True
+            continue
+        if not in_table or set(first_cell) <= set("-: "):
+            continue
+        scopes.extend(re.findall(r"`([^`]+)`", first_cell))
+    return scopes if found else None
+
+
+def path_claim_exists(repo_root: pathlib.Path, claim: str) -> bool:
+    if GLOB_CHARS & set(claim):
+        return next(repo_root.glob(claim), None) is not None
+    return (repo_root / claim).exists()
+
+
+def parse_stale_after(value: Any) -> Optional[datetime.datetime]:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.strptime(value, STALE_AFTER_FORMAT)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=datetime.timezone.utc)
+
+
 def validate_bundle(bundle_dir: pathlib.Path, repo_root: pathlib.Path) -> List[str]:
     """Compact repo-aware OKF v0.2 check replacing generic validate_okf.py in CI."""
     errs: List[str] = []
     repo_abs = repo_root.resolve()
     bundle_abs = bundle_dir.resolve()
     anchor_cache: Dict[pathlib.Path, set[str]] = {}
+    path_claim_cache: Dict[str, bool] = {}
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     def _get_anchors(p: pathlib.Path) -> set[str]:
         if p not in anchor_cache:
             anchor_cache[p] = collect_file_anchors(p)
         return anchor_cache[p]
+
+    def _claim_exists(claim: str) -> bool:
+        if claim not in path_claim_cache:
+            path_claim_cache[claim] = path_claim_exists(repo_abs, claim)
+        return path_claim_cache[claim]
+
+    def _check_scopes(rel: str, kind: str, scopes: List[str]) -> None:
+        for scope in scopes:
+            if not _claim_exists(scope):
+                errs.append(
+                    f"{rel}: {kind} `{scope}` matches no file or directory in the repository"
+                )
+
+    def _check_stale_after(rel: str, fm: Dict[str, Any], required: bool) -> None:
+        if "stale_after" not in fm:
+            if required:
+                errs.append(
+                    f"{rel}: missing stale_after (expected {STALE_AFTER_SHAPE} UTC timestamp)"
+                )
+            return
+        expiry = parse_stale_after(fm["stale_after"])
+        if expiry is None:
+            errs.append(
+                f"{rel}: malformed stale_after {fm['stale_after']!r} "
+                f"(expected {STALE_AFTER_SHAPE} UTC timestamp)"
+            )
+        elif expiry <= now:
+            errs.append(
+                f"{rel}: stale_after {fm['stale_after']} has passed; audit the rules and "
+                f"advance stale_after per {MAINTENANCE_PLAYBOOK}"
+            )
 
     for md in sorted(bundle_abs.rglob("*.md")):
         rel = md.relative_to(bundle_abs).as_posix()
@@ -372,6 +498,16 @@ def validate_bundle(bundle_dir: pathlib.Path, repo_root: pathlib.Path) -> List[s
         text = raw.decode("utf-8", errors="replace")
         has_fm = text.startswith("---\n")
         fm, body = parse_frontmatter(text)
+        for span in backticked_spans(body):
+            claim = repo_path_claim(span)
+            if claim is not None and not _claim_exists(claim):
+                errs.append(f"{rel}: repository path `{span}` does not exist")
+        if rel == ROUTING_TABLE_FILE:
+            routing_scopes = routing_table_scopes(body)
+            if routing_scopes is None:
+                errs.append(f"{rel}: missing routing table with header {ROUTING_TABLE_HEADER!r}")
+            else:
+                _check_scopes(rel, "routing table path", routing_scopes)
         if md.name == "log.md" or (md.name == "index.md" and rel != "index.md"):
             if has_fm:
                 errs.append(f"{rel}: reserved file must not have YAML frontmatter")
@@ -404,7 +540,10 @@ def validate_bundle(bundle_dir: pathlib.Path, repo_root: pathlib.Path) -> List[s
                 errs.append(
                     f"{rel}: unused footnote definition in body: {sorted(fn_defs - fn_refs)}"
                 )
-            if md.parent.name == "rules":
+            is_rule_set = md.parent.name == "rules"
+            _check_stale_after(rel, fm, required=is_rule_set)
+            if is_rule_set:
+                _check_scopes(rel, "Applies to scope", applies_to_scopes(body_without_defs))
                 for rtitle, subs in parse_rule_blocks(body_without_defs):
                     ev_text = subs.get("Evidence", "")
                     m_rep = re.search(

@@ -1,5 +1,9 @@
 # Update Log
 
+## 2026-11-02
+
+* **Update**: Added `stale_after` freshness, `Applies to` glob, diff-path routing table glob, and backticked repository path existence checks to `hack/render_playbook.py`, and expanded [Maintain the review knowledge bundle](playbooks/maintain_review_bundle.md) with the same-PR, rule-authoring, and periodic audit loops.
+
 ## 2026-11-01
 
 * **Update**: Capped per-rule representative citations at three threads across `rules/`, compacted `sources:` entries to single-line YAML flow mappings, added unused-source validation to `hack/render_playbook.py`, and recorded context-bounded loading guidance in [Review a pull request](playbooks/review_a_pull_request.md).
