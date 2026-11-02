@@ -116,13 +116,20 @@ func (c *Screener) Screen(ctx context.Context, request *fwksched.InferenceReques
 // revision label takes only values of revisions present in the pool.
 func (c *Screener) recordSelection(ctx context.Context, request *fwksched.InferenceRequest, revision string, source selectionSource) {
 	recordRevisionSelection(c.typedName.Name, revision, source)
+	// The share budget tracks only the revisions this Screener chose, not
+	// those a strict header imposed.
+	if c.selections != nil && source != sourceHeader {
+		c.selections.record(revision)
+	}
 	if logger := log.FromContext(ctx).V(logging.DEBUG); logger.Enabled() {
 		logger.Info("Selected rollout revision", "requestID", request.RequestID, "revision", revision, "source", source)
 	}
 }
 
 // chooseRevision returns the drawn revision, the revision after overflow, and
-// the source of the draw.
+// the source of the draw. A session identifier or conversation prefix keys the
+// draw first; otherwise the prefix cache step may pick a revision before the
+// weighted random draw.
 func (c *Screener) chooseRevision(
 	ctx context.Context,
 	request *fwksched.InferenceRequest,
@@ -142,6 +149,11 @@ func (c *Screener) chooseRevision(
 		}), source
 	}
 	draw := rand.Float64() //#nosec G404 -- traffic split across revisions, not security-sensitive
+	if cached := c.cacheRevision(ctx, request, endpoints, shares); cached != "" {
+		return cached, c.overflowRevision(ctx, request, endpoints, shares, cached, func(withRoom map[string]float64) string {
+			return pickWeightedRevision(withRoom, draw)
+		}), sourceCache
+	}
 	drawn := pickWeightedRevision(shares, draw)
 	return drawn, c.overflowRevision(ctx, request, endpoints, shares, drawn, func(withRoom map[string]float64) string {
 		return pickWeightedRevision(withRoom, drawWithin(shares, drawn, draw))

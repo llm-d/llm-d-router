@@ -332,6 +332,10 @@ request. Do not add it to a scheduling profile.
 | `revisionGating.overflow.role` | string | No | `prefill` | The role whose endpoints must have room; one of `requiredRoles`. |
 | `revisionGating.affinity.mode` | string | No | `none` | `none` draws each request's revision at random. `prefix` keys weighted rendezvous selection on a session identifier from `affinity.sources` or the text conversation prefix; see [Revision Affinity](#revision-affinity). |
 | `revisionGating.affinity.sources` | array | No | | With `prefix`, sources that resolve a session identifier in priority order, ahead of the conversation prefix. Each entry sets exactly one of `header` (a request header) or `attribute` (a request attribute such as `agent-identity`), with an optional `producer`. |
+| `revisionGating.affinity.prefixCache` | object | No | | With `prefix`, selects the revision holding the longest cached prefix for requests with no session identifier or conversation prefix, such as pre-tokenized requests; see [Prefix Cache Affinity](#prefix-cache-affinity). Requires `sum` or `max-role`. |
+| `revisionGating.affinity.prefixCache.producerName` | string | No | | Name of the `PrefixCacheMatchInfo` producer, as in `prefix-cache-scorer`. Empty selects the default producer. |
+| `revisionGating.affinity.prefixCache.minLeadBlocks` | integer | No | `2` | Matched blocks the best revision must hold beyond every other covered revision. |
+| `revisionGating.affinity.prefixCache.shareSlack` | number | No | `0.1` | How far, from `0` to `1`, a revision's recent fraction of selections may run above its share before the cache step stops choosing it. |
 
 ## Revision Overflow
 
@@ -426,8 +430,9 @@ sets for the whole rollout.
   applies to them: vLLM `/inference/v1/generate`, SGLang `/generate`, tokenized
   vLLM gRPC Generate and Embed, and completions or embeddings with token-ID
   input fall back to the weighted random draw unless a source resolves.
-  Configure `sources` (for example a session header) when tokenized traffic
-  needs revision affinity. vLLM gRPC Generate with text input is a completions
+  Configure `sources` (for example a session header) or
+  [`prefixCache`](#prefix-cache-affinity) when tokenized traffic needs revision
+  affinity. vLLM gRPC Generate with text input is a completions
   request and behaves the same way. Vertex AI gRPC chat completions and
   Responses requests use the conversation prefix like their HTTP forms.
 - Shares hold in aggregate across keys for any number of revisions. Changing
@@ -440,6 +445,54 @@ sets for the whole rollout.
 Shares apply across distinct keys. A key carrying a large fraction of traffic,
 such as a session identifier shared by many clients, sends all of that traffic
 to one revision. Leave affinity off when a few keys dominate traffic.
+
+### Prefix Cache Affinity
+
+Requests with nothing to key on, such as pre-tokenized, multimodal, stateful
+Responses, and completions requests, otherwise fall back to the weighted random
+draw. `affinity.prefixCache` sends them to the revision whose endpoints hold the
+longest cached prefix of the request, as reported by `PrefixCacheMatchInfo`:
+
+```yaml
+    revisionGating:
+      mode: max-role
+      requiredRoles: [prefill, decode]
+      affinity:
+        mode: prefix
+        sources:
+        - header: x-session-id
+        prefixCache:
+          producerName: ""            # default PrefixCacheMatchInfo producer
+          minLeadBlocks: 2
+          shareSlack: 0.1
+```
+
+- The Screener requires `PrefixCacheMatchInfo`, so the prefix cache producer
+  and the tokenizer it consumes are created when not configured, and run during
+  request handling on every located endpoint, before the Screener. No
+  `requestHandler.dataProducers` entry is needed. Scorers that read the same
+  producer reuse its output.
+- The selection order is a strict revision header, a coordinated decision, a
+  session identifier from `sources`, the text conversation prefix, the prefix
+  cache, then the weighted random draw. Requests keyed today keep rendezvous
+  selection and its properties.
+- For each covered revision, the cache step takes the most matched blocks on
+  any of its in-scope endpoints, of any role. A revision whose endpoints carry
+  no match info counts as zero. The top revision is chosen when it leads every
+  other covered revision by at least `minLeadBlocks`; otherwise the request
+  falls back to the weighted random draw.
+- **Share budget.** The Screener keeps a moving average, over roughly its last
+  100 selections, of the fraction of requests it sent to each revision. Strict
+  header requests are not counted. The cache step may choose a revision only
+  while that fraction is at most its share plus `shareSlack`. Without the
+  budget, a prompt shared by many sessions and cached only on the old revision
+  would send every new session there, and the new revision would never cache
+  it.
+- A full cache pick overflows to a weighted random pick among revisions with
+  room, and the cache pick is the candidate stored for parallel requests under
+  the decision ID.
+- Each EPP replica reads its own prefix cache index, so replicas can choose
+  different revisions for the same request.
 
 ## DisaggregatedSet Slice Affinity
 
@@ -495,12 +548,20 @@ never silently substitutes another revision or crosses revisions.
   requests screened onto a revision, labeled by `revision` and by `source`, the
   path that chose it: `header` (strict revision header), `coordinated`
   (revision already stored under the decision ID), `session` (affinity session
-  identifier), `prefix` (affinity conversation prefix), `random` (affinity off
-  or nothing to key on), or `single` (only one covered revision). Overflowed
-  requests keep the source of their draw. A strict header that matches no
-  endpoint is not counted here. The share of `session` and `prefix` shows how
-  much traffic revision affinity covers. Set log verbosity to `4` to log the
-  request ID, revision, and source of every selection.
+  identifier), `prefix` (affinity conversation prefix), `cache` (prefix cache
+  affinity), `random` (affinity off or nothing to key on), or `single` (only
+  one covered revision). Overflowed requests keep the source of their draw. A
+  strict header that matches no endpoint is not counted here. The share of
+  `session`, `prefix`, and `cache` shows how much traffic revision affinity
+  covers. Set log verbosity to `4` to log the request ID, revision, and source
+  of every selection.
+
+- `llm_d_router_endpoint_picker_disaggregatedset_revision_cache_affinity_total`:
+  prefix cache lookups for requests with no affinity key, labeled by `outcome`:
+  `chosen`, `no_lead` (no revision led by `minLeadBlocks`), `over_budget` (the
+  leading revision ran above its share plus `shareSlack`), or
+  `missing_match_info` (no covered endpoint carried match info). Log verbosity
+  `4` also logs the matched blocks per revision of every lookup.
 
 The share gauge, the overflow counter, and the selection counter remove a
 revision's series when that revision disappears from the observed Pod set.

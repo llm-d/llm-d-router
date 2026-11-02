@@ -255,6 +255,62 @@ func TestValidate_Affinity(t *testing.T) {
 	assertValidateError(t, cfg, "revisionGating.affinity.sources[0]")
 }
 
+func TestRevisionGating_UnmarshalJSON_PrefixCache(t *testing.T) {
+	raw := []byte(`{"mode":"sum","requiredRoles":["prefill","decode"],"affinity":{"mode":"prefix",` +
+		`"prefixCache":{"producerName":"my-prefix","minLeadBlocks":4,"shareSlack":0}}}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	prefixCache := gating.Affinity.PrefixCache
+	if prefixCache == nil || prefixCache.ProducerName != "my-prefix" || prefixCache.MinLeadBlocks != 4 ||
+		prefixCache.ShareSlack == nil || *prefixCache.ShareSlack != 0 {
+		t.Fatalf("prefixCache = %+v", prefixCache)
+	}
+
+	unknown := []byte(`{"mode":"sum","requiredRoles":["prefill"],"affinity":{"mode":"prefix","prefixCache":{"minLead":2}}}`)
+	if err := json.Unmarshal(unknown, &gating); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("want unknown field error, got %v", err)
+	}
+}
+
+func TestValidate_PrefixCache(t *testing.T) {
+	cfg := prefixCacheConfig(RevisionPrefixCache{})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	prefixCache := cfg.RevisionGating.Affinity.PrefixCache
+	if prefixCache.MinLeadBlocks != DefaultPrefixCacheMinLeadBlocks {
+		t.Fatalf("minLeadBlocks = %d, want default %d", prefixCache.MinLeadBlocks, DefaultPrefixCacheMinLeadBlocks)
+	}
+	if prefixCache.ShareSlack == nil || *prefixCache.ShareSlack != DefaultPrefixCacheShareSlack {
+		t.Fatalf("shareSlack = %v, want default %v", prefixCache.ShareSlack, DefaultPrefixCacheShareSlack)
+	}
+
+	zero := 0.0
+	cfg = prefixCacheConfig(RevisionPrefixCache{MinLeadBlocks: 1, ShareSlack: &zero})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := cfg.RevisionGating.Affinity.PrefixCache; got.MinLeadBlocks != 1 || *got.ShareSlack != 0 {
+		t.Fatalf("explicit values overwritten: %+v", got)
+	}
+
+	cfg = validConfig()
+	cfg.RevisionGating.Affinity = &RevisionAffinity{PrefixCache: &RevisionPrefixCache{}}
+	assertValidateError(t, cfg, "revisionGating.affinity.prefixCache requires revisionGating.affinity.mode=prefix")
+
+	cfg = prefixCacheConfig(RevisionPrefixCache{})
+	cfg.RevisionGating.Mode = GatingModeDisabled
+	assertValidateError(t, cfg, "revisionGating.affinity.prefixCache requires revisionGating.mode")
+
+	assertValidateError(t, prefixCacheConfig(RevisionPrefixCache{MinLeadBlocks: -1}), "minLeadBlocks must be positive")
+
+	for _, slack := range []float64{-0.1, 1.1} {
+		assertValidateError(t, prefixCacheConfig(RevisionPrefixCache{ShareSlack: &slack}), "shareSlack must be between 0 and 1")
+	}
+}
+
 func assertValidateError(t *testing.T, cfg Config, wantSubstring string) {
 	t.Helper()
 	err := cfg.Validate()

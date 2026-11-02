@@ -77,6 +77,17 @@ var (
 		},
 		[]string{"plugin_type", "plugin_name", "revision", "source"},
 	)
+	revisionCacheAffinityTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      metricsPrefix + "_revision_cache_affinity_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Prefix cache affinity lookups for requests with no affinity key, by outcome.",
+				compbasemetrics.ALPHA,
+			),
+		},
+		[]string{"plugin_type", "plugin_name", "outcome"},
+	)
 )
 
 // selectionSource labels how the Screener chose a request's revision.
@@ -91,6 +102,9 @@ const (
 	sourceSession selectionSource = "session"
 	// sourcePrefix is affinity keyed on the text conversation prefix.
 	sourcePrefix selectionSource = "prefix"
+	// sourceCache is prefix cache affinity: the revision holding the longest
+	// cached prefix of a request with no affinity key.
+	sourceCache selectionSource = "cache"
 	// sourceRandom is a weighted random draw: affinity is off or the request
 	// has nothing to key on.
 	sourceRandom selectionSource = "random"
@@ -107,8 +121,13 @@ func registerMetrics() {
 			revisionOverflowTotal,
 			revisionGatingShare,
 			revisionSelectionTotal,
+			revisionCacheAffinityTotal,
 		)
 	})
+}
+
+func recordCacheOutcome(pluginName string, outcome cacheOutcome) {
+	revisionCacheAffinityTotal.WithLabelValues(PluginType, pluginName, string(outcome)).Inc()
 }
 
 func recordStrictRevisionNoMatch(pluginName string) {

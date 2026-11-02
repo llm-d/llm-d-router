@@ -38,6 +38,7 @@ func resetMetrics(t *testing.T) {
 	revisionOverflowTotal.Reset()
 	revisionGatingShare.Reset()
 	revisionSelectionTotal.Reset()
+	revisionCacheAffinityTotal.Reset()
 }
 
 func selectionCount(revision string, source selectionSource) float64 {
