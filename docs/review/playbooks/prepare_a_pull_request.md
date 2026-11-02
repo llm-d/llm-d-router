@@ -4,7 +4,6 @@ title: Prepare a pull request
 description: "Pre-submission author workflow for self-checking diffs against targeted review rules and running make presubmit."
 tags: [playbook, authoring, presubmit]
 status: stable
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Procedure

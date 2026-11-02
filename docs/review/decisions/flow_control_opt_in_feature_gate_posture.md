@@ -7,7 +7,6 @@ status: stable
 sources:
   - { id: "pr-2180-ic-5119639333", resource: "https://github.com/llm-d/llm-d-router/pull/2180#issuecomment-5119639333", author: "human:ahg-g", last_modified: "2026-07-29T15:04:01Z" }
   - { id: "pr-2180-r3692815708", resource: "https://github.com/llm-d/llm-d-router/pull/2180#discussion_r3692815708", author: "human:liu-cong", last_modified: "2026-07-31T19:14:37Z" }
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Context

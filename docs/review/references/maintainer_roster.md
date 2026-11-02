@@ -4,7 +4,6 @@ title: Maintainer roster and corpus coverage
 description: "Roster of the 17 llm-d-router maintainers with team and CODEOWNERS provenance for the 2026-04-26 to 2026-10-26 review corpus."
 tags: [maintainers, provenance, reference]
 status: stable
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Maintainer roster

@@ -4,7 +4,6 @@ title: Conflict classes and recurring fault lines
 description: "Glossary of the five conflict audit classes (79 curated conflicts) and 14 architectural fault lines across llm-d-router reviews."
 tags: [conflicts, taxonomy, reference]
 status: stable
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Conflict classes

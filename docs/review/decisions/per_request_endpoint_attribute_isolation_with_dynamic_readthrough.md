@@ -7,7 +7,6 @@ status: stable
 sources:
   - { id: "pr-1478-r3355562756", resource: "https://github.com/llm-d/llm-d-router/pull/1478#discussion_r3355562756", author: "human:shmuelk", last_modified: "2026-06-04T11:16:44Z" }
   - { id: "pr-1478-r3356766432", resource: "https://github.com/llm-d/llm-d-router/pull/1478#discussion_r3356766432", author: "human:ahg-g", last_modified: "2026-06-04T14:35:21Z" }
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Context
@@ -23,7 +22,7 @@ Maintainers debated replacing endpoint snapshot cloning with shallow slice copie
 
 Merged dynamic attribute read-through for shared telemetry while isolating per-request computed attributes per scheduling cycle.
 
-Related rule: [Document lock ordering, shallow-copy safety, and engine protocol quirks in code comments](../rules/documentation_and_comments.md#document-lock-ordering-shallow-copy-safety-and-engine-protocol-quirks-in-code-comments).
+Related rule: [Exchange cross-plugin state through typed data-layer slots and keys](../rules/plugin_framework_contracts.md#exchange-cross-plugin-state-through-typed-data-layer-slots-and-keys).
 
 [^pr-1478-r3355562756]: [#1478](https://github.com/llm-d/llm-d-router/pull/1478#discussion_r3355562756) (human:shmuelk)
 [^pr-1478-r3356766432]: [#1478](https://github.com/llm-d/llm-d-router/pull/1478#discussion_r3356766432) (human:ahg-g)

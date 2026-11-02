@@ -4,7 +4,6 @@ title: Pull request template distinguishes Fixes from Part of
 description: "The pull request template distinguishes auto-closing Fixes references for complete resolutions from non-closing Part of references for multi-PR work."
 tags: ["scope-and-process", "pull-requests", github]
 status: stable
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 verified: { by: "human:conliu", at: "2026-10-29T00:00:00Z" }
 ---
 

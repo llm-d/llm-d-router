@@ -4,7 +4,6 @@ title: make presubmit runs unit tests
 description: "The top-level make presubmit target includes unit test execution so local pre-merge verification covers behavioral regressions alongside static lints."
 tags: ["testing-and-ci", presubmit, "nvc-01"]
 status: stable
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 verified: { by: "human:conliu", at: "2026-10-29T00:00:00Z" }
 ---
 
@@ -20,4 +19,4 @@ Keeping `make presubmit` lint-only stays fast but lets broken unit tests pass lo
 
 `make presubmit` runs unit tests in addition to static formatting, linting, security, vulnerability, image-tag, and boilerplate checks.
 
-Related rule: [See linked review rule](../rules/testing_and_ci.md#wire-new-checks-into-make-presubmit-and-pin-third-party-container-image-tags).
+Related rule: [AGENTS.md Pull requests](../../../AGENTS.md#pull-requests).

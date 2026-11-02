@@ -1,43 +1,42 @@
 ---
 type: Playbook
 title: Maintain the review knowledge bundle
-description: "Workflow for keeping docs/review/ current: same-PR updates when contracts or paths change, adding or refining rules from repeated review corrections, periodic stale_after audits, and regenerating docs/review_playbook.md."
+description: "Workflow for keeping the two-stage docs/review/ bundle current: same-PR contract and routing updates, rule authoring in rules/*.md + provenance.json, open-question graduation, opt-in stale_after audits, and compiling docs/review_playbook.md."
 tags: [playbook, maintenance, okf]
 status: stable
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Maintenance loops
 
-`make verify-review-playbook` runs `python3 hack/render_playbook.py --check` in `make presubmit`. It fails when `docs/review_playbook.md` differs from the rendered bundle, when a Markdown link or anchor is broken, when a backticked repository path, an `Applies to` glob, or a diff-path routing table glob in `docs/review/` matches nothing in the repository, or when a `stale_after` timestamp in `rules/*.md` is missing, malformed, or in the past. Each loop ends with `python3 hack/render_playbook.py` followed by `python3 hack/render_playbook.py --check`.
+`make verify-review-playbook` runs `python3 hack/render_playbook.py --check` in `make presubmit`. It fails when `docs/review_playbook.md` differs from the compiled output, when rules in `docs/review/rules/*.md` and keys in `docs/review/provenance.json` are out of sync, when a Markdown link or anchor is broken, or when a first-column glob in [review_a_pull_request.md](review_a_pull_request.md)'s routing table matches nothing in the repository. It does not validate inline backticked code paths in rule prose, and an expired `stale_after` timestamp emits a stderr `WARNING:` without failing `make presubmit` (`--check-staleness` enforces expiration during audits). Each loop ends with `python3 hack/render_playbook.py` followed by `python3 hack/render_playbook.py --check`.
 
 # Updating the bundle in the same pull request
 
-A pull request that changes an architectural contract, deprecates or removes a surface, moves or deletes a path referenced by `docs/review/`, or settles a question under `open_questions/` updates the matching `docs/review/` file in that pull request.
+A pull request that changes an architectural contract, deprecates or removes a surface, moves or deletes a top-level path matched by the routing table in [review_a_pull_request.md](review_a_pull_request.md), or settles a question under `open_questions/` updates `docs/review/` in that pull request.
 
-1. Edit the rule, decision, or reference that states the contract. Update `Applies to` globs and backticked paths to the new layout.
+1. Edit the affected Stage-1 rule in `rules/<section>.md`, metadata in `provenance.json`, or concept file under `decisions/` or `references/`, and update routing-table globs if top-level directory layouts moved.
 2. Append a dated entry under `## YYYY-MM-DD` at the top of `log.md` naming the pull request and the files changed.
-3. Regenerate and verify.
+3. Run `python3 hack/render_playbook.py` and `python3 hack/render_playbook.py --check`.
 
 # Adding or refining a rule
 
-Add or update a rule when maintainers repeat the same correction across at least three review threads, or agree on a recurring exception that belongs under `Reviewers accept`.
+Add or update a rule when maintainers repeat a subsystem or architectural correction across at least three review threads (and it is not already covered by `AGENTS.md` or automated CI linters), or agree on a recurring exception under `- Accept:`.
 
-1. Add the rule block to `rules/<section>.md` with `### Rule`, `### Evidence`, and optional `### Reviewers accept` and `### Open question` subsections. Cite at most three threads under `Representative review threads:` and at most eight distinct citations per rule, each registered in frontmatter `sources`.
-2. Set `Applies to` to the globs the rule governs.
-3. Append a dated entry to `log.md`, then regenerate and verify.
+1. Add `## <Rule Title>` with 1-3 imperative sentences (plus optional `- Accept:` and `- Open:` one-sentence bounds) to `rules/<section>.md`, with zero YAML frontmatter or `[^id]` footnotes.
+2. Add the matching `<section_stem>#<rule_anchor>` entry to `provenance.json` with `applies_to` globs, a specific one-sentence `consequence`, `observed_prs`, and 1-3 representative `examples` (plus optional `accept_decisions`, `accept_examples`, `decisions`, or `open_question`).
+3. Update counts in [failure_classes.md](../references/failure_classes.md) and [index.md](../index.md) if the rule count changed, append a dated entry to `log.md`, and run `python3 hack/render_playbook.py` and `python3 hack/render_playbook.py --check`.
 
 # Settling an open question
 
 1. Move the concept file with `git mv docs/review/open_questions/<slug>.md docs/review/decisions/<slug>.md`.
 2. Change frontmatter `type` from `Open Question` to `Decision`, change `status` from `draft` to `stable`, add `verified: { by: human:<github-login>, at: <ISO-8601> }`, and replace `# Resolution criteria` with `# Outcome` citing the deciding comment in `sources`.
-3. Update `open_questions/index.md`, `decisions/index.md`, and any rule block in `rules/<section>.md` linking to the former open question, then append a dated entry to `log.md`.
-4. Regenerate and verify.
+3. Remove the `- Open:` line from the rule in `rules/<section>.md`, move the `open_question` reference to `decisions` (or `accept_decisions`) in `provenance.json`, and update `open_questions/index.md` and `decisions/index.md`.
+4. Append a dated entry to `log.md`, then run `python3 hack/render_playbook.py` and `python3 hack/render_playbook.py --check`.
 
 # Periodic stale_after audit
 
-Every `Review Rule Set` under `rules/` carries a `stale_after` timestamp six months after its last audit. `make verify-review-playbook` fails once that date passes, so the audit happens before expiry.
+Every section in `provenance.json` carries a `stale_after` timestamp six months after its last audit. Run `python3 hack/render_playbook.py --check --check-staleness` to enforce freshness checks during scheduled maintainer audits.
 
-1. Compare each rule against pull requests merged and review threads opened since the previous audit. Remove rules that no longer match maintainer behavior, tighten `Reviewers accept` bounds that drifted, and settle resolved open questions into `decisions/`.
-2. Advance `stale_after` on every audited rule set by six months.
-3. Append a dated `Audit` entry to `log.md`, then regenerate and verify.
+1. Compare each rule against pull requests merged and review threads opened since the previous audit. Remove rules that duplicate CI or no longer match maintainer reviews, refine `- Accept:` bounds, and graduate settled open questions into `decisions/`.
+2. Advance `stale_after` on every audited section in `provenance.json` by six months.
+3. Append a dated `Audit` entry to `log.md`, then run `python3 hack/render_playbook.py` and `python3 hack/render_playbook.py --check --check-staleness`.

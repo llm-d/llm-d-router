@@ -7,7 +7,6 @@ status: stable
 sources:
   - { id: "issue-1364-ic-4560679710", resource: "https://github.com/llm-d/llm-d-router/issues/1364#issuecomment-4560679710", author: "human:zetxqx", last_modified: "2026-05-28T03:46:58Z" }
   - { id: "issue-1364-ic-4587275492", resource: "https://github.com/llm-d/llm-d-router/issues/1364#issuecomment-4587275492", author: "human:elevran", last_modified: "2026-05-31T16:17:22Z" }
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Context

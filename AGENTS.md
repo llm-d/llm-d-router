@@ -15,7 +15,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 ## Working in the codebase
 
 - Add trace attributes and span names in `pkg/common/observability/semconv/registry/` and run `make update-telemetry` to generate `llm_d.go` and `spans.go`; do not edit generated files directly.
-- When a change alters a contract documented in [docs/review/](docs/review/index.md), moves a path it references, or settles an open question there, update `docs/review/` and run `python3 hack/render_playbook.py` in the same PR; `make verify-review-playbook` fails on stale paths, broken links, or an unsynced `docs/review_playbook.md`. See [maintain_review_bundle.md](docs/review/playbooks/maintain_review_bundle.md).
+- When a change alters a contract in [docs/review/](docs/review/index.md), moves a path in its routing table, or settles an open question there, update `docs/review/` and run `python3 hack/render_playbook.py` in the same PR (`make verify-review-playbook`). See [maintain_review_bundle.md](docs/review/playbooks/maintain_review_bundle.md).
 - State your interpretation before coding. When the task has multiple valid reads, ask; don't pick one silently. For clear failure signals (logs, failing tests, reproducer), act; the ask rule is about unclear requirements, not unclear bugs.
 - Define success as a checkable outcome: "add validation" becomes "write failing tests for invalid inputs, then make them pass". Where the issue is reproducible, the failing test IS the success criterion; write it first and let it gate the implementation.
 - Before changing or extending a component, read an analogous one in the repository. The closest existing implementation is the canonical pattern; follow its structure, naming, and tests rather than introducing new conventions.
@@ -29,7 +29,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 ## Code review
 
 - Check every constant the change adds: grep its value across the repository and report any that already exists under another name for the same contract, any that declares a shared contract's value locally rather than importing it, and any declared away from its only reader.
-- Use [docs/review/](docs/review/index.md) as the canonical source for review rules, settled decisions, and open questions, and [docs/review_playbook.md](docs/review_playbook.md) as the rendered single-page checklist across process, plugin framework, project direction, configuration and compatibility, concurrency, error handling, protocol fidelity, request-path performance, observability, testing, security, and documentation.
+- `AGENTS.md` is canonical for repository-wide coding, prose, logging, constant-reuse, and PR rules. For subsystem and architectural review invariants, follow [review_a_pull_request.md](docs/review/playbooks/review_a_pull_request.md) to load only matching rule files under `docs/review/rules/`. Agents must not load `docs/review_playbook.md` or `docs/review/provenance.json`.
 
 ## Pull requests
 

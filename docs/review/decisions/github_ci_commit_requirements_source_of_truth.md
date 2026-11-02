@@ -4,7 +4,6 @@ title: GitHub CI checks are the source of truth for commit requirements
 description: "Enforced GitHub CI workflows define commit sign-off and formatting requirements rather than duplicate prose rules in contributor docs."
 tags: ["scope-and-process", ci, commits]
 status: stable
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 verified: { by: "human:conliu", at: "2026-10-29T00:00:00Z" }
 ---
 
@@ -20,4 +19,4 @@ Maintaining separate prose lists of commit rules across `AGENTS.md`, `CONTRIBUTI
 
 GitHub CI checks are the canonical source of truth for commit requirements (including DCO sign-off via `git commit -s`); contributor docs point to enforced checks rather than restating separate rules.
 
-Related rule: [See linked review rule](../rules/scope_and_process.md#iterate-in-place-from-personal-fork-branches-with-incremental-commits).
+Related rule: [AGENTS.md Git workflow](../../../AGENTS.md#git-workflow).

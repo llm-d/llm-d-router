@@ -7,7 +7,6 @@ status: draft
 sources:
   - { id: "pr-3278-ic-6229715180", resource: "https://github.com/llm-d/llm-d-router/pull/3278#issuecomment-6229715180", author: "human:kaushikmitr", last_modified: "2026-10-17T04:37:49Z" }
   - { id: "pr-3421-ic-6233960957", resource: "https://github.com/llm-d/llm-d-router/pull/3421#issuecomment-6233960957", author: "human:kaushikmitr", last_modified: "2026-10-17T12:37:26Z" }
-generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 ---
 
 # Question
