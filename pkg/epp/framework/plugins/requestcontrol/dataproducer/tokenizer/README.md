@@ -243,6 +243,13 @@ per 40ms of audio (`tokensPerSecond: 25`), Qwen3-Omni's encoder 13 per 1s chunk
 | `estimate.audio.defaultDuration`                | `10`      | Clip length in seconds when neither the header nor a payload supplies one.    |
 | `estimate.audio.maxAudioTokens`                 | –         | Cap on the tower's tokens for a clip, before `overheadTokens`; use the model's own limit, e.g. 750 for gemma4 (0 = uncapped). |
 
+Image sizes and the video and audio headers are declared by the client, so the
+backend bounds what they can add: placeholders stop growing a request once its
+estimated stream reaches 1,048,576 (2^20) tokens, and any further image, video,
+or audio part keeps a single placeholder. This bound applies after the
+per-modality caps above and sits above the context window of current
+multimodal models.
+
 ## Failure mode
 
 Per-request errors are returned to the Director, which logs and continues;

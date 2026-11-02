@@ -56,16 +56,16 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 		attemptStart := time.Now()
 		attemptWriter, attemptStatus := captureResponseStatus(w)
 		attemptReturned := false
-		defer recordDecodeAbort(&attemptReturned, attemptStart)
+		defer recordDecodeAbort(r.Context(), &attemptReturned, attemptStart)
 		_, _ = toolFields.compareValidatedDispatched(original)
 		needsPrefill, err := s.tryDecode(attemptWriter, decodeReq, body)
 		attemptReturned = true
 		// An attempt that falls back to prefill is not sampled; the decode after
 		// prefill is this request's decode stage.
 		if !needsPrefill {
-			metrics.RecordDecodeDuration(time.Since(attemptStart))
+			observeStageDuration(r.Context(), metrics.StageDecode, time.Since(attemptStart))
 			if err != nil || attemptStatus.failed() {
-				metrics.RecordError(metrics.StageDecode)
+				observeStageError(r.Context(), metrics.StageDecode)
 			}
 		}
 		if err != nil {
@@ -99,13 +99,13 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	decodeStart := time.Now()
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
-	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	_, _ = toolFields.compareValidatedDispatched(decodeRequestBody)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
 	decodeReturned = true
-	metrics.RecordDecodeDuration(time.Since(decodeStart))
+	observeStageDuration(r.Context(), metrics.StageDecode, time.Since(decodeStart))
 	if decodeStatus.failed() {
-		metrics.RecordError(metrics.StageDecode)
+		observeStageError(r.Context(), metrics.StageDecode)
 	}
 }
 
@@ -325,10 +325,10 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 	prefillStart := time.Now()
 	_, _ = toolFields.compareValidatedDispatched(pbody)
 	prefillHandler.ServeHTTP(pw, preq)
-	metrics.RecordPrefillDuration(time.Since(prefillStart))
+	observeStageDuration(r.Context(), metrics.StagePrefill, time.Since(prefillStart))
 
 	if isHTTPError(pw.statusCode) {
-		metrics.RecordError(metrics.StagePrefill)
+		observeStageError(r.Context(), metrics.StagePrefill)
 		logger.Error(nil, "prefill request failed", "code", pw.statusCode)
 		maps.Copy(w.Header(), pw.headers)
 		w.WriteHeader(pw.statusCode)

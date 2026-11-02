@@ -41,7 +41,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
 	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
@@ -94,13 +94,13 @@ func TestInferencePoolReconciler(t *testing.T) {
 		Version: v1.GroupVersion.Version,
 		Kind:    "InferencePool",
 	}
-	pool1 := testutil.MakeInferencePool("pool1").
+	pool1 := fwkgaie.MakeInferencePool("pool1").
 		Namespace("pool1-ns").
 		Selector(selectorV1).
 		TargetPorts(8080).
 		EndpointPickerRef("epp-service").ObjRef()
 	pool1.SetGroupVersionKind(gvk)
-	pool2 := testutil.MakeInferencePool("pool2").Namespace("pool2-ns").EndpointPickerRef("epp-service").ObjRef()
+	pool2 := fwkgaie.MakeInferencePool("pool2").Namespace("pool2-ns").EndpointPickerRef("epp-service").ObjRef()
 	pool2.SetGroupVersionKind(gvk)
 
 	period := time.Second

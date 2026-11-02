@@ -89,9 +89,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	fwkapix "github.com/llm-d/llm-d-router/test/framework/apix"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -351,6 +351,29 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestVideoRawPayloadIsForwardedUnchanged(t *testing.T) {
+	raw := []byte("--test\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nalias\r\n" +
+		"--test\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\na cat\r\n--test--\r\n")
+	parser := openai.NewOpenAIParser()
+	parsed, err := parser.ParseRequest(context.Background(), raw, map[string]string{
+		":path": "/v1/videos", "content-type": "multipart/form-data; boundary=test",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "alias", parsed.Body.Model)
+	require.IsType(t, fwkrh.RawPayload(nil), parsed.Body.Payload)
+
+	reqCtx := &handlers.RequestContext{
+		Request: &handlers.Request{RawBody: raw}, Parser: parser,
+		IncomingModelName: "alias", TargetModelName: "backend",
+	}
+	director := &Director{}
+	require.NoError(t, director.modelRewriteIfNeeded(context.Background(), reqCtx, parsed.Body))
+	require.False(t, parsed.Body.Mutated)
+	require.NoError(t, director.repackage(context.Background(), reqCtx, parsed.Body))
+	require.Equal(t, raw, reqCtx.Request.RawBody)
+	require.Equal(t, len(raw), reqCtx.RequestSize)
 }
 
 // --- Mocks ---
@@ -631,15 +654,15 @@ func TestDirector_HandleRequest(t *testing.T) {
 	objectiveNameSheddable := "imFoodReviewSheddable"
 	objectiveNameResolve := "imFoodReviewResolve"
 	// InferenceObjective definitions
-	ioFoodReview := testutil.MakeV1InferenceObjective("ioFoodReview").
+	ioFoodReview := fwkapix.MakeV1InferenceObjective("ioFoodReview").
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(2).
 		ObjRef()
-	ioFoodReviewSheddable := testutil.MakeV1InferenceObjective("imFoodReviewSheddable").
+	ioFoodReviewSheddable := fwkapix.MakeV1InferenceObjective("imFoodReviewSheddable").
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(-1).
 		ObjRef()
-	ioFoodReviewResolve := testutil.MakeV1InferenceObjective("imFoodReviewResolve").
+	ioFoodReviewResolve := fwkapix.MakeV1InferenceObjective("imFoodReviewResolve").
 		CreationTimestamp(metav1.Unix(1000, 0)).
 		Priority(1).
 		ObjRef()

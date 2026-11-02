@@ -46,6 +46,8 @@ const (
 	HeaderContentType = "content-type"
 	// ContentTypeJSON is the media type of JSON bodies.
 	ContentTypeJSON = "application/json"
+	// MediaTypeEventStream is the SSE media type without optional parameters.
+	MediaTypeEventStream = "text/event-stream"
 	// HeaderContentTypeOptions names the HTTP header that controls MIME sniffing of a body.
 	HeaderContentTypeOptions = "x-content-type-options"
 	// ContentTypeOptionsNoSniff disables MIME sniffing; http.Error sets it on every body it writes.
@@ -61,13 +63,13 @@ const (
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
-	FieldN                    = "n"
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldEcho                 = "echo"
 	FieldTools                = "tools"
 	FieldToolChoice           = "tool_choice"
 	FieldSamplingParams       = "sampling_params"
+	FieldN                    = "n"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"

@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hashicorp/golang-lru/v2/simplelru"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -41,7 +40,7 @@ type indexer struct {
 
 type podCache struct {
 	mu  sync.RWMutex
-	lru *simplelru.LRU[blockHash, struct{}]
+	lru *hashLRU
 }
 
 // newIndexer initializes an indexer with size limits and starts cache size reporting.
@@ -72,9 +71,7 @@ func (i *indexer) podCacheFor(pod server) *podCache {
 		if lruSize <= 0 {
 			lruSize = i.defaultLRUSize
 		}
-		// We ignore the error since the only possible error is if size <= 0.
-		l, _ := simplelru.NewLRU[blockHash, struct{}](lruSize, nil)
-		pc = &podCache{lru: l}
+		pc = &podCache{lru: newHashLRU(lruSize)}
 		i.pods[pod.ServerID] = pc
 	}
 	return pc
@@ -96,7 +93,7 @@ func (i *indexer) Add(hashes []blockHash, pod server) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	for idx := len(hashes) - 1; idx >= 0; idx-- {
-		pc.lru.Add(hashes[idx], struct{}{})
+		pc.lru.Add(hashes[idx])
 	}
 }
 
@@ -130,7 +127,7 @@ func (i *indexer) MatchLongestPrefix(hashes []blockHash, candidates []ServerID) 
 // runLength returns the largest n such that the LRU holds hashes[n-1], relying
 // on the contiguous run described on Add. It uses only Contains, which does not
 // update recency, so callers need only the pod's read lock.
-func runLength(l *simplelru.LRU[blockHash, struct{}], hashes []blockHash) int {
+func runLength(l *hashLRU, hashes []blockHash) int {
 	if !l.Contains(hashes[0]) {
 		return 0
 	}

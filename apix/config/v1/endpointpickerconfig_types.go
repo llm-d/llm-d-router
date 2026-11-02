@@ -385,6 +385,26 @@ type RequestHandlerConfig struct {
 	// backend's native priority scheduler can consume it. It is off by default:
 	// when disabled the request body is forwarded unchanged.
 	PropagatePriority bool `json:"propagatePriority,omitempty"`
+
+	// +optional
+	// DataProducers lists DataProducer plugins that run during request
+	// handling, on the located endpoints before screeners. A DataProducer not
+	// listed runs on the screened endpoints before admission and scheduling,
+	// unless a screener or a listed producer consumes its data, directly or
+	// through other producers; such a producer runs before screeners too.
+	//
+	// Each producer instance runs once per request, in one of the two phases;
+	// producers do not run per scheduling profile. Data a producer writes
+	// during request handling stays on the request and its endpoints, so
+	// screeners, the remaining producers, admitters, and scheduling profile
+	// plugins such as filters and scorers all read it from that one run, on the
+	// endpoints the screeners keep. To also produce the data after screening,
+	// configure a second instance under another name. That instance stays in
+	// the later phase only if its data key differs from the listed instance's,
+	// for example a key scoped by producer name as approx-prefix-cache-producer
+	// uses, because every producer of a key that a screener or a listed
+	// producer consumes runs before screeners.
+	DataProducers []DataProducerConfig `json:"dataProducers,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -401,6 +421,13 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.PropagatePriority {
 		parts = append(parts, "PropagatePriority: true")
+	}
+	if len(rhc.DataProducers) > 0 {
+		producerStrs := make([]string, len(rhc.DataProducers))
+		for i := range rhc.DataProducers {
+			producerStrs[i] = rhc.DataProducers[i].String()
+		}
+		parts = append(parts, fmt.Sprintf("DataProducers: [%s]", strings.Join(producerStrs, ", ")))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }
@@ -440,6 +467,24 @@ func (mc *MetricsConfig) String() string {
 		parts = append(parts, fmt.Sprintf("RequestITLBuckets: %v", mc.RequestITLBuckets))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// DataProducerConfig names a DataProducer plugin that runs during request
+// handling, before screeners.
+type DataProducerConfig struct {
+	// +required
+	// +kubebuilder:validation:Required
+	// PluginRef specifies a particular Plugin instance, by the name of an entry
+	// of the Plugins defined in the configuration's Plugins section. The plugin
+	// must implement DataProducer.
+	PluginRef string `json:"pluginRef"`
+}
+
+func (dpc *DataProducerConfig) String() string {
+	if dpc == nil {
+		return nilString
+	}
+	return fmt.Sprintf("{PluginRef: %s}", dpc.PluginRef)
 }
 
 // ParserConfig contains the configuration for a parser.

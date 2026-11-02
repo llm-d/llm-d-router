@@ -526,7 +526,9 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 				// Placeholders don't overlap, so only the item ending engine block i-1
 				// can continue into block i, where it is the first entry. Block i-1 is
 				// searched whole because block 0 ends with the cache salt, if any.
-				if prev != nil && len(hashes) > 0 && slices.Contains(prev.MMHashes, hashes[0]) {
+				// The event offset, when present, tells a continuation from a new copy.
+				if prev != nil && len(hashes) > 0 && ef.FirstContinuation != kvblock.MMContinuationNew &&
+					slices.Contains(prev.MMHashes, hashes[0]) {
 					hashes = hashes[1:]
 				}
 				canonical[canonicalIdx].MMHashes = append(canonical[canonicalIdx].MMHashes, hashes...)
@@ -651,6 +653,21 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"podIdentifier", podIdentifier,
 					"groupIdx", ev.GroupIdx,
 					"cacheKind", ev.KVCacheSpecKind,
+					"reason", reason,
+					"numTokens", len(ev.Tokens),
+					"numBlockHashes", len(ev.BlockHashes),
+					"blockSize", ev.BlockSize)
+				continue
+			}
+
+			if ev.LoraID != nil && (ev.LoraName == nil || *ev.LoraName == "") {
+				const reason = "unresolved_lora_adapter"
+				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
+					"podIdentifier", podIdentifier,
+					"groupIdx", ev.GroupIdx,
+					"cacheKind", ev.KVCacheSpecKind,
+					"loraID", *ev.LoraID,
 					"reason", reason,
 					"numTokens", len(ev.Tokens),
 					"numBlockHashes", len(ev.BlockHashes),

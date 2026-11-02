@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
+	"go.opentelemetry.io/otel/trace"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -41,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	prefixscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -175,6 +177,105 @@ func newProducerWithIndexer(ctx context.Context, idx kvCacheIndexer) *Producer {
 	}
 }
 
+func TestMatchEndpointBlockKeys_ReusesPodID(t *testing.T) {
+	for _, bigram := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bigram=%t", bigram), func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			const podID = "grouped-pod:8080"
+			endpoint := freshEndpoints()[0]
+			idx := &fakeKVCacheIndexer{
+				matchBlockKeys: func(_ context.Context, keys []kvblock.BlockHash, filter sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+					require.Equal(t, []kvblock.BlockHash{1, 2}, keys)
+					require.Equal(t, sets.New(podID), filter)
+					return map[string]kvcache.PodMatch{
+						podID: {WeightedScore: 1.6, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"cpu": 2}},
+					}, nil
+				},
+			}
+			p := newProducerWithIndexer(ctx, idx)
+			results, err := p.matchEndpointBlockKeys(ctx, trace.SpanFromContext(ctx),
+				tokenizedRequest("reuse-pod-id", 12),
+				[]endpointWithPodID{{endpoint: endpoint, podID: podID}},
+				[][]kvblock.BlockHash{{1, 2}}, []*mmPromptContent{nil},
+				kvblock.CacheFormat{Bigram: bigram, BlockSize: 4})
+			require.NoError(t, err)
+			require.Len(t, results, 1)
+			require.Same(t, endpoint, results[0].endpoint)
+			info := results[0].info
+			weighted, cached, total, blockSize := 1, 2, 2, 4
+			if bigram {
+				weighted, cached, total, blockSize = 6, 8, 12, 1
+			}
+			assert.Equal(t, weighted, info.MatchBlocks())
+			assert.Equal(t, cached, info.CachedBlockCount())
+			assert.Equal(t, cached, info.ConfirmedCachedBlockCount())
+			assert.Equal(t, map[string]int{"cpu": cached}, info.CachedBlocksByTier())
+			assert.Equal(t, total, info.TotalBlocks())
+			assert.Equal(t, blockSize, info.BlockSizeTokens())
+		})
+	}
+}
+
+func TestProduce_CacheFormatLookupOncePerEndpoint(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := freshEndpoints()
+	lookups := map[string]int{}
+	idx := &fakeKVCacheIndexer{
+		cacheFormat: func(pod string) kvblock.CacheFormat {
+			lookups[pod]++
+			return kvblock.CacheFormat{BlockSize: testBlockSize}
+		},
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			return []kvblock.BlockHash{1}, nil
+		},
+		matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, filter sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			require.Equal(t, sets.New("10.0.0.1:8080", "10.0.0.2:8080"), filter)
+			return map[string]kvcache.PodMatch{}, nil
+		},
+	}
+	p := newProducerWithIndexer(ctx, idx)
+	require.NoError(t, p.Produce(ctx, tokenizedRequest("catalog-lookups", testBlockSize), endpoints))
+	assert.Equal(t, map[string]int{"10.0.0.1:8080": 1, "10.0.0.2:8080": 1}, lookups)
+}
+
+func TestProduce_EndpointsWithoutMetadata(t *testing.T) {
+	for name, endpoints := range map[string][]scheduling.Endpoint{
+		"empty": nil,
+		"missing metadata": {
+			scheduling.NewEndpoint(nil, nil, nil),
+			scheduling.NewEndpoint(nil, nil, nil),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			computed, matched := false, false
+			idx := &fakeKVCacheIndexer{
+				cacheFormat: func(_ string) kvblock.CacheFormat {
+					t.Fatal("endpoints without metadata must not look up cache formats")
+					return kvblock.CacheFormat{}
+				},
+				computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+					computed = true
+					return []kvblock.BlockHash{1}, nil
+				},
+				matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, filter sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+					matched = true
+					require.Empty(t, filter)
+					return map[string]kvcache.PodMatch{}, nil
+				},
+			}
+			p := newProducerWithIndexer(ctx, idx)
+			require.NoError(t, p.Produce(ctx, tokenizedRequest("no-metadata", testBlockSize), endpoints))
+			assert.True(t, computed)
+			assert.True(t, matched)
+			for _, endpoint := range endpoints {
+				_, published := endpoint.Get(p.dk)
+				assert.False(t, published)
+			}
+		})
+	}
+}
+
 func TestProduce_BigramLookahead(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 2})
@@ -219,6 +320,11 @@ func TestProduce_BigramLookahead(t *testing.T) {
 		require.Equal(t, 2*i, info.CachedBlockCount())
 		require.Equal(t, 1, info.BlockSizeTokens())
 	}
+	scorer, err := prefixscorer.New(ctx, "test-scorer", p.TypedName().Name)
+	require.NoError(t, err)
+	scores := scorer.Score(ctx, request, endpoints)
+	require.Equal(t, 0.0, scores[endpoints[0]])
+	require.Equal(t, 1.0, scores[endpoints[1]])
 }
 
 func TestProduce_MixedCacheFormats(t *testing.T) {
@@ -273,6 +379,12 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 		if i == 1 {
 			require.Equal(t, map[string]int{"cpu": 4}, info.CachedBlocksByTier())
 		}
+	}
+	scorer, err := prefixscorer.New(ctx, "test-scorer", p.TypedName().Name)
+	require.NoError(t, err)
+	scores := scorer.Score(ctx, request, endpoints)
+	for i, want := range []float64{7.0 / 8, 3.0 / 8, 1} {
+		require.Equal(t, want, scores[endpoints[i]])
 	}
 	require.NoError(t, p.PreRequest(ctx, request, &scheduling.SchedulingResult{
 		PrimaryProfileName: "decode",

@@ -342,7 +342,7 @@ func (p *Producer) Produce(ctx context.Context,
 		return nil
 	}
 
-	groups := make(map[kvblock.CacheFormat][]scheduling.Endpoint)
+	groups := make(map[kvblock.CacheFormat][]endpointWithPodID)
 	for _, endpoint := range endpoints {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -350,11 +350,12 @@ func (p *Producer) Produce(ctx context.Context,
 		if md := endpoint.GetMetadata(); md != nil {
 			podID := fmt.Sprintf("%s:%s", md.Address, md.Port)
 			format := p.kvCacheIndexer.CacheFormat(podID)
-			groups[format] = append(groups[format], endpoint)
+			groups[format] = append(groups[format], endpointWithPodID{endpoint: endpoint, podID: podID})
 		}
 	}
 	if len(groups) == 0 {
-		groups[kvblock.CacheFormat{BlockSize: p.blockSizeTokens}] = endpoints
+		// Compute default-format keys even when no endpoint has metadata.
+		groups[kvblock.CacheFormat{BlockSize: p.blockSizeTokens}] = nil
 	}
 	keysByFormat := make(map[kvblock.CacheFormat][][]kvblock.BlockHash, len(groups))
 	var results []endpointResult
@@ -418,7 +419,7 @@ func (p *Producer) Produce(ctx context.Context,
 
 // matchEndpointBlockKeys matches one format's prompts against its endpoints.
 func (p *Producer) matchEndpointBlockKeys(ctx context.Context, span trace.Span,
-	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
+	request *scheduling.InferenceRequest, endpoints []endpointWithPodID,
 	perPromptKeys [][]kvblock.BlockHash, perPromptMMContent []*mmPromptContent,
 	format kvblock.CacheFormat,
 ) ([]endpointResult, error) {
@@ -480,15 +481,16 @@ func (p *Producer) matchEndpointBlockKeys(ctx context.Context, span trace.Span,
 	const weightedScoreRoundOff = 1e-6
 
 	results := make([]endpointResult, 0, len(endpoints))
-	for _, ep := range endpoints {
+	for _, candidate := range endpoints {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		ep := candidate.endpoint
 		md := ep.GetMetadata()
 		if md == nil {
 			continue
 		}
-		podKey := fmt.Sprintf("%s:%s", md.Address, md.Port)
+		podKey := candidate.podID
 		match := matches[podKey]
 		tiers := match.BlocksByTier
 		if tiers == nil {
@@ -532,6 +534,11 @@ func addPodMatch(a, b kvcache.PodMatch) kvcache.PodMatch {
 		a.BlocksByTier[tier] += count
 	}
 	return a
+}
+
+type endpointWithPodID struct {
+	endpoint scheduling.Endpoint
+	podID    string
 }
 
 type endpointResult struct {
