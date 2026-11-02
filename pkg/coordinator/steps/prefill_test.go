@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1229,11 +1230,13 @@ func TestPrefillStep_SGLangRequestScope(t *testing.T) {
 		body  string
 		valid bool
 	}{
-		{name: "single sample", body: `{"stream":true,"sampling_params":{"n":1}}`, valid: true},
 		{name: "null rank", body: `{"stream":true,"disagg_prefill_dp_rank":null}`, valid: true},
 		{name: "multiple samples", body: `{"stream":true,"sampling_params":{"n":2}}`},
 		{name: "rank override", body: `{"stream":true,"disagg_prefill_dp_rank":0}`},
 		{name: "non-streaming", body: `{"stream":false}`},
+		{name: "sampling array", body: `{"stream":true,"sampling_params":[{}]}`},
+		{name: "fractional sample count", body: `{"stream":true,"sampling_params":{"n":1.5}}`},
+		{name: "omitted sample count", body: `{"stream":true,"sampling_params":{}}`, valid: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var body map[string]any
@@ -1246,4 +1249,46 @@ func TestPrefillStep_SGLangRequestScope(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrefillStep_SGLangBody(t *testing.T) {
+	step, err := NewPrefillStep(gateway.NewWithTransport(nil, "http://gateway"), map[string]any{
+		ParamKVConnector: kv.SGLang,
+		ParamECConnector: ec.NIXL,
+	})
+	require.NoError(t, err)
+	var original map[string]any
+	require.NoError(t, json.Unmarshal([]byte(`{"text":"hello","stream":true,"sampling_params":{"n":1,"max_new_tokens":42,"min_new_tokens":3},"bootstrap_host":"client-host","bootstrap_port":1,"bootstrap_room":-1}`), &original))
+	originalJSON, err := json.Marshal(original)
+	require.NoError(t, err)
+	reqCtx := &pipeline.RequestContext{
+		Body:   original,
+		Stream: true,
+		// SGLang does not consume EC descriptors, including conflicting ones.
+		ECTransferParams: []map[string]any{
+			{"hash-a": map[string]any{"peer_port": 5501}},
+			{"hash-a": map[string]any{"peer_port": 5599}},
+		},
+	}
+	body, err := step.(*PrefillStep).buildPrefillBody(t.Context(), reqCtx, reqcommon.APITypeSGLangGenerate)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1", body[reqcommon.FieldBootstrapHost])
+	require.IsType(t, 0, body[reqcommon.FieldBootstrapPort])
+	require.IsType(t, int64(0), body[reqcommon.FieldBootstrapRoom])
+	want := maps.Clone(original)
+	maps.Copy(want, reqCtx.KVTransferParams)
+	require.Equal(t, want, body)
+	unchangedJSON, err := json.Marshal(original)
+	require.NoError(t, err)
+	require.Equal(t, originalJSON, unchangedJSON)
+}
+
+func TestPrefillStep_SGLangRequiresMatchingConnector(t *testing.T) {
+	step, err := NewPrefillStep(gateway.NewWithTransport(nil, "http://gateway"), map[string]any{ParamKVConnector: kv.NIXL})
+	require.NoError(t, err)
+	_, err = step.(*PrefillStep).buildPrefillBody(t.Context(), &pipeline.RequestContext{
+		Stream: true,
+		Body:   map[string]any{reqcommon.FieldStream: true},
+	}, reqcommon.APITypeSGLangGenerate)
+	require.ErrorIs(t, err, pipeline.ErrBadRequest)
 }

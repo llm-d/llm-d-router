@@ -141,7 +141,18 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 }
 
 func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format reqcommon.APIType) (map[string]any, error) {
-	if format == reqcommon.APITypeSGLangGenerate {
+	var ecParams map[string]any
+	if format != reqcommon.APITypeSGLangGenerate {
+		var err error
+		ecParams, err = s.ec.PreparePrefillECParams(ctx, reqCtx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
+
+	switch format {
+	case reqcommon.APITypeSGLangGenerate:
 		if s.kv.Name() != kv.SGLang || !reqCtx.Stream {
 			return nil, fmt.Errorf("/generate prefill requires kv-sglang and stream=true: %w", pipeline.ErrBadRequest)
 		}
@@ -159,19 +170,10 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			}
 		}
 		body := maps.Clone(reqCtx.Body)
-		// Prefill registers the room locally; decode uses the selected endpoint address.
-		body[reqcommon.FieldBootstrapHost] = "127.0.0.1"
-		reqCtx.KVTransferParams = s.kv.PreparePrefillKVParams(ctx, reqCtx)
-		maps.Copy(body, reqCtx.KVTransferParams)
+		reqCtx.KVTransferParams = kvParams
+		maps.Copy(body, kvParams)
 		return body, nil
-	}
-	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
-	if err != nil {
-		return nil, err
-	}
-	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
-	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
 		body := maps.Clone(reqCtx.Body)
 		reqcommon.CapSingleToken(body, format)
