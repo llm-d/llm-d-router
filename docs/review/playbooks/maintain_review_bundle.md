@@ -9,7 +9,7 @@ generated: { by: "okf-agent/gemini-2.5-pro", at: "2026-10-29T00:00:00Z" }
 
 # Maintenance loops
 
-`make verify-review-playbook` runs `python3 hack/render_playbook.py --check` in `make presubmit`. It fails when `docs/review_playbook.md` differs from the rendered bundle, when a Markdown link or anchor is broken, when a backticked repository path, an `Applies to` glob, or a diff-path routing table glob in `docs/review/` matches nothing in the repository, or when a `stale_after` timestamp in `rules/*.md` is missing, malformed, or in the past. Each loop below ends with `python3 hack/render_playbook.py` followed by `python3 hack/render_playbook.py --check`.
+`make verify-review-playbook` runs `python3 hack/render_playbook.py --check` in `make presubmit`. It fails when `docs/review_playbook.md` differs from the rendered bundle, when a Markdown link or anchor is broken, when a backticked repository path, an `Applies to` glob, or a diff-path routing table glob in `docs/review/` matches nothing in the repository, or when a `stale_after` timestamp in `rules/*.md` is missing, malformed, or in the past. Each loop ends with `python3 hack/render_playbook.py` followed by `python3 hack/render_playbook.py --check`.
 
 # Updating the bundle in the same pull request
 
