@@ -108,7 +108,10 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			route.path = metricsutil.DisaggPathPrefillDecode
 			route.prefiller = prefillHostPort
 		}
-		defer func() { summary.log(logger, route, status, time.Since(requestStart)) }()
+		defer func() {
+			elapsed := time.Since(requestStart)
+			summary.finish(func() { summary.log(logger, route, status, elapsed) })
+		}()
 
 		if len(prefillHostPort) == 0 {
 			logger.V(logging.DEBUG).Info("skip disaggregated prefill", "api", apiType.String())

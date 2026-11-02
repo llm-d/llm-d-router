@@ -193,3 +193,86 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 		})
 	}
 }
+
+// Concurrent P/D connectors (SGLang, Mooncake) do not wait for the prefill
+// response before decode returns to the client. The summary line must still
+// carry the prefill stage once prefill finishes.
+func TestRequestFinishedLineIncludesLateConcurrentPrefill(t *testing.T) {
+	var mu sync.Mutex
+	var logged []string
+	logger := funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: 0})
+
+	prefillDone := make(chan struct{})
+	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(prefillDone)
+		_, _ = io.Copy(io.Discard, r.Body)
+		// Prefill answers after decode has already returned to the client.
+		time.Sleep(200 * time.Millisecond)
+		statusHandler(http.StatusOK, `{}`).ServeHTTP(w, r)
+	}))
+	defer prefill.Close()
+	decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		statusHandler(http.StatusOK, `{"content":"hi"}`).ServeHTTP(w, r)
+	}))
+	defer decoder.Close()
+	decoderURL, err := url.Parse(decoder.URL)
+	require.NoError(t, err)
+	prefillURL, err := url.Parse(prefill.URL)
+	require.NoError(t, err)
+
+	s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: constants.KVConnectorSGLang})
+	s.logger = logger
+	s.allowlistValidator = &AllowlistValidator{}
+	sidecar := httptest.NewServer(s.createRoutes())
+	defer sidecar.Close()
+
+	r, err := http.NewRequest(http.MethodPost, sidecar.URL+reqcommon.PathChatCompletions,
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	require.NoError(t, err)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set(routing.PrefillEndpointHeader, prefillURL.Host)
+	resp, err := sidecar.Client().Do(r)
+	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	require.NoError(t, resp.Body.Close())
+
+	select {
+	case <-prefillDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prefill was never dispatched")
+	}
+
+	var lines []string
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = lines[:0]
+		for _, line := range logged {
+			if strings.Contains(line, `"msg"="request finished"`) && strings.Contains(line, `"prefillDuration"=`) {
+				lines = append(lines, line)
+			}
+		}
+		return len(lines) > 0
+	}, 2*time.Second, 10*time.Millisecond, "the summary line never reported the prefill stage: %v", logged)
+
+	summaryLines := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		total := 0
+		for _, line := range logged {
+			if strings.Contains(line, `"msg"="request finished"`) {
+				total++
+			}
+		}
+		return total
+	}
+	assert.Never(t, func() bool { return summaryLines() > 1 }, 300*time.Millisecond, 10*time.Millisecond,
+		"more than one summary line for the request")
+	assert.Equal(t, 1, summaryLines())
+	assert.Contains(t, lines[0], `"decodeDuration"=`)
+}
