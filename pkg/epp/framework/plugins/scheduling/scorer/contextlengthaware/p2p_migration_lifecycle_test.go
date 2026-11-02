@@ -29,14 +29,14 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	concretedatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 )
 
 const (
@@ -62,7 +62,7 @@ func (p *tokenizedPromptTestProducer) TypedName() fwkplugin.TypedName {
 }
 
 func (p *tokenizedPromptTestProducer) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{}}
+	return map[fwkplugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{}}
 }
 
 func (p *tokenizedPromptTestProducer) Produce(_ context.Context, _ *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
@@ -170,7 +170,7 @@ func TestP2PReusablePrefixRoutesFollowUpToShortPrefiller(t *testing.T) {
 // migrationKVSource returns the kv_transfer_params.remote_kv_source block the
 // p2p-source-producer wrote into the request body, or nil when absent.
 func migrationKVSource(request *scheduling.InferenceRequest) map[string]any {
-	payload, _ := request.Body.Payload.(fwkrh.PayloadMap)
+	payload, _ := request.Body.Payload.(fwkrequest.PayloadMap)
 	params, _ := payload[reqcommon.FieldKVTransferParams].(map[string]any)
 	source, _ := params[reqcommon.FieldRemoteKVSource].(map[string]any)
 	return source
@@ -200,10 +200,10 @@ func migrationTokenizedRequest(requestID string, tokenCount int) *scheduling.Inf
 	return &scheduling.InferenceRequest{
 		RequestID: requestID,
 		Headers:   map[string]string{},
-		Body: &fwkrh.InferenceRequestBody{
-			Payload: fwkrh.PayloadMap{},
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
+		Body: &fwkrequest.InferenceRequestBody{
+			Payload: fwkrequest.PayloadMap{},
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, tokenCount)}},
 			},
 		},
 	}

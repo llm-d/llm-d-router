@@ -30,6 +30,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
@@ -124,8 +125,8 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 	default:
 		logger.V(logutil.TRACE).Info("unsupported gRPC path, skipping", "path", headers[parsers.MethodPathKey])
 		return &fwkrh.ParseResult{
-			Body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload(body),
+			Body: &fwkrequest.InferenceRequestBody{
+				Payload: fwkrequest.RawPayload(body),
 			},
 			SkipResponseProcessing: true,
 		}, nil
@@ -153,7 +154,7 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 			logger.V(logutil.DEBUG).Info("parsed EmbedResponse", "promptTokens", embedResp.PromptTokens)
 			result := &fwkrh.ParsedResponse{}
 			if embedResp.PromptTokens > 0 {
-				result.Usage = &fwkrh.Usage{
+				result.Usage = &fwkrequest.Usage{
 					PromptTokens:     int(embedResp.PromptTokens),
 					CompletionTokens: 0,
 					TotalTokens:      int(embedResp.PromptTokens),
@@ -191,12 +192,12 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 	return result, nil
 }
 
-func requestControlUsage(promptToken, completionToken, cachedToken int) *fwkrh.Usage {
-	return &fwkrh.Usage{
+func requestControlUsage(promptToken, completionToken, cachedToken int) *fwkrequest.Usage {
+	return &fwkrequest.Usage{
 		PromptTokens:     promptToken,
 		CompletionTokens: completionToken,
 		TotalTokens:      promptToken + completionToken,
-		PromptTokenDetails: &fwkrh.PromptTokenDetails{
+		PromptTokenDetails: &fwkrequest.PromptTokenDetails{
 			CachedTokens: cachedToken,
 		},
 	}
@@ -210,15 +211,15 @@ func toGenerateResponse(payload []byte, resp *pb.GenerateResponse) error {
 	return proto.Unmarshal(parsedPayload, resp)
 }
 
-func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceRequestBody, error) {
-	var body *fwkrh.InferenceRequestBody
+func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrequest.InferenceRequestBody, error) {
+	var body *fwkrequest.InferenceRequestBody
 	switch pbReq.Input.(type) {
 	case *pb.GenerateRequest_Text:
-		body = &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{Raw: pbReq.GetText()},
+		body = &fwkrequest.InferenceRequestBody{
+			Completions: &fwkrequest.CompletionsRequest{
+				Prompt: fwkrequest.Prompt{Raw: pbReq.GetText()},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
+			Payload: fwkrequest.PayloadProto{Message: pbReq},
 		}
 	case *pb.GenerateRequest_Tokenized:
 		tokenized := pbReq.GetTokenized()
@@ -228,13 +229,13 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 		inputIDs := tokenized.GetInputIds()
 		copiedTokenIDsInt := make([]uint32, len(inputIDs))
 		copy(copiedTokenIDsInt, inputIDs)
-		body = &fwkrh.InferenceRequestBody{
-			Completions: &fwkrh.CompletionsRequest{
-				Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{copiedTokenIDsInt}},
+		body = &fwkrequest.InferenceRequestBody{
+			Completions: &fwkrequest.CompletionsRequest{
+				Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{copiedTokenIDsInt}},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{
+			Payload: fwkrequest.PayloadProto{Message: pbReq},
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{
 					TokenIDs:           copiedTokenIDsInt,
 					MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
 				}},
@@ -252,7 +253,7 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 	return body, nil
 }
 
-func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModalFeature {
+func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrequest.MultiModalFeature {
 	if mmInputs == nil {
 		return nil
 	}
@@ -263,14 +264,14 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModal
 	}
 
 	hashes := mmInputs.GetMmHashes()
-	features := make([]fwkrh.MultiModalFeature, 0, len(placeholders))
+	features := make([]fwkrequest.MultiModalFeature, 0, len(placeholders))
 	for i, placeholder := range placeholders {
 		hash := ""
 		if i < len(hashes) {
 			hash = hashes[i]
 		}
 
-		feature := fwkrh.MultiModalFeature{
+		feature := fwkrequest.MultiModalFeature{
 			Modality: reqcommon.ModalityImage,
 			Hash:     hash,
 		}
@@ -285,19 +286,19 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs) []fwkrh.MultiModal
 	return features
 }
 
-func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.InferenceRequestBody, error) {
-	var body *fwkrh.InferenceRequestBody
+func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrequest.InferenceRequestBody, error) {
+	var body *fwkrequest.InferenceRequestBody
 	if pbReq.Tokenized != nil {
 		inputIDs := pbReq.GetTokenized().InputIds
 		tokenIDs := make([]uint32, len(inputIDs))
 		copy(tokenIDs, inputIDs)
-		body = &fwkrh.InferenceRequestBody{
-			Embeddings: &fwkrh.EmbeddingsRequest{
-				Input: fwkrh.EmbeddingsInput{
+		body = &fwkrequest.InferenceRequestBody{
+			Embeddings: &fwkrequest.EmbeddingsRequest{
+				Input: fwkrequest.EmbeddingsInput{
 					TokenIDs: [][]uint32{tokenIDs},
 				},
 			},
-			Payload: fwkrh.PayloadProto{Message: pbReq},
+			Payload: fwkrequest.PayloadProto{Message: pbReq},
 		}
 	} else {
 		return nil, errors.New("missing tokenized input in EmbedRequest")

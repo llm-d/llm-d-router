@@ -237,8 +237,9 @@ func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 			EnableEviction:               true,
 		},
 		RequestHandler: &configapiv1alpha1.RequestHandlerConfig{
-			Parsers:           []configapiv1alpha1.ParserConfig{{PluginRef: "parser"}},
-			PropagatePriority: true,
+			Parsers:            []configapiv1alpha1.ParserConfig{{PluginRef: "parser"}},
+			PropagatePriority:  true,
+			ComposeFairnessIDs: true,
 		},
 	}
 }

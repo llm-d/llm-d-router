@@ -24,6 +24,7 @@ import (
 	"io"
 	"slices"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -37,7 +38,7 @@ func ParseRenderRequest(data []byte) (*fwkrh.ParseResult, error) {
 	}
 	model, _ := payload["model"].(string)
 	return &fwkrh.ParseResult{
-		Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.PayloadMap(payload), RawBody: data, Model: model, RenderRequest: true},
+		Body:                   &fwkrequest.InferenceRequestBody{Payload: fwkrequest.PayloadMap(payload), RawBody: data, Model: model, RenderRequest: true},
 		SkipResponseProcessing: true,
 	}, nil
 }

@@ -98,6 +98,7 @@ const (
 	FieldMessages             = "messages"
 	FieldModel                = "model"
 	FieldRole                 = "role"
+	FieldText                 = "text"
 	FieldType                 = "type"
 	FieldURL                  = "url"
 	FieldImageURL             = "image_url"
@@ -153,6 +154,9 @@ const ToolChoiceNone = "none"
 // part is still collected and primed. FieldFileID on an input_image, input_file
 // or computer_screenshot names a Files API upload the serving engine must fetch.
 const (
+	PartTypeText               = "text"
+	PartTypeInputText          = "input_text"
+	PartTypeOutputText         = "output_text"
 	PartTypeImageURL           = "image_url"
 	PartTypeAudioURL           = "audio_url"
 	PartTypeVideoURL           = "video_url"
@@ -161,6 +165,10 @@ const (
 	PartTypeInputFile          = "input_file"
 	PartTypeComputerScreenshot = "computer_screenshot"
 )
+
+// ResponsesItemTypeMessage is the Responses input item type of a role-tagged
+// message. An item that omits FieldType is a message too.
+const ResponsesItemTypeMessage = "message"
 
 // Anthropic Messages block types. An image block holds its image in a
 // FieldSource object; a tool_result block holds the tool's output under

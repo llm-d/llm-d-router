@@ -53,6 +53,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -222,7 +223,7 @@ type agentIdentityDirector struct {
 	err error
 }
 
-func (d *agentIdentityDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (d *agentIdentityDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	tracing.SetRequestAttribution(ctx, "agent-7", tracing.AttributionSourceAgentIdentity)
 	return reqCtx, d.err
 }

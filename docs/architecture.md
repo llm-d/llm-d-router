@@ -94,6 +94,11 @@ Required or Optional, directly or through other producers. This includes produce
 automatically. Every other producer runs in step 5. Producers in step 3 see every located candidate,
 so their per-endpoint work grows with the candidates the screeners remove.
 
+For example, `disaggregatedset-rollout-screener` with `revisionGating.affinity.prefixCache` consumes
+`PrefixCacheMatchInfo`, so `approx-prefix-cache-producer` and the `token-producer` it consumes run in
+step 3 with no `dataProducers` entry; see its
+[producer setup](../pkg/epp/framework/plugins/requesthandling/screener/disaggregatedsetrollout/README.md#producer-setup).
+
 #### Scheduling
 
 Each scheduling profile runs the following stages. Multiple profiles may run for one request, such as separate prefill and decode profiles.
@@ -431,6 +436,7 @@ Enable chunked decode via the pd-sidecar flag:
 - [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
 - [Envoy External Processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)
 - [EPP Container Sizing Guide](./operations.md)
+- [Inference API Routing](./api-routing.md)
 
 ### Canonical llm-d architecture (upstream)
 

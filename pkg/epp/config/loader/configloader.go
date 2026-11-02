@@ -38,7 +38,6 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
@@ -188,6 +187,7 @@ func InstantiateAndConfigure(
 		FlowControlConfig:  flowControlConfig,
 		ParserRegistry:     parserRegistry,
 		PropagatePriority:  rawConfig.RequestHandler.PropagatePriority,
+		ComposeFairnessIDs: rawConfig.RequestHandler.ComposeFairnessIDs,
 		DataProducerPhases: dataProducerPhases,
 	}, nil
 }
@@ -411,20 +411,20 @@ func loadFeatureConfig(gates configapiv1.FeatureGates) (map[string]bool, error) 
 }
 
 // buildDataProducerPhases places each DataProducer listed in
-// requestHandler.dataProducers in fwkrc.DataProducerPhaseRequestHandling,
+// requestHandler.dataProducers in fwkrh.DataProducerPhaseRequestHandling,
 // keyed by plugin name. datalayer.ResolveDataProducerPhases places the rest.
-func buildDataProducerPhases(rawConfigs []configapiv1.DataProducerConfig, handle fwkplugin.Handle) (map[string]fwkrc.DataProducerPhase, error) {
-	phases := make(map[string]fwkrc.DataProducerPhase, len(rawConfigs))
+func buildDataProducerPhases(rawConfigs []configapiv1.DataProducerConfig, handle fwkplugin.Handle) (map[string]fwkrh.DataProducerPhase, error) {
+	phases := make(map[string]fwkrh.DataProducerPhase, len(rawConfigs))
 	allPlugins := handle.GetAllPluginsWithNames()
 	for _, dp := range rawConfigs {
 		plugin, ok := allPlugins[dp.PluginRef]
 		if !ok {
 			return nil, fmt.Errorf("the configured data producer %q is not loaded", dp.PluginRef)
 		}
-		if _, ok := plugin.(fwkrc.DataProducer); !ok {
+		if _, ok := plugin.(fwkrh.DataProducer); !ok {
 			return nil, fmt.Errorf("the plugin %q is not a data producer plugin", dp.PluginRef)
 		}
-		phases[dp.PluginRef] = fwkrc.DataProducerPhaseRequestHandling
+		phases[dp.PluginRef] = fwkrh.DataProducerPhaseRequestHandling
 	}
 	return phases, nil
 }
