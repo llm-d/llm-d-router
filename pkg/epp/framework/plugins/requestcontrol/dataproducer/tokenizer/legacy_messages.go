@@ -295,9 +295,9 @@ func appendAnthropicMessage(conversation []tokenizerTypes.Conversation, m fwkrh.
 	var reasoning strings.Builder
 	for _, b := range m.Content.Structured {
 		switch b.Type {
-		case blockTypeText:
+		case reqcommon.PartTypeText:
 			if b.Text != "" {
-				contentBlocks = append(contentBlocks, tokenizerTypes.ContentBlock{Type: blockTypeText, Text: b.Text})
+				contentBlocks = append(contentBlocks, tokenizerTypes.ContentBlock{Type: reqcommon.PartTypeText, Text: b.Text})
 			}
 		case reqcommon.BlockTypeImage:
 			contentBlocks = appendImageBlock(contentBlocks, b.ImageSource())
@@ -312,7 +312,7 @@ func appendAnthropicMessage(conversation []tokenizerTypes.Conversation, m fwkrh.
 			} else {
 				text, _ := anthropicToolResultContent(b)
 				contentBlocks = append(contentBlocks, tokenizerTypes.ContentBlock{
-					Type: blockTypeText,
+					Type: reqcommon.PartTypeText,
 					Text: "Tool result: " + text,
 				})
 			}
@@ -325,7 +325,7 @@ func appendAnthropicMessage(conversation []tokenizerTypes.Conversation, m fwkrh.
 	}
 	conv.ToolCalls = toolCalls
 	switch {
-	case len(contentBlocks) == 1 && contentBlocks[0].Type == blockTypeText:
+	case len(contentBlocks) == 1 && contentBlocks[0].Type == reqcommon.PartTypeText:
 		conv.Content = &tokenizerTypes.Content{Raw: contentBlocks[0].Text}
 	case len(contentBlocks) > 0:
 		conv.Content = &tokenizerTypes.Content{Structured: contentBlocks}
@@ -484,8 +484,8 @@ func toChatContent(c *tokenizerTypes.Content) *chatContent {
 	parts := make([]chatPart, 0, len(c.Structured))
 	for _, b := range c.Structured {
 		switch b.Type {
-		case blockTypeText:
-			parts = append(parts, chatPart{Type: blockTypeText, Text: b.Text})
+		case reqcommon.PartTypeText:
+			parts = append(parts, chatPart{Type: reqcommon.PartTypeText, Text: b.Text})
 		case blockTypeImageURL:
 			parts = append(parts, chatPart{Type: blockTypeImageURL, ImageURL: &chatImageURL{URL: b.ImageURL.URL}})
 		case "audio_url":

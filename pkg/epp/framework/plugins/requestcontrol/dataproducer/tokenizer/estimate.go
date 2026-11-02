@@ -36,7 +36,6 @@ import (
 
 // Content-block types read by the estimate backend.
 const (
-	blockTypeText     = "text"
 	blockTypeImageURL = "image_url"
 	blockTypeThinking = "thinking"
 	blockTypeToolUse  = "tool_use"
@@ -53,7 +52,7 @@ func anthropicSystemText(ac fwkrh.AnthropicContent) string {
 	}
 	var sb strings.Builder
 	for _, block := range ac.Structured {
-		if block.Type == blockTypeText && block.Text != "" && !strings.HasPrefix(block.Text, anthropicBillingHeaderPrefix) {
+		if block.Type == reqcommon.PartTypeText && block.Text != "" && !strings.HasPrefix(block.Text, anthropicBillingHeaderPrefix) {
 			sb.WriteString(block.Text)
 		}
 	}
@@ -79,7 +78,7 @@ func anthropicToolResultContent(b fwkrh.AnthropicContentBlock) (string, []tokeni
 	var imageBlocks []tokenizerTypes.ContentBlock
 	for _, item := range content.Structured {
 		switch item.Type {
-		case blockTypeText:
+		case reqcommon.PartTypeText:
 			parts = append(parts, item.Text)
 		case reqcommon.BlockTypeImage:
 			imageBlocks = appendImageBlock(imageBlocks, item.ImageSource())
@@ -335,7 +334,7 @@ func (b estimateBackend) appendChatMessage(out []byte, features []fwkrh.MultiMod
 	}
 	for _, block := range msg.Content.Structured {
 		switch block.Type {
-		case blockTypeText:
+		case reqcommon.PartTypeText:
 			out = append(out, []byte(block.Text)...)
 		case "image_url":
 			out, features = appendMMAsset(out, features, reqcommon.ModalityImage, block.ImageURL.URL, b.img.placeholderCount(block.ImageURL.URL))
@@ -404,7 +403,7 @@ func (b estimateBackend) messagesBytes(req *fwkrh.MessagesRequest) ([]byte, []fw
 		}
 		for _, block := range msg.Content.Structured {
 			switch block.Type {
-			case blockTypeText:
+			case reqcommon.PartTypeText:
 				out = append(out, []byte(block.Text)...)
 			case reqcommon.BlockTypeImage:
 				if content, count := b.img.placeholderForAnthropicImage(block.ImageSource()); content != "" {
@@ -478,7 +477,7 @@ func (b estimateBackend) appendResponsesItem(out []byte, features []fwkrh.MultiM
 		return out, features
 	}
 	switch t, _ := m["type"].(string); t {
-	case "", responsesItemTypeMessage:
+	case "", reqcommon.ResponsesItemTypeMessage:
 		if role, ok := m["role"].(string); ok {
 			out = append(out, []byte(role)...)
 		}
@@ -559,7 +558,7 @@ func (b estimateBackend) appendResponsesContentPart(out []byte, features []fwkrh
 		return out, features
 	}
 	switch p["type"] {
-	case "input_text", "output_text":
+	case reqcommon.PartTypeInputText, reqcommon.PartTypeOutputText:
 		if text, ok := p["text"].(string); ok {
 			out = append(out, []byte(text)...)
 		}
