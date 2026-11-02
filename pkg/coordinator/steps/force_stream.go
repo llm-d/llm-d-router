@@ -286,9 +286,23 @@ func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64
 	return int64(n)*perChoice + forceStreamBaseOverheadBytes, true
 }
 
-// executeForceStream sends the prepared decode body upstream with streaming
-// enabled, reassembles the streamed frames into one non-streaming reply, and
-// writes that reply to the client. It balances the reservation on every exit.
+// responsesEchoBytes is the share of a forced request's reservation set aside for
+// the request fields the Responses terminal frame echoes back (tools,
+// instructions, schema): the forced body's size for the Responses shape, zero for
+// the others. It is reserved from the shared budget but not bounded by the
+// per-request cap, which caps the generated part only, so a large tool list does
+// not on its own keep a request from being force-streamed.
+func responsesEchoBytes(shape sseShape, bodyBytes []byte) int64 {
+	if shape != sseShapeResponses {
+		return 0
+	}
+	return int64(len(bodyBytes))
+}
+
+// executeForceStream sends the forced body upstream, reassembles the streamed
+// frames into one non-streaming reply, and writes that reply to the client. It
+// releases reserved, the whole reservation, on every exit; generated is the part
+// of it bounding the generated reply, which the per-request ceiling enforces.
 //
 // Nothing reaches the client until the whole response is buffered, so every error
 // here leaves the client uncommitted. A transport failure returns a plain error and
@@ -297,13 +311,10 @@ func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64
 // does not overwrite it. The fallback sentinels (ceiling, oversize, lossy-frame,
 // unreadable, truncated) instead return so decode runs the pass-through, which can
 // still serve the request or preserve a field the fold would drop.
-func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, reserved int64, parity *parityCheck) error {
+func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, bodyBytes []byte, generated, reserved int64, parity *parityCheck) error {
 	defer s.budget.release(reserved)
 
-	bodyBytes, headers, err := buildForceStreamRequest(reqCtx, shape)
-	if err != nil {
-		return err
-	}
+	headers := forceStreamHeaders(reqCtx)
 
 	logger.V(logutil.DEFAULT).Info("force-streaming request", "path", reqCtx.OriginalPath, "reservedBytes", reserved)
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
@@ -328,7 +339,7 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 
 	n := reqcommon.OutputChoiceCount(reqCtx.Body, reqcommon.DetectAPIType(reqCtx.OriginalPath))
 	reassembler := newSSEReassembler(shape, n)
-	if err := scanForcedResponse(resp.Body, reassembler, reserved, int64(len(bodyBytes))); err != nil {
+	if err := scanForcedResponse(resp.Body, reassembler, generated, responsesEchoBytes(shape, bodyBytes)); err != nil {
 		var upstreamErr *forceStreamUpstreamError
 		switch {
 		case errors.As(err, &upstreamErr):
@@ -462,18 +473,15 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	return false
 }
 
-// buildForceStreamRequest marshals the forced (stream:true) decode body and
-// builds its forwarding headers.
-func buildForceStreamRequest(reqCtx *pipeline.RequestContext, shape sseShape) ([]byte, map[string]string, error) {
-	bodyBytes, err := json.Marshal(forceStreamBody(reqCtx.Body, shape))
-	if err != nil {
-		return nil, nil, fmt.Errorf("%s: force-stream marshal: %w", DecodeStepName, err)
-	}
+// forceStreamHeaders builds the forced decode request's forwarding headers,
+// matching the pass-through's (see newDecodeProxyRequest), including the peer
+// topology the EPP's topology-affinity plugins read on the decode leg.
+func forceStreamHeaders(reqCtx *pipeline.RequestContext) map[string]string {
 	headers := gatewayHeaders(reqCtx, gateway.PhaseDecode)
 	if reqCtx.PeerTopology != "" {
 		headers[reqcommon.PeerTopologyHeaderKey] = reqCtx.PeerTopology
 	}
-	return bodyBytes, headers, nil
+	return headers
 }
 
 // forceStreamBody clones the prepared decode body, enables streaming, and asks
@@ -499,18 +507,19 @@ func forceStreamBody(src map[string]any, shape sseShape) map[string]any {
 
 // maxFrameBytes caps a single SSE line the scanner will buffer. For the chunk
 // shapes (and Messages, which reassembles text incrementally) the cap is the
-// reservation, with forceStreamMaxFrameBytes only as a ceiling for the rare case a
-// reservation exceeds 1 MiB; under the default per-request cap the reservation stays
-// below 1 MiB and is the binding limit. The Responses shape delivers its whole reply
-// in one terminal frame that echoes the request's fields (tools, instructions,
-// schema) back, so it is allowed the reservation plus the request body size. The
-// result is clamped to int so a cap above the platform int width cannot wrap
+// generated reservation, with forceStreamMaxFrameBytes only as a ceiling for the
+// rare case a reservation exceeds 1 MiB; under the default per-request cap the
+// reservation stays below 1 MiB and is the binding limit. The Responses shape
+// delivers its whole reply in one terminal frame that echoes the request's fields
+// (tools, instructions, schema) back, so it is allowed the generated reservation
+// plus echoBytes, both reserved from the shared budget (see responsesEchoBytes).
+// The result is clamped to int so a cap above the platform int width cannot wrap
 // negative when it sizes the scanner buffer (reachable only with a multi-GiB
 // per-request size on a 32-bit build).
-func maxFrameBytes(shape sseShape, reserved, requestBytes int64) int {
-	frameCap := reserved
+func maxFrameBytes(shape sseShape, generated, echoBytes int64) int {
+	frameCap := generated
 	if shape == sseShapeResponses {
-		frameCap = reserved + requestBytes
+		frameCap = generated + echoBytes
 	} else if frameCap > forceStreamMaxFrameBytes {
 		frameCap = forceStreamMaxFrameBytes
 	}
@@ -535,11 +544,12 @@ func initialScanBuf(frameCap int) int {
 // the per-request ceiling. A frame that cannot be parsed or a read failure is an
 // upstream fault; exceeding the ceiling returns errForceStreamCeiling; an error
 // frame returns a forceStreamUpstreamError carrying it. All return before any
-// byte is written to the client. requestBytes sizes the Responses terminal-frame
+// byte is written to the client. generated is the reservation for the generated
+// reply, which the ceiling enforces; echoBytes adds the Responses terminal-frame
 // allowance (see maxFrameBytes).
-func scanForcedResponse(r io.Reader, reassembler *sseReassembler, reserved, requestBytes int64) error {
+func scanForcedResponse(r io.Reader, reassembler *sseReassembler, generated, echoBytes int64) error {
 	scanner := bufio.NewScanner(r)
-	frameCap := maxFrameBytes(reassembler.shape, reserved, requestBytes)
+	frameCap := maxFrameBytes(reassembler.shape, generated, echoBytes)
 	scanner.Buffer(make([]byte, 0, initialScanBuf(frameCap)), frameCap)
 	sawDone := false
 	for scanner.Scan() {
@@ -565,17 +575,17 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, reserved, requ
 		if reassembler.lossyFrame {
 			return errForceStreamLossyFrame
 		}
-		if reassembler.bufferedBytes() > reserved {
+		if reassembler.bufferedBytes() > generated {
 			return errForceStreamCeiling
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		if errors.Is(err, bufio.ErrTooLong) {
-			// The Responses terminal frame is allowed the reservation plus the request
-			// body size, enough for the generated text plus the request fields it
-			// echoes. A frame past even that carries bytes neither the reservation nor
-			// the request accounts for, so it falls back to the pass-through rather
-			// than failing. For the other shapes an oversized frame is anomalous: a
+			// The Responses terminal frame is allowed the generated reservation plus
+			// the echo reservation, enough for the generated text plus the request
+			// fields it echoes. A frame past even that carries bytes the reservation
+			// does not account for, so it falls back to the pass-through rather than
+			// failing. For the other shapes an oversized frame is anomalous: a
 			// ceiling abort.
 			if reassembler.shape == sseShapeResponses {
 				return errForceStreamOversize

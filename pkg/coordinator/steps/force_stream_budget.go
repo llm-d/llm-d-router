@@ -34,8 +34,10 @@ import (
 type forceStreamBudget struct {
 	current atomic.Int64
 	max     int64
-	// perRequestMax caps a single request's reservation, so one large request
-	// cannot claim the whole budget and starve concurrent candidates.
+	// perRequestMax caps the generated part of a single request's reservation,
+	// so one large request cannot claim the whole budget and starve concurrent
+	// candidates. A Responses request also reserves its echoed request body
+	// (see responsesEchoBytes), which this cap does not bound.
 	perRequestMax int64
 }
 
@@ -46,7 +48,7 @@ func newForceStreamBudget(maxBytes, perRequestMax int64) *forceStreamBudget {
 // tryReserve adds n to the live total if it stays within max, reporting whether
 // it did. The compare-and-swap retries only against a competing reservation, so
 // a caller that loses the race re-reads the total instead of over-committing.
-// n must be in (0, max]; estimateReservation guarantees that before any call.
+// n must be positive; a value above max is refused like any other that does not fit.
 // current stays in [0, max], so max-current never underflows an int64.
 func (b *forceStreamBudget) tryReserve(n int64) bool {
 	for {

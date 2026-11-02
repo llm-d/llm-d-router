@@ -462,9 +462,11 @@ pipeline:
       #   higher, so this is not an RSS cap.
       #   force_stream_buffer_size: 1GiB
       #   force_stream_max_request_size caps the bytes one forced request may
-      #   reserve (human-readable, default 256KiB, capped to the buffer size). It
-      #   must exceed the fixed 2KiB reply-envelope overhead, or no output could be
-      #   buffered; a smaller value fails config load.
+      #   reserve for its generated reply (human-readable, default 256KiB, capped
+      #   to the buffer size). It must exceed the fixed 2KiB reply-envelope
+      #   overhead, or no output could be buffered; a smaller value fails config
+      #   load. A Responses request also reserves its own body size from the
+      #   buffer, outside this cap, since its reply echoes the request fields.
       #   force_stream_max_request_size: 256KiB
       #
       #   prompt_token_parity compares the prompt token count the decode

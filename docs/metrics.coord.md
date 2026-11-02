@@ -158,7 +158,7 @@ Recorded by the decode step when its `force_stream` parameter is on, which sends
 
 #### `force_stream_buffered_bytes` (Gauge)
 *   **Labels:** None
-*   **Description:** Bytes currently reserved against the shared `force_stream_buffer_size` budget by in-flight forced requests. It returns to 0 when no forced request is in flight. It counts wire bytes, not process memory.
+*   **Description:** Bytes currently reserved against the shared `force_stream_buffer_size` budget by in-flight forced requests. A request reserves for its generated reply and, on the Responses API, also its own body size, since the reply echoes the request fields. It returns to 0 when no forced request is in flight. It counts wire bytes, not process memory.
 
 ## Relationship to EPP metrics
 

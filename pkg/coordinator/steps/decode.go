@@ -133,12 +133,19 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 			case forceStreamLossy(shape, reqCtx.Body):
 				coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnsupported)
 			default:
-				reserved, ok := s.estimateReservation(reqCtx)
+				// The forced body is built before the reservation because the
+				// Responses reservation includes its size (see responsesEchoBytes).
+				bodyBytes, err := json.Marshal(forceStreamBody(reqCtx.Body, shape))
+				if err != nil {
+					return fmt.Errorf("%s: force-stream marshal: %w", DecodeStepName, err)
+				}
+				generated, ok := s.estimateReservation(reqCtx)
+				reserved := generated + responsesEchoBytes(shape, bodyBytes)
 				switch {
 				case !ok:
 					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnbounded)
 				case s.budget.tryReserve(reserved):
-					err := s.executeForceStream(ctx, logger, reqCtx, shape, reserved, parity)
+					err := s.executeForceStream(ctx, logger, reqCtx, shape, bodyBytes, generated, reserved, parity)
 					fallbackResult, isFallback := forceStreamFallbackResult(err)
 					if !isFallback {
 						return err

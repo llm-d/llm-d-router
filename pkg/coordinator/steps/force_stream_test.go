@@ -2225,6 +2225,95 @@ func TestForceStream_Responses_EchoedToolsRelayed(t *testing.T) {
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the reply")
 }
 
+// TestForceStream_Responses_ReservesRequestEcho covers the Responses terminal
+// frame, which echoes the request's tools and instructions back. The reservation
+// taken from the shared budget includes the request body size, so the budget and
+// its gauge account for the echo the coordinator holds. The per-request cap bounds
+// only the generated part, so a request whose echo alone exceeds the cap is still
+// force-streamed.
+func TestForceStream_Responses_ReservesRequestEcho(t *testing.T) {
+	// Larger than the 256KiB per-request cap on its own.
+	instructions := strings.Repeat("x", 512<<10)
+	var gaugeDuringRequest float64
+	var reg *prometheus.Registry
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gaugeDuringRequest = forceStreamGauge(t, reg)
+		completed := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp-1","model":"m","status":"completed","instructions":%q,"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}}`, instructions)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: %s\n\n", `{"type":"response.output_text.delta","delta":"hi"}`)
+		fmt.Fprintf(w, "data: %s\n\n", completed)
+	}))
+	defer server.Close()
+
+	reg = prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{
+		ParamForceStream:           true,
+		ParamForceStreamBufferSize: "1GiB",
+	})
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-resp-reserve-echo",
+		OriginalPath:     reqcommon.PathResponses,
+		Model:            "m",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "m", "stream": false, "max_output_tokens": 16, "input": "hi",
+			"instructions": instructions,
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+	require.Greater(t, gaugeDuringRequest, float64(len(instructions)),
+		"the reservation covers the echoed request, not only the generated text")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9,
+		"an echo larger than the per-request cap is still force-streamed")
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "the whole reservation is released")
+}
+
+// TestForceStream_Responses_EchoBudgetFull_FallsBack verifies a Responses request
+// whose echo does not fit the remaining shared budget takes the pass-through
+// before any forced attempt, counted fallback_budget.
+func TestForceStream_Responses_EchoBudgetFull_FallsBack(t *testing.T) {
+	var streams []any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(raw, &parsed)
+		streams = append(streams, parsed["stream"])
+		_, _ = w.Write([]byte(`{"id":"resp-1","status":"completed","output":[]}`))
+	}))
+	defer server.Close()
+
+	// The budget holds the generated part but not a 64KiB echo.
+	step, reg := newForceStreamStep(t, server.URL, "32KiB")
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-resp-echo-full",
+		OriginalPath:     reqcommon.PathResponses,
+		Model:            "m",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "m", "stream": false, "max_output_tokens": 16, "input": "hi",
+			"instructions": strings.Repeat("x", 64<<10),
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	require.Equal(t, []any{false}, streams, "no forced attempt; the pass-through serves the request once")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackBudget), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
+}
+
 func TestForceStream_Concurrency(t *testing.T) {
 	frames := []string{
 		`{"request_id":"c","choices":[{"index":0,"token_ids":[1,2]}],"usage":null}`,
