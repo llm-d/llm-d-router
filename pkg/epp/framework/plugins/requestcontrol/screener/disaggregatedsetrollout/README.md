@@ -385,7 +385,7 @@ filter then rejects the request with HTTP 429 although capacity exists.
   decision ID that already holds a revision (the phases of one P/D or E/P/D
   request, or a proxy retry that keeps `x-request-id`), it gets that revision
   even if it is full, so every part of the request stays on one revision.
-- `llm_d_router_endpoint_picker_disaggregatedset_revision_overflow_total`
+- `llm_d_epp_disaggregatedset_revision_overflow_total`
   counts overflows by source and target revision, once per decision.
 
 ## Revision Affinity
@@ -568,10 +568,10 @@ schedulingProfiles:
   `token-producer`.
 - Startup fails when `producerName` names no configured producer: `no default
   producer found for missing data key PrefixCacheMatchInfoDataKey/<name>`.
-- `llm_d_router_endpoint_picker_plugin_duration_seconds{extension_point="RequestHandlingDataProducer"}`
+- `llm_d_epp_plugin_duration_seconds{extension_point="RequestHandlingDataProducer"}`
   records the latency of producers that run during request handling.
 - A rising `outcome="missing_match_info"` on
-  `llm_d_router_endpoint_picker_disaggregatedset_revision_cache_affinity_total`
+  `llm_d_epp_disaggregatedset_revision_cache_affinity_total`
   means match info does not reach the Screener, for example because the
   producer fails or times out.
 
@@ -625,7 +625,7 @@ never silently substitutes another revision or crosses revisions.
   selections that matched no endpoint and failed closed.
 - `llm_d_epp_disaggregatedset_revision_gating_share`: current weighted share
   from `0` to `1` for each observed revision. Incomplete revisions report `0`.
-- `llm_d_router_endpoint_picker_disaggregatedset_revision_selection_total`:
+- `llm_d_epp_disaggregatedset_revision_selection_total`:
   requests screened onto a revision, labeled by `revision` and by `source`, the
   path that chose it: `header` (strict revision header), `coordinated`
   (revision already stored under the decision ID), `session` (affinity session
@@ -637,7 +637,7 @@ never silently substitutes another revision or crosses revisions.
   covers. Set log verbosity to `4` to log the request ID, revision, and source
   of every selection.
 
-- `llm_d_router_endpoint_picker_disaggregatedset_revision_cache_affinity_total`:
+- `llm_d_epp_disaggregatedset_revision_cache_affinity_total`:
   prefix cache lookups for requests with no affinity key, labeled by `outcome`:
   `chosen`, `no_lead` (no revision led by `minLeadBlocks`), `over_budget` (the
   leading revision ran above its share plus `shareSlack`), or
