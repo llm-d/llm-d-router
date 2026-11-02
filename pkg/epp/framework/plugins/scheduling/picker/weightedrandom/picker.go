@@ -158,13 +158,20 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
 	}
 
-	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ). Only positive-score endpoints are eligible; zero and
-	// negative scores are skipped and never returned, even as fallback entries.
+	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ)
 	weightedEndpoints := make([]weightedScoredEndpoint, 0, len(scoredEndpoints))
 
 	for _, scoredEndpoint := range scoredEndpoints {
 		if scoredEndpoint.Score <= 0 {
 			continue
+		}
+
+		// Sample on the effective weight w = (score/maxScore)^(1/T), normalized so weights stay in
+		// (0,1]; T=1 keeps probability proportional to score. The wrapper's Endpoint is the original
+		// candidate, which is what gets returned.
+		scoredEndpoint := &fwksched.ScoredEndpoint{
+			Endpoint: scoredEndpoint,
+			Score:    math.Pow(scoredEndpoint.Score/maxScore, 1.0/p.temperature),
 		}
 
 		// Generate a random number U in (0,1)
@@ -173,12 +180,9 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 			u = 1e-10 // Avoid 0 to ensure positive key
 		}
 
-		// Temperature tunes the effective weight: w = (score/maxScore)^(1/T), normalized so weights
-		// stay in (0,1]. T=1 keeps probability proportional to score.
-		effectiveWeight := math.Pow(scoredEndpoint.Score/maxScore, 1.0/p.temperature)
 		weightedEndpoints = append(weightedEndpoints, weightedScoredEndpoint{
 			ScoredEndpoint: scoredEndpoint,
-			key:            math.Pow(u, 1.0/effectiveWeight), // key = U^(1/w)
+			key:            math.Pow(u, 1.0/scoredEndpoint.Score),
 		})
 	}
 
@@ -192,7 +196,7 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 
 	targetEndpoints := make([]fwksched.Endpoint, selectedCount)
 	for i := range selectedCount {
-		targetEndpoints[i] = weightedEndpoints[i].ScoredEndpoint
+		targetEndpoints[i] = weightedEndpoints[i].ScoredEndpoint.Endpoint
 	}
 
 	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
