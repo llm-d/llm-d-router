@@ -1,0 +1,823 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package multimodal
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	k8stypes "k8s.io/apimachinery/pkg/types"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
+)
+
+func TestLRUCapacityFromCacheSizeMB(t *testing.T) {
+	assert.Equal(t, 2, lruCapacityFromCacheSizeMB(4))
+	assert.Equal(t, 1024, lruCapacityFromCacheSizeMB(2048))
+	assert.Equal(t, 2048, lruCapacityFromCacheSizeMB(0))
+}
+
+func TestFactory(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{"cacheSizeInMBPerServer": 4})
+	require.NoError(t, err)
+
+	created, err := Factory("mm-producer", plugin.StrictDecoder(raw), &testHandle{ctx: context.Background()})
+	require.NoError(t, err)
+	require.NotNil(t, created)
+	assert.Equal(t, "mm-producer", created.TypedName().Name)
+	assert.Equal(t, ProducerType, created.TypedName().Type)
+
+	_, err = Factory("bad", plugin.StrictDecoder(json.RawMessage(`{"cacheSizeInMBPerServer":"bad"}`)), &testHandle{ctx: context.Background()})
+	require.Error(t, err)
+
+	defaultProducer, err := Factory("default-producer", plugin.StrictDecoder(json.RawMessage(`{}`)), &testHandle{ctx: context.Background()})
+	require.NoError(t, err)
+	producer, ok := defaultProducer.(*Producer)
+	require.True(t, ok)
+	consumes := producer.Consumes()
+	assert.Empty(t, consumes.Required)
+	assert.Contains(t, consumes.Optional, tokenproducer.TokenizedPromptDataKey)
+
+	weightedRaw, err := json.Marshal(map[string]any{"cacheSizeInEmbeddingsPerServer": 1024})
+	require.NoError(t, err)
+	weightedPlugin, err := Factory("weighted", plugin.StrictDecoder(weightedRaw), &testHandle{ctx: context.Background()})
+	require.NoError(t, err)
+	weightedProducer := weightedPlugin.(*Producer)
+	assert.Equal(t, 1024, weightedProducer.cacheSize)
+	assert.True(t, weightedProducer.useItemSize)
+
+	_, err = Factory("ambiguous", plugin.StrictDecoder(json.RawMessage(`{
+		"cacheSizeInMBPerServer": 4,
+		"cacheSizeInEmbeddingsPerServer": 1024
+	}`)), &testHandle{ctx: context.Background()})
+	require.ErrorContains(t, err, "cannot both be set")
+}
+
+func TestExtractMMItemsFromTokenizedRequestUsesPlaceholderLengths(t *testing.T) {
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{
+					MultiModalFeatures: []fwkrequest.MultiModalFeature{
+						{Modality: reqcommon.ModalityImage, Hash: "image-a", Length: 576},
+						{Modality: reqcommon.ModalityImage, Hash: "image-b", Length: 0},
+						{Modality: reqcommon.ModalityImage, Hash: "image-a", Length: 144},
+					},
+				}},
+			},
+		},
+	})
+
+	assert.Equal(t, []attrmm.MatchItem{
+		{Hash: "image-a", Size: 576, Modality: string(reqcommon.ModalityImage)},
+		{Hash: "image-b", Size: 1, Modality: string(reqcommon.ModalityImage)},
+	}, items)
+}
+
+func TestProduceUsesPlaceholderLengthsWhenTokenizedRequestAvailable(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	endpointA := newEndpoint(podA)
+	request := requestWithHashes("req-tokenized", map[string]int{"hash-a": 80, "hash-c": 20})
+
+	require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpointA}))
+
+	assertMatchInfo(t, producer, endpointA,
+		nil,
+		[]attrmm.MatchItem{
+			{Hash: "hash-a", Size: 80, Modality: string(reqcommon.ModalityImage)},
+			{Hash: "hash-c", Size: 20, Modality: string(reqcommon.ModalityImage)},
+		})
+}
+
+func TestExtractMMItemsFromTokenizedRequestFallsBackToUnitWeight(t *testing.T) {
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{
+					MultiModalFeatures: []fwkrequest.MultiModalFeature{
+						{Modality: reqcommon.ModalityImage, Hash: "image-a", Length: 0},
+						{Modality: reqcommon.ModalityAudio, Hash: "image-b", Length: 0},
+					},
+				}},
+			},
+		},
+	})
+
+	assert.Equal(t, []attrmm.MatchItem{
+		{Hash: "image-a", Size: 1, Modality: string(reqcommon.ModalityImage)},
+		{Hash: "image-b", Size: 1, Modality: string(reqcommon.ModalityAudio)},
+	}, items)
+}
+
+func TestExtractMMItemsFromGenerateFeatures(t *testing.T) {
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			Generate: &fwkrequest.GenerateRequest{
+				TokenIDs: []uint32{1, 2, 3},
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{
+						"image": {"image-a", "image-b", "image-a"},
+						"audio": {"audio-x", ""},
+					},
+				},
+			},
+		},
+	})
+
+	assert.Equal(t, []attrmm.MatchItem{
+		{Hash: "audio-x", Size: 1, Modality: "audio"},
+		{Hash: "image-a", Size: 1, Modality: "image"},
+		{Hash: "image-b", Size: 1, Modality: "image"},
+	}, items)
+}
+
+func TestExtractMMItemsNilTokenizedRequestReturnsNil(t *testing.T) {
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{},
+	})
+	assert.Nil(t, items)
+}
+
+func TestExtractMMItemsEmptyMultiModalFeaturesReturnsNil(t *testing.T) {
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{},
+		},
+	})
+	assert.Nil(t, items)
+}
+
+func TestExtractMMItemsFromStructuredChatMedia(t *testing.T) {
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+				Messages: []fwkrequest.Message{{
+					Role: "user",
+					Content: fwkrequest.Content{Structured: []fwkrequest.ContentBlock{
+						{Type: "image_url", ImageURL: fwkrequest.ImageBlock{URL: "https://example.com/cat.png"}},
+					}},
+				}},
+			},
+		},
+	})
+
+	assert.Equal(t, []attrmm.MatchItem{
+		{Hash: contentHash("image_url", "https://example.com/cat.png"), Size: 1, Modality: string(reqcommon.ModalityImage)},
+	}, items)
+}
+
+func TestExtractMMItemsFromStructuredChatAudioURL(t *testing.T) {
+	audioURL := "https://example.com/clip.wav"
+	items := ExtractMMItems(&scheduling.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+				Messages: []fwkrequest.Message{{
+					Role: "user",
+					Content: fwkrequest.Content{Structured: []fwkrequest.ContentBlock{
+						{Type: "audio_url", AudioURL: fwkrequest.AudioURLBlock{URL: audioURL}},
+						{Type: "input_audio", InputAudio: fwkrequest.AudioBlock{Data: "AAAA", Format: "wav"}},
+					}},
+				}},
+			},
+		},
+	})
+
+	assert.Equal(t, []attrmm.MatchItem{
+		{Hash: contentHash("audio_url", audioURL), Size: 1, Modality: string(reqcommon.ModalityAudio)},
+		{Hash: contentHash("input_audio", "wav:AAAA"), Size: 1, Modality: string(reqcommon.ModalityAudio)},
+	}, items)
+}
+
+func TestProduceMatchesMultiplePodsAndPreRequestUpdatesPlacement(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
+	podC := k8stypes.NamespacedName{Namespace: "default", Name: "pod-c"}
+	producer.putCacheEntry("hash-a", podA, podB)
+
+	endpointA := newEndpoint(podA)
+	endpointB := newEndpoint(podB)
+	endpointC := newEndpoint(podC)
+	request := requestWithHashes("req-1", map[string]int{"hash-a": 80, "hash-c": 20})
+
+	require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpointA, endpointB, endpointC}))
+
+	img := string(reqcommon.ModalityImage)
+	assertMatchInfo(t, producer, endpointA,
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 80, Modality: img}},
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 80, Modality: img}, {Hash: "hash-c", Size: 20, Modality: img}})
+	assertMatchInfo(t, producer, endpointB,
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 80, Modality: img}},
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 80, Modality: img}, {Hash: "hash-c", Size: 20, Modality: img}})
+	assertMatchInfo(t, producer, endpointC,
+		nil,
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 80, Modality: img}, {Hash: "hash-c", Size: 20, Modality: img}})
+
+	_ = producer.PreRequest(context.Background(), request, schedulingResult(endpointC))
+	producer.ResponseBody(context.Background(), request, &fwkrh.Response{StartOfStream: true}, endpointC.GetMetadata())
+
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache["hash-a"], podA.String())
+	assert.Contains(t, cache["hash-a"], podB.String())
+	assert.Contains(t, cache["hash-a"], podC.String())
+	assert.Contains(t, cache["hash-c"], podC.String())
+}
+
+func TestPreRequestRecordsEncodeEndpointInDisaggregatedMode(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+	encodePod := k8stypes.NamespacedName{Namespace: "default", Name: "encode-pod"}
+	decodePod := k8stypes.NamespacedName{Namespace: "default", Name: "decode-pod"}
+
+	request := requestWithHashes("req-1", map[string]int{"hash-a": 1})
+
+	require.NoError(t, producer.Produce(context.Background(), request,
+		[]scheduling.Endpoint{newEndpoint(encodePod), newEndpoint(decodePod)}))
+
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode": {TargetEndpoints: []scheduling.Endpoint{newEndpoint(decodePod)}},
+			"encode": {TargetEndpoints: []scheduling.Endpoint{newEndpoint(encodePod)}},
+		},
+	}
+
+	_ = producer.PreRequest(context.Background(), request, result)
+	producer.ResponseBody(context.Background(), request,
+		&fwkrh.Response{StartOfStream: true}, newEndpoint(encodePod).GetMetadata())
+
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache["hash-a"], encodePod.String())
+	assert.NotContains(t, cache["hash-a"], decodePod.String())
+}
+
+func TestPreRequestFallsBackToPrimaryProfileWhenNoEncodeProfile(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+	pod := k8stypes.NamespacedName{Namespace: "default", Name: "aggregated-pod"}
+
+	request := requestWithHashes("req-1", map[string]int{"hash-a": 1})
+
+	require.NoError(t, producer.Produce(context.Background(), request,
+		[]scheduling.Endpoint{newEndpoint(pod)}))
+
+	_ = producer.PreRequest(context.Background(), request, schedulingResult(newEndpoint(pod)))
+	producer.ResponseBody(context.Background(), request,
+		&fwkrh.Response{StartOfStream: true}, newEndpoint(pod).GetMetadata())
+
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache["hash-a"], pod.String())
+}
+
+func TestLRUEviction(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInMBPerServer: 4}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+
+	for _, hash := range []string{"hash-1", "hash-2", "hash-3"} {
+		request := requestWithHashes(hash, map[string]int{hash: 1})
+		require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpoint}))
+		_ = producer.PreRequest(context.Background(), request, schedulingResult(endpoint))
+		producer.ResponseBody(context.Background(), request, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+	}
+
+	cache := producer.cacheSnapshot()
+	assert.NotContains(t, cache, "hash-1")
+	assert.Contains(t, cache, "hash-2")
+	assert.Contains(t, cache, "hash-3")
+}
+
+func TestWeightedEvictionUsesEncoderEmbeddingCapacity(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInEmbeddingsPerServer: 1024}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+
+	for _, tc := range []struct {
+		hash string
+		size int
+	}{
+		{hash: "a", size: 512},
+		{hash: "b", size: 64},
+		{hash: "c", size: 64},
+		{hash: "d", size: 512},
+	} {
+		request := requestWithHashes("request-"+tc.hash, map[string]int{tc.hash: tc.size})
+		require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpoint}))
+		require.NoError(t, producer.PreRequest(context.Background(), request, schedulingResult(endpoint)))
+		producer.ResponseBody(context.Background(), request, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+	}
+
+	cache := producer.cacheSnapshot()
+	assert.NotContains(t, cache, "a")
+	assert.Contains(t, cache, "b")
+	assert.Contains(t, cache, "c")
+	assert.Contains(t, cache, "d")
+}
+
+func TestWeightedEvictionPreservesRequestItemOrder(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInEmbeddingsPerServer: 512}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+	request := &scheduling.InferenceRequest{
+		RequestID: "ordered-items",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{
+					MultiModalFeatures: []fwkrequest.MultiModalFeature{
+						{Modality: reqcommon.ModalityImage, Hash: "first", Length: 512},
+						{Modality: reqcommon.ModalityImage, Hash: "second", Length: 512},
+					},
+				}},
+			},
+		},
+	}
+
+	require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), request, schedulingResult(endpoint)))
+	producer.ResponseBody(context.Background(), request, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+
+	cache := producer.cacheSnapshot()
+	assert.NotContains(t, cache, "first")
+	assert.Contains(t, cache, "second")
+}
+
+func TestPreRequestPinsReferencedEntriesUntilResponseStarts(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInEmbeddingsPerServer: 576}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+
+	active := requestWithHashes("active", map[string]int{"active": 512})
+	require.NoError(t, producer.Produce(context.Background(), active, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), active, schedulingResult(endpoint)))
+
+	freeable := requestWithHashes("freeable", map[string]int{"freeable": 64})
+	require.NoError(t, producer.Produce(context.Background(), freeable, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), freeable, schedulingResult(endpoint)))
+	producer.ResponseBody(context.Background(), freeable, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+
+	replacement := requestWithHashes("replacement", map[string]int{"replacement": 64})
+	require.NoError(t, producer.Produce(context.Background(), replacement, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), replacement, schedulingResult(endpoint)))
+
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache, "active")
+	assert.NotContains(t, cache, "freeable")
+	assert.Contains(t, cache, "replacement")
+}
+
+func TestPendingEntryCommitsAtStartOfStreamAfterCapacityBecomesFree(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInEmbeddingsPerServer: 512}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+
+	first := requestWithHashes("first", map[string]int{"first": 512})
+	require.NoError(t, producer.Produce(context.Background(), first, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), first, schedulingResult(endpoint)))
+
+	pending := requestWithHashes("pending", map[string]int{"pending": 512})
+	require.NoError(t, producer.Produce(context.Background(), pending, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), pending, schedulingResult(endpoint)))
+	assert.NotContains(t, producer.cacheSnapshot(), "pending")
+
+	producer.ResponseBody(context.Background(), first, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+	producer.ResponseBody(context.Background(), pending, &fwkrh.Response{
+		StartOfStream:    true,
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+	}, endpoint.GetMetadata())
+
+	cache := producer.cacheSnapshot()
+	assert.NotContains(t, cache, "first")
+	assert.Contains(t, cache, "pending")
+}
+
+func TestAbortedRequestDropsPendingEntry(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInEmbeddingsPerServer: 512}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+
+	active := requestWithHashes("active", map[string]int{"active": 512})
+	require.NoError(t, producer.Produce(context.Background(), active, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), active, schedulingResult(endpoint)))
+
+	pending := requestWithHashes("pending-abort", map[string]int{"pending": 512})
+	require.NoError(t, producer.Produce(context.Background(), pending, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), pending, schedulingResult(endpoint)))
+	producer.ResponseBody(context.Background(), pending, &fwkrh.Response{
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+	}, endpoint.GetMetadata())
+
+	producer.ResponseBody(context.Background(), active, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache, "active")
+	assert.NotContains(t, cache, "pending")
+}
+
+func TestAbortedRequestWithSyntheticStartOfStreamDropsPendingEntry(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInEmbeddingsPerServer: 512}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+
+	active := requestWithHashes("active", map[string]int{"active": 512})
+	require.NoError(t, producer.Produce(context.Background(), active, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), active, schedulingResult(endpoint)))
+
+	pending := requestWithHashes("pending-abort", map[string]int{"pending": 512})
+	require.NoError(t, producer.Produce(context.Background(), pending, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), pending, schedulingResult(endpoint)))
+	producer.ResponseBody(context.Background(), active, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+	producer.ResponseBody(context.Background(), pending, &fwkrh.Response{
+		StartOfStream:    true,
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+	}, endpoint.GetMetadata())
+
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache, "active")
+	assert.NotContains(t, cache, "pending")
+}
+
+func TestSharedRequestReferencesProtectEntryUntilBothRelease(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInEmbeddingsPerServer: 512}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+
+	seed := requestWithHashes("seed", map[string]int{"shared": 512})
+	require.NoError(t, producer.Produce(context.Background(), seed, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), seed, schedulingResult(endpoint)))
+	producer.ResponseBody(context.Background(), seed, &fwkrh.Response{
+		StartOfStream:    true,
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+	}, endpoint.GetMetadata())
+
+	first := requestWithHashes("first-reference", map[string]int{"shared": 512})
+	second := requestWithHashes("second-reference", map[string]int{"shared": 512})
+	for _, request := range []*scheduling.InferenceRequest{first, second} {
+		require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpoint}))
+		require.NoError(t, producer.PreRequest(context.Background(), request, schedulingResult(endpoint)))
+	}
+
+	replacement := requestWithHashes("replacement", map[string]int{"replacement": 512})
+	require.NoError(t, producer.Produce(context.Background(), replacement, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), replacement, schedulingResult(endpoint)))
+	assert.NotContains(t, producer.cacheSnapshot(), "replacement")
+
+	producer.ResponseBody(context.Background(), first, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+	assert.Contains(t, producer.cacheSnapshot(), "shared")
+	producer.ResponseBody(context.Background(), second, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+	producer.ResponseBody(context.Background(), replacement, &fwkrh.Response{StartOfStream: true}, endpoint.GetMetadata())
+
+	cache := producer.cacheSnapshot()
+	assert.NotContains(t, cache, "shared")
+	assert.Contains(t, cache, "replacement")
+}
+
+func TestPluginStateEvictionReleasesReferences(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInEmbeddingsPerServer: 512}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+
+	active := requestWithHashes("active", map[string]int{"active": 512})
+	require.NoError(t, producer.Produce(context.Background(), active, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), active, schedulingResult(endpoint)))
+	producer.pluginState.Delete(active.RequestID)
+	require.Eventually(t, func() bool {
+		producer.mutex.RLock()
+		defer producer.mutex.RUnlock()
+		return producer.caches[endpoint.GetMetadata().ID.String()].freeable.Len() == 1
+	}, time.Second, time.Millisecond)
+
+	replacement := requestWithHashes("replacement", map[string]int{"replacement": 512})
+	require.NoError(t, producer.Produce(context.Background(), replacement, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), replacement, schedulingResult(endpoint)))
+
+	cache := producer.cacheSnapshot()
+	assert.NotContains(t, cache, "active")
+	assert.Contains(t, cache, "replacement")
+}
+
+func TestPluginStateEvictionDoesNotBlockOnProducerLock(t *testing.T) {
+	producer := newTestProducer(t, &Parameters{CacheSizeInEmbeddingsPerServer: 512}, nil)
+	endpoint := newEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"})
+	request := requestWithHashes("active", map[string]int{"active": 512})
+	require.NoError(t, producer.Produce(context.Background(), request, []scheduling.Endpoint{endpoint}))
+	require.NoError(t, producer.PreRequest(context.Background(), request, schedulingResult(endpoint)))
+
+	producer.mutex.Lock()
+	done := make(chan struct{})
+	go func() {
+		producer.pluginState.Delete(request.RequestID)
+		close(done)
+	}()
+	returned := false
+	select {
+	case <-done:
+		returned = true
+	case <-time.After(time.Second):
+	}
+	producer.mutex.Unlock()
+	require.True(t, returned, "PluginState eviction must not wait for the producer lock")
+
+	require.Eventually(t, func() bool {
+		producer.mutex.RLock()
+		defer producer.mutex.RUnlock()
+		return producer.caches[endpoint.GetMetadata().ID.String()].freeable.Len() == 1
+	}, time.Second, time.Millisecond)
+}
+
+func TestStalePodCleanup(t *testing.T) {
+	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
+	producer := newTestProducer(t, nil, func() []k8stypes.NamespacedName { return []k8stypes.NamespacedName{podA} })
+	producer.putCacheEntry("hash-a", podA, podB)
+
+	// Simulate the periodic cleanup loop firing.
+	producer.removeStalePods()
+
+	assert.NotContains(t, producer.cacheSnapshot()["hash-a"], podB.String())
+	assert.Contains(t, producer.cacheSnapshot()["hash-a"], podA.String())
+
+	endpointA := newEndpoint(podA)
+	endpointB := newEndpoint(podB)
+	require.NoError(t, producer.Produce(context.Background(), requestWithHashes("req", map[string]int{"hash-a": 1}), []scheduling.Endpoint{endpointA, endpointB}))
+
+	img := string(reqcommon.ModalityImage)
+	assertMatchInfo(t, producer, endpointA,
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}},
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}})
+	assertMatchInfo(t, producer, endpointB,
+		nil,
+		[]attrmm.MatchItem{{Hash: "hash-a", Size: 1, Modality: img}})
+}
+
+func TestProducerEndpointExtractorInterfaceContract(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+	var _ fwkdl.EndpointExtractor = producer
+	assert.True(t, reflect.TypeOf(producer).Implements(reflect.TypeFor[fwkdl.EndpointExtractor]()))
+}
+
+// recordingRegistrar captures what RegisterDependencies asked for.
+type recordingRegistrar struct {
+	registrations []fwkdl.PendingRegistration
+}
+
+func (r *recordingRegistrar) Register(reg fwkdl.PendingRegistration) error {
+	r.registrations = append(r.registrations, reg)
+	return nil
+}
+
+func TestRegisterDependencies(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+	registrar := &recordingRegistrar{}
+
+	require.NoError(t, producer.RegisterDependencies(registrar))
+	require.Len(t, registrar.registrations, 1)
+
+	reg := registrar.registrations[0]
+	assert.Equal(t, sourcenotifications.EndpointNotificationSourceType, reg.SourceType)
+	assert.Equal(t, producer.TypedName(), reg.Owner)
+	assert.Same(t, producer, reg.Extractor, "the producer registers itself as the extractor")
+	assert.NotNil(t, reg.DefaultSource, "the source must be auto-created when absent")
+}
+
+func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
+	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
+	producer := newTestProducer(t, nil, nil)
+	producer.putCacheEntry("hash-a", podA, podB)
+
+	err := producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: podB}, nil),
+	})
+
+	require.NoError(t, err)
+	cache := producer.cacheSnapshot()
+	assert.Contains(t, cache["hash-a"], podA.String())
+	assert.NotContains(t, cache["hash-a"], podB.String())
+}
+
+type testHandle struct {
+	ctx                context.Context
+	podList            func() []k8stypes.NamespacedName
+	crossReplicaSyncer plugin.Plugin
+}
+
+func (h *testHandle) Context() context.Context {
+	return h.ctx
+}
+
+func (h *testHandle) Plugin(string) plugin.Plugin {
+	return nil
+}
+
+func (h *testHandle) AddPlugin(string, plugin.Plugin) {}
+
+func (h *testHandle) GetAllPlugins() []plugin.Plugin {
+	return nil
+}
+
+func (h *testHandle) GetAllPluginsWithNames() map[string]plugin.Plugin {
+	return nil
+}
+
+func (h *testHandle) Metrics() plugin.MetricsRecorder {
+	return nil
+}
+
+func (h *testHandle) CrossReplicaSyncer() plugin.Plugin {
+	return h.crossReplicaSyncer
+}
+
+func (h *testHandle) SetCrossReplicaSyncer(syncer plugin.Plugin) {
+	h.crossReplicaSyncer = syncer
+}
+
+func (h *testHandle) RefreshMetricsInterval() time.Duration {
+	return 0
+}
+
+func (h *testHandle) PodList() []k8stypes.NamespacedName {
+	if h.podList == nil {
+		return nil
+	}
+	return h.podList()
+}
+
+const testName = "test-mm-embeddings-cache-producer"
+
+func newTestProducer(t *testing.T, params *Parameters, podList func() []k8stypes.NamespacedName) *Producer {
+	t.Helper()
+	producer, err := New(context.Background(), testName, params, podList)
+	require.NoError(t, err)
+	return producer
+}
+
+func newEndpoint(name k8stypes.NamespacedName) scheduling.Endpoint {
+	return scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: name},
+		&fwkdl.Metrics{},
+		nil,
+	)
+}
+
+func requestWithHashes(requestID string, hashToWeight map[string]int) *scheduling.InferenceRequest {
+	features := make([]fwkrequest.MultiModalFeature, 0, len(hashToWeight))
+	for hash, weight := range hashToWeight {
+		features = append(features, fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: hash, Length: weight})
+	}
+	return &scheduling.InferenceRequest{
+		RequestID: requestID,
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{MultiModalFeatures: features}}},
+		},
+	}
+}
+
+func schedulingResult(target scheduling.Endpoint) *scheduling.SchedulingResult {
+	return &scheduling.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"default": {TargetEndpoints: []scheduling.Endpoint{target}},
+		},
+	}
+}
+
+func assertMatchInfo(t *testing.T, p *Producer, endpoint scheduling.Endpoint, matchedItems, requestItems []attrmm.MatchItem) {
+	t.Helper()
+	raw, ok := endpoint.Get(p.dk)
+	require.True(t, ok)
+	info, ok := raw.(*attrmm.EncoderCacheMatchInfo)
+	require.True(t, ok)
+	assert.ElementsMatch(t, matchedItems, info.MatchedItems())
+	assert.ElementsMatch(t, requestItems, info.RequestItems())
+}
+
+func TestDumpState(t *testing.T) {
+	podA := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	podB := k8stypes.NamespacedName{Namespace: "default", Name: "pod-b"}
+	podC := k8stypes.NamespacedName{Namespace: "default", Name: "pod-c"}
+	// podList is the datalayer's known pods (unsorted, and includes pod-c which
+	// has no cache entries); the per-pod cache view is tracked separately, so it
+	// is usually but not necessarily a subset.
+	podList := func() []k8stypes.NamespacedName {
+		return []k8stypes.NamespacedName{podB, podA, podC}
+	}
+	p, err := New(context.Background(), "test", &Parameters{}, podList)
+	require.NoError(t, err)
+
+	p.putCacheEntry("h1", podA)
+	p.putCacheEntry("h2", podA)
+	p.putCacheEntry("h3", podA)
+	p.putCacheEntry("h1", podB)
+	p.putCacheEntry("h2", podB)
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	// Content hashes (cache keys) must never reach the dump.
+	assert.NotContains(t, string(payload), "h1")
+
+	var state encoderCacheState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Equal(t, encoderCacheState{
+		PodList:        []string{"default/pod-a", "default/pod-b", "default/pod-c"},
+		TotalKnownPods: 3,
+		Pods: []podItemCount{
+			{Pod: "default/pod-a", Items: 3},
+			{Pod: "default/pod-b", Items: 2},
+		},
+		TotalPods: 2,
+		MaxPods:   maxDebugDumpPods,
+	}, state)
+}
+
+func TestDumpStateCapsPods(t *testing.T) {
+	p, err := New(context.Background(), "test", &Parameters{}, nil)
+	require.NoError(t, err)
+
+	const extra = 5
+	for i := 0; i < maxDebugDumpPods+extra; i++ {
+		pod := k8stypes.NamespacedName{Namespace: "default", Name: fmt.Sprintf("pod-%03d", i)}
+		for j := 0; j <= i; j++ {
+			p.putCacheEntry(fmt.Sprintf("h-%03d-%03d", i, j), pod)
+		}
+	}
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+
+	var state encoderCacheState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	// The dump is partial: TotalPods exceeds the returned count, capped at MaxPods.
+	assert.Equal(t, maxDebugDumpPods+extra, state.TotalPods)
+	assert.Greater(t, state.TotalPods, state.MaxPods)
+	assert.Len(t, state.Pods, maxDebugDumpPods)
+	// The pod holding the most items is listed first.
+	assert.Equal(t, "default/pod-104", state.Pods[0].Pod)
+	assert.Equal(t, maxDebugDumpPods+extra, state.Pods[0].Items)
+}
+
+func TestDumpStateEmpty(t *testing.T) {
+	p, err := New(context.Background(), "test", &Parameters{}, nil)
+	require.NoError(t, err)
+
+	payload, err := p.DumpState()
+	require.NoError(t, err)
+	assert.True(t, json.Valid(payload))
+	// Empty lists serialize as [] not null, matching the documented response shape.
+	assert.Contains(t, string(payload), `"podList":[]`)
+	assert.Contains(t, string(payload), `"pods":[]`)
+
+	var state encoderCacheState
+	require.NoError(t, json.Unmarshal(payload, &state))
+	assert.Empty(t, state.Pods)
+	assert.Equal(t, 0, state.TotalPods)
+	assert.Equal(t, 0, state.TotalKnownPods)
+	assert.Equal(t, maxDebugDumpPods, state.MaxPods)
+}
+
+func TestDumpStateConcurrentWithWrites(t *testing.T) {
+	p, err := New(context.Background(), "test", &Parameters{}, nil)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			pod := k8stypes.NamespacedName{Namespace: "default", Name: fmt.Sprintf("pod-%03d", i)}
+			p.putCacheEntry(fmt.Sprintf("h-%d", i), pod)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if _, err := p.DumpState(); err != nil {
+				t.Errorf("DumpState returned error: %v", err)
+			}
+		}
+	}()
+	wg.Wait()
+}

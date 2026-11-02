@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -41,7 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkapix "github.com/llm-d/llm-d-router/test/framework/apix"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -119,7 +120,7 @@ func TestServer(t *testing.T) {
 }
 
 func TestServer_TextToSpeechRawAudioStream(t *testing.T) {
-	model := testutil.MakeV1InferenceObjective("v1").
+	model := fwkapix.MakeV1InferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}
@@ -224,7 +225,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	expectedResponseHeaders := map[string]string{"x-went-into-resp-headers": "true", ":method": "POST", "x-test": "body"}
 	expectedSchedulerHeaders := map[string]string{":method": "POST", "x-test": "body", "x-request-id": "test-request-id"}
 
-	model := testutil.MakeV1InferenceObjective("v1").
+	model := fwkapix.MakeV1InferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}
@@ -448,10 +449,10 @@ type testDirector struct {
 	requestHeaders                   map[string]string
 	requestMetadata                  map[string]any
 	handleResponseBodyEndStreamCount int
-	lastInferenceRequestBody         *fwkrh.InferenceRequestBody
+	lastInferenceRequestBody         *fwkrequest.InferenceRequestBody
 }
 
-func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*handlers.RequestContext, error) {
+func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (*handlers.RequestContext, error) {
 	ts.requestHeaders = reqCtx.Request.Headers
 	ts.requestMetadata = reqCtx.Request.Metadata
 	ts.lastInferenceRequestBody = inferenceRequestBody
@@ -503,10 +504,10 @@ func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[
 	if m.skip {
 		return &fwkrh.ParseResult{
 			SkipResponseProcessing: true,
-			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
+			Body:                   &fwkrequest.InferenceRequestBody{Payload: fwkrequest.RawPayload(body)},
 		}, nil
 	}
-	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrh.InferenceRequestBody{}}, nil
+	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrequest.InferenceRequestBody{}}, nil
 }
 
 func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
@@ -529,7 +530,7 @@ func TestServer_Skip(t *testing.T) {
 	director := &testDirector{}
 	mockPar := &mockParser{skip: true}
 
-	model := testutil.MakeV1InferenceObjective("v1").
+	model := fwkapix.MakeV1InferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	ctx, cancel, ds := testutils.PrepareForTestStreamingServer(t, []*apixv1.InferenceObjective{model},
@@ -591,7 +592,7 @@ func TestServer_Skip(t *testing.T) {
 	// Verify that the body was forced to have RawPayload
 	require.NotNil(t, director.lastInferenceRequestBody, "InferenceRequestBody should be non-nil")
 	require.NotNil(t, director.lastInferenceRequestBody.Payload, "Payload should be non-nil")
-	rawPayload, ok := director.lastInferenceRequestBody.Payload.(fwkrh.RawPayload)
+	rawPayload, ok := director.lastInferenceRequestBody.Payload.(fwkrequest.RawPayload)
 	require.True(t, ok, "Payload should be RawPayload")
 	require.Equal(t, []byte(`{"model":"test"}`), []byte(rawPayload), "Payload should match raw body")
 
@@ -604,7 +605,7 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	// We will send a request body that is larger than 4MB (e.g., 5MB).
 	// Since the test gRPC server defaults to 4MB receive limit, EPP should reject it.
 
-	model := testutil.MakeV1InferenceObjective("v1").
+	model := fwkapix.MakeV1InferenceObjective("v1").
 		CreationTimestamp(metav1.Unix(1000, 0)).ObjRef()
 
 	director := &testDirector{}

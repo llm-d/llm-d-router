@@ -18,6 +18,7 @@ package toolcalling
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -113,10 +114,45 @@ type RequestSnapshot struct {
 	summary RequestSummary
 }
 
-// CanSkipCapture reports whether no supported fields need comparison.
-// The snapshot must be empty, and body must contain no field names or JSON escapes.
-// It does not validate JSON syntax.
+type telemetryEnabledContextKey struct{}
+
+// WithTelemetryEnabled lets downstream request processing observe tool fields.
+func WithTelemetryEnabled(ctx context.Context) context.Context {
+	return context.WithValue(ctx, telemetryEnabledContextKey{}, true)
+}
+
+// TelemetryEnabled reports whether tool-specific observations are enabled.
+func TelemetryEnabled(ctx context.Context) bool {
+	enabled, _ := ctx.Value(telemetryEnabledContextKey{}).(bool)
+	return enabled
+}
+
+type requestSnapshotContextKey struct{}
+
+type requestSnapshotContextValue struct {
+	body     []byte
+	snapshot RequestSnapshot
+}
+
+// WithRequestSnapshot carries a captured request through synchronous processing.
+// The caller keeps body unchanged until processing completes.
+func WithRequestSnapshot(ctx context.Context, body []byte, snapshot RequestSnapshot) context.Context {
+	return context.WithValue(ctx, requestSnapshotContextKey{}, requestSnapshotContextValue{body, snapshot})
+}
+
+// RequestSnapshotForBody returns the captured fields only for the same JSON body and API.
+func RequestSnapshotForBody(ctx context.Context, surface reqcommon.APIType, body []byte) (RequestSnapshot, bool) {
+	value, ok := ctx.Value(requestSnapshotContextKey{}).(requestSnapshotContextValue)
+	if !ok || value.snapshot.surface != surface || !bytes.Equal(value.body, body) {
+		return RequestSnapshot{}, false
+	}
+	return value.snapshot, true
+}
+
+// CanSkipCapture reports whether an empty snapshot and a body without JSON
+// escapes contain no supported field keys. It does not validate JSON syntax.
 func (snapshot RequestSnapshot) CanSkipCapture(body []byte) bool {
+	// Escaped keys can spell supported fields without their literal bytes.
 	if len(snapshot.fields) != 0 || bytes.IndexByte(body, '\\') >= 0 {
 		return false
 	}
@@ -124,10 +160,26 @@ func (snapshot RequestSnapshot) CanSkipCapture(body []byte) bool {
 	if err != nil {
 		return false
 	}
-	for _, field := range fields {
-		if bytes.Contains(body, []byte(field)) {
+	// Field words in prompt strings do not require another capture.
+	for len(body) > 0 {
+		start := bytes.IndexByte(body, '"')
+		if start < 0 {
+			break
+		}
+		body = body[start+1:]
+		end := bytes.IndexByte(body, '"')
+		if end < 0 {
 			return false
 		}
+		rest := bytes.TrimLeft(body[end+1:], " \t\r\n")
+		if len(rest) > 0 && rest[0] == ':' {
+			for _, field := range fields {
+				if bytes.Equal(body[:end], []byte(field)) {
+					return false
+				}
+			}
+		}
+		body = body[end+1:]
 	}
 	return true
 }
@@ -169,10 +221,7 @@ func captureRequestJSON(surface reqcommon.APIType, body []byte, validated bool) 
 			}
 			switch field {
 			case FieldTools:
-				var tools []json.RawMessage
-				if json.Unmarshal(raw, &tools) == nil && len(tools) > 0 {
-					snapshot.summary.ToolCountBucket = bucketToolCount(len(tools))
-				}
+				snapshot.summary.ToolCountBucket = toolCountBucketJSON(raw)
 			case FieldToolChoice:
 				decoder := json.NewDecoder(bytes.NewReader(raw))
 				decoder.UseNumber()
@@ -181,7 +230,7 @@ func captureRequestJSON(surface reqcommon.APIType, body []byte, validated bool) 
 					return RequestSnapshot{}, fmt.Errorf("decode %s field: %w", field, err)
 				}
 				snapshot.summary.ToolChoicePresent = true
-				snapshot.summary.ToolChoiceKind = normalizeToolChoiceValue(surface, value)
+				snapshot.summary.ToolChoiceKind = NormalizeToolChoice(surface, value)
 			}
 		}
 	}
@@ -262,6 +311,26 @@ func jsonValueEnd(body []byte) int {
 		}
 	}
 	return bytes.IndexAny(body, ",}] \t\r\n")
+}
+
+// The field value comes from a validated JSON body.
+func toolCountBucketJSON(raw []byte) ToolCountBucket {
+	if len(raw) == 0 || raw[0] != '[' {
+		return ""
+	}
+	rest := bytes.TrimLeft(raw[1:], " \t\r\n")
+	count := 0
+	for rest[0] != ']' {
+		count++
+		if count == 11 {
+			return ToolCountBucketElevenPlus
+		}
+		rest = bytes.TrimLeft(rest[jsonValueEnd(rest):], " \t\r\n")
+		if rest[0] == ',' {
+			rest = bytes.TrimLeft(rest[1:], " \t\r\n")
+		}
+	}
+	return bucketToolCount(count)
 }
 
 // CompareRequests compares every supported field for the common API surface.
@@ -414,7 +483,7 @@ func (snapshot RequestSnapshot) SpanAttributes(statuses []FieldStatus) []attribu
 		semconv.LLMDToolCallingAPISurfaceKey.String(snapshot.surface.String()),
 		semconv.LLMDToolCallingPresentKey.Bool(snapshot.summary.ToolCallingPresent),
 	)
-	if snapshot.summary.ToolCallingPresent {
+	if snapshot.summary.ToolChoicePresent {
 		attrs = append(attrs, semconv.LLMDToolCallingToolChoiceKey.String(string(snapshot.summary.ToolChoiceKind)))
 	}
 	if snapshot.summary.ToolCountBucket != "" {
@@ -471,7 +540,8 @@ func fieldsForSurface(surface reqcommon.APIType) ([]Field, error) {
 	}
 }
 
-func normalizeToolChoiceValue(surface reqcommon.APIType, value any) ToolChoiceKind {
+// NormalizeToolChoice classifies a decoded tool_choice value for the given API surface.
+func NormalizeToolChoice(surface reqcommon.APIType, value any) ToolChoiceKind {
 	switch choice := value.(type) {
 	case string:
 		switch choice {

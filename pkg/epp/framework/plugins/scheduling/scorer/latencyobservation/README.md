@@ -4,7 +4,7 @@
 
 A black-box scorer that ranks endpoints by their predicted time-to-first-token.
 It consumes the latency snapshot published by the
-[latency observer](../../../requestcontrol/dataproducer/latencyobserver/README.md) together with the
+[latency observer](../../../requesthandling/dataproducer/latencyobserver/README.md) together with the
 live in-flight load, and turns them into a prediction and a score.
 It does not depend on polling data from the endpoints.
 
@@ -172,5 +172,5 @@ Both plugins are Alpha, so the EPP must run with `--allow-experimental-plugins`.
 Debug logging at `--v 4` emits one `latency-observation score` line per candidate with its
 `predictedTTFT`, `score` and `hasBaseline`.
 
-See the [observer README](../../../requestcontrol/dataproducer/latencyobserver/README.md) for how the
+See the [observer README](../../../requesthandling/dataproducer/latencyobserver/README.md) for how the
 three anchors are measured.

@@ -73,7 +73,8 @@ func TestStandaloneChart(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			image := "registry.example:5000/team/router:dev"
-			router, err := renderRouter(context.Background(), testConfig(tc.namespace, image), simpleConfig, tc.replicas, tc.ports)
+			cfg := testConfig(tc.namespace, image)
+			router, err := renderRouter(context.Background(), cfg, simpleConfig, tc.replicas, tc.ports)
 			if err != nil {
 				t.Fatal(err)
 			}

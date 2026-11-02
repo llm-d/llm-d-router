@@ -4,9 +4,11 @@
 
 Pins subsequent requests in a session to the same pod the first request was sent to, as a hard constraint. When the session pod is among the candidates the filter returns it as the sole endpoint; when there is no session or the session pod is no longer a candidate, the filter returns all candidates unchanged so downstream filters and scorers decide. The filter never returns an empty set.
 
+Place this filter after any filter that can return an empty set, such as [`utilization-filter`](../utilization/README.md) without `fallbackOnEmpty`. When such a filter runs after this one and removes the session pod, no candidates remain and the request fails with 503, even if other pods pass that filter. When it runs before and removes the session pod, this filter returns all remaining candidates and the request is routed to one of them.
+
 Supports two algorithms, selected by the `strategy` parameter:
 
-- `encoded_endpoint_header` (default): stateless. The session is carried in a request header whose value is the base64-encoded `namespace/name` of the previously selected pod. As a [`ResponseHeaderProcessor`](../../../../interface/requestcontrol/plugins.go), the filter writes that same header on the response so the client can echo it back on the next request. When the token cannot be decoded the filter returns all candidates.
+- `encoded_endpoint_header` (default): stateless. The session is carried in a request header whose value is the base64-encoded `namespace/name` of the previously selected pod. As a [`ResponseHeaderProcessor`](../../../../interface/requesthandling/plugins.go), the filter writes that same header on the response so the client can echo it back on the next request. When the token cannot be decoded the filter returns all candidates.
 - `session_id`: stateful. The client supplies an opaque session identifier, read from one or more configured sources (a request header, or a request attribute published by an upstream plugin) tried in priority order. The filter maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client. An unbound session expresses no preference: the filter passes all candidates through and lets downstream plugins place the request. A bound session whose pod is absent from the candidate set also passes through, then rebinds to the pod the request was routed to.
 
 ## Parameters

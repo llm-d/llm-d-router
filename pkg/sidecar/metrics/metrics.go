@@ -31,6 +31,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 )
 
 // subsystem is the Prometheus subsystem for the disaggregation sidecar metrics.
@@ -97,6 +98,20 @@ var (
 		},
 		[]string{"stage"},
 	)
+
+	toolCallingFieldStatusTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: subsystem,
+			Name:      "tool_calling_field_status_total",
+			Help:      metricsutil.HelpMsgWithStability("Tool-calling request field outcomes by component, direction, field, and status.", compbasemetrics.ALPHA),
+		},
+		[]string{
+			toolcalling.MetricLabelComponent,
+			toolcalling.MetricLabelDirection,
+			toolcalling.MetricLabelField,
+			toolcalling.MetricLabelStatus,
+		},
+	)
 )
 
 var registerOnce sync.Once
@@ -112,6 +127,7 @@ func Register() {
 			prefillDuration,
 			decodeDuration,
 			errorsTotal,
+			toolCallingFieldStatusTotal,
 		)
 	})
 }
@@ -147,4 +163,31 @@ func RecordDecodeDuration(d time.Duration) {
 // RecordError counts a stage error (StageEncode, StagePrefill, or StageDecode).
 func RecordError(stage string) {
 	errorsTotal.WithLabelValues(stage).Inc()
+}
+
+const toolCallingComponent = "routing_sidecar"
+
+// RecordToolCallingFieldStatuses counts observed outcomes with bounded labels.
+func RecordToolCallingFieldStatuses(statuses []toolcalling.FieldStatus) {
+	for _, result := range statuses {
+		if !result.Observed {
+			continue
+		}
+		switch result.Field {
+		case toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat:
+		default:
+			continue
+		}
+		switch result.Status {
+		case toolcalling.FieldStatusPreserved, toolcalling.FieldStatusChanged, toolcalling.FieldStatusDropped, toolcalling.FieldStatusRejected:
+		default:
+			continue
+		}
+		toolCallingFieldStatusTotal.WithLabelValues(
+			toolCallingComponent,
+			toolcalling.DirectionRequest,
+			string(result.Field),
+			string(result.Status),
+		).Inc()
+	}
 }

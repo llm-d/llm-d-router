@@ -31,6 +31,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -1101,6 +1103,74 @@ func TestCollectMediaParts_ResponsesCollectsEveryMediaPart(t *testing.T) {
 	}
 }
 
+func TestCollectMediaParts_UntypedChatMedia(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		part     string
+		wantType string
+		wantMod  reqcommon.Modality
+	}{
+		{"image object", `{"image_url":{"url":"image"}}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"image string", `{"image_url":"image"}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"audio object", `{"audio_url":{"url":"audio"}}`, reqcommon.PartTypeAudioURL, reqcommon.ModalityAudio},
+		{"audio string", `{"audio_url":"audio"}`, reqcommon.PartTypeAudioURL, reqcommon.ModalityAudio},
+		{"inline audio", `{"input_audio":{"data":"AA==","format":"wav"}}`, reqcommon.PartTypeInputAudio, reqcommon.ModalityAudio},
+		{"video object", `{"video_url":{"url":"video"}}`, reqcommon.PartTypeVideoURL, reqcommon.ModalityVideo},
+		{"video string", `{"video_url":"video"}`, reqcommon.PartTypeVideoURL, reqcommon.ModalityVideo},
+		{"null type", `{"type":null,"image_url":{"url":"image"}}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"image before audio", `{"audio_url":{"url":"audio"},"image_url":{"url":"image"}}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"audio before inline audio", `{"input_audio":{"data":"AA==","format":"wav"},"audio_url":{"url":"audio"}}`, reqcommon.PartTypeAudioURL, reqcommon.ModalityAudio},
+		{"inline audio before video", `{"video_url":{"url":"video"},"input_audio":{"data":"AA==","format":"wav"}}`, reqcommon.PartTypeInputAudio, reqcommon.ModalityAudio},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var part map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tc.part), &part))
+			items := []any{map[string]any{"role": "user", "content": []any{part}}}
+
+			parts := collectMediaParts(items, reqcommon.APITypeChatCompletions)
+			require.Len(t, parts, 1)
+			require.Equal(t, tc.wantMod, parts[0].modality)
+			require.Equal(t, tc.wantType, part[reqcommon.FieldType])
+			if tc.wantType != reqcommon.PartTypeInputAudio {
+				require.NotEmpty(t, reqcommon.MediaPartURL(part))
+			}
+		})
+	}
+}
+
+func TestCollectMediaParts_PreservesTypesAndOtherAPIs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		apiType reqcommon.APIType
+		part    string
+		wantMod reqcommon.Modality
+	}{
+		{"explicit media type", reqcommon.APITypeChatCompletions, `{"type":"audio_url","audio_url":{"url":"audio"},"image_url":{"url":"image"}}`, reqcommon.ModalityAudio},
+		{"explicit text type", reqcommon.APITypeChatCompletions, `{"type":"text","text":"describe","image_url":{"url":"image"}}`, ""},
+		{"empty type", reqcommon.APITypeChatCompletions, `{"type":"","image_url":{"url":"image"}}`, ""},
+		{"invalid type", reqcommon.APITypeChatCompletions, `{"type":42,"image_url":{"url":"image"}}`, ""},
+		{"no media", reqcommon.APITypeChatCompletions, `{"text":"describe"}`, ""},
+		{"responses", reqcommon.APITypeResponses, `{"image_url":{"url":"image"}}`, ""},
+		{"messages", reqcommon.APITypeMessages, `{"image_url":{"url":"image"}}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var part map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tc.part), &part))
+			originalType := part[reqcommon.FieldType]
+			items := []any{map[string]any{"role": "user", "content": []any{part}}}
+
+			parts := collectMediaParts(items, tc.apiType)
+			require.Equal(t, originalType, part[reqcommon.FieldType])
+			if tc.wantMod == "" {
+				require.Empty(t, parts)
+			} else {
+				require.Len(t, parts, 1)
+				require.Equal(t, tc.wantMod, parts[0].modality)
+			}
+		})
+	}
+}
+
 // Every part whose type names a modality is collected, whether or not it still
 // carries usable media: replace-media-urls already rejected the unusable ones
 // (see collectMediaRefs), so filtering here would drop a part that has an entry
@@ -1923,4 +1993,38 @@ func TestEncodeStep_ResponsesFormat_CollapsesToGenerateWhenNotOpenAIFormat(t *te
 	if _, ok := receivedBody["input"]; ok {
 		t.Error("generate sub-request must not carry the client's input array")
 	}
+}
+
+// The client leaves while the encoder is silent: the context error and no
+// error-level log.
+func TestEncodeStep_ClientCancelLogsNoError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The encoder never answers; release lets server.Close finish.
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cancel()
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXL,
+	})
+	require.NoError(t, err)
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-1",
+		Model:     testModelName,
+		TokenIDs:  []int{1, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+	}
+
+	sink := &logCaptureSink{}
+	err = step.Execute(log.IntoContext(ctx, logr.New(sink)), reqCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, sink.errors, "a cancelled fan-out must not log at error level")
 }

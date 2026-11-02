@@ -43,6 +43,7 @@ The attribute is typically produced by the approximate prefix cache data produce
 | :--- | :--- | :--- | :--- |
 | `matchLengthWeight` | float | Weight of the absolute match length in the score. Must be between `0.0` and `1.0`. | `0.0` |
 | `matchLengthScaleTokens` | integer | The number of tokens used to normalize `matchLengthScore`. | `8192` |
+| `prefixMatchInfoProducerName` | string | Name of the prefix cache producer instance whose `PrefixCacheMatchInfo` the scorer reads. | `approx-prefix-cache-producer` |
 
 ### Example
 
@@ -58,6 +59,7 @@ plugins:
 
 *   **Tuning `matchLengthScaleTokens`**: This should be set to reflect your workload. A good rule of thumb is to set it to the **P95 prompt length** of your typical requests. Setting it too high (e.g., to the model's maximum limit when actual requests are short) will compress the score range and make the scorer less effective.
 *   The scorer is stateless; it does not manage cache state or hash prompts itself. It relies entirely on the data producer.
+*   **Named producers**: When the prefix cache producer is configured under a name other than `approx-prefix-cache-producer`, set `prefixMatchInfoProducerName` to that name. If it is unset and no producer has the default name, the EPP auto-creates an `approx-prefix-cache-producer` with default parameters and the scorer reads its output. The configured producer still runs on every request, and its parameters do not affect the score. The startup log line `auto-created default producer` shows this case.
 
 ## Multi-cluster support
 

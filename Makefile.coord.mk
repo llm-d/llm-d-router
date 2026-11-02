@@ -18,7 +18,7 @@ VLLM_IMAGE           ?= $(IMAGE_REGISTRY)/llm-d-inference-sim:$(VLLM_SIMULATOR_T
 EPP_IMAGE            ?= $(IMAGE_REGISTRY)/llm-d-router-endpoint-picker:$(EPP_TAG)
 
 # vllm-render defaults to the same simulator image as the other vLLM roles,
-# matching the router e2e suite (test/scripts/test-e2e-router.sh).
+# matching the router e2e suite (Makefile, test-e2e-run).
 VLLM_RENDER_IMAGE    ?= $(VLLM_IMAGE)
 VLLM_RENDER_PORT     ?= 8082
 

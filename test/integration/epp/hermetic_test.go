@@ -46,11 +46,11 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
-	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
-	"github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 const (
@@ -147,7 +147,7 @@ func TestFullDuplexStreamed_KubeInferenceObjectiveRequest(t *testing.T) {
 			hermeticTests := []testCase{
 				{
 					name:     "select lora despite higher kv cache (affinity)",
-					requests: integration.ReqLLM(logger, "test3", modelSQLLora, modelSQLLoraTarget),
+					requests: fwkepp.ReqLLM(logger, "test3", modelSQLLora, modelSQLLoraTarget),
 					pods: []PodState{
 						P(0, 10, 0.2, "foo", "bar"),
 						P(1, 10, 0.4, "foo", modelSQLLoraTarget), // Winner (Affinity overrides KV)
@@ -182,7 +182,7 @@ dataLayer:
   sources:
   - pluginRef: mock-metrics-source
 `,
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							"hi":                         "mom",
 							reqcommon.RequestIDHeaderKey: "test-request-id",
@@ -203,7 +203,7 @@ dataLayer:
 				},
 				{
 					name:     "do not shed requests by default",
-					requests: integration.ReqLLM(logger, "test4", modelSQLLora, modelSQLLoraTarget),
+					requests: fwkepp.ReqLLM(logger, "test4", modelSQLLora, modelSQLLoraTarget),
 					pods: []PodState{
 						P(0, 6, 0.2, "foo", "bar", modelSQLLoraTarget), // Winner (Lowest saturated)
 						P(1, 0, 0.85, "foo"),
@@ -218,7 +218,7 @@ dataLayer:
 				// --- Error Handling & Edge Cases ----
 				{
 					name: "invalid json body",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{"hi": "mom"},
 						"no healthy upstream",
 					),
@@ -232,7 +232,7 @@ dataLayer:
 				},
 				{
 					name: "split body across chunks",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							"hi":                         "mom",
 							metadata.ObjectiveKey:        modelSheddable,
@@ -253,7 +253,7 @@ dataLayer:
 				},
 				{
 					name: "images edits: multipart body split across chunks, routed unchanged",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							":path":                      "/v1/images/edits",
 							"content-type":               "multipart/form-data; boundary=" + imagesEditsBoundary,
@@ -271,7 +271,7 @@ dataLayer:
 				},
 				{
 					name: "images edits: non-multipart content-type rejected",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							":path":        "/v1/images/edits",
 							"content-type": "application/json",
@@ -282,15 +282,15 @@ dataLayer:
 						"images edits request must have a multipart/form-data content-type"),
 				},
 				{
-					name:     "no backend pods available",
-					requests: integration.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
-					pods:     nil,
-					wantResponses: ExpectReject(envoyTypePb.StatusCode_InternalServerError,
-						"no pods available in datastore"),
+					name:               "no backend pods available",
+					requests:           fwkepp.ReqHeaderOnly(map[string]string{"content-type": "application/json"}),
+					pods:               nil,
+					wantResponses:      ExpectRejectNoEndpoints(),
+					ignoreErrorMessage: true,
 				},
 				{
 					name: "request missing model field",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{"content-type": "application/json"},
 						`{"prompt":"hello world"}`,
 					),
@@ -299,7 +299,7 @@ dataLayer:
 				},
 				{
 					name: "messages API rejection uses the Anthropic envelope",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{":path": "/v1/messages", "content-type": "application/json"},
 						`{"model":"my-model","max_tokens":8}`,
 					),
@@ -337,15 +337,14 @@ dataLayer:
 						P(0, 0, 0.2, "foo"),
 						P(1, 0, 0.1, "foo", modelSQLLoraTarget),
 					},
-					wantResponses: ExpectRejectWithDropReason(envoyTypePb.StatusCode_ServiceUnavailable,
-						"failed to find endpoint candidates for serving the request",
-						errcommon.RequestDroppedReasonNoEndpoints),
+					wantResponses:      ExpectRejectNoEndpoints(),
+					ignoreErrorMessage: true,
 				},
 
 				// --- Request Modification (Passthrough & Rewrite) ---
 				{
 					name: "passthrough: model not in objectives",
-					requests: integration.ReqRaw(
+					requests: fwkepp.ReqRaw(
 						map[string]string{
 							"hi":                         "mom",
 							metadata.ObjectiveKey:        modelDirect,
@@ -365,7 +364,7 @@ dataLayer:
 				},
 				{
 					name:     "rewrite request model",
-					requests: integration.ReqLLM(logger, "test-rewrite", modelToBeWritten, modelToBeWritten),
+					requests: fwkepp.ReqLLM(logger, "test-rewrite", modelToBeWritten, modelToBeWritten),
 					pods: []PodState{
 						P(0, 0, 0.1, "foo", modelAfterRewrite),
 					},
@@ -377,7 +376,7 @@ dataLayer:
 				},
 				{
 					name: "protocol: simple GET (header only)",
-					requests: integration.ReqHeaderOnly(map[string]string{
+					requests: fwkepp.ReqHeaderOnly(map[string]string{
 						"content-type": "text/event-stream",
 						"status":       "200",
 					}),
@@ -485,13 +484,15 @@ dataLayer:
 						h.WaitForReadyPodsMetric(len(tc.pods))
 					}
 
-					responses, err := integration.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
+					responses, err := fwkepp.StreamedRequest(t, h.Client, tc.requests, len(tc.wantResponses))
 					require.NoError(t, err)
 
 					if len(tc.wantSpans) > 0 {
 						setHeaders := responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders()
 						require.NotEmpty(t, headerValue(setHeaders, "traceparent"), "expected traceparent when tracing is enabled")
+						require.NotEmpty(t, headerValue(setHeaders, tracing.FairnessIDHandoffHeader), "expected the attribution handoff on a sampled trace")
 						removeW3CTraceContextHeaders(responses)
+						asUntracedAttributionHandoff(responses[0])
 					}
 
 					if diff := cmp.Diff(tc.wantResponses, responses,
@@ -500,6 +501,7 @@ dataLayer:
 							return a.GetHeader().GetKey() < b.GetHeader().GetKey()
 						}),
 						protocmp.SortRepeated(func(a, b string) bool { return a < b }),
+						errorBodyOption(tc.ignoreErrorMessage),
 					); diff != "" {
 						t.Errorf("Response mismatch (-want +got): %v", diff)
 					}
@@ -556,7 +558,7 @@ var imagesEditsBody = strings.Join([]string{
 // expectImagesEditsRouteTo asserts the multipart request is routed to endpoint with its body
 // forwarded unchanged: multipart payloads are raw bytes, so no model rewrite is applied.
 func expectImagesEditsRouteTo(endpoint string) []*extProcPb.ProcessingResponse {
-	return integration.NewRequestBufferedResponse(
+	return fwkepp.NewRequestBufferedResponse(
 		endpoint,
 		[]byte(imagesEditsBody),
 		&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
@@ -583,6 +585,26 @@ func removeW3CTraceContextHeaders(responses []*extProcPb.ProcessingResponse) {
 			mutation.SetHeaders = filterOutW3CTraceContextHeaders(mutation.GetSetHeaders())
 		}
 	}
+}
+
+// asUntracedAttributionHandoff rewrites a sampled response's attribution handoff into
+// the untraced shape the shared expectations use: removed rather than set. The
+// handoff values are asserted in TestTraceContextDownstreamPropagation.
+func asUntracedAttributionHandoff(resp *extProcPb.ProcessingResponse) {
+	mutation := resp.GetRequestHeaders().GetResponse().GetHeaderMutation()
+	if mutation == nil {
+		return
+	}
+	kept := make([]*configPb.HeaderValueOption, 0, len(mutation.GetSetHeaders()))
+	for _, h := range mutation.GetSetHeaders() {
+		switch h.GetHeader().GetKey() {
+		case tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader:
+		default:
+			kept = append(kept, h)
+		}
+	}
+	mutation.SetHeaders = kept
+	mutation.RemoveHeaders = append(mutation.RemoveHeaders, tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader)
 }
 
 func filterOutW3CTraceContextHeaders(headers []*configPb.HeaderValueOption) []*configPb.HeaderValueOption {

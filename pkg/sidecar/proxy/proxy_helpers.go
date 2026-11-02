@@ -24,23 +24,30 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
+
+const logBodyBytesKey = "bodyBytes"
 
 // startHTTP starts the HTTP reverse proxy.
 func (s *Server) startHTTP(ctx context.Context) error {
@@ -57,7 +64,8 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	close(s.readyCh)
 
 	// Wrap handler with OpenTelemetry middleware to extract trace context from incoming requests
-	handler := otelhttp.NewHandler(s.handler, "llm-d-pd-proxy",
+	// The attribution handoff wraps it so every route's server span carries EPP's fairness identity.
+	handler := tracing.WithAttributionHandoff(otelhttp.NewHandler(s.handler, "llm-d-pd-proxy",
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 			path := ""
 			if r.URL != nil {
@@ -65,7 +73,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 			}
 			return r.Method + " " + path
 		}),
-	)
+	))
 
 	server := &http.Server{
 		Handler: handler,
@@ -156,25 +164,38 @@ func (s *Server) startHTTP(ctx context.Context) error {
 func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureSkipVerify bool) *httputil.ReverseProxy {
 	decoderProxy := httputil.NewSingleHostReverseProxy(decoderURL)
 	decoderProxy.Transport = s.newProxyTransport(decoderURL.Scheme, decoderInsecureSkipVerify)
-	decoderProxy.ErrorHandler = func(res http.ResponseWriter, _ *http.Request, err error) {
+	decoderProxy.ErrorHandler = func(res http.ResponseWriter, r *http.Request, err error) {
 
 		// Log errors from the decoder proxy
+		logger, ctxErr := logr.FromContext(r.Context())
+		if ctxErr != nil {
+			// Requests on the catch-all route skip the handler that seeds one.
+			logger = s.logger
+		}
 		var writeError error
+		var prefillErr *prefillFailedError
 		switch {
+		case errors.As(context.Cause(r.Context()), &prefillErr):
+			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
+				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			maps.Copy(res.Header(), prefillErr.response.headers)
+			res.WriteHeader(prefillErr.response.statusCode)
+			_, writeError = res.Write(prefillErr.response.bodyBytes())
+
 		case errors.Is(err, syscall.ECONNREFUSED):
-			s.logger.Error(err, "failed to connect to vLLM decoder",
+			logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusServiceUnavailable)
 			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
 
 		default:
-			s.logger.Error(err, "http: proxy error",
+			logger.Error(err, "http: proxy error",
 				"decoderURL", s.config.DecoderURL.String())
 			writeError = errorBadGateway(err, res)
 		}
 		if writeError != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(err, "failed to send error response to client")
 		}
 	}
 	return decoderProxy
@@ -210,7 +231,7 @@ var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldStream:               {},
 	reqcommon.FieldStreamOptions:        {},
 	reqcommon.FieldEcho:                 {},
-	requestFieldN:                       {},
+	reqcommon.FieldN:                    {},
 	reqcommon.FieldCacheHitThreshold:    {},
 	reqcommon.FieldContinueFinalMessage: {},
 	reqcommon.FieldAddGenerationPrompt:  {},
@@ -262,11 +283,12 @@ func decodeRequestBody(raw []byte) (map[string]any, error) {
 }
 
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
+	logger := log.FromContext(r.Context())
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		s.logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+		logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
 		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
-			s.logger.Error(writeErr, "failed to send error response to client")
+			logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
 	}
@@ -276,9 +298,9 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	// bodies, so those requests bypass this guard.
 	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
-			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
+			logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
 			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
-				s.logger.Error(writeErr, "failed to send error response to client")
+				logger.Error(writeErr, "failed to send error response to client")
 			}
 			return nil, nil, false
 		}
@@ -336,4 +358,24 @@ func isRetryableStatus(statusCode int) bool {
 // headers and status, so there is no recovery action for a write failure.
 func WriteAll(w io.Writer, b []byte) {
 	_, _ = w.Write(b)
+}
+
+// redirectEncodedInferencePath answers a POST whose percent-encoded path
+// decodes to an inference API path with a 307 to the decoded path. EPP picks its
+// request parser from the encoded path and ServeMux matches it segment by
+// segment, so the two can classify such a request differently. The redirect
+// brings the client back through EPP with the clean path, as ServeMux does for
+// repeated slashes and dot segments. Only POST is served on these paths, so
+// other methods pass through.
+func redirectEncodedInferencePath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.RawPath != "" {
+			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c {
+				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
+				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

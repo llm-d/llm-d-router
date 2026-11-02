@@ -95,6 +95,41 @@ func makeEngineKeys(n int, base uint64) []uint64 {
 	return keys
 }
 
+func TestBigramStoreValidationAndFormatLifecycle(t *testing.T) {
+	lookahead := uint32(33)
+	for _, tc := range []struct {
+		blockSize  int
+		hashes     []uint64
+		wantReason string
+	}{
+		{blockSize: 0, hashes: []uint64{100}, wantReason: "invalid_block_size"},
+		{blockSize: 2, hashes: []uint64{100, 101}, wantReason: "non_dense_block_span"},
+		{blockSize: 2, hashes: []uint64{100}},
+	} {
+		event := &BlockStoredEvent{
+			Tokens: []uint32{11, 22}, LookaheadToken: &lookahead,
+			BlockSize: tc.blockSize, BlockHashes: tc.hashes,
+		}
+		ok, reason := blockStoredEventDigestible(event, 1)
+		require.Equal(t, tc.wantReason == "", ok)
+		require.Equal(t, tc.wantReason, reason)
+	}
+	pool, _, _ := newTestPool(t, 1)
+	pool.processEventBatch(t.Context(), &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+		Tokens: []uint32{11, 22}, LookaheadToken: &lookahead,
+		BlockSize: 2, BlockHashes: []uint64{100},
+	}}}, "pod", "model")
+	format, ok := pool.CacheFormats().Get("pod")
+	require.True(t, ok)
+	require.Equal(t, kvblock.CacheFormat{Bigram: true, BlockSize: 2}, format)
+	pool.clearPod(t.Context(), "pod", false)
+	_, ok = pool.CacheFormats().Get("pod")
+	require.True(t, ok)
+	pool.clearPod(t.Context(), "pod", true)
+	_, ok = pool.CacheFormats().Get("pod")
+	require.False(t, ok)
+}
+
 type sourceEndpointAdapter struct{}
 
 func (a *sourceEndpointAdapter) ParseMessage(msg *RawMessage) (string, string, EventBatch, error) {
@@ -585,14 +620,14 @@ func TestCanonicalEviction_UnknownEngineKey(t *testing.T) {
 func TestRealignExtraFeatures(t *testing.T) {
 	t.Run("1:1 passthrough", func(t *testing.T) {
 		features := []*kvblock.BlockExtraFeatures{nil, nil, nil, nil}
-		result := realignExtraFeatures(features, 4)
+		result := realignExtraFeatures(features, 16, 64)
 		assert.Equal(t, features, result)
 	})
 
 	t.Run("1:many replication (all nil, text-only)", func(t *testing.T) {
 		// 2 engine blocks → 8 canonical blocks (ratio 4)
 		features := []*kvblock.BlockExtraFeatures{nil, nil}
-		result := realignExtraFeatures(features, 8)
+		result := realignExtraFeatures(features, 16, 128)
 		require.Len(t, result, 8)
 		for _, f := range result {
 			assert.Nil(t, f)
@@ -603,7 +638,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 		// 2 engine blocks → 4 canonical blocks (ratio 2)
 		feat0 := &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{{Hash: "img0"}}}
 		features := []*kvblock.BlockExtraFeatures{feat0, nil}
-		result := realignExtraFeatures(features, 4)
+		result := realignExtraFeatures(features, 16, 64)
 		require.Len(t, result, 4)
 		// Engine block 0 → canonical blocks 0, 1
 		assert.Equal(t, feat0, result[0])
@@ -616,7 +651,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 	t.Run("many:1 merge (all nil, text-only)", func(t *testing.T) {
 		// 8 engine blocks → 2 canonical blocks (ratio 4)
 		features := make([]*kvblock.BlockExtraFeatures, 8)
-		result := realignExtraFeatures(features, 2)
+		result := realignExtraFeatures(features, 64, 128)
 		require.Len(t, result, 2)
 		for _, f := range result {
 			assert.Nil(t, f)
@@ -632,7 +667,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 			nil,
 			{MMHashes: []kvblock.MMHash{{Hash: "c"}}},
 		}
-		result := realignExtraFeatures(features, 2)
+		result := realignExtraFeatures(features, 64, 128)
 		require.Len(t, result, 2)
 		// Canonical 0 should merge features from engine blocks 0 and 1
 		require.NotNil(t, result[0])
@@ -645,13 +680,132 @@ func TestRealignExtraFeatures(t *testing.T) {
 		assert.Equal(t, "c", result[1].MMHashes[0].Hash)
 	})
 
+	t.Run("many:1 merge (MM item spans several engine blocks)", func(t *testing.T) {
+		// 4 engine blocks → 1 canonical block (ratio 4). The engine tags every
+		// block an item overlaps, so "img" appears on blocks 0-2 and "vid" on 2-3.
+		img := kvblock.MMHash{Hash: "img"}
+		vid := kvblock.MMHash{Hash: "vid"}
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img, vid}},
+			{MMHashes: []kvblock.MMHash{vid}},
+		}
+		result := realignExtraFeatures(features, 64, 64)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{img, vid}, result[0].MMHashes)
+
+		// The request side lists each overlapping item once for the same layout.
+		want := kvblock.ComputeBlockExtraFeatures(
+			map[string][]string{"image": {"img"}, "video": {"vid"}},
+			map[string][]kvblock.PlaceholderRange{
+				"image": {{Offset: 0, Length: 40}},
+				"video": {{Offset: 40, Length: 24}},
+			},
+			64, 64)
+		require.Len(t, want, 1)
+		assert.Equal(t, want[0].MMHashes, result[0].MMHashes)
+	})
+
+	t.Run("many:1 merge matches the request side", func(t *testing.T) {
+		// Engine BS 16, canonical BS 64. The engine tags each 16-token block the
+		// way ComputeBlockExtraFeatures does, so realigning its features must give
+		// what the request side computes at the canonical block size.
+		cases := []struct {
+			name         string
+			hashes       []string
+			placeholders []kvblock.PlaceholderRange
+			numTokens    int
+		}{
+			{
+				name:         "same image twice in one canonical block",
+				hashes:       []string{"img", "img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 0, Length: 20}, {Offset: 20, Length: 20}},
+				numTokens:    64,
+			},
+			{
+				name:         "item crosses a canonical boundary",
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 40, Length: 50}},
+				numTokens:    128,
+			},
+			{
+				name:         "tokens not a multiple of the canonical block size",
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 70, Length: 70}},
+				numTokens:    368,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				mmHashes := map[string][]string{"image": tc.hashes}
+				mmPlaceholders := map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}
+				engine := kvblock.ComputeBlockExtraFeatures(mmHashes, mmPlaceholders, 16, tc.numTokens)
+				want := kvblock.ComputeBlockExtraFeatures(mmHashes, mmPlaceholders, 64, tc.numTokens)
+				assert.Equal(t, want, realignExtraFeatures(engine, 64, tc.numTokens))
+			})
+		}
+	})
+
+	t.Run("many:1 merge keeps the cache salt after the item", func(t *testing.T) {
+		// vLLM appends cache_salt to block 0's extra keys, after its MM hashes,
+		// so the item continuing into block 1 is not block 0's last entry.
+		img := kvblock.MMHash{Hash: "img"}
+		salt := kvblock.MMHash{Hash: "salt"}
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{img, salt}},
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img}},
+			nil,
+		}
+		result := realignExtraFeatures(features, 64, 64)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{img, salt}, result[0].MMHashes)
+	})
+
+	t.Run("many:1 merge uses the event offset for repeated items", func(t *testing.T) {
+		// Engine BS 16, canonical BS 32. vLLM emits (identifier, offset) with the
+		// offset relative to the block start; a negative offset is a continuation.
+		cases := []struct {
+			name         string
+			raw          [][]any
+			hashes       []string
+			placeholders []kvblock.PlaceholderRange
+		}{
+			{
+				name:         "same image in adjacent engine blocks",
+				raw:          [][]any{{[]any{"img", int64(10)}}, {[]any{"img", int64(6)}}},
+				hashes:       []string{"img", "img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 10, Length: 3}, {Offset: 22, Length: 8}},
+			},
+			{
+				name:         "one image spanning both engine blocks",
+				raw:          [][]any{{[]any{"img", int64(10)}}, {[]any{"img", int64(-6)}}},
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 10, Length: 20}},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				engine, err := kvblock.ParseRawExtraKeys(tc.raw, "")
+				require.NoError(t, err)
+				got := realignExtraFeatures(engine, 32, 32)
+				want := kvblock.ComputeBlockExtraFeatures(map[string][]string{"image": tc.hashes},
+					map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}, 32, 32)
+				assert.Equal(t, want, got)
+			})
+		}
+	})
+
 	t.Run("zero canonical blocks (engine BS < canonical BS)", func(t *testing.T) {
 		// 1 engine block → 0 canonical blocks: tokens < canonical block size.
 		// realignExtraFeatures returns an empty slice instead of panicking.
 		features := []*kvblock.BlockExtraFeatures{
 			{MMHashes: []kvblock.MMHash{{Hash: "img0"}}},
 		}
-		result := realignExtraFeatures(features, 0)
+		result := realignExtraFeatures(features, 64, 16)
 		assert.Empty(t, result)
 	})
 }
@@ -2071,4 +2225,108 @@ func TestProcessEventBatch_UnresolvedSubCanonicalParent(t *testing.T) {
 			assert.Error(t, err, "a store with an unresolved parent is not indexed")
 		})
 	}
+}
+
+func TestProcessEventBatch_LoRA(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokensA := makeTokens(16)
+	tokensB := makeTokens(32)[16:]
+	tokensC := makeTokens(48)[32:]
+
+	loraID := 1
+	loraName := "sql-lora"
+	emptyName := ""
+
+	skippedMetric := metrics.KVEventStoresSkipped.WithLabelValues(
+		cacheKindLabel(""), "unresolved_lora_adapter")
+	beforeSkipped := counterValue(t, skippedMetric)
+
+	// 1. Base-model event: LoraID == nil. Must be indexed under base model.
+	baseEvent := &BlockStoredEvent{
+		BlockHashes: []uint64{1001},
+		Tokens:      tokensA,
+		BlockSize:   16,
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{baseEvent}}, "pod-a", "test-model")
+
+	baseKeysA, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensA, "test-model", nil)
+	require.NoError(t, err)
+	lookupA, err := idx.Lookup(ctx, baseKeysA, nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, lookupA[baseKeysA[0]], "base-model event must be indexed under base model")
+
+	// 2. Unresolved LoRA events: LoraID != nil and (LoraName == nil or empty).
+	// Must NOT be indexed under base model or adapter, and must increment skipped metric.
+	unresolvedEvents := []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes: []uint64{2001},
+			Tokens:      tokensB,
+			BlockSize:   16,
+			LoraID:      &loraID,
+			LoraName:    nil,
+		},
+		&BlockStoredEvent{
+			BlockHashes: []uint64{2002},
+			Tokens:      tokensB,
+			BlockSize:   16,
+			LoraID:      &loraID,
+			LoraName:    &emptyName,
+		},
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: unresolvedEvents}, "pod-a", "test-model")
+
+	assert.Equal(t, 2.0, counterValue(t, skippedMetric)-beforeSkipped,
+		"unresolved LoRA events must increment skipped metric")
+
+	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(2001))
+	assert.Error(t, err, "unresolved LoRA engine key must not be mapped")
+	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(2002))
+	assert.Error(t, err, "unresolved LoRA engine key with empty name must not be mapped")
+
+	// Base-model request for tokensB must not hit unresolved LoRA entries
+	baseKeysB, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensB, "test-model", nil)
+	require.NoError(t, err)
+	lookupB, err := idx.Lookup(ctx, baseKeysB, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupB[baseKeysB[0]], "base-model request must not hit unresolved LoRA entry")
+
+	// Adapter request for tokensB must also find nothing
+	loraKeysB, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensB, loraName, nil)
+	require.NoError(t, err)
+	lookupLoraB, err := idx.Lookup(ctx, loraKeysB, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupLoraB[loraKeysB[0]], "adapter request must not hit unresolved LoRA entry")
+
+	// 3. Valid LoRA event: LoraID != nil and valid LoraName.
+	// Must be indexed under LoraName ("sql-lora"), not base model.
+	validLoraEvent := &BlockStoredEvent{
+		BlockHashes: []uint64{3001},
+		Tokens:      tokensC,
+		BlockSize:   16,
+		LoraID:      &loraID,
+		LoraName:    &loraName,
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{validLoraEvent}}, "pod-a", "test-model")
+
+	// Base-model request for tokensC must not hit LoRA entry
+	baseKeysC, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensC, "test-model", nil)
+	require.NoError(t, err)
+	lookupBaseC, err := idx.Lookup(ctx, baseKeysC, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupBaseC[baseKeysC[0]], "base-model request must not hit resolved LoRA entry")
+
+	// Adapter request for tokensC must hit
+	loraKeysC, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensC, loraName, nil)
+	require.NoError(t, err)
+	lookupLoraC, err := idx.Lookup(ctx, loraKeysC, nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, lookupLoraC[loraKeysC[0]], "adapter request must hit resolved LoRA entry")
+
+	// 4. Removal of unresolved LoRA block must be a safe no-op.
+	removeEvent := &BlockRemovedEvent{
+		BlockHashes: []uint64{2001, 2002},
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{removeEvent}}, "pod-a", "test-model")
 }

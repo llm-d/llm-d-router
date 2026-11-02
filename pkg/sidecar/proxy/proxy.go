@@ -124,6 +124,14 @@ type Config struct {
 	// MooncakeBootstrapPort is the port used to query the Mooncake bootstrap endpoint on prefill pods.
 	MooncakeBootstrapPort int
 
+	// ECMooncakePort is the ec_port the Mooncake EC consumer listens on for
+	// control messages. Used with --ec-connector=ec-mooncake.
+	ECMooncakePort int
+
+	// ECMooncakePodIP is the local decoder's address as encoder pods reach
+	// it, named as the Mooncake EC consumer when a request has no prefiller.
+	ECMooncakePodIP string
+
 	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
 	// injected as remote_port on the decode request so the decoder can pull KV from it.
 	// With data parallelism it is the rank-0 port: rank r's tier listens on
@@ -152,6 +160,8 @@ type Config struct {
 
 	// Tracing enables OpenTelemetry tracing.
 	Tracing bool
+	// EnableToolCallingTelemetry enables tool-specific request observations.
+	EnableToolCallingTelemetry bool
 	// MoRIIOWriteMode enables MoRI-IO WRITE-mode: the sidecar populates the
 	// prefill request's kv_transfer_params so the prefill engine pushes KV to decode
 	// via RDMA Write. Only meaningful with --kv-connector=nixlv2.
@@ -244,14 +254,14 @@ func (c Config) String() string {
 // absent); the APIType selects the fields that cap the prefill request.
 type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
 
-type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType)
 
 // Server is the reverse proxy server
 type Server struct {
 	logger             logr.Logger
 	addr               net.Addr      // the proxy TCP address
 	readyCh            chan struct{} // closed once addr is set and server is listening
-	handler            http.Handler  // the handler function. either a Mux or a proxy
+	handler            http.Handler  // the routes built by createRoutes
 	allowlistValidator *AllowlistValidator
 	handlePDConnector  pdConnectorHandler // handles the Prefiller-Decoder connector request
 	handleECConnector  ecConnectorHandler // handles the Encoder disaggregation connector request.
@@ -546,6 +556,8 @@ func (s *Server) setECConnector() {
 		s.handleECConnector = s.handleECSharedStorage
 	case constants.ECConnectorNIXL:
 		s.handleECConnector = s.handleECNIXL
+	case constants.ECConnectorMooncake:
+		s.handleECConnector = s.handleECMooncake
 	default:
 		// Unknown EC connector value, skip encoder stage. Validate() should
 		// have rejected this earlier; reaching here means the validation was
@@ -556,7 +568,7 @@ func (s *Server) setECConnector() {
 	}
 }
 
-func (s *Server) createRoutes() *http.ServeMux {
+func (s *Server) createRoutes() http.Handler {
 	// Configure handlers
 	mux := http.NewServeMux()
 
@@ -581,7 +593,7 @@ func (s *Server) createRoutes() *http.ServeMux {
 
 	mux.Handle("/", s.decoderProxy)
 
-	return mux
+	return redirectEncodedInferencePath(mux)
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.
@@ -592,14 +604,17 @@ func (s *Server) createProxyHandler(
 	urlPrefix string,
 	insecureSkipVerify bool,
 ) (http.Handler, error) {
+	// Backward compatible behavior: trim `http:` prefix. Trim before the cache
+	// lookup so a scheme-prefixed value and its bare form share one cache entry;
+	// looking up the untrimmed value would miss every time and build a new
+	// handler and connection per request.
+	hostPort, _ = strings.CutPrefix(hostPort, "http://")
+
 	// Check cache first
 	proxy, exists := cache.Get(hostPort)
 	if exists {
 		return proxy, nil
 	}
-
-	// Backward compatible behavior: trim `http:` prefix
-	hostPort, _ = strings.CutPrefix(hostPort, "http://")
 
 	u, err := url.Parse(urlPrefix + hostPort)
 	if err != nil {

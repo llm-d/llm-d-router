@@ -50,14 +50,15 @@ var internalForwardingHeaders = map[string]bool{
 }
 
 func isForwardableHeader(name string) bool {
-	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type"
+	// accept-encoding: http.Transport decompresses only the gzip it negotiated itself.
+	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type" && name != "accept-encoding"
 }
 
-// StripInternalHeaders removes headers the coordinator alone injects into
-// requests it forwards (e.g. x-llm-d-peer-topology, copied from the prefill
-// response onto the decode request). Call this on a client request's headers
-// as soon as they are received, so a client-supplied value is never mistaken
-// for one the coordinator generated itself.
+// StripInternalHeaders removes the internalForwardingHeaders. Call it on a
+// client request as soon as it is received, so a client-supplied value is
+// never mistaken for one the coordinator generated, and on an upstream
+// response before it is copied to the client, so a value stamped by an EPP
+// plugin is not exposed.
 func StripInternalHeaders(headers http.Header) {
 	for key := range internalForwardingHeaders {
 		headers.Del(key)
@@ -65,8 +66,8 @@ func StripInternalHeaders(headers http.Header) {
 }
 
 // ForwardedHeaders returns original request headers suitable for forwarding
-// to upstream services, excluding hop-by-hop headers, Content-Length/Host, and
-// coordinator-owned routing headers.
+// to upstream services, excluding hop-by-hop headers, Content-Length, Host,
+// Content-Type, Accept-Encoding, and coordinator-owned routing headers.
 // Keys are normalized to lowercase so they do not collide by case with headers
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
@@ -222,6 +223,12 @@ type RequestContext struct {
 // The bytes stay in the request body (data URI or input_audio.data) rather than
 // on the entry, so a large audio or video payload is not duplicated on reqCtx.
 //
+// KwargsData is the full MultiModalKwargsItem blob (encoder tensors plus
+// metadata). MMMetadata is the sibling metadata-only blob from render
+// (placeholder_metadata_fields and keep_on_cpu fields such as image_grid_thw),
+// without encoder inputs like pixel_values. Prefill may send MMMetadata with
+// ec_transfer_params instead of KwargsData.
+//
 // An entry's position in this slice means nothing on its own: steps pair an
 // entry with its content part by counting entries of the same Modality. See
 // steps.collectMediaParts for the invariant that keeps the two lined up.
@@ -229,6 +236,7 @@ type MultimodalEntry struct {
 	Modality    reqcommon.Modality
 	Hash        string
 	KwargsData  string
+	MMMetadata  string
 	Placeholder PlaceholderRange
 }
 

@@ -246,6 +246,8 @@ completions prompt is already a token array). See
      the Gateway) is forwarded with that same `4xx`, since the request was the root cause;
    - any other error, including an upstream `5xx`, returns `502 Bad Gateway`.
 
+   A client disconnect is logged at verbosity `VERBOSE`, not as an error.
+
    Upstream response bodies are logged server-side only and never returned to the client.
    A step returning `ErrPipelineDone` instead stops the pipeline and reports success, used
    by `conditional-decode` when the decode worker serves the request directly. A step that
@@ -277,16 +279,17 @@ steps read and mutate. The load-bearing fields:
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
-`Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `x-llm-d-epp-profile`. The
+`Host`, `Content-Length`, `Content-Type`, and `Accept-Encoding` removed, normalized to
+lowercase. Steps use it as the base header set, then stamp the request ID and
+`x-llm-d-epp-profile`. The
 pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
-request. Any client-provided value under that name is discarded.
-A client-provided `x-llm-d-pin-host-port` is also discarded, on the pipeline and on
-the passthrough, because EPP routes on it
-(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requestcontrol/screener/endpointpin/README.md)).
-A client-provided `Prefer` header is discarded as well: `Prefer: if-available` is the
-`conditional-decode` step's signal to EPP, and EPP answers a request that carries it
-with 412 on any other leg.
+request. Client-provided values of the coordinator-owned headers are discarded: EPP
+routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
+`x-llm-d-peer-topology`, and `x-llm-d-pin-host-port`
+(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requesthandling/screener/endpointpin/README.md)),
+and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
+any other leg. The same headers are removed from the upstream response before it
+reaches the client. Both apply on the pipeline and on the passthrough.
 The pipeline can allowlist response headers with `forward_response_headers`;
 values returned by any response-producing step are stored on the request context
 for later requests. A fan-out step selects the most frequent value for each
@@ -327,7 +330,7 @@ each EPP call is single-phase scheduling.
 Each profile filters the shared pod pool down to its own role with a role
 filter (`encode-filter`/`prefill-filter`/`decode-filter`), the same
 `schedulingProfiles`/role-filter pattern used in
-[deploy/config/sim-e-p-d-epp-config.yaml](../deploy/config/sim-e-p-d-epp-config.yaml).
+[test/e2e/artifacts/config/sim-e-p-d-epp-config.yaml](../test/e2e/artifacts/config/sim-e-p-d-epp-config.yaml).
 That file targets the sidecar model, though, so it picks profiles via
 `disagg-profile-handler` deciders rather than the `x-llm-d-epp-profile` header; header-based
 selection swaps in `header-profile-handler` for that one plugin.
@@ -639,7 +642,7 @@ edit: registration is the only wiring step.
   step can read them without the operator repeating them per step. The constants are
   `steps.ParamKVConnector` and `steps.ParamECConnector`.
 - Shared parsing helpers live in [pkg/coordinator/steps/utils.go](../pkg/coordinator/steps/utils.go)
-  (`parseUseOpenAIFormat`, `resolveFormat`, `buildMMFeatures`, `copyBody`,
+  (`parseUseOpenAIFormat`, `resolveFormat`, `buildPrefillMMFeatures`, `copyBody`,
   `coerceParamsMap`). Reuse them rather than re-implementing.
 
 ### Dependency injection
@@ -815,7 +818,7 @@ only the request carrier differs.
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
 | `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
-| `decode` | Stream the final completion to the client. | `kv_connector` |
+| `decode` | Stream the final completion to the client. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). | `kv_connector`, `prompt_token_parity` |
 
 Parameter semantics and defaults are documented inline in
 [config/coordinator/coordinator.yaml](../config/coordinator/coordinator.yaml). The wire formats each step
