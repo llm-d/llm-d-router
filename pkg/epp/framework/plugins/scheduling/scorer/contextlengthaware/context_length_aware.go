@@ -269,7 +269,7 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 			return 0
 		}
 		if p.labelName == DefaultContextLengthLabel {
-			return longestPromptTokens(request.Body.TokenizedRequest)
+			return request.Body.TokenizedRequest.MaxPromptTokenCount()
 		}
 		return request.Body.TokenizedRequest.TokenCount()
 	}
@@ -289,18 +289,6 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 	}
 	request.PutAttribute(p.routingLengthDataKey, routingLength)
 	return routingLength
-}
-
-// longestPromptTokens returns 0 for nil, as TokenizedRequest.TokenCount does.
-func longestPromptTokens(tp *scheduling.TokenizedRequest) int {
-	if tp == nil {
-		return 0
-	}
-	n := 0
-	for _, p := range tp.Prompts {
-		n = max(n, len(p.TokenIDs))
-	}
-	return n
 }
 
 // parseContextRange parses a label value into a single context range.

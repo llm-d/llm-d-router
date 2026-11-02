@@ -28,6 +28,16 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 )
 
+func TestTokenizedRequestTokenCounts(t *testing.T) {
+	nilRequest := (*TokenizedRequest)(nil)
+	assert.Equal(t, 0, nilRequest.TokenCount())
+	assert.Equal(t, 0, nilRequest.MaxPromptTokenCount())
+
+	tp := NewTokenizedRequest([][]uint32{{1, 2, 3}, {4}, {5, 6, 7, 8}})
+	assert.Equal(t, 8, tp.TokenCount())
+	assert.Equal(t, 4, tp.MaxPromptTokenCount())
+}
+
 func TestPrompt_UnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name    string

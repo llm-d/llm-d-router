@@ -255,6 +255,20 @@ func (tp *TokenizedRequest) TokenCount() int {
 	return n
 }
 
+// MaxPromptTokenCount returns the token count of the longest prompt. A model
+// server checks each prompt of a multi-prompt request against its maximum
+// model length separately.
+func (tp *TokenizedRequest) MaxPromptTokenCount() int {
+	if tp == nil {
+		return 0
+	}
+	n := 0
+	for _, p := range tp.Prompts {
+		n = max(n, len(p.TokenIDs))
+	}
+	return n
+}
+
 // MultiModalFeature holds all data needed for prefix-cache scoring of a single
 // multimodal item. Items are ordered by token position within the prompt.
 // Currently only reqcommon.ModalityImage is supported.
