@@ -6,8 +6,10 @@
 WARNING: Redis configuration alone does not enable shared in-flight load.
 The unmodified default and optimized-baseline profiles do not consume in-flight load.
 Select payload-agnostic.yaml or configure a consumer such as active-request-scorer
-in the scheduling profile. Keep syncCrossReplicaState enabled on its
-inflight-load-producer. Approximate prefix-cache state remains local.
+in the scheduling profile. Keep syncCrossReplicaState enabled (default) on both
+inflight-load-producer and approx-prefix-cache-producer to share in-flight load
+and capped recent approximate prefix-cache windows across replicas (set
+syncCrossReplicaState: false to keep either local).
 {{- end -}}
 {{- end -}}
 

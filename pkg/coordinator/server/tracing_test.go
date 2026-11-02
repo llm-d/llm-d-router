@@ -22,7 +22,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
@@ -250,16 +249,13 @@ func TestProbeRoutesAreNotTraced(t *testing.T) {
 	}
 }
 
-// handleInference clears the write deadline through http.ResponseController
-// and the reverse proxies flush, so the otel wrapper has to stay unwrappable.
-// Both failures are silent: ErrNotSupported is tolerated, and buffered bytes
-// still reach the client once the response ends.
+// The reverse proxies flush through the otel wrapper, so it has to expose
+// http.Flusher. The failure is silent: buffered bytes still reach the client
+// once the response ends.
 func TestOTelHandlerPreservesStreamingInterfaces(t *testing.T) {
-	var deadlineErr error
 	var canFlush bool
 
 	ts := httptest.NewServer(otelHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		deadlineErr = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 		_, canFlush = w.(http.Flusher)
 	})))
 	defer ts.Close()
@@ -270,9 +266,6 @@ func TestOTelHandlerPreservesStreamingInterfaces(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if deadlineErr != nil {
-		t.Errorf("clearing the write deadline through the otel wrapper: %v", deadlineErr)
-	}
 	if !canFlush {
 		t.Error("otel wrapper hides http.Flusher, streamed chunks would not reach the client")
 	}

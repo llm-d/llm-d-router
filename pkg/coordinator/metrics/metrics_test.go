@@ -122,6 +122,15 @@ llm_d_coordinator_request_size_bytes_count{model_name="m1"} 1
 	require.NoError(t, promtestutil.CollectAndCompare(requestSize, strings.NewReader(expected), "llm_d_coordinator_request_size_bytes"))
 }
 
+func TestRecordBuildInfo(t *testing.T) {
+	buildInfo.Reset()
+
+	RecordBuildInfo("abc123", "v1.2.3")
+
+	require.InDelta(t, 1.0, promtestutil.ToFloat64(buildInfo.WithLabelValues("abc123", "v1.2.3")), 1e-9)
+	require.Equal(t, 1, promtestutil.CollectAndCount(buildInfo, "llm_d_coordinator_info"))
+}
+
 func TestReset_ClearsAllVectors(t *testing.T) {
 	IncRequestTotal("m2")
 	require.InDelta(t, 1.0, promtestutil.ToFloat64(requestTotal.WithLabelValues("m2")), 1e-9)

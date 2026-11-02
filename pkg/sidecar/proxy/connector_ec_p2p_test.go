@@ -20,9 +20,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,13 +37,14 @@ import (
 )
 
 func TestEPDP2PCacheSource(t *testing.T) {
+	const sourceHost, sourcePort, sourceKVRequestID = "10.9.9.9", 7778, "k-from-epp"
 	for _, ecConnector := range []string{constants.ECConnectorNIXL, constants.ECExampleConnector, constants.ECConnectorMooncake} {
 		for _, withPrefiller := range []bool{true, false} {
 			path := "encode-decode"
 			if withPrefiller {
 				path = "encode-prefill-decode"
 			}
-			for _, scenario := range []string{"enabled", "disabled", "self-source", "malformed", "disallowed", "data-parallel"} {
+			for _, scenario := range []string{"enabled", "disabled", "malformed", "disallowed", "data-parallel"} {
 				if withPrefiller && scenario == "data-parallel" {
 					continue
 				}
@@ -75,9 +78,8 @@ func TestEPDP2PCacheSource(t *testing.T) {
 						Port: decoderURL.Port(), DecoderURL: decoderURL,
 						ECMooncakePodIP: decoderURL.Hostname(),
 						KVConnector:     constants.KVConnectorNIXLV2, ECConnector: ecConnector,
-						EnableP2PPull: scenario != "disabled", P2PConnectorPort: 7777,
+						EnableP2PPull: scenario != "disabled",
 					})
-					t.Setenv("POD_IP", decoderURL.Hostname())
 					srv.decoderProxy = srv.createDecoderProxyHandler(decoderURL, false)
 					prefillHost := strings.TrimPrefix(prefiller.URL, "http://")
 					encoderHost := strings.TrimPrefix(encoder.URL, "http://")
@@ -88,17 +90,27 @@ func TestEPDP2PCacheSource(t *testing.T) {
 					proxy := httptest.NewServer(srv.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions))
 					defer proxy.Close()
 
-					source := "10.9.9.9:8000"
-					switch scenario {
-					case "self-source":
-						source = decoderURL.Host
-						if withPrefiller {
-							source = prefillHost
-						}
-					case "malformed":
-						source = "not-a-host-port"
+					raw, err := json.Marshal(userMessageRequest(imageURLItem("https://example.com/image.jpg")))
+					require.NoError(t, err)
+					var request map[string]any
+					require.NoError(t, json.Unmarshal(raw, &request))
+					source := map[string]any{
+						reqcommon.FieldKVRequestID: sourceKVRequestID,
+						reqcommon.FieldRemoteHost:  sourceHost,
+						reqcommon.FieldRemotePort:  sourcePort,
 					}
-					body, err := json.Marshal(userMessageRequest(imageURLItem("https://example.com/image.jpg")))
+					switch scenario {
+					case "malformed":
+						source[reqcommon.FieldRemotePort] = "not-a-port"
+					case "disabled":
+						// A connector that cannot pull leaves the body unread, so
+						// a block it carried would reach the decoder as sent.
+						source = nil
+					}
+					if source != nil {
+						request[reqcommon.FieldKVTransferParams] = map[string]any{reqcommon.FieldRemoteKVSource: source}
+					}
+					body, err := json.Marshal(request)
 					require.NoError(t, err)
 					req, err := http.NewRequest(http.MethodPost, proxy.URL+reqcommon.PathChatCompletions, bytes.NewReader(body))
 					require.NoError(t, err)
@@ -106,7 +118,7 @@ func TestEPDP2PCacheSource(t *testing.T) {
 					if withPrefiller {
 						req.Header.Set(routing.PrefillEndpointHeader, prefillHost)
 					}
-					req.Header.Set(routing.KVCacheSourceHeader, source)
+					req.Header.Set(routing.KVCacheSourceHeader, net.JoinHostPort(sourceHost, strconv.Itoa(sourcePort)))
 					if scenario == "data-parallel" {
 						srv.forwardDataParallel = true
 						srv.dataParallelProxies[decoderURL.Host] = srv.decoderProxy
@@ -135,13 +147,13 @@ func TestEPDP2PCacheSource(t *testing.T) {
 					}
 					kv, _ := consumerBody[reqcommon.FieldKVTransferParams].(map[string]any)
 					if scenario == "enabled" {
-						require.Contains(t, kv, requestFieldRemoteKVSource)
-						peer := kv[requestFieldRemoteKVSource].(map[string]any)
-						require.Equal(t, "10.9.9.9", peer[reqcommon.FieldRemoteHost])
-						require.EqualValues(t, 7777, peer[reqcommon.FieldRemotePort])
-						require.NotEmpty(t, peer[requestFieldKVRequestID])
+						require.Contains(t, kv, reqcommon.FieldRemoteKVSource)
+						peer := kv[reqcommon.FieldRemoteKVSource].(map[string]any)
+						require.Equal(t, sourceHost, peer[reqcommon.FieldRemoteHost])
+						require.EqualValues(t, sourcePort, peer[reqcommon.FieldRemotePort])
+						require.Equal(t, sourceKVRequestID, peer[reqcommon.FieldKVRequestID])
 					} else {
-						require.NotContains(t, kv, requestFieldRemoteKVSource)
+						require.NotContains(t, kv, reqcommon.FieldRemoteKVSource)
 					}
 				})
 			}

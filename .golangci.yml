@@ -78,8 +78,8 @@ linters:
       alias:
         - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling
           alias: fwksched
-        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol
-          alias: fwkrc
+        - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling
+          alias: fwkrh
         - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol
           alias: fwkfc
         - pkg: github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks
@@ -110,6 +110,8 @@ linters:
           alias: fwkapix
         - pkg: github.com/llm-d/llm-d-router/test/framework/epp
           alias: fwkepp
+        - pkg: github.com/llm-d/llm-d-router/test/framework/epp/harness
+          alias: eppharness
     nolintlint:
       require-specific: true
     revive: # see https://github.com/mgechev/revive#available-rules for all options

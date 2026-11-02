@@ -54,20 +54,25 @@ type asyncSubmitter interface {
 	CancelRequests(ctx context.Context, requestIDs []string) error
 }
 
-// waitPollInterval is the poll cadence when the multiplexed wake-up is
-// unavailable (Redis without keyspace notifications, or wakeup_mode: poll).
 // maxTimeoutSeconds is the largest timeout that fits in a time.Duration without
 // overflowing. Enqueue mode sets no MaxSeconds, so a client value above this
 // would wrap to a negative or tiny deadline that the producer rejects as a
 // transport failure.
 const maxTimeoutSeconds = int64(math.MaxInt64) / int64(time.Second)
 
+// waitPollInterval is the poll cadence when the multiplexed wake-up is
+// unavailable (Redis without keyspace notifications, or wakeup_mode: poll).
 const waitPollInterval = 200 * time.Millisecond
 
 // waitBackupPollInterval is the slow safety poll under the notify wake-up:
 // keyspace notifications are fire and forget, so a lost notification is
 // recovered on the next backup tick rather than never.
 const waitBackupPollInterval = 2 * time.Second
+
+// waitGraceFloor is the shortest mailbox TTL a wait delivery sets. It
+// exceeds waitBackupPollInterval, so a waiter attached to the same id that
+// missed the wake-up still reads the result on its next poll.
+const waitGraceFloor = 5 * time.Second
 
 // Step bridges the coordinator to the llm-d-async broker. A
 // request that carries the mode header opts into async serving: passthrough
@@ -142,6 +147,12 @@ func New(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
 func (s *Step) Name() string { return StepName }
 
 func (s *Step) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	// Async serving applies to JSON HTTP requests only. A native gRPC Generate
+	// request cannot receive an OpenAI JSON error, so the step leaves it
+	// untouched even when it carries the mode header.
+	if reqCtx.IsNativeGRPC() {
+		return nil
+	}
 	headerVal := reqCtx.OriginalHeaders.Get(s.cfg.ModeHeader)
 	if headerVal == "" {
 		// No mode header means the request did not opt into async serving:
@@ -300,11 +311,20 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 		RequestQueueName: queue,
 		ResultQueueName:  resultKey(tenant, reqCtx.RequestID),
 	}
+	// A client gone before the submit has nothing queued under this
+	// submission, and the cancel below could hit a live copy of a retried id.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s: enqueue: %w", StepName, err)
+	}
 	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamAsyncBroker)
 	err = s.sub.SubmitRequest(ctx, msg)
 	call.Done()
 	if err != nil {
 		if ctx.Err() != nil {
+			// go-redis retries the enqueue after a failed reply read, and the
+			// wait before the retry returns the context error, so the submit
+			// can have landed.
+			s.cancelAbandoned(ctx, tenant, reqCtx.RequestID)
 			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
 		}
 		log.FromContext(ctx).WithName(StepName).Error(err, "failed to enqueue request", "id", reqCtx.RequestID)
@@ -314,20 +334,10 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	}
 
 	if mode == asyncModeEnqueue {
-		// The 202 is the only place a client learns an id the coordinator
-		// generated. If the client disconnected while the submit was in
-		// flight, nobody can fetch, delete, or retry the request, so cancel
-		// it pre-dispatch (best effort, per the producer's cancellation
-		// contract) instead of leaving a worker to produce a result no one
-		// reads. A client-chosen id stays queued: the client can still act on
-		// that id even though this connection is gone.
-		if !clientHoldsID(reqCtx) && ctx.Err() != nil {
-			cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancelFn()
-			if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, reqCtx.RequestID)}); err != nil {
-				log.FromContext(ctx).WithName(StepName).Error(err,
-					"failed to cancel request abandoned before the pending response", "id", reqCtx.RequestID)
-			}
+		if ctx.Err() != nil {
+			// The client left before the 202, so it may not hold the id: a
+			// gateway can mint one for a client that sent none.
+			s.cancelAbandoned(ctx, tenant, reqCtx.RequestID)
 			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
 		}
 		writePending(w, reqCtx.RequestID)
@@ -336,12 +346,18 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	return s.waitForResult(ctx, reqCtx, tenant, timeout)
 }
 
-// clientHoldsID reports whether the client supplied the id this request uses.
-// A missing or malformed x-request-id is replaced with a generated UUID, so the
-// client only knows the id when the value it sent is the one the request
-// carries.
-func clientHoldsID(reqCtx *pipeline.RequestContext) bool {
-	return reqCtx.OriginalHeaders.Get(reqcommon.RequestIDHeaderKey) == reqCtx.RequestID
+// cancelAbandoned cancels, pre-dispatch and best effort, a request whose
+// client disconnected. A later retry with the same id reattaches:
+// reattachRetry revives a still-queued copy, and an already-dropped one
+// leaves a cancelled tombstone that routes the retry to a fresh enqueue.
+// CancelRequests skips an id with no active token, so it is safe when the
+// submit did not land.
+func (s *Step) cancelAbandoned(ctx context.Context, tenant, id string) {
+	cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFn()
+	if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
+		log.FromContext(ctx).WithName(StepName).Error(err, "failed to cancel abandoned request", "id", id)
+	}
 }
 
 // unCancelScript revives a cancelled request that is still queued. The
@@ -370,6 +386,9 @@ func (s *Step) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContex
 	id := reqCtx.RequestID
 	state, res, err := lookupResult(ctx, s.rdb, tenant, id)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s: reattach: %w", StepName, ctx.Err())
+		}
 		logger.Error(err, "retry state lookup failed, enqueueing fresh", "id", id)
 		return nil
 	}
@@ -397,6 +416,22 @@ func (s *Step) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContex
 	return s.waitForResult(ctx, reqCtx, tenant, timeout)
 }
 
+// expireDelivered bounds the mailbox after a wait delivery. A success keeps
+// the wait grace, restarted by every delivery as on fetch. An error keeps at
+// most waitGraceFloor from its first delivery, so a client retrying by id
+// faster than the floor is still enqueued again once it has passed. EXPIRE
+// with LT would cap the TTL in one command but needs Redis 7.0.
+func (s *Step) expireDelivered(ctx context.Context, key string, pipelineResult error) error {
+	if errors.Is(pipelineResult, pipeline.ErrPipelineDone) {
+		return s.rdb.Expire(ctx, key, s.cfg.waitGrace()).Err()
+	}
+	ttl, err := s.rdb.PTTL(ctx, key).Result()
+	if err == nil && ttl >= 0 && ttl <= waitGraceFloor {
+		return nil
+	}
+	return errors.Join(err, s.rdb.Expire(ctx, key, waitGraceFloor).Err())
+}
+
 func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContext, tenant string, timeout time.Duration) error {
 	logger := log.FromContext(ctx).WithName(StepName)
 	w := reqCtx.ResponseWriter
@@ -412,11 +447,6 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 			waitCap = capDur
 			holdIsDeadline = false
 		}
-	}
-	// Held connections must outlive the server WriteTimeout, so clear the
-	// write deadline as the streaming path does.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		logger.Error(err, "could not clear write deadline for held connection")
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, waitCap)
 	defer cancel()
@@ -452,14 +482,15 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 			if writeErr != nil {
 				logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
 			} else {
-				// Delivery confirmed on the held connection, the result's only
-				// consumer: reclaim the mailbox now instead of letting it sit
-				// out the full result TTL. On write failure the key stays, as
-				// the client may still fetch by id.
-				delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer delCancel()
-				if err := s.rdb.Del(delCtx, resultKey(tenant, id)).Err(); err != nil {
-					logger.Error(err, "failed to delete delivered result", "id", id)
+				// Delivery confirmed: bound the mailbox (see expireDelivered)
+				// instead of letting it sit out the full result TTL. Deleting
+				// outright would take the result from other waiters attached
+				// to the same id. On write failure the key stays, as the
+				// client may still fetch by id.
+				graceCtx, graceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer graceCancel()
+				if err := s.expireDelivered(graceCtx, resultKey(tenant, id), pipelineResult); err != nil {
+					logger.Error(err, "failed to shrink result ttl after wait delivery", "id", id)
 				}
 			}
 			return pipelineResult
@@ -467,17 +498,7 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 		select {
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
-				// Client disconnected: nobody will fetch this result, so
-				// cancel pre-dispatch (best effort, per the producer's
-				// cancellation contract). A later retry with the same id
-				// reattaches: reattachRetry revives a still-queued copy, and
-				// an already-dropped one leaves a cancelled tombstone that
-				// routes the retry to a fresh enqueue.
-				cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancelFn()
-				if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
-					logger.Error(err, "failed to cancel abandoned request", "id", id)
-				}
+				s.cancelAbandoned(ctx, tenant, id)
 				return fmt.Errorf("%s: wait: %w", StepName, ctx.Err())
 			}
 			if holdIsDeadline {
@@ -494,8 +515,8 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 					pipelineResult, writeErr := writeResult(w, res)
 					if writeErr != nil {
 						logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
-					} else if err := s.rdb.Del(finalCtx, resultKey(tenant, id)).Err(); err != nil {
-						logger.Error(err, "failed to delete delivered result", "id", id)
+					} else if err := s.expireDelivered(finalCtx, resultKey(tenant, id), pipelineResult); err != nil {
+						logger.Error(err, "failed to shrink result ttl after wait delivery", "id", id)
 					}
 					return pipelineResult
 				}

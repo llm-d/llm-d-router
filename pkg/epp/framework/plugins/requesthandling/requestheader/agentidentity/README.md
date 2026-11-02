@@ -1,0 +1,224 @@
+# Agent Identity
+
+**Type:** `agent-identity`
+**Interfaces:** `requesthandling.RequestHeaderProcessor`, `plugin.ProducerPlugin`
+
+Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. It also resolves the thread that sent the request and the thread that spawned it, stored as the `"thread-id"` and `"parent-thread-id"` attributes. The Director then uses the `"agent-identity"` attribute when deriving `FairnessID`, so every turn of an agent session lands in the same flow-control fairness queue. When `requestHandler.composeFairnessIDs` is enabled (off by default) and the request also carries a tenant fairness ID, the Director composes the two into `<tenant>/<session>`.
+
+## What It Does
+
+The plugin runs after request assembly and before admission control. It inspects a fixed set of agent session headers and stores the first non-empty value as a request attribute via `request.PutAttribute(AgentIdentityKey, value)`, whose serialized name is `agent-identity`. It resolves the thread and parent the same way, from the thread and parent header lists below, and stores them as the `"thread-id"` and `"parent-thread-id"` attributes.
+
+The plugin stores the identity as a request attribute only — it does not set `FairnessID`. The Director reads the `"agent-identity"` attribute when deriving `FairnessID`. This separation means the agent identity is available as a reliable signal to other subsystems (scheduling, KV cache control, etc.) without being conflated with flow-control identity.
+
+### Standard headers
+
+The `x-llm-d-thread-id` and `x-llm-d-parent-thread-id` pair is the standard llm-d way for a client to declare its thread identity: any harness or gateway can send it directly, without harness-specific headers or router configuration. The convention for a program's tree: the root thread either omits `x-llm-d-thread-id` (the thread then falls back to the session id) or sends the root id itself, and a depth-1 child sends the root thread's id as its parent.
+
+## How It Works
+
+1. Walk the priority list of agent session headers and store the first non-empty match as the `"agent-identity"` request attribute. Operator-supplied entries from `additionalSessionHeaders` come first, followed by the built-in defaults in this order:
+   1. `x-claude-code-session-id` (Claude Code)
+   2. `x-session-affinity` (OpenCode)
+   3. `session-id` (Codex)
+   4. `session_id` (Codex, legacy underscored fallback)
+2. Walk the thread list and store the first non-empty match as the `"thread-id"` attribute. Operator-supplied entries from `additionalThreadHeaders` come first, followed by:
+   1. `x-llm-d-thread-id` (standard, any client)
+   2. `x-claude-code-agent-id` (Claude Code sub-agent)
+   3. `thread-id` (Codex)
+   4. `thread_id` (Codex, legacy underscored fallback)
+   5. `x-opencode-session-id` (OpenCode)
+
+   When no thread header matches, `"thread-id"` falls back to the `"agent-identity"` value, so a client that sends no thread header yields one thread per session.
+3. Walk the parent list and store the first non-empty match as the `"parent-thread-id"` attribute. Operator-supplied entries from `additionalParentThreadHeaders` come first, followed by:
+   1. `x-llm-d-parent-thread-id` (standard, any client)
+   2. `x-claude-code-parent-agent-id` (Claude Code nested sub-agent)
+   3. `x-codex-parent-thread-id` (Codex)
+   4. `x-parent-session-id` (OpenCode, shared wire convention)
+
+   A Claude Code sub-agent that sends its agent id but no parent header is a depth-1 child of the main thread, so its parent is the session id. This inference only fires when `x-claude-code-agent-id` supplied the thread: a request carrying both `x-llm-d-thread-id` and the Claude agent header gets no inferred parent. A parent equal to the thread id is not published, and a root thread publishes no parent: an absent or empty read means root.
+4. If no session header matches, no `"agent-identity"` attribute is stored — the Director falls through to `metadata.DefaultFairnessID`, so the request is still admitted, just into the shared default queue.
+
+After the plugin returns, the Director derives `FairnessID`:
+1. If `requestHandler.composeFairnessIDs` is enabled and the `x-llm-d-inference-fairness-id` header is set, percent-encode `%` (`%25`) and `/` (`%2F`) in the header, then append `/<agent-identity>` when the attribute is non-empty. The first path segment is therefore always the whole tenant, and flow control keys one queue per session while the tenant stays part of the fairness ID and metric labels.
+2. Else if the `x-llm-d-inference-fairness-id` header is set (composition disabled), use it as FairnessID as sent.
+3. Else if the `"agent-identity"` attribute exists, copy it to FairnessID.
+4. Else, use `"default-flow"`.
+
+Agent session IDs may contain `/`.
+
+With `publishIdentity: false` the plugin resolves the identity but stores no attribute, so the Director and every other consumer behave as if agent-identity were not configured. Use it to measure session-header coverage (`metrics: true`) before letting the identity drive fairness.
+
+Without `metrics` the plugin is stateless. With it, the plugin keeps the bounded active-session set described under [Metrics](#metrics). It is safe under concurrent use either way.
+
+## Inputs Consumed
+
+- `scheduling.InferenceRequest.Headers` — read-only lookup of the session headers above (built-in defaults plus any from `additionalSessionHeaders`) and of the thread and parent headers (built-in defaults plus any from `additionalThreadHeaders` / `additionalParentThreadHeaders`). Keys are expected lowercase (Envoy normalizes inbound headers).
+
+## Outputs Produced
+
+- `scheduling.InferenceRequest` attribute `"agent-identity"` (`string`) — set when a session header matches.
+- `scheduling.InferenceRequest` attribute `"thread-id"` (`string`) — set when a thread header matches or the agent identity is set.
+- `scheduling.InferenceRequest` attribute `"parent-thread-id"` (`string`) — set when the request belongs to a spawned thread; absent on a root.
+
+With `publishIdentity: false` none of the three is stored and `Produces()` declares nothing. A plugin that **requires** one of them (`session-state-producer`, `thunder-agent`) then fails configuration loading rather than silently reading nothing. A plugin that reads one as an **optional** session source (`session-affinity` with an `attribute:` source, the multicluster `rendezvous` filter) falls back to its next source, as it would without agent-identity configured. `publishIdentity: false` requires `metrics: true`; without it the plugin would do nothing and configuration loading fails.
+
+## Metrics
+
+With `metrics: true`, on the EPP's `/metrics` endpoint:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `llm_d_epp_agent_identity_requests_total` | counter | `harness`, `session_header` | Requests seen by the plugin. `session_header` is the header the session identity was resolved from, or `none`. `harness` is the `user-agent` product token (text before the first `/` or space, lowercased, `[a-z0-9._-]`, at most 64 characters): `unknown` when `user-agent` is absent or blank, `other` when it cannot be parsed or beyond 50 distinct values. |
+| `llm_d_epp_agent_identity_active_sessions` | gauge | `harness` | Distinct session identities this EPP replica saw in the last 5 minutes, labelled with the harness of the session's first request. Refreshed every 15 seconds; a harness with no active session has no series. |
+| `llm_d_epp_agent_identity_active_sessions_untracked_total` | counter | — | Requests whose session was not counted in `active_sessions` because the active-session set was full. Non-zero means the gauge is a lower bound. |
+
+No label carries a session ID. To count active sessions the plugin keeps, per session, only a seeded 8-byte hash of the identity, its last-seen time and its harness; sessions idle for more than 5 minutes are dropped. The set holds at most 100000 sessions; sessions first seen while it is full are not counted, so the gauge is then a lower bound, and `active_sessions_untracked_total` counts their requests. No statistics are kept about what happens within a session.
+
+The active-session count is per replica. When several EPP replicas serve the same pool, one session can reach more than one of them, so the distinct count across replicas lies between `max` and `sum` of the per-replica values. Only one `agent-identity` instance per EPP may enable `metrics`; a second fails configuration loading.
+
+Share of requests that carry a session identity:
+
+```promql
+sum(increase(llm_d_epp_agent_identity_requests_total{session_header!="none"}[7d]))
+  / sum(increase(llm_d_epp_agent_identity_requests_total[7d]))
+```
+
+Behind a proxy that replaces `user-agent` (for example LiteLLM), `harness` reports the proxy unless it forwards the client's user agent.
+
+## Configuration
+
+**Location:** Top-level `plugins:` list in the `EndpointPickerConfig`.
+**Enabled by default:** No. Add a `- type: agent-identity` entry to enable; the runner discovers it as a `RequestHeaderProcessor` and wires it in.
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `additionalSessionHeaders` | `[]string` | No | `[]` | Extra header names to check before the built-in defaults. Order is preserved; the first non-empty match wins. Use this to support a new agent, or to track an upstream rename, without a code change. |
+| `additionalThreadHeaders` | `[]string` | No | `[]` | Extra thread-ID header names, prepended the same way as `additionalSessionHeaders`. |
+| `additionalParentThreadHeaders` | `[]string` | No | `[]` | Extra parent-ID header names, prepended the same way as `additionalSessionHeaders`. |
+| `publishIdentity` | `bool` | No | `true` | Store the resolved identities as request attributes. `false` resolves the session without storing anything, so it cannot affect fairness or scheduling; requires `metrics: true`. |
+| `metrics` | `bool` | No | `false` | Export `llm_d_epp_agent_identity_requests_total`, `llm_d_epp_agent_identity_active_sessions` and `llm_d_epp_agent_identity_active_sessions_untracked_total`. One instance per EPP. |
+
+### Examples
+
+Default configuration — no parameters, only the built-in headers are checked:
+
+```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: agent-identity
+```
+
+With additional headers — checked before the built-in defaults (header names are arbitrary; substitute whatever the agent actually emits):
+
+```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: agent-identity
+    parameters:
+      additionalSessionHeaders:
+        - x-my-agent-session
+        - x-another-agent-id
+```
+
+Measure session-header coverage without letting it influence routing:
+
+```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: agent-identity
+    parameters:
+      publishIdentity: false
+      metrics: true
+```
+
+### Per-agent client setup
+
+The plugin only reads headers — getting them onto the wire is the agent's job. Each supported agent has different requirements.
+
+#### Claude Code — **LiteLLM is required**
+
+Claude Code speaks Anthropic's Messages API. llm-d's gateway exposes the OpenAI chat-completions wire format, so a translator is required in the path. LiteLLM works:
+
+```yaml
+# LiteLLM proxy config (pass to `litellm --config <path>`)
+model_list:
+  - model_name: <client-facing-model-name>
+    litellm_params:
+      model: hosted_vllm/<upstream-model-name>
+      api_base: http://<llmd-gateway>/v1
+
+general_settings:
+  forward_client_headers_to_llm_api: true
+```
+
+`forward_client_headers_to_llm_api: true` is **required** — without it LiteLLM strips `x-claude-code-session-id` (and every other `x-*` header) on the way to the upstream, and the plugin sees nothing.
+
+Then point Claude Code at LiteLLM and launch it. Use a settings file (rather than env vars) so inherited user-level settings, OAuth credentials, or keychain entries cannot override the configuration:
+
+```json
+// Claude Code settings file (any path, e.g. /tmp/claude-llmd-settings.json)
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://<litellm-host>",
+    "ANTHROPIC_AUTH_TOKEN": "dummy",
+    "ANTHROPIC_MODEL": "<client-facing-model-name>"
+  }
+}
+```
+
+```bash
+claude --bare --settings <path-to-settings.json> --setting-sources ""
+```
+
+`--bare` disables OAuth and keychain reads; `--setting-sources ""` disables loading any other settings file. Together they ensure only the file passed via `--settings` is used.
+
+`<client-facing-model-name>` must match the `model_name` declared in the LiteLLM `model_list` above. `ANTHROPIC_AUTH_TOKEN` is required by Claude Code but its value is unused when LiteLLM has no `master_key` set — any non-empty string works. Claude Code emits `x-claude-code-session-id` automatically on every outbound request — no further client config needed.
+
+#### OpenCode — **No LiteLLM required**
+
+OpenCode uses Vercel's AI SDK with `@ai-sdk/openai-compatible` and speaks OpenAI chat-completions natively, so it talks to the llm-d gateway directly.
+
+```json
+// ~/.config/opencode/opencode.json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "llmd-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llmd-local",
+      "options": {
+        "baseURL": "http://<llmd-gateway>/v1",
+        "apiKey": "dummy"
+      },
+      "models": {
+        "<upstream-model-name>": { "name": "<display-name>" }
+      }
+    }
+  }
+}
+```
+
+OpenCode emits `x-session-affinity` automatically on every outbound request.
+
+#### Codex — **No LiteLLM required**
+
+Codex emits a session header automatically on every outbound request. Current builds use the hyphenated `session-id` (no `x-` prefix); older builds use the underscored `session_id` form, which the plugin still recognizes as a fallback.
+
+## Limitations
+
+- **Default-queue fall-through is silent.** Requests from agents that don't match any of the configured headers land in the default fairness queue without any indication. This is by design (the plugin is non-fatal), but operators should not assume the absence of errors means every client is being identified.
+- **Codex `previous_response_id` is not used.** It references the prior turn's response, not the chain root, so keying on it would shard one conversation across many queues. Correctly folding it back to the root requires a `ResponseBody` hook recording `response.id → root` mappings, which this plugin does not implement.
+- **Thread and parent values are client-supplied.** Any caller can claim any thread id, so consumers keying state on them should scope by tenant, the way agent-lineage does.
+- **The lists are independent.** A thread and a parent may come from different header families when a client sends more than one.
+- **The standard pair carries no program identity.** A client that sends only the thread pair gets `thread-id` and `parent-thread-id` but no `agent-identity`; send a session header as well to get a per-program fairness key.
+
+## Related Documentation
+- Claude Code session header (official): <https://code.claude.com/docs/en/llm-gateway> — the `X-Claude-Code-Session-Id` row in "Request headers Claude Code includes."
+- OpenCode session header (Cloudflare announcement, documents the `x-session-affinity` contract): <https://blog.cloudflare.com/workers-ai-large-models/>
+- Codex session header (Codex CLI source — `build_session_headers` inserts `session_id` as an HTTP header on every outbound request; OpenAI does not document this in the public docs): <https://github.com/openai/codex/blob/d2e18246c96e8b440f9d97135356d37f3f3b4d63/codex-rs/codex-api/src/requests/headers.rs>

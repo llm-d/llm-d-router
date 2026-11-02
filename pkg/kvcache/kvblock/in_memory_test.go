@@ -141,6 +141,91 @@ func TestInMemoryIndexDefaultPodCacheSize(t *testing.T) {
 	assert.ElementsMatch(t, entries[1:], found[keys[0]])
 }
 
+// TestInMemoryIndexPodCacheOverflow checks which entry a request key at
+// PodCacheSize gives up for a new one. initial fills the key, least recent
+// first.
+func TestInMemoryIndexPodCacheOverflow(t *testing.T) {
+	confirmed := func(pod string) PodEntry { return PodEntry{PodIdentifier: pod, DeviceTier: "gpu"} }
+	speculative := func(pod string) PodEntry { return PodEntry{PodIdentifier: pod, Speculative: true} }
+
+	tests := []struct {
+		name    string
+		initial []PodEntry
+		add     PodEntry
+		want    []PodEntry
+	}{
+		{
+			name:    "confirmed_add_evicts_oldest_speculative",
+			initial: []PodEntry{confirmed("pod1"), speculative("pod2"), speculative("pod3")},
+			add:     confirmed("pod4"),
+			want:    []PodEntry{confirmed("pod1"), speculative("pod3"), confirmed("pod4")},
+		},
+		{
+			name:    "speculative_add_evicts_oldest_speculative",
+			initial: []PodEntry{confirmed("pod1"), speculative("pod2"), confirmed("pod3")},
+			add:     speculative("pod4"),
+			want:    []PodEntry{confirmed("pod1"), confirmed("pod3"), speculative("pod4")},
+		},
+		{
+			name:    "speculative_add_dropped_when_all_confirmed",
+			initial: []PodEntry{confirmed("pod1"), confirmed("pod2"), confirmed("pod3")},
+			add:     speculative("pod4"),
+			want:    []PodEntry{confirmed("pod1"), confirmed("pod2"), confirmed("pod3")},
+		},
+		{
+			name:    "confirmed_add_evicts_least_recent_confirmed",
+			initial: []PodEntry{confirmed("pod1"), confirmed("pod2"), confirmed("pod3")},
+			add:     confirmed("pod4"),
+			want:    []PodEntry{confirmed("pod2"), confirmed("pod3"), confirmed("pod4")},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 1, PodCacheSize: len(tc.initial)})
+			require.NoError(t, err)
+			keys := []BlockHash{1}
+			require.NoError(t, index.Add(ctx, nil, keys, tc.initial))
+			require.NoError(t, index.Add(ctx, nil, keys, []PodEntry{tc.add}))
+
+			found, err := index.Lookup(ctx, keys, nil)
+			require.NoError(t, err)
+			assert.ElementsMatch(t, tc.want, found[keys[0]])
+		})
+	}
+}
+
+// TestInMemoryIndexSpeculativeLeasesKeepConfirmedEntries fills a request key
+// with confirmed entries, then adds and releases a speculative entry per pod,
+// as routed requests and their lease expiries do. An engine announces a cached
+// block once, so a confirmed entry dropped here is not indexed again.
+func TestInMemoryIndexSpeculativeLeasesKeepConfirmedEntries(t *testing.T) {
+	ctx := t.Context()
+	index, err := NewInMemoryIndex(nil)
+	require.NoError(t, err)
+	capacity := DefaultInMemoryIndexConfig().PodCacheSize
+	confirmed := make([]PodEntry, capacity)
+	speculative := make([]PodEntry, capacity)
+	for i := range confirmed {
+		pod := fmt.Sprintf("10.0.0.%d:8000", i)
+		confirmed[i] = PodEntry{PodIdentifier: pod, DeviceTier: "gpu"}
+		speculative[i] = PodEntry{PodIdentifier: pod, Speculative: true}
+	}
+	keys := []BlockHash{1}
+	require.NoError(t, index.Add(ctx, nil, keys, confirmed))
+
+	for i := range speculative {
+		require.NoError(t, index.Add(ctx, nil, keys, speculative[i:i+1]))
+	}
+	for i := range speculative {
+		require.NoError(t, index.Evict(ctx, RequestKey, keys, speculative[i:i+1]))
+	}
+
+	found, err := index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, confirmed, found[keys[0]])
+}
+
 func TestInMemoryIndexClearIgnoresCancellation(t *testing.T) {
 	ctx := t.Context()
 	const numKeys = 600

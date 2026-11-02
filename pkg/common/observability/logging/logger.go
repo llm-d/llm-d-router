@@ -39,11 +39,13 @@ func LevelEncoder(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	enc.AppendString(SeverityText(l))
 }
 
-func InitSetupLogging(serviceName string) {
+func InitSetupLogging(serviceName string, opts ...zap.Opts) {
 	logger := NewLogger(
 		serviceName,
-		zap.Level(atomicLevel),
-		zap.RawZapOpts(uberzap.AddCaller()),
+		append([]zap.Opts{
+			zap.Level(atomicLevel),
+			zap.RawZapOpts(uberzap.AddCaller()),
+		}, opts...)...,
 	)
 	ctrl.SetLogger(logger)
 }

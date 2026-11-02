@@ -27,6 +27,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 )
 
 // RedisIndexConfig holds the configuration for the RedisIndex.
@@ -168,7 +170,7 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 		}
 
 		if len(filteredPods) == 0 {
-			logger.Info("no pods found for key, cutting search", "key", key)
+			logger.V(logging.TRACE).Info("no pods found for key, cutting search", "key", key)
 			return podsPerKey, nil // early stop since prefix-chain breaks here
 		}
 
@@ -197,12 +199,15 @@ func isPipelineFailure(results []*redis.StringSliceCmd) bool {
 // If engineKeys is nil, only requestKey -> PodEntry mappings are created (no engineKey -> requestKey mapping).
 // This is used for speculative entries where engine keys are not yet known.
 // When engineKeys is non-nil, the mapping type is inferred from the ratio of array lengths.
-func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
+func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry, geometry ...EngineGeometry) error {
 	if len(requestKeys) == 0 || len(entries) == 0 {
 		return fmt.Errorf("no keys or entries provided for adding to index")
 	}
 
-	pipe := r.RedisClient.Pipeline()
+	// MULTI/EXEC applies the mappings and the pod entries together, so
+	// pruneEngineKeyScript cannot run between them and delete a mapping whose
+	// pod entries this call has not written yet.
+	pipe := r.RedisClient.TxPipeline()
 
 	// Build engine->request mappings when engine keys are provided.
 	// The ratio of array lengths determines the mapping type:
@@ -210,7 +215,7 @@ func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHas
 	//   many:1 (4 eng, 1 req) -> E0->R0, E1->R0, E2->R0, E3->R0
 	//   1:many (1 eng, 4 req) -> E0->[R0, R1, R2, R3]
 	if engineKeys != nil {
-		mappings := engineToRequestMapping(engineKeys, requestKeys)
+		mappings := engineToRequestMapping(engineKeys, requestKeys, geometry...)
 		for ek, rks := range mappings {
 			for j, rk := range rks {
 				pipe.ZAdd(ctx, redisEngineKey(ek), redis.Z{Score: float64(j), Member: rk.String()})
@@ -380,6 +385,9 @@ func (r *RedisIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (Bl
 	hash, err := strconv.ParseUint(vals[0], 10, 64)
 	if err != nil {
 		return EmptyBlockHash, fmt.Errorf("invalid hash format: %s", vals[0])
+	}
+	if BlockHash(hash) == EmptyBlockHash {
+		return EmptyBlockHash, fmt.Errorf("engine key %s ends inside a canonical block", engineKey.String())
 	}
 	return BlockHash(hash), nil
 }

@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -83,11 +83,17 @@ func (p *chainProducer) Produce(ctx context.Context, _ *fwksched.InferenceReques
 }
 
 func newDirectorWithProducers(producers ...*chainProducer) *Director {
-	plugins := make([]fwkrc.DataProducer, len(producers))
+	plugins := make([]fwkrh.DataProducer, len(producers))
 	for i, p := range producers {
 		plugins[i] = p
 	}
 	return &Director{requestControlPlugins: Config{dataProducerPlugins: plugins}}
+}
+
+// runSchedulingProducers runs d's Scheduling-phase producers on an empty request.
+func runSchedulingProducers(ctx context.Context, d *Director) error {
+	return d.runDataProducers(ctx, fwkrh.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
+		&fwksched.InferenceRequest{}, nil, map[string]struct{}{})
 }
 
 // A failing producer skips only the producers that require its output, directly
@@ -102,7 +108,7 @@ func TestRunDataProducerPluginsContinuesPastFailure(t *testing.T) {
 	e := &chainProducer{name: "e", produces: fwkplugin.NewDataKey("e", "e"), requires: []fwkplugin.DataKey{keyB}}
 	f := &chainProducer{name: "f", produces: fwkplugin.NewDataKey("f", "f"), optional: []fwkplugin.DataKey{keyA}}
 
-	err := newDirectorWithProducers(a, b, c, d, e, f).runDataProducerPlugins(context.Background(), &fwksched.InferenceRequest{}, nil)
+	err := runSchedulingProducers(context.Background(), newDirectorWithProducers(a, b, c, d, e, f))
 
 	require.Error(t, err)
 	assert.ErrorContains(t, err, `DataProducer "a/chain" failed: unsupported body`)
@@ -124,7 +130,7 @@ func TestRunDataProducerPluginsContinuesPastTimeout(t *testing.T) {
 	b := &chainProducer{name: "b", produces: fwkplugin.NewDataKey("b", "b")}
 	c := &chainProducer{name: "c", produces: fwkplugin.NewDataKey("c", "c"), requires: []fwkplugin.DataKey{keyA}}
 
-	err := newDirectorWithProducers(a, b, c).runDataProducerPlugins(context.Background(), &fwksched.InferenceRequest{}, nil)
+	err := runSchedulingProducers(context.Background(), newDirectorWithProducers(a, b, c))
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.ErrorContains(t, err, `DataProducer "c/chain" skipped: required input a/a was not produced`)
@@ -140,7 +146,7 @@ func TestRunDataProducerPluginsStopsWhenRequestIsDone(t *testing.T) {
 		cancel()
 		a := &chainProducer{name: "a", produces: fwkplugin.NewDataKey("a", "a")}
 
-		err := newDirectorWithProducers(a).runDataProducerPlugins(ctx, &fwksched.InferenceRequest{}, nil)
+		err := runSchedulingProducers(ctx, newDirectorWithProducers(a))
 
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Never(t, a.ran.Load, 50*time.Millisecond, 5*time.Millisecond, "no producer starts for a request that is done")
@@ -151,7 +157,7 @@ func TestRunDataProducerPluginsStopsWhenRequestIsDone(t *testing.T) {
 		a := &chainProducer{name: "a", produces: fwkplugin.NewDataKey("a", "a"), hang: true, onProduce: cancel}
 		b := &chainProducer{name: "b", produces: fwkplugin.NewDataKey("b", "b")}
 
-		err := newDirectorWithProducers(a, b).runDataProducerPlugins(ctx, &fwksched.InferenceRequest{}, nil)
+		err := runSchedulingProducers(ctx, newDirectorWithProducers(a, b))
 
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Equal(t, 1, strings.Count(err.Error(), context.Canceled.Error()))
@@ -164,7 +170,7 @@ func TestRunDataProducerPluginsWithoutFailures(t *testing.T) {
 	a := &chainProducer{name: "a", produces: keyA}
 	b := &chainProducer{name: "b", produces: fwkplugin.NewDataKey("b", "b"), requires: []fwkplugin.DataKey{keyA}}
 
-	require.NoError(t, newDirectorWithProducers(a, b).runDataProducerPlugins(context.Background(), &fwksched.InferenceRequest{}, nil))
+	require.NoError(t, runSchedulingProducers(context.Background(), newDirectorWithProducers(a, b)))
 	assert.True(t, a.ran.Load())
 	assert.True(t, b.ran.Load())
 }

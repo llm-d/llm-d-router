@@ -59,10 +59,32 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // A response larger than the cap is read only up to maxResponseBytes.
 func TestParseBoundedMetricsCapsResponse(t *testing.T) {
 	cr := &countingReader{n: maxResponseBytes + 4096}
-	parse, _ := newMetricsParser(nil, maxResponseBytes)
+	parse, _ := newMetricsParser(nil)
 	_, err := parse(cr)
 	require.NoError(t, err)
 	require.LessOrEqual(t, cr.read, maxResponseBytes, "must not read past the cap")
+}
+
+// The pod metrics source applies the same cap as the multicluster source: a
+// model server that streams an oversized body must not make the EPP buffer it
+// in full. Bytes past the cap are never read, so garbage there never reaches
+// the parser.
+func TestPodMetricsSourceCapsResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.Copy(w, &countingReader{n: maxResponseBytes})
+		_, _ = w.Write([]byte("not a metrics line {{{\n"))
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	src, err := NewHTTPMetricsDataSource("http", "/metrics", "pod")
+	require.NoError(t, err)
+	endpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{MetricsHost: u.Host}, fwkdl.NewMetrics())
+
+	got, err := src.Poll(context.Background(), endpoint)
+	require.NoError(t, err, "bytes past the cap must not be parsed")
+	require.Empty(t, got)
 }
 
 type noopExtractor struct{}

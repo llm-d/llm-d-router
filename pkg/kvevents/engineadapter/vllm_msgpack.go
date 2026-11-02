@@ -40,9 +40,16 @@ const maxDecodeDepth = 64
 // Limit hash processing because only the final bytes contribute to the hash.
 const maxDecodeHashBytes = 64
 
-// errUnknownTypedEventTag is returned only after all fields of the event are
-// consumed, so a batch decoder can continue with the next event.
-var errUnknownTypedEventTag = errors.New("unknown typed event tag")
+// unknownTypedEventTagError carries the skipped tag to the batch decoder. It is
+// returned only after all fields of the event are consumed, so a batch decoder
+// can continue with the next event.
+type unknownTypedEventTagError struct {
+	tag string
+}
+
+func (e *unknownTypedEventTagError) Error() string {
+	return "unknown typed event tag: " + e.tag
+}
 
 type eventWireSchema struct {
 	name                 string
@@ -61,6 +68,7 @@ type msgpackTypedEventBatch struct {
 	schema           *eventWireSchema
 	timestamp        float64
 	events           []kvevents.GenericEvent
+	skippedTags      []string
 	dataParallelRank *int
 }
 
@@ -95,7 +103,8 @@ func (b *msgpackTypedEventBatch) DecodeMsgpack(dec *msgpack.Decoder) error {
 			event, err := decodeTypedEventFromDecoder(dec, b.schema)
 			// Skip events with tags this adapter does not know so the rest of
 			// the batch still reaches the index.
-			if errors.Is(err, errUnknownTypedEventTag) {
+			if unknown, ok := errors.AsType[*unknownTypedEventTagError](err); ok {
+				b.skippedTags = append(b.skippedTags, unknown.tag)
 				continue
 			}
 			if err != nil {
@@ -188,7 +197,7 @@ func decodeArrayTypedEvent(dec *msgpack.Decoder, schema *eventWireSchema) (kveve
 		if err := skipFields(dec, fieldCount-1); err != nil {
 			return nil, err
 		}
-		return nil, errUnknownTypedEventTag
+		return nil, &unknownTypedEventTagError{tag: tag}
 	}
 }
 
@@ -209,12 +218,17 @@ var vllmBlockStoredFieldDecoders = []eventFieldDecoder{
 	{"group_idx", decodeGroupIdx},
 	{"kv_cache_spec_kind", decodeKVCacheSpecKind},
 	{"kv_cache_spec_sliding_window", decodeSlidingWindow},
+	{"locality", decodeLocality},
+	{"ownership", decodeOwnership},
+	{"session_id", decodeSessionID},
 }
 
 var vllmBlockRemovedFieldDecoders = []eventFieldDecoder{
 	{"block_hashes", decodeHashesField},
 	{"medium", decodeMedium},
 	{"group_idx", decodeGroupIdx},
+	{"locality", decodeLocality},
+	{"ownership", decodeOwnership},
 }
 
 func typedFieldDecoders(tag string, schema *eventWireSchema) []eventFieldDecoder {
@@ -301,6 +315,9 @@ func decodeBlockSizeField(dec *msgpack.Decoder, fields *typedEventFields) error 
 }
 
 type typedEventFields struct {
+	sessionID      *string
+	locality       string
+	ownership      string
 	tag            string
 	hasTag         bool
 	blockHashes    []uint64
@@ -451,7 +468,7 @@ func decodeMapTypedEvent(dec *msgpack.Decoder, schema *eventWireSchema) (kvevent
 		if !schema.skipUnknownTags {
 			return nil, fmt.Errorf("%s: %s", schema.unknownTagPrefix, fields.tag)
 		}
-		return nil, errUnknownTypedEventTag
+		return nil, &unknownTypedEventTagError{tag: fields.tag}
 	}
 }
 
@@ -497,6 +514,9 @@ func (f *typedEventFields) requireBlockStoredFields() error {
 
 func (f *typedEventFields) blockStoredEvent() *kvevents.BlockStoredEvent {
 	return &kvevents.BlockStoredEvent{
+		SessionID:                    f.sessionID,
+		Locality:                     f.locality,
+		Ownership:                    f.ownership,
 		BlockHashes:                  f.blockHashes,
 		Tokens:                       f.tokens,
 		ParentHash:                   f.parentHash,
@@ -513,6 +533,8 @@ func (f *typedEventFields) blockStoredEvent() *kvevents.BlockStoredEvent {
 
 func (f *typedEventFields) blockRemovedEvent() *kvevents.BlockRemovedEvent {
 	return &kvevents.BlockRemovedEvent{
+		Locality:    f.locality,
+		Ownership:   f.ownership,
 		BlockHashes: f.blockHashes,
 		DeviceTier:  f.medium,
 		GroupIdx:    f.groupIdx,
@@ -688,6 +710,37 @@ func decodeLoraName(dec *msgpack.Decoder, fields *typedEventFields) error {
 		return fmt.Errorf("lora_name is not a string: %w", err)
 	}
 	fields.loraName = value
+	return nil
+}
+
+func decodeLocality(dec *msgpack.Decoder, fields *typedEventFields) error {
+	value, err := decodeOptionalString(dec)
+	if err != nil {
+		return fmt.Errorf("locality is not a string: %w", err)
+	}
+	if value != nil {
+		fields.locality = *value
+	}
+	return nil
+}
+
+func decodeOwnership(dec *msgpack.Decoder, fields *typedEventFields) error {
+	value, err := decodeOptionalString(dec)
+	if err != nil {
+		return fmt.Errorf("ownership is not a string: %w", err)
+	}
+	if value != nil {
+		fields.ownership = *value
+	}
+	return nil
+}
+
+func decodeSessionID(dec *msgpack.Decoder, fields *typedEventFields) error {
+	value, err := decodeOptionalString(dec)
+	if err != nil {
+		return fmt.Errorf("session_id is not a string: %w", err)
+	}
+	fields.sessionID = value
 	return nil
 }
 

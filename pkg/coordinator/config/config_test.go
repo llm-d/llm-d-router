@@ -54,13 +54,15 @@ func TestLoadDefaults(t *testing.T) {
 		{"server.cert_path", cfg.Server.CertPath, ""},
 		{"server.tls_min_version", cfg.Server.TLSMinVersion, ""},
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30 * time.Second},
-		{"server.write_timeout", cfg.Server.WriteTimeout, 120 * time.Second},
 		{"server.shutdown_timeout", cfg.Server.ShutdownTimeout, 25 * time.Second},
+		{"server.drain_timeout", cfg.Server.DrainTimeout, time.Duration(0)},
 		{"server.max_request_body_size", cfg.Server.MaxRequestBodySize, int64(DefaultMaxRequestBodySize)},
 		{"gateway.max_idle_conns_per_host", cfg.Gateway.MaxIdleConnsPerHost, 100},
 		{"gateway.idle_conn_timeout", cfg.Gateway.IdleConnTimeout, 90 * time.Second},
 		{"gateway.timeout", cfg.Gateway.Timeout, 60 * time.Second},
+		{"pipeline.worker_protocol", cfg.Pipeline.WorkerProtocol, "http"},
 		{"pipeline.use_openai_format", cfg.Pipeline.UseOpenAIFormat, true},
+		{"pipeline.max_step_reruns", cfg.Pipeline.MaxStepReruns, 0},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -74,6 +76,35 @@ func TestLoadDefaults(t *testing.T) {
 
 	if len(cfg.Server.TLSCipherSuites) != 0 {
 		t.Errorf("server.tls_cipher_suites = %v, want empty", cfg.Server.TLSCipherSuites)
+	}
+
+	if len(cfg.DeprecatedKeys) != 0 {
+		t.Errorf("DeprecatedKeys = %v, want empty", cfg.DeprecatedKeys)
+	}
+}
+
+func TestLoadDeprecatedWriteTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		env  bool
+	}{
+		{name: "file", body: "server:\n  write_timeout: 600s\n"},
+		{name: "env", body: "", env: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env {
+				t.Setenv("COORDINATOR_SERVER_WRITE_TIMEOUT", "600s")
+			}
+			cfg, err := Load(writeConfig(t, tt.body))
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if want := []string{"server.write_timeout"}; !slices.Equal(cfg.DeprecatedKeys, want) {
+				t.Errorf("DeprecatedKeys = %v, want %v", cfg.DeprecatedKeys, want)
+			}
+		})
 	}
 }
 
@@ -99,6 +130,36 @@ func TestLoadEnvOverride(t *testing.T) {
 			envKey: "COORDINATOR_PIPELINE_USE_OPENAI_FORMAT",
 			envVal: "false",
 			check:  func(c *Config) (any, any) { return c.Pipeline.UseOpenAIFormat, false },
+		},
+		{
+			name:   "worker protocol",
+			envKey: "COORDINATOR_PIPELINE_WORKER_PROTOCOL",
+			envVal: "grpc",
+			check:  func(c *Config) (any, any) { return c.Pipeline.WorkerProtocol, "grpc" },
+		},
+		{
+			name:   "force stream",
+			envKey: "COORDINATOR_PIPELINE_FORCE_STREAM",
+			envVal: "true",
+			check:  func(c *Config) (any, any) { return c.Pipeline.ForceStream, true },
+		},
+		{
+			name:   "force stream buffer size",
+			envKey: "COORDINATOR_PIPELINE_FORCE_STREAM_BUFFER_SIZE",
+			envVal: "512MiB",
+			check:  func(c *Config) (any, any) { return c.Pipeline.ForceStreamBufferSize, "512MiB" },
+		},
+		{
+			name:   "force stream max request size",
+			envKey: "COORDINATOR_PIPELINE_FORCE_STREAM_MAX_REQUEST_SIZE",
+			envVal: "128KiB",
+			check:  func(c *Config) (any, any) { return c.Pipeline.ForceStreamMaxRequestSize, "128KiB" },
+		},
+		{
+			name:   "max step re-runs",
+			envKey: "COORDINATOR_PIPELINE_MAX_STEP_RERUNS",
+			envVal: "2",
+			check:  func(c *Config) (any, any) { return c.Pipeline.MaxStepReruns, 2 },
 		},
 		{
 			name:   "metrics certificate path",
@@ -232,6 +293,16 @@ func TestLoadExplicitEmptyForwardResponseHeaders(t *testing.T) {
 	}
 	if len(cfg.Pipeline.ForwardResponseHeaders) != 0 {
 		t.Fatalf("pipeline.forward_response_headers = %v, want explicitly disabled", cfg.Pipeline.ForwardResponseHeaders)
+	}
+}
+
+func TestLoadMaxStepReruns(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "pipeline:\n  max_step_reruns: 1\n"))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Pipeline.MaxStepReruns; got != 1 {
+		t.Fatalf("pipeline.max_step_reruns = %d, want 1", got)
 	}
 }
 

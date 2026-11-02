@@ -21,19 +21,24 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const cleanEndpoint = "clean-endpoint"
@@ -377,7 +382,7 @@ func TestDetector_Lifecycle(t *testing.T) {
 
 	// 3. Decrement (Available)
 	targetEndpoint := newStubSchedulingEndpoint(reg, endpointName)
-	simulateResponseBody(ctx, reg, nil, &requestcontrol.Response{EndOfStream: true}, targetEndpoint.metadata)
+	simulateResponseBody(ctx, reg, nil, &fwkrh.Response{EndOfStream: true}, targetEndpoint.metadata)
 	require.InDelta(t, 0.0, detector.Saturation(ctx, candidates), 1e-6, "expected 0.0 after completion")
 
 	// 4. Increment again -> Delete -> Verify Reset
@@ -547,7 +552,7 @@ func TestDetector_TokenFilterIncomingTokens(t *testing.T) {
 	require.Len(t, kept, 1, "projected load above the limit is filtered")
 	require.Equal(t, cleanEndpoint, kept[0].GetMetadata().ID.Name)
 
-	untokenized := &fwksched.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}
+	untokenized := &fwksched.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{}}
 	require.Len(t, detector.Filter(ctx, untokenized, candidates), 1,
 		"the published cost is counted whether or not the prompt is tokenized")
 }
@@ -654,7 +659,7 @@ func TestDetector_TokenLifecycle(t *testing.T) {
 	simulatePreRequest(ctx, reg, req1, makeSchedulingResult(reg, endpointName))
 	require.InDelta(t, 0.1, detector.Saturation(ctx, candidates), 1e-6)
 
-	eos := &requestcontrol.Response{EndOfStream: true}
+	eos := &fwkrh.Response{EndOfStream: true}
 	simulateResponseBody(ctx, reg, req1, eos, targetEndpoint.metadata)
 	require.InDelta(t, 0.0, detector.Saturation(ctx, candidates), 1e-6)
 }
@@ -809,48 +814,65 @@ func TestDetector_HybridFilter(t *testing.T) {
 	})
 }
 
-// TestDetector_ConcurrencyStress performs race condition check.
+// TestDetector_ConcurrencyStress races ReserveDispatch and ReleaseDispatch for
+// the same request IDs across goroutines while other goroutines read Saturation.
+// Each ID must be reserved and released exactly once, and pendingDispatches must
+// stay consistent with the reservation set.
 func TestDetector_ConcurrencyStress(t *testing.T) {
 	t.Parallel()
 
-	reg := newLocalRegistry()
-	ctx := context.Background()
-	endpointName := "stress-endpoint"
-	fullID := fullEndpointName(endpointName)
+	const (
+		numIDs      = 200
+		contenders  = 8 // goroutines racing for each ID
+		readers     = 4
+		readsPerRun = 500
+	)
+	ctx := t.Context()
+	detector := newDetector("stress", config{mode: modeRequests, maxConcurrency: numIDs}, logr.Discard())
+	endpoints := []datalayer.Endpoint{newFakeEndpoint(newLocalRegistry(), "stress-endpoint")}
+	id := func(i int) string { return fmt.Sprintf("req-%d", i) }
 
-	warmUpRes := makeSchedulingResult(reg, endpointName)
-	warmUpEndpoint := newStubSchedulingEndpoint(reg, endpointName)
-	simulatePreRequest(ctx, reg, nil, warmUpRes)
-	simulateResponseBody(ctx, reg, nil, &requestcontrol.Response{EndOfStream: true}, warmUpEndpoint.metadata)
-
-	const numGoroutines = 50
-	const opsPerRoutine = 1000
-
-	var wg sync.WaitGroup
-	wg.Add(numGoroutines * 2)
-
-	for range numGoroutines {
-		go func() {
-			defer wg.Done()
-			res := makeSchedulingResult(reg, endpointName)
-			for range opsPerRoutine {
-				simulatePreRequest(ctx, reg, nil, res)
-			}
-		}()
+	// race runs op for every ID on each contender while readers call Saturation,
+	// and returns how many op calls reported success.
+	race := func(op func(string) bool, ids func(int) bool) (succeeded int64, outOfRange bool) {
+		var wins atomic.Int64
+		var badRead atomic.Bool
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for range contenders {
+			wg.Go(func() {
+				<-start
+				for i := range numIDs {
+					if ids(i) && op(id(i)) {
+						wins.Add(1)
+					}
+				}
+			})
+		}
+		for range readers {
+			wg.Go(func() {
+				<-start
+				for range readsPerRun {
+					if s := detector.Saturation(ctx, endpoints); s < 0 || s > 1 {
+						badRead.Store(true)
+					}
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+		return wins.Load(), badRead.Load()
 	}
 
-	for range numGoroutines {
-		go func() {
-			defer wg.Done()
-			targetEndpoint := newStubSchedulingEndpoint(reg, endpointName)
-			for range opsPerRoutine {
-				simulateResponseBody(ctx, reg, nil, &requestcontrol.Response{EndOfStream: true}, targetEndpoint.metadata)
-			}
-		}()
-	}
+	reserved, outOfRange := race(detector.ReserveDispatch, func(int) bool { return true })
+	require.Equal(t, int64(numIDs), reserved, "each ID must be reserved exactly once")
+	require.False(t, outOfRange, "Saturation left [0, 1] during reservations")
+	require.InDelta(t, 1.0, detector.Saturation(ctx, endpoints), 1e-9)
 
-	wg.Wait()
-	require.Equal(t, int64(0), reg.get(fullID).Requests)
+	released, outOfRange := race(detector.ReleaseDispatch, func(i int) bool { return i%2 == 0 })
+	require.Equal(t, int64(numIDs/2), released, "each ID must be released exactly once")
+	require.False(t, outOfRange, "Saturation left [0, 1] during releases")
+	require.InDelta(t, 0.5, detector.Saturation(ctx, endpoints), 1e-9)
 }
 
 // TestDetector_NilMetadataEndpoint verifies that endpoints with nil metadata
@@ -894,7 +916,7 @@ func simulatePreRequest(_ context.Context, reg *localRegistry, req *fwksched.Inf
 	})
 }
 
-func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, resp *requestcontrol.Response, metadata *datalayer.EndpointMetadata) {
+func simulateResponseBody(_ context.Context, reg *localRegistry, req *fwksched.InferenceRequest, resp *fwkrh.Response, metadata *datalayer.EndpointMetadata) {
 	if metadata == nil || resp == nil || !resp.EndOfStream {
 		return
 	}
@@ -1035,8 +1057,8 @@ func simulatedTokenLoad(req *fwksched.InferenceRequest) int64 {
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}}},
 		},
 	}
 }
@@ -1070,4 +1092,296 @@ func TestDetector_NilEndpointInList(t *testing.T) {
 		filtered := d.Filter(t.Context(), nil, []fwksched.Endpoint{nil})
 		require.Empty(t, filtered, "nil endpoint should be skipped by filter")
 	})
+}
+
+// TestDetector_EndpointOverrides covers per-endpoint capacities selected by pod labels: config
+// validation, selector precedence, and their effect on saturation and filtering.
+func TestDetector_EndpointOverrides(t *testing.T) {
+	t.Parallel()
+
+	t.Run("config validation", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name    string
+			params  string
+			wantErr string
+		}{
+			{
+				name:   "matchLabels with both limits",
+				params: `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxConcurrency":30,"maxTokenConcurrency":3000}]}`,
+			},
+			{
+				name:   "matchExpressions with one limit",
+				params: `{"endpointOverrides":[{"matchExpressions":[{"key":"gpu","operator":"In","values":["big","huge"]}],"maxConcurrency":30}]}`,
+			},
+			{
+				name:    "selector required",
+				params:  `{"endpointOverrides":[{"maxConcurrency":30}]}`,
+				wantErr: "matchLabels or matchExpressions is required",
+			},
+			{
+				name:    "limit required",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"}}]}`,
+				wantErr: "maxConcurrency or maxTokenConcurrency is required",
+			},
+			{
+				name:    "non-positive limit",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxConcurrency":0}]}`,
+				wantErr: "maxConcurrency must be strictly positive",
+			},
+			{
+				name:    "non-positive token limit",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxTokenConcurrency":0}]}`,
+				wantErr: "maxTokenConcurrency must be strictly positive",
+			},
+			{
+				name:    "token limit only in requests mode",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxTokenConcurrency":3000}]}`,
+				wantErr: `maxTokenConcurrency has no effect in "requests" mode`,
+			},
+			{
+				name:    "request limit only in tokens mode",
+				params:  `{"concurrencyMode":"tokens","endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxConcurrency":30}]}`,
+				wantErr: `maxConcurrency has no effect in "tokens" mode`,
+			},
+			{
+				name:   "one limit in hybrid mode",
+				params: `{"concurrencyMode":"hybrid","endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxTokenConcurrency":3000}]}`,
+			},
+			{
+				name:    "invalid expression operator",
+				params:  `{"endpointOverrides":[{"matchExpressions":[{"key":"gpu","operator":"Near","values":["big"]}],"maxConcurrency":30}]}`,
+				wantErr: "invalid selector",
+			},
+			{
+				name:    "unknown field",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxRequests":30}]}`,
+				wantErr: "unknown field",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				handle := fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil })
+				_, err := ConcurrencyDetectorFactory("test", fwkplugin.StrictDecoder([]byte(tc.params)), handle)
+				if tc.wantErr == "" {
+					require.NoError(t, err)
+					return
+				}
+				require.ErrorContains(t, err, tc.wantErr)
+			})
+		}
+	})
+
+	t.Run("unset limit keeps the pool value", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := buildConfig(&apiConfig{
+			MaxConcurrency:      ptr.To[int64](10),
+			MaxTokenConcurrency: ptr.To[int64](1000),
+			EndpointOverrides: []apiEndpointOverride{{
+				LabelSelector:  metav1.LabelSelector{MatchLabels: map[string]string{"gpu": "big"}},
+				MaxConcurrency: ptr.To[int64](30),
+			}},
+		})
+		require.NoError(t, err)
+		require.Len(t, cfg.endpointOverrides, 1)
+		require.EqualValues(t, 30, cfg.endpointOverrides[0].maxConcurrency)
+		require.EqualValues(t, 1000, cfg.endpointOverrides[0].maxTokenConcurrency)
+	})
+
+	// Two hardware classes: "big" endpoints take 30 requests, every other endpoint takes 10.
+	cfg, err := buildConfig(&apiConfig{
+		MaxConcurrency:      ptr.To[int64](10),
+		MaxTokenConcurrency: ptr.To[int64](1000),
+		EndpointOverrides: []apiEndpointOverride{
+			{
+				LabelSelector:       metav1.LabelSelector{MatchLabels: map[string]string{"gpu": "big"}},
+				MaxConcurrency:      ptr.To[int64](30),
+				MaxTokenConcurrency: ptr.To[int64](3000),
+			},
+			// Also matches "big" endpoints; never selected because the first match applies.
+			{
+				LabelSelector:  metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "gpu", Operator: metav1.LabelSelectorOpExists}}},
+				MaxConcurrency: ptr.To[int64](1),
+			},
+		},
+	})
+	require.NoError(t, err)
+	bigLabels := map[string]string{"gpu": "big"}
+
+	t.Run("saturation sums per-endpoint capacity", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		ctx := t.Context()
+		d := newDetector("overrides", *cfg, logr.Discard())
+		small := newFakeEndpoint(reg, "small")
+		big := newFakeEndpoint(reg, "big")
+		big.GetMetadata().Labels = bigLabels
+
+		driveLoad(ctx, reg, d, "small", 5)
+		driveLoad(ctx, reg, d, "big", 15)
+		// 20 in flight over a capacity of 10 + 30.
+		require.InDelta(t, 0.5, d.Saturation(ctx, []datalayer.Endpoint{small, big}), 1e-9)
+
+		// Without the override the pool reads as 20 / 20.
+		plain := newDetector("plain", config{mode: modeRequests, maxConcurrency: 10, maxTokenConcurrency: 1000}, logr.Discard())
+		require.InDelta(t, 1.0, plain.Saturation(ctx, []datalayer.Endpoint{small, big}), 1e-9)
+	})
+
+	t.Run("hybrid saturation uses per-endpoint ratios", func(t *testing.T) {
+		t.Parallel()
+		hybrid := *cfg
+		hybrid.mode = modeHybrid
+		// Hybrid is the larger of the per-endpoint average and the aggregate ratio. With
+		// capacities 10 and 30 the two differ, and each case lets a different term win.
+		for _, tc := range []struct {
+			name       string
+			small, big int
+			want       float64
+		}{
+			// Average (1.0 + 0) / 2 = 0.5; aggregate 10 / 40 = 0.25.
+			{name: "small endpoint full", small: 10, big: 0, want: 0.5},
+			// Average (0 + 1.0) / 2 = 0.5; aggregate 30 / 40 = 0.75.
+			{name: "big endpoint full", small: 0, big: 30, want: 0.75},
+			// Average (0.5 + 0.5) / 2 = 0.5; aggregate 20 / 40 = 0.5.
+			{name: "both half full", small: 5, big: 15, want: 0.5},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				reg := newLocalRegistry()
+				ctx := t.Context()
+				d := newDetector("overrides-hybrid", hybrid, logr.Discard())
+				small := newFakeEndpoint(reg, "small")
+				big := newFakeEndpoint(reg, "big")
+				big.GetMetadata().Labels = bigLabels
+
+				driveLoad(ctx, reg, d, "small", tc.small)
+				driveLoad(ctx, reg, d, "big", tc.big)
+				require.InDelta(t, tc.want, d.Saturation(ctx, []datalayer.Endpoint{small, big}), 1e-9)
+			})
+		}
+	})
+
+	t.Run("hybrid saturation includes the aggregate token ratio", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		ctx := t.Context()
+		hybrid := *cfg
+		hybrid.mode = modeHybrid
+		d := newDetector("overrides-hybrid-tokens", hybrid, logr.Discard())
+		small := newFakeEndpoint(reg, "small")
+		big := newFakeEndpoint(reg, "big")
+		big.GetMetadata().Labels = bigLabels
+
+		// Three requests of 400 input tokens load 1000 tokens each: the big endpoint is
+		// full on tokens (3000 / 3000) and nearly idle on requests (3 / 30). The
+		// per-endpoint average is (0 + 1.0) / 2 = 0.5, the aggregate request ratio is
+		// 3 / 40, and the aggregate token ratio is 3000 / 4000.
+		reqs := make([]*fwksched.InferenceRequest, 3)
+		for i := range reqs {
+			reqs[i] = makeTokenRequest(fmt.Sprintf("t-%d", i), 400)
+		}
+		driveTokenLoad(ctx, reg, d, "big", reqs)
+		require.InDelta(t, 0.75, d.Saturation(ctx, []datalayer.Endpoint{small, big}), 1e-9)
+	})
+
+	t.Run("filter applies the matched limit", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		ctx := t.Context()
+		d := newDetector("overrides-filter", *cfg, logr.Discard())
+		small := newStubSchedulingEndpoint(reg, "small")
+		big := newStubSchedulingEndpoint(reg, "big")
+		big.metadata.Labels = bigLabels
+
+		driveLoad(ctx, reg, d, "small", 10)
+		driveLoad(ctx, reg, d, "big", 10)
+		kept := d.Filter(ctx, nil, []fwksched.Endpoint{small, big})
+		require.Len(t, kept, 1, "the small endpoint is at its limit, the big one has room")
+		require.Equal(t, "big", kept[0].GetMetadata().ID.Name)
+
+		driveLoad(ctx, reg, d, "big", 20)
+		kept = d.Filter(ctx, nil, []fwksched.Endpoint{small, big})
+		require.Len(t, kept, 2, "both at their limits: fail open returns every endpoint")
+	})
+
+	t.Run("token filter applies the matched limit", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		ctx := t.Context()
+		tokens := *cfg
+		tokens.mode = modeTokens
+		d := newDetector("overrides-tokens", tokens, logr.Discard())
+		small := newStubSchedulingEndpoint(reg, "small")
+		big := newStubSchedulingEndpoint(reg, "big")
+		big.metadata.Labels = bigLabels
+		// 1 input token loads 3 tokens, so 500 requests put 1500 tokens on each endpoint.
+		reqs := make([]*fwksched.InferenceRequest, 500)
+		for i := range reqs {
+			reqs[i] = makeTokenRequest(fmt.Sprintf("r-%d", i), 1)
+		}
+		driveTokenLoad(ctx, reg, d, "small", reqs)
+		driveTokenLoad(ctx, reg, d, "big", reqs)
+
+		kept := d.Filter(ctx, nil, []fwksched.Endpoint{small, big})
+		require.Len(t, kept, 1, "1500 tokens exceed the 1000 pool limit but fit the 3000 override")
+		require.Equal(t, "big", kept[0].GetMetadata().ID.Name)
+	})
+
+	t.Run("nil metadata uses the pool value", func(t *testing.T) {
+		t.Parallel()
+		d := newDetector("overrides-nil", *cfg, logr.Discard())
+		req, tok := d.capacityFor(nil)
+		require.EqualValues(t, 10, req)
+		require.EqualValues(t, 1000, tok)
+	})
+
+	t.Run("capacity gauge reports the evaluated sum per stage", func(t *testing.T) {
+		t.Parallel()
+		eppmetrics.Register()
+		reg := newLocalRegistry()
+		// A unique detector name isolates this test's gauge series from parallel tests.
+		const detectorName = "overrides-capacity-gauge"
+		d := newDetector(detectorName, *cfg, logr.Discard())
+		small := newFakeEndpoint(reg, "small")
+		big := newFakeEndpoint(reg, "big")
+		big.GetMetadata().Labels = bigLabels
+
+		d.Saturation(flowcontrol.WithSaturationStage(t.Context(), flowcontrol.SaturationStageDecode), []datalayer.Endpoint{small, big})
+		require.Equal(t, 40.0, capacityGaugeValue(t, detectorName, flowcontrol.SaturationStageDecode, "requests"))
+		require.Equal(t, -1.0, capacityGaugeValue(t, detectorName, flowcontrol.SaturationStageDecode, "tokens"),
+			"requests mode does not export the token unit")
+
+		d.Saturation(t.Context(), nil)
+		require.Equal(t, 0.0, capacityGaugeValue(t, detectorName, "", "requests"), "an empty pool reports zero capacity")
+
+		hybrid := *cfg
+		hybrid.mode = modeHybrid
+		hd := newDetector(detectorName+"-hybrid", hybrid, logr.Discard())
+		hd.Saturation(flowcontrol.WithSaturationStage(t.Context(), flowcontrol.SaturationStageDecode), []datalayer.Endpoint{small, big})
+		require.Equal(t, 40.0, capacityGaugeValue(t, detectorName+"-hybrid", flowcontrol.SaturationStageDecode, "requests"))
+		require.Equal(t, 4000.0, capacityGaugeValue(t, detectorName+"-hybrid", flowcontrol.SaturationStageDecode, "tokens"))
+	})
+}
+
+// capacityGaugeValue reads the llm_d_epp_flow_control_detector_capacity series for the given
+// detector, stage and unit. It returns -1 when the series is absent.
+func capacityGaugeValue(t *testing.T, detectorName, stage, unit string) float64 {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != "llm_d_epp_flow_control_detector_capacity" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			got := map[string]string{}
+			for _, l := range m.GetLabel() {
+				got[l.GetName()] = l.GetValue()
+			}
+			if got["detector"] == detectorName && got["stage"] == stage && got["unit"] == unit {
+				return m.GetGauge().GetValue()
+			}
+		}
+	}
+	return -1 // Series absent.
 }

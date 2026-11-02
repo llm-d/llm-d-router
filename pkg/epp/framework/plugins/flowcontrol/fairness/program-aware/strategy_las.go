@@ -26,7 +26,8 @@ import (
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -82,21 +83,25 @@ func (s *lasState) AddService(cost float64, now time.Time, halfLifeSeconds float
 	return s.attainedService
 }
 
-var attainedServiceTokens = prometheus.NewGaugeVec(
-	prometheus.GaugeOpts{
-		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-		Name:      "program_aware_attained_service_tokens",
-		Help:      metricsutil.HelpMsgWithStability("Time-decayed attained service (weighted tokens consumed) per program.", compbasemetrics.ALPHA),
-	},
-	[]string{"program_id"},
-)
+func newAttainedServiceCollector(labels prometheus.Labels) *prometheus.GaugeVec {
+	return prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem:   eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:        "program_aware_attained_service_tokens",
+			Help:        metricsutil.HelpMsgWithStability("Time-decayed attained service (weighted tokens consumed) per program.", compbasemetrics.ALPHA),
+			ConstLabels: labels,
+		},
+		[]string{"program_id"},
+	)
+}
 
 var _ Strategy = &LASStrategy{}
 
 type LASStrategy struct {
-	weightService   float64
-	weightHeadWait  float64
-	halfLifeSeconds float64
+	weightService         float64
+	weightHeadWait        float64
+	halfLifeSeconds       float64
+	attainedServiceTokens *prometheus.GaugeVec
 
 	state sync.Map // key: program ID (string), value: *lasState
 }
@@ -181,23 +186,35 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) flowcontrol.FlowQ
 
 func (s *LASStrategy) OnPreRequest(_ *ProgramMetrics, _ *fwksched.InferenceRequest) {}
 
-func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrc.Response) {
+func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrh.Response) {
 	if request == nil || response == nil {
 		return
 	}
 	promptTokens := int64(response.Usage.PromptTokens)
 	completionTokens := int64(response.Usage.CompletionTokens)
+	if completionTokens <= 0 && response.StreamedEvents > 0 {
+		completionTokens = int64(response.StreamedEvents)
+		// The token producer runs after flow control, so the plugin cannot declare
+		// TokenizedPrompt as a dependency. At end of stream the body carries its count when one ran.
+		if promptTokens <= 0 && request.Body != nil {
+			promptTokens = int64(request.Body.TokenizedRequest.TokenCount())
+		}
+	}
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	id := programIDFor(request)
 	service := s.getOrCreateState(id).AddService(cost, time.Now(), s.halfLifeSeconds)
-	attainedServiceTokens.WithLabelValues(id).Set(service)
+	setProgramGauge(s.attainedServiceTokens, id, service)
 }
 
 func (s *LASStrategy) EvictProgram(id string) {
 	s.state.Delete(id)
-	attainedServiceTokens.DeleteLabelValues(id)
+	if s.attainedServiceTokens != nil {
+		s.attainedServiceTokens.DeleteLabelValues(id)
+	}
 }
 
 func (s *LASStrategy) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{attainedServiceTokens}
+	return []prometheus.Collector{s.attainedServiceTokens}
 }
+
+func (s *LASStrategy) Consumes() plugin.DataDependencies { return plugin.DataDependencies{} }

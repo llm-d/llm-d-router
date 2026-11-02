@@ -29,10 +29,12 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -76,7 +78,7 @@ func failFrom(f *EndpointHealthFilter, name, address, served string) {
 		}}
 	}
 	f.ResponseHeader(context.Background(), nil,
-		&fwkrc.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: "502"}, ReqMetadata: reqMetadata},
+		&fwkrh.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: "502"}, ReqMetadata: reqMetadata},
 		&fwkdl.EndpointMetadata{ID: id(name), Address: address, Port: "8000"})
 }
 
@@ -105,11 +107,341 @@ func newTestFilter(t *testing.T, params parameters) (*EndpointHealthFilter, *tes
 
 func respond(f *EndpointHealthFilter, name string, status string) {
 	f.ResponseHeader(context.Background(), nil,
-		&fwkrc.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: status}},
+		&fwkrh.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: status}},
 		&fwkdl.EndpointMetadata{ID: id(name)})
 }
 
 func intPtr(v int) *int { return &v }
+
+// pdRequest returns a request whose scheduling picked decode as the primary
+// target and prefill as the prefill target, named on the prefill routing
+// header the way the disagg profile handler sets it.
+func pdRequest(decode, prefill *fwkdl.EndpointMetadata) *fwksched.InferenceRequest {
+	decodeEndpoint := fwksched.NewEndpoint(decode, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	prefillEndpoint := fwksched.NewEndpoint(prefill, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	request := &fwksched.InferenceRequest{Headers: map[string]string{}}
+	routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, hostPort(prefill))
+	request.SchedulingResult = &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{decodeEndpoint}},
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefillEndpoint}},
+		},
+	}
+	return request
+}
+
+// pdRespond delivers a response for a P/D request: target is the decode
+// endpoint the EPP picked, and stage is the failed stage marked on the
+// response, or empty when the response marks none.
+func pdRespond(f *EndpointHealthFilter, request *fwksched.InferenceRequest,
+	target *fwkdl.EndpointMetadata, status, stage string) {
+	headers := map[string]string{reqcommon.PseudoHeaderStatus: status}
+	if stage != "" {
+		headers[routing.FailedStageHeader] = stage
+	}
+	f.ResponseHeader(context.Background(), request, &fwkrh.Response{Headers: headers}, target)
+}
+
+// TestPrefillFailureChargesPrefillEndpoint covers a failed prefill relayed by
+// the decode endpoint: the marker names the prefill stage, so the failure run
+// is charged to the prefill endpoint and the decode endpoint stays healthy.
+func TestPrefillFailureChargesPrefillEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{ResponseFailureThreshold: intPtr(3)})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 2 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"two failures are below the threshold")
+
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the third failure ejects the prefill endpoint, and the decode endpoint stays healthy")
+}
+
+// TestUnmarkedFailureOnPrefilledRequestChargesNoEndpoint covers a sidecar that
+// predates the failed-stage header, which writes no marker: a failed response
+// for a request that ran prefill is charged to no endpoint, because the status
+// can be either stage's.
+func TestUnmarkedFailureOnPrefilledRequestChargesNoEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 10 {
+		pdRespond(f, request, decode, "503", "")
+	}
+	assert.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// TestEncodeFailureChargesNoEndpoint covers a stage marker the filter cannot
+// attribute to one endpoint.
+func TestEncodeFailureChargesNoEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 10 {
+		pdRespond(f, request, decode, "503", routing.StageEncode)
+	}
+	assert.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// TestDisaggregatedSuccessChargesDecodeEndpoint covers a successful response
+// for a request that ran prefill: it resets the decode endpoint's failure run,
+// as a decode-only success does. Marked StageNone, it does not reset the
+// prefill endpoint's, because the prefill stage did not complete before the
+// response: shared-storage decode-first and concurrent dispatch can answer
+// before prefill.
+func TestDisaggregatedSuccessChargesDecodeEndpoint(t *testing.T) {
+	f, clock := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 4 {
+		failFrom(f, "decode", "10.0.0.1", "")
+	}
+	pdRespond(f, request, decode, "200", "")
+	for range 4 {
+		failFrom(f, "decode", "10.0.0.1", "")
+	}
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the success reset the decode endpoint's failure run")
+
+	failFrom(f, "decode", "10.0.0.1", "")
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the run continues from zero after the reset")
+
+	// Let the decode endpoint's ejection expire before the prefill sequence.
+	clock.advance(31 * time.Second)
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the decode endpoint's ejection expired")
+
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	for range 10 {
+		pdRespond(f, request, decode, "200", routing.StageNone)
+	}
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)),
+		"StageNone successes do not reset the prefill endpoint's failure run")
+}
+
+// TestPrefilledSuccessResetsPrefillRun covers a response marked
+// StageNonePrefilled: the prefill stage completed, so the prefill endpoint's
+// failure run resets, as a success resets the decode endpoint's.
+func TestPrefilledSuccessResetsPrefillRun(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	pdRespond(f, request, decode, "200", routing.StageNonePrefilled)
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the completed prefill reset the prefill endpoint's failure run")
+
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the run continues from zero after the reset")
+}
+
+// TestPrefilledSuccessResetsPrefillBackoff covers the ejection backoff of a
+// prefill endpoint: each ejection without a completed prefill in between lasts
+// longer, and a completed prefill resets it.
+func TestPrefilledSuccessResetsPrefillBackoff(t *testing.T) {
+	f, clock := newTestFilter(t, parameters{
+		EjectionDuration:    durationPtr(time.Minute),
+		MaxEjectionDuration: durationPtr(5 * time.Minute),
+	})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+	excludedFor := func() time.Duration {
+		t.Helper()
+		for range 5 {
+			pdRespond(f, request, decode, "503", routing.StagePrefill)
+		}
+		start := clock.now()
+		for len(f.Filter(context.Background(), nil, candidates)) < len(candidates) {
+			clock.advance(time.Second)
+		}
+		return clock.now().Sub(start)
+	}
+
+	assert.Equal(t, time.Minute, excludedFor())
+	assert.Equal(t, 2*time.Minute, excludedFor(), "StageNone successes in between keep the backoff")
+
+	pdRespond(f, request, decode, "200", routing.StageNone)
+	assert.Equal(t, 3*time.Minute, excludedFor(), "a StageNone success does not reset the backoff")
+
+	pdRespond(f, request, decode, "200", routing.StageNonePrefilled)
+	assert.Equal(t, time.Minute, excludedFor(), "a completed prefill resets the backoff")
+}
+
+// TestPrefilledDecodeFailureChargesBothEndpoints covers a decode failure the
+// sidecar learned of after writing the response, on a request whose prefill
+// completed: the failure is charged to the decode endpoint, and the prefill
+// endpoint's failure run still resets.
+func TestPrefilledDecodeFailureChargesBothEndpoints(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	for range 5 {
+		pdRespond(f, request, decode, "503", routing.StageNonePrefilled)
+	}
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the decode endpoint is ejected")
+
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the completed prefills reset the prefill endpoint's run, so one more failure does not eject it")
+}
+
+// TestNoneMarkerChargesDecodeEndpoint covers a failed response that carries the
+// no-stage marker from a sidecar that marks every response: with prefill and
+// encode failures always marked, an unmarked-by-stage failure is the decode
+// endpoint's, so it is charged to the picked endpoint.
+func TestNoneMarkerChargesDecodeEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 5 {
+		pdRespond(f, request, decode, "502", routing.StageNone)
+	}
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the decode endpoint is ejected and the prefill endpoint stays healthy")
+}
+
+// TestDecodeStageMarkerChargesDecodeEndpoint covers a decode failure the sidecar
+// marked, which only the concurrent-dispatch decode abort produces: it is
+// charged to the picked endpoint like an unmarked decode failure.
+func TestDecodeStageMarkerChargesDecodeEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 5 {
+		pdRespond(f, request, decode, "502", routing.StageDecode)
+	}
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// TestMarkedResponseOutsideFailureCodesResetsNothing covers a marked response
+// whose status is outside responseFailureCodes, such as the 504 of a prefill
+// KV-wait timeout: it is neither a failure nor a reset for any endpoint.
+func TestMarkedResponseOutsideFailureCodesResetsNothing(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 10 {
+		pdRespond(f, request, decode, "504", routing.StagePrefill)
+	}
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"a status outside the failure codes ejects no endpoint")
+
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	for range 10 {
+		pdRespond(f, request, decode, "504", routing.StagePrefill)
+	}
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)),
+		"a status outside the failure codes does not reset the failure run")
+}
+
+// TestMarkerIgnoredWithoutDisaggregatedStage covers a pool without the sidecar,
+// where a model-server-set marker reaches the EPP untouched: the marker is
+// ignored and the failure charges the picked endpoint.
+func TestMarkerIgnoredWithoutDisaggregatedStage(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	// A request with a scheduling result but no prefill or encoder target.
+	request := &fwksched.InferenceRequest{Headers: map[string]string{}}
+	request.SchedulingResult = &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {TargetEndpoints: []fwksched.Endpoint{
+				fwksched.NewEndpoint(decode, fwkdl.NewMetrics(), fwkdl.NewAttributes()),
+			}},
+		},
+	}
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1")}
+
+	for _, stage := range []string{routing.StagePrefill, routing.StageEncode, routing.StageDecode} {
+		for range 5 {
+			pdRespond(f, request, decode, "503", stage)
+		}
+	}
+	// The only candidate is ejected, so fail-open keeps it; the ejection
+	// counter is the observable.
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)))
+	assert.InDelta(t, 1, counterValue(t, ejections, "health", reasonResponse), 0,
+		"markers on a request that ran no disaggregated stage are ignored")
+}
+
+// TestPrefillMarkerWithoutMatchingEndpoint covers a prefill marker whose
+// address matches no scheduled endpoint, such as a prefill pod that left the
+// pool: no endpoint is charged.
+func TestPrefillMarkerWithoutMatchingEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{ResponseFailureThreshold: intPtr(1)})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	request.Headers[routing.PrefillEndpointHeader] = "10.0.0.9:8000"
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// TestMixedRoleCandidates covers the filter running before a role filter, on
+// candidates of both roles: a healthy candidate of one role keeps fail-open
+// from rescuing an ejected endpoint of the other role. This is why a
+// disaggregated profile narrows the candidates by role before this filter.
+func TestMixedRoleCandidates(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	for range 5 {
+		failFrom(f, "decode", "10.0.0.1", "")
+	}
+	candidates := []fwksched.Endpoint{endpointAt("prefill", "10.0.0.2"), endpointAt("decode", "10.0.0.1")}
+
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
 
 func TestFactory(t *testing.T) {
 	tests := []struct {
@@ -129,13 +461,14 @@ func TestFactory(t *testing.T) {
 				responseFailureCodes:     map[int]struct{}{502: {}, 503: {}},
 				ejectionDuration:         30 * time.Second,
 				maxEjectionDuration:      5 * time.Minute,
+				maxEjectionPercent:       100,
 			},
 		},
 		{
 			name: "all parameters",
 			params: `{"pollSource": "vllm-metrics", "pollFailureThreshold": 5, "pollFailureDuration": "30s",
 				"responseFailureThreshold": 2, "responseFailureCodes": [500, 502],
-				"ejectionDuration": "1m", "maxEjectionDuration": "10m"}`,
+				"ejectionDuration": "1m", "maxEjectionDuration": "10m", "maxEjectionPercent": 34}`,
 			want: config{
 				pollSource:               "vllm-metrics",
 				pollFailureThreshold:     5,
@@ -144,6 +477,7 @@ func TestFactory(t *testing.T) {
 				responseFailureCodes:     map[int]struct{}{500: {}, 502: {}},
 				ejectionDuration:         time.Minute,
 				maxEjectionDuration:      10 * time.Minute,
+				maxEjectionPercent:       34,
 			},
 		},
 		{
@@ -155,6 +489,7 @@ func TestFactory(t *testing.T) {
 				pollFailureDuration:  10 * time.Second,
 				responseFailureCodes: map[int]struct{}{502: {}, 503: {}},
 				maxEjectionDuration:  5 * time.Minute,
+				maxEjectionPercent:   100,
 			},
 		},
 		{name: "malformed", params: `{"pollFailureThreshold": "three"}`, wantErr: "failed to parse"},
@@ -167,6 +502,8 @@ func TestFactory(t *testing.T) {
 		{name: "empty codes", params: `{"responseFailureCodes": []}`, wantErr: "responseFailureCodes must not be empty"},
 		{name: "zero ejection", params: `{"ejectionDuration": "0s"}`, wantErr: "ejectionDuration must be positive"},
 		{name: "max below base", params: `{"ejectionDuration": "1m", "maxEjectionDuration": "30s"}`, wantErr: "must be at least ejectionDuration"},
+		{name: "zero max ejection percent", params: `{"maxEjectionPercent": 0}`, wantErr: "maxEjectionPercent must be between 1 and 100, got 0"},
+		{name: "max ejection percent above 100", params: `{"maxEjectionPercent": 101}`, wantErr: "maxEjectionPercent must be between 1 and 100, got 101"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -326,6 +663,161 @@ func TestResponseEjectionCountsOnlyConsecutiveFailures(t *testing.T) {
 	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)))
 }
 
+// grpcRespond delivers the end of a gRPC response stream whose grpc-status
+// the director wrote onto the response headers, mapped to no HTTP status:
+// the filter classifies it by the HTTP status the code corresponds to.
+func grpcRespond(f *EndpointHealthFilter, name, grpcStatus string) {
+	f.ResponseBody(context.Background(), nil,
+		&fwkrh.Response{
+			Headers: map[string]string{
+				reqcommon.HeaderContentType: grpcframe.MediaType,
+				grpcframe.HeaderStatus:      grpcStatus,
+			},
+			EndOfStream: true,
+		},
+		&fwkdl.EndpointMetadata{ID: id(name)})
+}
+
+// grpcHeaders delivers a gRPC response's headers. The stream's status is not
+// final yet, so the headers alone must charge nothing.
+func grpcHeaders(f *EndpointHealthFilter, name, grpcStatus string) {
+	headers := map[string]string{
+		reqcommon.PseudoHeaderStatus: "200",
+		reqcommon.HeaderContentType:  grpcframe.MediaType,
+	}
+	if grpcStatus != "" {
+		headers[grpcframe.HeaderStatus] = grpcStatus
+	}
+	f.ResponseHeader(context.Background(), nil,
+		&fwkrh.Response{Headers: headers},
+		&fwkdl.EndpointMetadata{ID: id(name)})
+}
+
+// A gRPC failure ejected at the end of the stream: UNAVAILABLE maps to 503,
+// which the default responseFailureCodes count.
+func TestGRPCFailureEjectsAtEndOfStream(t *testing.T) {
+	f, clock := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+	filter := func() []string { return names(f.Filter(context.Background(), nil, candidates)) }
+
+	for range 4 {
+		grpcRespond(f, "b", "14")
+	}
+	require.Equal(t, []string{"a", "b"}, filter(), "four failures are below the threshold")
+
+	grpcRespond(f, "b", "14")
+	require.Equal(t, []string{"a"}, filter(), "the fifth consecutive failure ejects")
+
+	clock.advance(30 * time.Second)
+	require.Equal(t, []string{"a", "b"}, filter(), "the ejection ends after ejectionDuration")
+}
+
+// A gRPC response's headers carry :status 200 whatever the stream's outcome,
+// and the grpc-status of a trailers-only response is final only once the
+// stream ends, so header delivery charges neither a failure nor a reset.
+func TestGRPCResponseHeadersChargeNothing(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "b", "14")
+	}
+	for range 10 {
+		grpcHeaders(f, "a", "")
+		grpcHeaders(f, "b", "")
+		grpcHeaders(f, "b", "14")
+	}
+	grpcRespond(f, "b", "14")
+	assert.Equal(t, []string{"a"}, names(f.Filter(context.Background(), nil, candidates)),
+		"header deliveries neither eject nor reset the failure run")
+}
+
+// A gRPC stream that ends OK resets the failure run, like an HTTP 200.
+func TestGRPCSuccessResetsFailureRun(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	grpcRespond(f, "a", grpcframe.StatusOK)
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// A gRPC status outside responseFailureCodes behaves like the HTTP status it
+// maps to: INVALID_ARGUMENT maps to 400, which resets the failure run.
+func TestGRPCStatusOutsideFailureCodesResetsRun(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	grpcRespond(f, "a", "3")
+	for range 4 {
+		grpcRespond(f, "a", "14")
+	}
+	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// A gRPC stream that ends without a status the EPP could see, such as a
+// disconnect before the trailers arrived, and a stream still in progress
+// both count nothing.
+// A gRPC response Envoy served from a fallback endpoint says nothing about the
+// endpoint the EPP picked, so its status neither charges nor resets the target.
+func TestGRPCResponsesServedByAnotherEndpointAreIgnored(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpointAt("a", "10.0.0.1"), endpointAt("b", "10.0.0.2")}
+	respondFrom := func(served, grpcStatus string) {
+		f.ResponseBody(context.Background(), nil,
+			&fwkrh.Response{
+				Headers: map[string]string{
+					reqcommon.HeaderContentType: grpcframe.MediaType,
+					grpcframe.HeaderStatus:      grpcStatus,
+				},
+				EndOfStream: true,
+				ReqMetadata: map[string]any{metadata.DestinationEndpointNamespace: map[string]any{
+					metadata.DestinationEndpointServedKey: served,
+				}},
+			},
+			&fwkdl.EndpointMetadata{ID: id("a"), Address: "10.0.0.1", Port: "8000"})
+	}
+
+	for range 5 {
+		respondFrom("10.0.0.2:8000", "14")
+	}
+	assert.Equal(t, []string{"a", "b"}, names(f.Filter(context.Background(), nil, candidates)),
+		"failures served by a fallback endpoint do not count toward the target")
+
+	for range 5 {
+		respondFrom("10.0.0.1:8000", "14")
+	}
+	assert.Equal(t, []string{"b"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+func TestGRPCStreamWithoutStatusCountsNothing(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)}
+
+	for range 4 {
+		grpcRespond(f, "b", "14")
+	}
+	// An intermediate chunk of a gRPC stream.
+	f.ResponseBody(context.Background(), nil,
+		&fwkrh.Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}},
+		&fwkdl.EndpointMetadata{ID: id("b")})
+	// The stream ends with no grpc-status the EPP saw.
+	f.ResponseBody(context.Background(), nil,
+		&fwkrh.Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}, EndOfStream: true},
+		&fwkdl.EndpointMetadata{ID: id("b")})
+	grpcRespond(f, "b", "14")
+	assert.Equal(t, []string{"a"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the status-less end neither ejects nor resets the failure run")
+}
+
 func TestResponseEjectionBackoff(t *testing.T) {
 	f, clock := newTestFilter(t, parameters{
 		EjectionDuration:    durationPtr(time.Minute),
@@ -460,7 +952,7 @@ func TestResponseHealthDisabled(t *testing.T) {
 		respond(f, "b", "502")
 	}
 	f.ResponseHeader(context.Background(), nil, nil, &fwkdl.EndpointMetadata{ID: id("b")})
-	f.ResponseHeader(context.Background(), nil, &fwkrc.Response{}, nil)
+	f.ResponseHeader(context.Background(), nil, &fwkrh.Response{}, nil)
 	assert.Equal(t, []string{"a", "b"},
 		names(f.Filter(context.Background(), nil, []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil)})))
 }
@@ -516,7 +1008,7 @@ func TestTransitionsLogOnceAtInfo(t *testing.T) {
 	assert.Contains(t, lines[1], "polls recovered")
 
 	for range 8 {
-		f.ResponseHeader(ctx, nil, &fwkrc.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: "502"}},
+		f.ResponseHeader(ctx, nil, &fwkrh.Response{Headers: map[string]string{reqcommon.PseudoHeaderStatus: "502"}},
 			&fwkdl.EndpointMetadata{ID: id("b")})
 	}
 	require.Len(t, lines, 3)
@@ -607,4 +1099,61 @@ func TestIncidentReplay(t *testing.T) {
 			assert.Len(t, f.Filter(context.Background(), nil, candidates()), 4)
 		})
 	}
+}
+
+// TestOneCallerCannotEjectMostOfThePool replays issue 4427: three working
+// endpoints, with 500 counted as a failure, and one caller whose requests
+// every engine answers with 500. Without a cap the caller ejects two of the
+// three endpoints, and every other request goes to the one left.
+func TestOneCallerCannotEjectMostOfThePool(t *testing.T) {
+	codes := []int{500, 502, 503}
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil), endpoint("c", nil)}
+	failAAndB := func(f *EndpointHealthFilter) []string {
+		f.Filter(context.Background(), nil, candidates)
+		for _, name := range []string{"a", "b"} {
+			for range 5 {
+				respond(f, name, "500")
+			}
+		}
+		return names(f.Filter(context.Background(), nil, candidates))
+	}
+
+	f, _ := newTestFilter(t, parameters{ResponseFailureCodes: codes})
+	require.Equal(t, []string{"c"}, failAAndB(f), "without a cap two of three endpoints are ejected")
+
+	f, clock := newTestFilter(t, parameters{ResponseFailureCodes: codes, MaxEjectionPercent: intPtr(50)})
+	require.Equal(t, []string{"b", "c"}, failAAndB(f), "50% of three endpoints caps the ejections at one")
+	assert.InDelta(t, 1, counterValue(t, ejections, "health", reasonResponse), 0)
+
+	clock.advance(30 * time.Second)
+	require.Equal(t, []string{"a", "b", "c"}, names(f.Filter(context.Background(), nil, candidates)))
+	respond(f, "b", "500")
+	assert.Equal(t, []string{"a", "c"}, names(f.Filter(context.Background(), nil, candidates)),
+		"a failure run held back by the cap ejects on its next failure once the cap allows")
+}
+
+func TestMaxEjectionPercentAlwaysAllowsOne(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{MaxEjectionPercent: intPtr(1)})
+	candidates := []fwksched.Endpoint{endpoint("a", nil), endpoint("b", nil), endpoint("c", nil)}
+	f.Filter(context.Background(), nil, candidates)
+	for _, name := range []string{"a", "b"} {
+		for range 5 {
+			respond(f, name, "502")
+		}
+	}
+	assert.Equal(t, []string{"b", "c"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+func TestMaxEjectionPercentIgnoresPollHealth(t *testing.T) {
+	f, clock := newTestFilter(t, parameters{MaxEjectionPercent: intPtr(50)})
+	since := clock.now().Add(-time.Minute)
+	candidates := []fwksched.Endpoint{endpoint("a", failing(5, since)), endpoint("b", nil), endpoint("c", nil), endpoint("d", nil)}
+	f.Filter(context.Background(), nil, candidates)
+	for _, name := range []string{"b", "c"} {
+		for range 5 {
+			respond(f, name, "502")
+		}
+	}
+	assert.Equal(t, []string{"d"}, names(f.Filter(context.Background(), nil, candidates)),
+		"an endpoint marked unhealthy by poll health does not count toward the cap")
 }

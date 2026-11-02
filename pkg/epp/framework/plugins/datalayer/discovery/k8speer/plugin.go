@@ -137,6 +137,9 @@ func Factory(name string, parameters *json.Decoder, handle fwkplugin.Handle) (fw
 
 func (p *Plugin) TypedName() fwkplugin.TypedName { return p.typedName }
 
+// Namespace returns the namespace watched for peer Pods.
+func (p *Plugin) Namespace() string { return p.namespace }
+
 // RegisterDependencies registers the Pod notification source used for peer
 // discovery. The datalayer runtime owns the Kubernetes watch and dispatches
 // deep-copied Pod events to the extractor.

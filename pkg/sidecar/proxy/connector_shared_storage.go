@@ -30,7 +30,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 const finishReasonCacheThreshold = "cache_threshold"
@@ -56,16 +56,16 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 		attemptStart := time.Now()
 		attemptWriter, attemptStatus := captureResponseStatus(w)
 		attemptReturned := false
-		defer recordDecodeAbort(&attemptReturned, attemptStart)
+		defer recordDecodeAbort(r.Context(), &attemptReturned, attemptStart)
 		_, _ = toolFields.compareValidatedDispatched(original)
 		needsPrefill, err := s.tryDecode(attemptWriter, decodeReq, body)
 		attemptReturned = true
 		// An attempt that falls back to prefill is not sampled; the decode after
 		// prefill is this request's decode stage.
 		if !needsPrefill {
-			metrics.RecordDecodeDuration(time.Since(attemptStart))
+			observeStageDuration(r.Context(), routing.StageDecode, time.Since(attemptStart))
 			if err != nil || attemptStatus.failed() {
-				metrics.RecordError(metrics.StageDecode)
+				observeStageError(r.Context(), routing.StageDecode)
 			}
 		}
 		if err != nil {
@@ -89,7 +89,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	body[reqcommon.FieldCacheHitThreshold] = 0
 	decodeRequestBody, err := json.Marshal(body)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send Invalid JSON error response to client")
 		}
 		return
@@ -99,13 +99,13 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	decodeStart := time.Now()
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
-	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	_, _ = toolFields.compareValidatedDispatched(decodeRequestBody)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
 	decodeReturned = true
-	metrics.RecordDecodeDuration(time.Since(decodeStart))
+	observeStageDuration(r.Context(), routing.StageDecode, time.Since(decodeStart))
 	if decodeStatus.failed() {
-		metrics.RecordError(metrics.StageDecode)
+		observeStageError(r.Context(), routing.StageDecode)
 	}
 }
 
@@ -145,7 +145,7 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 	if err := json.Unmarshal(dw.buffer.Bytes(), &response); err != nil {
 		logger.Error(jsonErrorForLog(err), "failed to unmarshal decode response", logBodyBytesKey, dw.buffer.Len())
 
-		if err := errorInternalServerError(err, w); err != nil {
+		if err := errorInternalServerError(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return false, err
@@ -253,7 +253,7 @@ func (s *Server) hasCacheThresholdFinishReason(response map[string]any) bool {
 		}
 	}
 
-	choices, ok := response[responseFieldChoices].([]any)
+	choices, ok := response[reqcommon.FieldChoices].([]any)
 	if !ok || len(choices) == 0 {
 		return false
 	}
@@ -263,7 +263,7 @@ func (s *Server) hasCacheThresholdFinishReason(response map[string]any) bool {
 		if !ok {
 			continue
 		}
-		finishReason, ok := choice[responseFieldFinishReason].(string)
+		finishReason, ok := choice[reqcommon.FieldFinishReason].(string)
 		if ok && finishReason == finishReasonCacheThreshold {
 			return true
 		}
@@ -277,14 +277,16 @@ func (s *Server) checkBufferedResponseForCacheThreshold(logger logr.Logger, data
 	// Parse SSE format: "data: {...json...}\n\ndata: {...json...}\n\n"
 	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || line == reqcommon.SSEDone || !strings.HasPrefix(line, reqcommon.SSEDataPrefix) {
+		if line == "" {
 			continue
 		}
-
-		jsonData := strings.TrimPrefix(line, reqcommon.SSEDataPrefix)
+		jsonData, ok := reqcommon.SSEDataPayload([]byte(line))
+		if !ok || len(jsonData) == 0 || reqcommon.SSEIsDone(jsonData) {
+			continue
+		}
 		var response map[string]any
-		if err := json.Unmarshal([]byte(jsonData), &response); err != nil {
-			logger.V(logging.DEBUG).Info("skipping malformed SSE chunk", "chunk", jsonData)
+		if err := json.Unmarshal(jsonData, &response); err != nil {
+			logger.V(logging.DEBUG).Info("skipping malformed SSE chunk", "chunk", string(jsonData))
 			continue
 		}
 
@@ -304,7 +306,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 
 	pbody, err := json.Marshal(body)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send Invalid JSON error response to client")
 		}
 		return err
@@ -313,7 +315,8 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		logger.Error(err, "failed to create prefill handler")
+		if err := errorBadGateway(w, r); err != nil {
 			logger.Error(err, "failed to send Bad Gateway error response to client")
 		}
 		return err
@@ -324,11 +327,26 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 	pw := &bufferedResponseWriter{}
 	prefillStart := time.Now()
 	_, _ = toolFields.compareValidatedDispatched(pbody)
-	prefillHandler.ServeHTTP(pw, preq)
-	metrics.RecordPrefillDuration(time.Since(prefillStart))
+	prefillErr := servePrefill(prefillHandler, pw, preq)
+	observeStageDuration(r.Context(), routing.StagePrefill, time.Since(prefillStart))
+
+	if prefillErr != nil {
+		// The reverse proxy also aborts the prefill body copy when the client
+		// disconnects, which is not a prefill failure.
+		if preq.Context().Err() != nil {
+			logger.V(logging.DEFAULT).Info("client disconnected during prefill")
+			return prefillErr
+		}
+		observeStageError(r.Context(), routing.StagePrefill)
+		logger.Error(prefillErr, "prefill request failed", "status", pw.statusCode)
+		if err := errorBadGateway(w, r); err != nil {
+			logger.Error(err, "failed to send Bad Gateway error response to client")
+		}
+		return prefillErr
+	}
 
 	if isHTTPError(pw.statusCode) {
-		metrics.RecordError(metrics.StagePrefill)
+		observeStageError(r.Context(), routing.StagePrefill)
 		logger.Error(nil, "prefill request failed", "code", pw.statusCode)
 		maps.Copy(w.Header(), pw.headers)
 		w.WriteHeader(pw.statusCode)

@@ -17,20 +17,19 @@ limitations under the License.
 package redis
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/google/uuid"
 	goredis "github.com/redis/go-redis/v9"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -38,20 +37,20 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/internal/crossreplica"
 )
 
 const (
 	RedisSyncerType        = "redis-syncer"
 	defaultAddress         = "localhost:6379"
-	defaultStateTTL        = 2 * time.Second
 	defaultCoordinationTTL = 180 * time.Second
-	minimumTTL             = time.Millisecond
 	batchSize              = 100
 	batchConcurrency       = 8
 )
 
 var _ fwkdl.CrossReplicaSyncer = (*RedisSyncer)(nil)
 var _ fwkdl.CrossReplicaBatchSyncer = (*RedisSyncer)(nil)
+var _ fwkdl.CrossReplicaPeerReader = (*RedisSyncer)(nil)
 
 type redisConfig struct {
 	Address         string `json:"address"`
@@ -77,7 +76,9 @@ type RedisSyncer struct {
 }
 
 type aggregateCacheEntry struct {
-	value any
+	value   any // nil when peers == 0
+	peers   int
+	version uint64
 }
 
 func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, error) {
@@ -88,8 +89,8 @@ func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, erro
 	if err != nil {
 		return 0, fmt.Errorf("redis-syncer: invalid %s %q: %w", name, raw, err)
 	}
-	if ttl < minimumTTL {
-		return 0, fmt.Errorf("redis-syncer: %s must be at least %s, got %s", name, minimumTTL, ttl)
+	if ttl < crossreplica.MinimumDuration {
+		return 0, fmt.Errorf("redis-syncer: %s must be at least %s, got %s", name, crossreplica.MinimumDuration, ttl)
 	}
 	return ttl, nil
 }
@@ -130,7 +131,7 @@ func RedisSyncerFactory(name string, params *json.Decoder, handle fwkplugin.Hand
 		cfg.Address = defaultAddress
 	}
 
-	stateTTL, err := parseTTL("stateTTL", cfg.StateTTL, defaultStateTTL)
+	stateTTL, err := parseTTL("stateTTL", cfg.StateTTL, crossreplica.DefaultStateTTL)
 	if err != nil {
 		return nil, err
 	}
@@ -180,39 +181,12 @@ func (s *RedisSyncer) coordKey(key fwkdl.StateKey, id string) string {
 	return "coord:" + string(key) + ":" + id
 }
 
-func encodeValue(value any) ([]byte, error) {
-	if value == nil {
-		return nil, errors.New("cannot encode nil value")
-	}
-
-	var buf bytes.Buffer
-	encoder := gob.NewEncoder(&buf)
-	if err := encoder.Encode(value); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func gobDecode(data []byte, prototype any) (any, error) {
-	if prototype == nil {
-		return nil, errors.New("cannot decode stored value without a type prototype")
-	}
-
-	decoder := gob.NewDecoder(bytes.NewReader(data))
-	valueType := reflect.TypeOf(prototype)
-	target := reflect.New(valueType)
-	if err := decoder.Decode(target.Interface()); err != nil {
-		return nil, err
-	}
-	return target.Elem().Interface(), nil
-}
-
 // set publishes this replica's value and prepares the peer aggregate returned
 // by get.
 func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
 	logger := ctrl.LoggerFrom(ctx)
 
-	data, err := encodeValue(value)
+	data, err := crossreplica.EncodeValue(value)
 	if err != nil {
 		return fmt.Errorf("redis-syncer: encode: %w", err)
 	}
@@ -239,15 +213,24 @@ func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID st
 	return nil
 }
 
+// cachePeerAggregate replaces the cached peer aggregate for hashKey. When no
+// peer raw value changed since the last call, it keeps the cached entry and
+// decodes nothing.
 func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, value any, raw map[string]string, aggregate func([]any) any) int {
 	logger := ctrl.LoggerFrom(ctx)
+	fields := slices.Sorted(maps.Keys(raw))
+	version := s.peerVersion(fields, raw)
+	if cached, ok := s.cache.Load(hashKey); ok && cached.(*aggregateCacheEntry).version == version {
+		return cached.(*aggregateCacheEntry).peers
+	}
+
 	remoteValues := make([]any, 0, len(raw))
-	for _, field := range slices.Sorted(maps.Keys(raw)) {
+	for _, field := range fields {
 		if field == s.replicaID {
 			continue
 		}
 		encoded := raw[field]
-		remoteValue, err := gobDecode([]byte(encoded), value)
+		remoteValue, err := crossreplica.DecodeValue([]byte(encoded), value)
 		if err != nil {
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
 				v.Info("redis-syncer: decode error", "field", field, "error", err)
@@ -257,13 +240,36 @@ func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, va
 		remoteValues = append(remoteValues, remoteValue)
 	}
 
-	if len(remoteValues) == 0 {
-		s.cache.Delete(hashKey)
-	} else {
-		s.cache.Store(hashKey, &aggregateCacheEntry{value: aggregate(remoteValues)})
+	entry := &aggregateCacheEntry{peers: len(remoteValues), version: version}
+	if len(remoteValues) > 0 {
+		entry.value = aggregate(remoteValues)
 	}
-
+	s.cache.Store(hashKey, entry)
 	return len(remoteValues)
+}
+
+// peerVersion hashes the sorted (field, raw) pairs of every peer field. Each
+// part is length-prefixed so that different pairs cannot hash the same bytes.
+// raw is the encoded value, so a value whose encoding is not deterministic,
+// such as one with a map field of several entries, can get a new version when
+// its replica publishes it unchanged. All peer values are then decoded and
+// aggregated again.
+func (s *RedisSyncer) peerVersion(sortedFields []string, raw map[string]string) uint64 {
+	d := xxhash.New()
+	var length [8]byte
+	write := func(part string) {
+		binary.LittleEndian.PutUint64(length[:], uint64(len(part)))
+		_, _ = d.Write(length[:])
+		_, _ = d.WriteString(part)
+	}
+	for _, field := range sortedFields {
+		if field == s.replicaID {
+			continue
+		}
+		write(field)
+		write(raw[field])
+	}
+	return d.Sum64()
 }
 
 func (s *RedisSyncer) Set(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) error {
@@ -328,7 +334,7 @@ func (s *RedisSyncer) setBatchChunk(ctx context.Context, spec fwkdl.CrossReplica
 	publications := make([]publication, 0, len(chunk))
 	for _, endpointID := range chunk {
 		value := spec.Read(endpointID)
-		data, err := encodeValue(value)
+		data, err := crossreplica.EncodeValue(value)
 		if err != nil {
 			failures[endpointID] = fmt.Errorf("redis-syncer: encode: %w", err)
 			continue
@@ -397,10 +403,26 @@ func execFailedWholeChunk(execErr error, cmds []goredis.Cmder) bool {
 func (s *RedisSyncer) get(_ context.Context, key fwkdl.StateKey, endpointID string, local any, aggregate func([]any) any) any {
 	hashKey := s.hashKey(key, endpointID)
 	cached, ok := s.cache.Load(hashKey)
-	if !ok {
+	if !ok || cached.(*aggregateCacheEntry).peers == 0 {
 		return local
 	}
 	return aggregate([]any{local, cached.(*aggregateCacheEntry).value})
+}
+
+// PeerSnapshot implements fwkdl.CrossReplicaPeerReader. Each successful Set or
+// SetBatch refreshes the snapshot from the HGETALL it ran; a failed one keeps
+// the previous snapshot. ok is false before the first successful Set or
+// SetBatch for endpointID and after Delete.
+func (s *RedisSyncer) PeerSnapshot(spec fwkdl.CrossReplicaSpec, endpointID string) (any, uint64, bool) {
+	cached, ok := s.cache.Load(s.hashKey(spec.StateKey, endpointID))
+	if !ok {
+		return nil, 0, false
+	}
+	entry := cached.(*aggregateCacheEntry)
+	if entry.peers == 0 {
+		return spec.Aggregate(nil), entry.version, true
+	}
+	return entry.value, entry.version, true
 }
 
 func (s *RedisSyncer) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
@@ -424,7 +446,7 @@ func (s *RedisSyncer) GetOrSet(ctx context.Context, key fwkdl.StateKey, id strin
 		return nil, false, errors.New("redis-syncer: getorset candidate must not be nil")
 	}
 
-	data, err := encodeValue(candidate)
+	data, err := crossreplica.EncodeValue(candidate)
 	if err != nil {
 		return nil, false, fmt.Errorf("redis-syncer: getorset encode: %w", err)
 	}
@@ -441,7 +463,7 @@ func (s *RedisSyncer) GetOrSet(ctx context.Context, key fwkdl.StateKey, id strin
 		return nil, false, fmt.Errorf("redis-syncer: getorset: %w", err)
 	}
 
-	actual, err := gobDecode([]byte(stored), candidate)
+	actual, err := crossreplica.DecodeValue([]byte(stored), candidate)
 	if err != nil {
 		return nil, false, fmt.Errorf("redis-syncer: getorset decode: %w", err)
 	}

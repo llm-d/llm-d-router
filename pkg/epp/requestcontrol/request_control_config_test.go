@@ -44,7 +44,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -84,14 +84,14 @@ func (p *hookPlugin) RequestHeader(_ context.Context, _ *fwksched.InferenceReque
 func (p *hookPlugin) Screen(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	return endpoints
 }
-func (p *hookPlugin) ResponseHeader(_ context.Context, _ *fwksched.InferenceRequest, _ *fwkrc.Response, _ *fwkdl.EndpointMetadata) {
+func (p *hookPlugin) ResponseHeader(_ context.Context, _ *fwksched.InferenceRequest, _ *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
 }
-func (p *hookPlugin) ResponseBody(_ context.Context, _ *fwksched.InferenceRequest, _ *fwkrc.Response, _ *fwkdl.EndpointMetadata) {
+func (p *hookPlugin) ResponseBody(_ context.Context, _ *fwksched.InferenceRequest, _ *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
 }
 func (p *hookPlugin) Admit(_ context.Context, _ *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
 	return nil
 }
-func (p *hookPlugin) Respond(_ context.Context, _ *fwkrc.RequestLine, _ []fwkdl.Endpoint) (*fwkrc.LocalResponse, error) {
+func (p *hookPlugin) Respond(_ context.Context, _ *fwkrh.RequestLine, _ []fwkdl.Endpoint) (*fwkrh.LocalResponse, error) {
 	return nil, errResponderNotImplemented
 }
 
@@ -107,7 +107,7 @@ func (p *unrankedPlugin) TypedName() fwkplugin.TypedName {
 func (p *unrankedPlugin) PreRequest(_ context.Context, _ *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
 	return nil
 }
-func (p *unrankedPlugin) Respond(_ context.Context, _ *fwkrc.RequestLine, _ []fwkdl.Endpoint) (*fwkrc.LocalResponse, error) {
+func (p *unrankedPlugin) Respond(_ context.Context, _ *fwkrh.RequestLine, _ []fwkdl.Endpoint) (*fwkrh.LocalResponse, error) {
 	return nil, errResponderNotImplemented
 }
 
@@ -115,16 +115,16 @@ func (p *unrankedPlugin) Respond(_ context.Context, _ *fwkrc.RequestLine, _ []fw
 // these, an interface change upstream would silently drop a mock from a hook list
 // and leave the matrix below asserting on empty slices.
 var (
-	_ fwkrc.RequestHeaderProcessor  = &hookPlugin{}
-	_ fwkrc.Screener                = &hookPlugin{}
-	_ fwkrc.Admitter                = &hookPlugin{}
-	_ fwkrc.DataProducer            = &hookPlugin{}
-	_ fwkrc.PreRequest              = &hookPlugin{}
-	_ fwkrc.ResponseHeaderProcessor = &hookPlugin{}
-	_ fwkrc.ResponseBodyProcessor   = &hookPlugin{}
-	_ fwkrc.Responder               = &hookPlugin{}
-	_ fwkrc.PreRequest              = &unrankedPlugin{}
-	_ fwkrc.Responder               = &unrankedPlugin{}
+	_ fwkrh.RequestHeaderProcessor  = &hookPlugin{}
+	_ fwkrh.Screener                = &hookPlugin{}
+	_ fwkrh.Admitter                = &hookPlugin{}
+	_ fwkrh.DataProducer            = &hookPlugin{}
+	_ fwkrh.PreRequest              = &hookPlugin{}
+	_ fwkrh.ResponseHeaderProcessor = &hookPlugin{}
+	_ fwkrh.ResponseBodyProcessor   = &hookPlugin{}
+	_ fwkrh.Responder               = &hookPlugin{}
+	_ fwkrh.PreRequest              = &unrankedPlugin{}
+	_ fwkrh.Responder               = &unrankedPlugin{}
 )
 
 func names[T interface{ TypedName() fwkplugin.TypedName }](plugins []T) []string {

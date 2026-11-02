@@ -20,9 +20,9 @@ package logger
 import (
 	"bytes"
 	"context"
-	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -59,37 +59,39 @@ func (s *buffer) read() string {
 }
 
 func TestLogger(t *testing.T) {
-	// Redirect the logger to a buffer
-	var b buffer
-	opts := &zap.Options{
-		DestWriter:  &b,
-		Development: true,
-		Level:       zapcore.Level(-5),
-	}
-	logger := zap.New(zap.UseFlagOptions(opts))
-	ctrl.SetLogger(logger)
-	ctx, cancel := context.WithCancel(context.Background())
-	ctx = logr.NewContext(ctx, logger)
+	// Run in a synctest bubble so the refresher and debug-logger tickers advance on the
+	// fake clock instead of costing real wall-clock seconds.
+	synctest.Test(t, func(t *testing.T) {
+		// Redirect the logger to a buffer
+		var b buffer
+		opts := &zap.Options{
+			DestWriter:  &b,
+			Development: true,
+			Level:       zapcore.Level(-5),
+		}
+		logger := zap.New(zap.UseFlagOptions(opts))
+		ctrl.SetLogger(logger)
+		ctx, cancel := context.WithCancel(t.Context())
+		ctx = logr.NewContext(ctx, logger)
 
-	StartMetricsLogger(ctx, &FakeLoggerDataStore{}, 100*time.Millisecond, 100*time.Millisecond)
+		StartMetricsLogger(ctx, &FakeLoggerDataStore{}, 100*time.Millisecond, 100*time.Millisecond)
 
-	time.Sleep(6 * time.Second)
-	cancel()
+		// Advance past debugPrintInterval so the debug logger ticks at least once.
+		time.Sleep(debugPrintInterval + time.Second)
+		cancel()
+		// Both goroutines exit on cancel; Wait returns once they have logged shutdown and returned.
+		synctest.Wait()
 
-	// Wait for goroutines to log shutdown message to avoid race condition with subsequent tests
-	assert.Eventually(t, func() bool {
 		logOutput := b.read()
-		return strings.Contains(logOutput, "Shutting down prometheus metrics thread") &&
-			strings.Contains(logOutput, "Shutting down metrics logger thread")
-	}, 1*time.Second, 10*time.Millisecond)
-
-	logOutput := b.read()
-	assert.Contains(t, logOutput, "Refreshing Prometheus Metrics	{\"ReadyPods\": 2}")
-	assert.Contains(t, logOutput, "Current Pods and metrics gathered	{\"Fresh metrics\": \"[Metadata: {ID:default/pod1 Name: Address:1.2.3.4:5678")
-	assert.Contains(t, logOutput, "Metrics: {ActiveModels:map[modelA:1] WaitingModels:map[modelB:2] MaxActiveModels:5")
-	assert.Contains(t, logOutput, "RunningRequestsSize:3 WaitingQueueSize:7 KVCacheUsagePercent:42.5 KvCacheMaxTokenCapacity:2048")
-	assert.Contains(t, logOutput, "Metadata: {ID:default/pod2 Name: Address:1.2.3.4:5679")
-	assert.Contains(t, logOutput, "\"Stale metrics\": \"[]\"")
+		assert.Contains(t, logOutput, "Shutting down prometheus metrics thread")
+		assert.Contains(t, logOutput, "Shutting down metrics logger thread")
+		assert.Contains(t, logOutput, "Refreshing Prometheus Metrics	{\"ReadyPods\": 2}")
+		assert.Contains(t, logOutput, "Current Pods and metrics gathered	{\"Fresh metrics\": \"[Metadata: {ID:default/pod1 Name: Address:1.2.3.4:5678")
+		assert.Contains(t, logOutput, "Metrics: {ActiveModels:map[modelA:1] WaitingModels:map[modelB:2] MaxActiveModels:5")
+		assert.Contains(t, logOutput, "RunningRequestsSize:3 WaitingQueueSize:7 KVCacheUsagePercent:42.5 KvCacheMaxTokenCapacity:2048")
+		assert.Contains(t, logOutput, "Metadata: {ID:default/pod2 Name: Address:1.2.3.4:5679")
+		assert.Contains(t, logOutput, "\"Stale metrics\": \"[]\"")
+	})
 }
 
 func TestCalculateSummary(t *testing.T) {
@@ -107,14 +109,14 @@ func TestCalculateSummary(t *testing.T) {
 			name: "single endpoint",
 			endpoints: []fwkdl.Endpoint{
 				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
-					KVCacheUsagePercent: 50.0,
+					KVCacheUsagePercent: 0.5,
 					WaitingQueueSize:    3,
 					RunningRequestsSize: 5,
 					UpdateTime:          time.Now(),
 				}),
 			},
 			want: summary{
-				kvCache:         stats{mean: 50.0, stdv: 0},
+				kvCache:         stats{mean: 0.5, stdv: 0},
 				queueSize:       stats{mean: 3.0, stdv: 0},
 				runningRequests: stats{mean: 5.0, stdv: 0},
 			},
@@ -123,22 +125,39 @@ func TestCalculateSummary(t *testing.T) {
 			name: "multiple endpoints aggregated",
 			endpoints: []fwkdl.Endpoint{
 				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
-					KVCacheUsagePercent: 30.0,
+					KVCacheUsagePercent: 0.3,
 					WaitingQueueSize:    2,
 					RunningRequestsSize: 1,
 					UpdateTime:          time.Now(),
 				}),
 				fwkdl.NewEndpoint(pod2, &fwkdl.Metrics{
-					KVCacheUsagePercent: 70.0,
+					KVCacheUsagePercent: 0.7,
 					WaitingQueueSize:    5,
 					RunningRequestsSize: 3,
 					UpdateTime:          time.Now(),
 				}),
 			},
 			want: summary{
-				kvCache:         stats{mean: 50.0, stdv: 28.28},
+				kvCache:         stats{mean: 0.5, stdv: 0.2828427},
 				queueSize:       stats{mean: 3.5, stdv: 2.12},
 				runningRequests: stats{mean: 2.0, stdv: 1.41},
+			},
+		},
+		{
+			// KV cache usage is a 0-1 fraction, so pool stats keep its precision.
+			name: "low and close KV cache usage keeps its precision",
+			endpoints: []fwkdl.Endpoint{
+				fwkdl.NewEndpoint(pod1, &fwkdl.Metrics{
+					KVCacheUsagePercent: 0.004,
+					UpdateTime:          time.Now(),
+				}),
+				fwkdl.NewEndpoint(pod2, &fwkdl.Metrics{
+					KVCacheUsagePercent: 0.007,
+					UpdateTime:          time.Now(),
+				}),
+			},
+			want: summary{
+				kvCache: stats{mean: 0.0055, stdv: 0.0021213},
 			},
 		},
 	}
@@ -146,7 +165,10 @@ func TestCalculateSummary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := calculateSummary(tt.endpoints)
-			assert.Equal(t, tt.want, got)
+			assert.InDelta(t, tt.want.kvCache.mean, got.kvCache.mean, 1e-6, "kv cache mean")
+			assert.InDelta(t, tt.want.kvCache.stdv, got.kvCache.stdv, 1e-6, "kv cache stdv")
+			assert.Equal(t, tt.want.queueSize, got.queueSize)
+			assert.Equal(t, tt.want.runningRequests, got.runningRequests)
 		})
 	}
 }

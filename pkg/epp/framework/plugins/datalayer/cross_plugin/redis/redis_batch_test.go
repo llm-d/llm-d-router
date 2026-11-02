@@ -35,6 +35,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/internal/crossreplica"
 )
 
 type batchPipelineHook struct {
@@ -85,7 +86,7 @@ func TestSetBatchMatchesSetAcrossChunks(t *testing.T) {
 				id    string
 				value cloneableInt
 			}{{"epp-z", 9}, {"epp-b", 7}} {
-				data, err := encodeValue(peer.value)
+				data, err := crossreplica.EncodeValue(peer.value)
 				require.NoError(t, err)
 				server.HSet(key, peer.id, string(data))
 			}
@@ -112,7 +113,8 @@ func TestSetBatchMatchesSetAcrossChunks(t *testing.T) {
 		got, gotOK := batch.cache.Load(key)
 		require.Equal(t, wantOK, gotOK, id)
 		if i%3 == 0 {
-			require.False(t, gotOK, id)
+			require.Zero(t, got.(*aggregateCacheEntry).peers, id)
+			require.Nil(t, got.(*aggregateCacheEntry).value, id)
 			continue
 		}
 		require.Equal(t, []any{cloneableInt(7), cloneableInt(9)}, got.(*aggregateCacheEntry).value)
@@ -134,7 +136,7 @@ func TestSetBatchEndpointFailures(t *testing.T) {
 		return cloneableInt(4)
 	}
 	require.NoError(t, server.Set(syncer.hashKey(spec.StateKey, ids[1]), "wrong-type"))
-	old := &aggregateCacheEntry{value: cloneableInt(99)}
+	old := &aggregateCacheEntry{value: cloneableInt(99), peers: 1}
 	for _, id := range ids {
 		syncer.cache.Store(syncer.hashKey(spec.StateKey, id), old)
 	}
@@ -149,8 +151,9 @@ func TestSetBatchEndpointFailures(t *testing.T) {
 		require.True(t, ok)
 		require.Same(t, old, entry)
 	}
-	_, ok := syncer.cache.Load(syncer.hashKey(spec.StateKey, ids[2]))
-	require.False(t, ok)
+	entry, ok := syncer.cache.Load(syncer.hashKey(spec.StateKey, ids[2]))
+	require.True(t, ok)
+	require.Zero(t, entry.(*aggregateCacheEntry).peers)
 }
 
 func TestSetBatchChunkFailuresKeepCaches(t *testing.T) {
@@ -400,7 +403,7 @@ func TestSetBatchConcurrentChunksPreserveEndpointResults(t *testing.T) {
 		}
 		return cloneableInt(4)
 	}
-	peer, err := encodeValue(cloneableInt(7))
+	peer, err := crossreplica.EncodeValue(cloneableInt(7))
 	require.NoError(t, err)
 	old := &aggregateCacheEntry{value: cloneableInt(99)}
 	for _, id := range ids {

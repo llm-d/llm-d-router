@@ -48,6 +48,17 @@ const (
 	outcomeMissingSignal = "missing_signal"
 )
 
+// Labels recorded only on the P2P-paired counter.
+const (
+	// outcomeMultiple is the affinity_outcome of a request the instance decided
+	// more than once because it runs in more than one scheduling profile, in
+	// place of the individual outcomes.
+	outcomeMultiple = "multiple"
+	// p2pOutcomeUnreported is the p2p_outcome of a request whose
+	// p2p-source-producer published no decision.
+	p2pOutcomeUnreported = "unreported"
+)
+
 var filterDecisions = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -57,6 +68,17 @@ var filterDecisions = prometheus.NewCounterVec(
 	[]string{"plugin_name", "outcome"},
 )
 
+var p2pDecisions = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "prefix_cache_affinity_filter_p2p_decisions_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Prefix cache affinity filter outcomes paired with the p2p-source-producer decision for the same request.",
+			compbasemetrics.ALPHA),
+	},
+	[]string{"plugin_name", "endpoint_role", "affinity_outcome", "p2p_outcome"},
+)
+
 // registerMetrics registers the filter collectors on the given registerer. A nil
 // registerer is a no-op, so the filter runs without metrics when the handle
 // supplies no recorder. Repeated registration of the same collector is tolerated.
@@ -64,12 +86,14 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return nil
 	}
-	if err := registerer.Register(filterDecisions); err != nil {
-		var alreadyRegistered prometheus.AlreadyRegisteredError
-		if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == filterDecisions {
-			return nil
+	for _, collector := range []prometheus.Collector{filterDecisions, p2pDecisions} {
+		if err := registerer.Register(collector); err != nil {
+			var alreadyRegistered prometheus.AlreadyRegisteredError
+			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == collector {
+				continue
+			}
+			return fmt.Errorf("register prefix cache affinity filter metric: %w", err)
 		}
-		return fmt.Errorf("register prefix cache affinity filter metric: %w", err)
 	}
 	return nil
 }
@@ -78,7 +102,12 @@ func recordDecision(pluginName, outcome string) {
 	filterDecisions.WithLabelValues(pluginName, outcome).Inc()
 }
 
+func recordP2PDecision(pluginName, role, affinityOutcome, p2pOutcome string) {
+	p2pDecisions.WithLabelValues(pluginName, role, affinityOutcome, p2pOutcome).Inc()
+}
+
 // resetMetrics clears the collectors between tests.
 func resetMetrics() {
 	filterDecisions.Reset()
+	p2pDecisions.Reset()
 }

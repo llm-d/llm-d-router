@@ -19,6 +19,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
@@ -134,6 +136,30 @@ func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 		"model_name cardinality must stay bounded by the cap, got %d series", count)
 }
 
+// The model_name and fairness_id labels come from request headers that Envoy
+// forwards as raw bytes. Prometheus panics on a label value that is not valid
+// UTF-8, and the gRPC server does not recover handler panics, so such a
+// request must fold to the overflow label instead of exiting the process.
+func TestRecordRequestCounterSurvivesNonUTF8AndOversizedLabels(t *testing.T) {
+	Reset()
+	resetFairnessLabelLimit(t)
+	t.Cleanup(Reset)
+
+	invalid := "model\xff"
+	oversized := strings.Repeat("m", metricsutil.MaxLabelValueLength+1)
+
+	require.NotPanics(t, func() {
+		RecordRequestCounter(invalid, invalid, reqcommon.APISurfaceUnknown, invalid, 0)
+		RecordRequestCounter(oversized, oversized, reqcommon.APISurfaceUnknown, oversized, 0)
+		RecordRequestErrCounter(context.Background(), invalid, invalid, reqcommon.APISurfaceUnknown, invalid, "0", "400")
+	})
+
+	require.Equal(t, 1, promtestutil.CollectAndCount(llmdRequestCounter),
+		"both requests must land on the single overflow series")
+	require.Equal(t, float64(2), promtestutil.ToFloat64(llmdRequestCounter.WithLabelValues(
+		metricsutil.OverflowValue, metricsutil.OverflowValue, metricsutil.OverflowValue, "0", reqcommon.APISurfaceUnknown.String())))
+}
+
 // The fairness_id label is populated from a client request header, so the shared limiter must
 // collapse an unbounded flood of distinct IDs into the overflow bucket instead of minting a series
 // per ID.
@@ -221,6 +247,26 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdFlowControlRequestQueueDuration),
 		"100 distinct model names must collapse to cap+overflow series, not one series each")
+}
+
+// RecordSchedulerAttempt's target_model_name falls back to the request-body model when no
+// rewrite rule matches, so it must go through the model limiter like the other record functions.
+func TestSchedulerAttemptBoundsTargetModelLabel(t *testing.T) {
+	const testCap = 3
+	oldModels := modelLabelLimiter
+	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
+	llmdSchedulerAttemptsTotal.Reset()
+	t.Cleanup(func() {
+		modelLabelLimiter = oldModels
+		llmdSchedulerAttemptsTotal.Reset()
+	})
+
+	for i := 0; i < 100; i++ {
+		RecordSchedulerAttempt(nil, fmt.Sprintf("model-%d", i), nil)
+	}
+
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdSchedulerAttemptsTotal),
+		"100 distinct target models must collapse to cap+overflow series, not one series each")
 }
 
 // A client can choose the overflow value itself as its fairness ID; GC of that flow must not
@@ -317,6 +363,7 @@ func TestInitFairnessIDResolutionMetricsCreatesOverflowSeries(t *testing.T) {
 
 	InitFairnessIDResolutionMetrics("pool-a")
 
-	require.Equal(t, 3, promtestutil.CollectAndCount(llmdFairnessIDOverflowCounter))
+	require.Equal(t, 4, promtestutil.CollectAndCount(llmdFairnessIDOverflowCounter))
 	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues("header", "pool-a")))
+	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues(tracing.AttributionSourceDerivedRoot, "pool-a")))
 }

@@ -357,6 +357,33 @@ type RequestHandlerConfig struct {
 	// backend's native priority scheduler can consume it. It is off by default:
 	// when disabled the request body is forwarded unchanged.
 	PropagatePriority bool `json:"propagatePriority,omitempty"`
+
+	// +optional
+	// ComposeFairnessIDs, when true, lets the EPP combine a request's
+	// fairness-ID header (the tenant identity) with its agent-identity attribute
+	// (the session identity) into a single "<tenant>/<session>" flow key. It is
+	// off by default: the fairness-ID header wins and the session identity does
+	// not key the flow. When enabled, "%" and "/" in the header are
+	// percent-encoded so the tenant part stays unambiguous.
+	ComposeFairnessIDs bool `json:"composeFairnessIDs,omitempty"`
+
+	// +optional
+	// RequestStreamUsage, when true, lets the EPP add
+	// stream_options.include_usage to a streamed OpenAI chat completions or
+	// completions request that does not ask for usage, so the model server
+	// reports the token usage that the EPP's token metrics and usage-reading
+	// plugins depend on. The EPP removes the usage-only frame this adds from the
+	// response before it reaches the client. It is off by default: when disabled
+	// the request body is forwarded unchanged.
+	RequestStreamUsage bool `json:"requestStreamUsage,omitempty"`
+
+	// +optional
+	// ForwardInputControlHeaders, when true, lets the EPP pass the client's
+	// input-control headers (objective, fairness ID, TTL, ...) to the chosen
+	// endpoint unchanged instead of stripping them. Set it only on a multi-cluster
+	// hub, whose endpoints are cluster EPPs that apply those headers themselves.
+	// It is off by default: a model server has no use for them.
+	ForwardInputControlHeaders bool `json:"forwardInputControlHeaders,omitempty"`
 }
 
 func (rhc *RequestHandlerConfig) String() string {
@@ -373,6 +400,15 @@ func (rhc *RequestHandlerConfig) String() string {
 	}
 	if rhc.PropagatePriority {
 		parts = append(parts, "PropagatePriority: true")
+	}
+	if rhc.ComposeFairnessIDs {
+		parts = append(parts, "ComposeFairnessIDs: true")
+	}
+	if rhc.RequestStreamUsage {
+		parts = append(parts, "RequestStreamUsage: true")
+	}
+	if rhc.ForwardInputControlHeaders {
+		parts = append(parts, "ForwardInputControlHeaders: true")
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
 }

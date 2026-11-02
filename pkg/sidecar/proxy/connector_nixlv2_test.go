@@ -47,6 +47,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 	BeforeEach(func() {
 		testInfo = sidecarConnectionTestSetup(constants.KVConnectorNIXLV2)
+		testInfo.proxy.config.ForwardPromptTokenIDs = true
 	})
 
 	startProxy := func() string {
@@ -176,6 +177,66 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 	})
 
+	It("should carry client prompt_token_ids into both the prefill and decode kv_transfer_params", func() {
+		proxyBaseAddr := startProxy()
+
+		body := `{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}],
+			"max_tokens": 50, "kv_transfer_params": {"prompt_token_ids": [5, 6, 7]}}`
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+		want := []any{float64(5), float64(6), float64(7)}
+		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+		pkv := testInfo.prefillHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(pkv).To(HaveKeyWithValue("prompt_token_ids", want))
+		Expect(pkv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
+
+		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
+		dkv := testInfo.decodeHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(dkv).To(HaveKeyWithValue("prompt_token_ids", want))
+	})
+
+	// When the prefill response omits kv_transfer_params (the decode-recompute
+	// fallback), the client's forwarded prompt_token_ids must still reach the decode
+	// request instead of being wiped by a nil kv_transfer_params.
+	It("should carry client prompt_token_ids to decode when prefill omits kv_transfer_params", func() {
+		testInfo.prefillHandler.RawResponse = `{"usage": {"prompt_tokens": 64, "completion_tokens": 1, "total_tokens": 65, "prompt_tokens_details": {}}}`
+		proxyBaseAddr := startProxy()
+
+		body := `{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}],
+			"max_tokens": 50, "kv_transfer_params": {"prompt_token_ids": [5, 6, 7]}}`
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+		want := []any{float64(5), float64(6), float64(7)}
+		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+		pkv := testInfo.prefillHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(pkv).To(HaveKeyWithValue("prompt_token_ids", want))
+
+		Eventually(func() int { return len(testInfo.decodeHandler.CompletionRequests) }).Should(Equal(1))
+		dkv := testInfo.decodeHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(dkv).To(HaveKeyWithValue("prompt_token_ids", want))
+	})
+
+	It("should not add prompt_token_ids when the client sent none", func() {
+		proxyBaseAddr := startProxy()
+		sendChatCompletionsRequest(proxyBaseAddr)
+		pkv := testInfo.prefillHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(pkv).ToNot(HaveKey("prompt_token_ids"))
+		dkv := testInfo.decodeHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(dkv).ToNot(HaveKey("prompt_token_ids"))
+	})
+
 	It("should forward untouched fields byte-for-byte, preserving nested key order", func() {
 		proxyBaseAddr := startProxy()
 
@@ -222,14 +283,41 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 7))
 	})
 
-	It("should return zero cached tokens when prefiller does not report cached tokens", func() {
+	It("should keep the decoder cached tokens when the prefiller reports no count", func() {
+		// An empty details object carries no number, so nothing was measured
+		// and the decoder's own count is the only one there is.
 		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{}}}`
 		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
 		proxyBaseAddr := startProxy()
 
 		response := sendChatCompletionsRequest(proxyBaseAddr)
 
-		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 0))
+		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 49))
+	})
+
+	It("should keep the decoder cached tokens when the prefiller usage has no details", func() {
+		// vLLM without --enable-prompt-tokens-details sends no details object
+		// however many tokens were cached, so the count was never measured.
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 49))
+	})
+
+	It("should leave the decoder usage without details unchanged", func() {
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		usage, ok := response["usage"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		_, hasDetails := usage["prompt_tokens_details"]
+		Expect(hasDetails).To(BeFalse(), "a count that was never measured stays absent")
 	})
 
 	It("should keep the decoder cached tokens when the prefiller reports no usage block", func() {
@@ -290,7 +378,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
 	})
 
-	It("should return zero cached tokens in streamed usage when prefiller does not report cached tokens", func() {
+	It("should keep the decoder cached tokens in streamed usage when the prefiller reports no count", func() {
 		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{}}}`
 		testInfo.decodeHandler.RawResponseType = eventStreamContentType
 		testInfo.decodeHandler.RawResponse = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65,\"prompt_tokens_details\":{\"cached_tokens\":49}}}\n\ndata: [DONE]\n"
@@ -298,8 +386,20 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		responseBody := sendStreamingChatCompletionsRequest(proxyBaseAddr)
 
-		Expect(responseBody).To(ContainSubstring(`"cached_tokens":0`))
-		Expect(responseBody).ToNot(ContainSubstring(`"cached_tokens":49`))
+		Expect(responseBody).ToNot(ContainSubstring(`"cached_tokens":0`))
+		Expect(responseBody).To(ContainSubstring(`"cached_tokens":49`))
+		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
+	})
+
+	It("should leave a streamed decoder usage without details unchanged", func() {
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65}}`
+		testInfo.decodeHandler.RawResponseType = eventStreamContentType
+		testInfo.decodeHandler.RawResponse = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65}}\n\ndata: [DONE]\n"
+		proxyBaseAddr := startProxy()
+
+		responseBody := sendStreamingChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(responseBody).ToNot(ContainSubstring(`prompt_tokens_details`))
 		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
 	})
 
@@ -1405,7 +1505,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		response, err := io.ReadAll(rp.Body)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(rp.StatusCode).To(Equal(http.StatusBadGateway), string(response))
-		Expect(string(response)).To(ContainSubstring("prefill pod"))
+		Expect(string(response)).To(ContainSubstring("internal error"))
 		Expect(env.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
 	})
 
@@ -1444,8 +1544,8 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(pkv).ToNot(HaveKey("remote_dp_size"))
 		Expect(pkv).ToNot(HaveKey("remote_hosts"))
 
-		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
-		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
+		Expect(testInfo.prefillHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
+		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
 	})
 
 	// Standard READ-mode parity: DP-rank propagation is a MoRI-IO WRITE-mode
@@ -1461,7 +1561,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		Expect(dkv).ToNot(HaveKey(requestFieldRemoteDPRank))
 		Expect(dkv).ToNot(HaveKey(requestFieldRemoteDPRankOverride))
 
-		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(requestHeaderDataParallelRank)).To(BeEmpty())
+		Expect(testInfo.decodeHandler.GetCompletionHeaders()[0].Get(routing.DataParallelRankHeader)).To(BeEmpty())
 	})
 })
 
@@ -1577,5 +1677,5 @@ func kvParams(h *mock.ChatCompletionHandler, i int) map[string]any { //nolint:un
 func dpRankHeader(h *mock.ChatCompletionHandler, i int) string { //nolint:unparam // i kept for future multi-request tests
 	hdrs := h.GetCompletionHeaders()
 	ExpectWithOffset(1, len(hdrs)).To(BeNumerically(">", i))
-	return hdrs[i].Get(requestHeaderDataParallelRank)
+	return hdrs[i].Get(routing.DataParallelRankHeader)
 }

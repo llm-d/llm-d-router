@@ -247,6 +247,7 @@ plugins:
       hashSeed: "42"
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557
+      allowUntrustedPublishers: true  # simulator pods publish to the EPP's bound socket
     indexerConfig:
       kvBlockIndexConfig:
         enableMetrics: false                  # enable kv-block index metrics (prometheus)
@@ -285,6 +286,7 @@ plugins:
       hashSeed: "42"
     kvEventsConfig:
       zmqEndpoint: tcp://0.0.0.0:5557
+      allowUntrustedPublishers: true  # simulator pods publish to the EPP's bound socket
     indexerConfig:
       kvBlockIndexConfig:
         enableMetrics: false

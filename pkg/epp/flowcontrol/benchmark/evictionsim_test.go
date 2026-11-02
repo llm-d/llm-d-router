@@ -37,7 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	evictfiltering "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/eviction/filtering"
@@ -250,11 +250,11 @@ func (p *syntheticPool) leaseLifecycle(req *fwksched.InferenceRequest, evictCh c
 			return
 		}
 		// Stream termination: the real cleanup path, which fires the confirmation listener.
-		p.evictor.ResponseBody(p.leaseCtx, req, &fwkrc.Response{EndOfStream: true}, p.epMeta)
+		p.evictor.ResponseBody(p.leaseCtx, req, &fwkrh.Response{EndOfStream: true}, p.epMeta)
 		p.evictionsConfirmed.Add(1)
 	case <-churnCh:
 		// Natural completion frees capacity through the same termination path.
-		p.evictor.ResponseBody(p.leaseCtx, req, &fwkrc.Response{EndOfStream: true}, p.epMeta)
+		p.evictor.ResponseBody(p.leaseCtx, req, &fwkrh.Response{EndOfStream: true}, p.epMeta)
 	case <-p.leaseCtx.Done():
 		return
 	}

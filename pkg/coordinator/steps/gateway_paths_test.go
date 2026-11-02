@@ -81,7 +81,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 		OriginalPath: reqcommon.PathChatCompletions,
 		Model:        "test-model",
 		Stream:       false,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -184,7 +184,7 @@ func TestGatewayPaths_CompletionsPreservedWhenOpenAIFormatDisabled(t *testing.T)
 		OriginalPath:     reqcommon.PathCompletions,
 		Model:            "test-model",
 		Stream:           false,
-		TokenIDs:         []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:         []uint32{1, 32000, 32000, 32000, 2345},
 		KVTransferParams: make(map[string]any),
 		Body:             map[string]any{"model": "test-model", "stream": false, "prompt": "hello"},
 	}
@@ -238,7 +238,7 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 		OriginalPath:     reqcommon.PathCompletions,
 		Model:            "test",
 		Stream:           false,
-		TokenIDs:         []int{1, 2345, 6789},
+		TokenIDs:         []uint32{1, 2345, 6789},
 		KVTransferParams: map[string]any{"k": "v"},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "h1"},

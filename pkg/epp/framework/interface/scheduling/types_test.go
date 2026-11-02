@@ -23,9 +23,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 var (
@@ -66,7 +66,7 @@ func TestInferenceRequest_String_HasFields(t *testing.T) {
 	r := &InferenceRequest{
 		RequestID:   "req-1",
 		TargetModel: "llama-7b",
-		Body:        &fwkrh.InferenceRequestBody{},
+		Body:        &fwkrequest.InferenceRequestBody{},
 		Headers:     map[string]string{"x-trace": "abc"},
 	}
 	s := r.String()
@@ -193,6 +193,15 @@ func TestScoredEndpointComparer(t *testing.T) {
 
 	other := NewEndpoint(newTestMetadata("pod-other"), newTestMetrics(), nil)
 	assert.False(t, ScoredEndpointComparer(ScoredEndpoint{Endpoint: a, Score: 1}, ScoredEndpoint{Endpoint: other, Score: 1}))
+}
+
+func TestEndpointScores(t *testing.T) {
+	scored := []*ScoredEndpoint{
+		{Endpoint: NewEndpoint(newTestMetadata("pod1"), newTestMetrics(), nil), Score: 2},
+		{Endpoint: NewEndpoint(newTestMetadata("pod2"), newTestMetrics(), nil), Score: 0.5},
+	}
+
+	assert.Equal(t, map[string]float64{"ns/pod1": 2, "ns/pod2": 0.5}, EndpointScores(scored).MarshalLog())
 }
 
 func TestProfileRunResult_FirstEndpoint(t *testing.T) {

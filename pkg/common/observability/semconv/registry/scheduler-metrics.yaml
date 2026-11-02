@@ -1,0 +1,120 @@
+# Prometheus names and label positions are compatibility contracts.
+groups:
+  - id: metric.llm_d.epp.scheduler.e2e_duration
+    type: metric
+    metric_name: llm_d_epp_scheduler_e2e_duration_seconds
+    brief: End-to-end scheduling latency distribution in seconds.
+    note: Carries a trace exemplar; see [Exemplars](#exemplars).
+    instrument: histogram
+    unit: s
+    stability: development
+    annotations:
+      go.name: llmdSchedulerE2ELatency
+      prometheus.buckets: [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1]
+
+  - id: metric.llm_d.epp.scheduler.attempts
+    type: metric
+    metric_name: llm_d_epp_scheduler_attempts_total
+    brief: Total number of scheduling attempts.
+    instrument: counter
+    unit: "{attempt}"
+    stability: development
+    annotations:
+      go.name: llmdSchedulerAttemptsTotal
+    attributes:
+      - id: status
+        type: string
+        stability: development
+        requirement_level: required
+        brief: Scheduling outcome, success or failure.
+        examples: [success, failure]
+        annotations:
+          prometheus.label_position: 0
+      - id: target_model_name
+        type: string
+        stability: development
+        requirement_level: required
+        brief: Target model selected for scheduling.
+        examples: [modelA]
+        annotations:
+          prometheus.label_position: 1
+      - id: endpoint_name
+        type: string
+        stability: development
+        requirement_level: required
+        brief: Name of the selected endpoint, or empty when no endpoint is selected.
+        examples: [pod-1]
+        annotations:
+          prometheus.label_position: 2
+      - id: namespace
+        type: string
+        stability: development
+        requirement_level: required
+        brief: Namespace of the selected endpoint.
+        examples: [default]
+        annotations:
+          prometheus.label_position: 3
+      - id: port
+        type: string
+        stability: development
+        requirement_level: required
+        brief: Port of the selected endpoint.
+        examples: ["8080"]
+        annotations:
+          prometheus.label_position: 4
+
+  - id: metric.llm_d.epp.scheduler.filter_eliminated
+    type: metric
+    metric_name: llm_d_epp_scheduler_filter_eliminated_total
+    brief: Total number of candidate endpoints removed by scheduling filters, by scheduler profile, plugin type and plugin name.
+    note: Filters after the one that removes the last candidate do not run, so that filter is the last one counted for the run.
+    instrument: counter
+    unit: "{endpoint}"
+    stability: development
+    annotations:
+      go.name: llmdSchedulerFilterEliminatedTotal
+    attributes:
+      - id: profile
+        type: string
+        stability: development
+        requirement_level: required
+        brief: Scheduler profile containing the filter.
+        examples: [decode]
+        annotations:
+          prometheus.label_position: 0
+      - id: plugin_type
+        type: string
+        stability: development
+        requirement_level: required
+        brief: Type of the filter plugin.
+        examples: [test-filter]
+        annotations:
+          prometheus.label_position: 1
+      - id: plugin_name
+        type: string
+        stability: development
+        requirement_level: required
+        brief: Configured name of the filter plugin instance.
+        examples: [f1]
+        annotations:
+          prometheus.label_position: 2
+
+  - id: metric.llm_d.epp.scheduler.failures
+    type: metric
+    metric_name: llm_d_epp_scheduler_failures_total
+    brief: Total number of failed scheduling attempts, by reason.
+    note: Each attempt counted with `status="failure"` in `llm_d_epp_scheduler_attempts_total` is counted here once.
+    instrument: counter
+    unit: "{attempt}"
+    stability: development
+    annotations:
+      go.name: llmdSchedulerFailuresTotal
+    attributes:
+      - id: reason
+        type: string
+        stability: development
+        requirement_level: required
+        brief: Reason scheduling failed.
+        examples: [all_filtered, no_profile_selected, profile_handler_error]
+        annotations:
+          prometheus.label_position: 0

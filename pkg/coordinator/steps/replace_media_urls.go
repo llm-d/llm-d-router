@@ -17,8 +17,10 @@ limitations under the License.
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -184,25 +186,29 @@ func NewReplaceMediaURLsStep(_ *gateway.Client, params map[string]any) (pipeline
 func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
+	if reqCtx.IsGRPC() {
+		return nil
+	}
 
 	// One slice, tagged by modality, in request order: that order is what pairs
 	// entries with parts later (see collectMediaParts). Separate passes over URL
 	// and inline parts would reorder a request mixing audio_url and input_audio.
 	var refs []mediaRef
 	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
-	if items, ok := promptItems(reqCtx.Body, apiType); ok {
-		var err error
-		refs, err = collectMediaRefs(items, apiType)
-		if err != nil {
-			return err
-		}
-		// The refs alias parts inside items, which promptItems may have decoded
-		// out of a json.RawMessage; store the slice back so the rewrites below
-		// land in the body. Skipped when nothing will be rewritten, which leaves
-		// the field raw and its key order intact.
-		if len(refs) > 0 {
-			setPromptItems(reqCtx.Body, apiType, items)
+	if mayContainMedia(reqCtx.Body, apiType) {
+		if items, ok := promptItems(reqCtx.Body, apiType); ok {
+			var err error
+			refs, err = collectMediaRefs(items, apiType)
+			if err != nil {
+				return err
+			}
+			// The refs alias parts inside items, which promptItems may have decoded
+			// out of a json.RawMessage; store the slice back so the rewrites below
+			// land in the body. Skipped when nothing will be rewritten, which leaves
+			// the field raw and its key order intact.
+			if len(refs) > 0 {
+				setPromptItems(reqCtx.Body, apiType, items)
+			}
 		}
 	}
 
@@ -223,6 +229,8 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	if len(refs) == 0 {
 		return nil
 	}
+
+	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
 	if s.maxMultimodalEntries > 0 && len(refs) > s.maxMultimodalEntries {
 		return fmt.Errorf("too many multimodal entries: got %d, max %d: %w", len(refs), s.maxMultimodalEntries, pipeline.ErrBadRequest)
@@ -316,6 +324,100 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 	}
 
 	return nil
+}
+
+type rawChatMediaToken struct {
+	prefix []byte
+	suffix []byte
+}
+
+func splitMediaToken(partType string) rawChatMediaToken {
+	prefix, suffix, _ := bytes.Cut([]byte(`"`+partType+`"`), []byte{'_'})
+	return rawChatMediaToken{prefix: prefix, suffix: suffix}
+}
+
+var (
+	// rawChatMediaTokens lists the JSON-quoted part types and untyped keys that
+	// collectMediaParts recognizes on chat completions and Responses requests,
+	// split on '_' for underscore-anchored scanning.
+	rawChatMediaTokens = []rawChatMediaToken{
+		splitMediaToken(reqcommon.PartTypeImageURL),
+		splitMediaToken(reqcommon.PartTypeInputImage),
+		splitMediaToken(reqcommon.PartTypeAudioURL),
+		splitMediaToken(reqcommon.PartTypeInputAudio),
+		splitMediaToken(reqcommon.PartTypeVideoURL),
+	}
+	rawMessagesMediaToken = []byte(`"` + reqcommon.BlockTypeImage + `"`)
+)
+
+// mayContainMedia reports whether body's prompt items field can contain a media
+// content part. When the field is still a json.RawMessage, scanning the raw
+// bytes skips a full json.Unmarshal on text-only requests. Unicode escapes that
+// can spell '_' or a lowercase ASCII letter fall back to decoding so escaped
+// keys or type values cannot bypass media handling.
+func mayContainMedia(body map[string]any, apiType reqcommon.APIType) bool {
+	field, ok := promptItemsField(apiType)
+	if !ok {
+		return false
+	}
+	raw, ok := body[field].(json.RawMessage)
+	if !ok {
+		return body[field] != nil
+	}
+	if len(raw) == 0 {
+		return false
+	}
+	if escapesMediaKeyChar(raw) {
+		return true
+	}
+	if apiType == reqcommon.APITypeMessages {
+		return bytes.Contains(raw, rawMessagesMediaToken)
+	}
+	return containsChatMediaToken(raw)
+}
+
+// escapesMediaKeyChar reports whether raw holds a \u escape of '_' or a
+// lowercase ASCII letter (U+005F or U+0061..U+007A), which spell every media
+// part type recognized by collectMediaParts.
+func escapesMediaKeyChar(raw []byte) bool {
+	for {
+		i := bytes.IndexByte(raw, '\\')
+		if i < 0 || i+4 >= len(raw) {
+			return false
+		}
+		if raw[i+1] == 'u' && raw[i+2] == '0' && raw[i+3] == '0' {
+			if c := raw[i+4]; c == '5' || c == '6' || c == '7' {
+				return true
+			}
+			raw = raw[i+4:]
+			continue
+		}
+		raw = raw[i+1:]
+	}
+}
+
+// containsChatMediaToken reports whether raw contains any JSON-quoted chat or
+// Responses media part token by anchoring on each '_' byte.
+func containsChatMediaToken(raw []byte) bool {
+	for off := 0; off < len(raw); {
+		rel := bytes.IndexByte(raw[off:], '_')
+		if rel < 0 {
+			return false
+		}
+		pos := off + rel
+		after := raw[pos+1:]
+		if len(after) > 0 {
+			c := after[0]
+			before := raw[:pos]
+			for _, tok := range rawChatMediaTokens {
+				if c == tok.suffix[0] && bytes.HasPrefix(after, tok.suffix) && bytes.HasSuffix(before, tok.prefix) {
+					return true
+				}
+			}
+		}
+		off = pos + 1
+	}
+	return false
 }
 
 // collectMediaRefs returns a ref per media content part, in walk order.
@@ -853,22 +955,65 @@ var errBlockedAddress = fmt.Errorf("address resolves to a blocked range: %w", pi
 // dedicated predicate for.
 var cgnatBlock = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 
+// nat64Block is the RFC 6052 well-known NAT64 prefix; the low 32 bits carry
+// the IPv4 destination.
+var nat64Block = &net.IPNet{IP: net.ParseIP("64:ff9b::"), Mask: net.CIDRMask(96, 128)}
+
+// ipv4CompatBlock is the deprecated IPv4-compatible range ::/96 (RFC 4291).
+var ipv4CompatBlock = &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(96, 128)}
+
+// maxRedirects matches the net/http default, which a custom CheckRedirect drops.
+const maxRedirects = 10
+
 func (g *addressGuard) newClient(timeout time.Duration) *http.Client {
 	// Clone DefaultTransport to keep Proxy: http.ProxyFromEnvironment, so image
 	// fetches still honor HTTP(S)_PROXY, and attach the dial-time IP guard.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	dialer := &net.Dialer{Control: g.dialControl}
 	transport.DialContext = dialer.DialContext
+	transport.Proxy = g.checkedProxy(transport.Proxy)
 
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxRedirects {
+				return fmt.Errorf("stopped after %d redirects: %w", maxRedirects, pipeline.ErrBadRequest)
+			}
+			if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
+				return fmt.Errorf("redirect from https to %q not allowed: %w", req.URL.Scheme, pipeline.ErrBadRequest)
+			}
 			if !g.hostAllowed(req.URL.Hostname()) {
 				return fmt.Errorf("redirect host %q not allowed: %w", req.URL.Hostname(), pipeline.ErrBadRequest)
 			}
 			return nil
 		},
+	}
+}
+
+// checkedProxy wraps proxy so that a request sent through a proxy has its
+// target resolved and checked first: dialControl only sees the proxy's address.
+// The proxy resolves the host again, so a DNS-rebinding target can
+// still differ from the checked IP; allowed_domains closes that if needed.
+func (g *addressGuard) checkedProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request) (*url.URL, error) {
+	if proxy == nil {
+		return nil
+	}
+	return func(r *http.Request) (*url.URL, error) {
+		proxyURL, err := proxy(r)
+		if err != nil || proxyURL == nil {
+			return proxyURL, err
+		}
+		ips, err := net.DefaultResolver.LookupIP(r.Context(), "ip", r.URL.Hostname())
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range ips {
+			if g.blockedIP(ip) {
+				return nil, errBlockedAddress
+			}
+		}
+		return proxyURL, nil
 	}
 }
 
@@ -895,13 +1040,16 @@ func (g *addressGuard) blockedIP(ip net.IP) bool {
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}
+	if nat64Block.Contains(ip) {
+		ip = ip.To16()[12:]
+	}
 	if ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
 	if ip.IsLoopback() {
 		return !g.allowLoopback
 	}
-	if cgnatBlock.Contains(ip) {
+	if cgnatBlock.Contains(ip) || ipv4CompatBlock.Contains(ip) {
 		return true
 	}
 	if ip.IsPrivate() {

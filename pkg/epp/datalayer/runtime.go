@@ -124,9 +124,11 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 		}
 	}
 
-	// boundTypes tracks (srcName, extractor type) pairs that already have a bound
-	// extractor. Pending registrations consult this so code-registered defaults
-	// yield to user-config extractors of the same Type.
+	// boundTypes tracks (srcName, extractor type) pairs bound by user config.
+	// Pending registrations consult this so code-registered defaults yield to
+	// user-config extractors of the same Type. Registrations from other plugins
+	// are not recorded here: same-Type plugin instances are distinct extractors
+	// (name-qualified data keys) and each must be wired.
 	boundTypes := make(map[string]map[string]struct{})
 	markBound := func(srcName, extType string) {
 		if boundTypes[srcName] == nil {
@@ -241,7 +243,6 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 		} else {
 			r.extractors.Append(srcName, pending.Extractor)
 		}
-		markBound(srcName, extType)
 	}
 
 	if cfg != nil {
@@ -393,13 +394,27 @@ func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVer
 }
 
 // Start is called to enable the Runtime to start processing data collection. It wires
-// Kubernetes notifications into the manager and starts cross-replica syncing.
+// Kubernetes notifications into the manager, starts cross-replica syncing and starts
+// the background work of polling sources that have any.
 func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
 	r.notificationSyncMu.Lock()
 	r.notificationSyncs = nil
 	r.notificationSyncMu.Unlock()
 
-	r.StartCrossReplicaSync(ctx)
+	if err := r.StartCrossReplicaSync(ctx); err != nil {
+		return err
+	}
+
+	for _, d := range r.dispatchers.Dispatchers() {
+		if id, ok := d.(*intervalDispatcher); ok {
+			d = id.PollingDispatcher
+		}
+		if s, ok := d.(fwkdl.StartablePollingSource); ok {
+			if err := s.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start polling source %s: %w", d.TypedName(), err)
+			}
+		}
+	}
 
 	notificationSyncs := make([]*notificationInitialSync, 0, r.notification.Count())
 	err := r.notification.ForEach(func(srcName string, src fwkdl.NotificationSource) error {
@@ -448,12 +463,19 @@ func (*Runtime) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "datalayer", Name: "runtime"}
 }
 
-// StartCrossReplicaSync starts the shared cross-replica publishing loop.
-func (r *Runtime) StartCrossReplicaSync(ctx context.Context) {
+// StartCrossReplicaSync starts the configured cross-replica syncer, when it
+// implements CrossReplicaStarter, and the shared cross-replica publishing loop.
+func (r *Runtime) StartCrossReplicaSync(ctx context.Context) error {
 	if r.crossReplicaPub == nil {
-		return
+		return nil
+	}
+	if starter, ok := r.crossReplicaPub.syncer.(fwkdl.CrossReplicaStarter); ok {
+		if err := starter.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start cross-replica syncer: %w", err)
+		}
 	}
 	r.crossReplicaPub.start(ctx)
+	return nil
 }
 
 // NewEndpoint sets up data polling on the provided endpoint.
@@ -471,32 +493,34 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 		dispatchers = append(dispatchers, d)
 	}
 	key := endpointMetadata.GetID()
+	// The collector is registered before the cross-replica publisher: a
+	// ReleaseEndpoint of the same endpoint holds the collector until it has
+	// deleted the registration, so an overlapping NewEndpoint is rejected here
+	// and never re-registers the endpoint with the publisher mid-release.
+	var collector *Collector
+	if len(dispatchers) > 0 {
+		collector = NewCollector()
+		if !r.collectors.Register(key, collector) {
+			logger.V(logging.DEFAULT).Info("collector already running for endpoint", "endpoint", key)
+			return nil
+		}
+		ticker := NewTimeTicker(r.pollingInterval)
+		if err := collector.Start(ctx, ticker, endpoint, dispatchers); err != nil {
+			logger.Error(err, "failed to start collector for endpoint", "endpoint", key)
+			r.collectors.Remove(key)
+			return nil
+		}
+	}
 	if r.crossReplicaPub != nil && !r.crossReplicaPub.registerEndpoint(key) {
 		logger.V(logging.DEFAULT).Info("endpoint already registered for cross-replica publishing", "endpoint", key)
+		if collector != nil {
+			r.collectors.Remove(key)
+			collector.Stop()
+		}
 		return nil
 	}
 	if len(dispatchers) == 0 {
 		logger.Info("No polling sources configured, creating endpoint without collector")
-		r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})
-		return endpoint
-	}
-
-	collector := NewCollector()
-	if !r.collectors.Register(key, collector) {
-		logger.V(logging.DEFAULT).Info("collector already running for endpoint", "endpoint", key)
-		return nil
-	}
-
-	ticker := NewTimeTicker(r.pollingInterval)
-	if err := collector.Start(ctx, ticker, endpoint, dispatchers); err != nil {
-		logger.Error(err, "failed to start collector for endpoint", "endpoint", key)
-		r.collectors.Remove(key)
-		if r.crossReplicaPub != nil {
-			if _, err := r.crossReplicaPub.delete(ctx, key); err != nil {
-				logger.Error(err, "failed to delete cross-replica state")
-			}
-		}
-		return nil
 	}
 
 	r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})

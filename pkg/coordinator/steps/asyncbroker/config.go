@@ -132,8 +132,9 @@ type asyncBrokerConfig struct {
 	WaitCapSeconds int64 `json:"wait_cap_seconds,omitempty"`
 	// FetchGraceSeconds is the mailbox TTL applied after a delivered fetch,
 	// covering lost-response retries. Unset falls back to
-	// resultFetchGraceTTL. Zero deletes the result on delivery, matching
-	// wait mode's eager delete.
+	// resultFetchGraceTTL. Zero deletes the result on a delivered fetch.
+	// Wait delivery of a success applies the same grace, with a floor of
+	// waitGraceFloor.
 	FetchGraceSeconds *int64 `json:"fetch_grace_seconds,omitempty"`
 
 	// Routes select the broker queue and tier per request. The queues must
@@ -262,6 +263,14 @@ func (c *asyncBrokerConfig) fetchGrace() time.Duration {
 		return resultFetchGraceTTL
 	}
 	return time.Duration(*c.FetchGraceSeconds) * time.Second
+}
+
+// waitGrace resolves the mailbox TTL applied after a wait delivery of a
+// success: the fetch grace, raised to waitGraceFloor so that a zero or short
+// grace does not reclaim the result under other waiters attached to the same
+// id.
+func (c *asyncBrokerConfig) waitGrace() time.Duration {
+	return max(c.fetchGrace(), waitGraceFloor)
 }
 
 // timeoutBounds resolves the deadline bounds for a queued mode, applying the

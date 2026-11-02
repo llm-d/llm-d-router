@@ -80,6 +80,24 @@ const (
 	ProbeResultTransportError = "transport_error"
 )
 
+// Result label values for force_stream_total, one per candidate outcome. The
+// forced outcome is a reassembled reply; the fallback_* outcomes and error_ceiling
+// take the non-forced pass-through; error_upstream and error_transport are also
+// classified by step_errors_total. The metric's Help string is the canonical
+// description of what each value means.
+const (
+	ForceStreamResultForced              = "forced"
+	ForceStreamResultFallbackBudget      = "fallback_budget"
+	ForceStreamResultFallbackUnbounded   = "fallback_unbounded"
+	ForceStreamResultFallbackUnsupported = "fallback_unsupported"
+	ForceStreamResultFallbackLossyFrame  = "fallback_lossy_frame"
+	ForceStreamResultFallbackOversize    = "fallback_oversize"
+	ForceStreamResultFallbackUnreadable  = "fallback_unreadable"
+	ForceStreamResultErrorCeiling        = "error_ceiling"
+	ForceStreamResultErrorUpstream       = "error_upstream"
+	ForceStreamResultErrorTransport      = "error_transport"
+)
+
 // Route label values for orchestration_overhead_seconds. These name the
 // coordinator's registered inference routes, not the raw URL path.
 const (
@@ -129,6 +147,9 @@ var (
 	// decode leg carried the rendered token IDs (so a mismatch means the
 	// worker ignored them) or rendered the prompt itself (renderer drift).
 	parityLabels = []string{"model_name", "api_type", "ids_forwarded"}
+	// forceStreamLabels are model_name, the step that force-streamed the
+	// request (decode or conditional-decode), and the request's outcome.
+	forceStreamLabels = []string{"model_name", "step", "result"}
 )
 
 // withLabel returns a fresh slice of base followed by extra. It allocates a
@@ -154,6 +175,7 @@ type resettableCollector interface {
 // Register and Reset both iterate it so the two stay in sync.
 func allCollectors() []resettableCollector {
 	return []resettableCollector{
+		buildInfo,
 		requestTotal,
 		requestErrorTotal,
 		requestDuration,
@@ -162,11 +184,14 @@ func allCollectors() []resettableCollector {
 		requestRunning,
 		stepDuration,
 		stepErrorTotal,
+		stepRerunTotal,
 		stepRunning,
 		upstreamRequestTotal,
 		upstreamRequestDuration,
 		executionPathTotal,
 		conditionalDecodeProbesTotal,
+		forceStreamBufferedBytes,
+		forceStreamTotal,
 		encodeSubrequests,
 		orchestrationOverhead,
 		mediaItems,

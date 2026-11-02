@@ -2,7 +2,7 @@
 
 llm-d Router. Go service that routes inference requests to model-serving pods via an Endpoint Picker (EPP), with a sidecar that coordinates disaggregated inference. Multi-vendor open source under the llm-d project. Review bandwidth is a shared community resource, so scope work tightly and discuss substantive changes in the open before code lands.
 
-`make help` lists targets. `make presubmit` is the pre-merge gate. All targets run inside a builder container; host Go is not required.
+`make help` lists targets. `make presubmit` is the static pre-merge gate (formatting, linting, security, boilerplate, telemetry, and review-playbook checks; it runs no Go tests). Build, lint, and test targets (`make test-unit`, `make -f Makefile.coord.mk test-unit`, `make test-integration-hermetic`, `make test-e2e`) run inside a builder container; `make tidy`, `make upgrade-deps`, and the code generation targets call the host Go toolchain.
 
 ## Agent operating rules
 
@@ -14,6 +14,9 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 
 ## Working in the codebase
 
+- Add trace attributes and span names in `pkg/common/observability/semconv/registry/` and run `make update-telemetry` to generate `llm_d.go` and `spans.go`; do not edit generated files directly.
+- Add scheduler metrics in `pkg/common/observability/semconv/registry/scheduler-metrics.yaml` and run `make update-telemetry` to generate their declarations and table in `docs/metrics.md`. Preserve Prometheus names and label positions; other metric definitions remain with their owning packages.
+- When a change alters a contract in [docs/review/](docs/review/index.md), moves a path in its routing table, or settles an open question there, update `docs/review/` and run `python3 hack/render_playbook.py` in the same PR (`make verify-review-playbook`). See [maintain_review_bundle.md](docs/review/playbooks/maintain_review_bundle.md).
 - State your interpretation before coding. When the task has multiple valid reads, ask; don't pick one silently. For clear failure signals (logs, failing tests, reproducer), act; the ask rule is about unclear requirements, not unclear bugs.
 - Define success as a checkable outcome: "add validation" becomes "write failing tests for invalid inputs, then make them pass". Where the issue is reproducible, the failing test IS the success criterion; write it first and let it gate the implementation.
 - Before changing or extending a component, read an analogous one in the repository. The closest existing implementation is the canonical pattern; follow its structure, naming, and tests rather than introducing new conventions.
@@ -21,12 +24,29 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - The plugin model is the main extension surface. Start at [docs/architecture.md](docs/architecture.md); existing filters, scorers, and profile handlers are the canonical references.
 - Tests in the same package describe the contract. Read them before changing behavior.
 - Verify behavior against the code, not from filenames or familiarity. Run the build or read the test when uncertain.
-- Do not claim work is complete without running `make presubmit` (or the targeted test) and confirming the relevant output. "Tests pass" is a claim, not a fact, until the command output exists.
+- Do not claim work is complete without running `make presubmit` and the targeted `-race` tests, and confirming the relevant output. "Tests pass" is a claim, not a fact, until the command output exists.
 - If execution goes sideways (unexpected state, cascading failures, a fix that breaks adjacent code), stop and replan. Restate what you know, identify where the plan broke, propose a revised path before continuing.
+
+## Testing
+
+- Extend existing table-driven tests when adding cases; use a plain `Test*` function without `t.Run` for a single case. Use `snake_case` subtest names without spaces or `/`.
+- Keep `t.Run` bodies linear: split success and error cases into separate tables when setup or assertions diverge, and avoid per-row `setup` or `check` closures.
+- Skip tests for trivial getters/setters, non-wire `String()` methods, test-builder setters, and generated code.
+- Test through exported APIs, constructor options, and `httptest.NewServer` or `bufconn`. Write new unit tests under `pkg/`, `cmd/`, and `internal/` with standard `testing.T` rather than `ginkgo/v2`, `gomega`, or `test/utils`, matching each package's assertion style.
+- Prefer real in-memory collaborators first, then existing testkits (`pkg/epp/framework/interface/flowcontrol/mocks`, `pkg/epp/flowcontrol/contracts/mocks`, `pkg/coordinator/metrics/metricstest`, `pkg/common/grpc/grpctest`) before defining a local stub.
+- Validate static EPP configs in-process (`pkg/epp/config/loader`, or `cmd/epp/runner` `--validate-config` when checking auto-created producers and data-layer wiring) rather than starting `envtest`, and do not modify frozen `test/testdata/plugins/stable/v1/` fixtures. Put large payloads in `testdata/` and multi-thousand-op stress loops in `Benchmark*` (`for b.Loop()`).
+- Avoid wall-clock `time.Sleep` in unit tests; use `testing/synctest` (keeping real OS sockets outside `synctest.Test`), channels, injected short timers, or `require.EventuallyWithT`. Cache ECDSA P-256 certs for TLS tests.
+- Bind ephemeral ports (`127.0.0.1:0`), use `t.TempDir()` and `t.Context()`, call `t.Parallel()` only when state is isolated (never with `t.Setenv` or package globals), and never call `t.Fatal` or `require.*` inside goroutines or HTTP handlers.
+- Compare protobuf messages with `cmp.Diff(want, got, protocmp.Transform())`, and avoid `reflect.DeepEqual` or `assert.Equal` on protobufs, `time.Time`, and `resource.Quantity`. Prefer `errors.Is`/`errors.As` over `err.Error()` substrings, and verify every new test fails when the code it guards breaks.
 
 ## Code review
 
+- Review against the conventions of the pull request's base branch at review time, not of the commit the pull request branched from. Run `git fetch origin <base>` first, then read this file, [review_a_pull_request.md](docs/review/playbooks/review_a_pull_request.md), and the routed rule files from the base tip (`git show origin/<base>:<path>`). A checked-out pull request branch can carry a stale copy of all three. Read the pull request's own copy only when the pull request changes `docs/review/` or this file.
 - Check every constant the change adds: grep its value across the repository and report any that already exists under another name for the same contract, any that declares a shared contract's value locally rather than importing it, and any declared away from its only reader.
+- Check test changes against [Testing](#testing): verify tests fail when the guarded code breaks, flag test-only hooks on production types (`Set*ForTest`, exported private state, single-implementation interfaces), and check `git log -S` before removing or weakening an existing assertion.
+- Execute a two-pass additive review per [review_a_pull_request.md](docs/review/playbooks/review_a_pull_request.md):
+  - **Pass 1 (Code and full-repo search first):** Inspect the diff, read modified files in full, and search the repository (`rg`/`grep` callers, sibling implementations, `pkg/common/`, `config/charts/`, tests, and docs) to catch logic bugs, edge cases, concurrency races, and contract mismatches directly from source code. Record all verified Pass-1 code findings before opening any Stage-1 rule file.
+  - **Pass 2 (Targeted non-code decisions - supplement only):** Route changed paths through [review_a_pull_request.md](docs/review/playbooks/review_a_pull_request.md) and load only the `0` to `2` matching rule files under `docs/review/rules/` (`0` rule files for test-only, doc-only, build, or CI diffs; never load `docs/review_playbook.md` or `docs/review/provenance.json`). Apply a rule only when its `When:` condition appears in the diff; Stage-1 rules are strictly additive to Pass 1, and matching `0` `When:` triggers must never drop, suppress, or downgrade verified Pass-1 code, concurrency, caller/callee, or test defects. Write natural code-focused review comments without citing internal `docs/review/` rule IDs.
 
 ## Pull requests
 
@@ -35,7 +55,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 - The PR addresses that issue and nothing else: no renames, reformatting, refactors, new abstractions, or pattern changes beyond what the issue requires.
 - Unrelated improvements belong in their own issue and PR, not folded into this PR. If you spot dead code or unrelated bugs in passing, mention them; don't fix them.
 - Self-check on the way out: if the change grew larger than expected or the fix feels hacky, rewrite the clean version before opening the PR.
-- Verify the code passes `make presubmit` locally before submitting a PR.
+- Verify the code passes `make presubmit` and targeted `-race` tests locally (see [prepare_a_pull_request.md](docs/review/playbooks/prepare_a_pull_request.md)) before submitting a PR.
 - Always use the project's `.github/PULL_REQUEST_TEMPLATE.md`.
   - Document user (not developer) facing changes in the ```release-note``` block. A required check
     validates it on the PR; the note is read from the PR body directly when release notes are
@@ -75,7 +95,8 @@ The codebase uses `go-logr` via controller-runtime. Verbosity constants are defi
 
 **Level conventions:**
 
-- `logger.Info(...)` for once-per-request operational signals.
+- `logger.Info(...)` for one-time startup or lifecycle signals.
+- `logger.V(logging.DEFAULT).Info(...)` for once-per-request operational signals.
 - `logger.V(logging.DEBUG).Info(...)` for per-item or per-loop signals that fire multiple times per request.
 - `logger.V(logging.TRACE).Info(...)` for detailed state transitions (cache operations, index updates).
 - `logger.Error(err, "msg", ...)` for recoverable errors that carry an underlying `error` value.

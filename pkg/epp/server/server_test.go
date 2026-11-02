@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -128,7 +129,7 @@ func TestServer_TextToSpeechRawAudioStream(t *testing.T) {
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	process, conn := testutils.GetStreamingServerClient(ctx, t, testListener)
 	defer conn.Close()
 
 	headers := testutils.BuildEnvoyGRPCHeaders(map[string]string{
@@ -197,7 +198,7 @@ func TestServer_TextToSpeechRawAudioStream(t *testing.T) {
 	require.Equal(t, 1, director.handleResponseBodyEndStreamCount)
 
 	cancel()
-	<-errChan
+	require.NoError(t, <-errChan)
 	testListener.Close()
 }
 
@@ -233,7 +234,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	process, conn := testutils.GetStreamingServerClient(ctx, t, testListener)
 	defer conn.Close()
 
 	// Send request headers - no response expected
@@ -391,7 +392,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	}
 
 	cancel()
-	<-errChan
+	require.NoError(t, <-errChan)
 	testListener.Close()
 }
 
@@ -448,10 +449,10 @@ type testDirector struct {
 	requestHeaders                   map[string]string
 	requestMetadata                  map[string]any
 	handleResponseBodyEndStreamCount int
-	lastInferenceRequestBody         *fwkrh.InferenceRequestBody
+	lastInferenceRequestBody         *fwkrequest.InferenceRequestBody
 }
 
-func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*handlers.RequestContext, error) {
+func (ts *testDirector) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (*handlers.RequestContext, error) {
 	ts.requestHeaders = reqCtx.Request.Headers
 	ts.requestMetadata = reqCtx.Request.Metadata
 	ts.lastInferenceRequestBody = inferenceRequestBody
@@ -488,6 +489,10 @@ func (ts *testDirector) HandleResponseBody(ctx context.Context, reqCtx *handlers
 	}
 	return reqCtx
 }
+func (ts *testDirector) GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata {
+	return ts.GetRandomEndpoint()
+}
+
 func (ts *testDirector) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	return &fwkdl.EndpointMetadata{
 		Address: podAddress,
@@ -503,10 +508,10 @@ func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[
 	if m.skip {
 		return &fwkrh.ParseResult{
 			SkipResponseProcessing: true,
-			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
+			Body:                   &fwkrequest.InferenceRequestBody{Payload: fwkrequest.RawPayload(body)},
 		}, nil
 	}
-	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrh.InferenceRequestBody{}}, nil
+	return &fwkrh.ParseResult{SkipResponseProcessing: false, Body: &fwkrequest.InferenceRequestBody{}}, nil
 }
 
 func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
@@ -537,7 +542,7 @@ func TestServer_Skip(t *testing.T) {
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{mockPar}, logr.Discard()), 0)
 
 	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	process, conn := testutils.GetStreamingServerClient(ctx, t, testListener)
 	defer conn.Close()
 
 	// Send request headers
@@ -591,12 +596,12 @@ func TestServer_Skip(t *testing.T) {
 	// Verify that the body was forced to have RawPayload
 	require.NotNil(t, director.lastInferenceRequestBody, "InferenceRequestBody should be non-nil")
 	require.NotNil(t, director.lastInferenceRequestBody.Payload, "Payload should be non-nil")
-	rawPayload, ok := director.lastInferenceRequestBody.Payload.(fwkrh.RawPayload)
+	rawPayload, ok := director.lastInferenceRequestBody.Payload.(fwkrequest.RawPayload)
 	require.True(t, ok, "Payload should be RawPayload")
 	require.Equal(t, []byte(`{"model":"test"}`), []byte(rawPayload), "Payload should match raw body")
 
 	cancel()
-	<-errChan
+	require.NoError(t, <-errChan)
 	testListener.Close()
 }
 
@@ -614,7 +619,7 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
 
 	testListener, errChan := testutils.SetupTestStreamingServer(ctx, t, streamingServer)
-	process, conn := testutils.GetStreamingServerClient(ctx, t)
+	process, conn := testutils.GetStreamingServerClient(ctx, t, testListener)
 	defer conn.Close()
 
 	// 1. Send request headers - no response expected yet
@@ -666,6 +671,6 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	t.Logf("Successfully reproduced gRPC stream limit error: %v", err)
 
 	cancel()
-	<-errChan
+	require.NoError(t, <-errChan)
 	testListener.Close()
 }

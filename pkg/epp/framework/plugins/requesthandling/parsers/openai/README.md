@@ -21,6 +21,11 @@ The images/edits endpoint accepts multipart/form-data.
 > priority scheduling is governed by EPP). When disabled, the request body is
 > forwarded unchanged.
 
+> [!NOTE]
+> Requesting usage in chat completions and completions streams is controlled by the global switch
+> `requestHandler.requestStreamUsage` (bool, default: `false`). See
+> [EPP token metrics](../../../../../../../docs/metrics.md#request-and-latency).
+
 ---
 
 ## Related Documentation

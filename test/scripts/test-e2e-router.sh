@@ -33,5 +33,6 @@ echo "Running end to end tests"
 
 # Prepare the local chart dependency before parallel workers render it.
 helm dependency build --skip-refresh "${DIR}/../../config/charts/llm-d-router-standalone"
+go test -v -race "${DIR}/../e2e/utils/standalone"
 
 run_ginkgo_suite "${DIR}/../e2e/"

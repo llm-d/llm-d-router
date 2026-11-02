@@ -33,6 +33,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	dlmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
@@ -83,26 +84,26 @@ var errBadGateway = errors.New("unexpected status code: 502")
 
 // setupHealthHarness starts an EPP over four healthy endpoints and returns the
 // address and ID of the one the tests make fail.
-func setupHealthHarness(t *testing.T, configText string) (*TestHarness, string, types.NamespacedName) {
+func setupHealthHarness(t *testing.T, configText string) (*eppharness.TestHarness, string, types.NamespacedName) {
 	t.Helper()
-	pods := []PodState{
-		P(0, 0, 0, modelMyModelTarget),
-		P(1, 0, 0, modelMyModelTarget),
-		P(2, 0, 0, modelMyModelTarget),
-		P(3, 0, 0, modelMyModelTarget),
+	pods := []eppharness.PodState{
+		eppharness.P(0, 0, 0, modelMyModelTarget),
+		eppharness.P(1, 0, 0, modelMyModelTarget),
+		eppharness.P(2, 0, 0, modelMyModelTarget),
+		eppharness.P(3, 0, 0, modelMyModelTarget),
 	}
-	h := NewTestHarness(t.Context(), t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
 	return h, "192.168.1.2:8000", types.NamespacedName{Namespace: h.Namespace, Name: "pod-1-rank-0"}
 }
 
 // routeAndRespond sends one request and answers it with the status that
 // respond returns for the endpoint the EPP picked. It returns that endpoint.
-func routeAndRespond(t *testing.T, h *TestHarness, respond func(endpoint string) string) string {
+func routeAndRespond(t *testing.T, h *eppharness.TestHarness, respond func(endpoint string) string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(ctx)
+	client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
 	require.NoError(t, err)
 
 	for _, req := range newRoutedRequest(nil) {
@@ -292,13 +293,13 @@ func TestEndpointHealth_FailsOpenWhenEveryEndpointFails(t *testing.T) {
 // names no configured polling data source instead of running without poll
 // health.
 func TestEndpointHealth_UnknownPollSourceFailsStartup(t *testing.T) {
-	opts := defaultEppServerOptions(t, "unused", endpointHealthConfig(`
+	opts := eppharness.DefaultEppServerOptions(t, "unused", endpointHealthConfig(`
       pollSource: no-such-source`))
 	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lis.Close() })
-	source := dlmocks.NewDataSource(fwkplugin.TypedName{Type: mockDataSourceType, Name: mockDataSourceType})
+	source := dlmocks.NewDataSource(fwkplugin.TypedName{Type: eppharness.MockDataSourceType, Name: eppharness.MockDataSourceType})
 
-	_, _, _, err = eppRunner.NewTestRunnerSetup(t.Context(), testEnv.Config, opts, source, lis)
+	_, _, _, err = eppRunner.NewTestRunnerSetup(t.Context(), eppharness.Config(), opts, source, lis)
 	require.ErrorContains(t, err, "poll-status/no-such-source")
 }

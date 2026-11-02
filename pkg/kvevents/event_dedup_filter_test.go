@@ -102,12 +102,10 @@ func TestEventDedupFilter_GroupIndependence(t *testing.T) {
 		"group 1 remove must be independent of the group 0 store")
 }
 
-// TestEventDedupFilter_DataParallelRankIndependence verifies the filter already
-// separates reference counts by data-parallel rank, so it is ready to become
-// DP-aware (see noDataParallelRank / PR #370) once the pool feeds a real rank
-// instead of the sentinel. On current main every scope uses the sentinel, so
-// this dimension is dormant in production but unit-tested here for forward
-// compatibility.
+// TestEventDedupFilter_DataParallelRankIndependence verifies that distinct
+// dataParallelRank values keep independent reference counts within one
+// podIdentifier bucket. Production callers pass noDataParallelRank because
+// pod discovery encodes the rank in podIdentifier.
 func TestEventDedupFilter_DataParallelRankIndependence(t *testing.T) {
 	f := newEventDedupFilter()
 	dp0 := testScope("pod-a", "gpu", noGroupIdx, 0)
@@ -184,6 +182,24 @@ func TestEventDedupFilter_ClearIsolatesPods(t *testing.T) {
 		"cleared pod-a count must be reset")
 	assert.Empty(t, f.filterRemove(b, []uint64{1}),
 		"pod-b count must survive pod-a clear (first of two removes suppressed)")
+}
+
+// TestEventDedupFilter_ReleasedScopesAreDropped verifies the filter holds no
+// state for a scope or pod once every reference in it is released.
+func TestEventDedupFilter_ReleasedScopesAreDropped(t *testing.T) {
+	f := newEventDedupFilter()
+	gpu := gpuScope("pod-a")
+	cpu := testScope("pod-a", "cpu", noGroupIdx, noDataParallelRank)
+
+	f.trackStore(gpu, []uint64{1, 2})
+	f.trackStore(cpu, []uint64{1})
+
+	f.filterRemove(gpu, []uint64{1, 2})
+	assert.NotContains(t, f.refs["pod-a"], gpu.podScope(), "released gpu scope must be dropped")
+	assert.Contains(t, f.refs["pod-a"], cpu.podScope(), "cpu scope still holds a reference")
+
+	f.filterRemove(cpu, []uint64{1})
+	assert.Empty(t, f.refs, "pod with no references left must be dropped")
 }
 
 // TestEventDedupFilter_NilSafe verifies the nil-receiver guards so a Pool

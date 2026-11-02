@@ -44,12 +44,17 @@ const (
 	defaultMetricsInsecureSkipVerify = true
 )
 
+// maxResponseBytes caps the metrics payload read from one scrape, so a hostile or broken
+// model server cannot exhaust memory in the parser.
+const maxResponseBytes = 8 << 20 // 8 MiB
+
 // metricsDatasourceParams holds the configuration parameters for the metrics data source plugin.
 // These values can be specified in the EndpointPickerConfig under the plugin's `parameters` field.
 type metricsDatasourceParams struct {
 	// Scheme defines the protocol scheme used in metrics retrieval (e.g., "http").
 	Scheme string `json:"scheme"`
-	// Path defines the URL path used in metrics retrieval (e.g., "/metrics").
+	// Path defines the URL path used in metrics retrieval (e.g., "/metrics"). It may
+	// carry a query string (e.g., "/v1/loads?format=prometheus").
 	Path string `json:"path"`
 	// Port, when set, overrides the endpoint's inference port for metrics retrieval.
 	// Use when the model server exposes metrics on a port other than the InferencePool target port.
@@ -65,6 +70,9 @@ type metricsDatasourceParams struct {
 	// target authenticates this scraper by certificate instead of a bearer token. Both set together.
 	ClientCertPath string `json:"clientCertPath"`
 	ClientKeyPath  string `json:"clientKeyPath"`
+	// ProxyURL sends scrapes through this HTTP proxy instead of dialing the endpoint,
+	// for model servers reachable only through a proxy, such as a sidecar that adds mTLS.
+	ProxyURL string `json:"proxyURL,omitempty"`
 	// Interval is the scrape period (e.g. "1s"). Rounded to the nearest multiple
 	// of --refresh-metrics-interval. Empty or omitted means every base tick.
 	Interval string `json:"interval"`
@@ -79,7 +87,7 @@ type metricsDatasourceParams struct {
 // InsecureSkipVerify defaults to true (matching the factory default).
 // Use this function directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
-	parser, observer := newMetricsParser(nil, 0)
+	parser, observer := newMetricsParser(nil)
 	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{SkipVerify: defaultMetricsInsecureSkipVerify},
 		MetricsDataSourceType, name, parser, observer)
 }
@@ -104,12 +112,17 @@ func MetricsDataSourceFactory(name string, parameters *json.Decoder, handle fwkp
 		return nil, err
 	}
 
-	opts := []http.Option{intervalOpt}
+	proxyOpt, err := http.ParseProxyURLOption(cfg.ProxyURL)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := []http.Option{intervalOpt, proxyOpt}
 	if cfg.Port != nil {
 		opts = append(opts, http.WithPortOverride(*cfg.Port))
 	}
 
-	parser, observer := newMetricsParser(cfg.Families, 0)
+	parser, observer := newMetricsParser(cfg.Families)
 	opts = append(opts, observer)
 
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
@@ -143,24 +156,30 @@ type FamilyReader interface {
 // newMetricsParser returns the source's parser and the option that feeds it the bound
 // extractors. The parser keeps the configured families and those the bound extractors declare.
 // Without configured families, it parses the whole response while any bound extractor is not a
-// FamilyReader. A positive maxBytes caps the bytes read from a response.
-func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (PrometheusMetricMap, error), http.Option) {
+// FamilyReader. The parser reads at most maxResponseBytes from a response.
+func newMetricsParser(families []string) (func(io.Reader) (PrometheusMetricMap, error), http.Option) {
 	var (
 		filter   atomic.Pointer[familyFilter]
 		declared = slices.Clone(families)
 		opaque   bool
+		cache    = newFamilyCache()
+		whole    = newFamilyFilter(nil)
 	)
+	whole.all, whole.cache = true, cache
+	newFilter := func(families []string) *familyFilter {
+		f := newFamilyFilter(families)
+		f.cache = cache
+		return f
+	}
 	if len(declared) > 0 {
-		filter.Store(newFamilyFilter(declared))
+		filter.Store(newFilter(declared))
 	}
 	parser := func(data io.Reader) (PrometheusMetricMap, error) {
-		if maxBytes > 0 {
-			data = io.LimitReader(data, maxBytes)
-		}
+		data = io.LimitReader(data, maxResponseBytes)
 		if f := filter.Load(); f != nil {
 			return f.parse(data)
 		}
-		return parseMetrics(data)
+		return whole.parse(data)
 	}
 	// AppendExtractor serializes the observer calls.
 	observer := func(ext fwkplugin.Plugin) {
@@ -174,7 +193,7 @@ func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (Prome
 		}
 		declared = append(declared, reader.MetricFamilies()...)
 		if !opaque && len(declared) > 0 {
-			filter.Store(newFamilyFilter(declared))
+			filter.Store(newFilter(declared))
 		}
 	}
 	return parser, http.WithExtractorObserver(observer)
@@ -184,10 +203,18 @@ func newMetricsParser(families []string, maxBytes int64) (func(io.Reader) (Prome
 // under the base family. Counters are declared under their _total name and need no suffix.
 var sampleSuffixes = [][]byte{[]byte("_bucket"), []byte("_sum"), []byte("_count")}
 
-// familyFilter parses only the lines of the listed metric families.
+// maxPooledBufferBytes is the largest kept-lines buffer returned to the pool, so a buffer grown by a
+// large response is not held between scrapes.
+const maxPooledBufferBytes = 1 << 20
+
+// familyFilter parses only the lines of the listed metric families, or every line when all is
+// set. With a cache, it reuses the parsed families of unchanged high-label lines.
 type familyFilter struct {
 	families map[string]struct{}
+	all      bool
+	cache    *familyCache
 	readers  sync.Pool
+	buffers  sync.Pool
 }
 
 func newFamilyFilter(families []string) *familyFilter {
@@ -196,6 +223,7 @@ func newFamilyFilter(families []string) *familyFilter {
 		f.families[name] = struct{}{}
 	}
 	f.readers.New = func() any { return bufio.NewReaderSize(nil, 64*1024) }
+	f.buffers.New = func() any { return new(bytes.Buffer) }
 	return f
 }
 
@@ -207,9 +235,16 @@ func (f *familyFilter) parse(data io.Reader) (PrometheusMetricMap, error) {
 		f.readers.Put(r)
 	}()
 
-	var kept bytes.Buffer
+	kept := f.buffers.Get().(*bytes.Buffer)
+	kept.Reset()
+	defer func() {
+		if kept.Cap() <= maxPooledBufferBytes {
+			f.buffers.Put(kept)
+		}
+	}()
 	var long []byte // a line longer than the reader's buffer, assembled across reads
 	var excluded map[string]struct{}
+	var runs familyRuns
 	for {
 		line, err := r.ReadSlice('\n')
 		if errors.Is(err, bufio.ErrBufferFull) {
@@ -220,9 +255,13 @@ func (f *familyFilter) parse(data io.Reader) (PrometheusMetricMap, error) {
 			line = append(long, line...)
 			long = nil
 		}
-		if f.keep(line, &excluded) {
+		if f.all || f.keep(line, &excluded) {
+			if f.cache != nil {
+				runs.observe(line, kept.Len())
+			}
 			kept.Write(line)
-			if len(line) > 0 && line[len(line)-1] != '\n' {
+			// The whole-response parse leaves an unterminated last line to the parser.
+			if !f.all && len(line) > 0 && line[len(line)-1] != '\n' {
 				kept.WriteByte('\n')
 			}
 		}
@@ -233,30 +272,20 @@ func (f *familyFilter) parse(data io.Reader) (PrometheusMetricMap, error) {
 			return nil, err
 		}
 	}
-	return parseMetrics(&kept)
+	if f.cache == nil {
+		return parseMetrics(kept)
+	}
+	return f.cache.parse(kept.Bytes(), runs.finish(kept.Len()))
 }
 
 // keep reports whether a text-format line belongs to a listed family. A declared, unlisted
 // family takes precedence over suffix matching for its samples.
 func (f *familyFilter) keep(line []byte, excluded *map[string]struct{}) bool {
-	line = bytes.TrimLeft(line, " \t")
-	metadata := bytes.HasPrefix(line, []byte("#"))
-	if metadata {
-		comment := bytes.TrimLeft(line[1:], " \t")
-		end := bytes.IndexAny(comment, " \t")
-		if end < 0 || (!bytes.Equal(comment[:end], []byte("HELP")) && !bytes.Equal(comment[:end], []byte("TYPE"))) {
-			return false
-		}
-		line = bytes.TrimLeft(comment[end:], " \t")
-	}
-	end := bytes.IndexAny(line, "{ \t\r\n")
-	if end < 0 {
-		end = len(line)
-	}
-	name := line[:end]
-	if len(name) == 0 {
+	kind, name, _ := lineHead(line)
+	if kind == lineOther {
 		return false
 	}
+	metadata := kind != lineSample
 	if _, ok := f.families[string(name)]; ok {
 		return true
 	}

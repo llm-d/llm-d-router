@@ -308,8 +308,23 @@ func matchedGrace(p sensorProfile) time.Duration {
 	return 500 * time.Millisecond
 }
 
+// evictionBase holds the settings every scenario shares.
+var evictionBase = evictionScenario{capacity: 20, preload: 20, hpCeiling: 0.9, maxRevoc: 2}
+
+// smokeEvictionScenarios is the -short subset: a single-arrival burst against each sensor profile
+// at its matched grace.
+func smokeEvictionScenarios() []evictionScenario {
+	profiles := []sensorProfile{profileConcurrency, profileUtilization}
+	out := make([]evictionScenario, 0, len(profiles))
+	for _, p := range profiles {
+		sc := evictionBase
+		sc.profile, sc.grace, sc.burst = p, matchedGrace(p), burstSingle
+		out = append(out, sc)
+	}
+	return out
+}
+
 func evictionScenarios(full bool) []evictionScenario {
-	base := evictionScenario{capacity: 20, preload: 20, hpCeiling: 0.9, maxRevoc: 2}
 	profiles := []sensorProfile{profileConcurrency, profileUtilization}
 	graces := []time.Duration{5 * time.Millisecond, 50 * time.Millisecond, 200 * time.Millisecond, 500 * time.Millisecond}
 	ks := []int{1, 2, 5}
@@ -329,7 +344,7 @@ func evictionScenarios(full bool) []evictionScenario {
 			for _, g := range graces {
 				for _, k := range ks {
 					for _, bu := range bursts {
-						sc := base
+						sc := evictionBase
 						sc.profile, sc.grace, sc.maxRevoc, sc.burst = p, g, k, bu
 						add(sc)
 					}
@@ -339,17 +354,17 @@ func evictionScenarios(full bool) []evictionScenario {
 			// Informative diagonal: grace sweep at k=2/batch32; k sweep at matched grace/batch32;
 			// single + sustained at matched settings.
 			for _, g := range graces {
-				sc := base
+				sc := evictionBase
 				sc.profile, sc.grace, sc.burst = p, g, burstBatch32
 				add(sc)
 			}
 			for _, k := range ks {
-				sc := base
+				sc := evictionBase
 				sc.profile, sc.grace, sc.maxRevoc, sc.burst = p, matchedGrace(p), k, burstBatch32
 				add(sc)
 			}
 			for _, bu := range []burstShape{burstSingle, burstSustained} {
-				sc := base
+				sc := evictionBase
 				sc.profile, sc.grace, sc.burst = p, matchedGrace(p), bu
 				add(sc)
 			}
@@ -361,14 +376,14 @@ func evictionScenarios(full bool) []evictionScenario {
 				lowGrace = 50 * time.Millisecond
 			}
 			{
-				sc := base
+				sc := evictionBase
 				sc.profile, sc.grace, sc.burst = p, lowGrace, burstSingle
 				add(sc)
 			}
 		}
 		// Baselines: eviction off, with and without natural churn.
 		for _, churn := range []time.Duration{0, 500 * time.Millisecond} {
-			sc := base
+			sc := evictionBase
 			sc.profile, sc.grace, sc.burst = p, matchedGrace(p), burstBatch32
 			sc.evictionOff, sc.churnMean = true, churn
 			add(sc)
@@ -384,18 +399,20 @@ func evictionScenarios(full bool) []evictionScenario {
 //	go test ./pkg/epp/flowcontrol/benchmark/ -run '^$' -bench EvictionDynamics -benchtime=1x -count=5
 //
 // Set EVICTION_BENCH_FULL=1 for the full matrix and EVICTION_BENCH_TABLE=1 to print a markdown
-// summary table after the run.
+// summary table after the run. With -short, only smokeEvictionScenarios runs, which is what
+// make bench-smoke uses.
 func BenchmarkEvictionDynamics(b *testing.B) {
-	if testing.Short() {
-		b.Skip("eviction dynamics benchmark skipped in -short mode")
-	}
-
 	// Reset so -count>1 repeats do not accumulate rows from earlier runs.
 	evictionTableMu.Lock()
 	evictionTable = nil
 	evictionTableMu.Unlock()
 
-	for _, sc := range evictionScenarios(os.Getenv("EVICTION_BENCH_FULL") != "") {
+	scenarios := evictionScenarios(os.Getenv("EVICTION_BENCH_FULL") != "")
+	if testing.Short() {
+		scenarios = smokeEvictionScenarios()
+	}
+
+	for _, sc := range scenarios {
 		b.Run(sc.name(), func(b *testing.B) {
 			agg := &scenarioAgg{}
 			for range b.N {

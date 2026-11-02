@@ -27,11 +27,14 @@ import (
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 )
@@ -45,40 +48,17 @@ func buildEventBatchPayload(t *testing.T) []byte {
 
 func buildEventPayload(t *testing.T, events ...[]any) []byte {
 	t.Helper()
-
-	rawEvents := make([]msgpack.RawMessage, 0, len(events))
-	for _, event := range events {
-		rawEvent, err := msgpack.Marshal(event)
-		require.NoError(t, err)
-		rawEvents = append(rawEvents, rawEvent)
-	}
-
-	// EventBatch is array-encoded: [TS, Events, DataParallelRank]
-	batch := []any{
-		1234567890.0, // TS
-		rawEvents,    // Events
-		nil,          // DataParallelRank
-	}
-
-	var buf bytes.Buffer
-	enc := msgpack.NewEncoder(&buf)
-	enc.UseArrayEncodedStructs(true)
-	require.NoError(t, enc.Encode(batch))
-	return buf.Bytes()
+	return buildEventPayloadAt(t, 1234567890.0, events...)
 }
 
 func buildDistinctBlockStoredPayload(t *testing.T, blockHash uint64) []byte {
 	t.Helper()
 
-	tokens := make([]uint32, 64)
-	for i := range tokens {
-		tokens[i] = uint32(blockHash) + uint32(i) + 1 //#nosec G115 -- test data is small
-	}
 	return buildEventPayload(t, []any{
 		string(kvevents.EventTypeBlockStored),
 		[]uint64{blockHash},
 		uint64(0),
-		tokens,
+		makeTestTokens(blockHash),
 		64,
 	})
 }
@@ -133,6 +113,15 @@ func availableEndpoint(t *testing.T, ctx context.Context) string {
 	return endpoint
 }
 
+// listenEphemeral binds sock to a kernel-assigned loopback port and returns its
+// endpoint. Binding port 0 directly leaves no window for another process to
+// take the port, unlike reserving one with availableEndpoint and binding later.
+func listenEphemeral(t *testing.T, sock zmq4.Socket) string {
+	t.Helper()
+	require.NoError(t, sock.Listen("tcp://127.0.0.1:0"))
+	return "tcp://" + sock.Addr().String()
+}
+
 func seqFrame(seq uint64) []byte {
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint64(b, seq)
@@ -167,13 +156,13 @@ func (b *replayBuffer) set(messages ...replayMessage) {
 	b.messages = append([]replayMessage(nil), messages...)
 }
 
-func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *replayBuffer {
+func startReplayBuffer(t *testing.T, ctx context.Context) (*replayBuffer, string) {
 	t.Helper()
 	buffer := &replayBuffer{}
 	topic := []byte("kv@10.0.0.1:8000@TestModel")
 
 	router := zmq4.NewRouter(ctx)
-	require.NoError(t, router.Listen(endpoint))
+	endpoint := listenEphemeral(t, router)
 	t.Cleanup(func() { router.Close() })
 
 	// A send failure means only that this client hung up, so it abandons the
@@ -238,7 +227,7 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 		}
 	}()
 
-	return buffer
+	return buffer, endpoint
 }
 
 // TestZMQPubSub verifies that the pure-Go ZMQ library correctly implements
@@ -470,11 +459,12 @@ func TestZMQSubscriber_ShortSequenceFrameSkipped(t *testing.T) {
 }
 
 type replayHarness struct {
-	ctx    context.Context
-	index  kvblock.Index
-	buffer *replayBuffer
-	pub    zmq4.Socket
-	topic  []byte
+	ctx        context.Context
+	index      kvblock.Index
+	buffer     *replayBuffer
+	pub        zmq4.Socket
+	subManager *kvevents.SubscriberManager
+	topic      []byte
 }
 
 func newReplayHarness(t *testing.T, messages []replayMessage, fail bool) *replayHarness {
@@ -502,9 +492,11 @@ func newReplayHarnessWithBehavior(
 	require.NoError(t, err)
 	pool.Start(ctx)
 
-	pubEndpoint := availableEndpoint(t, ctx)
-	replayEndpoint := availableEndpoint(t, ctx)
-	buffer := startReplayBuffer(t, ctx, replayEndpoint)
+	// The subscriber connects, as production subscribers with a replay endpoint
+	// do, so every listener in the harness binds its own port.
+	pub := zmq4.NewPub(ctx)
+	pubEndpoint := listenEphemeral(t, pub)
+	buffer, replayEndpoint := startReplayBuffer(t, ctx)
 	buffer.set(messages...)
 	buffer.fail.Store(fail)
 	buffer.mu.Lock()
@@ -516,12 +508,9 @@ func newReplayHarnessWithBehavior(
 
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
-		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, "", "kv@", false))
-	require.Eventually(t, func() bool { return buffer.requests.Load() == 1 },
+		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, "", "kv@", true))
+	require.Eventually(t, func() bool { return buffer.requests.Load() >= 1 },
 		5*time.Second, 50*time.Millisecond, "proactive replay expected")
-
-	pub := zmq4.NewPub(ctx)
-	require.NoError(t, pub.Dial(pubEndpoint))
 	time.Sleep(100 * time.Millisecond)
 
 	t.Cleanup(func() {
@@ -531,11 +520,12 @@ func newReplayHarnessWithBehavior(
 		cancel()
 	})
 	return &replayHarness{
-		ctx:    ctx,
-		index:  index,
-		buffer: buffer,
-		pub:    pub,
-		topic:  []byte("kv@10.0.0.1:8000@TestModel"),
+		ctx:        ctx,
+		index:      index,
+		buffer:     buffer,
+		pub:        pub,
+		subManager: subManager,
+		topic:      []byte("kv@10.0.0.1:8000@TestModel"),
 	}
 }
 
@@ -550,7 +540,7 @@ func TestZMQSubscriber_ProactiveReplayResumesAfterPartialResponse(t *testing.T) 
 		5*time.Second, 50*time.Millisecond, "partial replay should resume on a new request")
 	require.Equal(t, uint64(2), h.buffer.lastStartSeq.Load())
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond)
 }
@@ -566,7 +556,7 @@ func TestZMQSubscriber_ProactiveReplayAcceptsEndAfterProgress(t *testing.T) {
 		5*time.Second, 50*time.Millisecond, "replay should request the terminal marker after interruption")
 	require.Equal(t, uint64(3), h.buffer.lastStartSeq.Load())
 	time.Sleep(300 * time.Millisecond)
-	key, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+	key, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 	require.NoError(t, err)
 	hits, err := h.index.Lookup(h.ctx, []kvblock.BlockHash{key}, nil)
 	require.NoError(t, err)
@@ -580,13 +570,13 @@ func TestZMQSubscriber_ColdReplayRetainedHistoryIndexesLiveEvents(t *testing.T) 
 	}, false)
 
 	require.Eventually(t, func() bool {
-		_, firstErr := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
-		_, secondErr := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(200))
+		_, firstErr := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
+		_, secondErr := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 200))
 		return firstErr == nil && secondErr == nil
 	}, 5*time.Second, 50*time.Millisecond)
 	h.send(t, 20002, buildDistinctBlockStoredPayload(t, 300))
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond, "live events must advance after a retained replay window")
 	require.Equal(t, int32(1), h.buffer.requests.Load())
@@ -602,7 +592,7 @@ func TestZMQSubscriber_ColdReplayRetainedHistoryResumes(t *testing.T) {
 		5*time.Second, 50*time.Millisecond)
 	require.Equal(t, uint64(20002), h.buffer.lastStartSeq.Load())
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond)
 }
@@ -612,10 +602,10 @@ func TestZMQSubscriber_GapFillRejectsMissingRequestedSequence(t *testing.T) {
 		{seq: 0, payload: buildDistinctBlockStoredPayload(t, 100)},
 	}, false)
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond)
-	key, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	key, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 	require.NoError(t, err)
 	h.buffer.set(replayMessage{seq: 3, payload: buildDistinctBlockStoredPayload(t, 300)})
 	h.send(t, 3, buildDistinctBlockStoredPayload(t, 300))
@@ -626,7 +616,7 @@ func TestZMQSubscriber_GapFillRejectsMissingRequestedSequence(t *testing.T) {
 		hits, lookupErr := h.index.Lookup(h.ctx, []kvblock.BlockHash{key}, nil)
 		return lookupErr == nil && len(hits[key]) == 0
 	}, 5*time.Second, 50*time.Millisecond, "a missing gap sequence must invalidate stale cache state")
-	_, err = h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+	_, err = h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 	require.Error(t, err)
 }
 
@@ -636,14 +626,14 @@ func TestZMQSubscriber_ColdReplayRetainedHistoryRejectsInternalGap(t *testing.T)
 		{seq: 20002, payload: buildDistinctBlockStoredPayload(t, 300)},
 	}, false)
 	require.Eventually(t, func() bool {
-		key, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		key, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 		if err != nil {
 			return false
 		}
 		hits, err := h.index.Lookup(h.ctx, []kvblock.BlockHash{key}, nil)
 		return err == nil && len(hits[key]) == 0
 	}, 5*time.Second, 50*time.Millisecond, "a gap inside the retained window must clear partial state")
-	_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+	_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 	require.Error(t, err)
 }
 
@@ -654,11 +644,11 @@ func TestZMQSubscriber_ProactiveReplayClearsPartialHistoryOnGap(t *testing.T) {
 	}, false)
 
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond)
 	require.Eventually(t, func() bool {
-		key, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		key, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 		if err != nil {
 			return false
 		}
@@ -676,7 +666,7 @@ func TestZMQSubscriber_ProactiveReplayUsesInactivityDeadline(t *testing.T) {
 	}, false, 0, 1100*time.Millisecond, false)
 
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond)
 	require.Greater(t, time.Since(started), testReplayAttemptIdleTimeout)
@@ -704,7 +694,7 @@ func TestZMQSubscriber_ProactiveReplayRebuildsServingEndpoint(t *testing.T) {
 	}, false)
 
 	require.Eventually(t, func() bool {
-		key, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		key, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 		if err != nil {
 			return false
 		}
@@ -718,7 +708,7 @@ func TestZMQSubscriber_GapReplayDoesNotDuplicateTriggeringEvent(t *testing.T) {
 	h := newReplayHarness(t, nil, false)
 	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond)
 
@@ -730,13 +720,13 @@ func TestZMQSubscriber_GapReplayDoesNotDuplicateTriggeringEvent(t *testing.T) {
 	require.Eventually(t, func() bool { return h.buffer.requests.Load() == 2 },
 		5*time.Second, 50*time.Millisecond, "gap replay expected")
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond)
 
 	h.send(t, 3, buildBlockRemovedPayload(t, 300))
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 		return err != nil
 	}, 5*time.Second, 50*time.Millisecond,
 		"one remove must evict a block stored once on the wire")
@@ -746,13 +736,13 @@ func TestZMQSubscriber_DropsPostGapEventsDuringReplayCooldown(t *testing.T) {
 	h := newReplayHarness(t, nil, true)
 	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
 	require.Eventually(t, func() bool {
-		_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+		_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond)
 
 	h.send(t, 2, buildDistinctBlockStoredPayload(t, 300))
 	time.Sleep(300 * time.Millisecond)
-	_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+	_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 	require.Error(t, err, "event past an unrecovered gap must not reach the index")
 }
 
@@ -765,16 +755,45 @@ func TestZMQSubscriber_UnavailableReplayIndexesLiveEvents(t *testing.T) {
 	assert.Equal(t, int32(1), h.buffer.requests.Load(), "the replay is retried only after the cooldown")
 }
 
+// TestZMQSubscriber_FullReplayReplacesLiveState verifies that a full replay
+// replaces live-indexed state, so one BlockRemoved evicts the block.
+func TestZMQSubscriber_FullReplayReplacesLiveState(t *testing.T) {
+	h := newReplayHarness(t, nil, false)
+
+	// The replay buffer is empty, so the full replay succeeds without events and the frame is indexed.
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 50))
+	require.Eventually(t, func() bool { return h.indexed(50) },
+		5*time.Second, 50*time.Millisecond, "the first frame must be indexed")
+
+	// A backwards sequence restarts the stream, and the empty rebuild leaves it live-only.
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) },
+		5*time.Second, 50*time.Millisecond, "the restarted frame must be indexed")
+
+	// The next frame finds the buffer filled, so the full replay announces block 100 again.
+	h.buffer.set(
+		replayMessage{seq: 3, payload: buildDistinctBlockStoredPayload(t, 100)},
+		replayMessage{seq: 4, payload: buildDistinctBlockStoredPayload(t, 200)},
+	)
+	h.send(t, 4, buildDistinctBlockStoredPayload(t, 200))
+	require.Eventually(t, func() bool { return h.indexed(200) },
+		5*time.Second, 50*time.Millisecond, "the replayed frames must be indexed")
+
+	h.send(t, 5, buildBlockRemovedPayload(t, 100))
+	require.Eventually(t, func() bool { return !h.indexed(100) },
+		5*time.Second, 50*time.Millisecond, "one remove must evict a block that is resident once")
+}
+
 func TestZMQSubscriber_SequenceResetClearsAndRebuildsPod(t *testing.T) {
 	h := newReplayHarness(t, nil, false)
 	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
 	h.send(t, 1, buildDistinctBlockStoredPayload(t, 200))
 	require.Eventually(t, func() bool {
-		_, firstErr := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
-		_, secondErr := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(200))
+		_, firstErr := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
+		_, secondErr := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 200))
 		return firstErr == nil && secondErr == nil
 	}, 5*time.Second, 50*time.Millisecond)
-	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 	require.NoError(t, err)
 
 	h.buffer.set(replayMessage{seq: 0, payload: buildDistinctBlockStoredPayload(t, 300)})
@@ -783,7 +802,7 @@ func TestZMQSubscriber_SequenceResetClearsAndRebuildsPod(t *testing.T) {
 		5*time.Second, 50*time.Millisecond, "full replay after sequence reset expected")
 	require.Eventually(t, func() bool {
 		oldHits, lookupErr := h.index.Lookup(h.ctx, []kvblock.BlockHash{oldRequestKey}, nil)
-		_, newErr := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(300))
+		_, newErr := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 300))
 		return lookupErr == nil && len(oldHits[oldRequestKey]) == 0 && newErr == nil
 	}, 5*time.Second, 50*time.Millisecond,
 		"restart must replace stale pod state with the replayed epoch")
@@ -820,18 +839,18 @@ func TestZMQSubscriber_SequenceResetWithoutReplayClearsPod(t *testing.T) {
 	send(0, buildDistinctBlockStoredPayload(t, 100))
 	send(1, buildDistinctBlockStoredPayload(t, 200))
 	require.Eventually(t, func() bool {
-		_, firstErr := index.GetRequestKey(ctx, kvblock.BlockHash(100))
-		_, secondErr := index.GetRequestKey(ctx, kvblock.BlockHash(200))
+		_, firstErr := index.GetRequestKey(ctx, kvevents.ModelEngineKey("TestModel", 100))
+		_, secondErr := index.GetRequestKey(ctx, kvevents.ModelEngineKey("TestModel", 200))
 		return firstErr == nil && secondErr == nil
 	}, 5*time.Second, 50*time.Millisecond)
-	oldRequestKey, err := index.GetRequestKey(ctx, kvblock.BlockHash(100))
+	oldRequestKey, err := index.GetRequestKey(ctx, kvevents.ModelEngineKey("TestModel", 100))
 	require.NoError(t, err)
 
 	// The engine restarted at the same address: its publisher numbers from zero again.
 	send(0, buildDistinctBlockStoredPayload(t, 300))
 	require.Eventually(t, func() bool {
 		oldHits, lookupErr := index.Lookup(ctx, []kvblock.BlockHash{oldRequestKey}, nil)
-		_, newErr := index.GetRequestKey(ctx, kvblock.BlockHash(300))
+		_, newErr := index.GetRequestKey(ctx, kvevents.ModelEngineKey("TestModel", 300))
 		return lookupErr == nil && len(oldHits[oldRequestKey]) == 0 && newErr == nil
 	}, 5*time.Second, 50*time.Millisecond,
 		"restart must drop the pod's stale blocks without a replay endpoint")
@@ -891,11 +910,11 @@ func identified(t *testing.T, payload []byte, publisher byte) []byte {
 	return out
 }
 
-func startSnapshotServer(t *testing.T, ctx context.Context, endpoint string) *snapshotServer {
+func startSnapshotServer(t *testing.T, ctx context.Context) (*snapshotServer, string) {
 	t.Helper()
 	server := &snapshotServer{publisher: publisherID(0)}
 	rep := zmq4.NewRep(ctx)
-	require.NoError(t, rep.Listen(endpoint))
+	endpoint := listenEphemeral(t, rep)
 	t.Cleanup(func() { rep.Close() })
 	go func() {
 		for {
@@ -912,7 +931,7 @@ func startSnapshotServer(t *testing.T, ctx context.Context, endpoint string) *sn
 			}
 		}
 	}()
-	return server
+	return server, endpoint
 }
 
 func newSnapshotHarness(t *testing.T, cut int64, batches ...[]byte) (*replayHarness, *snapshotServer) {
@@ -935,23 +954,20 @@ func newSnapshotReplayHarness(
 	require.NoError(t, err)
 	pool.Start(ctx)
 
-	pubEndpoint := availableEndpoint(t, ctx)
-	snapshotEndpoint := availableEndpoint(t, ctx)
-	server := startSnapshotServer(t, ctx, snapshotEndpoint)
+	pub := zmq4.NewPub(ctx)
+	pubEndpoint := listenEphemeral(t, pub)
+	server, snapshotEndpoint := startSnapshotServer(t, ctx)
 	server.set(cut, batches...)
 	replayEndpoint := ""
 	var buffer *replayBuffer
 	if replay != nil {
-		replayEndpoint = availableEndpoint(t, ctx)
-		buffer = startReplayBuffer(t, ctx, replayEndpoint)
+		buffer, replayEndpoint = startReplayBuffer(t, ctx)
 		buffer.set(replay...)
 	}
 
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
-		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, snapshotEndpoint, "kv@", false))
-	pub := zmq4.NewPub(ctx)
-	require.NoError(t, pub.Dial(pubEndpoint))
+		ctx, t.Name(), "10.0.0.1:8000", pubEndpoint, replayEndpoint, snapshotEndpoint, "kv@", true))
 	time.Sleep(100 * time.Millisecond)
 
 	t.Cleanup(func() {
@@ -961,12 +977,13 @@ func newSnapshotReplayHarness(
 		cancel()
 	})
 	return &replayHarness{
-		ctx: ctx, index: index, buffer: buffer, pub: pub, topic: []byte("kv@10.0.0.1:8000@TestModel"),
+		ctx: ctx, index: index, buffer: buffer, pub: pub, subManager: subManager,
+		topic: []byte("kv@10.0.0.1:8000@TestModel"),
 	}, server
 }
 
 func (h *replayHarness) indexed(hash uint64) bool {
-	_, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(hash))
+	_, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", hash))
 	return err == nil
 }
 
@@ -987,7 +1004,7 @@ func TestZMQSubscriber_SnapshotRebuildsPodOnGap(t *testing.T) {
 	h.send(t, 5, buildEventBatchPayload(t))
 	require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
 
-	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 	require.NoError(t, err)
 
 	server.set(8, buildDistinctBlockStoredPayload(t, 300))
@@ -1012,7 +1029,7 @@ func TestZMQSubscriber_SnapshotSequenceResetReloadsPod(t *testing.T) {
 	h, server := newSnapshotHarness(t, 5, buildDistinctBlockStoredPayload(t, 100))
 	h.send(t, 5, buildEventBatchPayload(t))
 	require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
-	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 	require.NoError(t, err)
 
 	// The engine restarted at the same address: its publisher numbers from zero again.
@@ -1024,6 +1041,73 @@ func TestZMQSubscriber_SnapshotSequenceResetReloadsPod(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "a sequence reset must replace the pod's state with a new snapshot")
 	assert.False(t, h.indexed(999), "a frame at or before the cut is already in the snapshot")
 	assert.Equal(t, int32(2), server.requests.Load())
+}
+
+func TestZMQSubscriber_SnapshotMetrics(t *testing.T) {
+	liveOnly := func() float64 {
+		var m dto.Metric
+		require.NoError(t, metrics.LiveOnlySubscribers.Write(&m))
+		return m.GetGauge().GetValue()
+	}
+	loads := func() uint64 {
+		var m dto.Metric
+		require.NoError(t, metrics.SnapshotLoadDuration.Write(&m))
+		return m.GetHistogram().GetSampleCount()
+	}
+	before := loads()
+	baseline := liveOnly()
+
+	h, server := newSnapshotHarness(t, -2)
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a subscriber whose snapshot failed must be counted as live-only")
+	assert.Equal(t, before, loads(), "an unavailable snapshot is not a load")
+
+	// The engine restarted and serves a snapshot.
+	server.set(0, buildDistinctBlockStoredPayload(t, 300))
+	h.send(t, 0, buildEventBatchPayload(t))
+	require.Eventually(t, func() bool { return h.indexed(300) && liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a loaded snapshot must leave the live-only count")
+	assert.Equal(t, before+1, loads())
+
+	// The snapshot is unavailable when a gap rebuilds the pod.
+	server.set(-2)
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 400))
+	require.Eventually(t, func() bool { return h.indexed(400) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a failed rebuild must count the subscriber as live-only again")
+	assert.Equal(t, before+1, loads())
+
+	require.True(t, h.subManager.RemoveSubscriber(h.ctx, t.Name()))
+	require.Eventually(t, func() bool { return liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a removed live-only subscriber must leave the count")
+
+	// With a replay buffer, the snapshot and the replay both fail on join.
+	h, _ = newSnapshotReplayHarness(t, []replayMessage{}, -2)
+	h.buffer.fail.Store(true)
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a subscriber whose snapshot and replay failed must be counted as live-only")
+
+	// The engine restarted and its replay buffer serves the stream; the frame is inside the replay.
+	h.buffer.fail.Store(false)
+	h.buffer.set(replayMessage{seq: 0, payload: buildDistinctBlockStoredPayload(t, 200)})
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 999))
+	require.Eventually(t, func() bool { return h.indexed(200) && liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a completed replay must leave the live-only count")
+	assert.False(t, h.indexed(999), "a frame at or before the replayed sequence is already indexed")
+
+	// A failed gap replay starts the cooldown, so the next frame is indexed live.
+	h.buffer.fail.Store(true)
+	h.send(t, 2, buildEventBatchPayload(t))
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 300))
+	require.Eventually(t, func() bool { return h.indexed(300) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a failed gap replay must count the subscriber as live-only again")
+
+	// A restart from sequence 0 whose rebuild fails still indexes a complete stream.
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 500))
+	require.Eventually(t, func() bool { return h.indexed(500) && liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a restart from sequence 0 must leave the live-only count")
+	assert.Equal(t, before+1, loads())
 }
 
 func TestZMQSubscriber_SnapshotPreferredOverReplay(t *testing.T) {
@@ -1044,7 +1128,7 @@ func TestZMQSubscriber_FailedSnapshotFallsBackToReplay(t *testing.T) {
 	h.send(t, 1, buildDistinctBlockStoredPayload(t, 200))
 	require.Eventually(t, func() bool { return h.indexed(100) && h.indexed(200) },
 		5*time.Second, 50*time.Millisecond, "an unavailable snapshot must fall back to a full replay")
-	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 	require.NoError(t, err)
 
 	// The engine restarted and its snapshot is unavailable, so the pod is rebuilt from replay.
@@ -1063,7 +1147,7 @@ func TestZMQSubscriber_PublisherChangeReloadsSnapshot(t *testing.T) {
 	server.setPublisher(1)
 	h.send(t, 5, identified(t, buildEventBatchPayload(t), 1))
 	require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
-	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(100))
+	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 100))
 	require.NoError(t, err)
 
 	// A restarted engine whose first frame continues the old sequence.
@@ -1086,7 +1170,7 @@ func TestZMQSubscriber_SnapshotFromAnotherPublisherIsNotApplied(t *testing.T) {
 	require.Eventually(t, func() bool { return h.indexed(200) }, 5*time.Second, 50*time.Millisecond,
 		"live frames must be indexed while no matching snapshot is loaded")
 	assert.False(t, h.indexed(100), "a snapshot from another publisher must not be applied")
-	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvblock.BlockHash(200))
+	oldRequestKey, err := h.index.GetRequestKey(h.ctx, kvevents.ModelEngineKey("TestModel", 200))
 	require.NoError(t, err)
 
 	h.send(t, 3, identified(t, buildDistinctBlockStoredPayload(t, 300), 2))
@@ -1095,4 +1179,211 @@ func TestZMQSubscriber_SnapshotFromAnotherPublisherIsNotApplied(t *testing.T) {
 		return lookupErr == nil && len(oldHits[oldRequestKey]) == 0 && h.indexed(100) && h.indexed(300)
 	}, 5*time.Second, 50*time.Millisecond, "the restarted publisher's snapshot must replace the old blocks")
 	assert.Equal(t, int32(2), server.requests.Load())
+}
+
+func readCounterVec(t *testing.T, vec *prometheus.CounterVec, labels ...string) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, vec.WithLabelValues(labels...).Write(&m))
+	return m.GetCounter().GetValue()
+}
+
+func TestZMQSubscriber_GapAndCooldownDropMetrics(t *testing.T) {
+	h := newReplayHarness(t, nil, true)
+	const podID = "test-pod"
+	gapsBefore := readCounterVec(t, metrics.EventsSequenceGaps, podID)
+	missedBefore := readCounterVec(t, metrics.EventsMissed, podID)
+	droppedBefore := readCounterVec(t, metrics.EventsDropped, podID, "replay_cooldown")
+
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) },
+		5*time.Second, 50*time.Millisecond)
+
+	// Proactive replay on connect failed (replay fail=true), so cooldown is active.
+	// Sending seq 4 creates a gap of 3 missed events (seq 1, 2, 3).
+	h.send(t, 4, buildDistinctBlockStoredPayload(t, 400))
+	require.Eventually(t, func() bool {
+		return readCounterVec(t, metrics.EventsSequenceGaps, podID) >= gapsBefore+1
+	}, 5*time.Second, 50*time.Millisecond)
+
+	assert.Equal(t, missedBefore+3, readCounterVec(t, metrics.EventsMissed, podID))
+	assert.Equal(t, droppedBefore+1, readCounterVec(t, metrics.EventsDropped, podID, "replay_cooldown"))
+}
+
+func TestZMQSubscriber_MalformedFrameIncrementsDroppedMetric(t *testing.T) {
+	h := newReplayHarness(t, nil, false)
+	const podID = "test-pod"
+	droppedBefore := readCounterVec(t, metrics.EventsDropped, podID, "malformed_frame")
+
+	// Send a 2-frame message (missing payload frame) with the subscribed topic.
+	require.NoError(t, h.pub.Send(zmq4.NewMsgFrom(h.topic, seqFrame(0))))
+	require.Eventually(t, func() bool {
+		return readCounterVec(t, metrics.EventsDropped, podID, "malformed_frame") >= droppedBefore+1
+	}, 5*time.Second, 50*time.Millisecond)
+}
+
+func TestZMQSubscriber_DecodeErrorSeriesCleanedUpOnRemove(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+
+	const (
+		podID          = "default/pod-decode-cleanup"
+		sourceEndpoint = "10.0.9.5:8000"
+	)
+	t.Cleanup(func() { metrics.CleanupSubscriber(podID) })
+
+	index, err := kvblock.NewIndex(ctx, kvblock.DefaultIndexConfig())
+	require.NoError(t, err)
+	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
+	require.NoError(t, err)
+	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	require.NoError(t, err)
+	pool.Start(ctx)
+	defer pool.Shutdown(ctx)
+
+	pub := zmq4.NewPub(ctx)
+	pubEndpoint := listenEphemeral(t, pub)
+	defer pub.Close()
+	_, replayEndpoint := startReplayBuffer(t, ctx)
+
+	subManager := kvevents.NewSubscriberManager(pool)
+	defer subManager.Shutdown(ctx)
+	require.NoError(t, subManager.EnsureSubscriber(
+		ctx, podID, sourceEndpoint, pubEndpoint, replayEndpoint, "", "kv@", true))
+
+	topic := []byte("kv@" + sourceEndpoint + "@TestModel")
+	require.Eventually(t, func() bool {
+		if readCounterVec(t, metrics.EventsDropped, podID, "decode_error") >= 1 {
+			return true
+		}
+		_ = pub.Send(zmq4.NewMsgFrom(topic, seqFrame(0), []byte{0xff}))
+		return false
+	}, 5*time.Second, 20*time.Millisecond)
+
+	gatherDropped := func(tb require.TestingT) map[string]map[string]float64 {
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(metrics.EventsDropped)
+		mfs, gatherErr := reg.Gather()
+		require.NoError(tb, gatherErr)
+		got := make(map[string]map[string]float64)
+		for _, mf := range mfs {
+			for _, m := range mf.GetMetric() {
+				var labelPod, labelReason string
+				for _, l := range m.GetLabel() {
+					switch l.GetName() {
+					case "pod_identifier":
+						labelPod = l.GetValue()
+					case "reason":
+						labelReason = l.GetValue()
+					}
+				}
+				if got[labelPod] == nil {
+					got[labelPod] = make(map[string]float64)
+				}
+				got[labelPod][labelReason] = m.GetCounter().GetValue()
+			}
+		}
+		return got
+	}
+
+	series := gatherDropped(t)
+	assert.Equal(t, 1.0, series[podID]["decode_error"])
+	assert.Empty(t, series[sourceEndpoint])
+
+	require.True(t, subManager.RemoveSubscriber(ctx, podID))
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Empty(c, gatherDropped(c)[podID])
+	}, 5*time.Second, 20*time.Millisecond)
+}
+
+func TestZMQSubscriber_ReplayAndSnapshotSkipProcessingLagMetric(t *testing.T) {
+	readLag := func() (uint64, float64) {
+		var m dto.Metric
+		require.NoError(t, metrics.EventsProcessingLag.Write(&m))
+		return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
+	}
+
+	t.Run("gap_replay", func(t *testing.T) {
+		h := newReplayHarness(t, nil, false)
+		countBefore, sumBefore := readLag()
+
+		// Live seq=0 with timestamp 0 skips lag so only the post-replay live frame increments it.
+		h.send(t, 0, buildEventPayloadAt(t, 0, []any{
+			string(kvevents.EventTypeBlockStored),
+			[]uint64{100},
+			uint64(0),
+			makeTestTokens(100),
+			64,
+		}))
+		require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
+
+		h.buffer.set(
+			replayMessage{seq: 1, payload: buildDistinctBlockStoredPayload(t, 200)},
+			replayMessage{seq: 2, payload: buildDistinctBlockStoredPayload(t, 300)},
+		)
+		h.send(t, 2, buildDistinctBlockStoredPayload(t, 300))
+		require.Eventually(t, func() bool { return h.indexed(200) && h.indexed(300) },
+			5*time.Second, 50*time.Millisecond)
+
+		countAfterReplay, sumAfterReplay := readLag()
+		assert.Equal(t, countBefore, countAfterReplay)
+		assert.InDelta(t, sumBefore, sumAfterReplay, 1e-9)
+
+		recentTS := float64(time.Now().UnixNano()) / 1e9
+		h.send(t, 3, buildEventPayloadAt(t, recentTS, []any{
+			string(kvevents.EventTypeBlockStored),
+			[]uint64{400},
+			uint64(0),
+			makeTestTokens(400),
+			64,
+		}))
+		require.Eventually(t, func() bool { return h.indexed(400) }, 5*time.Second, 50*time.Millisecond)
+
+		countAfterLive, sumAfterLive := readLag()
+		assert.Equal(t, countAfterReplay+1, countAfterLive)
+		assert.Less(t, sumAfterLive-sumAfterReplay, 10.0)
+	})
+
+	t.Run("snapshot_rebuild", func(t *testing.T) {
+		countBefore, sumBefore := readLag()
+		h, _ := newSnapshotHarness(t, 5, buildDistinctBlockStoredPayload(t, 100))
+
+		h.send(t, 5, buildDistinctBlockStoredPayload(t, 999))
+		require.Eventually(t, func() bool { return h.indexed(100) }, 5*time.Second, 50*time.Millisecond)
+
+		countAfterSnapshot, sumAfterSnapshot := readLag()
+		assert.Equal(t, countBefore, countAfterSnapshot)
+		assert.InDelta(t, sumBefore, sumAfterSnapshot, 1e-9)
+	})
+}
+
+func makeTestTokens(blockHash uint64) []uint32 {
+	tokens := make([]uint32, 64)
+	for i := range tokens {
+		tokens[i] = uint32(blockHash) + uint32(i) + 1 //#nosec G115 -- test data is small
+	}
+	return tokens
+}
+
+func buildEventPayloadAt(t *testing.T, timestamp float64, events ...[]any) []byte {
+	t.Helper()
+
+	rawEvents := make([]msgpack.RawMessage, 0, len(events))
+	for _, event := range events {
+		rawEvent, err := msgpack.Marshal(event)
+		require.NoError(t, err)
+		rawEvents = append(rawEvents, rawEvent)
+	}
+
+	batch := []any{
+		timestamp,
+		rawEvents,
+		nil,
+	}
+
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf)
+	enc.UseArrayEncodedStructs(true)
+	require.NoError(t, enc.Encode(batch))
+	return buf.Bytes()
 }

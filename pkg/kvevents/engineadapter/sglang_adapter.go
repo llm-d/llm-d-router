@@ -47,6 +47,8 @@ var sglangBlockStoredFieldDecoders = []eventFieldDecoder{
 	{"lora_id", decodeLoraID},
 	{"medium", decodeMedium},
 	{"cache_salt", decodeSGLangCacheSalt},
+	{"session_id", decodeSessionID},
+	{"lora_name", decodeLoraName},
 }
 
 var sglangBlockRemovedFieldDecoders = []eventFieldDecoder{
@@ -57,6 +59,10 @@ var sglangBlockRemovedFieldDecoders = []eventFieldDecoder{
 // NewSGLangAdapter creates a SGLang adapter.
 func NewSGLangAdapter() *SGLangAdapter {
 	return &SGLangAdapter{}
+}
+
+func init() {
+	Register(EngineTypeSGLang, func() kvevents.EngineAdapter { return NewSGLangAdapter() })
 }
 
 // ShardingKey extracts the pod-id segment from a SGLang raw message topic.
@@ -70,7 +76,7 @@ func (s *SGLangAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 // It extracts pod identity and model name from the topic,
 // and decodes the msgpack payload into an EventBatch.
 func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
-	podID, modelName := parseTopic(msg.Topic)
+	podID, modelName := topicIdentity(msg)
 
 	batch := msgpackTypedEventBatch{schema: &sglangWireSchema}
 	if err := msgpack.Unmarshal(msg.Payload, &batch); err != nil {

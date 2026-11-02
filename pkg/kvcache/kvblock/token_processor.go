@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/cespare/xxhash/v2"
@@ -298,8 +299,11 @@ func (db *chunkedTokenDatabase) prefixHashes(
 	hashes := make([]uint64, len(tokenChunks))
 	for i, chunk := range tokenChunks {
 		var extras []MMHash
-		if extraFeatures[i] != nil {
-			extras = extraFeatures[i].MMHashes
+		if f := extraFeatures[i]; f != nil {
+			extras = f.MMHashes
+			if f.CacheSalt != "" {
+				extras = append(slices.Clip(extras), MMHash{Hash: f.CacheSalt})
+			}
 		}
 		switch {
 		case digest != nil:

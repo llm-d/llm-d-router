@@ -33,7 +33,7 @@ SIDECAR_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(SIDECAR_IMAGE_NAME)
 SIDECAR_TAG ?= dev
 export SIDECAR_IMAGE ?= $(SIDECAR_IMAGE_TAG_BASE):$(SIDECAR_TAG)
 
-VLLM_SIMULATOR_TAG ?= v1.0.0
+VLLM_SIMULATOR_TAG ?= v1.2.0
 VLLM_SIMULATOR_TAG_BASE ?= $(IMAGE_REGISTRY)/$(VLLM_SIMULATOR_IMAGE_NAME)
 export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 
@@ -182,7 +182,9 @@ sidecar_TEST_PACKAGES = ./pkg/sidecar/...
 # block (epp+sidecar only); CI's baseline cache unions all coverage/*.out, so
 # framework enters the CI baseline once this is on main. The PR run reports
 # coverage/framework.out as a new component.
-framework_TEST_PACKAGES = ./test/framework/...
+# The EPP harness is excluded: it is envtest-driven and exercised (though not
+# measured) by make test-integration-hermetic, so unit coverage would report 0%.
+framework_TEST_PACKAGES = $$(go list ./test/framework/... | grep -vE '/test/framework/epp/harness($$|/)' | tr '\n' ' ')
 
 # Internal variables for generic targets
 epp_IMAGE = $(EPP_IMAGE)
@@ -233,7 +235,17 @@ check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails o
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate
+presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate verify-telemetry verify-review-playbook
+
+.PHONY: update-telemetry verify-telemetry test-telemetry
+update-telemetry: image-build-builder ## Generate trace attributes, spans, scheduler metrics, and catalogs.
+	$(BUILDER_RUN) 'bash hack/telemetry.sh update'
+
+verify-telemetry: image-build-builder ## Check the telemetry registry and generated files.
+	$(BUILDER_RUN) 'bash hack/telemetry.sh verify'
+
+test-telemetry: image-build-builder ## Test telemetry generation and drift detection.
+	$(BUILDER_RUN) 'bash hack/test-telemetry.sh && go test ./pkg/common/observability/semconv ./pkg/epp/scheduling ./pkg/epp/metrics'
 
 .PHONY: git-branch-check
 git-branch-check:
@@ -258,6 +270,10 @@ go-mod-check: image-build-builder
 .PHONY: tidy
 tidy:
 	go mod tidy
+
+.PHONY: mod-download
+mod-download: image-build-builder ## Download every module in the build list into the module cache
+	$(BUILDER_RUN) 'go mod download'
 
 .PHONY: clean
 clean: ## Clean build artifacts, tools and caches
@@ -293,7 +309,7 @@ test-unit: test-unit-epp test-unit-sidecar test-unit-framework ## Run unit tests
 test-unit-%: image-build-builder
 	@mkdir -p $(COVERAGE_DIR)
 	@printf "\033[33;1m==== Running $* Unit Tests ====\033[0m\n"
-	$(BUILDER_RUN) "go test -v -race -coverprofile=$(COVERAGE_DIR)/$*.out -covermode=atomic $($*_TEST_PACKAGES)"
+	$(BUILDER_RUN) "go test -v -race -coverprofile=$(COVERAGE_DIR)/$*.out -covermode=atomic $($*_TEST_PACKAGES) && sed -i -E '/(\\.pb\\.go|\\/zz_generated[^/]*\\.go):/d' $(COVERAGE_DIR)/$*.out"
 	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/$*.out | tail -1'
 
 .PHONY: test-filter
@@ -348,9 +364,9 @@ bench-tokenizer: image-build-builder ## Run tokenizer + scorer benchmark (requir
 	$(BUILDER_RUN_CLUSTER) 'go test -bench=. -benchmem -count=5 -timeout=5m ./test/profiling/tokenizerbench/'
 
 .PHONY: bench-smoke
-bench-smoke: image-build-builder ## Smoke-run the flowcontrol benchmarks once (-benchtime=1x) to catch runtime rot
+bench-smoke: image-build-builder ## Smoke-run the flowcontrol benchmarks once (-race -short -benchtime=1x) to catch runtime rot
 	@printf "\033[33;1m==== Running Flow Control Benchmark Smoke ====\033[0m\n"
-	$(BUILDER_RUN) 'go test -run=^$$ -bench=. -benchtime=1x -timeout=5m ./pkg/epp/flowcontrol/benchmark/...'
+	$(BUILDER_RUN) 'go test -race -short -run=^$$ -bench=. -benchtime=1x -timeout=5m ./pkg/epp/flowcontrol/benchmark/...'
 
 .PHONY: post-deploy-test
 post-deploy-test: ## Run post deployment tests
@@ -364,6 +380,10 @@ verify-manifests: kubectl-validate ## Validate deployment manifests.
 .PHONY: verify-boilerplate
 verify-boilerplate: ## Check that .go and .sh files carry a copyright notice.
 	hack/copyright.sh verify
+
+.PHONY: verify-review-playbook
+verify-review-playbook: image-build-builder ## Check that docs/review/ is valid and docs/review_playbook.md is in sync.
+	$(BUILDER_RUN) 'python3 hack/render_playbook.py --check'
 
 ##@ Helm
 

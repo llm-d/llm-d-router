@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -36,21 +37,21 @@ import (
 const (
 	// epdDeploymentDir references the Kustomize directory for the non-disaggregated
 	// EPD scenario — single deployment, no routing sidecar, vLLM on port 8000
-	epdDeploymentDir = "../../deploy/environments/dev/epd"
+	epdDeploymentDir = "artifacts/environments/dev/epd"
 	// pdDisaggDir references the Kustomize directory for the deployment
 	// running vLLM with P/D (connector type is configurable via ${CONNECTOR_TYPE})
-	pdDisaggDir = "../../deploy/environments/dev/p-d"
+	pdDisaggDir = "artifacts/environments/dev/p-d"
 	// ePdDisaggDir references the Kustomize directory for the deployment
 	// running vLLM with E/PD (Encode/Prefill-Decode)
-	ePdDisaggDir = "../../deploy/environments/dev/e-pd"
+	ePdDisaggDir = "artifacts/environments/dev/e-pd"
 	// ePDDisaggDir references the Kustomize directory for the deployment
 	// running vLLM with E/P/D (Encode/Prefill/Decode)
-	ePDDisaggDir = "../../deploy/environments/dev/e-p-d"
+	ePDDisaggDir = "artifacts/environments/dev/e-p-d"
 
 	// encodeOnlyDir is the single-component kustomize path for encode-only pods.
-	encodeOnlyDir = "../../deploy/components/vllm-encode"
+	encodeOnlyDir = "artifacts/components/vllm-encode"
 	// prefillOnlyDir is the single-component kustomize path for prefill-only pods.
-	prefillOnlyDir = "../../deploy/components/vllm-prefill"
+	prefillOnlyDir = "artifacts/components/vllm-prefill"
 
 	simplePrompt = "Hello my name is Andrew, I have a doctorate in Rocket Science, and I like interplanetary space exploration"
 	extraPrompt  = "Why is the sky sometimes blue and sometimes red close to sunset?"
@@ -103,6 +104,29 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			standalone.Create(standaloneConfig(), simpleConfig, 1, 8000)
 
 			generateAndCheckLoad(5)
+		})
+
+		ginkgo.It("should keep routing through healthy EPP with fail-open enabled", func() {
+			createModelServersDecode(1)
+
+			cfg := standaloneConfig()
+			cfg.FailOpen = ptr.To(true)
+			cfg.HealthCheckInterval = "1s"
+			standalone.Create(cfg, simpleConfig, 1, 8000)
+
+			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
+			labelFilter := fmt.Sprintf(`model_name=%q`, simModelName)
+			routedRequest := func() int {
+				before := metrics.GetCounterMetric(metricsURL, "llm_d_epp_request_total", labelFilter)
+				runCompletion(simplePrompt, simModelName)
+				return metrics.GetCounterMetric(metricsURL, "llm_d_epp_request_total", labelFilter) - before
+			}
+
+			gomega.Eventually(routedRequest, readyTimeout, time.Second).Should(gomega.Equal(1))
+			ginkgo.By("Checking successful requests continue to reach EPP across the health-check window")
+			// Cover three consecutive failures at the configured 1s health-check interval.
+			gomega.Consistently(routedRequest, 5*time.Second, time.Second).Should(gomega.Equal(1),
+				"successful requests must be scheduled by EPP instead of taking the fail-open fallback")
 		})
 
 		ginkgo.It("should report metrics", func() {

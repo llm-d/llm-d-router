@@ -1,0 +1,12 @@
+# HELP trtllm_kv_cache_utilization KV cache utilization
+# TYPE trtllm_kv_cache_utilization gauge
+trtllm_kv_cache_utilization{engine_type="pytorch",model_name="Qwen/Qwen3-0.6B",pid="1"} 0.0
+# HELP trtllm_kv_cache_max_blocks Maximum number of KV cache blocks
+# TYPE trtllm_kv_cache_max_blocks gauge
+trtllm_kv_cache_max_blocks{engine_type="pytorch",model_name="Qwen/Qwen3-0.6B",pid="1"} 19958.0
+# HELP trtllm_kv_cache_free_blocks Number of free KV cache blocks
+# TYPE trtllm_kv_cache_free_blocks gauge
+trtllm_kv_cache_free_blocks{engine_type="pytorch",model_name="Qwen/Qwen3-0.6B",pid="1"} 19958.0
+# HELP trtllm_kv_cache_tokens_per_block Number of tokens per KV cache block
+# TYPE trtllm_kv_cache_tokens_per_block gauge
+trtllm_kv_cache_tokens_per_block{engine_type="pytorch",model_name="Qwen/Qwen3-0.6B",pid="1"} 32.0

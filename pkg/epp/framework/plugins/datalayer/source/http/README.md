@@ -8,6 +8,7 @@ The HTTP Data Source is a base implementation for data layer sources that retrie
 -   Configurable TLS certificate verification (skip verification).
 -   Pluggable response parsers.
 -   Directly polls endpoints based on their addressable metadata.
+-   Does not follow HTTP redirects. A redirect response fails the poll, so a polled endpoint cannot point the request at another address.
 
 ## Usage in Other Plugins
 

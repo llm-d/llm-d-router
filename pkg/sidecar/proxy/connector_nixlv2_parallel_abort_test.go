@@ -106,7 +106,7 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch decode abort", fun
 		Expect(err).ToNot(HaveOccurred(), "the client must get a response, not a dropped connection")
 		Expect(status).To(Equal(http.StatusBadGateway))
 		Expect(status).ToNot(Equal(http.StatusOK), "an empty 200 would hide the decode failure")
-		Expect(body).To(ContainSubstring("decode aborted"))
+		Expect(body).To(ContainSubstring("internal error"))
 	})
 
 	It("tears the connection down when decode aborts after its response reaches the client", func() {
@@ -165,10 +165,10 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch decode abort", fun
 var _ = Describe("deferredCommitWriter responseStarted", func() {
 
 	It("reports the response as started only once decode's output is relayed", func() {
-		dcw := newDeferredCommitWriter(httptest.NewRecorder())
+		dcw := newDeferredCommitWriter()
 		Expect(dcw.responseStarted()).To(BeFalse())
 
-		Expect(dcw.commit()).To(BeTrue())
+		Expect(dcw.commit(httptest.NewRecorder())).To(BeTrue())
 		// Committed, but decode has emitted nothing, so the commit is deferred
 		// and the response is still the caller's to write.
 		Expect(dcw.responseStarted()).To(BeFalse())
@@ -178,11 +178,11 @@ var _ = Describe("deferredCommitWriter responseStarted", func() {
 	})
 
 	It("reports no response started after an abort", func() {
-		dcw := newDeferredCommitWriter(httptest.NewRecorder())
+		dcw := newDeferredCommitWriter()
 		_, err := dcw.Write([]byte("partial"))
 		Expect(err).ToNot(HaveOccurred())
 		dcw.abort()
 		Expect(dcw.responseStarted()).To(BeFalse())
-		Expect(dcw.commit()).To(BeFalse())
+		Expect(dcw.commit(httptest.NewRecorder())).To(BeFalse())
 	})
 })

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -125,7 +126,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		OriginalPath: testChatCompletionsPath,
 		Model:        "llama-3",
 		Stream:       false,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -224,7 +225,7 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 		OriginalPath: reqcommon.PathResponses,
 		Model:        "llama-3",
 		Stream:       false,
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -280,7 +281,7 @@ func TestDecodeStep_Messages_NonStreaming(t *testing.T) {
 		RequestID:    "req-messages",
 		OriginalPath: reqcommon.PathMessages,
 		Model:        "llama-3",
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -361,7 +362,7 @@ func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
 		RequestID:    "req-stray-input",
 		OriginalPath: testChatCompletionsPath,
 		Model:        "llama-3",
-		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -524,7 +525,7 @@ func TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV(t *testing.T) 
 		RequestID:        "req-compl-rendered",
 		OriginalPath:     reqcommon.PathCompletions,
 		Model:            "test-model",
-		TokenIDs:         []int{1, 2345},
+		TokenIDs:         []uint32{1, 2345},
 		KVTransferParams: map[string]any{"block_id": "block-1"},
 		Body:             map[string]any{"model": "test-model", "prompt": "Hello"},
 		ResponseWriter:   recorder,
@@ -539,6 +540,50 @@ func TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV(t *testing.T) 
 	}
 	if _, ok := parsed[reqcommon.FieldKVTransferParams]; !ok {
 		t.Fatal("expected top-level kv_transfer_params for /v1/completions")
+	}
+}
+
+// TestDecodeStep_PromptTokenIDsInKVParams verifies that with
+// forward_prompt_token_ids set, chat-shaped decode requests carry the rendered
+// token ids in kv_transfer_params.prompt_token_ids, except for multimodal
+// requests and requests render did not tokenize, and that nothing is sent
+// when the parameter is unset.
+func TestDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
+	for _, tc := range promptTokenIDsCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), tc.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:      tc.path,
+				TokenIDs:          tc.tokens,
+				MultimodalEntries: tc.entries,
+				KVTransferParams:  map[string]any{"block_id": "xyz"},
+				Body:              map[string]any{"model": "m"},
+			}
+			maps.Copy(reqCtx.Body, tc.extra)
+			if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err != nil {
+				t.Fatal(err)
+			}
+			kvParams := reqCtx.Body[reqcommon.FieldKVTransferParams].(map[string]any)
+			got, ok := kvParams[reqcommon.FieldPromptTokenIDs]
+			if ok != tc.want {
+				t.Fatalf("prompt_token_ids present = %v, want %v (params %v)", ok, tc.want, kvParams)
+			}
+			if tc.want && fmt.Sprint(got) != fmt.Sprint(tc.tokens) {
+				t.Fatalf("prompt_token_ids = %v, want %v", got, tc.tokens)
+			}
+			if kvParams["do_remote_prefill"] != true {
+				t.Fatalf("do_remote_prefill = %v, want true", kvParams["do_remote_prefill"])
+			}
+		})
+	}
+}
+
+func TestDecodeStep_ForwardPromptTokenIDs_RejectsNonBool(t *testing.T) {
+	if _, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), map[string]any{ParamForwardPromptTokenIDs: "yes"}); err == nil {
+		t.Fatal("expected an error for a non-bool forward_prompt_token_ids")
 	}
 }
 
@@ -567,7 +612,7 @@ func TestDecodeStep_GenerateFormat_ToplevelKV(t *testing.T) {
 		RequestID:        "req-gen",
 		OriginalPath:     reqcommon.PathVLLMGenerate,
 		Model:            "test-model",
-		TokenIDs:         []int{1, 2, 3, 4, 5},
+		TokenIDs:         []uint32{1, 2, 3, 4, 5},
 		KVTransferParams: map[string]any{"block_id": wantBlockID, "peer_host": "10.0.0.42", "peer_port": 7777},
 		Body: map[string]any{
 			"model":           "test-model",
@@ -1090,7 +1135,7 @@ func TestDecodeStep_Responses_StampsFunctionCallOutputImage(t *testing.T) {
 		RequestID:    "req-responses-output",
 		OriginalPath: reqcommon.PathResponses,
 		Model:        "llama-3",
-		TokenIDs:     []int{1, 32000, 32000, 2345},
+		TokenIDs:     []uint32{1, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 			{Modality: reqcommon.ModalityImage, Hash: outputImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},

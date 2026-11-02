@@ -112,6 +112,8 @@ jobs:
     permissions:
       contents: write
       packages: read
+      id-token: write
+      attestations: write
     env:
       RELEASE_TAG: ${{ needs.set-params.outputs.tag }}
     steps:
@@ -131,6 +133,15 @@ jobs:
             "${{ needs.set-params.outputs.epp_name }}" \
             "${{ needs.set-params.outputs.sidecar_name }}" \
             "${{ needs.set-params.outputs.coordinator_name }}"
+
+      # Signs the exact files uploaded below so a consumer can check that a
+      # downloaded SBOM came from this workflow and was not changed after
+      # upload. The in-registry SBOMs are already covered by the image index
+      # attestation in ci-build-images.yaml.
+      - name: Attest the SBOM files
+        uses: actions/attest@v4
+        with:
+          subject-path: 'sbom/*'
 
       - name: Upload SBOMs to the release
         env:

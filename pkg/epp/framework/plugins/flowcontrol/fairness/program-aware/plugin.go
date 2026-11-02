@@ -25,11 +25,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -50,6 +53,7 @@ type Config struct {
 
 	TurnPriorityTimeWeight        float64 `json:"turnPriorityTimeWeight,omitempty"`
 	TurnPriorityInactivitySeconds float64 `json:"turnPriorityInactivitySeconds,omitempty"`
+	SessionStateProducerName      string  `json:"sessionStateProducerName,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -70,8 +74,13 @@ func (c Config) validate() error {
 	if c.EvictionTTLSeconds < 0 {
 		return fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", c.EvictionTTLSeconds)
 	}
-	if c.EvictionSweepSeconds <= 0 {
-		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
+	if c.EvictionTTLSeconds > 0 {
+		if err := duration.ValidateSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
+			return err
+		}
+	}
+	if err := duration.ValidateSeconds("evictionSweepSeconds", c.EvictionSweepSeconds); err != nil {
+		return err
 	}
 	if c.LASWeightService < 0 {
 		return fmt.Errorf("lasWeightService must be >= 0, got %v", c.LASWeightService)
@@ -93,10 +102,11 @@ func (c Config) validate() error {
 
 var (
 	_ flowcontrol.FairnessPolicy  = &ProgramAwarePlugin{}
-	_ fwkrc.PreRequest            = &ProgramAwarePlugin{}
-	_ fwkrc.ResponseBodyProcessor = &ProgramAwarePlugin{}
+	_ fwkrh.PreRequest            = &ProgramAwarePlugin{}
+	_ fwkrh.ResponseBodyProcessor = &ProgramAwarePlugin{}
 	_ plugin.StateDumper          = &ProgramAwarePlugin{}
 	_ plugin.ProducerPlugin       = &ProgramAwarePlugin{}
+	_ plugin.ConsumerPlugin       = &ProgramAwarePlugin{}
 )
 
 func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
@@ -109,18 +119,24 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
-	strategy, err := newStrategy(cfg)
+	if name == "" {
+		name = ProgramAwarePluginType
+	}
+	labels := prometheus.Labels{"policy": name}
+	strategy, err := newStrategy(cfg, labels)
 	if err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
-	p := &ProgramAwarePlugin{name: name, strategy: strategy}
+	fairnessIndex, avgWaitTimeMs := newCollectors(labels)
+	fairnessIndex.Set(1)
+	p := &ProgramAwarePlugin{name: name, strategy: strategy, fairnessIndex: fairnessIndex, avgWaitTimeMs: avgWaitTimeMs}
 	if handle != nil {
 		if reg := handle.Metrics(); reg != nil {
-			for _, c := range GetCollectors() {
-				reg.MustRegister(c)
-			}
-			for _, c := range strategy.Collectors() {
-				reg.MustRegister(c)
+			collectors := append([]prometheus.Collector{fairnessIndex, avgWaitTimeMs}, strategy.Collectors()...)
+			for _, c := range collectors {
+				if err := reg.Register(c); err != nil {
+					return nil, fmt.Errorf("%s plugin %q: registering metrics: %w", ProgramAwarePluginType, name, err)
+				}
 			}
 		}
 		if cfg.EvictionTTLSeconds > 0 {
@@ -133,8 +149,10 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 }
 
 type ProgramAwarePlugin struct {
-	name     string
-	strategy Strategy
+	name          string
+	strategy      Strategy
+	fairnessIndex prometheus.Gauge
+	avgWaitTimeMs *prometheus.GaugeVec
 
 	programMetrics sync.Map // key: program ID (string), value: *ProgramMetrics
 }
@@ -147,6 +165,11 @@ func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 // plugin's own PreRequest to read back.
 func (p *ProgramAwarePlugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{enqueueTimeAttributeKey: time.Time{}}
+}
+
+// Consumes declares the request data the configured strategy reads.
+func (p *ProgramAwarePlugin) Consumes() plugin.DataDependencies {
+	return p.getStrategy().Consumes()
 }
 
 // fairnessDumpState is the sanitized snapshot returned by DumpState. Program IDs
@@ -192,7 +215,7 @@ func (p *ProgramAwarePlugin) DumpState() (json.RawMessage, error) {
 // instances constructed in tests.
 func (p *ProgramAwarePlugin) getStrategy() Strategy {
 	if p.strategy == nil {
-		s, _ := newStrategy(DefaultConfig())
+		s, _ := newStrategy(DefaultConfig(), nil)
 		return s
 	}
 	return p.strategy
@@ -259,7 +282,9 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 		}
 	}
 
-	fairnessIndex.Set(p.computeFairnessIndex())
+	if p.fairnessIndex != nil {
+		p.fairnessIndex.Set(p.computeFairnessIndex())
+	}
 	return best, nil
 }
 
@@ -272,7 +297,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 
 	enqueueTime, _ := fwksched.ReadRequestAttribute[time.Time](request, enqueueTimeAttributeKey)
 	metrics.RecordDispatched(enqueueTime)
-	avgWaitTimeMs.WithLabelValues(id).Set(metrics.AverageWaitTime())
+	setProgramGauge(p.avgWaitTimeMs, id, metrics.AverageWaitTime())
 
 	p.getStrategy().OnPreRequest(metrics, request)
 	return nil
@@ -280,7 +305,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 
 // ResponseBody acts on the final stream chunk only; intermediate chunks are
 // no-ops.
-func (p *ProgramAwarePlugin) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
+func (p *ProgramAwarePlugin) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}
@@ -329,7 +354,9 @@ func (p *ProgramAwarePlugin) evictKey(key any) {
 	p.programMetrics.Delete(key)
 	if id, ok := key.(string); ok {
 		p.getStrategy().EvictProgram(id)
-		DeleteSharedSeries(id)
+		if p.avgWaitTimeMs != nil {
+			p.avgWaitTimeMs.DeleteLabelValues(id)
+		}
 	}
 }
 

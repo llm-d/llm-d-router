@@ -24,12 +24,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"path/filepath"
-	"strings"
+	"slices"
 	"syscall"
 	"time"
 
@@ -79,6 +81,12 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		IdleTimeout:       300 * time.Second, // 5 minutes for keep-alive connections
 		ReadHeaderTimeout: 30 * time.Second,  // Reasonable for headers only
 		MaxHeaderBytes:    1 << 20,           // 1 MB for headers is sufficient
+	}
+	if !s.config.SecureServing {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		server.Protocols = protocols
 	}
 
 	var cert *tls.Certificate
@@ -130,8 +138,11 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	}
 	s.logger.Info("server TLS", "tls", s.config.SecureServing, "cert_path", s.config.CertPath)
 
-	// Setup graceful termination (not strictly needed for sidecars)
+	// Serve returns as soon as Shutdown starts, so startHTTP waits on
+	// shutdownDone to keep the process alive while in-flight requests finish.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		s.logger.Info("shutting down")
 
@@ -155,6 +166,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		}
 	}
 
+	<-shutdownDone
 	return nil
 }
 
@@ -171,21 +183,35 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 			logger = s.logger
 		}
 		var writeError error
+		var prefillErr *prefillFailedError
 		switch {
+		case errors.As(context.Cause(r.Context()), &prefillErr):
+			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
+				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			if isVLLMGRPCRequest(r) {
+				s.relayVLLMPrefillFailure(res, r, prefillErr.response, vllmPrefillOutcome{relayError: true})
+				break
+			}
+			// A key with http.TrailerPrefix is sent as a trailer whether it is
+			// set before or after WriteHeader, so a buffered gRPC status relays
+			// as the HTTP/2 trailer the backend sent.
+			maps.Copy(res.Header(), prefillErr.response.headers)
+			res.WriteHeader(prefillErr.response.statusCode)
+			_, writeError = res.Write(prefillErr.response.bodyBytes())
+
 		case errors.Is(err, syscall.ECONNREFUSED):
 			logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
-			res.Header().Set("Content-Type", "application/json")
-			res.WriteHeader(http.StatusServiceUnavailable)
-			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
+			writeError = sendError(res, r, http.StatusServiceUnavailable,
+				"The decode node is not ready. Please check that the vLLM service is running and the port configuration is correct.")
 
 		default:
 			logger.Error(err, "http: proxy error",
 				"decoderURL", s.config.DecoderURL.String())
-			writeError = errorBadGateway(err, res)
+			writeError = errorBadGateway(res, r)
 		}
 		if writeError != nil {
-			logger.Error(err, "failed to send error response to client")
+			logger.Error(writeError, "failed to send error response to client")
 		}
 	}
 	return decoderProxy
@@ -205,13 +231,13 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 }
 
 // inspectedRequestFields lists the top-level request fields the sidecar reads
-// as Go values. decodeRequestBody decodes only these; every other field stays
-// a json.RawMessage so its bytes are forwarded unchanged. encoding/json sorts
-// map keys at every depth on Marshal, which would reorder free-form content
-// such as tools[].function.parameters that chat templates render into the
-// prompt verbatim.
+// as Go values; see reqcommon.DecodeRequestBody for why every other field stays
+// raw.
 var inspectedRequestFields = map[string]struct{}{
-	reqcommon.FieldKVTransferParams:     {},
+	// kv_transfer_params is deliberately NOT decoded as Go values: the only
+	// reader, clientPromptTokenIDs, handles the raw json.RawMessage form, and
+	// decoding it would materialize a long prompt_token_ids array (one boxed
+	// value per token) only to serialize it right back.
 	reqcommon.FieldECTransferParams:     {},
 	reqcommon.FieldMaxTokens:            {},
 	reqcommon.FieldMaxCompletionTokens:  {},
@@ -221,7 +247,7 @@ var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldStream:               {},
 	reqcommon.FieldStreamOptions:        {},
 	reqcommon.FieldEcho:                 {},
-	requestFieldN:                       {},
+	reqcommon.FieldN:                    {},
 	reqcommon.FieldCacheHitThreshold:    {},
 	reqcommon.FieldContinueFinalMessage: {},
 	reqcommon.FieldAddGenerationPrompt:  {},
@@ -250,26 +276,7 @@ func requestMessages(req map[string]any) ([]json.RawMessage, error) {
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, err
-	}
-	if fields == nil {
-		return nil, errors.New("request body is not a JSON object")
-	}
-	parsed := make(map[string]any, len(fields))
-	for k, v := range fields {
-		if _, ok := inspectedRequestFields[k]; !ok {
-			parsed[k] = v
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		parsed[k] = decoded
-	}
-	return parsed, nil
+	return reqcommon.DecodeRequestBody(raw, inspectedRequestFields)
 }
 
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
@@ -277,7 +284,14 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
-		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+			logger.Error(writeErr, "failed to send error response to client")
+		}
+		return nil, nil, false
+	}
+	if _, err := reqcommon.StreamRequested(parsed); err != nil {
+		logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
 			logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
@@ -289,7 +303,7 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
 			logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
-			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+			if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
 				logger.Error(writeErr, "failed to send error response to client")
 			}
 			return nil, nil, false
@@ -298,31 +312,182 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	return raw, parsed, true
 }
 
+// deleteCallerPDFlags removes a caller's do_remote_prefill and do_remote_decode
+// from kv_transfer_params and from sampling_params.extra_args.kv_transfer_params,
+// which vLLM's generate route reads, and reports whether either was present.
+// The P/D connectors set both flags themselves. A caller's do_remote_prefill on
+// a decoder-only request makes vLLM's NIXL scheduler assert.
+func deleteCallerPDFlags(body map[string]any) bool {
+	removed := false
+	if params, ok := body[reqcommon.FieldKVTransferParams].(json.RawMessage); ok {
+		if cleaned, stripped := stripPDFlags(params); stripped {
+			removed = true
+			if cleaned == nil {
+				delete(body, reqcommon.FieldKVTransferParams)
+			} else {
+				body[reqcommon.FieldKVTransferParams] = cleaned
+			}
+		}
+	}
+	return deleteExtraArgsPDFlags(body) || removed
+}
+
+func deleteExtraArgsPDFlags(body map[string]any) bool {
+	switch samplingParams := body[reqcommon.FieldSamplingParams].(type) {
+	case map[string]any:
+		extraArgs, _ := samplingParams[reqcommon.FieldExtraArgs].(map[string]any)
+		params, _ := extraArgs[reqcommon.FieldKVTransferParams].(map[string]any)
+		_, hasPrefill := params[reqcommon.FieldDoRemotePrefill]
+		_, hasDecode := params[reqcommon.FieldDoRemoteDecode]
+		delete(params, reqcommon.FieldDoRemotePrefill)
+		delete(params, reqcommon.FieldDoRemoteDecode)
+		return hasPrefill || hasDecode
+	case json.RawMessage:
+		var samplingFields, extraArgs map[string]json.RawMessage
+		if json.Unmarshal(samplingParams, &samplingFields) != nil ||
+			json.Unmarshal(samplingFields[reqcommon.FieldExtraArgs], &extraArgs) != nil {
+			return false
+		}
+		cleaned, stripped := stripPDFlags(extraArgs[reqcommon.FieldKVTransferParams])
+		if !stripped {
+			return false
+		}
+		if cleaned == nil {
+			delete(extraArgs, reqcommon.FieldKVTransferParams)
+		} else {
+			extraArgs[reqcommon.FieldKVTransferParams] = cleaned
+		}
+		rawExtraArgs, err := json.Marshal(extraArgs)
+		if err != nil {
+			return false
+		}
+		samplingFields[reqcommon.FieldExtraArgs] = rawExtraArgs
+		rawSampling, err := json.Marshal(samplingFields)
+		if err != nil {
+			return false
+		}
+		body[reqcommon.FieldSamplingParams] = json.RawMessage(rawSampling)
+		return true
+	}
+	return false
+}
+
+// stripPDFlags returns params without do_remote_prefill and do_remote_decode,
+// or nil when no other key is left, and whether either flag was present. Params
+// that cannot name a flag, such as one holding only prompt_token_ids, are not decoded.
+func stripPDFlags(params json.RawMessage) (json.RawMessage, bool) {
+	if !bytes.Contains(params, []byte(reqcommon.FieldDoRemotePrefill)) &&
+		!bytes.Contains(params, []byte(reqcommon.FieldDoRemoteDecode)) && !escapesKeyChar(params) {
+		return params, false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(params, &fields) != nil {
+		return params, false
+	}
+	_, hasPrefill := fields[reqcommon.FieldDoRemotePrefill]
+	_, hasDecode := fields[reqcommon.FieldDoRemoteDecode]
+	if !hasPrefill && !hasDecode {
+		return params, false
+	}
+	delete(fields, reqcommon.FieldDoRemotePrefill)
+	delete(fields, reqcommon.FieldDoRemoteDecode)
+	if len(fields) == 0 {
+		return nil, true
+	}
+	cleaned, err := json.Marshal(fields)
+	if err != nil {
+		return params, false
+	}
+	return cleaned, true
+}
+
+// decoderOnlyRequest returns r with deleteCallerPDFlags applied,
+// re-encoding the body only when it changed. Responses bodies go through
+// readJSONBody's guards. Any other body that can name kv_transfer_params and
+// does not decode is refused, since the engine's parser accepts bodies Go rejects.
+func (s *Server) decoderOnlyRequest(w http.ResponseWriter, r *http.Request, p2p p2pRouting, apiType reqcommon.APIType) (*http.Request, bool) {
+	body := p2p.body
+	if body == nil {
+		switch {
+		case apiType == reqcommon.APITypeResponses:
+			raw, parsed, ok := s.readJSONBody(r, w)
+			if !ok {
+				return r, false
+			}
+			r, body = cloneRequestWithBody(r.Context(), r, raw), parsed
+		case r.Body == nil:
+			return r, true
+		default:
+			raw, err := readBody(r)
+			_ = r.Body.Close()
+			if err != nil {
+				if writeErr := errorJSONInvalid(w, r, fmt.Errorf("failed to read request body: %w", err)); writeErr != nil {
+					log.FromContext(r.Context()).Error(writeErr, "failed to send error response to client")
+				}
+				return r, false
+			}
+			r = cloneRequestWithBody(r.Context(), r, raw)
+			// A key spelled with \u escapes, or a UTF-16 or UTF-32 body, which
+			// always holds a NUL byte, has no literal key to find.
+			if !bytes.Contains(raw, []byte(reqcommon.FieldKVTransferParams)) &&
+				!escapesKeyChar(raw) && !bytes.Contains(raw, []byte{0}) {
+				return r, true
+			}
+			// No inspected fields, so a number Go cannot hold does not hide the flags.
+			if body, err = reqcommon.DecodeRequestBody(raw, nil); err != nil {
+				if writeErr := errorJSONInvalid(w, r, fmt.Errorf("%w: %w", errInvalidJSON, err)); writeErr != nil {
+					log.FromContext(r.Context()).Error(writeErr, "failed to send error response to client")
+				}
+				return r, false
+			}
+		}
+	}
+	if !deleteCallerPDFlags(body) {
+		return r, true
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+			log.FromContext(r.Context()).Error(writeErr, "failed to send error response to client")
+		}
+		return r, false
+	}
+	return cloneRequestWithBody(r.Context(), r, raw), true
+}
+
+// escapesKeyChar reports whether raw holds a \u escape of '_' or a lower-case
+// letter, U+005F or U+0061 to U+007A, which spell kv_transfer_params and both
+// P/D flags.
+func escapesKeyChar(raw []byte) bool {
+	for {
+		i := bytes.Index(raw, []byte(`\u00`))
+		if i < 0 || i+4 >= len(raw) {
+			return false
+		}
+		if c := raw[i+4]; c == '5' || c == '6' || c == '7' {
+			return true
+		}
+		raw = raw[i+4:]
+	}
+}
+
+// readBody reads r.Body into one buffer sized from r.ContentLength. The cap
+// bounds what a client reserves by sending the header and withholding the body.
+func readBody(r *http.Request) ([]byte, error) {
+	const maxPresize = 4 << 20
+	if r.ContentLength <= 0 || r.ContentLength > maxPresize {
+		return io.ReadAll(r.Body)
+	}
+	buf := bytes.NewBuffer(make([]byte, 0, r.ContentLength+bytes.MinRead))
+	_, err := buf.ReadFrom(r.Body)
+	return buf.Bytes(), err
+}
+
 func cloneRequestWithBody(ctx context.Context, r *http.Request, body []byte) *http.Request {
 	cloned := r.Clone(ctx)
 	cloned.Body = io.NopCloser(bytes.NewReader(body))
 	cloned.ContentLength = int64(len(body))
 	return cloned
-}
-
-// extractHost returns the host part of a host:port string. A `http://`
-// prefix is trimmed first, matching createProxyHandler's tolerance for
-// routed endpoint values. If parsing fails (e.g. no port), the input is
-// returned as-is.
-func extractHost(hostWithPort string) string {
-	hostWithPort, _ = strings.CutPrefix(hostWithPort, "http://")
-	host, _, err := net.SplitHostPort(hostWithPort)
-	if err != nil {
-		return hostWithPort
-	}
-	return host
-}
-
-// isHostPort reports whether s parses as host:port with a non-empty host.
-// net.SplitHostPort accepts ":8000" (empty host), which is not a usable target.
-func isHostPort(s string) bool {
-	host, _, err := net.SplitHostPort(s)
-	return err == nil && host != ""
 }
 
 func newUUID() string {
@@ -348,4 +513,26 @@ func isRetryableStatus(statusCode int) bool {
 // headers and status, so there is no recovery action for a write failure.
 func WriteAll(w io.Writer, b []byte) {
 	_, _ = w.Write(b)
+}
+
+// redirectEncodedInferencePath answers a POST whose percent-encoded path
+// decodes to an inference API path with a 307 to the decoded path. EPP picks its
+// request parser from the encoded path and ServeMux matches it segment by
+// segment, so the two can classify such a request differently. The redirect
+// brings the client back through EPP with the clean path, as ServeMux does for
+// repeated slashes and dot segments. Only POST is served on these paths, so
+// other methods pass through. httpPaths and grpcPaths list the paths the
+// sidecar serves as inference routes; a path it forwards to the decoder
+// catch-all is not redirected.
+func redirectEncodedInferencePath(next http.Handler, httpPaths, grpcPaths []string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.RawPath != "" {
+			if c := path.Clean(r.URL.Path); slices.Contains(httpPaths, c) || slices.Contains(grpcPaths, c) {
+				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
+				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

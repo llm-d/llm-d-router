@@ -1,7 +1,7 @@
 # Header Label Affinity Scorer
 
 **Type:** `header-label-affinity-scorer`
-**Interfaces:** `scheduling.Scorer`, `requestcontrol.ResponseHeaderProcessor`
+**Interfaces:** `scheduling.Scorer`, `requesthandling.ResponseHeaderProcessor`
 
 Adds soft affinity for endpoints whose configured label equals a request
 header. A matching endpoint receives a score of `1`; every other endpoint
@@ -94,7 +94,7 @@ The affinity scorer stamps the selected prefill Pod's slice into
 decode.
 
 See the
-[DisaggregatedSet rollout configuration](../../../requestcontrol/screener/disaggregatedsetrollout/README.md#configuration)
+[DisaggregatedSet rollout configuration](../../../requesthandling/screener/disaggregatedsetrollout/README.md#configuration)
 for the complete screener, affinity scorer, and scheduling profile setup.
 
 The component coordinating the roles must copy `x-disagg-slice` from the

@@ -1,0 +1,28 @@
+---
+type: Decision
+title: Delete stranded deprecation helpers in the removal pull request
+description: Unreferenced registration and compatibility helpers are deleted in the pull request that removes their last caller rather than retained for hypothetical reuse.
+tags: ["maintainer-vs-maintainer", "mvm-12"]
+status: stable
+sources:
+  - { id: "pr-2509-ic-5398059091", resource: "https://github.com/llm-d/llm-d-router/pull/2509#issuecomment-5398059091", author: "human:roytman", last_modified: "2026-08-24T16:16:22Z" }
+  - { id: "pr-2509-ic-5398602893", resource: "https://github.com/llm-d/llm-d-router/pull/2509#issuecomment-5398602893", author: "human:elevran", last_modified: "2026-08-24T17:03:39Z" }
+---
+
+# Context
+
+When removing expired deprecated plugin aliases, authors offered to keep `RegisterDeprecatedWithPluginDependencies` for future deprecations versus deleting it immediately. (Conflict audit ID: `MVM-12`.)
+
+# Positions considered
+
+- **Position A (human:roytman)**: Proposed in #2509.[^pr-2509-ic-5398059091]
+- **Position B (human:elevran)**: Counter-position evaluated in #2509.[^pr-2509-ic-5398602893]
+
+# Outcome
+
+Deleted unreferenced deprecation helpers in the stranding change, relying on version control history if needed later.
+
+Related rule: [N+2 deprecation for shipped surfaces and zero shims for unshipped surfaces](../rules/governance_and_compatibility_policy.md#n2-deprecation-for-shipped-surfaces-and-zero-shims-for-unshipped-surfaces).
+
+[^pr-2509-ic-5398059091]: [#2509](https://github.com/llm-d/llm-d-router/pull/2509#issuecomment-5398059091) (human:roytman)
+[^pr-2509-ic-5398602893]: [#2509](https://github.com/llm-d/llm-d-router/pull/2509#issuecomment-5398602893) (human:elevran)

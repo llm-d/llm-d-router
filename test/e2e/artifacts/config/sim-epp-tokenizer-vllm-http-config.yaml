@@ -1,0 +1,42 @@
+# Sample EPP configuration with the token-producer plugin (vLLM HTTP backend)
+# and the precise-prefix-cache-producer + prefix-cache-scorer. Sidecar:
+#   command: ["vllm", "launch", "render"]
+#   args:    ["${MODEL_NAME}", "--port=8000"]
+# e2e only: the simulator pods publish KV events to a socket the EPP binds
+# (kvEventsConfig.zmqEndpoint with allowUntrustedPublishers). Deployments omit
+# zmqEndpoint; each engine binds its own PUB socket and the producer subscribes
+# to every discovered endpoint by default.
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: token-producer
+  parameters:
+    modelName: "${MODEL_NAME}"
+    vllm:
+      url: "http://localhost:8000"
+      # timeout: "5s"
+      # mmTimeout: "30s"
+- type: precise-prefix-cache-producer
+  parameters:
+    tokenProcessorConfig:
+      blockSizeTokens: 16
+      hashSeed: "42"
+    kvEventsConfig:
+      zmqEndpoint: tcp://0.0.0.0:5557
+      allowUntrustedPublishers: true  # simulator pods publish to the EPP's bound socket
+    indexerConfig:
+      kvBlockIndexConfig:
+        enableMetrics: false
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 10

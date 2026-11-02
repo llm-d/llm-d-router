@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // A new session is admitted only when a pod has room for its estimate.
@@ -69,9 +70,9 @@ func TestAdmittedPickReservesRoom(t *testing.T) {
 	require.False(t, isPaused(a, "s1"))
 }
 
-// Admitting a new session that does not fit pauses idle sessions past the
-// lease, longest idle first, and only as many as the admission needs.
-func TestAdmissionReclaimsLeaseExpiredIdleLongestFirst(t *testing.T) {
+// Admitting a new session that does not fit pauses idle sessions past
+// idleGracePeriod, longest idle first, and only as many as the admission needs.
+func TestAdmissionReclaimsIdlePastGracePeriodLongestFirst(t *testing.T) {
 	a := newTestAgent(testConfig())
 	seed(t, a, "s1", "pod-a", 300)
 	seed(t, a, "s2", "pod-a", 300)
@@ -89,10 +90,10 @@ func TestAdmissionReclaimsLeaseExpiredIdleLongestFirst(t *testing.T) {
 	require.Equal(t, float64(950), endpointTokens(a, "default/pod-a"))
 }
 
-// An idle session inside its lease keeps its room: the admission holds.
-func TestAdmissionKeepsIdleWithinLease(t *testing.T) {
+// An idle session within idleGracePeriod keeps its room: the admission holds.
+func TestAdmissionKeepsIdleWithinGracePeriod(t *testing.T) {
 	a := newTestAgent(testConfig())
-	seed(t, a, "s1", "pod-a", 900) // idle for less than the lease
+	seed(t, a, "s1", "pod-a", 900) // idle for less than idleGracePeriod
 	primeFitView(a, dlEndpoint("pod-a"))
 
 	q := makeQueue("s2", time.Now(), 1600) // estimate 400 > room 100
@@ -117,9 +118,9 @@ func TestNewSessionPrefersPodWithoutReclaim(t *testing.T) {
 }
 
 // An admitted session's turn that pushes its pod over the ceiling pauses
-// sessions idle past the lease, longest idle first. A session that just
+// sessions idle past idleGracePeriod, longest idle first. A session that just
 // finished a turn keeps its room.
-func TestAdmittedGrowthReclaimsPastLease(t *testing.T) {
+func TestAdmittedGrowthReclaimsPastGracePeriod(t *testing.T) {
 	a := newTestAgent(testConfig())
 	seed(t, a, "s1", "pod-a", 300)
 	seed(t, a, "s2", "pod-a", 250)
@@ -135,9 +136,9 @@ func TestAdmittedGrowthReclaimsPastLease(t *testing.T) {
 	require.False(t, isPaused(a, "s1"))
 }
 
-// When every idle session is inside the lease, an admitted session's turn
+// When every idle session is within idleGracePeriod, an admitted session's turn
 // still dispatches and pauses nobody; the pod stays over its ceiling.
-func TestAdmittedGrowthKeepsSessionsInsideLease(t *testing.T) {
+func TestAdmittedGrowthKeepsSessionsWithinGracePeriod(t *testing.T) {
 	a := newTestAgent(testConfig())
 	seed(t, a, "s1", "pod-a", 550)
 	seed(t, a, "s2", "pod-a", 450) // pod full
@@ -153,7 +154,7 @@ func TestAdmittedGrowthKeepsSessionsInsideLease(t *testing.T) {
 // reclaimed, even when it is long idle.
 func TestQueuedSessionNotReclaimed(t *testing.T) {
 	cfg := testConfig()
-	cfg.HeadWaitStarvationMs = 1000
+	cfg.ForceAdmitTimeout = metav1.Duration{Duration: time.Second}
 	a := newTestAgent(cfg)
 	seed(t, a, "s1", "pod-a", 600) // room 400
 	idleFor(a, "s1", time.Minute)
@@ -169,7 +170,7 @@ func TestQueuedSessionNotReclaimed(t *testing.T) {
 // pod can give up room, instead of never.
 func TestOversizedSessionFitsWhenPodReclaimable(t *testing.T) {
 	cfg := testConfig()
-	cfg.UtilThreshold = 0.5 // ceiling 500
+	cfg.UsableCapacityRatio = 0.5 // ceiling 500
 	a := newTestAgent(cfg)
 	seed(t, a, "s1", "pod-a", 600)
 	seed(t, a, "s2", "pod-a", 100)
@@ -177,7 +178,7 @@ func TestOversizedSessionFitsWhenPodReclaimable(t *testing.T) {
 	primeFitView(a, dlEndpoint("pod-a"))
 
 	q := makeQueue("s1", time.Now(), 2400) // estimate 600 > ceiling
-	require.Nil(t, pick(t, a, q), "s2 is inside its lease")
+	require.Nil(t, pick(t, a, q), "s2 is within idleGracePeriod")
 
 	idleFor(a, "s2", time.Minute)
 	require.Equal(t, q, pick(t, a, q))
@@ -246,7 +247,7 @@ func TestReservationPreventsDoubleAdmit(t *testing.T) {
 // The starvation backstop force-admits a head past the deadline, fit or not.
 func TestStarvationForcesAdmission(t *testing.T) {
 	cfg := testConfig()
-	cfg.HeadWaitStarvationMs = 1000
+	cfg.ForceAdmitTimeout = metav1.Duration{Duration: time.Second}
 	a := newTestAgent(cfg)
 	seed(t, a, "s1", "pod-a", 1000)
 	primeFitView(a, dlEndpoint("pod-a"))
@@ -255,14 +256,54 @@ func TestStarvationForcesAdmission(t *testing.T) {
 	require.Equal(t, q, pick(t, a, q))
 }
 
-// A paused session force-admitted past the deadline that fits even after
-// reclaim takes the room of its pod's sessions idle past the lease.
+// A zero forceAdmitTimeout disables forced admission even after long waits.
+func TestForceAdmitDisabledWhenZero(t *testing.T) {
+	cfg := testConfig()
+	cfg.ForceAdmitTimeout = metav1.Duration{Duration: 0}
+	a := newTestAgent(cfg)
+	seed(t, a, "s1", "pod-a", 1000)
+	primeFitView(a, dlEndpoint("pod-a"))
+
+	q := makeQueue("s2", time.Now().Add(-10*time.Minute), 4000)
+	require.Nil(t, pick(t, a, q))
+}
+
+// A sub-second forceAdmitTimeout compares against native time.Duration wait.
+func TestForceAdmitSubSecondDuration(t *testing.T) {
+	cfg := testConfig()
+	cfg.ForceAdmitTimeout = metav1.Duration{Duration: 500 * time.Millisecond}
+	a := newTestAgent(cfg)
+	seed(t, a, "s1", "pod-a", 1000)
+	primeFitView(a, dlEndpoint("pod-a"))
+
+	tooFresh := makeQueue("s2", time.Now().Add(-100*time.Millisecond), 4000)
+	require.Nil(t, pick(t, a, tooFresh))
+
+	starving := makeQueue("s2", time.Now().Add(-600*time.Millisecond), 4000)
+	require.Equal(t, starving, pick(t, a, starving))
+}
+
+// A zero idleGracePeriod reclaims idle sessions immediately without waiting.
+func TestIdleGracePeriodZeroReclaimsImmediately(t *testing.T) {
+	cfg := testConfig()
+	cfg.IdleGracePeriod = metav1.Duration{Duration: 0}
+	a := newTestAgent(cfg)
+	seed(t, a, "s1", "pod-a", 900)
+	primeFitView(a, dlEndpoint("pod-a"))
+
+	q := makeQueue("s2", time.Now(), 1600) // estimate 400 > room 100
+	require.Equal(t, q, pick(t, a, q))
+	require.True(t, isPaused(a, "s1"))
+}
+
+// A force-admitted paused session still reclaims sessions on its pod past
+// idleGracePeriod.
 func TestStarvingPausedSessionReclaimsIdle(t *testing.T) {
 	cfg := testConfig()
-	cfg.HeadWaitStarvationMs = 1000
+	cfg.ForceAdmitTimeout = metav1.Duration{Duration: time.Second}
 	a := newTestAgent(cfg)
 	seed(t, a, "s1", "pod-a", 600)
-	seed(t, a, "s3", "pod-a", 400) // within the lease
+	seed(t, a, "s3", "pod-a", 400) // within idleGracePeriod
 	seed(t, a, "s2", "pod-a", 700)
 	pause(a, "s2")
 	idleFor(a, "s1", time.Minute)

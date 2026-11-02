@@ -23,8 +23,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 )
 
 const turnPriorityStrategyName = "turn-priority"
@@ -44,17 +46,23 @@ var _ Strategy = &turnPriorityStrategy{}
 // workload means raising the weight, which trades prefix retention for admission
 // latency.
 //
-// The strategy requires one fairness ID per session, which holds for traffic
+// When the head request carries SessionState under sessionStateKey, depth comes
+// from the head's own session, so a flow that carries several sessions is scored
+// by the session whose request is next. Otherwise depth is the flow's dispatched
+// count, which requires one fairness ID per session. That holds for traffic
 // carrying a session header. Requests with no fairness ID share a single flow
 // whose dispatched count aggregates unrelated clients, so that count is not a
 // session depth and the ordering it produces is not meaningful. Such traffic
 // belongs in a priority band on a different fairness policy.
 //
-// A program's turn counter resets once it has been inactive for
+// The turn counter resets once the session or program has been inactive for
 // inactivitySeconds. The strategy keeps no accumulated per-program state.
 type turnPriorityStrategy struct {
 	timeWeight        float64
 	inactivitySeconds float64
+	// sessionStateKey is the request attribute of the configured
+	// session-state-producer instance.
+	sessionStateKey plugin.DataKey
 }
 
 func (s *turnPriorityStrategy) Name() string { return turnPriorityStrategyName }
@@ -80,7 +88,7 @@ func (s *turnPriorityStrategy) Pick(_ int, queues map[string]QueueInfo) flowcont
 			headWait = 0
 		}
 
-		score := float64(s.turnNumberFor(qi.Metrics, headEnqueue)) + s.timeWeight*headWait
+		score := float64(s.headTurnNumber(head, qi.Metrics, headEnqueue)) + s.timeWeight*headWait
 		// Tie-break on the longer head wait so equal depth dispatches in arrival
 		// order rather than by map iteration order.
 		if score > bestScore || (score == bestScore && headWait > bestWait) {
@@ -95,36 +103,72 @@ func (s *turnPriorityStrategy) Pick(_ int, queues map[string]QueueInfo) flowcont
 
 func (s *turnPriorityStrategy) OnPreRequest(_ *ProgramMetrics, _ *fwksched.InferenceRequest) {}
 
-func (s *turnPriorityStrategy) OnCompleted(_ *ProgramMetrics, _ *fwksched.InferenceRequest, _ *fwkrc.Response) {
+func (s *turnPriorityStrategy) OnCompleted(_ *ProgramMetrics, _ *fwksched.InferenceRequest, _ *fwkrh.Response) {
 }
 
 func (s *turnPriorityStrategy) EvictProgram(_ string) {}
 
 func (s *turnPriorityStrategy) Collectors() []prometheus.Collector { return nil }
 
-// turnNumberFor returns the turn number of a program's head request: the count of
-// requests already dispatched for the program plus the waiting request itself.
-// headEnqueue is the head request's arrival instant, so the idle gap is measured
-// from the previous completion to that arrival and excludes the head's own queue
-// wait.
-//
-// A program idle for longer than inactivitySeconds has its next request scored as
-// turn one, on the grounds that a session dormant that long has stopped competing
-// for its own prefix. Dispatching that request re-prefills the conversation, and
-// the program competes at its full dispatched count again.
-//
-// The count is read here but incremented in PreRequest, off the dispatch path, so
-// consecutive picks for one program can score against a count that lags by the
-// requests already dispatched from it.
+// Consumes declares the session state as optional: a head without it is scored
+// from the per-program metrics.
+func (s *turnPriorityStrategy) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Optional: map[plugin.DataKey]any{s.sessionStateKey: sessionstate.SessionState{}},
+	}
+}
+
+// headTurnNumber returns the turn number of a flow's head request, counted over
+// the head's session when the head carries SessionState and over the program's
+// metrics otherwise.
+func (s *turnPriorityStrategy) headTurnNumber(head flowcontrol.QueueItemAccessor, metrics *ProgramMetrics, headEnqueue time.Time) int64 {
+	if session, ok := s.headSessionState(head); ok {
+		return s.turnNumber(session.TurnsTaken, session.InFlightRequests, session.LastResponseAt, headEnqueue)
+	}
+	return s.turnNumberFor(metrics, headEnqueue)
+}
+
+// turnNumberFor returns the turn number of a head request from its program's
+// metrics. A program without metrics has dispatched nothing, so its head is
+// turn one.
 func (s *turnPriorityStrategy) turnNumberFor(metrics *ProgramMetrics, headEnqueue time.Time) int64 {
 	if metrics == nil {
 		return 1
 	}
-	if s.inactivitySeconds > 0 && metrics.InFlight() == 0 {
-		last := metrics.LastCompletionTime()
-		if !last.IsZero() && headEnqueue.Sub(last).Seconds() > s.inactivitySeconds {
-			return 1
-		}
+	return s.turnNumber(metrics.DispatchedCount(), metrics.InFlight(), metrics.LastCompletionTime(), headEnqueue)
+}
+
+// turnNumber returns the turn number of a head request: the count of requests
+// already dispatched plus the waiting request itself. headEnqueue is the head
+// request's arrival instant, so the idle gap is measured from the previous
+// completion to that arrival and excludes the head's own queue wait.
+//
+// A session idle for longer than inactivitySeconds has its next request scored as
+// turn one, on the grounds that a session dormant that long has stopped competing
+// for its own prefix. Dispatching that request re-prefills the conversation, and
+// the session competes at its full dispatched count again.
+//
+// The count is read here but incremented in PreRequest, off the dispatch path, so
+// consecutive picks for one session can score against a count that lags by the
+// requests already dispatched from it.
+func (s *turnPriorityStrategy) turnNumber(dispatched, inFlight int64, lastCompletion, headEnqueue time.Time) int64 {
+	if s.inactivitySeconds > 0 && inFlight == 0 && !lastCompletion.IsZero() &&
+		headEnqueue.Sub(lastCompletion).Seconds() > s.inactivitySeconds {
+		return 1
 	}
-	return metrics.DispatchedCount() + 1
+	return dispatched + 1
+}
+
+// headSessionState returns the session state the configured producer published
+// on a queue head, if any.
+func (s *turnPriorityStrategy) headSessionState(head flowcontrol.QueueItemAccessor) (sessionstate.SessionState, bool) {
+	orig := head.OriginalRequest()
+	if orig == nil {
+		return sessionstate.SessionState{}, false
+	}
+	req := orig.InferenceRequest()
+	if req == nil {
+		return sessionstate.SessionState{}, false
+	}
+	return fwksched.ReadRequestAttribute[sessionstate.SessionState](req, s.sessionStateKey)
 }

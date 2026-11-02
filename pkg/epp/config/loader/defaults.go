@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
@@ -143,6 +144,23 @@ func applySystemDefaults(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin
 	return nil
 }
 
+// defaultProfileName names the profile ensureSchedulingLayer creates when the
+// config defines none.
+const defaultProfileName = "default"
+
+// SchedulingProfileNames returns the profile names the config ends up with
+// after InstantiateAndConfigure applies defaults.
+func SchedulingProfileNames(cfg *configapiv1.EndpointPickerConfig) sets.Set[string] {
+	if len(cfg.SchedulingProfiles) == 0 {
+		return sets.New(defaultProfileName)
+	}
+	names := sets.New[string]()
+	for _, profile := range cfg.SchedulingProfiles {
+		names.Insert(profile.Name)
+	}
+	return names
+}
+
 // ensureSchedulingLayer guarantees that the scheduling subsystem is structurally complete.
 // It ensures a valid profile exists and injects missing architectural components (like Pickers and ProfileHandlers) if
 // they are not explicitly configured.
@@ -152,7 +170,7 @@ func ensureSchedulingLayer(
 	allPlugins map[string]fwkplugin.Plugin,
 ) error {
 	if len(cfg.SchedulingProfiles) == 0 {
-		defaultProfile := configapiv1.SchedulingProfile{Name: "default"}
+		defaultProfile := configapiv1.SchedulingProfile{Name: defaultProfileName}
 		// Auto-populate the default profile with all Filter, Scorer, and Picker plugins found.
 		for name, p := range allPlugins {
 			switch p.(type) {

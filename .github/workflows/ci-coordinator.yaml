@@ -43,7 +43,6 @@ jobs:
               - hack/**
               - test/**
               - config/coordinator/**
-              - deploy/**
               - .github/actions/docker-build-and-push/action.yml
               - .github/actions/e2e-runner-setup/action.yml
               - .github/workflows/ci-coordinator.yaml
@@ -52,7 +51,8 @@ jobs:
               - '!pkg/sidecar/**'
               - '!test/sidecar/**'
               - '!pkg/generator/**'
-              - '!test/e2e/**'
+              - '!test/e2e/*'
+              - '!test/e2e/utils/**'
               - '!test/integration/**'
               - '!test/profiling/**'
               - '!Makefile'
@@ -72,16 +72,24 @@ jobs:
           mkdir -p "$HOME/.cache/llm-d-gomodcache" "$HOME/.cache/llm-d-gobuildcache"
           echo "mod=$HOME/.cache/llm-d-gomodcache" >> "$GITHUB_OUTPUT"
           echo "build=$HOME/.cache/llm-d-gobuildcache" >> "$GITHUB_OUTPUT"
+          echo "goversion=$(sed -n 's/^FROM golang:\([^ ]*\).*/\1/p' Dockerfile.builder)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Go modules and build cache
-        uses: actions/cache@v6
+      - name: Restore Go modules
+        uses: actions/cache/restore@v6
         with:
-          path: |
-            ${{ steps.go-cache.outputs.mod }}
-            ${{ steps.go-cache.outputs.build }}
-          key: go-cache-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          path: ${{ steps.go-cache.outputs.mod }}
+          key: gomod-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: |
-            go-cache-${{ runner.os }}-
+            gomod-${{ runner.os }}-
+
+      - name: Restore Go build cache
+        id: go-build-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.go-cache.outputs.build }}
+          key: gobuild-coord-unit-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
+          restore-keys: |
+            gobuild-coord-unit-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-
 
       - name: Run coordinator unit tests
         shell: bash
@@ -89,6 +97,13 @@ jobs:
           GO_MOD_CACHE_VOL: ${{ steps.go-cache.outputs.mod }}
           GO_BUILD_CACHE_VOL: ${{ steps.go-cache.outputs.build }}
         run: make -f Makefile.coord.mk test-unit
+
+      - name: Save Go build cache (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.go-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.go-cache.outputs.build }}
+          key: gobuild-coord-unit-${{ runner.os }}-go${{ steps.go-cache.outputs.goversion }}-${{ github.sha }}
 
   e2e-images:
     needs: check-changes
@@ -116,7 +131,7 @@ jobs:
             archive: llm-d-router-endpoint-picker
           - name: simulator
             source: pull
-            image: ghcr.io/llm-d/llm-d-inference-sim:v1.0.0
+            image: ghcr.io/llm-d/llm-d-inference-sim:v1.2.0
             archive: llm-d-inference-sim
     name: e2e-images (${{ matrix.image.name }})
     steps:
@@ -184,10 +199,15 @@ jobs:
       matrix:
         include:
           - topology: single-EPP
+            gateway: envoy
             target: test-e2e-coordinator-run
           - topology: 3-EPP
+            gateway: envoy
             target: test-e2e-coordinator-3epp-run
-    name: e2e-tests (${{ matrix.topology }})
+          - topology: single-EPP
+            gateway: agentgateway
+            target: test-e2e-coordinator-run
+    name: e2e-tests (${{ matrix.topology }}, ${{ matrix.gateway }})
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -195,6 +215,8 @@ jobs:
       - name: Set up e2e runner
         id: e2e-setup
         uses: ./.github/actions/e2e-runner-setup
+        with:
+          cache-job: e2e-coordinator
 
       - name: Download builder image
         uses: actions/download-artifact@v8
@@ -232,7 +254,15 @@ jobs:
         env:
           GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
           GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
+          E2E_GATEWAY: ${{ matrix.gateway }}
         run: make -f Makefile.coord.mk ${{ matrix.target }}
+
+      - name: Save Go build cache (main branch only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && matrix.topology == 'single-EPP' && matrix.gateway == 'envoy' && steps.e2e-setup.outputs.go-build-cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.e2e-setup.outputs.go-build-cache }}
+          key: gobuild-e2e-coordinator-${{ runner.os }}-go${{ steps.e2e-setup.outputs.go-version }}-${{ github.sha }}
 
   e2e-tests-status:
     needs: e2e-tests

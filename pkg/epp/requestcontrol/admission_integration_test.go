@@ -18,12 +18,15 @@ package requestcontrol
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/clock"
+	testclock "k8s.io/utils/clock/testing"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -58,12 +61,15 @@ type realFlowControlHarness struct {
 
 // realFlowControlOpts selects the knobs each outcome needs: a fixed saturation level (1.0 keeps
 // requests queued), the candidate pool (empty vs. non-empty steers capacity-rejection
-// classification), the controller-default request TTL, and an optional per-band request cap.
+// classification), the controller-default request TTL, and optional per-band and per-flow request caps.
 type realFlowControlOpts struct {
 	saturation      float64
 	candidates      []fwkdl.Endpoint
 	requestTTL      time.Duration // Defaults to one minute (effectively "never" for these tests).
 	bandMaxRequests uint64        // Zero means unbounded.
+	flowMaxRequests uint64        // Zero means unbounded.
+	clock           clock.WithTicker
+	onProbe         func()
 }
 
 func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlowControlHarness {
@@ -85,6 +91,9 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 	if opts.bandMaxRequests > 0 {
 		bandOpts = append(bandOpts, fcregistry.WithBandMaxRequests(opts.bandMaxRequests))
 	}
+	if opts.flowMaxRequests > 0 {
+		bandOpts = append(bandOpts, fcregistry.WithBandMaxRequestsPerFlow(opts.flowMaxRequests))
+	}
 	band, err := fcregistry.NewPriorityBandConfig(0, defaults, bandOpts...)
 	require.NoError(t, err)
 	regCfg, err := fcregistry.NewConfig(defaults, fcregistry.WithPriorityBand(band))
@@ -97,7 +106,12 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 		requestTTL = time.Minute
 	}
 	detector := &mockSaturationDetector{
-		SaturationFunc: func(context.Context, []fwkdl.Endpoint) float64 { return opts.saturation },
+		SaturationFunc: func(context.Context, []fwkdl.Endpoint) float64 {
+			if opts.onProbe != nil {
+				opts.onProbe()
+			}
+			return opts.saturation
+		},
 	}
 	candidates := &mocks.MockEndpointCandidates{Candidates: opts.candidates}
 	fc := fccontroller.NewFlowController(ctx, "test-pool", &fccontroller.Config{
@@ -113,6 +127,7 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 		EndpointCandidates:  candidates,
 		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
 		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		Clock:               opts.clock,
 	})
 
 	return &realFlowControlHarness{
@@ -156,8 +171,8 @@ func waitAdmit(t *testing.T, result <-chan error) error {
 }
 
 // requireDropped asserts the errcommon.Error contract for a dropped request: the canonical error
-// code (which drives the HTTP status) and the dropped-reason response header.
-func requireDropped(t *testing.T, err error, wantCode string, wantReason errcommon.RequestDroppedReason) {
+// code (which drives the HTTP status) and the dropped-reason response header, returning its headers.
+func requireDropped(t *testing.T, err error, wantCode string, wantReason errcommon.RequestDroppedReason) map[string]string {
 	t.Helper()
 	require.Error(t, err)
 	var e errcommon.Error
@@ -165,6 +180,7 @@ func requireDropped(t *testing.T, err error, wantCode string, wantReason errcomm
 	assert.Equal(t, wantCode, e.Code, "incorrect error code")
 	assert.Equal(t, string(wantReason), e.Headers[errcommon.RequestDroppedReasonHeaderKey],
 		"incorrect dropped-reason header")
+	return e.Headers
 }
 
 func nonEmptyEndpoints() []fwkdl.Endpoint {
@@ -194,10 +210,12 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		t.Parallel()
 		// A saturated detector parks a filler request in the only queue slot (bandMaxRequests=1);
 		// the next request overflows band capacity against a non-empty pool -> RejectedCapacity.
+		// Using a frozen fake clock keeps elapsed stall at 0 so Retry-After is deterministically omitted.
 		h := newRealFlowControlHarness(t, realFlowControlOpts{
 			saturation:      1.0,
 			candidates:      nonEmptyEndpoints(),
 			bandMaxRequests: 1,
+			clock:           testclock.NewFakeClock(time.Now()),
 		})
 
 		filler := admitAsync(ctx, h.ac, "filler-req")
@@ -205,9 +223,71 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
-		requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonSaturated)
+		headers := requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonSaturated)
+		assert.NotContains(t, headers, errcommon.RetryAfterHeaderKey)
 
 		// Shut the controller down and drain the filler so the goroutine ends inside the test.
+		h.cancel()
+		require.Error(t, waitAdmit(t, filler), "queued filler should be evicted on shutdown")
+	})
+
+	t.Run("rejected_capacity_emits_retry_after_after_stall", func(t *testing.T) {
+		t.Parallel()
+		// A deterministic clock lets the test park a filler request, observe a post-enqueue
+		// dispatch cycle mark the band busy, advance to 2.5s without dispatches, and verify the
+		// overflow rejection emits Retry-After: 3 alongside 429 and rejected-saturated.
+		t0 := time.Now()
+		fakeClock := testclock.NewFakeClock(t0)
+		var probes atomic.Int64
+		h := newRealFlowControlHarness(t, realFlowControlOpts{
+			saturation:      1.0,
+			candidates:      nonEmptyEndpoints(),
+			bandMaxRequests: 1,
+			clock:           fakeClock,
+			onProbe:         func() { probes.Add(1) },
+		})
+
+		filler := admitAsync(ctx, h.ac, "filler-req")
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
+			time.Second, time.Millisecond, "filler request should be queued")
+
+		// Unlabeled endpoints evaluate only the decode stage (1 probe per cycle); waiting for 3
+		// probes guarantees at least one post-enqueue dispatch cycle has completed its deferred
+		// syncBusy even if role-labeled endpoints caused two probes per cycle.
+		targetProbes := probes.Load() + 3
+		require.Eventually(t, func() bool {
+			fakeClock.Step(time.Millisecond)
+			return probes.Load() >= targetProbes
+		}, time.Second, 10*time.Millisecond, "processor should complete a post-enqueue dispatch cycle")
+
+		fakeClock.SetTime(t0.Add(2500 * time.Millisecond))
+
+		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
+		headers := requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonSaturated)
+		assert.Equal(t, "3", headers[errcommon.RetryAfterHeaderKey])
+
+		h.cancel()
+		require.Error(t, waitAdmit(t, filler), "queued filler should be evicted on shutdown")
+	})
+
+	t.Run("rejected_flow_limit_returns_429_flow_limit", func(t *testing.T) {
+		t.Parallel()
+		// The band has room, but the flow's only slot (flowMaxRequests=1) holds the filler, so the
+		// next request from the same fairness ID is refused by its own per-flow limit.
+		h := newRealFlowControlHarness(t, realFlowControlOpts{
+			saturation:      1.0,
+			candidates:      nonEmptyEndpoints(),
+			flowMaxRequests: 1,
+		})
+
+		filler := admitAsync(ctx, h.ac, "filler-req")
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
+			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
+
+		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
+		headers := requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonFlowLimit)
+		assert.NotContains(t, headers, errcommon.RetryAfterHeaderKey)
+
 		h.cancel()
 		require.Error(t, waitAdmit(t, filler), "queued filler should be evicted on shutdown")
 	})
@@ -227,7 +307,8 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
-		requireDropped(t, err, errcommon.ServiceUnavailable, errcommon.RequestDroppedReasonNoEndpoints)
+		headers := requireDropped(t, err, errcommon.ServiceUnavailable, errcommon.RequestDroppedReasonNoEndpoints)
+		assert.NotContains(t, headers, errcommon.RetryAfterHeaderKey)
 
 		h.cancel()
 		require.Error(t, waitAdmit(t, filler), "queued filler should be evicted on shutdown")
@@ -246,7 +327,8 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		})
 
 		err := waitAdmit(t, admitAsync(ctx, h.ac, "ttl-req"))
-		requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonTTLExpired)
+		headers := requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonTTLExpired)
+		assert.NotContains(t, headers, errcommon.RetryAfterHeaderKey)
 	})
 
 	t.Run("evicted_ttl_empty_pool_returns_503_no_endpoints", func(t *testing.T) {

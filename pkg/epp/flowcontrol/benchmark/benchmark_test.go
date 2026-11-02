@@ -31,9 +31,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -42,7 +42,13 @@ import (
 // and concurrent connections.
 func BenchmarkFlowController_PerformanceMatrix(b *testing.B) {
 	if testing.Short() {
-		b.Skip("skipping PerformanceMatrix in short mode")
+		// Run one representative backpressure coordinate in -short mode so make bench-smoke
+		// exercises the matrix harness without running all 16 coordinates.
+		matrix := benchMatrix{limit: 1, priorities: 1, flows: 10, concurrency: 10}
+		b.Run(matrix.name(), func(b *testing.B) {
+			runMatrixCoordinate(b, matrix)
+		})
+		return
 	}
 	limits := []egressConcurrencyLimit{0, 1, 100}
 	priorities := []priorityLevels{1, 8}
@@ -307,8 +313,8 @@ func BenchmarkFlowController_FullPath(b *testing.B) {
 	ctx := b.Context()
 	h := setupFullPathBenchmark(ctx, b, "fullpath", numPriorities)
 
-	sosResp := &requestcontrol.Response{StartOfStream: true}
-	eosResp := &requestcontrol.Response{EndOfStream: true}
+	sosResp := &fwkrh.Response{StartOfStream: true}
+	eosResp := &fwkrh.Response{EndOfStream: true}
 	profileResults := map[string]*scheduling.ProfileRunResult{
 		"decode": {TargetEndpoints: []scheduling.Endpoint{h.schedEp}},
 	}
@@ -348,7 +354,7 @@ func BenchmarkFlowController_FullPath(b *testing.B) {
 			//    detector reads to compute saturation.
 			infReq := &scheduling.InferenceRequest{
 				RequestID: reqID,
-				Body:      &requesthandling.InferenceRequestBody{TokenizedRequest: &requesthandling.TokenizedRequest{Prompts: []requesthandling.PromptTokens{{TokenIDs: benchTokenIDs}}}},
+				Body:      &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: benchTokenIDs}}}},
 			}
 			schedResult := &scheduling.SchedulingResult{ProfileResults: profileResults}
 			_ = h.producer.PreRequest(ctx, infReq, schedResult)

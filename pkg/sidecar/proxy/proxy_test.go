@@ -142,6 +142,68 @@ var _ = Describe("Reverse Proxy", func() {
 		)
 	})
 
+	When("the context is cancelled while a request is in flight", func() {
+		It("should return from Start only after the request completes", func() {
+			ctx := newTestContext()
+
+			decodeStarted := make(chan struct{})
+			releaseDecode := make(chan struct{})
+			decodeBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				close(decodeStarted)
+				<-releaseDecode
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("decoded"))
+			}))
+			defer decodeBackend.Close()
+			// Close waits for the decode handler, so a failed assertion must still release it.
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseDecode) }) }
+			defer release()
+
+			targetURL, err := url.Parse(decodeBackend.URL)
+			Expect(err).ToNot(HaveOccurred())
+
+			proxy := NewProxy(Config{Port: "0", DecoderURL: targetURL})
+			proxy.allowlistValidator = &AllowlistValidator{enabled: false}
+
+			ctx, cancelFn := context.WithCancel(ctx)
+			defer cancelFn()
+			startErr := make(chan error, 1)
+			go func() { startErr <- proxy.Start(ctx) }()
+			<-proxy.readyCh
+
+			type result struct {
+				status int
+				body   string
+				err    error
+			}
+			resultCh := make(chan result, 1)
+			go func() {
+				resp, err := http.Post("http://"+proxy.addr.String()+"/v1/completions", "application/json",
+					strings.NewReader(`{"model":"m","prompt":"p"}`))
+				if err != nil {
+					resultCh <- result{err: err}
+					return
+				}
+				defer resp.Body.Close()
+				body, err := io.ReadAll(resp.Body)
+				resultCh <- result{status: resp.StatusCode, body: string(body), err: err}
+			}()
+
+			Eventually(decodeStarted).Should(BeClosed())
+			cancelFn()
+			Consistently(startErr, 300*time.Millisecond).ShouldNot(Receive())
+
+			release()
+			var res result
+			Eventually(resultCh).Should(Receive(&res))
+			Expect(res.err).ToNot(HaveOccurred())
+			Expect(res.status).To(Equal(http.StatusOK))
+			Expect(res.body).To(Equal("decoded"))
+			Eventually(startErr).Should(Receive(BeNil()))
+		})
+	})
+
 	When("x-prefiller-url is present", func() {
 		var decodeBackend *httptest.Server
 		var decodeHandler *mock.ChatCompletionHandler
@@ -381,7 +443,7 @@ var _ = Describe("SSRF protection startup warning", func() {
 			ContainSubstring("--"+enableSSRFProtection),
 			ContainSubstring(routing.PrefillEndpointHeader),
 			ContainSubstring(routing.EncoderEndpointsHeader),
-			ContainSubstring(routing.KVCacheSourceHeader),
+			ContainSubstring(reqcommon.FieldRemoteKVSource),
 		))
 	})
 })

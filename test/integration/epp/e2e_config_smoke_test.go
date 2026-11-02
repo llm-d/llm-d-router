@@ -10,7 +10,11 @@ You may obtain a copy of the License at
 
 package epp
 
-import "testing"
+import (
+	"testing"
+
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
+)
 
 // e2eConfigsForSmoke mirrors the YAML strings in test/e2e/configs_test.go so
 // the hermetic harness validates that the e2e fixtures actually parse +
@@ -222,6 +226,30 @@ schedulingProfiles:
   - pluginRef: prefix-cache-scorer
     weight: 2
 `,
+	// Regression test for #3982: a token-only pool can pair
+	// precise-prefix-cache-producer with a passthrough token-producer without
+	// configuring an unused HTTP render endpoint.
+	"preciseConfigWithPassthroughTokenProducer": `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: token-producer
+  parameters:
+    backend: passthrough
+- type: precise-prefix-cache-producer
+- type: prefix-cache-scorer
+  parameters:
+    prefixMatchInfoProducerName: precise-prefix-cache-producer
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+  - pluginRef: prefix-cache-scorer
+    weight: 2
+`,
 	"decodeOnlyConfig": `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
@@ -352,9 +380,9 @@ schedulingProfiles:
 func TestE2EConfigs_StartupParseSmoke(t *testing.T) {
 	for name, yaml := range e2eConfigsForSmoke {
 		t.Run(name, func(t *testing.T) {
-			// NewTestHarness fails the test if config-parse / plugin-init
+			// eppharness.NewTestHarness fails the test if config-parse / plugin-init
 			// errors — exactly what we want to catch before pushing.
-			_ = NewTestHarness(t.Context(), t, WithConfigText(yaml))
+			_ = eppharness.NewTestHarness(t.Context(), t, eppharness.WithConfigText(yaml))
 		})
 	}
 }

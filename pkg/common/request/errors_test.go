@@ -61,6 +61,28 @@ func TestAnthropicErrorType(t *testing.T) {
 	}
 }
 
+func TestAnthropicErrorStatus(t *testing.T) {
+	for errType, want := range map[string]int{
+		"invalid_request_error": http.StatusBadRequest,
+		"authentication_error":  http.StatusUnauthorized,
+		"permission_error":      http.StatusForbidden,
+		"not_found_error":       http.StatusNotFound,
+		"request_too_large":     http.StatusRequestEntityTooLarge,
+		"rate_limit_error":      http.StatusTooManyRequests,
+		"overloaded_error":      http.StatusServiceUnavailable,
+		"api_error":             http.StatusInternalServerError,
+		"some_new_error":        http.StatusInternalServerError,
+	} {
+		assert.Equal(t, want, AnthropicErrorStatus(errType), "type %q", errType)
+	}
+	// Every error type AnthropicErrorType returns maps back to a status of the same
+	// type, so a type added there without a status in anthropicErrorStatuses fails.
+	for status := http.StatusBadRequest; status <= 599; status++ {
+		errType := AnthropicErrorType(status)
+		assert.Equal(t, errType, AnthropicErrorType(AnthropicErrorStatus(errType)), "status %d", status)
+	}
+}
+
 func TestWriteAPIError(t *testing.T) {
 	const msg = `body <too> large & rejected`
 	for _, tc := range []struct {

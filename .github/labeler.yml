@@ -32,7 +32,7 @@ area/scheduling:
           - pkg/epp/scheduling/**
           - pkg/epp/framework/plugins/scheduling/**
           - pkg/epp/requestcontrol/**
-          - pkg/epp/framework/plugins/requestcontrol/**
+          - pkg/epp/framework/plugins/requesthandling/**
 
 # Admission, queuing and flow control
 area/flowcontrol:

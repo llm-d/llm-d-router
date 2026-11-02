@@ -1,0 +1,30 @@
+# HELP sglang:max_total_num_tokens Maximum total number of tokens in the KV cache pool.
+# TYPE sglang:max_total_num_tokens gauge
+sglang:max_total_num_tokens{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 200000.0
+# HELP sglang:page_size KV cache page size in tokens.
+# TYPE sglang:page_size gauge
+sglang:page_size{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 1.0
+# HELP sglang:num_pages Number of KV cache pages.
+# TYPE sglang:num_pages gauge
+sglang:num_pages{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 200000.0
+# HELP sglang:num_queue_reqs The number of requests in the waiting queue.
+# TYPE sglang:num_queue_reqs gauge
+sglang:num_queue_reqs{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:token_usage The token usage.
+# TYPE sglang:token_usage gauge
+sglang:token_usage{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:full_token_usage The token usage for full attention layers.
+# TYPE sglang:full_token_usage gauge
+sglang:full_token_usage{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:swa_token_usage The token usage for SWA layers.
+# TYPE sglang:swa_token_usage gauge
+sglang:swa_token_usage{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:pending_prealloc_token_usage The token usage for pending preallocated tokens (not preallocated yet).
+# TYPE sglang:pending_prealloc_token_usage gauge
+sglang:pending_prealloc_token_usage{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 0.0
+# HELP sglang:hicache_host_used_tokens Number of tokens currently used in the host KV cache.
+# TYPE sglang:hicache_host_used_tokens gauge
+sglang:hicache_host_used_tokens{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 6.0
+# HELP sglang:hicache_host_total_tokens Total capacity of the host KV cache in tokens.
+# TYPE sglang:hicache_host_total_tokens gauge
+sglang:hicache_host_total_tokens{engine_type="unified",model_name="Qwen/Qwen3-0.6B",moe_ep_rank="0",pp_rank="0",tp_rank="0"} 400001.0

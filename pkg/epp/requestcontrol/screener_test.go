@@ -26,17 +26,24 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 type mockScreener struct {
 	name   string
 	screen func([]fwksched.Endpoint) []fwksched.Endpoint
+	// consumes declares the endpoint attributes screen reads, so the scope the
+	// director applies at Screener lets them through.
+	consumes map[fwkplugin.DataKey]any
 }
 
 func (f *mockScreener) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "mock-screener", Name: f.name}
+}
+
+func (f *mockScreener) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: f.consumes}
 }
 
 func (f *mockScreener) Screen(
@@ -57,7 +64,7 @@ func TestConfigAddPluginsCollectsScreeners(t *testing.T) {
 
 	require.Len(t, config.screeners, 1)
 	assert.Same(t, screener, config.screeners[0])
-	var _ fwkrc.Screener = screener
+	var _ fwkrh.Screener = screener
 }
 
 func TestRunScreenersIntersectsIndependentSubsets(t *testing.T) {

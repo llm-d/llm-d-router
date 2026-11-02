@@ -26,7 +26,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // fanoutEncoderPrimer sends concurrent encoder requests for each multimodal
@@ -45,7 +45,11 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 }
 
 // handleECSharedStorage handles an Encoder-Prefiller-Decoder disaggregation request
-func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, kvCacheSource string, apiType reqcommon.APIType) {
+func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, p2p p2pRouting, apiType reqcommon.APIType) {
+	if isVLLMGRPCRequest(r) {
+		s.handleECSharedStorageVLLMGRPC(w, r, prefillEndPoint, encodeEndPoints, p2p)
+		return
+	}
 	logger := log.FromContext(r.Context())
 	logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
@@ -59,7 +63,8 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 	// Generate unique request UUID
 	reqUUID, err := uuid.NewUUID()
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		logger.Error(err, "failed to generate request ID")
+		if err := errorBadGateway(w, r); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -71,17 +76,17 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 		encodeStart := time.Now()
 		total, err := s.fanoutEncoderPrimer(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
-			metrics.RecordError(metrics.StageEncode)
+			observeStageError(r.Context(), routing.StageEncode)
 			logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
-			if err := errorBadGateway(err, w); err != nil {
+			if err := errorBadGateway(w, r); err != nil {
 				logger.Error(err, "failed to send error response to client")
 			}
 			return
 		}
 		if total > 0 {
-			metrics.RecordEncodeDuration(time.Since(encodeStart))
+			observeStageDuration(r.Context(), routing.StageEncode, time.Since(encodeStart))
 		}
 	}
 
-	s.runPDPipeline(w, r, body, prefillEndPoint, kvCacheSource, requestID, apiType)
+	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, p2p, apiType)
 }

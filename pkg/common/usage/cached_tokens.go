@@ -34,11 +34,24 @@ type cachedTokensUsageRewriter struct {
 	cachedTokens  *int
 	onUsage       func(block map[string]any)
 	dropUsageOnly bool
-	wroteHeader   bool
-	streaming     bool
-	streamBuffer  []byte
-	jsonBuffer    []byte
+	// passthrough is set when no option can change a byte: the writer then
+	// forwards every write as it arrives, keeps Content-Length, and only reads
+	// the body on the side to report usage to the observer.
+	passthrough bool
+	// observeOverflow is set once a passthrough JSON body exceeds
+	// maxObserveBytes; the copy is dropped and nothing is observed.
+	observeOverflow bool
+	wroteHeader     bool
+	streaming       bool
+	streamBuffer    []byte
+	jsonBuffer      []byte
 }
+
+// maxObserveBytes caps the copy of a passthrough JSON body kept for the
+// observer. A body past the cap is forwarded unchanged and not observed; the
+// usage block of an inference response sits at the end, so a partial copy
+// cannot be read. A variable so tests can lower it.
+var maxObserveBytes = 32 << 20
 
 // Options selects what the response writer does with the usage blocks it sees.
 type Options struct {
@@ -86,6 +99,7 @@ func NewResponseWriter(
 		cachedTokens:  opts.CachedTokens,
 		onUsage:       opts.OnUsage,
 		dropUsageOnly: opts.DropUsageOnlyFrame,
+		passthrough:   opts.CachedTokens == nil && !opts.DropUsageOnlyFrame,
 		streaming:     streaming,
 	}
 	// httpsnoop preserves optional ResponseWriter interfaces such as
@@ -117,13 +131,19 @@ func NewResponseWriter(
 }
 
 func (r *cachedTokensUsageRewriter) writeHeader(next httpsnoop.WriteHeaderFunc, statusCode int) {
-	// Rewriting may change the body size, so any upstream Content-Length is stale.
-	r.header.Del("Content-Length")
+	// Rewriting may change the body size, so any upstream Content-Length is
+	// stale. A passthrough writer forwards the body as it arrived.
+	if !r.passthrough {
+		r.header.Del("Content-Length")
+	}
 	r.wroteHeader = true
 	next(statusCode)
 }
 
 func (r *cachedTokensUsageRewriter) write(next httpsnoop.WriteFunc, body []byte) (int, error) {
+	if r.passthrough {
+		return r.writePassthrough(next, body)
+	}
 	if !r.streaming {
 		// ReverseProxy may split one JSON document across many Write calls; it is
 		// parsed once, by flushJSONBuffer.
@@ -142,6 +162,11 @@ func (r *cachedTokensUsageRewriter) write(next httpsnoop.WriteFunc, body []byte)
 }
 
 func (r *cachedTokensUsageRewriter) readFrom(next httpsnoop.WriteFunc, src io.Reader) (int64, error) {
+	if r.passthrough {
+		// Forward as it arrives, observing on the side; the tail (an unterminated
+		// SSE line, or the whole JSON document) is read by the flush.
+		return io.Copy(cachedTokensStreamWriter{write: r.write, forward: next}, src)
+	}
 	if r.streaming {
 		// SSE can be long-lived, so keep it streaming and rewrite complete lines.
 		n, err := io.Copy(cachedTokensStreamWriter{
@@ -178,7 +203,52 @@ func (w cachedTokensStreamWriter) Write(body []byte) (int, error) {
 	return w.write(w.forward, body)
 }
 
+// writePassthrough forwards body unchanged and feeds a copy to the observer:
+// complete SSE lines as they arrive, or the JSON document at the flush.
+func (r *cachedTokensUsageRewriter) writePassthrough(next httpsnoop.WriteFunc, body []byte) (int, error) {
+	if r.streaming {
+		r.observeSSEChunk(body)
+	} else if !r.observeOverflow {
+		if len(r.jsonBuffer)+len(body) > maxObserveBytes {
+			r.observeOverflow = true
+			r.jsonBuffer = nil
+		} else {
+			r.jsonBuffer = append(r.jsonBuffer, body...)
+		}
+	}
+	return next(body)
+}
+
+// observeSSEChunk runs the observer over the complete SSE lines in body,
+// holding an unterminated tail for the next write. Nothing is rewritten.
+func (r *cachedTokensUsageRewriter) observeSSEChunk(body []byte) {
+	if len(body) == 0 {
+		return
+	}
+	if len(r.streamBuffer) == 0 && sseChunkPassThrough(body) {
+		return
+	}
+	r.streamBuffer = append(r.streamBuffer, body...)
+	for {
+		lineEnd := bytes.IndexByte(r.streamBuffer, '\n')
+		if lineEnd < 0 {
+			if len(r.streamBuffer) == 0 {
+				r.streamBuffer = nil
+			}
+			return
+		}
+		r.processSSELine(r.streamBuffer[:lineEnd+1])
+		r.streamBuffer = r.streamBuffer[lineEnd+1:]
+	}
+}
+
 func (r *cachedTokensUsageRewriter) rewriteSSEChunk(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if len(r.streamBuffer) == 0 && sseChunkPassThrough(body) {
+		return body
+	}
 	r.streamBuffer = append(r.streamBuffer, body...)
 	updated := make([]byte, 0, len(r.streamBuffer))
 	for {
@@ -194,11 +264,40 @@ func (r *cachedTokensUsageRewriter) rewriteSSEChunk(body []byte) []byte {
 		}
 		r.streamBuffer = r.streamBuffer[lineEnd+1:]
 	}
+	if len(r.streamBuffer) == 0 {
+		r.streamBuffer = nil
+	}
 	return updated
+}
+
+// sseChunkPassThrough reports whether every newline-terminated line in body
+// passes processSSELine unchanged, undropped, and without invoking onUsage.
+func sseChunkPassThrough(body []byte) bool {
+	if len(body) == 0 || body[len(body)-1] != '\n' {
+		return false
+	}
+	if !bytes.Contains(body, usageKey) {
+		return true
+	}
+	for len(body) > 0 {
+		lineEnd := bytes.IndexByte(body, '\n')
+		line := bytes.TrimRight(body[:lineEnd], "\r")
+		if data, ok := reqcommon.SSEDataPayload(line); ok && bytes.Contains(data, usageKey) {
+			return false
+		}
+		body = body[lineEnd+1:]
+	}
+	return true
 }
 
 func (r *cachedTokensUsageRewriter) flushSSEBuffer(next httpsnoop.WriteFunc) error {
 	if len(r.streamBuffer) == 0 {
+		return nil
+	}
+	if r.passthrough {
+		// Already forwarded; only the observer is left to run on the tail.
+		r.processSSELine(r.streamBuffer)
+		r.streamBuffer = nil
 		return nil
 	}
 	// EOF without a final newline is malformed SSE, but forward it rather than
@@ -216,6 +315,14 @@ func (r *cachedTokensUsageRewriter) flushJSONBuffer(next httpsnoop.WriteFunc) er
 	if len(r.jsonBuffer) == 0 {
 		return nil
 	}
+	if r.passthrough {
+		// Already forwarded; parse the copy once for the observer.
+		if !r.observeOverflow {
+			r.process(r.jsonBuffer)
+		}
+		r.jsonBuffer = nil
+		return nil
+	}
 	updated := r.process(r.jsonBuffer)
 	r.jsonBuffer = nil
 	if !r.wroteHeader {
@@ -227,9 +334,11 @@ func (r *cachedTokensUsageRewriter) flushJSONBuffer(next httpsnoop.WriteFunc) er
 
 // CachedTokens reads the cached-token count out of a response's usage block,
 // which callers pass as the decoded value of the response's "usage" field. It
-// reports false when the block is absent or carries no count; vLLM sends the
-// details object as null when the count is zero, so callers that need a number
-// treat that as zero.
+// reports false when the block is absent or its details object carries no
+// number. A false result means no measurement applies: vLLM without
+// --enable-prompt-tokens-details sends no details object however many tokens
+// were cached, so a P/D response whose prefill leg reported none must relay
+// the decode worker's usage unchanged rather than substitute zero.
 func CachedTokens(block any) (int, bool) {
 	fields, ok := block.(map[string]any)
 	if !ok {
@@ -354,11 +463,11 @@ func (r *cachedTokensUsageRewriter) processSSE(body []byte) ([]byte, bool) {
 func (r *cachedTokensUsageRewriter) processSSELine(line []byte) (out []byte, isData bool, drop bool) {
 	trimmedLine := bytes.TrimRight(line, "\r\n")
 	lineEnding := line[len(trimmedLine):]
-	data, ok := bytes.CutPrefix(trimmedLine, []byte(reqcommon.SSEDataPrefix))
+	data, ok := reqcommon.SSEDataPayload(trimmedLine)
 	if !ok {
 		return line, false, false
 	}
-	if bytes.Equal(bytes.TrimSpace(data), []byte(reqcommon.SSEDoneMarker)) {
+	if reqcommon.SSEIsDone(data) {
 		return line, true, false
 	}
 	if !bytes.Contains(data, usageKey) {
@@ -397,7 +506,7 @@ func (r *cachedTokensUsageRewriter) observe(response map[string]json.RawMessage)
 		}
 	}
 	if block == nil {
-		for _, key := range []string{fieldResponse, fieldMessage} {
+		for _, key := range []string{reqcommon.FieldResponse, reqcommon.FieldMessage} {
 			raw, ok := response[key]
 			if !ok {
 				continue
@@ -423,7 +532,7 @@ func (r *cachedTokensUsageRewriter) observe(response map[string]json.RawMessage)
 // found under wrapper: the top-level block, and response.usage on Responses
 // stream events such as response.completed.
 func rewritable(wrapper string) bool {
-	return wrapper == "" || wrapper == fieldResponse
+	return wrapper == "" || wrapper == reqcommon.FieldResponse
 }
 
 // marshalWithUsage re-encodes response with block as its usage, or as the
@@ -459,12 +568,31 @@ func marshalWithUsage(response map[string]json.RawMessage, wrapper string, block
 // trailing usage frame vLLM sends for stream_options.include_usage: an empty
 // choices list beside the usage block.
 func hasEmptyChoices(response map[string]json.RawMessage) bool {
-	raw, ok := response[fieldChoices]
+	raw, ok := response[reqcommon.FieldChoices]
 	if !ok {
 		return false
 	}
 	var choices []json.RawMessage
 	return json.Unmarshal(raw, &choices) == nil && len(choices) == 0
+}
+
+// UsageOnlyFrame reports whether an SSE line is the trailing usage frame of a
+// chat or completions stream: a data line with a top-level usage block beside
+// an empty choices list. A trailing line ending is ignored.
+func UsageOnlyFrame(line []byte) bool {
+	data, ok := bytes.CutPrefix(bytes.TrimRight(line, "\r\n"), []byte(reqcommon.SSEDataPrefix))
+	if !ok || !bytes.Contains(data, usageKey) {
+		return false
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(data, &response); err != nil {
+		return false
+	}
+	var block map[string]any
+	if err := json.Unmarshal(response[reqcommon.FieldUsage], &block); err != nil || block == nil {
+		return false
+	}
+	return hasEmptyChoices(response)
 }
 
 func setCachedTokens(block map[string]any, cachedTokens int) bool {

@@ -95,6 +95,12 @@ func (p *Plugin) Filter(ctx context.Context, _ *fwksched.InferenceRequest, endpo
 
 	var positive, negative, noPrediction []fwksched.Endpoint
 	for _, ep := range endpoints {
+		// A prediction for a never-scraped endpoint was computed from zero-value
+		// metrics, so it says nothing about the endpoint's load.
+		if !ep.GetMetrics().Updated() {
+			noPrediction = append(noPrediction, ep)
+			continue
+		}
 		raw, ok := ep.Get(p.latencyPredictionInfoDataKey)
 		if !ok {
 			noPrediction = append(noPrediction, ep)

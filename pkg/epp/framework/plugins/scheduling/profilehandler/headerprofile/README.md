@@ -52,7 +52,8 @@ and makes one separate scheduling call per profile.
 | Profiles per request | Exactly one, ever | Decode always, plus encode/prefill when their decider approves -- up to three |
 | Scheduling calls per request | One per profile (caller drives the cascade) | One cycle picks every stage the request needs |
 | Primary profile | Whichever profile the header named | Always decode |
-| `requestcontrol.PreRequest` | Not implemented -- nothing downstream reads pod addresses from headers | Implemented: stamps `x-llm-d-prefiller-host-port` / `x-llm-d-encoder-hosts-ports` for the decode sidecar |
+| `requesthandling.PreRequest` | Not implemented -- nothing downstream reads pod addresses from request headers | Implemented: stamps `x-llm-d-prefiller-host-port` / `x-llm-d-encoder-hosts-ports` for the decode sidecar |
+| `requesthandling.ResponseHeaderProcessor` | Implemented when `prefillProfile` is set: reports the prefill pod on the response as `x-llm-d-prefiller-host-port` for the coordinator | Not implemented |
 | Fits | The coordinator model, which tracks cross-profile state itself | The sidecar model (llm-d-router), where the decode sidecar orchestrates the remaining hops |
 
 ## Configuration
@@ -63,6 +64,8 @@ and makes one separate scheduling call per profile.
 |---|---|---|---|
 | `headerName` | string | `x-llm-d-epp-profile` | Request header whose value names the scheduling profile to run. Matched case-insensitively: the EPP lowercases every incoming header name, so this is normalized to lowercase regardless of how it's written here. |
 | `defaultProfile` | string | `decode` | Scheduling profile to run when the header is missing or blank and more than one profile is configured. Matched case-sensitively against `schedulingProfiles` names, like the header value itself. Ignored when only one profile is configured, since that profile always runs. |
+| `prefillProfile` | string | empty | Scheduling profile whose endpoint `ResponseHeader` reports on the response as `x-llm-d-prefiller-host-port`. Matched case-sensitively. Empty reports nothing. Set it only on an EPP that serves the coordinator, since the header names a pod address and reaches whoever receives the response. |
+| `prefillProfileName` | string | empty | Scheduling profile that runs the prefill stage. The handler reports it in the `SchedulingResult` so prefill-aware plugins honor a prefill profile that is not named `prefill`. Empty follows `prefillProfile`; with both empty the scheduler reports `prefill` when that profile ran. |
 
 ### Example
 
@@ -94,3 +97,50 @@ To use a different fallback than `decode`:
   parameters:
     defaultProfile: prefill
 ```
+
+### Naming the prefill profile
+
+Prefill-aware plugins (`p2p-source-producer`, the prefix-cache producers, the
+`no-hit-lru` scorer, `predicted-latency-producer`) need to know which profile ran the
+prefill stage, and they take it from `SchedulingResult.PrefillProfileName`. With
+`prefillProfileName` set, this handler fills that field, so a deployment whose prefill
+profile is named e.g. `prefill-h200` keeps its prefill handling.
+
+The parameter is separate from `prefillProfile` because the two configure different
+things. `prefillProfile` turns on a response header that carries a pod address to
+whoever receives the response, which only a coordinator EPP can use;
+`prefillProfileName` only names the prefill stage to the scheduling plugins and is safe
+on any EPP. A coordinator EPP that already sets `prefillProfile` needs no second
+parameter, since the handler falls back to it.
+
+```yaml
+- type: header-profile-handler
+  parameters:
+    prefillProfileName: prefill-h200
+```
+
+### Reporting the prefill pod to the coordinator
+
+The coordinator makes one scheduling call per phase and cannot see which pod the
+gateway forwarded its prefill request to. Some KV connectors learn it from the prefill
+response body (vLLM returns `kv_transfer_params`), but `sglang.api.v1.GenerateResponse`
+has no such field. With `prefillProfile` set, the handler adds
+`x-llm-d-prefiller-host-port` to the prefill response when that profile ran, and the
+coordinator reads the prefill pod address from there. This works on any gateway that
+runs the EPP, with no gateway-specific route rules:
+
+```yaml
+plugins:
+- type: header-profile-handler
+  parameters:
+    prefillProfile: prefill
+```
+
+The value is the endpoint the proxy reports it sent the request to
+(`x-gateway-destination-endpoint-served` in the response metadata), so a fallback to
+another endpoint from the picker's list is reported correctly. When the proxy reports no
+served endpoint, the value is the first endpoint the EPP picked. On such a proxy the
+prefill profile should pick exactly one endpoint.
+
+The header is set on the response only. The prefill pod does not see it, so a routing
+sidecar in front of the pod does not read it as a disaggregation instruction.

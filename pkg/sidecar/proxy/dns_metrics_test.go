@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -121,12 +122,14 @@ func TestServeMetrics_ListenError(t *testing.T) {
 	held, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = held.Close() })
+	// serveMetrics binds the held address itself. macOS allows binding ":port"
+	// while "127.0.0.1:port" is held, so MetricsPort would not collide there.
+	t.Setenv(envMoRIIOMetricsAddr, held.Addr().String())
 
-	s := &Server{
-		logger: logr.Discard(),
-		config: Config{MetricsPort: held.Addr().(*net.TCPAddr).Port},
-	}
-	require.Error(t, s.serveMetrics(context.Background()))
+	s := &Server{logger: logr.Discard()}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.ErrorIs(t, s.serveMetrics(ctx), syscall.EADDRINUSE)
 }
 
 func TestServeMetrics_TLS(t *testing.T) {

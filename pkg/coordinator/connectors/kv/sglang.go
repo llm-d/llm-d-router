@@ -19,11 +19,11 @@ package kv
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"strconv"
 	"sync"
 
-	"github.com/google/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -76,8 +76,8 @@ func resolveSGLangBootstrapPort(ctx context.Context) int {
 }
 
 // sglangKV implements the SGLang KV transfer protocol. Both prefill and decode
-// receive bootstrap coordination fields (port and room ID). The prefill pod is
-// expected to echo bootstrap fields back in its kv_transfer_params response;
+// receive bootstrap coordination fields (port and room ID). PrefillStep
+// retains these fields in reqCtx.KVTransferParams;
 // PrepareDecodeKVParams forwards those verbatim so the decode pod can open the
 // bootstrap channel to the prefill pod.
 type sglangKV struct{}
@@ -86,10 +86,9 @@ func (sglangKV) Name() string { return SGLang }
 
 func (sglangKV) PreparePrefillKVParams(ctx context.Context, _ *pipeline.RequestContext) map[string]any {
 	params := map[string]any{
-		reqcommon.FieldDoRemoteDecode:  true,
-		reqcommon.FieldDoRemotePrefill: false,
-		reqcommon.FieldBootstrapPort:   resolveSGLangBootstrapPort(ctx),
-		reqcommon.FieldBootstrapRoom:   uuid.NewString(),
+		reqcommon.FieldBootstrapPort: resolveSGLangBootstrapPort(ctx),
+		// Keep the room exact through gateways that decode JSON numbers as float64.
+		reqcommon.FieldBootstrapRoom: rand.Int64N(1 << 53), //#nosec G404 -- bootstrap room identifier
 	}
 	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing prefill kv params", "params", params)
 	return params
@@ -100,8 +99,6 @@ func (sglangKV) PrepareDecodeKVParams(ctx context.Context, reqCtx *pipeline.Requ
 	for k, v := range reqCtx.KVTransferParams {
 		out[k] = v
 	}
-	out[reqcommon.FieldDoRemoteDecode] = false
-	out[reqcommon.FieldDoRemotePrefill] = true
 	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing decode kv params", "params", out)
 	return out
 }

@@ -26,23 +26,23 @@ import (
 // path can refresh the recency of every key it visited under a single
 // acquisition instead of one per key.
 type lruStore struct {
-	onEvict func(BlockHash)
-	mu      sync.RWMutex
-	lru     *simplelru.LRU[BlockHash, *PodCache]
+	mu  sync.RWMutex
+	lru *simplelru.LRU[BlockHash, *PodCache]
 }
 
-func newLRUStore(size int) (*lruStore, error) {
-	store := &lruStore{}
-	lru, err := simplelru.NewLRU[BlockHash, *PodCache](size, func(key BlockHash, _ *PodCache) {
-		if store.onEvict != nil {
-			store.onEvict(key)
+// newLRUStore builds a store of size keys. onEvict, when set, runs for every
+// entry the LRU drops: capacity eviction and Remove alike, since the
+// underlying callback does not distinguish them.
+func newLRUStore(size int, onEvict func(BlockHash, *PodCache)) (*lruStore, error) {
+	lru, err := simplelru.NewLRU[BlockHash, *PodCache](size, func(key BlockHash, pc *PodCache) {
+		if onEvict != nil {
+			onEvict(key, pc)
 		}
 	})
 	if err != nil {
 		return nil, err
 	}
-	store.lru = lru
-	return store, nil
+	return &lruStore{lru: lru}, nil
 }
 
 // Get returns the key's cache and marks it most recently used.

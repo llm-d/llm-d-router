@@ -20,6 +20,7 @@ package requestcontrol
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -290,8 +291,17 @@ func translateFlowControlError(err error, poolEmpty func() bool) error {
 			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
 		}
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no endpoints available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
+	case errors.Is(err, types.ErrFlowAtCapacity):
+		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonFlowLimit)}}
 	case errors.Is(err, types.ErrQueueAtCapacity):
-		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
+		headers := map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}
+		var capErr *types.QueueCapacityError
+		if errors.As(err, &capErr) {
+			if secs := int64(capErr.RetryAfterHint / time.Second); secs > 0 {
+				headers[errcommon.RetryAfterHeaderKey] = strconv.FormatInt(secs, 10)
+			}
+		}
+		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: headers}
 	case errors.Is(err, types.ErrTTLExpired):
 		if poolEmpty() {
 			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}

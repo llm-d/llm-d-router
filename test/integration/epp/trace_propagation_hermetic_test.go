@@ -28,7 +28,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 // TestTraceContextDownstreamPropagation verifies that EPP joins an upstream
@@ -58,17 +59,17 @@ func TestTraceContextDownstreamPropagation(t *testing.T) {
 		tracing.FairnessIDHandoffHeader:     "forged",
 		tracing.FairnessSourceHandoffHeader: tracing.AttributionSourceAgentIdentity,
 	}
-	requests := integration.ReqRaw(headers, string(body))
+	requests := fwkepp.ReqRaw(headers, string(body))
 
 	ctx := t.Context()
-	h := NewTestHarness(ctx, t, WithTracing(), WithStandardMode()).WithBaseResources()
-	h.WithPods([]PodState{
-		P(0, 3, 0.2),
-		P(1, 0, 0.1),
-		P(2, 10, 0.2),
+	h := eppharness.NewTestHarness(ctx, t, eppharness.WithTracing(), eppharness.WithStandardMode()).WithBaseResources()
+	h.WithPods([]eppharness.PodState{
+		eppharness.P(0, 3, 0.2),
+		eppharness.P(1, 0, 0.1),
+		eppharness.P(2, 10, 0.2),
 	}).WaitForSync(3, modelMyModel).WaitForReadyPodsMetric(3)
 
-	responses, err := integration.StreamedRequest(t, h.Client, requests, 2)
+	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
 	require.NoError(t, err)
 	require.Len(t, responses, 2)
 

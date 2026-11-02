@@ -92,7 +92,7 @@ func InitTracing(ctx context.Context, logger logr.Logger, defaultServiceName str
 			loggerWrap.Handle(fmt.Errorf("%s: %v", "init trace exporter failed", err))
 			return nil, err
 		}
-		opt = append(opt, sdktrace.WithBatcher(traceExporter))
+		opt = append(opt, sdktrace.WithBatcher(validUTF8Exporter{SpanExporter: traceExporter}))
 	}
 
 	tracerProvider := sdktrace.NewTracerProvider(opt...)

@@ -31,6 +31,8 @@ Runs each scheduling stage in sequence and assembles the final result from all s
 3. If a prefill decider is configured and approves the request, run the prefill profile.
 4. Return the assembled scheduling result with decode as the primary profile.
 
+The prefill profile runs only for a request whose path is one of the inference API paths the sidecar serves (see [Inference API Routing](../../../../../../../docs/api-routing.md)). The sidecar forwards any other request, such as `/v1/embeddings`, to its decoder, so the handler schedules it decode-only in either stage order without consulting the prefill decider.
+
 #### How It Works
 
 The handler is invoked repeatedly by the framework until all stages are complete. Each optional stage is gated by a decider: if the decider returns false for a request, the stage is marked as skipped so the handler doesn't revisit it on the next invocation. If the decode stage finds no suitable endpoint, all remaining stages are skipped and the request fails.

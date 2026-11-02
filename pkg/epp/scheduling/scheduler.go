@@ -165,13 +165,27 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 		err = errors.Join(errs...)
 	}
 
+	fillDefaultPrefillProfile(result)
+
 	return result, err
+}
+
+// fillDefaultPrefillProfile names the prefill profile on a result whose handler
+// left it unnamed, when the result carries a profile under the default name.
+func fillDefaultPrefillProfile(result *fwksched.SchedulingResult) {
+	if result == nil || result.PrefillProfileName != "" {
+		return
+	}
+	if result.ProfileResults[fwksched.DefaultPrefillProfile] == nil {
+		return
+	}
+	result.PrefillProfileName = fwksched.DefaultPrefillProfile
 }
 
 func runSchedulerProfile(ctx context.Context, name string, profile fwksched.SchedulerProfile,
 	request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint,
 ) (*fwksched.ProfileRunResult, error) {
-	profileCtx, span := tracing.Tracer(TracerScope).Start(ctx, "run_scheduler_profile",
+	profileCtx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanRunSchedulerProfile,
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(semconv.LLMDEPPProfileName(name)),
 	)

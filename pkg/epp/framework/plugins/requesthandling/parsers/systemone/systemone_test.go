@@ -26,6 +26,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -104,7 +105,7 @@ func TestSystemOneParser_ParseRequest_StateShapes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseRequest() error = %v", err)
 			}
-			got := result.Body.Payload.(fwkrh.PayloadMap)["state"]
+			got := result.Body.Payload.(fwkrequest.PayloadMap)["state"]
 			if diff := cmp.Diff(json.RawMessage(state), got); diff != "" {
 				t.Errorf("state mismatch (-want +got):\n%s", diff)
 			}
@@ -177,11 +178,11 @@ func TestSystemOneParser_RewriteModelName_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRequest() error = %v", err)
 	}
-	rewritten, err := parser.RewriteModelName(result.Body.Payload.(fwkrh.MarshalablePayload), "served-model")
+	rewritten, err := parser.RewriteModelName(result.Body.Payload.(fwkrequest.MarshalablePayload), "served-model")
 	if err != nil {
 		t.Fatalf("RewriteModelName() error = %v", err)
 	}
-	out, err := rewritten.(fwkrh.Marshaler).Marshal()
+	out, err := rewritten.(fwkrequest.Marshaler).Marshal()
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
@@ -224,7 +225,7 @@ func TestSystemOneParser_RewritePriority(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseRequest() error = %v", err)
 			}
-			payload, mutated, err := parser.RewritePriority(tt.ctx, result.Body.Payload.(fwkrh.MarshalablePayload), 5)
+			payload, mutated, err := parser.RewritePriority(tt.ctx, result.Body.Payload.(fwkrequest.MarshalablePayload), 5)
 			if err != nil {
 				t.Fatalf("RewritePriority() error = %v", err)
 			}
@@ -232,7 +233,7 @@ func TestSystemOneParser_RewritePriority(t *testing.T) {
 				t.Errorf("RewritePriority() mutated = false, want true")
 			}
 			// The client-supplied priority is replaced.
-			if got := payload.(fwkrh.PayloadMap)["priority"]; got != tt.want {
+			if got := payload.(fwkrequest.PayloadMap)["priority"]; got != tt.want {
 				t.Errorf("priority = %v, want %d", got, tt.want)
 			}
 		})
@@ -244,7 +245,7 @@ func TestSystemOneParser_ParseResponse(t *testing.T) {
 	tests := []struct {
 		name      string
 		body      string
-		wantUsage *fwkrh.Usage
+		wantUsage *fwkrequest.Usage
 		wantErr   bool
 	}{
 		{
@@ -253,7 +254,7 @@ func TestSystemOneParser_ParseResponse(t *testing.T) {
 				`"answers":{"team":{"type":"choice","choice":"billing","probabilities":{"billing":0.9,"shipping":0.1},"confidence":0.9}},` +
 				`"usage":{"input_tokens":254,"output_tokens":2},` +
 				`"diagnostics":{"team":{"label_mass":0.99,"argmax_is_label":true}}}`,
-			wantUsage: &fwkrh.Usage{PromptTokens: 254, CompletionTokens: 2, TotalTokens: 256},
+			wantUsage: &fwkrequest.Usage{PromptTokens: 254, CompletionTokens: 2, TotalTokens: 256},
 		},
 		{
 			name: "error response without usage",

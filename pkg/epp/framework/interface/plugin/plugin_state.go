@@ -208,6 +208,15 @@ func (s *PluginState) BindLiveness(ctx context.Context, requestID string) {
 	s.requestLiveness.Store(requestID, ctx)
 }
 
+// UnbindLiveness removes any context liveness binding for requestID so the
+// janitor resumes staleness-based reaping regulated by Touch.
+func (s *PluginState) UnbindLiveness(requestID string) {
+	if requestID == "" {
+		return
+	}
+	s.requestLiveness.Delete(requestID)
+}
+
 // LastAccessTime returns the last access time for the given requestID and a
 // boolean indicating if the requestID was found.
 func (s *PluginState) LastAccessTime(requestID string) (time.Time, bool) {

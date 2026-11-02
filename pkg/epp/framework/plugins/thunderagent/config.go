@@ -18,65 +18,55 @@ package thunderagent
 
 import (
 	"fmt"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+const defaultForceAdmitTimeout = 5 * time.Minute
+
+// sweepInterval is how often idle sessions and stale endpoints are swept.
+var sweepInterval = 10 * time.Second
 
 // Config holds the configuration for the ThunderAgent plugin.
 type Config struct {
-	// CapacityTokens is the per-endpoint KV cache capacity in tokens used when
-	// the endpoint does not report cache_config_info through the datalayer.
-	CapacityTokens int64 `json:"capacityTokens"`
-	// EvictionTTLSeconds is how long a session with no in-flight request and
-	// no activity is kept before its state is dropped.
-	EvictionTTLSeconds float64 `json:"evictionTtlSeconds"`
-	// EvictionSweepSeconds is how often idle sessions are swept.
-	EvictionSweepSeconds float64 `json:"evictionSweepSeconds"`
-	// UtilThreshold is the fraction of a pod's KV capacity at which the pod
-	// is treated as full (1.0 = 100%).
-	UtilThreshold float64 `json:"utilThreshold"`
-	// IdleLeaseSeconds is how long an idle session keeps its room after its
-	// last response. Past the lease, a paused or new session that does not
-	// otherwise fit may take the room, pausing the idle session. Set it to
-	// about a typical tool-call duration: shorter pauses sessions that are
-	// about to return, longer holds admissions behind long tool calls.
-	IdleLeaseSeconds float64 `json:"idleLeaseSeconds"`
-	// HeadWaitStarvationMs is the maximum queue wait: a request waiting
-	// this long is admitted even when no pod has room. 0 disables it. Keep it
-	// below the priority band's request TTL, or the request is shed first.
-	HeadWaitStarvationMs float64 `json:"headWaitStarvationMs"`
+	// FallbackCapacityTokens is the per-endpoint KV cache capacity in tokens
+	// used when the endpoint does not report cache_config_info through the
+	// datalayer.
+	FallbackCapacityTokens int64 `json:"fallbackCapacityTokens"`
+	// UsableCapacityRatio is the fraction of a pod's KV capacity available to
+	// sessions (1.0 = 100%).
+	UsableCapacityRatio float64 `json:"usableCapacityRatio"`
+	// IdleGracePeriod is how long an idle session keeps its room after its
+	// last response before another session can reclaim it. 0s reclaims idle
+	// sessions immediately.
+	IdleGracePeriod metav1.Duration `json:"idleGracePeriod"`
+	// ForceAdmitTimeout is the maximum queue wait before a request is admitted
+	// even when no pod has room. 0s disables forced admission.
+	ForceAdmitTimeout metav1.Duration `json:"forceAdmitTimeout"`
 }
 
 func defaultConfig() Config {
 	return Config{
-		CapacityTokens:       4194304,
-		EvictionTTLSeconds:   3600,
-		EvictionSweepSeconds: 10,
-		UtilThreshold:        1.0,
-		IdleLeaseSeconds:     30,
-		HeadWaitStarvationMs: 30000,
+		FallbackCapacityTokens: 4194304,
+		UsableCapacityRatio:    1.0,
+		IdleGracePeriod:        metav1.Duration{Duration: 30 * time.Second},
+		ForceAdmitTimeout:      metav1.Duration{Duration: defaultForceAdmitTimeout},
 	}
 }
 
 func (c Config) validate() error {
-	if c.CapacityTokens <= 0 {
-		return fmt.Errorf("capacityTokens must be > 0, got %d", c.CapacityTokens)
+	if c.FallbackCapacityTokens <= 0 {
+		return fmt.Errorf("fallbackCapacityTokens must be > 0, got %d", c.FallbackCapacityTokens)
 	}
-	if c.EvictionTTLSeconds <= 0 {
-		return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", c.EvictionTTLSeconds)
+	if !(c.UsableCapacityRatio > 0 && c.UsableCapacityRatio <= 1) {
+		return fmt.Errorf("usableCapacityRatio must be in (0, 1], got %v", c.UsableCapacityRatio)
 	}
-	if c.EvictionSweepSeconds <= 0 {
-		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
+	if c.IdleGracePeriod.Duration < 0 {
+		return fmt.Errorf("idleGracePeriod must be >= 0, got %v", c.IdleGracePeriod.Duration)
 	}
-	if c.UtilThreshold <= 0 || c.UtilThreshold > 1 {
-		return fmt.Errorf("utilThreshold must be in (0, 1], got %v", c.UtilThreshold)
-	}
-	if c.IdleLeaseSeconds < 0 {
-		return fmt.Errorf("idleLeaseSeconds must be >= 0, got %v", c.IdleLeaseSeconds)
-	}
-	if c.HeadWaitStarvationMs < 0 {
-		return fmt.Errorf("headWaitStarvationMs must be >= 0, got %v", c.HeadWaitStarvationMs)
-	}
-	if c.EvictionTTLSeconds*1000 <= c.HeadWaitStarvationMs {
-		return fmt.Errorf("evictionTtlSeconds (%v s) must exceed headWaitStarvationMs (%v ms), or a held session is evicted mid-wait and re-enters as new", c.EvictionTTLSeconds, c.HeadWaitStarvationMs)
+	if c.ForceAdmitTimeout.Duration < 0 {
+		return fmt.Errorf("forceAdmitTimeout must be >= 0, got %v", c.ForceAdmitTimeout.Duration)
 	}
 	return nil
 }

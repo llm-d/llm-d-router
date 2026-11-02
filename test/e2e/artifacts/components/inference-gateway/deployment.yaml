@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${EPP_NAME}
+  labels:
+    app: ${EPP_NAME}
+spec:
+  replicas: ${EPP_REPLICA_COUNT}
+  selector:
+    matchLabels:
+      app: ${EPP_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${EPP_NAME}
+    spec:
+      serviceAccountName: ${EPP_NAME}
+      terminationGracePeriodSeconds: 130
+      containers:
+      - name: epp
+        image: ${EPP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - --pool-name
+        - "${POOL_NAME}"
+        - --pool-namespace
+        - "${NAMESPACE}"
+        - --v
+        - "4"
+        - --zap-encoder
+        - "json"
+        - --grpc-port
+        - "9002"
+        - --grpc-health-port
+        - "9003"
+        - --config-file
+        - "/etc/epp/epp-config.yaml"
+        - --allow-experimental-plugins=true
+        - --metrics-endpoint-auth=${METRICS_ENDPOINT_AUTH}
+        - --ha-enable-leader-election=${ENABLE_LEADER_ELECTION}
+        ports:
+        - containerPort: 5557
+        - containerPort: 9002
+        - containerPort: 9003
+        - name: metrics
+          containerPort: 9090
+        # Startup gets its own budget so liveness cannot restart the
+        # container while it is still initializing.
+        startupProbe:
+          grpc:
+            port: 9003
+            service: liveness
+          periodSeconds: 5
+          failureThreshold: 60
+          timeoutSeconds: 5
+        livenessProbe:
+          grpc:
+            port: 9003
+            service: liveness
+          periodSeconds: 10
+        readinessProbe:
+          grpc:
+            port: 9003
+            service: readiness
+          periodSeconds: 10
+        volumeMounts:
+        - name: epp-config
+          mountPath: /etc/epp
+        - name: cache
+          mountPath: /cache
+      volumes:
+      - name: epp-config
+        configMap:
+          name: epp-config
+      - name: cache
+        emptyDir: {}

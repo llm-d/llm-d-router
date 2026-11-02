@@ -23,14 +23,14 @@ metadata:
   labels:
     {{- include "llm-d-router.labels" $ | nindent 4 }}
   annotations:
-    cloud.google.com/neg: '{"exposed_ports":{"{{ $.Values.router.epp.extProcPort | default 9002 }}":{}}}'
+    cloud.google.com/neg: '{"exposed_ports":{"{{ include "llm-d-router.epp.extProcPort" $ }}":{}}}'
 spec:
   selector:
     statefulset.kubernetes.io/pod-name: {{ printf "%s-%d" (include "llm-d-router.name" $) (int $i) }}
   ports:
     - name: grpc-ext-proc
       protocol: TCP
-      port: {{ $.Values.router.epp.extProcPort | default 9002 }}
+      port: {{ include "llm-d-router.epp.extProcPort" $ }}
       appProtocol: kubernetes.io/h2c
     - name: http-metrics
       protocol: TCP
@@ -55,7 +55,7 @@ spec:
   ports:
     - name: grpc-ext-proc
       protocol: TCP
-      port: {{ .Values.router.epp.extProcPort | default 9002 }}
+      port: {{ include "llm-d-router.epp.extProcPort" . }}
       appProtocol: kubernetes.io/h2c
     - name: http-metrics
       protocol: TCP
@@ -82,7 +82,7 @@ spec:
   ports:
     - name: grpc-ext-proc
       protocol: TCP
-      port: {{ .Values.router.epp.extProcPort | default 9002 }}
+      port: {{ include "llm-d-router.epp.extProcPort" . }}
       appProtocol: kubernetes.io/h2c
 {{- end }}
 {{- if $isPriorityRouting }}
@@ -106,7 +106,7 @@ spec:
   ports:
     - name: grpc-ext-proc
       protocol: TCP
-      port: {{ .Values.router.epp.extProcPort | default 9002 }}
+      port: {{ include "llm-d-router.epp.extProcPort" . }}
       appProtocol: kubernetes.io/h2c
 {{- end }}
 {{- end }}

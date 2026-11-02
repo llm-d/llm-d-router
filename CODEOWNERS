@@ -17,8 +17,6 @@
 /pkg/epp/handlers/                                                        @zetxqx @llm-d/router-maintainers
 /pkg/epp/requestcontrol/                                                  @zetxqx @llm-d/router-maintainers
 /pkg/epp/framework/common/request/                                        @zetxqx @llm-d/router-maintainers
-/pkg/epp/framework/interface/requestcontrol/                              @zetxqx @llm-d/router-maintainers
-/pkg/epp/framework/plugins/requestcontrol/                                @zetxqx @llm-d/router-maintainers
 /pkg/epp/framework/interface/requesthandling/                             @zetxqx @llm-d/router-maintainers
 /pkg/epp/framework/plugins/requesthandling/                               @zetxqx @llm-d/router-maintainers
 
@@ -40,22 +38,22 @@
 /pkg/sidecar/proxy/*p2p*                                                  @nilig @roytman @llm-d/router-maintainers
 
 # P2P request routing
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/          @nilig @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/         @nilig @llm-d/router-maintainers
 
 # SLO + latency-prediction subsystem
 /pkg/epp/framework/plugins/scheduling/filter/sloheadroomtier/             @kaushikmitr @llm-d/router-maintainers
 /pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity/         @kaushikmitr @llm-d/router-maintainers
 /pkg/epp/framework/plugins/scheduling/scorer/latency/                     @kaushikmitr @llm-d/router-maintainers
-/pkg/epp/framework/plugins/requestcontrol/admitter/latencyslo/            @kaushikmitr @llm-d/router-maintainers
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/predictedlatency/  @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requesthandling/admitter/latencyslo/           @kaushikmitr @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/ @kaushikmitr @llm-d/router-maintainers
 
 # Prefix cache
 /pkg/epp/framework/plugins/scheduling/scorer/prefix/                      @liu-cong @vMaroon @llm-d/router-maintainers
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/ @liu-cong @vMaroon @llm-d/router-maintainers
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/ @bongwoobak @vMaroon @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix/ @liu-cong @vMaroon @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache/ @bongwoobak @vMaroon @llm-d/router-maintainers
 
 # Tokenization
-/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer/          @vMaroon @liu-cong @sagearc @llm-d/router-maintainers
+/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer/         @vMaroon @liu-cong @sagearc @llm-d/router-maintainers
 
 # KV-cache subsystem — indexer, KV-block index, KV-events
 /pkg/kvcache/                                                              @vMaroon @liu-cong @hyeongyun0916 @yankay @sagearc @llm-d/router-maintainers

@@ -140,9 +140,9 @@ func snapshotStageMetrics(t *testing.T) stageMetrics {
 		encodeCount:   histogramCount(t, metricEncodeDuration),
 		prefillCount:  histogramCount(t, metricPrefillDuration),
 		decodeCount:   histogramCount(t, metricDecodeDuration),
-		encodeErrors:  stageErrors(t, metrics.StageEncode),
-		prefillErrors: stageErrors(t, metrics.StagePrefill),
-		decodeErrors:  stageErrors(t, metrics.StageDecode),
+		encodeErrors:  stageErrors(t, routing.StageEncode),
+		prefillErrors: stageErrors(t, routing.StagePrefill),
+		decodeErrors:  stageErrors(t, routing.StageDecode),
 	}
 }
 
@@ -243,8 +243,8 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 					allowedTargets: set.New(tt.allowed...),
 				}
 			}
-			s.handleECConnector = func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {}
-			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType) {}
+			s.handleECConnector = func(http.ResponseWriter, *http.Request, string, []string, p2pRouting, reqcommon.APIType) {}
+			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, p2pRouting, reqcommon.APIType) {}
 			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				if tt.want != "" {
 					t.Error("decoder passthrough must not be reached for a disaggregated request")
@@ -273,15 +273,15 @@ func TestDisaggTypeMetricSelection(t *testing.T) {
 func TestHandleECEncodeMetrics(t *testing.T) {
 	connectors := []struct {
 		name   string
-		handle func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType)
+		handle func(s *Server) ecConnectorHandler
 	}{
-		{name: "ec-nixl", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {
+		{name: "ec-nixl", handle: func(s *Server) ecConnectorHandler {
 			return s.handleECNIXL
 		}},
-		{name: "ec-shared-storage", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {
+		{name: "ec-shared-storage", handle: func(s *Server) ecConnectorHandler {
 			return s.handleECSharedStorage
 		}},
-		{name: "ec-mooncake", handle: func(s *Server) func(http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType) {
+		{name: "ec-mooncake", handle: func(s *Server) ecConnectorHandler {
 			return s.handleECMooncake
 		}},
 	}
@@ -356,7 +356,7 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 				rw := httptest.NewRecorder()
 				req := chatRequest(t, o.body())
 				// Empty prefill endpoint routes straight to decoderProxy after encode.
-				c.handle(s)(rw, req, "", []string{encoderURL.Host}, "", reqcommon.APITypeChatCompletions)
+				c.handle(s)(rw, req, "", []string{encoderURL.Host}, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 				assert.Equal(t, o.wantCode, rw.Code)
 				assert.Equal(t, o.wantDecoder, decoderCalled)
@@ -368,16 +368,17 @@ func TestHandleECEncodeMetrics(t *testing.T) {
 
 func TestECToolCallingMetrics(t *testing.T) {
 	const fields = `"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}`
-	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, string, reqcommon.APIType){
+	handlers := map[string]func(*Server, http.ResponseWriter, *http.Request, string, []string, p2pRouting, reqcommon.APIType){
 		"ec-nixl": (*Server).handleECNIXL, "ec-shared-storage": (*Server).handleECSharedStorage,
 	}
+	peer := &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: "10.9.9.9", port: 8000}}
 	for name, handle := range handlers {
 		for _, tt := range []struct {
 			name         string
 			api          reqcommon.APIType
 			route        string
 			fields       string
-			source       string
+			source       *kvSource
 			textOnly     bool
 			noEncoder    bool
 			encoderError bool
@@ -386,10 +387,10 @@ func TestECToolCallingMetrics(t *testing.T) {
 			wantCode     int
 		}{
 			{name: "chat direct", fields: fields, wantCode: 200},
-			{name: "chat direct P2P", fields: fields, source: "10.9.9.9:8000", wantCode: 200},
-			{name: "messages direct P2P", api: reqcommon.APITypeMessages, fields: fields, source: "10.9.9.9:8000", wantCode: 200},
-			{name: "P2P decode error", fields: fields, source: "10.9.9.9:8000", decodeError: true, wantCode: 503},
-			{name: "P2P data parallel", route: "dp", fields: fields, source: "10.9.9.9:8000", wantCode: 200},
+			{name: "chat direct P2P", fields: fields, source: peer, wantCode: 200},
+			{name: "messages direct P2P", api: reqcommon.APITypeMessages, fields: fields, source: peer, wantCode: 200},
+			{name: "P2P decode error", fields: fields, source: peer, decodeError: true, wantCode: 503},
+			{name: "P2P data parallel", route: "dp", fields: fields, source: peer, wantCode: 200},
 			{name: "messages direct", api: reqcommon.APITypeMessages, fields: fields, wantCode: 200},
 			{name: "chat PD", route: "pd", fields: fields, wantCode: 200},
 			{name: "messages PD", api: reqcommon.APITypeMessages, route: "pd", fields: fields, wantCode: 200},
@@ -457,7 +458,7 @@ func TestECToolCallingMetrics(t *testing.T) {
 				})
 				if tt.mutate {
 					pd := s.handlePDConnector
-					s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, target, source string, api reqcommon.APIType) {
+					s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, target string, source p2pRouting, api reqcommon.APIType) {
 						var body map[string]json.RawMessage
 						require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 						delete(body, string(toolcalling.FieldTools))
@@ -497,7 +498,7 @@ func TestECToolCallingMetrics(t *testing.T) {
 				}
 				before := toolFieldCounters(t)
 				rw := httptest.NewRecorder()
-				handle(s, rw, r, target, encoders, tt.source, tt.api)
+				handle(s, rw, r, target, encoders, p2pRouting{source: tt.source}, tt.api)
 				require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
 				wantDecode := !tt.encoderError && tt.route != "missing"
 				require.Equal(t, wantDecode, len(decodeBodies) == 1)
@@ -589,7 +590,7 @@ func TestECPipelineToolCallingOutcomes(t *testing.T) {
 				before := toolFieldCounters(t)
 				rw := httptest.NewRecorder()
 				dispatch := func() {
-					s.runPDPipeline(rw, r, map[string]any{string(toolcalling.FieldToolChoice): "none"}, "", "", "request", api)
+					s.runPDPipeline(rw, r, map[string]any{string(toolcalling.FieldToolChoice): "none"}, "", "request", p2pRouting{}, api)
 				}
 				if tt.abort {
 					require.PanicsWithValue(t, http.ErrAbortHandler, dispatch)
@@ -657,11 +658,11 @@ func TestSidecarTraceLogPrivacy(t *testing.T) {
 				rw := httptest.NewRecorder()
 				switch connector {
 				case "nixl", "parallel":
-					s.handleNIXLV2(rw, r, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+					s.handleNIXLV2(rw, r, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 				case "p2p":
-					s.handleP2P(rw, r, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+					s.handleP2P(rw, r, prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 				case "peer":
-					s.decodeWithP2PSource(rw, r, "peer:8000")
+					s.decodeWithP2PSource(rw, r, p2pRouting{source: &kvSource{kvRequestID: "request", p2pPeer: p2pPeer{host: "peer", port: 8000}}})
 				case "mooncake":
 					s.mooncakeEngineIDs.Add(prefillURL.Host, map[string]string{"0": "engine"})
 					s.handleMooncake(rw, r, prefillURL.Host, reqcommon.APITypeChatCompletions)
@@ -670,7 +671,7 @@ func TestSidecarTraceLogPrivacy(t *testing.T) {
 				case "shared":
 					s.handleSharedStorage(rw, r, prefillURL.Host, reqcommon.APITypeChatCompletions)
 				case "encoder":
-					s.handleECNIXL(rw, r, "", []string{prefillURL.Host}, "", reqcommon.APITypeChatCompletions)
+					s.handleECNIXL(rw, r, "", []string{prefillURL.Host}, p2pRouting{}, reqcommon.APITypeChatCompletions)
 				case "chunks":
 					s.runChunkedDecode(rw, r)
 				}
@@ -729,15 +730,15 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 				wantCode := http.StatusBadRequest
 				switch connector {
 				case "nixl", "parallel":
-					s.handleNIXLV2(rw, r, upstreamURL.Host, "", reqcommon.APITypeChatCompletions)
+					s.handleNIXLV2(rw, r, upstreamURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 				case "shared":
 					s.handleSharedStorage(rw, r, upstreamURL.Host, reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusInternalServerError
 				case "encoder-nixl":
-					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, "", reqcommon.APITypeChatCompletions)
+					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, p2pRouting{}, reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				case "encoder-example":
-					s.handleECSharedStorage(rw, r, "", []string{upstreamURL.Host}, "", reqcommon.APITypeChatCompletions)
+					s.handleECSharedStorage(rw, r, "", []string{upstreamURL.Host}, p2pRouting{}, reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				}
 				require.Equal(t, wantCode, rw.Code, rw.Body.String())
@@ -816,7 +817,7 @@ func TestJSONErrorForLog(t *testing.T) {
 func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 	const numberSecret = "987654321098765432109876543210e999" // notsecret
 	const textSecret = "private_diagnostic_schema_fixture"    // notsecret
-	for _, stage := range []string{"request", "shared", "chunks", "encoder", "bootstrap", "threshold string", "threshold object"} {
+	for _, stage := range []string{"request", "shared", "chunks", "encoder", "bootstrap", "parallel", "threshold string", "threshold object"} {
 		for _, verbosity := range []int{logging.DEBUG, logging.TRACE} {
 			t.Run(fmt.Sprintf("%s/verbosity=%d", stage, verbosity), func(t *testing.T) {
 				badResponse := fmt.Sprintf(`{"0":{"engine_id":"engine","argument":%s}}`, numberSecret)
@@ -873,17 +874,30 @@ func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 					if strings.HasPrefix(stage, "threshold") {
 						wantCode = http.StatusOK
 					}
+				case "parallel":
+					s.decoderProxy = statusHandler(http.StatusOK, chatResponse("ok", "stop", 1, 1))
+					parsed, err := decodeRequestBody([]byte(body))
+					require.NoError(t, err)
+					s.runNIXLProtocolV2WriteParallel(rw, r, []byte(body), parsed, "request-id", "transfer-id", upstreamURL.Host, nil, reqcommon.APITypeChatCompletions)
+					wantCode = http.StatusOK
 				case "chunks":
 					s.runChunkedDecode(rw, r)
 				case "encoder":
-					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, "", reqcommon.APITypeChatCompletions)
+					s.handleECNIXL(rw, r, "", []string{upstreamURL.Host}, p2pRouting{}, reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				case "bootstrap":
 					s.handleMooncake(rw, r, upstreamURL.Host, reqcommon.APITypeChatCompletions)
 					wantCode = http.StatusBadGateway
 				}
 				require.Equal(t, wantCode, rw.Code, rw.Body.String())
-				if !strings.HasPrefix(stage, "threshold") {
+				switch {
+				case strings.HasPrefix(stage, "threshold"), stage == "parallel":
+				case stage == "encoder" || stage == "bootstrap":
+					// A 502 answers a failed upstream call with a fixed message;
+					// the parser error stays in the log.
+					require.Contains(t, rw.Body.String(), "internal error")
+					require.NotContains(t, rw.Body.String(), numberSecret)
+				default:
 					require.Contains(t, rw.Body.String(), numberSecret, "client-facing parser errors must remain unchanged")
 				}
 				mu.Lock()
@@ -1534,7 +1548,7 @@ func TestHandleNIXLV2SerialMetrics(t *testing.T) {
 
 			before := snapshotStageMetrics(t)
 			rw := httptest.NewRecorder()
-			s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantCode, rw.Code)
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
@@ -1594,13 +1608,13 @@ func TestHandleNIXLV2SerialUnusablePrefillResponse(t *testing.T) {
 			req = withContextLogger(s, req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{})))
 			rw := httptest.NewRecorder()
 			require.NotPanics(t, func() {
-				s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+				s.handleNIXLV2(rw, req, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 			})
 
 			assert.Equal(t, http.StatusBadGateway, rw.Code)
-			var errBody errorResponse
+			var errBody reqcommon.OpenAIErrorResponse
 			require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &errBody), rw.Body.String())
-			assert.Equal(t, "BadGateway", errBody.Type)
+			assert.Equal(t, "server_error", errBody.Error.Type)
 			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
 
 			failureLogged := false
@@ -1618,6 +1632,101 @@ func TestHandleNIXLV2SerialUnusablePrefillResponse(t *testing.T) {
 			}
 			require.NotNil(t, prefillSpan, "the prefill span must end")
 			assert.Equal(t, codes.Error, prefillSpan.Status().Code)
+		})
+	}
+}
+
+// sequentialPrefillHandlers runs the P2P and shared storage P/D paths, which both
+// buffer a prefill response before dispatching decode.
+var sequentialPrefillHandlers = map[string]func(s *Server, w http.ResponseWriter, r *http.Request, prefillHostPort string){
+	"p2p": func(s *Server, w http.ResponseWriter, r *http.Request, prefillHostPort string) {
+		s.handleP2P(w, r, prefillHostPort, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefillHostPort), port: p2pConnectorPort}},
+			reqcommon.APITypeChatCompletions)
+	},
+	"shared storage": func(s *Server, w http.ResponseWriter, r *http.Request, prefillHostPort string) {
+		s.handleSharedStorage(w, r, prefillHostPort, reqcommon.APITypeChatCompletions)
+	},
+}
+
+func TestSequentialPrefillConnectionClosedMidBody(t *testing.T) {
+	for name, handle := range sequentialPrefillHandlers {
+		t.Run(name, func(t *testing.T) {
+			spans := tracetest.NewSpanRecorder()
+			useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				// Declaring more than is written makes the server close the
+				// connection after the partial body.
+				w.Header().Set("Content-Length", "400")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"choices":[`)
+			}))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{Port: "0", DecoderURL: prefillURL})
+			s.logger = log.Log
+			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decode must not run after a prefill failure")
+			})
+
+			before := snapshotStageMetrics(t)
+			req := chatRequest(t, textChatBody())
+			// Under a server context the reverse proxy panics with
+			// http.ErrAbortHandler when the body copy fails.
+			req = withContextLogger(s, req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{})))
+			rw := httptest.NewRecorder()
+			require.NotPanics(t, func() { handle(s, rw, req, prefillURL.Host) })
+
+			assert.Equal(t, http.StatusBadGateway, rw.Code)
+			var errBody reqcommon.OpenAIErrorResponse
+			require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &errBody), rw.Body.String())
+			assert.Equal(t, "server_error", errBody.Error.Type)
+			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
+
+			// Shared storage does not start a prefill span.
+			if name == "p2p" {
+				var prefillSpan sdktrace.ReadOnlySpan
+				for _, span := range spans.Ended() {
+					if span.Name() == "prefill" {
+						prefillSpan = span
+					}
+				}
+				require.NotNil(t, prefillSpan, "the prefill span must end")
+				assert.Equal(t, codes.Error, prefillSpan.Status().Code)
+			}
+		})
+	}
+}
+
+func TestSequentialPrefillClientDisconnectMidBody(t *testing.T) {
+	for name, handle := range sequentialPrefillHandlers {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			s := NewProxy(Config{Port: "0"})
+			s.logger = log.Log
+			// The client leaves while the prefill body is arriving, and the
+			// reverse proxy aborts the body copy.
+			s.prefillerProxies.Add("prefill:8000", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"choices":[`)
+				cancel()
+				panic(http.ErrAbortHandler)
+			}))
+			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decode must not run after the client left")
+			})
+
+			before := snapshotStageMetrics(t)
+			req := withContextLogger(s, chatRequest(t, textChatBody()).WithContext(ctx))
+			rw := httptest.NewRecorder()
+			require.NotPanics(t, func() { handle(s, rw, req, "prefill:8000") })
+
+			assert.Empty(t, rw.Body.String(), "nothing is sent to a client that left")
+			assert.Equal(t, stageMetrics{prefillCount: 1}, snapshotStageMetrics(t).delta(before))
 		})
 	}
 }
@@ -1677,11 +1786,117 @@ func TestHandleNIXLV2SerialInterruptedPrefillErrorRetry(t *testing.T) {
 			req := chatRequest(t, textChatBody())
 			req = req.WithContext(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{}))
 			rw := httptest.NewRecorder()
-			s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleNIXLV2(rw, req, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
 			assert.Equal(t, tt.wantAttempts, attempts.Load())
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
+		})
+	}
+}
+
+// A prefill pod that accepts the request and never answers must not hold it
+// until the route timeout.
+func TestHandleNIXLV2SerialPrefillTimeout(t *testing.T) {
+	const (
+		timeout = 100 * time.Millisecond
+		// The fake pod answers 200 after holdFor, so without a timeout the
+		// request succeeds slowly instead of answering 504.
+		holdFor = 5 * time.Second
+	)
+	tests := []struct {
+		name          string
+		maxRetries    int
+		holdAttempts  int32
+		cutOffBody    bool
+		wantCode      int
+		wantAttempts  int32
+		wantDelta     stageMetrics
+		wantFailStage string
+	}{
+		{
+			name:         "a hung attempt with retries disabled answers 504",
+			holdAttempts: 3,
+			wantCode:     http.StatusGatewayTimeout, wantAttempts: 1,
+			wantDelta:     stageMetrics{prefillCount: 1, prefillErrors: 1},
+			wantFailStage: routing.StagePrefill,
+		},
+		{
+			name:       "hung attempts exhaust the retries and answer 504",
+			maxRetries: 2, holdAttempts: 3,
+			wantCode: http.StatusGatewayTimeout, wantAttempts: 3,
+			wantDelta:     stageMetrics{prefillCount: 1, prefillErrors: 1},
+			wantFailStage: routing.StagePrefill,
+		},
+		{
+			name:       "a timed-out attempt is retried and the retry succeeds",
+			maxRetries: 2, holdAttempts: 1,
+			wantCode: http.StatusOK, wantAttempts: 2,
+			wantDelta: stageMetrics{prefillCount: 1, decodeCount: 1},
+		},
+		{
+			name:       "an attempt that answers within the timeout is not retried",
+			maxRetries: 2,
+			wantCode:   http.StatusOK, wantAttempts: 1,
+			wantDelta: stageMetrics{prefillCount: 1, decodeCount: 1},
+		},
+		{
+			// Prefill already ran, the same rule as a cut-off 2xx without a timeout.
+			name:       "a timeout that cuts off a 2xx body is not retried",
+			maxRetries: 2, holdAttempts: 3, cutOffBody: true,
+			wantCode: http.StatusGatewayTimeout, wantAttempts: 1,
+			wantDelta:     stageMetrics{prefillCount: 1, prefillErrors: 1},
+			wantFailStage: routing.StagePrefill,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if attempts.Add(1) > tt.holdAttempts {
+					statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
+					return
+				}
+				_, _ = io.Copy(io.Discard, r.Body)
+				if tt.cutOffBody {
+					w.Header().Set("Content-Length", "100")
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, `{"kv_transfer_params":`)
+					w.(http.Flusher).Flush()
+				}
+				select {
+				case <-r.Context().Done():
+				case <-time.After(holdFor):
+					statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
+				}
+			}))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{Port: "0", DecoderURL: prefillURL,
+				PrefillMaxRetries: tt.maxRetries, PrefillRetryBackoff: time.Millisecond,
+				PrefillTimeout: timeout})
+			s.logger = log.Log
+			s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[]}`)
+
+			before := snapshotStageMetrics(t)
+			req := chatRequest(t, textChatBody())
+			ctx, summary := withRequestSummary(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{}))
+			req = req.WithContext(ctx)
+			rw := httptest.NewRecorder()
+			started := time.Now()
+			s.handleNIXLV2(rw, req, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
+
+			assert.Less(t, time.Since(started), holdFor/2)
+			assert.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
+			assert.Equal(t, tt.wantAttempts, attempts.Load())
+			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
+			assert.Equal(t, tt.wantFailStage, summary.failedStage)
+			if tt.wantCode == http.StatusGatewayTimeout {
+				assert.Contains(t, rw.Body.String(), "prefill request timed out after 100ms")
+			}
 		})
 	}
 }
@@ -1727,7 +1942,7 @@ func TestHandleNIXLV2SerialClientCancelDuringPrefillBody(t *testing.T) {
 	handled := make(chan struct{})
 	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer close(handled)
-		s.handleNIXLV2(w, withContextLogger(s, r), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+		s.handleNIXLV2(w, withContextLogger(s, r), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 	}))
 	defer sidecar.Close()
 
@@ -1768,6 +1983,150 @@ func TestHandleNIXLV2SerialClientCancelDuringPrefillBody(t *testing.T) {
 	}
 	require.NotNil(t, prefillSpan, "the prefill span must end")
 	assert.Equal(t, codes.Unset, prefillSpan.Status().Code)
+}
+
+// A client that disconnects before the prefill response arrives makes the
+// reverse proxy answer 502 itself; that 502 is not a prefill failure.
+func TestHandleNIXLV2SerialClientCancelBeforePrefillResponse(t *testing.T) {
+	spans := tracetest.NewSpanRecorder()
+	useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
+	var posts atomic.Int32
+	received := make(chan struct{}, 1)
+	prefill := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case received <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	defer prefill.Close()
+	prefillURL, err := url.Parse(prefill.URL)
+	require.NoError(t, err)
+
+	s := NewProxy(Config{Port: "0", DecoderURL: prefillURL, PrefillMaxRetries: 2, PrefillRetryBackoff: time.Millisecond})
+	var logged []string
+	s.logger = funcr.New(func(prefix, args string) {
+		logged = append(logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: logging.TRACE})
+	s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("decode must not run after the client disconnected")
+	})
+	handled := make(chan struct{})
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handled)
+		s.handleNIXLV2(w, withContextLogger(s, r), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
+	}))
+	defer sidecar.Close()
+
+	before := snapshotStageMetrics(t)
+	raw, err := json.Marshal(textChatBody())
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sidecar.URL+reqcommon.PathChatCompletions, bytes.NewReader(raw))
+	require.NoError(t, err)
+	go func() {
+		if resp, err := sidecar.Client().Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-received:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prefill did not receive the request")
+	}
+	cancel()
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sidecar handler did not return after the client disconnected")
+	}
+
+	assert.Equal(t, stageMetrics{prefillCount: 1}, snapshotStageMetrics(t).delta(before))
+	assert.Equal(t, int32(1), posts.Load(), "a disconnected client's prefill must not be retried")
+	for _, entry := range logged {
+		assert.NotContains(t, entry, "prefill request failed")
+		assert.NotContains(t, entry, "retrying prefill request")
+	}
+	var prefillSpan sdktrace.ReadOnlySpan
+	for _, span := range spans.Ended() {
+		if span.Name() == "prefill" {
+			prefillSpan = span
+		}
+	}
+	require.NotNil(t, prefillSpan, "the prefill span must end")
+	assert.Equal(t, codes.Unset, prefillSpan.Status().Code)
+}
+
+// A prefill error that arrived before the client disconnected during the retry
+// backoff is still a prefill failure, whether its body was complete or cut off.
+func TestHandleNIXLV2SerialClientCancelDuringRetryBackoff(t *testing.T) {
+	for _, cutOff := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cut-off body %t", cutOff), func(t *testing.T) {
+			var posts atomic.Int32
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				posts.Add(1)
+				if cutOff {
+					w.Header().Set("Content-Length", "100")
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":`)
+			}))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{Port: "0", DecoderURL: prefillURL, PrefillMaxRetries: 2, PrefillRetryBackoff: time.Minute})
+			var once sync.Once
+			backoff := make(chan struct{})
+			s.logger = funcr.New(func(_, args string) {
+				if strings.Contains(args, "retrying prefill request") {
+					once.Do(func() { close(backoff) })
+				}
+			}, funcr.Options{Verbosity: logging.TRACE})
+			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decode must not run after the client disconnected")
+			})
+			handled := make(chan struct{})
+			sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(handled)
+				s.handleNIXLV2(w, withContextLogger(s, r), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
+			}))
+			defer sidecar.Close()
+
+			before := snapshotStageMetrics(t)
+			raw, err := json.Marshal(textChatBody())
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, sidecar.URL+reqcommon.PathChatCompletions, bytes.NewReader(raw))
+			require.NoError(t, err)
+			go func() {
+				if resp, err := sidecar.Client().Do(req); err == nil {
+					_ = resp.Body.Close()
+				}
+			}()
+
+			select {
+			case <-backoff:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the sidecar did not start the retry backoff")
+			}
+			cancel()
+			select {
+			case <-handled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("sidecar handler did not return after the client disconnected")
+			}
+
+			assert.Equal(t, int32(1), posts.Load())
+			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
+		})
+	}
 }
 
 // writeHeaderSignal closes written once the final status is written through it.
@@ -2270,7 +2629,7 @@ func TestP2PToolCallingMetrics(t *testing.T) {
 	chatBody := `{"model":"test-model","messages":[],"max_tokens":11,"tools":[{"type":"function","function":{"name":"example","parameters":{"z":9007199254740993,"a":1}}}],"tool_choice":"auto","parallel_tool_calls":false,"response_format":{"type":"json_object"}}`
 	chatFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice, toolcalling.FieldParallelToolCalls, toolcalling.FieldResponseFormat}
 	messagesFields := []toolcalling.Field{toolcalling.FieldTools, toolcalling.FieldToolChoice}
-	for _, path := range []string{"prefill and decode", "peer source", "self source"} {
+	for _, path := range []string{"prefill and decode", "peer source"} {
 		t.Run(path, func(t *testing.T) {
 			type testCase struct {
 				name          string
@@ -2333,13 +2692,12 @@ func TestP2PToolCallingMetrics(t *testing.T) {
 						if tt.invalidTarget {
 							target = "%invalid"
 						}
-						s.handleP2P(rw, r, target, "10.0.0.2:8000", tt.api)
+						s.handleP2P(rw, r, target, p2pRouting{
+							prefill: &p2pPeer{host: routing.ExtractHost(prefillURL.Host), port: p2pConnectorPort},
+							source:  &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: "10.0.0.2", port: 8000}},
+						}, tt.api)
 					} else {
-						source := "10.0.0.2:8000"
-						if path == "self source" {
-							source = "127.0.0.1:8000"
-						}
-						s.decodeWithP2PSource(rw, r, source)
+						s.decodeWithP2PSource(rw, r, p2pRouting{source: &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: "10.0.0.2", port: 8000}}})
 					}
 					require.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
 					wantPrefill, wantDecode := 0, 0
@@ -2372,9 +2730,6 @@ func TestP2PToolCallingMetrics(t *testing.T) {
 								require.NoError(t, json.Unmarshal(raw, &actual))
 								for _, field := range chatFields {
 									require.Equal(t, original[string(field)], actual[string(field)], "upstream field %s", field)
-								}
-								if path == "self source" {
-									require.Equal(t, tt.body, string(raw))
 								}
 							}
 						}
@@ -2433,7 +2788,7 @@ func TestP2PDispatchedToolCallingMetrics(t *testing.T) {
 					before := toolFieldCounters(t)
 					r := httptest.NewRequest(http.MethodPost, api.Path(), strings.NewReader(original))
 					rw := httptest.NewRecorder()
-					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields)
+					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields, false)
 					require.Equal(t, code, rw.Code)
 					require.Equal(t, tt.prefillStatus == 0, decodeCount == 1)
 					delta := toolFieldDelta(before, toolFieldCounters(t))
@@ -2501,7 +2856,7 @@ func TestHandleP2PMetrics(t *testing.T) {
 			s.decoderProxy = tt.decoder
 
 			before := snapshotStageMetrics(t)
-			s.handleP2P(tt.client(), chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleP2P(tt.client(), chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
 		})
@@ -2528,7 +2883,7 @@ func TestHandleP2PDecodeAbortMetrics(t *testing.T) {
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
-		s.handleP2P(httptest.NewRecorder(), chatRequest(t, body), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+		s.handleP2P(httptest.NewRecorder(), chatRequest(t, body), prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefillURL.Host), port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 	}()
 	assert.Equal(t, http.ErrAbortHandler, recovered, "abort panic must propagate")
 	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1},
@@ -2545,15 +2900,21 @@ func TestHandleP2PDecodeAbortMetrics(t *testing.T) {
 func TestRecordDecodeAbort(t *testing.T) {
 	t.Run("not returned records decode error and duration", func(t *testing.T) {
 		before := snapshotStageMetrics(t)
+		ctx, summary := withRequestSummary(context.Background())
 		returned := false
-		recordDecodeAbort(&returned, time.Now())
+		recordDecodeAbort(ctx, &returned, time.Now())
 		assert.Equal(t, stageMetrics{decodeCount: 1, decodeErrors: 1}, snapshotStageMetrics(t).delta(before))
+		assert.Equal(t, routing.StageDecode, summary.failedStage, "the request's summary line must show the aborted decode")
+		assert.Contains(t, summary.durations, routing.StageDecode)
 	})
 	t.Run("returned records nothing", func(t *testing.T) {
 		before := snapshotStageMetrics(t)
+		ctx, summary := withRequestSummary(context.Background())
 		returned := true
-		recordDecodeAbort(&returned, time.Now())
+		recordDecodeAbort(ctx, &returned, time.Now())
 		assert.Equal(t, stageMetrics{}, snapshotStageMetrics(t).delta(before))
+		assert.Empty(t, summary.failedStage)
+		assert.Empty(t, summary.durations)
 	})
 }
 
@@ -2760,9 +3121,9 @@ func TestHandleNIXLV2ParallelToolCallingMetrics(t *testing.T) {
 				body, err := decodeRequestBody([]byte(tt.body))
 				require.NoError(t, err)
 				body[string(toolcalling.FieldToolChoice)] = &parallelToolChoice{prefill: tt.prefillChoice, decode: tt.decodeChoice}
-				s.runNIXLProtocolV2WriteParallel(rw, r, []byte(tt.body), body, "request-id", "txrequest-id", target, "", tt.api)
+				s.runNIXLProtocolV2WriteParallel(rw, r, []byte(tt.body), body, "request-id", "txrequest-id", target, nil, tt.api)
 			} else {
-				s.handleNIXLV2(rw, r, target, "", tt.api)
+				s.handleNIXLV2(rw, r, target, p2pRouting{}, tt.api)
 			}
 			require.Equal(t, tt.wantCode, rw.Code)
 			if tt.wantCode == http.StatusOK {
@@ -2895,7 +3256,7 @@ func TestHandleNIXLV2ParallelWriteMetrics(t *testing.T) {
 
 			before := snapshotStageMetrics(t)
 			rw := httptest.NewRecorder()
-			s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleNIXLV2(rw, chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantCode, rw.Code)
 			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
@@ -2920,7 +3281,7 @@ func TestHandleNIXLV2SerialFinalizeFailureMetrics(t *testing.T) {
 	s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[`)
 
 	before := snapshotStageMetrics(t)
-	s.handleNIXLV2(&failingWriter{header: http.Header{}}, chatRequest(t, textChatBody()), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+	s.handleNIXLV2(&failingWriter{header: http.Header{}}, chatRequest(t, textChatBody()), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 	assert.Equal(t, stageMetrics{prefillCount: 1, decodeCount: 1, decodeErrors: 1}, snapshotStageMetrics(t).delta(before))
 }
@@ -2986,7 +3347,7 @@ func TestHandleNIXLV2ParallelWriteDecodeFailureCancelsPrefill(t *testing.T) {
 			before := snapshotStageMetrics(t)
 			rw := httptest.NewRecorder()
 			req := withContextLogger(s, chatRequest(t, textChatBody()))
-			s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleNIXLV2(rw, req, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 			prefill.requireCancelled(t)
 			assert.False(t, prefillErrorLogged.Load(), "a cancelled prefill must not be logged as a prefill failure")
@@ -3000,7 +3361,7 @@ func TestHandleNIXLV2ParallelWriteDecodeFailureCancelsPrefill(t *testing.T) {
 			assert.NotEqual(t, codes.Error, prefillSpan.Status().Code, "a cancelled prefill must not be marked as a prefill failure")
 			assert.Equal(t, tt.wantCode, rw.Code)
 			if tt.decodeAbort {
-				assert.Contains(t, rw.Body.String(), "decode aborted")
+				assert.Contains(t, rw.Body.String(), "internal error")
 			} else {
 				assert.Equal(t, "application/json", rw.Header().Get("Content-Type"))
 				assert.Equal(t, "1", rw.Header().Get("Retry-After"))
@@ -3082,7 +3443,7 @@ func TestHandleNIXLV2ParallelWritePrefillBodyCopyAbort(t *testing.T) {
 			ctx = context.WithValue(ctx, http.ServerContextKey, &http.Server{})
 			req := withContextLogger(s, chatRequest(t, textChatBody()).WithContext(ctx))
 			rw := httptest.NewRecorder()
-			s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleNIXLV2(rw, req, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantCode, rw.Code)
 			assert.Equal(t, !tt.decodeFails, prefillAbortLogged.Load())
@@ -3159,7 +3520,7 @@ func TestHandleNIXLV2ParallelWritePrefillFailureCancelsDecode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	req := withContextLogger(s, chatRequest(t, textChatBody()).WithContext(ctx))
-	s.handleNIXLV2(rw, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+	s.handleNIXLV2(rw, req, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 	require.True(t, held.Load(), "prefill error log hook never ran; the dispatchCtx guard is not exercised")
 	assert.Equal(t, http.StatusTooManyRequests, rw.Code)
@@ -3256,7 +3617,7 @@ func TestHandleNIXLV2ParallelWriteFailureMetrics(t *testing.T) {
 				body := textChatBody()
 				body[string(toolcalling.FieldTools)] = []any{}
 				body[string(toolcalling.FieldToolChoice)] = "auto"
-				s.handleNIXLV2(rw, chatRequest(t, body), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+				s.handleNIXLV2(rw, chatRequest(t, body), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 			}
 			if tt.wantPanic {
 				assert.PanicsWithValue(t, http.ErrAbortHandler, serve)

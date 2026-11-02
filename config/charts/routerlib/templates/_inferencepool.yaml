@@ -13,9 +13,10 @@ spec:
   - number: {{ .number }}
   {{- end }}
   {{- if $modelServers.protocol }}
-  {{- if eq $modelServers.protocol "grpc" }}
+  {{- $modelServerProtocol := lower $modelServers.protocol }}
+  {{- if eq $modelServerProtocol "grpc" }}
   appProtocol: "kubernetes.io/h2c"
-  {{- else if eq $modelServers.protocol "http" }}
+  {{- else if eq $modelServerProtocol "http" }}
   appProtocol: "http"
   {{- end }}
   {{- end }}
@@ -34,7 +35,7 @@ spec:
     name: {{ include "llm-d-router.name" . }}
     {{- end }}
     port:
-      number: {{ .Values.router.epp.extProcPort | default 9002 }}
+      number: {{ include "llm-d-router.epp.extProcPort" . }}
     failureMode: {{ .Values.router.inferencePool.failureMode | default "FailOpen" }}
 ---
 {{- end }}

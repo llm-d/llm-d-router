@@ -43,7 +43,7 @@ type candidate struct {
 	class     sessionClass
 	// tokens is the session's size once PreRequest charges this turn.
 	tokens   float64
-	waitMs   float64
+	wait     time.Duration
 	starving bool
 	fitPod   *endpointState
 }
@@ -56,7 +56,7 @@ type candidate struct {
 //
 // Unlike the original ThunderAgent, which restores a paused session onto any
 // pod with room, a paused session waits for its own pod, so its warm prefix
-// is kept. The wait is bounded by headWaitStarvationMs.
+// is kept. The wait is bounded by forceAdmitTimeout.
 // TODO(#3221): add an option to restore a paused session onto another pod
 // with room when its own pod stays full.
 //
@@ -69,10 +69,10 @@ type candidate struct {
 // pod), Pick returns nil. The requests stay queued and the
 // processor tries again on its next dispatch cycle.
 //
-// Room is capacity * utilThreshold minus the working set. When the picked
+// Room is capacity * usableCapacityRatio minus the working set. When the picked
 // session does not fit (including a session force-admitted onto its own pod),
 // or an admitted session's turn pushes its pod over the ceiling, sessions idle
-// past idleLeaseSeconds give up their room, longest idle first, and are
+// past idleGracePeriod give up their room, longest idle first, and are
 // paused. Sessions with a turn queued are never paused,
 // and nothing is paused until a session is picked.
 func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor) (fwkfc.FlowQueueAccessor, error) {
@@ -92,7 +92,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 			return true
 		}
 		id := headSessionID(head)
-		waitMs := float64(now.Sub(head.EnqueueTime()).Milliseconds())
+		wait := now.Sub(head.EnqueueTime())
 		if id != "" {
 			queued[id] = true
 		}
@@ -100,8 +100,8 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 			queue:     queue,
 			id:        id,
 			sizeBytes: headSizeBytes(head),
-			waitMs:    waitMs,
-			starving:  a.headWaitStarvationMs > 0 && waitMs >= a.headWaitStarvationMs,
+			wait:      wait,
+			starving:  a.forceAdmitTimeout > 0 && wait >= a.forceAdmitTimeout,
 		})
 		return true
 	})
@@ -145,7 +145,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		return nil, nil //nolint:nilnil
 	}
 	a.metrics.releases.WithLabelValues(best.class.String()).Inc()
-	if best.waitMs >= float64(holdWaitFloor.Milliseconds()) {
+	if best.wait >= holdWaitFloor {
 		a.metrics.delayedDispatches.WithLabelValues(best.class.String()).Inc()
 	}
 	if best.starving {
@@ -171,7 +171,7 @@ func (a *ThunderAgent) needsFitCheckLocked(candidates []*candidate) bool {
 
 // roomLocked is the pod's ceiling minus its working set.
 func (a *ThunderAgent) roomLocked(p *endpointState, now time.Time) float64 {
-	return p.capacity*a.utilThreshold - p.occupancy(now)
+	return p.capacity*a.usableCapacityRatio - p.occupancy(now)
 }
 
 // sizeAndFitLocked classifies and sizes a candidate and, for a paused or new
@@ -216,7 +216,7 @@ func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpoint
 // turns that skip the fit check) then fits once every other session on the
 // pod is paused or reclaimable, instead of never.
 func (a *ThunderAgent) fitTokens(p *endpointState, tokens float64) float64 {
-	return min(tokens, p.capacity*a.utilThreshold)
+	return min(tokens, p.capacity*a.usableCapacityRatio)
 }
 
 // newSessionPod picks the pod for a new session: among pods it fits once
@@ -267,14 +267,14 @@ func (a *ThunderAgent) admitLocked(best *candidate, now time.Time, queued map[st
 }
 
 // betterThan reports whether a outranks b:
-// waited past headWaitStarvationMs (oldest first) ->
+// waited past forceAdmitTimeout (oldest first) ->
 // class (admitted -> paused -> new) -> smallest footprint -> oldest.
 func betterThan(a, b *candidate) bool {
 	if a.starving != b.starving {
 		return a.starving
 	}
 	if a.starving {
-		return a.waitMs > b.waitMs
+		return a.wait > b.wait
 	}
 	if a.class != b.class {
 		return a.class < b.class
@@ -282,7 +282,7 @@ func betterThan(a, b *candidate) bool {
 	if a.tokens != b.tokens {
 		return a.tokens < b.tokens
 	}
-	return a.waitMs > b.waitMs
+	return a.wait > b.wait
 }
 
 // headSessionID returns the session of a queue head, read the same way as in

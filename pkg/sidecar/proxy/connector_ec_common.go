@@ -34,7 +34,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -105,9 +105,9 @@ func extractMMItems(logger logr.Logger, requestData map[string]any, apiType reqc
 			if !ok {
 				continue
 			}
-			partType, ok := partMap[reqcommon.FieldType].(string)
-			if !ok {
-				continue
+			partType, _ := partMap[reqcommon.FieldType].(string)
+			if apiType == reqcommon.APITypeChatCompletions {
+				partType = reqcommon.NormalizeChatPart(partMap)
 			}
 
 			if apiType == reqcommon.APITypeMessages {
@@ -318,25 +318,31 @@ func (s *Server) fanoutEncoder(
 // runPDPipeline finalizes the post-encoder request and dispatches it to the
 // configured P/D connector or directly to the decoder. The caller has already
 // generated requestID and merged any encoder-side metadata into
-// body. On JSON-marshal failure, runPDPipeline writes the error
+// body. p2p carries the prefill pod's P2P address and the pull source; its
+// body fields describe the body before the encoder ran and are not
+// forwarded. On JSON-marshal failure, runPDPipeline writes the error
 // response itself (matching the existing handler pattern) and returns.
 func (s *Server) runPDPipeline(
 	w http.ResponseWriter,
 	r *http.Request,
 	body map[string]any,
 	prefillEndPoint string,
-	kvCacheSource string,
 	requestID string,
+	p2p p2pRouting,
 	apiType reqcommon.APIType,
 ) {
 	logger := log.FromContext(r.Context())
 	// Skip decode-first; the encoder has run and prefill must execute.
 	body[reqcommon.FieldCacheHitThreshold] = 0
+	// Behind a prefiller the P/D connector sets the flags.
+	if len(prefillEndPoint) == 0 {
+		deleteCallerPDFlags(body)
+	}
 
 	modifiedBody, err := json.Marshal(body)
 	if err != nil {
 		logger.Error(err, "failed to marshal request after encoder", "requestID", requestID)
-		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
 			logger.Error(writeErr, "failed to send error response to client", "requestID", requestID)
 		}
 		return
@@ -363,7 +369,7 @@ func (s *Server) runPDPipeline(
 
 	if len(prefillEndPoint) > 0 {
 		logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
-		s.handlePDConnector(w, pdRequest, prefillEndPoint, kvCacheSource, apiType)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, p2pRouting{prefill: p2p.prefill, source: p2p.source}, apiType)
 		return
 	}
 
@@ -373,20 +379,20 @@ func (s *Server) runPDPipeline(
 	decodeStart := time.Now()
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
-	defer recordDecodeAbort(&decodeReturned, decodeStart)
+	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest, func() {
 		_, _ = toolFields.compareValidatedDispatched(modifiedBody)
 	}) {
-		if kvCacheSource != "" {
-			s.decodeWithP2PSource(decodeWriter, pdRequest, kvCacheSource)
+		if p2p.source != nil {
+			s.decodeWithP2PSource(decodeWriter, pdRequest, p2pRouting{source: p2p.source, body: body, raw: modifiedBody})
 		} else {
 			_, _ = toolFields.compareValidatedDispatched(modifiedBody)
 			s.decoderProxy.ServeHTTP(decodeWriter, pdRequest)
 		}
 	}
 	decodeReturned = true
-	metrics.RecordDecodeDuration(time.Since(decodeStart))
+	observeStageDuration(r.Context(), routing.StageDecode, time.Since(decodeStart))
 	if decodeStatus.failed() {
-		metrics.RecordError(metrics.StageDecode)
+		observeStageError(r.Context(), routing.StageDecode)
 	}
 }

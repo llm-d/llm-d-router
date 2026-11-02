@@ -23,10 +23,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
@@ -137,7 +139,7 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 		OriginalPath:       reqcommon.PathChatCompletions,
 		Model:              "llama-3",
 		Stream:             false,
-		TokenIDs:           []int{1, 32000, 32000, 32000, 2345},
+		TokenIDs:           []uint32{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-1", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
@@ -190,6 +192,74 @@ func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	}
 	if decodeReceivedKVParams["peer_host"] != "10.0.0.42" {
 		t.Fatalf("decode sent wrong peer_host: %v", decodeReceivedKVParams["peer_host"])
+	}
+}
+
+// The prefill pod stores the KV under the kv_request_id its request declared,
+// and the decode pod asks for that id, so the two requests must carry the
+// same one. A mismatch is silent: the pull finds nothing and decode recomputes
+// the prompt.
+func TestOffloadingKVRequestID_FlowFromPrefillToDecode(t *testing.T) {
+	const prefillP2PAddress = "10.0.0.7:7779"
+	var prefillKVParams, decodeKVParams map[string]any
+
+	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		kvParams, _ := parsed["kv_transfer_params"].(map[string]any)
+		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
+		case gateway.PhasePrefill:
+			prefillKVParams = kvParams
+			w.Header().Set(routing.KVCachePrefillHeader, prefillP2PAddress)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case gateway.PhaseDecode:
+			decodeKVParams = kvParams
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]any{"role": "assistant", "content": "done"}},
+				},
+			})
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+	prefillStep, _ := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.Offloading})
+	decodeStep, _ := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.Offloading})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "test-offloading-flow",
+		OriginalPath: reqcommon.PathChatCompletions,
+		Model:        "llama-3",
+		TokenIDs:     []uint32{1, 2345},
+		Body: map[string]any{
+			"model":    "llama-3",
+			"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("prefill failed: %v", err)
+	}
+	if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	remoteDecoder, _ := prefillKVParams[reqcommon.FieldRemoteDecoder].(map[string]any)
+	prefillID, _ := remoteDecoder[reqcommon.FieldKVRequestID].(string)
+	if prefillID == "" {
+		t.Fatalf("prefill kv_transfer_params = %v, want a remote_decoder.kv_request_id", prefillKVParams)
+	}
+	want := map[string]any{
+		reqcommon.FieldKVRequestID: prefillID,
+		reqcommon.FieldRemoteHost:  "10.0.0.7",
+		reqcommon.FieldRemotePort:  float64(7779),
+	}
+	if got := decodeKVParams[reqcommon.FieldRemotePrefiller]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("decode remote_prefiller = %v, want %v", got, want)
 	}
 }
 
@@ -371,6 +441,17 @@ func TestCachedTokens_KeepsTheWorkerCountWithoutAPrefillMeasurement(t *testing.T
 			connector:   kv.NIXL,
 			runPrefill:  true,
 		},
+		{
+			// vLLM without --enable-prompt-tokens-details sends a usage block
+			// with no details object however many tokens were cached.
+			name: "prefill usage without prompt token details",
+			prefillBody: map[string]any{
+				"kv_transfer_params": map[string]any{"block_id": "block-1"},
+				"usage":              map[string]any{"prompt_tokens": 64},
+			},
+			connector:  kv.NIXL,
+			runPrefill: true,
+		},
 	}
 
 	for _, test := range tests {
@@ -406,6 +487,62 @@ func TestCachedTokens_KeepsTheWorkerCountWithoutAPrefillMeasurement(t *testing.T
 
 			if got := clientCachedTokens(t, recorder.Body.String()); got != decodeCachedTokens {
 				t.Errorf("client cached_tokens = %d, want the decode worker's %d", got, decodeCachedTokens)
+			}
+		})
+	}
+}
+
+// A prefill usage block without a details object measured nothing: vLLM without
+// --enable-prompt-tokens-details sends one however many tokens were cached. The
+// details the decode worker sent, including their absence, reach the client
+// unchanged rather than being replaced with a fabricated zero.
+func TestCachedTokens_AbsentDetailsStayAbsent(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non-streaming"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			usageWithoutDetails := map[string]any{"prompt_tokens": 64, "completion_tokens": 1, "total_tokens": 65}
+			gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
+				case gateway.PhasePrefill:
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"kv_transfer_params": map[string]any{"block_id": "block-1"},
+						"usage":              usageWithoutDetails,
+					})
+				case gateway.PhaseDecode:
+					if stream {
+						writeUsageSSE(t, w, usageWithoutDetails)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"usage": usageWithoutDetails})
+				default:
+					http.Error(w, "not found", http.StatusNotFound)
+				}
+			}))
+			defer gwServer.Close()
+
+			gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+			reqCtx := cachedTokensRequestContext(stream)
+
+			prefillStep, _ := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+			if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("prefill failed: %v", err)
+			}
+			if reqCtx.PrefillCachedTokens != nil {
+				t.Errorf("prefill claimed a count of %d from a usage block that reported none", *reqCtx.PrefillCachedTokens)
+			}
+
+			decodeStep, _ := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+			recorder := httptest.NewRecorder()
+			reqCtx.ResponseWriter = recorder
+			if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("decode failed: %v", err)
+			}
+
+			if strings.Contains(recorder.Body.String(), reqcommon.FieldPromptTokensDetails) {
+				t.Errorf("client body carries %s: %s", reqcommon.FieldPromptTokensDetails, recorder.Body.String())
 			}
 		})
 	}
@@ -577,4 +714,108 @@ func clientCachedTokens(t *testing.T, body string) int {
 	}
 	t.Fatalf("no cached_tokens in the response the client received: %s", body)
 	return 0
+}
+
+func TestResponseHeaders_FlowFromConditionalDecodeMiss(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		probeRevision string
+		forceStream   bool
+	}{
+		{name: "412 carries the revision", probeRevision: "revision-b"},
+		{name: "412 without the revision", probeRevision: ""},
+		{name: "forced 412 carries the revision", probeRevision: "revision-b", forceStream: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runConditionalDecodeMissHeaderFlow(t, tc.probeRevision, tc.forceStream)
+		})
+	}
+}
+
+func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string, forceStream bool) {
+	t.Helper()
+	var prefillHeaders, decodeHeaders http.Header
+	var probeStream any
+
+	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Header.Get(routing.PreferHeader) == routing.PreferIfAvailable:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			probeStream = body["stream"]
+			if probeRevision != "" {
+				w.Header().Set("X-LLM-D-Disagg-Revision", probeRevision)
+			}
+			w.WriteHeader(http.StatusPreconditionFailed)
+
+		case r.Header.Get(reqcommon.EPPProfileHeaderKey) == gateway.PhasePrefill:
+			prefillHeaders = r.Header.Clone()
+			_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
+
+		case r.Header.Get(reqcommon.EPPProfileHeaderKey) == gateway.PhaseDecode:
+			decodeHeaders = r.Header.Clone()
+			if forceStream {
+				sseReply(condForcedFrames...)(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]any{"role": "assistant", "content": "done"}},
+				},
+			})
+
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+	conditionalDecodeStep, err := NewConditionalDecodeStep(gwClient, nil)
+	if err != nil {
+		t.Fatalf("build conditional-decode step: %v", err)
+	}
+	prefillStep, err := NewPrefillStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatalf("build prefill step: %v", err)
+	}
+	decodeStep, err := NewDecodeStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatalf("build decode step: %v", err)
+	}
+	if forceStream {
+		if err := EnableForceStream([]pipeline.Step{conditionalDecodeStep, prefillStep, decodeStep}, "", ""); err != nil {
+			t.Fatalf("enable force-stream: %v", err)
+		}
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "test-conditional-decode-header-flow",
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body: map[string]any{
+			"model":    "llama-3",
+			"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+	p, err := pipeline.NewWithForwardResponseHeaders(
+		[]pipeline.Step{conditionalDecodeStep, prefillStep, decodeStep},
+		[]string{"X-LLM-D-Disagg-Revision"},
+	)
+	if err != nil {
+		t.Fatalf("build pipeline: %v", err)
+	}
+	if err := p.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("pipeline failed: %v", err)
+	}
+
+	if forceStream && probeStream != true {
+		t.Fatalf("probe stream = %v, want the forced probe", probeStream)
+	}
+	if got := prefillHeaders.Get("X-LLM-D-Disagg-Revision"); got != probeRevision {
+		t.Errorf("prefill revision header = %q, want %q", got, probeRevision)
+	}
+	if got := decodeHeaders.Get("X-LLM-D-Disagg-Revision"); got != probeRevision {
+		t.Errorf("decode revision header = %q, want %q", got, probeRevision)
+	}
 }

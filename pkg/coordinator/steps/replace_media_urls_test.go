@@ -17,6 +17,7 @@ limitations under the License.
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -26,15 +27,21 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
@@ -468,6 +475,18 @@ func TestReplaceMediaURLsStep_RawPromptItems(t *testing.T) {
 			items: `[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + imageServer.URL + `/photo.jpg"}}]}]`,
 		},
 		{
+			name:  "chat completions untyped image object",
+			path:  reqcommon.PathChatCompletions,
+			field: "messages",
+			items: `[{"role":"user","content":[{"image_url":{"url":"` + imageServer.URL + `/photo.jpg"}}]}]`,
+		},
+		{
+			name:  "chat completions untyped image string",
+			path:  reqcommon.PathChatCompletions,
+			field: "messages",
+			items: `[{"role":"user","content":[{"image_url":"` + imageServer.URL + `/photo.jpg"}]}]`,
+		},
+		{
 			name:  "responses",
 			path:  reqcommon.PathResponses,
 			field: "input",
@@ -498,6 +517,52 @@ func TestReplaceMediaURLsStep_RawPromptItems(t *testing.T) {
 			url, _ := reqcommon.MediaPartURLRef(part)
 			if !strings.HasPrefix(url, "data:image/jpeg;base64,") {
 				t.Fatalf("expected data URI, got %s", url)
+			}
+		})
+	}
+}
+
+func TestReplaceMediaURLsToRender_UntypedImage(t *testing.T) {
+	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000},
+			"features": map[string]any{
+				"mm_hashes":       map[string]any{"image": []string{"image-hash"}},
+				"mm_placeholders": map[string]any{"image": []any{map[string]any{"offset": 1, "length": 1}}},
+				"kwargs_data":     map[string]any{"image": []string{"image-data"}},
+			},
+		})
+	}))
+	defer renderServer.Close()
+
+	for _, tc := range []struct {
+		name     string
+		imageURL string
+	}{
+		{"object", `{"url":"data:image/jpeg;base64,/9j/4AAQSkZJRg=="}`},
+		{"string", `"data:image/jpeg;base64,/9j/4AAQSkZJRg=="`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: reqcommon.PathChatCompletions,
+				Body: map[string]any{
+					"messages": json.RawMessage(`[{"role":"user","content":[{"image_url":` + tc.imageURL + `}]}]`),
+				},
+			}
+			replaceStep := newLoopbackStep(t, nil)
+			if err := replaceStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatal(err)
+			}
+			renderStep, err := NewRenderStep(nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			renderStep.(*RenderStep).SetServiceAddress(renderServer.URL)
+			if err := renderStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("render failed after replace-media-urls: %v", err)
+			}
+			if len(reqCtx.MultimodalEntries) != 1 || reqCtx.MultimodalEntries[0].Hash != "image-hash" {
+				t.Fatalf("expected one rendered image, got %+v", reqCtx.MultimodalEntries)
 			}
 		})
 	}
@@ -1577,6 +1642,10 @@ func TestAddressGuard_BlockedIP(t *testing.T) {
 		{"unique-local v6", "fc00::1", true},
 		{"ipv4-mapped metadata", "::ffff:169.254.169.254", true},
 		{"ipv4-mapped private", "::ffff:10.0.0.1", true},
+		{"nat64 metadata", "64:ff9b::a9fe:a9fe", true},
+		{"nat64 private", "64:ff9b::a00:1", true},
+		{"nat64 public", "64:ff9b::808:808", false},
+		{"ipv4-compatible metadata", "::a9fe:a9fe", true},
 		{"public v4", "8.8.8.8", false},
 		{"public v6", "2001:4860:4860::8888", false},
 	}
@@ -1674,6 +1743,89 @@ func TestReplaceMediaURLsStep_BlocksRedirectToPrivate(t *testing.T) {
 	}
 	if !errors.Is(err, pipeline.ErrBadRequest) {
 		t.Fatalf("blocked redirect must classify as bad request, got %v", err)
+	}
+}
+
+// With HTTP(S)_PROXY set, the dialer only sees the proxy's address, so the
+// target must be checked before the request is handed to the proxy.
+func TestReplaceMediaURLsStep_BlocksMetadataIPThroughProxy(t *testing.T) {
+	var proxied atomic.Bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxied.Store(true)
+		w.Header().Set("Content-Type", testImagePNGMIME)
+		_, _ = w.Write([]byte("metadata"))
+	}))
+	defer proxy.Close()
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// newClient clones http.DefaultTransport, so a proxy set there before the
+	// step is built reaches the step through the production wiring. t.Setenv
+	// would not: http.ProxyFromEnvironment reads the environment once.
+	orig := http.DefaultTransport
+	withProxy := orig.(*http.Transport).Clone()
+	withProxy.Proxy = http.ProxyURL(proxyURL)
+	http.DefaultTransport = withProxy
+	t.Cleanup(func() { http.DefaultTransport = orig })
+	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "2s"})
+
+	_, _, err = rmu.download(context.Background(), "http://169.254.169.254/latest/meta-data/", reqcommon.ModalityImage)
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("blocked target behind a proxy must classify as bad request, got %v", err)
+	}
+	if proxied.Load() {
+		t.Fatal("request to a blocked target must not reach the proxy")
+	}
+}
+
+// A nil Proxy means direct connections; the wrapper must keep it nil so the
+// transport dials directly and dialControl checks the target.
+func TestAddressGuard_CheckedProxyKeepsDirectTransport(t *testing.T) {
+	if (&addressGuard{}).checkedProxy(nil) != nil {
+		t.Fatal("checkedProxy(nil) must return nil")
+	}
+}
+
+func TestReplaceMediaURLsStep_CapsRedirects(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, server.URL+"/next", http.StatusFound)
+	}))
+	defer server.Close()
+
+	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+	_, _, err := rmu.download(context.Background(), server.URL, reqcommon.ModalityImage)
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("redirect loop must classify as bad request, got %v", err)
+	}
+}
+
+func TestReplaceMediaURLsStep_RejectsHTTPSDowngradeRedirect(t *testing.T) {
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", testImagePNGMIME)
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer plain.Close()
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL, http.StatusFound)
+	}))
+	defer secure.Close()
+
+	// An http start that hops to https must not be able to drop back to http.
+	start := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, secure.URL, http.StatusFound)
+	}))
+	defer start.Close()
+
+	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "2s"})
+	rmu.client.Transport.(*http.Transport).TLSClientConfig = secure.Client().Transport.(*http.Transport).TLSClientConfig
+	for _, rawURL := range []string{secure.URL, start.URL} {
+		_, _, err := rmu.download(context.Background(), rawURL, reqcommon.ModalityImage)
+		if !errors.Is(err, pipeline.ErrBadRequest) {
+			t.Fatalf("https to http redirect from %s must classify as bad request, got %v", rawURL, err)
+		}
 	}
 }
 
@@ -3655,5 +3807,525 @@ func TestReplaceMediaURLsStep_ResponsesCollectsChatImagePart(t *testing.T) {
 	}
 	if n := hits.Load(); n != 1 {
 		t.Errorf("expected the part to be downloaded once, got %d", n)
+	}
+}
+
+func TestReplaceMediaURLsStep_TextOnlyAllocs(t *testing.T) {
+	step, err := NewReplaceMediaURLsStep(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+
+	tests := []struct {
+		name  string
+		path  string
+		field string
+		raw   json.RawMessage
+	}{
+		{
+			name:  "chat_completions_64kb",
+			path:  reqcommon.PathChatCompletions,
+			field: reqcommon.FieldMessages,
+			raw:   buildTwoTurnRawItems(64<<10, "Summarize the distributed systems latency budget and tail behavior across replication groups without dropping traffic. "),
+		},
+		{
+			name:  "chat_completions_64kb_underscores_escapes",
+			path:  reqcommon.PathChatCompletions,
+			field: reqcommon.FieldMessages,
+			raw:   buildTwoTurnRawItemsWithUnderscoresAndEscapes(64 << 10),
+		},
+		{
+			name:  "messages_64kb",
+			path:  reqcommon.PathMessages,
+			field: reqcommon.FieldMessages,
+			raw:   buildTwoTurnRawItems(64<<10, "Summarize the distributed systems latency budget and tail behavior across replication groups without dropping traffic. "),
+		},
+		{
+			name:  "responses_64kb_input_text",
+			path:  reqcommon.PathResponses,
+			field: reqcommon.FieldInput,
+			raw:   buildResponsesInputTextRawItems(64 << 10),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: tc.path,
+				Body:         map[string]any{tc.field: tc.raw},
+			}
+			allocs := testing.AllocsPerRun(100, func() {
+				if err := step.Execute(ctx, reqCtx); err != nil {
+					t.Errorf("Execute failed: %v", err)
+				}
+			})
+			if allocs != 0 {
+				t.Errorf("allocs = %v, want 0", allocs)
+			}
+			if _, ok := reqCtx.Body[tc.field].(json.RawMessage); !ok {
+				t.Errorf("%s became %T, want json.RawMessage", tc.field, reqCtx.Body[tc.field])
+			}
+			if len(reqCtx.MultimodalEntries) != 0 {
+				t.Errorf("got %d multimodal entries, want 0", len(reqCtx.MultimodalEntries))
+			}
+		})
+	}
+}
+
+func TestReplaceMediaURLsStep_TextOnlyFastPathRecordsZeroMediaMetrics(t *testing.T) {
+	step, err := NewReplaceMediaURLsStep(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	const mediaItemsMetric = "llm_d_coordinator_media_items"
+
+	tests := []struct {
+		name  string
+		path  string
+		field string
+		raw   json.RawMessage
+	}{
+		{
+			name:  "chat_completions",
+			path:  reqcommon.PathChatCompletions,
+			field: reqcommon.FieldMessages,
+			raw:   json.RawMessage(`[{"role":"user","content":"hello world"}]`),
+		},
+		{
+			name:  "messages",
+			path:  reqcommon.PathMessages,
+			field: reqcommon.FieldMessages,
+			raw:   json.RawMessage(`[{"role":"user","content":"hello world"}]`),
+		},
+		{
+			name:  "responses",
+			path:  reqcommon.PathResponses,
+			field: reqcommon.FieldInput,
+			raw:   json.RawMessage(`[{"role":"user","content":[{"type":"input_text","text":"hello world"}]}]`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: tc.path,
+				Body:         map[string]any{tc.field: tc.raw},
+			}
+			if err := step.Execute(ctx, reqCtx); err != nil {
+				t.Fatalf("Execute failed: %v", err)
+			}
+			if _, ok := reqCtx.Body[tc.field].(json.RawMessage); !ok {
+				t.Fatalf("%s became %T, want json.RawMessage", tc.field, reqCtx.Body[tc.field])
+			}
+			for _, mediaType := range []string{coordmetrics.MediaTypeImage, coordmetrics.MediaTypeOther} {
+				labels := map[string]string{"media_type": mediaType}
+				if got := metricstest.HistogramCount(t, reg, mediaItemsMetric, labels); got != 1 {
+					t.Errorf("media_items count for %q = %d, want 1", mediaType, got)
+				}
+				if got := metricstest.HistogramSum(t, reg, mediaItemsMetric, labels); got != 0 {
+					t.Errorf("media_items sum for %q = %v, want 0", mediaType, got)
+				}
+			}
+		})
+	}
+}
+
+func TestEscapesMediaKeyChar(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "escaped_underscore_lowercase", raw: `"\u005f"`, want: true},
+		{name: "escaped_underscore_uppercase", raw: `"\u005F"`, want: true},
+		{name: "escaped_lowercase_i", raw: `"\u0069"`, want: true},
+		{name: "escaped_lowercase_z", raw: `"\u007a"`, want: true},
+		{name: "backslash_before_escaped_underscore", raw: `\\\u005f`, want: true},
+		{name: "false_u00_before_escaped_underscore", raw: `\u00\u005f`, want: true},
+		{name: "html_escape_lt", raw: `a \u003c b`, want: false},
+		{name: "html_escape_gt", raw: `a \u003e b`, want: false},
+		{name: "html_escape_amp", raw: `a \u0026 b`, want: false},
+		{name: "non_ascii_latin_escape", raw: `text \u00e9`, want: false},
+		{name: "non_ascii_punctuation_escape", raw: `user\u2019s`, want: false},
+		{name: "non_ascii_cjk_escape", raw: `\u4e2d`, want: false},
+		{name: "truncated_u00_at_end", raw: `prefix\u00`, want: false},
+		{name: "escaped_quotes_and_newlines", raw: `\"hello\"\n\\world`, want: false},
+		{name: "no_backslashes", raw: `plain text`, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := escapesMediaKeyChar([]byte(tc.raw)); got != tc.want {
+				t.Errorf("escapesMediaKeyChar(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMayContainMedia_MatchesModalityContracts(t *testing.T) {
+	for _, tok := range rawChatMediaTokens {
+		if len(tok.prefix) <= 1 || len(tok.suffix) <= 1 {
+			t.Fatalf("rawChatMediaTokens entry %+v must have non-empty prefix and suffix", tok)
+		}
+		if tok.prefix[0] != '"' || tok.suffix[len(tok.suffix)-1] != '"' {
+			t.Fatalf("rawChatMediaTokens entry %+v must be JSON-quoted", tok)
+		}
+		partType := string(tok.prefix[1:]) + "_" + string(tok.suffix[:len(tok.suffix)-1])
+		if _, ok := reqcommon.PartModality(partType); !ok {
+			t.Errorf("rawChatMediaTokens entry %q is not recognized by reqcommon.PartModality", partType)
+		}
+	}
+
+	allPartTypes := []string{
+		reqcommon.PartTypeText,
+		reqcommon.PartTypeInputText,
+		reqcommon.PartTypeOutputText,
+		reqcommon.PartTypeRefusal,
+		reqcommon.PartTypeImageURL,
+		reqcommon.PartTypeAudioURL,
+		reqcommon.PartTypeVideoURL,
+		reqcommon.PartTypeInputAudio,
+		reqcommon.PartTypeInputImage,
+		reqcommon.PartTypeInputFile,
+		reqcommon.PartTypeComputerScreenshot,
+	}
+	for _, pt := range allPartTypes {
+		_, wantMedia := reqcommon.PartModality(pt)
+		raw := json.RawMessage(`[{"role":"user","content":[{"type":"` + pt + `"}]}]`)
+		if got := mayContainMedia(map[string]any{reqcommon.FieldMessages: raw}, reqcommon.APITypeChatCompletions); got != wantMedia {
+			t.Errorf("chat mayContainMedia(%q) = %v, want %v", pt, got, wantMedia)
+		}
+		if got := mayContainMedia(map[string]any{reqcommon.FieldInput: raw}, reqcommon.APITypeResponses); got != wantMedia {
+			t.Errorf("responses mayContainMedia(%q) = %v, want %v", pt, got, wantMedia)
+		}
+	}
+
+	allBlockTypes := []string{
+		reqcommon.BlockTypeImage,
+		reqcommon.BlockTypeToolResult,
+		reqcommon.PartTypeText,
+	}
+	for _, bt := range allBlockTypes {
+		_, wantMedia := reqcommon.MessagesBlockModality(bt)
+		raw := json.RawMessage(`[{"role":"user","content":[{"type":"` + bt + `"}]}]`)
+		if got := mayContainMedia(map[string]any{reqcommon.FieldMessages: raw}, reqcommon.APITypeMessages); got != wantMedia {
+			t.Errorf("messages mayContainMedia(%q) = %v, want %v", bt, got, wantMedia)
+		}
+	}
+}
+
+func TestReplaceMediaURLsStep_RawMessageMediaFormats(t *testing.T) {
+	mediaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/audio.wav":
+			w.Header().Set("Content-Type", testAudioWAVMIME)
+			_, _ = w.Write([]byte("wav-bytes"))
+		case "/video.mp4":
+			w.Header().Set("Content-Type", testVideoMP4MIME)
+			_, _ = w.Write([]byte("mp4-bytes"))
+		default:
+			w.Header().Set("Content-Type", testImageJPEGContentType)
+			_, _ = w.Write([]byte("jpeg-bytes"))
+		}
+	}))
+	defer mediaServer.Close()
+
+	tests := []struct {
+		name                    string
+		path                    string
+		field                   string
+		raw                     string
+		wantModality            reqcommon.Modality
+		forbidLiteralUnderscore bool
+	}{
+		{
+			name:         "messages_spaced_type_image",
+			path:         reqcommon.PathMessages,
+			field:        reqcommon.FieldMessages,
+			raw:          "[\n  {\n    \"role\": \"user\",\n    \"content\": [\n      {\n        \"type\" : \n\t \"image\",\n        \"source\": {\"type\": \"url\", \"url\": \"" + mediaServer.URL + "/photo.jpg\"}\n      }\n    ]\n  }\n]",
+			wantModality: reqcommon.ModalityImage,
+		},
+		{
+			name:         "messages_nested_tool_result_spaced_image",
+			path:         reqcommon.PathMessages,
+			field:        reqcommon.FieldMessages,
+			raw:          `[{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "image", "source": {"type": "url", "url": "` + mediaServer.URL + `/photo.jpg"}}]}]}]`,
+			wantModality: reqcommon.ModalityImage,
+		},
+		{
+			name:         "chat_spaced_image_url",
+			path:         reqcommon.PathChatCompletions,
+			field:        reqcommon.FieldMessages,
+			raw:          `[{"role": "user", "content": [{"type" : "image_url", "image_url": {"url": "` + mediaServer.URL + `/photo.jpg"}}]}]`,
+			wantModality: reqcommon.ModalityImage,
+		},
+		{
+			name:         "chat_untyped_audio_url",
+			path:         reqcommon.PathChatCompletions,
+			field:        reqcommon.FieldMessages,
+			raw:          `[{"role": "user", "content": [{"audio_url": {"url": "` + mediaServer.URL + `/audio.wav"}}]}]`,
+			wantModality: reqcommon.ModalityAudio,
+		},
+		{
+			name:         "chat_video_url",
+			path:         reqcommon.PathChatCompletions,
+			field:        reqcommon.FieldMessages,
+			raw:          `[{"role": "user", "content": [{"type": "video_url", "video_url": {"url": "` + mediaServer.URL + `/video.mp4"}}]}]`,
+			wantModality: reqcommon.ModalityVideo,
+		},
+		{
+			name:         "chat_input_audio_inline",
+			path:         reqcommon.PathChatCompletions,
+			field:        reqcommon.FieldMessages,
+			raw:          `[{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "aGk=", "format": "wav"}}]}]`,
+			wantModality: reqcommon.ModalityAudio,
+		},
+		{
+			name:         "responses_spaced_input_image",
+			path:         reqcommon.PathResponses,
+			field:        reqcommon.FieldInput,
+			raw:          `[{"role": "user", "content": [{"type" : "input_image", "image_url": "` + mediaServer.URL + `/photo.jpg"}]}]`,
+			wantModality: reqcommon.ModalityImage,
+		},
+		{
+			name:         "chat_unicode_escaped_key",
+			path:         reqcommon.PathChatCompletions,
+			field:        reqcommon.FieldMessages,
+			raw:          `[{"role":"user","content":[{"type":"\u0069mage_url","\u0069mage_url":{"url":"` + mediaServer.URL + `/photo.jpg"}}]}]`,
+			wantModality: reqcommon.ModalityImage,
+		},
+		{
+			name:                    "chat_unicode_escaped_underscore",
+			path:                    reqcommon.PathChatCompletions,
+			field:                   reqcommon.FieldMessages,
+			raw:                     `[{"role":"user","content":[{"type":"image\u005furl","image\u005furl":{"url":"` + mediaServer.URL + `/photo.jpg"}}]}]`,
+			wantModality:            reqcommon.ModalityImage,
+			forbidLiteralUnderscore: true,
+		},
+		{
+			name:                    "chat_unicode_escaped_underscore_uppercase_hex",
+			path:                    reqcommon.PathChatCompletions,
+			field:                   reqcommon.FieldMessages,
+			raw:                     `[{"role":"user","content":[{"type":"image\u005Furl","image\u005Furl":{"url":"` + mediaServer.URL + `/photo.jpg"}}]}]`,
+			wantModality:            reqcommon.ModalityImage,
+			forbidLiteralUnderscore: true,
+		},
+		{
+			name:                    "chat_escaped_backslash_before_unicode_escape",
+			path:                    reqcommon.PathChatCompletions,
+			field:                   reqcommon.FieldMessages,
+			raw:                     `[{"role":"user","content":[{"type":"text","text":"\\\\"},{"type":"image\u005furl","image\u005furl":{"url":"` + mediaServer.URL + `/photo.jpg"}}]}]`,
+			wantModality:            reqcommon.ModalityImage,
+			forbidLiteralUnderscore: true,
+		},
+		{
+			name:         "messages_unicode_escaped_type",
+			path:         reqcommon.PathMessages,
+			field:        reqcommon.FieldMessages,
+			raw:          `[{"role":"user","content":[{"type":"\u0069mage","source":{"type":"url","url":"` + mediaServer.URL + `/photo.jpg"}}]}]`,
+			wantModality: reqcommon.ModalityImage,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.forbidLiteralUnderscore && bytes.Contains([]byte(tc.raw), []byte("_")) {
+				t.Fatalf("test fixture %q must not contain a literal '_'", tc.name)
+			}
+			step := newLoopbackStep(t, map[string]any{})
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: tc.path,
+				Body:         map[string]any{tc.field: json.RawMessage(tc.raw)},
+			}
+			if err := step.Execute(t.Context(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(reqCtx.MultimodalEntries) != 1 {
+				t.Fatalf("got %d multimodal entries, want 1", len(reqCtx.MultimodalEntries))
+			}
+			if got := reqCtx.MultimodalEntries[0].Modality; got != tc.wantModality {
+				t.Errorf("modality = %q, want %q", got, tc.wantModality)
+			}
+			if _, ok := reqCtx.Body[tc.field].([]any); !ok {
+				t.Errorf("%s is %T, want decoded []any stored back", tc.field, reqCtx.Body[tc.field])
+			}
+		})
+	}
+}
+
+func TestReplaceMediaURLsStep_RawMessageNonMediaEdgeCases(t *testing.T) {
+	step, err := NewReplaceMediaURLsStep(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+		body map[string]any
+	}{
+		{
+			name: "empty_raw_message",
+			path: reqcommon.PathChatCompletions,
+			body: map[string]any{reqcommon.FieldMessages: json.RawMessage{}},
+		},
+		{
+			name: "nil_field",
+			path: reqcommon.PathChatCompletions,
+			body: map[string]any{reqcommon.FieldMessages: nil},
+		},
+		{
+			name: "missing_field",
+			path: reqcommon.PathChatCompletions,
+			body: map[string]any{},
+		},
+		{
+			name: "malformed_raw_json_without_media",
+			path: reqcommon.PathChatCompletions,
+			body: map[string]any{reqcommon.FieldMessages: json.RawMessage("{not-json")},
+		},
+		{
+			name: "text_only_with_unicode_escape",
+			path: reqcommon.PathChatCompletions,
+			body: map[string]any{reqcommon.FieldMessages: json.RawMessage(`[{"role":"user","content":"a \u003c b"}]`)},
+		},
+		{
+			name: "false_positive_quoted_image_token_messages",
+			path: reqcommon.PathMessages,
+			body: map[string]any{reqcommon.FieldMessages: json.RawMessage(`[{"role":"user","content":"image"}]`)},
+		},
+		{
+			name: "false_positive_quoted_image_url_token_chat",
+			path: reqcommon.PathChatCompletions,
+			body: map[string]any{reqcommon.FieldMessages: json.RawMessage(`[{"role":"user","content":"image_url"}]`)},
+		},
+		{
+			name: "unsupported_api_path",
+			path: reqcommon.PathCompletions,
+			body: map[string]any{reqcommon.FieldPrompt: json.RawMessage(`"hello"`)},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: tc.path,
+				Body:         tc.body,
+			}
+			if err := step.Execute(t.Context(), reqCtx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(reqCtx.MultimodalEntries) != 0 {
+				t.Fatalf("got %d multimodal entries, want 0", len(reqCtx.MultimodalEntries))
+			}
+		})
+	}
+}
+
+// buildTwoTurnRawItems returns a 2-turn JSON messages array of at least
+// targetBytes, matching the json.RawMessage that decodeRequestBody leaves in
+// reqCtx.Body on a large text prompt.
+func buildTwoTurnRawItems(targetBytes int, chunk string) json.RawMessage {
+	const prefix = `[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"`
+	const suffix = `"}]`
+	var sb strings.Builder
+	sb.Grow(targetBytes + len(prefix) + len(chunk) + len(suffix))
+	sb.WriteString(prefix)
+	for sb.Len()+len(suffix) < targetBytes {
+		sb.WriteString(chunk)
+	}
+	sb.WriteString(suffix)
+	return json.RawMessage(sb.String())
+}
+
+// buildTwoTurnRawItemsWithUnderscoresAndEscapes builds a 2-turn JSON prompt
+// containing realistic underscores and Go/Python JSON escapes (\u003c, \u003e,
+// \u0026, \u2019, \u4e2d).
+func buildTwoTurnRawItemsWithUnderscoresAndEscapes(targetBytes int) json.RawMessage {
+	const chunk = `func handle_request(req_id string) bool { return a \u003c b \u0026\u0026 c \u003e d } // user\u2019s note \u4e2d\n`
+	return buildTwoTurnRawItems(targetBytes, chunk)
+}
+
+// buildResponsesInputTextRawItems builds a Responses API input array carrying
+// realistic input_text content parts totaling at least targetBytes.
+func buildResponsesInputTextRawItems(targetBytes int) json.RawMessage {
+	const textChunk = "Summarize the distributed systems latency budget and tail behavior across replication groups without dropping traffic. "
+	var partText strings.Builder
+	for partText.Len() < 4096 {
+		partText.WriteString(textChunk)
+	}
+	part := `{"type":"` + reqcommon.PartTypeInputText + `","text":"` + partText.String() + `"}`
+
+	var sb strings.Builder
+	sb.Grow(targetBytes + len(part) + 128)
+	sb.WriteString(`[{"role":"system","content":[{"type":"` + reqcommon.PartTypeInputText + `","text":"You are a helpful assistant."}]},{"role":"user","content":[`)
+	first := true
+	for sb.Len() < targetBytes {
+		if !first {
+			sb.WriteByte(',')
+		}
+		first = false
+		sb.WriteString(part)
+	}
+	sb.WriteString(`]}]`)
+	return json.RawMessage(sb.String())
+}
+
+func BenchmarkReplaceMediaURLsStep_TextOnly(b *testing.B) {
+	step, err := NewReplaceMediaURLsStep(nil, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := log.IntoContext(b.Context(), logr.Discard())
+
+	cases := []struct {
+		name  string
+		path  string
+		field string
+		raw   json.RawMessage
+	}{
+		{
+			name:  "chat_completions_64kb",
+			path:  reqcommon.PathChatCompletions,
+			field: reqcommon.FieldMessages,
+			raw:   buildTwoTurnRawItems(64<<10, "Summarize the distributed systems latency budget and tail behavior across replication groups without dropping traffic. "),
+		},
+		{
+			name:  "chat_completions_64kb_underscores_escapes",
+			path:  reqcommon.PathChatCompletions,
+			field: reqcommon.FieldMessages,
+			raw:   buildTwoTurnRawItemsWithUnderscoresAndEscapes(64 << 10),
+		},
+		{
+			name:  "messages_64kb",
+			path:  reqcommon.PathMessages,
+			field: reqcommon.FieldMessages,
+			raw:   buildTwoTurnRawItems(64<<10, "Summarize the distributed systems latency budget and tail behavior across replication groups without dropping traffic. "),
+		},
+		{
+			name:  "responses_64kb_input_text",
+			path:  reqcommon.PathResponses,
+			field: reqcommon.FieldInput,
+			raw:   buildResponsesInputTextRawItems(64 << 10),
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: tc.path,
+				Body:         map[string]any{tc.field: tc.raw},
+			}
+			b.ReportAllocs()
+			b.SetBytes(int64(len(tc.raw)))
+			for b.Loop() {
+				if err := step.Execute(ctx, reqCtx); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

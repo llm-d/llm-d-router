@@ -61,16 +61,18 @@ var (
 		tracing.FairnessSourceHandoffHeader,
 	)
 
-	// InternalRoutingHeaders carry worker addresses that the P/D sidecar connects to.
-	// Only EPP plugins may set them: client values are dropped on ingress and
-	// removed from the forwarded request when no plugin sets them. Deprecated
-	// aliases are included, so neither spelling can be supplied by a client.
-	InternalRoutingHeaders = routingHeaderNames(
+	// InternalRoutingHeaders carry worker addresses and ports that the P/D
+	// sidecar connects to or forwards to the model server. Only EPP plugins may
+	// set them: client values are dropped on ingress and removed from the
+	// forwarded request when no plugin sets them. Deprecated aliases and retired
+	// names are included, so no spelling can be supplied by a client.
+	InternalRoutingHeaders = sets.New(routing.AllHeaderNames(
 		routing.PrefillEndpointHeader,
+		routing.KVCachePrefillHeader,
+		routing.KVCacheSourceHeader,
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
-		routing.KVCacheSourceHeader,
-	)
+	)...)
 
 	// ScreeningHeaders are client headers that screener plugins read. They stay
 	// on the request on ingress, unlike InternalRoutingHeaders. EPP does not
@@ -80,28 +82,22 @@ var (
 		routing.EndpointPinHeader,
 	)
 
-	// ProtocolHeaders are managed by the proxy layer (Envoy/EPP).
-	// W3C trace context headers are re-injected from the active span in
-	// generateHeaders and must not be forwarded from the client.
-	ProtocolHeaders = sets.New(
-		"content-length",
+	// TracePropagationHeaders are the W3C Trace Context and Baggage headers.
+	// generateHeaders sets them from the propagator, and EPP removes a client
+	// copy that the propagator does not re-inject.
+	TracePropagationHeaders = sets.New(
 		"traceparent",
 		"tracestate",
 		"baggage",
 	)
+
+	// ProtocolHeaders are managed by the proxy layer (Envoy/EPP).
+	ProtocolHeaders = sets.New("content-length").Union(TracePropagationHeaders)
 )
 
 func IsSystemOwnedHeader(key string) bool {
 	k := strings.ToLower(key)
 	return InputControlHeaders.Has(k) || ScreeningHeaders.Has(k) || OutputInjectionHeaders.Has(k) || ProtocolHeaders.Has(k)
-}
-
-func routingHeaderNames(keys ...string) sets.Set[string] {
-	headers := sets.New[string]()
-	for _, key := range keys {
-		headers.Insert(routing.HeaderNames(key)...)
-	}
-	return headers
 }
 
 func lowerHeaderNames(keys ...string) sets.Set[string] {

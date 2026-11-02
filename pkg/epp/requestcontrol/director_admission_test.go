@@ -115,8 +115,18 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 				d.requestControlPlugins = *NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("deny", errors.New("latency objective cannot be met")))
 			},
 			wantDecision: "rejected",
-			wantReason:   errcommon.Internal,
+			wantReason:   "admitter:mock-admit-data",
 			wantQueued:   true,
+			wantErr:      true,
+		},
+		{
+			name: "typed admitter denial keeps its error code",
+			setup: func(d *Director) {
+				d.requestControlPlugins = *NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("deny",
+					errcommon.Error{Code: errcommon.ResourceExhausted, Msg: "saturated"}))
+			},
+			wantDecision: "rejected",
+			wantReason:   errcommon.ResourceExhausted,
 			wantErr:      true,
 		},
 		{

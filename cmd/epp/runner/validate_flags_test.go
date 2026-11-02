@@ -17,8 +17,14 @@ limitations under the License.
 package runner
 
 import (
+	"os"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
+	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/labels"
 
@@ -44,4 +50,35 @@ func TestValidateKubernetesDiscoveryFlags(t *testing.T) {
 	opts.EndpointSelector = nil
 	opts.ObjectivesFile = "/etc/epp/objectives.yaml"
 	require.ErrorContains(t, validateKubernetesDiscoveryFlags(opts), "objectives-file requires file discovery")
+}
+
+func TestRun_LogsCompleteFlagsError(t *testing.T) {
+	prevFlagSet := pflag.CommandLine
+	prevArgs := os.Args
+	pflag.CommandLine = pflag.NewFlagSet("epp-test", pflag.ContinueOnError)
+	os.Args = []string{"epp", "--tls-min-version=1.3"}
+	t.Cleanup(func() {
+		pflag.CommandLine = prevFlagSet
+		os.Args = prevArgs
+	})
+
+	var mu sync.Mutex
+	var logged strings.Builder
+	previous := setupLog
+	setupLog = funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged.WriteString(prefix + " " + args + "\n")
+	}, funcr.Options{})
+	t.Cleanup(func() { setupLog = previous })
+
+	err := NewRunner().Run(t.Context())
+	require.ErrorContains(t, err, `invalid tls-min-version "1.3"`)
+
+	mu.Lock()
+	logs := logged.String()
+	mu.Unlock()
+	assert.Contains(t, logs, "Failed to complete flags")
+	assert.Contains(t, logs, "invalid tls-min-version")
+	assert.Contains(t, logs, "unknown TLS version")
 }

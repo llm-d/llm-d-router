@@ -27,7 +27,9 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -67,7 +69,22 @@ func outcomeGRPCResponse(grpcStatus string) []*extProcPb.ProcessingRequest {
 		}},
 		{Request: &extProcPb.ProcessingRequest_ResponseTrailers{
 			ResponseTrailers: &extProcPb.HttpTrailers{Trailers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
-				{Key: "grpc-status", RawValue: []byte(grpcStatus)},
+				{Key: grpcframe.HeaderStatus, RawValue: []byte(grpcStatus)},
+			}}},
+		}},
+	}
+}
+
+// outcomeGRPCTrailersOnlyResponse is a gRPC response that failed before
+// streaming a frame: its grpc-status is the only HEADERS frame's, and the
+// stream ends without a body or trailers.
+func outcomeGRPCTrailersOnlyResponse(grpcStatus string) []*extProcPb.ProcessingRequest {
+	return []*extProcPb.ProcessingRequest{
+		{Request: &extProcPb.ProcessingRequest_ResponseHeaders{
+			ResponseHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
+				{Key: ":status", RawValue: []byte("200")},
+				{Key: "content-type", RawValue: []byte(grpcframe.MediaType)},
+				{Key: grpcframe.HeaderStatus, RawValue: []byte(grpcStatus)},
 			}}},
 		}},
 	}
@@ -107,9 +124,27 @@ func TestProcessRecordsRequestOutcome(t *testing.T) {
 			wantReason:  errcommon.ModelServerError,
 		},
 		{
+			name:        "gRPC error in trailers after 200 counts a client error for an invalid argument",
+			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCResponse("3")...),
+			wantOutcome: "failed",
+			wantReason:  errcommon.ModelServerClientError,
+		},
+		{
 			name:        "gRPC OK in trailers",
-			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCResponse("0")...),
+			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCResponse(grpcframe.StatusOK)...),
 			wantOutcome: "completed",
+		},
+		{
+			name:        "gRPC trailers-only unavailable",
+			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCTrailersOnlyResponse("14")...),
+			wantOutcome: "failed",
+			wantReason:  errcommon.ModelServerError,
+		},
+		{
+			name:        "gRPC trailers-only invalid argument",
+			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCTrailersOnlyResponse("3")...),
+			wantOutcome: "failed",
+			wantReason:  errcommon.ModelServerClientError,
 		},
 		{
 			name:        "admission sheds the request",
@@ -252,7 +287,7 @@ type cancellingDirector struct {
 	cancel context.CancelFunc
 }
 
-func (d *cancellingDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (d *cancellingDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	d.cancel()
 	return reqCtx, nil
 }
@@ -265,7 +300,7 @@ type attributingDirector struct {
 	err        error
 }
 
-func (d *attributingDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (d *attributingDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{FairnessID: d.fairnessID}
 	reqCtx.Priority = d.priority
 	return reqCtx, d.err

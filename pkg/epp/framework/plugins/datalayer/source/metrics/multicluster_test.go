@@ -48,6 +48,14 @@ func TestMultiClusterMetricsDataSourceFactoryRejectsBadInterval(t *testing.T) {
 	require.Error(t, err)
 }
 
+// The pod source's port override is not applied by this source, so setting it is
+// rejected rather than silently scraping the endpoint's own port.
+func TestMultiClusterMetricsDataSourceFactoryRejectsPort(t *testing.T) {
+	dec := json.NewDecoder(strings.NewReader(`{"port":9090}`))
+	_, err := MultiClusterMetricsDataSourceFactory("multicluster-metrics", dec, nil)
+	require.ErrorContains(t, err, "metricsPort")
+}
+
 // A valid interval is parsed and reaches the source.
 func TestMultiClusterMetricsDataSourceFactoryHonorsInterval(t *testing.T) {
 	dec := json.NewDecoder(strings.NewReader(`{"interval":"2s"}`))

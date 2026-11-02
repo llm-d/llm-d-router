@@ -1,0 +1,50 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package preciseprefixcache
+
+import (
+	"fmt"
+
+	"k8s.io/apimachinery/pkg/util/sets"
+
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
+)
+
+// indexPodIdentifier returns the identifier the KV-block index stores md's blocks
+// under. vLLM already publishes KV events per rank; when the EPP subscribes per
+// endpoint via pod discovery (or a bound kv-events-source), a rank endpoint adds
+// its rank so ranks sharing one pod address and port stay distinct in the index.
+func (p *Producer) indexPodIdentifier(md *fwkdl.EndpointMetadata) string {
+	if p.sharedEvents != nil || (p.kvEventsConfig != nil && p.kvEventsConfig.DiscoverPods && p.kvEventsConfig.ZMQEndpoint == "") {
+		return srckvevents.PodIdentifier(md)
+	}
+	return fmt.Sprintf("%s:%s", md.Address, md.Port)
+}
+
+// extractEndpointSet builds the index pod identifier set used to filter
+// kvblock.Index lookups to candidate endpoints. Endpoints without metadata
+// are skipped.
+func extractEndpointSet(endpoints []endpointWithPodID) sets.Set[string] {
+	endpointSet := sets.New[string]()
+	for _, ep := range endpoints {
+		if m := ep.endpoint.GetMetadata(); m != nil {
+			endpointSet.Insert(ep.podID)
+		}
+	}
+	return endpointSet
+}

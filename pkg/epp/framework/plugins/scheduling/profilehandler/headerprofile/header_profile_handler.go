@@ -21,14 +21,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net"
 	"slices"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 const (
@@ -40,8 +45,11 @@ const (
 	defaultProfileName = "decode"
 )
 
-// compile-time type assertion
-var _ fwksched.ProfileHandler = &HeaderProfileHandler{}
+// compile-time type assertions
+var (
+	_ fwksched.ProfileHandler       = &HeaderProfileHandler{}
+	_ fwkrh.ResponseHeaderProcessor = &HeaderProfileHandler{}
+)
 
 // parameters configures the HeaderProfileHandler.
 type parameters struct {
@@ -53,6 +61,16 @@ type parameters struct {
 	// carry the header at all - pass-through calls (e.g. /models) or a deployment that
 	// doesn't disaggregate.
 	DefaultProfile string `json:"defaultProfile"`
+	// PrefillProfile names the scheduling profile whose endpoint ResponseHeader
+	// reports on the response as x-llm-d-prefiller-host-port. Empty, the default,
+	// reports nothing.
+	PrefillProfile string `json:"prefillProfile"`
+	// PrefillProfileName names the scheduling profile that runs the prefill stage. The
+	// handler reports it in the SchedulingResult so prefill-aware plugins honor a
+	// prefill profile that is not named "prefill". Empty follows PrefillProfile, which a
+	// coordinator deployment sets to the same profile; both empty leave the
+	// SchedulingResult field unset for the scheduler to default.
+	PrefillProfileName string `json:"prefillProfileName"`
 }
 
 // HeaderProfileHandlerFactory defines the factory function for HeaderProfileHandler.
@@ -64,7 +82,9 @@ func HeaderProfileHandlerFactory(name string, rawParameters *json.Decoder, _ fwk
 		}
 	}
 
-	return NewHeaderProfileHandler(params.HeaderName, params.DefaultProfile).WithName(name), nil
+	return NewHeaderProfileHandler(params.HeaderName, params.DefaultProfile).
+		WithPrefillProfile(params.PrefillProfile).
+		WithPrefillProfileName(params.PrefillProfileName).WithName(name), nil
 }
 
 // NewHeaderProfileHandler trims and defaults both arguments, additionally
@@ -96,9 +116,11 @@ func NewHeaderProfileHandler(headerName, defaultProfile string) *HeaderProfileHa
 // there's nothing to choose or the header is missing/blank; an unrecognized header value
 // is still an error.
 type HeaderProfileHandler struct {
-	typedName      fwkplugin.TypedName
-	headerName     string
-	defaultProfile string
+	typedName          fwkplugin.TypedName
+	headerName         string
+	defaultProfile     string
+	prefillProfile     string
+	prefillProfileName string
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -110,6 +132,31 @@ func (h *HeaderProfileHandler) TypedName() fwkplugin.TypedName {
 func (h *HeaderProfileHandler) WithName(name string) *HeaderProfileHandler {
 	h.typedName.Name = name
 	return h
+}
+
+// WithPrefillProfile sets the profile whose endpoint ResponseHeader reports on the
+// response. An empty or blank name disables the report.
+func (h *HeaderProfileHandler) WithPrefillProfile(name string) *HeaderProfileHandler {
+	h.prefillProfile = strings.TrimSpace(name)
+	return h
+}
+
+// WithPrefillProfileName sets the profile this handler reports in the SchedulingResult
+// as the request's prefill stage.
+func (h *HeaderProfileHandler) WithPrefillProfileName(name string) *HeaderProfileHandler {
+	h.prefillProfileName = strings.TrimSpace(name)
+	return h
+}
+
+// resultPrefillProfileName is the prefill profile name ProcessResults reports:
+// prefillProfileName when configured, else prefillProfile, which a coordinator
+// deployment sets to the profile that runs prefill. Empty leaves the field unset and the
+// scheduler fills in the default.
+func (h *HeaderProfileHandler) resultPrefillProfileName() string {
+	if h.prefillProfileName != "" {
+		return h.prefillProfileName
+	}
+	return h.prefillProfile
 }
 
 // profileHeader returns the trimmed value of the profile-selecting header, or "" when
@@ -205,5 +252,29 @@ func (h *HeaderProfileHandler) ProcessResults(_ context.Context, request *fwksch
 	return &fwksched.SchedulingResult{
 		ProfileResults:     profileResults,
 		PrimaryProfileName: profileName,
+		PrefillProfileName: h.resultPrefillProfileName(),
 	}, nil
+}
+
+// ResponseHeader reports the prefill pod on the response as
+// x-llm-d-prefiller-host-port when prefillProfile is configured and is the
+// profile that ran. The value is the endpoint the proxy reports it served, or
+// the endpoint the EPP picked when the proxy reports none. Nothing is added to
+// the request, so the pod never sees the header. See README.md for why the
+// coordinator reads it.
+func (h *HeaderProfileHandler) ResponseHeader(_ context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
+	if h.prefillProfile == "" || request == nil || request.SchedulingResult == nil || response == nil || response.Headers == nil {
+		return
+	}
+	if request.SchedulingResult.PrimaryProfileName != h.prefillProfile {
+		return
+	}
+	hostPort, _ := metadata.ServedEndpoint(response.ReqMetadata)
+	if hostPort == "" && targetEndpoint != nil {
+		hostPort = net.JoinHostPort(targetEndpoint.GetIPAddress(), targetEndpoint.GetPort())
+	}
+	if hostPort == "" {
+		return
+	}
+	response.Headers[routing.PrefillEndpointHeader] = hostPort
 }

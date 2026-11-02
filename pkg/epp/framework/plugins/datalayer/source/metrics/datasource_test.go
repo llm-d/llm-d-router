@@ -68,6 +68,19 @@ func TestMetricsDataSourceFactory_PortOverride(t *testing.T) {
 	}
 }
 
+func TestMetricsDataSourceFactory_ProxyURL(t *testing.T) {
+	for _, params := range []string{`{"proxyURL":"http://127.0.0.1:15081"}`, `{"proxyURL":""}`, `{}`} {
+		ds, err := MetricsDataSourceFactory("m", fwkplugin.StrictDecoder(json.RawMessage(params)), nil)
+		assert.NoError(t, err, params)
+		assert.NotNil(t, ds, params)
+	}
+
+	for _, params := range []string{`{"proxyURL":"127.0.0.1:15081"}`, `{"proxyURL":"socks5://127.0.0.1:1080"}`} {
+		_, err := MetricsDataSourceFactory("m", fwkplugin.StrictDecoder(json.RawMessage(params)), nil)
+		assert.Error(t, err, params)
+	}
+}
+
 func TestDatasource(t *testing.T) {
 	_, err := http.NewHTTPDataSource("invalid", "/metrics", http.TLSOptions{SkipVerify: true}, MetricsDataSourceType,
 		"metrics-data-source", parseMetrics)

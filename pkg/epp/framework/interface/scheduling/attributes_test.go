@@ -107,3 +107,68 @@ func TestRequestAttributes_ConcurrentAfterInit(t *testing.T) {
 
 	assert.Len(t, r.AttributeKeys(), writers*writes)
 }
+
+func TestRequestAttributes_DynamicResolvesOnEveryRead(t *testing.T) {
+	tests := []struct {
+		name string
+		wrap func(get func() any) any
+	}{
+		{name: "pointer", wrap: func(get func() any) any { return &DynamicRequestAttribute{Get: get} }},
+		{name: "value", wrap: func(get func() any) any { return DynamicRequestAttribute{Get: get} }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &InferenceRequest{}
+			turns := 1
+			r.PutAttribute(testKey("turns"), tc.wrap(func() any { return turns }))
+
+			got, ok := ReadRequestAttribute[int](r, testKey("turns"))
+			assert.True(t, ok)
+			assert.Equal(t, 1, got)
+
+			turns = 2
+			got, ok = ReadRequestAttribute[int](r, testKey("turns"))
+			assert.True(t, ok)
+			assert.Equal(t, 2, got, "a dynamic attribute must reflect the getter's current value")
+		})
+	}
+}
+
+func TestRequestAttributes_DynamicAbsentValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "nil wrapper", value: (*DynamicRequestAttribute)(nil)},
+		{name: "nil getter", value: &DynamicRequestAttribute{}},
+		{name: "nil result", value: &DynamicRequestAttribute{Get: func() any { return nil }}},
+		{name: "nil getter by value", value: DynamicRequestAttribute{}},
+		{name: "nil result by value", value: DynamicRequestAttribute{Get: func() any { return nil }}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &InferenceRequest{}
+			r.PutAttribute(testKey("k"), tc.value)
+			v, ok := r.GetAttribute(testKey("k"))
+			assert.False(t, ok)
+			assert.Nil(t, v)
+		})
+	}
+}
+
+func TestRequestAttributes_DynamicHonorsScope(t *testing.T) {
+	r := &InferenceRequest{}
+	called := false
+	r.PutAttribute(testKey("k"), &DynamicRequestAttribute{Get: func() any { called = true; return "v" }})
+
+	scoped := r.WithAttributeScope(denyAllScope{})
+	_, ok := scoped.GetAttribute(testKey("k"))
+	assert.False(t, ok)
+	assert.False(t, called, "a read the scope rejects must not invoke the getter")
+}
+
+type denyAllScope struct{}
+
+func (denyAllScope) AllowPut(fwkplugin.DataKey) bool { return false }
+func (denyAllScope) AllowGet(fwkplugin.DataKey) bool { return false }
+func (denyAllScope) Declares(fwkplugin.DataKey) bool { return false }

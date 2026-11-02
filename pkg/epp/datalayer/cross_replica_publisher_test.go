@@ -18,6 +18,7 @@ package datalayer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -293,13 +294,44 @@ func testCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, contributors ...
 	return &crossReplicaPublisher{syncer: syncer, contributors: contributors, publishTimeout: defaultCrossReplicaPublishTimeout}
 }
 
+type startingSyncer struct {
+	fakeSyncer
+	startErr error
+	started  int
+}
+
+func (s *startingSyncer) Start(context.Context) error {
+	s.started++
+	return s.startErr
+}
+
+func TestStartCrossReplicaSync_StartsSyncer(t *testing.T) {
+	syncer := &startingSyncer{}
+	pub := testCrossReplicaPublisher(syncer)
+	pub.interval = time.Hour
+	r := &Runtime{crossReplicaPub: pub}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	require.NoError(t, r.StartCrossReplicaSync(ctx))
+	assert.Equal(t, 1, syncer.started)
+}
+
+func TestStartCrossReplicaSync_ReturnsStartError(t *testing.T) {
+	syncer := &startingSyncer{startErr: errors.New("address already in use")}
+	r := &Runtime{crossReplicaPub: testCrossReplicaPublisher(syncer)}
+
+	err := r.StartCrossReplicaSync(context.Background())
+	require.ErrorContains(t, err, "address already in use")
+}
+
 func TestCrossReplicaPublisher_PublishesForEndpoint(t *testing.T) {
 	syncer := &fakeSyncer{}
 	pub := testCrossReplicaPublisher(syncer, fakeContributor{key: "inflight:test"})
 	endpointID := types.NamespacedName{Namespace: "ns", Name: "ep-a"}
 	require.True(t, pub.registerEndpoint(endpointID))
 
-	pub.publish(context.Background(), endpointID)
+	pub.publish(context.Background(), endpointID, nil)
 
 	require.Len(t, syncer.sets, 1)
 	assert.Equal(t, fwkdl.StateKey("inflight:test"), syncer.sets[0].key)
@@ -322,12 +354,12 @@ func TestCrossReplicaPublisher_RateLimitsVisiblePublishFailures(t *testing.T) {
 	}, funcr.Options{})
 	ctx := log.IntoContext(context.Background(), logger)
 
-	pub.publish(ctx, endpointID)
-	pub.publish(ctx, endpointID)
+	pub.publish(ctx, endpointID, nil)
+	pub.publish(ctx, endpointID, nil)
 	require.Equal(t, int64(1), failures.Load())
 
 	pub.publishFailureLog.Interval = time.Nanosecond
-	pub.publish(ctx, endpointID)
+	pub.publish(ctx, endpointID, nil)
 	require.Equal(t, int64(2), failures.Load())
 }
 
@@ -473,7 +505,7 @@ func TestCrossReplicaPublisher_PublishesContributorsConcurrently(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pub.publish(context.Background(), endpointID)
+		pub.publish(context.Background(), endpointID, nil)
 	}()
 
 	started := map[fwkdl.StateKey]bool{}
@@ -510,7 +542,7 @@ func TestCrossReplicaPublisher_SkipsEndpointDeletedAfterSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, removed)
 
-	pub.publish(context.Background(), snapshot[0])
+	pub.publish(context.Background(), snapshot[0], nil)
 	assert.Empty(t, syncer.sets)
 }
 

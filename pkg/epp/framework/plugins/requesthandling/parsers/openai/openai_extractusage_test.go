@@ -85,3 +85,19 @@ func TestExtractUsage_StringCoercion(t *testing.T) {
 		t.Errorf("TotalTokens = %d, want 1031", u.TotalTokens)
 	}
 }
+
+// The SSE spec allows "data:" with no space after the colon; a stream chunk
+// in that form reads the same as the spaced wire form.
+func TestExtractUsageStreaming_NoSpaceDataLine(t *testing.T) {
+	body := "data:{\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"total_tokens\":9}}\n\n"
+	u := extractUsageStreaming([]byte(body))
+	if u == nil {
+		t.Fatal("usage is nil")
+	}
+	if u.PromptTokens != 7 {
+		t.Errorf("PromptTokens = %d, want 7", u.PromptTokens)
+	}
+	if u.TotalTokens != 9 {
+		t.Errorf("TotalTokens = %d, want 9", u.TotalTokens)
+	}
+}

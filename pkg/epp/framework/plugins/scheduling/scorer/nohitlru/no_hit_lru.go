@@ -28,7 +28,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
@@ -39,17 +39,11 @@ const (
 
 	// defaultLRUSize is the maximum number of endpoints we'll consider in the cache
 	defaultLRUSize = 1024
-
-	// defaultPrefillProfile is the name of the prefill profile
-	//
-	// This is currently hardcoded until we have a defined proper config interface.
-	// (See also https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/2104/	)
-	defaultPrefillProfile = "prefill"
 )
 
 // compile-time type assertions
 var _ scheduling.Scorer = &NoHitLRU{}
-var _ requestcontrol.PreRequest = &NoHitLRU{}
+var _ fwkrh.PreRequest = &NoHitLRU{}
 var _ plugin.ConsumerPlugin = &NoHitLRU{}
 var _ plugin.StateDumper = &NoHitLRU{}
 
@@ -347,8 +341,8 @@ func (s *NoHitLRU) PreRequest(ctx context.Context, request *scheduling.Inference
 	if targetProfile, ok := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]; ok && targetProfile != nil && len(targetProfile.TargetEndpoints) != 0 {
 		s.moveTargetPodToFront(ctx, request, targetProfile, schedulingResult.PrimaryProfileName)
 	}
-	if targetProfile, ok := schedulingResult.ProfileResults[defaultPrefillProfile]; ok && targetProfile != nil && len(targetProfile.TargetEndpoints) != 0 {
-		s.moveTargetPodToFront(ctx, request, targetProfile, defaultPrefillProfile)
+	if targetProfile := schedulingResult.PrefillProfile(); targetProfile != nil && len(targetProfile.TargetEndpoints) != 0 {
+		s.moveTargetPodToFront(ctx, request, targetProfile, schedulingResult.PrefillProfileName)
 	}
 	return nil
 }

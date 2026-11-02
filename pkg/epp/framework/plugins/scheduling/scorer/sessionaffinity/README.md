@@ -6,7 +6,7 @@ Scores candidate pods by giving a higher score to the pod that was previously us
 
 Supports two algorithms, selected by the `strategy` parameter:
 
-- `encoded_endpoint_header` (default): stateless. The session is carried in a request header whose value is the base64-encoded `namespace/name` of the previously selected pod. As a [`ResponseHeaderProcessor`](../../../../interface/requestcontrol/plugins.go), the scorer writes that same header on the response so the client can echo it back on the next request.
+- `encoded_endpoint_header` (default): stateless. The session is carried in a request header whose value is the base64-encoded `namespace/name` of the previously selected pod. As a [`ResponseHeaderProcessor`](../../../../interface/requesthandling/plugins.go), the scorer writes that same header on the response so the client can echo it back on the next request.
 - `session_id`: stateful. The client supplies an opaque session identifier, read from one or more configured sources (a request header, or a request attribute published by an upstream plugin) tried in priority order. The scorer maintains a server-side, TTL-evicted binding from that identifier to the pod that served it. Nothing is written back to the client. An unbound session expresses no preference: the scorer gives every candidate zero and lets the picker place the request. A bound session whose pod is absent from the candidate set also scores zero everywhere, then rebinds to the pod the request was routed to.
 
 ## Parameters
@@ -14,7 +14,7 @@ Supports two algorithms, selected by the `strategy` parameter:
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `strategy` | string | `encoded_endpoint_header` | `encoded_endpoint_header` or `session_id`. Only the config block matching the strategy is used. |
-| `profileName` | string | | The name of the profile this instance is associated with. When set (e.g. `prefill`), the plugin looks up the target pod from the results of that profile in `SchedulingResult`. When empty, it defaults to the primary (decode) pod. |
+| `profileName` | string | | The name of the profile this instance is associated with. When set (e.g. `prefill`), the plugin looks up the target pod from the results of that profile in `SchedulingResult`. It must name a profile in `schedulingProfiles`, or loading the config fails. When empty, it defaults to the primary (decode) pod. |
 | `encodedEndpointHeaderConfig` | object | | Config for `encoded_endpoint_header`; see below. |
 | `sessionIdConfig` | object | | Config for `session_id`; see below. |
 

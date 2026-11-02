@@ -13,7 +13,8 @@ the generic `endpoint-attribute-filter` and `endpoint-attribute-scorer`
 2. Looks up the `DCGM_FI_DEV_GPU_UTIL` metric family.
 3. Keeps samples that belong to this endpoint:
    - If a sample has a `pod` label and the endpoint has a `Name`, only
-     matching samples are kept (DaemonSet multi-pod payloads).
+     matching samples are kept (DaemonSet multi-pod payloads). A sample that
+     also has a `namespace` label must match the endpoint's namespace.
    - If the sample has no `pod` label, it is kept (sidecar / unlabeled payloads).
 4. Aggregates matching samples using `max` (highest-utilized GPU for the pod).
 5. Normalizes the value from 0-100 to [0.0, 1.0].

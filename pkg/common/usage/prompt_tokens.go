@@ -18,15 +18,6 @@ package usage
 
 import reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
-// Keys under which a streamed event nests the object that carries usage:
-// Responses stream events wrap the response object, and the Messages
-// message_start event wraps the message object.
-const (
-	fieldResponse = "response"
-	fieldMessage  = "message"
-	fieldChoices  = "choices"
-)
-
 // UsageBlock returns the usage object a decoded response or stream event
 // carries. It is the top-level "usage" for chat, completions, generate, and
 // the final Responses and Messages objects; "response.usage" for Responses
@@ -37,7 +28,7 @@ func UsageBlock(response map[string]any) (map[string]any, bool) {
 	if block, ok := response[reqcommon.FieldUsage].(map[string]any); ok {
 		return block, true
 	}
-	for _, wrapper := range []string{fieldResponse, fieldMessage} {
+	for _, wrapper := range []string{reqcommon.FieldResponse, reqcommon.FieldMessage} {
 		inner, ok := response[wrapper].(map[string]any)
 		if !ok {
 			continue
@@ -48,13 +39,6 @@ func UsageBlock(response map[string]any) (map[string]any, bool) {
 	}
 	return nil, false
 }
-
-// Messages usage splits the prompt into the part served from cache and the
-// rest; input_tokens alone excludes the cached part.
-const (
-	fieldCacheReadInputTokens     = "cache_read_input_tokens"
-	fieldCacheCreationInputTokens = "cache_creation_input_tokens"
-)
 
 // PromptTokens reads the whole prompt's token count out of a usage block:
 // prompt_tokens on the chat, completions and generate routes, which already
@@ -75,7 +59,7 @@ func PromptTokens(block any) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	read, _ := intValue(fields[fieldCacheReadInputTokens])
-	created, _ := intValue(fields[fieldCacheCreationInputTokens])
+	read, _ := intValue(fields[reqcommon.FieldCacheReadInputTokens])
+	created, _ := intValue(fields[reqcommon.FieldCacheCreationInputTokens])
 	return n + read + created, true
 }

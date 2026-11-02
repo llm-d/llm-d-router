@@ -23,6 +23,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 )
@@ -37,6 +38,22 @@ type Config struct {
 	// PropagatePriority mirrors requestHandler.propagatePriority: when true the
 	// director injects the resolved priority into the outbound request body.
 	PropagatePriority bool
+	// ComposeFairnessIDs mirrors requestHandler.composeFairnessIDs: when true the
+	// director composes the fairness-ID header with the agent identity into
+	// "<tenant>/<session>".
+	ComposeFairnessIDs bool
+	// RequestStreamUsage mirrors requestHandler.requestStreamUsage: when true
+	// the director asks for usage in OpenAI chat completions and completions
+	// streams whose client did not.
+	RequestStreamUsage bool
+	// ForwardInputControlHeaders mirrors requestHandler.forwardInputControlHeaders:
+	// when true the EPP passes the client's input-control headers to the chosen
+	// endpoint (a multi-cluster hub's cluster EPPs).
+	ForwardInputControlHeaders bool
+	// DataProducerPhases places the producers listed in
+	// requestHandler.dataProducers, keyed by plugin name, in
+	// DataProducerPhaseRequestHandling. Producers not listed are absent.
+	DataProducerPhases map[string]fwkrh.DataProducerPhase
 }
 
 func (c *Config) String() string {

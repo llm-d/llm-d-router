@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -35,22 +36,22 @@ func TestPassthroughParser_ParseRequest(t *testing.T) {
 		name     string
 		body     []byte
 		headers  map[string]string
-		wantBody *fwkrh.InferenceRequestBody
+		wantBody *fwkrequest.InferenceRequestBody
 	}{
 		{
 			name:    "empty body",
 			body:    []byte{},
 			headers: map[string]string{},
-			wantBody: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload([]byte{}),
+			wantBody: &fwkrequest.InferenceRequestBody{
+				Payload: fwkrequest.RawPayload([]byte{}),
 			},
 		},
 		{
 			name:    "non-empty body",
 			body:    []byte("hello world"),
 			headers: map[string]string{},
-			wantBody: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload([]byte("hello world")),
+			wantBody: &fwkrequest.InferenceRequestBody{
+				Payload: fwkrequest.RawPayload([]byte("hello world")),
 			},
 		},
 	}

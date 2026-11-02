@@ -18,6 +18,7 @@ package eviction
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -74,6 +75,18 @@ func newItem(id string, priority int, dispatchOffset time.Duration) *flowcontrol
 	}
 }
 
+// drain pops every evictable item in eviction order.
+func drain(q *EvictionQueue) []*flowcontrol.EvictionItem {
+	var items []*flowcontrol.EvictionItem
+	for {
+		item := q.PopIfBelow(math.MaxInt)
+		if item == nil {
+			return items
+		}
+		items = append(items, item)
+	}
+}
+
 // --- Tests ---
 
 func TestEvictionQueue_TrackAndUntrack(t *testing.T) {
@@ -86,9 +99,9 @@ func TestEvictionQueue_TrackAndUntrack(t *testing.T) {
 		untrackIDs            []string
 		wantInFlight          int      // expected after track+untrack, before pop
 		wantEvictable         int      // expected after track+untrack, before pop
-		wantPopIDs            []string // if set, PopN is called and order is verified
-		wantInFlightAfterPop  int      // expected after PopN (-1 to skip check)
-		wantEvictableAfterPop int      // expected after PopN (-1 to skip check)
+		wantPopIDs            []string // if set, the queue is drained and order is verified
+		wantInFlightAfterPop  int      // expected after draining (-1 to skip check)
+		wantEvictableAfterPop int      // expected after draining (-1 to skip check)
 	}{
 		{
 			name:                  "track evictable and untrack",
@@ -220,23 +233,23 @@ func TestEvictionQueue_TrackAndUntrack(t *testing.T) {
 
 			// Verify pop order and post-pop state if specified.
 			if tt.wantPopIDs != nil {
-				evicted := q.PopN(100)
+				evicted := drain(q)
 				require.Len(t, evicted, len(tt.wantPopIDs))
 				for i, wantID := range tt.wantPopIDs {
 					assert.Equal(t, wantID, evicted[i].RequestID, "evicted[%d]", i)
 				}
 				if tt.wantInFlightAfterPop >= 0 {
-					assert.Equal(t, tt.wantInFlightAfterPop, q.InFlightLen(), "InFlightLen after PopN")
+					assert.Equal(t, tt.wantInFlightAfterPop, q.InFlightLen(), "InFlightLen after draining")
 				}
 				if tt.wantEvictableAfterPop >= 0 {
-					assert.Equal(t, tt.wantEvictableAfterPop, q.EvictableLen(), "EvictableLen after PopN")
+					assert.Equal(t, tt.wantEvictableAfterPop, q.EvictableLen(), "EvictableLen after draining")
 				}
 			}
 		})
 	}
 }
 
-func TestEvictionQueue_PopN_TiebreakByDispatchTime(t *testing.T) {
+func TestEvictionQueue_TiebreakByDispatchTime(t *testing.T) {
 	t.Parallel()
 	q := NewEvictionQueue(&testOrdering{}, &acceptAllFilter{})
 
@@ -244,31 +257,12 @@ func TestEvictionQueue_PopN_TiebreakByDispatchTime(t *testing.T) {
 	q.Track(newItem("oldest", 0, -100*time.Millisecond))
 	q.Track(newItem("middle", 0, 0))
 
-	evicted := q.PopN(3)
+	evicted := drain(q)
 	require.Len(t, evicted, 3)
 
 	assert.Equal(t, "newer", evicted[0].RequestID)
 	assert.Equal(t, "middle", evicted[1].RequestID)
 	assert.Equal(t, "oldest", evicted[2].RequestID)
-}
-
-func TestEvictionQueue_PopN_Bounds(t *testing.T) {
-	t.Parallel()
-	q := NewEvictionQueue(&testOrdering{}, &acceptAllFilter{})
-
-	assert.Empty(t, q.PopN(5), "PopN on empty queue should return empty slice")
-	assert.Empty(t, q.PopN(0), "PopN(0) should return empty slice")
-
-	q.Track(newItem("req-1", 0, 0))
-	q.Track(newItem("req-2", 0, time.Millisecond))
-
-	assert.Empty(t, q.PopN(0), "PopN(0) with items should return empty slice")
-	assert.Equal(t, 2, q.EvictableLen(), "PopN(0) should not remove items")
-
-	evicted := q.PopN(10)
-	assert.Len(t, evicted, 2, "PopN should return all items when n > heap size")
-	assert.Equal(t, 0, q.EvictableLen())
-	assert.Equal(t, 0, q.InFlightLen())
 }
 
 func TestEvictionQueue_Peek(t *testing.T) {
@@ -290,6 +284,40 @@ func TestEvictionQueue_Peek(t *testing.T) {
 	peeked.Priority = 999
 	peeked2 := q.Peek()
 	assert.Equal(t, -1, peeked2.Priority, "Mutating Peek result should not affect the heap")
+}
+
+func TestEvictionQueue_PopIfBelow(t *testing.T) {
+	t.Parallel()
+	q := NewEvictionQueue(&testOrdering{}, &acceptAllFilter{})
+
+	assert.Nil(t, q.PopIfBelow(0), "PopIfBelow on empty queue should return nil")
+
+	q.Track(newItem("req-low", -5, 0))
+	q.Track(newItem("req-mid", -1, 0))
+	q.Track(newItem("req-high", 0, 0))
+
+	// Bound at or below the top item's priority (-5) must return nil without mutating state.
+	assert.Nil(t, q.PopIfBelow(-5), "PopIfBelow should return nil when top item priority == priorityBound")
+	assert.Nil(t, q.PopIfBelow(-10), "PopIfBelow should return nil when top item priority > priorityBound")
+	assert.Equal(t, 3, q.InFlightLen(), "InFlightLen must be unchanged when PopIfBelow returns nil")
+	assert.Equal(t, 3, q.EvictableLen(), "EvictableLen must be unchanged when PopIfBelow returns nil")
+
+	// Bound strictly above -5 pops req-low.
+	popped := q.PopIfBelow(-1)
+	require.NotNil(t, popped)
+	assert.Equal(t, "req-low", popped.RequestID)
+	assert.Equal(t, 2, q.InFlightLen())
+	assert.Equal(t, 2, q.EvictableLen())
+
+	// Next top item is req-mid (priority -1); bound -1 must return nil and leave req-mid tracked.
+	assert.Nil(t, q.PopIfBelow(-1))
+	assert.Equal(t, 2, q.InFlightLen())
+	assert.Equal(t, 2, q.EvictableLen())
+
+	// Untracking req-mid must remove it from both allInFlight and the heap.
+	q.Untrack("req-mid")
+	assert.Equal(t, 1, q.InFlightLen())
+	assert.Equal(t, 1, q.EvictableLen())
 }
 
 func TestEvictionQueue_Concurrency(t *testing.T) {
@@ -316,7 +344,9 @@ func TestEvictionQueue_Concurrency(t *testing.T) {
 					q.Track(item)
 					q.Untrack(reqID)
 				case 2:
-					q.PopN(1)
+					// Priorities span 0..goroutines-1, so a mid-range bound exercises both the
+					// pop and the at-bound return under contention.
+					q.PopIfBelow(goroutines / 2)
 				case 3:
 					q.EvictableLen()
 					q.InFlightLen()
@@ -337,7 +367,7 @@ func TestEvictionQueue_Concurrency(t *testing.T) {
 		"In-flight count should always be >= evictable count")
 
 	// Drain remaining items and verify they come out in order.
-	remaining := q.PopN(inFlight + 1)
+	remaining := drain(q)
 	for i := 1; i < len(remaining); i++ {
 		assert.LessOrEqual(t, remaining[i-1].Priority, remaining[i].Priority,
 			"Remaining items should pop in priority order")

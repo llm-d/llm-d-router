@@ -172,12 +172,12 @@ func calculateSummary(endpoints []fwkdl.Endpoint) (result summary) {
 
 	sampleSize := math.Max(1.0, size-1)
 
-	// Round stats to two decimal places
-	result.kvCache.mean = round2(result.kvCache.mean)
+	// Round the count stats to two decimal places. KV cache usage is a 0-1
+	// fraction, so it keeps full precision.
 	result.queueSize.mean = round2(result.queueSize.mean)
 	result.runningRequests.mean = round2(result.runningRequests.mean)
 
-	result.kvCache.stdv = round2(math.Sqrt(kvSS / sampleSize))
+	result.kvCache.stdv = math.Sqrt(kvSS / sampleSize)
 	result.queueSize.stdv = round2(math.Sqrt(queueSS / sampleSize))
 	result.runningRequests.stdv = round2(math.Sqrt(reqSS / sampleSize))
 

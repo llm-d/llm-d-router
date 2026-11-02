@@ -39,7 +39,7 @@ const (
 	FieldTools             Field = "tools"
 	FieldToolChoice        Field = "tool_choice"
 	FieldParallelToolCalls Field = "parallel_tool_calls"
-	FieldResponseFormat    Field = "response_format"
+	FieldResponseFormat    Field = reqcommon.FieldResponseFormat
 )
 
 // FieldStatusValue is the bounded outcome for a compared request field.

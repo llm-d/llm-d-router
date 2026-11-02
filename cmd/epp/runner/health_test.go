@@ -20,14 +20,23 @@ package runner
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials/insecure"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -306,12 +315,36 @@ func TestHealthServer_Check(t *testing.T) {
 			wantStatus:            healthPb.HealthCheckResponse_SERVING,
 		},
 		{
-			// Drain also applies in all-active (no leader election).
-			name:                  "LeaderElectionDisabled_Draining_NotServing",
+			// In all-active mode (no leader election), liveness must stay Serving
+			// during drain so kubelet does not restart the pod mid-drain.
+			name:                  "LeaderElectionDisabled_Draining_Liveness_StillServing",
 			leaderElectionEnabled: false,
 			draining:              true,
 			hasSynced:             true,
 			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               LivenessCheckService,
+			wantStatus:            healthPb.HealthCheckResponse_SERVING,
+		},
+		{
+			// In all-active mode, readiness should still fail while draining so
+			// traffic is removed from the endpoint during graceful shutdown.
+			name:                  "LeaderElectionDisabled_Draining_Readiness_NotServing",
+			leaderElectionEnabled: false,
+			draining:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               ReadinessCheckService,
+			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
+		},
+		{
+			// Empty service name is used by load balancers and should report
+			// non-liveness drain state in all-active mode.
+			name:                  "LeaderElectionDisabled_Draining_EmptyService_NotServing",
+			leaderElectionEnabled: false,
+			draining:              true,
+			hasSynced:             true,
+			pool:                  &datalayer.EndpointPool{AppProtocol: v1.AppProtocolHTTP},
+			service:               "",
 			wantStatus:            healthPb.HealthCheckResponse_NOT_SERVING,
 		},
 		{
@@ -456,4 +489,62 @@ func TestHealthServer_StandbyLogging(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Envoy health-checks on a reused connection and sends keepalive pings every 15s with no
+// active stream, so the server must accept pings that frequent without sending GOAWAY.
+func TestHealthServerKeepsIdleConnectionAtEnvoyKeepaliveInterval(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		// An in-memory listener keeps all I/O inside the bubble; goroutines blocked on a real
+		// socket would stop the fake clock from advancing.
+		lis := bufconn.Listen(1 << 16)
+		var isLeader atomic.Bool
+		isLeader.Store(true)
+		srv := newHealthGRPCServer(testr.New(t), &mockDatastore{}, &isLeader, nil, false, nil, nil)
+		serveDone := make(chan struct{})
+		go func() {
+			defer close(serveDone)
+			_ = srv.Serve(lis)
+		}()
+		defer func() {
+			srv.Stop()
+			<-serveDone
+		}()
+
+		// Envoy's interval; a 10s client interval would sit on the server's 10s MinTime and could strike.
+		conn, err := grpc.NewClient("passthrough:///pipe",
+			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+				return lis.DialContext(ctx)
+			}),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 15 * time.Second, Timeout: 3 * time.Second, PermitWithoutStream: true}))
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer checkCancel()
+		if _, err := healthPb.NewHealthClient(conn).Check(checkCtx, &healthPb.HealthCheckRequest{}, grpc.WaitForReady(true)); err != nil {
+			t.Fatalf("Check failed: %v (code %v)", err, status.Code(err))
+		}
+		// grpc-go updates the picker before the connectivity state manager, so a fast
+		// loopback Check can return while GetState still reports CONNECTING.
+		for state := conn.GetState(); state != connectivity.Ready; state = conn.GetState() {
+			if !conn.WaitForStateChange(checkCtx, state) {
+				t.Fatalf("connection state after Check = %v, want Ready", conn.GetState())
+			}
+		}
+
+		// With the default enforcement policy the server sends GOAWAY after the third ping (about 45s).
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 70*time.Second)
+		defer waitCancel()
+		start := time.Now()
+		if conn.WaitForStateChange(waitCtx, connectivity.Ready) {
+			t.Fatalf("idle connection left Ready after %v (state %v): server rejected 15s keepalive pings with GOAWAY too_many_pings",
+				time.Since(start).Round(time.Second), conn.GetState())
+		}
+	})
 }

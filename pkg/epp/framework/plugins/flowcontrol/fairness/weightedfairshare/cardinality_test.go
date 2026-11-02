@@ -1,0 +1,73 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package weightedfairshare
+
+import (
+	"fmt"
+	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+)
+
+// Fairness IDs come from a request header, so the flow_id gauges share the
+// --fairness-id-metric-label-limit cap with every other fairness_id label.
+func TestFlowGauges_RespectFairnessIDLabelLimit(t *testing.T) {
+	metricsutil.SetFairnessIDLabelLimit(2)
+	t.Cleanup(func() { metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit) })
+
+	p := newPolicy(t, "")
+	for i := range 5 {
+		complete(p, fmt.Sprintf("tenant-%d", i), 0, 100, 0)
+	}
+
+	assert.Equal(t, 2, testutil.CollectAndCount(p.vserviceGauge))
+	assert.Equal(t, 2, testutil.CollectAndCount(p.weightGauge))
+	// Accounting still covers every flow; only the series are capped.
+	assert.Equal(t, 100.0, virtualService(p, "tenant-4"))
+}
+
+// An ID the operator gave a weight keeps its series when client-chosen IDs
+// have already filled the cap. The limit is set after the policy is built, as
+// at startup. The pin outlives the test, so cap tests here use unweighted IDs,
+// and no other test pins weighted-past-cap.
+func TestFlowGauges_WeightedIDsKeepSeriesPastLimit(t *testing.T) {
+	t.Cleanup(func() { metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit) })
+
+	p := newPolicy(t, `{"flowWeights":{"weighted-past-cap":7}}`)
+	metricsutil.SetFairnessIDLabelLimit(1)
+	for _, id := range []string{"first", "second", "weighted-past-cap"} {
+		complete(p, id, 0, 100, 0)
+	}
+
+	assert.Equal(t, 2, testutil.CollectAndCount(p.vserviceGauge), "first and weighted-past-cap; second is past the cap")
+	assert.Equal(t, 2, testutil.CollectAndCount(p.weightGauge))
+	assert.Equal(t, 7.0, testutil.ToFloat64(p.weightGauge.WithLabelValues("weighted-past-cap", "0")))
+}
+
+// A limit of 0 turns per-ID series off, weighted IDs included.
+func TestFlowGauges_ZeroLimitFoldsWeightedIDs(t *testing.T) {
+	metricsutil.SetFairnessIDLabelLimit(0)
+	t.Cleanup(func() { metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit) })
+
+	p := newPolicy(t, `{"flowWeights":{"team-a":7}}`)
+	complete(p, "team-a", 0, 100, 0)
+
+	assert.Equal(t, 0, testutil.CollectAndCount(p.weightGauge))
+}

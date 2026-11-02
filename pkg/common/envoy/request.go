@@ -22,8 +22,9 @@ import (
 
 // GenerateRequestBodyResponses splits the request body bytes into chunked body
 // responses and wraps each chunk in a ProcessingResponse_RequestBody envelope.
-func GenerateRequestBodyResponses(requestBodyBytes []byte) []*extProcPb.ProcessingResponse {
-	commonResponses := BuildChunkedBodyResponses(requestBodyBytes, true)
+// setEos marks the last chunk as the end of the stream.
+func GenerateRequestBodyResponses(requestBodyBytes []byte, setEos bool) []*extProcPb.ProcessingResponse {
+	commonResponses := BuildChunkedBodyResponses(requestBodyBytes, setEos)
 	responses := make([]*extProcPb.ProcessingResponse, 0, len(commonResponses))
 	for _, commonResp := range commonResponses {
 		resp := &extProcPb.ProcessingResponse{

@@ -53,6 +53,7 @@ ec-connector: %q
 enable-ssrf-protection: true
 enable-prefiller-sampling: true
 enable-p2p-pull: true
+forward-prompt-token-ids: true
 enable-tls:
 - prefiller
 - decoder
@@ -65,6 +66,7 @@ pool-group: "pool-group-file"
 max-idle-conns-per-host: 300
 prefill-max-retries: 3
 prefill-retry-backoff: "500ms"
+prefill-timeout: "5s"
 decode-chunk-size: 128
 mooncake-bootstrap-port: 9000
 tracing: true
@@ -99,6 +101,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		enable-ssrf-protection: true,
 		enable-prefiller-sampling: true,
 		enable-p2p-pull: true,
+		forward-prompt-token-ids: true,
 		enable-tls: ['prefiller', 'decoder'],
 		tls-insecure-skip-verify: ['decoder'],
 		secure-serving: false,
@@ -108,6 +111,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		max-idle-conns-per-host: 200,
 		prefill-max-retries: 2,
 		prefill-retry-backoff: '300ms',
+		prefill-timeout: '150ms',
 		decode-chunk-size: 256,
 		mooncake-bootstrap-port: 9001,
 		tracing: true
@@ -144,6 +148,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = true
+				o.ForwardPromptTokenIDs = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -165,6 +170,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.PrefillMaxRetries = 2
 				o.PrefillRetryBackoff = 300 * time.Millisecond
+				o.PrefillTimeout = 150 * time.Millisecond
 
 				o.DecodeChunkSize = 256
 				o.Tracing = true
@@ -192,6 +198,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = true
+				o.ForwardPromptTokenIDs = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -213,6 +220,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.PrefillMaxRetries = 3
 				o.PrefillRetryBackoff = 500 * time.Millisecond
+				o.PrefillTimeout = 5 * time.Second
 
 				o.DecodeChunkSize = 128
 				o.Tracing = true
@@ -254,6 +262,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = false
+				o.ForwardPromptTokenIDs = true // from forward-prompt-token-ids: true in the inline YAML
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -275,6 +284,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.PrefillMaxRetries = 2
 				o.PrefillRetryBackoff = 300 * time.Millisecond
+				o.PrefillTimeout = 150 * time.Millisecond
 
 				o.DecodeChunkSize = 256
 				o.Tracing = true
@@ -306,6 +316,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				ecConnector:               constants.ECExampleConnector,
 				enableSSRFProtection:      true,
 				enablePrefillerSampling:   true,
+				forwardPromptTokenIDs:     false, // overrides forward-prompt-token-ids: true in the file YAML
 				enableTLS:                 &[]string{prefillStage},
 				tlsInsecureSkipVerify:     &[]string{prefillStage},
 				secureServing:             false,
@@ -329,6 +340,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = true
+				o.ForwardPromptTokenIDs = false
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -350,6 +362,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.PrefillMaxRetries = 3
 				o.PrefillRetryBackoff = 500 * time.Millisecond
+				o.PrefillTimeout = 5 * time.Second
 
 				o.DecodeChunkSize = 128
 				o.Tracing = true
@@ -425,6 +438,15 @@ func TestSidecarConfiguration(t *testing.T) {
 			compareOptions(t, expected, opts)
 		})
 	}
+}
+
+func TestDecodeChunkSizeFlagDeprecated(t *testing.T) {
+	_, fs := newTestOptions(t)
+
+	decodeChunkSizeFlag := fs.Lookup(decodeChunkSize)
+	require.NotNil(t, decodeChunkSizeFlag)
+	require.Contains(t, decodeChunkSizeFlag.Usage, "Deprecated")
+	require.False(t, decodeChunkSizeFlag.Hidden, "a deprecated flag without a replacement stays visible in help")
 }
 
 func TestSecureServingFlag(t *testing.T) {
@@ -505,6 +527,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual(enableSSRFProtection, expected.EnableSSRFProtection, actual.EnableSSRFProtection)
 	assertEqual(enablePrefillerSampling, expected.EnablePrefillerSampling, actual.EnablePrefillerSampling)
 	assertEqual(enableP2PPull, expected.EnableP2PPull, actual.EnableP2PPull)
+	assertEqual(forwardPromptTokenIDs, expected.ForwardPromptTokenIDs, actual.ForwardPromptTokenIDs)
 
 	assertEqual("UseTLSForPrefiller", expected.UseTLSForPrefiller, actual.UseTLSForPrefiller)
 	assertEqual("UseTLSForDecoder", expected.UseTLSForDecoder, actual.UseTLSForDecoder)
@@ -527,6 +550,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 
 	assertEqual(prefillMaxRetries, expected.PrefillMaxRetries, actual.PrefillMaxRetries)
 	assertEqual(prefillRetryBackoff, expected.PrefillRetryBackoff, actual.PrefillRetryBackoff)
+	assertEqual(prefillTimeout, expected.PrefillTimeout, actual.PrefillTimeout)
 
 	assertEqual(decodeChunkSize, expected.DecodeChunkSize, actual.DecodeChunkSize)
 	assertEqual(tracingFlag, expected.Tracing, actual.Tracing)
@@ -664,30 +688,6 @@ func TestToolCallingTelemetryOption(t *testing.T) {
 	require.True(t, opts.EnableToolCallingTelemetry)
 }
 
-func TestP2PConnectorPort(t *testing.T) {
-	t.Run("defaults to 7777", func(t *testing.T) {
-		opts := NewOptions()
-		require.NoError(t, opts.Complete())
-		require.NoError(t, opts.Validate())
-		require.Equal(t, defaultP2PConnectorPort, opts.P2PConnectorPort)
-	})
-
-	t.Run("env var overrides default", func(t *testing.T) {
-		t.Setenv(envP2PConnectorPort, "9500")
-		opts := NewOptions()
-		require.NoError(t, opts.Complete())
-		require.NoError(t, opts.Validate())
-		require.Equal(t, 9500, opts.P2PConnectorPort)
-	})
-
-	t.Run("rejects out-of-range port", func(t *testing.T) {
-		opts := NewOptions()
-		opts.P2PConnectorPort = 70000
-		require.NoError(t, opts.Complete())
-		require.ErrorContains(t, opts.Validate(), "--p2p-connector-port must be between 1 and 65535")
-	})
-}
-
 func TestECMooncakeOptions(t *testing.T) {
 	t.Run("defaults to vLLM's ec_port and POD_IP", func(t *testing.T) {
 		t.Setenv("POD_IP", "10.0.0.9")
@@ -742,24 +742,6 @@ func TestValidateOffloadingDP(t *testing.T) {
 		opts := NewOptions()
 		opts.KVConnector = constants.KVConnectorOffloading
 		opts.DataParallelSize = 1
-		require.NoError(t, opts.Complete())
-		require.NoError(t, opts.Validate())
-	})
-
-	t.Run("rejects a rank port beyond 65535", func(t *testing.T) {
-		opts := NewOptions()
-		opts.KVConnector = constants.KVConnectorOffloading
-		opts.DataParallelSize = 4
-		opts.P2PConnectorPort = 65533
-		require.NoError(t, opts.Complete())
-		require.ErrorContains(t, opts.Validate(), "exceeds 65535")
-	})
-
-	t.Run("allows the highest rank port at 65535", func(t *testing.T) {
-		opts := NewOptions()
-		opts.KVConnector = constants.KVConnectorOffloading
-		opts.DataParallelSize = 4
-		opts.P2PConnectorPort = 65532
 		require.NoError(t, opts.Complete())
 		require.NoError(t, opts.Validate())
 	})
@@ -890,6 +872,30 @@ func TestValidateDataParallelSize(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := NewOptions()
 			opts.DataParallelSize = tt.dataParallelSize
+			_ = opts.Complete()
+			err := opts.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatePrefillTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		wantErr bool
+	}{
+		{"zero disables it", 0, false},
+		{"positive valid", 5 * time.Second, false},
+		{"negative invalid", -time.Second, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.PrefillTimeout = tt.timeout
 			_ = opts.Complete()
 			err := opts.Validate()
 			if (err != nil) != tt.wantErr {
@@ -1473,9 +1479,71 @@ func TestCompleteTLSServingProfile(t *testing.T) {
 			expectedError: `below the TLS 1.2 minimum`,
 		},
 		{
+			name:               "VersionTLS12",
+			flags:              []string{"--tls-min-version=VersionTLS12"},
+			expectedMinVersion: tls.VersionTLS12,
+		},
+		{
+			name:          "TLS1.2 is not a version name",
+			flags:         []string{"--tls-min-version=TLS1.2"},
+			expectedError: "unknown TLS version",
+		},
+		{
+			name:          "lowercase versiontls12",
+			flags:         []string{"--tls-min-version=versiontls12"},
+			expectedError: "unknown TLS version",
+		},
+		{
+			name:                 "single cipher",
+			flags:                []string{"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"},
+			expectedCipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			name:                 "leading space cipher",
+			flags:                []string{"--tls-cipher-suites= TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"},
+			expectedCipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			name:  "space after comma",
+			flags: []string{"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
+			expectedCipherSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			},
+		},
+		{
+			name:                 "trailing comma",
+			flags:                []string{"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,"},
+			expectedCipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			// Stays nil so tls.Config falls back to its defaults; a non-nil empty slice would disable every TLS 1.2 suite.
+			name:  "only empty elements",
+			flags: []string{"--tls-cipher-suites=,"},
+		},
+		{
+			name:  "unset",
+			flags: []string{},
+		},
+		{
+			name:                 "legacy CHACHA20 alias",
+			flags:                []string{"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"},
+			expectedCipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256},
+		},
+		{
 			name:          "invalid cipher suite",
 			flags:         []string{"--tls-cipher-suites=FAKE_CIPHER_SUITE"},
-			expectedError: `invalid tls-cipher-suites: unknown cipher suite "FAKE_CIPHER_SUITE"`,
+			expectedError: `invalid tls-cipher-suites: Cipher suite FAKE_CIPHER_SUITE not supported or doesn't exist`,
+		},
+		{
+			name:          "insecure cipher suite",
+			flags:         []string{"--tls-cipher-suites=TLS_RSA_WITH_RC4_128_SHA"},
+			expectedError: `invalid tls-cipher-suites: insecure cipher suite "TLS_RSA_WITH_RC4_128_SHA"`,
+		},
+		{
+			name:          "insecure cipher suite among secure ones",
+			flags:         []string{"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"},
+			expectedError: `invalid tls-cipher-suites: insecure cipher suite "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"`,
 		},
 	}
 
@@ -1505,6 +1573,16 @@ func TestCompleteTLSServingProfileFromYAML(t *testing.T) {
 
 	require.NoError(t, opts.Complete())
 	require.Equal(t, uint16(tls.VersionTLS12), opts.TLSMinVersion)
+	require.Equal(t, []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}, opts.TLSCipherSuites)
+}
+
+func TestCompleteTLSServingProfileFromYAMLSpacePadded(t *testing.T) {
+	opts, flagSet := newTestOptions(t)
+	require.NoError(t, flagSet.Parse([]string{
+		`--configuration={tls-cipher-suites: [" TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"]}`,
+	}))
+
+	require.NoError(t, opts.Complete())
 	require.Equal(t, []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}, opts.TLSCipherSuites)
 }
 

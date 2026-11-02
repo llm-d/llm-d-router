@@ -31,12 +31,12 @@ func LeaderElection(runnable manager.Runnable, needsLeaderElection bool) manager
 	}
 }
 
-// RequireLeaderElection wraps the given runnable, marking it as not requiring leader election.
+// NoLeaderElection wraps the given runnable, marking it as not requiring leader election.
 func NoLeaderElection(runnable manager.Runnable) manager.Runnable {
 	return LeaderElection(runnable, false)
 }
 
-// NeedLeaderElection implements manager.NeedLeaderElection interface.
+// NeedLeaderElection implements the manager.LeaderElectionRunnable interface.
 func (r *leaderElection) NeedLeaderElection() bool {
 	return r.needsLeaderElection
 }

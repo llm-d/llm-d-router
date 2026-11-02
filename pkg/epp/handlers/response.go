@@ -20,6 +20,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"strconv"
 	"strings"
 	"time"
@@ -30,8 +31,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -78,8 +82,11 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 
 	var parsedResp *fwkrh.ParsedResponse
 	parseBytes := responseBytes
-	if isEventStream(reqCtx.Response.Headers[reqcommon.HeaderContentType]) {
+	contentType := reqCtx.Response.Headers[reqcommon.HeaderContentType]
+	if isEventStream(contentType) {
 		parseBytes = completeSSELines(ctx, reqCtx, responseBytes, endOfStream)
+	} else if grpcframe.IsContentType(contentType) {
+		parseBytes = completeGRPCFrames(ctx, reqCtx, responseBytes, endOfStream)
 	}
 	parser, err := s.getOrResolveParser(reqCtx)
 	if err != nil {
@@ -97,6 +104,19 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
+		if parsedResp.DisjointInputTokens != nil {
+			mergeDisjointInput(&reqCtx.Usage, &reqCtx.disjointInput, *parsedResp.DisjointInputTokens)
+		}
+	}
+	// Usage salvaged from dropped oversized SSE lines is merged after the parser
+	// so a dropped line that follows a parsed usage line in the same chunk still
+	// wins, matching the parsers' "last usage event in a chunk wins" rule.
+	if reqCtx.salvagedUsage != nil {
+		mergeUsage(&reqCtx.Usage, *reqCtx.salvagedUsage)
+		reqCtx.salvagedUsage = nil
+	}
+	if endOfStream && parsedResp != nil && reqCtx.responseStatusCode == "" {
+		reqCtx.Completion = parsedResp.Completion
 	}
 	if endOfStream {
 		// Recorded once here rather than per chunk: a server reporting cumulative
@@ -124,23 +144,30 @@ const maxSSELineBytes = 4 << 20
 // isEventStream reports whether a content-type header value is text/event-stream.
 func isEventStream(contentType string) bool {
 	mediaType, _, _ := strings.Cut(contentType, ";")
-	return strings.EqualFold(strings.TrimSpace(mediaType), fwkrequest.MediaTypeEventStream)
+	return strings.EqualFold(strings.TrimSpace(mediaType), reqcommon.MediaTypeEventStream)
 }
 
 // completeSSELines returns only whole lines, carrying a partial last line to the next chunk.
-// A line longer than maxSSELineBytes is dropped up to its newline.
+// A line longer than maxSSELineBytes is dropped up to its newline, its usage salvaged.
 func completeSSELines(ctx context.Context, reqCtx *RequestContext, chunk []byte, endOfStream bool) []byte {
 	if reqCtx.sseLineDiscarding {
 		lineEnd := bytes.IndexByte(chunk, '\n')
 		if lineEnd < 0 {
+			salvageDroppedSSELine(ctx, reqCtx, chunk, endOfStream)
 			return nil
 		}
 		reqCtx.sseLineDiscarding = false
+		salvageDroppedSSELine(ctx, reqCtx, chunk[:lineEnd], true)
 		chunk = chunk[lineEnd+1:]
 	}
 	lineEnd := bytes.LastIndexByte(chunk, '\n')
 	if lineEnd < 0 {
 		if len(reqCtx.sseLineCarry)+len(chunk) > maxSSELineBytes {
+			// This chunk has no newline, so every byte still belongs to the
+			// dropped line. The newline that ends it arrives in a later chunk
+			// and finishes the salvage there.
+			salvageDroppedSSELine(ctx, reqCtx, reqCtx.sseLineCarry, false)
+			salvageDroppedSSELine(ctx, reqCtx, chunk, endOfStream)
 			dropSSELine(ctx, reqCtx, endOfStream)
 			return nil
 		}
@@ -159,19 +186,27 @@ func completeSSELines(ctx context.Context, reqCtx *RequestContext, chunk []byte,
 	}
 	reqCtx.sseLineCarry = nil
 	tail := chunk[lineEnd+1:]
+	// Drop oversized lines in data before salvaging the tail. The tail and the
+	// oversized lines inside data share one salvager, and the tail is fed first;
+	// running dropOversizedLines first lets each salvager see exactly one line
+	// instead of flushing a following oversized line into the still-open tail
+	// scan and losing both usages.
+	kept := dropOversizedLines(ctx, reqCtx, data)
 	switch {
 	case len(tail) > maxSSELineBytes:
+		salvageDroppedSSELine(ctx, reqCtx, tail, endOfStream)
 		dropSSELine(ctx, reqCtx, endOfStream)
 	case endOfStream:
-		data = append(data, tail...)
+		kept = append(kept, tail...)
 	case len(tail) > 0:
 		reqCtx.sseLineCarry = bytes.Clone(tail)
 	}
-	return dropOversizedLines(ctx, data)
+	return kept
 }
 
 // dropOversizedLines removes the lines of data longer than maxSSELineBytes, copying only when one is dropped.
-func dropOversizedLines(ctx context.Context, data []byte) []byte {
+// Each dropped line's usage is salvaged first.
+func dropOversizedLines(ctx context.Context, reqCtx *RequestContext, data []byte) []byte {
 	if len(data) <= maxSSELineBytes {
 		return data
 	}
@@ -184,6 +219,7 @@ func dropOversizedLines(ctx context.Context, data []byte) []byte {
 		}
 		line := data[start:end]
 		if len(bytes.TrimSuffix(line, []byte("\n"))) > maxSSELineBytes {
+			salvageDroppedSSELine(ctx, reqCtx, line, true)
 			if !dropped {
 				logSSELineDrop(ctx)
 				kept = append(kept, data[:start]...)
@@ -211,19 +247,228 @@ func logSSELineDrop(ctx context.Context) {
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized SSE line from response parsing", "limit", maxSSELineBytes)
 }
 
+// maxUsageFrameBytes caps the partial line held back while a requested usage
+// frame is removed. A usage-only frame is a few hundred bytes, so a longer line
+// is forwarded as it arrives rather than when its end does.
+const maxUsageFrameBytes = 64 << 10
+
+// dropRequestedUsageFrame returns the part of a streamed response chunk the
+// client receives. When the director requested usage the client did not ask
+// for, the usage-only frame the model server adds is removed.
+func (r *RequestContext) dropRequestedUsageFrame(chunk []byte, endOfStream bool) []byte {
+	if !r.StreamUsageRequested || !isEventStream(r.Response.Headers[reqcommon.HeaderContentType]) {
+		return chunk
+	}
+	return r.usageFrames.filter(chunk, endOfStream)
+}
+
+// usageFrameFilter removes the usage-only frame from a chat or completions
+// event stream, together with the blank line that ends its event. ext_proc
+// chunks split SSE lines at any byte, so a partial last line is held until the
+// rest of it arrives.
+type usageFrameFilter struct {
+	// carry is the partial last line of the previous chunk, not yet forwarded.
+	carry []byte
+	// passing is set while the rest of a line forwarded without a check arrives.
+	passing bool
+	// dropBlank is set after a dropped frame until the next line.
+	dropBlank bool
+}
+
+// filter returns the bytes of chunk to forward, copying only to drop a line or
+// to hold a partial one.
+func (f *usageFrameFilter) filter(chunk []byte, endOfStream bool) []byte {
+	data := chunk
+	hadCarry := len(f.carry) > 0
+	if hadCarry {
+		data = append(f.carry, data...)
+		f.carry = nil
+	}
+	var kept []byte
+	dropped := false
+	pos := 0
+	for pos < len(data) {
+		rest := data[pos:]
+		n := bytes.IndexByte(rest, '\n') + 1
+		whole := n > 0
+		if !whole {
+			if !endOfStream && !f.passing && len(rest) <= maxUsageFrameBytes {
+				if pos == 0 && hadCarry {
+					// data grew from the hold, so retaining it keeps the spare
+					// capacity and the next chunk appends in place.
+					f.carry = data
+				} else {
+					f.carry = bytes.Clone(rest)
+				}
+				break
+			}
+			n = len(rest)
+		}
+		line := rest[:n]
+		// An oversized partial line is forwarded before its end arrives, so it
+		// cannot be dropped; checking it would scan and parse truncated JSON.
+		var drop bool
+		if !whole && !endOfStream {
+			f.dropBlank = false
+		} else {
+			drop = f.drop(line)
+		}
+		if !whole {
+			f.passing = !endOfStream
+		}
+		if drop && !dropped {
+			kept = append(make([]byte, 0, len(data)), data[:pos]...)
+			dropped = true
+		} else if !drop && dropped {
+			kept = append(kept, line...)
+		}
+		pos += n
+	}
+	if dropped {
+		return kept
+	}
+	return data[:pos]
+}
+
+// drop reports whether line is removed: the usage-only frame, or the blank
+// line right after one.
+func (f *usageFrameFilter) drop(line []byte) bool {
+	if f.passing {
+		f.passing = false
+		return false
+	}
+	if f.dropBlank {
+		f.dropBlank = false
+		if len(bytes.TrimRight(line, "\r\n")) == 0 {
+			return true
+		}
+	}
+	if usage.UsageOnlyFrame(line) {
+		f.dropBlank = true
+		return true
+	}
+	return false
+}
+
+// maxGRPCFrameBytes caps one buffered gRPC message payload during response parsing.
+const maxGRPCFrameBytes = 4 << 20
+
+// completeGRPCFrames returns contiguous complete gRPC frames from chunk, carrying any
+// trailing partial frame to the next chunk. Frames whose payload exceeds maxGRPCFrameBytes
+// are skipped by exact byte length without buffering so later frames stay aligned.
+func completeGRPCFrames(ctx context.Context, reqCtx *RequestContext, chunk []byte, endOfStream bool) []byte {
+	if reqCtx.grpcStreamCorrupted {
+		return nil
+	}
+	if reqCtx.grpcFrameSkipRemaining > 0 {
+		if uint64(len(chunk)) < reqCtx.grpcFrameSkipRemaining {
+			reqCtx.grpcFrameSkipRemaining -= uint64(len(chunk))
+			if endOfStream {
+				reqCtx.grpcFrameSkipRemaining = 0
+			}
+			return nil
+		}
+		chunk = chunk[reqCtx.grpcFrameSkipRemaining:]
+		reqCtx.grpcFrameSkipRemaining = 0
+	}
+
+	hadCarry := len(reqCtx.grpcFrameCarry) > 0
+	data := chunk
+	if hadCarry {
+		reqCtx.grpcFrameCarry = append(reqCtx.grpcFrameCarry, chunk...)
+		data = reqCtx.grpcFrameCarry
+		reqCtx.grpcFrameCarry = nil
+	}
+
+	var kept []byte
+	copied := false
+	offset := 0
+	for offset < len(data) {
+		rem := data[offset:]
+		if len(rem) < grpcframe.HeaderLen {
+			kept, offset = finishPartialGRPCFrame(reqCtx, rem, kept, offset, len(data), offset == 0 && hadCarry, copied, endOfStream)
+			break
+		}
+		if rem[0] != 0 {
+			reqCtx.grpcStreamCorrupted = true
+			if copied {
+				kept = append(kept, rem...)
+			} else {
+				offset = len(data)
+			}
+			break
+		}
+		msgLen := binary.BigEndian.Uint32(rem[1:grpcframe.HeaderLen])
+		frameLen := uint64(grpcframe.HeaderLen) + uint64(msgLen)
+		if msgLen > maxGRPCFrameBytes {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized gRPC frame from response parsing", "limit", maxGRPCFrameBytes)
+			if !copied {
+				kept = append(kept, data[:offset]...)
+				copied = true
+			}
+			if uint64(len(rem)) < frameLen {
+				if !endOfStream {
+					reqCtx.grpcFrameSkipRemaining = frameLen - uint64(len(rem))
+				}
+				break
+			}
+			payload := rem[grpcframe.HeaderLen : grpcframe.HeaderLen+msgLen]
+			offset += grpcframe.HeaderLen + len(payload)
+			continue
+		}
+		if uint64(len(rem)) < frameLen {
+			kept, offset = finishPartialGRPCFrame(reqCtx, rem, kept, offset, len(data), offset == 0 && hadCarry, copied, endOfStream)
+			break
+		}
+		payload := rem[grpcframe.HeaderLen : grpcframe.HeaderLen+msgLen]
+		step := grpcframe.HeaderLen + len(payload)
+		if copied {
+			kept = append(kept, rem[:step]...)
+		}
+		offset += step
+	}
+	if copied {
+		return kept
+	}
+	return data[:offset]
+}
+
+func finishPartialGRPCFrame(
+	reqCtx *RequestContext,
+	rem, kept []byte,
+	offset, dataLen int,
+	reuseCarry, copied, endOfStream bool,
+) ([]byte, int) {
+	switch {
+	case endOfStream && copied:
+		return append(kept, rem...), offset
+	case endOfStream:
+		return kept, dataLen
+	case reuseCarry:
+		reqCtx.grpcFrameCarry = rem
+	default:
+		reqCtx.grpcFrameCarry = bytes.Clone(rem)
+	}
+	return kept, offset
+}
+
 // mergeUsage folds a parsed usage block into the usage accumulated for the request.
 // Anthropic streaming reports usage on message_start and again on message_delta, and a
 // block may carry only some of the fields, so a zero is read as "not reported" and
 // leaves the accumulated value alone. Parsers that emit usage once with every field
 // populated are unaffected.
-func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
+func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 	if src.PromptTokens != 0 {
 		dst.PromptTokens = src.PromptTokens
 	}
 	if src.CompletionTokens != 0 {
 		dst.CompletionTokens = src.CompletionTokens
 	}
-	if src.PromptTokenDetails != nil {
+	// Each response chunk is parsed into a fresh Usage, so a later frame that
+	// serializes a placeholder zero would otherwise replace a cache count an
+	// earlier chunk reported. A zero only fills in a count that is still unknown.
+	if src.PromptTokenDetails != nil &&
+		(src.PromptTokenDetails.CachedTokens != 0 || dst.PromptTokenDetails == nil) {
 		dst.PromptTokenDetails = src.PromptTokenDetails
 	}
 	// A block reporting both halves of the usage owns the total it came with; a partial
@@ -235,6 +480,26 @@ func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
 	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
 }
 
+// mergeDisjointInput folds the input buckets of one chunk into acc and derives the
+// prompt and total from them. A chunk's PromptTokens and TotalTokens cover only the
+// buckets that chunk reported, so mergeUsage alone undercounts when message_delta
+// omits the cache buckets message_start reported in an earlier chunk.
+func mergeDisjointInput(dst *fwkrequest.Usage, acc *fwkrh.DisjointInputTokens, src fwkrh.DisjointInputTokens) {
+	if src.Uncached > 0 {
+		acc.Uncached = src.Uncached
+	}
+	if src.CacheRead > 0 {
+		acc.CacheRead = src.CacheRead
+	}
+	if src.CacheCreation > 0 {
+		acc.CacheCreation = src.CacheCreation
+	}
+	if prompt := acc.Uncached + acc.CacheRead + acc.CacheCreation; prompt > 0 {
+		dst.PromptTokens = prompt
+	}
+	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
+}
+
 func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *RequestContext, resp *extProcPb.ProcessingRequest_ResponseHeaders) *RequestContext {
 	for _, header := range resp.ResponseHeaders.Headers.Headers {
 		reqCtx.Response.Headers[header.Key] = envoy.GetHeaderValue(header)
@@ -242,14 +507,20 @@ func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *Req
 	return s.director.HandleResponseHeader(ctx, reqCtx)
 }
 
+// generateResponseHeaderResponse re-sets the response headers after the
+// response plugins ran. The failed-stage marker the plugins read is left out,
+// and removed from the upstream set when the response carried one, so the
+// client never sees it.
 func (s *StreamingServer) generateResponseHeaderResponse(reqCtx *RequestContext) *extProcPb.ProcessingResponse {
+	mutation := &extProcPb.HeaderMutation{SetHeaders: s.generateResponseHeaders(reqCtx)}
+	if _, ok := reqCtx.Response.Headers[routing.FailedStageHeader]; ok {
+		mutation.RemoveHeaders = []string{routing.FailedStageHeader}
+	}
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &extProcPb.HeadersResponse{
 				Response: &extProcPb.CommonResponse{
-					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: s.generateResponseHeaders(reqCtx),
-					},
+					HeaderMutation: mutation,
 				},
 			},
 		},
@@ -301,9 +572,10 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 		})
 	}
 
-	// Include any non-system-owned headers.
+	// Include any non-system-owned headers. The failed-stage marker is
+	// internal; generateResponseHeaderResponse removes it.
 	for key, value := range reqCtx.Response.Headers {
-		if request.IsSystemOwnedHeader(key) {
+		if request.IsSystemOwnedHeader(key) || key == routing.FailedStageHeader {
 			continue
 		}
 		headers = append(headers, &configPb.HeaderValueOption{

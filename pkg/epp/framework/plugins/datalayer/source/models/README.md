@@ -20,8 +20,9 @@ The Models Data Source polls inference server pods for model information and pas
 - `scheme` (string, optional, default: `"http"`): Protocol scheme: `"http"` or `"https"`.
 - `path` (string, optional, default: `"/v1/models"`): URL path for the models API endpoint.
 - `insecureSkipVerify` (bool, optional, default: `true`): Skip TLS certificate verification.
-- `caCertPath` (string, optional): PEM CA bundle to verify the target's server cert.
-- `clientCertPath` / `clientKeyPath` (string, optional): client certificate for mTLS. Set both together.
+- `caCertPath` (string, optional): PEM CA bundle to verify the target's server cert. Setting it enables verification regardless of `insecureSkipVerify`.
+- `clientCertPath` / `clientKeyPath` (string, optional): client certificate for mTLS. Set both together. A rotated
+  certificate is picked up without a restart; the CA bundle is read once at startup.
 - `interval` (string, optional): Scrape period (e.g. `"5s"`). Rounded to the nearest
   multiple of `--refresh-metrics-interval` (default 50ms). Omit to scrape every
   base tick.

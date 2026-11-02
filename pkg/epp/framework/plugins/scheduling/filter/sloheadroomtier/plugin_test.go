@@ -20,6 +20,7 @@ package sloheadroomtier
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,11 +35,23 @@ func makeEndpoint(name string, ttftHeadroom, tpotHeadroom float64, hasPrediction
 	meta := &fwkdl.EndpointMetadata{
 		ID: types.NamespacedName{Name: name, Namespace: "default"},
 	}
-	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{}, fwkdl.NewAttributes())
+	ep := fwksched.NewEndpoint(meta, &fwkdl.Metrics{UpdateTime: time.Now()}, fwkdl.NewAttributes())
 	if hasPrediction {
 		ep.Put(attrlatency.LatencyPredictionInfoDataKey, attrlatency.NewLatencyPredictionInfo(
 			ttftHeadroom >= 0, tpotHeadroom >= 0, ttftHeadroom, tpotHeadroom, 100, 10, 0))
 	}
+	return ep
+}
+
+// makeNeverScrapedEndpoint returns an endpoint whose metrics were never scraped,
+// carrying a prediction with the given headroom.
+func makeNeverScrapedEndpoint(name string, ttftHeadroom, tpotHeadroom float64) fwksched.Endpoint {
+	meta := &fwkdl.EndpointMetadata{
+		ID: types.NamespacedName{Name: name, Namespace: "default"},
+	}
+	ep := fwksched.NewEndpoint(meta, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	ep.Put(attrlatency.LatencyPredictionInfoDataKey, attrlatency.NewLatencyPredictionInfo(
+		ttftHeadroom >= 0, tpotHeadroom >= 0, ttftHeadroom, tpotHeadroom, 100, 10, 0))
 	return ep
 }
 
@@ -134,4 +147,22 @@ func TestFactory_InvalidEpsilon(t *testing.T) {
 	_, err := Factory("test", fwkplugin.StrictDecoder([]byte(`{"epsilonExploreNeg": 1.5}`)), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "epsilonExploreNeg must be in [0, 1]")
+}
+
+func TestFilter_NeverScrapedPredictionIsNotTrusted(t *testing.T) {
+	p := newTestPlugin(Config{EpsilonExploreNeg: 0})
+	endpoints := []fwksched.Endpoint{
+		makeEndpoint("busy1", -100, -50, true),
+		makeEndpoint("busy2", -200, -80, true),
+		makeNeverScrapedEndpoint("never-scraped", 100, 50),
+	}
+	result := p.Filter(context.Background(), nil, endpoints)
+	assert.Equal(t, 3, len(result), "a prediction made from never-scraped metrics should not form the positive tier on its own")
+
+	onlyNeverScraped := []fwksched.Endpoint{
+		makeNeverScrapedEndpoint("a", 100, 50),
+		makeNeverScrapedEndpoint("b", -100, -50),
+	}
+	result = p.Filter(context.Background(), nil, onlyNeverScraped)
+	assert.Equal(t, 2, len(result), "with no scraped endpoint, every endpoint should be kept")
 }

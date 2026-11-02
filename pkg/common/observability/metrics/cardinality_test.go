@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -35,6 +36,33 @@ func TestBoundedLabel(t *testing.T) {
 	require.Equal(t, "a", b.Bound("a"), "already-admitted value still returns itself after cap")
 	require.Equal(t, OverflowValue, b.Bound("d"), "further unseen values keep collapsing")
 	require.Equal(t, "", b.Bound(""), "empty value passes through without consuming a slot")
+}
+
+// Request headers can carry bytes that are not valid UTF-8, and Prometheus
+// panics on such a label value. Oversized values must not be retained for the
+// process lifetime either. Both fold to the overflow value without consuming a
+// cap slot.
+func TestBoundedLabelRejectsInvalidAndOversizedValues(t *testing.T) {
+	b := NewBoundedLabel(2)
+
+	invalid := "model\xff"
+	oversized := strings.Repeat("m", MaxLabelValueLength+1)
+	atLimit := strings.Repeat("m", MaxLabelValueLength)
+
+	got, overflow := b.BoundWithOverflow(invalid)
+	require.Equal(t, OverflowValue, got, "non-UTF-8 value folds to overflow")
+	require.True(t, overflow)
+
+	got, overflow = b.BoundWithOverflow(oversized)
+	require.Equal(t, OverflowValue, got, "value longer than MaxLabelValueLength folds to overflow")
+	require.True(t, overflow)
+
+	require.Equal(t, atLimit, b.Bound(atLimit), "value at MaxLabelValueLength is admitted")
+	require.Equal(t, "a", b.Bound("a"), "rejected values did not consume a cap slot")
+	require.Equal(t, OverflowValue, b.Bound("c"), "cap is now full")
+
+	b.Pin(invalid)
+	require.Equal(t, OverflowValue, b.Bound(invalid), "pinning does not admit a non-UTF-8 value")
 }
 
 // Pinned names model operator-configured values (for example EPP's
@@ -159,4 +187,82 @@ func TestFairnessIDLimitPinsDefaultFlow(t *testing.T) {
 
 	SetFairnessIDLabelLimit(0)
 	require.Equal(t, OverflowValue, BoundFairnessID(request.DefaultFairnessID))
+}
+
+// An operator-configured fairness ID stays visible once client IDs fill the cap
+// and takes no cap slot, whether it is pinned before or after the limit is set.
+func TestPinFairnessID(t *testing.T) {
+	resetFairnessPins(t)
+
+	SetFairnessIDLabelLimit(1)
+	PinFairnessID("configured")
+	require.Equal(t, "first", BoundFairnessID("first"), "pin does not consume the cap slot")
+	require.Equal(t, OverflowValue, BoundFairnessID("second"))
+	got, overflow := BoundFairnessIDWithOverflow("configured")
+	require.Equal(t, "configured", got)
+	require.False(t, overflow)
+
+	// Startup builds plugins, which pin, before it applies the flag's limit.
+	SetFairnessIDLabelLimit(1)
+	require.Equal(t, "first", BoundFairnessID("first"))
+	require.Equal(t, OverflowValue, BoundFairnessID("second"))
+	require.Equal(t, "configured", BoundFairnessID("configured"))
+
+	// A limit of 0 turns per-ID labels off for pinned IDs too.
+	SetFairnessIDLabelLimit(0)
+	require.Equal(t, OverflowValue, BoundFairnessID("configured"))
+	PinFairnessID("pinned-at-zero")
+	require.Equal(t, OverflowValue, BoundFairnessID("pinned-at-zero"))
+
+	// A pin made at 0 takes effect once the limit is raised.
+	SetFairnessIDLabelLimit(1)
+	require.Equal(t, "first", BoundFairnessID("first"))
+	require.Equal(t, "pinned-at-zero", BoundFairnessID("pinned-at-zero"))
+}
+
+// A fairness ID that equals the overflow value is not pinned, so it still counts
+// as overflow once the cap is full.
+func TestPinFairnessIDSkipsOverflowValue(t *testing.T) {
+	resetFairnessPins(t)
+
+	SetFairnessIDLabelLimit(1)
+	PinFairnessID(OverflowValue)
+	require.Equal(t, "first", BoundFairnessID("first"))
+	_, overflow := BoundFairnessIDWithOverflow(OverflowValue)
+	require.True(t, overflow)
+}
+
+// PinFairnessID records only IDs the cap can emit as their own label value.
+func TestPinFairnessIDIgnoresUnemittableIDs(t *testing.T) {
+	resetFairnessPins(t)
+
+	SetFairnessIDLabelLimit(1)
+	long := strings.Repeat("a", MaxLabelValueLength+1)
+	for _, id := range []string{"", OverflowValue, long, "bad-\xff"} {
+		PinFairnessID(id)
+	}
+	require.Equal(t, 0, PinnedFairnessIDCount())
+	require.Equal(t, OverflowValue, BoundFairnessID(long))
+}
+
+// PinnedFairnessIDCount counts each pinned ID once.
+func TestPinnedFairnessIDCountCountsDistinctIDs(t *testing.T) {
+	resetFairnessPins(t)
+
+	PinFairnessID("a")
+	PinFairnessID("a")
+	PinFairnessID("b")
+	require.Equal(t, 2, PinnedFairnessIDCount())
+}
+
+// resetFairnessPins drops the pins a test made, which otherwise last for the
+// rest of the test binary.
+func resetFairnessPins(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		fairnessPinsMu.Lock()
+		fairnessPins = map[string]struct{}{}
+		fairnessPinsMu.Unlock()
+		SetFairnessIDLabelLimit(DefaultFairnessIDLabelLimit)
+	})
 }

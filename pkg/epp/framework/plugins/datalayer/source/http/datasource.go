@@ -34,8 +34,10 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -56,6 +58,8 @@ type HTTPDataSource[T any] struct {
 	typedName fwkplugin.TypedName
 	scheme    string
 	path      string
+	// rawQuery is the query string of the configured path, if any.
+	rawQuery string
 	// portOverride, when non-zero, replaces the port in the endpoint's
 	// MetricsHost with this value. This allows a source to target a
 	// different port on the same pod (e.g. DCGM Exporter on :9400)
@@ -76,6 +80,10 @@ type HTTPDataSource[T any] struct {
 
 	mu   sync.RWMutex
 	exts []fwkdl.PollingExtractor[T]
+
+	// certWatcher, when set, hot-reloads the mTLS client certificate. Start runs it.
+	certWatcher *certwatcher.CertWatcher
+	startOnce   sync.Once
 }
 
 // TLSOptions configures the https transport. The zero value verifies the target
@@ -87,11 +95,13 @@ type HTTPDataSource[T any] struct {
 // independently verified the target identity; do not use SkipVerify to talk to
 // endpoints whose certificate cannot be authenticated out of band.
 type TLSOptions struct {
-	// SkipVerify disables verification of the target's server certificate.
-	// See the TLSOptions doc for the threat model this assumes.
+	// SkipVerify disables verification of the target's server certificate
+	// when CACertPath is empty. See the TLSOptions doc for the threat model
+	// this assumes.
 	SkipVerify bool
 	// CACertPath is a PEM CA bundle used to verify the target instead of the
-	// system pool. Ignored when SkipVerify is set. Must be an absolute path.
+	// system pool. Setting it enables verification even when SkipVerify is set.
+	// Must be an absolute path.
 	CACertPath string
 	// ClientCertPath and ClientKeyPath present a client certificate for mTLS.
 	// Both must be set together. Paths must be absolute.
@@ -106,6 +116,7 @@ type options struct {
 	portOverride   int
 	useNodeAddress bool
 	interval       time.Duration
+	proxyURL       *url.URL
 	onExtractor    func(fwkplugin.Plugin)
 }
 
@@ -128,6 +139,31 @@ func WithUseNodeAddress() Option {
 // every base tick (the default).
 func WithInterval(d time.Duration) Option {
 	return func(o *options) { o.interval = d }
+}
+
+// WithProxyURL sends the source's requests through the HTTP proxy at proxyURL
+// instead of dialing the endpoint. The request still names the endpoint, so a
+// proxy such as a sidecar that adds mTLS can forward it. Other sources keep
+// dialing directly.
+func WithProxyURL(proxyURL *url.URL) Option {
+	return func(o *options) { o.proxyURL = proxyURL }
+}
+
+// ParseProxyURLOption parses a proxy URL from plugin parameters and returns a
+// WithProxyURL Option. An empty string returns a no-op Option so callers can
+// always append the result.
+func ParseProxyURLOption(raw string) (Option, error) {
+	if raw == "" {
+		return func(*options) {}, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL %q: %w", raw, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("invalid proxy URL %q: must be http:// or https:// with a host", raw)
+	}
+	return WithProxyURL(u), nil
 }
 
 // WithExtractorObserver calls fn with each extractor bound to the source, so a source can
@@ -178,33 +214,101 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	if cfg.interval < 0 {
 		return nil, fmt.Errorf("interval must be non-negative, got %s", cfg.interval)
 	}
+	target, err := url.Parse(path)
+	if err == nil {
+		_, err = url.ParseQuery(target.RawQuery)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid path %q: %w", path, err)
+	}
+	if target.Scheme != "" || target.Opaque != "" || target.User != nil || target.Host != "" || target.Fragment != "" {
+		return nil, fmt.Errorf("invalid path %q: must be a URL path with optional query string", path)
+	}
 
 	cl := &client{
 		Client: http.Client{
 			Timeout:   timeout,
 			Transport: baseTransport,
+			// A scraped endpoint picks the redirect target, so following one would let
+			// a pod point the scrape at any address the EPP can reach.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
-	if scheme == "https" {
-		tlsCfg, err := tlsClientConfig(tlsOpts)
-		if err != nil {
-			return nil, err
+	var watcher *certwatcher.CertWatcher
+	if scheme == "https" || cfg.proxyURL != nil {
+		// baseTransport is shared by every source; a source that changes it gets a copy.
+		transport := baseTransport.Clone()
+		if scheme == "https" {
+			tlsCfg, cw, err := tlsClientConfig(tlsOpts)
+			if err != nil {
+				return nil, err
+			}
+			transport.TLSClientConfig = tlsCfg
+			watcher = cw
 		}
-		httpsTransport := baseTransport.Clone()
-		httpsTransport.TLSClientConfig = tlsCfg
-		cl.Transport = httpsTransport
+		if cfg.proxyURL != nil {
+			transport.Proxy = http.ProxyURL(cfg.proxyURL)
+		}
+		cl.Transport = transport
+		if watcher != nil {
+			rt := &rotatingTransport{}
+			rt.current.Store(transport)
+			watcher.RegisterCallback(func(tls.Certificate) { rt.rotate() })
+			cl.Transport = rt
+		}
 	}
 	return &HTTPDataSource[T]{
 		typedName:      fwkplugin.TypedName{Type: pluginType, Name: pluginName},
 		scheme:         scheme,
-		path:           path,
+		path:           target.Path,
+		rawQuery:       target.RawQuery,
 		portOverride:   cfg.portOverride,
 		useNodeAddress: cfg.useNodeAddress,
 		interval:       cfg.interval,
 		onExtractor:    cfg.onExtractor,
 		client:         cl,
 		parser:         parser,
+		certWatcher:    watcher,
 	}, nil
+}
+
+// rotatingTransport delegates to a transport that is replaced whenever the client
+// certificate rotates, so keep-alive connections handshaken with the previous
+// certificate are not reused. Connections in flight at rotation finish on the old
+// transport and are then reaped by its idle timeout.
+type rotatingTransport struct {
+	mu      sync.Mutex // serializes rotate
+	current atomic.Pointer[http.Transport]
+}
+
+func (t *rotatingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.current.Load().RoundTrip(req)
+}
+
+func (t *rotatingTransport) rotate() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	old := t.current.Load()
+	t.current.Store(old.Clone())
+	old.CloseIdleConnections()
+}
+
+// Start runs the client certificate watcher, if any, until ctx is done. It does
+// not block, and calls after the first are no-ops.
+func (s *HTTPDataSource[T]) Start(ctx context.Context) error {
+	if s.certWatcher == nil {
+		return nil
+	}
+	s.startOnce.Do(func() {
+		go func() {
+			if err := s.certWatcher.Start(ctx); err != nil {
+				log.FromContext(ctx).Error(err, "client certificate watcher stopped", "source", s.typedName)
+			}
+		}()
+	})
+	return nil
 }
 
 var (
@@ -229,24 +333,29 @@ func caCertPool(path string) (*x509.CertPool, error) {
 }
 
 // tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
-// system pool), plus an mTLS client certificate when ClientCertPath is set.
-func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
-	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
-	if !opts.SkipVerify && opts.CACertPath != "" {
+// system pool), plus an mTLS client certificate when ClientCertPath is set. The
+// client certificate is served from the returned watcher so rotations on disk are
+// picked up once it is started; the CA pool is loaded once.
+func tlsClientConfig(opts TLSOptions) (*tls.Config, *certwatcher.CertWatcher, error) {
+	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify && opts.CACertPath == ""} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
+	if opts.CACertPath != "" {
 		pool, err := caCertPool(opts.CACertPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		cfg.RootCAs = pool
 	}
-	if opts.ClientCertPath != "" || opts.ClientKeyPath != "" {
-		cert, err := tls.LoadX509KeyPair(opts.ClientCertPath, opts.ClientKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
-		}
-		cfg.Certificates = []tls.Certificate{cert}
+	if opts.ClientCertPath == "" && opts.ClientKeyPath == "" {
+		return cfg, nil, nil
 	}
-	return cfg, nil
+	cw, err := certwatcher.New(opts.ClientCertPath, opts.ClientKeyPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
+	}
+	cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		return cw.GetCertificate(nil)
+	}
+	return cfg, cw, nil
 }
 
 func (s *HTTPDataSource[T]) TypedName() fwkplugin.TypedName { return s.typedName }
@@ -347,5 +456,5 @@ func (s *HTTPDataSource[T]) getEndpoint(ep Addressable) *url.URL {
 		}
 		host = net.JoinHostPort(ip, strconv.Itoa(s.portOverride))
 	}
-	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path}
+	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path, RawQuery: s.rawQuery}
 }

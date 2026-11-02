@@ -19,7 +19,13 @@ package weightedrandom
 
 import (
 	"context"
+	"encoding/json"
 	"math"
+	"math/rand/v2"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -27,6 +33,156 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
+
+func TestPickWeightedRandomPickerTemperature(t *testing.T) {
+	const (
+		testIterations = 10000
+		tolerance      = 0.05 // Verify within tolerance +/-5%
+	)
+
+	endpoint1 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, nil, nil)
+	endpoint2 := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod2"}}, nil, nil)
+
+	// Temperature reshapes the selection distribution: probability becomes proportional to
+	// score^(1/T). T<1 sharpens toward the highest score, T>1 flattens toward uniform, T=1 stays
+	// proportional.
+	tests := []struct {
+		name        string
+		temperature float64
+		input       []*fwksched.ScoredEndpoint
+	}{
+		{
+			name:        "Low temperature sharpens toward the highest score",
+			temperature: 0.3,
+			input: []*fwksched.ScoredEndpoint{
+				{Endpoint: endpoint1, Score: 2},
+				{Endpoint: endpoint2, Score: 1},
+			},
+		},
+		{
+			name:        "High temperature flattens toward uniform",
+			temperature: 5,
+			input: []*fwksched.ScoredEndpoint{
+				{Endpoint: endpoint1, Score: 2},
+				{Endpoint: endpoint2, Score: 1},
+			},
+		},
+		{
+			name:        "Temperature one stays proportional",
+			temperature: 1,
+			input: []*fwksched.ScoredEndpoint{
+				{Endpoint: endpoint1, Score: 3},
+				{Endpoint: endpoint2, Score: 1},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			picker := NewWeightedRandomPicker(1).WithTemperature(test.temperature)
+
+			// Expected probability is proportional to score^(1/T). The picker normalizes scores by
+			// their max before applying the exponent, which preserves these ratios.
+			totalWeight := 0.0
+			endpointWeights := make(map[string]float64)
+			for _, endpoint := range test.input {
+				w := math.Pow(endpoint.Score, 1.0/test.temperature)
+				endpointWeights[endpoint.GetMetadata().ID.Name] = w
+				totalWeight += w
+			}
+
+			expectedProbabilities := make(map[string]float64)
+			for name, w := range endpointWeights {
+				expectedProbabilities[name] = w / totalWeight
+			}
+
+			selectionCounts := make(map[string]int)
+			for range testIterations {
+				result := picker.Pick(context.Background(), test.input)
+				selectionCounts[result.TargetEndpoints[0].GetMetadata().ID.Name]++
+			}
+
+			for endpointName, expectedProb := range expectedProbabilities {
+				actualProb := float64(selectionCounts[endpointName]) / float64(testIterations)
+				if math.Abs(actualProb-expectedProb) > tolerance {
+					t.Errorf("Endpoint %s: expected probability %.3f +/-%.1f%%, got %.3f (count: %d/%d)",
+						endpointName, expectedProb, tolerance*100, actualProb, selectionCounts[endpointName], testIterations)
+				}
+			}
+		})
+	}
+}
+
+// TestPickWeightedRandomPickerLowTemperatureMultiPick checks that every slot follows score order at
+// low temperature, where the effective weights of non-top endpoints are far below 1e-3.
+func TestPickWeightedRandomPickerLowTemperatureMultiPick(t *testing.T) {
+	low := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "low"}}, nil, nil)
+	mid := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "mid"}}, nil, nil)
+	top := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "top"}}, nil, nil)
+	input := []*fwksched.ScoredEndpoint{
+		{Endpoint: low, Score: 0.25},
+		{Endpoint: mid, Score: 0.5},
+		{Endpoint: top, Score: 1.0},
+	}
+
+	// At T=0.01 the chance of any order other than [top, mid] is about 0.5^100 per call.
+	picker := NewWeightedRandomPicker(2).WithTemperature(0.01)
+	for range 100 {
+		result := picker.Pick(context.Background(), input)
+		if len(result.TargetEndpoints) != 2 {
+			t.Fatalf("expected 2 endpoints, got %d", len(result.TargetEndpoints))
+		}
+		first := result.TargetEndpoints[0].GetMetadata().ID.Name
+		second := result.TargetEndpoints[1].GetMetadata().ID.Name
+		if first != "top" || second != "mid" {
+			t.Fatalf("expected [top mid], got [%s %s]", first, second)
+		}
+	}
+}
+
+// TestWeightedRandomPickerFactoryTemperature verifies that the factory rejects non-positive
+// temperatures and accepts a valid or omitted value.
+func TestWeightedRandomPickerFactoryTemperature(t *testing.T) {
+	tests := []struct {
+		name      string
+		params    string
+		expectErr bool
+	}{
+		{name: "valid temperature", params: `{"temperature": 0.5}`, expectErr: false},
+		{name: "temperature omitted uses default", params: `{}`, expectErr: false},
+		{name: "zero temperature rejected", params: `{"temperature": 0}`, expectErr: true},
+		{name: "negative temperature rejected", params: `{"temperature": -1}`, expectErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := WeightedRandomPickerFactory("test", json.NewDecoder(strings.NewReader(test.params)), nil)
+			if test.expectErr && err == nil {
+				t.Errorf("expected an error for params %s, got nil", test.params)
+			}
+			if !test.expectErr && err != nil {
+				t.Errorf("unexpected error for params %s: %v", test.params, err)
+			}
+		})
+	}
+}
+
+func TestWithTemperatureIgnoresNonPositiveValues(t *testing.T) {
+	tests := []struct {
+		value    float64
+		expected float64
+	}{
+		{value: 0.5, expected: 0.5},
+		{value: 0, expected: DefaultTemperature},
+		{value: -1, expected: DefaultTemperature},
+	}
+
+	for _, test := range tests {
+		if got := NewWeightedRandomPicker(1).WithTemperature(test.value).temperature; got != test.expected {
+			t.Errorf("WithTemperature(%g): expected temperature %g, got %g", test.value, test.expected, got)
+		}
+	}
+}
 
 func TestPickWeightedRandomPicker(t *testing.T) {
 	const (
@@ -157,4 +313,136 @@ func TestPickWeightedRandomPickerExcludesNonPositiveScores(t *testing.T) {
 	if result.TargetEndpoints[0].GetMetadata().ID.Name != "pod1" {
 		t.Fatalf("expected pod1, got %s", result.TargetEndpoints[0].GetMetadata().ID.Name)
 	}
+}
+
+func TestWeightedRandomPickerWithRand(t *testing.T) {
+	t.Parallel()
+
+	makeMixedInput := func() []*fwksched.ScoredEndpoint {
+		input := make([]*fwksched.ScoredEndpoint, 10)
+		for i := range input {
+			ep := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod" + strconv.Itoa(i)}}, nil, nil)
+			score := 0.0
+			if i < 5 {
+				score = float64(i + 1)
+			}
+			input[i] = &fwksched.ScoredEndpoint{Endpoint: ep, Score: score}
+		}
+		return input
+	}
+
+	makeZeroInput := func() []*fwksched.ScoredEndpoint {
+		input := make([]*fwksched.ScoredEndpoint, 10)
+		for i := range input {
+			ep := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "zero" + strconv.Itoa(i)}}, nil, nil)
+			input[i] = &fwksched.ScoredEndpoint{Endpoint: ep, Score: 0}
+		}
+		return input
+	}
+
+	collectPicks := func(ctx context.Context, p *WeightedRandomPicker, makeInput func() []*fwksched.ScoredEndpoint, n int) []string {
+		picks := make([]string, 0, n*5)
+		for range n {
+			res := p.Pick(ctx, makeInput())
+			for _, ep := range res.TargetEndpoints {
+				picks = append(picks, ep.GetMetadata().ID.Name)
+			}
+		}
+		return picks
+	}
+
+	t.Run("reproducible_positive_picks", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		p1 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(42, 99))
+		p1.explorationBudget = 0.5
+		p2 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(42, 99))
+		p2.explorationBudget = 0.5
+		p3 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(100, 200))
+		p3.explorationBudget = 0.5
+
+		got1 := collectPicks(ctx, p1, makeMixedInput, 20)
+		got2 := collectPicks(ctx, p2, makeMixedInput, 20)
+		got3 := collectPicks(ctx, p3, makeMixedInput, 20)
+
+		if !slices.Equal(got1, got2) {
+			t.Fatalf("identical seeds produced different picks: %v vs %v", got1, got2)
+		}
+		if slices.Equal(got1, got3) {
+			t.Fatalf("distinct seeds produced identical picks: %v", got1)
+		}
+	})
+
+	t.Run("reproducible_all_zero_fallback", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		p1 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(7, 13))
+		p2 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(7, 13))
+		p3 := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(100, 200))
+
+		got1 := collectPicks(ctx, p1, makeZeroInput, 20)
+		got2 := collectPicks(ctx, p2, makeZeroInput, 20)
+		got3 := collectPicks(ctx, p3, makeZeroInput, 20)
+
+		if !slices.Equal(got1, got2) {
+			t.Fatalf("identical seeds produced different all-zero picks: %v vs %v", got1, got2)
+		}
+		if slices.Equal(got1, got3) {
+			t.Fatalf("distinct seeds produced identical all-zero picks: %v", got1)
+		}
+	})
+
+	t.Run("nil_restores_default", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		seeded := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(42, 99))
+		seeded.explorationBudget = 0.5
+		reset := NewWeightedRandomPicker(5).WithRand(rand.NewPCG(42, 99)).WithRand(nil)
+		reset.explorationBudget = 0.5
+
+		wantPositive := collectPicks(ctx, seeded, makeMixedInput, 20)
+		gotPositive := collectPicks(ctx, reset, makeMixedInput, 20)
+		if len(gotPositive) != 20*5 {
+			t.Fatalf("expected %d positive-path picks, got %d", 20*5, len(gotPositive))
+		}
+		if slices.Equal(wantPositive, gotPositive) {
+			t.Fatalf("WithRand(nil) still followed the seeded positive sequence")
+		}
+
+		wantZero := collectPicks(ctx, seeded, makeZeroInput, 20)
+		gotZero := collectPicks(ctx, reset, makeZeroInput, 20)
+		if len(gotZero) != 20*5 {
+			t.Fatalf("expected %d all-zero picks, got %d", 20*5, len(gotZero))
+		}
+		if slices.Equal(wantZero, gotZero) {
+			t.Fatalf("WithRand(nil) still followed the seeded all-zero fallback sequence")
+		}
+	})
+
+	t.Run("concurrent_pick_mixed_inputs", func(t *testing.T) {
+		t.Parallel()
+		ctx := t.Context()
+		p := NewWeightedRandomPicker(3).WithRand(rand.NewPCG(11, 22))
+		p.explorationBudget = 0.5
+
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(func() {
+				for i := range 200 {
+					var input []*fwksched.ScoredEndpoint
+					if i%2 == 0 {
+						input = makeMixedInput()
+					} else {
+						input = makeZeroInput()
+					}
+					res := p.Pick(ctx, input)
+					if len(res.TargetEndpoints) != 3 {
+						t.Errorf("expected 3 endpoints, got %d", len(res.TargetEndpoints))
+						return
+					}
+				}
+			})
+		}
+		wg.Wait()
+	})
 }

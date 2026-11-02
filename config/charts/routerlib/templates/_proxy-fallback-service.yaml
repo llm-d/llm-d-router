@@ -21,6 +21,9 @@ spec:
       port: {{ include "llm-d-router.proxy.fallbackPort" . }}
       targetPort: {{ include "llm-d-router.proxy.fallbackPort" . }}
       protocol: TCP
+      {{- if eq (lower ((.Values.router.modelServers | default dict).protocol | default "http")) "grpc" }}
+      appProtocol: kubernetes.io/h2c
+      {{- end }}
 ---
 {{- end -}}
 {{- end -}}

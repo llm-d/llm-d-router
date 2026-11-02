@@ -22,17 +22,14 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 const nilString = "<nil>"
-
-type TokenizedRequest = fwkrh.TokenizedRequest
-
-type MultiModalFeature = fwkrh.MultiModalFeature
 
 // RequestObjectives represents the scheduling objectives parsed from the InferenceObjectiveSpec, to be used in scheduling decisions.
 type RequestObjectives struct {
@@ -46,8 +43,12 @@ type InferenceRequest struct {
 	// TargetModel is the final target model after traffic split.
 	TargetModel string
 	// Data contains the request-body fields that we parse out as user input.
-	Body *fwkrh.InferenceRequestBody
-	// Headers is a map of the request headers.
+	Body *fwkrequest.InferenceRequestBody
+	// Headers is a map of the request headers. Edits made before the request is
+	// forwarded apply to it, except to EPP-owned headers: a header set in the
+	// map is forwarded with its value, and a client header deleted from the map
+	// is removed. Envoy never removes a pseudo-header or host, so deleting one
+	// forwards the client's value.
 	Headers map[string]string
 	// Request Objective
 	Objectives RequestObjectives
@@ -55,6 +56,8 @@ type InferenceRequest struct {
 	FairnessID string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.
 	RequestSizeBytes int
+	// ReceivedTimestamp is when the EPP received the request.
+	ReceivedTimestamp time.Time
 	// SchedulingResult captures the scheduling decisions made during the cycle.
 	SchedulingResult *SchedulingResult
 
@@ -191,6 +194,19 @@ type ScoredEndpoint struct {
 	Score float64
 }
 
+// EndpointScores implements logr.Marshaler to render scored endpoints as a map
+// of namespaced name to score. The map is built only when the log line is
+// actually written.
+type EndpointScores []*ScoredEndpoint
+
+func (s EndpointScores) MarshalLog() interface{} {
+	scores := make(map[string]float64, len(s))
+	for _, ep := range s {
+		scores[ep.GetMetadata().GetNamespacedName().String()] = ep.Score
+	}
+	return scores
+}
+
 // ProfileRunResult captures the profile run result.
 type ProfileRunResult struct {
 	TargetEndpoints []Endpoint
@@ -201,10 +217,18 @@ type ProfileRunResult struct {
 	ScoredCandidates []ScoredEndpoint
 }
 
+// DefaultPrefillProfile is the prefill profile name a profile handler runs when
+// it does not name one.
+const DefaultPrefillProfile = "prefill"
+
 // SchedulingResult captures the result of the scheduling cycle.
 type SchedulingResult struct {
 	ProfileResults     map[string]*ProfileRunResult
 	PrimaryProfileName string
+	// PrefillProfileName names the profile that picked the prefill stage, when
+	// the profile handler ran one. The prefill profile name is configurable, so
+	// consumers read it here instead of looking up a fixed name.
+	PrefillProfileName string
 }
 
 // PrimaryEndpoint returns the first endpoint the primary profile picked, as
@@ -215,6 +239,16 @@ func (r *SchedulingResult) PrimaryEndpoint() Endpoint {
 		return nil
 	}
 	return r.ProfileResults[r.PrimaryProfileName].FirstEndpoint()
+}
+
+// PrefillProfile returns the profile result that picked the prefill stage, or
+// nil when the result is nil, has no prefill profile name, or that profile
+// picked none.
+func (r *SchedulingResult) PrefillProfile() *ProfileRunResult {
+	if r == nil || r.PrefillProfileName == "" {
+		return nil
+	}
+	return r.ProfileResults[r.PrefillProfileName]
 }
 
 // FirstEndpoint returns the first endpoint the profile picked, as stored, or

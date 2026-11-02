@@ -17,13 +17,18 @@ limitations under the License.
 package kvblock_test
 
 import (
+	"context"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
 	miniredisserver "github.com/alicebob/miniredis/v2/server"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	. "github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 )
@@ -159,6 +164,56 @@ func TestRedisBatchEvictPreservesMappingAndPrunesNext(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestRedisIndexEngineEvictKeepsMappingAddedConcurrently holds pod B's HSET,
+// which Add sends after its ZADD, until pod A's engine-key eviction of the same
+// block has finished. Pod B's entry must stay reachable through its engine key,
+// or later removals and child stores for that engine key cannot resolve it.
+func TestRedisIndexEngineEvictKeepsMappingAddedConcurrently(t *testing.T) {
+	ctx := t.Context()
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(server.Close)
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	const (
+		engineKey  BlockHash = 9001
+		requestKey BlockHash = 1
+	)
+	podA := PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
+	podB := PodEntry{PodIdentifier: "10.0.0.2:8000", DeviceTier: "gpu"}
+	require.NoError(t, index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podA}))
+
+	reached, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	server.Server().SetPreHook(func(_ *miniredisserver.Peer, command string, args ...string) bool {
+		if command == "HSET" && len(args) > 1 && args[0] == requestKey.String() &&
+			strings.Contains(args[1], podB.PodIdentifier) {
+			once.Do(func() {
+				close(reached)
+				<-release
+			})
+		}
+		return false
+	})
+
+	added := make(chan error, 1)
+	go func() {
+		added <- index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podB})
+	}()
+	<-reached
+	require.NoError(t, index.Evict(ctx, EngineKey, []BlockHash{engineKey}, []PodEntry{podA}))
+	close(release)
+	require.NoError(t, <-added)
+
+	result, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+	require.NoError(t, err)
+	require.Equal(t, []PodEntry{podB}, result[requestKey])
+	got, err := index.GetRequestKey(ctx, engineKey)
+	require.NoError(t, err, "engine key mapping removed while pod B's entry remains")
+	require.Equal(t, requestKey, got)
+}
+
 // TestRedisLookup_OneBadKeyDoesNotDiscardOtherMatches verifies that a single
 // key with a Redis type conflict (for example a stale key of the wrong type
 // sharing the request-key namespace) does not fail keys elsewhere in the
@@ -246,4 +301,23 @@ func TestRedisLookup_AllKeysBadIsNotAPipelineFailure(t *testing.T) {
 	result, err := index.Lookup(t.Context(), []BlockHash{badKey1, badKey2}, sets.Set[string]{})
 	require.NoError(t, err)
 	require.Empty(t, result)
+}
+
+// A lookup that reaches the end of the cached prefix is the normal case on
+// almost every request, so it must not log at the default verbosity.
+func TestRedisLookup_PrefixEndIsQuietAtDefaultVerbosity(t *testing.T) {
+	index := createRedisIndexForTesting(t)
+	var logged []string
+	logger := funcr.New(func(prefix, args string) {
+		logged = append(logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: 0})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	pod := PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{1}, []PodEntry{pod}))
+
+	got, err := index.Lookup(ctx, []BlockHash{1, 2, 3}, sets.New[string]())
+	require.NoError(t, err)
+	require.Equal(t, map[BlockHash][]PodEntry{1: {pod}}, got)
+	require.Empty(t, logged)
 }
