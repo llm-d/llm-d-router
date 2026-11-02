@@ -231,28 +231,10 @@ type RequestContext struct {
 // calls Cancel when decode has not recorded an outcome. The first of
 // Release and Cancel runs its callback and later calls do nothing.
 type PrefillDrain struct {
-	done   chan struct{}
-	err    error
-	cancel context.CancelFunc
-}
-
-// NewPrefillDrain requires a non-nil context cancellation function.
-func NewPrefillDrain(cancel context.CancelFunc) *PrefillDrain {
-	return &PrefillDrain{done: make(chan struct{}), cancel: cancel}
-}
-
-// Done is closed when the drain ends.
-func (d *PrefillDrain) Done() <-chan struct{} { return d.done }
-
-// Err returns the drain result. Callers must first receive from Done.
-func (d *PrefillDrain) Err() error { return d.err }
-
-func (d *PrefillDrain) Cancel() { d.cancel() }
-
-// Complete records the drain result. The drain worker must call it exactly once.
-func (d *PrefillDrain) Complete(err error) {
-	d.err = err
-	close(d.done)
+	// Result delivers one error, or nil on success, to the decode step.
+	// It must be buffered so the reader can finish after decode returns.
+	Result <-chan error
+	Cancel context.CancelFunc
 }
 
 // MultimodalEntry describes one multimodal item in the request and where it
