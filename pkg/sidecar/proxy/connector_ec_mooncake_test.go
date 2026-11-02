@@ -216,7 +216,7 @@ func TestHandleECMooncakeUntypedMedia(t *testing.T) {
 		`{"type":"image_url","image_url":{"url":"` + img2 + `"},"uuid":"client-uuid"}]}]}`
 
 	h, rec := runECMooncake(t, reqcommon.PathChatCompletions, reqcommon.APITypeChatCompletions, body, func(part map[string]any) string {
-		return `{"engine-` + part[partFieldUUID].(string) + `":{"metadata":{"image_grid_thw":[[1,4,6]]},"item_indices":[0]}}`
+		return `{"engine-` + part[reqcommon.FieldUUID].(string) + `":{"metadata":{"image_grid_thw":[[1,4,6]]},"item_indices":[0]}}`
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Len(t, h.calls, 2)
@@ -231,9 +231,9 @@ func TestHandleECMooncakeUntypedMedia(t *testing.T) {
 		call := h.callFor(t, img)
 		part := content[idx].(map[string]any)
 		assert.Equal(t, "image_embeds", part[reqcommon.FieldType])
-		assert.Equal(t, call.part[partFieldUUID], part[partFieldUUID])
+		assert.Equal(t, call.part[reqcommon.FieldUUID], part[reqcommon.FieldUUID])
 		assert.Equal(t, map[string]any{
-			"mm_hash":     "engine-" + call.part[partFieldUUID].(string),
+			"mm_hash":     "engine-" + call.part[reqcommon.FieldUUID].(string),
 			"transfer_id": call.transferIDs[0],
 		}, transferItems[idx])
 	}
