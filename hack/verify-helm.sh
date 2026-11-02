@@ -20,6 +20,7 @@ GKE_GATEWAY_API_VERSION="${GKE_GATEWAY_API_VERSION:-v1.4.0}"
 GIE_VERSION="${GIE_VERSION:-v1.6.2}"
 HELM="${HELM:-${SCRIPT_ROOT}/bin/helm}"
 KUBECTL_VALIDATE="${KUBECTL_VALIDATE:-${SCRIPT_ROOT}/bin/kubectl-validate}"
+YQ="${YQ:-${SCRIPT_ROOT}/bin/yq}"
 TEMP_DIR=$(mktemp -d)
 
 make kubectl-validate
@@ -578,6 +579,51 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   echo "Metrics authentication RBAC checks passed for ${chart}."
 done
 
+echo "Verifying cluster RBAC names..."
+render_cluster_rbac_name() {
+  local chart="$1" release="$2" namespace="$3"
+  local output="${TEMP_DIR}/${chart}-cluster-rbac-name.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template "${release}" "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace "${namespace}" --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    --set router.monitoring.prometheus.auth.enabled=true "${args[@]}" > "${output}"; then
+    echo "Cluster RBAC rendering failed for ${chart}: ${release}/${namespace}"
+    exit 1
+  fi
+  cluster_rbac_name=$("${YQ}" 'select(.kind == "ClusterRole" and .metadata.name == "*-epp") | .metadata.name' "${output}")
+  local binding_name role_ref
+  binding_name=$("${YQ}" 'select(.kind == "ClusterRoleBinding" and .metadata.name == "*-epp") | .metadata.name' "${output}")
+  role_ref=$("${YQ}" 'select(.kind == "ClusterRoleBinding" and .metadata.name == "*-epp") | .roleRef.name' "${output}")
+  if [ -z "${cluster_rbac_name}" ] || [ "${binding_name}" != "${cluster_rbac_name}" ] || [ "${role_ref}" != "${cluster_rbac_name}" ]; then
+    echo "${chart}: ClusterRole '${cluster_rbac_name}', binding '${binding_name}' and roleRef '${role_ref}' must match for ${release}/${namespace}"
+    exit 1
+  fi
+}
+
+long_release=$(printf 'r%.0s' {1..40})
+long_namespace=$(printf 'n%.0s' {1..40})
+shared_prefix=llm-d-nightly-tiered-prefix-cache-gke-gpu
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  render_cluster_rbac_name "${chart}" short default
+  if [ "${cluster_rbac_name}" != "short-default-epp" ]; then
+    echo "${chart}: expected short-default-epp, got ${cluster_rbac_name}"
+    exit 1
+  fi
+
+  render_cluster_rbac_name "${chart}" "${long_release}" "${long_namespace}"
+
+  render_cluster_rbac_name "${chart}" tiered-prefix-cache "${shared_prefix}"
+  first_name="${cluster_rbac_name}"
+  render_cluster_rbac_name "${chart}" tiered-prefix-cache "${shared_prefix}-sglang"
+  if [ "${cluster_rbac_name}" == "${first_name}" ]; then
+    echo "${chart}: namespaces sharing their first 40 characters got the same ClusterRole name ${first_name}"
+    exit 1
+  fi
+done
+
 echo "Running llm-d-router-standalone negative validation tests..."
 missing_endpoint_selector_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.inferencePool.create=false --set router.modelServers.type=vllm --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
 echo "Executing: ${missing_endpoint_selector_command}"
@@ -681,6 +727,29 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
     eval "${skip_verify_render_command}"
     if ! grep -Eq -- "^[[:space:]]+insecureSkipVerify: ${skip_verify_want}$" "${skip_verify_render_output}"; then
       echo "${chart} did not render insecureSkipVerify: ${skip_verify_want} for router.epp.metricsDataSource.insecureSkipVerify=${skip_verify_set}"
+      exit 1
+    fi
+  done
+done
+
+echo "Verifying GOMEMLIMIT follows router.epp.resources.limits.memory..."
+# Each case is name:GOMEMLIMIT entries:limits.memory references.
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  for gomemlimit_case in "default:1:1" "no-limit:0:0" "user-env:1:0"; do
+    IFS=: read -r gomemlimit_set gomemlimit_want_env gomemlimit_want_ref <<< "${gomemlimit_case}"
+    case "${gomemlimit_set}" in
+      default) gomemlimit_args="" ;;
+      no-limit) gomemlimit_args="--set router.epp.resources.limits.memory=null" ;;
+      user-env) gomemlimit_args="--set 'router.epp.env[0].name=GOMEMLIMIT' --set-string 'router.epp.env[0].value=1GiB'" ;;
+    esac
+    gomemlimit_render_output="${TEMP_DIR}/${chart}-gomemlimit-${gomemlimit_set}-render.yaml"
+    gomemlimit_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/${chart} --set router.modelServers.matchLabels.app=llm-instance-gateway ${gomemlimit_args} > ${gomemlimit_render_output}"
+    echo "Executing: ${gomemlimit_render_command}"
+    eval "${gomemlimit_render_command}"
+    gomemlimit_env=$(grep -c -- '- name: GOMEMLIMIT$' "${gomemlimit_render_output}" || true)
+    gomemlimit_ref=$(grep -c -- 'resource: limits.memory$' "${gomemlimit_render_output}" || true)
+    if [ "${gomemlimit_env}" != "${gomemlimit_want_env}" ] || [ "${gomemlimit_ref}" != "${gomemlimit_want_ref}" ]; then
+      echo "${chart} (${gomemlimit_set}): expected ${gomemlimit_want_env} GOMEMLIMIT and ${gomemlimit_want_ref} limits.memory reference, got ${gomemlimit_env} and ${gomemlimit_ref}"
       exit 1
     fi
   done
@@ -850,6 +919,13 @@ for header in x-llm-d-prefiller-host-port x-prefiller-host-port x-llm-d-encoder-
     exit 1
   fi
 done
+# Fail-open must not leave the ext_proc cluster in panic mode: with no healthy EPP host the
+# ext_proc stream has to fail before the body is sent, or the request loses its body.
+ext_proc_cluster=$(awk '/- name: ext_proc$/{c=1} c' "${proxy_service_render_output}" | head -40)
+if ! grep -A1 -- 'healthy_panic_threshold:' <<<"${ext_proc_cluster}" | grep -q -- 'value: 0$'; then
+  echo "Proxy service mode with fail-open did not disable panic mode on the ext_proc cluster"
+  exit 1
+fi
 
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."
 fail_closed_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fail-closed-render.yaml"
@@ -860,6 +936,21 @@ if grep -q -- 'inference_pool_fallback\|proxy-svc-epp-model-servers' "${fail_clo
 fi
 if ! grep -q -- 'remove: x-gateway-destination-endpoint' "${fail_closed_render_output}"; then
   echo "Destination header strip missing with router.proxy.failOpen=false"
+  exit 1
+fi
+if grep -q -- 'healthy_panic_threshold' "${fail_closed_render_output}"; then
+  echo "ext_proc panic mode changed with router.proxy.failOpen=false"
+  exit 1
+fi
+priority_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-priority-failopen-render.yaml"
+${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.replicas=2 > "${priority_render_output}"
+if ! grep -A1 -- 'healthy_panic_threshold:' "${priority_render_output}" | grep -q -- 'value: 0$'; then
+  echo "Priority routing with fail-open did not disable panic mode on the ext_proc cluster"
+  exit 1
+fi
+${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.replicas=2 --set router.proxy.failOpen=false > "${priority_render_output}"
+if ! grep -A1 -- 'healthy_panic_threshold:' "${priority_render_output}" | grep -q -- 'value: 10$'; then
+  echo "Priority routing with fail-open off did not keep router.proxy.priorityRouting.healthyPanicThreshold"
   exit 1
 fi
 fallback_port_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fallback-port-render.yaml"

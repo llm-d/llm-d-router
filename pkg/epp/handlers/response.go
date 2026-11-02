@@ -222,7 +222,11 @@ func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
 	if src.CompletionTokens != 0 {
 		dst.CompletionTokens = src.CompletionTokens
 	}
-	if src.PromptTokenDetails != nil {
+	// Each response chunk is parsed into a fresh Usage, so a later frame that
+	// serializes a placeholder zero would otherwise replace a cache count an
+	// earlier chunk reported. A zero only fills in a count that is still unknown.
+	if src.PromptTokenDetails != nil &&
+		(src.PromptTokenDetails.CachedTokens != 0 || dst.PromptTokenDetails == nil) {
 		dst.PromptTokenDetails = src.PromptTokenDetails
 	}
 	// A block reporting both halves of the usage owns the total it came with; a partial

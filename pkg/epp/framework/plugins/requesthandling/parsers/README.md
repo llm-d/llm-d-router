@@ -6,6 +6,7 @@ This directory contains parser plugins used to parse and understand the payloads
 
 *   **`openai-parser`**: A parser supporting the [OpenAI API](https://developers.openai.com/api/reference/overview). Along with `anthropic-parser`, `vllmhttp-parser` and `systemone-parser`, it is registered by default if no parsers are explicitly specified.
     *   **Drawback**: For the [Decisions API](https://developers.openai.com/api/docs/guides/decisions), `POST /v1/decisions`, the engine renders the prompts, so prefix-cache-aware scorers get no signal for these requests.
+    *   **Drawback**: For async video generation, `POST /v1/videos`, the status and content requests (`GET /v1/videos/{id}`, `GET /v1/videos/{id}/content`) carry no body and are routed to a random endpoint, so a pool with more than one vLLM-Omni replica needs session affinity. `POST /v1/videos/sync` is unaffected.
     *   **Note**: SGLang serves its own request format on `/v1/decisions`. The parser forwards it unchanged, so all backends serving this path in a pool must run the same engine.
 *   **`anthropic-parser`**: A parser designed to handle requests for the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages). It supports both standard JSON and streaming SSE responses.
 *   **`vllmgrpc-parser`**: A parser designed to handle requests specifically for the [vLLM gRPC API](https://docs.vllm.ai/en/latest/api/vllm/entrypoints/grpc_server/).
