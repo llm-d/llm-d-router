@@ -1,12 +1,11 @@
-syntax = "proto3";
-
 // Shared `/generate` wire contract for HTTP, gRPC, and OpenAI lowering.
 // Native Rust serving supports a subset of Python's fields; its normalization
 // explicitly ignores the Python-only extensions. Unknown JSON keys remain
 // ignored for compatibility with clients sending additional Python fields.
-package sglang.api.v1;
 
-option go_package = "github.com/llm-d/llm-d-router/pkg/common/sglang/gen/apiv1";
+syntax = "proto3";
+
+package sglang.api.v1;
 
 import "sglang/api/v1/common.proto";
 import "sglang/api/v1/finish.proto";

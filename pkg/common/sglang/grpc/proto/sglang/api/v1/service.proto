@@ -1,13 +1,12 @@
-syntax = "proto3";
-
 // The native SGLang gRPC service served by rust/sglang-server's tonic
 // transport, over the same api_core the HTTP endpoints use. Covers exactly the
 // surface the native server implements (the legacy sglang.runtime.v1 bridge's
 // embed/classify/tokenize RPCs have no native backend here and are not
 // carried over).
-package sglang.api.v1;
 
-option go_package = "github.com/llm-d/llm-d-router/pkg/common/sglang/gen/apiv1";
+syntax = "proto3";
+
+package sglang.api.v1;
 
 import "sglang/api/v1/generate.proto";
 import "sglang/api/v1/hicache.proto";

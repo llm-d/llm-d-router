@@ -1,14 +1,13 @@
-syntax = "proto3";
-
 // The terminal finish reason — Python's `FinishReasonDict`
 // (`BaseFinishReason.to_json()` in schedule_batch.py), echoed verbatim as
 // `meta_info.finish_reason`. JSON is internally tagged by "type" with the
 // variant payload inlined; a type this build doesn't know round-trips
 // unchanged (unknown_variant_passthrough) so a Python-side addition never
 // fails a frame decode.
-package sglang.api.v1;
 
-option go_package = "github.com/llm-d/llm-d-router/pkg/common/sglang/gen/apiv1";
+syntax = "proto3";
+
+package sglang.api.v1;
 
 import "sglang/json/v1/options.proto";
 

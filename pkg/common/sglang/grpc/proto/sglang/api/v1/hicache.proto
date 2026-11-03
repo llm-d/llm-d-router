@@ -1,9 +1,7 @@
+// HiCache storage management APIs shared by HTTP JSON and gRPC.
 syntax = "proto3";
 
-// HiCache storage management APIs shared by HTTP JSON and gRPC.
 package sglang.api.v1;
-
-option go_package = "github.com/llm-d/llm-d-router/pkg/common/sglang/gen/apiv1";
 
 import "sglang/json/v1/options.proto";
 

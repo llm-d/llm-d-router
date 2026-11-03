@@ -33,8 +33,9 @@
 #                                local git history, to guide manually
 #                                correcting misattributed notices.
 #
-# Generated files ("Code generated ... DO NOT EDIT." in the first 5 lines)
-# are skipped in every mode.
+# Generated files ("Code generated ... DO NOT EDIT." before the package clause
+# in .go files per https://go.dev/s/generatedcode, or in the first 5 lines of
+# .sh files) are skipped in every mode.
 
 set -o errexit
 set -o nounset
@@ -95,7 +96,10 @@ in_scope_files() {
 }
 
 is_generated() {
-  head -5 "$1" | grep -qE "${GENERATED_RE}"
+  case "$1" in
+    *.go) awk '/^package[[:space:]]/{exit 1} /^\/\/ Code generated .* DO NOT EDIT\.$/{found=1; exit 0} END{exit !found}' "$1" ;;
+    *) head -5 "$1" | grep -qE "${GENERATED_RE}" ;;
+  esac
 }
 
 has_llmd_notice() { grep -qE "${LLMD_RE}" "$1"; }

@@ -1,5 +1,3 @@
-syntax = "proto3";
-
 // The JSON-fidelity option vocabulary: how a message, field, or oneof behaves
 // on the HTTP JSON wire, declared in the schema itself. The sglang-api-codegen
 // generator reads these options from the FileDescriptorSet and emits the serde
@@ -7,9 +5,10 @@ syntax = "proto3";
 // one generator template with its own unit tests.
 //
 // gRPC never sees these options: the protobuf wire format is untouched.
-package sglang.json.v1;
 
-option go_package = "github.com/llm-d/llm-d-router/pkg/common/sglang/gen/jsonv1";
+syntax = "proto3";
+
+package sglang.json.v1;
 
 import "google/protobuf/descriptor.proto";
 

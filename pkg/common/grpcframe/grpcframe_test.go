@@ -30,7 +30,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/sglang/gen/apiv1"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/sglang/grpc/gen/apiv1"
 )
 
 func TestParsePayload(t *testing.T) {

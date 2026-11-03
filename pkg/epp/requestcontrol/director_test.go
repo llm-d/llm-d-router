@@ -67,7 +67,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
-	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/sglang/gen/apiv1"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/sglang/grpc/gen/apiv1"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fccontractmocks "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"

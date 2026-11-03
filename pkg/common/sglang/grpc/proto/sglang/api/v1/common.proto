@@ -1,11 +1,10 @@
-syntax = "proto3";
-
 // Shared carriers for the native SGLang API. The ground truth for the JSON
 // shapes is the sglang.json.v1 options on each field; the protobuf shapes are
 // the explicit oneofs/messages themselves.
-package sglang.api.v1;
 
-option go_package = "github.com/llm-d/llm-d-router/pkg/common/sglang/gen/apiv1";
+syntax = "proto3";
+
+package sglang.api.v1;
 
 import "sglang/json/v1/options.proto";
 
