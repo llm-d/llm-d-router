@@ -153,7 +153,13 @@ func TestTerminationCause(t *testing.T) {
 		{
 			name:  "skipped response processing never observes completion",
 			state: requestResponseProcessingSkipped,
-			want:  fwkrh.TerminationCauseError,
+			want:  fwkrh.TerminationCauseNotObserved,
+		},
+		{
+			name:   "skipped response processing with a cancelled context",
+			state:  requestResponseProcessingSkipped,
+			ctxErr: context.Canceled,
+			want:   fwkrh.TerminationCauseNotObserved,
 		},
 	}
 
