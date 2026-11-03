@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -210,6 +211,18 @@ func TestForceStreamLossy(t *testing.T) {
 	require.False(t, forceStreamLossy(sseShapeMessages, map[string]any{"thinking": nil}))
 	// thinking is a Messages field; chat turns reasoning on with its own fields.
 	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"thinking": map[string]any{"type": "enabled"}}))
+
+	// vLLM rejects prompt_logprobs and use_beam_search with stream=true, so a
+	// request carrying either takes the pass-through rather than failing with an
+	// error about streaming the client never asked for.
+	for _, shape := range []sseShape{sseShapeChat, sseShapeText} {
+		require.True(t, forceStreamLossy(shape, map[string]any{"prompt_logprobs": 1}))
+		require.True(t, forceStreamLossy(shape, map[string]any{"prompt_logprobs": float64(0)}))
+		require.True(t, forceStreamLossy(shape, map[string]any{"prompt_logprobs": float64(-1)}))
+		require.True(t, forceStreamLossy(shape, map[string]any{"use_beam_search": true}))
+		require.False(t, forceStreamLossy(shape, map[string]any{"prompt_logprobs": nil}))
+		require.False(t, forceStreamLossy(shape, map[string]any{"use_beam_search": false}))
+	}
 
 	// return_token_ids makes the chat and text replies carry token ids the fold
 	// drops, so a request that sets it is lossy; false or absent is not.
@@ -965,16 +978,15 @@ func TestForceStream_MultipleChoices(t *testing.T) {
 	require.Equal(t, "B1B2", second["message"].(map[string]any)["content"])
 }
 
-// TestForceStream_ChatBothTokenLimits_ReservesForCompletionTokens reproduces the
-// reviewer's measured 5xx end to end: a chat n:2 request carrying both max_tokens
-// (16) and max_completion_tokens (4000). The engine honors max_completion_tokens,
-// so the reply can run well past the 16-token reservation the old precedence would
-// have sized. The streamed content below exceeds that wrong reservation (16 tokens
-// ~= 3 KiB for n:2) but fits the correct one (4000 tokens ~= 128 KiB), so the
-// request force-streams successfully instead of tripping the ceiling into a 5xx.
+// TestForceStream_ChatBothTokenLimits_ReservesForCompletionTokens verifies a chat
+// n:2 request carrying both max_tokens (16) and max_completion_tokens (4000) is
+// reserved against max_completion_tokens, the limit the engine honors. The
+// streamed content is sized to exceed a 16-token reservation (about 3 KiB for n:2)
+// and fit a 4000-token one (about 128 KiB), so the request force-streams instead
+// of tripping the ceiling.
 func TestForceStream_ChatBothTokenLimits_ReservesForCompletionTokens(t *testing.T) {
-	// ~2 KiB of content per choice, more than the wrong (16-token) reservation
-	// allows for the two choices combined, less than the correct (4000-token) one.
+	// About 2 KiB of content per choice: more than a 16-token reservation holds
+	// for the two choices combined, less than a 4000-token one.
 	chunk := strings.Repeat("x", 2048)
 	frames := []string{
 		fmt.Sprintf(`{"id":"c","model":"llama-3","choices":[{"index":0,"delta":{"role":"assistant","content":%q}},{"index":1,"delta":{"role":"assistant","content":%q}}]}`, chunk, chunk),
@@ -2499,6 +2511,157 @@ func TestForceStream_Responses_TerminalPastEchoAllowance_FallsBack(t *testing.T)
 	require.Equal(t, []any{true, false}, streams, "a forced attempt, then the pass-through")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackOversize), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
+}
+
+// forceStreamOverRealServer serves one forced decode request through a real HTTP
+// server with the given WriteTimeout, against an upstream that takes upstreamDelay
+// before it finishes streaming, and returns the client's response or error.
+func forceStreamOverRealServer(t *testing.T, writeTimeout, upstreamDelay time.Duration) (*http.Response, []byte, error, *prometheus.Registry) {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"slow\"}}]}\n\n")
+		flusher.Flush()
+		time.Sleep(upstreamDelay)
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	t.Cleanup(upstream.Close)
+
+	step, reg := newForceStreamStep(t, upstream.URL, "1GiB")
+	front := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCtx := &pipeline.RequestContext{
+			RequestID:        "req-slow",
+			OriginalPath:     reqcommon.PathChatCompletions,
+			Model:            "llama-3",
+			Stream:           false,
+			KVTransferParams: map[string]any{},
+			Body: map[string]any{
+				"model": "llama-3", "stream": false, "max_tokens": 16,
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			},
+			ResponseWriter: w,
+		}
+		_ = step.Execute(r.Context(), reqCtx)
+	}))
+	front.Config.WriteTimeout = writeTimeout
+	front.Start()
+	t.Cleanup(front.Close)
+
+	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		return nil, nil, err, reg
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	return resp, body, err, reg
+}
+
+// TestForceStream_OutlastsWriteTimeout covers a forced request whose generation
+// takes longer than the server WriteTimeout. The client asked for a non-streaming
+// reply, so the handler keeps the write deadline, but the forced request reads a
+// stream whose headers arrive at once, so the upstream response-header timeout
+// never bounds it. The decode step clears the write deadline once it commits to
+// force-streaming, as the handler does for a streaming request, so the reply
+// reaches the client instead of being cut off.
+func TestForceStream_OutlastsWriteTimeout(t *testing.T) {
+	resp, body, err, reg := forceStreamOverRealServer(t, 300*time.Millisecond, 900*time.Millisecond)
+	require.NoError(t, err, "the client must get the whole reply, not a cut connection")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(body, &got))
+	msg := got["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	require.Equal(t, "slow", msg["content"])
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+}
+
+// failingWriter is a ResponseWriter whose body writes fail, standing in for a
+// client that is gone by the time the forced reply is written.
+type failingWriter struct{ header http.Header }
+
+func (f *failingWriter) Header() http.Header       { return f.header }
+func (f *failingWriter) WriteHeader(int)           {}
+func (f *failingWriter) Write([]byte) (int, error) { return 0, errors.New("write: broken pipe") }
+
+// TestForceStream_FailedClientWriteNotCountedForced verifies a forced reply that
+// cannot be written to the client is not counted as forced: the client did not
+// receive it.
+func TestForceStream_FailedClientWriteNotCountedForced(t *testing.T) {
+	frames := []string{
+		`{"id":"c","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	}
+	server := sseServer(t, frames, nil)
+	defer server.Close()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-write-fail",
+		OriginalPath:     reqcommon.PathChatCompletions,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false, "max_tokens": 16,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: &failingWriter{header: http.Header{}},
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	var written *pipeline.ResponseWrittenError
+	require.True(t, errors.As(err, &written), "a reply that could not be written is a failure, got %v", err)
+	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9,
+		"a reply the client did not receive is not counted as forced")
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "the reservation is released")
+}
+
+// TestForceStream_ClientGoneBeforeWriteIsCancellation verifies a forced reply
+// whose write fails after the client's request context ended is reported as a
+// cancellation, the way the pass-through treats a client that left, and is not
+// counted as forced.
+func TestForceStream_ClientGoneBeforeWriteIsCancellation(t *testing.T) {
+	frames := []string{
+		`{"id":"c","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	}
+	server := sseServer(t, frames, nil)
+	defer server.Close()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+	ctx, cancel := context.WithCancel(context.Background())
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-client-gone",
+		OriginalPath:     reqcommon.PathChatCompletions,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false, "max_tokens": 16,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		// The client leaves while the reply is being written.
+		ResponseWriter: &cancelOnWriteWriter{failingWriter: failingWriter{header: http.Header{}}, cancel: cancel},
+	}
+
+	err := step.Execute(ctx, reqCtx)
+	require.ErrorIs(t, err, context.Canceled, "a client that left is a cancellation, got %v", err)
+	require.True(t, pipeline.IsClientCancellation(ctx, err))
+	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+}
+
+// cancelOnWriteWriter cancels the request context when the body is written, then
+// fails the write, as a client that disconnects mid-reply does.
+type cancelOnWriteWriter struct {
+	failingWriter
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnWriteWriter) Write(b []byte) (int, error) {
+	c.cancel()
+	return c.failingWriter.Write(b)
 }
 
 func TestForceStream_Concurrency(t *testing.T) {

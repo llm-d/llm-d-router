@@ -192,7 +192,7 @@ var (
 			Name:      "force_stream_total",
 			Help: metricsutil.HelpMsgWithStability(
 				"Total number of force-stream candidate requests by model and outcome: "+
-					"forced (reassembled from a streamed upstream into one reply), "+
+					"forced (reassembled from a streamed upstream into one reply and written to the client), "+
 					"fallback_budget (budget full), "+
 					"fallback_unbounded (a declared token limit whose estimate exceeds the per-request cap), "+
 					"fallback_unsupported (the reply carries a field the reassembler drops, declared in the request or seen on a frame, or the kv-sglang connector, whose decode server cannot recompute a prompt on fallback), "+

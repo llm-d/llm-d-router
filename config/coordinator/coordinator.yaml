@@ -473,7 +473,9 @@ pipeline:
       #   upstream, reassembling the streamed reply into one non-streaming
       #   response. Off by default (streaming and non-streaming replies can
       #   carry different fields). A forced request reserves from the budget
-      #   below and falls back to the pass-through when it is full.
+      #   below and falls back to the pass-through when it is full. Like a
+      #   streaming request, a forced request is not bounded by
+      #   server.write_timeout.
       #   force_stream: true
       #   force_stream_buffer_size caps the wire bytes concurrent forced requests
       #   may reserve at once (human-readable, default 1GiB). Peak heap runs

@@ -103,6 +103,7 @@ const (
 	FieldFunctions            = "functions"
 	FieldLogprobs             = "logprobs"
 	FieldReturnTokenIDs       = "return_token_ids"
+	FieldUseBeamSearch        = "use_beam_search"
 	FieldPromptLogprobs       = "prompt_logprobs"
 	FieldReasoningEffort      = "reasoning_effort"
 	FieldChatTemplateKwargs   = "chat_template_kwargs"

@@ -28,6 +28,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/go-logr/logr"
@@ -317,6 +318,15 @@ func responsesEchoBytes(shape sseShape, bodyBytes []byte) int64 {
 func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, bodyBytes []byte, generated, reserved int64, parity *parityCheck) error {
 	defer s.budget.release(reserved)
 
+	// The client asked for a non-streaming reply, so the handler kept the server
+	// WriteTimeout, but the forced request reads a stream: its headers arrive at
+	// once, so the gateway's response-header timeout no longer bounds the
+	// generation. Clear the write deadline as the handler does for a streaming
+	// request, so a generation that outlasts WriteTimeout still reaches the client.
+	if err := http.NewResponseController(reqCtx.ResponseWriter).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		logger.V(logutil.DEFAULT).Info("could not clear write deadline for force-stream", "error", err)
+	}
+
 	headers := forceStreamHeaders(reqCtx)
 
 	logger.V(logutil.DEFAULT).Info("force-streaming request", "path", reqCtx.OriginalPath, "reservedBytes", reserved)
@@ -380,7 +390,7 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 
 	// The client asked for a non-streaming reply, so no include_usage was injected.
 	writer, finalize := s.responseWriter(reqCtx, parity, false)
-	return writeForcedResponse(logger, reqCtx, writer, finalize, reassembler)
+	return writeForcedResponse(ctx, logger, reqCtx, writer, finalize, reassembler)
 }
 
 // thinkingTypeDisabled is the Anthropic Messages thinking.type that turns
@@ -428,6 +438,18 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	}
 	if shape != sseShapeChat && shape != sseShapeText {
 		return false
+	}
+	// vLLM rejects prompt_logprobs and use_beam_search when stream=true, so the
+	// forced request would fail with an error about a stream the client never
+	// asked for; prompt_logprobs is also dropped by the fold. Either takes the
+	// pass-through.
+	if _, ok := reqcommon.FieldValue(body, reqcommon.FieldPromptLogprobs); ok {
+		return true
+	}
+	if v, ok := reqcommon.FieldValue(body, reqcommon.FieldUseBeamSearch); ok {
+		if set, ok := v.(bool); ok && set {
+			return true
+		}
 	}
 	// return_token_ids adds token ids to every choice and the prompt's token ids to
 	// the reply, neither of which the fold keeps.
@@ -625,7 +647,7 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, generated, ech
 // the forced reply gets the same usage rewrite as the pass-through; finalize
 // flushes what w buffered. A marshal failure returns a plain error before any
 // write, so the server answers a clean 502.
-func writeForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, w http.ResponseWriter, finalize func() error, reassembler *sseReassembler) error {
+func writeForcedResponse(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, w http.ResponseWriter, finalize func() error, reassembler *sseReassembler) error {
 	payload, err := json.Marshal(reassembler.result())
 	if err != nil {
 		return fmt.Errorf("%s: force-stream marshal response: %w", DecodeStepName, err)
@@ -639,10 +661,16 @@ func writeForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, w 
 		err = finalize()
 	}
 	if err != nil {
-		// The response is already committed; the client disconnected mid-write.
-		// Report success to the pipeline and record the forced outcome, since
-		// the request was served as far as the coordinator is concerned.
+		// The status is committed, so nothing else can be written; the client did
+		// not receive the reply, so it is a failure, not a forced success. A
+		// client that already left is a routine cancellation, logged quietly like
+		// the pass-through's.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			logger.V(logutil.VERBOSE).Info("force-stream: client left before the reply was written", "error", ctxErr)
+			return fmt.Errorf("%s: %w", DecodeStepName, ctxErr)
+		}
 		logger.Error(err, "force-stream client write incomplete")
+		return &pipeline.ResponseWrittenError{Step: DecodeStepName, StatusCode: http.StatusOK, Cause: err}
 	}
 	coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultForced)
 	logger.V(logutil.DEFAULT).Info("force-stream complete", "bytes", len(payload))
