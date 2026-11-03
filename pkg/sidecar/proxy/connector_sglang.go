@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 	"math/rand/v2"
 	"net/http"
@@ -27,12 +28,16 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/proto"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 var (
@@ -52,6 +57,12 @@ func init() {
 }
 
 func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
+	if (r.URL != nil && r.URL.Path == sglangapiv1.SglangService_Generate_FullMethodName) ||
+		grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
+		s.handleSGLangGRPC(w, r, prefillPodHostPort)
+		return
+	}
+
 	logger := log.FromContext(r.Context())
 	logger.V(logging.DEBUG).Info("running SGLang protocol", "url", prefillPodHostPort)
 
@@ -78,6 +89,70 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// Send concurrent prefill and decode requests
 	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
+}
+
+func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running SGLang gRPC protocol", "url", prefillPodHostPort)
+
+	defer r.Body.Close()
+	// ReadMessage rejects a declared length over the limit before it
+	// allocates, and data after the one frame of a unary request.
+	frame, err := grpcframe.ReadMessage(r.Body, grpcframe.MaxPayloadLen)
+	if err != nil {
+		logger.V(logging.DEBUG).Info("invalid gRPC request frame", "error", err)
+		code, msg := codes.InvalidArgument, "invalid GenerateRequest frame"
+		switch {
+		case errors.Is(err, grpcframe.ErrCompressed):
+			code, msg = codes.Unimplemented, err.Error()
+		case errors.Is(err, grpcframe.ErrTooLarge):
+			code, msg = codes.ResourceExhausted, err.Error()
+		}
+		grpcframe.WriteError(w, code, msg)
+		return
+	}
+	payload := frame[grpcframe.HeaderLen:]
+
+	var genReq sglangapiv1.GenerateRequest
+	if err := proto.Unmarshal(payload, &genReq); err != nil {
+		logger.V(logging.DEBUG).Info("invalid GenerateRequest protobuf", "error", err)
+		grpcframe.WriteError(w, codes.InvalidArgument, "invalid GenerateRequest")
+		return
+	}
+
+	roomID := s.generateSGLangRoomID()
+	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
+
+	bootstrapHost := extractHost(prefillPodHostPort)
+	bootstrapPort := int64(sglangBootstrapPort)
+	genReq.BootstrapHost = &sglangapiv1.OptionalStringOrList{
+		Value: &sglangapiv1.OptionalStringOrList_One{
+			One: &sglangapiv1.OptionalString{Value: proto.String(bootstrapHost)},
+		},
+	}
+	genReq.BootstrapPort = &sglangapiv1.OptionalInt64OrList{
+		Value: &sglangapiv1.OptionalInt64OrList_One{
+			One: &sglangapiv1.OptionalInt64{Value: proto.Int64(bootstrapPort)},
+		},
+	}
+	genReq.BootstrapRoom = &sglangapiv1.OptionalInt64OrList{
+		Value: &sglangapiv1.OptionalInt64OrList_One{
+			One: &sglangapiv1.OptionalInt64{Value: proto.Int64(roomID)},
+		},
+	}
+	logger.V(logging.TRACE).Info("bootstrap info added",
+		"bootstrap_host", bootstrapHost,
+		"bootstrap_port", sglangBootstrapPort,
+		"bootstrap_room", roomID)
+
+	body, err := grpcframe.MarshalProto(&genReq)
+	if err != nil {
+		logger.Error(err, "failed to marshal GenerateRequest")
+		grpcframe.WriteError(w, codes.Internal, "failed to encode GenerateRequest")
+		return
+	}
+
+	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, nil)
 }
 
 func (s *Server) addSGLangBootstrapInfo(logger logr.Logger, requestData map[string]interface{}, prefillHostPort string, roomID int64) map[string]interface{} {

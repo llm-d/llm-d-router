@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -578,10 +579,8 @@ func (s *Server) createRoutes() http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	// DetectAPIType owns the path-to-API mapping; deriving it here keeps the
-	// served routes from drifting away from it.
-	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
-		handler := s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path))
+	registerInferenceRoute := func(path string, apiType reqcommon.APIType) {
+		handler := s.disaggregatedPrefillHandler(apiType)
 		mux.HandleFunc("POST "+path, handler)
 		mux.HandleFunc("POST "+path+"/{$}", func(w http.ResponseWriter, r *http.Request) {
 			r = r.Clone(r.Context())
@@ -590,12 +589,25 @@ func (s *Server) createRoutes() http.Handler {
 			handler(w, r)
 		})
 	}
+	// DetectAPIType owns the path-to-API mapping; deriving it here keeps the
+	// served routes from drifting away from it.
+	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
+		registerInferenceRoute(path, reqcommon.DetectAPIType(path))
+	}
+	// Only the sglang connector reads a protobuf body. With any other
+	// connector the path stays on the decoder catch-all below, which forwards
+	// the call decode-only as before.
+	var grpcPaths []string
+	if s.config.KVConnector == constants.KVConnectorSGLang {
+		grpcPaths = append(grpcPaths, sglangapiv1.SglangService_Generate_FullMethodName)
+		registerInferenceRoute(sglangapiv1.SglangService_Generate_FullMethodName, reqcommon.APITypeSGLangGenerate)
+	}
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 
 	mux.Handle("/", s.decoderProxy)
 
-	return redirectEncodedInferencePath(mux)
+	return redirectEncodedInferencePath(mux, grpcPaths...)
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.

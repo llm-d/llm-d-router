@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -367,11 +368,12 @@ func WriteAll(w io.Writer, b []byte) {
 // segment, so the two can classify such a request differently. The redirect
 // brings the client back through EPP with the clean path, as ServeMux does for
 // repeated slashes and dot segments. Only POST is served on these paths, so
-// other methods pass through.
-func redirectEncodedInferencePath(next http.Handler) http.Handler {
+// other methods pass through. grpcPaths lists the gRPC method paths that the
+// sidecar serves as inference routes.
+func redirectEncodedInferencePath(next http.Handler, grpcPaths ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.RawPath != "" {
-			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c {
+			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c || slices.Contains(grpcPaths, c) {
 				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
 				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
 				return
