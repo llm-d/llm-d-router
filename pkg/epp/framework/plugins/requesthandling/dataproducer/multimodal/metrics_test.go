@@ -18,6 +18,9 @@ package multimodal
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -27,8 +30,11 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 )
 
@@ -138,6 +144,61 @@ func TestProduceRecordsMetrics(t *testing.T) {
 	require.NoError(t, producer.Produce(context.Background(), request, nil))
 
 	assert.Equal(t, initialQueries+2, testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, img)))
+}
+
+// A token-in /generate request keys mm_hashes by whatever the client sends.
+// Those keys reach the modality label of both counters, so each new key must
+// not mint a new series.
+func TestProduceBoundsClientChosenModality(t *testing.T) {
+	producer := newTestProducer(t, nil, nil)
+	pod := k8stypes.NamespacedName{Namespace: "default", Name: "pod-a"}
+	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, metricsutil.OverflowValue))
+	initialHits := testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, pod.String(), metricsutil.OverflowValue))
+
+	const requests = 200
+	for i := range requests {
+		hash := fmt.Sprintf("hash-%d", i)
+		producer.putCacheEntry(hash, pod)
+		body := fmt.Sprintf(`{"token_ids":[1,2,3],"features":{"mm_hashes":{"client-modality-%d":[%q]}}}`, i, hash)
+		var generate fwkrequest.GenerateRequest
+		require.NoError(t, json.Unmarshal([]byte(body), &generate))
+		request := &scheduling.InferenceRequest{
+			RequestID: fmt.Sprintf("req-%d", i),
+			Body:      &fwkrequest.InferenceRequestBody{Generate: &generate},
+		}
+		require.NoError(t, producer.Produce(context.Background(), request, nil))
+	}
+
+	assert.Zero(t, clientModalitySeries(t, encoderCacheQueriesTotal), "queries: client-chosen modalities must not become label values")
+	assert.Zero(t, clientModalitySeries(t, encoderCacheHitsTotal), "hits: client-chosen modalities must not become label values")
+	assert.Equal(t, initialQueries+requests,
+		testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, metricsutil.OverflowValue)))
+	assert.Equal(t, initialHits+requests,
+		testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, pod.String(), metricsutil.OverflowValue)))
+}
+
+// clientModalitySeries counts the series in vec whose modality label is one of
+// the client-chosen keys TestProduceBoundsClientChosenModality sends.
+func clientModalitySeries(t *testing.T, vec *prometheus.CounterVec) int {
+	t.Helper()
+	ch := make(chan prometheus.Metric)
+	go func() {
+		vec.Collect(ch)
+		close(ch)
+	}()
+	series := 0
+	for m := range ch {
+		var pb dto.Metric
+		if !assert.NoError(t, m.Write(&pb)) {
+			continue
+		}
+		for _, label := range pb.GetLabel() {
+			if label.GetName() == "modality" && strings.HasPrefix(label.GetValue(), "client-modality-") {
+				series++
+			}
+		}
+	}
+	return series
 }
 
 func hitRatioHistogram() (*dto.Histogram, error) {
