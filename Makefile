@@ -41,7 +41,13 @@ export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 # plugin's HTTP backend. The dev renderer manifest overrides the image's command
 # with that CLI, so this image cannot be swapped for the simulator there. The
 # e2e suites render through the simulator instead and override this per target.
-export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.21.0
+# The tag must serve every render route the plugin calls, including
+# /v1/messages/render and /v1/responses/render; tags below v0.30.0 answer 404
+# there and the plugin falls back to the deprecated chat-completions
+# conversion. v0.32.0 serves the routes but cannot run model inference on a
+# Triton-less CPU build (vllm-project/vllm#61131), so it is not usable for the
+# serving manifests that share this tag.
+export VLLM_RENDER_IMAGE ?= vllm/vllm-openai-cpu:v0.31.0
 export VLLM_RENDER_PORT ?= 8082
 export VLLM_RENDER_URL ?= http://vllm-render:$(VLLM_RENDER_PORT)
 
@@ -227,7 +233,17 @@ check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails o
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate
+presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate verify-telemetry
+
+.PHONY: update-telemetry verify-telemetry test-telemetry
+update-telemetry: image-build-builder ## Generate trace attributes, span names, and the catalog.
+	$(BUILDER_RUN) 'bash hack/telemetry.sh update'
+
+verify-telemetry: image-build-builder ## Check the telemetry registry and generated files.
+	$(BUILDER_RUN) 'bash hack/telemetry.sh verify'
+
+test-telemetry: image-build-builder ## Test telemetry generation and drift detection.
+	$(BUILDER_RUN) 'bash hack/test-telemetry.sh && go test ./pkg/common/observability/semconv ./pkg/epp/scheduling'
 
 .PHONY: git-branch-check
 git-branch-check:

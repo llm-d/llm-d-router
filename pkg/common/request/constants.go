@@ -46,6 +46,8 @@ const (
 	HeaderContentType = "content-type"
 	// ContentTypeJSON is the media type of JSON bodies.
 	ContentTypeJSON = "application/json"
+	// MediaTypeEventStream is the SSE media type without optional parameters.
+	MediaTypeEventStream = "text/event-stream"
 	// HeaderContentTypeOptions names the HTTP header that controls MIME sniffing of a body.
 	HeaderContentTypeOptions = "x-content-type-options"
 	// ContentTypeOptionsNoSniff disables MIME sniffing; http.Error sets it on every body it writes.
@@ -57,6 +59,7 @@ const (
 
 	FieldKVTransferParams     = "kv_transfer_params"
 	FieldECTransferParams     = "ec_transfer_params"
+	FieldECDescriptorMetadata = "metadata" // ec_transfer_params descriptor field: the item's placeholder metadata
 	FieldMaxTokens            = "max_tokens"
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
@@ -67,7 +70,9 @@ const (
 	FieldEcho                 = "echo"
 	FieldTools                = "tools"
 	FieldToolChoice           = "tool_choice"
+	FieldResponseFormat       = "response_format"
 	FieldSamplingParams       = "sampling_params"
+	FieldN                    = "n"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
@@ -87,8 +92,10 @@ const (
 	FieldMessages             = "messages"
 	FieldModel                = "model"
 	FieldRole                 = "role"
+	FieldText                 = "text"
 	FieldType                 = "type"
 	FieldURL                  = "url"
+	FieldUUID                 = "uuid" // content part field vLLM keys a multimodal item's hash on
 	FieldImageURL             = "image_url"
 	FieldStore                = "store"
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
@@ -142,6 +149,9 @@ const ToolChoiceNone = "none"
 // part is still collected and primed. FieldFileID on an input_image, input_file
 // or computer_screenshot names a Files API upload the serving engine must fetch.
 const (
+	PartTypeText               = "text"
+	PartTypeInputText          = "input_text"
+	PartTypeOutputText         = "output_text"
 	PartTypeImageURL           = "image_url"
 	PartTypeAudioURL           = "audio_url"
 	PartTypeVideoURL           = "video_url"
@@ -150,6 +160,10 @@ const (
 	PartTypeInputFile          = "input_file"
 	PartTypeComputerScreenshot = "computer_screenshot"
 )
+
+// ResponsesItemTypeMessage is the Responses input item type of a role-tagged
+// message. An item that omits FieldType is a message too.
+const ResponsesItemTypeMessage = "message"
 
 // Anthropic Messages block types. An image block holds its image in a
 // FieldSource object; a tool_result block holds the tool's output under

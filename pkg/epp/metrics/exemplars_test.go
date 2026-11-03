@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 func ctxWithSpan(t *testing.T, sampled bool) context.Context {
@@ -83,34 +84,34 @@ func latencyRecorders() []latencyRecorder {
 		{
 			name: "ttft",
 			record: func(ctx context.Context) {
-				RecordRequestTTFT(ctx, "m", "t", "f", "1", true, received, firstToken)
+				RecordRequestTTFT(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", true, received, firstToken)
 			},
 			vec:    llmdRequestTTFT,
-			labels: []string{"m", "t", "f", "1", "true"},
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String(), "true"},
 		},
 		{
 			name: "tpot",
 			record: func(ctx context.Context) {
-				RecordRequestTPOT(ctx, "m", "t", "f", "1", true, received, firstToken, complete, 5)
+				RecordRequestTPOT(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", true, received, firstToken, complete, 5)
 			},
 			vec:    llmdRequestTPOT,
-			labels: []string{"m", "t", "f", "1"},
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String()},
 		},
 		{
 			name: "itl",
 			record: func(ctx context.Context) {
-				RecordInterTokenLatency(ctx, "m", "t", "f", "1", 0.02)
+				RecordInterTokenLatency(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", 0.02)
 			},
 			vec:    llmdInterTokenLatency,
-			labels: []string{"m", "t", "f", "1"},
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String()},
 		},
 		{
 			name: "ntpot",
 			record: func(ctx context.Context) {
-				RecordNormalizedTimePerOutputToken(ctx, "m", "t", "f", "1", received, complete, 5)
+				RecordNormalizedTimePerOutputToken(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", received, complete, 5)
 			},
 			vec:    llmdNormalizedTimePerOutputToken,
-			labels: []string{"m", "t", "f", "1"},
+			labels: []string{"m", "t", "f", "1", reqcommon.APITypeMessages.String()},
 		},
 		{
 			name: "scheduler",
@@ -168,6 +169,42 @@ func TestLatencyRecordersAttachTraceExemplars(t *testing.T) {
 	}
 }
 
+// errorCounter returns the request_error_total series RecordRequestErrCounter
+// writes for the arguments used below.
+func errorCounter(t *testing.T) *dto.Counter {
+	t.Helper()
+	m, err := llmdRequestErrCounter.GetMetricWithLabelValues("m", "t", "f", "1", reqcommon.APITypeMessages.String(), "502")
+	require.NoError(t, err)
+	var metric dto.Metric
+	require.NoError(t, m.Write(&metric))
+	return metric.GetCounter()
+}
+
+func TestRequestErrCounterAttachesTraceExemplar(t *testing.T) {
+	t.Run("sampled", func(t *testing.T) {
+		Reset()
+		ctx, span := ctxWithRecordingSpan(t)
+		defer span.End()
+		RecordRequestErrCounter(ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", "502")
+
+		counter := errorCounter(t)
+		require.InDelta(t, 1, counter.GetValue(), 1e-9)
+		require.NotNil(t, counter.GetExemplar(), "an error on a sampled request must link to its trace")
+		labels := exemplarLabels(counter.GetExemplar())
+		require.Equal(t, span.SpanContext().TraceID().String(), labels[metricsutil.ExemplarTraceIDLabel])
+		require.Equal(t, span.SpanContext().SpanID().String(), labels[metricsutil.ExemplarSpanIDLabel])
+	})
+
+	t.Run("unsampled", func(t *testing.T) {
+		Reset()
+		RecordRequestErrCounter(ctxWithSpan(t, false), "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", "502")
+
+		counter := errorCounter(t)
+		require.Nil(t, counter.GetExemplar())
+		require.InDelta(t, 1, counter.GetValue(), 1e-9, "the error must still be counted")
+	})
+}
+
 // BenchmarkRecordInterTokenLatency measures the exemplar cost on the ITL path,
 // which records once per streaming chunk.
 func BenchmarkRecordInterTokenLatency(b *testing.B) {
@@ -193,7 +230,7 @@ func BenchmarkRecordInterTokenLatency(b *testing.B) {
 			Reset()
 			b.ReportAllocs()
 			for b.Loop() {
-				RecordInterTokenLatency(bc.ctx, "m", "t", "f", "1", 0.02)
+				RecordInterTokenLatency(bc.ctx, "m", "t", reqcommon.APITypeMessages.Surface(), "f", "1", 0.02)
 			}
 		})
 	}

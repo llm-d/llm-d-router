@@ -126,12 +126,39 @@ func Factory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkp
 			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 	}
+	if err := config.validate(); err != nil {
+		return nil, fmt.Errorf("invalid parameters for plugin %q: %w", name, err)
+	}
 	return &Plugin{
 		typedName:                    fwkplugin.TypedName{Type: LatencyScorerType, Name: name},
 		config:                       config,
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 	}, nil
+}
+
+func (c *Config) validate() error {
+	switch c.HeadroomSelectionStrategy {
+	case StrategyLeast, StrategyMost:
+	default:
+		return fmt.Errorf("headroomSelectionStrategy must be %q or %q, got %q", StrategyLeast, StrategyMost, c.HeadroomSelectionStrategy)
+	}
+	weights := []struct {
+		name  string
+		value float64
+	}{
+		{"ttftWeight", c.TTFTWeight},
+		{"tpotWeight", c.TPOTWeight},
+		{"compositeKVWeight", c.CompositeKVWeight},
+		{"compositeQueueWeight", c.CompositeQueueWeight},
+		{"compositePrefixWeight", c.CompositePrefixWeight},
+	}
+	for _, w := range weights {
+		if w.value < 0 {
+			return fmt.Errorf("%s must be >= 0, got %v", w.name, w.value)
+		}
+	}
+	return nil
 }
 
 func (s *Plugin) TypedName() fwkplugin.TypedName {
@@ -318,7 +345,8 @@ func (s *Plugin) scoreBucket(ctx context.Context, data []epData, scores map[fwks
 			// Prefer endpoints closest to the SLO (bin-packing approach to preserve fully idle nodes).
 			w = float64(int((1.0-combined)*float64(wMax-minWeight)) + minWeight + 1)
 		}
-		scores[d.endpoint] = w / float64(wMax)
+		// w runs from minWeight+1 to wMax+1, so divide by wMax+1 to keep the score in [0, 1].
+		scores[d.endpoint] = w / float64(wMax+1)
 
 		logger.V(logutil.TRACE).Info("LatencyScorer: scored endpoint",
 			"endpoint", d.endpoint.GetMetadata().ID.Name,

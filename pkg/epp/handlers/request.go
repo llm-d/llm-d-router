@@ -73,7 +73,11 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 func (s *StreamingServer) fallbackToRandomEndpoint(ctx context.Context, reqCtx *RequestContext, requestSize int) error {
 	endpoint := s.director.GetRandomEndpoint()
 	if endpoint == nil {
-		return errcommon.Error{Code: errcommon.Internal, Msg: "no pods available in datastore"}
+		return errcommon.Error{
+			Code:    errcommon.ServiceUnavailable,
+			Msg:     "no pods available in datastore",
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+		}
 	}
 	reqCtx.TargetEndpoint = net.JoinHostPort(endpoint.GetIPAddress(), endpoint.GetPort())
 	reqCtx.RequestSize = requestSize

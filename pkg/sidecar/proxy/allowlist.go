@@ -187,8 +187,20 @@ func (av *AllowlistValidator) Start(ctx context.Context) error {
 	av.podInformersMu.Unlock()
 
 	// Wait for cache sync
-	if !cache.WaitForCacheSync(av.stopCh, av.poolInformer.HasSynced) {
+	syncCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-av.stopCh:
+			cancel()
+		case <-syncCtx.Done():
+		}
+	}()
+	if !cache.WaitForCacheSync(syncCtx.Done(), av.poolInformer.HasSynced) {
 		av.Stop()
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("failed to sync InferencePool cache: %w", err)
+		}
 		return fmt.Errorf("failed to sync InferencePool cache within timeout (check RBAC permissions for inferencepools.%s and that pool '%s' exists)", av.gvr.String(), av.poolName)
 	}
 

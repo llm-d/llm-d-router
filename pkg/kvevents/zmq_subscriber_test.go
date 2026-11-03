@@ -133,6 +133,15 @@ func availableEndpoint(t *testing.T, ctx context.Context) string {
 	return endpoint
 }
 
+// listenEphemeral binds sock to a kernel-assigned loopback port and returns its
+// endpoint. Binding port 0 directly leaves no window for another process to
+// take the port, unlike reserving one with availableEndpoint and binding later.
+func listenEphemeral(t *testing.T, sock zmq4.Socket) string {
+	t.Helper()
+	require.NoError(t, sock.Listen("tcp://127.0.0.1:0"))
+	return "tcp://" + sock.Addr().String()
+}
+
 func seqFrame(seq uint64) []byte {
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint64(b, seq)
@@ -167,13 +176,13 @@ func (b *replayBuffer) set(messages ...replayMessage) {
 	b.messages = append([]replayMessage(nil), messages...)
 }
 
-func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *replayBuffer {
+func startReplayBuffer(t *testing.T, ctx context.Context) (*replayBuffer, string) {
 	t.Helper()
 	buffer := &replayBuffer{}
 	topic := []byte("kv@10.0.0.1:8000@TestModel")
 
 	router := zmq4.NewRouter(ctx)
-	require.NoError(t, router.Listen(endpoint))
+	endpoint := listenEphemeral(t, router)
 	t.Cleanup(func() { router.Close() })
 
 	// A send failure means only that this client hung up, so it abandons the
@@ -238,7 +247,7 @@ func startReplayBuffer(t *testing.T, ctx context.Context, endpoint string) *repl
 		}
 	}()
 
-	return buffer
+	return buffer, endpoint
 }
 
 // TestZMQPubSub verifies that the pure-Go ZMQ library correctly implements
@@ -502,9 +511,11 @@ func newReplayHarnessWithBehavior(
 	require.NoError(t, err)
 	pool.Start(ctx)
 
-	pubEndpoint := availableEndpoint(t, ctx)
-	replayEndpoint := availableEndpoint(t, ctx)
-	buffer := startReplayBuffer(t, ctx, replayEndpoint)
+	// The subscriber connects, as production subscribers with a replay endpoint
+	// do, so every listener in the harness binds its own port.
+	pub := zmq4.NewPub(ctx)
+	pubEndpoint := listenEphemeral(t, pub)
+	buffer, replayEndpoint := startReplayBuffer(t, ctx)
 	buffer.set(messages...)
 	buffer.fail.Store(fail)
 	buffer.mu.Lock()
@@ -516,12 +527,9 @@ func newReplayHarnessWithBehavior(
 
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
-		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, "", "kv@", false))
-	require.Eventually(t, func() bool { return buffer.requests.Load() == 1 },
+		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, "", "kv@", true))
+	require.Eventually(t, func() bool { return buffer.requests.Load() >= 1 },
 		5*time.Second, 50*time.Millisecond, "proactive replay expected")
-
-	pub := zmq4.NewPub(ctx)
-	require.NoError(t, pub.Dial(pubEndpoint))
 	time.Sleep(100 * time.Millisecond)
 
 	t.Cleanup(func() {
@@ -891,11 +899,11 @@ func identified(t *testing.T, payload []byte, publisher byte) []byte {
 	return out
 }
 
-func startSnapshotServer(t *testing.T, ctx context.Context, endpoint string) *snapshotServer {
+func startSnapshotServer(t *testing.T, ctx context.Context) (*snapshotServer, string) {
 	t.Helper()
 	server := &snapshotServer{publisher: publisherID(0)}
 	rep := zmq4.NewRep(ctx)
-	require.NoError(t, rep.Listen(endpoint))
+	endpoint := listenEphemeral(t, rep)
 	t.Cleanup(func() { rep.Close() })
 	go func() {
 		for {
@@ -912,7 +920,7 @@ func startSnapshotServer(t *testing.T, ctx context.Context, endpoint string) *sn
 			}
 		}
 	}()
-	return server
+	return server, endpoint
 }
 
 func newSnapshotHarness(t *testing.T, cut int64, batches ...[]byte) (*replayHarness, *snapshotServer) {
@@ -935,23 +943,20 @@ func newSnapshotReplayHarness(
 	require.NoError(t, err)
 	pool.Start(ctx)
 
-	pubEndpoint := availableEndpoint(t, ctx)
-	snapshotEndpoint := availableEndpoint(t, ctx)
-	server := startSnapshotServer(t, ctx, snapshotEndpoint)
+	pub := zmq4.NewPub(ctx)
+	pubEndpoint := listenEphemeral(t, pub)
+	server, snapshotEndpoint := startSnapshotServer(t, ctx)
 	server.set(cut, batches...)
 	replayEndpoint := ""
 	var buffer *replayBuffer
 	if replay != nil {
-		replayEndpoint = availableEndpoint(t, ctx)
-		buffer = startReplayBuffer(t, ctx, replayEndpoint)
+		buffer, replayEndpoint = startReplayBuffer(t, ctx)
 		buffer.set(replay...)
 	}
 
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
-		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, snapshotEndpoint, "kv@", false))
-	pub := zmq4.NewPub(ctx)
-	require.NoError(t, pub.Dial(pubEndpoint))
+		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, snapshotEndpoint, "kv@", true))
 	time.Sleep(100 * time.Millisecond)
 
 	t.Cleanup(func() {

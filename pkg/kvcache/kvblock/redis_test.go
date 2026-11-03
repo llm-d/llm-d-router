@@ -17,9 +17,11 @@ limitations under the License.
 package kvblock_test
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
+	miniredisserver "github.com/alicebob/miniredis/v2/server"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -48,6 +50,54 @@ func createRedisIndexForTesting(t *testing.T) Index {
 // TestRedisIndexBehavior tests the Redis index implementation using common test behaviors.
 func TestRedisIndexBehavior(t *testing.T) {
 	testCommonIndexBehavior(t, createRedisIndexForTesting)
+}
+
+func TestRedisClear_SkipsNonHashKeys(t *testing.T) {
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	defer server.Close()
+
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	const coordinationKey = "coord:revision:request-1"
+	keys := []BlockHash{111, 222}
+	target := PodEntry{PodIdentifier: "target", DeviceTier: "gpu"}
+	keeper := PodEntry{PodIdentifier: "keeper", DeviceTier: "gpu"}
+	require.NoError(t, index.Add(ctx, nil, keys, []PodEntry{target, keeper}))
+	require.NoError(t, server.Set(coordinationKey, "v1"))
+	var coordinationHKeys atomic.Int64
+	server.Server().SetPreHook(func(_ *miniredisserver.Peer, command string, args ...string) bool {
+		if command == "HKEYS" && len(args) == 1 && args[0] == coordinationKey {
+			coordinationHKeys.Add(1)
+		}
+		return false
+	})
+
+	require.NoError(t, index.Clear(ctx, target.PodIdentifier))
+	require.Zero(t, coordinationHKeys.Load(), "Clear must not read coordination strings as hashes")
+
+	for _, key := range keys {
+		result, err := index.Lookup(ctx, []BlockHash{key}, nil)
+		require.NoError(t, err)
+		require.Equal(t, []PodEntry{keeper}, result[key])
+	}
+	value, err := server.Get(coordinationKey)
+	require.NoError(t, err)
+	require.Equal(t, "v1", value)
+}
+
+func TestRedisClear_ConnectionFailureReturnsError(t *testing.T) {
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	server.Close()
+
+	require.ErrorContains(t, index.Clear(t.Context(), "target"), "clear scan failed")
 }
 
 // TestRedisIndexEvictLookupFailure verifies that a lookup failure (e.g. lost

@@ -17,6 +17,7 @@ limitations under the License.
 package coordinate2e
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os/exec"
@@ -36,6 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	inferenceapi "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/test/coordinator/e2e/internal/e2eutil"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -142,6 +145,7 @@ func testWrapper(test func()) func() {
 			if ginkgo.CurrentSpecReport().Failed() {
 				// Dump the workload before the deletes below remove it.
 				testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
+				dumpEnvoyExtProcStats(nsName)
 				if keepClusterOnFailure {
 					return
 				}
@@ -361,14 +365,62 @@ func createCoordinator(nsName, config string) {
 func waitForCoordinatorReady() {
 	ginkgo.By("Waiting for coordinator to be reachable via gateway")
 	gomega.Eventually(func() bool {
-		return pollReady(gatewayBaseURL() + "/readyz")
+		return pollReady(gatewayBaseURL()+"/readyz", nil)
 	}, readyTimeout, defaultInterval).Should(gomega.BeTrue(), "coordinator should be reachable via gateway within the ready timeout")
 }
 
-// pollReady reports whether a GET on url returns HTTP 200 within the client timeout.
-func pollReady(url string) bool {
+// waitForPhaseRoutesReady polls a model server's /health through each phase
+// route until it returns 200. Those routes run ext_proc against the EPP, which
+// the coordinator's /readyz route skips, so a Deployment-ready EPP can still
+// fail a phase call while Envoy's ext_proc stream or the EPP's datastore is
+// not yet usable. A bodyless GET makes the EPP pick a random pool endpoint.
+func waitForPhaseRoutesReady() {
+	ginkgo.By("Waiting for each phase route to reach a model server through the EPP")
+	for _, phase := range []string{gateway.PhaseEncode, gateway.PhasePrefill, gateway.PhaseDecode} {
+		header := http.Header{reqcommon.EPPProfileHeaderKey: []string{phase}}
+		gomega.Eventually(func() bool {
+			return pollReady(gatewayBaseURL()+"/health", header)
+		}, readyTimeout, defaultInterval).Should(gomega.BeTrue(),
+			"%s route should reach a model server through the EPP within the ready timeout", phase)
+	}
+}
+
+// dumpEnvoyExtProcStats prints Envoy's ext_proc filter and EPP cluster stats
+// (stream failures, connect failures, healthy members). Envoy answers a failed
+// ext_proc call with an empty 500 that no EPP or access log line explains, so
+// these counters are what separate an unhealthy EPP from a failed connect or a
+// reset stream.
+func dumpEnvoyExtProcStats(nsName string) {
+	ctx, cancel := context.WithTimeout(testConfig.Context, 10*time.Second)
+	defer cancel()
+	pods, err := testConfig.KubeCli.CoreV1().Pods(nsName).List(ctx, metav1.ListOptions{LabelSelector: "app=envoy"})
+	if err != nil {
+		ginkgo.GinkgoWriter.Printf("Failed to list Envoy pods: %v\n", err)
+		return
+	}
+	for i := range pods.Items {
+		name := pods.Items[i].Name
+		out, err := testConfig.KubeCli.CoreV1().Pods(nsName).
+			ProxyGet("http", name, "19001", "/stats/prometheus", map[string]string{"filter": "ext_proc"}).
+			DoRaw(ctx)
+		if err != nil {
+			ginkgo.GinkgoWriter.Printf("Failed to fetch Envoy stats from %s: %v\n", name, err)
+			continue
+		}
+		ginkgo.GinkgoWriter.Printf("--- Envoy ext_proc stats: %s ---\n%s\n", name, out)
+	}
+}
+
+// pollReady reports whether a GET on url with the given headers returns HTTP 200
+// within the client timeout.
+func pollReady(url string, header http.Header) bool {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header = header
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}

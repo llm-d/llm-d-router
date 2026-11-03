@@ -23,7 +23,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
@@ -82,8 +82,8 @@ func (p *parameters) validate() error {
 
 // compile-time type assertion
 var _ scheduling.Filter = &SessionAffinity{}
-var _ requestcontrol.ResponseHeaderProcessor = &SessionAffinity{}
-var _ requestcontrol.PreRequest = &SessionAffinity{}
+var _ fwkrh.ResponseHeaderProcessor = &SessionAffinity{}
+var _ fwkrh.PreRequest = &SessionAffinity{}
 
 // Factory defines the factory function for the SessionAffinity filter.
 func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
@@ -125,7 +125,7 @@ type strategy interface {
 	Consumes() plugin.DataDependencies
 	filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint
 	preRequest(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult)
-	responseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata)
+	responseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *fwkrh.Response, targetPod *datalayer.EndpointMetadata)
 }
 
 func newStrategy(params parameters, handle plugin.Handle) strategy {
@@ -166,6 +166,6 @@ func (s *SessionAffinity) PreRequest(ctx context.Context, request *scheduling.In
 }
 
 // ResponseHeader sets the session header on the response sent to the client.
-func (s *SessionAffinity) ResponseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
+func (s *SessionAffinity) ResponseHeader(ctx context.Context, request *scheduling.InferenceRequest, response *fwkrh.Response, targetPod *datalayer.EndpointMetadata) {
 	s.strategy.responseHeader(ctx, request, response, targetPod)
 }

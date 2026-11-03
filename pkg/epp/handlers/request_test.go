@@ -49,6 +49,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -682,6 +683,30 @@ func TestFallbackToRandomEndpoint(t *testing.T) {
 	}
 }
 
+func TestFallbackToRandomEndpointWithoutEndpoints(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &emptyPoolDirector{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.fallbackToRandomEndpoint(context.Background(), reqCtx, 0)
+	var epErr errcommon.Error
+	require.ErrorAs(t, err, &epErr)
+	assert.Equal(t, errcommon.ServiceUnavailable, epErr.Code)
+	assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), epErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
+}
+
+type emptyPoolDirector struct {
+	Director
+}
+
+func (*emptyPoolDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
+	return nil
+}
+
 type mockDirectorRequest struct {
 	Director
 	endpoint *datalayer.EndpointMetadata
@@ -824,6 +849,12 @@ func TestToolCallingAPIForPath(t *testing.T) {
 		{path: "/provider/messages/", want: reqcommon.APITypeMessages, wantOK: true},
 		{path: "/provider/responses?stream=true", want: reqcommon.APITypeResponses, wantOK: true},
 		{path: "/v1/chat/completions/?stream=true", want: reqcommon.APITypeChatCompletions, wantOK: true},
+		{path: reqcommon.PathCompletions, wantOK: false},
+		{path: reqcommon.PathVLLMGenerate, wantOK: false},
+		{path: reqcommon.PathSGLangGenerate, wantOK: false},
+		{path: "/provider" + reqcommon.PathCompletions + "/?stream=true", wantOK: false},
+		{path: "/provider" + reqcommon.PathVLLMGenerate + "/?stream=true", wantOK: false},
+		{path: "/provider" + reqcommon.PathSGLangGenerate + "/?stream=true", wantOK: false},
 		{path: "/v1/chat/completions/render", wantOK: false},
 		{path: "/v1/messages/render", wantOK: false},
 		{path: "/v1/messages/count_tokens", wantOK: false},
@@ -868,7 +899,7 @@ type requestIntegrityDirector struct {
 	checkSnapshot      func(context.Context, []byte)
 }
 
-func (d *requestIntegrityDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (d *requestIntegrityDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	d.called = true
 	if d.checkSnapshot != nil {
 		d.checkSnapshot(ctx, reqCtx.Request.RawBody)
@@ -1252,7 +1283,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 				require.Equal(t, tt.wantErrorStatus, srv.sentResponses[0].GetImmediateResponse().GetStatus().GetCode())
 				wantErrorMessage := tt.wantErrorMessage
 				if tt.path == reqcommon.PathMessages {
-					var messages fwkrh.MessagesRequest
+					var messages fwkrequest.MessagesRequest
 					if decodeErr := json.Unmarshal([]byte(tt.body), &messages); decodeErr != nil {
 						wantErrorMessage = "error parsing messages request: " + decodeErr.Error()
 					}

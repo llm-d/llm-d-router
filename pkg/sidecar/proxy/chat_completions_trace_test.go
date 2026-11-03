@@ -23,10 +23,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -946,5 +948,89 @@ func TestPrefillHandlerOmitsCorrelationWhenTracingDisabled(t *testing.T) {
 		if strings.Contains(rec, tracing.LogKeyTraceID) || strings.Contains(rec, tracing.LogKeySpanID) {
 			t.Errorf("unexpected correlation fields with tracing disabled: %q", rec)
 		}
+	}
+}
+
+// Every registered connector reads its logger from the request context, so each
+// line it writes while handling a request carries that request's trace_id. A
+// connector added to supportedKVConnectors or supportedECConnectors runs here
+// without changes to this test; one that logs through the process-scoped
+// logger fails with the file and line of the uncorrelated call.
+func TestConnectorLogsCarryRequestTraceID(t *testing.T) {
+	// One backend plays prefiller, decoder, encoder and Mooncake bootstrap.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			statusHandler(http.StatusOK, `{"0":{"engine_id":"engine"}}`).ServeHTTP(w, r)
+			return
+		}
+		statusHandler(http.StatusOK, chatResponse("ok", "stop", 1, 1)).ServeHTTP(w, r)
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+	bootstrapPort, err := strconv.Atoi(upstreamURL.Port())
+	require.NoError(t, err)
+
+	type connector struct{ kv, ec string }
+	connectors := make([]connector, 0, len(supportedKVConnectors)+len(supportedECConnectors))
+	for _, kv := range slices.Sorted(maps.Keys(supportedKVConnectors)) {
+		connectors = append(connectors, connector{kv: kv})
+	}
+	for _, ec := range slices.Sorted(maps.Keys(supportedECConnectors)) {
+		connectors = append(connectors, connector{ec: ec})
+	}
+
+	for _, c := range connectors {
+		t.Run(c.kv+c.ec, func(t *testing.T) {
+			sr := tracetest.NewSpanRecorder()
+			useTracerProviderForTest(t, sdktrace.NewTracerProvider(
+				sdktrace.WithSpanProcessor(sr),
+				sdktrace.WithSampler(sdktrace.AlwaysSample()),
+			))
+
+			s := NewProxy(Config{Port: "8000", KVConnector: c.kv, ECConnector: c.ec,
+				DecoderURL: upstreamURL, MooncakeBootstrapPort: bootstrapPort})
+			var mu sync.Mutex
+			var logged []string
+			s.logger = funcr.New(func(prefix, args string) {
+				mu.Lock()
+				defer mu.Unlock()
+				logged = append(logged, prefix+" "+args)
+			}, funcr.Options{Verbosity: logging.TRACE, LogCaller: funcr.All})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.decoderProxy = s.createDecoderProxyHandler(upstreamURL, false)
+
+			req := chatRequest(t, userMessageRequest(imageURLItem("https://example.com/img.jpg")))
+			req.Header.Set(routing.PrefillEndpointHeader, upstreamURL.Host)
+			if c.ec != "" {
+				req.Header.Set(routing.EncoderEndpointsHeader, upstreamURL.Host)
+			}
+			rw := httptest.NewRecorder()
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(rw, req)
+			require.Equal(t, http.StatusOK, rw.Code, rw.Body.String())
+
+			// Concurrent-dispatch prefill outlives the handler; its last line is
+			// written before its span ends.
+			require.Eventually(t, func() bool { return len(sr.Started()) == len(sr.Ended()) },
+				5*time.Second, 10*time.Millisecond, "spans still open")
+
+			var traceID string
+			for _, span := range sr.Ended() {
+				if span.Name() == "forward_request" {
+					traceID = span.SpanContext().TraceID().String()
+				}
+			}
+			require.NotEmpty(t, traceID, "forward_request span not recorded")
+
+			mu.Lock()
+			defer mu.Unlock()
+			wantField := fmt.Sprintf("%q=%q", tracing.LogKeyTraceID, traceID)
+			connectorLogged := false
+			for _, rec := range logged {
+				assert.Contains(t, rec, wantField, "log line missing the request's trace_id")
+				connectorLogged = connectorLogged || !strings.Contains(rec, `"file"="dispatch.go"`)
+			}
+			assert.True(t, connectorLogged, "the connector logged nothing: %v", logged)
+		})
 	}
 }

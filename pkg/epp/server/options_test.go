@@ -255,6 +255,53 @@ func TestGRPCFlags(t *testing.T) {
 	}
 }
 
+func TestMaxRequestBodySizeFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		want        int
+		expectError bool
+	}{
+		{name: "Default is unlimited", want: 0},
+		{name: "Raw integer", args: []string{"--max-request-body-size", "1048576"}, want: 1048576},
+		{name: "Binary unit with B suffix", args: []string{"--max-request-body-size", "64MiB"}, want: 64 << 20},
+		{name: "Decimal unit", args: []string{"--max-request-body-size", "64M"}, want: 64000000},
+		{name: "Invalid unit", args: []string{"--max-request-body-size", "64invalid"}, expectError: true},
+		{name: "Negative", args: []string{"--max-request-body-size", "-1Mi"}, expectError: true},
+		{name: "Overflow", args: []string{"--max-request-body-size", "10Ei"}, expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := pflag.NewFlagSet(tt.name, pflag.ContinueOnError)
+			opts := NewOptions()
+			opts.AddFlags(fs)
+
+			argv := append([]string{"--pool-name", testPoolName, "--config-file", testConfigFile}, tt.args...)
+			if err := fs.Parse(argv); err != nil {
+				t.Fatalf("Failed to parse flags: %v", err)
+			}
+
+			err := opts.Complete()
+			if err == nil {
+				err = opts.Validate()
+			}
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("Expected Complete() or Validate() to fail, but it succeeded")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Complete/Validate failed unexpectedly with error: %v", err)
+			}
+			if opts.MaxRequestBodySize != tt.want {
+				t.Errorf("MaxRequestBodySize mismatch: got %v, want %v", opts.MaxRequestBodySize, tt.want)
+			}
+		})
+	}
+}
+
 // TestPortFlags exercises --grpc-port, --metrics-port, and --grpc-health-port
 // as uint16-backed flags: defaults, valid values including the boundary
 // 65535, and rejection of values outside the uint16 range at parse time.

@@ -65,7 +65,8 @@ type redisConfig struct {
 
 // RedisSyncer is a CrossReplicaSyncer backed by Redis for cross-replica
 // state sharing. Set prepares each endpoint's peer aggregate, and Get combines
-// it with the live local value.
+// it with the live local value. Only a successful Set replaces the aggregate, so
+// while Redis is unreachable the last known peer state keeps counting.
 type RedisSyncer struct {
 	typedName       fwkplugin.TypedName
 	replicaID       string
@@ -76,8 +77,7 @@ type RedisSyncer struct {
 }
 
 type aggregateCacheEntry struct {
-	value     any
-	expiresAt time.Time
+	value any
 }
 
 func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, error) {
@@ -211,7 +211,6 @@ func gobDecode(data []byte, prototype any) (any, error) {
 // by get.
 func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
 	logger := ctrl.LoggerFrom(ctx)
-	now := time.Now()
 
 	data, err := encodeValue(value)
 	if err != nil {
@@ -232,7 +231,7 @@ func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID st
 	if err != nil {
 		return fmt.Errorf("redis-syncer: hgetall: %w", err)
 	}
-	peerCount := s.cachePeerAggregate(ctx, hashKey, value, raw, aggregate, now)
+	peerCount := s.cachePeerAggregate(ctx, hashKey, value, raw, aggregate)
 
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
 		v.Info("redis-syncer: Set", "key", string(key), "endpoint", endpointID, "replica", s.replicaID, "numReplicas", peerCount+1)
@@ -240,7 +239,7 @@ func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID st
 	return nil
 }
 
-func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, value any, raw map[string]string, aggregate func([]any) any, now time.Time) int {
+func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, value any, raw map[string]string, aggregate func([]any) any) int {
 	logger := ctrl.LoggerFrom(ctx)
 	remoteValues := make([]any, 0, len(raw))
 	for _, field := range slices.Sorted(maps.Keys(raw)) {
@@ -261,10 +260,7 @@ func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, va
 	if len(remoteValues) == 0 {
 		s.cache.Delete(hashKey)
 	} else {
-		s.cache.Store(hashKey, &aggregateCacheEntry{
-			value:     aggregate(remoteValues),
-			expiresAt: now.Add(s.stateTTL),
-		})
+		s.cache.Store(hashKey, &aggregateCacheEntry{value: aggregate(remoteValues)})
 	}
 
 	return len(remoteValues)
@@ -350,7 +346,6 @@ func (s *RedisSyncer) setBatchChunk(ctx context.Context, spec fwkdl.CrossReplica
 	if len(publications) == 0 {
 		return failures
 	}
-	now := time.Now()
 	commands, execErr := pipe.Exec(ctx)
 	if execFailedWholeChunk(execErr, commands) {
 		for _, publication := range publications {
@@ -370,7 +365,7 @@ func (s *RedisSyncer) setBatchChunk(ctx context.Context, spec fwkdl.CrossReplica
 			failures[publication.endpointID] = fmt.Errorf("redis-syncer: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", err)
 			continue
 		}
-		peerCount := s.cachePeerAggregate(ctx, s.hashKey(spec.StateKey, publication.endpointID), publication.value, publication.result.Val(), spec.Aggregate, now)
+		peerCount := s.cachePeerAggregate(ctx, s.hashKey(spec.StateKey, publication.endpointID), publication.value, publication.result.Val(), spec.Aggregate)
 		if v := logger.V(logutil.DEBUG); v.Enabled() {
 			v.Info("redis-syncer: Set", "key", string(spec.StateKey), "endpoint", publication.endpointID, "replica", s.replicaID, "numReplicas", peerCount+1)
 		}
@@ -405,12 +400,7 @@ func (s *RedisSyncer) get(_ context.Context, key fwkdl.StateKey, endpointID stri
 	if !ok {
 		return local
 	}
-	entry := cached.(*aggregateCacheEntry)
-	if !entry.expiresAt.After(time.Now()) {
-		s.cache.CompareAndDelete(hashKey, cached)
-		return local
-	}
-	return aggregate([]any{local, entry.value})
+	return aggregate([]any{local, cached.(*aggregateCacheEntry).value})
 }
 
 func (s *RedisSyncer) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {

@@ -34,12 +34,13 @@ import (
 // dataParallelHandler checks if Data Parallel handling is needed.
 // Returns true if Data Parallel processing was needed
 func (s *Server) dataParallelHandler(w http.ResponseWriter, r *http.Request, beforeDispatch func()) bool {
+	logger := log.FromContext(r.Context())
 	dataParallelPodHostPort := r.Header.Get(routing.DataParallelEndpointHeader)
 	if dataParallelPodHostPort != "" {
-		s.logger.Info("The use of the x-data-parallel-host-port is deprecated. Use Istio >= 1.28.1.")
+		logger.Info("The use of the x-data-parallel-host-port is deprecated. Use Istio >= 1.28.1.")
 		handler := s.dataParallelProxies[dataParallelPodHostPort]
 		if handler != nil {
-			s.logger.V(logging.DEBUG).Info("Data parallel routing", "to", dataParallelPodHostPort)
+			logger.V(logging.DEBUG).Info("Data parallel routing", "to", dataParallelPodHostPort)
 			// Missing replicas must not supply evidence of a dispatched request.
 			if beforeDispatch != nil {
 				beforeDispatch()
@@ -47,13 +48,13 @@ func (s *Server) dataParallelHandler(w http.ResponseWriter, r *http.Request, bef
 			handler.ServeHTTP(w, r)
 		} else {
 			// Shouldn't happen, send to default server
-			s.logger.V(logging.DEBUG).Info("Didn't find the Data Parallel Proxy", "for", dataParallelPodHostPort)
+			logger.V(logging.DEBUG).Info("Didn't find the Data Parallel Proxy", "for", dataParallelPodHostPort)
 			w.WriteHeader(http.StatusBadRequest)
 		}
 		return true
 	}
 
-	s.logger.V(logging.DEBUG).Info("skip data parallel")
+	logger.V(logging.DEBUG).Info("skip data parallel")
 	return false
 }
 

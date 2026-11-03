@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -985,6 +986,54 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 	}
 }
 
+// TestEncodeStep_BuildsTokenIDsFromSpan verifies the encode sub-request prompt
+// carries the entry's placeholder span as it sits in the full prompt, so a
+// model that interleaves other tokens inside the span preprocesses the same
+// sequence the prefiller expands.
+func TestEncodeStep_BuildsTokenIDsFromSpan(t *testing.T) {
+	var receivedTokenIDs []any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		receivedTokenIDs, _ = parsed["token_ids"].([]any)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"h1": map[string]any{"peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, _ := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-span",
+		Model:     "test",
+		TokenIDs:  []int{1, 32000, 32001, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	require.Equal(t, []any{float64(1), float64(32000), float64(32001), float64(32000)}, receivedTokenIDs)
+
+	// A span past the end of token_ids fails the request.
+	reqCtx.TokenIDs = []int{1, 32000}
+	require.Error(t, step.Execute(context.Background(), reqCtx))
+
+	// A negative length or an offset+length that overflows int fails the
+	// request instead of panicking.
+	reqCtx.TokenIDs = []int{1, 32000, 32001, 32000, 2345}
+	for _, span := range []pipeline.PlaceholderRange{
+		{Offset: 4, Length: -2},
+		{Offset: 2, Length: math.MaxInt},
+	} {
+		reqCtx.MultimodalEntries[0].Placeholder = span
+		require.Error(t, step.Execute(context.Background(), reqCtx), "span %+v", span)
+	}
+}
+
 // TestEncodeStep_GenerateFormat_CapsSingleToken verifies the generate-format
 // encoder sub-request carries sampling_params.max_tokens=1. The sub-request is
 // built from RequestContext, so the min_tokens check guards against the step
@@ -1100,6 +1149,74 @@ func TestCollectMediaParts_ResponsesCollectsEveryMediaPart(t *testing.T) {
 	// reorder the two images around the audio between them.
 	if parts[0].part["image_url"] != "u1" {
 		t.Errorf("part 0 = %+v, want the input_image carrying u1", parts[0].part)
+	}
+}
+
+func TestCollectMediaParts_UntypedChatMedia(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		part     string
+		wantType string
+		wantMod  reqcommon.Modality
+	}{
+		{"image object", `{"image_url":{"url":"image"}}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"image string", `{"image_url":"image"}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"audio object", `{"audio_url":{"url":"audio"}}`, reqcommon.PartTypeAudioURL, reqcommon.ModalityAudio},
+		{"audio string", `{"audio_url":"audio"}`, reqcommon.PartTypeAudioURL, reqcommon.ModalityAudio},
+		{"inline audio", `{"input_audio":{"data":"AA==","format":"wav"}}`, reqcommon.PartTypeInputAudio, reqcommon.ModalityAudio},
+		{"video object", `{"video_url":{"url":"video"}}`, reqcommon.PartTypeVideoURL, reqcommon.ModalityVideo},
+		{"video string", `{"video_url":"video"}`, reqcommon.PartTypeVideoURL, reqcommon.ModalityVideo},
+		{"null type", `{"type":null,"image_url":{"url":"image"}}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"image before audio", `{"audio_url":{"url":"audio"},"image_url":{"url":"image"}}`, reqcommon.PartTypeImageURL, reqcommon.ModalityImage},
+		{"audio before inline audio", `{"input_audio":{"data":"AA==","format":"wav"},"audio_url":{"url":"audio"}}`, reqcommon.PartTypeAudioURL, reqcommon.ModalityAudio},
+		{"inline audio before video", `{"video_url":{"url":"video"},"input_audio":{"data":"AA==","format":"wav"}}`, reqcommon.PartTypeInputAudio, reqcommon.ModalityAudio},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var part map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tc.part), &part))
+			items := []any{map[string]any{"role": "user", "content": []any{part}}}
+
+			parts := collectMediaParts(items, reqcommon.APITypeChatCompletions)
+			require.Len(t, parts, 1)
+			require.Equal(t, tc.wantMod, parts[0].modality)
+			require.Equal(t, tc.wantType, part[reqcommon.FieldType])
+			if tc.wantType != reqcommon.PartTypeInputAudio {
+				require.NotEmpty(t, reqcommon.MediaPartURL(part))
+			}
+		})
+	}
+}
+
+func TestCollectMediaParts_PreservesTypesAndOtherAPIs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		apiType reqcommon.APIType
+		part    string
+		wantMod reqcommon.Modality
+	}{
+		{"explicit media type", reqcommon.APITypeChatCompletions, `{"type":"audio_url","audio_url":{"url":"audio"},"image_url":{"url":"image"}}`, reqcommon.ModalityAudio},
+		{"explicit text type", reqcommon.APITypeChatCompletions, `{"type":"text","text":"describe","image_url":{"url":"image"}}`, ""},
+		{"empty type", reqcommon.APITypeChatCompletions, `{"type":"","image_url":{"url":"image"}}`, ""},
+		{"invalid type", reqcommon.APITypeChatCompletions, `{"type":42,"image_url":{"url":"image"}}`, ""},
+		{"no media", reqcommon.APITypeChatCompletions, `{"text":"describe"}`, ""},
+		{"responses", reqcommon.APITypeResponses, `{"image_url":{"url":"image"}}`, ""},
+		{"messages", reqcommon.APITypeMessages, `{"image_url":{"url":"image"}}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var part map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tc.part), &part))
+			originalType := part[reqcommon.FieldType]
+			items := []any{map[string]any{"role": "user", "content": []any{part}}}
+
+			parts := collectMediaParts(items, tc.apiType)
+			require.Equal(t, originalType, part[reqcommon.FieldType])
+			if tc.wantMod == "" {
+				require.Empty(t, parts)
+			} else {
+				require.Len(t, parts, 1)
+				require.Equal(t, tc.wantMod, parts[0].modality)
+			}
+		})
 	}
 }
 

@@ -102,7 +102,7 @@ func routeAndRespond(t *testing.T, h *TestHarness, respond func(endpoint string)
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(ctx)
+	client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
 	require.NoError(t, err)
 
 	for _, req := range newRoutedRequest(nil) {
@@ -292,13 +292,13 @@ func TestEndpointHealth_FailsOpenWhenEveryEndpointFails(t *testing.T) {
 // names no configured polling data source instead of running without poll
 // health.
 func TestEndpointHealth_UnknownPollSourceFailsStartup(t *testing.T) {
-	opts := defaultEppServerOptions(t, "unused", endpointHealthConfig(`
+	opts := DefaultEppServerOptions(t, "unused", endpointHealthConfig(`
       pollSource: no-such-source`))
 	lis, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lis.Close() })
-	source := dlmocks.NewDataSource(fwkplugin.TypedName{Type: mockDataSourceType, Name: mockDataSourceType})
+	source := dlmocks.NewDataSource(fwkplugin.TypedName{Type: MockDataSourceType, Name: MockDataSourceType})
 
-	_, _, _, err = eppRunner.NewTestRunnerSetup(t.Context(), testEnv.Config, opts, source, lis)
+	_, _, _, err = eppRunner.NewTestRunnerSetup(t.Context(), Config(), opts, source, lis)
 	require.ErrorContains(t, err, "poll-status/no-such-source")
 }

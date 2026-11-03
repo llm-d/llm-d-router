@@ -128,8 +128,8 @@ func TestCustomEdgesReachTheScrape(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	require.NoError(t, reg.Register(histogram))
-	histogram.WithLabelValues("m", "tm", "f", "p").Observe(0.015)
-	histogram.WithLabelValues("m", "tm", "f", "p").Observe(0.5)
+	histogram.WithLabelValues("m", "tm", "f", "p", "messages").Observe(0.015)
+	histogram.WithLabelValues("m", "tm", "f", "p", "messages").Observe(0.5)
 
 	got := gatherFrom(t, reg)
 	require.Equal(t, edges, bucketEdges(got))
@@ -152,7 +152,7 @@ func gatherSingle(t *testing.T, histogram *prometheus.HistogramVec, observation 
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	require.NoError(t, reg.Register(histogram))
-	histogram.WithLabelValues("m", "tm", "f", "p").Observe(observation)
+	histogram.WithLabelValues("m", "tm", "f", "p", "messages").Observe(observation)
 	return gatherFrom(t, reg)
 }
 

@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/rest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -45,6 +46,8 @@ const (
 	// wireTestModel labels the observation this file records, so its exemplar can
 	// be told apart from any other test's on the shared registry.
 	wireTestModel = "openmetrics-wire-test"
+	// wireTestErrorModel does the same for the error this file records.
+	wireTestErrorModel = "openmetrics-wire-test-error"
 )
 
 // exemplarLabels returns the label set of the first exemplar in an OpenMetrics
@@ -134,7 +137,7 @@ func TestMetricsEndpointServesExemplarsOnTheWire(t *testing.T) {
 
 	received := time.Now()
 	require.True(t, eppmetrics.RecordRequestLatencies(
-		ctx, wireTestModel, "target-model", "fairness", "priority",
+		ctx, wireTestModel, "target-model", reqcommon.APITypeMessages.Surface(), "fairness", "priority",
 		received, received.Add(420*time.Millisecond),
 	))
 
@@ -156,6 +159,28 @@ func TestMetricsEndpointServesExemplarsOnTheWire(t *testing.T) {
 				"the span ID must reach the wire, so a backend can open the span that observed the latency")
 		})
 	}
+}
+
+// TestMetricsEndpointServesErrorCounterExemplarsOnTheWire checks that a counter's
+// exemplar reaches the scrape too, on its _total sample.
+func TestMetricsEndpointServesErrorCounterExemplarsOnTheWire(t *testing.T) {
+	eppmetrics.Register()
+
+	ctx, span := recordingSpan(t)
+	defer span.End()
+
+	eppmetrics.RecordRequestErrCounter(
+		ctx, wireTestErrorModel, "target-model", reqcommon.APITypeMessages.Surface(), "fairness", "priority", "502",
+	)
+
+	_, body := scrapeMetrics(t, nil, openMetricsAccept)
+
+	labels, ok := exemplarLabels(body, wireTestErrorModel)
+	require.True(t, ok, "the error must carry an exemplar on the wire")
+	require.Contains(t, labels, `trace_id="`+span.SpanContext().TraceID().String()+`"`,
+		"the trace ID must reach the wire")
+	require.Contains(t, labels, `span_id="`+span.SpanContext().SpanID().String()+`"`,
+		"the span ID must reach the wire")
 }
 
 // TestMetricsEndpointKeepsClassicFormatForClassicScrapers checks that a scraper

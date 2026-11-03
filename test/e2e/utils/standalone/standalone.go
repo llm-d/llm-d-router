@@ -57,15 +57,22 @@ var (
 
 // Config carries the suite settings the standalone router helpers need.
 type Config struct {
-	TestConfig    *testutils.TestConfig
-	Namespace     string
-	EPPImage      string
-	HTTPPort      int
-	MetricsPort   int
-	K8sContext    string
-	PodSelector   map[string]string
-	ReleaseName   string
-	KeepOnFailure bool
+	TestConfig *testutils.TestConfig
+	Namespace  string
+	EPPImage   string
+	// HTTPPort and MetricsPort are the localhost ports clients dial.
+	HTTPPort    int
+	MetricsPort int
+	// HTTPNodePort and MetricsNodePort are the router-access Service's NodePorts;
+	// 0 lets the API server allocate them.
+	HTTPNodePort        int
+	MetricsNodePort     int
+	K8sContext          string
+	PodSelector         map[string]string
+	ReleaseName         string
+	KeepOnFailure       bool
+	FailOpen            *bool
+	HealthCheckInterval string
 }
 
 // Router describes the router one test case rendered and created.
@@ -86,7 +93,7 @@ func Create(cfg Config, plugins string, replicas int, targetPorts ...int32) *Rou
 	defer cancel()
 	router, err := renderRouter(ctx, cfg, plugins, replicas, targetPorts)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	access, err := runtime.DefaultUnstructuredConverter.ToUnstructured(router.accessService(cfg.Namespace, cfg.HTTPPort, cfg.MetricsPort))
+	access, err := runtime.DefaultUnstructuredConverter.ToUnstructured(router.accessService(cfg.Namespace, cfg.HTTPNodePort, cfg.MetricsNodePort))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	router.objects = append(router.objects, &unstructured.Unstructured{Object: access})
 	resources := &lifecycle.CaseResources{Client: cfg.TestConfig.K8sClient}
@@ -133,14 +140,25 @@ func renderRouter(ctx context.Context, cfg Config, plugins string, replicas int,
 	for i, port := range targetPorts {
 		ports[i] = map[string]int32{"number": port}
 	}
-	values, err := yaml.Marshal(map[string]any{
-		"router": map[string]any{
-			"modelServers": map[string]any{"matchLabels": cfg.PodSelector, "targetPorts": ports},
-			"epp": map[string]any{
-				"image": imageValues, "replicas": replicas,
-				"pluginsCustomConfig": map[string]string{"epp-config.yaml": plugins},
-			},
+	routerValues := map[string]any{
+		"modelServers": map[string]any{"matchLabels": cfg.PodSelector, "targetPorts": ports},
+		"epp": map[string]any{
+			"image": imageValues, "replicas": replicas,
+			"pluginsCustomConfig": map[string]string{"epp-config.yaml": plugins},
 		},
+	}
+	proxyValues := map[string]any{}
+	if cfg.FailOpen != nil {
+		proxyValues["failOpen"] = *cfg.FailOpen
+	}
+	if cfg.HealthCheckInterval != "" {
+		proxyValues["healthCheckInterval"] = cfg.HealthCheckInterval
+	}
+	if len(proxyValues) > 0 {
+		routerValues["proxy"] = proxyValues
+	}
+	values, err := yaml.Marshal(map[string]any{
+		"router": routerValues,
 	})
 	if err != nil {
 		return nil, err
