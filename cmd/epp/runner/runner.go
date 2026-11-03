@@ -128,6 +128,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/outlenbucket"
 	respondermodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responder/models"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responsereceived/headercopy"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responsereceived/latencyreporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responsereceived/topologystamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/screener/disaggregatedsetrollout"
@@ -683,6 +684,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(topologystamp.PluginType, fwkplugin.StabilityAlpha, topologystamp.Factory)
 	fwkplugin.Register(latencyreporter.PluginType, fwkplugin.StabilityAlpha, latencyreporter.PluginFactory)
+	fwkplugin.Register(headercopy.PluginType, fwkplugin.StabilityAlpha, headercopy.Factory)
 
 	// bylabel role filters
 	// Stable

@@ -318,15 +318,17 @@ func (s *Server) fanoutEncoder(
 // runPDPipeline finalizes the post-encoder request and dispatches it to the
 // configured P/D connector or directly to the decoder. The caller has already
 // generated requestID and merged any encoder-side metadata into
-// body. On JSON-marshal failure, runPDPipeline writes the error
+// body. p2p carries the prefill pod's P2P address and the pull source; its
+// body fields describe the body before the encoder ran and are not
+// forwarded. On JSON-marshal failure, runPDPipeline writes the error
 // response itself (matching the existing handler pattern) and returns.
 func (s *Server) runPDPipeline(
 	w http.ResponseWriter,
 	r *http.Request,
 	body map[string]any,
 	prefillEndPoint string,
-	kvCacheSource string,
 	requestID string,
+	p2p p2pRouting,
 	apiType reqcommon.APIType,
 ) {
 	logger := log.FromContext(r.Context())
@@ -363,7 +365,7 @@ func (s *Server) runPDPipeline(
 
 	if len(prefillEndPoint) > 0 {
 		logger.V(logging.DEBUG).Info("using P/D protocol after encoder", "prefiller", prefillEndPoint)
-		s.handlePDConnector(w, pdRequest, prefillEndPoint, kvCacheSource, apiType)
+		s.handlePDConnector(w, pdRequest, prefillEndPoint, p2pRouting{prefill: p2p.prefill, source: p2p.source}, apiType)
 		return
 	}
 
@@ -377,8 +379,8 @@ func (s *Server) runPDPipeline(
 	if !s.forwardDataParallel || !s.dataParallelHandler(decodeWriter, pdRequest, func() {
 		_, _ = toolFields.compareValidatedDispatched(modifiedBody)
 	}) {
-		if kvCacheSource != "" {
-			s.decodeWithP2PSource(decodeWriter, pdRequest, kvCacheSource)
+		if p2p.source != nil {
+			s.decodeWithP2PSource(decodeWriter, pdRequest, p2pRouting{source: p2p.source, body: body, raw: modifiedBody})
 		} else {
 			_, _ = toolFields.compareValidatedDispatched(modifiedBody)
 			s.decoderProxy.ServeHTTP(decodeWriter, pdRequest)

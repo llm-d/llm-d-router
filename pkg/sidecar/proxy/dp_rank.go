@@ -86,10 +86,7 @@ func resolveDecodeDPRank(prefillKV any, requestID string, dpSize int) (rank int,
 	if !present {
 		return fallback, false
 	}
-	if f, ok := rv.(float64); ok && f != math.Trunc(f) {
-		return fallback, false
-	}
-	if ri, ok := toInt(rv); ok && ri >= 0 && ri < dpSize {
+	if ri, ok := toWholeInt(rv); ok && ri >= 0 && ri < dpSize {
 		return ri, true
 	}
 	return fallback, false

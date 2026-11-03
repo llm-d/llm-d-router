@@ -78,6 +78,15 @@ const (
 	FieldRemoteEngineID       = "remote_engine_id"
 	FieldRemoteHost           = "remote_host"
 	FieldRemotePort           = "remote_port"
+	// OffloadingConnector P2P tier roles, carried inside kv_transfer_params. The
+	// role is encoded by the nesting key, named for the remote party it
+	// describes: remote_decoder on the prefill request, remote_prefiller on the
+	// decode request, remote_kv_source for a cached-prefix pull. Each block
+	// carries its own kv_request_id.
+	FieldRemoteDecoder        = "remote_decoder"
+	FieldRemotePrefiller      = "remote_prefiller"
+	FieldRemoteKVSource       = "remote_kv_source"
+	FieldKVRequestID          = "kv_request_id"
 	FieldCacheHitThreshold    = "cache_hit_threshold"
 	FieldContinueFinalMessage = "continue_final_message"
 	FieldAddGenerationPrompt  = "add_generation_prompt"
