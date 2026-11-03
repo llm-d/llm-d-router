@@ -28,13 +28,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
-	grpcutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 )
 
@@ -91,7 +91,7 @@ func (p *VllmGRPCParser) Claims() fwkrh.Claims {
 func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	logger := log.FromContext(ctx)
 
-	parsedPayload, err := grpcutil.ParseGrpcPayload(body)
+	parsedPayload, err := grpcframe.ParsePayload(body)
 	if err != nil {
 		return nil, errors.New("invalid or unsupported gRPC payload")
 	}
@@ -204,7 +204,7 @@ func requestControlUsage(promptToken, completionToken, cachedToken int) *fwkrequ
 }
 
 func toGenerateResponse(payload []byte, resp *pb.GenerateResponse) error {
-	parsedPayload, err := grpcutil.ParseGrpcPayload(payload)
+	parsedPayload, err := grpcframe.ParsePayload(payload)
 	if err != nil {
 		return err
 	}
@@ -307,7 +307,7 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrequest.Inf
 }
 
 func toEmbedResponse(payload []byte, resp *pb.EmbedResponse) error {
-	parsedPayload, err := grpcutil.ParseGrpcPayload(payload)
+	parsedPayload, err := grpcframe.ParsePayload(payload)
 	if err != nil {
 		return err
 	}

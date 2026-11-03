@@ -409,6 +409,8 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkre
 	switch body := body.(type) {
 	case fwkrequest.RawPayload:
 		payload = body
+	case fwkrequest.PayloadProto:
+		return errors.New("native vLLM rendering requires an HTTP JSON payload")
 	case fwkrequest.Marshaler:
 		payload, err = body.Marshal()
 		if err != nil {
