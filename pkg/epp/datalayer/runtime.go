@@ -165,8 +165,8 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 				return err
 			}
 
-			// PollingDispatchers own their extractors; notification/endpoint use extractorMap.
-			if disp, ok := src.(fwkdl.PollingDispatcher); ok {
+			// Sources with typed payloads own their extractor dispatch.
+			if disp, ok := src.(fwkdl.ExtractorBinder); ok {
 				for _, ext := range srcCfg.Extractors {
 					if err := disp.AppendExtractor(ext); err != nil {
 						return fmt.Errorf("dispatcher %s rejected extractor %s: %w",
@@ -233,7 +233,7 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 			continue
 		}
 
-		if disp, ok := matchedSrc.(fwkdl.PollingDispatcher); ok {
+		if disp, ok := matchedSrc.(fwkdl.ExtractorBinder); ok {
 			if err := disp.AppendExtractor(pending.Extractor); err != nil {
 				return fmt.Errorf("dispatcher %s rejected pending extractor %s: %w",
 					matchedSrc.TypedName(), pending.Extractor.TypedName(), err)
@@ -600,6 +600,9 @@ func (r *Runtime) validateSourceExtractors(src fwkplugin.Plugin, extractors []fw
 		seenTypes[extType] = struct{}{}
 	}
 
+	if _, ok := src.(fwkdl.ExtractorBinder); ok {
+		return nil
+	}
 	for _, ext := range extractors {
 		if notifySrc, ok := src.(fwkdl.NotificationSource); ok {
 			notifyExt, ok := ext.(fwkdl.NotificationExtractor)
