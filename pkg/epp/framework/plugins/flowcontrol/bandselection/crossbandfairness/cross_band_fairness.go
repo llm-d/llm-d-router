@@ -172,15 +172,15 @@ func (p *crossBandFairnessPolicy) Rank(_ context.Context, params flowcontrol.Ban
 	p.syncBands(params, weights)
 
 	sort.SliceStable(order, func(a, b int) bool {
-		ba := p.bands[params.Priorities[order[a]]]
-		bb := p.bands[params.Priorities[order[b]]]
-		if ba.eligible != bb.eligible {
-			return ba.eligible
+		left := p.bands[params.Priorities[order[a]]]
+		right := p.bands[params.Priorities[order[b]]]
+		if left.eligible != right.eligible {
+			return left.eligible
 		}
-		if !ba.eligible {
+		if !left.eligible {
 			return false
 		}
-		return ba.virtualTime < bb.virtualTime
+		return left.virtualTime < right.virtualTime
 	})
 
 	p.ranked = p.ranked[:0]
