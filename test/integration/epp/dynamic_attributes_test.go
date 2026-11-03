@@ -86,7 +86,7 @@ flowControl:
 	h.WaitForReadyPodsMetric(len(pods))
 
 	// Stream 1: Request 1
-	client1, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(ctx)
+	client1, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
 	require.NoError(t, err)
 
 	// Send Request 1 Headers
@@ -128,7 +128,7 @@ flowControl:
 	// Load should be 1.
 
 	// Stream 2: Request 2
-	client2, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(ctx)
+	client2, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
 	require.NoError(t, err)
 
 	// Send Request 2 Headers
