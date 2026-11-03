@@ -421,13 +421,18 @@ type predictedLatencyCtx struct {
 
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
 	inputTokenCount := 0
+	incomingModelName := ""
 	if request.Body != nil {
 		if tp := request.Body.TokenizedRequest; tp != nil {
 			inputTokenCount = tp.TokenCount()
 		}
+		// Body.Model is the model the client asked for. A rewrite changes TargetModel
+		// and the payload but not Body.Model, so this is the director's IncomingModelName.
+		incomingModelName = request.Body.Model
 	}
 	return &predictedLatencyCtx{
 		targetModel:                    request.TargetModel,
+		incomingModelName:              incomingModelName,
 		inputTokenCount:                inputTokenCount,
 		lastSeenMetrics:                make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints:  make(map[string]float64),

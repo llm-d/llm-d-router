@@ -734,6 +734,9 @@ only when that plugin is configured and records the related prediction, observat
 | `llm_d_epp_request_slo_violation_total` | Counter | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | SLO violations. |
 | `llm_d_epp_request_prediction_failures_total` | Counter | `plugin_name`, `plugin_type`, `reason` | Failed latency prediction attempts (`request_error`, `nil_response`, `length_mismatch`, `predictor_unavailable`). |
 
+`model_name` is the model in the request body and `target_model_name` is the model after any
+InferenceModelRewrite. Both share the model label cap described in [Metrics catalog](#metrics-catalog).
+
 ### Disaggregation
 
 The EPP disaggregation metrics come from two different plugins.
