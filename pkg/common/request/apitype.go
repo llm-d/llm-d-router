@@ -33,6 +33,8 @@ const (
 	PathAudioGenerate     = "/v1/audio/generate"
 	PathImagesGenerations = "/v1/images/generations"
 	PathImagesEdits       = "/v1/images/edits"
+	PathVideos            = "/v1/videos"
+	PathVideosSync        = "/v1/videos/sync"
 	PathMessages          = "/v1/messages"
 	PathVLLMGenerate      = "/inference/v1/generate"
 	PathSGLangGenerate    = "/generate"

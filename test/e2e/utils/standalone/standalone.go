@@ -65,12 +65,14 @@ type Config struct {
 	MetricsPort int
 	// HTTPNodePort and MetricsNodePort are the router-access Service's NodePorts;
 	// 0 lets the API server allocate them.
-	HTTPNodePort    int
-	MetricsNodePort int
-	K8sContext      string
-	PodSelector     map[string]string
-	ReleaseName     string
-	KeepOnFailure   bool
+	HTTPNodePort        int
+	MetricsNodePort     int
+	K8sContext          string
+	PodSelector         map[string]string
+	ReleaseName         string
+	KeepOnFailure       bool
+	FailOpen            *bool
+	HealthCheckInterval string
 }
 
 // Router describes the router one test case rendered and created.
@@ -144,6 +146,16 @@ func renderRouter(ctx context.Context, cfg Config, plugins string, replicas int,
 			"image": imageValues, "replicas": replicas,
 			"pluginsCustomConfig": map[string]string{"epp-config.yaml": plugins},
 		},
+	}
+	proxyValues := map[string]any{}
+	if cfg.FailOpen != nil {
+		proxyValues["failOpen"] = *cfg.FailOpen
+	}
+	if cfg.HealthCheckInterval != "" {
+		proxyValues["healthCheckInterval"] = cfg.HealthCheckInterval
+	}
+	if len(proxyValues) > 0 {
+		routerValues["proxy"] = proxyValues
 	}
 	values, err := yaml.Marshal(map[string]any{
 		"router": routerValues,

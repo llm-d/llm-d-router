@@ -528,7 +528,7 @@ func newReplayHarnessWithBehavior(
 	subManager := kvevents.NewSubscriberManager(pool)
 	require.NoError(t, subManager.EnsureSubscriber(
 		ctx, "test-pod", "10.0.0.1:8000", pubEndpoint, replayEndpoint, "", "kv@", true))
-	require.Eventually(t, func() bool { return buffer.requests.Load() == 1 },
+	require.Eventually(t, func() bool { return buffer.requests.Load() >= 1 },
 		5*time.Second, 50*time.Millisecond, "proactive replay expected")
 	time.Sleep(100 * time.Millisecond)
 

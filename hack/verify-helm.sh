@@ -952,6 +952,52 @@ if ! grep -A1 -- 'healthy_panic_threshold:' <<<"${ext_proc_cluster}" | grep -q -
   exit 1
 fi
 
+echo "Verifying Envoy active health checks require EPP's gRPC health service..."
+for proxy_mode in sidecar service; do
+  for fail_open in true false; do
+    health_checking_render_output="${TEMP_DIR}/envoy-health-checking-${proxy_mode}-${fail_open}.yaml"
+    if ! "${HELM}" template health-checking "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+      --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+      --set router.proxy.mode="${proxy_mode}" --set router.proxy.failOpen="${fail_open}" > "${health_checking_render_output}"; then
+      echo "Envoy Helm render failed in ${proxy_mode} mode with failOpen=${fail_open}"
+      exit 1
+    fi
+    if ! grep -q -- '--health-checking=true' "${health_checking_render_output}"; then
+      echo "Envoy did not enable EPP's gRPC health service in ${proxy_mode} mode with failOpen=${fail_open}"
+      exit 1
+    fi
+
+    for flag_type in --set --set-string; do
+      if health_checking_error=$("${HELM}" template health-checking "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+        --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+        --set router.proxy.mode="${proxy_mode}" --set router.proxy.failOpen="${fail_open}" \
+        "${flag_type}" router.epp.flags.health-checking=false 2>&1); then
+        echo "Envoy accepted ${flag_type} router.epp.flags.health-checking=false in ${proxy_mode} mode with failOpen=${fail_open}"
+        exit 1
+      fi
+      if ! grep -q -- 'router.epp.flags.health-checking' <<<"${health_checking_error}"; then
+        echo "Unexpected Helm validation error: ${health_checking_error}"
+        exit 1
+      fi
+    done
+  done
+done
+
+for proxy_setting in router.proxy.enabled=false router.proxy.proxyType=agentgateway; do
+  health_checking_render_output="${TEMP_DIR}/no-envoy-health-checking.yaml"
+  if ! "${HELM}" template health-checking "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+    --set "${proxy_setting}" \
+    --set router.epp.flags.health-checking=false > "${health_checking_render_output}"; then
+    echo "Helm render rejected disabled health checking with ${proxy_setting}"
+    exit 1
+  fi
+  if grep -q -- '--health-checking=true' "${health_checking_render_output}"; then
+    echo "Unexpectedly enabled EPP health checking with ${proxy_setting}"
+    exit 1
+  fi
+done
+
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."
 fail_closed_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fail-closed-render.yaml"
 ${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.failOpen=false > "${fail_closed_render_output}"
