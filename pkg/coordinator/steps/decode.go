@@ -130,7 +130,9 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	if s.forceStream && !reqCtx.Stream {
 		if shape, shapeOK := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); shapeOK {
 			switch {
-			case forceStreamLossy(shape, reqCtx.Body):
+			case s.kv.Name() == kv.SGLang, forceStreamLossy(shape, reqCtx.Body):
+				// An SGLang decode server has no local-prefill path, so a fallback
+				// could not recompute a prompt whose handoff the forced attempt used.
 				coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnsupported)
 			default:
 				generated, ok := s.estimateReservation(reqCtx)
@@ -154,11 +156,11 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 					}
 					// The attempt failed with nothing written to the client. Falling back
 					// re-sends reqCtx.Body through the pass-through, so the pod may run the
-					// request twice. A body carrying the prefiller's one-shot P2P block
-					// handoff cannot replay it: the forced attempt already pulled the
-					// blocks. The fallback drops the handoff instead, so the decode pod
-					// recomputes the prompt; the reply is slower but correct.
-					if spendsRemoteBlocks(reqCtx.Body) {
+					// request twice. Unless the connector is replay-safe, the forced attempt
+					// already used the one-shot handoff the body names, so the fallback
+					// drops it and the decode pod recomputes the prompt; the reply is slower
+					// but correct.
+					if !kvHandoffReplaySafe(s.kv) {
 						logger.Info("force-stream failed and its KV block handoff is spent; decode will recompute the prompt", "error", err.Error())
 						delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
 						// The prefill cache-hit count describes the handoff just dropped.
@@ -191,20 +193,13 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	return out.streamedError(DecodeStepName)
 }
 
-// spendsRemoteBlocks reports whether the decode body carries a one-shot P2P KV
-// handoff: remote_block_ids naming blocks the prefiller streamed to this decode pod
-// and frees once pulled (the NIXL path). The forced attempt already pulled them, so
-// re-sending the body would replay a spent handoff; the fallback drops the handoff
-// when this is set. do_remote_prefill alone does not qualify: shared storage also
-// sets it but names no blocks, since the decode pod re-reads the shared store,
-// making a replay safe.
-func spendsRemoteBlocks(body map[string]any) bool {
-	params, ok := body[reqcommon.FieldKVTransferParams].(map[string]any)
-	if !ok {
-		return false
-	}
-	ids, ok := params[reqcommon.FieldRemoteBlockIDs].([]any)
-	return ok && len(ids) > 0
+// kvHandoffReplaySafe reports whether a decode body's kv_transfer_params may be
+// sent a second time. Only kv-shared-storage qualifies: its decode pod re-reads
+// the shared store, so a replay finds the KV again. The other connectors name a
+// one-shot handoff, the NIXL blocks the prefiller frees once pulled or the SGLang
+// bootstrap room, and a connector not listed here is treated as one-shot too.
+func kvHandoffReplaySafe(conn kv.Connector) bool {
+	return conn.Name() == kv.SharedStorage
 }
 
 // forceStreamFallbackResult classifies a force-stream error as fallback-eligible,

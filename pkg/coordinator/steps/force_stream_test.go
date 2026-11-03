@@ -1735,6 +1735,58 @@ func TestForceStream_LossyFrameSpentHandoff_Recomputes(t *testing.T) {
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
 }
 
+// TestForceStream_SGLang_SkippedBeforeAttempt covers the kv-sglang connector. An
+// SGLang decode server started with --disaggregation-mode=decode has no
+// local-prefill path, so a fallback could never recompute the prompt: without a
+// bootstrap room it answers 400, and with a room no prefill pairs with it waits.
+// Force-streaming is therefore skipped before any attempt, and the single decode
+// call goes through the pass-through with its handoff intact.
+func TestForceStream_SGLang_SkippedBeforeAttempt(t *testing.T) {
+	const passthroughReply = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`
+	var calls []spentHandoffCall
+	server := spentHandoffServer(t, "data: {}\n\n", passthroughReply, &calls)
+	defer server.Close()
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{
+		ParamForceStream:               true,
+		ParamForceStreamBufferSize:     "1GiB",
+		ParamForceStreamMaxRequestSize: "1GiB",
+		ParamKVConnector:               kv.SGLang,
+	})
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-sglang",
+		OriginalPath: reqcommon.PathChatCompletions,
+		Model:        "m",
+		Stream:       false,
+		KVTransferParams: map[string]any{
+			reqcommon.FieldBootstrapHost: "10.0.0.5",
+			reqcommon.FieldBootstrapPort: 8998,
+			reqcommon.FieldBootstrapRoom: int64(12345),
+		},
+		Body: map[string]any{
+			"model": "m", "stream": false, "max_tokens": 16,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+	require.Len(t, calls, 1, "one decode call: no forced attempt, so the room is used once")
+	require.Equal(t, false, calls[0].stream, "the call is the non-streaming pass-through")
+	require.True(t, calls[0].hasKV, "the handoff is sent intact")
+	require.EqualValues(t, 12345, calls[0].kvParams.(map[string]any)[reqcommon.FieldBootstrapRoom])
+	require.JSONEq(t, passthroughReply, recorder.Body.String())
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "nothing was reserved")
+}
+
 // TestForceStream_MessagesThinkingSpentHandoff_PassesThrough covers a Messages
 // request that turns thinking on, on a NIXL path carrying a one-shot block
 // handoff. Its thinking blocks would make a forced attempt lossy, and the attempt
@@ -1840,27 +1892,19 @@ func TestForceStream_ForwardsPeerTopology(t *testing.T) {
 	}
 }
 
-// TestSpendsRemoteBlocks covers the one-shot P2P handoff detector that gates the
-// fallback's recompute: only a non-empty remote_block_ids list qualifies, so a
-// shared-storage body (do_remote_prefill but no block ids) and bodies with no or a
-// malformed kv_transfer_params all report false and fall back with their params.
-func TestSpendsRemoteBlocks(t *testing.T) {
-	tests := []struct {
-		name string
-		body map[string]any
-		want bool
-	}{
-		{"no kv_transfer_params", map[string]any{"model": "m"}, false},
-		{"kv_transfer_params not a map", map[string]any{reqcommon.FieldKVTransferParams: "nope"}, false},
-		{"shared storage: do_remote_prefill, no ids", map[string]any{reqcommon.FieldKVTransferParams: map[string]any{reqcommon.FieldDoRemotePrefill: true}}, false},
-		{"empty remote_block_ids", map[string]any{reqcommon.FieldKVTransferParams: map[string]any{reqcommon.FieldRemoteBlockIDs: []any{}}}, false},
-		{"remote_block_ids wrong type", map[string]any{reqcommon.FieldKVTransferParams: map[string]any{reqcommon.FieldRemoteBlockIDs: "1,2"}}, false},
-		{"populated remote_block_ids", map[string]any{reqcommon.FieldKVTransferParams: map[string]any{reqcommon.FieldRemoteBlockIDs: []any{1, 2}}}, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, spendsRemoteBlocks(tc.body))
-		})
+// TestKVHandoffReplaySafe covers which KV connectors may re-send their decode
+// kv_transfer_params on a fallback. Only kv-shared-storage is replay-safe: its
+// decode pod re-reads the shared store. Every other connector names a one-shot
+// handoff the forced attempt already used, so the fallback drops it.
+func TestKVHandoffReplaySafe(t *testing.T) {
+	for name, want := range map[string]bool{
+		kv.SharedStorage: true,
+		kv.NIXL:          false,
+		kv.SGLang:        false,
+	} {
+		conn, err := kv.Build(name)
+		require.NoError(t, err)
+		require.Equal(t, want, kvHandoffReplaySafe(conn), name)
 	}
 }
 
