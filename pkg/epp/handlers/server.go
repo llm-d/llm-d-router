@@ -113,6 +113,7 @@ type Director interface {
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
 	HandleResponseBody(ctx context.Context, reqCtx *RequestContext, endOfStream bool) *RequestContext
 	GetRandomEndpoint() *fwkdl.EndpointMetadata
+	GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata
 }
 
 type Datastore interface {
@@ -895,6 +896,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			return err
 		}
 		if reqCtx.requestState == requestResponseProcessingSkipped {
+			// A header-time skip (e.g. a WebSocket upgrade) never reaches the body
+			// phase, so the request-processing latency is recorded here. OnceFunc
+			// keeps the body-phase skip from recording twice.
+			recordRequestProcessing()
 			logger.V(logutil.DEFAULT).Info("EPP skipped response interception, routed request",
 				"targetEndpoint", reqCtx.TargetEndpoint,
 				"targetModel", reqCtx.TargetModelName)

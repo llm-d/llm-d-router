@@ -709,6 +709,10 @@ func (*emptyPoolDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
 	return nil
 }
 
+func (*emptyPoolDirector) GetRandomDecodeEndpoint() *datalayer.EndpointMetadata {
+	return nil
+}
+
 func headersFrame(headers map[string]string) *extProcPb.ProcessingRequest_RequestHeaders {
 	hv := make([]*configPb.HeaderValue, 0, len(headers))
 	for k, v := range headers {
@@ -780,6 +784,107 @@ func TestHandleRequestHeadersRejectsNonGetWebSocketUpgrade(t *testing.T) {
 	assert.Empty(t, reqCtx.TargetEndpoint)
 }
 
+func headersFrameLines(lines ...[2]string) *extProcPb.ProcessingRequest_RequestHeaders {
+	hv := make([]*configPb.HeaderValue, 0, len(lines))
+	for _, l := range lines {
+		hv = append(hv, &configPb.HeaderValue{Key: l[0], Value: l[1]})
+	}
+	return &extProcPb.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: hv}},
+	}
+}
+
+func TestIsWebSocketUpgradeMultiLineHeaders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		lines [][2]string
+		want  bool
+	}{
+		{
+			name: "upgrade token on the second Connection line",
+			lines: [][2]string{
+				{"Connection", "keep-alive"},
+				{"Connection", "Upgrade"},
+				{"Upgrade", "websocket"},
+			},
+			want: true,
+		},
+		{
+			name: "websocket on the second Upgrade line",
+			lines: [][2]string{
+				{"Upgrade", "h2c"},
+				{"Upgrade", "websocket"},
+				{"Connection", "Upgrade"},
+			},
+			want: true,
+		},
+		{
+			name: "no upgrade token on any Connection line",
+			lines: [][2]string{
+				{"Connection", "keep-alive"},
+				{"Connection", "close"},
+				{"Upgrade", "websocket"},
+			},
+			want: false,
+		},
+		{
+			name: "upgrade token without a websocket Upgrade line",
+			lines: [][2]string{
+				{"Connection", "Upgrade"},
+				{"Upgrade", "h2c"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isWebSocketUpgrade(headersFrameLines(tc.lines...)))
+		})
+	}
+}
+
+func TestHandleRequestHeaders_WebSocketUpgradePicksDecodeEndpoint(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &decodePickingDirector{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.HandleRequestHeaders(context.Background(), reqCtx, headersFrame(map[string]string{
+		":method":    http.MethodGet,
+		"connection": "Upgrade",
+		"upgrade":    "websocket",
+	}))
+
+	require.NoError(t, err)
+	assert.Equal(t, "1.2.3.4:80", reqCtx.TargetEndpoint,
+		"an upgrade must route through the decode picker, not the plain random pick")
+}
+
+func TestHandleRequestHeaders_WebSocketUpgradeWithoutDecodeEndpoints(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &emptyPoolDirector{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.HandleRequestHeaders(context.Background(), reqCtx, headersFrame(map[string]string{
+		":method":    http.MethodGet,
+		"connection": "Upgrade",
+		"upgrade":    "websocket",
+	}))
+
+	assert.Equal(t, errcommon.ServiceUnavailable, errcommon.CanonicalCode(err))
+	assert.Empty(t, reqCtx.TargetEndpoint)
+}
+
 func TestProcessClosesStreamAfterWebSocketUpgrade(t *testing.T) {
 	t.Parallel()
 
@@ -820,17 +925,39 @@ func TestProcessClosesStreamAfterWebSocketUpgrade(t *testing.T) {
 
 type mockDirectorRequest struct {
 	Director
-	endpoint *datalayer.EndpointMetadata
+	endpoint       *datalayer.EndpointMetadata
+	decodeEndpoint *datalayer.EndpointMetadata
 }
 
 func (m *mockDirectorRequest) GetRandomEndpoint() *datalayer.EndpointMetadata {
 	if m.endpoint != nil {
 		return m.endpoint
 	}
+	return defaultTestEndpoint()
+}
+
+func (m *mockDirectorRequest) GetRandomDecodeEndpoint() *datalayer.EndpointMetadata {
+	if m.decodeEndpoint != nil {
+		return m.decodeEndpoint
+	}
+	return defaultTestEndpoint()
+}
+
+func defaultTestEndpoint() *datalayer.EndpointMetadata {
 	return &datalayer.EndpointMetadata{
 		Address: "1.2.3.4",
 		Port:    "80",
 	}
+}
+
+// decodePickingDirector answers every plain random pick with no endpoint, so a
+// test can tell whether the request path used the decode picker.
+type decodePickingDirector struct {
+	mockDirectorRequest
+}
+
+func (*decodePickingDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
+	return nil
 }
 
 // Attribution must be established from the incoming headers before the Director

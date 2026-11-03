@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
@@ -66,7 +67,9 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 		if envoy.ExtractHeaderValue(req, ":method") != http.MethodGet {
 			return errcommon.Error{Code: errcommon.BadRequest, Msg: "WebSocket upgrade requires the GET method"}
 		}
-		if err := s.fallbackToRandomEndpoint(ctx, reqCtx, 0); err != nil {
+		// The session needs one pod for its lifetime, and that pod must serve
+		// decode; a prefill-only pod fails every session after the handshake.
+		if err := s.fallbackToEndpoint(ctx, reqCtx, s.director.GetRandomDecodeEndpoint(), 0); err != nil {
 			return err
 		}
 		reqCtx.requestState = requestResponseProcessingSkipped
@@ -88,21 +91,35 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 }
 
 // isWebSocketUpgrade reports whether req asks to upgrade to WebSocket (RFC 6455
-// section 4.1). Connection may list several tokens.
+// section 4.1). Connection and Upgrade are list fields and may arrive split
+// across several header lines (RFC 9110 section 5.3), so every line is scanned.
 func isWebSocketUpgrade(req *extProcPb.ProcessingRequest_RequestHeaders) bool {
-	if !strings.EqualFold(strings.TrimSpace(envoy.ExtractHeaderValue(req, "upgrade")), "websocket") {
-		return false
-	}
-	for _, token := range strings.Split(envoy.ExtractHeaderValue(req, "connection"), ",") {
-		if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
-			return true
+	toWebSocket := false
+	connectionUpgrades := false
+	for _, header := range req.RequestHeaders.Headers.Headers {
+		switch strings.ToLower(header.Key) {
+		case "upgrade":
+			if strings.EqualFold(strings.TrimSpace(envoy.GetHeaderValue(header)), "websocket") {
+				toWebSocket = true
+			}
+		case "connection":
+			for _, token := range strings.Split(envoy.GetHeaderValue(header), ",") {
+				if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+					connectionUpgrades = true
+				}
+			}
 		}
 	}
-	return false
+	return toWebSocket && connectionUpgrades
 }
 
 func (s *StreamingServer) fallbackToRandomEndpoint(ctx context.Context, reqCtx *RequestContext, requestSize int) error {
-	endpoint := s.director.GetRandomEndpoint()
+	return s.fallbackToEndpoint(ctx, reqCtx, s.director.GetRandomEndpoint(), requestSize)
+}
+
+// fallbackToEndpoint routes reqCtx to endpoint, answering with the no-endpoints
+// rejection when endpoint is nil.
+func (s *StreamingServer) fallbackToEndpoint(ctx context.Context, reqCtx *RequestContext, endpoint *fwkdl.EndpointMetadata, requestSize int) error {
 	if endpoint == nil {
 		return errcommon.Error{
 			Code:    errcommon.ServiceUnavailable,
