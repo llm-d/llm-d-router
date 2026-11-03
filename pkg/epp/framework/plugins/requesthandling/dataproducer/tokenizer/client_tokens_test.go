@@ -27,6 +27,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 )
@@ -74,6 +75,10 @@ func TestProduce_UsesClientPromptTokenIDs(t *testing.T) {
 			params: map[string]any{"prompt_token_ids": []uint32{4, 2}},
 			want:   []uint32{4, 2},
 		},
+		"raw json outside the canonical form": {
+			params: json.RawMessage(`{"prompt_token_ids":[1.0, 2e0]}`),
+			want:   []uint32{1, 2},
+		},
 		"other kv params preserved alongside": {
 			params: json.RawMessage(`{"remote_engine_id":"e","prompt_token_ids":[1]}`),
 			want:   []uint32{1},
@@ -101,7 +106,6 @@ func TestProduce_ClientPromptTokenIDsOnEveryChatShapedAPI(t *testing.T) {
 	for name, body := range map[string]*fwkrequest.InferenceRequestBody{
 		"messages":  {Messages: &fwkrequest.MessagesRequest{}},
 		"responses": {Responses: &fwkrequest.ResponsesRequest{}},
-		"generate":  {Generate: &fwkrequest.GenerateRequest{}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := newTestPlugin(failingTokenizer(t))
@@ -111,6 +115,120 @@ func TestProduce_ClientPromptTokenIDsOnEveryChatShapedAPI(t *testing.T) {
 			req := &scheduling.InferenceRequest{Body: body}
 
 			require.NoError(t, p.Produce(context.Background(), req, nil))
+
+			require.NotNil(t, req.Body.TokenizedRequest)
+			assert.Equal(t, []uint32{3, 4}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+		})
+	}
+}
+
+// TestProduce_KVPromptTokenIDsIgnoredOffChatPath checks that an API outside
+// vLLM's chat path keeps its own tokenization: the field is ignored there, and
+// a generate request's features would be lost.
+func TestProduce_KVPromptTokenIDsIgnoredOffChatPath(t *testing.T) {
+	kvParams := json.RawMessage(`{"prompt_token_ids":[3,4]}`)
+	features := &tokenization.MultiModalFeatures{
+		MMHashes:       map[string][]string{"image": {"h0"}},
+		MMPlaceholders: map[string][]kvblock.PlaceholderRange{"image": {{Offset: 0, Length: 2}}},
+	}
+	body := &fwkrequest.InferenceRequestBody{
+		Generate: &fwkrequest.GenerateRequest{TokenIDs: []uint32{1, 2}, Features: features},
+		Payload:  fwkrequest.PayloadMap{reqcommon.FieldKVTransferParams: kvParams},
+	}
+	req := &scheduling.InferenceRequest{Body: body}
+
+	require.NoError(t, newTestPlugin(failingTokenizer(t)).Produce(context.Background(), req, nil))
+
+	require.NotNil(t, req.Body.TokenizedRequest)
+	assert.Equal(t, []uint32{1, 2}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	assert.Equal(t, convertMMFeaturesToUpstream(features), req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures)
+}
+
+// TestProduce_KVPromptTokenIDsRenderedWithMedia checks that a chat-shaped request
+// with media still renders: vLLM ignores the ids when content is not text, and
+// the render supplies the multimodal features.
+func TestProduce_KVPromptTokenIDsRenderedWithMedia(t *testing.T) {
+	backendTokens := []uint32{42}
+	render := &mockTokenizer{
+		renderChatFunc: func(fwkrequest.RequestPayload) ([]uint32, *tokenization.MultiModalFeatures, error) {
+			return backendTokens, nil, nil
+		},
+	}
+	image := fwkrequest.ContentBlock{Type: reqcommon.PartTypeImageURL, ImageURL: fwkrequest.ImageBlock{URL: "http://img"}}
+	untypedImage := fwkrequest.ContentBlock{ImageURL: fwkrequest.ImageBlock{URL: "http://img"}}
+	tests := map[string]*fwkrequest.InferenceRequestBody{
+		"chat image part": {ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+			Messages: []fwkrequest.Message{{Role: "user", Content: fwkrequest.Content{Structured: []fwkrequest.ContentBlock{image}}}},
+		}},
+		"chat part without a type": {ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+			Messages: []fwkrequest.Message{{Role: "user", Content: fwkrequest.Content{Structured: []fwkrequest.ContentBlock{untypedImage}}}},
+		}},
+		"messages image block": {Messages: &fwkrequest.MessagesRequest{
+			Messages: []fwkrequest.AnthropicMessage{{Role: "user", Content: fwkrequest.AnthropicContent{
+				Structured: []fwkrequest.AnthropicContentBlock{{Type: reqcommon.BlockTypeImage}},
+			}}},
+		}},
+		"messages image in tool result": {Messages: &fwkrequest.MessagesRequest{
+			Messages: []fwkrequest.AnthropicMessage{{Role: "user", Content: fwkrequest.AnthropicContent{
+				Structured: []fwkrequest.AnthropicContentBlock{{
+					Type:    reqcommon.BlockTypeToolResult,
+					Content: json.RawMessage(`[{"type":"image","source":{"type":"url","url":"http://img"}}]`),
+				}},
+			}}},
+		}},
+		"responses input image": {Responses: &fwkrequest.ResponsesRequest{
+			Input: []any{map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "http://img"},
+			}}},
+		}},
+		"responses image in function call output": {Responses: &fwkrequest.ResponsesRequest{
+			Input: []any{map[string]any{"type": "function_call_output", "output": []any{
+				map[string]any{"type": reqcommon.PartTypeInputImage, "image_url": "http://img"},
+			}}},
+		}},
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			body.Payload = fwkrequest.PayloadMap{
+				reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":[3,4]}`),
+			}
+			req := &scheduling.InferenceRequest{Body: body}
+
+			require.NoError(t, newTestPlugin(render).Produce(context.Background(), req, nil))
+
+			require.NotNil(t, req.Body.TokenizedRequest)
+			assert.Equal(t, backendTokens, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
+		})
+	}
+}
+
+// TestProduce_KVPromptTokenIDsWithTextOnlyParts checks that text-only structured
+// content still uses the supplied ids.
+func TestProduce_KVPromptTokenIDsWithTextOnlyParts(t *testing.T) {
+	text := []fwkrequest.ContentBlock{{Type: reqcommon.PartTypeText, Text: "hi"}}
+	tests := map[string]*fwkrequest.InferenceRequestBody{
+		"chat text part": {ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+			Messages: []fwkrequest.Message{{Role: "user", Content: fwkrequest.Content{Structured: text}}},
+		}},
+		"messages text block": {Messages: &fwkrequest.MessagesRequest{
+			Messages: []fwkrequest.AnthropicMessage{{Role: "user", Content: fwkrequest.AnthropicContent{
+				Structured: []fwkrequest.AnthropicContentBlock{{Type: reqcommon.PartTypeText, Text: "hi"}},
+			}}},
+		}},
+		"responses input text": {Responses: &fwkrequest.ResponsesRequest{
+			Input: []any{map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": reqcommon.PartTypeInputText, "text": "hi"},
+			}}},
+		}},
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			body.Payload = fwkrequest.PayloadMap{
+				reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":[3,4]}`),
+			}
+			req := &scheduling.InferenceRequest{Body: body}
+
+			require.NoError(t, newTestPlugin(failingTokenizer(t)).Produce(context.Background(), req, nil))
 
 			require.NotNil(t, req.Body.TokenizedRequest)
 			assert.Equal(t, []uint32{3, 4}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)

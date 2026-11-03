@@ -27,9 +27,10 @@ import (
 
 // clientPromptTokenIDs returns the prompt token IDs a request already carries,
 // so the backend does not render the prompt again: a token-array completions
-// prompt, or kv_transfer_params.prompt_token_ids, which vLLM's chat path
-// consumes in place of templating and tokenizing the messages. Returns nil
-// when the request carries none.
+// prompt, or kv_transfer_params.prompt_token_ids on the APIs vLLM's chat path
+// serves, which consumes the field in place of templating and tokenizing the
+// messages. Returns nil when the request carries none, and when it carries
+// media, since vLLM then ignores the field and renders the messages.
 func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) [][]uint32 {
 	if body.Completions != nil {
 		// The completions path reads the prompt; it does not read
@@ -39,29 +40,100 @@ func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) [][]uint32 {
 		}
 		return nil
 	}
+	if !chatPathTextOnly(body) {
+		return nil
+	}
 	payload, ok := body.Payload.(fwkrequest.PayloadMap)
 	if !ok {
 		return nil
 	}
-	value, ok := payload[reqcommon.FieldKVTransferParams]
-	if !ok || value == nil {
-		return nil
-	}
-	var params map[string]any
-	switch v := value.(type) {
+	var rawIDs any
+	switch v := payload[reqcommon.FieldKVTransferParams].(type) {
 	case map[string]any:
-		params = v
+		rawIDs = v[reqcommon.FieldPromptTokenIDs]
 	case json.RawMessage:
+		// Decoding into raw values keeps the id array as bytes for
+		// ParseCanonicalTokenIDs, rather than one json.Number per id.
+		var params map[string]json.RawMessage
 		if err := parserutil.Unmarshal(v, &params); err != nil {
 			return nil
+		}
+		if ids, ok := params[reqcommon.FieldPromptTokenIDs]; ok {
+			rawIDs = ids
 		}
 	default:
 		return nil
 	}
-	if ids := parseTokenIDList(params[reqcommon.FieldPromptTokenIDs]); ids != nil {
+	if ids := parseTokenIDList(rawIDs); ids != nil {
 		return [][]uint32{ids}
 	}
 	return nil
+}
+
+// chatPathTextOnly reports whether the request is one vLLM's chat path serves
+// (chat completions, Messages, Responses) and names no media. vLLM renders the
+// messages instead of using prompt_token_ids when any content part is not text,
+// and only a render yields the multimodal features downstream plugins read.
+func chatPathTextOnly(body *fwkrequest.InferenceRequestBody) bool {
+	switch {
+	case body.ChatCompletions != nil:
+		for _, msg := range body.ChatCompletions.Messages {
+			for _, block := range msg.Content.Structured {
+				if !isTextPartType(block.Type) {
+					return false
+				}
+			}
+		}
+		return true
+	case body.Messages != nil:
+		for _, msg := range body.Messages.Messages {
+			for _, block := range msg.Content.Structured {
+				if _, ok := reqcommon.MessagesBlockModality(block.Type); ok {
+					return false
+				}
+				if block.Type == reqcommon.BlockTypeToolResult {
+					for _, nested := range block.ToolResultContent().Structured {
+						if _, ok := reqcommon.MessagesBlockModality(nested.Type); ok {
+							return false
+						}
+					}
+				}
+			}
+		}
+		return true
+	case body.Responses != nil:
+		items, _ := body.Responses.Input.([]any)
+		for _, item := range items {
+			itemMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, array := range reqcommon.ItemPartArrays(itemMap, reqcommon.APITypeResponses) {
+				for _, part := range array.Parts {
+					partMap, ok := part.(map[string]any)
+					if !ok {
+						continue
+					}
+					if partType, _ := partMap[reqcommon.FieldType].(string); !isTextPartType(partType) {
+						return false
+					}
+				}
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// isTextPartType reports whether a chat or Responses content part of this type
+// is parsed as text. The ContentBlock decoder types a part without a type by its
+// media field, so an untyped media part does not read as text here.
+func isTextPartType(partType string) bool {
+	switch partType {
+	case reqcommon.PartTypeText, reqcommon.PartTypeInputText, reqcommon.PartTypeOutputText, reqcommon.PartTypeRefusal, blockTypeThinking:
+		return true
+	}
+	return false
 }
 
 // parseTokenIDList converts a prompt_token_ids value to token IDs. The value is
@@ -79,6 +151,11 @@ func parseTokenIDList(value any) []uint32 {
 		if ids, ok := fwkrequest.ParseCanonicalTokenIDs(v); ok {
 			return ids
 		}
+		var decoded []any
+		if err := parserutil.Unmarshal(v, &decoded); err != nil {
+			return nil
+		}
+		return parseTokenIDList(decoded)
 	case []any:
 		ids := make([]uint32, 0, len(v))
 		for _, item := range v {

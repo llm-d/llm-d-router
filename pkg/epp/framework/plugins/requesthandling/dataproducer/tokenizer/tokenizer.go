@@ -405,9 +405,8 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 
 // Produce derives the request's TokenizedRequest via the configured backend and
 // stores it on the body. Skips when one is already present or the request
-// carries prompt token IDs of its own (a token-array completions prompt, or
-// kv_transfer_params.prompt_token_ids); errors propagate to the Director, which
-// logs and continues.
+// carries prompt token IDs of its own (see clientPromptTokenIDs); errors
+// propagate to the Director, which logs and continues.
 //
 // The tokenize span opens below the already-tokenized skip path, so it is
 // emitted only when the backend is actually invoked.

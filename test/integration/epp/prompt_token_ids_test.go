@@ -17,6 +17,7 @@ limitations under the License.
 package epp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,15 +26,17 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	envoyCorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/testing/protocmp"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 // renderRecorder captures the bodies of the render requests a token-producer
@@ -152,7 +155,7 @@ dataLayer:
 			}
 			h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 
-			requests := integration.ReqRaw(map[string]string{
+			requests := fwkepp.ReqRaw(map[string]string{
 				":path":                      "/v1/chat/completions",
 				"hi":                         "mom",
 				reqcommon.RequestIDHeaderKey: "test-request-id",
@@ -160,7 +163,7 @@ dataLayer:
 				metadata.ModelNameRewriteKey: modelMyModelTarget,
 			}, tc.body)
 
-			responses, err := integration.StreamedRequest(t, h.Client, requests, 2)
+			responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
 			require.NoError(t, err)
 
 			// The repackage rewrites the model to the target, injects the
@@ -168,7 +171,7 @@ dataLayer:
 			// keys; nested objects keep their original bytes.
 			expectedBody, err := json.Marshal(tc.wantBody)
 			require.NoError(t, err)
-			wantResponses := integration.NewRequestBufferedResponse("192.168.1.1:8000", expectedBody,
+			wantResponses := fwkepp.NewRequestBufferedResponse("192.168.1.1:8000", expectedBody,
 				&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: ":path", RawValue: []byte("/v1/chat/completions")}},
 				&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "hi", RawValue: []byte("mom")}},
 				&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
@@ -189,4 +192,95 @@ dataLayer:
 				"render calls carrying the request body")
 		})
 	}
+}
+
+// TestClientPromptTokenIDsKeyPrefixCache checks that supplied prompt token IDs
+// are what the prefix cache keys on: a second request with the same IDs and
+// different message text routes to the pod that served the first, even when
+// another pod scores better on queue depth and KV utilization.
+func TestClientPromptTokenIDsKeyPrefixCache(t *testing.T) {
+	renderSrv := httptest.NewServer(http.HandlerFunc((&renderRecorder{}).handle))
+	t.Cleanup(renderSrv.Close)
+
+	configText := fmt.Sprintf(`
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: %s
+      vllm:
+        url: %s
+  - type: approx-prefix-cache-producer
+    parameters:
+      autoTune: false
+      blockSizeTokens: 4
+  - type: prefix-cache-scorer
+  - type: queue-scorer
+  - type: kv-cache-utilization-scorer
+  - type: openai-parser
+  - type: mock-metrics-source
+  - type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: prefix-cache-scorer
+        weight: 10
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+  - pluginRef: mock-metrics-source
+`, modelMyModelTarget, renderSrv.URL)
+
+	h := NewTestHarness(t.Context(), t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
+	// Pod 1 scores better on queue depth and KV utilization, so only a prefix
+	// cache hit can send the second request to pod 0.
+	pods := []PodState{
+		P(0, 0, 0.1, modelMyModelTarget),
+		P(1, 0, 0.0, modelMyModelTarget),
+	}
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
+
+	const tokenIDs = `[11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26]`
+	route := func(content string, subset []string) string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(ctx)
+		require.NoError(t, err)
+		body := `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"` + content + `"}],` +
+			`"max_tokens":10,"kv_transfer_params":{"prompt_token_ids":` + tokenIDs + `}}`
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      "/v1/chat/completions",
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+		}, body)
+		// The EPP reads the subset hint from the end-of-stream body message.
+		requests[len(requests)-1].MetadataContext = &envoyCorev3.Metadata{FilterMetadata: fwkepp.GenerateRequestMetadata(subset)}
+		for _, req := range requests {
+			require.NoError(t, client.Send(req))
+		}
+		headersResp, err := client.Recv()
+		require.NoError(t, err)
+		endpoint := headerValue(headersResp.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
+		require.NotEmpty(t, endpoint)
+		_, err = client.Recv()
+		require.NoError(t, err)
+		require.NoError(t, client.CloseSend())
+		return endpoint
+	}
+
+	// Pin the first request to pod 0 so the cached prefix lands on the pod the
+	// other scorers rank lower.
+	require.Equal(t, "192.168.1.1:8000", route("first request", []string{"192.168.1.1:8000"}))
+
+	// The prefix index is updated after routing, off the request path.
+	require.Eventually(t, func() bool {
+		return route("different text, same token ids", nil) == "192.168.1.1:8000"
+	}, 5*time.Second, 100*time.Millisecond, "a request with the same token ids must route to the pod that cached them")
 }

@@ -18,11 +18,13 @@ The plugin is idempotent: if
 `InferenceRequestBody.TokenizedRequest` is already populated by an earlier
 producer, tokenization is skipped. A request that already carries prompt token
 IDs is not rendered either: a token-array Completions `prompt`, or
-`kv_transfer_params.prompt_token_ids` on every other API, which vLLM's chat
-path consumes in place of templating and tokenizing the messages. Those IDs are
-published as sent; engine-side preprocessing such as truncation or special
-tokens is not reflected. Multi-modal features are flattened into the
-upstream list shape, sorted by placeholder offset.
+`kv_transfer_params.prompt_token_ids` on a text-only Chat Completions, Messages,
+or Responses request, which vLLM's chat path consumes in place of templating
+and tokenizing the messages. A request with media content is rendered, since
+vLLM then ignores the field and the render supplies the multimodal features.
+Those IDs are published as sent; engine-side preprocessing such as truncation
+or special tokens is not reflected. Multi-modal features are flattened into
+the upstream list shape, sorted by placeholder offset.
 
 ## Backend
 

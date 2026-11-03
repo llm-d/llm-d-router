@@ -152,6 +152,7 @@ const (
 	PartTypeText               = "text"
 	PartTypeInputText          = "input_text"
 	PartTypeOutputText         = "output_text"
+	PartTypeRefusal            = "refusal"
 	PartTypeImageURL           = "image_url"
 	PartTypeAudioURL           = "audio_url"
 	PartTypeVideoURL           = "video_url"
