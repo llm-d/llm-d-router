@@ -259,16 +259,7 @@ func (p *Plugin) PreRequest(ctx context.Context, request *scheduling.InferenceRe
 
 func mutateKVTransferParams(payload fwkrequest.PayloadMap, load loadAction,
 	offload Policy) bool {
-	value := payload[commonrequest.FieldKVTransferParams]
-	params, decoded := value.(map[string]any)
-	if !decoded {
-		raw, ok := value.(json.RawMessage)
-		if ok {
-			if err := parserutil.Unmarshal(raw, &params); err == nil && params != nil {
-				decoded = true
-			}
-		}
-	}
+	params, decoded := parserutil.ObjectField(payload, commonrequest.FieldKVTransferParams)
 	if !decoded {
 		if load != loadDisable && offload != PolicyDisable {
 			return false

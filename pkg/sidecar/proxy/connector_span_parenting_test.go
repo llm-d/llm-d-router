@@ -158,7 +158,7 @@ func TestNIXLV2StagesAreSiblingSpans(t *testing.T) {
 
 	req, forward := requestWithForwardSpan(t, reqcommon.PathChatCompletions, []byte(chatCompletionsRequestBody))
 	rec := httptest.NewRecorder()
-	s.handleNIXLV2(rec, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+	s.handleNIXLV2(rec, req, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 	forward.End()
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
