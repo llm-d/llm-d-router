@@ -29,52 +29,60 @@ import (
 // a token-array completions prompt, or kv_transfer_params.prompt_token_ids on a
 // text-only chat-path request (see chatPathTextOnly). Returns nil otherwise, and
 // when echo is set, since vLLM then renders the messages instead of using the
-// field.
-func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) [][]uint32 {
+// field. When the request carries IDs that are not used, ignored names the
+// reason.
+func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) (ids [][]uint32, ignored string) {
 	if body.Completions != nil {
 		// The completions path reads the prompt; it does not read
 		// kv_transfer_params.prompt_token_ids, so a text prompt must be rendered.
 		if len(body.Completions.Prompt.TokenIDs) == 0 {
-			return nil
+			return nil, ""
 		}
 		// vLLM truncates the prompt when truncate_prompt_tokens is set, so only a
 		// render yields the tokens the engine serves.
 		if payload, ok := body.Payload.(fwkrequest.PayloadMap); ok && payload[reqcommon.FieldTruncatePromptTokens] != nil {
-			return nil
+			return nil, "truncate_prompt_tokens is set"
 		}
-		return body.Completions.Prompt.TokenIDs
-	}
-	if !chatPathTextOnly(body) {
-		return nil
+		return body.Completions.Prompt.TokenIDs, ""
 	}
 	payload, ok := body.Payload.(fwkrequest.PayloadMap)
 	if !ok {
-		return nil
+		return nil, ""
+	}
+	rawIDs, present := kvPromptTokenIDs(payload)
+	switch {
+	case !present:
+		return nil, ""
+	case !chatPathTextOnly(body):
+		return nil, "request is outside the chat path or carries media"
 	}
 	if echo, _ := payload[reqcommon.FieldEcho].(bool); echo {
-		return nil
+		return nil, "echo is set"
 	}
-	var rawIDs any
+	if parsed := parseTokenIDList(rawIDs); parsed != nil {
+		return [][]uint32{parsed}, ""
+	}
+	return nil, "malformed or empty"
+}
+
+// kvPromptTokenIDs returns the undecoded kv_transfer_params.prompt_token_ids
+// value and whether the field is present.
+func kvPromptTokenIDs(payload fwkrequest.PayloadMap) (any, bool) {
 	switch v := payload[reqcommon.FieldKVTransferParams].(type) {
 	case map[string]any:
-		rawIDs = v[reqcommon.FieldPromptTokenIDs]
+		ids, ok := v[reqcommon.FieldPromptTokenIDs]
+		return ids, ok
 	case json.RawMessage:
 		// Decode to raw values so the id array stays as bytes for
 		// ParseCanonicalTokenIDs.
 		var params map[string]json.RawMessage
 		if err := parserutil.Unmarshal(v, &params); err != nil {
-			return nil
+			return nil, false
 		}
-		if ids, ok := params[reqcommon.FieldPromptTokenIDs]; ok {
-			rawIDs = ids
-		}
-	default:
-		return nil
+		ids, ok := params[reqcommon.FieldPromptTokenIDs]
+		return ids, ok
 	}
-	if ids := parseTokenIDList(rawIDs); ids != nil {
-		return [][]uint32{ids}
-	}
-	return nil
+	return nil, false
 }
 
 // chatPathTextOnly reports whether the request is one vLLM's chat path serves

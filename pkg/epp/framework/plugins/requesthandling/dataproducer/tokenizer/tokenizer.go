@@ -33,7 +33,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -425,11 +427,16 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		}
 		return nil
 	}
-	if arrays := clientPromptTokenIDs(request.Body); arrays != nil {
+	arrays, ignored := clientPromptTokenIDs(request.Body)
+	if arrays != nil {
 		tp := fwkrequest.NewTokenizedRequest(arrays)
 		tp.CacheSalt = CacheSaltFromBody(request.Body)
 		request.Body.TokenizedRequest = tp
+		log.FromContext(ctx).V(logging.DEBUG).Info("using client-supplied prompt token IDs", "tokenCount", tp.TokenCount())
 		return nil
+	}
+	if ignored != "" {
+		log.FromContext(ctx).V(logging.DEBUG).Info("ignoring client-supplied prompt token IDs, rendering", "reason", ignored)
 	}
 
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))

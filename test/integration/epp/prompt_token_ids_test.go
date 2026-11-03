@@ -120,13 +120,13 @@ dataLayer:
 	}{
 		{
 			name:   "prompt_token_ids skips rendering",
-			marker: "ids-marker",
-			body: `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"ids-marker"}],` +
+			marker: "skip-marker",
+			body: `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"skip-marker"}],` +
 				`"max_tokens":100,"kv_transfer_params":{"prompt_token_ids":[7,8,9]}}`,
 			wantBody: map[string]any{
 				"kv_transfer_params": json.RawMessage(`{"prompt_token_ids":[7,8,9]}`),
 				"max_tokens":         json.Number("100"),
-				"messages":           json.RawMessage(`[{"role":"user","content":"ids-marker"}]`),
+				"messages":           json.RawMessage(`[{"role":"user","content":"skip-marker"}]`),
 				"model":              modelMyModelTarget,
 				"priority":           2,
 			},
@@ -134,11 +134,11 @@ dataLayer:
 		},
 		{
 			name:   "no prompt_token_ids renders once",
-			marker: "no-ids-marker",
-			body:   `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"no-ids-marker"}],"max_tokens":100}`,
+			marker: "render-marker",
+			body:   `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"render-marker"}],"max_tokens":100}`,
 			wantBody: map[string]any{
 				"max_tokens": json.Number("100"),
-				"messages":   json.RawMessage(`[{"role":"user","content":"no-ids-marker"}]`),
+				"messages":   json.RawMessage(`[{"role":"user","content":"render-marker"}]`),
 				"model":      modelMyModelTarget,
 				"priority":   2,
 			},
