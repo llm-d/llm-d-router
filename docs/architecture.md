@@ -94,6 +94,11 @@ Required or Optional, directly or through other producers. This includes produce
 automatically. Every other producer runs in step 5. Producers in step 3 see every located candidate,
 so their per-endpoint work grows with the candidates the screeners remove.
 
+For example, `disaggregatedset-rollout-screener` with `revisionGating.affinity.prefixCache` consumes
+`PrefixCacheMatchInfo`, so `approx-prefix-cache-producer` and the `token-producer` it consumes run in
+step 3 with no `dataProducers` entry; see its
+[producer setup](../pkg/epp/framework/plugins/requesthandling/screener/disaggregatedsetrollout/README.md#producer-setup).
+
 #### Scheduling
 
 Each scheduling profile runs the following stages. Multiple profiles may run for one request, such as separate prefill and decode profiles.
@@ -408,6 +413,8 @@ Enable chunked decode via the pd-sidecar flag:
 >   choice for every choice.
 > - the request declares a non-empty `tools` array and does not set `tool_choice: none`, because a
 >   tool call cannot be reassembled across chunk boundaries.
+> - the request sets `structured_outputs`, or a `response_format` whose `type` is not `text`, because
+>   vLLM applies the constraint to each chunk's output separately.
 
 ---
 

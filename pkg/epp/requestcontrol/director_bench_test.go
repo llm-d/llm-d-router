@@ -28,8 +28,8 @@ import (
 	crzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 )
 
@@ -66,7 +66,7 @@ func newStreamingRequestContext(requestID string) *handlers.RequestContext {
 		TargetPod: &fwkdl.EndpointMetadata{
 			ID: types.NamespacedName{Namespace: "ns", Name: "pod"},
 		},
-		Usage: fwkrh.Usage{},
+		Usage: fwkrequest.Usage{},
 	}
 }
 

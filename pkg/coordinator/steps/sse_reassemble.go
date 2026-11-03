@@ -89,7 +89,6 @@ const (
 	fieldContentBlock = "content_block"
 	fieldStopReason   = "stop_reason"
 	fieldStopSequence = "stop_sequence"
-	partTypeText      = "text"
 )
 
 // Choice and envelope fields of a vLLM chat, completions or generate stream. A
@@ -101,7 +100,6 @@ const (
 const (
 	fieldChoiceStopReason  = "stop_reason"
 	fieldTokenIDs          = "token_ids"
-	fieldText              = "text"
 	fieldID                = "id"
 	fieldObject            = "object"
 	fieldCreated           = "created"
@@ -112,7 +110,7 @@ const (
 var (
 	foldedChoiceKeys = map[sseShape]map[string]bool{
 		sseShapeChat:     {reqcommon.FieldIndex: true, reqcommon.FieldDelta: true, reqcommon.FieldFinishReason: true, fieldChoiceStopReason: true},
-		sseShapeText:     {reqcommon.FieldIndex: true, fieldText: true, reqcommon.FieldFinishReason: true, fieldChoiceStopReason: true},
+		sseShapeText:     {reqcommon.FieldIndex: true, reqcommon.FieldText: true, reqcommon.FieldFinishReason: true, fieldChoiceStopReason: true},
 		sseShapeGenerate: {reqcommon.FieldIndex: true, fieldTokenIDs: true, reqcommon.FieldFinishReason: true, fieldChoiceStopReason: true},
 	}
 	foldedFrameKeys = map[sseShape]map[string]bool{
@@ -321,7 +319,7 @@ func (r *sseReassembler) addMessages(frame map[string]any) {
 		// A non-text block (tool_use, thinking) is announced here before any delta;
 		// the fold keeps only text, so flag the reply lossy.
 		if block, ok := frame[fieldContentBlock].(map[string]any); ok {
-			if t, ok := block[reqcommon.FieldType].(string); ok && t != partTypeText {
+			if t, ok := block[reqcommon.FieldType].(string); ok && t != reqcommon.PartTypeText {
 				r.lossyFrame = true
 			}
 		}
@@ -335,7 +333,7 @@ func (r *sseReassembler) addMessages(frame map[string]any) {
 			r.lossyFrame = true
 			return
 		}
-		if text, ok := delta[partTypeText].(string); ok {
+		if text, ok := delta[reqcommon.FieldText].(string); ok {
 			r.messageText.WriteString(text)
 			r.contentBytes += int64(len(text))
 		}
@@ -467,7 +465,7 @@ func (r *sseReassembler) foldChoice(choice map[string]any) {
 			r.contentBytes += int64(len(ids)) * forceStreamBytesPerToken
 		}
 	case sseShapeText:
-		if text, ok := choice[fieldText].(string); ok {
+		if text, ok := choice[reqcommon.FieldText].(string); ok {
 			acc.content.WriteString(text)
 			r.contentBytes += int64(len(text))
 		}
@@ -597,7 +595,7 @@ func (r *sseReassembler) messagesResult() map[string]any {
 		reqcommon.FieldType: objectMessage,
 		reqcommon.FieldRole: role,
 		reqcommon.FieldContent: []any{
-			map[string]any{reqcommon.FieldType: partTypeText, partTypeText: r.messageText.String()},
+			map[string]any{reqcommon.FieldType: reqcommon.PartTypeText, reqcommon.FieldText: r.messageText.String()},
 		},
 	}
 	if r.id != "" {
@@ -711,7 +709,7 @@ func (r *sseReassembler) resultChoice(c *sseChoice) map[string]any {
 		}
 		choice[fieldTokenIDs] = tokens
 	default:
-		choice[fieldText] = c.content.String()
+		choice[reqcommon.FieldText] = c.content.String()
 	}
 	return choice
 }

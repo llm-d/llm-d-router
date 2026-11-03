@@ -66,7 +66,10 @@ Tuning knobs, all under the `flowControl:` config section:
   Each limit is disabled when omitted or zero. Both limits must permit admission, including at the
   exact boundary; aggregate band and global limits still apply. Dispatch and cleanup release queue
   capacity. Limits use Kubernetes resource quantities and can be set on `priorityBands`,
-  `defaultPriorityBand`, and `defaultNegativePriorityBand`.
+  `defaultPriorityBand`, and `defaultNegativePriorityBand`. While the pool has endpoints, a request
+  refused only by its own flow's limit gets 429 with reason `rejected-flow-limit`; a request refused
+  by a full band or global limit gets `rejected-saturated`, even if its flow is also at its limit.
+  With no endpoints, every capacity refusal is 503 `rejected-no-endpoints`.
 * `defaultRequestTTL` — the queue-wait budget against a pool that has endpoints, and the other way a
   request is shed. Keep it under the client or gateway deadline, and size it to the time-to-first-token
   budget you are willing to spend waiting on a saturated pool. Priority-band entries and templates

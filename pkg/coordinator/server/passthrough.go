@@ -169,7 +169,8 @@ func isOpenAIPassthroughPath(path string) bool {
 	switch path {
 	case reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathResponses,
 		reqcommon.PathConversations, reqcommon.PathModels, reqcommon.PathEmbeddings, reqcommon.PathAudioSpeech,
-		reqcommon.PathImagesGenerations, reqcommon.PathImagesEdits:
+		reqcommon.PathAudioGenerate, reqcommon.PathImagesGenerations, reqcommon.PathImagesEdits,
+		reqcommon.PathVideos, reqcommon.PathVideosSync:
 		return true
 	default:
 		return false

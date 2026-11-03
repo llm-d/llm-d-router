@@ -81,7 +81,7 @@ func TestEndpointScoresMetadataOffByDefault(t *testing.T) {
 func requestHeaderEnvoyLbMetadata(t *testing.T, h *TestHarness) *structpb.Struct {
 	t.Helper()
 
-	requests := fwkepp.ReqLLM(logger, "hello", modelMyModel, modelMyModelTarget)
+	requests := fwkepp.ReqLLM(Logger(), "hello", modelMyModel, modelMyModelTarget)
 
 	// RequestHeaders + RequestBody -> request header response and request body response.
 	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)

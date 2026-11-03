@@ -245,6 +245,8 @@ test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["proxy-service-scheduling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.nodeSelector.pool=router --set router.proxy.nodeSelector.pool=router --set-json router.proxy.tolerations=[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}] --set-json router.proxy.affinity={\"podAntiAffinity\":{\"preferredDuringSchedulingIgnoredDuringExecution\":[{\"weight\":100,\"podAffinityTerm\":{\"topologyKey\":\"kubernetes.io/hostname\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}}]}}"
 test_cases_llm_d_router_standalone["proxy-service-pod-settings"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.podAnnotations.team=router --set router.proxy.podSecurityContext.runAsUser=65532"
+test_cases_llm_d_router_standalone["pod-placement"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.priorityClassName=router-critical --set router.proxy.priorityClassName=router-critical --set router.epp.podLabels.team=router --set router.proxy.podLabels.team=router --set-json router.epp.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-standalone\":\"release-name-epp\"}}}] --set-json router.proxy.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}]"
+test_cases_llm_d_router_standalone["pod-placement-statefulset"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.podLabels.team=router"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
 test_cases_llm_d_router_standalone["lifecycle-override"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.epp.lifecycle.preStop.exec.command[0]=/epp-drain --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
 test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
@@ -345,6 +347,20 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
     if ! grep -q "team: router" "${epp_yaml}" || ! grep -q "runAsUser: 65532" "${epp_yaml}"; then
       echo "Validation failed: proxy podAnnotations or podSecurityContext not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "pod-placement" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if [ "$(grep -c 'priorityClassName: "router-critical"' "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "team: router" "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "topologySpreadConstraints:" "${epp_yaml}")" -ne 2 ]; then
+      echo "Validation failed: EPP and proxy priorityClassName, podLabels or topologySpreadConstraints not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "pod-placement-statefulset" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "kind: StatefulSet" "${epp_yaml}" || ! grep -q "team: router" "${epp_yaml}"; then
+      echo "Validation failed: router.epp.podLabels not rendered on the EPP StatefulSet for test: ${key}"
       exit 1
     fi
   fi
@@ -702,6 +718,15 @@ if eval "${invalid_tokenizer_flavor_command}"; then
   exit 1
 fi
 
+for label_path in router.epp.podLabels.llm-d-router-standalone router.proxy.podLabels.llm-d-router-proxy; do
+  invalid_pod_labels_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set ${label_path}=override"
+  echo "Executing: ${invalid_pod_labels_command}"
+  if eval "${invalid_pod_labels_command}"; then
+    echo "Helm template unexpectedly succeeded for chart-owned label ${label_path}"
+    exit 1
+  fi
+done
+
 echo "Verifying llm-d-router-standalone extra flags render as --flag=value..."
 flag_render_output="${TEMP_DIR}/llm-d-router-standalone-flag-render.yaml"
 flag_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set-string router.epp.flags.secure-serving=false > ${flag_render_output}"
@@ -926,6 +951,52 @@ if ! grep -A1 -- 'healthy_panic_threshold:' <<<"${ext_proc_cluster}" | grep -q -
   echo "Proxy service mode with fail-open did not disable panic mode on the ext_proc cluster"
   exit 1
 fi
+
+echo "Verifying Envoy active health checks require EPP's gRPC health service..."
+for proxy_mode in sidecar service; do
+  for fail_open in true false; do
+    health_checking_render_output="${TEMP_DIR}/envoy-health-checking-${proxy_mode}-${fail_open}.yaml"
+    if ! "${HELM}" template health-checking "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+      --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+      --set router.proxy.mode="${proxy_mode}" --set router.proxy.failOpen="${fail_open}" > "${health_checking_render_output}"; then
+      echo "Envoy Helm render failed in ${proxy_mode} mode with failOpen=${fail_open}"
+      exit 1
+    fi
+    if ! grep -q -- '--health-checking=true' "${health_checking_render_output}"; then
+      echo "Envoy did not enable EPP's gRPC health service in ${proxy_mode} mode with failOpen=${fail_open}"
+      exit 1
+    fi
+
+    for flag_type in --set --set-string; do
+      if health_checking_error=$("${HELM}" template health-checking "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+        --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+        --set router.proxy.mode="${proxy_mode}" --set router.proxy.failOpen="${fail_open}" \
+        "${flag_type}" router.epp.flags.health-checking=false 2>&1); then
+        echo "Envoy accepted ${flag_type} router.epp.flags.health-checking=false in ${proxy_mode} mode with failOpen=${fail_open}"
+        exit 1
+      fi
+      if ! grep -q -- 'router.epp.flags.health-checking' <<<"${health_checking_error}"; then
+        echo "Unexpected Helm validation error: ${health_checking_error}"
+        exit 1
+      fi
+    done
+  done
+done
+
+for proxy_setting in router.proxy.enabled=false router.proxy.proxyType=agentgateway; do
+  health_checking_render_output="${TEMP_DIR}/no-envoy-health-checking.yaml"
+  if ! "${HELM}" template health-checking "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+    --set "${proxy_setting}" \
+    --set router.epp.flags.health-checking=false > "${health_checking_render_output}"; then
+    echo "Helm render rejected disabled health checking with ${proxy_setting}"
+    exit 1
+  fi
+  if grep -q -- '--health-checking=true' "${health_checking_render_output}"; then
+    echo "Unexpectedly enabled EPP health checking with ${proxy_setting}"
+    exit 1
+  fi
+done
 
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."
 fail_closed_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fail-closed-render.yaml"

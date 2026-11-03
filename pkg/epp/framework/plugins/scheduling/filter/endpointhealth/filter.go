@@ -33,7 +33,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -178,7 +178,7 @@ func (p *parameters) toConfig() (config, error) {
 
 // compile-time type assertions
 var _ fwksched.Filter = &EndpointHealthFilter{}
-var _ fwkrc.ResponseHeaderProcessor = &EndpointHealthFilter{}
+var _ fwkrh.ResponseHeaderProcessor = &EndpointHealthFilter{}
 var _ fwkplugin.ConsumerPlugin = &EndpointHealthFilter{}
 
 // Factory defines the factory function for EndpointHealthFilter.
@@ -278,7 +278,7 @@ func (f *EndpointHealthFilter) Filter(ctx context.Context, _ *fwksched.Inference
 // ResponseHeader counts the response status toward the serving endpoint's
 // response health.
 func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, _ *fwksched.InferenceRequest,
-	response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {
+	response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
 	if f.tracker.cfg.responseFailureThreshold == 0 || response == nil || targetEndpoint == nil {
 		return
 	}

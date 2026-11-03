@@ -1,7 +1,7 @@
 # Program-Aware Fairness Policy
 
 **Type:** `program-aware-fairness`
-**Interfaces:** `flowcontrol.FairnessPolicy`, `requestcontrol.PreRequest`, `requestcontrol.ResponseBodyProcessor`
+**Interfaces:** `flowcontrol.FairnessPolicy`, `requesthandling.PreRequest`, `requesthandling.ResponseBodyProcessor`
 
 The program-aware fairness policy schedules per-program queues using aggregated per-program metrics rather than per-request attributes. Programs are identified by the fairness ID on each request, which the Director derives from the fairness ID header (`x-llm-d-inference-fairness-id`) and the agent-identity attribute resolved from session headers, allowing distinct workflows or tenants sharing an inference pool to compete on equal footing at the workflow level. When `requestHandler.composeFairnessIDs` is enabled and a request carries both a tenant fairness ID and a session identity, the Director composes them into a `<tenant>/<session>` ID so each session gets its own queue; see [Composed flow IDs](#composed-flow-ids-multi-tenant-pools).
 
@@ -97,7 +97,7 @@ Under `las`, **attained service**, measured as a weighted sum of input and outpu
 
 * **Program identity**: From the request's `FairnessID` field, which the Director populates from the fairness ID header, the agent-identity attribute, or their `<tenant>/<session>` composition.
 * **Queue state**: Reads queue length and the head item's enqueue time from the `FlowQueueAccessor`.
-* **Token usage** (`las`): From the `Response.Usage` field on stream completion.
+* **Token usage** (`las`): From `Response.Usage` on stream completion, falling back to `Response.StreamedEvents` for output tokens when `Response.Usage.CompletionTokens` is zero and `Response.StreamedEvents` is positive.
 * **Dispatched count, in-flight count, last completion time** (`turn-priority`): From the per-program metrics maintained across the request lifecycle.
 
 ## Configuration
@@ -129,7 +129,7 @@ flowControl:
 | `evictionTtlSeconds` | `3600` | A program with no completion in this window is evicted from the metrics map. |
 | `evictionSweepSeconds` | `300` | How often the eviction sweep runs. Must be `> 0`. |
 
-A complete sample is shipped at [`deploy/config/sim-program-aware-config.yaml`](../../../../../../../deploy/config/sim-program-aware-config.yaml).
+A complete sample is shipped at [`test/e2e/artifacts/config/sim-program-aware-config.yaml`](../../../../../../../test/e2e/artifacts/config/sim-program-aware-config.yaml).
 
 ## Observability
 

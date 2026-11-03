@@ -228,7 +228,7 @@ whose body reached the EPP and whose ending the EPP observes.
 | `outcome` | Meaning | `reason` |
 |---|---|---|
 | `completed` | The model server answered with status 200 and the response finished. | empty |
-| `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated`. |
+| `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated` or `rejected-flow-limit`. |
 | `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
 | `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
 | `failed` | Any other error, before or after dispatch, including a response status other than 200 or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
@@ -694,6 +694,25 @@ Control alone does not emit them.
 | `llm_d_epp_program_aware_avg_wait_time_milliseconds` | Gauge | `program_id` | Mean wait time. |
 | `llm_d_epp_program_aware_attained_service_tokens` | Gauge | `program_id` | Attained service. |
 
+### Latency by prompt bucket and path
+
+These metrics are owned by the `latency-reporter` response plugin and are registered only when it
+is configured. They add the `prompt_bucket` and prefill/decode `path` dimensions to request latency.
+The plugin holds no targets; thresholds are applied in PromQL.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_latency_requests_total` | Counter | `priority`, `prompt_bucket`, `path`, `streaming`, `outcome` | `outcome` is `completed`, `evicted`, `cancelled` or `failed`, mirroring [Request outcomes](#request-outcomes) for dispatched requests. `path` is `remote` (prefill on a separate prefill pod) or `local` (prefill on the serving pod, including a declined remote prefill and deployments without P/D). |
+| `llm_d_epp_latency_ttft_seconds` | Histogram | `priority`, `prompt_bucket`, `path`, `streaming` | TTFT of completed requests. For `streaming="false"`, it equals end-to-end latency. |
+| `llm_d_epp_latency_tpot_seconds` | Histogram | `priority`, `path` | Mean TPOT of completed streaming requests. |
+
+The request counter carries the same labels as the TTFT histogram, because it is the denominator
+of attainment ratios over that histogram. `streaming` has the same meaning as on
+`llm_d_epp_request_ttft_seconds`. For outcomes by tenant or model, use
+`llm_d_epp_request_outcome_total`; the plugin counts only dispatched requests, so its totals are not
+expected to match that counter's. The plugin README carries PromQL for percentiles, threshold
+fractions and failure ratios.
+
 ### Predicted latency and SLO
 
 These metrics are registered and recorded by the `predicted-latency-producer`. They are present
@@ -932,7 +951,9 @@ These metrics are owned by the EPP Flow Control layer.
     early rejections where no queue item is created (e.g. rejection during controller shutdown).
 *   **Actionability:**
     *   Rising `outcome="RejectedCapacity"`: queue limits too tight or backends persistently
-        saturated - tune `maxBytes`/`maxRequests` or scale backends.
+        saturated - tune `maxBytes`/`maxRequests` or scale backends. Per-flow limit refusals are counted
+        here too; split them out with `llm_d_epp_request_outcome_total{reason="rejected-flow-limit"}` and
+        tune `maxRequestsPerFlow`/`maxBytesPerFlow`.
     *   Rising `outcome="RejectedNoEndpoints"`: the pool scaled to zero or all endpoints unregistered
         - investigate pool health and scaling.
     *   Rising `outcome="EvictedTTL"`: requests waiting longer than their TTL - investigate backend
@@ -1018,7 +1039,7 @@ load reported for a replacement endpoint with the same labels.
 These metrics belong to the precise-prefix-cache pipeline. Set
 `indexerConfig.kvBlockIndexConfig.enableMetrics` to `true` on the
 `precise-prefix-cache-producer` parameters. The option defaults to `false`, and shipped sample
-configs (e.g. [`deploy/config/sim-epp-kvcache-config.yaml`](../deploy/config/sim-epp-kvcache-config.yaml))
+configs (e.g. [`test/e2e/artifacts/config/sim-epp-kvcache-config.yaml`](../test/e2e/artifacts/config/sim-epp-kvcache-config.yaml))
 leave it off, so these series are absent until an operator opts in. The embedded llm-d-kv-cache
 index and KV-event pool register these metrics in the router pod's EPP registry, so they are
 available from the existing EPP `/metrics` endpoint. Index metrics are unlabeled. KV-event metrics

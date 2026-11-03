@@ -32,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -215,7 +216,7 @@ func logSSELineDrop(ctx context.Context) {
 // block may carry only some of the fields, so a zero is read as "not reported" and
 // leaves the accumulated value alone. Parsers that emit usage once with every field
 // populated are unaffected.
-func mergeUsage(dst *fwkrh.Usage, src fwkrh.Usage) {
+func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 	if src.PromptTokens != 0 {
 		dst.PromptTokens = src.PromptTokens
 	}

@@ -49,11 +49,7 @@ const (
 	ecMooncakeFieldItems       = "ec_items"
 	ecMooncakeFieldTransferID  = "transfer_id"
 	ecMooncakeFieldMMHash      = "mm_hash"
-	ecMooncakeFieldMetadata    = "metadata"
 )
-
-// partFieldUUID is the content part field vLLM keys a multimodal item's hash on.
-const partFieldUUID = "uuid"
 
 // ecMooncakeEmbedsTypes maps each chat media part type to the metadata-only
 // embeds part it is rewritten to once the encoder has pushed its embedding.
@@ -79,7 +75,7 @@ type ecMooncakeItem struct {
 }
 
 func (it *ecMooncakeItem) metadata() map[string]any {
-	md, _ := it.reported[ecMooncakeFieldMetadata].(map[string]any)
+	md, _ := it.reported[reqcommon.FieldECDescriptorMetadata].(map[string]any)
 	return md
 }
 
@@ -143,10 +139,10 @@ func (s *Server) fanoutEncoderMooncake(
 		if _, ok := ecMooncakeEmbedsTypes[partType]; !ok || apiType != reqcommon.APITypeChatCompletions {
 			continue
 		}
-		id, _ := part[partFieldUUID].(string)
+		id, _ := part[reqcommon.FieldUUID].(string)
 		if id == "" {
 			id = ecMooncakeContentUUID(part)
-			part[partFieldUUID] = id
+			part[reqcommon.FieldUUID] = id
 		}
 		items[idx].uuid = id
 	}
@@ -294,7 +290,7 @@ func rewriteECMooncakeMessages(body map[string]any, items []ecMooncakeItem) ([]m
 					continue
 				}
 				if rawAudio {
-					partMap[partFieldUUID] = it.uuid
+					partMap[reqcommon.FieldUUID] = it.uuid
 					transferItems = append(transferItems, it.transferItem())
 					turnChanged = true
 					continue
@@ -307,7 +303,7 @@ func rewriteECMooncakeMessages(body map[string]any, items []ecMooncakeItem) ([]m
 				array.Parts[j] = map[string]any{
 					reqcommon.FieldType: embedsType,
 					embedsType:          flattenECMetadata(md),
-					partFieldUUID:       it.uuid,
+					reqcommon.FieldUUID: it.uuid,
 				}
 				transferItems = append(transferItems, it.transferItem())
 				rewritten++
