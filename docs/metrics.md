@@ -281,13 +281,18 @@ in the error rate, can be opened as the trace behind it.
 | `trace_id` | The request's trace is sampled. |
 | `span_id` | The observing component's tracing is on. With it off, only `trace_id` is attached. |
 
+On the P/D sidecar's stage durations, `span_id` names the sidecar's `forward_request` span,
+the parent of its `prefill` and `decode` spans, since not every connector opens a span per
+stage. A Mooncake or SGLang prefill that finishes after `forward_request` has ended carries
+only `trace_id`.
+
 Two things are needed to see them:
 
 - **Prometheus must store exemplars.** They are dropped unless it runs with
   `--enable-feature=exemplar-storage`.
 - **The scrape must use OpenMetrics.** Exemplars have no representation in the classic
-  text format. Prometheus requests OpenMetrics by default, so its scrapes of the EPP
-  switch to OpenMetrics with no scrape config change. No series is renamed, since every
+  text format. Prometheus requests OpenMetrics by default, so its scrapes switch to
+  OpenMetrics with no scrape config change. No series is renamed, since every
   counter already ends in `_total`. On Prometheus 2.x, whole-number histogram bounds are
   ingested as `le="1.0"` rather than `le="1"` (Prometheus 3 normalizes both to `1.0`),
   which only matters to queries matching `le` exactly. Scrapers that do not ask for
@@ -1071,9 +1076,9 @@ enablement and TLS.
 |---|---|---|---|
 | `llm_d_disagg_sidecar_requests_total` | Counter | `api_type` | Requests on the intercepted inference API paths. `api_type` is `chat_completions`, `completions`, `messages`, `responses`, `vllm_generate`, or `sglang_generate`. |
 | `llm_d_disagg_sidecar_disagg_requests_total` | Counter | `disagg_type` | Requests routed through disaggregation. `disagg_type` is `prefill-decode`, `encode-decode`, or `encode-prefill-decode`. |
-| `llm_d_disagg_sidecar_encode_duration_seconds` | Histogram | - | Encode stage latency. |
-| `llm_d_disagg_sidecar_prefill_duration_seconds` | Histogram | - | Prefill stage latency. |
-| `llm_d_disagg_sidecar_decode_duration_seconds` | Histogram | - | Decode stage latency. Not sampled when prefill returns an error status, since decode is then not run or its output is discarded. |
+| `llm_d_disagg_sidecar_encode_duration_seconds` | Histogram | - | Encode stage latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_disagg_sidecar_prefill_duration_seconds` | Histogram | - | Prefill stage latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_disagg_sidecar_decode_duration_seconds` | Histogram | - | Decode stage latency. Not sampled when prefill returns an error status, since decode is then not run or its output is discarded. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_disagg_sidecar_request_errors_total` | Counter | `stage` | Stage errors. `stage` is `encode`, `prefill`, or `decode`. |
 | `llm_d_disagg_sidecar_tool_calling_field_status_total` | Counter | `component`, `direction`, `field`, `status` | Observed request-field outcomes, once per field and client request. |
 
