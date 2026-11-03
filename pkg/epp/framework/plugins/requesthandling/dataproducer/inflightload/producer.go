@@ -619,9 +619,10 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// firing OnEvicted at most once per entry; entries already released at
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
-		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
-			p.tokenEstimator.ObserveOutput(request, int64(resp.Usage.CompletionTokens))
-			if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
+		if request.Body != nil && resp.TerminationCause == fwkrh.TerminationCauseNatural && resp.Usage.CompletionTokens > 0 {
+			bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
+			p.tokenEstimator.ObserveOutput(bucket, int64(resp.Usage.CompletionTokens))
+			if ok {
 				log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen actual",
 					"requestID", request.RequestID,
 					"estimatedBucket", bucket.String(),

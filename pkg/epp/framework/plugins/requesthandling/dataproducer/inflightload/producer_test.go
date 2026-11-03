@@ -738,26 +738,34 @@ func (f *stubSchedulingEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable
 }
 func (f *stubSchedulingEndpoint) Keys() []fwkplugin.DataKey { return f.attr.Keys() }
 
-// makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
-// which is what the estimator reads to derive the input token count. No outlen-bucket
-// attribute is set, so the estimator reads the request as UNKNOWN (the zero value) --
-// matching a deployment where the outlen-bucket plugin is not enabled, hence the
-// UnknownOutputTokens output the counter-tracking tests expect.
 // TestInFlightLoadProducer_EndOfStreamObservesOutput verifies that the completion tokens
-// reported at EndOfStream feed the UNKNOWN output estimate.
+// reported at EndOfStream feed the UNKNOWN output estimate only when the stream ended naturally.
 func TestInFlightLoadProducer_EndOfStreamObservesOutput(t *testing.T) {
 	producer := newTestProducer(t)
 	req := makeTokenRequest("req-observe", 4)
 	req.SchedulingResult = &fwksched.SchedulingResult{}
 
-	producer.ResponseBody(context.Background(), req, &requestcontrol.Response{
-		EndOfStream: true,
-		Usage:       fwkrh.Usage{CompletionTokens: 300},
+	producer.ResponseBody(context.Background(), req, &fwkrh.Response{
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+		Usage:            fwkrequest.Usage{CompletionTokens: 50},
+	}, nil)
+	require.Equal(t, UnknownOutputTokens, producer.tokenEstimator.EstimateOutputFromRequest(req))
+
+	producer.ResponseBody(context.Background(), req, &fwkrh.Response{
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+		Usage:            fwkrequest.Usage{CompletionTokens: 300},
 	}, nil)
 
 	require.Equal(t, int64(300), producer.tokenEstimator.EstimateOutputFromRequest(req))
 }
 
+// makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
+// which is what the estimator reads to derive the input token count. No outlen-bucket
+// attribute is set, so the estimator reads the request as UNKNOWN (the zero value) --
+// matching a deployment where the outlen-bucket plugin is not enabled, hence the
+// UnknownOutputTokens output the counter-tracking tests expect.
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,

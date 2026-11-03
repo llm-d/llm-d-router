@@ -178,43 +178,42 @@ func TestEstimateOutputFromRequest_UnknownRunningAverage(t *testing.T) {
 
 	t.Run("averages UNKNOWN observations", func(t *testing.T) {
 		e := NewSimpleTokenEstimator(nil)
-		e.ObserveOutput(unknown, 300)
-		e.ObserveOutput(tokenizedRequest(10), 500) // missing attribute reads as UNKNOWN
+		e.ObserveOutput(outlenbucket.Unknown, 300)
+		e.ObserveOutput(outlenbucket.Unknown, 500)
 		require.Equal(t, int64(400), e.EstimateOutputFromRequest(unknown))
 	})
 
 	t.Run("ignores SHORT, LONG and empty observations", func(t *testing.T) {
 		e := NewSimpleTokenEstimator(nil)
-		e.ObserveOutput(requestWithBucket(outlenbucket.Short, nil), 10)
-		e.ObserveOutput(requestWithBucket(outlenbucket.Long, nil), 8000)
-		e.ObserveOutput(unknown, 0)
-		e.ObserveOutput(nil, 300)
+		e.ObserveOutput(outlenbucket.Short, 10)
+		e.ObserveOutput(outlenbucket.Long, 8000)
+		e.ObserveOutput(outlenbucket.Unknown, 0)
 		require.Equal(t, UnknownOutputTokens, e.EstimateOutputFromRequest(unknown))
 	})
 
 	t.Run("clamped to [SHORT, LONG]", func(t *testing.T) {
 		low := NewSimpleTokenEstimator(nil)
-		low.ObserveOutput(unknown, 1)
+		low.ObserveOutput(outlenbucket.Unknown, 1)
 		require.Equal(t, ShortOutputTokens, low.EstimateOutputFromRequest(unknown))
 
 		high := NewSimpleTokenEstimator(nil)
-		high.ObserveOutput(unknown, 10*LongOutputTokens)
+		high.ObserveOutput(outlenbucket.Unknown, 10*LongOutputTokens)
 		require.Equal(t, LongOutputTokens, high.EstimateOutputFromRequest(unknown))
 	})
 
 	t.Run("bounded by the client cap", func(t *testing.T) {
 		e := NewSimpleTokenEstimator(nil)
-		e.ObserveOutput(unknown, 800)
+		e.ObserveOutput(outlenbucket.Unknown, 800)
 		require.Equal(t, int64(400), e.EstimateOutputFromRequest(requestWithBucket(outlenbucket.Unknown, ptr.To(int64(400)))))
 	})
 
 	t.Run("follows a workload shift faster than the cumulative mean", func(t *testing.T) {
 		e := NewSimpleTokenEstimator(nil)
 		for range unknownOutputWindow {
-			e.ObserveOutput(unknown, 200)
+			e.ObserveOutput(outlenbucket.Unknown, 200)
 		}
 		for range unknownOutputWindow {
-			e.ObserveOutput(unknown, 2000)
+			e.ObserveOutput(outlenbucket.Unknown, 2000)
 		}
 		require.Greater(t, e.EstimateOutputFromRequest(unknown), int64(1100))
 	})

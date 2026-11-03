@@ -34,7 +34,7 @@ type TokenEstimator interface {
 	// the client-requested cap and the estimator's operator cap.
 	EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64
 	// ObserveOutput records the completion tokens a finished request produced.
-	ObserveOutput(request *fwksched.InferenceRequest, completionTokens int64)
+	ObserveOutput(bucket outlenbucket.Bucket, completionTokens int64)
 }
 
 const (
@@ -128,11 +128,8 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 
 // ObserveOutput folds the completion tokens of a finished UNKNOWN request into the
 // UNKNOWN estimate. SHORT and LONG keep their flat estimates and are not observed.
-func (e *SimpleTokenEstimator) ObserveOutput(request *fwksched.InferenceRequest, completionTokens int64) {
-	if request == nil || completionTokens <= 0 {
-		return
-	}
-	if bucket, _ := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); bucket != outlenbucket.Unknown {
+func (e *SimpleTokenEstimator) ObserveOutput(bucket outlenbucket.Bucket, completionTokens int64) {
+	if bucket != outlenbucket.Unknown || completionTokens <= 0 {
 		return
 	}
 
