@@ -20,8 +20,10 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -68,6 +70,7 @@ func newNamedProducerForPreRequest(ctx context.Context, name string, speculative
 		kvCacheIndexer:     &fakeKVCacheIndexer{index: idx},
 		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		speculativeCache:   cache,
+		speculativeLeases:  newSpeculativeLeases(idx, logr.Discard()),
 		speculativeTTL:     time.Minute,
 		speculativeEnabled: speculativeEnabled,
 		pluginState:        plugin.NewPluginState(ctx),
@@ -1020,7 +1023,7 @@ func TestSpeculativeTTLExpiry_EvictsAllPromptKeys(t *testing.T) {
 		},
 	}
 
-	cache, ttl, err := buildSpeculativeCache(ctx, PluginConfig{
+	cache, _, ttl, err := buildSpeculativeCache(ctx, PluginConfig{
 		SpeculativeIndexing: true,
 		SpeculativeTTL:      "20ms",
 	}, idx)
@@ -1070,4 +1073,72 @@ func TestBlockKeysStateClone(t *testing.T) {
 	delete(state.perFormatKeys, bigram)
 	require.Equal(t, [][]kvblock.BlockHash{{1, 2}}, cloned.perFormatKeys[plain])
 	require.Equal(t, [][]kvblock.BlockHash{{3}}, cloned.perFormatKeys[bigram])
+}
+
+// newSpeculativeTTLProducer returns a Producer that seeds speculative entries
+// into idx, with the TTL cache and its eviction callback built as in New.
+func newSpeculativeTTLProducer(ctx context.Context, t *testing.T, ttl string, idx kvblock.Index) *Producer {
+	t.Helper()
+	cache, leases, parsed, err := buildSpeculativeCache(ctx, PluginConfig{
+		SpeculativeIndexing: true,
+		SpeculativeTTL:      ttl,
+	}, idx)
+	require.NoError(t, err)
+	return &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: "speculative-ttl"},
+		kvCacheIndexer:     &fakeKVCacheIndexer{index: idx},
+		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("speculative-ttl"),
+		speculativeCache:   cache,
+		speculativeLeases:  leases,
+		speculativeTTL:     parsed,
+		speculativeEnabled: true,
+		pluginState:        plugin.NewPluginState(ctx),
+	}
+}
+
+// Requests that route the same prefix to the same pod share one speculative
+// index entry. An older request's TTL expiry must not remove that entry while
+// a newer request that seeded it is still live (#3700).
+func TestSpeculativeTTLExpiry_KeepsEntryOfLiveRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+		defer func() {
+			cancel()
+			synctest.Wait()
+		}()
+
+		idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+		require.NoError(t, err)
+		p := newSpeculativeTTLProducer(ctx, t, "200ms", idx)
+
+		keys := []kvblock.BlockHash{0x1, 0x2, 0x3, 0x4}
+		seed := func(id string) {
+			p.pluginState.Write(id, blockKeysStateKey, &blockKeysState{perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{
+				{BlockSize: testBlockSize}: {keys},
+			}})
+			require.NoError(t, p.PreRequest(ctx, &scheduling.InferenceRequest{RequestID: id},
+				primaryOnly("default", testEndpoints[0])))
+		}
+		chain := func() int {
+			synctest.Wait()
+			got, err := idx.Lookup(ctx, keys, nil)
+			require.NoError(t, err)
+			return len(got)
+		}
+
+		seed("A") // expires at 200ms
+		time.Sleep(120 * time.Millisecond)
+		seed("B") // expires at 320ms
+		time.Sleep(90 * time.Millisecond)
+		assert.Equal(t, len(keys), chain(), "A expired while B is live")
+
+		seed("C") // expires at 410ms
+		time.Sleep(120 * time.Millisecond)
+		require.True(t, p.speculativeCache.Has("C"))
+		assert.Equal(t, len(keys), chain(), "B expired while C is live")
+
+		time.Sleep(100 * time.Millisecond)
+		require.False(t, p.speculativeCache.Has("C"))
+		assert.Zero(t, chain(), "the last live request expired")
+	})
 }
