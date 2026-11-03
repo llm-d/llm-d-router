@@ -235,11 +235,12 @@ func SplitCompleteFrames(data []byte) (complete, rest []byte, err error) {
 
 // FramePayload wraps payload in an uncompressed 5-byte gRPC frame.
 func FramePayload(payload []byte) ([]byte, error) {
-	if uint64(len(payload)) > math.MaxUint32 {
-		return nil, fmt.Errorf("gRPC payload length %d exceeds uint32 maximum", len(payload))
+	const maxPayload = min(math.MaxUint32, math.MaxInt-HeaderLen)
+	if len(payload) > maxPayload {
+		return nil, fmt.Errorf("gRPC payload length %d exceeds maximum %d", len(payload), maxPayload)
 	}
 	framed := make([]byte, HeaderLen+len(payload))
-	binary.BigEndian.PutUint32(framed[1:HeaderLen], uint32(len(payload))) //#nosec G115 -- guarded by MaxUint32 check above
+	binary.BigEndian.PutUint32(framed[1:HeaderLen], uint32(len(payload))) //#nosec G115 -- guarded by maxPayload check above
 	copy(framed[HeaderLen:], payload)
 	return framed, nil
 }
