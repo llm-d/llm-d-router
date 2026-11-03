@@ -212,9 +212,9 @@ func TestForceStreamLossy(t *testing.T) {
 	// thinking is a Messages field; chat turns reasoning on with its own fields.
 	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"thinking": map[string]any{"type": "enabled"}}))
 
-	// vLLM rejects prompt_logprobs and use_beam_search with stream=true, so a
-	// request carrying either takes the pass-through rather than failing with an
-	// error about streaming the client never asked for.
+	// prompt_logprobs and use_beam_search take the pass-through. vLLM v0.31 rejects
+	// prompt_logprobs=1 and completions beam search with stream=true, and a stream
+	// carries no prompt logprobs even for prompt_logprobs=0.
 	for _, shape := range []sseShape{sseShapeChat, sseShapeText} {
 		require.True(t, forceStreamLossy(shape, map[string]any{"prompt_logprobs": 1}))
 		require.True(t, forceStreamLossy(shape, map[string]any{"prompt_logprobs": float64(0)}))
@@ -2515,8 +2515,9 @@ func TestForceStream_Responses_TerminalPastEchoAllowance_FallsBack(t *testing.T)
 
 // forceStreamOverRealServer serves one forced decode request through a real HTTP
 // server with the given WriteTimeout, against an upstream that takes upstreamDelay
-// before it finishes streaming, and returns the client's response or error.
-func forceStreamOverRealServer(t *testing.T, writeTimeout, upstreamDelay time.Duration) (*http.Response, []byte, error, *prometheus.Registry) {
+// before it finishes streaming. It returns the metrics registry and the status and
+// body the client received, or the error reading them.
+func forceStreamOverRealServer(t *testing.T, writeTimeout, upstreamDelay time.Duration) (*prometheus.Registry, int, []byte, error) {
 	t.Helper()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -2552,11 +2553,11 @@ func forceStreamOverRealServer(t *testing.T, writeTimeout, upstreamDelay time.Du
 
 	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{}`))
 	if err != nil {
-		return nil, nil, err, reg
+		return reg, 0, nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
-	return resp, body, err, reg
+	return reg, resp.StatusCode, body, err
 }
 
 // TestForceStream_OutlastsWriteTimeout covers a forced request whose generation
@@ -2567,9 +2568,9 @@ func forceStreamOverRealServer(t *testing.T, writeTimeout, upstreamDelay time.Du
 // force-streaming, as the handler does for a streaming request, so the reply
 // reaches the client instead of being cut off.
 func TestForceStream_OutlastsWriteTimeout(t *testing.T) {
-	resp, body, err, reg := forceStreamOverRealServer(t, 300*time.Millisecond, 900*time.Millisecond)
+	reg, status, body, err := forceStreamOverRealServer(t, 300*time.Millisecond, 900*time.Millisecond)
 	require.NoError(t, err, "the client must get the whole reply, not a cut connection")
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusOK, status)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(body, &got))
 	msg := got["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)

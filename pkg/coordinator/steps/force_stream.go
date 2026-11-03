@@ -308,13 +308,17 @@ func responsesEchoBytes(shape sseShape, bodyBytes []byte) int64 {
 // releases reserved, the whole reservation, on every exit; generated is the part
 // of it bounding the generated reply, which the per-request ceiling enforces.
 //
+// It clears the server write deadline, as the handler does for a streaming
+// request, since a stream is not bounded by the gateway's response-header timeout.
 // Nothing reaches the client until the whole response is buffered, so every error
-// here leaves the client uncommitted. A transport failure returns a plain error and
-// the server answers a clean 5xx; an upstream 4xx/5xx, or an error frame streamed
-// after the 200, is forwarded and reported with UpstreamStreamedError so the server
-// does not overwrite it. The fallback sentinels (ceiling, oversize, lossy-frame,
-// unreadable, truncated) instead return so decode runs the pass-through, which can
-// still serve the request or preserve a field the fold would drop.
+// before the reply is written leaves the client uncommitted. A transport failure
+// returns a plain error and the server answers a clean 5xx; an upstream 4xx/5xx,
+// or an error frame streamed after the 200, is forwarded and reported with
+// UpstreamStreamedError so the server does not overwrite it. The fallback
+// sentinels (ceiling, oversize, lossy-frame, unreadable, truncated) instead return
+// so decode runs the pass-through, which can still serve the request or preserve a
+// field the fold would drop. A reply that fails to reach the client is a failure,
+// not a forced success (see writeForcedResponse).
 func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, bodyBytes []byte, generated, reserved int64, parity *parityCheck) error {
 	defer s.budget.release(reserved)
 
@@ -397,10 +401,12 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 // thinking off; enabled and adaptive both let the model emit thinking blocks.
 const thinkingTypeDisabled = "disabled"
 
-// forceStreamLossy reports whether force-streaming would drop fields the
-// reassembler does not fold. The chat and text shapes fold only generated text,
-// so a request that may produce tool calls, function calls, logprobs, or chat
-// reasoning content takes the pass-through to keep them. The Messages shape folds
+// forceStreamLossy reports whether a request should not be force-streamed: its
+// reply would carry fields the reassembler does not fold, or the forced streaming
+// request would not be served as the client's request is. The chat and text
+// shapes fold only generated text, so a request that may produce tool calls,
+// function calls, logprobs, returned token ids, or chat reasoning content takes
+// the pass-through to keep them, as does one with prompt_logprobs or beam search. The Messages shape folds
 // only text content blocks, so a request declaring tools or turning thinking on
 // takes the pass-through to keep its tool_use or thinking blocks (a server-side
 // block the request does not declare is caught on the frame instead). The generate
@@ -439,10 +445,13 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	if shape != sseShapeChat && shape != sseShapeText {
 		return false
 	}
-	// vLLM rejects prompt_logprobs and use_beam_search when stream=true, so the
-	// forced request would fail with an error about a stream the client never
-	// asked for; prompt_logprobs is also dropped by the fold. Either takes the
-	// pass-through.
+	// prompt_logprobs and use_beam_search take the pass-through. With stream=true,
+	// vLLM rejects prompt_logprobs above 0 (or -1) on chat and completions, and
+	// beam search on completions, so the forced request would fail with an error
+	// about a stream the client never asked for. A stream also carries no prompt
+	// logprobs, so even an accepted value would be dropped; and the fold
+	// reassembles a beam-search reply as if it were sampled, so chat beam search,
+	// which vLLM does stream, is excluded too.
 	if _, ok := reqcommon.FieldValue(body, reqcommon.FieldPromptLogprobs); ok {
 		return true
 	}

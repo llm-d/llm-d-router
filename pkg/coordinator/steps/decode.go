@@ -121,9 +121,10 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 
 	// Force-streaming applies only to a non-streaming request. A request whose
 	// reply may carry fields the reassembler drops (tool calls, logprobs,
-	// reasoning) takes the pass-through to keep them; forceStreamLossy
-	// catches what the request declares up front, and a server-side default is
-	// caught on the frame mid-stream (both fall back here). Every other candidate
+	// reasoning), or that the engine would not serve as a stream, takes the
+	// pass-through; forceStreamLossy catches what the request declares up front,
+	// and a server-side default is caught on the frame mid-stream (both fall back
+	// here). Every other candidate
 	// reserves budget and reassembles the whole reply; one whose estimate exceeds
 	// the per-request cap, or that finds the budget full, falls through to the
 	// pass-through below, which buffers nothing.

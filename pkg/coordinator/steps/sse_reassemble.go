@@ -549,9 +549,9 @@ func (r *sseReassembler) bufferedBytes() int64 {
 }
 
 // result builds the single non-streaming reply. Choices come out ordered by
-// index. A choice that never carried a finish_reason gets an explicit null, and
-// chat choices that never carried a role default to assistant, matching a
-// non-streaming reply's shape.
+// index. A choice that never carried a finish_reason or stop_reason gets an
+// explicit null, and chat choices that never carried a role default to assistant,
+// matching a non-streaming reply's shape.
 func (r *sseReassembler) result() map[string]any {
 	if r.shape == sseShapeResponses {
 		// scanForcedResponse returns errForceStreamTruncated unless a terminal event
@@ -640,10 +640,10 @@ func (r *sseReassembler) terminated() bool {
 // writeEnvelope sets the top-level reply fields for the shape. The chat and text
 // shapes share the OpenAI envelope (id, model, object, ...). The generate shape
 // instead carries request_id, prompt_logprobs, and kv_transfer_params, and no
-// object. kv_transfer_params is null in the terminal decode reply (the remote
-// handoff it would carry is consumed before the client-facing reply); emitting
-// it as null keeps the forced reply identical to the worker's own non-streaming
-// generate reply.
+// object; kv_transfer_params is null in the terminal decode reply, since the
+// remote handoff it would carry is consumed before the client-facing reply. vLLM's
+// non-streaming generate reply also carries model and created, which its stream
+// does not, so the forced reply omits them.
 func (r *sseReassembler) writeEnvelope(out map[string]any) {
 	if r.shape == sseShapeGenerate {
 		if r.requestID != "" {
