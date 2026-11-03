@@ -277,12 +277,8 @@ func (s *EncodeStep) buildEncodeBody(reqCtx *pipeline.RequestContext, entry pipe
 		reqcommon.CapSingleToken(body, format)
 		return body, nil
 	default:
-		// resolveFormat can also return APITypeCompletions, but a completions
-		// request never carries media: render's executeCompletions never
-		// populates MultimodalEntries, so this fan-out never runs for one. That
-		// leaves APITypeCompletions and any future format value as cases that
-		// should not reach here; treat them as a programming error instead of
-		// silently sending a generate-shaped body to the wrong endpoint.
+		// Render leaves MultimodalEntries empty for Completions and SGLang
+		// generate, so neither format reaches the encode fanout.
 		return nil, fmt.Errorf("unsupported request format %v", format)
 	}
 }
