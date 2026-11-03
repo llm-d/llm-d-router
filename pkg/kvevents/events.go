@@ -100,6 +100,10 @@ type EngineAdapter interface {
 
 // BlockStoredEvent represents blocks being added to the cache.
 type BlockStoredEvent struct {
+	// SessionID identifies the request context that reported these blocks, which may be shared.
+	SessionID   *string
+	Locality    string
+	Ownership   string
 	BlockHashes []uint64
 	Tokens      []uint32
 	// LookaheadToken completes the last bigram. Tokens contains only cached positions.
@@ -125,6 +129,8 @@ func (e *BlockStoredEvent) Type() EventType {
 
 // BlockRemovedEvent represents blocks being evicted from the cache.
 type BlockRemovedEvent struct {
+	Locality    string
+	Ownership   string
 	BlockHashes []uint64
 	DeviceTier  string
 	// GroupIdx identifies the vLLM KV cache group that removed this block.
