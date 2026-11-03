@@ -69,11 +69,137 @@ ALLOWED_PROV_RULE_KEYS = {
 }
 ALLOWED_PROV_OQ_KEYS = {"file", "citations"}
 
-CODE_OR_LINK_RE = re.compile(
-    r"(?P<code>(?<!`)(`{3,})(?!`)(?:.*?)(?<!`)\2(?!`)|(?<!`)(`{1,2})(?!`)(?:(?!\n\n).)*?(?<!`)\3(?!`))"
-    r"|(?P<bang>!?)\[(?P<label>(?:`+[^`\n]*`+|(?!\n\n)[^\[\]])+)\]\((?P<link>[^)\n]+)\)",
-    re.DOTALL,
-)
+def _find_code_spans(text: str) -> List[Tuple[int, int]]:
+    """Finds non-overlapping Markdown code spans and fenced code blocks in O(n) time.
+
+    Runs of 3+ backticks match the next maximal run of the same length anywhere in
+    text; runs of 1 or 2 backticks match the next maximal run of the same length
+    before any blank-line paragraph break ('\\n\\n').
+    """
+    n = len(text)
+    runs_by_len: Dict[int, List[Tuple[int, int]]] = {}
+    all_runs: List[Tuple[int, int, int]] = []
+    i = 0
+    while i < n:
+        if text[i] == "`":
+            j = i + 1
+            while j < n and text[j] == "`":
+                j += 1
+            length = j - i
+            all_runs.append((i, j, length))
+            runs_by_len.setdefault(length, []).append((i, j))
+            i = j
+        else:
+            i += 1
+
+    ptr_by_len: Dict[int, int] = {length: 0 for length in runs_by_len}
+    spans: List[Tuple[int, int]] = []
+    consumed_until = 0
+    next_dn = text.find("\n\n", 0)
+    if next_dn == -1:
+        next_dn = n
+
+    for start, end, length in all_runs:
+        if start < consumed_until:
+            continue
+        same_len_runs = runs_by_len[length]
+        p = ptr_by_len[length]
+        while p < len(same_len_runs) and same_len_runs[p][0] <= start:
+            p += 1
+        ptr_by_len[length] = p
+        if p >= len(same_len_runs):
+            continue
+        close_start, close_end = same_len_runs[p]
+        if length < 3:
+            if next_dn < end:
+                next_dn = text.find("\n\n", end)
+                if next_dn == -1:
+                    next_dn = n
+            if next_dn < close_start:
+                continue
+        spans.append((start, close_end))
+        consumed_until = close_end
+
+    return spans
+
+
+def strip_code_spans(text: str) -> str:
+    """Removes Markdown inline code spans and fenced code blocks in O(n) time."""
+    spans = _find_code_spans(text)
+    if not spans:
+        return text
+    parts: List[str] = []
+    pos = 0
+    for start, end in spans:
+        if pos < start:
+            parts.append(text[pos:start])
+        pos = end
+    if pos < len(text):
+        parts.append(text[pos:])
+    return "".join(parts)
+
+
+def iter_markdown_links(text: str) -> List[Tuple[int, int, bool, str, str]]:
+    """Scans Markdown links (start, end, is_image, label, target) outside code spans in O(n) time."""
+    n = len(text)
+    spans = _find_code_spans(text)
+    span_idx = 0
+    num_spans = len(spans)
+    links: List[Tuple[int, int, bool, str, str]] = []
+    open_bracket: Optional[int] = None
+    next_rparen = -1
+    next_nl = -1
+    i = 0
+
+    while i < n:
+        while span_idx < num_spans and spans[span_idx][0] < i:
+            span_idx += 1
+        if span_idx < num_spans and spans[span_idx][0] == i:
+            s_start, s_end = spans[span_idx]
+            span_idx += 1
+            if open_bracket is not None and "\n" in text[s_start:s_end]:
+                open_bracket = None
+            i = s_end
+            continue
+
+        ch = text[i]
+        if ch == "\n" and i + 1 < n and text[i + 1] == "\n":
+            open_bracket = None
+            i += 2
+            while i < n and text[i] == "\n":
+                i += 1
+            continue
+        if ch == "[":
+            open_bracket = i
+            i += 1
+            continue
+        if ch == "]":
+            b = open_bracket
+            open_bracket = None
+            if b is not None and i > b + 1 and i + 2 < n and text[i + 1] == "(":
+                link_start = i + 2
+                if next_rparen < link_start:
+                    next_rparen = text.find(")", link_start)
+                    if next_rparen == -1:
+                        next_rparen = n
+                if next_nl < link_start:
+                    next_nl = text.find("\n", link_start)
+                    if next_nl == -1:
+                        next_nl = n
+                if link_start < next_rparen < next_nl:
+                    is_img = b > 0 and text[b - 1] == "!"
+                    m_start = b - 1 if is_img else b
+                    m_end = next_rparen + 1
+                    links.append(
+                        (m_start, m_end, is_img, text[b + 1 : i], text[link_start:next_rparen])
+                    )
+                    i = m_end
+                    continue
+            i += 1
+            continue
+        i += 1
+
+    return links
 
 
 def unquote_yaml(val: str) -> str:
@@ -85,13 +211,48 @@ def unquote_yaml(val: str) -> str:
     return val
 
 
+def _split_flow_items(inner: str) -> List[str]:
+    """Splits a flat YAML flow collection interior on top-level commas in O(n) time."""
+    parts: List[str] = []
+    start = 0
+    in_double = False
+    in_single = False
+    i = 0
+    n = len(inner)
+    while i < n:
+        ch = inner[i]
+        if in_double:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+        elif in_single:
+            if ch == "'" and i + 1 < n and inner[i + 1] == "'":
+                i += 2
+                continue
+            if ch == "'":
+                in_single = False
+        else:
+            if ch == '"':
+                in_double = True
+            elif ch == "'":
+                in_single = True
+            elif ch == ",":
+                parts.append(inner[start:i])
+                start = i + 1
+        i += 1
+    parts.append(inner[start:])
+    return parts
+
+
 def parse_flow_mapping(flow_str: str) -> Dict[str, str]:
     """Parses a flat YAML flow mapping '{ k1: v1, k2: v2 }' into a dict."""
     inner = flow_str.strip()[1:-1].strip()
     mapping: Dict[str, str] = {}
     if not inner:
         return mapping
-    for part in re.findall(r'(?:[^,"]|"(?:\\.|[^"])*")+?(?=,|$)', inner):
+    for part in _split_flow_items(inner):
         chunk = part.strip()
         if ":" in chunk:
             mk, mv = chunk.split(":", 1)
@@ -152,7 +313,7 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
             continue
         if rest.startswith("[") and rest.endswith("]"):
             inner = rest[1:-1].strip()
-            fm[key] = [unquote_yaml(x) for x in inner.split(",")] if inner else []
+            fm[key] = [unquote_yaml(x) for x in _split_flow_items(inner)] if inner else []
         elif rest.startswith("{") and rest.endswith("}"):
             fm[key] = parse_flow_mapping(rest)
         else:
@@ -267,25 +428,31 @@ def rewrite_links_to_docs(text: str, source_dir_from_docs: str) -> str:
     """Rewrites relative Markdown links authored inside docs/<source_dir_from_docs>/
     to paths relative to docs/ (where docs/review_playbook.md lives), skipping code spans.
     """
-
-    def _repl(m: re.Match[str]) -> str:
-        if m.group("code") is not None or m.group("bang") == "!":
-            return m.group(0)
-        label = m.group("label")
-        link = m.group("link")
-        if link.startswith(("http://", "https://", "mailto:", "#")):
-            return m.group(0)
+    links = iter_markdown_links(text)
+    if not links:
+        return text
+    src_from_repo = posixpath.normpath(posixpath.join("docs", source_dir_from_docs))
+    out: List[str] = []
+    pos = 0
+    for m_start, m_end, is_image, label, link in links:
+        if is_image or link.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        if pos < m_start:
+            out.append(text[pos:m_start])
         if "#" in link:
             path_part, frag = link.split("#", 1)
             frag_suffix = "#" + frag
         else:
             path_part, frag_suffix = link, ""
-        src_from_repo = posixpath.normpath(posixpath.join("docs", source_dir_from_docs))
         target_from_repo = posixpath.normpath(posixpath.join(src_from_repo, path_part))
         rel_from_docs = posixpath.relpath(target_from_repo, "docs")
-        return f"[{label}]({rel_from_docs}{frag_suffix})"
-
-    return CODE_OR_LINK_RE.sub(_repl, text)
+        out.append(f"[{label}]({rel_from_docs}{frag_suffix})")
+        pos = m_end
+    if pos == 0:
+        return text
+    if pos < len(text):
+        out.append(text[pos:])
+    return "".join(out)
 
 
 def url_to_short_ref(url: str) -> str:
@@ -580,10 +747,10 @@ def routing_table_rows(body: str) -> Optional[List[Tuple[List[str], List[str]]]]
         globs = re.findall(r"`([^`]+)`", first_cell)
         second_cell = cells[1] if len(cells) >= 2 else ""
         rule_files: List[str] = []
-        for m in CODE_OR_LINK_RE.finditer(second_cell):
-            if m.group("code") is not None or m.group("bang") == "!":
+        for _, _, is_image, _, link in iter_markdown_links(second_cell):
+            if is_image:
                 continue
-            target = m.group("link").split("#", 1)[0].strip()
+            target = link.split("#", 1)[0].strip()
             rule_files.append(posixpath.basename(target))
         rows.append((globs, rule_files))
     return rows if found else None
@@ -623,10 +790,9 @@ def validate_markdown_links(
     get_anchors: Any,
     errs: List[str],
 ) -> None:
-    for m in CODE_OR_LINK_RE.finditer(body):
-        if m.group("code") is not None or m.group("bang") == "!":
+    for _, _, is_image, _, target in iter_markdown_links(body):
+        if is_image:
             continue
-        target = m.group("link")
         if "#" in target:
             tpath_raw, frag = target.split("#", 1)
             tpath = tpath_raw.strip()
@@ -976,12 +1142,7 @@ def validate_bundle(
             body_without_defs = "\n".join(
                 ln for ln in body.splitlines() if not re.match(r"^\[\^[a-zA-Z0-9_.-]+\]:\s+", ln)
             )
-            prose_without_code = re.sub(
-                r"(?<!`)(`{3,})(?!`)(?:.*?)(?<!`)\1(?!`)|(?<!`)(`{1,2})(?!`)(?:(?!\n\n).)*?(?<!`)\2(?!`)",
-                "",
-                body_without_defs,
-                flags=re.DOTALL,
-            )
+            prose_without_code = strip_code_spans(body_without_defs)
             fn_refs = set(re.findall(r"\[\^([a-zA-Z0-9_.-]+)\](?!:)", prose_without_code))
             if fn_refs - sids:
                 errs.append(
