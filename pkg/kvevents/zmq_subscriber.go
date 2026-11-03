@@ -132,6 +132,13 @@ func (z *zmqSubscriber) Start(ctx context.Context) {
 			// We run the subscriber in a separate function to handle socket
 			// setup/teardown and connection retries cleanly.
 			z.runSubscriber(ctx)
+			if z.pool.consumer != nil && z.sourceEndpoint != "" {
+				z.resetForSource("")
+				z.lastSeq, z.lastLiveSeq = 0, 0
+				z.hasLastSeq, z.hasLastLiveSeq = false, false
+				z.lastReplayFailure = time.Time{}
+				z.publisherID = nil
+			}
 			// wait before retrying, unless the context has been canceled.
 			select {
 			case <-time.After(retryInterval):
@@ -209,6 +216,12 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		if z.replayEndpoint == "" && z.snapshotEndpoint == "" {
+			if z.pool.consumer != nil && z.sourceEndpoint != "" {
+				if z.acceptLiveWithoutReplay(topic, seq) {
+					z.addTask(ctx, topic, seq, payload)
+				}
+				continue
+			}
 			// A per-endpoint subscriber reads a single publisher, so a backwards
 			// sequence means the engine restarted with an empty cache. The bound
 			// global socket interleaves many publishers, so its sequences move
@@ -306,6 +319,19 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		z.lastSeq = seq
 		z.hasLastSeq = true
 	}
+}
+
+func (z *zmqSubscriber) acceptLiveWithoutReplay(topic string, seq uint64) bool {
+	if z.hasLastLiveSeq {
+		if seq == z.lastLiveSeq {
+			return false
+		}
+		if seq != z.lastLiveSeq+1 {
+			z.resetForSource(topic)
+		}
+	}
+	z.lastLiveSeq, z.hasLastLiveSeq = seq, true
+	return true
 }
 
 // addTask hands a received message to the pool, carrying the receive span's

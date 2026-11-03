@@ -102,6 +102,9 @@ func (sm *SubscriberManager) EnsureSubscriber(
 	// Create a context and start subscriber
 	subCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	if sm.pool.consumer != nil && sourceEndpoint != "" {
+		sm.pool.AddTask(&RawMessage{SourceEndpoint: sourceEndpoint, reset: true})
+	}
 	go func() {
 		defer close(done)
 		subscriber.Start(subCtx)
