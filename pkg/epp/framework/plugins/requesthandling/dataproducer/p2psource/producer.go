@@ -43,6 +43,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	p2psourceconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/constants"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixmetrics"
 )
 
 const (
@@ -208,7 +209,7 @@ type Producer struct {
 
 // PluginFactory parses the raw plugin configuration and returns a configured
 // Producer.
-func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
+func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := Config{MinCachedTokenDelta: defaultMinCachedTokenDelta, P2PConnectorPort: defaultP2PConnectorPort}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&cfg); err != nil {
@@ -224,6 +225,11 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 	if cfg.CostModel != nil {
 		if err := cfg.CostModel.validate(); err != nil {
 			return nil, fmt.Errorf("%s: %w", PluginType, err)
+		}
+	}
+	if handle != nil {
+		if err := registerMetrics(handle.Metrics()); err != nil {
+			return nil, err
 		}
 	}
 	return New(name, cfg), nil
@@ -486,17 +492,27 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		request.Headers = map[string]string{}
 	}
 
-	// One line per request with the decision and its inputs, so pull behavior
-	// can be joined to request latency without TRACE-level log volume. The
-	// inputs are collected only when the line is enabled.
+	// One decision count per request, and one line with the decision and its
+	// inputs, so pull behavior can be joined to request latency without
+	// TRACE-level log volume. The inputs are collected only when the line is
+	// enabled.
 	dlog := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.DEFAULT)
 	logDecision := dlog.Enabled()
 	outcome := "no-best-match"
 	var kv []any
 	if logDecision {
 		kv = []any{"requestID", request.RequestID}
-		defer func() { dlog.Info("p2p decision", append(kv, "outcome", outcome)...) }()
 	}
+	// The prefix-cache metrics' role rule and prefill profile name, not
+	// prefillProfileName, so ratios against their prompt tokens divide counts
+	// of the same stage.
+	_, role := prefixmetrics.PredictionTarget(schedulingResult, defaultPrefillProfile)
+	defer func() {
+		recordDecision(p.typedName.Name, role, outcome)
+		if logDecision {
+			dlog.Info("p2p decision", append(kv, "outcome", outcome)...)
+		}
+	}()
 
 	computing := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	pr, exists := schedulingResult.ProfileResults[p.prefillProfile]
@@ -581,6 +597,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		return nil
 	}
 	outcome = "pulled"
+	recordPredictedPulledTokens(p.typedName.Name, role, delta)
 	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, net.JoinHostPort(best.address, strconv.Itoa(best.p2pPort)))
 	if logDecision {
 		kv = append(kv, "p2pPort", best.p2pPort)
