@@ -705,6 +705,25 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(events[2]).To(Equal(reqcommon.SSEDone))
 		})
 
+		// readEvents returns the data of each SSE event in a streamed response.
+		readEvents := func(resp *http.Response) []string {
+			var events []string
+			scanner := bufio.NewScanner(resp.Body)
+			for scanner.Scan() {
+				if data, ok := strings.CutPrefix(scanner.Text(), reqcommon.SSEDataPrefix); ok {
+					events = append(events, data)
+				}
+			}
+			Expect(scanner.Err()).ToNot(HaveOccurred())
+			return events
+		}
+
+		// withID gives a chatResponse its own id and created, as vLLM gives each decode request.
+		withID := func(response, id string, created int) string {
+			response = strings.Replace(response, `"test-id"`, `"`+id+`"`, 1)
+			return strings.Replace(response, "1234567890", fmt.Sprint(created), 1)
+		}
+
 		It("emits one SSE event per chunk and terminates with [DONE]", func() {
 			ti := newChunkedTestSetup(5, []string{
 				chatResponse("hello ", "length", 5, 5),
@@ -717,26 +736,68 @@ var _ = Describe("Chunked Decode", func() {
 			Expect(resp.StatusCode).To(Equal(http.StatusOK))
 			Expect(resp.Header.Get("Content-Type")).To(Equal("text/event-stream"))
 
-			var events []string
-			scanner := bufio.NewScanner(resp.Body)
-			for scanner.Scan() {
-				if line := scanner.Text(); strings.HasPrefix(line, "data: ") {
-					events = append(events, line)
-				}
-			}
-
-			// Two chunk data events + usage event + [DONE]
-			Expect(events).To(HaveLen(4))
-			Expect(events[3]).To(Equal(reqcommon.SSEDone))
+			// Two chunk data events + [DONE]; no usage event without include_usage.
+			events := readEvents(resp)
+			Expect(events).To(HaveLen(3))
+			Expect(reqcommon.SSEDataPrefix + events[2]).To(Equal(reqcommon.SSEDone))
 
 			var first map[string]any
-			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], reqcommon.SSEDataPrefix)), &first)).To(Succeed())
+			Expect(json.Unmarshal([]byte(events[0]), &first)).To(Succeed())
 			delta := first["choices"].([]any)[0].(map[string]any)[responseFieldDelta].(map[string]any)
 			Expect(delta[reqcommon.FieldContent]).To(Equal("hello "))
+		})
 
-			// Verify cumulative usage in the final usage event.
+		It("streams chat.completion.chunk events with the first chunk's id and the role on the first event only", func() {
+			ti := newChunkedTestSetup(5, []string{
+				withID(chatResponse("hello ", "length", 5, 5), "chatcmpl-1", 100),
+				withID(chatResponse("world", "stop", 9, 5), "chatcmpl-2", 200),
+			})
+			defer ti.stop()
+
+			resp := doPost(ti.addr,
+				`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10,"stream":true}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			events := readEvents(resp)
+			Expect(events).To(HaveLen(3))
+			for i, data := range events[:2] {
+				var event map[string]any
+				Expect(json.Unmarshal([]byte(data), &event)).To(Succeed())
+				Expect(event).To(HaveKeyWithValue(responseFieldObject, objectChatCompletionChunk))
+				Expect(event).To(HaveKeyWithValue(responseFieldID, "chatcmpl-1"))
+				Expect(event).To(HaveKeyWithValue(responseFieldCreated, BeNumerically("==", 100)))
+				Expect(event).To(HaveKeyWithValue(reqcommon.FieldModel, "test-model"))
+				delta := firstChoice(event)[responseFieldDelta].(map[string]any)
+				if i == 0 {
+					Expect(delta).To(HaveKeyWithValue(reqcommon.FieldRole, roleAssistant))
+				} else {
+					Expect(delta).ToNot(HaveKey(reqcommon.FieldRole))
+				}
+			}
+		})
+
+		It("sends cumulative usage with the stream's envelope when include_usage is set", func() {
+			ti := newChunkedTestSetup(5, []string{
+				withID(chatResponse("hello ", "length", 5, 5), "chatcmpl-1", 100),
+				withID(chatResponse("world", "stop", 9, 5), "chatcmpl-2", 200),
+			})
+			defer ti.stop()
+
+			resp := doPost(ti.addr, `{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10,"stream":true,`+
+				`"stream_options":{"include_usage":true}}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			// Two chunk data events + usage event + [DONE]
+			events := readEvents(resp)
+			Expect(events).To(HaveLen(4))
+			Expect(reqcommon.SSEDataPrefix + events[3]).To(Equal(reqcommon.SSEDone))
+
 			var usageEvent map[string]any
-			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[2], reqcommon.SSEDataPrefix)), &usageEvent)).To(Succeed())
+			Expect(json.Unmarshal([]byte(events[2]), &usageEvent)).To(Succeed())
+			Expect(usageEvent).To(HaveKeyWithValue(responseFieldObject, objectChatCompletionChunk))
+			Expect(usageEvent).To(HaveKeyWithValue(responseFieldID, "chatcmpl-1"))
+			Expect(usageEvent).To(HaveKeyWithValue(reqcommon.FieldModel, "test-model"))
+			Expect(usageEvent[responseFieldChoices]).To(BeEmpty())
 			usage := usageEvent["usage"].(map[string]any)
 			promptTokens, _ := toInt(usage["prompt_tokens"])
 			completionTokens, _ := toInt(usage["completion_tokens"])

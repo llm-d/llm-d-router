@@ -43,6 +43,12 @@ const (
 	responseFieldMessage = "message"
 	responseFieldIndex   = "index"
 	responseFieldDelta   = "delta"
+	responseFieldID      = "id"
+	responseFieldObject  = "object"
+	responseFieldCreated = "created"
+
+	objectChatCompletionChunk = "chat.completion.chunk"
+	fieldIncludeUsage         = "include_usage"
 
 	roleAssistant = "assistant"
 )
@@ -112,6 +118,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	}
 
 	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
+	// Read before the chunk requests drop stream_options.
+	includeUsage := streamIncludeUsage(body)
 	originalMaxTokens := resolveMaxTokens(body)
 
 	span.SetAttributes(
@@ -197,6 +205,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		totalTokens          int
 		chunkIndex           int
 		lastResponse         map[string]any
+		envelope             streamEnvelope
 		originalPromptTokens int
 		textAccum            strings.Builder
 	)
@@ -320,6 +329,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		totalTokens += chunkTokens
 		if chunkIndex == 0 {
 			originalPromptTokens = extractPromptTokens(chunkResponse)
+			envelope = newStreamEnvelope(chunkResponse)
 		}
 		chunkIndex++
 
@@ -337,7 +347,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 		if streamingEnabled {
 			last := terminal || empty || remainingTokens(originalMaxTokens, totalTokens) == 0
-			if err := emitSSEChunk(w, chunkResponse, last); err != nil {
+			if err := emitSSEChunk(w, chunkResponse, envelope, chunkIndex == 1, last); err != nil {
 				logger.Error(err, "failed to write SSE chunk to client")
 				return
 			}
@@ -375,13 +385,15 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	}
 
 	if streamingEnabled {
-		// Emit corrected cumulative usage as a final event before [DONE].
-		// Individual chunk events have usage stripped by emitSSEChunk.
-		if lastResponse != nil {
+		// Emit corrected cumulative usage as a final event before [DONE], only when
+		// the client asked for it, as vLLM does. Chunk events have usage stripped
+		// by emitSSEChunk.
+		if includeUsage && lastResponse != nil {
 			usageEvent := map[string]any{
 				reqcommon.FieldUsage: cumulativeUsage,
 				responseFieldChoices: []any{},
 			}
+			envelope.apply(usageEvent)
 			if data, err := json.Marshal(usageEvent); err == nil {
 				fmt.Fprintf(w, "%s%s\n\n", reqcommon.SSEDataPrefix, data)
 			}
@@ -488,12 +500,52 @@ func extractFinishReason(response map[string]any) string {
 	return reason
 }
 
+// streamEnvelope holds the fields that every event of one stream shares. Each
+// chunk is a separate decode request with its own id and created, so they are
+// taken from the first chunk's response and reused for the whole stream.
+type streamEnvelope struct {
+	id, created, model any
+}
+
+// newStreamEnvelope reads the envelope fields of a chunk response.
+func newStreamEnvelope(response map[string]any) streamEnvelope {
+	return streamEnvelope{
+		id:      response[responseFieldID],
+		created: response[responseFieldCreated],
+		model:   response[reqcommon.FieldModel],
+	}
+}
+
+// apply sets the stream's envelope on an SSE event. A field the decoder did
+// not send stays unset.
+func (e streamEnvelope) apply(event map[string]any) {
+	event[responseFieldObject] = objectChatCompletionChunk
+	for field, value := range map[string]any{
+		responseFieldID:      e.id,
+		responseFieldCreated: e.created,
+		reqcommon.FieldModel: e.model,
+	} {
+		if value != nil {
+			event[field] = value
+		}
+	}
+}
+
+// streamIncludeUsage reports whether the request sets stream_options.include_usage.
+func streamIncludeUsage(body map[string]any) bool {
+	options, _ := body[reqcommon.FieldStreamOptions].(map[string]any)
+	include, _ := options[fieldIncludeUsage].(bool)
+	return include
+}
+
 // emitSSEChunk writes one SSE data event to w, converting a buffered
-// non-streaming response into a streaming delta event (chat or legacy).
+// non-streaming response into a chat.completion.chunk delta event that
+// carries the stream's envelope. The role is sent on the first event only.
 // Unless last is set, finish_reason is null: the decoder stopped that chunk at
 // its chunk budget, and the next chunk continues the response.
-func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool) error {
+func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, envelope streamEnvelope, first, last bool) error {
 	streamChunk := maps.Clone(chunkResponse)
+	envelope.apply(streamChunk)
 
 	if choices, _ := chunkResponse[responseFieldChoices].([]any); len(choices) > 0 {
 		streamChoices := make([]any, 0, len(choices))
@@ -510,7 +562,11 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool
 			if last {
 				streamChoice[responseFieldFinishReason] = choice[responseFieldFinishReason]
 			}
-			streamChoice[responseFieldDelta] = map[string]any{reqcommon.FieldContent: text, reqcommon.FieldRole: roleAssistant}
+			delta := map[string]any{reqcommon.FieldContent: text}
+			if first {
+				delta[reqcommon.FieldRole] = roleAssistant
+			}
+			streamChoice[responseFieldDelta] = delta
 			streamChoices = append(streamChoices, streamChoice)
 		}
 		streamChunk[responseFieldChoices] = streamChoices
