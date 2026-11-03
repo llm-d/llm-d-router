@@ -372,7 +372,8 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 
 	reqUUID, err := uuid.NewUUID()
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		logger.Error(err, "failed to generate request ID")
+		if err := errorBadGateway(w, r); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -383,7 +384,7 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 		fail := func(err error) {
 			observeStageError(r.Context(), metrics.StageEncode)
 			logger.Error(err, "encoder processing failed", "requestID", requestID)
-			if err := errorBadGateway(err, w); err != nil {
+			if err := errorBadGateway(w, r); err != nil {
 				logger.Error(err, "failed to send error response to client")
 			}
 		}
