@@ -19,6 +19,7 @@ package tokenizer
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -75,6 +76,10 @@ func TestProduce_UsesClientPromptTokenIDs(t *testing.T) {
 			params: map[string]any{"prompt_token_ids": []uint32{4, 2}},
 			want:   []uint32{4, 2},
 		},
+		"max uint32": {
+			params: map[string]any{"prompt_token_ids": []any{json.Number("4294967295")}},
+			want:   []uint32{math.MaxUint32},
+		},
 		"raw json outside the canonical form": {
 			params: json.RawMessage(`{"prompt_token_ids":[1.0, 2e0]}`),
 			want:   []uint32{1, 2},
@@ -122,9 +127,9 @@ func TestProduce_ClientPromptTokenIDsOnEveryChatShapedAPI(t *testing.T) {
 	}
 }
 
-// TestProduce_KVPromptTokenIDsIgnoredOffChatPath checks that an API outside
-// vLLM's chat path keeps its own tokenization: the field is ignored there, and
-// a generate request's features would be lost.
+// TestProduce_KVPromptTokenIDsIgnoredOffChatPath checks that a request outside
+// vLLM's chat path ignores kv_transfer_params.prompt_token_ids and keeps its
+// own tokens and features.
 func TestProduce_KVPromptTokenIDsIgnoredOffChatPath(t *testing.T) {
 	kvParams := json.RawMessage(`{"prompt_token_ids":[3,4]}`)
 	features := &tokenization.MultiModalFeatures{
@@ -210,6 +215,13 @@ func TestProduce_KVPromptTokenIDsWithTextOnlyParts(t *testing.T) {
 		"chat text part": {ChatCompletions: &fwkrequest.ChatCompletionsRequest{
 			Messages: []fwkrequest.Message{{Role: "user", Content: fwkrequest.Content{Structured: text}}},
 		}},
+		"chat refusal, output text and thinking parts": {ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+			Messages: []fwkrequest.Message{{Role: "assistant", Content: fwkrequest.Content{Structured: []fwkrequest.ContentBlock{
+				{Type: reqcommon.PartTypeRefusal},
+				{Type: reqcommon.PartTypeOutputText, Text: "a"},
+				{Type: blockTypeThinking},
+			}}}},
+		}},
 		"messages text block": {Messages: &fwkrequest.MessagesRequest{
 			Messages: []fwkrequest.AnthropicMessage{{Role: "user", Content: fwkrequest.AnthropicContent{
 				Structured: []fwkrequest.AnthropicContentBlock{{Type: reqcommon.PartTypeText, Text: "hi"}},
@@ -251,8 +263,9 @@ func TestProduce_ClientPromptTokenIDsWithEstimateBackend(t *testing.T) {
 
 func TestProduce_CompletionsTokenPromptPassthrough(t *testing.T) {
 	tests := map[string]struct {
-		prompt fwkrequest.Prompt
-		want   [][]uint32
+		prompt  fwkrequest.Prompt
+		payload fwkrequest.PayloadMap
+		want    [][]uint32
 	}{
 		"single array": {
 			prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{1, 2, 3}}},
@@ -262,21 +275,29 @@ func TestProduce_CompletionsTokenPromptPassthrough(t *testing.T) {
 			prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{1, 2}, {3}}},
 			want:   [][]uint32{{1, 2}, {3}},
 		},
+		"truncate prompt tokens null": {
+			prompt:  fwkrequest.Prompt{TokenIDs: [][]uint32{{1, 2, 3}}},
+			payload: fwkrequest.PayloadMap{reqcommon.FieldTruncatePromptTokens: nil},
+			want:    [][]uint32{{1, 2, 3}},
+		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			p := newTestPlugin(failingTokenizer(t))
 			body := &fwkrequest.InferenceRequestBody{
 				Completions: &fwkrequest.CompletionsRequest{Prompt: tc.prompt, CacheSalt: "s"},
-				Payload:     fwkrequest.PayloadMap{"prompt": []any{1, 2}},
+				Payload:     tc.payload,
 			}
 			req := &scheduling.InferenceRequest{Body: body}
 
 			require.NoError(t, p.Produce(context.Background(), req, nil))
 
 			require.NotNil(t, req.Body.TokenizedRequest)
-			assert.Equal(t, tc.want[0], req.Body.TokenizedRequest.Prompts[0].TokenIDs)
-			require.Len(t, req.Body.TokenizedRequest.Prompts, len(tc.want))
+			got := make([][]uint32, len(req.Body.TokenizedRequest.Prompts))
+			for i, prompt := range req.Body.TokenizedRequest.Prompts {
+				got[i] = prompt.TokenIDs
+			}
+			assert.Equal(t, tc.want, got)
 			assert.Equal(t, "s", req.Body.TokenizedRequest.CacheSalt)
 		})
 	}
@@ -323,6 +344,43 @@ func TestProduce_ClientPromptTokenIDsFallsBackToBackend(t *testing.T) {
 		}),
 		"prompt token ids overflow": chatBodyWithPayload(fwkrequest.PayloadMap{
 			reqcommon.FieldKVTransferParams: map[string]any{"prompt_token_ids": []any{json.Number("4294967296")}},
+		}),
+		"raw prompt token ids not a list": chatBodyWithPayload(fwkrequest.PayloadMap{
+			reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":"x"}`),
+		}),
+		"raw prompt token ids null": chatBodyWithPayload(fwkrequest.PayloadMap{
+			reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":null}`),
+		}),
+		"raw prompt token ids negative": chatBodyWithPayload(fwkrequest.PayloadMap{
+			reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":[-1]}`),
+		}),
+		"raw prompt token ids nested": chatBodyWithPayload(fwkrequest.PayloadMap{
+			reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":[[1,2]]}`),
+		}),
+		"raw prompt token ids overflow": chatBodyWithPayload(fwkrequest.PayloadMap{
+			reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":[4294967296]}`),
+		}),
+		"float prompt token id negative": chatBodyWithPayload(fwkrequest.PayloadMap{
+			reqcommon.FieldKVTransferParams: map[string]any{"prompt_token_ids": []any{float64(-1)}},
+		}),
+		"float prompt token id fractional": chatBodyWithPayload(fwkrequest.PayloadMap{
+			reqcommon.FieldKVTransferParams: map[string]any{"prompt_token_ids": []any{1.5}},
+		}),
+		"messages malformed ids": {
+			Messages: &fwkrequest.MessagesRequest{},
+			Payload:  fwkrequest.PayloadMap{reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":["1"]}`)},
+		},
+		"responses malformed ids": {
+			Responses: &fwkrequest.ResponsesRequest{},
+			Payload:   fwkrequest.PayloadMap{reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":[]}`)},
+		},
+		"completions token prompt with truncate prompt tokens": {
+			Completions: &fwkrequest.CompletionsRequest{Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{1, 2, 3}}}},
+			Payload:     fwkrequest.PayloadMap{reqcommon.FieldTruncatePromptTokens: json.Number("2")},
+		},
+		"echo set": chatBodyWithPayload(fwkrequest.PayloadMap{
+			reqcommon.FieldEcho:             true,
+			reqcommon.FieldKVTransferParams: json.RawMessage(`{"prompt_token_ids":[7]}`),
 		}),
 		"raw payload": chatBodyWithPayload(fwkrequest.RawPayload(`{}`)),
 		"completions text prompt": {

@@ -25,20 +25,24 @@ import (
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 )
 
-// clientPromptTokenIDs returns the prompt token IDs a request already carries,
-// so the backend does not render the prompt again: a token-array completions
-// prompt, or kv_transfer_params.prompt_token_ids on the APIs vLLM's chat path
-// serves, which consumes the field in place of templating and tokenizing the
-// messages. Returns nil when the request carries none, and when it carries
-// media, since vLLM then ignores the field and renders the messages.
+// clientPromptTokenIDs returns the prompt token IDs a request already carries:
+// a token-array completions prompt, or kv_transfer_params.prompt_token_ids on a
+// text-only chat-path request (see chatPathTextOnly). Returns nil otherwise, and
+// when echo is set, since vLLM then renders the messages instead of using the
+// field.
 func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) [][]uint32 {
 	if body.Completions != nil {
 		// The completions path reads the prompt; it does not read
 		// kv_transfer_params.prompt_token_ids, so a text prompt must be rendered.
-		if len(body.Completions.Prompt.TokenIDs) > 0 {
-			return body.Completions.Prompt.TokenIDs
+		if len(body.Completions.Prompt.TokenIDs) == 0 {
+			return nil
 		}
-		return nil
+		// vLLM truncates the prompt when truncate_prompt_tokens is set, so only a
+		// render yields the tokens the engine serves.
+		if payload, ok := body.Payload.(fwkrequest.PayloadMap); ok && payload[reqcommon.FieldTruncatePromptTokens] != nil {
+			return nil
+		}
+		return body.Completions.Prompt.TokenIDs
 	}
 	if !chatPathTextOnly(body) {
 		return nil
@@ -47,13 +51,16 @@ func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) [][]uint32 {
 	if !ok {
 		return nil
 	}
+	if echo, _ := payload[reqcommon.FieldEcho].(bool); echo {
+		return nil
+	}
 	var rawIDs any
 	switch v := payload[reqcommon.FieldKVTransferParams].(type) {
 	case map[string]any:
 		rawIDs = v[reqcommon.FieldPromptTokenIDs]
 	case json.RawMessage:
-		// Decoding into raw values keeps the id array as bytes for
-		// ParseCanonicalTokenIDs, rather than one json.Number per id.
+		// Decode to raw values so the id array stays as bytes for
+		// ParseCanonicalTokenIDs.
 		var params map[string]json.RawMessage
 		if err := parserutil.Unmarshal(v, &params); err != nil {
 			return nil
@@ -71,9 +78,10 @@ func clientPromptTokenIDs(body *fwkrequest.InferenceRequestBody) [][]uint32 {
 }
 
 // chatPathTextOnly reports whether the request is one vLLM's chat path serves
-// (chat completions, Messages, Responses) and names no media. vLLM renders the
-// messages instead of using prompt_token_ids when any content part is not text,
-// and only a render yields the multimodal features downstream plugins read.
+// (chat completions, Messages, Responses) and carries no media part. vLLM's chat
+// path consumes prompt_token_ids in place of templating and tokenizing the
+// messages, but renders them when a part carries media, and only a render
+// yields the multimodal features downstream plugins read.
 func chatPathTextOnly(body *fwkrequest.InferenceRequestBody) bool {
 	switch {
 	case body.ChatCompletions != nil:
@@ -126,8 +134,9 @@ func chatPathTextOnly(body *fwkrequest.InferenceRequestBody) bool {
 }
 
 // isTextPartType reports whether a chat or Responses content part of this type
-// is parsed as text. The ContentBlock decoder types a part without a type by its
-// media field, so an untyped media part does not read as text here.
+// counts as text for the prompt_token_ids check. The set matches vLLM's
+// TEXT_PART_TYPES. The ContentBlock decoder types an untyped part by its media
+// field, so an untyped media part is not text here.
 func isTextPartType(partType string) bool {
 	switch partType {
 	case reqcommon.PartTypeText, reqcommon.PartTypeInputText, reqcommon.PartTypeOutputText, reqcommon.PartTypeRefusal, blockTypeThinking:
@@ -138,8 +147,8 @@ func isTextPartType(partType string) bool {
 
 // parseTokenIDList converts a prompt_token_ids value to token IDs. The value is
 // raw JSON when the envelope kept kv_transfer_params opaque, a decoded list
-// whose numbers are json.Number or float64, or a []uint32 written by a
-// mutation. Returns nil for an absent, empty, or malformed value, so
+// whose numbers are json.Number or float64, or a []uint32 a plugin set
+// in-process on the payload map. Returns nil for an absent, empty, or malformed value, so
 // tokenization proceeds normally.
 func parseTokenIDList(value any) []uint32 {
 	switch v := value.(type) {

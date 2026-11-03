@@ -408,8 +408,8 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 // carries prompt token IDs of its own (see clientPromptTokenIDs); errors
 // propagate to the Director, which logs and continues.
 //
-// The tokenize span opens below the already-tokenized skip path, so it is
-// emitted only when the backend is actually invoked.
+// The tokenize span opens below the skip paths, so it is emitted only when the
+// backend is invoked.
 func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
 	if request.Body == nil {
 		return errors.New("request body is nil")

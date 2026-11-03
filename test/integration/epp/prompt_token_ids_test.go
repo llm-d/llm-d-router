@@ -57,7 +57,7 @@ func (r *renderRecorder) handle(w http.ResponseWriter, req *http.Request) {
 	r.mutex.Lock()
 	r.bodies = append(r.bodies, string(body))
 	r.mutex.Unlock()
-	// The chat and messages render response shape; completions is not exercised here.
+	// Chat and Messages render response shape.
 	_, _ = w.Write([]byte(`{"token_ids":[5,6,7]}`))
 }
 
@@ -150,7 +150,7 @@ dataLayer:
 		t.Run(tc.name, func(t *testing.T) {
 			h := NewTestHarness(t.Context(), t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
 			pods := []PodState{
-				P(0, 0, 0.1, modelMyModelTarget), // Winner: lowest queue and KV utilization
+				P(0, 0, 0.1, modelMyModelTarget),
 				P(1, 5, 0.5, modelMyModelTarget),
 			}
 			h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
@@ -199,7 +199,8 @@ dataLayer:
 // different message text routes to the pod that served the first, even when
 // another pod scores better on queue depth and KV utilization.
 func TestClientPromptTokenIDsKeyPrefixCache(t *testing.T) {
-	renderSrv := httptest.NewServer(http.HandlerFunc((&renderRecorder{}).handle))
+	recorder := &renderRecorder{}
+	renderSrv := httptest.NewServer(http.HandlerFunc(recorder.handle))
 	t.Cleanup(renderSrv.Close)
 
 	configText := fmt.Sprintf(`
@@ -283,4 +284,7 @@ dataLayer:
 	require.Eventually(t, func() bool {
 		return route("different text, same token ids", nil) == "192.168.1.1:8000"
 	}, 5*time.Second, 100*time.Millisecond, "a request with the same token ids must route to the pod that cached them")
+	// The render stub returns fixed tokens, so a rendered request would also hit the prefix.
+	require.Zero(t, recorder.callsContaining("first request"))
+	require.Zero(t, recorder.callsContaining("different text, same token ids"))
 }

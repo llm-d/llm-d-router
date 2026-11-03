@@ -59,8 +59,7 @@ const (
 
 	FieldKVTransferParams = "kv_transfer_params"
 	// FieldPromptTokenIDs is the kv_transfer_params field carrying
-	// pre-tokenized prompt token IDs. vLLM's chat path consumes it in place of
-	// templating and tokenizing the request's messages.
+	// pre-tokenized prompt token IDs.
 	FieldPromptTokenIDs       = "prompt_token_ids"
 	FieldECTransferParams     = "ec_transfer_params"
 	FieldMaxTokens            = "max_tokens"
@@ -70,6 +69,7 @@ const (
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldEcho                 = "echo"
+	FieldTruncatePromptTokens = "truncate_prompt_tokens"
 	FieldTools                = "tools"
 	FieldToolChoice           = "tool_choice"
 	FieldSamplingParams       = "sampling_params"
