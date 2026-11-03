@@ -25,14 +25,76 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr/funcr"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
+	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+func TestSGLangPrefillDecode(t *testing.T) {
+	testCtx, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	t.Cleanup(stop)
+	ctx, cancel := context.WithCancel(testCtx)
+	prefillCancelled := make(chan struct{})
+	var prefill, decode map[string]any
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		if r.URL.Path != reqcommon.PathSGLangGenerate {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set(reqcommon.HeaderContentType, reqcommon.MediaTypeEventStream)
+		if r.Header.Get(reqcommon.EPPProfileHeaderKey) == gateway.PhasePrefill {
+			prefill = body
+			w.Header().Set(routing.PrefillEndpointHeader, "10.0.0.7:8000")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			close(prefillCancelled)
+			return
+		}
+		decode = body
+		_, _ = io.WriteString(w, "data: decode\n\n")
+	}))
+	t.Cleanup(gw.Close)
+	t.Cleanup(cancel)
+	client := gateway.NewWithTransport(nil, gw.URL)
+	params := map[string]any{ParamKVConnector: kv.SGLang}
+	prefillStep, err := NewPrefillStep(client, params)
+	require.NoError(t, err)
+	decodeStep, err := NewDecodeStep(client, params)
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{OriginalPath: reqcommon.PathSGLangGenerate, Stream: true,
+		Body: map[string]any{"text": "hello", "stream": true, reqcommon.FieldBootstrapHost: "untrusted"}, ResponseWriter: recorder}
+	ctx = log.IntoContext(ctx, funcr.New(func(_, _ string) {}, funcr.Options{Verbosity: logutil.TRACE}))
+	require.NoError(t, pipeline.New([]pipeline.Step{prefillStep, decodeStep}).Execute(ctx, reqCtx),
+		"decode must complete while prefill is held open")
+	require.Equal(t, "127.0.0.1", prefill[reqcommon.FieldBootstrapHost])
+	require.NotNil(t, prefill[reqcommon.FieldBootstrapRoom])
+	require.NotNil(t, prefill[reqcommon.FieldBootstrapPort])
+	require.Equal(t, "10.0.0.7", decode[reqcommon.FieldBootstrapHost])
+	require.Equal(t, prefill[reqcommon.FieldBootstrapRoom], decode[reqcommon.FieldBootstrapRoom])
+	require.Equal(t, prefill[reqcommon.FieldBootstrapPort], decode[reqcommon.FieldBootstrapPort])
+	require.Equal(t, "data: decode\n\n", recorder.Body.String())
+	cancel()
+	select {
+	case <-prefillCancelled:
+	case <-testCtx.Done():
+		t.Fatal("request completion did not cancel prefill")
+	}
+}
 
 // TestECTransferParams_NotForwardedToDecodeBackend verifies that ec_transfer_params
 // accumulated by the encode step are never included in the decode request body.
