@@ -143,6 +143,51 @@ func TestPluginFactory_Validation(t *testing.T) {
 			expectErr:  true,
 			errContain: "failed to parse",
 		},
+		{
+			name:      "explicit estimate backend",
+			params:    `{"backend":"estimate"}`,
+			expectErr: false,
+		},
+		{
+			name:      "explicit estimate backend with estimate parameters",
+			params:    `{"backend":"estimate","estimate":{"image":{"mode":"static","static":{"staticToken":8}}}}`,
+			expectErr: false,
+		},
+		{
+			name:      "explicit vllm backend with modelName",
+			params:    `{"backend":"vllm","modelName":"m"}`,
+			expectErr: false,
+		},
+		{
+			name:       "explicit vllm backend requires modelName",
+			params:     `{"backend":"vllm"}`,
+			expectErr:  true,
+			errContain: "'modelName' must be specified when 'backend' is \"vllm\"",
+		},
+		{
+			name:       "explicit vllm backend rejects estimate parameters",
+			params:     `{"backend":"vllm","modelName":"m","estimate":{}}`,
+			expectErr:  true,
+			errContain: "'backend' is \"vllm\" but 'estimate' is set",
+		},
+		{
+			name:       "explicit estimate backend rejects vllm parameters",
+			params:     `{"backend":"estimate","vllm":{}}`,
+			expectErr:  true,
+			errContain: "'backend' is \"estimate\" but 'vllm' or 'modelName' is set",
+		},
+		{
+			name:       "unknown backend",
+			params:     `{"backend":"uds"}`,
+			expectErr:  true,
+			errContain: "'backend' must be \"estimate\" or \"vllm\", got \"uds\"",
+		},
+		{
+			name:       "estimates and vllm stay mutually exclusive without backend",
+			params:     `{"modelName":"m","estimate":{}}`,
+			expectErr:  true,
+			errContain: "only one of 'estimate' or 'vllm' may be set",
+		},
 	}
 
 	for _, tt := range tests {
@@ -161,6 +206,43 @@ func TestPluginFactory_Validation(t *testing.T) {
 				require.NoError(t, err)
 				assert.NotNil(t, p)
 			}
+		})
+	}
+}
+
+func TestPluginFactory_BackendSelection(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	handle := plugin.NewEppHandle(ctx, nil)
+
+	tests := []struct {
+		name    string
+		params  string
+		want    string
+		wantErr string
+	}{
+		{name: "zero config infers estimate", params: `{}`, want: BackendEstimate},
+		{name: "modelName alone infers vllm", params: `{"modelName":"m"}`, want: BackendVLLM},
+		{name: "estimate block infers estimate", params: `{"estimate":{}}`, want: BackendEstimate},
+		{name: "explicit estimate", params: `{"backend":"estimate"}`, want: BackendEstimate},
+		{
+			name:    "explicit estimate rejects modelName",
+			params:  `{"backend":"estimate","modelName":"m"}`,
+			wantErr: "'backend' is \"estimate\" but 'vllm' or 'modelName' is set",
+		},
+		{name: "explicit vllm", params: `{"backend":"vllm","modelName":"m"}`, want: BackendVLLM},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := PluginFactory("test-tokenizer", plugin.StrictDecoder(json.RawMessage(tt.params)), handle)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			tp, ok := p.(*Plugin)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, tp.Backend())
 		})
 	}
 }
