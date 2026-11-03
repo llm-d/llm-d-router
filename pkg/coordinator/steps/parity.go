@@ -114,11 +114,11 @@ func idsForwardedIn(body map[string]any, apiType reqcommon.APIType) bool {
 	case reqcommon.APITypeVLLMGenerate:
 		return true
 	case reqcommon.APITypeCompletions:
-		_, ok := body["prompt"].([]int)
+		_, ok := body[reqcommon.FieldPrompt].([]int)
 		return ok
 	}
 	kv, ok := body[reqcommon.FieldKVTransferParams].(map[string]any)
-	return ok && kv[fieldPromptTokenIDs] != nil
+	return ok && kv[reqcommon.FieldPromptTokenIDs] != nil
 }
 
 // parityResponseWriter returns the writer a leg's response is streamed
@@ -195,7 +195,7 @@ func injectIncludeUsage(body map[string]any, stream bool, apiType reqcommon.APIT
 	if present && !ok {
 		return false, true
 	}
-	if include, ok := options[fieldIncludeUsage].(bool); ok && include {
+	if include, ok := options[reqcommon.FieldIncludeUsage].(bool); ok && include {
 		return false, false
 	}
 	// vLLM reports usage on every chunk when include_usage and
@@ -203,14 +203,14 @@ func injectIncludeUsage(body map[string]any, stream bool, apiType reqcommon.APIT
 	// gets no usage today; adding include_usage would put a usage block in
 	// each of its content chunks, which the writer cannot drop, so the check
 	// is skipped rather than reshaping the stream.
-	if continuous, ok := options[fieldContinuousUsageStats].(bool); ok && continuous {
+	if continuous, ok := options[reqcommon.FieldContinuousUsageStats].(bool); ok && continuous {
 		return false, false
 	}
 	merged := make(map[string]any, len(options)+1)
 	for k, v := range options {
 		merged[k] = v
 	}
-	merged[fieldIncludeUsage] = true
+	merged[reqcommon.FieldIncludeUsage] = true
 	body[reqcommon.FieldStreamOptions] = merged
 	return true, false
 }
@@ -241,9 +241,3 @@ func streamOptions(body map[string]any) (options map[string]any, present bool, o
 		return nil, true, false
 	}
 }
-
-const (
-	fieldIncludeUsage         = "include_usage"
-	fieldContinuousUsageStats = "continuous_usage_stats"
-	fieldPromptTokenIDs       = "prompt_token_ids"
-)

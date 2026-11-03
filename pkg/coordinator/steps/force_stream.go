@@ -553,7 +553,7 @@ func forceStreamBody(src map[string]any, shape sseShape) map[string]any {
 	// to keep. The Responses and Messages streams carry usage on their own events
 	// and take no stream_options.
 	if shape == sseShapeChat || shape == sseShapeText || shape == sseShapeGenerate {
-		body[reqcommon.FieldStreamOptions] = map[string]any{fieldIncludeUsage: true}
+		body[reqcommon.FieldStreamOptions] = map[string]any{reqcommon.FieldIncludeUsage: true}
 	}
 	return body
 }

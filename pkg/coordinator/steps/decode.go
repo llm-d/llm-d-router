@@ -220,7 +220,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(reqCtx.TokenIDs) > 0 {
-			reqCtx.Body["prompt"] = reqCtx.TokenIDs
+			reqCtx.Body[reqcommon.FieldPrompt] = reqCtx.TokenIDs
 		}
 	default:
 		// kvParams and injectUUIDs above already ran; both are harmless here

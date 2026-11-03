@@ -466,7 +466,7 @@ func (r *cachedTokensUsageRewriter) observe(response map[string]json.RawMessage)
 		}
 	}
 	if block == nil {
-		for _, key := range []string{fieldResponse, fieldMessage} {
+		for _, key := range []string{reqcommon.FieldResponse, reqcommon.FieldMessage} {
 			raw, ok := response[key]
 			if !ok {
 				continue
@@ -492,7 +492,7 @@ func (r *cachedTokensUsageRewriter) observe(response map[string]json.RawMessage)
 // found under wrapper: the top-level block, and response.usage on Responses
 // stream events such as response.completed.
 func rewritable(wrapper string) bool {
-	return wrapper == "" || wrapper == fieldResponse
+	return wrapper == "" || wrapper == reqcommon.FieldResponse
 }
 
 // marshalWithUsage re-encodes response with block as its usage, or as the
@@ -528,7 +528,7 @@ func marshalWithUsage(response map[string]json.RawMessage, wrapper string, block
 // trailing usage frame vLLM sends for stream_options.include_usage: an empty
 // choices list beside the usage block.
 func hasEmptyChoices(response map[string]json.RawMessage) bool {
-	raw, ok := response[fieldChoices]
+	raw, ok := response[reqcommon.FieldChoices]
 	if !ok {
 		return false
 	}

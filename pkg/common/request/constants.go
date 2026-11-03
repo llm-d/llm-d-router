@@ -67,8 +67,11 @@ const (
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
 	FieldMinTokens            = "min_tokens"
+	FieldPrompt               = "prompt"
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
+	FieldIncludeUsage         = "include_usage"          // stream_options field: emit a final usage-only frame
+	FieldContinuousUsageStats = "continuous_usage_stats" // stream_options field: vLLM emits usage on every frame
 	FieldEcho                 = "echo"
 	FieldTruncatePromptTokens = "truncate_prompt_tokens" //#nosec G101 -- request field name, not a credential
 	FieldTools                = "tools"
@@ -153,17 +156,27 @@ const (
 // prompt_tokens and completion_tokens with details under prompt_tokens_details;
 // Responses and Conversations report input_tokens and output_tokens with details
 // under input_tokens_details. total_tokens is named the same in every API.
+// Messages splits the prompt into the part served from cache and the rest, so
+// input_tokens alone excludes cache_read_input_tokens and
+// cache_creation_input_tokens.
 const (
-	FieldUsage               = "usage"
-	FieldPromptTokens        = "prompt_tokens"
-	FieldCompletionTokens    = "completion_tokens"
-	FieldInputTokens         = "input_tokens"
-	FieldOutputTokens        = "output_tokens"
-	FieldTotalTokens         = "total_tokens"
-	FieldPromptTokensDetails = "prompt_tokens_details" //#nosec G101 -- JSON field name, not a credential
-	FieldInputTokensDetails  = "input_tokens_details"  //#nosec G101 -- JSON field name, not a credential
-	FieldCachedTokens        = "cached_tokens"         //#nosec G101 -- JSON field name, not a credential
+	FieldUsage                    = "usage"
+	FieldPromptTokens             = "prompt_tokens"
+	FieldCompletionTokens         = "completion_tokens"
+	FieldInputTokens              = "input_tokens"
+	FieldOutputTokens             = "output_tokens"
+	FieldTotalTokens              = "total_tokens"
+	FieldPromptTokensDetails      = "prompt_tokens_details"       //#nosec G101 -- JSON field name, not a credential
+	FieldInputTokensDetails       = "input_tokens_details"        //#nosec G101 -- JSON field name, not a credential
+	FieldCachedTokens             = "cached_tokens"               //#nosec G101 -- JSON field name, not a credential
+	FieldCacheReadInputTokens     = "cache_read_input_tokens"     //#nosec G101 -- JSON field name, not a credential
+	FieldCacheCreationInputTokens = "cache_creation_input_tokens" //#nosec G101 -- JSON field name, not a credential
 )
+
+// FieldResponse wraps the response object in Responses stream events, which is
+// where those events carry usage; the Messages message_start event wraps its
+// object under FieldMessage the same way.
+const FieldResponse = "response"
 
 // Server-sent event framing for streamed responses. SGLang sends the bare
 // marker as an event payload, the OpenAI APIs send the framed line.
