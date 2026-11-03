@@ -21,8 +21,10 @@ limitations under the License.
 package routing
 
 import (
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -78,6 +80,21 @@ const (
 // IsTCPPort reports whether port is in 1-65535.
 func IsTCPPort(port int) bool {
 	return port >= 1 && port <= 65535
+}
+
+// ParseHostPort splits a trimmed host:port, reporting false when
+// net.SplitHostPort rejects it, the host is empty, or the port is outside the
+// TCP range.
+func ParseHostPort(value string) (string, int, bool) {
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil || host == "" {
+		return "", 0, false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || !IsTCPPort(port) {
+		return "", 0, false
+	}
+	return host, port, true
 }
 
 // RankPort returns the port data parallel rank listens on when rank 0 listens

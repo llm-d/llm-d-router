@@ -106,6 +106,11 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	defer resp.Body.Close()
 
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
+	if reader, ok := s.kv.(kv.PrefillResponseReader); ok {
+		if err := reader.ReadPrefillResponse(reqCtx, resp.Header); err != nil {
+			return fmt.Errorf("prefill: %w", err)
+		}
+	}
 
 	var prefillResp prefillResponse
 	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {
