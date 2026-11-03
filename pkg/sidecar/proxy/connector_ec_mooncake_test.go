@@ -175,15 +175,15 @@ func TestHandleECMooncakeRewritesChat(t *testing.T) {
 	h, rec := runECMooncake(t, reqcommon.PathChatCompletions, reqcommon.APITypeChatCompletions, body, func(part map[string]any) string {
 		// The engine folds processing options into the hash, so it reports a
 		// key other than the uuid it was sent.
-		return `{"engine-` + part[partFieldUUID].(string) + `":{"metadata":{"image_grid_thw":[[1,4,6]]},"item_indices":[0]}}`
+		return `{"engine-` + part[reqcommon.FieldUUID].(string) + `":{"metadata":{"image_grid_thw":[[1,4,6]]},"item_indices":[0]}}`
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Len(t, h.calls, 2)
 
 	call1, call2 := h.callFor(t, img1), h.callFor(t, img2)
 	uuid1 := ecMooncakeContentUUID(imageURLItem(img1))
-	assert.Equal(t, uuid1, call1.part[partFieldUUID], "a part without a uuid is keyed by its content")
-	assert.Equal(t, "client-uuid", call2.part[partFieldUUID], "a client uuid is kept")
+	assert.Equal(t, uuid1, call1.part[reqcommon.FieldUUID], "a part without a uuid is keyed by its content")
+	assert.Equal(t, "client-uuid", call2.part[reqcommon.FieldUUID], "a client uuid is kept")
 	for _, c := range []encoderCall{call1, call2} {
 		assert.Equal(t, "tcp://127.0.0.1:19019", c.consumerZMQ, "the prefiller is the EC consumer")
 		require.Len(t, c.transferIDs, 1)
@@ -198,7 +198,7 @@ func TestHandleECMooncakeRewritesChat(t *testing.T) {
 		"image_embeds": map[string]any{"image_grid_thw": []any{float64(1), float64(4), float64(6)}},
 		"uuid":         uuid1,
 	}, content[1])
-	assert.Equal(t, "client-uuid", content[2].(map[string]any)[partFieldUUID])
+	assert.Equal(t, "client-uuid", content[2].(map[string]any)[reqcommon.FieldUUID])
 
 	ec := h.prefillBody[reqcommon.FieldECTransferParams].(map[string]any)
 	assert.Contains(t, ec, "engine-"+uuid1)
@@ -216,7 +216,7 @@ func TestHandleECMooncakeUntypedMedia(t *testing.T) {
 		`{"type":"image_url","image_url":{"url":"` + img2 + `"},"uuid":"client-uuid"}]}]}`
 
 	h, rec := runECMooncake(t, reqcommon.PathChatCompletions, reqcommon.APITypeChatCompletions, body, func(part map[string]any) string {
-		return `{"engine-` + part[partFieldUUID].(string) + `":{"metadata":{"image_grid_thw":[[1,4,6]]},"item_indices":[0]}}`
+		return `{"engine-` + part[reqcommon.FieldUUID].(string) + `":{"metadata":{"image_grid_thw":[[1,4,6]]},"item_indices":[0]}}`
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Len(t, h.calls, 2)
@@ -231,9 +231,9 @@ func TestHandleECMooncakeUntypedMedia(t *testing.T) {
 		call := h.callFor(t, img)
 		part := content[idx].(map[string]any)
 		assert.Equal(t, "image_embeds", part[reqcommon.FieldType])
-		assert.Equal(t, call.part[partFieldUUID], part[partFieldUUID])
+		assert.Equal(t, call.part[reqcommon.FieldUUID], part[reqcommon.FieldUUID])
 		assert.Equal(t, map[string]any{
-			"mm_hash":     "engine-" + call.part[partFieldUUID].(string),
+			"mm_hash":     "engine-" + call.part[reqcommon.FieldUUID].(string),
 			"transfer_id": call.transferIDs[0],
 		}, transferItems[idx])
 	}
@@ -273,9 +273,9 @@ func TestHandleECMooncakeAudioStaysRaw(t *testing.T) {
 	content := prefillContent(t, h.prefillBody)
 	require.Len(t, content, 2)
 	assert.Equal(t, "image_url", content[0].(map[string]any)["type"])
-	assert.Equal(t, ecMooncakeContentUUID(imageURLItem(img)), content[0].(map[string]any)[partFieldUUID])
+	assert.Equal(t, ecMooncakeContentUUID(imageURLItem(img)), content[0].(map[string]any)[reqcommon.FieldUUID])
 	assert.Equal(t, "audio_url", content[1].(map[string]any)["type"])
-	assert.Equal(t, ecMooncakeContentUUID(audioURLItem(audio)), content[1].(map[string]any)[partFieldUUID])
+	assert.Equal(t, ecMooncakeContentUUID(audioURLItem(audio)), content[1].(map[string]any)[reqcommon.FieldUUID])
 
 	ec := h.prefillBody[reqcommon.FieldECTransferParams].(map[string]any)
 	assert.Equal(t, []any{
@@ -291,7 +291,7 @@ func TestHandleECMooncakeResponsesNoRewrite(t *testing.T) {
 	const img = "https://example.com/a.jpg"
 	body := `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","image_url":"` + img + `"}]}]}`
 	h, rec := runECMooncake(t, reqcommon.PathResponses, reqcommon.APITypeResponses, body, func(part map[string]any) string {
-		assert.NotContains(t, part, partFieldUUID)
+		assert.NotContains(t, part, reqcommon.FieldUUID)
 		return `{"content-hash":{"metadata":{"image_grid_thw":[[1,2,2]]},"item_indices":[0]}}`
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

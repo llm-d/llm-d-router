@@ -171,6 +171,10 @@ type RequestContext struct {
 
 	TokenIDs          []int
 	MultimodalEntries []MultimodalEntry
+	// MMPayload is the render step's mm_payload when render returned no
+	// kwargs_data for the entries: "none". Empty when the entries
+	// carry kwargs_data or render did not populate them.
+	MMPayload string
 	// ECTransferParams is an ordered list (one entry per encode response).
 	// Each entry is a single-key map: mm_hash -> opaque per-encoding transfer
 	// descriptor (see the ec.Connector interface doc for the descriptor shape).

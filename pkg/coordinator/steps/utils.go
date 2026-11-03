@@ -185,7 +185,7 @@ func buildPrefillMMFeatures(entries []pipeline.MultimodalEntry, ecTransferParams
 			"offset": entry.Placeholder.Offset,
 			"length": entry.Placeholder.Length,
 		})
-		if _, hasEC := ecTransferParams[entry.Hash]; hasEC && entry.MMMetadata != "" {
+		if _, ok := ecDescriptor(ecTransferParams, entry.Hash); ok && entry.MMMetadata != "" {
 			kwargsByMod[mod] = append(kwargsByMod[mod], nil)
 			metadataByMod[mod] = append(metadataByMod[mod], kwargsSentinel(entry.MMMetadata))
 		} else {
@@ -397,6 +397,118 @@ func kwargsSentinel(k string) any {
 		return nil
 	}
 	return k
+}
+
+// generateContentPartTypes maps a modality to its /inference/v1/generate
+// content_parts type.
+var generateContentPartTypes = map[reqcommon.Modality]string{
+	reqcommon.ModalityImage: reqcommon.PartTypeImageURL,
+	reqcommon.ModalityAudio: reqcommon.PartTypeAudioURL,
+	reqcommon.ModalityVideo: reqcommon.PartTypeVideoURL,
+}
+
+// generateContentParts returns one /inference/v1/generate content part per
+// entry, in entry order. See generateContentPart.
+func generateContentParts(reqCtx *pipeline.RequestContext) ([]map[string]any, error) {
+	partsByMod := clientMediaParts(reqCtx)
+	localIdx := modalityLocalIndexes(reqCtx.MultimodalEntries)
+	parts := make([]map[string]any, len(reqCtx.MultimodalEntries))
+	for i, entry := range reqCtx.MultimodalEntries {
+		part, err := generateContentPart(entry, localIdx[i], partsByMod)
+		if err != nil {
+			return nil, err
+		}
+		parts[i] = part
+	}
+	return parts, nil
+}
+
+// clientMediaParts groups the media parts of the client's own request body.
+func clientMediaParts(reqCtx *pipeline.RequestContext) map[reqcommon.Modality][]mediaPart {
+	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+	items, ok := promptItems(reqCtx.Body, apiType)
+	if !ok {
+		return nil
+	}
+	return groupMediaPartsByModality(collectMediaParts(items, apiType))
+}
+
+// generateContentPart builds the content part that carries entry's media from
+// the client request to /inference/v1/generate. The part is flat
+// ({"type", "url", "uuid"}), the shape vLLM's generate route parses, and its
+// uuid is the render hash so the worker keys the item as render did. Errors
+// mean entries and parts got out of line inside the coordinator.
+func generateContentPart(entry pipeline.MultimodalEntry, localIdx int, partsByMod map[reqcommon.Modality][]mediaPart) (map[string]any, error) {
+	partType, ok := generateContentPartTypes[entry.Modality]
+	if !ok {
+		return nil, fmt.Errorf("no content_parts type for modality %s", entry.Modality)
+	}
+	parts := partsByMod[entry.Modality]
+	if localIdx < 0 || localIdx >= len(parts) {
+		return nil, fmt.Errorf("no %s media part at index %d, request has %d", entry.Modality, localIdx, len(parts))
+	}
+	part := parts[localIdx].part
+	url := reqcommon.MediaPartURL(part)
+	if data, format, isInline := inlineAudioData(part); isInline {
+		mime, err := audioFormatToMIME(format)
+		if err != nil {
+			return nil, err
+		}
+		url = dataURIPrefix + mime + ";base64," + data
+	}
+	if url == "" {
+		return nil, fmt.Errorf("%s media part at index %d carries no media", entry.Modality, localIdx)
+	}
+	return map[string]any{
+		reqcommon.FieldType: partType,
+		reqcommon.FieldURL:  url,
+		reqcommon.FieldUUID: entry.Hash,
+	}, nil
+}
+
+// checkUniformSpan verifies span sits inside tokenIDs and is a run of one
+// repeated token, the shape the Qwen-VL family produces. A model whose parser
+// interleaves other tokens inside a range cannot have the span collapsed to
+// its first token: the worker would expand a different prompt than render
+// produced.
+func checkUniformSpan(tokenIDs []int, span pipeline.PlaceholderRange) error {
+	if span.Offset < 0 || span.Length < 1 || span.Offset > len(tokenIDs) || span.Length > len(tokenIDs)-span.Offset {
+		return fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
+			span.Offset, span.Length, len(tokenIDs))
+	}
+	for i := span.Offset + 1; i < span.Offset+span.Length; i++ {
+		if tokenIDs[i] != tokenIDs[span.Offset] {
+			return fmt.Errorf("placeholder (offset %d, length %d) is not a uniform run of one token, which mm_payload none requires",
+				span.Offset, span.Length)
+		}
+	}
+	return nil
+}
+
+// collapsePlaceholders shrinks every entry's placeholder span in tokenIDs to
+// its first token. A generate request that carries content_parts takes an
+// unexpanded prompt: the worker's multimodal processor expands each
+// placeholder itself, so every span must pass checkUniformSpan.
+func collapsePlaceholders(tokenIDs []int, entries []pipeline.MultimodalEntry) ([]int, error) {
+	ranges := make([]pipeline.PlaceholderRange, len(entries))
+	for i, entry := range entries {
+		ranges[i] = entry.Placeholder
+	}
+	slices.SortFunc(ranges, func(a, b pipeline.PlaceholderRange) int { return a.Offset - b.Offset })
+	collapsed := make([]int, 0, len(tokenIDs))
+	pos := 0
+	for _, r := range ranges {
+		if r.Offset < pos {
+			return nil, fmt.Errorf("placeholder (offset %d, length %d) overlaps another placeholder",
+				r.Offset, r.Length)
+		}
+		if err := checkUniformSpan(tokenIDs, r); err != nil {
+			return nil, err
+		}
+		collapsed = append(collapsed, tokenIDs[pos:r.Offset+1]...)
+		pos = r.Offset + r.Length
+	}
+	return append(collapsed, tokenIDs[pos:]...), nil
 }
 
 // singleEntryKwargs builds a kwargs_data value for one entry: each encode
@@ -641,11 +753,9 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 			if !ok {
 				return nil, fmt.Errorf("mm_placeholders[%s][%d] must be an object: %w", mod, i, pipeline.ErrBadRequest)
 			}
-			// The non-negative guarantee is load-bearing:
-			// EncodeStep.buildEncodeTokenIDs indexes fullTokenIDs[offset]
-			// (upper-bound guarded only) and allocates make([]int, 1+length),
-			// which panics on a negative. vLLM accepts negatives here, so this
-			// is deliberately stricter; do not relax it to a plain int parse.
+			// vLLM accepts negatives here; the coordinator does not, so a bad
+			// span fails as a 400 at parse time instead of resurfacing as a
+			// span error in encode. Do not relax this to a plain int parse.
 			offset, err := anyToNonNegativeInt(pMap["offset"])
 			if err != nil {
 				return nil, fmt.Errorf("mm_placeholders[%s][%d].offset: %v: %w", mod, i, err, pipeline.ErrBadRequest)
@@ -684,13 +794,12 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 
 // validatePlaceholderBounds checks that every placeholder span [offset,
 // offset+length) lies within a prompt of tokenCount tokens. It guards the
-// generate path, where the client supplies placeholder geometry directly:
-// EncodeStep.buildEncodeTokenIDs indexes token_ids[offset] and allocates
-// make([]int, 1+length), so an out-of-range offset reads the wrong token and an
-// unbounded length (a tiny request can claim billions) is a memory-exhaustion
-// vector. vLLM declares offset/length as plain unbounded ints on the generate
-// endpoint and does not enforce this, so the coordinator does. offset and
-// length are already guaranteed non-negative by extractMultimodalEntries.
+// generate path, where the client supplies placeholder geometry directly and a
+// bad span is a bad request: without it the same mistake surfaces later as a
+// span error in encode or prefill. vLLM declares offset/length as plain
+// unbounded ints on the generate endpoint and does not enforce this, so the
+// coordinator does. offset and length are already guaranteed non-negative by
+// extractMultimodalEntries.
 func validatePlaceholderBounds(entries []pipeline.MultimodalEntry, tokenCount int) error {
 	for i, e := range entries {
 		off := e.Placeholder.Offset
