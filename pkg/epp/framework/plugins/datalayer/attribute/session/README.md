@@ -17,3 +17,7 @@ Holds the session identifier extracted from a request. Stored on the
 
 - **`session-id-producer`** (Request Control): extracts the session
   identifier from a configured request header or named cookie.
+
+`SessionCacheRequest` carries an external session producer's request stamp and
+ordered engine-block paths. Its contract and configuration are documented in the
+[session prefix cache producer](../../../requesthandling/dataproducer/sessionprefixcache/README.md).
