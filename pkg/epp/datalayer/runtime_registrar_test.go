@@ -232,8 +232,8 @@ func TestConfigure_PendingVsPending_BothBoundOnSameType(t *testing.T) {
 }
 
 // User-config extractors of a Type outrank every pending registration of that
-// Type, including when several plugins registered pendings for it.
-func TestConfigure_SiblingPendingsYieldToConfigByType(t *testing.T) {
+// Type, including when several plugins registered pending registrations for it.
+func TestConfigure_SiblingPendingRegistrationsYieldToConfigByType(t *testing.T) {
 	r := NewRuntime(0)
 	logger := newTestLogger(t)
 
@@ -264,7 +264,7 @@ func TestConfigure_SiblingPendingsYieldToConfigByType(t *testing.T) {
 
 	exts, ok := r.extractors.Get("ep-src")
 	require.True(t, ok)
-	require.Len(t, exts, 1, "both pendings must yield to the user-configured extractor")
+	require.Len(t, exts, 1, "both pending registrations must yield to the user-configured extractor")
 	assert.Equal(t, "config-ext", exts[0].TypedName().Name)
 }
 
