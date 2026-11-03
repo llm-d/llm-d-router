@@ -458,9 +458,16 @@ func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 
 func (s *StreamingServer) putBuffer(buf *bytes.Buffer) {
 	buf.Reset()
-	if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+	if s.poolKeeps(buf) {
 		s.bufferPool.Put(buf)
 	}
+}
+
+// poolKeeps reports whether putBuffer returns buf to the pool. The request body
+// handler relies on this rule: RawBody takes the memory of a buffer the pool
+// does not keep, so such a buffer must never be reused.
+func (s *StreamingServer) poolKeeps(buf *bytes.Buffer) bool {
+	return s.maxPoolBufferSize == 0 || buf.Cap() <= s.maxPoolBufferSize
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
@@ -690,10 +697,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				loggerTrace.Info("decoding")
 				reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 				inboundBody := buf.Bytes()
-				if s.maxPoolBufferSize > 0 && buf.Cap() > s.maxPoolBufferSize {
-					// putBuffer drops a buffer above the pool cap, so RawBody takes its
-					// memory. Parsers and the Director replace RawBody on a rewrite and
-					// never write into it, so inboundBody stays the comparison baseline.
+				if !s.poolKeeps(buf) {
+					// putBuffer drops this buffer, so RawBody takes its memory.
+					// Parsers and the Director replace RawBody on a rewrite and never
+					// write into it, so inboundBody stays the comparison baseline.
 					reqCtx.Request.RawBody = inboundBody
 					buf = nil
 				} else {

@@ -33,12 +33,15 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // inFlightProcessServer replays reqs and then blocks in Recv until finish is
@@ -337,6 +340,48 @@ func TestProcessRawBodyUsesBufferAbovePoolCap(t *testing.T) {
 			require.NoError(t, srv.finish())
 		})
 	}
+}
+
+func TestProcessToolCallingSnapshotWithBufferAbovePoolCap(t *testing.T) {
+	const bufferCap = 64 << 10
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	const prefix, suffix = `{"model":"m","tools":[],"messages":[{"role":"user","content":"`, `"}]}`
+	body := []byte(prefix + strings.Repeat("a", 40<<10) + suffix)
+	registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+	director := &rawBodyDirector{}
+	server := NewStreamingServer(nil, director, registry, bufferCap/2)
+	server.SetToolCallingTelemetryEnabled(true)
+	var backing []byte
+	server.bufferPool.New = func() any {
+		backing = make([]byte, 0, bufferCap)
+		return bytes.NewBuffer(backing)
+	}
+
+	srv := newInFlightProcessServer(requestMessages(reqcommon.PathChatCompletions, body, 16<<10))
+	srv.start(t, server)
+	require.Equal(t, body, director.rawBody)
+	require.Same(t, &backing[:1][0], &director.rawBody[0], "RawBody shares the request buffer's memory")
+	require.NoError(t, srv.finish())
+
+	// The snapshot comparison ran with RawBody and the snapshot on the same memory.
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var preserved float64
+	for _, family := range families {
+		if family.GetName() != "llm_d_epp_tool_calling_field_status_total" {
+			continue
+		}
+		for _, sample := range family.GetMetric() {
+			if metricHasLabels(sample, map[string]string{
+				toolcalling.MetricLabelField:  string(toolcalling.FieldTools),
+				toolcalling.MetricLabelStatus: string(toolcalling.FieldStatusPreserved),
+			}) {
+				preserved += sample.GetCounter().GetValue()
+			}
+		}
+	}
+	require.Equal(t, float64(1), preserved, "tools field reported as preserved")
 }
 
 // retainingDirector keeps the parsed body on the request, as the Director does
