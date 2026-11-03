@@ -307,11 +307,13 @@ func (r *RequestContext) apiType() reqcommon.APIType {
 }
 
 // releaseRequestBody drops the request body once it has been forwarded, because
-// a streamed response can last for the whole generation.
+// a streamed response can last for the whole generation. Body is replaced rather
+// than cleared: a DataProducer that outlived its timeout can still hold a copy of
+// the request and read the original body.
 func (r *RequestContext) releaseRequestBody() {
 	r.Request.RawBody = nil
 	if r.SchedulingRequest != nil && r.SchedulingRequest.Body != nil {
-		r.SchedulingRequest.Body.ReleaseContent()
+		r.SchedulingRequest.Body = r.SchedulingRequest.Body.ResponsePhaseView()
 	}
 }
 

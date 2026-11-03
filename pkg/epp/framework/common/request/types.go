@@ -169,23 +169,17 @@ func (b *InferenceRequestBody) MutatePayloadMap(fn func(PayloadMap)) {
 	b.Mutated = true
 }
 
-// ReleaseContent drops the request content once the body has been forwarded, so a
-// long response does not keep it in memory. It keeps TokenizedRequest and the
-// derived fields that response-phase plugins read.
-func (b *InferenceRequestBody) ReleaseContent() {
-	b.Completions = nil
-	b.ChatCompletions = nil
-	b.Messages = nil
-	b.Responses = nil
-	b.TextToSpeech = nil
-	b.AudioGenerate = nil
-	b.Conversations = nil
-	b.Embeddings = nil
-	b.Generate = nil
-	b.Images = nil
-	b.Videos = nil
-	b.Payload = nil
-	b.RawBody = nil
+// ResponsePhaseView returns a new body with only the fields that response-phase
+// plugins read. The request handler swaps it in once the body has been forwarded,
+// so a long response does not keep the request content in memory. A new field is
+// left out unless it is added here.
+func (b *InferenceRequestBody) ResponsePhaseView() *InferenceRequestBody {
+	return &InferenceRequestBody{
+		TokenizedRequest: b.TokenizedRequest,
+		Stream:           b.Stream,
+		MaxOutputTokens:  b.MaxOutputTokens,
+		Model:            b.Model,
+	}
 }
 
 // MaxOutputTokensFromPayload returns the client-requested output-token cap read

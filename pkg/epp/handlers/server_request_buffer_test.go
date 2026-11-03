@@ -28,6 +28,7 @@ import (
 	"time"
 	"weak"
 
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -152,19 +153,40 @@ func TestProcessReleasesRequestBufferAfterRequestPhase(t *testing.T) {
 	}
 }
 
-// weakBodyDirector keeps the parsed body on the request, as the Director does for
-// scheduling, and records weak pointers to the request content.
-type weakBodyDirector struct {
-	mockDirector
-	body        *fwkrequest.InferenceRequestBody
-	rawBody     weak.Pointer[byte]
-	completions weak.Pointer[fwkrequest.CompletionsRequest]
-	prompt      weak.Pointer[byte]
+// streamingResponse returns the response headers and a first response body chunk
+// of a streamed response that has not ended.
+func streamingResponse() []*extProcPb.ProcessingRequest {
+	return []*extProcPb.ProcessingRequest{
+		{Request: &extProcPb.ProcessingRequest_ResponseHeaders{
+			ResponseHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
+				{Key: ":status", RawValue: []byte("200")},
+				{Key: "content-type", RawValue: []byte("text/event-stream")},
+			}}},
+		}},
+		{Request: &extProcPb.ProcessingRequest_ResponseBody{
+			ResponseBody: &extProcPb.HttpBody{Body: []byte("data: {}\n\n")},
+		}},
+	}
 }
 
-func (d *weakBodyDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, body *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
+// responsePhaseDirector keeps the parsed body on the request, as the Director
+// does for scheduling. It records weak pointers to the request content and the
+// request body that response-phase plugins would receive.
+type responsePhaseDirector struct {
+	mockDirector
+	tokenized      *fwkrequest.TokenizedRequest
+	rawBody        weak.Pointer[byte]
+	completions    weak.Pointer[fwkrequest.CompletionsRequest]
+	prompt         weak.Pointer[byte]
+	headerBody     fwkrequest.InferenceRequestBody
+	bodyChunkBody  fwkrequest.InferenceRequestBody
+	responseBodies int
+}
+
+func (d *responsePhaseDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, body *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
+	// A DataProducer sets TokenizedRequest before scheduling.
+	body.TokenizedRequest = d.tokenized
 	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: body}
-	d.body = body
 	d.rawBody = weak.Make(&reqCtx.Request.RawBody[0])
 	d.completions = weak.Make(body.Completions)
 	prompt := body.Payload.(fwkrequest.PayloadMap)["prompt"].(json.RawMessage)
@@ -172,14 +194,30 @@ func (d *weakBodyDirector) HandleRequest(_ context.Context, reqCtx *RequestConte
 	return reqCtx, nil
 }
 
+func (d *responsePhaseDirector) HandleResponseHeader(_ context.Context, reqCtx *RequestContext) *RequestContext {
+	d.headerBody = *reqCtx.SchedulingRequest.Body
+	return reqCtx
+}
+
+func (d *responsePhaseDirector) HandleResponseBody(_ context.Context, reqCtx *RequestContext, _ bool) *RequestContext {
+	if d.responseBodies == 0 {
+		d.bodyChunkBody = *reqCtx.SchedulingRequest.Body
+	}
+	d.responseBodies++
+	return reqCtx
+}
+
 func TestProcessReleasesRequestContentAfterForwarding(t *testing.T) {
 	const prefix, suffix = `{"model":"m","stream":true,"max_tokens":16,"prompt":"`, `"}`
 	body := []byte(prefix + strings.Repeat("a", 64<<10) + suffix)
 	registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
-	director := &weakBodyDirector{}
+	director := &responsePhaseDirector{
+		tokenized: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}}},
+	}
 	server := NewStreamingServer(nil, director, registry, 0)
 
-	srv := newInFlightProcessServer(requestMessages(reqcommon.PathCompletions, body, 16<<10))
+	reqs := append(requestMessages(reqcommon.PathCompletions, body, 16<<10), streamingResponse()...)
+	srv := newInFlightProcessServer(reqs)
 	srv.start(t, server)
 	require.Eventually(t, func() bool {
 		runtime.GC()
@@ -187,10 +225,74 @@ func TestProcessReleasesRequestContentAfterForwarding(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "request content reachable while the stream waits for the response")
 	require.NoError(t, srv.finish())
 
-	require.True(t, director.body.Stream)
-	require.Equal(t, "m", director.body.Model)
-	require.NotNil(t, director.body.MaxOutputTokens)
-	require.Equal(t, int64(16), *director.body.MaxOutputTokens)
+	maxTokens := int64(16)
+	want := fwkrequest.InferenceRequestBody{
+		TokenizedRequest: director.tokenized,
+		Stream:           true,
+		MaxOutputTokens:  &maxTokens,
+		Model:            "m",
+	}
+	require.Equal(t, want, director.headerBody, "request body in ResponseHeader")
+	require.Same(t, director.tokenized, director.headerBody.TokenizedRequest)
+	require.Equal(t, want, director.bodyChunkBody, "request body in ResponseBody")
+	require.Same(t, director.tokenized, director.bodyChunkBody.TokenizedRequest)
+}
+
+// stragglerDirector starts a goroutine that holds a copy of the request and reads
+// its body, as a DataProducer does when it outlives its timeout:
+// dataProducerPluginsWithTimeout passes each producer a copy of the request and
+// returns without waiting for it.
+type stragglerDirector struct {
+	mockDirector
+	responseStarted chan struct{}
+	stop            chan struct{}
+	done            chan struct{}
+	contentKept     bool
+}
+
+func (d *stragglerDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, body *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
+	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: body}
+	producerRequest := *reqCtx.SchedulingRequest
+	go func() {
+		defer close(d.done)
+		for {
+			select {
+			case <-d.stop:
+				d.contentKept = producerRequest.Body.Completions != nil && producerRequest.Body.Payload != nil
+				return
+			default:
+				// Reads that overlap the release, for the race detector.
+				_ = producerRequest.Body.Completions
+				runtime.Gosched()
+			}
+		}
+	}()
+	return reqCtx, nil
+}
+
+func (d *stragglerDirector) HandleResponseHeader(_ context.Context, reqCtx *RequestContext) *RequestContext {
+	close(d.responseStarted)
+	return reqCtx
+}
+
+func TestProcessReleaseKeepsBodyForStragglingProducer(t *testing.T) {
+	body := []byte(`{"model":"m","stream":true,"prompt":"hello"}`)
+	registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+	director := &stragglerDirector{
+		responseStarted: make(chan struct{}),
+		stop:            make(chan struct{}),
+		done:            make(chan struct{}),
+	}
+	server := NewStreamingServer(nil, director, registry, 0)
+
+	reqs := append(requestMessages(reqcommon.PathCompletions, body, len(body)), streamingResponse()...)
+	srv := newInFlightProcessServer(reqs)
+	srv.start(t, server)
+	<-director.responseStarted
+	close(director.stop)
+	<-director.done
+	require.NoError(t, srv.finish())
+	require.True(t, director.contentKept, "request content cleared under a producer that still reads it")
 }
 
 // retainingDirector keeps the parsed body on the request, as the Director does
