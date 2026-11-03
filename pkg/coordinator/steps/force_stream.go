@@ -112,15 +112,17 @@ var errForceStreamUnreadable = errors.New("force-stream: upstream stream unreada
 // than return a truncated reply as a 200. It is handled like errForceStreamUnreadable.
 var errForceStreamTruncated = errors.New("force-stream: upstream stream ended before a terminal marker")
 
-// errForceStreamLossyFrame marks a chat or text stream whose delta carried a field
-// the reassembler does not fold (anything beyond role and content: reasoning,
-// tool_calls, refusal, audio, annotations). forceStreamLossy diverts a request that
-// declares such a feature up front, but a server-side default (a reasoning parser, a
-// template) emits these with no request-side signal. Detecting it on the frame falls
-// back to the pass-through, which preserves the field, rather than dropping it from a
-// forced reply. Nothing has reached the client, so it is handled like
-// errForceStreamUnreadable.
-var errForceStreamLossyFrame = errors.New("force-stream: streamed delta carried an unfoldable field; falling back to pass-through")
+// errForceStreamLossyFrame marks a stream that carried data the reassembler does
+// not fold: a chat delta field beyond role and content (reasoning, tool_calls,
+// refusal), a choice or frame field outside the folded set (token_ids returned
+// alongside text, routed_experts, prompt_token_ids), a non-text Messages block, or
+// a choice index past the declared n. forceStreamLossy diverts a request that
+// declares such a feature up front, but a server-side default (a reasoning parser,
+// routed experts) emits these with no request-side signal. Detecting it on the
+// frame falls back to the pass-through, which preserves the data, rather than
+// dropping it from a forced reply. Nothing has reached the client, so it is
+// handled like errForceStreamUnreadable.
+var errForceStreamLossyFrame = errors.New("force-stream: stream carried data the reassembler drops; falling back to pass-through")
 
 // Fields of an error frame a pod streams after its 200 headers. The vLLM and
 // SGLang chat and completions streams send the OpenAI envelope, an error object
@@ -427,6 +429,13 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	if shape != sseShapeChat && shape != sseShapeText {
 		return false
 	}
+	// return_token_ids adds token ids to every choice and the prompt's token ids to
+	// the reply, neither of which the fold keeps.
+	if v, ok := reqcommon.FieldValue(body, reqcommon.FieldReturnTokenIDs); ok {
+		if set, ok := v.(bool); ok && set {
+			return true
+		}
+	}
 	// Resolve each field through reqcommon.FieldValue, not a bare type assertion:
 	// the coordinator decodes only an allow-list of request fields and leaves the
 	// rest (tools, logprobs, reasoning) as json.RawMessage, which an assertion would
@@ -492,10 +501,10 @@ func forceStreamBody(src map[string]any, shape sseShape) map[string]any {
 	body := maps.Clone(src)
 	body[reqcommon.FieldStream] = true
 
-	// Only the chat and text shapes return a usage block, and only when asked, so
-	// request one for them. The Responses API has no stream_options (usage arrives
-	// in the terminal response event), and the generate reply carries no usage block.
-	if shape == sseShapeChat || shape == sseShapeText {
+	// The chat, text and generate streams report usage only when asked, so request
+	// it for them. The Responses and Messages streams carry usage on their own
+	// events and take no stream_options.
+	if shape == sseShapeChat || shape == sseShapeText || shape == sseShapeGenerate {
 		opts := map[string]any{}
 		if existing, ok := body[reqcommon.FieldStreamOptions].(map[string]any); ok {
 			maps.Copy(opts, existing)

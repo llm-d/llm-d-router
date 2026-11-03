@@ -141,6 +141,89 @@ func TestSSEReassemble_ChoicesChargedToCeiling(t *testing.T) {
 	require.ErrorIs(t, err, errForceStreamCeiling, "empty choices past the reservation trip the ceiling")
 }
 
+// TestSSEReassemble_UnfoldedChoiceKeyIsLossy verifies a non-null choice key the
+// fold does not reassemble marks the reply lossy, for the chat, text and generate
+// shapes. The frames are vLLM v0.31 stream shapes: return_token_ids streams
+// token_ids on a chat or text choice, and enable_return_routed_experts streams
+// routed_experts on a generate choice. A null value carries no data and is ignored,
+// since vLLM's generate stream sends routed_experts and sampling_mask as null on
+// every chunk.
+func TestSSEReassemble_UnfoldedChoiceKeyIsLossy(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shape sseShape
+		frame string
+		want  bool
+	}{
+		{"chat token_ids", sseShapeChat, `{"choices":[{"index":0,"delta":{"content":"hi"},"logprobs":null,"finish_reason":null,"token_ids":[151667]}]}`, true},
+		{"text token_ids", sseShapeText, `{"choices":[{"index":0,"text":"hi","logprobs":null,"finish_reason":null,"prompt_token_ids":null,"token_ids":[13]}]}`, true},
+		{"text prompt_token_ids", sseShapeText, `{"choices":[{"index":0,"text":"hi","prompt_token_ids":[1,2]}]}`, true},
+		{"generate routed_experts", sseShapeGenerate, `{"request_id":"g","choices":[{"index":0,"token_ids":[13],"routed_experts":"AAEC"}]}`, true},
+		{"generate sampling_mask", sseShapeGenerate, `{"request_id":"g","choices":[{"index":0,"token_ids":[13],"sampling_mask":[[1]]}]}`, true},
+		{"logprobs value", sseShapeText, `{"choices":[{"index":0,"text":"hi","logprobs":{"tokens":["hi"]}}]}`, true},
+		{"generate nulls", sseShapeGenerate, `{"request_id":"g","choices":[{"index":0,"logprobs":null,"finish_reason":null,"token_ids":[13],"routed_experts":null,"sampling_mask":null}],"usage":null}`, false},
+		{"chat folded keys", sseShapeChat, `{"choices":[{"index":0,"delta":{"content":"hi"},"logprobs":null,"finish_reason":"stop","stop_reason":"7"}]}`, false},
+		{"text folded keys", sseShapeText, `{"choices":[{"index":0,"text":"","logprobs":null,"finish_reason":"stop","stop_reason":"7","prompt_token_ids":null,"token_ids":null}]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSSEReassembler(tc.shape, 0)
+			r.add(frame(t, tc.frame))
+			require.Equal(t, tc.want, r.lossyFrame)
+		})
+	}
+}
+
+// TestSSEReassemble_UnfoldedTopLevelKeyIsLossy verifies a non-null top-level key
+// outside the envelope the fold rebuilds marks the reply lossy. vLLM's chat stream
+// with return_token_ids sends prompt_token_ids on its first chunk, which the
+// non-streaming reply carries at the top level.
+func TestSSEReassemble_UnfoldedTopLevelKeyIsLossy(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shape sseShape
+		frame string
+		want  bool
+	}{
+		{"chat prompt_token_ids", sseShapeChat, `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"prompt_token_ids":[151644,872],"prompt_text":null}`, true},
+		{"generate mm_placeholders", sseShapeGenerate, `{"request_id":"g","choices":[],"mm_placeholders":{"image":[]}}`, true},
+		{"chat envelope only", sseShapeChat, `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","system_fingerprint":"fp","choices":[],"usage":{"prompt_tokens":9}}`, false},
+		{"chat null extras", sseShapeChat, `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"prompt_token_ids":null,"prompt_text":null,"metrics":null}`, false},
+		{"generate envelope only", sseShapeGenerate, `{"request_id":"g","choices":[],"usage":{"prompt_tokens":3}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSSEReassembler(tc.shape, 0)
+			r.add(frame(t, tc.frame))
+			require.Equal(t, tc.want, r.lossyFrame)
+		})
+	}
+}
+
+// TestSSEReassemble_StopReason verifies stop_reason, which vLLM's non-streaming
+// choices always carry and its stream sets on the finish chunk, is kept on every
+// chat, text and generate choice, defaulting to null.
+func TestSSEReassemble_StopReason(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		shape  sseShape
+		frames []string
+		want   any
+	}{
+		{"text stop string", sseShapeText, []string{`{"choices":[{"index":0,"text":" 5, 6, "}]}`, `{"choices":[{"index":0,"text":"","finish_reason":"stop","stop_reason":"7"}]}`}, "7"},
+		{"chat stop token id", sseShapeChat, []string{`{"choices":[{"index":0,"delta":{"content":"hi"}}]}`, `{"choices":[{"index":0,"delta":{},"finish_reason":"stop","stop_reason":151645}]}`}, float64(151645)},
+		{"generate no stop", sseShapeGenerate, []string{`{"request_id":"g","choices":[{"index":0,"finish_reason":"length","token_ids":[1]}]}`}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSSEReassembler(tc.shape, 0)
+			for _, f := range tc.frames {
+				r.add(frame(t, f))
+			}
+			choice := r.result()["choices"].([]any)[0].(map[string]any)
+			require.Contains(t, choice, "stop_reason", "stop_reason is always present")
+			require.Equal(t, tc.want, choice["stop_reason"])
+		})
+	}
+}
+
 // TestSSEReassemble_UsageChargedToCeiling verifies the retained usage block counts
 // toward bufferedBytes, so usage-only frames that add new fields, or grow an
 // existing one, trip the per-request ceiling instead of growing the heap past the
@@ -287,19 +370,18 @@ func TestShapeForAPIType(t *testing.T) {
 	require.False(t, ok)
 }
 
-// TestSSEReassemble_DropsChoicesBeyondN verifies the reassembler ignores a choice
-// whose index is at or beyond the declared n, so an upstream returning more
-// choices than reserved cannot grow memory past the reservation.
-func TestSSEReassemble_DropsChoicesBeyondN(t *testing.T) {
+// TestSSEReassemble_ChoiceBeyondNIsLossy verifies a choice whose index is at or
+// beyond the declared n marks the reply lossy rather than being dropped, so the
+// request falls back instead of returning a 200 missing that choice. vLLM's
+// completions stream numbers choices output.index + prompt_idx*n, so a prompt list
+// of two with n=1 streams indices 0 and 1. The choice is still not stored, so an
+// upstream reporting surplus choices cannot grow memory past the reservation.
+func TestSSEReassemble_ChoiceBeyondNIsLossy(t *testing.T) {
 	r := newSSEReassembler(sseShapeText, 1)
-	r.add(frame(t, `{"choices":[{"index":0,"text":"keep"},{"index":5,"text":"drop"}]}`))
+	r.add(frame(t, `{"choices":[{"index":0,"text":"keep"},{"index":1,"text":"second prompt"}]}`))
 
-	choices := r.result()["choices"].([]any)
-	require.Len(t, choices, 1)
-	require.EqualValues(t, 0, choices[0].(map[string]any)["index"])
-	require.Equal(t, "keep", choices[0].(map[string]any)["text"])
-	// The dropped choice is not charged to the ceiling: only the kept choice's
-	// overhead and text are.
+	require.True(t, r.lossyFrame, "a choice past n must fall back, not be dropped")
+	require.Len(t, r.choices, 1, "the surplus choice is not stored")
 	require.EqualValues(t, forceStreamPerChoiceOverheadBytes+len("keep"), r.bufferedBytes())
 }
 
@@ -564,9 +646,9 @@ func TestSSEReassemble_Generate(t *testing.T) {
 	require.Nil(t, got["prompt_logprobs"])
 	require.Contains(t, got, "kv_transfer_params")
 	require.Nil(t, got["kv_transfer_params"])
-	// The non-streaming generate reply has no usage block, so the trailing
-	// frame's usage is dropped.
-	require.NotContains(t, got, "usage")
+	// vLLM's non-streaming generate reply carries usage, and its stream reports
+	// it in a trailing include_usage frame, so the forced reply keeps it.
+	require.Equal(t, map[string]any{"prompt_tokens": float64(10), "completion_tokens": float64(16), "total_tokens": float64(26)}, got["usage"])
 
 	choices := got["choices"].([]any)
 	require.Len(t, choices, 1)

@@ -210,6 +210,12 @@ func TestForceStreamLossy(t *testing.T) {
 	require.False(t, forceStreamLossy(sseShapeMessages, map[string]any{"thinking": nil}))
 	// thinking is a Messages field; chat turns reasoning on with its own fields.
 	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"thinking": map[string]any{"type": "enabled"}}))
+
+	// return_token_ids makes the chat and text replies carry token ids the fold
+	// drops, so a request that sets it is lossy; false or absent is not.
+	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"return_token_ids": true}))
+	require.True(t, forceStreamLossy(sseShapeText, map[string]any{"return_token_ids": true}))
+	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"return_token_ids": false}))
 }
 
 // TestForceStreamLossy_RawMessageFields guards the production body shape: the
@@ -300,8 +306,14 @@ func TestForceStreamBody_StreamOptions(t *testing.T) {
 		require.Equal(t, true, opts["include_usage"])
 	})
 
-	t.Run("no stream_options for responses, generate, or messages", func(t *testing.T) {
-		for _, shape := range []sseShape{sseShapeResponses, sseShapeGenerate, sseShapeMessages} {
+	t.Run("requests include_usage for generate", func(t *testing.T) {
+		body := forceStreamBody(map[string]any{"model": "m", "token_ids": []any{1}}, sseShapeGenerate)
+		opts := body["stream_options"].(map[string]any)
+		require.Equal(t, true, opts["include_usage"], "vLLM's generate stream reports usage only when asked")
+	})
+
+	t.Run("no stream_options for responses or messages", func(t *testing.T) {
+		for _, shape := range []sseShape{sseShapeResponses, sseShapeMessages} {
 			body := forceStreamBody(map[string]any{"model": "m"}, shape)
 			require.Equal(t, true, body["stream"])
 			_, has := body["stream_options"]
@@ -886,6 +898,8 @@ func TestForceStream_Generate_ReassemblesToJSON(t *testing.T) {
 	// The sampling_params cap is read, so the request is reservable and forced
 	// rather than passed through unchanged.
 	require.Equal(t, true, upstreamBody["stream"], "generate with a sampling_params cap must be force-streamed")
+	require.Equal(t, map[string]any{"include_usage": true}, upstreamBody["stream_options"],
+		"vLLM's generate stream reports usage only when asked")
 
 	result := recorder.Result()
 	require.Equal(t, "application/json", result.Header.Get("Content-Type"))
@@ -894,15 +908,15 @@ func TestForceStream_Generate_ReassemblesToJSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal(respBody, &got))
 
 	// The generate reply is token-level: a request_id envelope with prompt_logprobs
-	// and kv_transfer_params null, token_ids folded per choice, no object, and no
-	// usage block (unlike chat and text, the non-streaming generate reply omits it).
+	// and kv_transfer_params null, token_ids folded per choice, no object, and the
+	// usage block the include_usage frame reports, as vLLM's non-streaming reply has.
 	require.Equal(t, "generate-tokens-g1", got["request_id"])
 	require.NotContains(t, got, "object")
 	require.Contains(t, got, "prompt_logprobs")
 	require.Nil(t, got["prompt_logprobs"])
 	require.Contains(t, got, "kv_transfer_params")
 	require.Nil(t, got["kv_transfer_params"])
-	require.NotContains(t, got, "usage")
+	require.Equal(t, map[string]any{"prompt_tokens": float64(3), "completion_tokens": float64(4), "total_tokens": float64(7)}, got["usage"])
 	choice := got["choices"].([]any)[0].(map[string]any)
 	require.NotContains(t, choice, "routed_experts")
 	require.Equal(t, []any{float64(28715), float64(314), float64(678), float64(921)}, choice["token_ids"])

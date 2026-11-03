@@ -92,6 +92,47 @@ const (
 	partTypeText      = "text"
 )
 
+// Choice and envelope fields of a vLLM chat, completions or generate stream. A
+// choice's stop_reason is the stop string or token id that ended it, null when no
+// stop matched; it is a different field from the Anthropic Messages stop_reason
+// (fieldStopReason). foldedChoiceKeys and foldedFrameKeys list, per shape, the
+// keys the fold reassembles into the reply; a non-null key outside them carries
+// data the forced reply would drop.
+const (
+	fieldChoiceStopReason  = "stop_reason"
+	fieldTokenIDs          = "token_ids"
+	fieldText              = "text"
+	fieldID                = "id"
+	fieldObject            = "object"
+	fieldCreated           = "created"
+	fieldSystemFingerprint = "system_fingerprint"
+	fieldRequestID         = "request_id"
+)
+
+var (
+	foldedChoiceKeys = map[sseShape]map[string]bool{
+		sseShapeChat:     {reqcommon.FieldIndex: true, reqcommon.FieldDelta: true, reqcommon.FieldFinishReason: true, fieldChoiceStopReason: true},
+		sseShapeText:     {reqcommon.FieldIndex: true, fieldText: true, reqcommon.FieldFinishReason: true, fieldChoiceStopReason: true},
+		sseShapeGenerate: {reqcommon.FieldIndex: true, fieldTokenIDs: true, reqcommon.FieldFinishReason: true, fieldChoiceStopReason: true},
+	}
+	foldedFrameKeys = map[sseShape]map[string]bool{
+		sseShapeChat:     {fieldID: true, fieldObject: true, fieldCreated: true, reqcommon.FieldModel: true, fieldSystemFingerprint: true, reqcommon.FieldChoices: true, reqcommon.FieldUsage: true},
+		sseShapeText:     {fieldID: true, fieldObject: true, fieldCreated: true, reqcommon.FieldModel: true, fieldSystemFingerprint: true, reqcommon.FieldChoices: true, reqcommon.FieldUsage: true},
+		sseShapeGenerate: {fieldRequestID: true, reqcommon.FieldChoices: true, reqcommon.FieldUsage: true},
+	}
+)
+
+// hasUnfoldedKey reports whether m carries a non-null key outside folded. A
+// null value carries no data: vLLM sends unset optional fields as null.
+func hasUnfoldedKey(m map[string]any, folded map[string]bool) bool {
+	for k, v := range m {
+		if v != nil && !folded[k] {
+			return true
+		}
+	}
+	return false
+}
+
 // shapeForAPIType maps the API a request used to the reassembly shape its stream
 // folds into. ok is false for an API the force-stream path does not handle; the
 // caller then declines to force-stream rather than misparsing the stream as text.
@@ -124,6 +165,7 @@ type sseChoice struct {
 	tokenIDs     []any
 	finishReason any
 	hasFinish    bool
+	stopReason   any
 }
 
 // sseReassembler folds the data frames of one streamed completion into the
@@ -133,17 +175,18 @@ type sseChoice struct {
 // separate, and merges the usage block the include_usage trailing frame carries.
 //
 // Only the fields a non-streaming reply needs are folded: text content or token
-// ids, role, finish_reason, and usage. A chat delta's tool_calls, function_call,
-// logprobs, and reasoning are not reassembled, nor are a generate
-// choice's logprobs. The decode step leaves force-streaming off for a request that
-// declares such a field (see forceStreamLossy); a server-side default the request
-// does not declare is caught on the frame instead (lossyFrame), and both take the
-// pass-through, which preserves the dropped field.
+// ids, role, finish_reason, stop_reason, and usage. Anything else a stream
+// carries is not reassembled: a chat delta's tool_calls, function_call and
+// reasoning, any choice's logprobs, token ids returned alongside text, and
+// per-choice or per-reply extras such as routed_experts and prompt_token_ids. The
+// decode step leaves force-streaming off for a request that declares such a field
+// (see forceStreamLossy); one the request does not declare is caught on the frame
+// instead (lossyFrame), and both take the pass-through, which preserves it.
 type sseReassembler struct {
 	shape sseShape
 	// maxChoices caps how many choice indices fold, matching the client's declared
 	// n so an upstream reporting more choices than reserved cannot grow memory past
-	// the reservation. Zero means no cap.
+	// the reservation; a choice past it marks the reply lossy. Zero means no cap.
 	maxChoices int
 
 	id                string
@@ -164,10 +207,11 @@ type sseReassembler struct {
 	// reply so its status, usage, and error reach the client unchanged.
 	responseObject map[string]any
 
-	// lossyFrame is set when a chat delta carried a field beyond role and content,
-	// which the fold drops. The scan treats it as a fallback so the pass-through
-	// keeps the field. It catches a server-side default (reasoning parser, template)
-	// that forceStreamLossy cannot predict from the request.
+	// lossyFrame is set when a frame carried data the fold drops: a non-null key
+	// outside the folded set on a frame, a choice or a chat delta, or a choice
+	// index past maxChoices. The scan treats it as a fallback so the pass-through
+	// keeps the data. It catches what forceStreamLossy cannot predict from the
+	// request, such as a reasoning parser or routed experts enabled server-side.
 	lossyFrame bool
 
 	// Messages-shape accumulators. The Anthropic reply is assembled from its events
@@ -199,6 +243,9 @@ func (r *sseReassembler) add(frame map[string]any) {
 		return
 	}
 	r.captureMeta(frame)
+	if hasUnfoldedKey(frame, foldedFrameKeys[r.shape]) {
+		r.lossyFrame = true
+	}
 	if choices, ok := frame[reqcommon.FieldChoices].([]any); ok {
 		for _, c := range choices {
 			if choice, ok := c.(map[string]any); ok {
@@ -317,7 +364,7 @@ func (r *sseReassembler) addMessages(frame map[string]any) {
 func (r *sseReassembler) captureMeta(frame map[string]any) {
 	if r.shape == sseShapeGenerate {
 		if r.requestID == "" {
-			if id, ok := frame["request_id"].(string); ok {
+			if id, ok := frame[fieldRequestID].(string); ok {
 				r.requestID = id
 			}
 		}
@@ -334,17 +381,17 @@ func (r *sseReassembler) captureMeta(frame map[string]any) {
 		}
 	}
 	if r.systemFingerprint == "" {
-		if fp, ok := frame["system_fingerprint"].(string); ok {
+		if fp, ok := frame[fieldSystemFingerprint].(string); ok {
 			r.systemFingerprint = fp
 		}
 	}
 	if r.shape == sseShapeText && r.object == "" {
-		if object, ok := frame["object"].(string); ok {
+		if object, ok := frame[fieldObject].(string); ok {
 			r.object = object
 		}
 	}
 	if !r.hasCreated {
-		if created, ok := frame["created"]; ok && created != nil {
+		if created, ok := frame[fieldCreated]; ok && created != nil {
 			r.created = created
 			r.hasCreated = true
 		}
@@ -367,9 +414,9 @@ func (r *sseReassembler) choice(index int) *sseChoice {
 
 // foldChoice appends one streamed choice fragment to its accumulator. An absent
 // or null index defaults to 0 so a single-choice stream that omits it still folds
-// into one choice. An index that is not a non-negative integer, or is at or beyond
-// the declared n, is dropped, so an upstream returning malformed, out-of-range, or
-// surplus choices cannot grow the choice map past the reservation.
+// into one choice. An index that is not a non-negative integer is dropped; one at
+// or beyond the declared n is not stored either, so surplus choices cannot grow
+// the choice map past the reservation, but it marks the reply lossy.
 func (r *sseReassembler) foldChoice(choice map[string]any) {
 	index := 0
 	if v := choice[reqcommon.FieldIndex]; v != nil {
@@ -380,7 +427,15 @@ func (r *sseReassembler) foldChoice(choice map[string]any) {
 		index = n
 	}
 	if r.maxChoices > 0 && index >= r.maxChoices {
+		// A choice past the declared n is not stored, so it cannot grow memory past
+		// the reservation, but it is part of the reply: vLLM numbers completions
+		// choices output.index + prompt_idx*n, so a prompt list streams indices past
+		// n. Dropping it would return a 200 missing a choice, so the reply is lossy.
+		r.lossyFrame = true
 		return
+	}
+	if hasUnfoldedKey(choice, foldedChoiceKeys[r.shape]) {
+		r.lossyFrame = true
 	}
 	acc := r.choice(index)
 
@@ -404,7 +459,7 @@ func (r *sseReassembler) foldChoice(choice map[string]any) {
 			}
 		}
 	case sseShapeGenerate:
-		if ids, ok := choice["token_ids"].([]any); ok {
+		if ids, ok := choice[fieldTokenIDs].([]any); ok {
 			acc.tokenIDs = append(acc.tokenIDs, ids...)
 			// Account each buffered token at the per-token byte estimate the
 			// reservation uses, so an upstream that ignores max_tokens trips the
@@ -412,7 +467,7 @@ func (r *sseReassembler) foldChoice(choice map[string]any) {
 			r.contentBytes += int64(len(ids)) * forceStreamBytesPerToken
 		}
 	case sseShapeText:
-		if text, ok := choice["text"].(string); ok {
+		if text, ok := choice[fieldText].(string); ok {
 			acc.content.WriteString(text)
 			r.contentBytes += int64(len(text))
 		}
@@ -421,6 +476,9 @@ func (r *sseReassembler) foldChoice(choice map[string]any) {
 	if fr, ok := choice[reqcommon.FieldFinishReason]; ok && fr != nil {
 		acc.finishReason = fr
 		acc.hasFinish = true
+	}
+	if sr, ok := choice[fieldChoiceStopReason]; ok && sr != nil {
+		acc.stopReason = sr
 	}
 }
 
@@ -519,10 +577,7 @@ func (r *sseReassembler) result() map[string]any {
 	}
 	out[reqcommon.FieldChoices] = choices
 
-	// The generate endpoint's non-streaming reply carries no usage block, so the
-	// forced reply drops any usage its stream reports. Chat and text non-streaming
-	// replies do carry usage, so it is folded there.
-	if r.usage != nil && r.shape != sseShapeGenerate {
+	if r.usage != nil {
 		out[reqcommon.FieldUsage] = r.usage
 	}
 	return out
@@ -594,7 +649,7 @@ func (r *sseReassembler) terminated() bool {
 func (r *sseReassembler) writeEnvelope(out map[string]any) {
 	if r.shape == sseShapeGenerate {
 		if r.requestID != "" {
-			out["request_id"] = r.requestID
+			out[fieldRequestID] = r.requestID
 		}
 		out[reqcommon.FieldPromptLogprobs] = nil
 		out[reqcommon.FieldKVTransferParams] = nil
@@ -607,12 +662,12 @@ func (r *sseReassembler) writeEnvelope(out map[string]any) {
 		out[reqcommon.FieldModel] = r.model
 	}
 	if r.systemFingerprint != "" {
-		out["system_fingerprint"] = r.systemFingerprint
+		out[fieldSystemFingerprint] = r.systemFingerprint
 	}
 	if r.hasCreated {
-		out["created"] = r.created
+		out[fieldCreated] = r.created
 	}
-	out["object"] = r.resultObject()
+	out[fieldObject] = r.resultObject()
 }
 
 func (r *sseReassembler) resultObject() string {
@@ -635,6 +690,9 @@ func (r *sseReassembler) resultChoice(c *sseChoice) map[string]any {
 	} else {
 		choice[reqcommon.FieldFinishReason] = nil
 	}
+	// vLLM's non-streaming choices always carry stop_reason, null when no stop
+	// string or token id ended the choice.
+	choice[fieldChoiceStopReason] = c.stopReason
 
 	switch r.shape {
 	case sseShapeChat:
@@ -651,9 +709,9 @@ func (r *sseReassembler) resultChoice(c *sseChoice) map[string]any {
 		if tokens == nil {
 			tokens = []any{}
 		}
-		choice["token_ids"] = tokens
+		choice[fieldTokenIDs] = tokens
 	default:
-		choice["text"] = c.content.String()
+		choice[fieldText] = c.content.String()
 	}
 	return choice
 }

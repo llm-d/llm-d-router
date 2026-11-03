@@ -98,6 +98,7 @@ const (
 	FieldOutput               = "output"
 	FieldFunctions            = "functions"
 	FieldLogprobs             = "logprobs"
+	FieldReturnTokenIDs       = "return_token_ids"
 	FieldPromptLogprobs       = "prompt_logprobs"
 	FieldReasoningEffort      = "reasoning_effort"
 	FieldChatTemplateKwargs   = "chat_template_kwargs"
