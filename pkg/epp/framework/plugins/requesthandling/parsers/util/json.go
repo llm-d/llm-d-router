@@ -45,7 +45,9 @@ func ParseRenderRequest(data []byte) (*fwkrh.ParseResult, error) {
 }
 
 // UnmarshalEnvelope keeps objects, arrays, and rawFields opaque so routing
-// metadata edits cannot round-trip content through Go values.
+// metadata edits cannot round-trip content through Go values. The json.RawMessage
+// values can share memory with data, so callers must not modify them in place; to
+// change a value, replace it.
 func UnmarshalEnvelope(data []byte, rawFields ...string) (map[string]any, error) {
 	fields, ok := splitObject(data)
 	if !ok {
@@ -109,10 +111,7 @@ func splitObject(data []byte) (map[string]json.RawMessage, bool) {
 	}
 	for {
 		keyEnd := stringEnd(data, i)
-		key, ok := objectKey(data[i:keyEnd])
-		if !ok {
-			return nil, false
-		}
+		key := objectKey(data[i:keyEnd])
 		i = skipSpace(data, skipSpace(data, keyEnd)+1) // past ':'
 		valueEnd := jsonValueEnd(data, i)
 		fields[key] = json.RawMessage(data[i:valueEnd:valueEnd])
@@ -126,8 +125,9 @@ func splitObject(data []byte) (map[string]json.RawMessage, bool) {
 
 // objectKey decodes a quoted key. A key that is plain ASCII without escapes is
 // used as is; any other key goes through json.Unmarshal, which unescapes it and
-// replaces invalid UTF-8.
-func objectKey(quoted []byte) (string, bool) {
+// replaces invalid UTF-8. The caller has validated data, so json.Unmarshal of a
+// key cannot fail.
+func objectKey(quoted []byte) string {
 	plain := true
 	for _, c := range quoted {
 		if c == '\\' || c >= utf8.RuneSelf {
@@ -136,13 +136,11 @@ func objectKey(quoted []byte) (string, bool) {
 		}
 	}
 	if plain {
-		return string(quoted[1 : len(quoted)-1]), true
+		return string(quoted[1 : len(quoted)-1])
 	}
 	var key string
-	if err := json.Unmarshal(quoted, &key); err != nil {
-		return "", false
-	}
-	return key, true
+	_ = json.Unmarshal(quoted, &key)
+	return key
 }
 
 // The scanners below assume data is valid JSON and i is at the start of a token.

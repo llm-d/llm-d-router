@@ -120,11 +120,16 @@ func FuzzSplitObjectMatchesUnmarshal(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		got, ok := splitObject(data)
+		var want map[string]json.RawMessage
+		err := json.Unmarshal(data, &want)
 		if !ok {
+			// A declined object falls back to the copying json.Unmarshal path.
+			if err == nil && want != nil {
+				t.Fatalf("splitObject declined object %q", data)
+			}
 			return
 		}
-		var want map[string]json.RawMessage
-		if err := json.Unmarshal(data, &want); err != nil {
+		if err != nil {
 			t.Fatalf("splitObject accepted %q, json.Unmarshal: %v", data, err)
 		}
 		if diff := cmp.Diff(want, got); diff != "" {
