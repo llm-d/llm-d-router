@@ -90,8 +90,24 @@ func (i *indexer) podCacheFor(pod server) *podCache {
 		i.pods[pod.ServerID] = pc
 		i.logger.V(logutil.VERBOSE).Info("Created prefix index for pod",
 			"pod", pod.ServerID, "capacityBlocks", lruSize, "capacityFromMetrics", pod.CapacityFromMetrics)
+		i.warnIfOffloadCapacityUnknown(pod, lruSize)
 	}
 	return pc
+}
+
+// warnIfOffloadCapacityUnknown logs, when a pod's index is created or resized
+// from a capacity that covers the HBM tier only while the engine offloads KV
+// cache, so the undercount is visible to the operator. It fires once per
+// sizing, not per request.
+func (i *indexer) warnIfOffloadCapacityUnknown(pod server, capacityBlocks int) {
+	if !pod.OffloadCapacityUnknown {
+		return
+	}
+	i.logger.V(logutil.DEFAULT).Info("WARNING: the model server offloads KV cache but does not report the offload tier's capacity; "+
+		"the prefix index covers the HBM tier only, so prefix matches on this pod are under-reported. "+
+		"Disable autoTune and set lruCapacityPerServer to the offload-extended capacity, "+
+		"or run a model server version that reports it.",
+		"pod", pod.ServerID, "capacityBlocks", capacityBlocks)
 }
 
 // resizeIfNeeded applies pod's capacity to pc, whose lock the caller must
@@ -113,6 +129,7 @@ func (i *indexer) resizeIfNeeded(pc *podCache, pod server) {
 	pc.lru.Resize(newSize)
 	i.logger.V(logutil.DEFAULT).Info("Resized prefix index for pod",
 		"pod", pod.ServerID, "fromBlocks", oldSize, "toBlocks", newSize, "capacityFromMetrics", pod.CapacityFromMetrics)
+	i.warnIfOffloadCapacityUnknown(pod, newSize)
 }
 
 // Add inserts hashes tail-first: matching is anchored at the first block, so
