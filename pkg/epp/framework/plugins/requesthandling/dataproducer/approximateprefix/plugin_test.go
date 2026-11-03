@@ -28,6 +28,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -459,6 +460,92 @@ func TestMakeserver_CapacityFromMetrics(t *testing.T) {
 			assert.Equal(t, tc.want, p.makeserver(endpoint))
 		})
 	}
+}
+
+// TestMakeserver_OffloadTier checks how the offload-extended capacity an
+// engine reports in tokens combines with its HBM block count under each
+// capacityTier, and when the undercount warning is raised.
+func TestMakeserver_OffloadTier(t *testing.T) {
+	tests := []struct {
+		name    string
+		tier    string
+		metrics *fwkdl.Metrics
+		want    server
+	}{
+		{
+			// SGLang v0.5.16, --hicache-ratio 2, 200000 one-token pages: the host
+			// pool wins and converts at the 64-token router block, not the page.
+			name:    "sglang hicache",
+			metrics: &fwkdl.Metrics{CacheBlockSize: 1, CacheNumBlocks: 200000, KvCacheMaxTokenCapacity: 400001},
+			want:    server{NumOfGPUBlocks: 6250, CapacityFromMetrics: true},
+		},
+		{
+			name:    "sglang hicache with hbm tier",
+			tier:    capacityTierHBM,
+			metrics: &fwkdl.Metrics{CacheBlockSize: 1, CacheNumBlocks: 200000, KvCacheMaxTokenCapacity: 400001},
+			want:    server{NumOfGPUBlocks: 3125, CapacityFromMetrics: true},
+		},
+		{
+			name:    "vllm cpu tier larger than hbm",
+			metrics: &fwkdl.Metrics{CacheBlockSize: 16, CacheNumBlocks: 1024, KvCacheMaxTokenCapacity: 1048576, KvCacheOffloadDetected: true},
+			want:    server{NumOfGPUBlocks: 16384, CapacityFromMetrics: true},
+		},
+		{
+			// The CPU tier holds a copy of the HBM tier, so the larger one is the
+			// cache's capacity, never the sum.
+			name:    "vllm cpu tier smaller than hbm",
+			metrics: &fwkdl.Metrics{CacheBlockSize: 16, CacheNumBlocks: 74272, KvCacheMaxTokenCapacity: 1048576, KvCacheOffloadDetected: true},
+			want:    server{NumOfGPUBlocks: 18568, CapacityFromMetrics: true},
+		},
+		{
+			name:    "vllm offloading without a capacity",
+			metrics: &fwkdl.Metrics{CacheBlockSize: 16, CacheNumBlocks: 1024, KvCacheOffloadDetected: true},
+			want:    server{NumOfGPUBlocks: 256, CapacityFromMetrics: true, OffloadCapacityUnknown: true},
+		},
+		{
+			name:    "vllm offloading without a capacity with hbm tier",
+			tier:    capacityTierHBM,
+			metrics: &fwkdl.Metrics{CacheBlockSize: 16, CacheNumBlocks: 1024, KvCacheOffloadDetected: true},
+			want:    server{NumOfGPUBlocks: 256, CapacityFromMetrics: true},
+		},
+		{
+			name:    "offloading detected before the cache metrics",
+			metrics: &fwkdl.Metrics{KvCacheOffloadDetected: true},
+			want:    server{NumOfGPUBlocks: 500},
+		},
+		{
+			name:    "token capacity without a block count",
+			metrics: &fwkdl.Metrics{KvCacheMaxTokenCapacity: 6400},
+			want:    server{NumOfGPUBlocks: 100, CapacityFromMetrics: true},
+		},
+		{
+			name:    "token capacity below one router block",
+			metrics: &fwkdl.Metrics{KvCacheMaxTokenCapacity: 10},
+			want:    server{NumOfGPUBlocks: 1, CapacityFromMetrics: true},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config{AutoTune: true, BlockSizeTokens: defaultBlockSizeTokens, LRUCapacityPerServer: 500, CapacityTier: tc.tier}
+			p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+			require.NoError(t, err)
+
+			id := k8stypes.NamespacedName{Name: "pod1"}
+			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: id}, tc.metrics, fwkdl.NewAttributes())
+			tc.want.ServerID = ServerID(id)
+			assert.Equal(t, tc.want, p.makeserver(endpoint))
+		})
+	}
+}
+
+func TestNewDataProducer_CapacityTier(t *testing.T) {
+	for _, tier := range []string{"", capacityTierAll, capacityTierHBM} {
+		_, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config{AutoTune: true, CapacityTier: tier}, testHandle())
+		assert.NoError(t, err, "capacityTier %q", tier)
+	}
+	_, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config{AutoTune: true, CapacityTier: "cpu"}, testHandle())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CapacityTier")
 }
 
 // TestPreRequest_ResizesLRUWhenMetricsArriveLate checks that a pod first
