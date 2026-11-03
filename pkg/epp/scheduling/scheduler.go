@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/scheduling/decisionhistory"
 )
 
 const (
@@ -54,8 +55,18 @@ func NewSchedulerWithConfig(config *SchedulerConfig) *Scheduler {
 }
 
 type Scheduler struct {
-	profileHandler fwksched.ProfileHandler
-	profiles       map[string]fwksched.SchedulerProfile
+	profileHandler  fwksched.ProfileHandler
+	profiles        map[string]fwksched.SchedulerProfile
+	decisionHistory *decisionhistory.Recorder
+}
+
+// WithDecisionRecorder sets the recorder that retains recent scheduling
+// decisions for the /debug/scheduling/recent endpoint. Without a recorder,
+// decision collection stays disabled and the scheduling hot path is
+// unchanged.
+func (s *Scheduler) WithDecisionRecorder(recorder *decisionhistory.Recorder) *Scheduler {
+	s.decisionHistory = recorder
+	return s
 }
 
 // Schedule finds the target pod based on metrics and the requested lora adapter.
@@ -66,13 +77,20 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	handlerName := s.profileHandler.TypedName()
 
 	scheduleStart := time.Now()
+	collector := s.decisionHistory.Begin(request.RequestID, request.TargetModel)
+	ctx = decisionhistory.ContextWithCollector(ctx, collector)
 	var failureReason string
 	defer func() {
 		metrics.RecordSchedulerE2ELatency(ctx, time.Since(scheduleStart))
 		metrics.RecordSchedulerAttempt(err, request.TargetModel, result)
 		if err != nil {
 			metrics.RecordSchedulerFailure(failureReason)
+		} else {
+			// failureReason keeps the last assigned candidate on the success
+			// path; the decision history records failure reasons only.
+			failureReason = ""
 		}
+		s.decisionHistory.Commit(collector, time.Now(), primaryEndpointID(result), failureReason)
 	}()
 
 	profileRunResults := map[string]*fwksched.ProfileRunResult{}
@@ -171,11 +189,30 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 func runSchedulerProfile(ctx context.Context, name string, profile fwksched.SchedulerProfile,
 	request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint,
 ) (*fwksched.ProfileRunResult, error) {
+	if c := decisionhistory.CollectorFromContext(ctx); c != nil {
+		c.ProfileStarted(name, len(candidateEndpoints))
+	}
 	profileCtx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanRunSchedulerProfile,
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(semconv.LLMDEPPProfileName(name)),
 	)
 	defer span.End()
 
-	return profile.Run(profileCtx, request, candidateEndpoints)
+	result, err := profile.Run(profileCtx, request, candidateEndpoints)
+	if err != nil {
+		if c := decisionhistory.CollectorFromContext(ctx); c != nil {
+			c.ProfileFailed(err.Error())
+		}
+	}
+	return result, err
+}
+
+// primaryEndpointID returns the ID of the primary profile's first picked
+// endpoint, or an empty string when the attempt picked none.
+func primaryEndpointID(result *fwksched.SchedulingResult) string {
+	endpoint := result.PrimaryEndpoint()
+	if endpoint == nil {
+		return ""
+	}
+	return endpoint.GetMetadata().ID.String()
 }

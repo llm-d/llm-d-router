@@ -37,6 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/scheduling/decisionhistory"
 )
 
 // internalSpanKind is hoisted to avoid allocating a span-start option on every
@@ -197,6 +198,9 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		if eliminated := candidates - len(filteredEndpoints); eliminated > 0 {
 			metrics.RecordSchedulerFilterEliminated(p.name, typedName.Type, typedName.Name, eliminated)
 		}
+		if c := decisionhistory.CollectorFromContext(ctx); c != nil {
+			c.FilterRan(typedName.Type, typedName.Name, candidates, len(filteredEndpoints))
+		}
 		if debugEnabled {
 			debug.Info("Completed running filter plugin successfully", "plugin", typedName, "endpoints", filteredEndpoints)
 		}
@@ -264,6 +268,9 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 			verbose.Info("Running scorer plugin", "plugin", typedName)
 		}
 		scores := runScorer(ctx, tracer, tracingActive, scorer, request, endpoints)
+		if c := decisionhistory.CollectorFromContext(ctx); c != nil {
+			c.ScorerRan(typedName.Type, typedName.Name, scorer.Weight(), endpointScoresByID(scores))
+		}
 		for endpoint, score := range scores { // weight is relative to the sum of weights
 			if debugEnabled {
 				debug.Info("Calculated score", "plugin", typedName, "endpoint", endpoint.GetMetadata().ID, "score", score)
@@ -430,7 +437,29 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 		result.ScoredCandidates = storage
 	}
 
+	if c := decisionhistory.CollectorFromContext(ctx); c != nil {
+		names, topScores := topScoredEndpoints(scoredEndpoints, c.TopK())
+		var targets []string
+		if result != nil {
+			targets = make([]string, len(result.TargetEndpoints))
+			for i, endpoint := range result.TargetEndpoints {
+				targets[i] = endpoint.GetMetadata().ID.String()
+			}
+		}
+		c.Picked(names, topScores, targets)
+	}
+
 	return result
+}
+
+// endpointScoresByID rekeys a scorer's per-endpoint scores by endpoint ID for
+// decision recording. Only called when a decision collector is present.
+func endpointScoresByID(scores map[fwksched.Endpoint]float64) map[string]float64 {
+	byID := make(map[string]float64, len(scores))
+	for endpoint, score := range scores {
+		byID[endpoint.GetMetadata().ID.String()] = score
+	}
+	return byID
 }
 
 // topScoredEndpoints returns the names and weighted scores of the highest
