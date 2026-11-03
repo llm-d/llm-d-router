@@ -177,6 +177,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics/collectors"
 	"github.com/llm-d/llm-d-router/pkg/epp/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/scheduling/decisionhistory"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 	"github.com/llm-d/llm-d-router/pkg/epp/statesync"
 	"github.com/llm-d/llm-d-router/version"
@@ -538,6 +539,15 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
 	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
+
+	if opts.SchedulingDecisionsHistory > 0 {
+		decisionRecorder := decisionhistory.NewRecorder(opts.SchedulingDecisionsHistory, opts.SchedulingDecisionsTopEndpoints)
+		if err = runserver.SetupSchedulingDecisionsDebugHandler(mgr, decisionRecorder); err != nil {
+			setupLog.Error(err, "Failed to setup scheduling decisions debug handler")
+			return nil, nil, err
+		}
+		scheduler = scheduler.WithDecisionRecorder(decisionRecorder)
+	}
 
 	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
 		setupLog.Error(err, "Plugin stability validation failed")
