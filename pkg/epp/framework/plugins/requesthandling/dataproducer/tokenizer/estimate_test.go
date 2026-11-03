@@ -276,16 +276,50 @@ func TestEstimateBackend_EmbeddingsNestedTokenIDsPassthrough(t *testing.T) {
 	assert.Equal(t, 5, tp.TokenCount())
 }
 
-// TestEstimateBackend_EmbeddingsTextEstimatesPlainText asserts string
-// embeddings input is byte-estimated from its text, like completions.
-func TestEstimateBackend_EmbeddingsTextEstimatesPlainText(t *testing.T) {
+func TestEstimateBackend_EmbeddingsTextPreservesPrompts(t *testing.T) {
+	batchPrompt := strings.Repeat("a", 1200)
 	tests := []struct {
-		name  string
-		input fwkrequest.EmbeddingsInput
-		want  string
+		name                string
+		input               fwkrequest.EmbeddingsInput
+		want                []string
+		wantTotalTokens     int
+		wantMaxPromptTokens int
 	}{
-		{name: "single string", input: fwkrequest.EmbeddingsInput{Raw: "abcdefgh"}, want: "abcdefgh"},
-		{name: "string array", input: fwkrequest.EmbeddingsInput{Strings: []string{"abcd", "efgh"}}, want: "abcd efgh"},
+		{
+			name:                "single string",
+			input:               fwkrequest.EmbeddingsInput{Raw: "abcdefgh"},
+			want:                []string{"abcdefgh"},
+			wantTotalTokens:     2,
+			wantMaxPromptTokens: 2,
+		},
+		{
+			name:                "single-element string array",
+			input:               fwkrequest.EmbeddingsInput{Strings: []string{"abcdefgh"}},
+			want:                []string{"abcdefgh"},
+			wantTotalTokens:     2,
+			wantMaxPromptTokens: 2,
+		},
+		{
+			name:                "string array",
+			input:               fwkrequest.EmbeddingsInput{Strings: []string{"abcd", "efgh"}},
+			want:                []string{"abcd", "efgh"},
+			wantTotalTokens:     2,
+			wantMaxPromptTokens: 1,
+		},
+		{
+			name:                "unaligned strings with longest in the middle",
+			input:               fwkrequest.EmbeddingsInput{Strings: []string{"a", "bcdef", "gh"}},
+			want:                []string{"a", "bcdef", "gh"},
+			wantTotalTokens:     4,
+			wantMaxPromptTokens: 2,
+		},
+		{
+			name:                "batch total exceeds context range",
+			input:               fwkrequest.EmbeddingsInput{Strings: []string{batchPrompt, batchPrompt, batchPrompt, batchPrompt}},
+			want:                []string{batchPrompt, batchPrompt, batchPrompt, batchPrompt},
+			wantTotalTokens:     1200,
+			wantMaxPromptTokens: 300,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -293,8 +327,12 @@ func TestEstimateBackend_EmbeddingsTextEstimatesPlainText(t *testing.T) {
 				Embeddings: &fwkrequest.EmbeddingsRequest{Input: tt.input},
 			})
 			require.NoError(t, err)
-			require.Len(t, tp.Prompts, 1)
-			assert.Equal(t, packBytes([]byte(tt.want)), tp.Prompts[0].TokenIDs)
+			assert.Equal(t, tt.wantTotalTokens, tp.TokenCount())
+			assert.Equal(t, tt.wantMaxPromptTokens, tp.MaxPromptTokenCount())
+			require.Len(t, tp.Prompts, len(tt.want))
+			for i, prompt := range tt.want {
+				assert.Equal(t, packBytes([]byte(prompt)), tp.Prompts[i].TokenIDs)
+			}
 		})
 	}
 }

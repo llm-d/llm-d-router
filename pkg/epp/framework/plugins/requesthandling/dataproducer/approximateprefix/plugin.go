@@ -321,6 +321,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	prefixCacheServers := make(map[ServerID]int)
 	predictedCachedTokens := make(map[ServerID]int)
 	totalBlocks := 0
+	indexedTokens := 0
 	for i, hashes := range perPromptHashes {
 		for j, matchLen := range p.indexerInst.MatchLongestPrefix(hashes, candidates) {
 			if matchLen == 0 {
@@ -330,6 +331,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 			predictedCachedTokens[candidates[j]] += min(matchLen*blockSize, perPromptTokens[i])
 		}
 		totalBlocks += len(hashes)
+		indexedTokens += min(len(hashes)*blockSize, perPromptTokens[i])
 	}
 	if v := log.FromContext(ctx).V(logutil.TRACE); v.Enabled() {
 		matched := make(map[string]int, len(prefixCacheServers))
@@ -342,7 +344,8 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	bestAvailable := 0
 	for _, pod := range pods {
 		id := ServerID(pod.GetMetadata().ID)
-		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(prefixCacheServers[id], totalBlocks, blockSize))
+		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(prefixCacheServers[id], totalBlocks, blockSize).
+			WithTokenCounts(indexedTokens, predictedCachedTokens[id]))
 		bestAvailable = max(bestAvailable, predictedCachedTokens[id])
 	}
 

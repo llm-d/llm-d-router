@@ -137,6 +137,9 @@ type PrefixCacheMatchInfo struct {
 	// per tier. Speculative index entries count under SpeculativeTierKey.
 	// Nil when the producer supplies no tier data.
 	cachedBlocksByTier map[string]int
+	indexedTokens      int
+	cachedTokens       int
+	hasTokenCounts     bool
 	// optional multimodal block-match attribution
 	mm *MMMatchInfo
 }
@@ -166,6 +169,19 @@ func (p *PrefixCacheMatchInfo) WithCachedBlockCount(cachedBlockCount int) *Prefi
 	p.cachedBlockCount = cachedBlockCount
 	p.confirmedCachedBlockCount = cachedBlockCount
 	return p
+}
+
+// WithTokenCounts records counts bounded by each prompt's length, excluding
+// unhashed tails.
+func (p *PrefixCacheMatchInfo) WithTokenCounts(indexedTokens, cachedTokens int) *PrefixCacheMatchInfo {
+	p.indexedTokens = indexedTokens
+	p.cachedTokens = cachedTokens
+	p.hasTokenCounts = true
+	return p
+}
+
+func (p *PrefixCacheMatchInfo) TokenCounts() (indexedTokens, cachedTokens int, ok bool) {
+	return p.indexedTokens, p.cachedTokens, p.hasTokenCounts
 }
 
 // WithMM attaches MM tracking. Call only for requests that carry MM content
@@ -227,6 +243,9 @@ func (p *PrefixCacheMatchInfo) Clone() fwkdl.Cloneable {
 		cachedBlockCount:          p.cachedBlockCount,
 		confirmedCachedBlockCount: p.confirmedCachedBlockCount,
 		cachedBlocksByTier:        maps.Clone(p.cachedBlocksByTier),
+		indexedTokens:             p.indexedTokens,
+		cachedTokens:              p.cachedTokens,
+		hasTokenCounts:            p.hasTokenCounts,
 	}
 	if p.mm != nil {
 		clone.mm = ptr.To(*p.mm)

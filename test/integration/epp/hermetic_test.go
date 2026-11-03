@@ -19,6 +19,7 @@ limitations under the License.
 package epp
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -32,9 +33,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/testing/protocmp"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/contextlengthaware"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
@@ -461,6 +466,89 @@ dataLayer:
 					}
 				})
 			}
+		})
+	}
+}
+
+func TestEmbeddingsBatchContextLengthFiltering(t *testing.T) {
+	configText := `
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: openai-parser
+  - type: token-producer
+    parameters:
+      estimate: {}
+  - type: context-length-aware
+    parameters:
+      enableFiltering: true
+  - type: max-score-picker
+  - type: mock-metrics-source
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+  - pluginRef: mock-metrics-source
+schedulingProfiles:
+  - name: default
+    plugins:
+    - pluginRef: context-length-aware
+    - pluginRef: max-score-picker
+`
+	prompt := strings.Repeat("a", 1200)
+	for _, tt := range []struct {
+		name         string
+		input        []string
+		wantRejected bool
+	}{
+		{
+			name:  "each input fits despite batch total exceeding range",
+			input: []string{prompt, prompt, prompt, prompt},
+		},
+		{
+			name:         "one input exceeds range",
+			input:        []string{prompt, strings.Repeat("b", 4100), prompt},
+			wantRejected: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			h := NewTestHarness(ctx, t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
+			h.WithPods([]PodState{P(0, 0, 0.1)}).WaitForSync(1, modelMyModel).WaitForMetricsDelivery()
+
+			pod := &corev1.Pod{}
+			key := types.NamespacedName{Namespace: h.Namespace, Name: "pod-0"}
+			require.NoError(t, K8sClient().Get(ctx, key, pod))
+			pod.Labels[contextlengthaware.DefaultContextLengthLabel] = "0-1024"
+			require.NoError(t, K8sClient().Update(ctx, pod))
+			require.Eventually(t, func() bool {
+				pods := h.Datastore.PodList(datastore.AllPodsPredicate)
+				return len(pods) == 1 && pods[0].GetMetadata().Labels[contextlengthaware.DefaultContextLengthLabel] == "0-1024"
+			}, 10*time.Second, 50*time.Millisecond, "context length label must reach the EPP before routing")
+
+			body, err := json.Marshal(map[string]any{
+				"model": modelMyModelTarget,
+				"input": tt.input,
+			})
+			require.NoError(t, err)
+			requests := fwkepp.ReqRaw(map[string]string{
+				":path":               "/v1/embeddings",
+				"content-type":        "application/json",
+				metadata.ObjectiveKey: modelMyModel,
+			}, string(body))
+			responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
+			require.NoError(t, err)
+			if tt.wantRejected {
+				require.Empty(t, cmp.Diff(ExpectRejectNoEndpoints(), responses,
+					protocmp.Transform(), errorBodyOption(true)))
+				return
+			}
+			require.Len(t, responses, 2, "a batch whose inputs each fit must be routed")
+			require.NotNil(t, responses[0].GetRequestHeaders())
+			headers := responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders()
+			require.Equal(t, "192.168.1.1:8000", headerValue(headers, metadata.DestinationEndpointKey))
 		})
 	}
 }

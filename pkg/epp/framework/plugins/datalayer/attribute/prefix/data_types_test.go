@@ -63,7 +63,8 @@ func TestPrefixCacheMatchInfo_WithConfirmedCachedBlockCount(t *testing.T) {
 func TestPrefixCacheMatchInfo_CloneCopiesCachedBlockCounts(t *testing.T) {
 	orig := NewPrefixCacheMatchInfo(192, 256, 16).
 		WithCachedBlockCount(240).
-		WithConfirmedCachedBlockCount(224)
+		WithConfirmedCachedBlockCount(224).
+		WithTokenCounts(4090, 3830)
 	clone, ok := orig.Clone().(*PrefixCacheMatchInfo)
 	require.True(t, ok)
 	assert.Equal(t, orig.MatchBlocks(), clone.MatchBlocks())
@@ -71,14 +72,23 @@ func TestPrefixCacheMatchInfo_CloneCopiesCachedBlockCounts(t *testing.T) {
 	assert.Equal(t, orig.BlockSizeTokens(), clone.BlockSizeTokens())
 	assert.Equal(t, orig.CachedBlockCount(), clone.CachedBlockCount())
 	assert.Equal(t, orig.ConfirmedCachedBlockCount(), clone.ConfirmedCachedBlockCount())
+	indexed, cached, ok := clone.TokenCounts()
+	require.True(t, ok)
+	assert.Equal(t, 4090, indexed)
+	assert.Equal(t, 3830, cached)
 
 	// Mutating the clone must not affect the original.
 	clone.WithCachedBlockCount(1)
 	clone.WithConfirmedCachedBlockCount(2)
+	clone.WithTokenCounts(3, 1)
 	assert.Equal(t, 240, orig.CachedBlockCount())
 	assert.Equal(t, 224, orig.ConfirmedCachedBlockCount())
 	assert.Equal(t, 1, clone.CachedBlockCount())
 	assert.Equal(t, 2, clone.ConfirmedCachedBlockCount())
+	indexed, cached, ok = orig.TokenCounts()
+	require.True(t, ok)
+	assert.Equal(t, 4090, indexed)
+	assert.Equal(t, 3830, cached)
 }
 
 func TestPrefixCacheMatchInfo_CachedBlocksByTierDefaultsToNil(t *testing.T) {

@@ -45,6 +45,8 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix"
+	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/outlenbucket"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
@@ -1193,6 +1195,79 @@ func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
 	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+}
+
+func TestUncachedInputTokens_ApproximateBatch(t *testing.T) {
+	cache, err := approximateprefix.ApproxPrefixCacheFactory(approxprefixconstants.ApproxPrefixCachePluginType, nil, testutils.NewTestHandle(t.Context()))
+	require.NoError(t, err)
+	producer, ok := cache.(fwkrh.DataProducer)
+	require.True(t, ok)
+
+	prompts := make([][]uint32, 100)
+	for i := range prompts {
+		prompts[i] = []uint32{uint32(i)}
+	}
+	request := &fwksched.InferenceRequest{
+		RequestID:   "cold-batch",
+		TargetModel: "test-model",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: fwkrequest.NewTokenizedRequest(prompts),
+		},
+	}
+	endpoint := newStubSchedulingEndpoint("test-ep")
+	require.NoError(t, producer.Produce(t.Context(), request, []fwksched.Endpoint{endpoint}))
+
+	inputTokens := int64(request.Body.TokenizedRequest.TokenCount())
+	require.Equal(t, inputTokens, uncachedInputTokens(endpoint, inputTokens, attrprefix.PrefixCacheMatchInfoDataKey))
+}
+
+func TestUncachedInputTokens_PromptBoundedCounts(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		matchedBlocks int
+		totalBlocks   int
+		indexedTokens int
+		cachedTokens  int
+		wantUncached  int64
+	}{
+		{
+			name:          "short prompt cached",
+			matchedBlocks: 1,
+			totalBlocks:   3,
+			indexedTokens: 6,
+			cachedTokens:  1,
+			wantUncached:  5,
+		},
+		{
+			name:          "long prompt cached",
+			matchedBlocks: 2,
+			totalBlocks:   3,
+			indexedTokens: 6,
+			cachedTokens:  5,
+			wantUncached:  1,
+		},
+		{
+			name:          "unhashed tail",
+			matchedBlocks: 1,
+			totalBlocks:   2,
+			indexedTokens: 5,
+			cachedTokens:  1,
+			wantUncached:  5,
+		},
+		{
+			name:         "no hashed prefix",
+			wantUncached: 6,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoint := newStubSchedulingEndpoint("test-ep")
+			info := attrprefix.NewPrefixCacheMatchInfo(tt.matchedBlocks, tt.totalBlocks, 4).
+				WithTokenCounts(tt.indexedTokens, tt.cachedTokens)
+			endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, info)
+
+			require.Equal(t, tt.wantUncached, uncachedInputTokens(endpoint, 6, attrprefix.PrefixCacheMatchInfoDataKey))
+		})
+	}
 }
 
 func TestUncachedInputTokens_Overestimate(t *testing.T) {

@@ -28,6 +28,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -103,6 +104,77 @@ func TestProduce(t *testing.T) {
 		prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
 		assert.Equal(t, 0, prefixInfo.MatchBlocks())
 		assert.Equal(t, 2, prefixInfo.TotalBlocks())
+	}
+}
+
+func TestProducePromptBoundedTokenCounts(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	for _, tt := range []struct {
+		name        string
+		cached      []uint32
+		maxBlocks   int
+		maxTokens   int
+		wantIndexed int
+		wantCached  int
+	}{
+		{
+			name:        "short prompt cached",
+			cached:      []uint32{1},
+			maxBlocks:   defaultMaxPrefixBlocks,
+			wantIndexed: 6,
+			wantCached:  1,
+		},
+		{
+			name:        "long prompt cached",
+			cached:      []uint32{2, 3, 4, 5, 6},
+			maxBlocks:   defaultMaxPrefixBlocks,
+			wantIndexed: 6,
+			wantCached:  5,
+		},
+		{
+			name:        "unhashed tail",
+			cached:      []uint32{1},
+			maxBlocks:   1,
+			wantIndexed: 5,
+			wantCached:  1,
+		},
+		{
+			name:      "no hashed prefix",
+			maxTokens: 2,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := newDataProducer(t.Context(), ApproxPrefixCachePluginType, config{
+				BlockSizeTokens:        4,
+				MaxPrefixBlocksToMatch: tt.maxBlocks,
+				MaxPrefixTokensToMatch: tt.maxTokens,
+				LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+			}, testHandle())
+			require.NoError(t, err)
+			endpoint := fwksched.NewEndpoint(
+				&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}},
+				fwkdl.NewMetrics(), fwkdl.NewAttributes(),
+			)
+			seed := &fwksched.InferenceRequest{Body: tokenizedBody(tt.cached)}
+			for _, hashes := range prefixhash.GetBlockHashes(t.Context(), seed, 4, defaultMaxPrefixBlocks) {
+				p.indexer().Add(hashes, p.makeserver(endpoint))
+			}
+			req := &fwksched.InferenceRequest{
+				RequestID: uuid.NewString(),
+				Body: &fwkrequest.InferenceRequestBody{
+					TokenizedRequest: fwkrequest.NewTokenizedRequest([][]uint32{{1}, {2, 3, 4, 5, 6}}),
+				},
+			}
+			require.NoError(t, p.Produce(t.Context(), req, []fwksched.Endpoint{endpoint}))
+			raw, ok := endpoint.Get(attrprefix.PrefixCacheMatchInfoDataKey)
+			require.True(t, ok)
+			info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+			require.True(t, ok)
+			indexed, cached, ok := info.TokenCounts()
+			require.True(t, ok)
+			assert.Equal(t, tt.wantIndexed, indexed)
+			assert.Equal(t, tt.wantCached, cached)
+		})
 	}
 }
 

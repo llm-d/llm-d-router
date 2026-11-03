@@ -237,7 +237,10 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
-		return estimateMultiStringCompletions(body.Completions)
+		return estimateMultiStringInputs(body.Completions.Prompt.Strings)
+	}
+	if body.Embeddings != nil && len(body.Embeddings.Input.Strings) > 1 {
+		return estimateMultiStringInputs(body.Embeddings.Input.Strings)
 	}
 
 	raw, err := estimateBytes(body)
@@ -247,9 +250,9 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 	return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: packBytes(raw)}}}, nil
 }
 
-func estimateMultiStringCompletions(req *fwkrequest.CompletionsRequest) (*fwkrequest.TokenizedRequest, error) {
-	prompts := make([]fwkrequest.PromptTokens, 0, len(req.Prompt.Strings))
-	for _, s := range req.Prompt.Strings {
+func estimateMultiStringInputs(inputs []string) (*fwkrequest.TokenizedRequest, error) {
+	prompts := make([]fwkrequest.PromptTokens, 0, len(inputs))
+	for _, s := range inputs {
 		ids := packBytes([]byte(s))
 		prompts = append(prompts, fwkrequest.PromptTokens{TokenIDs: ids})
 	}
