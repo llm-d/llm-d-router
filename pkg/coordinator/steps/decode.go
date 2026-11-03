@@ -345,7 +345,7 @@ func injectMediaPartUUIDs(items []any, apiType reqcommon.APIType, entries []pipe
 		modCounter[media.modality]++
 		hashes := hashesByMod[media.modality]
 		if localIdx < len(hashes) {
-			media.part["uuid"] = hashes[localIdx]
+			media.part[reqcommon.FieldUUID] = hashes[localIdx]
 			continue
 		}
 		// A miss means entries and parts got out of line upstream (see
