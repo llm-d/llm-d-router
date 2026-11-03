@@ -173,10 +173,9 @@ var (
 // Force-stream family. Recorded by the decode step when force-streaming is
 // enabled: it streams the upstream response and reassembles it into one
 // non-streaming reply. The gauge tracks bytes reserved against the shared
-// buffer budget by the shapes that buffer the whole reply, so an operator can
-// see how close concurrent forced requests run to the limit; the counter
-// attributes each candidate request to its outcome, so it sums to candidate
-// volume.
+// buffer budget by in-flight forced requests, so an operator can see how close
+// they run to the limit; the counter records each candidate's outcome, as the
+// Help string defines.
 var (
 	forceStreamBufferedBytes = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
