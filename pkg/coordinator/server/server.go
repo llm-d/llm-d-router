@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -117,6 +118,11 @@ func otelHandler(next http.Handler) http.Handler {
 // request checks, and the pipeline. Any other request reaches next as sent. The
 // request is copied, as http.StripPrefix does, so middleware outside this one
 // keeps the client's path.
+func isServedInferencePath(cleanPath string) bool {
+	return reqcommon.DetectAPIType(cleanPath).Path() == cleanPath ||
+		cleanPath == sglangapiv1.SglangService_Generate_FullMethodName
+}
+
 func canonicalizeInferencePath(routes chi.Routes) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +131,7 @@ func canonicalizeInferencePath(routes chi.Routes) func(http.Handler) http.Handle
 				return
 			}
 			c := path.Clean(r.URL.Path)
-			if (c == r.URL.Path && r.URL.RawPath == "") || reqcommon.DetectAPIType(c).Path() != c ||
+			if (c == r.URL.Path && r.URL.RawPath == "") || !isServedInferencePath(c) ||
 				!routes.Match(chi.NewRouteContext(), http.MethodPost, c) {
 				next.ServeHTTP(w, r)
 				return
@@ -232,6 +238,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Post(reqcommon.PathMessages, s.handleInference)
 	r.Post(reqcommon.PathVLLMGenerate, s.handleInference)
 	// r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
+	r.Post(sglangapiv1.SglangService_Generate_FullMethodName, s.handleSGLangGRPC)
 	r.Get(pathHealthz, s.handleHealth)
 	r.Get(pathReadyz, s.handleHealth)
 	r.NotFound(s.passthrough.ServeHTTP)
@@ -247,6 +254,12 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 		Handler:      otelHandler(r),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
+	}
+	if !cfg.SecureServing {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		s.httpServer.Protocols = protocols
 	}
 
 	return s, nil

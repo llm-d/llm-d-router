@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
@@ -50,6 +51,8 @@ var internalForwardingHeaders = map[string]bool{
 	routing.EndpointPinHeader:             true,
 	routing.PreferHeader:                  true,
 	routing.KVCachePrefillHeader:          true,
+	routing.PrefillEndpointHeader:         true,
+	routing.LegacyPrefillEndpointHeader:   true,
 }
 
 func isForwardableHeader(name string) bool {
@@ -234,6 +237,20 @@ type RequestContext struct {
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
+
+	// GenerateRequest holds the parsed protobuf message for SGLang native gRPC
+	// Generate requests. Nil for JSON HTTP requests.
+	GenerateRequest *sglangapiv1.GenerateRequest
+	// PrefillStream holds the active concurrent SGLang gRPC prefill stream
+	// started by PrefillStep and coordinated with DecodeStep.
+	PrefillStream *SGLangPrefillStream
+}
+
+// ClosePrefillStream cancels and releases any active concurrent prefill stream.
+func (rc *RequestContext) ClosePrefillStream() {
+	if rc != nil && rc.PrefillStream != nil {
+		rc.PrefillStream.Close()
+	}
 }
 
 // MultimodalEntry describes one multimodal item in the request and where it

@@ -42,15 +42,17 @@ itself.
 
 When the sidecar reads a request body and refuses it, it answers with a
 vLLM-style JSON 400, including on `/v1/messages`. The coordinator answers in the
-error envelope of the request's API: Anthropic's for `/v1/messages` and
-OpenAI's for the other paths.
+error envelope of the request's API: Anthropic's for `/v1/messages`, gRPC status
+trailers for `/sglang.api.v1.SglangService/Generate`, and OpenAI's for the other
+HTTP paths.
 
 ## Path forms
 
 Paths are case-sensitive. The coordinator runs before EPP and the sidecar runs
-after it, so they accept different forms of the six inference API paths:
+after it, so they accept different forms of the inference paths:
 `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`,
-`/inference/v1/generate` and `/generate`.
+`/inference/v1/generate`, `/generate` and
+`/sglang.api.v1.SglangService/Generate`.
 
 The coordinator cleans the path of a POST request with Go's `path.Clean`. When
 the result is an inference API path it serves, the request is routed, checked
@@ -59,9 +61,9 @@ segments or an encoded slash do not change the outcome. Every other request
 keeps its path, so the 405 in the table applies to the exact path only.
 
 EPP picks its request parser by matching the end of the raw path and ignores a
-trailing slash. The sidecar therefore serves a POST to the six paths with or
+trailing slash. The sidecar therefore serves a POST to those paths with or
 without a trailing slash, and no other form of them. It answers a POST to a
-percent-encoded form of the six paths with a 307 redirect to the decoded path,
+percent-encoded form of those paths with a 307 redirect to the decoded path,
 for example `/v1%2Fresponses` to `/v1/responses`. Its `ServeMux` redirects a
 path with repeated slashes or dot segments to the cleaned path, for example
 `//v1/responses` to `/v1/responses`, with the status Go's `net/http` uses for
@@ -95,7 +97,9 @@ table.
 | POST | `/v1/responses` | served | served | forwards a stateless request |
 | POST | `/v1/messages` | served | served | forwards |
 | POST | `/generate` | served | passthrough [1] | no route |
-| not POST | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate` | passthrough [3] | 405 | terminates `GET /v1/responses` (WebSocket) |
+| POST | `/sglang.api.v1.SglangService/Generate` | served | served | no route |
+| POST | `/sglang.api.v1.SglangService/{other}` | passthrough | passthrough | no route |
+| not POST | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, `/sglang.api.v1.SglangService/Generate` | passthrough [3] | 405 | terminates `GET /v1/responses` (WebSocket) |
 | not POST | `/generate` | passthrough [3] | passthrough [3] | no route |
 | POST | `/v1/messages/count_tokens` | passthrough | passthrough | forwards |
 | POST | `/v1/conversations` | passthrough | passthrough | forwards |
@@ -115,7 +119,7 @@ table.
 | GET, DELETE | `/v1/requests/{id}` | passthrough | answered by the `async-broker` step when enabled, which answers other methods with 405; otherwise passthrough | no route |
 | any method chi recognizes | `/v1/files` and its sub-paths, `/v1/embeddings`, any other path | passthrough | passthrough | no route |
 
-1. The coordinator pipeline does not handle SGLang generate requests. The
+1. The coordinator pipeline does not handle HTTP `POST /generate` requests. The
    request reaches a decode pod's sidecar, which serves it.
 2. Stateful. Without the agentic-api gateway, the request reaches whichever
    decode pod EPP selects, and any state the engine keeps exists on that pod

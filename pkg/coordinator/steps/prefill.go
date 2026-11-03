@@ -76,6 +76,9 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	if reqCtx.GenerateRequest != nil {
+		return s.executeSGLangGRPC(ctx, reqCtx)
+	}
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)

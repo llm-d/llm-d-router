@@ -161,6 +161,9 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	if reqCtx.GenerateRequest != nil {
+		return nil
+	}
 	// The pipeline's only check of this invariant: this is the first step to
 	// pair on Modality (see modIndex in applyRenderResponse), replace-media-urls
 	// entries are already in place, and the later readers take whatever this

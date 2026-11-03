@@ -203,7 +203,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		// Render populates TokenIDs on every success path (including a valid
 		// empty prompt array in the completions branch), so gate on the step
 		// having run rather than on len > 0.
-		if executed["render"] {
+		if executed["render"] && reqCtx.GenerateRequest == nil {
 			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
 		}
 		coordmetrics.RecordEncodeSubrequests(reqCtx.Route, reqCtx.EncodeFanout)

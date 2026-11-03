@@ -184,6 +184,9 @@ func NewReplaceMediaURLsStep(_ *gateway.Client, params map[string]any) (pipeline
 func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	if reqCtx.GenerateRequest != nil {
+		return nil
+	}
 	logger := log.FromContext(ctx).WithName(ReplaceMediaURLsStepName)
 
 	// One slice, tagged by modality, in request order: that order is what pairs
