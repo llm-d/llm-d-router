@@ -249,7 +249,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllminference-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllminference-parser, vllmgrpc-parser, vllmhttp-parser, sglanggrpc-parser, sglanghttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.metricsDataSource.scheme` | Scheme EPP uses to scrape model server metrics (`http` or `https`). | `http` |
 | `router.epp.metricsDataSource.path` | URL path on model server pods that serves Prometheus metrics. | `/metrics` |
 | `router.epp.metricsDataSource.port` | Port override for model server metrics scrapes (1-65535), such as `8000` when inference uses gRPC on `50051`. Unset scrapes each endpoint's inference port. Do not set on multi-port data-parallel pools. | `null` |

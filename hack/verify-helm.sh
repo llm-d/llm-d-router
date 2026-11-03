@@ -70,6 +70,7 @@ test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set r
 test_cases_llm_d_router_gateway["vllm-grpc-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["vllm-grpc-override-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=GRPC --set router.modelServers.grpcServiceName=vllm.grpc.engine.VllmEngine --set router.epp.parsers[0]=vllmgrpc-parser --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["vllm-grpc-empty-service-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.grpcServiceName= --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["sglang-grpc-gke"]="--set provider.name=gke --set router.modelServers.type=sglang --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["pdb"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
@@ -153,6 +154,23 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
     gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
     if ! grep -q "type: GRPC" "${gke_yaml}" || grep -q "grpcServiceName:" "${gke_yaml}"; then
       echo "Validation failed: empty router.modelServers.grpcServiceName did not omit grpcServiceName on GRPC HealthCheckPolicy for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "sglang-grpc-gke" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "pluginRef: sglanggrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: sglanggrpc-parser and passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'appProtocol: "kubernetes.io/h2c"' "${epp_yaml}"; then
+      echo "Validation failed: h2c appProtocol not found in InferencePool for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'grpcServiceName: "/sglang.api.v1.SglangService/HealthCheck"' "${gke_yaml}"; then
+      echo "Validation failed: SGLang gRPC HealthCheckPolicy not found in rendered output for test: ${key}"
       exit 1
     fi
   fi
@@ -319,6 +337,7 @@ test_cases_llm_d_router_standalone["proxy-autoscaling"]="--set router.modelServe
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["vllm-grpc"]="--set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.targetPorts[0].number=50051 --set router.epp.metricsDataSource.port=8000 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+test_cases_llm_d_router_standalone["sglang-grpc"]="--set router.modelServers.type=sglang --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_standalone["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
@@ -382,6 +401,13 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     fi
     if ! grep -Eq "^[[:space:]]+port: 8000$" "${epp_yaml}"; then
       echo "Validation failed: metricsDataSource.port not rendered in standalone EPP config for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "sglang-grpc" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "pluginRef: sglanggrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: sglanggrpc-parser and passthrough-parser not found in rendered output for test: ${key}"
       exit 1
     fi
   fi
