@@ -25,6 +25,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 // TestEndpointScoresMetadata verifies the opt-in request-path dynamic metadata contract: with
@@ -32,11 +33,11 @@ import (
 // struct mapping every endpoint the scheduler scored to its score, including candidates the picker
 // did not select, while the endpoint key itself is unchanged.
 func TestEndpointScoresMetadata(t *testing.T) {
-	h := NewTestHarness(t.Context(), t, WithStandardMode(), WithEmitEndpointScores()).WithBaseResources()
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithEmitEndpointScores()).WithBaseResources()
 
 	// Both pods stay strictly below the utilization-detector limits (queue < 5, KV < 0.8)
 	// so the default filter drops neither and the scheduler scores both.
-	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget), P(1, 4, 0.5, modelMyModelTarget)}
+	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget), eppharness.P(1, 4, 0.5, modelMyModelTarget)}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
 
 	envoyLb := requestHeaderEnvoyLbMetadata(t, h)
@@ -63,9 +64,9 @@ func TestEndpointScoresMetadata(t *testing.T) {
 // TestEndpointScoresMetadataOffByDefault verifies that without --emit-endpoint-scores the
 // request-path dynamic metadata carries only the destination endpoint key.
 func TestEndpointScoresMetadataOffByDefault(t *testing.T) {
-	h := NewTestHarness(t.Context(), t, WithStandardMode()).WithBaseResources()
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode()).WithBaseResources()
 
-	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget), P(1, 5, 0.5, modelMyModelTarget)}
+	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget), eppharness.P(1, 5, 0.5, modelMyModelTarget)}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 
 	envoyLb := requestHeaderEnvoyLbMetadata(t, h)
@@ -78,10 +79,10 @@ func TestEndpointScoresMetadataOffByDefault(t *testing.T) {
 
 // requestHeaderEnvoyLbMetadata drives one LLM request through the EPP and returns the envoy.lb
 // dynamic metadata struct attached to the request-headers ext_proc response.
-func requestHeaderEnvoyLbMetadata(t *testing.T, h *TestHarness) *structpb.Struct {
+func requestHeaderEnvoyLbMetadata(t *testing.T, h *eppharness.TestHarness) *structpb.Struct {
 	t.Helper()
 
-	requests := fwkepp.ReqLLM(Logger(), "hello", modelMyModel, modelMyModelTarget)
+	requests := fwkepp.ReqLLM(eppharness.Logger(), "hello", modelMyModel, modelMyModelTarget)
 
 	// RequestHeaders + RequestBody -> request header response and request body response.
 	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
