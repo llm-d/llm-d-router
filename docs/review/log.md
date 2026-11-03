@@ -1,5 +1,9 @@
 # Update Log
 
+## 2026-11-03
+
+* **Update**: Expanded diff-path routing in [review_a_pull_request.md](playbooks/review_a_pull_request.md) to cover all non-test Go packages under `cmd/`, `pkg/`, and `internal/`, added production Go routing coverage, unified `rules/index.md` section discovery, code-span-safe link validation, and `provenance.json` schema validation to `hack/render_playbook.py`, and removed duplicate verbosity-guard prose from [observability.md](rules/observability.md).
+
 ## 2026-11-02
 
 * **Update**: Refactored the review bundle into a two-stage workflow: stripped YAML frontmatter, `sources:`, and `[^id]` footnotes from Stage-1 `rules/*.md`, removed 5 rules duplicating `AGENTS.md` and CI linters (58 to 53 rules), moved all citation provenance, `stale_after` timestamps, recurrence counts, and per-rule consequences into [`provenance.json`](provenance.json), compiled a human-readable [`docs/review_playbook.md`](../review_playbook.md) via `hack/render_playbook.py`, restricted path existence validation to routing-table globs in [review_a_pull_request.md](playbooks/review_a_pull_request.md), and moved `stale_after` expiration enforcement into opt-in `--check-staleness`.

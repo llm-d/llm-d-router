@@ -60,7 +60,7 @@
       "title": "Observability",
       "kind": "failure-class",
       "stale_after": "2027-04-26T00:00:00Z",
-      "description": "Canonical metric subsystems and bounded label cardinality, single terminal request outcomes, package-scoped OpenTelemetry spans, and guarded debug logs."
+      "description": "Canonical metric subsystems and bounded label cardinality, single terminal request outcomes, package-scoped OpenTelemetry spans, and bounded debug state."
     },
     "testing_and_ci": {
       "title": "Testing and CI",
@@ -1888,7 +1888,7 @@
         "decisions/sampled_per_plugin_otel_spans_and_opt_in_kv_event_spans.md"
       ]
     },
-    "observability#guard-per-item-debug-loops-and-cap-stateful-plugin-dumps": {
+    "observability#summarize-collections-in-string-and-cap-stateful-plugin-dumps": {
       "applies_to": [
         "pkg/*/metrics/**",
         "pkg/common/observability/**",
@@ -1896,7 +1896,7 @@
         "docs/metrics*.md",
         "docs/telemetry.md"
       ],
-      "consequence": "Unguarded per-candidate formatting allocates on every request even when debug logging is disabled, and uncapped state dumps stall debug endpoints.",
+      "consequence": "Formatting full collections on the request path allocates per item even at low log verbosity, and uncapped state dumps stall debug endpoints.",
       "observed_prs": 57,
       "examples": [
         {

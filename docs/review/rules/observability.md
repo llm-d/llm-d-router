@@ -11,6 +11,6 @@ Record at most one terminal outcome per request across early-return, buffered, a
 ## Acquire package-scoped OTel tracers and propagate spans end to end
 Acquire OpenTelemetry tracers via `tracing.Tracer(TracerScope)` with a package-scoped `TracerScope` constant (`llm-d.ai/...`), standard semantic-convention attribute keys, and route templates rather than raw URLs. Extract inbound W3C trace context at ingress and propagate spans across all outbound HTTP and gRPC calls.
 
-## Guard per-item debug loops and cap stateful plugin dumps
-Guard per-candidate and per-block debug loops behind `v.Enabled()`, summarize collections by count in `String()`, and implement `DumpState` only on stateful plugins with sanitized entries capped to fixed top-K bounds.
+## Summarize collections in String() and cap stateful plugin dumps
+Summarize collections by count in `String()` on hot paths, and implement `DumpState` only on stateful plugins with sanitized entries capped to fixed top-K bounds.
 - Accept: Omitting debug logs on routine plugin no-op branches when sibling plugins stay silent and proxy trace headers already record the decision.

@@ -373,7 +373,7 @@ Back new scoring formulas, cache indexes, hot-path locks, and default threshold 
 
 ## Observability
 
-Canonical metric subsystems and bounded label cardinality, single terminal request outcomes, package-scoped OpenTelemetry spans, and guarded debug logs.
+Canonical metric subsystems and bounded label cardinality, single terminal request outcomes, package-scoped OpenTelemetry spans, and bounded debug state.
 
 ### Register metrics under canonical component subsystems with bounded label cardinality
 
@@ -400,11 +400,11 @@ Acquire OpenTelemetry tracers via `tracing.Tracer(TracerScope)` with a package-s
 - **Settled decision:** [Ratio-sampled per-plugin OpenTelemetry spans with high-overhead KV-event spans gated off](review/decisions/sampled_per_plugin_otel_spans_and_opt_in_kv_event_spans.md).
 - **Examples:** Observed in 37 PRs: [#708](https://github.com/llm-d/llm-d-router/issues/708), [#922](https://github.com/llm-d/llm-d-router/pull/922#discussion_r3178210848), [#1513](https://github.com/llm-d/llm-d-router/pull/1513#discussion_r3369205741)
 
-### Guard per-item debug loops and cap stateful plugin dumps
+### Summarize collections in String() and cap stateful plugin dumps
 
-Guard per-candidate and per-block debug loops behind `v.Enabled()`, summarize collections by count in `String()`, and implement `DumpState` only on stateful plugins with sanitized entries capped to fixed top-K bounds.
+Summarize collections by count in `String()` on hot paths, and implement `DumpState` only on stateful plugins with sanitized entries capped to fixed top-K bounds.
 
-- **Why it matters:** Unguarded per-candidate formatting allocates on every request even when debug logging is disabled, and uncapped state dumps stall debug endpoints.
+- **Why it matters:** Formatting full collections on the request path allocates per item even at low log verbosity, and uncapped state dumps stall debug endpoints.
 - **Reviewers accept:** Omitting debug logs on routine plugin no-op branches when sibling plugins stay silent and proxy trace headers already record the decision ([#2319](https://github.com/llm-d/llm-d-router/pull/2319#issuecomment-5265371475)).
 - **Settled decision:** [Once-per-request operational logs use V(logging.DEFAULT)](review/decisions/once_per_request_logs_default_verbosity.md).
 - **Examples:** Observed in 57 PRs: [#891](https://github.com/llm-d/llm-d-router/pull/891#discussion_r3189062435), [#901](https://github.com/llm-d/llm-d-router/pull/901#discussion_r3252750496), [#972](https://github.com/llm-d/llm-d-router/pull/972#discussion_r3178428969)

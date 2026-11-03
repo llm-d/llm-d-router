@@ -39,6 +39,8 @@ ROUTING_TABLE_FILE = "playbooks/review_a_pull_request.md"
 ROUTING_TABLE_HEADER = "Touched repository paths"
 PROVENANCE_FILE = "provenance.json"
 GLOB_CHARS = frozenset("*?[")
+GO_ROUTING_DIRS = ("cmd", "pkg", "internal")
+TEST_OR_PROCESS_ONLY_RULES = frozenset({"testing_and_ci.md", "scope_and_process.md"})
 
 ALLOWED_KEYS = {
     "okf_version",
@@ -52,6 +54,26 @@ ALLOWED_KEYS = {
     "generated",
     "verified",
 }
+
+ALLOWED_PROV_TOP_KEYS = {"corpus", "sections", "rules"}
+ALLOWED_PROV_SECTION_KEYS = {"title", "kind", "stale_after", "description"}
+ALLOWED_PROV_RULE_KEYS = {
+    "applies_to",
+    "consequence",
+    "observed_prs",
+    "examples",
+    "decisions",
+    "accept_decisions",
+    "accept_examples",
+    "open_question",
+}
+ALLOWED_PROV_OQ_KEYS = {"file", "citations"}
+
+CODE_OR_LINK_RE = re.compile(
+    r"(?P<code>(?<!`)(`{3,})(?!`)(?:.*?)(?<!`)\2(?!`)|(?<!`)(`{1,2})(?!`)(?:(?!\n\n).)*?(?<!`)\3(?!`))"
+    r"|(?P<bang>!?)\[(?P<label>(?:`+[^`\n]*`+|(?!\n\n)[^\[\]])+)\]\((?P<link>[^)\n]+)\)",
+    re.DOTALL,
+)
 
 
 def unquote_yaml(val: str) -> str:
@@ -161,6 +183,7 @@ def parse_stage1_rule_file(text: str, rel: str = "") -> Tuple[str, List[Dict[str
     lines = text.splitlines()
     sec_title = ""
     rules: List[Dict[str, Optional[str]]] = []
+    seen_anchors: set[str] = set()
     cur_title: Optional[str] = None
     cur_rule_lines: List[str] = []
     cur_accept: Optional[str] = None
@@ -178,47 +201,78 @@ def parse_stage1_rule_file(text: str, rel: str = "") -> Tuple[str, List[Dict[str
             )
 
     for idx, line in enumerate(lines, 1):
-        if line.startswith("# ") and not line.startswith("## "):
-            if sec_title:
-                raise ValueError(f"{rel}:{idx}: multiple H1 headings in rule file")
-            sec_title = line[2:].strip()
-        elif line.startswith("## ") and not line.startswith("### "):
+        if re.match(r"^#{3,}(?:\s|$)", line):
+            raise ValueError(
+                f"{rel}:{idx}: Stage-1 rule files must not contain ### or deeper subheadings"
+            )
+        if re.match(r"^##(?:\s|$)", line):
+            if not sec_title:
+                raise ValueError(
+                    f"{rel}:{idx}: '## <Rule>' heading must appear after '# <Section Title>'"
+                )
             _flush()
-            cur_title = line[3:].strip()
+            rtitle = line[2:].strip()
+            if not rtitle:
+                raise ValueError(f"{rel}:{idx}: empty '## <Rule>' heading")
+            ranchor = github_heading_anchor(rtitle)
+            if not ranchor or ranchor in seen_anchors:
+                raise ValueError(
+                    f"{rel}:{idx}: duplicate or empty rule heading anchor {ranchor!r}"
+                )
+            seen_anchors.add(ranchor)
+            cur_title = rtitle
             cur_rule_lines = []
             cur_accept = None
             cur_open = None
-        elif line.startswith("### "):
-            raise ValueError(f"{rel}:{idx}: Stage-1 rule files must not contain ### subheadings")
+        elif re.match(r"^#(?:\s|$)", line):
+            if sec_title or cur_title is not None or rules:
+                raise ValueError(f"{rel}:{idx}: multiple or misplaced H1 headings in rule file")
+            sec_title = line[1:].strip()
+            if not sec_title:
+                raise ValueError(f"{rel}:{idx}: empty '# <Section Title>' heading")
         elif line.startswith("- Accept:"):
             if cur_title is None or cur_accept is not None:
                 raise ValueError(f"{rel}:{idx}: misplaced or duplicate '- Accept:' line")
-            cur_accept = line[len("- Accept:") :].strip()
+            acc_val = line[len("- Accept:") :].strip()
+            if not acc_val:
+                raise ValueError(f"{rel}:{idx}: empty '- Accept:' value")
+            cur_accept = acc_val
         elif line.startswith("- Open:"):
             if cur_title is None or cur_open is not None:
                 raise ValueError(f"{rel}:{idx}: misplaced or duplicate '- Open:' line")
-            cur_open = line[len("- Open:") :].strip()
-        elif cur_title is not None:
-            if line.strip():
-                if cur_accept is not None or cur_open is not None:
-                    raise ValueError(
-                        f"{rel}:{idx}: rule prose must precede '- Accept:' and '- Open:' lines"
-                    )
-                cur_rule_lines.append(line)
+            open_val = line[len("- Open:") :].strip()
+            if not open_val:
+                raise ValueError(f"{rel}:{idx}: empty '- Open:' value")
+            cur_open = open_val
+        elif line.strip():
+            if cur_title is None:
+                raise ValueError(
+                    f"{rel}:{idx}: unexpected content outside '## <Rule>' section"
+                )
+            if cur_accept is not None or cur_open is not None:
+                raise ValueError(
+                    f"{rel}:{idx}: rule prose must precede '- Accept:' and '- Open:' lines"
+                )
+            cur_rule_lines.append(line)
 
     _flush()
     if not sec_title:
         raise ValueError(f"{rel}: missing '# <Section Title>' heading")
+    if not rules:
+        raise ValueError(f"{rel}: Stage-1 rule file contains no '## <Rule>' entries")
     return sec_title, rules
 
 
 def rewrite_links_to_docs(text: str, source_dir_from_docs: str) -> str:
     """Rewrites relative Markdown links authored inside docs/<source_dir_from_docs>/
-    to paths relative to docs/ (where docs/review_playbook.md lives).
+    to paths relative to docs/ (where docs/review_playbook.md lives), skipping code spans.
     """
 
     def _repl(m: re.Match[str]) -> str:
-        label, link = m.group(1), m.group(2)
+        if m.group("code") is not None or m.group("bang") == "!":
+            return m.group(0)
+        label = m.group("label")
+        link = m.group("link")
         if link.startswith(("http://", "https://", "mailto:", "#")):
             return m.group(0)
         if "#" in link:
@@ -231,7 +285,7 @@ def rewrite_links_to_docs(text: str, source_dir_from_docs: str) -> str:
         rel_from_docs = posixpath.relpath(target_from_repo, "docs")
         return f"[{label}]({rel_from_docs}{frag_suffix})"
 
-    return re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _repl, text)
+    return CODE_OR_LINK_RE.sub(_repl, text)
 
 
 def url_to_short_ref(url: str) -> str:
@@ -276,7 +330,7 @@ def parse_rules_index_entries(bundle_dir: pathlib.Path) -> List[Tuple[str, str]]
         raise FileNotFoundError(f"Missing rules index: {rules_index_path}")
     entries: List[Tuple[str, str]] = []
     for line in rules_index_path.read_text(encoding="utf-8").splitlines():
-        m_item = re.match(r"^\* \[([^\]]+)\]\(([^)]+\.md)\)", line.strip())
+        m_item = re.match(r"^[-*]\s+\[([^\]]+)\]\(([^)]+\.md)\)", line.strip())
         if m_item:
             entries.append((m_item.group(1).strip(), m_item.group(2).strip()))
     return entries
@@ -294,13 +348,23 @@ def render_playbook(bundle_dir: pathlib.Path, omit_generated_header: bool = Fals
     if not prov_path.is_file():
         raise FileNotFoundError(f"Missing provenance sidecar: {prov_path}")
     prov = json.loads(prov_path.read_text(encoding="utf-8"))
+    if not isinstance(prov, dict):
+        raise ValueError(f"{PROVENANCE_FILE}: top-level JSON value must be an object")
     sec_prov_map: Dict[str, Any] = prov.get("sections") or {}
     rule_prov_map: Dict[str, Any] = prov.get("rules") or {}
 
     sec_entries = parse_rules_index_entries(bundle_dir)
+    seen_sec_files: set[str] = set()
     parsed_sections: List[Tuple[str, str, List[Dict[str, Optional[str]]]]] = []
     for sec_title, sec_file in sec_entries:
+        if "/" in sec_file:
+            raise ValueError(f"rules/index.md: expected bare filename in rules/, got {sec_file!r}")
+        if sec_file in seen_sec_files:
+            raise ValueError(f"rules/index.md: duplicate rule file entry {sec_file!r}")
+        seen_sec_files.add(sec_file)
         sec_path = bundle_dir / "rules" / sec_file
+        if not sec_path.is_file():
+            raise FileNotFoundError(f"rules/index.md: missing rule file rules/{sec_file}")
         parsed_title, rules = parse_stage1_rule_file(
             sec_path.read_text(encoding="utf-8"), f"rules/{sec_file}"
         )
@@ -309,6 +373,15 @@ def render_playbook(bundle_dir: pathlib.Path, omit_generated_header: bool = Fals
                 f"rules/{sec_file}: H1 {parsed_title!r} does not match rules/index.md {sec_title!r}"
             )
         parsed_sections.append((sec_title, sec_file[:-3], rules))
+
+    disk_rule_files = {
+        p.name for p in (bundle_dir / "rules").glob("*.md") if p.name != "index.md"
+    }
+    missing_idx_files = sorted(disk_rule_files - seen_sec_files)
+    if missing_idx_files:
+        raise ValueError(
+            f"rules/index.md: missing rule files present in rules/: {missing_idx_files}"
+        )
 
     out_lines: List[str] = ["# Review Playbook", ""]
     if not omit_generated_header:
@@ -337,6 +410,8 @@ def render_playbook(bundle_dir: pathlib.Path, omit_generated_header: bool = Fals
             if rkey not in rule_prov_map:
                 raise KeyError(f"Missing provenance entry for {rkey}")
             rprov = rule_prov_map[rkey]
+            if not isinstance(rprov, dict):
+                raise ValueError(f"{PROVENANCE_FILE} ({rkey}): rule entry must be an object")
 
             rule_prose = rewrite_links_to_docs(str(r["rule"] or ""), "review/rules")
             consequence = str(rprov.get("consequence") or "").strip()
@@ -348,12 +423,16 @@ def render_playbook(bundle_dir: pathlib.Path, omit_generated_header: bool = Fals
             out_lines.append(f"- **Why it matters:** {consequence}")
 
             if r.get("accept"):
-                acc_text = str(r["accept"]).rstrip(".")
+                acc_text = rewrite_links_to_docs(str(r["accept"]), "review/rules").rstrip(".")
                 acc_refs: List[str] = []
                 for dec_rel in rprov.get("accept_decisions") or []:
                     acc_refs.append(decision_link_from_docs(bundle_dir, dec_rel))
                 for ex in rprov.get("accept_examples") or []:
-                    url = str(ex["url"])
+                    if not isinstance(ex, dict) or not isinstance(ex.get("url"), str) or not ex["url"].strip():
+                        raise ValueError(
+                            f"{PROVENANCE_FILE} ({rkey}): accept_examples item missing non-empty string 'url'"
+                        )
+                    url = ex["url"].strip()
                     acc_refs.append(f"[{url_to_short_ref(url)}]({url})")
                 suffix = f" ({', '.join(acc_refs)})." if acc_refs else "."
                 out_lines.append(f"- **Reviewers accept:** {acc_text}{suffix}")
@@ -366,35 +445,46 @@ def render_playbook(bundle_dir: pathlib.Path, omit_generated_header: bool = Fals
                 out_lines.append(f"- **{label}:** {', '.join(dec_links)}.")
 
             oq_meta = rprov.get("open_question")
-            if isinstance(oq_meta, dict) and oq_meta.get("file"):
-                oq_rel = str(oq_meta["file"])
-                oq_path = bundle_dir / oq_rel
-                if oq_path.is_file():
-                    oq_fm, oq_body = parse_frontmatter(oq_path.read_text(encoding="utf-8"))
-                    if (
-                        oq_fm.get("type") == "Open Question"
-                        and oq_fm.get("status", "stable") == "draft"
-                    ):
-                        oq_h1 = parse_h1_sections(oq_body)
-                        oq_sources = oq_fm.get("sources") or []
-                        oq_smap = {
-                            str(s["id"]): str(s["resource"])
-                            for s in oq_sources
-                            if isinstance(s, dict)
-                        }
-                        oq_restored = restore_inline_citations(
-                            oq_h1.get("Question", ""), oq_smap
-                        ).rstrip(".")
-                        out_lines.append(
-                            f"- **Open question:** {oq_restored} ([details](review/{oq_rel}))."
-                        )
+            if oq_meta is not None:
+                if not isinstance(oq_meta, dict):
+                    raise ValueError(f"{PROVENANCE_FILE} ({rkey}): open_question must be an object")
+                if oq_meta.get("file"):
+                    oq_rel = str(oq_meta["file"])
+                    oq_path = bundle_dir / oq_rel
+                    if oq_path.is_file():
+                        oq_fm, oq_body = parse_frontmatter(oq_path.read_text(encoding="utf-8"))
+                        if (
+                            oq_fm.get("type") == "Open Question"
+                            and oq_fm.get("status", "stable") == "draft"
+                        ):
+                            oq_h1 = parse_h1_sections(oq_body)
+                            oq_sources = oq_fm.get("sources") or []
+                            oq_smap = {
+                                str(s["id"]): str(s["resource"])
+                                for s in oq_sources
+                                if isinstance(s, dict)
+                            }
+                            oq_dir_from_docs = posixpath.normpath(
+                                posixpath.join("review", posixpath.dirname(oq_rel))
+                            )
+                            oq_restored = rewrite_links_to_docs(
+                                restore_inline_citations(oq_h1.get("Question", ""), oq_smap),
+                                oq_dir_from_docs,
+                            ).rstrip(".")
+                            out_lines.append(
+                                f"- **Open question:** {oq_restored} ([details](review/{oq_rel}))."
+                            )
 
             obs_prs = int(rprov.get("observed_prs") or 0)
             pr_noun = "PR" if obs_prs == 1 else "PRs"
-            ex_links = [
-                f"[{url_to_short_ref(str(ex['url']))}]({ex['url']})"
-                for ex in (rprov.get("examples") or [])
-            ]
+            ex_links: List[str] = []
+            for ex in rprov.get("examples") or []:
+                if not isinstance(ex, dict) or not isinstance(ex.get("url"), str) or not ex["url"].strip():
+                    raise ValueError(
+                        f"{PROVENANCE_FILE} ({rkey}): examples item missing non-empty string 'url'"
+                    )
+                ex_url = ex["url"].strip()
+                ex_links.append(f"[{url_to_short_ref(ex_url)}]({ex_url})")
             out_lines.append(
                 f"- **Examples:** Observed in {obs_prs} {pr_noun}: {', '.join(ex_links)}"
             )
@@ -434,26 +524,76 @@ def collect_file_anchors(md_path: pathlib.Path) -> set[str]:
     return collect_text_anchors(text)
 
 
-def routing_table_scopes(body: str) -> Optional[List[str]]:
-    """Returns backticked path globs in the first column of the diff-path routing table,
+def glob_to_regex(pattern: str) -> re.Pattern[str]:
+    """Compiles a repository POSIX path glob supporting **, *, and ? to an anchored regex."""
+    pat = pattern.strip("/")
+    i = 0
+    n = len(pat)
+    out: List[str] = ["^"]
+    while i < n:
+        if pat.startswith("**/", i):
+            out.append("(?:.+/)?")
+            i += 3
+        elif pat.startswith("/**", i) and i + 3 == n:
+            out.append("/.+")
+            i += 3
+        elif pat.startswith("/**/", i):
+            out.append("(?:/|/.+/)")
+            i += 4
+        elif pat.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pat[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pat[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pat[i]))
+            i += 1
+    out.append("$")
+    return re.compile("".join(out))
+
+
+def routing_table_rows(body: str) -> Optional[List[Tuple[List[str], List[str]]]]:
+    """Returns [(globs, rule_filenames), ...] from the diff-path routing table,
     or None when no table starts with ROUTING_TABLE_HEADER.
     """
-    scopes: List[str] = []
+    rows: List[Tuple[List[str], List[str]]] = []
     found = False
     in_table = False
     for line in body.splitlines():
         if not line.startswith("|"):
             in_table = False
             continue
-        first_cell = line.strip().strip("|").split("|", 1)[0].strip()
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if not cells:
+            continue
+        first_cell = cells[0]
         if first_cell == ROUTING_TABLE_HEADER:
             found = True
             in_table = True
             continue
         if not in_table or set(first_cell) <= set("-: "):
             continue
-        scopes.extend(re.findall(r"`([^`]+)`", first_cell))
-    return scopes if found else None
+        globs = re.findall(r"`([^`]+)`", first_cell)
+        second_cell = cells[1] if len(cells) >= 2 else ""
+        rule_files: List[str] = []
+        for m in CODE_OR_LINK_RE.finditer(second_cell):
+            if m.group("code") is not None or m.group("bang") == "!":
+                continue
+            target = m.group("link").split("#", 1)[0].strip()
+            rule_files.append(posixpath.basename(target))
+        rows.append((globs, rule_files))
+    return rows if found else None
+
+
+def routing_table_scopes(body: str) -> Optional[List[str]]:
+    rows = routing_table_rows(body)
+    if rows is None:
+        return None
+    return [g for globs, _ in rows for g in globs]
 
 
 def path_claim_exists(repo_root: pathlib.Path, claim: str) -> bool:
@@ -483,8 +623,10 @@ def validate_markdown_links(
     get_anchors: Any,
     errs: List[str],
 ) -> None:
-    without_fences = re.sub(r"```.*?```", "", body, flags=re.DOTALL)
-    for _, target in re.findall(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)", without_fences):
+    for m in CODE_OR_LINK_RE.finditer(body):
+        if m.group("code") is not None or m.group("bang") == "!":
+            continue
+        target = m.group("link")
         if "#" in target:
             tpath_raw, frag = target.split("#", 1)
             tpath = tpath_raw.strip()
@@ -545,9 +687,9 @@ def validate_bundle(
             path_claim_cache[claim] = path_claim_exists(repo_abs, claim)
         return path_claim_cache[claim]
 
-    # 1. Validate provenance.json structure, ASCII, and stale_after timestamps
+    # 1. Validate provenance.json structure, schema keys, ASCII, and stale_after timestamps
     prov_path = bundle_abs / PROVENANCE_FILE
-    prov: Dict[str, Any] = {}
+    prov: Any = {}
     if not prov_path.is_file():
         errs.append(f"missing {PROVENANCE_FILE}")
     else:
@@ -558,11 +700,45 @@ def validate_bundle(
             prov = json.loads(raw_prov.decode("utf-8"))
         except ValueError as exc:
             errs.append(f"{PROVENANCE_FILE}: invalid JSON ({exc})")
+            prov = {}
 
-    sec_prov_map: Dict[str, Any] = (prov.get("sections") or {}) if isinstance(prov, dict) else {}
-    rule_prov_map: Dict[str, Any] = (prov.get("rules") or {}) if isinstance(prov, dict) else {}
+    sec_prov_map: Dict[str, Any] = {}
+    rule_prov_map: Dict[str, Any] = {}
+    if not isinstance(prov, dict):
+        errs.append(f"{PROVENANCE_FILE}: top-level JSON value must be an object")
+    else:
+        bad_top_keys = sorted(set(prov.keys()) - ALLOWED_PROV_TOP_KEYS)
+        if bad_top_keys:
+            errs.append(f"{PROVENANCE_FILE}: unknown top-level keys: {bad_top_keys}")
+        raw_secs = prov.get("sections")
+        if raw_secs is not None and not isinstance(raw_secs, dict):
+            errs.append(f"{PROVENANCE_FILE}: 'sections' must be an object")
+        elif isinstance(raw_secs, dict):
+            sec_prov_map = raw_secs
+        raw_rules = prov.get("rules")
+        if raw_rules is not None and not isinstance(raw_rules, dict):
+            errs.append(f"{PROVENANCE_FILE}: 'rules' must be an object")
+        elif isinstance(raw_rules, dict):
+            rule_prov_map = raw_rules
+
+    for sk, sv in sec_prov_map.items():
+        if not isinstance(sv, dict):
+            errs.append(f"{PROVENANCE_FILE} ({sk}): section entry must be an object")
+        else:
+            bad_sec_keys = sorted(set(sv.keys()) - ALLOWED_PROV_SECTION_KEYS)
+            if bad_sec_keys:
+                errs.append(f"{PROVENANCE_FILE} ({sk}): unknown section keys: {bad_sec_keys}")
+
+    for rk, rv in rule_prov_map.items():
+        if not isinstance(rv, dict):
+            errs.append(f"{PROVENANCE_FILE} ({rk}): rule entry must be an object")
+        else:
+            bad_rule_keys = sorted(set(rv.keys()) - ALLOWED_PROV_RULE_KEYS)
+            if bad_rule_keys:
+                errs.append(f"{PROVENANCE_FILE} ({rk}): unknown rule keys: {bad_rule_keys}")
 
     discovered_sections: set[str] = set()
+    discovered_section_titles: Dict[str, str] = {}
     discovered_rules: set[str] = set()
     seen_consequences: Dict[str, str] = {}
 
@@ -583,15 +759,35 @@ def validate_bundle(
         if rel == ROUTING_TABLE_FILE:
             if has_fm:
                 errs.append(f"{rel}: Stage-1 agent routing file must not have YAML frontmatter")
-            routing_scopes = routing_table_scopes(body)
-            if routing_scopes is None:
+            rows = routing_table_rows(body)
+            if rows is None:
                 errs.append(f"{rel}: missing routing table with header {ROUTING_TABLE_HEADER!r}")
             else:
-                for scope in routing_scopes:
-                    if not _claim_exists(scope):
-                        errs.append(
-                            f"{rel}: routing table path `{scope}` matches no file or directory in the repository"
-                        )
+                prod_go_regexes: List[re.Pattern[str]] = []
+                for row_globs, row_rules in rows:
+                    if not row_globs or not row_rules:
+                        errs.append(f"{rel}: routing table row missing globs or rule file links")
+                    for scope in row_globs:
+                        if not _claim_exists(scope):
+                            errs.append(
+                                f"{rel}: routing table path `{scope}` matches no file or directory in the repository"
+                            )
+                    if set(row_rules) - TEST_OR_PROCESS_ONLY_RULES:
+                        for g in row_globs:
+                            if not g.endswith("_test.go") and not g.startswith("test/"):
+                                prod_go_regexes.append(glob_to_regex(g))
+                for dname in GO_ROUTING_DIRS:
+                    dpath = repo_abs / dname
+                    if not dpath.is_dir():
+                        continue
+                    for go_file in sorted(dpath.rglob("*.go")):
+                        if go_file.name.endswith("_test.go"):
+                            continue
+                        go_rel = go_file.relative_to(repo_abs).as_posix()
+                        if not any(rx.match(go_rel) for rx in prod_go_regexes):
+                            errs.append(
+                                f"{rel}: unrouted production Go file {go_rel!r} matches no production routing row"
+                            )
             idx = md.parent / "index.md"
             if not idx.is_file() or f"({md.name})" not in idx.read_text(encoding="utf-8"):
                 errs.append(f"{rel}: not listed in {idx.relative_to(bundle_abs).as_posix()}")
@@ -606,6 +802,7 @@ def validate_bundle(
                 errs.append(f"{rel}: Stage-1 rule file must not contain [^id] footnotes")
             try:
                 sec_title, s_rules = parse_stage1_rule_file(text, rel)
+                discovered_section_titles[sec_stem] = sec_title
             except ValueError as exc:
                 errs.append(str(exc))
                 s_rules = []
@@ -613,9 +810,9 @@ def validate_bundle(
 
             if sec_stem not in sec_prov_map:
                 errs.append(f"{rel}: missing section '{sec_stem}' in {PROVENANCE_FILE}")
-            else:
+            elif isinstance(sec_prov_map[sec_stem], dict):
                 smeta = sec_prov_map[sec_stem]
-                if smeta.get("title") != sec_title:
+                if sec_title and smeta.get("title") != sec_title:
                     errs.append(
                         f"{rel}: H1 {sec_title!r} differs from {PROVENANCE_FILE} title {smeta.get('title')!r}"
                     )
@@ -650,6 +847,8 @@ def validate_bundle(
                     errs.append(f"{rel}: rule '{rkey}' missing from {PROVENANCE_FILE}")
                     continue
                 rprov = rule_prov_map[rkey]
+                if not isinstance(rprov, dict):
+                    continue
                 conseq = str(rprov.get("consequence") or "").strip()
                 if not conseq:
                     errs.append(f"{PROVENANCE_FILE} ({rkey}): missing consequence")
@@ -660,13 +859,33 @@ def validate_bundle(
                 else:
                     seen_consequences[conseq] = rkey
 
-                exs = rprov.get("examples") or []
+                exs = rprov.get("examples")
                 if not isinstance(exs, list) or not (1 <= len(exs) <= MAX_REPRESENTATIVE_THREADS):
+                    ex_count = len(exs) if isinstance(exs, list) else 0
                     errs.append(
-                        f"{PROVENANCE_FILE} ({rkey}): expected 1..{MAX_REPRESENTATIVE_THREADS} examples, got {len(exs)}"
+                        f"{PROVENANCE_FILE} ({rkey}): expected 1..{MAX_REPRESENTATIVE_THREADS} examples, got {ex_count}"
                     )
-                if int(rprov.get("observed_prs") or 0) < 1:
-                    errs.append(f"{PROVENANCE_FILE} ({rkey}): observed_prs must be >= 1")
+                else:
+                    for i_ex, ex in enumerate(exs):
+                        if not isinstance(ex, dict) or not isinstance(ex.get("url"), str) or not ex["url"].strip():
+                            errs.append(
+                                f"{PROVENANCE_FILE} ({rkey}): examples[{i_ex}] must have a non-empty string 'url'"
+                            )
+
+                if "accept_examples" in rprov and rprov["accept_examples"] is not None:
+                    acc_exs = rprov["accept_examples"]
+                    if not isinstance(acc_exs, list):
+                        errs.append(f"{PROVENANCE_FILE} ({rkey}): accept_examples must be a list")
+                    else:
+                        for i_ex, ex in enumerate(acc_exs):
+                            if not isinstance(ex, dict) or not isinstance(ex.get("url"), str) or not ex["url"].strip():
+                                errs.append(
+                                    f"{PROVENANCE_FILE} ({rkey}): accept_examples[{i_ex}] must have a non-empty string 'url'"
+                                )
+
+                obs_prs_val = rprov.get("observed_prs")
+                if isinstance(obs_prs_val, bool) or not isinstance(obs_prs_val, int) or obs_prs_val < 1:
+                    errs.append(f"{PROVENANCE_FILE} ({rkey}): observed_prs must be an integer >= 1")
 
                 has_acc_prov = bool(rprov.get("accept_examples") or rprov.get("accept_decisions"))
                 if bool(r.get("accept")) != has_acc_prov:
@@ -675,28 +894,69 @@ def validate_bundle(
                     )
 
                 for dec_field in ("decisions", "accept_decisions"):
-                    for dec_rel in rprov.get(dec_field) or []:
-                        if not (bundle_abs / dec_rel).is_file():
-                            errs.append(f"{PROVENANCE_FILE} ({rkey}): missing {dec_rel}")
+                    if dec_field in rprov and rprov[dec_field] is not None:
+                        if not isinstance(rprov[dec_field], list):
+                            errs.append(f"{PROVENANCE_FILE} ({rkey}): {dec_field} must be a list")
+                        else:
+                            for dec_rel in rprov[dec_field]:
+                                if not isinstance(dec_rel, str) or not (bundle_abs / dec_rel).is_file():
+                                    errs.append(f"{PROVENANCE_FILE} ({rkey}): missing {dec_rel}")
 
-                oq_meta = rprov.get("open_question")
                 has_draft_oq = False
-                if oq_meta is not None:
-                    oq_rel = str(oq_meta.get("file") or "")
-                    oq_path = bundle_abs / oq_rel
-                    if not oq_rel or not oq_path.is_file():
-                        errs.append(f"{PROVENANCE_FILE} ({rkey}): missing open_question file {oq_rel!r}")
+                if "open_question" in rprov:
+                    oq_meta = rprov["open_question"]
+                    if not isinstance(oq_meta, dict):
+                        errs.append(f"{PROVENANCE_FILE} ({rkey}): open_question must be an object")
                     else:
-                        oq_fm, _ = parse_frontmatter(oq_path.read_text(encoding="utf-8"))
-                        has_draft_oq = oq_fm.get("status", "stable") == "draft"
+                        bad_oq_keys = sorted(set(oq_meta.keys()) - ALLOWED_PROV_OQ_KEYS)
+                        if bad_oq_keys:
+                            errs.append(
+                                f"{PROVENANCE_FILE} ({rkey}): unknown open_question keys: {bad_oq_keys}"
+                            )
+                        oq_rel = str(oq_meta.get("file") or "").strip()
+                        oq_path = bundle_abs / oq_rel
+                        if not oq_rel or not oq_path.is_file():
+                            errs.append(
+                                f"{PROVENANCE_FILE} ({rkey}): missing open_question file {oq_rel!r}"
+                            )
+                        else:
+                            try:
+                                oq_fm, oq_body = parse_frontmatter(
+                                    oq_path.read_text(encoding="utf-8")
+                                )
+                            except ValueError as exc:
+                                errs.append(f"{PROVENANCE_FILE} ({rkey}): {oq_rel}: {exc}")
+                                oq_fm, oq_body = {}, ""
+                            oq_h1 = parse_h1_sections(oq_body)
+                            oq_question = oq_h1.get("Question", "").strip()
+                            if oq_fm.get("type") != "Open Question":
+                                errs.append(
+                                    f"{PROVENANCE_FILE} ({rkey}): open_question {oq_rel} must have "
+                                    f"type 'Open Question', got {oq_fm.get('type')!r}"
+                                )
+                            if oq_fm.get("status", "stable") != "draft":
+                                errs.append(
+                                    f"{PROVENANCE_FILE} ({rkey}): open_question {oq_rel} must have "
+                                    f"status 'draft', got {oq_fm.get('status', 'stable')!r}"
+                                )
+                            if not oq_question:
+                                errs.append(
+                                    f"{PROVENANCE_FILE} ({rkey}): open_question {oq_rel} has empty "
+                                    "'# Question' section"
+                                )
+                            has_draft_oq = (
+                                oq_fm.get("type") == "Open Question"
+                                and oq_fm.get("status", "stable") == "draft"
+                                and bool(oq_question)
+                            )
+                        if not r.get("open"):
+                            errs.append(
+                                f"{PROVENANCE_FILE} ({rkey}): stale open_question entry without '- Open:' in {rel}"
+                            )
                 if bool(r.get("open")) != has_draft_oq:
                     errs.append(
                         f"{rkey}: '- Open:' in {rel} out of sync with draft open_question in {PROVENANCE_FILE}"
                     )
-
-            idx = md.parent / "index.md"
-            if not idx.is_file() or f"({md.name})" not in idx.read_text(encoding="utf-8"):
-                errs.append(f"{rel}: not listed in {idx.relative_to(bundle_abs).as_posix()}")
         elif md.name == "log.md" or (md.name == "index.md" and rel != "index.md"):
             if has_fm:
                 errs.append(f"{rel}: reserved file must not have YAML frontmatter")
@@ -716,8 +976,12 @@ def validate_bundle(
             body_without_defs = "\n".join(
                 ln for ln in body.splitlines() if not re.match(r"^\[\^[a-zA-Z0-9_.-]+\]:\s+", ln)
             )
-            prose_without_code = re.sub(r"```.*?```", "", body_without_defs, flags=re.DOTALL)
-            prose_without_code = re.sub(r"`[^`\n]+`", "", prose_without_code)
+            prose_without_code = re.sub(
+                r"(?<!`)(`{3,})(?!`)(?:.*?)(?<!`)\1(?!`)|(?<!`)(`{1,2})(?!`)(?:(?!\n\n).)*?(?<!`)\2(?!`)",
+                "",
+                body_without_defs,
+                flags=re.DOTALL,
+            )
             fn_refs = set(re.findall(r"\[\^([a-zA-Z0-9_.-]+)\](?!:)", prose_without_code))
             if fn_refs - sids:
                 errs.append(
@@ -747,6 +1011,36 @@ def validate_bundle(
             _get_anchors,
             errs,
         )
+
+    # 2b. Validate unified section discovery in rules/index.md
+    try:
+        idx_entries = parse_rules_index_entries(bundle_abs)
+    except FileNotFoundError as exc:
+        errs.append(str(exc))
+        idx_entries = []
+    else:
+        seen_idx_files: set[str] = set()
+        for idx_title, idx_file in idx_entries:
+            if "/" in idx_file:
+                errs.append(f"rules/index.md: expected bare filename in rules/, got {idx_file!r}")
+                continue
+            if idx_file in seen_idx_files:
+                errs.append(f"rules/index.md: duplicate rule file entry {idx_file!r}")
+            seen_idx_files.add(idx_file)
+            stem = idx_file[:-3]
+            if stem not in discovered_sections:
+                errs.append(f"rules/index.md: references missing rule file {idx_file!r}")
+            elif stem in discovered_section_titles and discovered_section_titles[stem] != idx_title:
+                errs.append(
+                    f"rules/index.md: link text {idx_title!r} for {idx_file} "
+                    f"does not match H1 {discovered_section_titles[stem]!r}"
+                )
+        expected_rule_files = {f"{s}.md" for s in discovered_sections}
+        missing_from_idx = sorted(expected_rule_files - seen_idx_files)
+        if missing_from_idx:
+            errs.append(
+                f"rules/index.md: missing rule files present in rules/: {missing_from_idx}"
+            )
 
     orphan_secs = sorted(set(sec_prov_map.keys()) - discovered_sections)
     if orphan_secs:
@@ -814,11 +1108,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    rendered: Optional[str] = None
+    render_err: Optional[Exception] = None
     try:
         rendered = render_playbook(args.bundle, omit_generated_header=args.omit_header)
     except Exception as exc:  # noqa: BLE001
-        sys.stderr.write(f"RENDER ERROR: {exc}\n")
-        return 1
+        render_err = exc
+        if not (args.check or args.check_staleness):
+            sys.stderr.write(f"RENDER ERROR: {exc}\n")
+            return 1
 
     if args.check or args.check_staleness:
         v_errs, v_warns = validate_bundle(
@@ -834,7 +1132,11 @@ def main() -> int:
             for e in v_errs:
                 sys.stderr.write(f"BUNDLE ERROR: {e}\n")
             return 1
+        if render_err is not None:
+            sys.stderr.write(f"RENDER ERROR: {render_err}\n")
+            return 1
 
+    assert rendered is not None
     if args.check:
         if not args.output.is_file():
             sys.stderr.write(

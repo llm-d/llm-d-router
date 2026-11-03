@@ -8,7 +8,7 @@ status: stable
 
 # Maintenance loops
 
-`make verify-review-playbook` runs `python3 hack/render_playbook.py --check` in `make presubmit`. It fails when `docs/review_playbook.md` differs from the compiled output, when rules in `docs/review/rules/*.md` and keys in `docs/review/provenance.json` are out of sync, when a Markdown link or anchor is broken, or when a first-column glob in [review_a_pull_request.md](review_a_pull_request.md)'s routing table matches nothing in the repository. It does not validate inline backticked code paths in rule prose, and an expired `stale_after` timestamp emits a stderr `WARNING:` without failing `make presubmit` (`--check-staleness` enforces expiration during audits). Each loop ends with `python3 hack/render_playbook.py` followed by `python3 hack/render_playbook.py --check`.
+`make verify-review-playbook` runs `python3 hack/render_playbook.py --check` in `make presubmit`. It fails when `docs/review_playbook.md` differs from the compiled output, when rules in `docs/review/rules/*.md` and keys in `docs/review/provenance.json` are out of sync, when a Markdown link or anchor is broken, when a first-column glob in [review_a_pull_request.md](review_a_pull_request.md)'s routing table matches nothing in the repository, or when a non-test Go file under `cmd/`, `pkg/`, or `internal/` matches no production routing row. It does not validate inline backticked code paths in rule prose, and an expired `stale_after` timestamp emits a stderr `WARNING:` without failing `make presubmit` (`--check-staleness` enforces expiration during audits). Each loop ends with `python3 hack/render_playbook.py` followed by `python3 hack/render_playbook.py --check`.
 
 # Updating the bundle in the same pull request
 

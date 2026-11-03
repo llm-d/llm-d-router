@@ -10,7 +10,7 @@ Compact Stage-1 subsystem and architectural review rules loaded on demand via [r
 * [Error handling and boundaries](error_handling_and_boundaries.md) - Boundary input validation, explicit error propagation without fabricated fallbacks, and unwrapped status-code mapping.
 * [Protocol parsing and wire fidelity](protocol_parsing_and_wire_fidelity.md) - Passthrough JSON fidelity, declarative route claims, complete SSE frame buffering, multi-API multimodal parity, host-port-rank endpoint keys, and disaggregated stage ordering.
 * [Performance on the request path](performance_on_the_request_path.md) - Zero avoidable hot-path allocations, pooled transports and multiplexed event sockets, orthogonal load signals, contiguous prefix-cache scoring, and reproducible benchmarks.
-* [Observability](observability.md) - Canonical metric subsystems and bounded label cardinality, single terminal request outcomes, package-scoped OpenTelemetry spans, and guarded debug logs.
+* [Observability](observability.md) - Canonical metric subsystems and bounded label cardinality, single terminal request outcomes, package-scoped OpenTelemetry spans, and bounded debug state.
 * [Testing and CI](testing_and_ci.md) - Production factory tests with exact output assertions, colocated sleep-free unit tests, and namespace-isolated E2E teardown.
 * [Security and trust boundaries](security_and_trust_boundaries.md) - Header namespacing and ingress/egress scrubbing, InferencePool SSRF target allowlists, TLS minimums, namespace-scoped watches, and sensitive payload redaction.
 * [Documentation and comments](documentation_and_comments.md) - Colocated plugin READMEs, upstream guide linking, and review-round documentation synchronization.
