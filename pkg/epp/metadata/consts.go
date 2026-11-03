@@ -105,15 +105,21 @@ func HeaderNames(key string) []string {
 }
 
 // GetLowerCaseHeaderValue returns a header value from a lower-case header map using the current name first, then deprecated aliases.
+// Empty values are skipped, so an empty current name does not hide a deprecated one. A header sent only with empty
+// values is reported as present with an empty value, the same as a header without aliases.
 func GetLowerCaseHeaderValue(headers map[string]string, key string) (string, bool) {
 	key = strings.ToLower(key)
 	if aliases, ok := headerAliases[key]; ok {
+		present := false
 		for _, alias := range aliases {
 			if value, ok := headers[alias]; ok {
-				return value, true
+				if value != "" {
+					return value, true
+				}
+				present = true
 			}
 		}
-		return "", false
+		return "", present
 	}
 	value, ok := headers[key]
 	return value, ok

@@ -178,6 +178,17 @@ func TestHandleRequestHeaders(t *testing.T) {
 			wantTarget:    "new-model",
 		},
 		{
+			name: "Falls back to old aliases when the new control headers are empty",
+			headers: []*configPb.HeaderValue{
+				{Key: metadata.ObjectiveKey, Value: ""},
+				{Key: metadata.OldObjectiveKey, Value: "old-objective"},
+				{Key: metadata.ModelNameRewriteKey, Value: ""},
+				{Key: metadata.OldModelNameRewriteKey, Value: "old-model"},
+			},
+			wantObjective: "old-objective",
+			wantTarget:    "old-model",
+		},
+		{
 			name: "Drops client-supplied routing headers",
 			headers: []*configPb.HeaderValue{
 				{Key: "X-Prefiller-Host-Port", Value: "10.0.0.1:9090"},
@@ -755,7 +766,7 @@ func TestRequestAttributionAtIngress(t *testing.T) {
 	}{
 		{"canonical header", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: "team-a"}}, "team-a", tracing.AttributionSourceHeader},
 		{"deprecated alias", []*configPb.HeaderValue{{Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
-		{"empty canonical shadows alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, reqcommon.DefaultFairnessID, tracing.AttributionSourceDefault},
+		{"empty canonical falls back to alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := extractTraceContext(context.Background(), &extProcPb.ProcessingRequest_RequestHeaders{

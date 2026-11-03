@@ -28,7 +28,7 @@ This policy inspects the following attributes of the request:
 Requests are prioritized as follows:
 1. Requests with **earlier absolute deadlines** are dispatched first.
 2. If two requests have the same deadline, or if both lack a valid deadline, they are ordered by `ReceivedTimestamp` (FCFS).
-3. Requests without a valid `x-llm-d-slo-ttft-ms` header (missing, empty, or invalid integer) are assigned a far-future deadline, placing them behind all SLO-bound requests.
+3. Requests whose TTFT SLO is missing, empty, or not a valid integer are assigned a far-future deadline, placing them behind all SLO-bound requests. The SLO is read from `x-llm-d-slo-ttft-ms`, or from its deprecated name when that header is empty or absent.
 
 ## Behavior and Queue Pairing
 
