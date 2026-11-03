@@ -118,6 +118,7 @@ documents the strategy and its calibration.
 | `maxTTFTPenaltyMs` | `float64` | No | `18000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
 | `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
+| `p2pSourceProducerName` | `string` | No | (empty) | Name of the `p2p-source-producer` whose decision is paired with this filter's outcome per request; empty disables the pairing |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
 2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
@@ -130,6 +131,19 @@ to `latencyPredictor` to source TTFT from the latency predictor instead.
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
 - Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer`)
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
+- Reads `P2PSourceDecision` in `PreRequest` when `p2pSourceProducerName` is set (from `p2p-source-producer`; optional)
+
+## Metrics
+
+- `llm_d_epp_prefix_cache_affinity_filter_decisions_total{plugin_name, outcome}`: one count per
+  `Filter` call.
+- `llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total{plugin_name, endpoint_role,
+  affinity_outcome, p2p_outcome}`, with `p2pSourceProducerName` set: one count per request this
+  instance filtered, pairing its outcome with the `p2p-source-producer`'s decision for the same
+  request. `p2p_outcome="unreported"` marks a request whose producer published no decision, and
+  `affinity_outcome="multiple"` one this instance decided more than once, because it runs in
+  more than one scheduling profile. Requests whose scheduling failed reach no `PreRequest` and
+  are counted only by the first metric.
 
 **Configuration Example:**
 

@@ -58,6 +58,8 @@ func newTestPlugin(config Config) *Plugin {
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
+		outcomeDataKey:               fwkplugin.NewDataKey("affinity-outcome", PluginType).WithNonEmptyProducerName("test"),
+		p2pDecisionDataKey:           attrprefix.P2PSourceDecisionDataKey.WithNonEmptyProducerName(config.P2PSourceProducerName),
 	}
 }
 

@@ -571,6 +571,7 @@ reaches its `PreRequest` records one decision.
 |---|---|---|---|
 | `llm_d_epp_p2p_source_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `outcome` | One per request, with the outcome the producer's `p2p decision` log line names. |
 | `llm_d_epp_p2p_source_predicted_pulled_tokens` | Histogram | `plugin_name`, `endpoint_role` | Prompt tokens the selected source holds beyond the endpoint computing the prefix, per request sent to pull. |
+| `llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `affinity_outcome`, `p2p_outcome` | Emitted by a `prefix-cache-affinity-filter` with `p2pSourceProducerName` set: its outcome and the producer's decision for the same request. |
 
 A request records the first outcome in this table that applies to it.
 
@@ -601,6 +602,14 @@ endpoints that compute the prefix, the prefill pods under P/D disaggregation. vL
 promotion job from its P2P tier (`tier=~".*:p2p"`) in `vllm:kv_offload_tiering_promotion_latency_seconds`,
 labelled `result="success"` or `result="failure"`. As with the prefix prediction, the cohorts differ:
 a pull that fails or falls back to local prefill is counted on the router side only.
+
+The paired counter records, for each request the affinity filter decided, the producer's `outcome`
+as `p2p_outcome`. An outcome compares the producer's source with the selected endpoints, not with
+the filter's sticky set, so it does not show whether a `load_override` moved the request off the
+sticky set: a request selected onto another endpoint that holds the same prefix as the source can
+record `below-floor`. `p2p_outcome="unreported"` is a request with no P2P decision, and
+`affinity_outcome="multiple"` one the filter decided more than once for, because the instance runs
+in several scheduling profiles.
 
 ### Token producer render
 

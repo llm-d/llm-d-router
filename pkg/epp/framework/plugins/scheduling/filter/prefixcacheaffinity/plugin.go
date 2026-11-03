@@ -37,6 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
@@ -48,7 +49,10 @@ const (
 	PluginType = "prefix-cache-affinity-filter"
 )
 
-var _ fwksched.Filter = &Plugin{}
+var (
+	_ fwksched.Filter  = &Plugin{}
+	_ fwkrh.PreRequest = &Plugin{}
+)
 
 // TTFTSource selects the per-endpoint TTFT signal used by the load gate. The
 // choice also determines which producer attribute the filter consumes.
@@ -94,6 +98,12 @@ type Config struct {
 	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
 	InFlightLoadProducerName          string `json:"inFlightLoadProducerName,omitempty"`
+
+	// P2PSourceProducerName names the p2p-source-producer whose decision for
+	// each request is paired with this filter's outcome in
+	// llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total. Empty disables
+	// the pairing.
+	P2PSourceProducerName string `json:"p2pSourceProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -112,7 +122,12 @@ type Plugin struct {
 	prefixMatchDataKey           fwkplugin.DataKey
 	latencyPredictionInfoDataKey fwkplugin.DataKey
 	inFlightLoadDataKey          fwkplugin.DataKey
+	outcomeDataKey               fwkplugin.DataKey
+	p2pDecisionDataKey           fwkplugin.DataKey
 }
+
+// affinityOutcome is the outcome Filter stores on the request for PreRequest.
+type affinityOutcome string
 
 func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	config := DefaultConfig
@@ -135,6 +150,8 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
+		outcomeDataKey:               fwkplugin.NewDataKey("affinity-outcome", PluginType).WithNonEmptyProducerName(name),
+		p2pDecisionDataKey:           attrprefix.P2PSourceDecisionDataKey.WithNonEmptyProducerName(config.P2PSourceProducerName),
 	}, nil
 }
 
@@ -195,8 +212,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	}
 
 	if len(endpoints) <= 1 || p.config.AffinityThreshold <= 0 {
-		recordDecision(p.typedName.Name, outcomeNotApplicable)
-		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeNotApplicable))
+		p.decide(request, span, outcomeNotApplicable)
 		return endpoints
 	}
 
@@ -204,8 +220,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	if rand.Float64() < p.config.ExplorationProbability { //#nosec G404 -- exploration sampling, not security-sensitive
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: exploration skip, keeping all",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
-		recordDecision(p.typedName.Name, outcomeExploration)
-		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeExploration))
+		p.decide(request, span, outcomeExploration)
 		return endpoints
 	}
 
@@ -225,8 +240,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	if len(sticky) == 0 {
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: no sticky endpoints",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
-		recordDecision(p.typedName.Name, outcomeNoMatch)
-		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeNoMatch))
+		p.decide(request, span, outcomeNoMatch)
 		return endpoints
 	}
 
@@ -237,8 +251,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 		if !stickyOk || !nonStickyOk {
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate skipped, missing signal",
 				"stickyObserved", stickyOk, "nonStickyObserved", nonStickyOk)
-			recordDecision(p.typedName.Name, outcomeMissingSignal)
-			span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeMissingSignal))
+			p.decide(request, span, outcomeMissingSignal)
 			return endpoints
 		}
 		penalty := bestStickyTTFT - bestNonStickyTTFT
@@ -247,17 +260,33 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate broken",
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
 				"penalty", penalty, "maxPenalty", p.config.MaxTTFTPenaltyMs)
-			recordDecision(p.typedName.Name, outcomeLoadOverride)
-			span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeLoadOverride))
+			p.decide(request, span, outcomeLoadOverride)
 			return endpoints
 		}
 	}
 
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
-	recordDecision(p.typedName.Name, outcomeSticky)
-	span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeSticky))
+	p.decide(request, span, outcomeSticky)
 	return sticky
+}
+
+// decide records the filter's outcome in its decision counter and span and,
+// when P2P pairing is on, on the request for PreRequest.
+func (p *Plugin) decide(request *fwksched.InferenceRequest, span trace.Span, outcome string) {
+	recordDecision(p.typedName.Name, outcome)
+	span.SetAttributes(semconv.LLMDEPPFilterDecision(outcome))
+	if !p.pairsP2P() || request == nil {
+		return
+	}
+	if _, decided := fwksched.ReadRequestAttribute[affinityOutcome](request, p.outcomeDataKey); decided {
+		outcome = outcomeMultiple
+	}
+	request.PutAttribute(p.outcomeDataKey, affinityOutcome(outcome))
+}
+
+func (p *Plugin) pairsP2P() bool {
+	return p.config.P2PSourceProducerName != ""
 }
 
 func (p *Plugin) Consumes() fwkplugin.DataDependencies {
@@ -271,7 +300,41 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 			required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
 		}
 	}
-	return fwkplugin.DataDependencies{Required: required}
+	deps := fwkplugin.DataDependencies{Required: required}
+	if p.pairsP2P() {
+		// Optional: the filter routes the same without a p2p-source-producer,
+		// and the declared read orders that producer's PreRequest before this one.
+		deps.Optional = map[fwkplugin.DataKey]any{p.p2pDecisionDataKey: attrprefix.P2PSourceDecision{}}
+	}
+	return deps
+}
+
+// Produces declares the outcome Filter stores on the request when P2P pairing
+// is on; PreRequest reads it back.
+func (p *Plugin) Produces() map[fwkplugin.DataKey]any {
+	if !p.pairsP2P() {
+		return nil
+	}
+	return map[fwkplugin.DataKey]any{p.outcomeDataKey: affinityOutcome("")}
+}
+
+// PreRequest pairs the outcome Filter stored for the request with the
+// p2p-source-producer's decision. A request this instance did not filter is
+// not counted.
+func (p *Plugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
+	if !p.pairsP2P() || request == nil {
+		return nil
+	}
+	outcome, ok := fwksched.ReadRequestAttribute[affinityOutcome](request, p.outcomeDataKey)
+	if !ok {
+		return nil
+	}
+	decision, ok := fwksched.ReadRequestAttribute[attrprefix.P2PSourceDecision](request, p.p2pDecisionDataKey)
+	if !ok {
+		decision = attrprefix.P2PSourceDecision{Outcome: p2pOutcomeUnreported}
+	}
+	recordP2PDecision(p.typedName.Name, decision.EndpointRole, string(outcome), decision.Outcome)
+	return nil
 }
 
 func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {

@@ -107,6 +107,18 @@ var ReusablePrefixTokensDataKey = plugin.NewDataKey("ReusablePrefixTokensDataKey
 // blocks from the sampled source.
 type ReusablePrefixTokens int
 
+// P2PSourceDecisionDataKey identifies the decision a p2p-source-producer
+// instance reached for the request in PreRequest.
+var P2PSourceDecisionDataKey = plugin.NewDataKey("P2PSourceDecisionDataKey", p2psourceconstants.P2PSourcePluginType)
+
+// P2PSourceDecision is a p2p-source-producer's decision for one request: the
+// outcome and endpoint_role it recorded in
+// llm_d_epp_p2p_source_decisions_total.
+type P2PSourceDecision struct {
+	Outcome      string
+	EndpointRole string
+}
+
 // SpeculativeTierKey is the CachedBlocksByTier key for speculative index
 // entries, which carry no engine-reported device tier.
 const SpeculativeTierKey = "speculative"
