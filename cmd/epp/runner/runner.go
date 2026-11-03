@@ -115,6 +115,7 @@ import (
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache"
 	latencyproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionid"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionprefixcache"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/forwardtokens"
@@ -768,6 +769,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(activerequest.ActiveRequestType, fwkplugin.StabilityBeta, activerequest.Factory)
 	fwkplugin.Register(mmcacheaffinity.Type, fwkplugin.StabilityBeta, mmcacheaffinity.Factory)
 	fwkplugin.RegisterWithPluginDependencies(preciseproducer.PluginType, fwkplugin.StabilityBeta, preciseproducer.PluginFactory, preciseproducer.ConfigParser)
+	fwkplugin.RegisterWithPluginDependencies(sessionprefixcache.PluginType, fwkplugin.StabilityAlpha, sessionprefixcache.PluginFactory, sessionprefixcache.ConfigParser)
 	// Alpha
 	fwkplugin.Register(headerprofile.HeaderProfileHandlerType, fwkplugin.StabilityAlpha, headerprofile.HeaderProfileHandlerFactory)
 	fwkplugin.Register(endpointattribute.EndpointAttributeScorerType, fwkplugin.StabilityAlpha, endpointattribute.EndpointAttributeScorerFactory)
