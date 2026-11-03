@@ -78,7 +78,7 @@ func continuationPrompt(request *fwksched.InferenceRequest) (string, bool) {
 		prompt = c.Prompt.Strings[0]
 	}
 	tr := request.Body.TokenizedRequest
-	if tr == nil || len(tr.Prompts) != 1 || !slices.Equal(tr.Prompts[0].TokenIDs, fwkrequest.PackBytes([]byte(prompt))) {
+	if tr == nil || len(tr.Prompts) != 1 || !slices.Equal(tr.Prompts[0].TokenIDs, tokenproducer.PackBytes([]byte(prompt))) {
 		return "", false
 	}
 	return prompt, true
@@ -111,7 +111,7 @@ func (p *dataProducer) ResponseBody(_ context.Context, request *fwksched.Inferen
 	if err != nil || response.Completion == nil || response.TerminationCause != fwkrh.TerminationCauseNatural {
 		return
 	}
-	tokens := fwkrequest.PackBytes([]byte(state.prompt + response.Completion.Text))
+	tokens := tokenproducer.PackBytes([]byte(state.prompt + response.Completion.Text))
 	keyed := &fwksched.InferenceRequest{
 		TargetModel: request.TargetModel,
 		Body: &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{

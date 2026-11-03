@@ -45,12 +45,18 @@ func hashTokens(t []uint32) uint64 {
 	return xxhash.Sum64(unsafe.Slice((*byte)(unsafe.Pointer(&t[0])), len(t)*4)) //#nosec G103 -- mirrors HashBlock's production reinterpretation, length guarded above
 }
 
+func TestPackBytes(t *testing.T) {
+	assert.Nil(t, PackBytes(nil))
+	assert.Equal(t, []uint32{0x64636261}, PackBytes([]byte("abcd")))
+	assert.Equal(t, []uint32{0x64636261, 0x65}, PackBytes([]byte("abcde")), "tail is zero-padded")
+}
+
 // TestPackBytes_KeyPreserving asserts packed-token hashing matches raw-byte
 // hashing, so the scorer's cache keys are unchanged.
 func TestPackBytes_KeyPreserving(t *testing.T) {
 	raw := []byte("the quick brown fox jumps over!!") // len 32, 4-byte aligned
 	require.Zero(t, len(raw)%fwkrequest.BytesPerToken, "fixture must be %d-byte aligned, got len %d", fwkrequest.BytesPerToken, len(raw))
-	tokens := fwkrequest.PackBytes(raw)
+	tokens := PackBytes(raw)
 	require.Len(t, tokens, len(raw)/fwkrequest.BytesPerToken)
 	assert.Equal(t, xxhash.Sum64(raw), hashTokens(tokens), "packed-token hash != raw-byte hash; estimate path is not key-preserving")
 }
@@ -75,7 +81,7 @@ func TestEstimateBackend_GenerateTextEstimatesPseudoTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_ImagesEstimatesPromptPseudoTokens asserts an
@@ -90,7 +96,7 @@ func TestEstimateBackend_ImagesEstimatesPromptPseudoTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_ImagesIncludesNegativePrompt asserts an
@@ -103,7 +109,7 @@ func TestEstimateBackend_ImagesIncludesNegativePrompt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte("a cat wearing a hat\nblurry")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("a cat wearing a hat\nblurry")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt asserts a
@@ -114,7 +120,7 @@ func TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt(t *testing.T)
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_AudioGenerateEstimatesPromptPseudoTokens asserts an
@@ -127,7 +133,7 @@ func TestEstimateBackend_AudioGenerateEstimatesPromptPseudoTokens(t *testing.T) 
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte(prompt)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_AudioGenerateIncludesNegativePrompt asserts an
@@ -140,7 +146,7 @@ func TestEstimateBackend_AudioGenerateIncludesNegativePrompt(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte("a dog barking\nsilence")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("a dog barking\nsilence")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_AudioGenerateIgnoresWhitespaceOnlyNegativePrompt
@@ -151,7 +157,7 @@ func TestEstimateBackend_AudioGenerateIgnoresWhitespaceOnlyNegativePrompt(t *tes
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte("a dog barking")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("a dog barking")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechEstimatesPseudoTokens asserts TTS input text
@@ -163,7 +169,7 @@ func TestEstimateBackend_TextToSpeechEstimatesPseudoTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte(input)), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte(input)), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIncludesInstructions asserts TTS
@@ -175,7 +181,7 @@ func TestEstimateBackend_TextToSpeechIncludesInstructions(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte("hello\ncheerful radio voice")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello\ncheerful radio voice")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyInstructions asserts
@@ -188,7 +194,7 @@ func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyInstructions(t *testin
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIncludesRefText asserts a voice-cloning
@@ -201,7 +207,7 @@ func TestEstimateBackend_TextToSpeechIncludesRefText(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte("hello\nthis is the reference clip")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello\nthis is the reference clip")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText asserts
@@ -212,7 +218,7 @@ func TestEstimateBackend_TextToSpeechIncludesInstructionsAndRefText(t *testing.T
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte("hello\ncheerful\nreference clip")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello\ncheerful\nreference clip")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText asserts a
@@ -223,7 +229,7 @@ func TestEstimateBackend_TextToSpeechIgnoresWhitespaceOnlyRefText(t *testing.T) 
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
-	assert.Equal(t, fwkrequest.PackBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
+	assert.Equal(t, PackBytes([]byte("hello")), tp.Prompts[0].TokenIDs)
 }
 
 // TestEstimateBackend_CompletionsTokenIDsPassthrough asserts token-ID completions
@@ -294,7 +300,7 @@ func TestEstimateBackend_EmbeddingsTextEstimatesPlainText(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.Len(t, tp.Prompts, 1)
-			assert.Equal(t, fwkrequest.PackBytes([]byte(tt.want)), tp.Prompts[0].TokenIDs)
+			assert.Equal(t, PackBytes([]byte(tt.want)), tp.Prompts[0].TokenIDs)
 		})
 	}
 }

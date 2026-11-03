@@ -19,7 +19,6 @@ package request
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -240,26 +239,6 @@ func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
 // backend packs this many bytes into each pseudo-token, so its counts agree
 // with byte-based estimates.
 const BytesPerToken = 4
-
-// PackBytes packs bytes into little-endian uint32 pseudo-tokens of
-// BytesPerToken bytes, zero-padding the tail. It is the encoding of the
-// tokenizer's estimate backend.
-func PackBytes(raw []byte) []uint32 {
-	if len(raw) == 0 {
-		return nil
-	}
-	out := make([]uint32, (len(raw)+BytesPerToken-1)/BytesPerToken)
-	var last [BytesPerToken]byte
-	for i := range out {
-		chunk := raw[i*BytesPerToken:]
-		if len(chunk) < BytesPerToken {
-			copy(last[:], chunk)
-			chunk = last[:]
-		}
-		out[i] = binary.LittleEndian.Uint32(chunk)
-	}
-	return out
-}
 
 // TokenizedRequest contains the result of tokenizing the request prompt.
 // It is consumed by scheduling and request-control plugins that benefit from
