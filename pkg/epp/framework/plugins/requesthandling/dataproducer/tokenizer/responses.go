@@ -165,7 +165,7 @@ func (b renderBackend) renderLegacyResponses(ctx context.Context, body *fwkreque
 	return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
 		TokenIDs:           tokenIDs,
 		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
-	}}}, nil
+	}}, LegacyTranslated: true}, nil
 }
 
 func prepareLegacyResponsesToolFields(body *fwkrequest.InferenceRequestBody) *renderToolBaseline {

@@ -66,7 +66,8 @@ const (
 	FieldKVTransferParams = "kv_transfer_params"
 	// FieldPromptTokenIDs is the kv_transfer_params field carrying
 	// pre-tokenized prompt token IDs.
-	FieldPromptTokenIDs       = "prompt_token_ids"
+	FieldPromptTokenIDs = "prompt_token_ids"
+	FieldPrompt         = "prompt" // /v1/completions request body prompt field
 	FieldECTransferParams     = "ec_transfer_params"
 	FieldECDescriptorMetadata = "metadata" // ec_transfer_params descriptor field: the item's placeholder metadata
 	FieldMaxTokens            = "max_tokens"
