@@ -55,7 +55,7 @@ func completionsRequest(prompt string) *fwksched.InferenceRequest {
 		TargetModel: "m",
 		Body: &fwkrequest.InferenceRequestBody{
 			Completions:      &fwkrequest.CompletionsRequest{Prompt: fwkrequest.Prompt{Raw: prompt}},
-			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: fwkrequest.PackBytes([]byte(prompt))}}},
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokenproducer.PackBytes([]byte(prompt))}}},
 		},
 	}
 }

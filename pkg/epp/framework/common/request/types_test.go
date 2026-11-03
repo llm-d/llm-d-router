@@ -786,12 +786,6 @@ func TestGenerateRequest_UnmarshalJSONCanonicalPreservesAbsentFeatures(t *testin
 	assert.Equal(t, []string{"stale"}, g.Features.MMHashes["image"])
 }
 
-func TestPackBytes(t *testing.T) {
-	assert.Nil(t, PackBytes(nil))
-	assert.Equal(t, []uint32{0x64636261}, PackBytes([]byte("abcd")))
-	assert.Equal(t, []uint32{0x64636261, 0x65}, PackBytes([]byte("abcde")), "tail is zero-padded")
-}
-
 func TestCompletionsRequestEchoDisabled(t *testing.T) {
 	for raw, want := range map[string]bool{
 		`{"prompt":"p"}`:              true,
