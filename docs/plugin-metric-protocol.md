@@ -89,6 +89,39 @@ If absent, the value is taken from the `approximate-prefix` plugin's `LRUCapacit
 | Triton TensorRT-LLM | `nv_trt_llm_kv_cache_block_metrics{kv_cache_block_type=max}` | — |
 | trtllm-serve | `trtllm_kv_cache_max_blocks` | — |
 
+With trtllm-serve's default KV cache manager, `trtllm_kv_cache_max_blocks` counts GPU and host
+(`kv_cache_config.host_cache_size`) blocks together, so the auto-tuned capacity already covers the
+host tier. With `use_kv_cache_manager_v2` the gauge counts GPU blocks only and the host tier is not
+reported (NVIDIA/TensorRT-LLM#21395); set `lruCapacityPerServer` with `autoTune: false` on such
+deployments.
+
+### TotalKVCacheTokens (optional)
+
+The capacity in tokens of the model server's offload-extended KV cache, for example a host-memory
+tier that holds a copy of the HBM cache. Used to auto-tune the approximate prefix cache: the
+per-pod index is sized to the larger of this value and NumGPUBlocks x BlockSize, or to one of
+them when the producer's `capacityTiers` lists a single tier. Absent on model servers without an
+offload tier.
+
+- **Type:** Labeled/Gauge
+- **Required by:** `prefix-cache-scorer`, `prefix-cache-affinity-filter` (via `approximate-prefix` when `AutoTune` is enabled)
+
+| Model server | Metric | Label | Notes |
+| --- | --- | --- | --- |
+| vLLM | `vllm:kv_offload_config_info` | `cpu_kv_cache_size_tokens` | Releases after v0.32.0, with `CPUOffloadingSpec` or `TieringOffloadingSpec`. The series appears after the engine's first scheduler step. |
+| SGLang | `sglang:hicache_host_total_tokens` | — | v0.5.10 and later, with `--enable-hierarchical-cache`. |
+| trtllm-serve | — | — | Not needed under the default KV cache manager, see NumGPUBlocks. |
+
+### KVCacheOffloadDetection (optional)
+
+A metric whose presence reports that the model server offloads KV cache to another tier. When it
+is present and TotalKVCacheTokens is not, the approximate prefix cache logs a warning that the
+index covers the HBM tier only.
+
+| Model server | Metric |
+| --- | --- |
+| vLLM | `vllm:kv_offload_total_bytes_total`, registered by the `OffloadingConnector` at startup. |
+
 ## LoRA Adapter Serving
 
 **Required by:** `lora-affinity-scorer`; `lora-residency-scorer` reads only `max_lora` and `running_lora_adapters`

@@ -62,6 +62,17 @@ type (
 		// CacheNumBlocksSpec defines the metric specification string for retrieving num GPU blocks directly
 		// as a gauge value (alternative to CacheInfoSpec labels).
 		CacheNumBlocksSpec string `json:"cacheNumBlocksSpec,omitempty"`
+		// CacheTotalTokensSpec defines the metric specification string for the KV cache capacity in
+		// tokens of the engine's offload-extended cache (e.g. SGLang's HiCache host pool). Optional:
+		// a scrape without the metric leaves KvCacheMaxTokenCapacity unchanged and logs no error.
+		CacheTotalTokensSpec string `json:"cacheTotalTokensSpec,omitempty"`
+		// CacheTotalTokensLabelName names a label on the CacheTotalTokensSpec metric that carries the
+		// capacity (e.g. vLLM's cpu_kv_cache_size_tokens on vllm:kv_offload_config_info). Empty reads
+		// the gauge value.
+		CacheTotalTokensLabelName string `json:"cacheTotalTokensLabelName,omitempty"`
+		// CacheOffloadDetectionSpec defines a metric whose presence reports that the engine offloads
+		// KV cache to another tier (e.g. vLLM's OffloadingConnector transfer counters). Optional.
+		CacheOffloadDetectionSpec string `json:"cacheOffloadDetectionSpec,omitempty"`
 		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
 		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
 	}
@@ -96,13 +107,26 @@ type (
 
 // Default engine configurations for vLLM, SGLang, ATOM, TokenSpeed, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
-	{
+	{ //#nosec G101 -- CacheTotalTokensSpec names a metric, not a credential
 		Name:                "vllm",
 		QueuedRequestsSpec:  "vllm:num_requests_waiting",
 		RunningRequestsSpec: "vllm:num_requests_running",
 		KVUsageSpec:         "vllm:kv_cache_usage_perc",
 		LoRASpec:            "vllm:lora_requests_info",
 		CacheInfoSpec:       "vllm:cache_config_info",
+		// The CPU offload tier reports its capacity as a label of
+		// vllm:kv_offload_config_info (vLLM after v0.32.0, from the engine's first
+		// scheduler step). With TieringOffloadingSpec the label is on the
+		// tier="0:primary" series. The connector registers the transfer counters at
+		// startup, so their presence reports offloading on every vLLM release;
+		// total_bytes is the one name that exists on releases both before and
+		// after the counters were renamed to load_bytes and store_bytes. It is
+		// deprecated upstream; remove CacheOffloadDetectionSpec once the oldest
+		// supported vLLM reports kv_offload_config_info, since the warning it
+		// drives has nothing to say on those releases.
+		CacheTotalTokensSpec:      "vllm:kv_offload_config_info",
+		CacheTotalTokensLabelName: "cpu_kv_cache_size_tokens",
+		CacheOffloadDetectionSpec: "vllm:kv_offload_total_bytes_total",
 		// vLLM reports the tiering counters only when it runs with TieringOffloadingSpec,
 		// and creates each series on its first event.
 		CustomMetrics: []customMetricConfigParams{
@@ -118,7 +142,7 @@ var defaultEngineConfigs = []engineConfigParams{
 			{AttributeKey: attrmetrics.NixlKVExpiredRequestsKey, MetricSpec: "vllm:nixl_num_kv_expired_reqs_total", Optional: true},
 		},
 	},
-	{
+	{ //#nosec G101 -- CacheTotalTokensSpec names a metric, not a credential
 		Name:                "sglang",
 		QueuedRequestsSpec:  "sglang:num_queue_reqs",
 		RunningRequestsSpec: "sglang:num_running_reqs",
@@ -127,6 +151,11 @@ var defaultEngineConfigs = []engineConfigParams{
 		CacheInfoSpec:       "",
 		CacheBlockSizeSpec:  "sglang:page_size",
 		CacheNumBlocksSpec:  "sglang:num_pages",
+		// SGLang v0.5.10 and later report the HiCache host pool capacity when
+		// hierarchical caching is enabled. SGLang requires the host pool to be
+		// larger than the device pool, and the host pool holds a copy of every
+		// device page, so this gauge alone is the cache's total capacity.
+		CacheTotalTokensSpec: "sglang:hicache_host_total_tokens",
 	},
 	{
 		Name:                "atom",
@@ -260,16 +289,19 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 		}
 
 		mapping, err := NewMappingFromConfig(MappingConfig{
-			Queue:               engineConfig.QueuedRequestsSpec,
-			Running:             engineConfig.RunningRequestsSpec,
-			KVUsage:             engineConfig.KVUsageSpec,
-			Lora:                engineConfig.LoRASpec,
-			CacheInfo:           engineConfig.CacheInfoSpec,
-			CacheBlockSizeLabel: engineConfig.CacheBlockSizeLabelName,
-			CacheNumBlocksLabel: engineConfig.CacheNumBlocksLabelName,
-			CacheBlockSize:      engineConfig.CacheBlockSizeSpec,
-			CacheNumBlocks:      engineConfig.CacheNumBlocksSpec,
-			CustomMetrics:       customMetrics,
+			Queue:                 engineConfig.QueuedRequestsSpec,
+			Running:               engineConfig.RunningRequestsSpec,
+			KVUsage:               engineConfig.KVUsageSpec,
+			Lora:                  engineConfig.LoRASpec,
+			CacheInfo:             engineConfig.CacheInfoSpec,
+			CacheBlockSizeLabel:   engineConfig.CacheBlockSizeLabelName,
+			CacheNumBlocksLabel:   engineConfig.CacheNumBlocksLabelName,
+			CacheBlockSize:        engineConfig.CacheBlockSizeSpec,
+			CacheNumBlocks:        engineConfig.CacheNumBlocksSpec,
+			CacheTotalTokens:      engineConfig.CacheTotalTokensSpec,
+			CacheTotalTokensLabel: engineConfig.CacheTotalTokensLabelName,
+			CacheOffloadDetection: engineConfig.CacheOffloadDetectionSpec,
+			CustomMetrics:         customMetrics,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create mapping for engine %q: %w", engineConfig.Name, err)
