@@ -17,7 +17,7 @@ The policy computes a deadline for each request as:
 `Deadline = ReceivedTimestamp + x-llm-d-slo-ttft-ms`
 
 - **`ReceivedTimestamp`**: The time the request was received by the gateway.
-- **`x-llm-d-slo-ttft-ms`**: A request header specifying the target Time-To-First-Token in milliseconds. The deprecated `x-slo-ttft-ms` alias is still accepted for compatibility.
+- **`x-llm-d-slo-ttft-ms`**: A request header specifying the target Time-To-First-Token in milliseconds. The deprecated `x-slo-ttft-ms` alias is still accepted for compatibility, and is read when `x-llm-d-slo-ttft-ms` is empty or absent.
 
 ## Inputs consumed
 
@@ -28,7 +28,7 @@ This policy inspects the following attributes of the request:
 Requests are prioritized as follows:
 1. Requests with **earlier absolute deadlines** are dispatched first.
 2. If two requests have the same deadline, or if both lack a valid deadline, they are ordered by `ReceivedTimestamp` (FCFS).
-3. Requests whose TTFT SLO is missing, empty, or not a valid integer are assigned a far-future deadline, placing them behind all SLO-bound requests. The SLO is read from `x-llm-d-slo-ttft-ms`, or from its deprecated name when that header is empty or absent.
+3. Requests whose TTFT SLO is missing, empty, or not a valid integer are assigned a far-future deadline, placing them behind all SLO-bound requests.
 
 ## Behavior and Queue Pairing
 
