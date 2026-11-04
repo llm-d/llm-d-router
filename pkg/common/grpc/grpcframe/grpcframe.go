@@ -48,11 +48,14 @@ const (
 	StatusOK = "0"
 )
 
-var trailerHeaders = [...]string{
-	HeaderStatus,
-	HeaderMessage,
-	HeaderStatusDetailsBin,
-}
+var (
+	canonicalStatus = http.CanonicalHeaderKey(HeaderStatus)
+	trailerHeaders  = [...]string{
+		HeaderStatus,
+		HeaderMessage,
+		HeaderStatusDetailsBin,
+	}
+)
 
 // IsContentType reports whether contentType is a gRPC media type
 // ("application/grpc" or "application/grpc+<subtype>").
@@ -63,24 +66,18 @@ func IsContentType(contentType string) bool {
 }
 
 // Status extracts the gRPC status code string from an HTTP header or trailer
-// map, including unannounced HTTP/2 trailers prefixed with http.TrailerPrefix
-// by httputil.ReverseProxy.
+// map, including unannounced HTTP/2 trailers prefixed with http.TrailerPrefix.
 func Status(h http.Header) (string, bool) {
-	if len(h) == 0 {
-		return "", false
-	}
-	if v := firstNonEmpty(h.Values(HeaderStatus)); v != "" {
-		return v, true
-	}
-	if v := firstNonEmpty(h.Values(http.TrailerPrefix + HeaderStatus)); v != "" {
-		return v, true
-	}
-	for k, vv := range h {
-		trimmed := strings.TrimPrefix(k, http.TrailerPrefix)
-		if strings.EqualFold(trimmed, HeaderStatus) {
-			if v := firstNonEmpty(vv); v != "" {
-				return v, true
-			}
+	// http.CanonicalHeaderKey leaves keys containing ':' unchanged, so
+	// httputil.ReverseProxy (TrailerPrefix + "Grpc-Status") and direct callers
+	// (TrailerPrefix + HeaderStatus) store distinct map keys.
+	for _, key := range [...]string{
+		canonicalStatus,
+		http.TrailerPrefix + canonicalStatus,
+		http.TrailerPrefix + HeaderStatus,
+	} {
+		if v := firstNonEmpty(h[key]); v != "" {
+			return v, true
 		}
 	}
 	return "", false
@@ -96,11 +93,11 @@ func HasErrorStatus(h http.Header) bool {
 // http.TrailerPrefix so net/http emits them as HTTP/2 trailers after body writes.
 func CopyTrailers(dst, src http.Header) {
 	for _, key := range trailerHeaders {
-		for _, val := range src.Values(key) {
-			dst.Add(http.TrailerPrefix+key, val)
-		}
-		for _, val := range src.Values(http.TrailerPrefix + key) {
-			dst.Add(http.TrailerPrefix+key, val)
+		canonical := http.CanonicalHeaderKey(key)
+		for _, srcKey := range [...]string{canonical, http.TrailerPrefix + canonical, http.TrailerPrefix + key} {
+			for _, val := range src[srcKey] {
+				dst.Add(http.TrailerPrefix+key, val)
+			}
 		}
 	}
 }
@@ -144,6 +141,17 @@ func encodeStatusMessage(msg string) string {
 	return b.String()
 }
 
+func parseFrameHeader(header []byte) (uint32, error) {
+	if len(header) < HeaderLen {
+		return 0, fmt.Errorf("invalid gRPC frame: expected at least %d bytes for header, got %d", HeaderLen, len(header))
+	}
+	if header[0] != 0 {
+		// TODO(#895): handle compressed payload.
+		return 0, errors.New("compressed gRPC payload is not supported")
+	}
+	return binary.BigEndian.Uint32(header[1:HeaderLen]), nil
+}
+
 // ReadFrame reads a single uncompressed gRPC frame from r and returns its
 // payload bytes. It returns io.EOF when r ends cleanly on a frame boundary.
 // When maxPayloadBytes > 0, frames declaring a larger payload are rejected
@@ -157,10 +165,10 @@ func ReadFrame(r io.Reader, maxPayloadBytes int) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read gRPC frame header: %w", err)
 	}
-	if header[0] != 0 {
-		return nil, errors.New("compressed gRPC payload is not supported")
+	msgLen, err := parseFrameHeader(header[:])
+	if err != nil {
+		return nil, err
 	}
-	msgLen := binary.BigEndian.Uint32(header[1:HeaderLen])
 	if maxPayloadBytes > 0 && uint64(msgLen) > uint64(maxPayloadBytes) {
 		return nil, fmt.Errorf("gRPC frame payload %d bytes exceeds limit %d", msgLen, maxPayloadBytes)
 	}
@@ -176,16 +184,10 @@ func ReadFrame(r io.Reader, maxPayloadBytes int) ([]byte, error) {
 
 // ParsePayload extracts the message payload from a single uncompressed gRPC frame.
 func ParsePayload(data []byte) ([]byte, error) {
-	if len(data) < HeaderLen {
-		return nil, fmt.Errorf("invalid gRPC frame: expected at least %d bytes for header, got %d", HeaderLen, len(data))
+	msgLen, err := parseFrameHeader(data)
+	if err != nil {
+		return nil, err
 	}
-
-	if data[0] != 0 {
-		// TODO(#895): handle compressed payload.
-		return nil, errors.New("compressed gRPC payload is not supported")
-	}
-	msgLen := binary.BigEndian.Uint32(data[1:HeaderLen])
-
 	// Compare in uint64 so HeaderLen+msgLen cannot overflow when msgLen is near
 	// math.MaxUint32, which would wrap the check and let the slice below panic.
 	if uint64(len(data)) < uint64(HeaderLen)+uint64(msgLen) {
@@ -208,29 +210,6 @@ func ParsePayloads(data []byte) ([][]byte, error) {
 		data = data[HeaderLen+len(payload):]
 	}
 	return payloads, nil
-}
-
-// SplitCompleteFrames splits data into contiguous whole uncompressed gRPC frames
-// and any trailing partial frame bytes that require further stream chunks.
-// It returns an error if a frame specifies a non-zero compression flag.
-func SplitCompleteFrames(data []byte) (complete, rest []byte, err error) {
-	offset := 0
-	for offset < len(data) {
-		rem := data[offset:]
-		if len(rem) < HeaderLen {
-			break
-		}
-		if rem[0] != 0 {
-			return data[:offset], nil, errors.New("compressed gRPC payload is not supported")
-		}
-		msgLen := binary.BigEndian.Uint32(rem[1:HeaderLen])
-		if uint64(len(rem)) < uint64(HeaderLen)+uint64(msgLen) {
-			break
-		}
-		payload := rem[HeaderLen : HeaderLen+msgLen]
-		offset += HeaderLen + len(payload)
-	}
-	return data[:offset], data[offset:], nil
 }
 
 // FramePayload wraps payload in an uncompressed 5-byte gRPC frame.

@@ -92,14 +92,11 @@ generate-proto-sglang: buf protoc-gen-go protoc-gen-go-grpc ## Generate SGLang G
 
 .PHONY: verify-sglang-proto
 verify-sglang-proto: generate-proto-sglang ## Check that SGLang Go bindings match sgl-project/sglang@$(SGLANG_REF).
-	@git diff --exit-code -- $(SGLANG_GRPC_DIR) || { \
-		echo "ERROR: $(SGLANG_GRPC_DIR) differs from sgl-project/sglang@$(SGLANG_REF). Run 'make generate-proto-sglang' and commit the result."; \
-		exit 1; \
-	}
-	@untracked="$$(git ls-files --others --exclude-standard -- $(SGLANG_GRPC_DIR))"; \
-	if [ -n "$$untracked" ]; then \
-		echo "ERROR: untracked generated files under $(SGLANG_GRPC_DIR):"; \
-		echo "$$untracked"; \
+	@status="$$(git status --porcelain -- $(SGLANG_GRPC_DIR))"; \
+	if [ -n "$$status" ]; then \
+		echo "ERROR: $(SGLANG_GRPC_DIR) differs from sgl-project/sglang@$(SGLANG_REF). Run 'make generate-proto-sglang' and commit the result:"; \
+		echo "$$status"; \
+		git diff -- $(SGLANG_GRPC_DIR); \
 		exit 1; \
 	fi
 

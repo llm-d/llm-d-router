@@ -144,43 +144,6 @@ func TestParsePayloads(t *testing.T) {
 	}
 }
 
-func TestSplitCompleteFrames(t *testing.T) {
-	f1, err := FramePayload([]byte("alpha"))
-	require.NoError(t, err)
-	f2, err := FramePayload([]byte("bravo"))
-	require.NoError(t, err)
-
-	t.Run("partial header carried", func(t *testing.T) {
-		complete, rest, err := SplitCompleteFrames(f1[:3])
-		require.NoError(t, err)
-		require.Empty(t, complete)
-		require.Equal(t, f1[:3], rest)
-	})
-
-	t.Run("complete frame followed by partial payload", func(t *testing.T) {
-		combined := append(append([]byte{}, f1...), f2[:7]...)
-		complete, rest, err := SplitCompleteFrames(combined)
-		require.NoError(t, err)
-		require.Equal(t, f1, complete)
-		require.Equal(t, f2[:7], rest)
-
-		resumed := append(append([]byte{}, rest...), f2[7:]...)
-		complete2, rest2, err := SplitCompleteFrames(resumed)
-		require.NoError(t, err)
-		require.Equal(t, f2, complete2)
-		require.Empty(t, rest2)
-	})
-
-	t.Run("compressed frame after valid frame", func(t *testing.T) {
-		compressed := []byte{1, 0, 0, 0, 2, 'h', 'i'}
-		combined := append(append([]byte{}, f1...), compressed...)
-		complete, rest, err := SplitCompleteFrames(combined)
-		require.EqualError(t, err, "compressed gRPC payload is not supported")
-		require.Equal(t, f1, complete)
-		require.Empty(t, rest)
-	})
-}
-
 func TestMarshalProtoRoundTrip(t *testing.T) {
 	_, err := MarshalProto(nil)
 	require.EqualError(t, err, "nil protobuf message")
@@ -240,8 +203,12 @@ func TestStatusAndHasErrorStatus(t *testing.T) {
 	require.Equal(t, "14", code)
 	require.True(t, HasErrorStatus(trailerErr))
 
-	rawMapErr := http.Header{http.TrailerPrefix + "Grpc-Status": []string{"3"}}
-	require.True(t, HasErrorStatus(rawMapErr))
+	reverseProxyTrailerErr := make(http.Header)
+	reverseProxyTrailerErr.Add(http.TrailerPrefix+http.CanonicalHeaderKey(HeaderStatus), "3")
+	code, ok = Status(reverseProxyTrailerErr)
+	require.True(t, ok)
+	require.Equal(t, "3", code)
+	require.True(t, HasErrorStatus(reverseProxyTrailerErr))
 }
 
 func TestCopyTrailersAndWriteError(t *testing.T) {
@@ -256,6 +223,12 @@ func TestCopyTrailersAndWriteError(t *testing.T) {
 	CopyTrailers(dst, rec.Header())
 	require.Equal(t, "3", dst.Get(http.TrailerPrefix+HeaderStatus))
 	require.Equal(t, "bad request: 50%25 done%0Aretry", dst.Get(http.TrailerPrefix+HeaderMessage))
+
+	fromReverseProxy := make(http.Header)
+	fromReverseProxy.Add(http.TrailerPrefix+http.CanonicalHeaderKey(HeaderStatus), "14")
+	dstFromProxy := make(http.Header)
+	CopyTrailers(dstFromProxy, fromReverseProxy)
+	require.Equal(t, "14", dstFromProxy.Get(http.TrailerPrefix+HeaderStatus))
 }
 
 func TestReadFrame(t *testing.T) {
@@ -278,4 +251,10 @@ func TestReadFrame(t *testing.T) {
 
 	_, err = ReadFrame(bytes.NewReader(f2), 3)
 	require.ErrorContains(t, err, "exceeds limit 3")
+
+	_, err = ReadFrame(bytes.NewReader([]byte{1, 0, 0, 0, 0}), 64)
+	require.EqualError(t, err, "compressed gRPC payload is not supported")
+
+	_, err = ReadFrame(bytes.NewReader(f1[:3]), 64)
+	require.ErrorContains(t, err, "read gRPC frame header")
 }
