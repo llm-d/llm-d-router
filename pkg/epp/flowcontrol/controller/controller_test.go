@@ -1244,16 +1244,70 @@ func TestFlowController_Concurrency_Backpressure(t *testing.T) {
 // processor looks up a managed queue at the missing band and rejects the request.
 func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T) {
 	t.Parallel()
+	metrics.Register()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	const originalPriority = 100
+	const (
+		flowID           = "batch"
+		poolName         = "fallback-pool"
+		originalPriority = 100
+	)
 
-	var capturedKey flowcontrol.FlowKey
+	gaugeValue := func(metricName, priority string) (float64, bool) {
+		families, err := ctrlmetrics.Registry.Gather()
+		require.NoError(t, err)
+		for _, mf := range families {
+			if mf.GetName() != metricName {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				if hasLabels(m, map[string]string{
+					"fairness_id":    flowID,
+					"priority":       priority,
+					"inference_pool": poolName,
+				}) {
+					return m.GetGauge().GetValue(), true
+				}
+			}
+		}
+		return 0, false
+	}
+	counterValue := func(priority string) (float64, bool) {
+		families, err := ctrlmetrics.Registry.Gather()
+		require.NoError(t, err)
+		for _, mf := range families {
+			if mf.GetName() != "llm_d_epp_flow_control_requests_total" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				if hasLabels(m, map[string]string{
+					"outcome":        types.QueueOutcomeDispatched.String(),
+					"priority":       priority,
+					"inference_pool": poolName,
+				}) {
+					return m.GetCounter().GetValue(), true
+				}
+			}
+		}
+		return 0, false
+	}
+
+	var (
+		capturedKey       flowcontrol.FlowKey
+		inFlightQueueSize float64
+		inFlightBytes     float64
+		unprovisionedSize bool
+		unprovisionedByte bool
+	)
 	processor := &mockProcessor{
 		SubmitFunc: func(item *internal.FlowItem) error {
 			capturedKey = item.OriginalRequest().FlowKey()
+			inFlightQueueSize, _ = gaugeValue("llm_d_epp_flow_control_queue_size", "0")
+			inFlightBytes, _ = gaugeValue("llm_d_epp_flow_control_queue_bytes", "0")
+			_, unprovisionedSize = gaugeValue("llm_d_epp_flow_control_queue_size", "100")
+			_, unprovisionedByte = gaugeValue("llm_d_epp_flow_control_queue_bytes", "100")
 			go item.FinalizeWithError(nil)
 			return nil
 		},
@@ -1270,13 +1324,40 @@ func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T
 
 	h := newUnitHarness(ctx, t, &Config{DefaultRequestTTL: time.Minute}, registry, processor)
 
-	outcome, err := h.fc.EnqueueAndWait(ctx, newTestRequest(flowcontrol.FlowKey{ID: "batch", Priority: originalPriority}))
+	req := newTestRequest(flowcontrol.FlowKey{ID: flowID, Priority: originalPriority})
+	req.InferencePoolNameV = poolName
+	outcome, err := h.fc.EnqueueAndWait(ctx, req)
 
 	require.NoError(t, err, "fallback request should be dispatched, not rejected")
 	assert.Equal(t, types.QueueOutcomeDispatched, outcome)
 	assert.Equal(t, 0, capturedKey.Priority,
 		"fallback request must be enqueued at priority 0, not its original unprovisioned priority")
-	assert.Equal(t, "batch", capturedKey.ID, "fallback must preserve the flow ID")
+	assert.Equal(t, flowID, capturedKey.ID, "fallback must preserve the flow ID")
+
+	assert.Equal(t, float64(1), inFlightQueueSize, "QueueSize must be incremented at priority 0 while queued")
+	assert.Equal(t, float64(req.ByteSize()), inFlightBytes, "QueueBytes must be incremented at priority 0 while queued")
+	assert.False(t, unprovisionedSize, "QueueSize must not record a series at the unprovisioned priority")
+	assert.False(t, unprovisionedByte, "QueueBytes must not record a series at the unprovisioned priority")
+
+	postQueueSize, ok := gaugeValue("llm_d_epp_flow_control_queue_size", "0")
+	require.True(t, ok, "QueueSize series for fallback priority 0 should exist")
+	assert.Zero(t, postQueueSize, "QueueSize for fallback priority 0 must return to 0 after completion")
+
+	postQueueBytes, ok := gaugeValue("llm_d_epp_flow_control_queue_bytes", "0")
+	require.True(t, ok, "QueueBytes series for fallback priority 0 should exist")
+	assert.Zero(t, postQueueBytes, "QueueBytes for fallback priority 0 must return to 0 after completion")
+
+	_, hasOrphanedSize := gaugeValue("llm_d_epp_flow_control_queue_size", "100")
+	assert.False(t, hasOrphanedSize, "QueueSize must not leave an orphaned series at unprovisioned priority 100")
+	_, hasOrphanedBytes := gaugeValue("llm_d_epp_flow_control_queue_bytes", "100")
+	assert.False(t, hasOrphanedBytes, "QueueBytes must not leave an orphaned series at unprovisioned priority 100")
+
+	dispatchedAtZero, ok := counterValue("0")
+	require.True(t, ok, "RequestsTotal series for fallback priority 0 should exist")
+	assert.Equal(t, float64(1), dispatchedAtZero, "RequestsTotal must be recorded under fallback priority 0")
+
+	_, hasOrphanedTotal := counterValue("100")
+	assert.False(t, hasOrphanedTotal, "RequestsTotal must not record a series at unprovisioned priority 100")
 }
 
 // TestFlowController_EnqueueAndWait_QueueDurationCarriesTraceExemplar checks that the queue duration exemplar links
@@ -1386,4 +1467,14 @@ func queueDurationHistogram(t *testing.T, flowID string) *dto.Histogram {
 	}
 	require.FailNow(t, "no queue duration series recorded", "fairness_id %q", flowID)
 	return nil
+}
+
+func hasLabels(m *dto.Metric, want map[string]string) bool {
+	matched := 0
+	for _, lp := range m.GetLabel() {
+		if v, ok := want[lp.GetName()]; ok && lp.GetValue() == v {
+			matched++
+		}
+	}
+	return matched == len(want)
 }
