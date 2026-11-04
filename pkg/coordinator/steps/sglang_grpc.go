@@ -459,8 +459,10 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 }
 
 // rewriteDecodeFrameCachedTokens substitutes prefill's prompt-cache hit count
-// onto decode frames because the decode worker counts KV blocks transferred
-// from prefill rather than hits in prefill's prompt cache.
+// onto terminal decode frames because the decode worker counts KV blocks
+// transferred from prefill rather than hits in prefill's prompt cache. Only
+// terminal frames are rewritten so that per-token frames are forwarded without
+// a re-marshal.
 func rewriteDecodeFrameCachedTokens(ctx context.Context, logger logr.Logger, payload []byte, ps *pipeline.SGLangPrefillStream) ([]byte, error) {
 	if ps == nil {
 		return grpcframe.FramePayload(payload)
@@ -470,15 +472,13 @@ func rewriteDecodeFrameCachedTokens(ctx context.Context, logger logr.Logger, pay
 		return nil, err
 	}
 	frame := item.GetFrame()
-	if frame == nil || frame.GetMetaInfo() == nil {
+	if frame.GetMetaInfo().GetFinishReason() == nil {
 		return grpcframe.FramePayload(payload)
 	}
 	index := frame.GetIndex()
-	if frame.GetMetaInfo().GetFinishReason() != nil {
-		if _, ok := ps.CachedTokens(index); !ok {
-			if !ps.Wait(ctx, sglangPrefillWaitOnTerminal) {
-				logger.V(logutil.DEBUG).Info("timed out waiting for prefill cached_tokens on terminal decode frame", "index", index)
-			}
+	if _, ok := ps.CachedTokens(index); !ok {
+		if !ps.Wait(ctx, sglangPrefillWaitOnTerminal) {
+			logger.V(logutil.DEBUG).Info("timed out waiting for prefill cached_tokens on terminal decode frame", "index", index)
 		}
 	}
 	cached, ok := ps.CachedTokens(index)

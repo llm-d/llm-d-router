@@ -286,6 +286,9 @@ func TestSGLangGRPC_ConcurrentPrefillDecodeStreamsAndRewritesCachedTokens(t *tes
 	if items[0].GetText() != "Hi" || items[1].GetText() != "Hi there" {
 		t.Fatalf("unexpected texts: %q, %q", items[0].GetText(), items[1].GetText())
 	}
+	if got := items[0].GetMetaInfo().GetCachedTokens(); got != 0 {
+		t.Fatalf("non-terminal cached_tokens = %d, want 0 from decode", got)
+	}
 	if got := items[1].GetMetaInfo().GetCachedTokens(); got != 48 {
 		t.Fatalf("terminal cached_tokens = %d, want 48 from prefill", got)
 	}

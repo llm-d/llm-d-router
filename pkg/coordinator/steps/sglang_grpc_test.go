@@ -25,8 +25,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
@@ -94,6 +96,43 @@ func TestGRPCAndHTTPStatusMappings(t *testing.T) {
 	for _, tc := range errBodyToGRPC {
 		require.Equal(t, tc.wantGRPC, sglangErrorBodyGRPCCode(tc.code), "code=%d", tc.code)
 	}
+}
+
+func TestRewriteDecodeFrameCachedTokens_OnlyTerminalFrames(t *testing.T) {
+	ps := pipeline.NewSGLangPrefillStream(func() {}, nil)
+	ps.RecordCachedTokens(0, 48)
+
+	marshal := func(finish *sglangapiv1.FinishReason) []byte {
+		payload, err := proto.Marshal(&sglangapiv1.GenerateStreamItem{
+			Item: &sglangapiv1.GenerateStreamItem_Frame{
+				Frame: &sglangapiv1.GenerateResponse{
+					MetaInfo: &sglangapiv1.GenerateMetaInfo{CachedTokens: 0, FinishReason: finish},
+				},
+			},
+		})
+		require.NoError(t, err)
+		return payload
+	}
+	cachedTokens := func(framed []byte) uint32 {
+		payload, err := grpcframe.ParsePayload(framed)
+		require.NoError(t, err)
+		var item sglangapiv1.GenerateStreamItem
+		require.NoError(t, proto.Unmarshal(payload, &item))
+		return item.GetFrame().GetMetaInfo().GetCachedTokens()
+	}
+
+	// A non-terminal frame is forwarded byte for byte.
+	nonTerminal := marshal(nil)
+	out, err := rewriteDecodeFrameCachedTokens(context.Background(), logr.Discard(), nonTerminal, ps)
+	require.NoError(t, err)
+	require.Equal(t, nonTerminal, out[grpcframe.HeaderLen:])
+	require.Equal(t, uint32(0), cachedTokens(out))
+
+	// A terminal frame gets the prefill cached_tokens.
+	terminal := marshal(&sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Stop{Stop: &sglangapiv1.FinishStop{}}})
+	out, err = rewriteDecodeFrameCachedTokens(context.Background(), logr.Discard(), terminal, ps)
+	require.NoError(t, err)
+	require.Equal(t, uint32(48), cachedTokens(out))
 }
 
 func TestSGLangPrefillStreamLifecycle(t *testing.T) {
