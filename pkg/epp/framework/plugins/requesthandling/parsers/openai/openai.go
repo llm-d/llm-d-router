@@ -72,6 +72,11 @@ const (
 	// audioGenerateAPI is the vLLM Omni text-to-audio generation endpoint (e.g.
 	// Stable Audio), distinct from audioSpeechAPI's text-to-speech.
 	audioGenerateAPI = "audio/generate"
+	// audioTranscriptionsAPI and audioTranslationsAPI are the OpenAI-compatible
+	// speech-to-text endpoints. Both take multipart/form-data with the same
+	// scalar fields, so one parser serves both.
+	audioTranscriptionsAPI = "audio/transcriptions"
+	audioTranslationsAPI   = "audio/translations"
 
 	octetStreamType = "application/octet-stream"
 
@@ -125,6 +130,8 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			videosAPI,
 			videosSyncAPI,
 			audioSpeechAPI,
+			audioTranscriptionsAPI,
+			audioTranslationsAPI,
 			request.DecisionsPathSuffix,
 			audioGenerateAPI,
 		},
@@ -153,6 +160,9 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	}
 	if apiType == videosAPI || apiType == videosSyncAPI {
 		return parseVideosRequest(body, headers)
+	}
+	if apiType == audioTranscriptionsAPI || apiType == audioTranslationsAPI {
+		return parseTranscriptionsRequest(apiType, body, headers)
 	}
 	if apiType == request.DecisionsPathSuffix {
 		return parseDecisionsRequest(body)
@@ -393,6 +403,12 @@ func determineAPITypeFromPath(path string) string {
 	}
 	if request.MatchPathSuffix(path, "/audio/speech") {
 		return audioSpeechAPI
+	}
+	if request.MatchPathSuffix(path, "/"+audioTranscriptionsAPI) {
+		return audioTranscriptionsAPI
+	}
+	if request.MatchPathSuffix(path, "/"+audioTranslationsAPI) {
+		return audioTranslationsAPI
 	}
 	if request.MatchPathSuffix(path, request.DecisionsPathSuffix) {
 		return request.DecisionsPathSuffix
@@ -732,6 +748,43 @@ func parseVideosRequest(body []byte, headers map[string]string) (*fwkrh.ParseRes
 	}
 	if videos.Prompt == "" {
 		return nil, errors.New("invalid videos request: must have prompt field")
+	}
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// parseTranscriptionsRequest parses a multipart/form-data /v1/audio/transcriptions
+// or /v1/audio/translations request. The audio file part drives the engine's
+// cost, so it is captured as UploadedMedia for input-cost estimation; the
+// engine is authoritative for the required file field, and the original body is
+// forwarded unchanged.
+func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+	transcriptions := &request.TranscriptionRequest{}
+	extractedBody := &request.InferenceRequestBody{
+		Transcriptions: transcriptions,
+		Payload:        request.RawPayload(body),
+	}
+	err := parseMultipartForm(body, headers, apiType, func(name string, value []byte) error {
+		switch name {
+		case reqcommon.FieldModel:
+			extractedBody.Model = string(value)
+		case "prompt":
+			transcriptions.Prompt = string(value)
+		case "stream":
+			stream, err := strconv.ParseBool(string(value))
+			if err != nil {
+				return fmt.Errorf("invalid %s stream field: %w", apiType, err)
+			}
+			extractedBody.Stream = stream
+		}
+		return nil
+	}, func(name string) bool {
+		return name == "file"
+	}, func(_ string, media request.UploadedMedia) error {
+		transcriptions.Audio = media
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 }

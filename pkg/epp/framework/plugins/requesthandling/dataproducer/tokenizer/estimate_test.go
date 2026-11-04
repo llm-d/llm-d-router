@@ -1240,6 +1240,73 @@ func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
 	assert.Equal(t, 3*13+2, tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3omni-shaped audio length")
 }
 
+// transcriptionsBody builds a request body carrying an uploaded audio file part,
+// the shape the openai parser produces for /v1/audio/transcriptions.
+func transcriptionsBody(prompt string, media fwkrequest.UploadedMedia) *fwkrequest.InferenceRequestBody {
+	return &fwkrequest.InferenceRequestBody{Transcriptions: &fwkrequest.TranscriptionRequest{
+		Prompt: prompt,
+		Audio:  media,
+	}}
+}
+
+// uploadedWAV returns the UploadedMedia the parser captures for a WAV file
+// part. Head carries the same leading bytes the parser retains.
+func uploadedWAV(t *testing.T, sampleRate, channels, dataLen int) fwkrequest.UploadedMedia {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(wavBase64(sampleRate, channels, dataLen))
+	require.NoError(t, err)
+	head := raw
+	if len(head) > 1024 {
+		head = head[:1024]
+	}
+	return fwkrequest.UploadedMedia{ContentType: "audio/wav", SizeBytes: int64(len(raw)), Head: head, Hash: xxhash.Sum64(raw)}
+}
+
+// TestTranscriptionsEstimator_WAVDuration asserts an uploaded WAV file part
+// resolves to its exact duration: 48000 data bytes at 32000 B/s is 1.5s. The
+// feature mirrors the chat audio representation: hash, offset behind the
+// conditioning text, and placeholder span counted in the request's tokens.
+func TestTranscriptionsEstimator_WAVDuration(t *testing.T) {
+	media := uploadedWAV(t, 16000, 1, 48000)
+	tp, err := estimateBackend{}.produce(context.Background(), transcriptionsBody("hint", media))
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, reqcommon.ModalityAudio, features[0].Modality)
+	assert.Equal(t, audioTokens(1.5), features[0].Length)
+	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
+	assert.Equal(t, len(packBytes([]byte("hint"))), features[0].Offset)
+	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
+}
+
+// TestTranscriptionsEstimator_NonWAVUsesByteRate asserts an uploaded file that
+// is not a WAV converts through the byte rate: 48000 bytes at the default
+// 16000 B/s is 3s.
+func TestTranscriptionsEstimator_NonWAVUsesByteRate(t *testing.T) {
+	media := fwkrequest.UploadedMedia{ContentType: "audio/mpeg", SizeBytes: 48000, Head: []byte("ID3 not a riff header")}
+	tp, err := estimateBackend{}.produce(context.Background(), transcriptionsBody("", media))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(3), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestTranscriptionsEstimator_DurationHeaderWins asserts a header-declared
+// duration beats the payload-derived one.
+func TestTranscriptionsEstimator_DurationHeaderWins(t *testing.T) {
+	media := fwkrequest.UploadedMedia{ContentType: "audio/mpeg", SizeBytes: 480000}
+	tp, err := estimateBackend{}.produce(audioCtx(audioMetadata{duration: 5}), transcriptionsBody("", media))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(5), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestTranscriptionsEstimator_NoFilePart asserts a form without a file part
+// still carries the default-duration weight rather than zero.
+func TestTranscriptionsEstimator_NoFilePart(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), transcriptionsBody("", fwkrequest.UploadedMedia{}))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(defaultAudioDuration), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
 // TestEstimateBackend_ChatAudioWeightingDistinct asserts two clips of different
 // length produce different token streams, so audio weighting reaches the
 // locality keys instead of collapsing to one placeholder.
