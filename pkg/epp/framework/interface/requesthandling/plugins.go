@@ -80,6 +80,8 @@ type PreRequest interface {
 // ResponseHeaderProcessor is called by the director after the response headers are successfully received
 // which indicates the beginning of the response handling by the model server.
 // The given pod argument is the pod that served the request.
+// The request content has been released by then: request.Body holds only Model,
+// Stream, MaxOutputTokens and TokenizedRequest.
 type ResponseHeaderProcessor interface {
 	plugin.Plugin
 	ResponseHeader(ctx context.Context, request *fwksched.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)
@@ -95,6 +97,9 @@ type ResponseHeaderProcessor interface {
 //   - Plugins must treat the call where response.EndOfStream == true as the final lifecycle hook
 //     to perform cleanup or final logging.
 //   - The end-of-stream call carries response.TerminationCause; earlier calls leave it empty.
+//
+// The request content has been released by then: request.Body holds only Model,
+// Stream, MaxOutputTokens and TokenizedRequest.
 //
 // TODO(https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2079):
 // Upstream proposes passing error/termination state through the signature. Response.TerminationCause

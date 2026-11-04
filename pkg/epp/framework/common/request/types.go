@@ -169,6 +169,19 @@ func (b *InferenceRequestBody) MutatePayloadMap(fn func(PayloadMap)) {
 	b.Mutated = true
 }
 
+// ResponsePhaseView returns a new body with only the fields that response-phase
+// plugins read. The request handler swaps it in once the body has been forwarded,
+// so a long response does not keep the request content in memory. A new field is
+// left out unless it is added here.
+func (b *InferenceRequestBody) ResponsePhaseView() *InferenceRequestBody {
+	return &InferenceRequestBody{
+		TokenizedRequest: b.TokenizedRequest,
+		Stream:           b.Stream,
+		MaxOutputTokens:  b.MaxOutputTokens,
+		Model:            b.Model,
+	}
+}
+
 // MaxOutputTokensFromPayload returns the client-requested output-token cap read
 // from a decoded JSON request body. The keys are tried in order and the first one
 // holding a valid value wins, so callers express per-API precedence (e.g. chat
