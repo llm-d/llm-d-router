@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -52,6 +53,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/server"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/steps/asyncbroker"
 )
 
 func startH2CTestGateway(t *testing.T, handler http.Handler) *httptest.Server {
@@ -497,7 +499,11 @@ func TestSGLangGRPC_RejectsOversizedAndMalformedBodies(t *testing.T) {
 	if got := sendRaw("/sglang.api.v1.SglangService%2FGenerate", corruptFrame); got != "3" {
 		t.Fatalf("percent-encoded corrupt protobuf status = %q, want 3 (InvalidArgument)", got)
 	}
-	oversized := bytes.Repeat([]byte("x"), config.BytesPerMB+16)
+	// The frame header declares more than the 1 MB limit.
+	oversized, err := grpcframe.FramePayload(bytes.Repeat([]byte("x"), config.BytesPerMB+16))
+	if err != nil {
+		t.Fatalf("FramePayload: %v", err)
+	}
 	if got := sendRaw(sglangapiv1.SglangService_Generate_FullMethodName, oversized); got != "8" {
 		t.Fatalf("oversized body status = %q, want 8 (ResourceExhausted)", got)
 	}
@@ -569,14 +575,27 @@ func TestSGLangGRPC_JSONOnlyStepsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewConditionalDecodeStep: %v", err)
 	}
+	encodeStep, err := steps.NewEncodeStep(coordGW, nil)
+	if err != nil {
+		t.Fatalf("NewEncodeStep: %v", err)
+	}
+	asyncStep, err := asyncbroker.New(coordGW, map[string]any{
+		"redis_url":   "redis://" + miniredis.RunT(t).Addr(),
+		"wakeup_mode": "poll",
+	})
+	if err != nil {
+		t.Fatalf("asyncbroker.New: %v", err)
+	}
 	decodeStep, err := steps.NewDecodeStep(coordGW, map[string]any{"kv_connector": kv.SGLang})
 	if err != nil {
 		t.Fatalf("NewDecodeStep: %v", err)
 	}
 
 	addr := startCoordinatorH2C(t, config.ServerConfig{}, pipeline.New([]pipeline.Step{
+		asyncStep,
 		replaceStep,
 		renderStep,
+		encodeStep,
 		condStep,
 		decodeStep,
 	}), coordGW)
@@ -587,7 +606,10 @@ func TestSGLangGRPC_JSONOnlyStepsNoOp(t *testing.T) {
 	}
 	defer conn.Close()
 
-	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+	// The async mode header would make async-broker answer with a JSON
+	// error if it ran on this request.
+	callCtx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("x-llm-d-async-mode", "enqueue"))
+	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(callCtx, &sglangapiv1.GenerateRequest{
 		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "skip json steps"}},
 	})
 	if err != nil {

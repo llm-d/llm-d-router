@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -343,10 +344,10 @@ func TestReadMessage(t *testing.T) {
 		{name: "truncated payload", body: frame[:len(frame)-1], want: ErrMalformed},
 		{name: "trailing data", body: append(append([]byte{}, frame...), 0), want: ErrMalformed},
 		{name: "compressed", body: []byte{1, 0, 0, 0, 0}, want: ErrCompressed},
-		{name: "declared over limit, short body", body: []byte{0, 0, 0, 1, 0}, want: ErrMalformed},
+		{name: "declared over limit, short body", body: []byte{0, 0, 0, 1, 0}, want: ErrTooLarge},
 		{name: "declared over limit", body: tooLargeDeclared, want: ErrTooLarge},
-		{name: "garbage over limit", body: bytes.Repeat([]byte("x"), limit+1), want: ErrTooLarge},
-		{name: "trailing data over limit", body: append(append([]byte{}, frame...), make([]byte, limit)...), want: ErrTooLarge},
+		{name: "compression flag on a large body", body: bytes.Repeat([]byte("x"), limit+1), want: ErrCompressed},
+		{name: "trailing data over limit", body: append(append([]byte{}, frame...), make([]byte, limit)...), want: ErrMalformed},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -357,4 +358,15 @@ func TestReadMessage(t *testing.T) {
 
 	_, err = ReadMessage(errReader{}, limit)
 	require.ErrorIs(t, err, io.ErrClosedPipe)
+
+	// An oversized or compressed header is rejected before any payload read.
+	for _, header := range [][]byte{{0, 0, 0, 1, 0}, {1, 0, 0, 0, 1}} {
+		_, err = ReadMessage(io.MultiReader(bytes.NewReader(header), errReader{}), limit)
+		require.NotErrorIs(t, err, io.ErrClosedPipe, "header %v", header)
+	}
+
+	// The largest limit does not overflow.
+	got, err = ReadMessage(bytes.NewReader(frame), math.MaxInt64)
+	require.NoError(t, err)
+	require.Equal(t, frame, got)
 }
