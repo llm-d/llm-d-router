@@ -113,6 +113,7 @@ type Director interface {
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
 	HandleResponseBody(ctx context.Context, reqCtx *RequestContext, endOfStream bool) *RequestContext
 	GetRandomEndpoint() *fwkdl.EndpointMetadata
+	GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata
 }
 
 type Datastore interface {
@@ -253,8 +254,8 @@ const (
 	// The state machine sends an ImmediateResponse(429) to the proxy.
 	requestEvicted
 	// requestResponseProcessingSkipped indicates that EPP response-phase stream interception was skipped for this request.
-	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
-	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
+	// The state machine sends the RequestHeadersResponse, and a RequestBodyResponse when the request has a body,
+	// with the routing decision to the proxy, and then gracefully closes the stream to stop further external processing.
 	requestResponseProcessingSkipped
 	// requestAnsweredLocal indicates a Responder answered the request itself with an
 	// ImmediateResponse rather than routing it to a model server. The state machine sends the
@@ -906,6 +907,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			return err
 		}
 		if reqCtx.requestState == requestResponseProcessingSkipped {
+			// A header-time skip (e.g. a WebSocket upgrade) never reaches the body
+			// phase, so the request-processing latency is recorded here. OnceFunc
+			// keeps the body-phase skip from recording twice.
+			recordRequestProcessing()
 			logger.V(logutil.DEFAULT).Info("EPP skipped response interception, routed request",
 				"targetEndpoint", reqCtx.TargetEndpoint,
 				"targetModel", reqCtx.TargetModelName)

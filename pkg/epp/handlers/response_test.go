@@ -167,6 +167,10 @@ func (m *mockDirector) HandleResponseHeader(ctx context.Context, reqCtx *Request
 func (m *mockDirector) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	return &fwkdl.EndpointMetadata{}
 }
+
+func (m *mockDirector) GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata {
+	return &fwkdl.EndpointMetadata{}
+}
 func (m *mockDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	if m.stream {
 		reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{Stream: true}}
