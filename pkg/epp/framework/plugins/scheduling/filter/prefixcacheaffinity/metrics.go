@@ -46,15 +46,18 @@ const (
 	// outcomeMissingSignal: Either side of the TTFT comparison lacked the configured attribute
 	// gate skipped and sticky set kept
 	outcomeMissingSignal = "missing_signal"
-	// outcomeMultiple: the instance decided more than once for the request
-	// because it runs in more than one scheduling profile. Recorded only on the
-	// P2P-paired counter, which keeps neither decision.
-	outcomeMultiple = "multiple"
 )
 
-// p2pOutcomeUnreported is the p2p_outcome of a request whose
-// p2p-source-producer published no decision.
-const p2pOutcomeUnreported = "unreported"
+// Labels recorded only on the P2P-paired counter.
+const (
+	// outcomeMultiple is the affinity_outcome of a request the instance decided
+	// more than once because it runs in more than one scheduling profile, in
+	// place of the individual outcomes.
+	outcomeMultiple = "multiple"
+	// p2pOutcomeUnreported is the p2p_outcome of a request whose
+	// p2p-source-producer published no decision.
+	p2pOutcomeUnreported = "unreported"
+)
 
 var filterDecisions = prometheus.NewCounterVec(
 	prometheus.CounterOpts{

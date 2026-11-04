@@ -571,7 +571,6 @@ reaches its `PreRequest` records one decision.
 |---|---|---|---|
 | `llm_d_epp_p2p_source_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `outcome` | One per request, with the outcome the producer's `p2p decision` log line names. |
 | `llm_d_epp_p2p_source_predicted_pulled_tokens` | Histogram | `plugin_name`, `endpoint_role` | Prompt tokens the selected source holds beyond the endpoint computing the prefix, per request sent to pull. |
-| `llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `affinity_outcome`, `p2p_outcome` | Emitted by a `prefix-cache-affinity-filter` with `p2pSourceProducerName` set: its outcome and the producer's decision for the same request. |
 
 A request records the first outcome in this table that applies to it.
 
@@ -603,13 +602,24 @@ promotion job from its P2P tier (`tier=~".*:p2p"`) in `vllm:kv_offload_tiering_p
 labelled `result="success"` or `result="failure"`. As with the prefix prediction, the cohorts differ:
 a pull that fails or falls back to local prefill is counted on the router side only.
 
-The paired counter records, for each request the affinity filter decided, the producer's `outcome`
-as `p2p_outcome`. An outcome compares the producer's source with the selected endpoints, not with
-the filter's sticky set, so it does not show whether a `load_override` moved the request off the
-sticky set: a request selected onto another endpoint that holds the same prefix as the source can
-record `below-floor`. `p2p_outcome="unreported"` is a request with no P2P decision, and
-`affinity_outcome="multiple"` one the filter decided more than once for, because the instance runs
-in several scheduling profiles.
+### Prefix-cache affinity filter and P2P
+
+A `prefix-cache-affinity-filter` with `p2pSourceProducerName` set emits this counter, labelled by the
+filter instance. Each request the instance filtered that reaches `PreRequest` records one count.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `affinity_outcome`, `p2p_outcome` | The filter's outcome for the request, with the decision of the `p2p-source-producer` that `p2pSourceProducerName` names. |
+
+`affinity_outcome` is the filter's outcome, or `multiple` for a request the instance decided more
+than once because it runs in more than one scheduling profile. `p2p_outcome` and `endpoint_role` are
+the producer's `outcome` and `endpoint_role` (see [P2P KV-cache source](#p2p-kv-cache-source)).
+`p2p_outcome="unreported"` marks a request with no published P2P decision, and its `endpoint_role`
+is empty. A likely cause is a `p2pSourceProducerName` that names no configured `p2p-source-producer`,
+which startup accepts because the dependency is optional.
+
+`self` and `below-floor` occur whether or not the selected endpoint is in the filter's sticky set,
+so `p2p_outcome` does not show whether a `load_override` moved the request off it.
 
 ### Token producer render
 

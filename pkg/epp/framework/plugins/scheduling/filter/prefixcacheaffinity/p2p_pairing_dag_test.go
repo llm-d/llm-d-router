@@ -77,12 +77,15 @@ func TestStartupValidationWithP2PPairing(t *testing.T) {
 		plugins func(t *testing.T) []plugin.Plugin
 		// explicit request-handling phase for the P2P producer
 		requestHandlingP2P bool
+		// filters the p2p-source-producer must run before
+		pairedFilters []string
 	}{
 		{
 			name: "prefill throughput TTFT",
 			plugins: func(t *testing.T) []plugin.Plugin {
 				return []plugin.Plugin{prefix, inFlight, p2p, affinityFilter(t, "affinity", paired)}
 			},
+			pairedFilters: []string{"affinity"},
 		},
 		{
 			name: "latency predictor TTFT",
@@ -90,6 +93,7 @@ func TestStartupValidationWithP2PPairing(t *testing.T) {
 				return []plugin.Plugin{prefix, latency, p2p,
 					affinityFilter(t, "affinity", `{"p2pSourceProducerName": "p2p", "maxTTFTPenaltyMs": 100, "ttftSource": "latencyPredictor"}`)}
 			},
+			pairedFilters: []string{"affinity"},
 		},
 		{
 			name: "P2P producer in the request-handling phase",
@@ -97,6 +101,7 @@ func TestStartupValidationWithP2PPairing(t *testing.T) {
 				return []plugin.Plugin{prefix, inFlight, p2p, affinityFilter(t, "affinity", paired)}
 			},
 			requestHandlingP2P: true,
+			pairedFilters:      []string{"affinity"},
 		},
 		{
 			name: "paired without a p2p-source-producer",
@@ -116,6 +121,7 @@ func TestStartupValidationWithP2PPairing(t *testing.T) {
 				return []plugin.Plugin{prefix, inFlight, p2p,
 					affinityFilter(t, "affinity-prefill", paired), affinityFilter(t, "affinity-decode", paired)}
 			},
+			pairedFilters: []string{"affinity-prefill", "affinity-decode"},
 		},
 	}
 
@@ -131,16 +137,11 @@ func TestStartupValidationWithP2PPairing(t *testing.T) {
 			require.NoError(t, err)
 
 			p2pAt := slices.Index(order, p2p.TypedName().String())
-			for _, p := range plugins {
-				if p.TypedName().Type != prefixcacheaffinity.PluginType || p2pAt < 0 {
-					continue
-				}
-				// Only a paired filter declares an output.
-				if len(p.(plugin.ProducerPlugin).Produces()) == 0 {
-					continue
-				}
-				require.Less(t, p2pAt, slices.Index(order, p.TypedName().String()),
-					"the p2p-source-producer runs before the paired filter")
+			for _, name := range test.pairedFilters {
+				filterAt := slices.Index(order, plugin.TypedName{Type: prefixcacheaffinity.PluginType, Name: name}.String())
+				require.NotEqual(t, -1, p2pAt, "the p2p-source-producer is ordered")
+				require.NotEqual(t, -1, filterAt, "filter %s is ordered", name)
+				require.Less(t, p2pAt, filterAt, "the p2p-source-producer runs before filter %s", name)
 			}
 		})
 	}

@@ -500,8 +500,9 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		request.Headers = map[string]string{}
 	}
 
-	// One decision count per request, and one line with the decision and its
-	// inputs, so pull behavior can be joined to request latency without
+	// One decision count per request, the decision published on the request
+	// for a paired prefix-cache-affinity-filter, and one line with the decision
+	// and its inputs, so pull behavior can be joined to request latency without
 	// TRACE-level log volume. The inputs are collected only when the line is
 	// enabled.
 	dlog := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.DEFAULT)

@@ -51,7 +51,7 @@ const (
 
 var (
 	_ fwksched.Filter  = &Plugin{}
-	_ fwkrh.PreRequest = &Plugin{}
+	_ fwkrh.PreRequest = &pairedPlugin{}
 )
 
 // TTFTSource selects the per-endpoint TTFT signal used by the load gate. The
@@ -126,6 +126,12 @@ type Plugin struct {
 	p2pDecisionDataKey           fwkplugin.DataKey
 }
 
+// pairedPlugin is the filter with p2pSourceProducerName set. Only it implements
+// PreRequest, so an unpaired filter adds no per-request hook.
+type pairedPlugin struct {
+	*Plugin
+}
+
 // affinityOutcome is the outcome Filter stores on the request for PreRequest.
 type affinityOutcome string
 
@@ -144,7 +150,7 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 			return nil, err
 		}
 	}
-	return &Plugin{
+	p := &Plugin{
 		typedName:                    fwkplugin.TypedName{Type: PluginType, Name: name},
 		config:                       config,
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
@@ -152,7 +158,11 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
 		outcomeDataKey:               fwkplugin.NewDataKey("affinity-outcome", PluginType).WithNonEmptyProducerName(name),
 		p2pDecisionDataKey:           attrprefix.P2PSourceDecisionDataKey.WithNonEmptyProducerName(config.P2PSourceProducerName),
-	}, nil
+	}
+	if p.pairsP2P() {
+		return &pairedPlugin{Plugin: p}, nil
+	}
+	return p, nil
 }
 
 func (c *Config) validate() error {
@@ -271,8 +281,9 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	return sticky
 }
 
-// decide records the filter's outcome in its decision counter and span and,
-// when P2P pairing is on, on the request for PreRequest.
+// decide records the outcome. With pairing on, a repeat call for the same
+// request (the instance runs in several scheduling profiles) stores
+// outcomeMultiple.
 func (p *Plugin) decide(request *fwksched.InferenceRequest, span trace.Span, outcome string) {
 	recordDecision(p.typedName.Name, outcome)
 	span.SetAttributes(semconv.LLMDEPPFilterDecision(outcome))
@@ -300,29 +311,29 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 			required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
 		}
 	}
-	deps := fwkplugin.DataDependencies{Required: required}
-	if p.pairsP2P() {
-		// Optional: the filter routes the same without a p2p-source-producer,
-		// and the declared read orders that producer's PreRequest before this one.
-		deps.Optional = map[fwkplugin.DataKey]any{p.p2pDecisionDataKey: attrprefix.P2PSourceDecision{}}
-	}
+	return fwkplugin.DataDependencies{Required: required}
+}
+
+// Consumes adds the p2p-source-producer's decision as optional: the filter
+// routes the same without that producer, and the declared read orders the
+// producer's PreRequest before this one.
+func (p *pairedPlugin) Consumes() fwkplugin.DataDependencies {
+	deps := p.Plugin.Consumes()
+	deps.Optional = map[fwkplugin.DataKey]any{p.p2pDecisionDataKey: attrprefix.P2PSourceDecision{}}
 	return deps
 }
 
-// Produces declares the outcome Filter stores on the request when P2P pairing
-// is on; PreRequest reads it back.
-func (p *Plugin) Produces() map[fwkplugin.DataKey]any {
-	if !p.pairsP2P() {
-		return nil
-	}
+// Produces declares the outcome Filter stores on the request; PreRequest reads
+// it back.
+func (p *pairedPlugin) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{p.outcomeDataKey: affinityOutcome("")}
 }
 
 // PreRequest pairs the outcome Filter stored for the request with the
 // p2p-source-producer's decision. A request this instance did not filter is
 // not counted.
-func (p *Plugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
-	if !p.pairsP2P() || request == nil {
+func (p *pairedPlugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
+	if request == nil {
 		return nil
 	}
 	outcome, ok := fwksched.ReadRequestAttribute[affinityOutcome](request, p.outcomeDataKey)

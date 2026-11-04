@@ -133,18 +133,6 @@ to `latencyPredictor` to source TTFT from the latency predictor instead.
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 - Reads `P2PSourceDecision` in `PreRequest` when `p2pSourceProducerName` is set (from `p2p-source-producer`; optional)
 
-## Metrics
-
-- `llm_d_epp_prefix_cache_affinity_filter_decisions_total{plugin_name, outcome}`: one count per
-  `Filter` call.
-- `llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total{plugin_name, endpoint_role,
-  affinity_outcome, p2p_outcome}`, with `p2pSourceProducerName` set: one count per request this
-  instance filtered, pairing its outcome with the `p2p-source-producer`'s decision for the same
-  request. `p2p_outcome="unreported"` marks a request whose producer published no decision, and
-  `affinity_outcome="multiple"` one this instance decided more than once, because it runs in
-  more than one scheduling profile. Requests whose scheduling failed reach no `PreRequest` and
-  are counted only by the first metric.
-
 **Configuration Example:**
 
 ```yaml
@@ -161,3 +149,13 @@ schedulingProfiles:
     plugins:
       - pluginRef: prefix-affinity
 ```
+
+## Metrics
+
+- `llm_d_epp_prefix_cache_affinity_filter_decisions_total`: one count per `Filter` call, labelled
+  by `outcome`.
+- `llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total`: with `p2pSourceProducerName` set,
+  each filtered request's outcome paired with the `p2p-source-producer`'s decision.
+
+See [Prefix-cache affinity filter and P2P](../../../../../../../docs/metrics.md#prefix-cache-affinity-filter-and-p2p)
+for the paired counter's labels.
