@@ -224,6 +224,14 @@ func TestForceStreamLossy(t *testing.T) {
 		require.False(t, forceStreamLossy(shape, map[string]any{"use_beam_search": false}))
 	}
 
+	// return_prompt_text adds the rendered prompt to the chat reply, which the fold
+	// does not keep; generate's top-level return_token_ids adds the prompt's token
+	// ids and multimodal placeholders the same way.
+	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"return_prompt_text": true}))
+	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"return_prompt_text": false}))
+	require.True(t, forceStreamLossy(sseShapeGenerate, map[string]any{"return_token_ids": true}))
+	require.False(t, forceStreamLossy(sseShapeGenerate, map[string]any{"return_token_ids": false}))
+
 	// return_token_ids makes the chat and text replies carry token ids the fold
 	// drops, so a request that sets it is lossy; false or absent is not.
 	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"return_token_ids": true}))

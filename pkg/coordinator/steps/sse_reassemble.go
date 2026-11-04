@@ -105,6 +105,10 @@ const (
 	fieldCreated           = "created"
 	fieldSystemFingerprint = "system_fingerprint"
 	fieldRequestID         = "request_id"
+	// fieldMetrics is the per-request metrics object vLLM sets on the final
+	// include_usage chunk, and on the non-streaming reply, when the server runs
+	// with --enable-per-request-metrics or speculative decoding.
+	fieldMetrics = "metrics"
 )
 
 var (
@@ -114,9 +118,9 @@ var (
 		sseShapeGenerate: {reqcommon.FieldIndex: true, fieldTokenIDs: true, reqcommon.FieldFinishReason: true, fieldChoiceStopReason: true},
 	}
 	foldedFrameKeys = map[sseShape]map[string]bool{
-		sseShapeChat:     {fieldID: true, fieldObject: true, fieldCreated: true, reqcommon.FieldModel: true, fieldSystemFingerprint: true, reqcommon.FieldChoices: true, reqcommon.FieldUsage: true},
-		sseShapeText:     {fieldID: true, fieldObject: true, fieldCreated: true, reqcommon.FieldModel: true, fieldSystemFingerprint: true, reqcommon.FieldChoices: true, reqcommon.FieldUsage: true},
-		sseShapeGenerate: {fieldRequestID: true, reqcommon.FieldChoices: true, reqcommon.FieldUsage: true},
+		sseShapeChat:     {fieldID: true, fieldObject: true, fieldCreated: true, reqcommon.FieldModel: true, fieldSystemFingerprint: true, reqcommon.FieldChoices: true, reqcommon.FieldUsage: true, fieldMetrics: true},
+		sseShapeText:     {fieldID: true, fieldObject: true, fieldCreated: true, reqcommon.FieldModel: true, fieldSystemFingerprint: true, reqcommon.FieldChoices: true, reqcommon.FieldUsage: true, fieldMetrics: true},
+		sseShapeGenerate: {fieldRequestID: true, reqcommon.FieldChoices: true, reqcommon.FieldUsage: true, fieldMetrics: true},
 	}
 )
 
@@ -199,6 +203,9 @@ type sseReassembler struct {
 	order   []int
 
 	usage map[string]any
+	// metrics is the per-request metrics object, kept whole: vLLM sends it once,
+	// on the final chunk.
+	metrics map[string]any
 
 	// responseObject is the terminal response object captured from a terminal
 	// Responses event (completed, incomplete, or failed), emitted verbatim as the
@@ -253,6 +260,10 @@ func (r *sseReassembler) add(frame map[string]any) {
 	}
 	if usage, ok := frame[reqcommon.FieldUsage].(map[string]any); ok {
 		r.mergeUsage(usage)
+	}
+	if m, ok := frame[fieldMetrics].(map[string]any); ok && r.metrics == nil {
+		r.metrics = m
+		r.contentBytes += int64(len(fieldMetrics)) + encodedSize(m)
 	}
 }
 
@@ -577,6 +588,9 @@ func (r *sseReassembler) result() map[string]any {
 
 	if r.usage != nil {
 		out[reqcommon.FieldUsage] = r.usage
+	}
+	if r.metrics != nil {
+		out[fieldMetrics] = r.metrics
 	}
 	return out
 }

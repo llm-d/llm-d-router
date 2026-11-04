@@ -198,6 +198,29 @@ func TestSSEReassemble_UnfoldedTopLevelKeyIsLossy(t *testing.T) {
 	}
 }
 
+// TestSSEReassemble_KeepsMetrics verifies the per-request metrics vLLM puts on
+// the final include_usage chunk, with --enable-per-request-metrics or under
+// speculative decoding, are kept on the reply rather than taken as unfolded data.
+// vLLM's non-streaming reply carries the same top-level metrics.
+func TestSSEReassemble_KeepsMetrics(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shape sseShape
+		last  string
+	}{
+		{"chat", sseShapeChat, `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":3},"metrics":{"ttft_s":0.05,"speculative_decoding":{"num_drafts":2}}}`},
+		{"text", sseShapeText, `{"id":"c","object":"text_completion","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":3},"metrics":{"ttft_s":0.05,"speculative_decoding":{"num_drafts":2}}}`},
+		{"generate", sseShapeGenerate, `{"request_id":"g","choices":[],"usage":{"prompt_tokens":3},"metrics":{"ttft_s":0.05,"speculative_decoding":{"num_drafts":2}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSSEReassembler(tc.shape, 1)
+			r.add(frame(t, tc.last))
+			require.False(t, r.lossyFrame, "metrics is folded, not dropped")
+			require.Equal(t, map[string]any{"ttft_s": 0.05, "speculative_decoding": map[string]any{"num_drafts": float64(2)}}, r.result()["metrics"])
+		})
+	}
+}
+
 // TestSSEReassemble_StopReason verifies stop_reason, which vLLM's non-streaming
 // choices always carry and its stream sets on the finish chunk, is kept on every
 // chat, text and generate choice, defaulting to null.

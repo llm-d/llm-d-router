@@ -440,7 +440,9 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 				}
 			}
 		}
-		return false
+		// The top-level return_token_ids adds the prompt's token ids and
+		// multimodal placeholders to the reply, which the fold does not keep.
+		return boolField(body, reqcommon.FieldReturnTokenIDs)
 	}
 	if shape != sseShapeChat && shape != sseShapeText {
 		return false
@@ -455,17 +457,14 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	if _, ok := reqcommon.FieldValue(body, reqcommon.FieldPromptLogprobs); ok {
 		return true
 	}
-	if v, ok := reqcommon.FieldValue(body, reqcommon.FieldUseBeamSearch); ok {
-		if set, ok := v.(bool); ok && set {
-			return true
-		}
+	if boolField(body, reqcommon.FieldUseBeamSearch) {
+		return true
 	}
 	// return_token_ids adds token ids to every choice and the prompt's token ids to
-	// the reply, neither of which the fold keeps.
-	if v, ok := reqcommon.FieldValue(body, reqcommon.FieldReturnTokenIDs); ok {
-		if set, ok := v.(bool); ok && set {
-			return true
-		}
+	// the reply, and chat's return_prompt_text adds the rendered prompt; the fold
+	// keeps neither.
+	if boolField(body, reqcommon.FieldReturnTokenIDs) || (shape == sseShapeChat && boolField(body, reqcommon.FieldReturnPromptText)) {
+		return true
 	}
 	// Resolve each field through reqcommon.FieldValue, not a bare type assertion:
 	// the coordinator decodes only an allow-list of request fields and leaves the
@@ -512,6 +511,17 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// boolField reports whether body sets field to true, resolving a json.RawMessage
+// value the coordinator left undecoded.
+func boolField(body map[string]any, field string) bool {
+	v, ok := reqcommon.FieldValue(body, field)
+	if !ok {
+		return false
+	}
+	set, ok := v.(bool)
+	return ok && set
 }
 
 // forceStreamHeaders builds the forced decode request's forwarding headers,
