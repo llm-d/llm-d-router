@@ -516,8 +516,7 @@ and the Admitter plugins. `llm_d.epp.admission.decision` is `admitted` or `rejec
 the request failed before admission, and not changed by a later scheduling failure or eviction.
 A rejection adds `llm_d.epp.admission.reason`: the `x-llm-d-request-dropped-reason` value, such
 as `rejected-ttl-expired`, or the EPP error code when none is set. An Admitter plugin that denies
-without an error code is recorded as `admitter:` plus its plugin type, such as
-`admitter:latency-slo-admitter`. When Flow Control dispatched
+without an error code is recorded as `admitter:` plus its plugin type. When Flow Control dispatched
 the request, `llm_d.epp.admission.queue_duration_ms` holds the time behind the
 `x-llm-d-flow-queue-duration-ms` response header, in fractional milliseconds.
 
