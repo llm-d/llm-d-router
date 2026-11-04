@@ -15,7 +15,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package epp
+// Package harness boots a shared envtest environment and per-test EPP servers for
+// integration suites.
+//
+// It sits at the top of the framework layering and may import anything, including
+// pkg/epp/server and cmd/epp/runner; only integration and e2e suites import it.
+package harness
 
 import (
 	"context"
@@ -27,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +70,7 @@ import (
 	eppRunner "github.com/llm-d/llm-d-router/cmd/epp/runner"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -89,7 +96,7 @@ var (
 // llm-d CRDs and fixtures so API group migrations are exercised before CI.
 var repoRootPath string
 
-// Run builds the shared envtest environment, runs the package's tests and tears the
+// Run builds the shared envtest environment, runs the calling package's tests and tears the
 // environment down again. TestMain delegates to it.
 func Run(m *testing.M) int {
 	ctrl.SetLogger(logger)
@@ -108,6 +115,9 @@ func Run(m *testing.M) int {
 	}
 	cfg, err := testEnv.Start()
 	if err != nil {
+		// Start can fail after etcd and kube-apiserver are up (CRD install, default
+		// namespace wait) without stopping them, so stop here before panicking.
+		_ = testEnv.Stop()
 		panic(fmt.Sprintf("failed to start test environment: %v", err))
 	}
 	// Deferred so the environment stops on every exit from Run, including a panic below.
@@ -645,4 +655,62 @@ func (h *TestHarness) ExpectMetrics(expected map[string]string) {
 			h.t.Errorf("Metric mismatch for %s: %v", name, err)
 		}
 	}
+}
+
+// --- Data Structures & Metrics Helpers ---
+
+// PodState describes the simulated metrics of one fake model-server pod. Build it with P.
+type PodState struct {
+	index        int
+	queueSize    int
+	kvCacheUsage float64
+	activeModels []string
+}
+
+// P constructs a Pod State: Index, Queue, KV%, Models...
+// Usage: P(0, 5, 0.2, "model-a")
+func P(idx int, q int, kv float64, models ...string) PodState {
+	return PodState{index: idx, queueSize: q, kvCacheUsage: kv, activeModels: models}
+}
+
+type label struct{ name, value string }
+
+func labelsToString(labels []label) string {
+	parts := make([]string, len(labels))
+	for i, l := range labels {
+		parts[i] = fmt.Sprintf("%s=%q", l.name, l.value)
+	}
+	return strings.Join(parts, ",")
+}
+
+// MetricReqTotal renders the expected llm_d_epp_request_total exposition text.
+func MetricReqTotal(model, target string, priority int) string {
+	return fmt.Sprintf(`
+    # HELP llm_d_epp_request_total [ALPHA] Total number of processed requests.
+    # TYPE llm_d_epp_request_total counter
+    llm_d_epp_request_total{%s} 1
+    `, labelsToString([]label{{"api_surface", reqcommon.APISurfaceUnknown.String()}, {"fairness_id", reqcommon.DefaultFairnessID}, {"model_name", model}, {"priority", strconv.Itoa(priority)}, {"target_model_name", target}}))
+}
+
+// MetricReadyPods renders the expected llm_d_epp_ready_endpoints exposition text.
+func MetricReadyPods(count int) string {
+	return fmt.Sprintf(`
+	# HELP llm_d_epp_ready_endpoints [ALPHA] The number of ready endpoints in the inference server pool.
+	# TYPE llm_d_epp_ready_endpoints gauge
+	llm_d_epp_ready_endpoints{%s} %d
+    `, labelsToString([]label{{"name", TestPoolName}}), count)
+}
+
+// CleanMetric removes indentation from multiline metric strings and ensures a trailing newline exists, which is
+// required by the Prometheus text parser.
+func CleanMetric(s string) string {
+	lines := strings.Split(s, "\n")
+	var cleaned []string
+	for _, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	return strings.Join(cleaned, "\n") + "\n"
 }

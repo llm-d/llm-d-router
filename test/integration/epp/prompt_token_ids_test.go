@@ -37,6 +37,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 // renderRecorder captures the bodies of the render requests a token-producer
@@ -148,10 +149,10 @@ dataLayer:
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewTestHarness(t.Context(), t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
-			pods := []PodState{
-				P(0, 0, 0.1, modelMyModelTarget),
-				P(1, 5, 0.5, modelMyModelTarget),
+			h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
+			pods := []eppharness.PodState{
+				eppharness.P(0, 0, 0.1, modelMyModelTarget),
+				eppharness.P(1, 5, 0.5, modelMyModelTarget),
 			}
 			h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 
@@ -238,12 +239,12 @@ dataLayer:
   - pluginRef: mock-metrics-source
 `, modelMyModelTarget, renderSrv.URL)
 
-	h := NewTestHarness(t.Context(), t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
 	// Pod 1 scores better on queue depth and KV utilization, so only a prefix
 	// cache hit can send the second request to pod 0.
-	pods := []PodState{
-		P(0, 0, 0.1, modelMyModelTarget),
-		P(1, 0, 0.0, modelMyModelTarget),
+	pods := []eppharness.PodState{
+		eppharness.P(0, 0, 0.1, modelMyModelTarget),
+		eppharness.P(1, 0, 0.0, modelMyModelTarget),
 	}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
 
@@ -252,7 +253,7 @@ dataLayer:
 		t.Helper()
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
-		client, err := extProcPb.NewExternalProcessorClient(h.grpcConn).Process(ctx)
+		client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
 		require.NoError(t, err)
 		body := `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"` + content + `"}],` +
 			`"max_tokens":10,"kv_transfer_params":{"prompt_token_ids":` + tokenIDs + `}}`
