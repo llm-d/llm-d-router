@@ -55,7 +55,7 @@ func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (
 func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName }
 
 func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.GenerateRequest != nil {
+	if reqCtx.IsSGLangGRPC() {
 		return nil
 	}
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)

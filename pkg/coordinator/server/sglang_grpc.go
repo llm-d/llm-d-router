@@ -19,7 +19,6 @@ package server
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -27,12 +26,11 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/protobuf/proto"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
-	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/sglangwire"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -86,32 +84,30 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ReadMessage sizes the body from the gRPC length prefix, so a large
+	// request is read into one exact-size buffer.
 	var err error
-	body, err = io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
+	body, err = grpcframe.ReadMessage(r.Body, s.maxRequestBodySize*config.BytesPerMB)
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal("", coordmetrics.ErrorCodeBadRequest)
-		grpcframe.WriteError(cw, codes.InvalidArgument, "failed to read request body")
+		switch {
+		case errors.Is(err, grpcframe.ErrTooLarge):
+			grpcframe.WriteError(cw, codes.ResourceExhausted, "request body too large")
+		case errors.Is(err, grpcframe.ErrCompressed):
+			grpcframe.WriteError(cw, codes.Unimplemented, grpcframe.ErrCompressed.Error())
+		case errors.Is(err, grpcframe.ErrMalformed):
+			grpcframe.WriteError(cw, codes.InvalidArgument, "invalid gRPC frame")
+		default:
+			grpcframe.WriteError(cw, codes.InvalidArgument, "failed to read request body")
+		}
 		return
 	}
-	if int64(len(body)) > s.maxRequestBodySize*config.BytesPerMB {
-		coordmetrics.IncRequestErrorTotal("", coordmetrics.ErrorCodeBadRequest)
-		grpcframe.WriteError(cw, codes.ResourceExhausted, "request body too large")
-		return
-	}
-
-	payload, err := grpcframe.ParsePayload(body)
-	if errors.Is(err, grpcframe.ErrCompressed) {
-		coordmetrics.IncRequestErrorTotal("", coordmetrics.ErrorCodeBadRequest)
-		grpcframe.WriteError(cw, codes.Unimplemented, grpcframe.ErrCompressed.Error())
-		return
-	}
-	if err != nil || len(body) != grpcframe.HeaderLen+len(payload) {
-		coordmetrics.IncRequestErrorTotal("", coordmetrics.ErrorCodeBadRequest)
-		grpcframe.WriteError(cw, codes.InvalidArgument, "invalid gRPC frame")
-		return
-	}
-	var genReq sglangapiv1.GenerateRequest
-	if err := proto.Unmarshal(payload, &genReq); err != nil {
+	payload := body[grpcframe.HeaderLen:]
+	// A top-level wire scan replaces a full proto.Unmarshal. The steps copy
+	// the payload bytes into each leg request, and the SGLang worker
+	// validates nested fields.
+	stream, err := sglangwire.ScanGenerateRequest(payload)
+	if err != nil {
 		coordmetrics.IncRequestErrorTotal("", coordmetrics.ErrorCodeBadRequest)
 		grpcframe.WriteError(cw, codes.InvalidArgument, "invalid GenerateRequest payload")
 		return
@@ -130,16 +126,16 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 	pipeline.StripInternalHeaders(headers)
 
 	reqCtx = &pipeline.RequestContext{
-		RequestID:        requestID,
-		OriginalPath:     r.URL.Path,
-		OriginalHeaders:  headers,
-		OriginalBody:     body,
-		GenerateRequest:  &genReq,
-		Stream:           true,
-		Route:            route,
-		KVTransferParams: make(map[string]any),
-		ResponseWriter:   cw,
-		ParseDuration:    parseDuration,
+		RequestID:           requestID,
+		OriginalPath:        r.URL.Path,
+		OriginalHeaders:     headers,
+		OriginalBody:        body,
+		GRPCGeneratePayload: payload,
+		Stream:              true,
+		Route:               route,
+		KVTransferParams:    make(map[string]any),
+		ResponseWriter:      cw,
+		ParseDuration:       parseDuration,
 	}
 	defer reqCtx.ClosePrefillStream()
 
@@ -151,7 +147,7 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 		logger.V(logutil.DEFAULT).Info("replaced invalid client request ID", "rejectedLength", len(clientRequestID))
 	}
 
-	logger.V(logutil.DEFAULT).Info("received gRPC request", "path", r.URL.Path, "stream", genReq.GetStream())
+	logger.V(logutil.DEFAULT).Info("received gRPC request", "path", r.URL.Path, "stream", stream)
 
 	// Clear the write deadline: a server-streaming RPC can outlast WriteTimeout.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {

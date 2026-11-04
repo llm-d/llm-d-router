@@ -97,7 +97,7 @@ func parsePromptTokenParity(params map[string]any) (string, error) {
 func (s *DecodeStep) Name() string { return DecodeStepName }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.GenerateRequest != nil {
+	if reqCtx.IsSGLangGRPC() {
 		return s.executeSGLangGRPC(ctx, reqCtx)
 	}
 	logger := log.FromContext(ctx).WithName(DecodeStepName)

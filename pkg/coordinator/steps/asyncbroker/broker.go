@@ -145,7 +145,7 @@ func (s *Step) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) err
 	// Async serving applies to JSON HTTP requests only. A gRPC Generate
 	// request has no model field and cannot get an OpenAI JSON error, so the
 	// step leaves it untouched even when it carries the mode header.
-	if reqCtx.GenerateRequest != nil {
+	if reqCtx.IsSGLangGRPC() {
 		return nil
 	}
 	headerVal := reqCtx.OriginalHeaders.Get(s.cfg.ModeHeader)

@@ -103,7 +103,7 @@ func TestRewriteDecodeFrameCachedTokens_OnlyTerminalFrames(t *testing.T) {
 	ps.RecordCachedTokens(0, 48)
 
 	marshal := func(finish *sglangapiv1.FinishReason) []byte {
-		payload, err := proto.Marshal(&sglangapiv1.GenerateStreamItem{
+		framed, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
 			Item: &sglangapiv1.GenerateStreamItem_Frame{
 				Frame: &sglangapiv1.GenerateResponse{
 					MetaInfo: &sglangapiv1.GenerateMetaInfo{CachedTokens: 0, FinishReason: finish},
@@ -111,7 +111,7 @@ func TestRewriteDecodeFrameCachedTokens_OnlyTerminalFrames(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
-		return payload
+		return framed
 	}
 	cachedTokens := func(framed []byte) uint32 {
 		payload, err := grpcframe.ParsePayload(framed)
@@ -121,12 +121,26 @@ func TestRewriteDecodeFrameCachedTokens_OnlyTerminalFrames(t *testing.T) {
 		return item.GetFrame().GetMetaInfo().GetCachedTokens()
 	}
 
-	// A non-terminal frame is forwarded byte for byte.
+	// A non-terminal frame is forwarded as the same slice: no copy.
 	nonTerminal := marshal(nil)
 	out, err := rewriteDecodeFrameCachedTokens(context.Background(), logr.Discard(), nonTerminal, ps)
 	require.NoError(t, err)
-	require.Equal(t, nonTerminal, out[grpcframe.HeaderLen:])
+	require.Same(t, &nonTerminal[0], &out[0])
 	require.Equal(t, uint32(0), cachedTokens(out))
+	require.Zero(t, testing.AllocsPerRun(100, func() {
+		_, _ = rewriteDecodeFrameCachedTokens(context.Background(), logr.Discard(), nonTerminal, ps)
+	}))
+
+	// Without a prefill stream (decode-only), frames are also forwarded as is.
+	out, err = rewriteDecodeFrameCachedTokens(context.Background(), logr.Discard(), nonTerminal, nil)
+	require.NoError(t, err)
+	require.Same(t, &nonTerminal[0], &out[0])
+
+	// A malformed frame is forwarded unchanged with an error.
+	malformed := []byte{0, 0, 0, 0, 1, 0xff}
+	out, err = rewriteDecodeFrameCachedTokens(context.Background(), logr.Discard(), malformed, ps)
+	require.Error(t, err)
+	require.Equal(t, malformed, out)
 
 	// A terminal frame gets the prefill cached_tokens.
 	terminal := marshal(&sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Stop{Stop: &sglangapiv1.FinishStop{}}})
@@ -169,9 +183,9 @@ func TestDecodeSGLangGRPC_ClassifiesTransportErrorsAsUpstreamTransport(t *testin
 
 	rec := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
-		RequestID:       "req-transport-1",
-		GenerateRequest: &sglangapiv1.GenerateRequest{},
-		ResponseWriter:  rec,
+		RequestID:           "req-transport-1",
+		GRPCGeneratePayload: []byte{},
+		ResponseWriter:      rec,
 	}
 	execErr := step.Execute(context.Background(), reqCtx)
 	require.Error(t, execErr)
@@ -196,9 +210,9 @@ func TestDecodeSGLangGRPC_ClassifiesTransportErrorsAsUpstreamTransport(t *testin
 
 	rec2 := httptest.NewRecorder()
 	reqCtx2 := &pipeline.RequestContext{
-		RequestID:       "req-transport-2",
-		GenerateRequest: &sglangapiv1.GenerateRequest{},
-		ResponseWriter:  rec2,
+		RequestID:           "req-transport-2",
+		GRPCGeneratePayload: []byte{},
+		ResponseWriter:      rec2,
 	}
 	truncErr := truncStep.Execute(context.Background(), reqCtx2)
 	require.Error(t, truncErr)

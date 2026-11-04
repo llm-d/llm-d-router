@@ -161,7 +161,7 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.GenerateRequest != nil {
+	if reqCtx.IsSGLangGRPC() {
 		return nil
 	}
 	// The pipeline's only check of this invariant: this is the first step to

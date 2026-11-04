@@ -76,7 +76,7 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.GenerateRequest != nil {
+	if reqCtx.IsSGLangGRPC() {
 		return s.executeSGLangGRPC(ctx, reqCtx)
 	}
 	logger := log.FromContext(ctx).WithName(PrefillStepName)

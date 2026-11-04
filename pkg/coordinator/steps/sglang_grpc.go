@@ -34,6 +34,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/sglangwire"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -76,14 +77,11 @@ func (s *PrefillStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Re
 		return errors.New("prefill: missing SGLang bootstrap_room")
 	}
 
-	prefillReq := proto.Clone(reqCtx.GenerateRequest).(*sglangapiv1.GenerateRequest)
-	prefillReq.BootstrapHost = nil
-	prefillReq.BootstrapPort = optionalInt64One(port)
-	prefillReq.BootstrapRoom = optionalInt64One(room)
-
-	bodyBytes, err := grpcframe.MarshalProto(prefillReq)
+	// Copy the client payload byte for byte and set only the bootstrap
+	// fields: no decode, deep copy, or re-encode of token IDs or media.
+	bodyBytes, err := sglangwire.FrameGenerateRequest(reqCtx.GRPCGeneratePayload, &sglangwire.Bootstrap{Port: port, Room: room})
 	if err != nil {
-		return fmt.Errorf("prefill: marshal GenerateRequest: %w", err)
+		return fmt.Errorf("prefill: build GenerateRequest: %w", err)
 	}
 
 	// Cancel prefill if the client disconnects while decode is running, while
@@ -162,8 +160,9 @@ func drainSGLangPrefillStream(ctx context.Context, logger logr.Logger, resp *htt
 	defer ps.MarkDone()
 	defer func() { _ = resp.Body.Close() }()
 
+	frames := grpcframe.NewReader(resp.Body, maxSGLangGRPCFrameBytes)
 	for {
-		payload, err := grpcframe.ReadFrame(resp.Body, maxSGLangGRPCFrameBytes)
+		frame, err := frames.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -179,8 +178,11 @@ func drainSGLangPrefillStream(ctx context.Context, logger logr.Logger, resp *htt
 			}
 			return
 		}
-		var item sglangapiv1.GenerateStreamItem
-		if err := proto.Unmarshal(payload, &item); err != nil {
+		payload := frame[grpcframe.HeaderLen:]
+		// The wire scan reads index and cached_tokens without decoding
+		// output, logprob, or prompt token fields.
+		item, err := sglangwire.ScanStreamItem(payload)
+		if err != nil {
 			if ctx.Err() == nil {
 				logger.Error(err, "prefill GenerateStreamItem decode error")
 				ps.Fail(
@@ -192,17 +194,12 @@ func drainSGLangPrefillStream(ctx context.Context, logger logr.Logger, resp *htt
 			}
 			return
 		}
-		if streamErr := item.GetError(); streamErr != nil && ctx.Err() == nil {
-			errBody := streamErr.GetError()
-			msg := errBody.GetMessage()
-			code := sglangErrorBodyGRPCCode(errBody.GetCode())
-			cause := fmt.Errorf("prefill stream error (code %d): %s", errBody.GetCode(), msg)
-			logger.Error(cause, "prefill stream reported error", "code", errBody.GetCode())
-			ps.Fail(cause, strconv.FormatUint(uint64(code), 10), grpcframe.EncodeStatusMessage(msg), "")
+		if item.IsError && ctx.Err() == nil {
+			failPrefillStreamError(logger, payload, ps)
 			return
 		}
-		if frame := item.GetFrame(); frame != nil && frame.GetMetaInfo() != nil {
-			ps.RecordCachedTokens(frame.GetIndex(), frame.GetMetaInfo().GetCachedTokens())
+		if !item.IsError && item.HasMetaInfo {
+			ps.RecordCachedTokens(item.Index, item.CachedTokens)
 		}
 	}
 
@@ -231,14 +228,33 @@ func drainSGLangPrefillStream(ctx context.Context, logger logr.Logger, resp *htt
 	}
 }
 
+// failPrefillStreamError decodes an in-stream prefill error item, which is
+// rare, and records it on ps.
+func failPrefillStreamError(logger logr.Logger, payload []byte, ps *pipeline.SGLangPrefillStream) {
+	var item sglangapiv1.GenerateStreamItem
+	if err := proto.Unmarshal(payload, &item); err != nil {
+		logger.Error(err, "prefill GenerateStreamItem decode error")
+		ps.Fail(
+			err,
+			strconv.FormatUint(uint64(codes.Internal), 10),
+			grpcframe.EncodeStatusMessage("invalid prefill stream frame"),
+			"",
+		)
+		return
+	}
+	errBody := item.GetError().GetError()
+	msg := errBody.GetMessage()
+	code := sglangErrorBodyGRPCCode(errBody.GetCode())
+	cause := fmt.Errorf("prefill stream error (code %d): %s", errBody.GetCode(), msg)
+	logger.Error(cause, "prefill stream reported error", "code", errBody.GetCode())
+	ps.Fail(cause, strconv.FormatUint(uint64(code), 10), grpcframe.EncodeStatusMessage(msg), "")
+}
+
 func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
-	decodeReq := proto.Clone(reqCtx.GenerateRequest).(*sglangapiv1.GenerateRequest)
-	decodeReq.BootstrapHost = nil
-	decodeReq.BootstrapPort = nil
-	decodeReq.BootstrapRoom = nil
-
+	// A nil bootstrap strips any client bootstrap fields (decode-only).
+	var bootstrap *sglangwire.Bootstrap
 	if len(reqCtx.KVTransferParams) > 0 {
 		kvParams := s.kv.PrepareDecodeKVParams(ctx, reqCtx)
 		host, _ := kvParams[reqcommon.FieldBootstrapHost].(string)
@@ -247,14 +263,12 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 		if host == "" || !portOK || !roomOK {
 			return errors.New("decode: incomplete SGLang bootstrap parameters")
 		}
-		decodeReq.BootstrapHost = optionalStringOne(host)
-		decodeReq.BootstrapPort = optionalInt64One(port)
-		decodeReq.BootstrapRoom = optionalInt64One(room)
+		bootstrap = &sglangwire.Bootstrap{Host: host, Port: port, Room: room}
 	}
 
-	bodyBytes, err := grpcframe.MarshalProto(decodeReq)
+	bodyBytes, err := sglangwire.FrameGenerateRequest(reqCtx.GRPCGeneratePayload, bootstrap)
 	if err != nil {
-		return fmt.Errorf("decode: marshal GenerateRequest: %w", err)
+		return fmt.Errorf("decode: build GenerateRequest: %w", err)
 	}
 
 	ps := reqCtx.PrefillStream
@@ -347,8 +361,12 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 		committed = true
 	}
 
+	// frames reuses one buffer for the whole stream. Each frame keeps its
+	// header, so a frame that needs no rewrite is written without a copy.
+	frames := grpcframe.NewReader(resp.Body, maxSGLangGRPCFrameBytes)
+	loggedRewriteErr := false
 	for {
-		payload, readErr := grpcframe.ReadFrame(resp.Body, maxSGLangGRPCFrameBytes)
+		frame, readErr := frames.Next()
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
@@ -383,13 +401,11 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 			return &pipeline.UpstreamStreamedError{Step: DecodeStepName, Cause: wrappedErr}
 		}
 
-		framedOut, err := rewriteDecodeFrameCachedTokens(decodeCtx, logger, payload, ps)
-		if err != nil {
+		framedOut, err := rewriteDecodeFrameCachedTokens(decodeCtx, logger, frame, ps)
+		if err != nil && !loggedRewriteErr {
+			// Forward the frame unchanged. Log once per stream, not per frame.
 			logger.Error(err, "failed to process decode GenerateStreamItem")
-			framedOut, err = grpcframe.FramePayload(payload)
-			if err != nil {
-				return err
-			}
+			loggedRewriteErr = true
 		}
 
 		commitHeaders()
@@ -458,32 +474,40 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 
 // rewriteDecodeFrameCachedTokens substitutes prefill's prompt-cache hit count
 // onto terminal decode frames because the decode worker counts KV blocks
-// transferred from prefill rather than hits in prefill's prompt cache. Only
-// terminal frames are rewritten so that per-token frames are forwarded without
-// a re-marshal.
-func rewriteDecodeFrameCachedTokens(ctx context.Context, logger logr.Logger, payload []byte, ps *pipeline.SGLangPrefillStream) ([]byte, error) {
+// transferred from prefill rather than hits in prefill's prompt cache.
+//
+// frame is a full gRPC frame, header included. A wire scan finds the
+// terminal frame without allocating. Every other frame is returned as is,
+// so per-token frames are forwarded without a copy. Only a terminal frame
+// whose cached_tokens changes is decoded and re-encoded. On a scan error,
+// rewriteDecodeFrameCachedTokens returns frame unchanged with the error.
+func rewriteDecodeFrameCachedTokens(ctx context.Context, logger logr.Logger, frame []byte, ps *pipeline.SGLangPrefillStream) ([]byte, error) {
 	if ps == nil {
-		return grpcframe.FramePayload(payload)
+		return frame, nil
 	}
-	var item sglangapiv1.GenerateStreamItem
-	if err := proto.Unmarshal(payload, &item); err != nil {
-		return nil, err
+	payload := frame[grpcframe.HeaderLen:]
+	scanned, err := sglangwire.ScanStreamItem(payload)
+	if err != nil {
+		return frame, err
 	}
-	frame := item.GetFrame()
-	if frame.GetMetaInfo().GetFinishReason() == nil {
-		return grpcframe.FramePayload(payload)
+	if scanned.IsError || !scanned.Finished {
+		return frame, nil
 	}
-	index := frame.GetIndex()
+	index := scanned.Index
 	if _, ok := ps.CachedTokens(index); !ok {
 		if !ps.Wait(ctx, sglangPrefillWaitOnTerminal) {
 			logger.V(logutil.DEBUG).Info("timed out waiting for prefill cached_tokens on terminal decode frame", "index", index)
 		}
 	}
 	cached, ok := ps.CachedTokens(index)
-	if !ok || frame.GetMetaInfo().GetCachedTokens() == cached {
-		return grpcframe.FramePayload(payload)
+	if !ok || scanned.CachedTokens == cached {
+		return frame, nil
 	}
-	frame.MetaInfo.CachedTokens = cached
+	var item sglangapiv1.GenerateStreamItem
+	if err := proto.Unmarshal(payload, &item); err != nil {
+		return frame, err
+	}
+	item.GetFrame().GetMetaInfo().CachedTokens = cached
 	return grpcframe.MarshalProto(&item)
 }
 
@@ -584,22 +608,6 @@ func int64FromParam(v any) (int64, bool) {
 		return int64(val), true
 	default:
 		return 0, false
-	}
-}
-
-func optionalStringOne(v string) *sglangapiv1.OptionalStringOrList {
-	return &sglangapiv1.OptionalStringOrList{
-		Value: &sglangapiv1.OptionalStringOrList_One{
-			One: &sglangapiv1.OptionalString{Value: proto.String(v)},
-		},
-	}
-}
-
-func optionalInt64One(v int64) *sglangapiv1.OptionalInt64OrList {
-	return &sglangapiv1.OptionalInt64OrList{
-		Value: &sglangapiv1.OptionalInt64OrList_One{
-			One: &sglangapiv1.OptionalInt64{Value: proto.Int64(v)},
-		},
 	}
 }
 

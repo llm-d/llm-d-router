@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
@@ -239,12 +238,20 @@ type RequestContext struct {
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
 
-	// GenerateRequest holds the parsed protobuf message for SGLang native gRPC
-	// Generate requests. Nil for JSON HTTP requests.
-	GenerateRequest *sglangapiv1.GenerateRequest
+	// GRPCGeneratePayload holds the unframed protobuf payload of an SGLang
+	// native gRPC Generate request, as a subslice of OriginalBody. Steps
+	// rewrite it at the wire level instead of decoding it. Nil for JSON HTTP
+	// requests. Use IsSGLangGRPC to test for a gRPC Generate request.
+	GRPCGeneratePayload []byte
 	// PrefillStream holds the active concurrent SGLang gRPC prefill stream
 	// started by PrefillStep and coordinated with DecodeStep.
 	PrefillStream *SGLangPrefillStream
+}
+
+// IsSGLangGRPC reports whether the request is an SGLang native gRPC Generate
+// request. An empty GenerateRequest has an empty but non-nil payload.
+func (rc *RequestContext) IsSGLangGRPC() bool {
+	return rc.GRPCGeneratePayload != nil
 }
 
 // ClosePrefillStream cancels and releases any active concurrent prefill stream.
