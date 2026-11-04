@@ -288,6 +288,27 @@ func TestFlowRegistry_Stats(t *testing.T) {
 
 // --- Garbage Collection Tests ---
 
+func TestFlowRegistry_GarbageCollection_IdleStartsWhenTheConnectionCloses(t *testing.T) {
+	t.Parallel()
+	h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
+	key := flowcontrol.FlowKey{ID: "long-connection-flow", Priority: highPriority}
+
+	// The connection stays open for most of the GC timeout.
+	err := h.fr.WithConnection(key, func(contracts.ActiveFlowConnection) error {
+		h.fakeClock.Step(h.config.FlowGCTimeout - time.Minute)
+		return nil
+	})
+	require.NoError(t, err, "WithConnection should not fail")
+
+	h.fakeClock.Step(2 * time.Minute) // Idle for two minutes since the connection closed.
+	h.fr.ExecuteGCCycle()
+	h.assertFlowExists(key, "Flow idle for less than FlowGCTimeout since its last connection closed must survive GC")
+
+	h.fakeClock.Step(h.config.FlowGCTimeout) // Idle for longer than FlowGCTimeout.
+	h.fr.ExecuteGCCycle()
+	h.assertFlowDoesNotExist(key, "Flow idle for longer than FlowGCTimeout since its last connection closed must be collected")
+}
+
 func TestFlowRegistry_GarbageCollection(t *testing.T) {
 	t.Run("ShouldCollectIdleFlow", func(t *testing.T) {
 		t.Parallel()
