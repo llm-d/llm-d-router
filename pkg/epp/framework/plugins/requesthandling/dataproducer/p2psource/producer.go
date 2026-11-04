@@ -56,6 +56,11 @@ const (
 	// must set prefillProfileName to match.
 	defaultPrefillProfile = "prefill"
 
+	// prefixMetricsPrefillProfile is the prefill profile name the prefix-cache
+	// prediction metrics read. endpoint_role uses it, not prefillProfileName, so
+	// both metric families give a request the same role.
+	prefixMetricsPrefillProfile = "prefill"
+
 	defaultMinCachedTokenDelta = 1
 
 	// defaultP2PConnectorPort is the port of the vLLM OffloadingConnector P2P
@@ -503,10 +508,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	if logDecision {
 		kv = []any{"requestID", request.RequestID}
 	}
-	// The prefix-cache metrics' role rule and their fixed "prefill" profile
-	// name, not prefillProfileName, so both metric families give a request the
-	// same endpoint_role.
-	_, role := prefixmetrics.PredictionTarget(schedulingResult, defaultPrefillProfile)
+	_, role := prefixmetrics.PredictionTarget(schedulingResult, prefixMetricsPrefillProfile)
 	defer func() {
 		recordDecision(p.typedName.Name, role, outcome)
 		if logDecision {

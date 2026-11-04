@@ -17,10 +17,12 @@ limitations under the License.
 package p2psource
 
 import (
+	"context"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -28,6 +30,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
@@ -172,6 +175,18 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 			role:    "",
 		},
 		{
+			name:   "no endpoint metadata",
+			config: Config{MinCachedTokenDelta: 1},
+			request: func(p *Producer) *scheduling.InferenceRequest {
+				return preRequest(p, "req-nometa", peer("10.0.0.2", 48))
+			},
+			result: func(*Producer) *scheduling.SchedulingResult {
+				return decodeOnly(scheduling.NewEndpointFromSnapshot(nil, nil, nil))
+			},
+			outcome: "no-endpoint",
+			role:    "decode",
+		},
+		{
 			name:   "decode request",
 			config: Config{MinCachedTokenDelta: 1},
 			request: func(p *Producer) *scheduling.InferenceRequest {
@@ -255,6 +270,51 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 				"predicted pulled tokens count and sum by endpoint_role")
 		})
 	}
+}
+
+// PluginFactory registers both collectors on the handle's registry, so a
+// deployment exports them.
+func TestPluginFactoryExportsMetrics(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+
+	registry := prometheus.NewRegistry()
+	handle := plugin.NewEppHandle(context.Background(),
+		func() []k8stypes.NamespacedName { return nil }, plugin.WithMetricsRecorder(registry))
+	built, err := PluginFactory("p2p", nil, handle)
+	require.NoError(t, err)
+	p := built.(*Producer)
+	require.NoError(t, p.PreRequest(utils.NewTestContext(t), preRequest(p, "req-pull", peer("10.0.0.2", 48)),
+		decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	byName := map[string]*dto.MetricFamily{}
+	for _, family := range families {
+		byName[family.GetName()] = family
+	}
+	labels := map[string]string{"plugin_name": "p2p", "endpoint_role": "decode", "outcome": "pulled"}
+	decisions := byName["llm_d_epp_p2p_source_decisions_total"]
+	require.NotNil(t, decisions, "decision counter exported")
+	require.Len(t, decisions.GetMetric(), 1)
+	assert.Equal(t, labels, labelMap(decisions.GetMetric()[0]))
+	assert.Equal(t, float64(1), decisions.GetMetric()[0].GetCounter().GetValue())
+
+	delete(labels, "outcome")
+	pulled := byName["llm_d_epp_p2p_source_predicted_pulled_tokens"]
+	require.NotNil(t, pulled, "predicted pulled tokens exported")
+	require.Len(t, pulled.GetMetric(), 1)
+	assert.Equal(t, labels, labelMap(pulled.GetMetric()[0]))
+	assert.Equal(t, uint64(1), pulled.GetMetric()[0].GetHistogram().GetSampleCount())
+	assert.Equal(t, float64(32), pulled.GetMetric()[0].GetHistogram().GetSampleSum())
+}
+
+func labelMap(metric *dto.Metric) map[string]string {
+	labels := map[string]string{}
+	for _, label := range metric.GetLabel() {
+		labels[label.GetName()] = label.GetValue()
+	}
+	return labels
 }
 
 // pulledTokensObserved returns the observation count and sum of the predicted
