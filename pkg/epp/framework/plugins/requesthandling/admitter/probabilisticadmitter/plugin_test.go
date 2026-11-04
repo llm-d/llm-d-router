@@ -301,6 +301,9 @@ func TestErrorTypeIsStructured(t *testing.T) {
 	if eppErr.Code != errcommon.ResourceExhausted {
 		t.Errorf("expected code %q, got %q", errcommon.ResourceExhausted, eppErr.Code)
 	}
+	if got := eppErr.Headers[errcommon.RequestDroppedReasonHeaderKey]; got != string(errcommon.RequestDroppedReasonSaturated) {
+		t.Errorf("expected dropped reason header %q, got %q", errcommon.RequestDroppedReasonSaturated, got)
+	}
 }
 
 func TestProbabilisticShedding(t *testing.T) {

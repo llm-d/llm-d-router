@@ -138,8 +138,9 @@ func (p *ProbabilisticAdmitter) Admit(_ context.Context, request *fwksched.Infer
 
 	if p.randFn() < prob {
 		return errcommon.Error{
-			Code: errcommon.ResourceExhausted,
-			Msg:  fmt.Sprintf("probabilistic-admitter: rejected, saturation=%.3f prob=%.2f", saturation, prob),
+			Code:    errcommon.ResourceExhausted,
+			Msg:     fmt.Sprintf("probabilistic-admitter: rejected, saturation=%.3f prob=%.2f", saturation, prob),
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
 		}
 	}
 	return nil
