@@ -28,6 +28,7 @@ jobs:
     outputs:
       src: ${{ steps.filter.outputs.src }}
       helm: ${{ steps.filter.outputs.helm }}
+      sglang-proto: ${{ steps.filter.outputs.sglang-proto }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -56,6 +57,27 @@ jobs:
               - 'config/charts/**'
               - 'hack/verify-helm.sh'
               - '.github/workflows/ci-pr-checks.yaml'
+            sglang-proto:
+              - 'pkg/common/sglang/grpc/**'
+              - 'Makefile.gen.mk'
+              - '.github/workflows/ci-pr-checks.yaml'
+
+  verify-sglang-proto:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.sglang-proto == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Verify vendored SGLang protos match SGLANG_REF
+        run: make verify-sglang-proto
 
   verify-helm-charts:
     needs: check-changes

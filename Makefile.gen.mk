@@ -114,7 +114,19 @@ generate-proto-sglang: protoc protoc-gen-go protoc-gen-go-grpc
 		--go_out=module=$(SGLANG_GO_MODULE):. \
 		--go-grpc_out=module=$(SGLANG_GO_MODULE):. \
 		$(addprefix $(SGLANG_PROTO_DIR)/,$(SGLANG_PROTO_FILES))
-	$(MAKE) format
+
+.PHONY: verify-sglang-proto
+verify-sglang-proto: sync-sglang-proto ## Check that vendored SGLang schemas and Go bindings match sgl-project/sglang@$(SGLANG_REF).
+	@git diff --exit-code -- $(SGLANG_GRPC_DIR) || { \
+		echo "ERROR: $(SGLANG_GRPC_DIR) differs from sgl-project/sglang@$(SGLANG_REF). Run 'make sync-sglang-proto' and commit the result."; \
+		exit 1; \
+	}
+	@untracked="$$(git ls-files --others --exclude-standard -- $(SGLANG_GRPC_DIR))"; \
+	if [ -n "$$untracked" ]; then \
+		echo "ERROR: untracked generated files under $(SGLANG_GRPC_DIR):"; \
+		echo "$$untracked"; \
+		exit 1; \
+	fi
 
 PROTOC_OS := $(shell uname -s | sed 's/Linux/linux/; s/Darwin/osx/')
 PROTOC_ARCH := $(shell uname -m | sed 's/amd64/x86_64/; s/arm64/aarch_64/; s/aarch64/aarch_64/')
