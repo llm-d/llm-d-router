@@ -136,10 +136,8 @@ func TestPlaintextH2CPassthroughStreamsFramesAndTrailers(t *testing.T) {
 	assert.Equal(t, []byte("chunk-2"), got2)
 	_, err = grpcframe.ReadFrame(resp.Body, 64)
 	require.ErrorIs(t, err, io.EOF)
+	// The backend sent grpc-status as a trailer; it must arrive as one.
 	status, ok := grpcframe.Status(resp.Trailer)
-	if !ok {
-		status, ok = grpcframe.Status(resp.Header)
-	}
 	require.True(t, ok)
 	assert.Equal(t, grpcframe.StatusOK, status)
 
@@ -160,6 +158,10 @@ func TestRunConcurrentPDRelaysGRPCPrefillError(t *testing.T) {
 		wantCode    string
 		wantMessage string
 		wantBody    []byte
+		// wantInTrailer selects where the status must arrive: a trailers-only
+		// response carries it in the HTTP/2 HEADERS frame, a mid-stream error
+		// in the trailing HEADERS frame. The relay must not move it.
+		wantInTrailer bool
 	}{
 		{
 			name: "trailers-only gRPC error",
@@ -179,9 +181,10 @@ func TestRunConcurrentPDRelaysGRPCPrefillError(t *testing.T) {
 				w.Header().Set(http.TrailerPrefix+grpcframe.HeaderStatus, "14")
 				w.Header().Set(http.TrailerPrefix+grpcframe.HeaderMessage, "prefill unavailable")
 			},
-			wantCode:    "14",
-			wantMessage: "prefill unavailable",
-			wantBody:    func() []byte { b, _ := grpcframe.FramePayload([]byte("partial")); return b }(),
+			wantCode:      "14",
+			wantMessage:   "prefill unavailable",
+			wantBody:      func() []byte { b, _ := grpcframe.FramePayload([]byte("partial")); return b }(),
+			wantInTrailer: true,
 		},
 	}
 
@@ -251,13 +254,15 @@ func TestRunConcurrentPDRelaysGRPCPrefillError(t *testing.T) {
 				assert.Empty(t, respBody)
 			}
 
-			gotStatus, ok := grpcframe.Status(resp.Trailer)
-			gotMsg := resp.Trailer.Get(grpcframe.HeaderMessage)
-			if !ok {
-				gotStatus, ok = grpcframe.Status(resp.Header)
-				gotMsg = resp.Header.Get(grpcframe.HeaderMessage)
+			statusIn, statusNotIn := resp.Header, resp.Trailer
+			if tt.wantInTrailer {
+				statusIn, statusNotIn = resp.Trailer, resp.Header
 			}
-			require.True(t, ok, "expected grpc-status on response header or trailer")
+			gotStatus, ok := grpcframe.Status(statusIn)
+			gotMsg := statusIn.Get(grpcframe.HeaderMessage)
+			require.True(t, ok, "expected grpc-status where the backend sent it (trailer=%v)", tt.wantInTrailer)
+			_, moved := grpcframe.Status(statusNotIn)
+			assert.False(t, moved, "grpc-status must not be duplicated or moved")
 			assert.Equal(t, tt.wantCode, gotStatus)
 			assert.Equal(t, tt.wantMessage, gotMsg)
 

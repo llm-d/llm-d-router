@@ -213,7 +213,8 @@ type prefillFailedError struct {
 }
 
 func (e *prefillFailedError) Error() string {
-	if code, ok := grpcframe.Status(e.response.headers); ok && code != grpcframe.StatusOK {
+	if grpcframe.HasErrorStatus(e.response.headers) {
+		code, _ := grpcframe.Status(e.response.headers)
 		return fmt.Sprintf("prefill returned %d (grpc-status %s)", e.response.statusCode, code)
 	}
 	return fmt.Sprintf("prefill returned %d", e.response.statusCode)

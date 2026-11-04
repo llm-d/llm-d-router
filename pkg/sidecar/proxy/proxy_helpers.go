@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -183,7 +184,12 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.As(context.Cause(r.Context()), &prefillErr):
 			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
 				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
-			writeError = writeBufferedResponse(res, prefillErr.response)
+			// A key with http.TrailerPrefix is sent as a trailer whether it is
+			// set before or after WriteHeader, so a buffered gRPC status relays
+			// as the HTTP/2 trailer the backend sent.
+			maps.Copy(res.Header(), prefillErr.response.headers)
+			res.WriteHeader(prefillErr.response.statusCode)
+			_, writeError = res.Write(prefillErr.response.bodyBytes())
 
 		case errors.Is(err, syscall.ECONNREFUSED):
 			logger.Error(err, "failed to connect to vLLM decoder",
@@ -201,30 +207,6 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		}
 	}
 	return decoderProxy
-}
-
-func writeBufferedResponse(dst http.ResponseWriter, src *bufferedResponseWriter) error {
-	dstHeader := dst.Header()
-	for k, vv := range src.headers {
-		if strings.HasPrefix(k, http.TrailerPrefix) {
-			continue
-		}
-		dstHeader[k] = append([]string(nil), vv...)
-	}
-	dst.WriteHeader(src.statusCode)
-	var writeErr error
-	if body := src.bodyBytes(); len(body) > 0 {
-		_, writeErr = dst.Write(body)
-	}
-	for k, vv := range src.headers {
-		if !strings.HasPrefix(k, http.TrailerPrefix) {
-			continue
-		}
-		for _, v := range vv {
-			dstHeader.Add(k, v)
-		}
-	}
-	return writeErr
 }
 
 func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
