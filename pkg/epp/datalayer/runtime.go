@@ -124,9 +124,11 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 		}
 	}
 
-	// boundTypes tracks (srcName, extractor type) pairs that already have a bound
-	// extractor. Pending registrations consult this so code-registered defaults
-	// yield to user-config extractors of the same Type.
+	// boundTypes tracks (srcName, extractor type) pairs bound by user config.
+	// Pending registrations consult this so code-registered defaults yield to
+	// user-config extractors of the same Type. Registrations from other plugins
+	// are not recorded here: same-Type plugin instances are distinct extractors
+	// (name-qualified data keys) and each must be wired.
 	boundTypes := make(map[string]map[string]struct{})
 	markBound := func(srcName, extType string) {
 		if boundTypes[srcName] == nil {
@@ -241,7 +243,6 @@ func (r *Runtime) Configure(cfg *Config, logger logr.Logger) error {
 		} else {
 			r.extractors.Append(srcName, pending.Extractor)
 		}
-		markBound(srcName, extType)
 	}
 
 	if cfg != nil {
