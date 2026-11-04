@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -175,7 +176,7 @@ func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 	}{
 		{
 			name:   "OK",
-			status: "0",
+			status: grpcframe.StatusOK,
 			want:   "",
 		},
 		{
@@ -208,7 +209,7 @@ func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 
 			if tt.status != "" {
 				header := &corev3.HeaderValue{
-					Key: "grpc-status",
+					Key: grpcframe.HeaderStatus,
 				}
 				if tt.useValue {
 					header.Value = tt.status

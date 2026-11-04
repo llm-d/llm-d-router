@@ -60,6 +60,8 @@ import (
 	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
@@ -351,6 +353,37 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestRepackageProtoPayload(t *testing.T) {
+	msg := &sglangapiv1.GenerateRequest{
+		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "prompt"}},
+	}
+	originalBytes, err := grpcframe.MarshalProto(msg)
+	require.NoError(t, err)
+
+	reqCtx := &handlers.RequestContext{Request: &handlers.Request{RawBody: originalBytes}}
+	body := &fwkrequest.InferenceRequestBody{
+		Generate: &fwkrequest.GenerateRequest{Text: "prompt"},
+		Payload:  fwkrequest.PayloadProto{Message: msg},
+	}
+	dir := &Director{}
+
+	require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
+	require.Equal(t, originalBytes, reqCtx.Request.RawBody)
+	require.Equal(t, len(originalBytes), reqCtx.RequestSize)
+
+	priority := int64(3)
+	msg.Priority = &priority
+	body.Mutated = true
+	require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
+
+	payloadBytes, err := grpcframe.ParsePayload(reqCtx.Request.RawBody)
+	require.NoError(t, err)
+	var decoded sglangapiv1.GenerateRequest
+	require.NoError(t, proto.Unmarshal(payloadBytes, &decoded))
+	require.Equal(t, int64(3), decoded.GetPriority())
+	require.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
 }
 
 func TestVideoRawPayloadIsForwardedUnchanged(t *testing.T) {
