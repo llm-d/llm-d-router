@@ -20,6 +20,7 @@ limitations under the License.
 package sglanghttp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -278,11 +279,44 @@ func (p *SGLangHTTPParser) ParseResponse(_ context.Context, body []byte, headers
 	if isEventStream(headers) {
 		return &fwkrh.ParsedResponse{Usage: extractStreamingUsage(body)}, nil
 	}
-	usage, err := parseMetaInfoUsage(body)
+	usage, err := parseGenerateResponseUsage(body)
 	if err != nil {
 		return nil, err
 	}
 	return &fwkrh.ParsedResponse{Usage: usage}, nil
+}
+
+// parseGenerateResponseUsage reads usage from a non-streaming /generate
+// response. With sampling_params.n above 1, SGLang returns an array with one
+// object per sample. The samples share one prompt, so prompt and cached tokens
+// are counted once and completion tokens are summed.
+func parseGenerateResponseUsage(body []byte) (*request.Usage, error) {
+	if trimmed := bytes.TrimSpace(body); len(trimmed) == 0 || trimmed[0] != '[' {
+		return parseMetaInfoUsage(body)
+	}
+	var samples []json.RawMessage
+	if err := json.Unmarshal(body, &samples); err != nil {
+		return nil, err
+	}
+	var usage *request.Usage
+	for _, sample := range samples {
+		u, err := parseMetaInfoUsage(sample)
+		if err != nil {
+			return nil, err
+		}
+		if u == nil {
+			continue
+		}
+		if usage == nil {
+			usage = u
+			continue
+		}
+		usage.CompletionTokens += u.CompletionTokens
+	}
+	if usage != nil {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	return usage, nil
 }
 
 func isEventStream(headers map[string]string) bool {
