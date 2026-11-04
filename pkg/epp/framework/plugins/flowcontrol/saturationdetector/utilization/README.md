@@ -47,9 +47,9 @@ the last known score for a bounded window) can be added later.
 **Scrape-lag compensation:** `WaitingQueueSize` is scraped on a poller while the Flow Controller's dispatch loop runs far faster, so between two scrapes the queue term is stale-low and the gate would let the controller over-dispatch. When an `inflight-load-producer` is configured, the queue term is corrected by the in-flight requests the scrape does not yet reflect:
 
     Credit = max(0, InFlightRequests - (WaitingQueueSize + RunningRequestsSize))
-    QueueScore = (WaitingQueueSize + Credit) / QueueThreshold
+    QueueScore = (WaitingQueueSize - DeferredQueueSize + Credit) / QueueThreshold
 
-`InFlightRequests` is the producer's per-endpoint counter, incremented at dispatch and decremented on request completion, so the correction already accounts for requests that returned since the last scrape. Endpoints without the attribute contribute zero credit.
+`InFlightRequests` is the producer's per-endpoint counter, incremented at dispatch and decremented on request completion, so the correction already accounts for requests that returned since the last scrape. Endpoints without the attribute contribute zero credit. `DeferredQueueSize` is the `core-metrics-extractor` attribute for the part of `WaitingQueueSize` that waits on something other than a batch slot (vLLM: a KV transfer, a LoRA slot or a grammar compile); endpoints whose engine config names no `deferredRequestsSpec` carry no such attribute, and a deferred count above the waiting queue (series scraped out of step) leaves the queue term unchanged.
 
 The correction rests on these assumptions:
 

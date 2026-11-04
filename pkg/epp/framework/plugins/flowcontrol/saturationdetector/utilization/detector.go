@@ -37,6 +37,8 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
+	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -130,23 +132,36 @@ func NewDetector(name string, cfg Config, logger logr.Logger) *Detector {
 // scraped metrics alone when no inflight-load-producer is configured.
 func (d *Detector) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
-		Optional: map[fwkplugin.DataKey]any{d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{}},
+		Optional: map[fwkplugin.DataKey]any{
+			d.inFlightLoadDataKey:    attrconcurrency.InFlightLoad{},
+			deferredQueueSizeDataKey: attrmetrics.ScalarMetricValue(0),
+		},
 	}
 }
 
-// queueDepth returns the scraped waiting queue plus the in-flight requests the
-// scrape does not yet reflect (see Saturation).
+// deferredQueueSizeDataKey is the extractor attribute for the part of
+// WaitingQueueSize that waits on something other than a batch slot.
+var deferredQueueSizeDataKey = attrmetrics.ScalarMetricDataKey(extractormetrics.DeferredQueueSizeKey)
+
+// queueDepth returns the scraped waiting queue less the requests the engine
+// reports as deferred, plus the in-flight requests the scrape does not yet
+// reflect (see Saturation). A deferred count above the waiting queue comes
+// from series scraped out of step and leaves the queue term unchanged.
 func (d *Detector) queueDepth(m *datalayer.Metrics, attrs datalayer.AttributeMap) int64 {
 	waiting := int64(m.WaitingQueueSize)
 	if attrs == nil {
 		return waiting
 	}
+	queued := waiting
+	if deferred, ok := attrmetrics.ReadScalarMetricValue(attrs, deferredQueueSizeDataKey); ok && int64(deferred) <= waiting {
+		queued = waiting - int64(deferred)
+	}
 	if val, ok := attrs.Get(d.inFlightLoadDataKey); ok {
 		if load, ok := val.(*attrconcurrency.InFlightLoad); ok {
-			return waiting + max(0, load.Requests-waiting-int64(m.RunningRequestsSize))
+			queued += max(0, load.Requests-waiting-int64(m.RunningRequestsSize))
 		}
 	}
-	return waiting
+	return queued
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -180,7 +195,9 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 //	credit = max(0, InFlightRequests - (WaitingQueueSize + RunningRequestsSize))
 //
-// The credit corrects each endpoint's score before aggregation. It is added
+// The queue-depth term is WaitingQueueSize less the DeferredQueueSize attribute
+// when the extractor publishes one. The credit corrects each endpoint's score
+// before aggregation. It is added
 // only to the queue-depth term (the fast, controllable signal); the KV-cache
 // term is left as measured. Endpoints without the attribute contribute zero
 // credit and fall back to the scraped queue depth. See the package README for

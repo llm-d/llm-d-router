@@ -40,6 +40,10 @@ const (
 	// --- Internal Keys (for Legacy/Gauge Usage) ---
 	KVCacheUsagePercentKey = "KVCacheUsagePercent"
 	WaitingQueueSizeKey    = "WaitingQueueSize"
+	// DeferredQueueSizeKey holds the part of WaitingQueueSize that waits on
+	// something other than a batch slot. Published for engine configs with a
+	// deferredRequestsSpec; 0 on a scrape without the series.
+	DeferredQueueSizeKey   = "DeferredQueueSize"
 	RunningRequestsSizeKey = "RunningRequestsSize"
 	ActiveModelsKey        = "ActiveModels"
 	WaitingModelsKey       = "WaitingModels"
@@ -98,6 +102,7 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 	produced := map[fwkplugin.DataKey]any{
 		attrmetrics.ScalarMetricDataKey(KVCacheUsagePercentKey):      attrmetrics.ScalarMetricValue(0),
 		attrmetrics.ScalarMetricDataKey(WaitingQueueSizeKey):         attrmetrics.ScalarMetricValue(0),
+		attrmetrics.ScalarMetricDataKey(DeferredQueueSizeKey):        attrmetrics.ScalarMetricValue(0),
 		attrmetrics.ScalarMetricDataKey(RunningRequestsSizeKey):      attrmetrics.ScalarMetricValue(0),
 		fwkplugin.NewDataKey(ActiveModelsKey, MetricsExtractorType):  map[string]int{},
 		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType): map[string]int{},
@@ -158,6 +163,16 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			clone.WaitingQueueSize = int(value)
 			putBuiltinScalarAttribute(ep, mapping, WaitingQueueSizeKey, value)
 			samples.Observe(fwkdl.ScalarFieldWaitingQueueSize, value)
+			if deferred := mapping.DeferredQueuedRequests; deferred != nil {
+				deferredValue, err := deferred.aggregateMetric(families, aggregateSum)
+				if err != nil {
+					deferredValue = 0
+					if trace := log.FromContext(ctx).V(logutil.TRACE); trace.Enabled() {
+						trace.Info("Deferred queue series not reported", "reason", err.Error())
+					}
+				}
+				putBuiltinScalarAttribute(ep, mapping, DeferredQueueSizeKey, deferredValue)
+			}
 			updated = true
 		}
 	}
