@@ -77,9 +77,10 @@ func (s *PrefillStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Re
 		return errors.New("prefill: missing SGLang bootstrap_room")
 	}
 
-	// Copy the client payload byte for byte and set only the bootstrap
-	// fields: no decode, deep copy, or re-encode of token IDs or media.
-	bodyBytes, err := sglangwire.FrameGenerateRequest(reqCtx.GRPCGeneratePayload, &sglangwire.Bootstrap{Port: port, Room: room})
+	// The leg body is the client payload bytes, shared with decode and not
+	// copied, between a frame header and the bootstrap fields.
+	payload := reqCtx.GRPCGeneratePayload
+	head, tail, err := sglangwire.LegEnvelope(len(payload), &sglangwire.Bootstrap{Port: port, Room: room})
 	if err != nil {
 		return fmt.Errorf("prefill: build GenerateRequest: %w", err)
 	}
@@ -94,7 +95,7 @@ func (s *PrefillStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Re
 	path := sglangapiv1.SglangService_Generate_FullMethodName
 	logger.V(logutil.DEFAULT).Info("sending gRPC request", "path", path)
 
-	resp, err := streamGRPCToGateway(prefillCtx, s.gwClient, coordmetrics.UpstreamPrefill, path, bodyBytes, gatewayHeaders(reqCtx, gateway.PhasePrefill))
+	resp, err := streamGRPCToGateway(prefillCtx, s.gwClient, coordmetrics.UpstreamPrefill, path, gatewayHeaders(reqCtx, gateway.PhasePrefill), head, payload, tail)
 	if err != nil {
 		ps.Close()
 		ps.MarkDone()
@@ -267,7 +268,8 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 		bootstrap = &sglangwire.Bootstrap{Host: host, Port: port, Room: room}
 	}
 
-	bodyBytes, err := sglangwire.FrameGenerateRequest(reqCtx.GRPCGeneratePayload, bootstrap)
+	payload := reqCtx.GRPCGeneratePayload
+	head, tail, err := sglangwire.LegEnvelope(len(payload), bootstrap)
 	if err != nil {
 		return fmt.Errorf("decode: build GenerateRequest: %w", err)
 	}
@@ -308,7 +310,7 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 	path := sglangapiv1.SglangService_Generate_FullMethodName
 	logger.V(logutil.DEFAULT).Info("sending gRPC request", "path", path, "stream", reqCtx.Stream)
 
-	resp, err := streamGRPCToGateway(decodeCtx, s.gwClient, coordmetrics.UpstreamDecode, path, bodyBytes, headers)
+	resp, err := streamGRPCToGateway(decodeCtx, s.gwClient, coordmetrics.UpstreamDecode, path, headers, head, payload, tail)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("decode: %w", ctxErr)
@@ -521,9 +523,9 @@ func rewriteDecodeFrameCachedTokens(ctx context.Context, logger logr.Logger, fra
 	return rewritten, nil
 }
 
-func streamGRPCToGateway(ctx context.Context, gwClient *gateway.Client, upstream, path string, body []byte, headers map[string]string) (*http.Response, error) {
+func streamGRPCToGateway(ctx context.Context, gwClient *gateway.Client, upstream, path string, headers map[string]string, body ...[]byte) (*http.Response, error) {
 	call := coordmetrics.StartUpstreamCall(upstream)
-	resp, err := gwClient.StreamGRPC(ctx, path, body, headers)
+	resp, err := gwClient.StreamGRPC(ctx, path, headers, body...)
 	call.Done()
 	return resp, err
 }

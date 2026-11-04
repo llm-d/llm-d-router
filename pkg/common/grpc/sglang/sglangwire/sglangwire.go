@@ -83,17 +83,54 @@ func forEachField(b []byte, fn func(num protowire.Number, wireType protowire.Typ
 	return nil
 }
 
+// Request holds what the coordinator reads from a GenerateRequest payload.
+type Request struct {
+	// Stream is the stream field.
+	Stream bool
+	// Payload is the request payload without any bootstrap_host,
+	// bootstrap_port, or bootstrap_room field, which a client may not set.
+	// When the client sent none, Payload aliases the scanned payload with no
+	// copy. Both legs of a request share it; see LegEnvelope.
+	Payload []byte
+}
+
 // ScanGenerateRequest checks that payload is well-formed GenerateRequest wire
-// data at the top level and returns the stream field. Nested messages are
-// left for the SGLang worker to validate.
-func ScanGenerateRequest(payload []byte) (stream bool, err error) {
-	err = forEachField(payload, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
-		if num == reqStream && wireType == protowire.VarintType {
-			v, _ := protowire.ConsumeVarint(value)
-			stream = v != 0
+// data at the top level, reads the stream field, and drops client bootstrap
+// fields. Nested messages are left for the SGLang worker to validate.
+func ScanGenerateRequest(payload []byte) (Request, error) {
+	req := Request{Payload: payload}
+	var stripped []byte // set once the first bootstrap field is dropped
+	for pos := 0; pos < len(payload); {
+		num, wireType, n := protowire.ConsumeTag(payload[pos:])
+		if n < 0 {
+			return Request{}, ErrMalformed
 		}
-	})
-	return stream, err
+		m := protowire.ConsumeFieldValue(num, wireType, payload[pos+n:])
+		if m < 0 {
+			return Request{}, ErrMalformed
+		}
+		end := pos + n + m
+		if num == reqBootstrapHost || num == reqBootstrapPort || num == reqBootstrapRoom {
+			if stripped == nil {
+				stripped = make([]byte, 0, len(payload)-(n+m))
+				stripped = append(stripped, payload[:pos]...)
+			}
+			pos = end
+			continue
+		}
+		if num == reqStream && wireType == protowire.VarintType {
+			v, _ := protowire.ConsumeVarint(payload[pos+n:])
+			req.Stream = v != 0
+		}
+		if stripped != nil {
+			stripped = append(stripped, payload[pos:end]...)
+		}
+		pos = end
+	}
+	if stripped != nil {
+		req.Payload = stripped
+	}
+	return req, nil
 }
 
 // Bootstrap holds the SGLang disaggregation fields to set on a leg request.
@@ -104,34 +141,26 @@ type Bootstrap struct {
 	Room int64
 }
 
-// FrameGenerateRequest returns payload as a gRPC frame, with every
-// bootstrap_host, bootstrap_port, and bootstrap_room field removed. When b is
-// not nil, it then appends b's fields. All other fields are copied byte for
-// byte. The result takes one allocation.
-func FrameGenerateRequest(payload []byte, b *Bootstrap) ([]byte, error) {
-	size := grpcframe.HeaderLen + len(payload)
-	if b != nil {
-		size += bootstrapSize(b)
-	}
-	out := make([]byte, grpcframe.HeaderLen, size)
-	err := forEachField(payload, func(num protowire.Number, _ protowire.Type, _, field []byte) {
-		if num != reqBootstrapHost && num != reqBootstrapPort && num != reqBootstrapRoom {
-			out = append(out, field...)
-		}
-	})
-	if err != nil {
-		return nil, err
-	}
-	if b != nil {
-		out = appendBootstrap(out, b)
-	}
+// LegEnvelope returns the gRPC frame header and the bootstrap suffix that
+// make one leg request out of a bootstrap-free payload of payloadLen bytes:
+// send head, then the payload, then tail. The payload bytes are not copied,
+// so the prefill and decode legs share them. When b is nil, tail is empty.
+// head and tail come from one allocation.
+func LegEnvelope(payloadLen int, b *Bootstrap) (head, tail []byte, err error) {
 	const maxPayload = min(math.MaxUint32, math.MaxInt-grpcframe.HeaderLen)
-	msgLen := len(out) - grpcframe.HeaderLen
-	if msgLen > maxPayload {
-		return nil, errors.New("sglangwire: GenerateRequest too large for a gRPC frame")
+	tailLen := 0
+	if b != nil {
+		tailLen = bootstrapSize(b)
 	}
-	binary.BigEndian.PutUint32(out[1:grpcframe.HeaderLen], uint32(msgLen)) //#nosec G115 -- guarded by MaxUint32 check above
-	return out, nil
+	if payloadLen < 0 || payloadLen > maxPayload-tailLen {
+		return nil, nil, errors.New("sglangwire: GenerateRequest too large for a gRPC frame")
+	}
+	buf := make([]byte, grpcframe.HeaderLen, grpcframe.HeaderLen+tailLen)
+	if b != nil {
+		buf = appendBootstrap(buf, b)
+	}
+	binary.BigEndian.PutUint32(buf[1:grpcframe.HeaderLen], uint32(payloadLen+tailLen)) //#nosec G115 -- guarded by maxPayload check above
+	return buf[:grpcframe.HeaderLen:grpcframe.HeaderLen], buf[grpcframe.HeaderLen:], nil
 }
 
 // optionalStringSize returns the encoded size of an OptionalStringOrList

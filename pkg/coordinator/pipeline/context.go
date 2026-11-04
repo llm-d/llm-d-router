@@ -239,9 +239,11 @@ type RequestContext struct {
 	ResponseWriter http.ResponseWriter
 
 	// GRPCGeneratePayload holds the unframed protobuf payload of an SGLang
-	// native gRPC Generate request, as a subslice of OriginalBody. Steps
-	// rewrite it at the wire level instead of decoding it. Nil for JSON HTTP
-	// requests. Use IsSGLangGRPC to test for a gRPC Generate request.
+	// native gRPC Generate request with client bootstrap fields removed. It
+	// aliases OriginalBody unless a field was removed. The prefill and decode
+	// steps send it as is, between a frame header and their bootstrap
+	// fields, so neither copies it. Nil for JSON HTTP requests. Use
+	// IsSGLangGRPC to test for a gRPC Generate request.
 	GRPCGeneratePayload []byte
 	// PrefillStream holds the active concurrent SGLang gRPC prefill stream
 	// started by PrefillStep and coordinated with DecodeStep.

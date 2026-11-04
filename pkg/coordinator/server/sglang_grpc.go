@@ -103,10 +103,10 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload := body[grpcframe.HeaderLen:]
-	// A top-level wire scan replaces a full proto.Unmarshal. The steps copy
-	// the payload bytes into each leg request, and the SGLang worker
-	// validates nested fields.
-	stream, err := sglangwire.ScanGenerateRequest(payload)
+	// A top-level wire scan replaces a full proto.Unmarshal. It drops client
+	// bootstrap fields, and both legs then send genReq.Payload without a
+	// copy. The SGLang worker validates nested fields.
+	genReq, err := sglangwire.ScanGenerateRequest(payload)
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal("", coordmetrics.ErrorCodeBadRequest)
 		grpcframe.WriteError(cw, codes.InvalidArgument, "invalid GenerateRequest payload")
@@ -130,7 +130,7 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 		OriginalPath:        r.URL.Path,
 		OriginalHeaders:     headers,
 		OriginalBody:        body,
-		GRPCGeneratePayload: payload,
+		GRPCGeneratePayload: genReq.Payload,
 		Stream:              true,
 		Route:               route,
 		KVTransferParams:    make(map[string]any),
@@ -147,7 +147,7 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 		logger.V(logutil.DEFAULT).Info("replaced invalid client request ID", "rejectedLength", len(clientRequestID))
 	}
 
-	logger.V(logutil.DEFAULT).Info("received gRPC request", "path", r.URL.Path, "stream", stream)
+	logger.V(logutil.DEFAULT).Info("received gRPC request", "path", r.URL.Path, "stream", genReq.Stream)
 
 	// Clear the write deadline: a server-streaming RPC can outlast WriteTimeout.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {

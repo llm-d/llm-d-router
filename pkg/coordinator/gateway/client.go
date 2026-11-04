@@ -184,19 +184,16 @@ func (c *Client) Post(ctx context.Context, path string, body []byte, headers map
 
 // StreamGRPC sends a gRPC POST request to the gateway and returns the
 // streaming response without buffering the body, regardless of log verbosity.
-func (c *Client) StreamGRPC(ctx context.Context, path string, body []byte, headers map[string]string) (*http.Response, error) {
+// The body is sent as the concatenation of segments, which are not joined, so
+// a large segment can be shared between requests.
+func (c *Client) StreamGRPC(ctx context.Context, path string, headers map[string]string, segments ...[]byte) (*http.Response, error) {
 	url := c.baseURL + path
 
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating gRPC request: %w", err)
 	}
-	req.ContentLength = int64(len(body))
+	bodyLen := setSegmentedBody(req, segments)
 	req.Header.Set(ContentTypeHeader, grpcframe.MediaType)
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -204,7 +201,7 @@ func (c *Client) StreamGRPC(ctx context.Context, path string, body []byte, heade
 
 	logger := log.FromContext(ctx).WithName("gateway")
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		v.Info("gRPC request", "path", path, "bodyLen", len(body), "headers", httplog.RedactedHeaders(req.Header))
+		v.Info("gRPC request", "path", path, "bodyLen", bodyLen, "headers", httplog.RedactedHeaders(req.Header))
 	}
 
 	resp, err := c.httpClient.Do(req) //#nosec -- baseURL is operator-configured (cfg.Address); path is validated upstream
@@ -212,6 +209,40 @@ func (c *Client) StreamGRPC(ctx context.Context, path string, body []byte, heade
 		return nil, fmt.Errorf("sending gRPC request to gateway: %w", err)
 	}
 	return resp, nil
+}
+
+// setSegmentedBody installs segments as the request body and returns the
+// total length. It sets ContentLength, and GetBody so the HTTP/2 transport
+// can replay the body after a GOAWAY, which http.NewRequest does only for a
+// bytes.Reader body. Empty segments are skipped.
+func setSegmentedBody(req *http.Request, segments [][]byte) int64 {
+	var total int64
+	parts := make([][]byte, 0, len(segments))
+	for _, seg := range segments {
+		if len(seg) > 0 {
+			total += int64(len(seg))
+			parts = append(parts, seg)
+		}
+	}
+	if total == 0 {
+		req.Body = http.NoBody
+		req.ContentLength = 0
+		return 0
+	}
+	open := func() io.ReadCloser {
+		if len(parts) == 1 {
+			return io.NopCloser(bytes.NewReader(parts[0]))
+		}
+		readers := make([]io.Reader, len(parts))
+		for i, part := range parts {
+			readers[i] = bytes.NewReader(part)
+		}
+		return io.NopCloser(io.MultiReader(readers...))
+	}
+	req.Body = open()
+	req.GetBody = func() (io.ReadCloser, error) { return open(), nil }
+	req.ContentLength = total
+	return total
 }
 
 // BaseURL returns the gateway base URL (e.g. "http://inference-gateway:80").

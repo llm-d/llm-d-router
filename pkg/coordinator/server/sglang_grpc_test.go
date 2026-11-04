@@ -404,7 +404,7 @@ func TestSGLangGRPC_DecodeOnlyAndControlRPCPassthrough(t *testing.T) {
 	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lastProfile.Store(r.Header.Get(reqcommon.EPPProfileHeaderKey))
 		body, _ := io.ReadAll(r.Body)
-		resp, err := gwClient.StreamGRPC(r.Context(), r.URL.Path, body, nil)
+		resp, err := gwClient.StreamGRPC(r.Context(), r.URL.Path, nil, body)
 		if err != nil {
 			t.Errorf("forward to backend: %v", err)
 			return
@@ -549,7 +549,7 @@ func TestSGLangGRPC_JSONOnlyStepsNoOp(t *testing.T) {
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
-		resp, err := gwClient.StreamGRPC(r.Context(), r.URL.Path, body, nil)
+		resp, err := gwClient.StreamGRPC(r.Context(), r.URL.Path, nil, body)
 		if err != nil {
 			t.Errorf("forward to backend: %v", err)
 			return

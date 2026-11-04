@@ -52,6 +52,14 @@ func testRequest() *sglangapiv1.GenerateRequest {
 	}
 }
 
+// legBody assembles one leg request as the gateway client sends it.
+func legBody(t *testing.T, payload []byte, b *Bootstrap) []byte {
+	t.Helper()
+	head, tail, err := LegEnvelope(len(payload), b)
+	require.NoError(t, err)
+	return bytes.Join([][]byte{head, payload, tail}, nil)
+}
+
 func decodeFrame(t *testing.T, framed []byte) *sglangapiv1.GenerateRequest {
 	t.Helper()
 	payload, err := grpcframe.ParsePayload(framed)
@@ -62,8 +70,56 @@ func decodeFrame(t *testing.T, framed []byte) *sglangapiv1.GenerateRequest {
 	return &got
 }
 
-func TestFrameGenerateRequestMatchesProto(t *testing.T) {
-	payload, err := proto.Marshal(testRequest())
+func mustMarshal(t *testing.T, m proto.Message) []byte {
+	t.Helper()
+	b, err := proto.Marshal(m)
+	require.NoError(t, err)
+	return b
+}
+
+func TestScanGenerateRequestStripsClientBootstrapFields(t *testing.T) {
+	payload := mustMarshal(t, testRequest())
+	req, err := ScanGenerateRequest(payload)
+	require.NoError(t, err)
+	require.True(t, req.Stream)
+
+	want := testRequest()
+	want.BootstrapHost, want.BootstrapPort, want.BootstrapRoom = nil, nil, nil
+	var got sglangapiv1.GenerateRequest
+	require.NoError(t, proto.Unmarshal(req.Payload, &got))
+	if diff := cmp.Diff(want, &got, protocmp.Transform()); diff != "" {
+		t.Fatalf("mismatch (-want +got):\n%s", diff)
+	}
+	require.LessOrEqual(t, cap(req.Payload), len(payload), "stripped copy is one allocation of at most the input size")
+	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() { _, _ = ScanGenerateRequest(payload) }))
+	require.Equal(t, payload, mustMarshal(t, testRequest()), "input not modified")
+
+	// Without client bootstrap fields (the normal case), Payload aliases the
+	// input and the scan does not allocate.
+	clean := testRequest()
+	clean.BootstrapHost, clean.BootstrapPort, clean.BootstrapRoom = nil, nil, nil
+	cleanPayload := mustMarshal(t, clean)
+	req, err = ScanGenerateRequest(cleanPayload)
+	require.NoError(t, err)
+	require.Same(t, &cleanPayload[0], &req.Payload[0])
+	require.Len(t, req.Payload, len(cleanPayload))
+	require.Zero(t, testing.AllocsPerRun(100, func() { _, _ = ScanGenerateRequest(cleanPayload) }))
+
+	for _, stream := range []*bool{nil, proto.Bool(false), proto.Bool(true)} {
+		req, err := ScanGenerateRequest(mustMarshal(t, &sglangapiv1.GenerateRequest{Stream: stream, Priority: proto.Int64(1)}))
+		require.NoError(t, err)
+		require.Equal(t, stream != nil && *stream, req.Stream)
+	}
+
+	_, err = ScanGenerateRequest([]byte{0xff, 0xff, 0xff})
+	require.ErrorIs(t, err, ErrMalformed)
+	// A length prefix past the end of the payload.
+	_, err = ScanGenerateRequest([]byte{0x12, 0x05, 'a'})
+	require.ErrorIs(t, err, ErrMalformed)
+}
+
+func TestLegEnvelopeMatchesProto(t *testing.T) {
+	req, err := ScanGenerateRequest(mustMarshal(t, testRequest()))
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -72,7 +128,7 @@ func TestFrameGenerateRequestMatchesProto(t *testing.T) {
 		want func(*sglangapiv1.GenerateRequest)
 	}{
 		{
-			name: "strip only (decode-only)",
+			name: "no bootstrap (decode-only)",
 			want: func(r *sglangapiv1.GenerateRequest) {
 				r.BootstrapHost, r.BootstrapPort, r.BootstrapRoom = nil, nil, nil
 			},
@@ -94,48 +150,27 @@ func TestFrameGenerateRequestMatchesProto(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			framed, err := FrameGenerateRequest(payload, tc.b)
-			require.NoError(t, err)
 			want := testRequest()
 			tc.want(want)
-			if diff := cmp.Diff(want, decodeFrame(t, framed), protocmp.Transform()); diff != "" {
+			if diff := cmp.Diff(want, decodeFrame(t, legBody(t, req.Payload, tc.b)), protocmp.Transform()); diff != "" {
 				t.Fatalf("mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
 
-	// Without client bootstrap fields (the normal case), the frame is
-	// allocated at its exact size.
-	clean := testRequest()
-	clean.BootstrapHost, clean.BootstrapPort, clean.BootstrapRoom = nil, nil, nil
-	cleanPayload, err := proto.Marshal(clean)
+	// head and tail share one exact-size allocation, and head has no spare
+	// capacity so an append cannot overwrite tail.
+	head, tail, err := LegEnvelope(10, &Bootstrap{Host: "h", Port: 1, Room: 2})
 	require.NoError(t, err)
-	framed, err := FrameGenerateRequest(cleanPayload, &Bootstrap{Host: "h", Port: 1, Room: 2})
-	require.NoError(t, err)
-	require.Equal(t, len(framed), cap(framed))
+	require.Len(t, head, grpcframe.HeaderLen)
+	require.Equal(t, grpcframe.HeaderLen, cap(head))
+	require.Equal(t, len(tail), cap(tail))
+	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() {
+		_, _, _ = LegEnvelope(10, &Bootstrap{Host: "h", Port: 1, Room: 2})
+	}))
 
-	_, err = FrameGenerateRequest([]byte{0xff}, nil)
-	require.ErrorIs(t, err, ErrMalformed)
-
-	allocs := testing.AllocsPerRun(100, func() {
-		_, _ = FrameGenerateRequest(payload, &Bootstrap{Host: "10.2.3.4", Port: 8998, Room: 7})
-	})
-	require.Equal(t, 1.0, allocs)
-}
-
-func TestScanGenerateRequest(t *testing.T) {
-	for _, stream := range []*bool{nil, proto.Bool(false), proto.Bool(true)} {
-		payload, err := proto.Marshal(&sglangapiv1.GenerateRequest{Stream: stream, Priority: proto.Int64(1)})
-		require.NoError(t, err)
-		got, err := ScanGenerateRequest(payload)
-		require.NoError(t, err)
-		require.Equal(t, stream != nil && *stream, got)
-	}
-	_, err := ScanGenerateRequest([]byte{0xff, 0xff, 0xff})
-	require.ErrorIs(t, err, ErrMalformed)
-	// A length prefix past the end of the payload.
-	_, err = ScanGenerateRequest([]byte{0x12, 0x05, 'a'})
-	require.ErrorIs(t, err, ErrMalformed)
+	_, _, err = LegEnvelope(-1, nil)
+	require.Error(t, err)
 }
 
 func TestScanStreamItem(t *testing.T) {
