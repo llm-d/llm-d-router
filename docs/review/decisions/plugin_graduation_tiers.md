@@ -19,4 +19,4 @@ Applying uniform deprecation shims to brand-new plugins slows iteration, whereas
 
 Plugins follow a three-tier graduation path: `Alpha` carries no backward-compatibility guarantee and every new plugin starts in `Alpha`; `Beta` guarantees backward compatibility across two minor versions; `Stable` guarantees backward compatibility within a major version.
 
-Related rule: [See linked review rule](../rules/configuration_helm_and_compatibility.md#provide-a-two-release-deprecation-window-for-shipped-user-facing-surfaces).
+Related rule: [Plugin Alpha, Beta, and Stable graduation and frozen v1 fixtures](../rules/governance_and_compatibility_policy.md#plugin-alpha-beta-and-stable-graduation-and-frozen-v1-fixtures).

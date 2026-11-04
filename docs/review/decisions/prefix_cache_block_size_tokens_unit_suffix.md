@@ -22,7 +22,5 @@ Maintainers debated reverting `blockSizeTokens` to `blockSize` to match internal
 
 Merged as `blockSizeTokens` across prefix-cache scorers so operators see tokens rather than ambiguous byte or block counts.
 
-Related rule: [Name plugin packages with concise domain nouns and qualify config units](../rules/plugin_framework_contracts.md#name-plugin-packages-with-concise-domain-nouns-and-qualify-config-units).
-
 [^issue-747-ic-4326491096]: [#747](https://github.com/llm-d/llm-d-router/issues/747#issuecomment-4326491096) (human:roytman)
 [^issue-747-ic-4344420419]: [#747](https://github.com/llm-d/llm-d-router/issues/747#issuecomment-4344420419) (human:ahg-g)

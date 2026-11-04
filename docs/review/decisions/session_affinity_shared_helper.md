@@ -22,7 +22,7 @@ Maintainers weighed modeling session-affinity token decoding as a pre-scheduling
 
 Merged as the shared stateless helper package `pkg/epp/framework/plugins/scheduling/util/sessionaffinity`, avoiding producer DAG registration and config wiring overhead when extraction performs pure header parsing with no external I/O or cross-plugin caching.
 
-Related rule: [Separate data producers from scheduling filters and scorers](../rules/plugin_framework_contracts.md#separate-data-producers-from-scheduling-filters-and-scorers).
+Related rule: [External conversation history vs bounded routing state](../rules/settled_architectural_boundaries.md#external-conversation-history-vs-bounded-routing-state).
 
 [^issue-815-ic-4535092791]: [#815](https://github.com/llm-d/llm-d-router/issues/815#issuecomment-4535092791) (human:ahg-g)
 [^issue-815-ic-4603503350]: [#815](https://github.com/llm-d/llm-d-router/issues/815#issuecomment-4603503350) (human:liu-cong)

@@ -22,7 +22,7 @@ Maintainers discussed deleting `deploy/` Kustomize manifests entirely in favor o
 
 Kept `config/charts/` as the canonical end-user packaging surface while retaining `deploy/` for local `kind` workflows and E2E tests.
 
-Related rule: [Deploy through Helm charts and configure components via structured files](../rules/project_direction.md#deploy-through-helm-charts-and-configure-components-via-structured-files).
+Related rule: [Helm charts in config/charts/ and local Kustomize in deploy/](../rules/governance_and_compatibility_policy.md#helm-charts-in-configcharts-and-local-kustomize-in-deploy).
 
 [^issue-1177]: [#1177](https://github.com/llm-d/llm-d-router/issues/1177) (human:ahg-g)
 [^issue-1177-ic-4478503514]: [#1177](https://github.com/llm-d/llm-d-router/issues/1177#issuecomment-4478503514) (human:shmuelk)

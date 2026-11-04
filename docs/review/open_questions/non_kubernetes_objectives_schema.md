@@ -17,7 +17,7 @@ Whether non-Kubernetes deployments load `InferenceObjective` definitions from Ku
 
 Bare-metal and Slurm deployments without Kubernetes discover endpoints from static files and need a file-based path to configure per-tenant priority objectives. (Conflict audit ID: `UNR-12`.)
 
-Attached review rule: [Model endpoints with orchestrator-neutral domain types](../rules/project_direction.md#model-endpoints-with-orchestrator-neutral-domain-types).
+Attached review rule: [Homogeneous base model and role per InferencePool](../rules/settled_architectural_boundaries.md#homogeneous-base-model-and-role-per-inferencepool).
 
 # Positions
 

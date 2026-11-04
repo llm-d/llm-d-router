@@ -17,8 +17,6 @@ Whether `DumpState` output hashes tenant and program identifiers by default[^pr-
 
 The `/debug/plugins/state` endpoint exposes bounded snapshots of stateful plugin registries for live operational diagnosis, trading tenant identifier privacy against operator debuggability. (Conflict audit ID: `UNR-05`.)
 
-Attached review rule: [Enforce TLS minimums, namespace-scoped watches, and payload redaction](../rules/security_and_trust_boundaries.md#enforce-tls-minimums-namespace-scoped-watches-and-payload-redaction).
-
 # Positions
 
 - **Position A**: Hash program and tenant identifiers with SHA-256 by default in `DumpState` output so debug captures do not leak raw caller identifiers.[^pr-2008-rev-4759516825]

@@ -19,4 +19,3 @@ A bare `Fixes #` prompt in `.github/PULL_REQUEST_TEMPLATE.md` nudges authors tow
 
 `.github/PULL_REQUEST_TEMPLATE.md` explicitly separates `Fixes #` (used only when the pull request resolves the entire issue) from `Part of #` (used for partial slices that keep the tracking issue open).
 
-Related rule: [See linked review rule](../rules/scope_and_process.md#settle-design-tradeoffs-on-public-issues-and-scope-auto-close-keywords).

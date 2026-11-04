@@ -17,8 +17,6 @@ Whether accepted design proposals live in an in-repo proposals directory[^pr-237
 
 Architectural changes require public discussion before pull request iteration, but maintainers have not settled where accepted long-form RFCs are archived after discussion. (Conflict audit ID: `UNR-07`.)
 
-Attached review rule: [Settle design tradeoffs on public issues and scope auto-close keywords](../rules/scope_and_process.md#settle-design-tradeoffs-on-public-issues-and-scope-auto-close-keywords).
-
 # Positions
 
 - **Position A**: Create an in-repo `proposals/` directory alongside `CONTRIBUTING.md` so accepted designs are versioned with code.[^pr-2376-r3832021146]

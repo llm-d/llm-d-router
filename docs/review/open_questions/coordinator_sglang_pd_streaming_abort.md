@@ -15,7 +15,7 @@ How the Coordinator scopes SGLang `/generate` interception without breaking non-
 
 # Context
 
-Surfaced in conflict audit `UNR-13`. Related rule: [See linked review rule](../rules/project_direction.md#configure-backend-engine-identity-explicitly-and-isolate-engine-schemas).
+Surfaced in conflict audit `UNR-13`.
 
 # Positions
 

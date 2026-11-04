@@ -22,7 +22,7 @@ When removing expired deprecated plugin aliases, authors offered to keep `Regist
 
 Deleted unreferenced deprecation helpers in the stranding change, relying on version control history if needed later.
 
-Related rule: [Share common helpers and delete dead code in the stranding change](../rules/plugin_framework_contracts.md#share-common-helpers-and-delete-dead-code-in-the-stranding-change).
+Related rule: [N+2 deprecation for shipped surfaces and zero shims for unshipped surfaces](../rules/governance_and_compatibility_policy.md#n2-deprecation-for-shipped-surfaces-and-zero-shims-for-unshipped-surfaces).
 
 [^pr-2509-ic-5398059091]: [#2509](https://github.com/llm-d/llm-d-router/pull/2509#issuecomment-5398059091) (human:roytman)
 [^pr-2509-ic-5398602893]: [#2509](https://github.com/llm-d/llm-d-router/pull/2509#issuecomment-5398602893) (human:elevran)

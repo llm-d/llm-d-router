@@ -17,7 +17,7 @@ Whether the disaggregation sidecar should watch `InferencePool` and `Pod` object
 
 The disaggregation sidecar validates prefill target addresses against known pool endpoints when `--enable-ssrf-protection` is enabled, creating a tension between SSRF defense and Kubernetes API-server watch fan-out. (Conflict audit ID: `MVM-08`.)
 
-Attached review rule: [Keep client conversation state out of the router and orchestrate multi-stage pipelines in the coordinator](../rules/project_direction.md#keep-client-conversation-state-out-of-the-router-and-orchestrate-multi-stage-pipelines-in-the-coordinator).
+Attached review rule: [Cluster orchestration in pkg/coordinator and pod proxy in pkg/sidecar](../rules/settled_architectural_boundaries.md#cluster-orchestration-in-pkgcoordinator-and-pod-proxy-in-pkgsidecar).
 
 # Positions
 

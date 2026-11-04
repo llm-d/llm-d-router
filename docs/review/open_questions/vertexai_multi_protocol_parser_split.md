@@ -15,7 +15,7 @@ Whether Vertex AI REST and gRPC routes belong in one `vertexai-parser` using dec
 
 # Context
 
-Surfaced in conflict audit `UNR-11`. Related rule: [See linked review rule](../rules/protocol_parsing_and_wire_fidelity.md#claim-inference-routes-declaratively-with-unmatched-route-fallthrough).
+Surfaced in conflict audit `UNR-11`.
 
 # Positions
 

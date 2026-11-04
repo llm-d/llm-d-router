@@ -22,7 +22,7 @@ Maintainers initially closed router-side `/v1/models` aggregation under homogene
 
 Introduced a generic `Responder` extension point and merged `models-responder` so endpoints with distinct loaded LoRA adapters union cleanly without core-to-plugin imports.
 
-Related rule: [Scope each pool to a single homogeneous base model and role](../rules/project_direction.md#scope-each-pool-to-a-single-homogeneous-base-model-and-role).
+Related rule: [Homogeneous base model and role per InferencePool](../rules/settled_architectural_boundaries.md#homogeneous-base-model-and-role-per-inferencepool).
 
 [^issue-1878-ic-4864624197]: [#1878](https://github.com/llm-d/llm-d-router/issues/1878#issuecomment-4864624197) (human:shmuelk)
 [^pr-2308-rev-5453802061]: [#2308](https://github.com/llm-d/llm-d-router/pull/2308#pullrequestreview-5453802061) (human:elevran)

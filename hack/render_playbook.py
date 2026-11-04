@@ -23,12 +23,13 @@ GENERATED_HEADER = (
 
 TWO_STAGE_NOTE = (
     "> **Two-stage workflow:** This file is the compiled human-readable review guide for "
-    "contributors and maintainers, combining subsystem rules with rationale, accepted exceptions, "
-    "open questions, and representative pull request threads. Coding and review agents must not "
-    "load `docs/review_playbook.md` or `docs/review/provenance.json`; agents route changed paths "
-    "through [review_a_pull_request.md](review/playbooks/review_a_pull_request.md) and load only "
-    "matching rule files under `docs/review/rules/`. See [AGENTS.md](../AGENTS.md) for "
-    "repository-wide coding, prose, logging, constant-reuse, and pull request rules."
+    "contributors and maintainers, combining targeted non-code review rules with rationale, "
+    "accepted exceptions, open questions, and representative pull request threads. Coding and "
+    "review agents must not load `docs/review_playbook.md` or `docs/review/provenance.json`; "
+    "agents inspect code and search the repository first, then route changed paths through "
+    "[review_a_pull_request.md](review/playbooks/review_a_pull_request.md) to load at most "
+    "`0` to `2` matching rule files under `docs/review/rules/`. See [AGENTS.md](../AGENTS.md) "
+    "for repository-wide coding, prose, logging, constant-reuse, and pull request rules."
 )
 
 MAX_REPRESENTATIVE_THREADS = 3
@@ -40,7 +41,8 @@ ROUTING_TABLE_HEADER = "Touched repository paths"
 PROVENANCE_FILE = "provenance.json"
 GLOB_CHARS = frozenset("*?[")
 GO_ROUTING_DIRS = ("cmd", "pkg", "internal")
-TEST_OR_PROCESS_ONLY_RULES = frozenset({"testing_and_ci.md", "scope_and_process.md"})
+NO_RULES_SENTINEL = "None (AGENTS.md and repo search only)"
+MAX_ROUTED_RULE_FILES = 2
 
 ALLOWED_KEYS = {
     "okf_version",
@@ -723,11 +725,11 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(out))
 
 
-def routing_table_rows(body: str) -> Optional[List[Tuple[List[str], List[str]]]]:
-    """Returns [(globs, rule_filenames), ...] from the diff-path routing table,
+def routing_table_rows(body: str) -> Optional[List[Tuple[List[str], List[str], str]]]:
+    """Returns [(globs, rule_filenames, second_cell), ...] from the diff-path routing table,
     or None when no table starts with ROUTING_TABLE_HEADER.
     """
-    rows: List[Tuple[List[str], List[str]]] = []
+    rows: List[Tuple[List[str], List[str], str]] = []
     found = False
     in_table = False
     for line in body.splitlines():
@@ -752,7 +754,7 @@ def routing_table_rows(body: str) -> Optional[List[Tuple[List[str], List[str]]]]
                 continue
             target = link.split("#", 1)[0].strip()
             rule_files.append(posixpath.basename(target))
-        rows.append((globs, rule_files))
+        rows.append((globs, rule_files, second_cell))
     return rows if found else None
 
 
@@ -760,7 +762,7 @@ def routing_table_scopes(body: str) -> Optional[List[str]]:
     rows = routing_table_rows(body)
     if rows is None:
         return None
-    return [g for globs, _ in rows for g in globs]
+    return [g for globs, _, _ in rows for g in globs]
 
 
 def path_claim_exists(repo_root: pathlib.Path, claim: str) -> bool:
@@ -930,15 +932,23 @@ def validate_bundle(
                 errs.append(f"{rel}: missing routing table with header {ROUTING_TABLE_HEADER!r}")
             else:
                 prod_go_regexes: List[re.Pattern[str]] = []
-                for row_globs, row_rules in rows:
-                    if not row_globs or not row_rules:
-                        errs.append(f"{rel}: routing table row missing globs or rule file links")
+                for row_globs, row_rules, second_cell in rows:
+                    is_explicit_none = second_cell == NO_RULES_SENTINEL and not row_rules
+                    has_valid_rules = (
+                        1 <= len(row_rules) <= MAX_ROUTED_RULE_FILES
+                        and second_cell != NO_RULES_SENTINEL
+                    )
+                    if not row_globs or not (is_explicit_none or has_valid_rules):
+                        errs.append(
+                            f"{rel}: routing table row must have globs and either "
+                            f"{NO_RULES_SENTINEL!r} or 1..{MAX_ROUTED_RULE_FILES} rule file links"
+                        )
                     for scope in row_globs:
                         if not _claim_exists(scope):
                             errs.append(
                                 f"{rel}: routing table path `{scope}` matches no file or directory in the repository"
                             )
-                    if set(row_rules) - TEST_OR_PROCESS_ONLY_RULES:
+                    if is_explicit_none or has_valid_rules:
                         for g in row_globs:
                             if not g.endswith("_test.go") and not g.startswith("test/"):
                                 prod_go_regexes.append(glob_to_regex(g))
@@ -1007,8 +1017,13 @@ def validate_bundle(
                 rtitle = str(r["title"] or "")
                 rkey = f"{sec_stem}#{github_heading_anchor(rtitle)}"
                 discovered_rules.add(rkey)
-                if not r.get("rule"):
+                rule_body = str(r.get("rule") or "")
+                if not rule_body:
                     errs.append(f"{rel} ({rtitle}): empty rule body")
+                elif not rule_body.startswith("When "):
+                    errs.append(
+                        f"{rel} ({rtitle}): Stage-1 rule body must start with 'When <condition>:'"
+                    )
                 if rkey not in rule_prov_map:
                     errs.append(f"{rel}: rule '{rkey}' missing from {PROVENANCE_FILE}")
                     continue

@@ -22,7 +22,7 @@ Contributors proposed scheduler-level fallback profiles when primary scorers lac
 
 Closed scheduler fallback profiles and kept single weighted-linear-combination profile execution with graceful degradation inside individual scorers.
 
-Related rule: [Keep core runtimes built in and policy plugins optional](../rules/project_direction.md#keep-core-runtimes-built-in-and-policy-plugins-optional).
+Related rule: [Capacity shedding in SaturationDetector or AdmissionPlugin](../rules/settled_architectural_boundaries.md#capacity-shedding-in-saturationdetector-or-admissionplugin).
 
 [^issue-1139]: [#1139](https://github.com/llm-d/llm-d-router/issues/1139) (human:kaushikmitr)
 [^issue-1139-ic-4601790080]: [#1139](https://github.com/llm-d/llm-d-router/issues/1139#issuecomment-4601790080) (human:elevran)

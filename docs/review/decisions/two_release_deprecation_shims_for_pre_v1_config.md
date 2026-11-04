@@ -22,7 +22,7 @@ During API graduation refactors, maintainers debated making clean breaking confi
 
 Enforced backward-compatible deprecation shims on shipped user-facing config fields and removed the shims two releases later.
 
-Related rule: [Provide a two-release deprecation window for shipped user-facing surfaces](../rules/configuration_helm_and_compatibility.md#provide-a-two-release-deprecation-window-for-shipped-user-facing-surfaces).
+Related rule: [N+2 deprecation for shipped surfaces and zero shims for unshipped surfaces](../rules/governance_and_compatibility_policy.md#n2-deprecation-for-shipped-surfaces-and-zero-shims-for-unshipped-surfaces).
 
 [^pr-1247]: [#1247](https://github.com/llm-d/llm-d-router/pull/1247) (human:ahg-g)
 [^pr-1247-ic-4529235883]: [#1247](https://github.com/llm-d/llm-d-router/pull/1247#issuecomment-4529235883) (human:elevran)

@@ -22,7 +22,5 @@ Maintainers debated keeping a single metrics documentation source inside `llm-d-
 
 Retained component-level `docs/metrics.md` and Grafana dashboards in `llm-d-router` while publishing end-user operations guides in `llm-d/llm-d`.
 
-Related rule: [Colocate plugin READMEs and link to canonical upstream guides](../rules/documentation_and_comments.md#colocate-plugin-readmes-and-link-to-canonical-upstream-guides).
-
 [^pr-1636-ic-4696185999]: [#1636](https://github.com/llm-d/llm-d-router/pull/1636#issuecomment-4696185999) (human:gyliu513)
 [^pr-1636-ic-4701069127]: [#1636](https://github.com/llm-d/llm-d-router/pull/1636#issuecomment-4701069127) (human:ahg-g)

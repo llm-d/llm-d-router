@@ -22,7 +22,5 @@ Maintainers evaluated reshaping the `Extractor` plugin interface around compile-
 
 Closed the generic-extractor refactor and standardized type-safe cross-plugin access around `datalayer.Slot[T]` and `DataKey` handles.
 
-Related rule: [Exchange cross-plugin state through typed data-layer slots and keys](../rules/plugin_framework_contracts.md#exchange-cross-plugin-state-through-typed-data-layer-slots-and-keys).
-
 [^pr-883]: [#883](https://github.com/llm-d/llm-d-router/pull/883) (human:hexfusion)
 [^pr-883-ic-4321888471]: [#883](https://github.com/llm-d/llm-d-router/pull/883#issuecomment-4321888471) (human:shmuelk)

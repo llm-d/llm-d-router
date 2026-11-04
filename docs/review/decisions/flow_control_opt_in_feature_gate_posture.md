@@ -22,7 +22,5 @@ Maintainers debated enabling flow control by default upon GA code maturity versu
 
 Merged GA stability improvements with the `flowControl` gate off by default, deferring default-on activation to a dedicated graduation issue.
 
-Related rule: [Ship safe out-of-the-box defaults and gate workload-sensitive features behind opt-in config](../rules/configuration_helm_and_compatibility.md#ship-safe-out-of-the-box-defaults-and-gate-workload-sensitive-features-behind-opt-in-config).
-
 [^pr-2180-ic-5119639333]: [#2180](https://github.com/llm-d/llm-d-router/pull/2180#issuecomment-5119639333) (human:ahg-g)
 [^pr-2180-r3692815708]: [#2180](https://github.com/llm-d/llm-d-router/pull/2180#discussion_r3692815708) (human:liu-cong)

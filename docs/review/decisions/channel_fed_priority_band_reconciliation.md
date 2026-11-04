@@ -22,7 +22,5 @@ Maintainers compared reconciling dynamic flow-control priority bands directly un
 
 Merged edge-triggered controller reconciliation feeding the processor loop with read/write lock protection and idle drain before removal.
 
-Related rule: [Reconcile dynamic priority bands on controller edges and drain before removal](../rules/concurrency_and_shared_state.md#reconcile-dynamic-priority-bands-on-controller-edges-and-drain-before-removal).
-
 [^issue-1184]: [#1184](https://github.com/llm-d/llm-d-router/issues/1184) (human:LukeAVanDrie)
 [^issue-1184-ic-4477880575]: [#1184](https://github.com/llm-d/llm-d-router/issues/1184#issuecomment-4477880575) (human:shmuelk)

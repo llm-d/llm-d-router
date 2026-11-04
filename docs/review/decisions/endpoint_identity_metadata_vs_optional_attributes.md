@@ -22,7 +22,5 @@ Maintainers debated placing endpoint rank and type directly on `EndpointMetadata
 
 `EndpointMetadata` carries core identity (`ID`, `Name`, `Type`), while worker rank and optional topology signals flow through data-layer attributes.
 
-Related rule: [Model endpoints with orchestrator-neutral domain types](../rules/project_direction.md#model-endpoints-with-orchestrator-neutral-domain-types).
-
 [^pr-1106-ic-4478669785]: [#1106](https://github.com/llm-d/llm-d-router/pull/1106#issuecomment-4478669785) (human:elevran)
 [^pr-1106-r3271256891]: [#1106](https://github.com/llm-d/llm-d-router/pull/1106#discussion_r3271256891) (human:ahg-g)

@@ -18,7 +18,7 @@ Whether the plugin framework recovers plugin panics at the invocation boundary a
 
 No extension point in the EPP plugin framework wraps plugin execution in `recover()`. A nil dereference or slice bounds fault in any filter, scorer, data producer, or flow-control policy terminates the EPP process and resets all in-flight requests. (Conflict audit ID: `UNR-06`.)
 
-Attached review rule: [Propagate errors explicitly without fabricated fallbacks](../rules/error_handling_and_boundaries.md#propagate-errors-explicitly-without-fabricated-fallbacks).
+Attached review rule: [Unjoined timed-out DataProducer goroutines and buffer lifetimes](../rules/unencoded_runtime_hazards.md#unjoined-timed-out-dataproducer-goroutines-and-buffer-lifetimes).
 
 # Positions
 

@@ -15,7 +15,7 @@ How parallel sub-agents identify themselves on the wire so the shared session ma
 
 # Context
 
-Surfaced in conflict audit `UNR-10`. Related rule: [See linked review rule](../rules/project_direction.md#keep-client-conversation-state-out-of-the-router-and-orchestrate-multi-stage-pipelines-in-the-coordinator).
+Surfaced in conflict audit `UNR-10`. Related rule: [External conversation history vs bounded routing state](../rules/settled_architectural_boundaries.md#external-conversation-history-vs-bounded-routing-state).
 
 # Positions
 

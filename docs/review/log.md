@@ -2,7 +2,8 @@
 
 ## 2026-11-03
 
-* **Update**: Expanded diff-path routing in [review_a_pull_request.md](playbooks/review_a_pull_request.md) to cover all non-test Go packages under `cmd/`, `pkg/`, and `internal/`, added production Go routing coverage, unified `rules/index.md` section discovery, code-span-safe link validation, and `provenance.json` schema validation to `hack/render_playbook.py`, and removed duplicate verbosity-guard prose from [observability.md](rules/observability.md).
+* **Update**: Pruned Stage-1 `rules/*.md` from 12 files (53 rules) to 4 files (17 `When:`-triggered non-code rules) by removing contracts inferable from repository code search and `AGENTS.md`, removed broad `- Accept:` nit-suppression waivers, updated `AGENTS.md` and [review_a_pull_request.md](playbooks/review_a_pull_request.md) to the two-pass additive review protocol (`0` to `2` rule files per diff with explicit `None (AGENTS.md and repo search only)` routing rows), updated `hack/render_playbook.py` and [`provenance.json`](provenance.json), and regenerated [`docs/review_playbook.md`](../review_playbook.md).
+* **Update**: Expanded diff-path routing in [review_a_pull_request.md](playbooks/review_a_pull_request.md) to cover all non-test Go packages under `cmd/`, `pkg/`, and `internal/`, added production Go routing coverage, unified `rules/index.md` section discovery, code-span-safe link validation, and `provenance.json` schema validation to `hack/render_playbook.py`, and removed duplicate verbosity-guard prose from `rules/observability.md`.
 
 ## 2026-11-02
 

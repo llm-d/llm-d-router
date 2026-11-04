@@ -19,4 +19,3 @@ Unqualified `logger.Info(...)` emits at verbosity 0 regardless of operator verbo
 
 Once-per-request operational signals use `logger.V(logging.DEFAULT).Info(...)`. Per-item loops use `logger.V(logging.DEBUG)` guarded by `v.Enabled()`, and state transitions use `logger.V(logging.TRACE)`.
 
-Related rule: [Summarize collections in String() and cap stateful plugin dumps](../rules/observability.md#summarize-collections-in-string-and-cap-stateful-plugin-dumps).

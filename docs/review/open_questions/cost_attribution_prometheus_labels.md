@@ -17,8 +17,6 @@ Whether per-tenant, per-workload, and per-user cost attribution belongs on Prome
 
 Operators want token usage and latency attributed to business tenants, workloads, and users, whereas Prometheus time-series cardinality scales multiplicatively with unbounded request-header values. (Conflict audit ID: `UNR-08`.)
 
-Attached review rule: [Register metrics under canonical component subsystems with bounded label cardinality](../rules/observability.md#register-metrics-under-canonical-component-subsystems-with-bounded-label-cardinality).
-
 # Positions
 
 - **Position A**: Allow operators to opt into `tenant_id`, `workload_id`, and `user_id` Prometheus labels in deployments where upstream gateways enforce closed tenant sets.[^pr-2834]

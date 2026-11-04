@@ -15,7 +15,7 @@ Whether `prefix-cache-affinity-filter` incorporates queue-wait tokens and uncach
 
 # Context
 
-Surfaced in conflict audit `UNR-09`. Related rule: [See linked review rule](../rules/performance_on_the_request_path.md#score-prefix-caches-contiguously-and-break-near-ties-by-load).
+Surfaced in conflict audit `UNR-09`.
 
 # Positions
 

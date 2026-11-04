@@ -22,7 +22,5 @@ Maintainers weighed trace export volume from per-filter and per-scorer spans aga
 
 Kept per-plugin request spans under `ParentBased(TraceIDRatioBased)` sampling (default `0.1`) and gated per-KV-event tracing off by default after measuring 12-13% CPU overhead.
 
-Related rule: [Acquire package-scoped OTel tracers and propagate spans end to end](../rules/observability.md#acquire-package-scoped-otel-tracers-and-propagate-spans-end-to-end).
-
 [^pr-1834-ic-5092454943]: [#1834](https://github.com/llm-d/llm-d-router/pull/1834#issuecomment-5092454943) (human:elevran)
 [^pr-1834-ic-5096359788]: [#1834](https://github.com/llm-d/llm-d-router/pull/1834#issuecomment-5096359788) (human:gyliu513)

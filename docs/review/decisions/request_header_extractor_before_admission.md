@@ -22,7 +22,7 @@ Maintainers compared a built-in `headerPopulator` list, overloading `PreAdmissio
 
 Merged the pre-admission header extraction extension point (`agent-identity`) so fairness and admission policies read typed attributes.
 
-Related rule: [Keep core runtimes built in and policy plugins optional](../rules/project_direction.md#keep-core-runtimes-built-in-and-policy-plugins-optional).
+Related rule: [Capacity shedding in SaturationDetector or AdmissionPlugin](../rules/settled_architectural_boundaries.md#capacity-shedding-in-saturationdetector-or-admissionplugin).
 
 [^issue-1450-ic-4604976814]: [#1450](https://github.com/llm-d/llm-d-router/issues/1450#issuecomment-4604976814) (human:liu-cong)
 [^issue-1450-ic-4701681953]: [#1450](https://github.com/llm-d/llm-d-router/issues/1450#issuecomment-4701681953) (human:elevran)

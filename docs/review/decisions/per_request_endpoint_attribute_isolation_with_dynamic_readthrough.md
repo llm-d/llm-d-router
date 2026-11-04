@@ -22,7 +22,5 @@ Maintainers debated replacing endpoint snapshot cloning with shallow slice copie
 
 Merged dynamic attribute read-through for shared telemetry while isolating per-request computed attributes per scheduling cycle.
 
-Related rule: [Exchange cross-plugin state through typed data-layer slots and keys](../rules/plugin_framework_contracts.md#exchange-cross-plugin-state-through-typed-data-layer-slots-and-keys).
-
 [^pr-1478-r3355562756]: [#1478](https://github.com/llm-d/llm-d-router/pull/1478#discussion_r3355562756) (human:shmuelk)
 [^pr-1478-r3356766432]: [#1478](https://github.com/llm-d/llm-d-router/pull/1478#discussion_r3356766432) (human:ahg-g)

@@ -22,7 +22,7 @@ Maintainers debated stripping client-supplied `priority` fields on all requests 
 
 Implemented backend priority stamping behind an opt-in parser `PriorityRewriter` capability so default passthrough preserves client fields.
 
-Related rule: [Preserve unrecognized client request fields and wire fidelity](../rules/protocol_parsing_and_wire_fidelity.md#preserve-unrecognized-client-request-fields-and-wire-fidelity).
+Related rule: [Client JSON passthrough, Content-Length, and Connection upgrade](../rules/external_wire_and_engine_contracts.md#client-json-passthrough-content-length-and-connection-upgrade).
 
 [^pr-2265-r3825571633]: [#2265](https://github.com/llm-d/llm-d-router/pull/2265#discussion_r3825571633) (human:zetxqx)
 [^pr-2265-r3906042639]: [#2265](https://github.com/llm-d/llm-d-router/pull/2265#discussion_r3906042639) (human:ahg-g)

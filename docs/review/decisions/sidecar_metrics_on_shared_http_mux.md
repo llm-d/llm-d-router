@@ -22,7 +22,5 @@ Maintainers debated adding a dedicated `--metrics-port` (`9090`) to the disaggre
 
 Served `/metrics` on the existing sidecar HTTP mux and dropped `--metrics-port`, keeping a separate metrics port only on EPP where the data-plane port speaks gRPC.
 
-Related rule: [Register metrics under canonical component subsystems with bounded label cardinality](../rules/observability.md#register-metrics-under-canonical-component-subsystems-with-bounded-label-cardinality).
-
 [^pr-1677-ic-4743512723]: [#1677](https://github.com/llm-d/llm-d-router/pull/1677#issuecomment-4743512723) (human:gyliu513)
 [^pr-1677-ic-4742031723]: [#1677](https://github.com/llm-d/llm-d-router/pull/1677#issuecomment-4742031723) (human:shmuelk)

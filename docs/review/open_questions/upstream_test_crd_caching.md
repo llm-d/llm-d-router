@@ -17,7 +17,7 @@ Whether unmodified upstream CRDs used by tests are fetched from GitHub on every 
 
 Verification scripts (`hack/verify-helm.sh`, `hack/verify-manifests.sh`) fetch upstream Gateway API and GIE CRDs from GitHub tags, exposing CI runs to transient HTTP rate limits. (Conflict audit ID: `UNR-03`.)
 
-Attached review rule: [Consume versioned upstream CRDs and protobufs without vendoring](../rules/project_direction.md#consume-versioned-upstream-crds-and-protobufs-without-vendoring).
+Attached review rule: [Unmerged upstream engine contracts and versioned GIE CRDs](../rules/governance_and_compatibility_policy.md#unmerged-upstream-engine-contracts-and-versioned-gie-crds).
 
 # Positions
 
