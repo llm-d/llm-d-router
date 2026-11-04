@@ -416,6 +416,72 @@ func TestCanonicalWritePath_ManyToOne(t *testing.T) {
 	}
 }
 
+// TestCanonicalWritePath_ManyToOneTrailingBlock covers a many:1 store that ends
+// mid canonical block: 9 engine blocks of 16 tokens against 64-token canonical
+// blocks. Each engine key maps to the canonical key holding its tokens, and the
+// trailing engine key maps to none.
+func TestCanonicalWritePath_ManyToOneTrailingBlock(t *testing.T) {
+	tokens := makeTokens(144)
+	engineKeys := makeEngineKeys(9, 100)
+	trailing := engineKeys[8]
+
+	store := func(t *testing.T) (*Pool, kvblock.Index, []kvblock.BlockHash) {
+		t.Helper()
+		ctx := logging.NewTestLoggerIntoContext(context.Background())
+		pool, idx, tp := newTestPool(t, 64)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: engineKeys, Tokens: tokens, BlockSize: 16},
+		}}, "pod-a", "test-model")
+		canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+		require.NoError(t, err)
+		require.Len(t, canonicalKeys, 2)
+		return pool, idx, canonicalKeys
+	}
+
+	t.Run("engine keys map to the canonical key holding their tokens", func(t *testing.T) {
+		ctx := context.Background()
+		_, idx, canonicalKeys := store(t)
+		for i, ek := range engineKeys[:8] {
+			reqKey, err := idx.GetRequestKey(ctx, kvblock.BlockHash(ek))
+			require.NoError(t, err, "engine key %d", ek)
+			assert.Equal(t, canonicalKeys[i/4], reqKey, "engine key %d should resolve to canonical key %d", ek, i/4)
+		}
+		_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(trailing))
+		assert.Error(t, err, "the trailing engine key holds no full canonical block")
+	})
+
+	t.Run("removing the trailing block keeps both canonical keys", func(t *testing.T) {
+		ctx := logging.NewTestLoggerIntoContext(context.Background())
+		pool, idx, canonicalKeys := store(t)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockRemovedEvent{BlockHashes: []uint64{trailing}},
+		}}, "pod-a", "test-model")
+
+		result, err := idx.Lookup(ctx, canonicalKeys, nil)
+		require.NoError(t, err)
+		for i, ck := range canonicalKeys {
+			assert.Len(t, result[ck], 1, "canonical key %d should still be held by pod-a", i)
+		}
+	})
+
+	t.Run("a child of the trailing block is skipped", func(t *testing.T) {
+		ctx := logging.NewTestLoggerIntoContext(context.Background())
+		pool, idx, _ := store(t)
+		skipped := metrics.KVEventStoresSkipped.WithLabelValues(
+			cacheKindLabel(""), "unresolved_sub_canonical_parent")
+		before := counterValue(t, skipped)
+
+		childKeys := makeEngineKeys(4, 200)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: childKeys, Tokens: makeTokens(208)[144:], ParentHash: trailing, BlockSize: 16},
+		}}, "pod-a", "test-model")
+
+		assert.Equal(t, 1.0, counterValue(t, skipped)-before)
+		_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(childKeys[0]))
+		assert.Error(t, err, "a child chained on the wrong canonical key is not indexed")
+	})
+}
+
 // TestCanonicalWritePath_OneToMany verifies the 1:many mapping when engine block size (128)
 // is larger than canonical (64): 1 engine key maps to 2 canonical request keys.
 func TestCanonicalWritePath_OneToMany(t *testing.T) {
