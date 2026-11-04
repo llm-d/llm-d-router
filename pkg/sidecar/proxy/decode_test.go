@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -721,7 +722,7 @@ var _ = Describe("Chunked Decode", func() {
 		// withID gives a chatResponse its own id and created, as vLLM gives each decode request.
 		withID := func(response, id string, created int) string {
 			response = strings.Replace(response, `"test-id"`, `"`+id+`"`, 1)
-			return strings.Replace(response, "1234567890", fmt.Sprint(created), 1)
+			return strings.Replace(response, "1234567890", strconv.Itoa(created), 1)
 		}
 
 		It("emits one SSE event per chunk and terminates with [DONE]", func() {
