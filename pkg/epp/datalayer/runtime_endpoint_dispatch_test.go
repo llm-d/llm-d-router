@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +30,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	extmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/mocks"
+	datasourcemocks "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -201,4 +203,33 @@ func TestUpdateEndpointRecoversPanickingExtractor(t *testing.T) {
 
 	events := working.GetEvents()
 	require.Len(t, events, 1, "the dispatch loop must continue to the next extractor after the panic")
+}
+
+// TestNewEndpointReleasesRegistrationWhenCollectorIsHeld covers the window in
+// ReleaseEndpoint between deleting the cross-replica registration and removing the
+// collector. A NewEndpoint that lands in that window must not keep the registration
+// it made, otherwise every retry stops at "already registered" and the endpoint is
+// never tracked again.
+func TestNewEndpointReleasesRegistrationWhenCollectorIsHeld(t *testing.T) {
+	syncer := &fakeSyncer{}
+	r := NewRuntime(time.Second)
+	r.crossReplicaPub = testCrossReplicaPublisher(syncer)
+	require.NoError(t, r.dispatchers.Register(&datasourcemocks.MetricsDataSource{}))
+	endpointID := types.NamespacedName{Namespace: "ns", Name: "ep-a"}
+	meta := &fwkdl.EndpointMetadata{ID: endpointID, Address: "1.2.3.4:5678"}
+
+	// The release deleted the registration and has not removed the collector yet.
+	require.True(t, r.collectors.Register(endpointID, NewCollector()))
+
+	require.Nil(t, r.NewEndpoint(context.Background(), meta))
+	require.Empty(t, r.crossReplicaPub.endpointSnapshot(),
+		"a NewEndpoint that returns nil must not leave a publisher registration")
+
+	// Once the release finishes, the retry registers and tracks the endpoint.
+	_, ok := r.collectors.Remove(endpointID)
+	require.True(t, ok)
+	ep := r.NewEndpoint(context.Background(), meta)
+	require.NotNil(t, ep, "the retry should register the endpoint after the collector is gone")
+	defer r.ReleaseEndpoint(ep)
+	require.Equal(t, []types.NamespacedName{endpointID}, r.crossReplicaPub.endpointSnapshot())
 }

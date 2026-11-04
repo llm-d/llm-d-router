@@ -485,6 +485,14 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 	collector := NewCollector()
 	if !r.collectors.Register(key, collector) {
 		logger.V(logging.DEFAULT).Info("collector already running for endpoint", "endpoint", key)
+		// The collector belongs to an endpoint being released. The registration made
+		// above is ours, so drop it: a retry has to get past this check once the
+		// collector is gone, and ReleaseEndpoint only removes its own registration.
+		if r.crossReplicaPub != nil {
+			if _, err := r.crossReplicaPub.delete(ctx, key); err != nil {
+				logger.Error(err, "failed to delete cross-replica state")
+			}
+		}
 		return nil
 	}
 
