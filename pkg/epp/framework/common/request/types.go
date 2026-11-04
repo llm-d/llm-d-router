@@ -517,6 +517,8 @@ type TextToSpeechRequest struct {
 	// RefText is the transcript of a reference audio clip for voice cloning
 	// and is tokenized alongside Input.
 	RefText string `json:"ref_text,omitempty"`
+	// CacheSalt isolates prefix caches for security.
+	CacheSalt string `json:"cache_salt,omitempty"`
 }
 
 func (r *TextToSpeechRequest) String() string {

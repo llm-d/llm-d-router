@@ -18,13 +18,18 @@ package prefixhash
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 )
 
 // testMaxPrefixBlocks is a cap large enough not to truncate any prompt in
@@ -119,6 +124,42 @@ func TestGetBlockHashesCacheSalt(t *testing.T) {
 
 	assert.Equal(t, len(noSalt), len(salted))
 	assert.NotEqual(t, noSalt, salted, "cache salt must change the block hashes")
+}
+
+func TestGetBlockHashes_TextToSpeechCacheSalt(t *testing.T) {
+	ctx := context.Background()
+	p, err := tokenizer.PluginFactory("tokens", plugin.StrictDecoder(nil), plugin.NewEppHandle(ctx, nil))
+	require.NoError(t, err)
+	producer, ok := p.(*tokenizer.Plugin)
+	require.True(t, ok)
+	parser := openai.NewOpenAIParser()
+
+	hashesFor := func(salt string) [][]BlockHash {
+		payload := map[string]any{
+			"model":        "tts",
+			"input":        "Welcome to customer support.",
+			"instructions": "Speak clearly.",
+			"ref_text":     "This is the reference clip.",
+		}
+		if salt != "" {
+			payload["cache_salt"] = salt
+		}
+		raw, err := json.Marshal(payload)
+		require.NoError(t, err)
+		parsed, err := parser.ParseRequest(ctx, raw, map[string]string{":path": "/v1/audio/speech"})
+		require.NoError(t, err)
+		req := &fwksched.InferenceRequest{TargetModel: "tts", Body: parsed.Body}
+		require.NoError(t, producer.Produce(ctx, req, nil))
+		require.NotNil(t, req.Body.TokenizedRequest)
+		hashes := GetBlockHashes(ctx, req, 2, testMaxPrefixBlocks)
+		require.NotEmpty(t, hashes)
+		return hashes
+	}
+
+	tenantA := hashesFor("tenant-a")
+	assert.Equal(t, tenantA, hashesFor("tenant-a"))
+	assert.NotEqual(t, tenantA, hashesFor("tenant-b"), "different tenants must not match")
+	assert.NotEqual(t, tenantA, hashesFor(""), "salted and unsalted requests must not match")
 }
 
 // TestGetBlockHashes_ModelSaltBoundary covers (model, salt) pairs whose
