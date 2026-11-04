@@ -35,44 +35,45 @@ type SGLangPrefillStream struct {
 	closeOnce  sync.Once
 	finishOnce sync.Once
 
-	mu           sync.Mutex
-	err          error
-	grpcStatus   string
-	grpcMessage  string
-	cachedTokens *uint32
-	onFail       func(error)
+	mu             sync.Mutex
+	err            error
+	grpcStatus     string
+	grpcMessage    string
+	grpcDetailsBin string
+	cachedTokens   map[uint32]uint32
+	onFail         func(error)
 }
 
 // NewSGLangPrefillStream constructs a stream tracker bound to cancel and
 // stopAfter (from context.AfterFunc).
 func NewSGLangPrefillStream(cancel context.CancelFunc, stopAfter func() bool) *SGLangPrefillStream {
 	return &SGLangPrefillStream{
-		cancel:    cancel,
-		stopAfter: stopAfter,
-		done:      make(chan struct{}),
+		cancel:       cancel,
+		stopAfter:    stopAfter,
+		done:         make(chan struct{}),
+		cachedTokens: make(map[uint32]uint32),
 	}
 }
 
 // RecordCachedTokens stores the prompt prefix-cache hit count reported by a
-// prefill GenerateResponse frame.
-func (s *SGLangPrefillStream) RecordCachedTokens(tokens uint32) {
+// prefill GenerateResponse frame for item index.
+func (s *SGLangPrefillStream) RecordCachedTokens(index, tokens uint32) {
 	s.mu.Lock()
-	s.cachedTokens = &tokens
+	s.cachedTokens[index] = tokens
 	s.mu.Unlock()
 }
 
-// CachedTokens returns the cached token count reported by prefill, if any.
-func (s *SGLangPrefillStream) CachedTokens() (uint32, bool) {
+// CachedTokens returns the cached token count reported by prefill for item
+// index, if any.
+func (s *SGLangPrefillStream) CachedTokens(index uint32) (uint32, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cachedTokens == nil {
-		return 0, false
-	}
-	return *s.cachedTokens, true
+	tokens, ok := s.cachedTokens[index]
+	return tokens, ok
 }
 
 // Fail records a prefill failure and notifies any registered failure callback.
-func (s *SGLangPrefillStream) Fail(err error, grpcStatus, grpcMessage string) {
+func (s *SGLangPrefillStream) Fail(err error, grpcStatus, grpcMessage, grpcDetailsBin string) {
 	s.mu.Lock()
 	if s.err != nil {
 		s.mu.Unlock()
@@ -81,6 +82,7 @@ func (s *SGLangPrefillStream) Fail(err error, grpcStatus, grpcMessage string) {
 	s.err = err
 	s.grpcStatus = grpcStatus
 	s.grpcMessage = grpcMessage
+	s.grpcDetailsBin = grpcDetailsBin
 	cb := s.onFail
 	s.mu.Unlock()
 	if cb != nil {
@@ -102,11 +104,12 @@ func (s *SGLangPrefillStream) OnFailure(fn func(error)) {
 	}
 }
 
-// Failure returns any recorded prefill gRPC status code, message, and error.
-func (s *SGLangPrefillStream) Failure() (grpcStatus, grpcMessage string, err error) {
+// Failure returns any recorded prefill gRPC status code, message, status
+// details binary trailer, and error.
+func (s *SGLangPrefillStream) Failure() (grpcStatus, grpcMessage, grpcDetailsBin string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.grpcStatus, s.grpcMessage, s.err
+	return s.grpcStatus, s.grpcMessage, s.grpcDetailsBin, s.err
 }
 
 // MarkDone signals that the background prefill reader has finished.

@@ -253,8 +253,13 @@ func TestReadFrame(t *testing.T) {
 	require.ErrorContains(t, err, "exceeds limit 3")
 
 	_, err = ReadFrame(bytes.NewReader([]byte{1, 0, 0, 0, 0}), 64)
-	require.EqualError(t, err, "compressed gRPC payload is not supported")
+	require.ErrorIs(t, err, ErrCompressed)
 
 	_, err = ReadFrame(bytes.NewReader(f1[:3]), 64)
 	require.ErrorContains(t, err, "read gRPC frame header")
+}
+
+func TestEncodeStatusMessage(t *testing.T) {
+	require.Equal(t, "plain ascii", EncodeStatusMessage("plain ascii"))
+	require.Equal(t, "50%25\x20bad%0Aline2%0D%00%C3%A9", EncodeStatusMessage("50% bad\nline2\r\x00é"))
 }

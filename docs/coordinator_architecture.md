@@ -222,7 +222,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, and `/sglang.api.v1.SglangService/Generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `x-llm-d-epp-profile` header constants. |
@@ -443,6 +443,16 @@ The `kv-sglang` `bootstrap_port` advertised to prefill pods defaults to 8998 and
 overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. The value
 is read once on the first prefill request that uses the connector; a non-integer value is
 rejected in favor of the default and logged at error level.
+
+On `POST /sglang.api.v1.SglangService/Generate`, `GenerateResponse` carries no bootstrap
+host field. The gateway must set `x-llm-d-prefiller-host-port` on prefill responses to
+the selected pod address (`host:port`). In Envoy, add `response_headers_to_add` with
+`key: x-llm-d-prefiller-host-port`, `value: "%UPSTREAM_HOST%"`, and
+`append_action: OVERWRITE_IF_EXISTS_OR_ADD` on the prefill route. Both
+[envoy.yaml](../test/e2e/artifacts/environments/dev/coordinator-e2e-infra/envoy.yaml) and
+[envoy-3-epp.yaml](../test/e2e/artifacts/environments/dev/coordinator-e2e-infra/envoy-3-epp.yaml)
+include this rule. The coordinator strips this internal header from client responses and
+fails the request before decode when a prefill response omits it.
 
 `kv-offloading` has no setting of its own. The prefill EPP computes every P2P tier port:
 its `p2p-source-producer` sets the prefill pod's P2P tier address on the

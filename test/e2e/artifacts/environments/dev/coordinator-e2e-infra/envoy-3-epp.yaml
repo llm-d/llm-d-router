@@ -136,6 +136,11 @@ data:
                                 idle_timeout: 86400s
                                 upgrade_configs:
                                   - upgrade_type: websocket
+                              response_headers_to_add:
+                                - header:
+                                    key: x-llm-d-prefiller-host-port
+                                    value: "%UPSTREAM_HOST%"
+                                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
                               typed_per_filter_config:
                                 envoy.filters.http.ext_proc:
                                   "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute

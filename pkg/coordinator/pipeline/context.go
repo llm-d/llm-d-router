@@ -37,13 +37,14 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
-// internalForwardingHeaders are set only by the coordinator or read by it
-// from a phase response; a client copy is dropped, and so is a value of
+// internalForwardingHeaders are set by the coordinator on outbound phase calls
+// or stamped by EPP or the gateway and read by the coordinator from a phase
+// response; a client copy is dropped, and so is a value of
 // forward_response_headers under these names. EPP routes on epp-profile and
 // x-llm-d-pin-host-port, and answers Prefer: if-available, the
 // conditional-decode probe's signal, with 412 on any other leg. The prefill
-// P2P address names the prefill pod a decode request pulls from, so a client
-// cannot choose it.
+// P2P address and prefill endpoint headers name the prefill pod a decode
+// request pulls from, so a client cannot choose them.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,

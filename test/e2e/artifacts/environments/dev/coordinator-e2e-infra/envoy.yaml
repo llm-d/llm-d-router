@@ -99,6 +99,34 @@ data:
                         - name: vllm-${NAMESPACE}
                           domains: ["*"]
                           routes:
+                            # Stamp the selected prefill pod's host:port onto the response so
+                            # SGLang P/D flows in the coordinator can derive bootstrap_host.
+                            - match:
+                                prefix: "/"
+                                headers:
+                                  - name: x-llm-d-epp-profile
+                                    string_match:
+                                      exact: prefill
+                              route:
+                                cluster: original_destination_cluster
+                                timeout: 86400s
+                                idle_timeout: 86400s
+                                upgrade_configs:
+                                  - upgrade_type: websocket
+                              response_headers_to_add:
+                                - header:
+                                    key: x-llm-d-prefiller-host-port
+                                    value: "%UPSTREAM_HOST%"
+                                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                              typed_per_filter_config:
+                                envoy.filters.http.ext_proc:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                                  overrides:
+                                    grpc_service:
+                                      envoy_grpc:
+                                        cluster_name: ext_proc_epd
+                                        authority: ${EPP_NAME}.${NAMESPACE}:9002
+                                      timeout: 10s
                             # e-p-d pool — any x-llm-d-epp-profile value. The single EPP picks the
                             # scheduling profile named by the header (encode/prefill/decode).
                             - match:

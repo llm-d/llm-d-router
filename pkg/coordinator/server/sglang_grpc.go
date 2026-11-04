@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -79,6 +80,12 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	if enc := strings.TrimSpace(r.Header.Get("grpc-encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
+		coordmetrics.IncRequestErrorTotal("", coordmetrics.ErrorCodeBadRequest)
+		grpcframe.WriteError(cw, codes.Unimplemented, grpcframe.ErrCompressed.Error())
+		return
+	}
+
 	var err error
 	body, err = io.ReadAll(io.LimitReader(r.Body, s.maxRequestBodySize*config.BytesPerMB+1))
 	if err != nil {
@@ -93,6 +100,11 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload, err := grpcframe.ParsePayload(body)
+	if errors.Is(err, grpcframe.ErrCompressed) {
+		coordmetrics.IncRequestErrorTotal("", coordmetrics.ErrorCodeBadRequest)
+		grpcframe.WriteError(cw, codes.Unimplemented, grpcframe.ErrCompressed.Error())
+		return
+	}
 	if err != nil || len(body) != grpcframe.HeaderLen+len(payload) {
 		coordmetrics.IncRequestErrorTotal("", coordmetrics.ErrorCodeBadRequest)
 		grpcframe.WriteError(cw, codes.InvalidArgument, "invalid gRPC frame")
@@ -141,7 +153,7 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 
 	logger.V(logutil.DEFAULT).Info("received gRPC request", "path", r.URL.Path, "stream", genReq.GetStream())
 
-	// SglangService/Generate is server-streaming regardless of genReq.Stream.
+	// Clear the write deadline: a server-streaming RPC can outlast WriteTimeout.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		logger.V(logutil.DEFAULT).Info("could not clear write deadline for gRPC response", "error", err)
 	}
@@ -174,10 +186,10 @@ func classifyGRPCPipelineError(err error, requestID string) (codes.Code, string)
 				fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 		}
 		return pipeline.HTTPStatusToGRPCCode(upstream.StatusCode),
-			fmt.Sprintf("internal error (request_id: %s)", requestID)
+			reqcommon.InternalErrorMessage(requestID)
 	}
 	if errors.As(err, &upstream) {
-		return codes.Unavailable, fmt.Sprintf("internal error (request_id: %s)", requestID)
+		return codes.Unavailable, reqcommon.InternalErrorMessage(requestID)
 	}
-	return codes.Internal, fmt.Sprintf("internal error (request_id: %s)", requestID)
+	return codes.Internal, reqcommon.InternalErrorMessage(requestID)
 }

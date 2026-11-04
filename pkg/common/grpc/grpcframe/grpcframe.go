@@ -49,6 +49,9 @@ const (
 )
 
 var (
+	// ErrCompressed reports a gRPC frame with the compression flag set.
+	ErrCompressed = errors.New("compressed gRPC payload is not supported")
+
 	canonicalStatus = http.CanonicalHeaderKey(HeaderStatus)
 	trailerHeaders  = [...]string{
 		HeaderStatus,
@@ -108,7 +111,7 @@ func WriteError(w http.ResponseWriter, code codes.Code, msg string) {
 	h.Set(reqcommon.HeaderContentType, MediaType)
 	h.Set(HeaderStatus, strconv.FormatUint(uint64(code), 10))
 	if msg != "" {
-		h.Set(HeaderMessage, encodeStatusMessage(msg))
+		h.Set(HeaderMessage, EncodeStatusMessage(msg))
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -122,9 +125,9 @@ func firstNonEmpty(vals []string) string {
 	return ""
 }
 
-// encodeStatusMessage percent-encodes bytes outside unescaped printable ASCII
+// EncodeStatusMessage percent-encodes bytes outside unescaped printable ASCII
 // per the gRPC over HTTP/2 specification.
-func encodeStatusMessage(msg string) string {
+func EncodeStatusMessage(msg string) string {
 	const hexUpper = "0123456789ABCDEF"
 	var b strings.Builder
 	b.Grow(len(msg))
@@ -147,7 +150,7 @@ func parseFrameHeader(header []byte) (uint32, error) {
 	}
 	if header[0] != 0 {
 		// TODO(#895): handle compressed payload.
-		return 0, errors.New("compressed gRPC payload is not supported")
+		return 0, ErrCompressed
 	}
 	return binary.BigEndian.Uint32(header[1:HeaderLen]), nil
 }
