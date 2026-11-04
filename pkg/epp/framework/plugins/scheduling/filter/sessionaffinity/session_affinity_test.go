@@ -281,6 +281,35 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 	}
 }
 
+func TestSessionAffinity_ReferencedProfiles(t *testing.T) {
+	tests := []struct {
+		name   string
+		params string
+		want   []string
+	}{
+		{name: "no profileName", params: `{"strategy":"encoded_endpoint_header"}`, want: nil},
+		{name: "encoded_endpoint_header with profileName", params: `{"strategy":"encoded_endpoint_header","profileName":"prefill"}`, want: []string{"prefill"}},
+		{name: "session_id with profileName", params: `{"strategy":"session_id","profileName":"prefill"}`, want: []string{"prefill"}},
+	}
+
+	handle := utils.NewTestHandle(utils.NewTestContext(t))
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p, err := sessionaffinity.Factory("test", plugin.StrictDecoder(json.RawMessage(test.params)), handle)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(test.want, p.(*sessionaffinity.SessionAffinity).ReferencedProfiles()); diff != "" {
+				t.Errorf("unexpected referenced profiles (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	if diff := cmp.Diff([]string{"prefill"}, sessionaffinity.NewSessionAffinity("test", "", "prefill").ReferencedProfiles()); diff != "" {
+		t.Errorf("unexpected referenced profiles from NewSessionAffinity (-want +got):\n%s", diff)
+	}
+}
+
 func TestSessionAffinity_FactoryValidation(t *testing.T) {
 	tests := []struct {
 		name      string
