@@ -161,6 +161,7 @@ func drainSGLangPrefillStream(ctx context.Context, logger logr.Logger, resp *htt
 	defer func() { _ = resp.Body.Close() }()
 
 	frames := grpcframe.NewReader(resp.Body, maxSGLangGRPCFrameBytes)
+	defer frames.Release()
 	for {
 		frame, err := frames.Next()
 		if errors.Is(err, io.EOF) {
@@ -364,6 +365,7 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 	// frames reuses one buffer for the whole stream. Each frame keeps its
 	// header, so a frame that needs no rewrite is written without a copy.
 	frames := grpcframe.NewReader(resp.Body, maxSGLangGRPCFrameBytes)
+	defer frames.Release()
 	loggedRewriteErr := false
 	for {
 		frame, readErr := frames.Next()

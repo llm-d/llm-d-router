@@ -295,6 +295,7 @@ func TestReader(t *testing.T) {
 	require.NoError(t, err)
 
 	fr := NewReader(bytes.NewReader(append(append([]byte{}, f1...), f2...)), 1<<20)
+	defer fr.Release()
 	got, err := fr.Next()
 	require.NoError(t, err)
 	require.Equal(t, f1, got, "Next returns the frame with its header")
@@ -326,6 +327,33 @@ func TestReader(t *testing.T) {
 		}
 	})
 	require.Zero(t, allocs)
+}
+
+func TestReaderRelease(t *testing.T) {
+	// A released Reader with a large buffer is not reused; a small one may be.
+	// sync.Pool gives no reuse guarantee, so only check that both paths are
+	// safe and that a fresh Reader starts with an empty buffer.
+	huge, err := FramePayload(bytes.Repeat([]byte("x"), readerMaxPooledBuf+1))
+	require.NoError(t, err)
+	fr := NewReader(bytes.NewReader(huge), 0)
+	_, err = fr.Next()
+	require.NoError(t, err)
+	fr.Release()
+
+	small, err := FramePayload([]byte("small"))
+	require.NoError(t, err)
+	fr = NewReader(bytes.NewReader(small), 0)
+	got, err := fr.Next()
+	require.NoError(t, err)
+	require.Equal(t, small, got)
+	fr.Release()
+
+	fr = NewReader(bytes.NewReader(nil), 0)
+	defer fr.Release()
+	require.Len(t, fr.buf, HeaderLen)
+	require.LessOrEqual(t, cap(fr.buf), readerMaxPooledBuf)
+	_, err = fr.Next()
+	require.ErrorIs(t, err, io.EOF)
 }
 
 type errReader struct{}

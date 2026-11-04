@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
@@ -211,10 +212,40 @@ type Reader struct {
 	buf             []byte
 }
 
-// NewReader returns a Reader for r. When maxPayloadBytes > 0, frames that
-// declare a larger payload are rejected before the buffer grows.
+const (
+	// readerInitialBuf is the initial frame buffer size of a Reader.
+	readerInitialBuf = 4096
+	// readerMaxPooledBuf bounds the buffer a released Reader keeps for reuse,
+	// so one large frame does not pin its buffer in the pool.
+	readerMaxPooledBuf = 1 << 20
+)
+
+var readerPool = sync.Pool{
+	New: func() any {
+		return &Reader{buf: make([]byte, HeaderLen, readerInitialBuf)}
+	},
+}
+
+// NewReader returns a Reader for r, with a buffer taken from a pool. When
+// maxPayloadBytes > 0, frames that declare a larger payload are rejected
+// before the buffer grows. Call Release when the stream is done.
 func NewReader(r io.Reader, maxPayloadBytes int) *Reader {
-	return &Reader{r: r, maxPayloadBytes: maxPayloadBytes, buf: make([]byte, HeaderLen, 4096)}
+	fr := readerPool.Get().(*Reader)
+	fr.r = r
+	fr.maxPayloadBytes = maxPayloadBytes
+	return fr
+}
+
+// Release returns the Reader's buffer to the pool. The Reader and any frame
+// returned by Next must not be used after Release.
+func (fr *Reader) Release() {
+	if cap(fr.buf) > readerMaxPooledBuf {
+		return
+	}
+	fr.r = nil
+	fr.maxPayloadBytes = 0
+	fr.buf = fr.buf[:HeaderLen]
+	readerPool.Put(fr)
 }
 
 // Next reads the next frame and returns it with its 5-byte header, ready to
