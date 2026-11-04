@@ -535,8 +535,9 @@ pipeline:
       #
       #   forward_prompt_token_ids sends the token IDs the render step
       #   produced in kv_transfer_params.prompt_token_ids on text-only chat
-      #   completions, Responses and Messages requests. vLLM v0.30.0 and
-      #   later builds the decode input from them and skips chat templating
-      #   and tokenization. Engines without that support ignore the field.
-      #   Requests with multimodal content are rendered from messages.
+      #   completions, Responses and Messages requests. The decode worker
+      #   builds its input from them and skips chat templating and
+      #   tokenization. Requires vLLM v0.32.0 or later: earlier versions use
+      #   the IDs on echo requests and return no echoed prompt. Requests with
+      #   multimodal content are rendered from messages.
       #   forward_prompt_token_ids: false
