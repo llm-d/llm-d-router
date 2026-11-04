@@ -59,6 +59,9 @@ sliding-window KV cache groups of hybrid models (for example gpt-oss) once a
 group's events report its window size. Their stores and removals go to a
 separate in-memory window index, keyed by group, which scoring does not read.
 It defaults to `false`, and sliding-window stores are then skipped.
+`kvEventsConfig.windowIndexConfig` sizes the window index (`size` and
+`podCacheSize`, as in `inMemoryConfig`); it defaults to
+`indexerConfig.kvBlockIndexConfig.inMemoryConfig`.
 
 Set `kvEventsConfig.podDiscoveryConfig.snapshotSocketPort` to the port where
 vLLM serves KV-event snapshots (offset by data-parallel rank like `socketPort`)

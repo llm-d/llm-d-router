@@ -123,35 +123,17 @@ func TestWindowIndex_UnknownWindowSkipped(t *testing.T) {
 	requireGroups(ctx, t, pool.WindowIndex(), keys)
 }
 
-// A sliding-window store whose parent block only the full-attention group
-// stored resolves the parent through the prefix index.
-func TestWindowIndex_ParentFromPrefixIndex(t *testing.T) {
-	ctx := logging.NewTestLoggerIntoContext(context.Background())
-	pool, idx, tp := newWindowTestPool(t)
-	window := 128
-	tokens := makeTokens(128)
-	first, second := makeEngineKeys(4, 3200), makeEngineKeys(4, 3204)
-
-	process(ctx, pool,
-		groupStore(0, KVCacheSpecKindFullAttention, nil, tokens[:64], first, 0),
-		groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens[64:], second, first[3]))
-
-	firstKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens[:64], windowTestModel, nil)
-	require.NoError(t, err)
-	secondKeys, err := tp.TokensToKVBlockKeys(firstKeys[3], tokens[64:], windowTestModel, nil)
-	require.NoError(t, err)
-	requireGroups(ctx, t, pool.WindowIndex(), secondKeys, 1)
-	requireGroups(ctx, t, idx, secondKeys)
-}
-
 // Clearing a pod clears its window index entries too.
 func TestWindowIndex_ClearedWithPod(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	pool, _, tp := newWindowTestPool(t)
 	window := 128
 	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 3300)
 
-	process(ctx, pool, groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens, makeEngineKeys(4, 3300), 0))
+	process(ctx, pool,
+		groupStore(0, KVCacheSpecKindFullAttention, nil, tokens, engineKeys, 0),
+		groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens, engineKeys, 0))
 	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
 	require.NoError(t, err)
 	requireGroups(ctx, t, pool.WindowIndex(), keys, 1)
@@ -170,13 +152,16 @@ func TestWindowIndex_StoreWithoutWindowSize(t *testing.T) {
 	tokens := makeTokens(128)
 	first, second := makeEngineKeys(4, 3400), makeEngineKeys(4, 3404)
 
-	process(ctx, pool, groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens[:64], first, 0))
+	process(ctx, pool,
+		groupStore(0, KVCacheSpecKindFullAttention, nil, tokens[:64], first, 0),
+		groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens[:64], first, 0))
 	firstKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens[:64], windowTestModel, nil)
 	require.NoError(t, err)
 	requireGroups(ctx, t, pool.WindowIndex(), firstKeys, 1)
 
 	group := 1
 	process(ctx, pool,
+		groupStore(0, KVCacheSpecKindFullAttention, nil, tokens[64:], second, first[3]),
 		groupStore(1, KVCacheSpecKindSlidingWindow, nil, tokens[64:], second, first[3]),
 		&BlockRemovedEvent{BlockHashes: first, GroupIdx: &group})
 
@@ -184,7 +169,7 @@ func TestWindowIndex_StoreWithoutWindowSize(t *testing.T) {
 	require.NoError(t, err)
 	requireGroups(ctx, t, pool.WindowIndex(), firstKeys)
 	requireGroups(ctx, t, pool.WindowIndex(), secondKeys, 1)
-	requireGroups(ctx, t, idx, append(firstKeys, secondKeys...))
+	requireGroups(ctx, t, idx, append(firstKeys, secondKeys...), 0)
 }
 
 // Removals of a sliding-window group go to the window index by the group's
@@ -196,7 +181,9 @@ func TestWindowIndex_RemovalRoutedByKind(t *testing.T) {
 	tokens := makeTokens(64)
 	engineKeys := makeEngineKeys(4, 3500)
 
-	process(ctx, pool, groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens, engineKeys, 0))
+	process(ctx, pool,
+		groupStore(0, KVCacheSpecKindFullAttention, nil, tokens, engineKeys, 0),
+		groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens, engineKeys, 0))
 	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
 	require.NoError(t, err)
 	requireGroups(ctx, t, pool.WindowIndex(), keys, 1)
@@ -207,4 +194,120 @@ func TestWindowIndex_RemovalRoutedByKind(t *testing.T) {
 	group := 1
 	process(ctx, pool, &BlockRemovedEvent{BlockHashes: engineKeys, GroupIdx: &group})
 	requireGroups(ctx, t, pool.WindowIndex(), keys)
+}
+
+// vLLM publishes a step's sliding-window store before its full-attention
+// store, and the sliding-window store holds only the blocks inside the window:
+// for a new prompt, one hash over the whole span with no parent; after a NIXL
+// transfer or a CPU restore, the last block alone.
+func TestWindowIndex_StoreBeforeFullAttention(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	window := 16
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 3600)
+	for _, tc := range []struct {
+		name   string
+		tokens []uint32
+		parent uint64
+	}{
+		{"new prompt", tokens, 0},
+		{"last block", tokens[48:], engineKeys[2]},
+		{"last block without parent hash", tokens[48:], 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, idx, tp := newWindowTestPool(t)
+			process(ctx, pool,
+				groupStore(0, KVCacheSpecKindSlidingWindow, &window, tc.tokens, engineKeys[3:], tc.parent),
+				groupStore(1, KVCacheSpecKindFullAttention, nil, tokens, engineKeys, 0))
+
+			keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
+			require.NoError(t, err)
+			requireGroups(ctx, t, idx, keys, 1)
+			requireGroups(ctx, t, pool.WindowIndex(), keys[:3])
+			requireGroups(ctx, t, pool.WindowIndex(), keys[3:], 0)
+		})
+	}
+}
+
+// A sliding-window removal later in the batch applies after the store.
+func TestWindowIndex_RemovalLaterInBatch(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, tp := newWindowTestPool(t)
+	window := 16
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 3700)
+	group := 0
+
+	process(ctx, pool,
+		groupStore(0, KVCacheSpecKindSlidingWindow, &window, tokens[48:], engineKeys[3:], engineKeys[2]),
+		groupStore(1, KVCacheSpecKindFullAttention, nil, tokens, engineKeys, 0),
+		&BlockRemovedEvent{BlockHashes: engineKeys[3:], GroupIdx: &group})
+
+	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
+	require.NoError(t, err)
+	requireGroups(ctx, t, pool.WindowIndex(), keys)
+}
+
+// An AllBlocksCleared later in the batch drops the sliding-window store before
+// it.
+func TestWindowIndex_ClearLaterInBatch(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newWindowTestPool(t)
+	window := 16
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 3800)
+
+	process(ctx, pool,
+		groupStore(0, KVCacheSpecKindSlidingWindow, &window, tokens[48:], engineKeys[3:], engineKeys[2]),
+		&AllBlocksClearedEvent{},
+		groupStore(1, KVCacheSpecKindFullAttention, nil, tokens, engineKeys, 0))
+
+	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
+	require.NoError(t, err)
+	requireGroups(ctx, t, idx, keys, 1)
+	requireGroups(ctx, t, pool.WindowIndex(), keys)
+}
+
+// A sliding-window store whose blocks the prefix index does not map is skipped.
+func TestWindowIndex_UnresolvedStoreSkipped(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, tp := newWindowTestPool(t)
+	window := 16
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 3900)
+	metric := metrics.KVEventStoresSkipped.WithLabelValues(string(KVCacheSpecKindSlidingWindow), "unresolved_window_blocks")
+	before := counterValue(t, metric)
+
+	process(ctx, pool, groupStore(0, KVCacheSpecKindSlidingWindow, &window, tokens[48:], engineKeys[3:], engineKeys[2]))
+
+	assert.Equal(t, 1.0, counterValue(t, metric)-before)
+	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
+	require.NoError(t, err)
+	requireGroups(ctx, t, pool.WindowIndex(), keys)
+}
+
+func TestWindowIndex_ConfiguredSize(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+	tp, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 16, HashSeed: "test"})
+	require.NoError(t, err)
+	cfg := DefaultConfig()
+	cfg.IndexSlidingWindowGroups = true
+	cfg.WindowIndexConfig = &kvblock.InMemoryIndexConfig{Size: 2}
+	pool, err := NewPool(cfg, idx, tp, nil)
+	require.NoError(t, err)
+	window := 128
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 4000)
+
+	process(ctx, pool,
+		groupStore(0, KVCacheSpecKindFullAttention, nil, tokens, engineKeys, 0),
+		groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens, engineKeys, 0))
+
+	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
+	require.NoError(t, err)
+	requireGroups(ctx, t, idx, keys, 0)
+	requireGroups(ctx, t, pool.WindowIndex(), keys[:2])
+	requireGroups(ctx, t, pool.WindowIndex(), keys[2:], 1)
 }
