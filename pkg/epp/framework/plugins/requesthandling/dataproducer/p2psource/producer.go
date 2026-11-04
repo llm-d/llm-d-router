@@ -503,9 +503,9 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	if logDecision {
 		kv = []any{"requestID", request.RequestID}
 	}
-	// The prefix-cache metrics' role rule and prefill profile name, not
-	// prefillProfileName, so ratios against their prompt tokens divide counts
-	// of the same stage.
+	// The prefix-cache metrics' role rule and their fixed "prefill" profile
+	// name, not prefillProfileName, so both metric families give a request the
+	// same endpoint_role.
 	_, role := prefixmetrics.PredictionTarget(schedulingResult, defaultPrefillProfile)
 	defer func() {
 		recordDecision(p.typedName.Name, role, outcome)

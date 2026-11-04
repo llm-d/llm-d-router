@@ -583,9 +583,13 @@ reaches its `PreRequest` records one decision.
 | `prefill-port-invalid` | The prefill endpoint's P2P port is outside 1-65535, and the request fails. |
 
 `endpoint_role` follows the prefix cache prediction metrics: `prefill` for a request with a target in
-the `prefill` profile, `decode` for every other request, and empty when scheduling selected no endpoint.
+the profile named `prefill`, `decode` for every other request, and empty when scheduling selected no
+endpoint. The role does not read `prefillProfileName`. On a P/D deployment whose prefill profile has
+another name, both metric families label every request `decode`, where the P2P metrics describe the
+prefill endpoint and the prefix cache prediction metrics the decode endpoint.
 
-The share of prompt tokens the router sent to pull is `llm_d_epp_p2p_source_predicted_pulled_tokens_sum`
+On an aggregated deployment, or a P/D deployment whose prefill profile is named `prefill`, the share
+of prompt tokens the router sent to pull is `llm_d_epp_p2p_source_predicted_pulled_tokens_sum`
 divided by `llm_d_epp_prefix_prompt_tokens_sum` of the prefix producer named in
 `prefixMatchInfoProducerName`, matched on `endpoint_role`. The share vLLM served from a peer is
 `vllm:prompt_tokens_cached_by_source_total{source="p2p"}` divided by `vllm:prompt_tokens_total` on the

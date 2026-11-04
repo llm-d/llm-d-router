@@ -104,6 +104,29 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 			pulledTokens: 32,
 		},
 		{
+			// The pull is for the prefill-h200 endpoint: against the decode
+			// endpoint's 48 cached tokens it would be below the floor. The role
+			// still follows the prefix-cache metrics, which read only the
+			// "prefill" profile.
+			name:   "pulled for a disaggregated request with a renamed prefill profile",
+			config: Config{MinCachedTokenDelta: 1, PrefillProfileName: "prefill-h200"},
+			request: func(p *Producer) *scheduling.InferenceRequest {
+				return preRequest(p, "req-pd-h200", peer("10.0.0.3", 48))
+			},
+			result: func(p *Producer) *scheduling.SchedulingResult {
+				return &scheduling.SchedulingResult{
+					PrimaryProfileName: "decode",
+					ProfileResults: map[string]*scheduling.ProfileRunResult{
+						"decode":       {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-d", "10.0.0.4", 3)}},
+						"prefill-h200": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-p", "10.0.0.2", 1)}},
+					},
+				}
+			},
+			outcome:      "pulled",
+			role:         "decode",
+			pulledTokens: 32,
+		},
+		{
 			name:    "self",
 			config:  Config{MinCachedTokenDelta: 1},
 			request: func(p *Producer) *scheduling.InferenceRequest { return preRequest(p, "req-self", peer("10.0.0.1", 32)) },

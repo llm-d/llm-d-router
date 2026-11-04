@@ -227,7 +227,8 @@ For cache-aware prefill-work routing, follow the
   the computing endpoint, per request sent to pull.
 
 See [P2P KV-cache source](../../../../../../../docs/metrics.md#p2p-kv-cache-source) for every
-outcome and the vLLM metrics that report the pulls served.
+outcome, how `endpoint_role` is assigned under a renamed prefill profile, and the vLLM metrics that
+report the pulls served.
 
 ## Related Documentation
 
