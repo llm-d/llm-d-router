@@ -3075,13 +3075,19 @@ func TestDirector_ReleasesProducerStateOnEarlyReturn(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		admitError    error
-		scheduleError error
-		preRequestErr error
-		wantReleased  int
-		wantAbandoned int
+		name           string
+		flowControlErr error
+		admitError     error
+		scheduleError  error
+		preRequestErr  error
+		wantReleased   int
+		wantAbandoned  int
 	}{
+		{
+			name:           "flow-control rejection releases state through RequestAbandoned",
+			flowControlErr: errors.New("request rejected by flow control"),
+			wantAbandoned:  1,
+		},
 		{
 			name:          "admission denial releases state through RequestAbandoned",
 			admitError:    errors.New("endpoint cannot be admitted"),
@@ -3110,6 +3116,9 @@ func TestDirector_ReleasesProducerStateOnEarlyReturn(t *testing.T) {
 			if tt.scheduleError != nil {
 				dir.scheduler = &mockScheduler{scheduleErr: tt.scheduleError}
 			}
+			if tt.flowControlErr != nil {
+				dir.admissionController = &mockAdmissionController{admitErr: tt.flowControlErr}
+			}
 			producer := newRequestStateProducer("state")
 			preRequest := []fwkrh.PreRequest{producer}
 			if tt.preRequestErr != nil {
@@ -3137,7 +3146,7 @@ func TestDirector_ReleasesProducerStateOnEarlyReturn(t *testing.T) {
 			require.NoError(t, err)
 
 			_, handleErr := dir.HandleRequest(ctx, reqCtx, parseResult.Body)
-			if tt.admitError != nil || tt.scheduleError != nil || tt.preRequestErr != nil {
+			if tt.flowControlErr != nil || tt.admitError != nil || tt.scheduleError != nil || tt.preRequestErr != nil {
 				require.Error(t, handleErr)
 			} else {
 				require.NoError(t, handleErr)
