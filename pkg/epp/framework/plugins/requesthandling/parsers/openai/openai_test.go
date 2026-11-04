@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/google/go-cmp/cmp"
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -2299,6 +2300,8 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			videosAPI,
 			videosSyncAPI,
 			audioSpeechAPI,
+			audioTranscriptionsAPI,
+			audioTranslationsAPI,
 			request.DecisionsPathSuffix,
 			audioGenerateAPI,
 		},
@@ -2808,6 +2811,119 @@ func TestOpenAIParser_ImagesEditsSharesMultipartReader(t *testing.T) {
 	raw, ok := result.Body.Payload.(request.RawPayload)
 	if !ok || !bytes.Equal(raw, body) {
 		t.Errorf("Payload = %T, want unchanged RawPayload", result.Body.Payload)
+	}
+}
+
+func TestOpenAIParser_ParseRequestTranscriptions(t *testing.T) {
+	media := string([]byte{0, 1, 255, '\r', '\n', '-', '-', 137})
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "file", value: media, filename: "audio.mp3", mediaType: "audio/mpeg"},
+		videoFormPart{name: "model", value: "whisper-large-v3"},
+		videoFormPart{name: "language", value: "en"},
+		videoFormPart{name: "prompt", value: "previous segment text"},
+		videoFormPart{name: "response_format", value: "verbose_json"},
+		videoFormPart{name: "stream", value: "true"},
+		videoFormPart{name: "model", value: "uploaded bytes", filename: "model.txt", mediaType: "text/plain"},
+	)
+	for _, path := range []string{"/v1/audio/transcriptions", "/v1/audio/translations"} {
+		t.Run(path, func(t *testing.T) {
+			result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+				map[string]string{":path": path, reqcommon.HeaderContentType: ct})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Body.Model != "whisper-large-v3" {
+				t.Errorf("Model = %q, want whisper-large-v3", result.Body.Model)
+			}
+			if !result.Body.Stream {
+				t.Error("Stream = false, want true")
+			}
+			audio := result.Body.Transcriptions.Audio
+			if result.Body.Transcriptions.Prompt != "previous segment text" {
+				t.Errorf("Prompt = %q, want the conditioning text", result.Body.Transcriptions.Prompt)
+			}
+			if audio.SizeBytes != int64(len(media)) || string(audio.Head) != media {
+				t.Errorf("Audio = {SizeBytes:%d HeadLen:%d}, want the file part of %d bytes", audio.SizeBytes, len(audio.Head), len(media))
+			}
+			if audio.Hash != xxhash.Sum64([]byte(media)) {
+				t.Error("Audio.Hash does not cover the file part's full stream")
+			}
+			if audio.ContentType != "audio/mpeg" {
+				t.Errorf("Audio.ContentType = %q, want audio/mpeg", audio.ContentType)
+			}
+			raw, ok := result.Body.Payload.(request.RawPayload)
+			if !ok {
+				t.Fatalf("Payload = %T, want RawPayload", result.Body.Payload)
+			}
+			if !bytes.Equal(raw, body) {
+				t.Error("forwarded multipart body differs from the received body")
+			}
+			if result.SkipResponseProcessing {
+				t.Error("transcriptions response processing was skipped")
+			}
+		})
+	}
+}
+
+func TestOpenAIParser_ParseRequestTranscriptionsFileOnly(t *testing.T) {
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "file", value: "audio", filename: "a.wav", mediaType: "audio/wav"})
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Body.Model != "" || result.Body.Stream {
+		t.Errorf("body = {Model:%q Stream:%v}, want zero values", result.Body.Model, result.Body.Stream)
+	}
+	audio := result.Body.Transcriptions.Audio
+	if audio.SizeBytes != 5 || string(audio.Head) != "audio" || audio.ContentType != "audio/wav" {
+		t.Errorf("Audio = {SizeBytes:%d Head:%q ContentType:%q}, want the captured file part", audio.SizeBytes, audio.Head, audio.ContentType)
+	}
+}
+
+// A file part larger than the head bound retains only its leading bytes, while
+// the size and hash cover the full stream.
+func TestOpenAIParser_ParseRequestTranscriptionsHeadBound(t *testing.T) {
+	content := strings.Repeat("a", uploadedFileHeadBytes+4096)
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "file", value: content, filename: "a.wav", mediaType: "audio/wav"})
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := result.Body.Transcriptions.Audio
+	if audio.SizeBytes != int64(len(content)) {
+		t.Errorf("SizeBytes = %d, want %d", audio.SizeBytes, len(content))
+	}
+	if len(audio.Head) != uploadedFileHeadBytes {
+		t.Errorf("len(Head) = %d, want %d", len(audio.Head), uploadedFileHeadBytes)
+	}
+	if audio.Hash != xxhash.Sum64String(content) {
+		t.Error("Hash does not cover the full file part")
+	}
+}
+
+func TestOpenAIParser_ParseRequestTranscriptionsInvalidForms(t *testing.T) {
+	parser := NewOpenAIParser()
+	headersFor := func(ct string) map[string]string {
+		return map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct}
+	}
+	body, ct := buildVideoForm(t, videoFormPart{name: "model", value: "whisper-large-v3"})
+	invalidStream, invalidCT := buildVideoForm(t,
+		videoFormPart{name: "model", value: "whisper-large-v3"},
+		videoFormPart{name: "stream", value: "yes"})
+	if _, err := parser.ParseRequest(context.Background(), invalidStream, headersFor(invalidCT)); err == nil {
+		t.Error("ParseRequest accepted an invalid stream field")
+	}
+	for _, badCT := range []string{"application/json", "multipart/form-data"} {
+		if _, err := parser.ParseRequest(context.Background(), body, headersFor(badCT)); err == nil {
+			t.Errorf("ParseRequest accepted content-type %q", badCT)
+		}
+	}
+	if _, err := parser.ParseRequest(context.Background(), body[:len(body)-20], headersFor(ct)); err == nil {
+		t.Error("ParseRequest accepted a truncated form")
 	}
 }
 

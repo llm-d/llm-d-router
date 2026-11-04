@@ -85,7 +85,7 @@ func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 // to be used in forming scheduling decisions.
 // An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest,
 // TextToSpeechRequest, AudioGenerateRequest, ConversationsRequest, EmbeddingsRequest, GenerateRequest,
-// ImagesGenerationsRequest, VideoGenerationRequest, or MessagesRequest.
+// ImagesGenerationsRequest, VideoGenerationRequest, TranscriptionRequest, or MessagesRequest.
 type InferenceRequestBody struct {
 	// CompletionsRequest is the representation of the OpenAI /v1/completions request body.
 	Completions *CompletionsRequest `json:"completions,omitempty"`
@@ -112,6 +112,9 @@ type InferenceRequestBody struct {
 	// Videos is the representation of the OpenAI-compatible vLLM-Omni
 	// /v1/videos and /v1/videos/sync multipart request body.
 	Videos *VideoGenerationRequest `json:"videos,omitempty"`
+	// Transcriptions is the representation of the OpenAI-compatible
+	// /v1/audio/transcriptions and /v1/audio/translations multipart request body.
+	Transcriptions *TranscriptionRequest `json:"transcriptions,omitempty"`
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -719,6 +722,35 @@ func (v *VideoGenerationRequest) String() string {
 		len(v.Prompt), v.Size, derefInt(v.Width), derefInt(v.Height),
 		derefInt(v.NumFrames), derefFloat(v.FPS),
 		derefInt(v.NumInferenceSteps), derefInt(v.NumOutputsPerPrompt))
+}
+
+// TranscriptionRequest represents the routing-relevant fields of an
+// OpenAI-compatible /v1/audio/transcriptions or /v1/audio/translations
+// request. Both endpoints are served by the same handler and accept
+// multipart/form-data, so they share this shape. The uploaded audio drives
+// the engine's cost, so it is carried as UploadedMedia; the scalar fields
+// the engine validates are not modeled here.
+type TranscriptionRequest struct {
+	// Prompt is the optional conditioning text.
+	Prompt string `json:"prompt,omitempty"`
+	// Audio carries the uploaded file part. Its zero value means the request
+	// carried no file part.
+	Audio UploadedMedia `json:"-"`
+}
+
+// UploadedMedia describes one uploaded multipart file part without retaining
+// its body: Hash covers the full stream, SizeBytes its length, and Head its
+// leading bytes for container sniffing. The retention bound for Head is the
+// one the tokenizer's WAV chunk walk reads.
+type UploadedMedia struct {
+	// ContentType is the file part's declared MIME type.
+	ContentType string `json:"-"`
+	// SizeBytes is the file part's length in bytes.
+	SizeBytes int64 `json:"-"`
+	// Head holds the leading bytes of the file part.
+	Head []byte `json:"-"`
+	// Hash is the xxhash of the file part's full byte stream.
+	Hash uint64 `json:"-"`
 }
 
 // GenerateRequest holds pre-tokenized input for native generate endpoints
