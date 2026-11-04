@@ -377,6 +377,8 @@ func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCau
 	switch {
 	case reqCtx.requestState == requestEvicted:
 		return fwkrh.TerminationCauseEvicted
+	case reqCtx.requestState == requestResponseProcessingSkipped:
+		return fwkrh.TerminationCauseNotObserved
 	case ctxErr != nil:
 		return fwkrh.TerminationCauseClientDisconnect
 	default:
