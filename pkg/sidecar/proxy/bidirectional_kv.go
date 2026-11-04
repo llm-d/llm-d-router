@@ -115,7 +115,7 @@ var kvReuseScopeFields = []string{
 
 // fieldTruncatePromptTokens shifts token positions when it truncates, so a
 // request that sets it takes no part.
-const fieldTruncatePromptTokens = "truncate_prompt_tokens"
+const fieldTruncatePromptTokens = "truncate_prompt_tokens" //#nosec G101 -- JSON field name, not a credential
 
 // kvReuseEntry is one cached decode response. used makes the entry single-use
 // even when two requests with identical history race for it.

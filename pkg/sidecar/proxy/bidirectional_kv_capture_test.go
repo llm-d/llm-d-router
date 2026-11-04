@@ -56,8 +56,8 @@ func captureSSE(t *testing.T, stream string, chunk int) (*httptest.ResponseRecor
 
 func TestDecodeCaptureStreamedContentAndToolCalls(t *testing.T) {
 	stream := sseFrames(
-		`{"choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"}}]}`,
-		`{"choices":[{"index":0,"delta":{"content":"lo"}}]}`,
+		`{"choices":[{"index":0,"delta":{"role":"assistant","content":"Hi, "}}]}`,
+		`{"choices":[{"index":0,"delta":{"content":"there"}}]}`,
 		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":""}}]}}]}`,
 		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":"}}]}}]}`,
 		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}`,
@@ -72,7 +72,7 @@ func TestDecodeCaptureStreamedContentAndToolCalls(t *testing.T) {
 
 	params, reply, ok := c.result()
 	require.True(t, ok)
-	require.Equal(t, "Hello", reply["content"])
+	require.Equal(t, "Hi, there", reply["content"])
 	require.Equal(t, []any{
 		map[string]any{"id": "call_1", "type": "function", "function": map[string]any{"name": "lookup", "arguments": `{"q":1}`}},
 		map[string]any{"id": "call_2", "type": "function", "function": map[string]any{"name": "other", "arguments": `{}`}},
