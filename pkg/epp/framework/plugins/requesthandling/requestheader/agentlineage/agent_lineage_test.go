@@ -462,6 +462,44 @@ func TestRequestHeader_DoesNotTouchFairnessIDOrAgentIdentity(t *testing.T) {
 	}
 }
 
+// TestRequestHeader_WalkHopCap pins that a chain longer than maxWalkHops
+// stops at a deterministic ancestor instead of traversing every link: a
+// client can chain links up to the map bound, and the walk must not hold the
+// lock for the whole chain.
+func TestRequestHeader_WalkHopCap(t *testing.T) {
+	p := newPlugin(t, "")
+
+	// Declare a chain C0 <- C1 <- ... <- C70, longer than maxWalkHops.
+	for i := 1; i <= 70; i++ {
+		headers := map[string]string{
+			OpenCodeSessionHeader: fmt.Sprintf("C%d", i),
+			ParentSessionHeader:   fmt.Sprintf("C%d", i-1),
+		}
+		if _, ok := send(t, p, "", headers); !ok {
+			t.Fatalf("declaration %d published no root", i)
+		}
+	}
+
+	// Within the cap the walk reaches the chain's root.
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "C5"}, "C0")
+
+	// Past the cap the walk stops after maxWalkHops links.
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "C70"}, fmt.Sprintf("C%d", 70-maxWalkHops))
+}
+
+// TestRequestHeader_SelfLinkNotRecorded pins that a parent header naming the
+// request's own session is dropped rather than stored: it carries no lineage
+// and only consumes a map entry.
+func TestRequestHeader_SelfLinkNotRecorded(t *testing.T) {
+	p := newPlugin(t, "")
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S", ParentSessionHeader: "S"}, "S")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.parents) != 0 {
+		t.Fatalf("parent map holds %d entries after a self-link, want 0", len(p.parents))
+	}
+}
+
 func TestRequestHeader_ConcurrentAccess(t *testing.T) {
 	p := newPlugin(t, `{"maxParentEntries": 16, "parentEntryTtlSeconds": 1}`)
 	var wg sync.WaitGroup

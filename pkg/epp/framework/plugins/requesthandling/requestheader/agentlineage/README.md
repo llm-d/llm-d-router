@@ -26,7 +26,7 @@ The plugin runs after request assembly and before admission control. It resolves
    - Neither: publish nothing.
 4. Publish the root via `request.PutAttribute(DerivedRootKey, root)`.
 
-The parent map is scoped by the fairness-ID header value (the tenant, `""` when absent), so links never cross tenants. Reading a link refreshes it, so an in-use program never expires; a link unused for `parentEntryTtlSeconds` is dropped. At `maxParentEntries` the least-recently-used link is evicted. A lineage cycle ends the walk at the current node with a stable result.
+The parent map is scoped by the fairness-ID header value (the tenant, `""` when absent), so links never cross tenants. Reading a link refreshes it, so an in-use program never expires; a link unused for `parentEntryTtlSeconds` is dropped. At `maxParentEntries` the least-recently-used link is evicted. A lineage cycle ends the walk at the current node with a stable result, and the walk follows at most 64 links, so a client chaining links up to the map bound cannot extend the walk's cost.
 
 After the plugin returns, the Director derives `FairnessID` (`requestHandler.composeFairnessIDs` opt-in):
 

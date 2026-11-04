@@ -62,6 +62,11 @@ const (
 	// header; larger values are ignored and the session falls back to the
 	// header list.
 	maxTurnMetadataHeaderBytes = 8192
+	// maxWalkHops bounds a single parent-map walk. Nesting reaches three to
+	// four layers in the harnesses, and a client can chain links up to the
+	// map bound, so the walk stops past this many links and roots at the
+	// current node, keeping the lock hold bounded.
+	maxWalkHops = 64
 )
 
 // defaultParentHeaders is the built-in ordered list of parent-ID headers.
@@ -249,10 +254,15 @@ func codexTurnMetadataSession(value string) string {
 	return strings.TrimSpace(payload.SessionID)
 }
 
-// recordLink stores child -> parent under the tenant scope. At the bound the
+// recordLink stores child -> parent under the tenant scope. A link naming
+// the session's own ID is dropped: it carries no lineage. At the bound the
 // least-recently-used link is evicted; expired links are the oldest, so the
-// bound also reclaims them.
+// bound also reclaims them. The eviction scan is O(len(parents)), kept small
+// by the bound.
 func (p *Plugin) recordLink(tenant, session, parent string) {
+	if session == parent {
+		return
+	}
 	now := p.now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -274,17 +284,22 @@ func (p *Plugin) recordLink(tenant, session, parent string) {
 }
 
 // walkToRoot follows recorded parent links from start to the first ancestor
-// with no live link. Reading a link refreshes it, so an in-use program never
-// expires; an expired link is deleted and treated as absent. A cycle ends
-// the walk at the current node.
+// with no live link, at most maxWalkHops links. Reading a link refreshes it,
+// so an in-use program never expires; an expired link is deleted and treated
+// as absent. A cycle ends the walk at the current node.
 func (p *Plugin) walkToRoot(tenant, start string) string {
 	now := p.now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	current := start
-	visited := map[string]bool{start: true}
-	for {
+	// visited is allocated only when a link is followed: a request that
+	// walks nothing must not pay a map allocation.
+	var visited map[string]bool
+	for hops := 0; ; hops++ {
+		if hops >= maxWalkHops {
+			return current
+		}
 		key := lineageKey{tenant: tenant, session: current}
 		link, ok := p.parents[key]
 		if !ok || now.Sub(link.updatedAt) > p.parentEntryTTL {
@@ -292,6 +307,9 @@ func (p *Plugin) walkToRoot(tenant, start string) string {
 				delete(p.parents, key)
 			}
 			return current
+		}
+		if visited == nil {
+			visited = map[string]bool{start: true}
 		}
 		if visited[link.parent] {
 			return current
