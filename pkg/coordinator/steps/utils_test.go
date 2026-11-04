@@ -109,6 +109,7 @@ func TestExtractTokenIDs(t *testing.T) {
 		{name: "negative_token", input: []any{float64(-1)}, wantErr: true},
 		{name: "non_integer_token", input: []any{float64(1.5)}, wantErr: true},
 		{name: "overflow_float_token", input: []any{float64(1e19)}, wantErr: true},
+		{name: "two_pow_63_float_token", input: []any{float64(1 << 63)}, wantErr: true},
 		{name: "string_element", input: []any{"abc"}, wantErr: true},
 		{name: "bool_element", input: []any{true}, wantErr: true},
 	}

@@ -555,17 +555,12 @@ func toIntSlice(values []any) ([]int, error) {
 func anyToNonNegativeInt(v any) (int, error) {
 	switch n := v.(type) {
 	case float64:
-		if n < 0 || n != math.Trunc(n) {
+		// float64 cannot represent MaxInt64 exactly (it rounds to 2^63), so
+		// reject at that bound to keep the int64(n) conversion well-defined.
+		if n < 0 || n != math.Trunc(n) || n >= math.MaxInt64 || int64(n) > math.MaxInt {
 			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
 		}
-		// An in-range integer-valued float64 round-trips through int; a value
-		// too large to fit does not (the conversion saturates), so this rejects
-		// overflow without depending on the fragile float64(MaxInt) boundary.
-		i := int(n)
-		if float64(i) != n {
-			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
-		}
-		return i, nil
+		return int(n), nil
 	case json.Number:
 		i, err := n.Int64()
 		if err != nil {
