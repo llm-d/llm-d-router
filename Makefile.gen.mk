@@ -69,7 +69,7 @@ controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessar
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
-SGLANG_GRPC_DIR := pkg/common/sglang/grpc
+SGLANG_GRPC_DIR := pkg/common/grpc/sglang
 SGLANG_PROTO_DIR := $(SGLANG_GRPC_DIR)/proto
 SGLANG_PROTO_FILES := \
 	sglang/json/v1/options.proto \

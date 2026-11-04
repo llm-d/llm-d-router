@@ -25,7 +25,7 @@ import (
 	"strings"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
-	"github.com/llm-d/llm-d-router/pkg/common/grpcframe"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"

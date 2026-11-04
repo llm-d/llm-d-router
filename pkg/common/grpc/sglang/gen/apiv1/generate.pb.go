@@ -12,7 +12,7 @@
 package apiv1
 
 import (
-	_ "github.com/llm-d/llm-d-router/pkg/common/sglang/grpc/gen/jsonv1"
+	_ "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/jsonv1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"

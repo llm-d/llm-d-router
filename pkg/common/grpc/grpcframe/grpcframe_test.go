@@ -29,8 +29,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/sglang/grpc/gen/apiv1"
 )
 
 func TestParsePayload(t *testing.T) {

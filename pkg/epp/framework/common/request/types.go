@@ -27,7 +27,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/llm-d/llm-d-router/pkg/common/grpcframe"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"

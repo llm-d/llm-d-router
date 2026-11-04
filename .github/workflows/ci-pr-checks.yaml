@@ -58,7 +58,7 @@ jobs:
               - 'hack/verify-helm.sh'
               - '.github/workflows/ci-pr-checks.yaml'
             sglang-proto:
-              - 'pkg/common/sglang/grpc/**'
+              - 'pkg/common/grpc/sglang/**'
               - 'Makefile.gen.mk'
               - '.github/workflows/ci-pr-checks.yaml'
 
