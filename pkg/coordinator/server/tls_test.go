@@ -264,6 +264,24 @@ func TestNew_RejectsInvalidTLSProfile(t *testing.T) {
 			name: "unknown cipher suite",
 			cfg:  config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_NOT_A_CIPHER"}},
 		},
+		{
+			name: "insecure RC4 cipher suite",
+			cfg: config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{
+				"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_RC4_128_SHA"}},
+		},
+		{
+			name: "insecure CBC_SHA256 cipher suite",
+			cfg: config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{
+				"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"}},
+		},
+		{
+			name: "suites without the HTTP/2-required AES_128_GCM_SHA256",
+			cfg:  config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}},
+		},
+		{
+			name: "only TLS 1.3 suites with a TLS 1.2 minimum",
+			cfg:  config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_AES_128_GCM_SHA256"}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -307,4 +325,33 @@ func TestServe_DefaultMinVersionRejectsTLS11Client(t *testing.T) {
 		MinVersion:         tls.VersionTLS10,
 	})
 	require.Error(t, err, "TLS 1.1 client must be rejected when the minimum is TLS 1.2")
+}
+
+func TestServe_TLSWithConfiguredCipherSuites(t *testing.T) {
+	addr := serve(t, config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{
+		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}})
+
+	conn, err := tls.Dial("tcp", addr, &tls.Config{
+		InsecureSkipVerify: true, //#nosec -- self-signed cert under test
+		MaxVersion:         tls.VersionTLS12,
+		CipherSuites:       []uint16{tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384},
+	})
+	require.NoError(t, err)
+	require.Equal(t, tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, conn.ConnectionState().CipherSuite)
+	require.NoError(t, conn.Close())
+}
+
+func TestServe_TLS13MinVersionSkipsHTTP2CipherRequirement(t *testing.T) {
+	addr := serve(t, config.ServerConfig{
+		SecureServing:   true,
+		TLSMinVersion:   "VersionTLS13",
+		TLSCipherSuites: []string{"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
+	})
+
+	conn, err := tls.Dial("tcp", addr, &tls.Config{
+		InsecureSkipVerify: true, //#nosec -- self-signed cert under test
+		MinVersion:         tls.VersionTLS13,
+	})
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
 }
