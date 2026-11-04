@@ -67,17 +67,17 @@ func fieldNum(m interface {
 
 // forEachField calls fn for every top-level field of b with the field's
 // number, wire type, value bytes, and full encoding (tag and value).
-func forEachField(b []byte, fn func(num protowire.Number, typ protowire.Type, value, field []byte)) error {
+func forEachField(b []byte, fn func(num protowire.Number, wireType protowire.Type, value, field []byte)) error {
 	for len(b) > 0 {
-		num, typ, n := protowire.ConsumeTag(b)
+		num, wireType, n := protowire.ConsumeTag(b)
 		if n < 0 {
 			return ErrMalformed
 		}
-		m := protowire.ConsumeFieldValue(num, typ, b[n:])
+		m := protowire.ConsumeFieldValue(num, wireType, b[n:])
 		if m < 0 {
 			return ErrMalformed
 		}
-		fn(num, typ, b[n:n+m], b[:n+m])
+		fn(num, wireType, b[n:n+m], b[:n+m])
 		b = b[n+m:]
 	}
 	return nil
@@ -87,8 +87,8 @@ func forEachField(b []byte, fn func(num protowire.Number, typ protowire.Type, va
 // data at the top level and returns the stream field. Nested messages are
 // left for the SGLang worker to validate.
 func ScanGenerateRequest(payload []byte) (stream bool, err error) {
-	err = forEachField(payload, func(num protowire.Number, typ protowire.Type, value, _ []byte) {
-		if num == reqStream && typ == protowire.VarintType {
+	err = forEachField(payload, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+		if num == reqStream && wireType == protowire.VarintType {
 			v, _ := protowire.ConsumeVarint(value)
 			stream = v != 0
 		}
@@ -125,8 +125,9 @@ func FrameGenerateRequest(payload []byte, b *Bootstrap) ([]byte, error) {
 	if b != nil {
 		out = appendBootstrap(out, b)
 	}
+	const maxPayload = min(math.MaxUint32, math.MaxInt-grpcframe.HeaderLen)
 	msgLen := len(out) - grpcframe.HeaderLen
-	if uint64(msgLen) > math.MaxUint32 {
+	if msgLen > maxPayload {
 		return nil, errors.New("sglangwire: GenerateRequest too large for a gRPC frame")
 	}
 	binary.BigEndian.PutUint32(out[1:grpcframe.HeaderLen], uint32(msgLen)) //#nosec G115 -- guarded by MaxUint32 check above
@@ -142,7 +143,7 @@ func optionalStringSize(s string) (outer, inner int) {
 
 // optionalInt64Size is optionalStringSize for OptionalInt64OrList.
 func optionalInt64Size(v int64) (outer, inner int) {
-	inner = protowire.SizeTag(optInt64Value) + protowire.SizeVarint(uint64(v))
+	inner = protowire.SizeTag(optInt64Value) + protowire.SizeVarint(int64Varint(v))
 	return protowire.SizeTag(optInt64OrOne) + protowire.SizeBytes(inner), inner
 }
 
@@ -164,9 +165,9 @@ func appendBootstrap(out []byte, b *Bootstrap) []byte {
 	if b.Host != "" {
 		outer, inner := optionalStringSize(b.Host)
 		out = protowire.AppendTag(out, reqBootstrapHost, protowire.BytesType)
-		out = protowire.AppendVarint(out, uint64(outer))
+		out = appendLen(out, outer)
 		out = protowire.AppendTag(out, optStringOrOne, protowire.BytesType)
-		out = protowire.AppendVarint(out, uint64(inner))
+		out = appendLen(out, inner)
 		out = protowire.AppendTag(out, optStringValue, protowire.BytesType)
 		out = protowire.AppendString(out, b.Host)
 	}
@@ -177,11 +178,22 @@ func appendBootstrap(out []byte, b *Bootstrap) []byte {
 func appendOptionalInt64(out []byte, num protowire.Number, v int64) []byte {
 	outer, inner := optionalInt64Size(v)
 	out = protowire.AppendTag(out, num, protowire.BytesType)
-	out = protowire.AppendVarint(out, uint64(outer))
+	out = appendLen(out, outer)
 	out = protowire.AppendTag(out, optInt64OrOne, protowire.BytesType)
-	out = protowire.AppendVarint(out, uint64(inner))
+	out = appendLen(out, inner)
 	out = protowire.AppendTag(out, optInt64Value, protowire.VarintType)
-	return protowire.AppendVarint(out, uint64(v))
+	return protowire.AppendVarint(out, int64Varint(v))
+}
+
+// appendLen appends a length prefix. n is a non-negative encoded size.
+func appendLen(out []byte, n int) []byte {
+	return protowire.AppendVarint(out, uint64(n)) //#nosec G115 -- n is a non-negative size
+}
+
+// int64Varint returns the varint value of a protobuf int64 field, which
+// encodes negative values as their two's complement.
+func int64Varint(v int64) uint64 {
+	return uint64(v) //#nosec G115 -- two's complement is the protobuf int64 encoding
 }
 
 // StreamItem holds the GenerateStreamItem fields the coordinator reads.
@@ -205,15 +217,19 @@ type StreamItem struct {
 func ScanStreamItem(payload []byte) (StreamItem, error) {
 	var item StreamItem
 	var scanErr error
-	err := forEachField(payload, func(num protowire.Number, typ protowire.Type, value, _ []byte) {
-		if typ != protowire.BytesType {
+	err := forEachField(payload, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+		if wireType != protowire.BytesType {
 			return
 		}
+		// frame and error share the item oneof. Like proto.Unmarshal, a
+		// switch to the other member discards the fields read so far.
 		switch num {
 		case itemError:
-			item.IsError = true
+			item = StreamItem{IsError: true}
 		case itemFrame:
-			item.IsError = false
+			if item.IsError {
+				item = StreamItem{}
+			}
 			body, _ := protowire.ConsumeBytes(value)
 			if err := scanResponse(body, &item); err != nil {
 				scanErr = err
@@ -228,12 +244,12 @@ func ScanStreamItem(payload []byte) (StreamItem, error) {
 
 func scanResponse(b []byte, item *StreamItem) error {
 	var scanErr error
-	err := forEachField(b, func(num protowire.Number, typ protowire.Type, value, _ []byte) {
+	err := forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
 		switch {
-		case num == respIndex && typ == protowire.VarintType:
+		case num == respIndex && wireType == protowire.VarintType:
 			v, _ := protowire.ConsumeVarint(value)
 			item.Index = uint32(v) //#nosec G115 -- uint32 field, protobuf truncates the same way
-		case num == respMetaInfo && typ == protowire.BytesType:
+		case num == respMetaInfo && wireType == protowire.BytesType:
 			item.HasMetaInfo = true
 			body, _ := protowire.ConsumeBytes(value)
 			if err := scanMetaInfo(body, item); err != nil {
@@ -248,11 +264,11 @@ func scanResponse(b []byte, item *StreamItem) error {
 }
 
 func scanMetaInfo(b []byte, item *StreamItem) error {
-	return forEachField(b, func(num protowire.Number, typ protowire.Type, value, _ []byte) {
+	return forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
 		switch {
-		case num == metaFinishReason && typ == protowire.BytesType:
+		case num == metaFinishReason && wireType == protowire.BytesType:
 			item.Finished = true
-		case num == metaCachedTokens && typ == protowire.VarintType:
+		case num == metaCachedTokens && wireType == protowire.VarintType:
 			v, _ := protowire.ConsumeVarint(value)
 			item.CachedTokens = uint32(v) //#nosec G115 -- uint32 field, protobuf truncates the same way
 		}

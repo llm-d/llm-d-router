@@ -507,8 +507,16 @@ func rewriteDecodeFrameCachedTokens(ctx context.Context, logger logr.Logger, fra
 	if err := proto.Unmarshal(payload, &item); err != nil {
 		return frame, err
 	}
-	item.GetFrame().GetMetaInfo().CachedTokens = cached
-	return grpcframe.MarshalProto(&item)
+	meta := item.GetFrame().GetMetaInfo()
+	if meta == nil {
+		return frame, nil
+	}
+	meta.CachedTokens = cached
+	rewritten, err := grpcframe.MarshalProto(&item)
+	if err != nil {
+		return frame, err
+	}
+	return rewritten, nil
 }
 
 func streamGRPCToGateway(ctx context.Context, gwClient *gateway.Client, upstream, path string, body []byte, headers map[string]string) (*http.Response, error) {

@@ -17,6 +17,7 @@ limitations under the License.
 package sglangwire
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -209,4 +210,51 @@ func TestScanStreamItem(t *testing.T) {
 	require.NoError(t, err)
 	_, err = ScanStreamItem(payload[:len(payload)-1])
 	require.ErrorIs(t, err, ErrMalformed)
+}
+
+// Concatenated messages merge on the wire. frame and error share the item
+// oneof, so a switch between them discards the earlier member's fields.
+func TestScanStreamItemOneofSwitchDiscardsEarlierFields(t *testing.T) {
+	marshal := func(item *sglangapiv1.GenerateStreamItem) []byte {
+		b, err := proto.Marshal(item)
+		require.NoError(t, err)
+		return b
+	}
+	terminal := marshal(&sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{
+		Index: proto.Uint32(3),
+		MetaInfo: &sglangapiv1.GenerateMetaInfo{
+			FinishReason: &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Stop{Stop: &sglangapiv1.FinishStop{}}},
+			CachedTokens: 48,
+		},
+	}}})
+	errItem := marshal(&sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Error{Error: &sglangapiv1.GenerateStreamError{
+		Error: &sglangapiv1.ErrorBody{Message: "boom"},
+	}}})
+	noMeta := marshal(&sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{Text: "x"}}})
+
+	tests := []struct {
+		name    string
+		payload []byte
+		want    StreamItem
+	}{
+		{name: "frame, error, frame", payload: bytes.Join([][]byte{terminal, errItem, noMeta}, nil), want: StreamItem{}},
+		{name: "frame, error", payload: bytes.Join([][]byte{terminal, errItem}, nil), want: StreamItem{IsError: true}},
+		{name: "frame, frame merges", payload: bytes.Join([][]byte{terminal, noMeta}, nil), want: StreamItem{Index: 3, HasMetaInfo: true, Finished: true, CachedTokens: 48}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ScanStreamItem(tc.payload)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+
+			var decoded sglangapiv1.GenerateStreamItem
+			require.NoError(t, proto.Unmarshal(tc.payload, &decoded))
+			frame := decoded.GetFrame()
+			require.Equal(t, decoded.GetError() != nil, got.IsError)
+			require.Equal(t, frame.GetIndex(), got.Index)
+			require.Equal(t, frame.GetMetaInfo() != nil, got.HasMetaInfo)
+			require.Equal(t, frame.GetMetaInfo().GetFinishReason() != nil, got.Finished)
+			require.Equal(t, frame.GetMetaInfo().GetCachedTokens(), got.CachedTokens)
+		})
+	}
 }
