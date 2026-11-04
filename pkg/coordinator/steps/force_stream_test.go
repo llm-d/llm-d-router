@@ -232,6 +232,10 @@ func TestForceStreamLossy(t *testing.T) {
 	require.True(t, forceStreamLossy(sseShapeGenerate, map[string]any{"return_token_ids": true}))
 	require.False(t, forceStreamLossy(sseShapeGenerate, map[string]any{"return_token_ids": false}))
 
+	// vLLM's generate route rejects sampling_params.prompt_logprob_token_ids with
+	// stream=true, and its stream has no field for those scores.
+	require.True(t, forceStreamLossy(sseShapeGenerate, map[string]any{"sampling_params": map[string]any{"prompt_logprob_token_ids": []any{1, 2}}}))
+
 	// return_token_ids makes the chat and text replies carry token ids the fold
 	// drops, so a request that sets it is lossy; false or absent is not.
 	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"return_token_ids": true}))
@@ -2671,6 +2675,106 @@ type cancelOnWriteWriter struct {
 func (c *cancelOnWriteWriter) Write(b []byte) (int, error) {
 	c.cancel()
 	return c.failingWriter.Write(b)
+}
+
+// TestForceStream_RelaysUpstreamHeaders verifies the forced reply and a forwarded
+// upstream error carry the decode response's headers, as the pass-through does.
+// Coordinator-internal headers and the stream's own framing and caching headers
+// are not copied: they describe the event stream, not the reply that replaces it.
+func TestForceStream_RelaysUpstreamHeaders(t *testing.T) {
+	newReq := func(w http.ResponseWriter) *pipeline.RequestContext {
+		return &pipeline.RequestContext{
+			RequestID:        "req-headers",
+			OriginalPath:     reqcommon.PathChatCompletions,
+			Model:            "llama-3",
+			Stream:           false,
+			KVTransferParams: map[string]any{},
+			Body: map[string]any{
+				"model": "llama-3", "stream": false, "max_tokens": 16,
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			},
+			ResponseWriter: w,
+		}
+	}
+
+	t.Run("forced reply", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Session-Token", "dG9rZW4=")
+			w.Header().Set(reqcommon.PeerTopologyHeaderKey, "zone=a")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+		}))
+		defer server.Close()
+		step, reg := newForceStreamStep(t, server.URL, "1GiB")
+		rec := httptest.NewRecorder()
+		require.NoError(t, step.Execute(context.Background(), newReq(rec)))
+		require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+		require.Equal(t, "dG9rZW4=", rec.Header().Get("X-Session-Token"), "a decode-profile header reaches the client")
+		require.Empty(t, rec.Header().Get(reqcommon.PeerTopologyHeaderKey), "a coordinator-internal header is not leaked")
+		require.Empty(t, rec.Header().Get("Cache-Control"), "the stream's caching header does not describe the reply")
+		require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	})
+
+	t.Run("forwarded upstream error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "7")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"slow down"}`))
+		}))
+		defer server.Close()
+		step, _ := newForceStreamStep(t, server.URL, "1GiB")
+		rec := httptest.NewRecorder()
+		err := step.Execute(context.Background(), newReq(rec))
+		var streamed *pipeline.UpstreamStreamedError
+		require.True(t, errors.As(err, &streamed))
+		require.Equal(t, http.StatusTooManyRequests, rec.Code)
+		require.Equal(t, "7", rec.Header().Get("Retry-After"), "the client learns how long to wait")
+	})
+}
+
+// TestForceStream_ClientCancelMidStreamNotCountedUnreadable verifies a client that
+// cancels while the forced stream is being read is not counted fallback_unreadable,
+// which reports an unreadable upstream stream; the pod's stream was fine.
+func TestForceStream_ClientCancelMidStreamNotCountedUnreadable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sent := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		close(sent)
+		time.Sleep(500 * time.Millisecond)
+	}))
+	defer server.Close()
+	// Cancel once the first frame is out, so the scan is mid-read.
+	go func() {
+		<-sent
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-cancel-mid",
+		OriginalPath:     reqcommon.PathChatCompletions,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false, "max_tokens": 16,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+	err := step.Execute(ctx, reqCtx)
+	require.True(t, pipeline.IsClientCancellation(ctx, err), "a client that left is a cancellation, got %v", err)
+	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnreadable), 1e-9,
+		"the upstream stream was readable; the client left")
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
 }
 
 func TestForceStream_Concurrency(t *testing.T) {

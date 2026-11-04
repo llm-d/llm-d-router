@@ -356,11 +356,13 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 
 	n := reqcommon.OutputChoiceCount(reqCtx.Body, reqcommon.DetectAPIType(reqCtx.OriginalPath))
 	reassembler := newSSEReassembler(shape, n)
+	upstreamHeader := resp.Header
 	if err := scanForcedResponse(resp.Body, reassembler, generated, responsesEchoBytes(shape, bodyBytes)); err != nil {
 		var upstreamErr *forceStreamUpstreamError
 		switch {
 		case errors.As(err, &upstreamErr):
 			coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultErrorUpstream)
+			copyUpstreamHeaders(reqCtx.ResponseWriter.Header(), upstreamHeader)
 			return writeUpstreamError(reqCtx, upstreamErr.status, reqcommon.ContentTypeJSON, upstreamErr.payload)
 		case errors.Is(err, errForceStreamCeiling):
 			// decode records error_ceiling and runs the pass-through. A buffered reply
@@ -376,11 +378,12 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 		default:
 			// A request whose context already ended (client disconnected, or a
 			// client-set deadline expired) is a routine lifecycle event, not a backend
-			// fault, so the read failure it surfaces is logged quietly rather than as
-			// an error (matching the pass-through's ErrorHandler).
+			// fault: the read failure it surfaces is logged quietly (matching the
+			// pass-through's ErrorHandler) and returned as the cancellation, so it is
+			// neither counted fallback_unreadable nor re-sent.
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				logger.V(logutil.VERBOSE).Info("force-stream: client cancelled", "error", ctxErr)
-				return errForceStreamUnreadable
+				return fmt.Errorf("%s: %w", DecodeStepName, ctxErr)
 			}
 			// The upstream returned 200 but no complete reply reached the client: an
 			// unreadable stream (bad JSON, interrupted read) or one cut off before a
@@ -394,6 +397,7 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 
 	// The client asked for a non-streaming reply, so no include_usage was injected.
 	writer, finalize := s.responseWriter(reqCtx, parity, false)
+	copyUpstreamHeaders(writer.Header(), upstreamHeader)
 	return writeForcedResponse(ctx, logger, reqCtx, writer, finalize, reassembler)
 }
 
@@ -429,12 +433,13 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	}
 	if shape == sseShapeGenerate {
 		// The generate fold keeps only token ids and finish reasons, so a
-		// sampling_params asking for logprobs or prompt_logprobs takes the
-		// pass-through to keep them. vLLM leaves both unset (null) by default;
+		// sampling_params asking for logprobs, prompt_logprobs or
+		// prompt_logprob_token_ids takes the pass-through to keep them; vLLM
+		// also rejects prompt_logprob_token_ids with stream=true. vLLM leaves both unset (null) by default;
 		// any value, including 0, requests at least the chosen token's logprob,
 		// and -1 requests the whole vocabulary.
 		if sp, ok := body[reqcommon.FieldSamplingParams].(map[string]any); ok {
-			for _, field := range []string{reqcommon.FieldLogprobs, reqcommon.FieldPromptLogprobs} {
+			for _, field := range []string{reqcommon.FieldLogprobs, reqcommon.FieldPromptLogprobs, reqcommon.FieldPromptLogprobTokenIDs} {
 				if _, set := reqcommon.FieldValue(sp, field); set {
 					return true
 				}
@@ -706,7 +711,32 @@ func forwardUpstreamError(reqCtx *pipeline.RequestContext, resp *http.Response) 
 	if contentType == "" {
 		contentType = reqcommon.ContentTypeJSON
 	}
+	copyUpstreamHeaders(reqCtx.ResponseWriter.Header(), resp.Header)
 	return writeUpstreamError(reqCtx, resp.StatusCode, contentType, respBody)
+}
+
+// streamOnlyHeaders describe the event stream the forced request read rather than
+// the reply that replaces it: its framing, length, encoding and caching. The
+// forced reply sets its own Content-Type and Content-Length.
+var streamOnlyHeaders = []string{
+	gateway.ContentTypeHeader, "Content-Length", "Content-Encoding", "Cache-Control", "Etag", "Last-Modified",
+}
+
+// copyUpstreamHeaders copies the decode response's headers to the client, as
+// the pass-through does: a plugin on the decode profile can stamp a header the
+// client relies on (a session-affinity token, Retry-After on a 429).
+// Coordinator-internal and hop-by-hop headers are dropped, as are those that
+// describe the stream rather than the reply.
+func copyUpstreamHeaders(dst, src http.Header) {
+	h := src.Clone()
+	pipeline.StripInternalHeaders(h)
+	pipeline.StripHopByHopHeaders(h)
+	for _, name := range streamOnlyHeaders {
+		h.Del(name)
+	}
+	for k, v := range h {
+		dst[k] = v
+	}
 }
 
 // writeUpstreamError writes an upstream error status and body to the client and

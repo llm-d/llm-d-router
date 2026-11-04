@@ -475,7 +475,9 @@ pipeline:
       #   carry different fields). A forced request reserves from the budget
       #   below and falls back to the pass-through when it is full. Like a
       #   streaming request, a forced request is not bounded by
-      #   server.write_timeout. With kv_connector: kv-sglang, force_stream is
+      #   server.write_timeout, nor is the pass-through it falls back to; the
+      #   gateway timeout still bounds the wait for the upstream's response
+      #   headers. With kv_connector: kv-sglang, force_stream is
       #   accepted but forces no request: an SGLang decode server has no
       #   local-prefill path, so a fallback could not recompute the prompt, and
       #   every request takes the pass-through, counted fallback_unsupported.

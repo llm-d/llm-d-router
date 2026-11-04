@@ -194,7 +194,7 @@ var (
 				"Total number of force-stream candidate requests by model and outcome: "+
 					"forced (reassembled from a streamed upstream into one reply and written to the client), "+
 					"fallback_budget (budget full), "+
-					"fallback_unbounded (a declared token limit whose estimate exceeds the per-request cap), "+
+					"fallback_unbounded (the reply estimate exceeds the per-request cap: a declared token limit too large for it, or an n whose per-choice overhead alone exceeds it), "+
 					"fallback_unsupported (the reply carries a field the reassembler drops, declared in the request or seen on a frame; the engine would not serve the request as a stream; "+
 					"or the kv-sglang connector, whose decode server cannot recompute a prompt on fallback), "+
 					"fallback_oversize (Responses completed frame larger than the reservation plus the request body), "+
