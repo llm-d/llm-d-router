@@ -739,9 +739,8 @@ Requirements:
   `truncate_prompt_tokens`. Requests that differ (other APIs, `n` greater than 1,
   prompt truncation) run the ordinary P/D flow. The sidecar refuses to start
   with MoRI-IO write mode or chunked decode (`--decode-chunk-size`).
-- The decoder returns no reasoning output for the turn. A response that carries
-  reasoning text is not cached, because a chat template may render it
-  differently on the next turn.
+- A decode response that carries reasoning text is not cached, because a chat
+  template may render reasoning from earlier turns differently.
 
 The prefill engine copies the replayed blocks over the leading blocks of the new
 prompt without comparing token contents. The sidecar therefore addresses each
