@@ -23,6 +23,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -51,6 +52,10 @@ const (
 var (
 	// ErrCompressed reports a gRPC frame with the compression flag set.
 	ErrCompressed = errors.New("compressed gRPC payload is not supported")
+	// ErrTooLarge reports a gRPC request body over the size limit.
+	ErrTooLarge = errors.New("gRPC request body too large")
+	// ErrMalformed reports a truncated gRPC frame or data after the frame.
+	ErrMalformed = errors.New("invalid gRPC frame")
 
 	canonicalStatus = http.CanonicalHeaderKey(HeaderStatus)
 	trailerHeaders  = [...]string{
@@ -168,21 +173,127 @@ func ReadFrame(r io.Reader, maxPayloadBytes int) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read gRPC frame header: %w", err)
 	}
-	msgLen, err := parseFrameHeader(header[:])
+	msgLen, err := checkFrameHeader(header[:], maxPayloadBytes)
 	if err != nil {
 		return nil, err
 	}
-	if maxPayloadBytes > 0 && uint64(msgLen) > uint64(maxPayloadBytes) {
-		return nil, fmt.Errorf("gRPC frame payload %d bytes exceeds limit %d", msgLen, maxPayloadBytes)
-	}
-	if uint64(msgLen) > uint64(math.MaxInt) {
-		return nil, fmt.Errorf("gRPC frame payload %d bytes overflows int", msgLen)
-	}
-	payload := make([]byte, int(msgLen)) //#nosec G115 -- guarded by MaxInt check above
+	payload := make([]byte, msgLen)
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return nil, fmt.Errorf("read gRPC frame payload: %w", err)
 	}
 	return payload, nil
+}
+
+// checkFrameHeader parses header and checks the declared payload length
+// against maxPayloadBytes (when > 0) and math.MaxInt-HeaderLen.
+func checkFrameHeader(header []byte, maxPayloadBytes int) (int, error) {
+	msgLen, err := parseFrameHeader(header)
+	if err != nil {
+		return 0, err
+	}
+	if maxPayloadBytes > 0 && uint64(msgLen) > uint64(maxPayloadBytes) {
+		return 0, fmt.Errorf("gRPC frame payload %d bytes exceeds limit %d", msgLen, maxPayloadBytes)
+	}
+	if uint64(msgLen) > uint64(math.MaxInt-HeaderLen) {
+		return 0, fmt.Errorf("gRPC frame payload %d bytes overflows int", msgLen)
+	}
+	return int(msgLen), nil //#nosec G115 -- guarded by MaxInt check above
+}
+
+// Reader reads uncompressed gRPC frames from a stream into one reused
+// buffer, so a long server stream does not allocate per frame.
+type Reader struct {
+	r               io.Reader
+	maxPayloadBytes int
+	buf             []byte
+}
+
+// NewReader returns a Reader for r. When maxPayloadBytes > 0, frames that
+// declare a larger payload are rejected before the buffer grows.
+func NewReader(r io.Reader, maxPayloadBytes int) *Reader {
+	return &Reader{r: r, maxPayloadBytes: maxPayloadBytes, buf: make([]byte, HeaderLen, 4096)}
+}
+
+// Next reads the next frame and returns it with its 5-byte header, ready to
+// write to another gRPC stream as is. Use frame[HeaderLen:] for the payload.
+// The returned slice is valid only until the next call to Next. Next returns
+// io.EOF when the stream ends cleanly on a frame boundary.
+func (fr *Reader) Next() ([]byte, error) {
+	header := fr.buf[:HeaderLen]
+	_, err := io.ReadFull(fr.r, header)
+	if errors.Is(err, io.EOF) {
+		return nil, io.EOF
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read gRPC frame header: %w", err)
+	}
+	msgLen, err := checkFrameHeader(header, fr.maxPayloadBytes)
+	if err != nil {
+		return nil, err
+	}
+	frame := slices.Grow(header, msgLen)[:HeaderLen+msgLen]
+	if _, err := io.ReadFull(fr.r, frame[HeaderLen:]); err != nil {
+		return nil, fmt.Errorf("read gRPC frame payload: %w", err)
+	}
+	fr.buf = frame
+	return frame, nil
+}
+
+// ReadMessage reads a request body that must hold exactly one uncompressed
+// gRPC frame of at most maxFrameBytes bytes, header included. It allocates
+// the frame once at its exact size, from the length prefix. When the body
+// is larger than maxFrameBytes it returns ErrTooLarge. Otherwise it returns
+// ErrCompressed for a compressed frame and ErrMalformed for a truncated
+// frame or trailing data. Other errors come from r.
+func ReadMessage(r io.Reader, maxFrameBytes int64) ([]byte, error) {
+	var header [HeaderLen]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return nil, malformedOrReadError(err)
+	}
+	msgLen, err := parseFrameHeader(header[:])
+	if err != nil || int64(HeaderLen)+int64(msgLen) > maxFrameBytes {
+		// Only an error path drains the body: a body over the limit reports
+		// ErrTooLarge first, whatever its header declares.
+		if err == nil {
+			err = ErrMalformed
+		}
+		return nil, classifyRemainder(r, HeaderLen, maxFrameBytes, err)
+	}
+	frame := make([]byte, HeaderLen+int(msgLen))
+	copy(frame, header[:])
+	if _, err := io.ReadFull(r, frame[HeaderLen:]); err != nil {
+		return nil, malformedOrReadError(err)
+	}
+	if _, err := io.ReadFull(r, header[:1]); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, fmt.Errorf("read gRPC request body: %w", err)
+		}
+		return nil, classifyRemainder(r, int64(len(frame))+1, maxFrameBytes, ErrMalformed)
+	}
+	return frame, nil
+}
+
+func malformedOrReadError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return ErrMalformed
+	}
+	return fmt.Errorf("read gRPC request body: %w", err)
+}
+
+// classifyRemainder drains at most maxFrameBytes+1 body bytes in total and
+// returns ErrTooLarge when the body exceeds maxFrameBytes, else fallback.
+func classifyRemainder(r io.Reader, consumed, maxFrameBytes int64, fallback error) error {
+	if consumed > maxFrameBytes {
+		return ErrTooLarge
+	}
+	n, err := io.Copy(io.Discard, io.LimitReader(r, maxFrameBytes+1-consumed))
+	if err != nil {
+		return fmt.Errorf("read gRPC request body: %w", err)
+	}
+	if consumed+n > maxFrameBytes {
+		return ErrTooLarge
+	}
+	return fallback
 }
 
 // ParsePayload extracts the message payload from a single uncompressed gRPC frame.
@@ -227,14 +338,21 @@ func FramePayload(payload []byte) ([]byte, error) {
 	return framed, nil
 }
 
-// MarshalProto serializes msg and wraps it in an uncompressed 5-byte gRPC frame.
+// MarshalProto serializes msg and wraps it in an uncompressed 5-byte gRPC
+// frame. It encodes directly after the reserved header, so it allocates once.
 func MarshalProto(msg proto.Message) ([]byte, error) {
 	if msg == nil {
 		return nil, errors.New("nil protobuf message")
 	}
-	raw, err := proto.Marshal(msg)
+	size := proto.Size(msg)
+	if uint64(size) > math.MaxUint32 {
+		return nil, fmt.Errorf("gRPC payload length %d exceeds maximum %d", size, uint64(math.MaxUint32))
+	}
+	// UseCachedSize reuses the sizes that proto.Size just computed.
+	framed, err := proto.MarshalOptions{UseCachedSize: true}.MarshalAppend(make([]byte, HeaderLen, HeaderLen+size), msg)
 	if err != nil {
 		return nil, err
 	}
-	return FramePayload(raw)
+	binary.BigEndian.PutUint32(framed[1:HeaderLen], uint32(len(framed)-HeaderLen)) //#nosec G115 -- guarded by MaxUint32 check above
+	return framed, nil
 }

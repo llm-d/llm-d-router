@@ -263,3 +263,98 @@ func TestEncodeStatusMessage(t *testing.T) {
 	require.Equal(t, "plain ascii", EncodeStatusMessage("plain ascii"))
 	require.Equal(t, "50%25\x20bad%0Aline2%0D%00%C3%A9", EncodeStatusMessage("50% bad\nline2\r\x00é"))
 }
+
+func TestMarshalProtoAllocatesOnce(t *testing.T) {
+	req := &sglangapiv1.GenerateRequest{
+		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "hello sglang"}},
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		if _, err := MarshalProto(req); err != nil {
+			t.Fatal(err)
+		}
+	})
+	require.Equal(t, 1.0, allocs)
+}
+
+func TestReader(t *testing.T) {
+	f1, err := FramePayload([]byte("first"))
+	require.NoError(t, err)
+	big := bytes.Repeat([]byte("x"), 8192) // larger than the initial buffer
+	f2, err := FramePayload(big)
+	require.NoError(t, err)
+
+	fr := NewReader(bytes.NewReader(append(append([]byte{}, f1...), f2...)), 1<<20)
+	got, err := fr.Next()
+	require.NoError(t, err)
+	require.Equal(t, f1, got, "Next returns the frame with its header")
+	got, err = fr.Next()
+	require.NoError(t, err)
+	require.Equal(t, f2, got)
+	_, err = fr.Next()
+	require.ErrorIs(t, err, io.EOF)
+
+	_, err = NewReader(bytes.NewReader(f1), 3).Next()
+	require.ErrorContains(t, err, "exceeds limit 3")
+	_, err = NewReader(bytes.NewReader([]byte{1, 0, 0, 0, 0}), 64).Next()
+	require.ErrorIs(t, err, ErrCompressed)
+	_, err = NewReader(bytes.NewReader(f1[:3]), 64).Next()
+	require.ErrorContains(t, err, "read gRPC frame header")
+	_, err = NewReader(bytes.NewReader(f1[:7]), 64).Next()
+	require.ErrorContains(t, err, "read gRPC frame payload")
+
+	// Steady state reuses the buffer: no allocation per frame.
+	stream := bytes.Repeat(f1, 100)
+	r := bytes.NewReader(stream)
+	fr = NewReader(r, 64)
+	allocs := testing.AllocsPerRun(10, func() {
+		r.Reset(stream)
+		for {
+			if _, err := fr.Next(); err != nil {
+				break
+			}
+		}
+	})
+	require.Zero(t, allocs)
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+func TestReadMessage(t *testing.T) {
+	frame, err := FramePayload([]byte("payload"))
+	require.NoError(t, err)
+	const limit = 64
+
+	got, err := ReadMessage(bytes.NewReader(frame), limit)
+	require.NoError(t, err)
+	require.Equal(t, frame, got)
+	require.Equal(t, len(frame), cap(got), "allocated at the exact size")
+
+	tooLargeDeclared, err := FramePayload(bytes.Repeat([]byte("x"), limit))
+	require.NoError(t, err)
+	tests := []struct {
+		name string
+		body []byte
+		want error
+	}{
+		{name: "empty", body: nil, want: ErrMalformed},
+		{name: "short header", body: []byte{0, 1}, want: ErrMalformed},
+		{name: "truncated payload", body: frame[:len(frame)-1], want: ErrMalformed},
+		{name: "trailing data", body: append(append([]byte{}, frame...), 0), want: ErrMalformed},
+		{name: "compressed", body: []byte{1, 0, 0, 0, 0}, want: ErrCompressed},
+		{name: "declared over limit, short body", body: []byte{0, 0, 0, 1, 0}, want: ErrMalformed},
+		{name: "declared over limit", body: tooLargeDeclared, want: ErrTooLarge},
+		{name: "garbage over limit", body: bytes.Repeat([]byte("x"), limit+1), want: ErrTooLarge},
+		{name: "trailing data over limit", body: append(append([]byte{}, frame...), make([]byte, limit)...), want: ErrTooLarge},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ReadMessage(bytes.NewReader(tc.body), limit)
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
+
+	_, err = ReadMessage(errReader{}, limit)
+	require.ErrorIs(t, err, io.ErrClosedPipe)
+}
