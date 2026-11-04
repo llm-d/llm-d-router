@@ -529,7 +529,7 @@ func renderOnlyBudget(path string, payload []byte) ([]byte, error) {
 		return nil, err
 	}
 	// Automatic prompt truncation depends on the original output budget.
-	if truncate, ok := envelope["truncate_prompt_tokens"]; ok && !bytes.Equal(bytes.TrimSpace(truncate), []byte("null")) {
+	if truncate, ok := envelope[reqcommon.FieldTruncatePromptTokens]; ok && !bytes.Equal(bytes.TrimSpace(truncate), []byte("null")) {
 		return payload, nil
 	}
 	envelope["max_tokens"] = json.RawMessage("1")

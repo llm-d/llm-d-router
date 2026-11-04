@@ -33,7 +33,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -440,11 +442,12 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 }
 
 // Produce derives the request's TokenizedRequest via the configured backend and
-// stores it on the body. Skips when one is already present; errors propagate to
-// the Director, which logs and continues.
+// stores it on the body. Skips when one is already present or the request
+// carries prompt token IDs of its own (see clientPromptTokenIDs); errors
+// propagate to the Director, which logs and continues.
 //
-// The tokenize span opens below the already-tokenized skip path, so it is
-// emitted only when the backend is actually invoked.
+// The tokenize span opens below the skip paths, so it is emitted only when the
+// backend is invoked.
 func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
 	if request.Body == nil {
 		return errors.New("request body is nil")
@@ -459,6 +462,17 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 			request.Body.TokenizedRequest.CacheSalt = CacheSaltFromBody(request.Body)
 		}
 		return nil
+	}
+	arrays, ignored := clientPromptTokenIDs(request.Body)
+	if arrays != nil {
+		tp := fwkrequest.NewTokenizedRequest(arrays)
+		tp.CacheSalt = CacheSaltFromBody(request.Body)
+		request.Body.TokenizedRequest = tp
+		log.FromContext(ctx).V(logging.DEBUG).Info("using client-supplied prompt token IDs", "tokenCount", tp.TokenCount())
+		return nil
+	}
+	if ignored != "" {
+		log.FromContext(ctx).V(logging.DEBUG).Info("ignoring client-supplied prompt token IDs, rendering", "reason", ignored)
 	}
 
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))
