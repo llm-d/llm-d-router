@@ -107,6 +107,27 @@ func TestSpanAttributes(t *testing.T) {
 	assert.Equal(t, int64(1), attrs[1].Value.AsInt64())
 }
 
+// The label keeps the modalities this repo produces and folds the rest, which
+// a token-in request can name freely.
+func TestMetricLabel(t *testing.T) {
+	tests := map[string]string{
+		"":                       "",
+		ModalityNone:             ModalityNone,
+		"image":                  "image",
+		"audio,image":            "audio,image",
+		"audio,image,video":      "audio,image,video",
+		"client-modality":        ModalityOther,
+		"other":                  ModalityOther,
+		"client-modality,image":  "image,other",
+		"a,b,image":              "image,other",
+		"audio,client,image,zzz": "audio,image,other",
+		"image,none":             "image,other",
+	}
+	for in, want := range tests {
+		assert.Equal(t, want, MetricLabel(in), "MetricLabel(%q)", in)
+	}
+}
+
 func requestWith(features ...fwkrequest.MultiModalFeature) *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		Body: &fwkrequest.InferenceRequestBody{
