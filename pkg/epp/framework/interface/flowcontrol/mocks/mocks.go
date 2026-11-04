@@ -193,6 +193,17 @@ func (m *MockPriorityBandAccessor) Queue(id string) flowcontrol.FlowQueueAccesso
 func (m *MockPriorityBandAccessor) IterateQueues(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
 	if m.IterateQueuesFunc != nil {
 		m.IterateQueuesFunc(callback)
+		return
+	}
+	if m.FlowKeysFunc != nil && m.QueueFunc != nil {
+		for _, key := range m.FlowKeysFunc() {
+			q := m.QueueFunc(key.ID)
+			if q != nil && q.Len() > 0 {
+				if !callback(q) {
+					return
+				}
+			}
+		}
 	}
 }
 

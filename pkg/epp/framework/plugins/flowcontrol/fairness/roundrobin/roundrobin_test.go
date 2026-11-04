@@ -144,6 +144,114 @@ func TestRoundRobin_Pick_SkipsEmptyQueues(t *testing.T) {
 	assert.Equal(t, flow1ID, selected.FlowKey().ID, "Should wrap around and select flow1 again")
 }
 
+func TestRoundRobin_Pick_UsesIterateQueues(t *testing.T) {
+	t.Parallel()
+	policy := newRoundRobin("")
+	ctx := context.Background()
+	state := policy.NewState(ctx)
+
+	flowEmptyKey := flowcontrol.FlowKey{ID: "flowEmpty", Priority: 0}
+	queue1 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow1Key}
+	queue2 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 2, FlowKeyV: flow2Key}
+	queue3 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 3, FlowKeyV: flow3Key}
+	queueEmpty := &fwkfcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowEmptyKey}
+
+	var flowKeysCalled, queueCalled bool
+	mockBand := &fwkfcmocks.MockPriorityBandAccessor{
+		PolicyStateV: state,
+		FlowKeysFunc: func() []flowcontrol.FlowKey {
+			flowKeysCalled = true
+			return nil
+		},
+		QueueFunc: func(_ string) flowcontrol.FlowQueueAccessor {
+			queueCalled = true
+			return nil
+		},
+		IterateQueuesFunc: func(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
+			for _, q := range []flowcontrol.FlowQueueAccessor{queue3, queueEmpty, queue1, queue2} {
+				if !callback(q) {
+					return
+				}
+			}
+		},
+	}
+
+	expectedOrder := []string{flow1ID, flow2ID, flow3ID, flow1ID, flow2ID, flow3ID}
+	for i, expectedID := range expectedOrder {
+		selected, err := policy.Pick(ctx, mockBand)
+		require.NoError(t, err, "Pick %d should not error", i+1)
+		require.NotNil(t, selected, "Pick %d should select a queue", i+1)
+		assert.Equal(t, expectedID, selected.FlowKey().ID, "Pick %d should select %s", i+1, expectedID)
+	}
+	assert.False(t, flowKeysCalled, "Pick must use IterateQueues and never call FlowKeys()")
+	assert.False(t, queueCalled, "Pick must use IterateQueues and never call Queue()")
+}
+
+func TestRoundRobin_Pick_DrainedQueuePreservesCursorOrder(t *testing.T) {
+	t.Parallel()
+	policy := newRoundRobin("")
+	ctx := context.Background()
+	state := policy.NewState(ctx)
+
+	queue1 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow1Key}
+	queue2 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow2Key}
+	queue3 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow3Key}
+
+	activeQueues := []flowcontrol.FlowQueueAccessor{queue1, queue2, queue3}
+	mockBand := &fwkfcmocks.MockPriorityBandAccessor{
+		PolicyStateV: state,
+		FlowKeysFunc: func() []flowcontrol.FlowKey {
+			keys := make([]flowcontrol.FlowKey, len(activeQueues))
+			for i, q := range activeQueues {
+				keys[i] = q.FlowKey()
+			}
+			return keys
+		},
+		QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
+			for _, q := range activeQueues {
+				if q.FlowKey().ID == id {
+					return q
+				}
+			}
+			return nil
+		},
+		IterateQueuesFunc: func(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
+			for _, q := range activeQueues {
+				if !callback(q) {
+					return
+				}
+			}
+		},
+	}
+
+	// Pick 1 selects flow1; Pick 2 selects flow2.
+	selected, err := policy.Pick(ctx, mockBand)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, flow1ID, selected.FlowKey().ID)
+
+	selected, err = policy.Pick(ctx, mockBand)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, flow2ID, selected.FlowKey().ID)
+
+	// Simulate flow2 draining between picks so only flow1 and flow3 remain active.
+	// The next pick advances to flow3 in sorted FlowKey order.
+	activeQueues = []flowcontrol.FlowQueueAccessor{queue1, queue3}
+	selected, err = policy.Pick(ctx, mockBand)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, flow3ID, selected.FlowKey().ID, "When lastSelected flow drains, Pick must advance to the next flow in sorted order")
+
+	// Simulate flow3 draining while flow2 becomes active again (active: flow1, flow2).
+	// The next pick wraps around to flow1.
+	activeQueues = []flowcontrol.FlowQueueAccessor{queue1, queue2}
+	selected, err = policy.Pick(ctx, mockBand)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, flow1ID, selected.FlowKey().ID, "When the last flow in sorted order drains, Pick must wrap around to the first active flow")
+}
+
 func TestRoundRobin_Pick_HandlesDynamicFlows(t *testing.T) {
 	t.Parallel()
 	policy := newRoundRobin("")

@@ -87,43 +87,49 @@ func (p *roundRobin) Pick(
 
 	v := flowGroup.PolicyState()
 	c, ok := v.(*roundRobinCursor)
-	if !ok {
+	if !ok || c == nil {
 		return nil, fmt.Errorf("invalid state type for RoundRobin policy: expected *roundRobinCursor, got %T", v)
 	}
+
+	var activeQueues []flowcontrol.FlowQueueAccessor
+	flowGroup.IterateQueues(func(q flowcontrol.FlowQueueAccessor) bool {
+		if q != nil && q.Len() > 0 {
+			activeQueues = append(activeQueues, q)
+		}
+		return true
+	})
+	if len(activeQueues) == 0 {
+		c.mu.Lock()
+		c.lastSelected = nil
+		c.mu.Unlock()
+		return nil, nil //nolint:nilnil
+	}
+
+	slices.SortFunc(activeQueues, func(a, b flowcontrol.FlowQueueAccessor) int {
+		return a.FlowKey().Compare(b.FlowKey())
+	})
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	keys := flowGroup.FlowKeys()
-	if len(keys) == 0 {
-		c.lastSelected = nil // Reset cursor if no flows are present.
-		return nil, nil      //nolint:nilnil
-	}
-
-	// Sort for deterministic ordering.
-	slices.SortFunc(keys, func(a, b flowcontrol.FlowKey) int { return a.Compare(b) })
-
-	startIndex := 0
+	startIdx := 0
 	if c.lastSelected != nil {
-		// Find the index of the last selected flow.
-		// If it's not found (e.g., the flow was removed), we'll start from the beginning (index 0).
-		if idx := slices.Index(keys, *c.lastSelected); idx != -1 {
-			startIndex = (idx + 1) % len(keys)
+		idx, found := slices.BinarySearchFunc(
+			activeQueues,
+			*c.lastSelected,
+			func(q flowcontrol.FlowQueueAccessor, target flowcontrol.FlowKey) int {
+				return q.FlowKey().Compare(target)
+			},
+		)
+		if found {
+			startIdx = (idx + 1) % len(activeQueues)
+		} else {
+			startIdx = idx % len(activeQueues)
 		}
 	}
 
-	numFlows := len(keys)
-	for i := range numFlows {
-		currentIdx := (startIndex + i) % numFlows
-		currentKey := keys[currentIdx]
-		queue := flowGroup.Queue(currentKey.ID)
-		if queue != nil && queue.Len() > 0 {
-			c.lastSelected = &currentKey
-			return queue, nil
-		}
-	}
-
-	// No non-empty queue was found.
-	c.lastSelected = nil
-	return nil, nil //nolint:nilnil
+	selectedQueue := activeQueues[startIdx]
+	selectedKey := selectedQueue.FlowKey()
+	c.lastSelected = &selectedKey
+	return selectedQueue, nil
 }
