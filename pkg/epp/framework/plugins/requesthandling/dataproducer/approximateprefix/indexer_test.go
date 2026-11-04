@@ -72,6 +72,28 @@ func TestIndexer_AddAndGet(t *testing.T) {
 	assert.Empty(t, i.Get(blockHash(5)), "tail hash should be evicted before the head")
 }
 
+func TestIndexer_Remove(t *testing.T) {
+	pod := server{
+		ServerID:       ServerID{Namespace: "default", Name: "server1"},
+		NumOfGPUBlocks: 4,
+	}
+	i := newIndexer(context.Background(), 4, "test-name", "test-type").(*indexer)
+
+	i.Add([]blockHash{1, 2, 3}, pod)
+	assert.Equal(t, 3, i.PodBlockCounts()[pod.ServerID])
+
+	i.Remove([]blockHash{1, 2, 3}, pod.ServerID)
+	assert.Equal(t, 0, i.PodBlockCounts()[pod.ServerID], "removed hashes leave the pod's index")
+	assert.Empty(t, i.Get(blockHash(1)))
+
+	// Removing for a pod the indexer never tracked is a no-op.
+	i.Remove([]blockHash{1}, ServerID{Namespace: "default", Name: "unknown"})
+
+	// A prompt added after a removal re-populates the entries.
+	i.Add([]blockHash{1, 2, 3}, pod)
+	assert.NotEmpty(t, i.Get(blockHash(1)))
+}
+
 func TestIndexer_RemovePodAndEviction(t *testing.T) {
 	const indexerSize = 10
 

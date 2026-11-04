@@ -19,6 +19,7 @@ package approximateprefix
 
 import (
 	"math"
+	"sync"
 	"time"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -36,6 +37,9 @@ type indexerInterface interface {
 	// Add records that server holds hashes. hashes must be a prompt's block
 	// hashes starting at block 0; MatchLongestPrefix relies on this.
 	Add(hashes []blockHash, server server)
+	// Remove deletes hashes from server, undoing an Add whose request never
+	// ran on the server.
+	Remove(hashes []blockHash, server ServerID)
 	RemovePod(server ServerID)
 	Pods() []ServerID
 	PodBlockCounts() map[ServerID]int
@@ -104,6 +108,31 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 		PredictedCachedTokens:     predictedCachedTokens,
 		BestAvailableCachedTokens: s.BestAvailableCachedTokens,
 	}
+}
+
+// updateCell coordinates the asynchronous indexer Add queued in PreRequest
+// with a rollback in ResponseBody that can run before the queued Add does.
+type updateCell struct {
+	mu         sync.Mutex
+	rolledBack bool
+}
+
+// indexUpdateRecord is the set of indexer entries PreRequest added for one
+// request: the prompt hashes and the servers they were recorded for. It
+// survives until the response reports whether the request ran, so a failed
+// response can remove entries no pod computed.
+type indexUpdateRecord struct {
+	servers         []server
+	perPromptHashes [][]blockHash
+	// cell is shared, not copied, so every holder of the record observes one
+	// rollback flag.
+	cell *updateCell
+}
+
+// Clone shares cell deliberately: the rollback flag is coordination state.
+func (r *indexUpdateRecord) Clone() plugin.StateData {
+	cp := *r
+	return &cp
 }
 
 const (

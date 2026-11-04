@@ -23,12 +23,14 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -60,11 +62,17 @@ var minBlockSizeTokens = 64
 var (
 	_ fwkrh.DataProducer                = &dataProducer{}
 	_ fwkrh.PreRequest                  = &dataProducer{}
+	_ fwkrh.ResponseBodyProcessor       = &dataProducer{}
 	_ plugin.StateDumper                = &dataProducer{}
 	_ datalayer.EndpointExtractor       = (*dataProducer)(nil)
 	_ datalayer.Registrant              = &dataProducer{}
 	_ datalayer.CrossReplicaContributor = (*dataProducer)(nil)
 )
+
+// indexUpdateStateKey identifies the per-request record of indexer entries
+// PreRequest added. The record lives until the response arrives so a failed
+// response can remove the entries.
+const indexUpdateStateKey plugin.StateKey = "indexUpdate"
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
 type dataProducer struct {
@@ -512,9 +520,13 @@ func (p *dataProducer) forgetPeerMerged(endpointID string) {
 
 // PreRequest records in the shared indexer the result of the scheduling selection.
 // It updates the indexer with the prefix hashes for the selected endpoint(s).
+// The entries are optimistic: ResponseBody removes them when the response
+// reports the request never ran, so a retry is not routed as cached.
+// See https://github.com/llm-d/llm-d-router/issues/3919.
 func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
-	// Delete the state to avoid memory leak.
-	defer p.pluginState.Delete(request.RequestID)
+	// Release the scheduling state; the index-update record written below is
+	// kept until the response arrives.
+	defer p.pluginState.DeleteKey(request.RequestID, plugin.StateKey(p.typedName.Name))
 	primaryProfileResult := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if len(primaryProfileResult.TargetEndpoints) == 0 {
 		return nil
@@ -539,8 +551,21 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		return nil
 	}
 
-	// Update indexer asynchronously to avoid blocking the request path.
+	record := &indexUpdateRecord{
+		servers:         servers,
+		perPromptHashes: state.PerPromptHashes,
+		cell:            &updateCell{},
+	}
+	p.pluginState.Write(request.RequestID, indexUpdateStateKey, record)
+
+	// Update indexer asynchronously to avoid blocking the request path. The
+	// cell guards against a rollback that lands before this goroutine runs.
 	p.wg.Go(func() {
+		record.cell.mu.Lock()
+		defer record.cell.mu.Unlock()
+		if record.cell.rolledBack {
+			return
+		}
 		for _, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
 				p.indexerInst.Add(hashes, s)
@@ -580,6 +605,60 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		})
 	}
 	return nil
+}
+
+// ResponseBody releases the index-update record when the response stream ends,
+// removing the entries PreRequest added when the response reports the request
+// never ran on the model server. A prompt whose request failed must not look
+// cached: neither endpoint computed it, and a retry routed on the stale
+// entries would skip prefill.
+func (p *dataProducer) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, _ *datalayer.EndpointMetadata) {
+	if request == nil || response == nil || !response.EndOfStream {
+		return
+	}
+	record, err := plugin.ReadPluginStateKey[*indexUpdateRecord](p.pluginState, request.RequestID, indexUpdateStateKey)
+	if err != nil {
+		// PreRequest never ran, or the staleness janitor already reaped the record.
+		return
+	}
+	p.pluginState.Delete(request.RequestID)
+	if !responseFailed(response) {
+		return
+	}
+
+	record.cell.mu.Lock()
+	defer record.cell.mu.Unlock()
+	if record.cell.rolledBack {
+		return
+	}
+	record.cell.rolledBack = true
+	for _, s := range record.servers {
+		for _, hashes := range record.perPromptHashes {
+			p.indexerInst.Remove(hashes, s.ServerID)
+			if p.syncerActive() {
+				p.recent.removePrompt(s.String(), hashes)
+			}
+		}
+	}
+	log.FromContext(ctx).V(logutil.DEFAULT).Info("Removed prefix index entries for failed request",
+		"requestID", request.RequestID, "terminationCause", response.TerminationCause)
+}
+
+// responseFailed reports whether the response says the request did not run to
+// completion on the model server. A stream torn down before completing carries
+// a non-natural TerminationCause. A response delivered in full can still carry
+// an error status, which TerminationCauseNatural does not distinguish, so the
+// status header is read as well.
+func responseFailed(response *fwkrh.Response) bool {
+	if response.TerminationCause != "" && response.TerminationCause != fwkrh.TerminationCauseNatural {
+		return true
+	}
+	status := response.Headers[reqcommon.PseudoHeaderStatus]
+	if status == "" {
+		status = response.Headers[reqcommon.HeaderStatus]
+	}
+	code, err := strconv.Atoi(status)
+	return err == nil && code >= 400
 }
 
 // bestAmongScored returns the highest prediction the picker could have chosen.
