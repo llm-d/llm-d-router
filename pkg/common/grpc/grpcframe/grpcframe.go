@@ -58,7 +58,17 @@ var (
 	ErrMalformed = errors.New("invalid gRPC frame")
 
 	canonicalStatus = http.CanonicalHeaderKey(HeaderStatus)
-	trailerHeaders  = [...]string{
+	// statusKeys are the map keys under which grpc-status can appear, computed
+	// once so Status does not allocate per call. http.CanonicalHeaderKey
+	// leaves keys containing ':' unchanged, so httputil.ReverseProxy
+	// (TrailerPrefix + "Grpc-Status") and direct callers (TrailerPrefix +
+	// HeaderStatus) store distinct map keys.
+	statusKeys = [...]string{
+		canonicalStatus,
+		http.TrailerPrefix + canonicalStatus,
+		http.TrailerPrefix + HeaderStatus,
+	}
+	trailerHeaders = [...]string{
 		HeaderStatus,
 		HeaderMessage,
 		HeaderStatusDetailsBin,
@@ -76,14 +86,7 @@ func IsContentType(contentType string) bool {
 // Status extracts the gRPC status code string from an HTTP header or trailer
 // map, including unannounced HTTP/2 trailers prefixed with http.TrailerPrefix.
 func Status(h http.Header) (string, bool) {
-	// http.CanonicalHeaderKey leaves keys containing ':' unchanged, so
-	// httputil.ReverseProxy (TrailerPrefix + "Grpc-Status") and direct callers
-	// (TrailerPrefix + HeaderStatus) store distinct map keys.
-	for _, key := range [...]string{
-		canonicalStatus,
-		http.TrailerPrefix + canonicalStatus,
-		http.TrailerPrefix + HeaderStatus,
-	} {
+	for _, key := range statusKeys {
 		if v := firstNonEmpty(h[key]); v != "" {
 			return v, true
 		}

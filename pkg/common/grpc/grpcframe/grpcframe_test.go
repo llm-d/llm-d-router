@@ -212,6 +212,16 @@ func TestStatusAndHasErrorStatus(t *testing.T) {
 	require.True(t, HasErrorStatus(reverseProxyTrailerErr))
 }
 
+func TestStatusDoesNotAllocate(t *testing.T) {
+	h := http.Header{http.TrailerPrefix + HeaderStatus: {"0"}}
+	allocs := testing.AllocsPerRun(100, func() {
+		if _, ok := Status(h); !ok {
+			t.Fatal("status not found")
+		}
+	})
+	require.Zero(t, allocs)
+}
+
 func TestCopyTrailersAndWriteError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	WriteError(rec, codes.InvalidArgument, "bad request: 50% done\nretry")
