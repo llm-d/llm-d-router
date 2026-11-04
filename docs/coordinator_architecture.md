@@ -423,6 +423,11 @@ combination at startup. When `kv_connector` is `kv-sglang`, leave the step out a
 the `prefill` step. Every request then runs remote prefill and a KV transfer, including
 short or already-cached prompts.
 
+On `POST /sglang.api.v1.SglangService/Generate`, `conditional-decode` does nothing and
+the pipeline continues to the next step. A pipeline that includes the step for HTTP
+requests therefore runs `prefill` and `decode` on every gRPC Generate request. The
+`render`, `replace-media-urls`, and `async-broker` steps also do nothing on this path.
+
 ### KV and EC transfer protocols
 
 Because the coordinator builds the prefill and decode request bodies itself, it must
