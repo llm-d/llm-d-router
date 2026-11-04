@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,15 @@ const (
 	requestFieldStructuredOutputs = "structured_outputs"
 	responseFormatText            = "text"
 )
+
+// vLLMError is the flat error shape older vLLM versions return, which a
+// chunked decode stream re-nests in the OpenAI error envelope.
+type vLLMError struct {
+	Object  string `json:"object"`
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    int    `json:"code"`
+}
 
 // dispatchDecode routes a fully-prepared decode request to either chunked
 // decode or the regular decoder proxy. Chunked decode is only used for
@@ -259,7 +269,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			finalMessage[reqcommon.FieldContent] = content
 			message, err := json.Marshal(finalMessage)
 			if err != nil {
-				if writeErr := errorInternalServerError(err, w); writeErr != nil {
+				if writeErr := errorInternalServerError(w, r, err); writeErr != nil {
 					logger.Error(writeErr, "failed to send error response to client")
 				}
 				return
@@ -269,7 +279,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 		chunkBody, err := json.Marshal(chunkReq)
 		if err != nil {
-			if err := errorJSONInvalid(err, w); err != nil {
+			if err := errorJSONInvalid(w, r, err); err != nil {
 				logger.Error(err, "failed to send error response to client")
 			}
 			return
@@ -291,8 +301,10 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			if streamingEnabled && chunkIndex > 0 {
 				// The status went out with the first chunk, so the error is sent the
 				// way vLLM reports a failure in a stream: as a data event before [DONE].
-				errorBody := bw.bodyBytes()
-				var flatError errorResponse
+				// The writer appends a newline to the JSON body, which would break the
+				// SSE event framing, so trim it.
+				errorBody := bytes.TrimSpace(bw.bodyBytes())
+				var flatError vLLMError
 				if json.Unmarshal(errorBody, &flatError) == nil && flatError.Object == "error" {
 					var err error
 					errorBody, err = json.Marshal(reqcommon.OpenAIErrorResponse{Error: reqcommon.OpenAIError{
@@ -315,7 +327,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		var chunkResponse map[string]any
 		if err := json.Unmarshal(bw.bodyBytes(), &chunkResponse); err != nil {
 			logger.Error(jsonErrorForLog(err), "failed to unmarshal chunk response", "chunk", chunkIndex)
-			if err := errorInternalServerError(err, w); err != nil {
+			if err := errorInternalServerError(w, r, err); err != nil {
 				logger.Error(err, "failed to send error response to client")
 			}
 			return
@@ -402,7 +414,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	// Non-streaming: reassemble the full response.
 	// overwrite choices with the text accumulated across all chunks.
 	if lastResponse == nil {
-		if err := errorInternalServerError(errors.New("no chunks produced"), w); err != nil {
+		if err := errorInternalServerError(w, r, errors.New("no chunks produced")); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -423,7 +435,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 	respBody, err := json.Marshal(lastResponse)
 	if err != nil {
-		if err := errorInternalServerError(err, w); err != nil {
+		if err := errorInternalServerError(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return

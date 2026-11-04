@@ -156,7 +156,7 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 				logger.Error(err, "passthrough proxy error")
 			}
 			if isOpenAIPassthroughPath(req.URL.Path) {
-				rejectInference(logger, w, reqcommon.DetectAPIType(req.URL.Path), http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID))
+				rejectInference(logger, w, reqcommon.DetectAPIType(req.URL.Path), http.StatusBadGateway, reqcommon.InternalErrorMessage(requestID))
 			} else {
 				w.WriteHeader(http.StatusBadGateway)
 			}

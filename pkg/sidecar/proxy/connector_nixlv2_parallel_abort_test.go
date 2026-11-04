@@ -106,7 +106,7 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch decode abort", fun
 		Expect(err).ToNot(HaveOccurred(), "the client must get a response, not a dropped connection")
 		Expect(status).To(Equal(http.StatusBadGateway))
 		Expect(status).ToNot(Equal(http.StatusOK), "an empty 200 would hide the decode failure")
-		Expect(body).To(ContainSubstring("decode aborted"))
+		Expect(body).To(ContainSubstring("internal error"))
 	})
 
 	It("tears the connection down when decode aborts after its response reaches the client", func() {

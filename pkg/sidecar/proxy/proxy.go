@@ -606,6 +606,18 @@ func (s *Server) createProxyHandler(
 
 	newProxy := httputil.NewSingleHostReverseProxy(u)
 	newProxy.Transport = s.newProxyTransport(u.Scheme, insecureSkipVerify)
+	// The default handler answers with an empty 502, which the connectors relay
+	// to the client as the prefill response.
+	newProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		logger, ctxErr := logr.FromContext(r.Context())
+		if ctxErr != nil {
+			logger = s.logger
+		}
+		logger.Error(err, "http: proxy error", "target", u.String())
+		if writeErr := errorBadGateway(w, r); writeErr != nil {
+			logger.Error(writeErr, "failed to send error response to client")
+		}
+	}
 	cache.Add(hostPort, newProxy)
 
 	return newProxy, nil

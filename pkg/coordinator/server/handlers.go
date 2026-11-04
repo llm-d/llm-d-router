@@ -129,6 +129,11 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	// kv_transfer_params tells a model server which pod to pull KV from, so
+	// only the KV connector and the EPP may write it, but not every step
+	// rebuilds the body, so a client copy is dropped once here.
+	_, clientKVTransferParams := parsed[reqcommon.FieldKVTransferParams]
+	delete(parsed, reqcommon.FieldKVTransferParams)
 	parseDuration = time.Since(parseStart)
 	parseDone = true
 
@@ -189,6 +194,10 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		// Log the rejected length, never the raw value, to avoid reflecting
 		// attacker-controlled content into the log.
 		logger.V(logutil.DEFAULT).Info("replaced invalid client request ID", "rejectedLength", len(clientRequestID))
+	}
+	if clientKVTransferParams {
+		// Presence only: the value carries a host, a port and a request id.
+		logger.V(logutil.DEFAULT).Info("dropped client-supplied kv_transfer_params")
 	}
 
 	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)
@@ -295,7 +304,7 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 	if errors.As(err, &upstream) && upstream.StatusCode >= http.StatusBadRequest && upstream.StatusCode < http.StatusInternalServerError {
 		return upstream.StatusCode, fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 	}
-	return http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID)
+	return http.StatusBadGateway, reqcommon.InternalErrorMessage(requestID)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

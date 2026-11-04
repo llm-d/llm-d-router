@@ -115,7 +115,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	if p2p.prefill == nil {
 		err := fmt.Errorf("request header %s is absent or not a host:port with a TCP port; the EPP must run p2p-source-producer with prefillProfileName matching the disaggregation prefill profile", routing.KVCachePrefillHeader)
 		logger.Error(err, "cannot build the decode request", "prefill_host", extractHost(prefillPodHostPort))
-		if err := errorInternalServerError(err, w); err != nil {
+		if err := errorInternalServerError(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -142,18 +142,14 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	// Prefill request: store KV under kv_request_id, no peer address. Capped to a
 	// single output token so the prefiller returns as soon as KV is stored.
 	prefillData := maps.Clone(requestData)
-	prefillKVParams := map[string]any{
-		reqcommon.FieldRemoteDecoder: map[string]any{
-			reqcommon.FieldKVRequestID: kvRequestID,
-		},
-	}
+	prefillKVParams := reqcommon.RemoteDecoderParams(kvRequestID)
 	addP2PPullToPrefill(prefillKVParams, source)
 	prefillData[reqcommon.FieldKVTransferParams] = prefillKVParams
 	reqcommon.CapSingleToken(prefillData, apiType)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -165,13 +161,11 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	// Decode request: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
 	// (streaming, token limits) is preserved.
 	decodeData := maps.Clone(requestData)
-	decodeData[reqcommon.FieldKVTransferParams] = map[string]any{
-		reqcommon.FieldRemotePrefiller: reqcommon.P2PPeerParams(kvRequestID, p2p.prefill.host, p2p.prefill.port),
-	}
+	decodeData[reqcommon.FieldKVTransferParams] = reqcommon.RemotePrefillerParams(kvRequestID, p2p.prefill.host, p2p.prefill.port)
 
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -201,7 +195,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		logger.Error(err, "failed to create prefill handler")
+		if err := errorBadGateway(w, r); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -372,9 +367,8 @@ func parsePrefillP2P(logger logr.Logger, value string) *p2pPeer {
 	if value == "" {
 		return nil
 	}
-	host, portStr, err := net.SplitHostPort(value)
-	port, convErr := strconv.Atoi(portStr)
-	if err != nil || host == "" || convErr != nil || !routing.IsTCPPort(port) {
+	host, port, ok := routing.ParseHostPort(value)
+	if !ok {
 		logger.Info("ignoring malformed prefill P2P address header", "value", value)
 		return nil
 	}
@@ -405,7 +399,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, p2p
 
 	newBody, err := json.Marshal(requestData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
