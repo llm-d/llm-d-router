@@ -71,8 +71,11 @@ func NewPolicyFunc(
 	usageLimitName string,
 	f func(ctx context.Context, saturation float64, priorities []int, ceilings []float64),
 ) flowcontrol.UsageLimitPolicy {
+	if usageLimitName == "" {
+		usageLimitName = StaticUsageLimitPolicyType
+	}
 	return &usageLimitPolicyFunc{
-		typeName: fmt.Sprint(usageLimitName, "-type"),
+		typeName: StaticUsageLimitPolicyType,
 		name:     usageLimitName,
 		f:        f,
 	}
