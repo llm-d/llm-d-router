@@ -53,6 +53,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -785,6 +786,34 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	number := rand.Intn(len(pods)) //#nosec G404 -- load spreading across pods, not security-sensitive
 	pod := pods[number]
 	return pod.GetMetadata()
+}
+
+// GetRandomDecodeEndpoint returns a random endpoint that can serve a decode
+// session, for requests routed without a scheduling profile. A nil metadata
+// with a non-empty pool means no endpoint is decode-capable.
+func (d *Director) GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata {
+	pods := d.datastore.PodList(decodeCapableEndpoint)
+	if len(pods) == 0 {
+		return nil
+	}
+	number := rand.Intn(len(pods)) //#nosec G404 -- load spreading across pods, not security-sensitive
+	return pods[number].GetMetadata()
+}
+
+// decodeCapableEndpoint follows the bylabel role filters: an endpoint without
+// the role label counts as decode-capable, prefill-only, encode-only, and
+// unrecognized roles do not.
+func decodeCapableEndpoint(ep fwkdl.Endpoint) bool {
+	meta := ep.GetMetadata()
+	if meta == nil || meta.Labels == nil {
+		return true
+	}
+	switch meta.Labels[bylabel.RoleLabel] {
+	case "", bylabel.RoleDecode, bylabel.RolePrefillDecode, bylabel.RoleEncodePrefillDecode:
+		return true
+	default:
+		return false
+	}
 }
 
 // runPreRequestPlugins invokes every registered PreRequest plugin, wraps each non-nil
