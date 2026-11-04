@@ -475,12 +475,17 @@ pipeline:
       #   carry different fields). A forced request reserves from the budget
       #   below and falls back to the pass-through when it is full. Like a
       #   streaming request, a forced request is not bounded by
-      #   server.write_timeout.
+      #   server.write_timeout. With kv_connector: kv-sglang, force_stream is
+      #   accepted but forces no request: an SGLang decode server has no
+      #   local-prefill path, so a fallback could not recompute the prompt, and
+      #   every request takes the pass-through, counted fallback_unsupported.
       #   force_stream: true
+      #
       #   force_stream_buffer_size caps the wire bytes concurrent forced requests
       #   may reserve at once (human-readable, default 1GiB). Peak heap runs
       #   higher, so this is not an RSS cap.
       #   force_stream_buffer_size: 1GiB
+      #
       #   force_stream_max_request_size caps the bytes one forced request may
       #   reserve for its generated reply (human-readable, default 256KiB, capped
       #   to the buffer size). It must exceed the fixed 2KiB reply-envelope
