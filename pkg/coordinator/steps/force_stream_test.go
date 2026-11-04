@@ -1933,12 +1933,15 @@ func TestForceStream_ForwardsPeerTopology(t *testing.T) {
 // TestKVHandoffReplaySafe covers which KV connectors may re-send their decode
 // kv_transfer_params on a fallback. Only kv-shared-storage is replay-safe: its
 // decode pod re-reads the shared store. Every other connector names a one-shot
-// handoff the forced attempt already used, so the fallback drops it.
+// handoff the forced attempt already used, so the fallback drops it; a
+// kv-offloading decode pod then recomputes the prompt, as vLLM's P2P tier does
+// itself when a fetch fails.
 func TestKVHandoffReplaySafe(t *testing.T) {
 	for name, want := range map[string]bool{
 		kv.SharedStorage: true,
 		kv.NIXL:          false,
 		kv.SGLang:        false,
+		kv.Offloading:    false,
 	} {
 		conn, err := kv.Build(name)
 		require.NoError(t, err)

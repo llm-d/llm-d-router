@@ -114,7 +114,7 @@ const (
 	FieldReturnTokenIDs        = "return_token_ids"
 	FieldUseBeamSearch         = "use_beam_search"
 	FieldReturnPromptText      = "return_prompt_text"
-	FieldPromptLogprobTokenIDs = "prompt_logprob_token_ids"
+	FieldPromptLogprobTokenIDs = "prompt_logprob_token_ids" //#nosec G101 -- JSON field name, not a credential
 	FieldPromptLogprobs        = "prompt_logprobs"
 	FieldReasoningEffort       = "reasoning_effort"
 	FieldChatTemplateKwargs    = "chat_template_kwargs"

@@ -197,8 +197,9 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // kvHandoffReplaySafe reports whether a decode body's kv_transfer_params may be
 // sent a second time. Only kv-shared-storage qualifies: its decode pod re-reads
 // the shared store, so a replay finds the KV again. The other connectors name a
-// one-shot handoff, the NIXL blocks the prefiller frees once pulled or the SGLang
-// bootstrap room, and a connector not listed here is treated as one-shot too.
+// one-shot handoff: the NIXL blocks the prefiller frees once pulled, the
+// kv-offloading P2P batch the prefiller releases once fetched, or the SGLang
+// bootstrap room. A connector not listed here is treated as one-shot too.
 func kvHandoffReplaySafe(conn kv.Connector) bool {
 	return conn.Name() == kv.SharedStorage
 }
