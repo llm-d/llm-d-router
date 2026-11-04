@@ -276,14 +276,12 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 				return
 			}
 			ps.DetachRequestContext()
+			// Close is idempotent, so the timer may fire after the prefill
+			// reader is done without effect.
 			select {
 			case <-ps.Done():
 			default:
-				graceTimer := time.AfterFunc(sglangPrefillGrace, ps.Close)
-				go func() {
-					<-ps.Done()
-					graceTimer.Stop()
-				}()
+				time.AfterFunc(sglangPrefillGrace, ps.Close)
 			}
 		}()
 	}
