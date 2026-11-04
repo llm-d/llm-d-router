@@ -525,14 +525,28 @@ func extractGRPCStatus(h http.Header) (grpcStatusWire, bool) {
 	}
 	return grpcStatusWire{
 		status:     statusStr,
-		message:    grpcHeaderValue(h, grpcframe.HeaderMessage),
-		detailsBin: grpcHeaderValue(h, grpcframe.HeaderStatusDetailsBin),
+		message:    grpcHeaderValue(h, &grpcMessageKeys),
+		detailsBin: grpcHeaderValue(h, &grpcDetailsBinKeys),
 	}, true
 }
 
-func grpcHeaderValue(h http.Header, key string) string {
+// grpcHeaderKeys lists the map keys under which a gRPC status header can
+// appear: canonical, and as a canonical or raw http.TrailerPrefix trailer.
+// They are computed once so that each lookup does not allocate.
+type grpcHeaderKeys [3]string
+
+func newGRPCHeaderKeys(key string) grpcHeaderKeys {
 	canonical := http.CanonicalHeaderKey(key)
-	for _, k := range [...]string{canonical, http.TrailerPrefix + canonical, http.TrailerPrefix + key} {
+	return grpcHeaderKeys{canonical, http.TrailerPrefix + canonical, http.TrailerPrefix + key}
+}
+
+var (
+	grpcMessageKeys    = newGRPCHeaderKeys(grpcframe.HeaderMessage)
+	grpcDetailsBinKeys = newGRPCHeaderKeys(grpcframe.HeaderStatusDetailsBin)
+)
+
+func grpcHeaderValue(h http.Header, keys *grpcHeaderKeys) string {
+	for _, k := range keys {
 		for _, v := range h[k] {
 			if trimmed := strings.TrimSpace(v); trimmed != "" {
 				return trimmed
@@ -575,8 +589,8 @@ func setPrefixedGRPCTrailer(dst http.Header, st grpcStatusWire) {
 
 func copyUpstreamResponseHeaders(dst, src http.Header) {
 	for k, vv := range src {
-		lower := strings.ToLower(k)
-		if lower == "content-length" || lower == "transfer-encoding" || lower == "connection" || lower == "trailer" ||
+		if strings.EqualFold(k, "content-length") || strings.EqualFold(k, "transfer-encoding") ||
+			strings.EqualFold(k, "connection") || strings.EqualFold(k, "trailer") ||
 			strings.EqualFold(k, grpcframe.HeaderStatus) ||
 			strings.EqualFold(k, grpcframe.HeaderMessage) ||
 			strings.EqualFold(k, grpcframe.HeaderStatusDetailsBin) {

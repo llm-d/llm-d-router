@@ -149,6 +149,26 @@ func TestRewriteDecodeFrameCachedTokens_OnlyTerminalFrames(t *testing.T) {
 	require.Equal(t, uint32(48), cachedTokens(out))
 }
 
+func TestSGLangPrefillStreamCachedTokensPerIndex(t *testing.T) {
+	ps := pipeline.NewSGLangPrefillStream(func() {}, nil)
+	for _, index := range []uint32{0, 1, 7} {
+		_, ok := ps.CachedTokens(index)
+		require.False(t, ok, "index %d before record", index)
+	}
+	ps.RecordCachedTokens(0, 10)
+	ps.RecordCachedTokens(7, 70)
+	ps.RecordCachedTokens(0, 11) // last value wins
+
+	got, ok := ps.CachedTokens(0)
+	require.True(t, ok)
+	require.Equal(t, uint32(11), got)
+	got, ok = ps.CachedTokens(7)
+	require.True(t, ok)
+	require.Equal(t, uint32(70), got)
+	_, ok = ps.CachedTokens(1)
+	require.False(t, ok)
+}
+
 func TestSGLangPrefillStreamLifecycle(t *testing.T) {
 	parentCtx, cancelParent := context.WithCancel(context.Background())
 	var prefillCancelled atomic.Bool
