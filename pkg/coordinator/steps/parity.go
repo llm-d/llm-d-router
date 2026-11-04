@@ -53,8 +53,8 @@ func parsePromptTokenParity(params map[string]any) (string, error) {
 }
 
 // parityCheck compares the prompt token count a worker reports with the
-// number of token IDs the render step produced, which is what prefill ran on
-// and what the EPP scored. A difference means the worker rendered a different
+// number of token IDs the render step produced, which is what the EPP scored
+// and, when prefill ran, what it ran on. A difference means the worker rendered a different
 // prompt: it ignored forwarded IDs (vLLM does for messages with non-text
 // content or with echo set) or the two renderers disagree (tokenizer, chat
 // template, processor version, chat_template_kwargs). Either way a KV cache

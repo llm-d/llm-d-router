@@ -89,3 +89,24 @@ func TestInjectIncludeUsage_LeavesMalformedStreamOptionsAlone(t *testing.T) {
 		t.Fatalf("stream_options must be left as sent, got %v", body[reqcommon.FieldStreamOptions])
 	}
 }
+
+// stream_options can be the client's own decoded object, shared with
+// reqCtx.Body through conditional-decode's shallow clone. The injection must
+// build a copy, or a 412 would hand the decode step include_usage=true and
+// the client a usage frame it never asked for.
+func TestInjectIncludeUsage_CopiesClientStreamOptions(t *testing.T) {
+	client := map[string]any{"include_obfuscation": false}
+	body := map[string]any{reqcommon.FieldStreamOptions: client}
+
+	injected, invalid := injectIncludeUsage(body, true, reqcommon.APITypeChatCompletions)
+	if !injected || invalid {
+		t.Fatalf("injectIncludeUsage = (injected %v, invalid %v), want (true, false)", injected, invalid)
+	}
+	if _, leaked := client[reqcommon.FieldIncludeUsage]; leaked {
+		t.Fatal("injection wrote include_usage into the client's stream_options map")
+	}
+	merged, _ := body[reqcommon.FieldStreamOptions].(map[string]any)
+	if merged[reqcommon.FieldIncludeUsage] != true || merged["include_obfuscation"] != false {
+		t.Fatalf("merged stream_options = %v, want the client's fields plus include_usage", merged)
+	}
+}

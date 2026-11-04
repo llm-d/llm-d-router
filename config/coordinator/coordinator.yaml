@@ -508,9 +508,9 @@ pipeline:
       #
       #   prompt_token_parity compares the prompt token count the decode
       #   worker reports in its usage block with the number of token IDs the
-      #   render step produced, which is what prefill ran on. It needs a
-      #   render step ahead of it: without rendered token IDs there is
-      #   nothing to compare and the parameter does nothing. The same
+      #   render step produced. It needs a render step ahead of it: without
+      #   rendered token IDs there is nothing to compare and the parameter
+      #   does nothing. The same
       #   parameter exists on conditional-decode, whose served cache hits
       #   are checked the same way. A difference
       #   means decode rendered a different prompt than prefill did: the

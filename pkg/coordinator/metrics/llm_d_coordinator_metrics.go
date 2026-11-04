@@ -269,15 +269,17 @@ var (
 	)
 )
 
-// Prompt-token parity. Recorded by the decode step when the decode worker's
-// usage reports a prompt token count different from the number of token IDs
-// the render step produced and the coordinator sent to prefill. Compare
-// against upstream_request_total{upstream="decode"} for a rate.
+// Prompt-token parity. Recorded by the decode step, and by conditional-decode
+// on a served hit, when the worker's usage reports a prompt token count
+// different from the number of token IDs the render step produced. A hit is
+// counted in upstream_request_total under upstream="conditional-decode", so
+// the rate's denominator is upstream_request_total{upstream="decode"} plus
+// conditional_decode_probes_total{result="served"}.
 var promptTokenMismatchTotal = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Subsystem: LLMDRouterCoordinatorSubsystem,
 		Name:      "prompt_token_mismatch_total",
-		Help:      metricsutil.HelpMsgWithStability("Total number of decode responses whose prompt token count differed from the rendered token count sent to prefill.", compbasemetrics.ALPHA),
+		Help:      metricsutil.HelpMsgWithStability("Total number of decode responses, including served conditional-decode hits, whose prompt token count differed from the rendered token count.", compbasemetrics.ALPHA),
 	},
 	parityLabels,
 )
