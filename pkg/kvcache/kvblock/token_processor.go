@@ -21,6 +21,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"math"
+	"strconv"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/fxamacker/cbor/v2"
@@ -92,6 +94,13 @@ type TokenProcessor interface {
 	// It returns a slice of generated Keys.
 	TokensToKVBlockKeys(
 		parentKey BlockHash, tokens []uint32, modelName string,
+		extraFeatures []*BlockExtraFeatures,
+	) ([]BlockHash, error)
+
+	// TokensToBigramKVBlockKeys hashes overlapping pages of blockSize+1 raw
+	// tokens, representing blockSize cached positions and one lookahead token.
+	TokensToBigramKVBlockKeys(
+		parentKey BlockHash, tokens []uint32, blockSize int, modelName string,
 		extraFeatures []*BlockExtraFeatures,
 	) ([]BlockHash, error)
 
@@ -198,6 +207,58 @@ func (db *chunkedTokenDatabase) hash(parent uint64, tokens []uint32, extra inter
 	return h.Sum64()
 }
 
+// FNV-64a parameters, as in hash/fnv.
+const (
+	fnv64Offset = 14695981039346656037
+	fnv64Prime  = 1099511628211
+)
+
+// hashCBORFNVBlock returns hash(parent, tokens, nil). It feeds the canonical
+// CBOR encoding of [parent, tokens, null] to FNV-64a byte by byte instead of
+// marshaling it.
+func hashCBORFNVBlock(parent uint64, tokens []uint32) uint64 {
+	h := fnvByte(fnv64Offset, 0x83) // array of 3
+	h = fnvCBORHead(h, 0, parent)
+	if tokens == nil {
+		h = fnvByte(h, 0xf6) // the encoder writes a nil slice as null
+	} else {
+		h = fnvCBORHead(h, 4, uint64(len(tokens)))
+		for _, t := range tokens {
+			h = fnvCBORHead(h, 0, uint64(t))
+		}
+	}
+	return fnvByte(h, 0xf6) // null
+}
+
+func fnvByte(h uint64, b byte) uint64 {
+	return (h ^ uint64(b)) * fnv64Prime
+}
+
+// fnvCBORHead hashes a CBOR item head: the major type with its argument in
+// the shortest form, as canonical encoding requires.
+func fnvCBORHead(h uint64, major byte, arg uint64) uint64 {
+	m := major << 5
+	var n int
+	switch {
+	case arg < 24:
+		return fnvByte(h, m|byte(arg))
+	case arg <= math.MaxUint8:
+		h, n = fnvByte(h, m|24), 1
+	case arg <= math.MaxUint16:
+		h, n = fnvByte(h, m|25), 2
+	case arg <= math.MaxUint32:
+		h, n = fnvByte(h, m|26), 4
+	default:
+		h, n = fnvByte(h, m|27), 8
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], arg)
+	for _, b := range buf[8-n:] {
+		h = fnvByte(h, b)
+	}
+	return h
+}
+
 // hashXXH64 computes one XXH64 digest over the parent hash (8 bytes
 // little-endian), the token IDs (4 bytes little-endian each, so keys are
 // identical across architectures and shareable through a Redis-backed index),
@@ -240,9 +301,12 @@ func (db *chunkedTokenDatabase) prefixHashes(
 		if extraFeatures[i] != nil {
 			extras = extraFeatures[i].MMHashes
 		}
-		if digest != nil {
+		switch {
+		case digest != nil:
 			prefix = hashXXH64(digest, prefix, chunk, extras)
-		} else {
+		case extras == nil:
+			prefix = hashCBORFNVBlock(prefix, chunk)
+		default:
 			prefix = db.hash(prefix, chunk, extras)
 		}
 		hashes[i] = prefix
@@ -277,6 +341,36 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 	extraFeatures []*BlockExtraFeatures,
 ) ([]BlockHash, error) {
 	chunks := db.chunkTokens(tokens)
+	keys, err := db.chunksToKVBlockKeys(parentKey, chunks, modelName, extraFeatures, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%w (blockSizeTokens=%d, tokens=%d)", err, db.BlockSizeTokens, len(tokens))
+	}
+	return keys, nil
+}
+
+// TokensToBigramKVBlockKeys hashes complete SGLang bigram pages.
+func (db *chunkedTokenDatabase) TokensToBigramKVBlockKeys(
+	parentKey BlockHash, tokens []uint32, blockSize int, modelName string,
+	extraFeatures []*BlockExtraFeatures,
+) ([]BlockHash, error) {
+	if blockSize <= 0 {
+		return nil, fmt.Errorf("bigram block size must be greater than 0, got %d", blockSize)
+	}
+	chunks := make([][]uint32, 0, max(0, (len(tokens)-1)/blockSize))
+	for i := 0; blockSize < len(tokens)-i; i += blockSize {
+		chunks = append(chunks, tokens[i:i+blockSize+1])
+	}
+	keys, err := db.chunksToKVBlockKeys(parentKey, chunks, modelName, extraFeatures, blockSize)
+	if err != nil {
+		return nil, fmt.Errorf("%w (blockSizeTokens=%d, tokens=%d)", err, blockSize, len(tokens))
+	}
+	return keys, nil
+}
+
+func (db *chunkedTokenDatabase) chunksToKVBlockKeys(
+	parentKey BlockHash, chunks [][]uint32, modelName string,
+	extraFeatures []*BlockExtraFeatures, bigramBlockSize int,
+) ([]BlockHash, error) {
 	if len(chunks) == 0 {
 		return nil, nil
 	}
@@ -291,13 +385,21 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 		currentParentHash = uint64(parentKey)
 	} else {
 		currentParentHash = db.getInitHash(modelName, digest)
+		if bigramBlockSize > 0 {
+			// Separate bigram pages from plain blocks and other page geometries.
+			format := []*BlockExtraFeatures{{MMHashes: []MMHash{
+				{Hash: "sglang-bigram"},
+				{Hash: strconv.Itoa(bigramBlockSize)},
+			}}}
+			currentParentHash = db.prefixHashes(currentParentHash, [][]uint32{nil}, format, digest)[0]
+		}
 	}
 
 	if extraFeatures == nil {
 		extraFeatures = make([]*BlockExtraFeatures, len(chunks))
 	} else if len(extraFeatures) != len(chunks) {
-		return nil, fmt.Errorf("extraFeatures length %d does not match token chunk count %d (blockSizeTokens=%d, tokens=%d)",
-			len(extraFeatures), len(chunks), db.BlockSizeTokens, len(tokens))
+		return nil, fmt.Errorf("extraFeatures length %d does not match token chunk count %d",
+			len(extraFeatures), len(chunks))
 	}
 
 	ph := db.prefixHashes(currentParentHash, chunks, extraFeatures, digest)

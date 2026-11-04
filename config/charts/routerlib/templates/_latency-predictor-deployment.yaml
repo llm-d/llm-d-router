@@ -1,0 +1,83 @@
+{{- define "llm-d-epp.latency-predictor-deployment" -}}
+{{- $lp := .Values.router.latencyPredictor -}}
+{{- if and $lp.enabled (eq (include "llm-d-router.latencyPredictor.mode" .) "service") -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-d-router.latencyPredictor.trainingName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.latencyPredictor.trainingSelectorLabels" . | nindent 4 }}
+spec:
+  # The training server holds its samples and models in an emptyDir, so a second
+  # replica would train on a disjoint sample set. Recreate keeps one server.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "llm-d-router.latencyPredictor.trainingSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-d-router.labels" . | nindent 8 }}
+        {{- include "llm-d-router.latencyPredictor.trainingSelectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ toYaml $lp.trainingServer.config | sha256sum }}
+    spec:
+      {{- with $lp.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.router.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      containers:
+      {{- include "llm-d-router.latencyPredictor.trainingContainer" . | nindent 8 }}
+      volumes:
+      {{- include "llm-d-router.latencyPredictor.trainingVolume" . | nindent 8 }}
+      {{- with include "llm-d-router.latencyPredictor.scheduling" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-d-router.latencyPredictor.predictionName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "llm-d-router.labels" . | nindent 4 }}
+    {{- include "llm-d-router.latencyPredictor.predictionSelectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ $lp.predictionServers.count }}
+  selector:
+    matchLabels:
+      {{- include "llm-d-router.latencyPredictor.predictionSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "llm-d-router.labels" . | nindent 8 }}
+        {{- include "llm-d-router.latencyPredictor.predictionSelectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ toYaml $lp.predictionServers.config | sha256sum }}
+    spec:
+      {{- with $lp.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.router.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      containers:
+      {{- include "llm-d-router.latencyPredictor.predictionContainer" (dict "root" . "index" 0) | nindent 8 }}
+      volumes:
+      {{- include "llm-d-router.latencyPredictor.predictionVolume" (dict "root" . "index" 0) | nindent 8 }}
+      {{- with include "llm-d-router.latencyPredictor.scheduling" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
+---
+{{- end -}}
+{{- end -}}

@@ -18,6 +18,7 @@ package runner
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -130,6 +131,8 @@ featureGates:
 			opts.PoolName = testPoolName
 
 			r := NewRunner()
+			r.servingCtx, r.cancelServing = context.WithCancel(context.WithoutCancel(ctx))
+			t.Cleanup(r.stopServing)
 			rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 			require.NoError(t, err)
 
@@ -149,7 +152,7 @@ featureGates:
 			endpointCandidates := contracts.EndpointCandidates(
 				requestcontrol.NewDatastoreEndpointCandidates(ds))
 			_, admissionController, controlPlane, _ :=
-				r.initAdmissionControl(ctx, opts, eppConfig, endpointCandidates)
+				r.initAdmissionControl(r.servingCtx, opts, eppConfig, endpointCandidates)
 
 			if wantEnabled {
 				require.IsType(t, &requestcontrol.FlowControlAdmissionController{}, admissionController)
@@ -187,4 +190,32 @@ func TestFeatureGatesFlagNotDuplicatedAcrossCalls(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, first, second, "the cached config should be returned")
 	require.Len(t, second.FeatureGates, 1, "the flag gate must not be appended twice")
+}
+
+func TestServingContext(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(enabled), func(t *testing.T) {
+			r := NewRunner()
+			t.Cleanup(r.stopServing)
+			opts := runserver.NewOptions()
+			opts.FeatureGates = []string{flowcontrol.FeatureGate + "=" + strconv.FormatBool(enabled)}
+			type lifecycleKey struct{}
+			key := lifecycleKey{}
+			ctx, cancel := context.WithCancel(context.WithValue(t.Context(), key, "request-serving"))
+			defer cancel()
+			r.servingCtx, r.cancelServing = context.WithCancel(context.WithoutCancel(ctx))
+			rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+			require.NoError(t, err)
+			ds := datastore.NewDatastore(r.servingCtx, r.setupMetricsCollection(opts))
+			_, err = r.parseConfigurationPhaseTwo(r.servingCtx, rawConfig, ds, opts.RefreshMetricsInterval)
+			require.NoError(t, err)
+			require.Same(t, r.servingCtx, r.PluginHandle.Context(), "serving dependencies must share their lifecycle")
+			require.Equal(t, "request-serving", r.PluginHandle.Context().Value(key))
+
+			cancel()
+			require.NoError(t, r.PluginHandle.Context().Err(), "serving dependencies must remain running during drain")
+			r.stopServing()
+			require.ErrorIs(t, r.PluginHandle.Context().Err(), context.Canceled)
+		})
+	}
 }

@@ -37,10 +37,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/eviction"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fcTypes "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
@@ -52,7 +52,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -88,8 +88,8 @@ func TestConcurrentSaturationReads(t *testing.T) {
 			schedEp := fwksched.NewEndpoint(pd.epMeta, datalayer.NewMetrics(), nil)
 			req := &fwksched.InferenceRequest{
 				RequestID: fmt.Sprintf("req-%d", i),
-				Body: &fwkrh.InferenceRequestBody{
-					TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
+				Body: &fwkrequest.InferenceRequestBody{
+					TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
 				},
 			}
 			result := &fwksched.SchedulingResult{
@@ -102,7 +102,7 @@ func TestConcurrentSaturationReads(t *testing.T) {
 			}
 			req.SchedulingResult = result
 			pd.producer.ResponseBody(ctx, req,
-				&requestcontrol.Response{EndOfStream: true}, pd.epMeta)
+				&fwkrh.Response{EndOfStream: true}, pd.epMeta)
 		}
 	}()
 
@@ -165,8 +165,8 @@ func TestSaturationFullLoop(t *testing.T) {
 		schedEp := fwksched.NewEndpoint(pd.epMeta, datalayer.NewMetrics(), nil)
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("prefill-%d", i),
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 			},
 		}
 		result := &fwksched.SchedulingResult{
@@ -454,8 +454,8 @@ func TestUsageLimitThresholdGatesDispatch(t *testing.T) {
 		schedEp := fwksched.NewEndpoint(pd.epMeta, datalayer.NewMetrics(), nil)
 		req := &fwksched.InferenceRequest{
 			RequestID: fmt.Sprintf("inflight-%d", i),
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 10)}}},
 			},
 		}
 		result := &fwksched.SchedulingResult{
@@ -701,7 +701,7 @@ func TestEvictionPipeline(t *testing.T) {
 
 	// Complete the protected request normally.
 	requestEvictor.ResponseBody(ctx, protectedReq,
-		&requestcontrol.Response{EndOfStream: true}, epMeta)
+		&fwkrh.Response{EndOfStream: true}, epMeta)
 
 	inFlight, evictable = requestEvictor.Stats()
 	require.Equal(t, 0, inFlight, "all requests should be cleaned up after eviction and completion")
@@ -907,7 +907,7 @@ func TestZombieCapacityStarvation(t *testing.T) {
 		endpointCandidates: nonEmptyCandidates(),
 		controllerCfg: &controller.Config{
 			// The sweep finalizes and removes an expired item in the same pass, so queue-wait expiry cannot strand a
-			// zombie. A caller deadline can: it finalizes the item where it sits and leaves the sweep to reclaim it.
+			// zombie. Caller cancellation can: it finalizes the item where it sits and leaves the sweep to reclaim it.
 			// The budgets therefore sit beyond the test's horizon and the callers give up instead.
 			DefaultRequestTTL:        1 * time.Minute,
 			NoEndpointRequestTTL:     1 * time.Minute,
@@ -918,33 +918,12 @@ func TestZombieCapacityStarvation(t *testing.T) {
 
 	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
 
-	// Fill capacity with 3 requests whose callers give up while they are queued.
-	expired := make(chan dispatchResult, 3)
-	for i := 0; i < 3; i++ {
-		id := fmt.Sprintf("zombie-%d", i)
-		go func() {
-			reqCtx, reqCancel := context.WithTimeout(h.ctx, 50*time.Millisecond)
-			defer reqCancel()
-			req := &testRequest{id: id, key: key, byteSize: 100}
-			outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
-			expired <- dispatchResult{id: id, outcome: outcome, err: err}
-		}()
-		time.Sleep(5 * time.Millisecond)
-	}
+	// Fill capacity with 3 requests and have their callers give up only once all 3 are observably queued: only an item
+	// that reached a queue holds the capacity this test goes on to observe.
+	release := h.fillQueue(t, key, 3, 100, func() bool { return h.reg.Stats().Global.Len == 3 })
+	release()
 
-	// Wait for all to be finalized. Each must be evicted rather than rejected: only an item that reached a queue holds
-	// the capacity this test goes on to observe.
-	for i := 0; i < 3; i++ {
-		select {
-		case r := <-expired:
-			require.ErrorIs(t, r.err, fcTypes.ErrEvicted, "zombie must have been queued before it was finalized")
-			require.ErrorIs(t, r.err, fcTypes.ErrTTLExpired)
-		case <-time.After(5 * time.Second):
-			t.Fatalf("zombie %d was not finalized", i)
-		}
-	}
-
-	// All 3 expired, but cleanup hasn't run (interval=10s).
+	// All 3 are finalized, but cleanup hasn't run (interval=10s).
 	// The new request is rejected because zombies still consume capacity
 	// in the registry's atomic counters.
 	newResult := make(chan dispatchResult, 1)
@@ -958,10 +937,10 @@ func TestZombieCapacityStarvation(t *testing.T) {
 
 	select {
 	case r := <-newResult:
-		// Zombie capacity starvation: the 3 expired items still occupy
+		// Zombie capacity starvation: the 3 finalized items still occupy
 		// capacity slots until the cleanup sweep reclaims them (interval=10s).
 		require.Equal(t, fcTypes.QueueOutcomeRejectedCapacity, r.outcome,
-			"post-zombie request should be rejected -- expired items consume capacity until cleanup sweep runs")
+			"post-zombie request should be rejected -- finalized items consume capacity until cleanup sweep runs")
 	case <-time.After(5 * time.Second):
 		t.Fatal("post-zombie request hung")
 	}
@@ -1004,8 +983,8 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	schedEp := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	oldReq := &fwksched.InferenceRequest{
 		RequestID: "old-req",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	oldResult := &fwksched.SchedulingResult{
@@ -1038,7 +1017,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	require.NotPanics(t, func() {
 		oldReq.SchedulingResult = oldResult
 		producer.ResponseBody(ctx, oldReq,
-			&requestcontrol.Response{EndOfStream: true}, epMeta)
+			&fwkrh.Response{EndOfStream: true}, epMeta)
 	})
 
 	// New tracker should still be at zero -- old request's cleanup must not
@@ -1060,8 +1039,8 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 	newSchedEp := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	newReq := &fwksched.InferenceRequest{
 		RequestID: "new-req",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	newResult := &fwksched.SchedulingResult{
@@ -1075,7 +1054,7 @@ func TestEndpointReregistrationSaturationAccuracy(t *testing.T) {
 
 	newReq.SchedulingResult = newResult
 	producer.ResponseBody(ctx, newReq,
-		&requestcontrol.Response{EndOfStream: true}, epMeta)
+		&fwkrh.Response{EndOfStream: true}, epMeta)
 	require.Equal(t, int64(0), producer.GetRequests(eid),
 		"counter must be exactly 0 after new request completes -- negative value indicates old OnEvicted corrupted the new tracker")
 }
@@ -1121,8 +1100,8 @@ func TestEndpointIdentityCollisionDuringPodReplacement(t *testing.T) {
 	schedEp := fwksched.NewEndpoint(epMeta, datalayer.NewMetrics(), nil)
 	req := &fwksched.InferenceRequest{
 		RequestID: "new-pod-req",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 50)}}},
 		},
 	}
 	result := &fwksched.SchedulingResult{

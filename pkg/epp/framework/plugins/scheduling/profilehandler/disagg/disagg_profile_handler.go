@@ -30,13 +30,15 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/observability/multimodal"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
 )
 
@@ -46,9 +48,11 @@ const (
 	// DisaggProfileHandlerType is the canonical type for the unified disaggregation profile handler.
 	DisaggProfileHandlerType = "disagg-profile-handler"
 
-	defaultDecodeProfile  = "decode"
-	defaultPrefillProfile = "prefill"
-	defaultEncodeProfile  = "encode"
+	// DefaultPrefillProfile is the prefill scheduling profile name used when none is configured.
+	DefaultPrefillProfile = "prefill"
+
+	defaultDecodeProfile = "decode"
+	defaultEncodeProfile = "encode"
 )
 
 // StageOrder defines the execution order of stages in the disaggregation profile handler.
@@ -192,7 +196,7 @@ func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, _ plugin.Hand
 		parameters.Profiles.Decode = defaultDecodeProfile
 	}
 	if parameters.Profiles.Prefill == "" {
-		parameters.Profiles.Prefill = defaultPrefillProfile
+		parameters.Profiles.Prefill = DefaultPrefillProfile
 	}
 	if parameters.Profiles.Encode == "" {
 		parameters.Profiles.Encode = defaultEncodeProfile
@@ -216,7 +220,7 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 // compile-time assertions
 var (
 	_ scheduling.ProfileHandler = &Handler{}
-	_ requestcontrol.PreRequest = &Handler{}
+	_ fwkrh.PreRequest          = &Handler{}
 	_ plugin.ProducerPlugin     = &Handler{}
 	_ plugin.ConsumerPlugin     = &Handler{}
 )
@@ -298,7 +302,7 @@ func (h *Handler) Consumes() plugin.DataDependencies {
 	consumed := plugin.DataDependencies{
 		Required: map[plugin.DataKey]any{
 			prefixMatchInfoDK:                    attrprefix.PrefixCacheMatchInfo{},
-			tokenproducer.TokenizedPromptDataKey: scheduling.TokenizedRequest{},
+			tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
 		},
 		Optional: map[plugin.DataKey]any{},
 	}
@@ -356,7 +360,9 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if request.TargetModel != "" {
 		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+	if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+		span.SetAttributes(semconv.GenAIRequestID(clientRequestID))
+	}
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	if h.stageOrder == StageOrderPrefillFirst {
@@ -580,7 +586,9 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 	if request.TargetModel != "" {
 		span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
 	}
-	span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+	if clientRequestID := request.Headers[reqcommon.RequestIDHeaderKey]; clientRequestID != "" {
+		span.SetAttributes(semconv.GenAIRequestID(clientRequestID))
+	}
 	span.SetAttributes(mmobs.SpanAttributes(request)...)
 
 	// Prefill header

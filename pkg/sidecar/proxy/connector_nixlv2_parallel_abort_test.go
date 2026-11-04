@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -106,7 +106,7 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch decode abort", fun
 		Expect(err).ToNot(HaveOccurred(), "the client must get a response, not a dropped connection")
 		Expect(status).To(Equal(http.StatusBadGateway))
 		Expect(status).ToNot(Equal(http.StatusOK), "an empty 200 would hide the decode failure")
-		Expect(body).To(ContainSubstring("decode aborted"))
+		Expect(body).To(ContainSubstring("internal error"))
 	})
 
 	It("tears the connection down when decode aborts after its response reaches the client", func() {
@@ -130,17 +130,25 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch decode abort", fun
 	})
 
 	It("keeps the KV-wait timeout's 504 when decode aborts as well", func() {
-		// Both failures race: the backstop owns the response, so the decode
-		// abort must not write a second status over the 504.
+		// Decode aborts after the backstop cancels prefill, so the timeout
+		// owns the response.
 		decodeClosed := make(chan struct{})
+		prefillCanceled := make(chan struct{})
 		stop := make(chan struct{})
 		prefill := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
 			select {
 			case <-r.Context().Done():
+				close(prefillCanceled)
 			case <-stop:
 			}
 		})
-		decode := abortingDecodeHandler("", decodeClosed, nil)
+		decode := abortingDecodeHandler("", decodeClosed, func() {
+			select {
+			case <-prefillCanceled:
+			case <-stop:
+			}
+		})
 
 		env := startParallelCommitProxy(prefill, decode, func(cfg *Config) {
 			cfg.MoRIIOParallelDecodeWaitTimeout = 300 * time.Millisecond

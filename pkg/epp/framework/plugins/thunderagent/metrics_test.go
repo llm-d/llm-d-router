@@ -40,6 +40,7 @@ func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 		`endpoint_capacity_tokens{endpoint="default/pod-a"}`:    1600,
 		`endpoint_working_set_tokens{endpoint="default/pod-a"}`: 300,
 		`sessions{state="idle"}`:                                1,
+		`sessions{state="paused"}`:                              0,
 		`sessions{state="running"}`:                             0,
 	}, gather(t, reg))
 
@@ -51,6 +52,7 @@ func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 
 	require.Equal(t, map[string]float64{
 		`sessions{state="idle"}`:    0,
+		`sessions{state="paused"}`:  0,
 		`sessions{state="running"}`: 0,
 	}, gather(t, reg))
 }

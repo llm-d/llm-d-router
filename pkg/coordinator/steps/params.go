@@ -32,8 +32,6 @@ const (
 	ParamECConnector = "ec_connector"
 )
 
-const ModalityImage = "image"
-
 func buildKVConnector(params map[string]any) (kv.Connector, error) {
 	name, err := paramString(params, ParamKVConnector)
 	if err != nil {

@@ -1,0 +1,348 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package disaggregatedsetrollout
+
+import (
+	"encoding/json"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
+)
+
+func validConfig() Config {
+	return Config{
+		Scope: Scope{
+			LabelSelector: "disaggregatedset.x-k8s.io/name=my-set",
+		},
+		RevisionGating: &RevisionGating{
+			RevisionHeaderName: "x-llm-d-disagg-revision",
+			RevisionLabelKey:   "disaggregatedset.x-k8s.io/revision",
+			RoleLabelKey:       "disaggregatedset.x-k8s.io/role",
+			Mode:               GatingModeSum,
+			RequiredRoles:      []string{"prefill", "decode"},
+		},
+	}
+}
+
+func TestValidate_Valid(t *testing.T) {
+	cfg := validConfig()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+}
+
+func TestValidate_MissingScopeSelector(t *testing.T) {
+	cfg := validConfig()
+	cfg.Scope.LabelSelector = ""
+	assertValidateError(t, cfg, "scope.labelSelector")
+}
+
+func TestValidate_UnparsableScopeSelector(t *testing.T) {
+	cfg := validConfig()
+	cfg.Scope.LabelSelector = "not a valid selector!!"
+	assertValidateError(t, cfg, "scope.labelSelector")
+}
+
+func TestValidate_GatingDefaults(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating.RevisionHeaderName = ""
+	cfg.RevisionGating.RevisionLabelKey = ""
+	cfg.RevisionGating.RoleLabelKey = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty protocol fields should default silently: %v", err)
+	}
+	if cfg.RevisionGating.RevisionHeaderName != DefaultRevisionHeader {
+		t.Fatalf("want default %q, got %q", DefaultRevisionHeader, cfg.RevisionGating.RevisionHeaderName)
+	}
+	if cfg.RevisionGating.RevisionLabelKey != DefaultRevisionLabel {
+		t.Fatalf("want default %q, got %q", DefaultRevisionLabel, cfg.RevisionGating.RevisionLabelKey)
+	}
+	if cfg.RevisionGating.RoleLabelKey != DefaultRoleLabel {
+		t.Fatalf("want default %q, got %q", DefaultRoleLabel, cfg.RevisionGating.RoleLabelKey)
+	}
+	if !cfg.RevisionGating.coordinationEnabled() {
+		t.Fatal("coordination should default to enabled")
+	}
+}
+
+func TestValidate_GatingRequiredRolesEmpty(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating.RequiredRoles = nil
+	assertValidateError(t, cfg, "revisionGating.requiredRoles")
+}
+
+func TestValidate_GatingRequiredRolesRejectsDuplicates(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating.RequiredRoles = []string{"prefill", "prefill"}
+	assertValidateError(t, cfg, "duplicate role")
+}
+
+func TestValidate_GatingRequiredRolesRejectsEmptyRole(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating.RequiredRoles = []string{"prefill", ""}
+	assertValidateError(t, cfg, "revisionGating.requiredRoles[1]")
+}
+
+func TestValidate_GatingRequired(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating = nil
+	assertValidateError(t, cfg, "revisionGating is required")
+}
+
+func TestValidate_GatingUnknownMode(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating.Mode = "bogus"
+	assertValidateError(t, cfg, "revisionGating.mode")
+}
+
+func TestValidate_GatingMaxRole(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating.Mode = GatingModeMaxRole
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("gating.mode=max-role should validate: %v", err)
+	}
+	cfg.RevisionGating.RequiredRoles = nil
+	assertValidateError(t, cfg, "revisionGating.requiredRoles")
+}
+
+func TestValidate_GatingDisabledSkipsSubValidation(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating.Mode = GatingModeDisabled
+	cfg.RevisionGating.RequiredRoles = nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("gating.mode=disabled should validate without requiredRoles: %v", err)
+	}
+}
+
+func TestGating_Active(t *testing.T) {
+	if (*RevisionGating)(nil).Active() {
+		t.Errorf("nil should not be active")
+	}
+	sum := &RevisionGating{Mode: GatingModeSum, RequiredRoles: []string{"r"}}
+	if !sum.Active() {
+		t.Errorf("mode=sum with requiredRoles should be active")
+	}
+	sumMissingSub := &RevisionGating{Mode: GatingModeSum}
+	if sumMissingSub.Active() {
+		t.Errorf("mode=sum without requiredRoles should not be active")
+	}
+	maxRole := &RevisionGating{Mode: GatingModeMaxRole, RequiredRoles: []string{"r"}}
+	if !maxRole.Active() {
+		t.Errorf("mode=max-role with requiredRoles should be active")
+	}
+	maxRoleMissingSub := &RevisionGating{Mode: GatingModeMaxRole}
+	if maxRoleMissingSub.Active() {
+		t.Errorf("mode=max-role without requiredRoles should not be active")
+	}
+	disabled := &RevisionGating{Mode: GatingModeDisabled, RequiredRoles: []string{"r"}}
+	if disabled.Active() {
+		t.Errorf("mode=disabled should not be active")
+	}
+	unknown := &RevisionGating{Mode: "bogus"}
+	if unknown.Active() {
+		t.Errorf("unknown mode should not be active")
+	}
+}
+
+func TestRevisionGating_UnmarshalJSON_LowercasesHeaderName(t *testing.T) {
+	// Normalisation is at the JSON boundary; construction in Go leaves
+	// the field alone.
+	raw := []byte(`{"revisionHeaderName":"X-LLM-D-Disagg-Revision","mode":"sum","requiredRoles":["prefill","decode"]}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if gating.RevisionHeaderName != "x-llm-d-disagg-revision" {
+		t.Fatalf("header not lowered on unmarshal: got %q", gating.RevisionHeaderName)
+	}
+	if got := strings.Join(gating.RequiredRoles, ","); got != "prefill,decode" {
+		t.Fatalf("requiredRoles = %q, want prefill,decode", got)
+	}
+}
+
+func TestRevisionGating_UnmarshalJSON_DisablesCoordination(t *testing.T) {
+	raw := []byte(`{"mode":"sum","requiredRoles":["prefill","decode"],"disableCoordination":true}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if gating.coordinationEnabled() {
+		t.Fatal("disableCoordination=true should disable coordination")
+	}
+}
+
+func TestRevisionGating_UnmarshalJSON_RejectsOldNestedRoles(t *testing.T) {
+	raw := []byte(`{"mode":"sum","requireRoles":{"values":["prefill","decode"]}}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("want unknown field error, got %v", err)
+	}
+}
+
+func TestValidate_LeavesHeaderNameAloneOnInCodeConstruction(t *testing.T) {
+	// Validate must not mutate; normalisation is at unmarshal time.
+	cfg := validConfig()
+	cfg.RevisionGating.RevisionHeaderName = "X-LLM-D-Disagg-Revision"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("mixed-case header name should validate: %v", err)
+	}
+	if cfg.RevisionGating.RevisionHeaderName != "X-LLM-D-Disagg-Revision" {
+		t.Fatalf("Validate mutated RevisionHeaderName: got %q", cfg.RevisionGating.RevisionHeaderName)
+	}
+}
+
+func TestRevisionGating_UnmarshalJSON_Affinity(t *testing.T) {
+	raw := []byte(`{"mode":"sum","requiredRoles":["prefill","decode"],"affinity":{"mode":"prefix","sources":[{"header":"X-Session-ID"},{"attribute":"agent-identity"}]}}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if gating.affinityMode() != AffinityModePrefix {
+		t.Fatalf("affinity mode = %q, want %q", gating.affinityMode(), AffinityModePrefix)
+	}
+	want := []sessionaffinity.SessionIDSource{{Header: "X-Session-ID"}, {Attribute: "agent-identity"}}
+	if !slices.Equal(gating.Affinity.Sources, want) {
+		t.Fatalf("sources = %+v, want %+v", gating.Affinity.Sources, want)
+	}
+
+	unknown := []byte(`{"mode":"sum","requiredRoles":["prefill"],"affinity":{"mode":"prefix","sessionHeader":"x"}}`)
+	if err := json.Unmarshal(unknown, &gating); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("want unknown field error, got %v", err)
+	}
+}
+
+func TestValidate_Affinity(t *testing.T) {
+	cfg := validConfig()
+	if cfg.RevisionGating.affinityMode() != AffinityModeNone {
+		t.Fatalf("affinity should default to %q", AffinityModeNone)
+	}
+	for _, affinity := range []RevisionAffinity{
+		{},
+		{Mode: AffinityModeNone},
+		{Mode: AffinityModePrefix},
+		{Mode: AffinityModePrefix, Sources: []sessionaffinity.SessionIDSource{{Header: "x-session-id"}, {Attribute: "agent-identity"}}},
+	} {
+		cfg := validConfig()
+		cfg.RevisionGating.Affinity = &affinity
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("affinity %+v rejected: %v", affinity, err)
+		}
+	}
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Mode: "sticky"}
+	assertValidateError(t, cfg, "revisionGating.affinity.mode")
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Sources: []sessionaffinity.SessionIDSource{{Header: "x-session-id"}}}
+	assertValidateError(t, cfg, "revisionGating.affinity.sources requires")
+
+	cfg.RevisionGating.Affinity = &RevisionAffinity{Mode: AffinityModePrefix, Sources: []sessionaffinity.SessionIDSource{{Header: "x", Attribute: "y"}}}
+	assertValidateError(t, cfg, "revisionGating.affinity.sources[0]")
+}
+
+func TestRevisionGating_UnmarshalJSON_PrefixCache(t *testing.T) {
+	raw := []byte(`{"mode":"sum","requiredRoles":["prefill","decode"],"affinity":{"mode":"prefix",` +
+		`"prefixCache":{"producerName":"my-prefix","minLeadBlocks":4,"shareSlack":0}}}`)
+	var gating RevisionGating
+	if err := json.Unmarshal(raw, &gating); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	prefixCache := gating.Affinity.PrefixCache
+	if prefixCache == nil || prefixCache.ProducerName != "my-prefix" || prefixCache.MinLeadBlocks != 4 ||
+		prefixCache.ShareSlack == nil || *prefixCache.ShareSlack != 0 {
+		t.Fatalf("prefixCache = %+v", prefixCache)
+	}
+
+	unknown := []byte(`{"mode":"sum","requiredRoles":["prefill"],"affinity":{"mode":"prefix","prefixCache":{"minLead":2}}}`)
+	if err := json.Unmarshal(unknown, &gating); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("want unknown field error, got %v", err)
+	}
+}
+
+func TestValidate_PrefixCache(t *testing.T) {
+	cfg := prefixCacheConfig(RevisionPrefixCache{})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	prefixCache := cfg.RevisionGating.Affinity.PrefixCache
+	if prefixCache.MinLeadBlocks != DefaultPrefixCacheMinLeadBlocks {
+		t.Fatalf("minLeadBlocks = %d, want default %d", prefixCache.MinLeadBlocks, DefaultPrefixCacheMinLeadBlocks)
+	}
+	if prefixCache.ShareSlack == nil || *prefixCache.ShareSlack != DefaultPrefixCacheShareSlack {
+		t.Fatalf("shareSlack = %v, want default %v", prefixCache.ShareSlack, DefaultPrefixCacheShareSlack)
+	}
+
+	zero := 0.0
+	cfg = prefixCacheConfig(RevisionPrefixCache{MinLeadBlocks: 1, ShareSlack: &zero})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := cfg.RevisionGating.Affinity.PrefixCache; got.MinLeadBlocks != 1 || *got.ShareSlack != 0 {
+		t.Fatalf("explicit values overwritten: %+v", got)
+	}
+
+	cfg = validConfig()
+	cfg.RevisionGating.Affinity = &RevisionAffinity{PrefixCache: &RevisionPrefixCache{}}
+	assertValidateError(t, cfg, "revisionGating.affinity.prefixCache requires revisionGating.affinity.mode=prefix")
+
+	cfg = prefixCacheConfig(RevisionPrefixCache{})
+	cfg.RevisionGating.Mode = GatingModeDisabled
+	assertValidateError(t, cfg, "revisionGating.affinity.prefixCache requires revisionGating.mode")
+
+	assertValidateError(t, prefixCacheConfig(RevisionPrefixCache{MinLeadBlocks: -1}), "minLeadBlocks must be positive")
+
+	for _, slack := range []float64{-0.1, 1.1} {
+		assertValidateError(t, prefixCacheConfig(RevisionPrefixCache{ShareSlack: &slack}), "shareSlack must be between 0 and 1")
+	}
+}
+
+func assertValidateError(t *testing.T, cfg Config, wantSubstring string) {
+	t.Helper()
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatalf("expected error containing %q, got nil", wantSubstring)
+	}
+	if !strings.Contains(err.Error(), wantSubstring) {
+		t.Fatalf("error %q does not contain %q", err.Error(), wantSubstring)
+	}
+}
+
+func TestValidate_Overflow(t *testing.T) {
+	cfg := validConfig()
+	cfg.RevisionGating.Overflow = &RevisionOverflow{GuardPluginName: "prefill-guard"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("overflow rejected: %v", err)
+	}
+	if cfg.RevisionGating.Overflow.Role != DefaultOverflowRole {
+		t.Fatalf("overflow role defaults to %q, got %q", DefaultOverflowRole, cfg.RevisionGating.Overflow.Role)
+	}
+	for _, tc := range []struct {
+		mode     GatingMode
+		overflow RevisionOverflow
+		want     string
+	}{
+		{GatingModeSum, RevisionOverflow{}, "guardPluginName is required"},
+		{GatingModeSum, RevisionOverflow{GuardPluginName: "prefill-guard", Role: "encode"}, "must be one of revisionGating.requiredRoles"},
+		{GatingModeDisabled, RevisionOverflow{GuardPluginName: "prefill-guard"}, "revisionGating.overflow requires revisionGating.mode"},
+	} {
+		cfg := validConfig()
+		cfg.RevisionGating.Mode = tc.mode
+		cfg.RevisionGating.Overflow = &tc.overflow
+		assertValidateError(t, cfg, tc.want)
+	}
+}

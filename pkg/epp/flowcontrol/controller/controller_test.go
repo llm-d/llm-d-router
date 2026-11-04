@@ -32,10 +32,14 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/utils/clock"
 	testclock "k8s.io/utils/clock/testing"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
@@ -47,6 +51,7 @@ import (
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // --- Test Harness & Fixtures ---
@@ -465,7 +470,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
-			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
+			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
 
 			result := make(chan error, 1)
 			go func() {
@@ -489,7 +494,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
 			reqCtx, reqCancel := context.WithCancel(context.Background())
-			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
+			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
 
 			reqCancel()
 			cancel()
@@ -505,7 +510,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
-			item := internal.NewItem(newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
+			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
 			item.SetHandle(&fwkfcmocks.MockQueueItemHandle{})
 
 			cancel()
@@ -1272,4 +1277,113 @@ func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T
 	assert.Equal(t, 0, capturedKey.Priority,
 		"fallback request must be enqueued at priority 0, not its original unprovisioned priority")
 	assert.Equal(t, "batch", capturedKey.ID, "fallback must preserve the flow ID")
+}
+
+// TestFlowController_EnqueueAndWait_QueueDurationCarriesTraceExemplar checks that the queue duration exemplar links
+// to the trace of the request passed to EnqueueAndWait, although the item is finalized on another goroutine.
+func TestFlowController_EnqueueAndWait_QueueDurationCarriesTraceExemplar(t *testing.T) {
+	t.Parallel()
+	metrics.Register()
+
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+	recordingCtx, span := tp.Tracer("queue-exemplar-test").Start(context.Background(), "request")
+	// The span must outlive the parallel subtests, which run after this function returns.
+	t.Cleanup(func() { span.End() })
+
+	callerSpan := func(flags trace.TraceFlags) context.Context {
+		return trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID:    trace.TraceID{1},
+			SpanID:     trace.SpanID{1},
+			TraceFlags: flags,
+		}))
+	}
+
+	testCases := []struct {
+		name string
+		ctx  context.Context
+		// wantLabels is nil when no exemplar is expected.
+		wantLabels map[string]string
+	}{
+		{
+			name: "recording span",
+			ctx:  recordingCtx,
+			wantLabels: map[string]string{
+				"trace_id": span.SpanContext().TraceID().String(),
+				"span_id":  span.SpanContext().SpanID().String(),
+			},
+		},
+		{
+			name:       "sampled caller span",
+			ctx:        callerSpan(trace.FlagsSampled),
+			wantLabels: map[string]string{"trace_id": trace.TraceID{1}.String()},
+		},
+		{
+			name: "unsampled caller span",
+			ctx:  callerSpan(0),
+		},
+		{
+			name: "no span",
+			ctx:  context.Background(),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			processor := &mockProcessor{
+				SubmitFunc: func(item *internal.FlowItem) error {
+					go item.FinalizeWithError(nil)
+					return nil
+				},
+			}
+			h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: time.Minute}, nil, processor)
+
+			// A flow ID per case keeps each case on its own series.
+			flowID := "queue-exemplar/" + tc.name
+			outcome, err := h.fc.EnqueueAndWait(tc.ctx, newTestRequest(flowcontrol.FlowKey{ID: flowID, Priority: 100}))
+			require.NoError(t, err)
+			require.Equal(t, types.QueueOutcomeDispatched, outcome)
+
+			hist := queueDurationHistogram(t, flowID)
+			require.Equal(t, uint64(1), hist.GetSampleCount())
+			var exemplars []map[string]string
+			for _, bucket := range hist.GetBucket() {
+				if bucket.GetExemplar() == nil {
+					continue
+				}
+				labels := map[string]string{}
+				for _, lp := range bucket.GetExemplar().GetLabel() {
+					labels[lp.GetName()] = lp.GetValue()
+				}
+				exemplars = append(exemplars, labels)
+			}
+			if tc.wantLabels == nil {
+				require.Empty(t, exemplars)
+				return
+			}
+			require.Equal(t, []map[string]string{tc.wantLabels}, exemplars)
+		})
+	}
+}
+
+// queueDurationHistogram returns the flow control queue duration series recorded for a flow ID.
+func queueDurationHistogram(t *testing.T, flowID string) *dto.Histogram {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, mf := range families {
+		if mf.GetName() != "llm_d_epp_flow_control_request_queue_duration_seconds" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "fairness_id" && lp.GetValue() == flowID {
+					return m.GetHistogram()
+				}
+			}
+		}
+	}
+	require.FailNow(t, "no queue duration series recorded", "fairness_id %q", flowID)
+	return nil
 }

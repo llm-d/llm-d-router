@@ -133,7 +133,11 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	}
 
 	_, execErr := pipe.Exec(ctx)
-	if execErr != nil {
+	if execErr != nil && isPipelineFailure(results) {
+		// At least one command failed with something other than a per-key
+		// type conflict: the pipeline round-trip itself broke (for example
+		// the connection dropped), not just one key. There is no partial
+		// result worth salvaging.
 		return nil, fmt.Errorf("redis pipeline execution failed: %w", execErr)
 	}
 
@@ -172,6 +176,21 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 	}
 
 	return podsPerKey, nil
+}
+
+// isPipelineFailure reports whether a non-nil pipe.Exec error is a
+// transport/server-level failure rather than per-key type conflicts. A
+// connection, timeout, or server-wide failure fails at least one command
+// with an error other than WRONGTYPE; a key-type collision (for example a
+// stale key of the wrong type sharing the request-key namespace) only ever
+// produces WRONGTYPE, even when it is the only key in the batch.
+func isPipelineFailure(results []*redis.StringSliceCmd) bool {
+	for _, cmd := range results {
+		if err := cmd.Err(); err != nil && !redis.HasErrorPrefix(err, "WRONGTYPE") {
+			return true
+		}
+	}
+	return false
 }
 
 // Add adds a set of keys and their associated pod entries to the index backend.
@@ -372,7 +391,7 @@ func redisEngineKey(engineKey BlockHash) string {
 // Clear removes every hash field for the pod across all request-key hashes and
 // device tiers. Each field is a JSON-encoded PodEntry, so matching decodes the
 // field and compares PodIdentifier — catching every tier, group, and speculative
-// variant. It pages the keyspace with SCAN (skipping engine: keys) and HDELs
+// variant. It pages the keyspace with SCAN (skipping non-hash keys) and HDELs
 // the pod's fields. O(keyspace), but Clear is rare and
 // off the Lookup/Add hot path. Because it deletes from the shared store, it is
 // correct for multi-replica deployments with no cross-process coordination.
@@ -383,15 +402,11 @@ func (r *RedisIndex) Clear(ctx context.Context, podIdentifier string) error {
 	removed := 0
 	var cursor uint64
 	for {
-		keys, next, err := r.RedisClient.Scan(ctx, cursor, "*", scanBatch).Result()
+		keys, next, err := r.RedisClient.ScanType(ctx, cursor, "*", scanBatch, "hash").Result()
 		if err != nil {
 			return fmt.Errorf("clear scan failed: %w", err)
 		}
 		for _, key := range keys {
-			if strings.HasPrefix(key, "engine:") {
-				continue // engine:<hash> ZSETs hold no pod fields
-			}
-
 			fields, err := r.RedisClient.HKeys(ctx, key).Result()
 			if err != nil {
 				return fmt.Errorf("clear hkeys failed for %s: %w", key, err)

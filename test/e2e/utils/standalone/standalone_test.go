@@ -19,6 +19,9 @@ package standalone
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -27,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -62,18 +66,25 @@ func testConfig(namespace, image string) Config {
 
 func TestStandaloneChart(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		namespace string
-		replicas  int
-		ports     []int32
+		name                string
+		namespace           string
+		replicas            int
+		ports               []int32
+		failOpen            *bool
+		healthCheckInterval string
 	}{
-		{"single", "e2e-1", 1, []int32{8000}},
-		{"leader-election", "e2e-2", 3, []int32{8000}},
-		{"data-parallel", "e2e-3", 1, []int32{8000, 8001}},
+		{"single", "e2e-1", 1, []int32{8000}, nil, ""},
+		{"leader-election", "e2e-2", 3, []int32{8000}, nil, ""},
+		{"data-parallel", "e2e-3", 1, []int32{8000, 8001}, nil, ""},
+		{"fail-open", "e2e-4", 1, []int32{8000}, ptr.To(true), "1s"},
+		{"fail-closed", "e2e-5", 1, []int32{8000}, ptr.To(false), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			image := "registry.example:5000/team/router:dev"
-			router, err := renderRouter(context.Background(), testConfig(tc.namespace, image), simpleConfig, tc.replicas, tc.ports)
+			cfg := testConfig(tc.namespace, image)
+			cfg.FailOpen = tc.failOpen
+			cfg.HealthCheckInterval = tc.healthCheckInterval
+			router, err := renderRouter(context.Background(), cfg, simpleConfig, tc.replicas, tc.ports)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,6 +137,9 @@ func TestStandaloneChart(t *testing.T) {
 					t.Errorf("missing EPP flag %s", flag)
 				}
 			}
+			if !strings.Contains(strings.Join(args, "\n"), "--health-checking=true") {
+				t.Fatal("Envoy requires EPP's gRPC health service")
+			}
 			hasElection := strings.Contains(strings.Join(args, "\n"), "--ha-enable-leader-election")
 			if hasElection != (tc.replicas > 1) {
 				t.Fatalf("leader election enabled = %t for %d replicas", hasElection, tc.replicas)
@@ -138,8 +152,16 @@ func TestStandaloneChart(t *testing.T) {
 				t.Fatal("plugin configuration changed during rendering")
 			}
 			envoy, _, _ := unstructured.NestedString(objects["ConfigMap/envoy"].Object, "data", "envoy.yaml")
-			if !strings.Contains(envoy, "failure_mode_allow: false") || !strings.Contains(envoy, "address: 127.0.0.1") {
-				t.Fatal("expected chart fail-closed sidecar proxy configuration")
+			failOpen := tc.failOpen != nil && *tc.failOpen
+			if !strings.Contains(envoy, fmt.Sprintf("failure_mode_allow: %t", failOpen)) || !strings.Contains(envoy, "address: 127.0.0.1") {
+				t.Fatal("unexpected sidecar proxy configuration")
+			}
+			healthCheckInterval := tc.healthCheckInterval
+			if healthCheckInterval == "" {
+				healthCheckInterval = "10s"
+			}
+			if !strings.Contains(envoy, "interval: "+healthCheckInterval) {
+				t.Fatalf("Envoy health-check interval must be %s", healthCheckInterval)
 			}
 			pool := objects["InferencePool/"+poolName]
 			ports, _, _ := unstructured.NestedSlice(pool.Object, "spec", "targetPorts")
@@ -171,6 +193,32 @@ func TestStandaloneChart(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStandaloneChartDefaults(t *testing.T) {
+	defaultValues := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(defaultValues, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalValuesPath := valuesPath
+	valuesPath = defaultValues
+	t.Cleanup(func() { valuesPath = originalValuesPath })
+
+	cfg := testConfig("e2e-defaults", "registry.example:5000/team/router:dev")
+	router, err := renderRouter(context.Background(), cfg, simpleConfig, 1, []int32{8000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, obj := range router.objects {
+		if obj.GetKind() == "ConfigMap" && obj.GetName() == "envoy" {
+			envoy, _, _ := unstructured.NestedString(obj.Object, "data", "envoy.yaml")
+			if !strings.Contains(envoy, "failure_mode_allow: true") {
+				t.Fatal("unset fail-open must preserve the chart default")
+			}
+			return
+		}
+	}
+	t.Fatal("chart did not render the Envoy configuration")
 }
 
 func TestStandaloneImageValues(t *testing.T) {

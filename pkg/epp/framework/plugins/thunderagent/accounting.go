@@ -20,8 +20,11 @@ import (
 	"context"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -30,7 +33,7 @@ import (
 // estimate on the request for ResponseBody to remove. A session can have
 // several turns in flight at once (parallel sub-agents), so each turn charges
 // and later removes only its own estimate.
-func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
+func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
 	id := sessionID(request)
 	if id == "" {
 		return nil
@@ -48,22 +51,38 @@ func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.Inference
 	now := time.Now()
 	m := a.mgr
 	m.mu.Lock()
+	movedFrom := ""
+	if prev, ok := m.sessions[id]; ok && prev.class() == classAdmitted && prev.endpoint.id != md.ID.String() {
+		movedFrom = prev.endpoint.id
+	}
 	s := m.bindLocked(id, m.ensureEndpointLocked(md.ID.String(), capacity, now))
+	resumed := s.paused
+	s.paused = false
+	s.reservedUntil = time.Time{}
 	// At least one token, so inflightTokens is nonzero exactly while a turn
 	// is in flight.
 	estimate := max(estimateTokens(request.RequestSizeBytes), 1)
 	s.inflightTokens += estimate
+	s.turnCount++
 	s.lastActivity = now
 	m.mu.Unlock()
 
 	request.PutAttribute(inflightEstimateKey, estimate)
+
+	if resumed {
+		a.metrics.resumes.Inc()
+	}
+	if movedFrom != "" {
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Session moved off its pod: the pod was filtered out, or other scorers outweigh thunder-agent",
+			"fromPod", movedFrom, "toPod", md.ID.String())
+	}
 	return nil
 }
 
 // ResponseBody settles a completed turn: it removes the turn's own in-flight
 // estimate and replaces the session's committed tokens with the usage total.
 // Requests PreRequest did not charge are ignored.
-func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
+func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}
@@ -91,6 +110,7 @@ func (a *ThunderAgent) ResponseBody(_ context.Context, request *fwksched.Inferen
 	case estimate > s.committedTokens:
 		s.committedTokens = estimate
 	}
+	s.lastResponseAt = now
 	s.lastActivity = now
 	m.mu.Unlock()
 }

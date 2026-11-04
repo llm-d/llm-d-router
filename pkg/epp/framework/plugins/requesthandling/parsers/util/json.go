@@ -24,6 +24,7 @@ import (
 	"io"
 	"slices"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -37,7 +38,7 @@ func ParseRenderRequest(data []byte) (*fwkrh.ParseResult, error) {
 	}
 	model, _ := payload["model"].(string)
 	return &fwkrh.ParseResult{
-		Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.PayloadMap(payload), RawBody: data, Model: model, RenderRequest: true},
+		Body:                   &fwkrequest.InferenceRequestBody{Payload: fwkrequest.PayloadMap(payload), RawBody: data, Model: model, RenderRequest: true},
 		SkipResponseProcessing: true,
 	}, nil
 }
@@ -68,6 +69,22 @@ func UnmarshalEnvelope(data []byte, rawFields ...string) (map[string]any, error)
 		result[key] = value
 	}
 	return result, nil
+}
+
+// ObjectField returns payload[key] as a JSON object. UnmarshalEnvelope keeps
+// object fields as json.RawMessage, so such a value is decoded with Unmarshal;
+// a caller that edits the result must store it back under key.
+func ObjectField(payload map[string]any, key string) (map[string]any, bool) {
+	switch value := payload[key].(type) {
+	case map[string]any:
+		return value, true
+	case json.RawMessage:
+		var decoded map[string]any
+		if err := Unmarshal(value, &decoded); err == nil && decoded != nil {
+			return decoded, true
+		}
+	}
+	return nil, false
 }
 
 // Unmarshal decodes one JSON value, preserves numbers as json.Number, and rejects trailing data.

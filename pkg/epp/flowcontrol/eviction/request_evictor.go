@@ -26,10 +26,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -112,7 +111,7 @@ func (p *RequestEvictor) PreRequest(
 		return nil
 	}
 	metadata := targetEndpoint.GetMetadata()
-	requestID := request.Headers[reqcommon.RequestIDHeaderKey]
+	requestID := request.RequestID
 	if requestID == "" {
 		return nil
 	}
@@ -153,7 +152,7 @@ func (p *RequestEvictor) PreRequest(
 func (p *RequestEvictor) ResponseBody(
 	ctx context.Context,
 	request *scheduling.InferenceRequest,
-	response *requestcontrol.Response,
+	response *fwkrh.Response,
 	targetEndpoint *datalayer.EndpointMetadata,
 ) {
 	if !response.EndOfStream {
@@ -162,7 +161,7 @@ func (p *RequestEvictor) ResponseBody(
 	if request == nil {
 		return
 	}
-	requestID := request.Headers[reqcommon.RequestIDHeaderKey]
+	requestID := request.RequestID
 	if requestID == "" {
 		return
 	}

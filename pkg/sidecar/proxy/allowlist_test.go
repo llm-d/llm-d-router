@@ -33,16 +33,135 @@ limitations under the License.
 package proxy
 
 import (
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	"context"
+	"errors"
+	"sync"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clientfeatures "k8s.io/client-go/features"
+	clientfeaturestesting "k8s.io/client-go/features/testing"
+	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/set"
 )
 
+// newTestAllowlistValidator creates an enabled validator with a fake Kubernetes client.
+func newTestAllowlistValidator() *AllowlistValidator {
+	GinkgoHelper()
+	clientfeaturestesting.SetFeatureDuringTest(GinkgoTB(), clientfeatures.WatchListClient, false)
+	poolGVR := schema.GroupVersionResource{Group: routing.InferencePoolAPIGroup, Version: "v1", Resource: inferencePoolResource}
+	podGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		poolGVR: "InferencePoolList",
+		podGVR:  "PodList",
+	})
+	validator := &AllowlistValidator{
+		enabled:        true,
+		dynamicClient:  client,
+		namespace:      "test",
+		poolName:       "test",
+		gvr:            poolGVR,
+		allowedTargets: set.New[string](),
+		podInformers:   make(map[string]cache.SharedInformer),
+		podStopChans:   make(map[string]chan struct{}),
+		poolPorts:      make(map[string][]string),
+		stopCh:         make(chan struct{}),
+	}
+	return validator
+}
+
 var _ = Describe("AllowlistValidator", func() {
+	Context("lifecycle", func() {
+		var validator *AllowlistValidator
+
+		BeforeEach(func() {
+			validator = newTestAllowlistValidator()
+			DeferCleanup(validator.Stop)
+		})
+
+		It("should reject repeated starts and allow repeated stops", func() {
+			ctx := newTestContext()
+			Expect(validator.Start(ctx)).To(Succeed())
+			Expect(validator.Start(ctx)).To(HaveOccurred())
+			validator.Stop()
+			Expect(validator.Stop).ToNot(Panic())
+			Expect(validator.Start(ctx)).To(HaveOccurred())
+		})
+
+		It("should stop concurrently without creating more pod informers", func() {
+			Expect(validator.Start(newTestContext())).To(Succeed())
+			validator.createPodInformer(validator.poolName, labels.Everything(), []string{"8000"})
+			validator.podInformersMu.RLock()
+			podInformer := validator.podInformers[validator.poolName]
+			validator.podInformersMu.RUnlock()
+			Eventually(podInformer.HasSynced, 3*time.Second, 10*time.Millisecond).Should(BeTrue())
+
+			var callers sync.WaitGroup
+			for range 8 {
+				callers.Add(1)
+				go func() {
+					defer callers.Done()
+					validator.Stop()
+					validator.createPodInformer(validator.poolName, labels.Everything(), []string{"8000"})
+				}()
+			}
+			callers.Wait()
+			Eventually(validator.poolInformer.IsStopped, 3*time.Second, 10*time.Millisecond).Should(BeTrue())
+			Eventually(podInformer.IsStopped, 3*time.Second, 10*time.Millisecond).Should(BeTrue())
+			Expect(validator.podInformers).To(BeEmpty())
+			Expect(validator.podStopChans).To(BeEmpty())
+		})
+	})
+
+	DescribeTable("should interrupt cache synchronization", func(stopValidator bool) {
+		validator := newTestAllowlistValidator()
+		client := validator.dynamicClient.(*dynamicfake.FakeDynamicClient)
+		listStarted := make(chan struct{}, 1)
+		client.PrependReactor("list", inferencePoolResource, func(clienttesting.Action) (bool, runtime.Object, error) {
+			select {
+			case listStarted <- struct{}{}:
+			default:
+			}
+			return true, nil, errors.New("pool list failed")
+		})
+		ctx, cancel := context.WithCancel(newTestContext())
+		done := make(chan struct{})
+		var startErr error
+		go func() {
+			defer close(done)
+			startErr = validator.Start(ctx)
+		}()
+		DeferCleanup(func() {
+			cancel()
+			validator.Stop()
+			Eventually(done, time.Second).Should(BeClosed())
+		})
+		Eventually(listStarted, 3*time.Second).Should(Receive())
+		if stopValidator {
+			validator.Stop()
+		} else {
+			cancel()
+		}
+		Eventually(done, time.Second).Should(BeClosed())
+		Expect(startErr).To(HaveOccurred())
+		Expect(validator.stopCh).To(BeClosed())
+		if !stopValidator {
+			Expect(startErr).To(MatchError(context.Canceled))
+		}
+	},
+		Entry("when the context is canceled", false),
+		Entry("when the validator is stopped", true),
+	)
+
 	Context("when SSRF protection is disabled", func() {
 		var validator *AllowlistValidator
 
@@ -56,6 +175,7 @@ var _ = Describe("AllowlistValidator", func() {
 			Expect(validator.IsAllowed("malicious.example.com:8080")).To(BeTrue())
 			Expect(validator.IsAllowed("10.0.0.1:8000")).To(BeTrue())
 			Expect(validator.IsAllowed("http://evil.host/ssrf")).To(BeTrue())
+			Expect(validator.IsAllowedHost("malicious.example.com")).To(BeTrue())
 		})
 	})
 
@@ -228,6 +348,7 @@ var _ = Describe("AllowlistValidator", func() {
 				enabled:        true,
 				namespace:      "test-namespace",
 				allowedTargets: set.New[string](),
+				allowedHosts:   set.New[string](),
 			}
 			pod := &unstructured.Unstructured{
 				Object: map[string]interface{}{
@@ -253,6 +374,14 @@ var _ = Describe("AllowlistValidator", func() {
 		It("should block allowlisted hosts on ports outside the pool target ports", func() {
 			Expect(validator.IsAllowed("10.244.1.100:9090")).To(BeFalse())
 			Expect(validator.IsAllowed("valid-pod:9999")).To(BeFalse())
+		})
+
+		It("should allow pod hosts on any port when checked by host", func() {
+			Expect(validator.IsAllowedHost("10.244.1.100")).To(BeTrue())
+			Expect(validator.IsAllowedHost("valid-pod")).To(BeTrue())
+			Expect(validator.IsAllowedHost("10.0.0.1")).To(BeFalse())
+			Expect(validator.IsAllowedHost("evil-pod")).To(BeFalse())
+			Expect(validator.IsAllowedHost("")).To(BeFalse())
 		})
 
 		It("should block targets without a port", func() {

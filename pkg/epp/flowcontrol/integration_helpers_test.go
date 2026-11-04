@@ -41,7 +41,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -151,7 +151,7 @@ type dispatchResult struct {
 // scheduling under CI load. The returned release func cancels the queued requests' context,
 // drains their results, and asserts none was rejected for capacity.
 func (h *integrationHarness) fillQueue(
-	t *testing.T, key flowcontrol.FlowKey, n int, byteSize uint64, settled func() bool,
+	t *testing.T, key flowcontrol.FlowKey, n int, byteSize uint64, settled func() bool, //nolint:unparam // n matches each test's band capacity
 ) (release func()) {
 	t.Helper()
 	queuedCtx, queuedCancel := context.WithCancel(h.ctx)

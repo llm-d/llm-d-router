@@ -17,6 +17,7 @@ limitations under the License.
 package metadata
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,4 +57,49 @@ func TestGetLowerCaseHeaderValuePrefersCurrentName(t *testing.T) {
 	got, ok = GetLowerCaseHeaderValue(headers, "X-User-Header")
 	assert.True(t, ok)
 	assert.Equal(t, "user-value", got)
+}
+
+func TestIsFiniteFloat(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		value float64
+		want  bool
+	}{
+		{"zero", 0, true},
+		{"positive", 12.5, true},
+		{"negative", -1, true},
+		{"maximum", math.MaxFloat64, true},
+		{"NaN", math.NaN(), false},
+		{"positive infinity", math.Inf(1), false},
+		{"negative infinity", math.Inf(-1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, IsFiniteFloat(tc.value))
+		})
+	}
+}
+
+// The fairness ID is read from the current header name when present, even if empty, and from
+// the deprecated name otherwise.
+func TestGetLowerCaseHeaderValueFairnessID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{name: "deprecated name only", headers: map[string]string{OldFlowFairnessIDKey: "team-a"}, want: "team-a"},
+		{name: "both names", headers: map[string]string{FlowFairnessIDKey: "team-b", OldFlowFairnessIDKey: "team-a"}, want: "team-b"},
+		{name: "current name empty", headers: map[string]string{FlowFairnessIDKey: "", OldFlowFairnessIDKey: "team-a"}, want: ""},
+	}
+	for _, test := range tests {
+		got, ok := GetLowerCaseHeaderValue(test.headers, FlowFairnessIDKey)
+		assert.True(t, ok, test.name)
+		assert.Equal(t, test.want, got, test.name)
+	}
 }

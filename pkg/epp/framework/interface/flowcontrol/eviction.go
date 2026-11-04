@@ -27,7 +27,7 @@ import (
 // EvictionItem represents an in-flight request that has been dispatched to a model server
 // and may be evicted to free resources.
 type EvictionItem struct {
-	// RequestID is the unique identifier for the request (from x-request-id header).
+	// RequestID is the unique identifier for the request; see scheduling.InferenceRequest.RequestID.
 	RequestID string
 	// Priority is the request's priority level from the InferenceObjective.
 	Priority int

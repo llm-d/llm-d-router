@@ -18,6 +18,7 @@ package kvevents //nolint:testpackage // tests use unexported processEventBatch
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -92,6 +93,41 @@ func makeEngineKeys(n int, base uint64) []uint64 {
 		keys[i] = base + uint64(i) //#nosec G115 -- test data, i is small
 	}
 	return keys
+}
+
+func TestBigramStoreValidationAndFormatLifecycle(t *testing.T) {
+	lookahead := uint32(33)
+	for _, tc := range []struct {
+		blockSize  int
+		hashes     []uint64
+		wantReason string
+	}{
+		{blockSize: 0, hashes: []uint64{100}, wantReason: "invalid_block_size"},
+		{blockSize: 2, hashes: []uint64{100, 101}, wantReason: "non_dense_block_span"},
+		{blockSize: 2, hashes: []uint64{100}},
+	} {
+		event := &BlockStoredEvent{
+			Tokens: []uint32{11, 22}, LookaheadToken: &lookahead,
+			BlockSize: tc.blockSize, BlockHashes: tc.hashes,
+		}
+		ok, reason := blockStoredEventDigestible(event, 1)
+		require.Equal(t, tc.wantReason == "", ok)
+		require.Equal(t, tc.wantReason, reason)
+	}
+	pool, _, _ := newTestPool(t, 1)
+	pool.processEventBatch(t.Context(), &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+		Tokens: []uint32{11, 22}, LookaheadToken: &lookahead,
+		BlockSize: 2, BlockHashes: []uint64{100},
+	}}}, "pod", "model")
+	format, ok := pool.CacheFormats().Get("pod")
+	require.True(t, ok)
+	require.Equal(t, kvblock.CacheFormat{Bigram: true, BlockSize: 2}, format)
+	pool.clearPod(t.Context(), "pod", false)
+	_, ok = pool.CacheFormats().Get("pod")
+	require.True(t, ok)
+	pool.clearPod(t.Context(), "pod", true)
+	_, ok = pool.CacheFormats().Get("pod")
+	require.False(t, ok)
 }
 
 type sourceEndpointAdapter struct{}
@@ -584,14 +620,14 @@ func TestCanonicalEviction_UnknownEngineKey(t *testing.T) {
 func TestRealignExtraFeatures(t *testing.T) {
 	t.Run("1:1 passthrough", func(t *testing.T) {
 		features := []*kvblock.BlockExtraFeatures{nil, nil, nil, nil}
-		result := realignExtraFeatures(features, 4)
+		result := realignExtraFeatures(features, 16, 64)
 		assert.Equal(t, features, result)
 	})
 
 	t.Run("1:many replication (all nil, text-only)", func(t *testing.T) {
 		// 2 engine blocks → 8 canonical blocks (ratio 4)
 		features := []*kvblock.BlockExtraFeatures{nil, nil}
-		result := realignExtraFeatures(features, 8)
+		result := realignExtraFeatures(features, 16, 128)
 		require.Len(t, result, 8)
 		for _, f := range result {
 			assert.Nil(t, f)
@@ -602,7 +638,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 		// 2 engine blocks → 4 canonical blocks (ratio 2)
 		feat0 := &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{{Hash: "img0"}}}
 		features := []*kvblock.BlockExtraFeatures{feat0, nil}
-		result := realignExtraFeatures(features, 4)
+		result := realignExtraFeatures(features, 16, 64)
 		require.Len(t, result, 4)
 		// Engine block 0 → canonical blocks 0, 1
 		assert.Equal(t, feat0, result[0])
@@ -615,7 +651,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 	t.Run("many:1 merge (all nil, text-only)", func(t *testing.T) {
 		// 8 engine blocks → 2 canonical blocks (ratio 4)
 		features := make([]*kvblock.BlockExtraFeatures, 8)
-		result := realignExtraFeatures(features, 2)
+		result := realignExtraFeatures(features, 64, 128)
 		require.Len(t, result, 2)
 		for _, f := range result {
 			assert.Nil(t, f)
@@ -631,7 +667,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 			nil,
 			{MMHashes: []kvblock.MMHash{{Hash: "c"}}},
 		}
-		result := realignExtraFeatures(features, 2)
+		result := realignExtraFeatures(features, 64, 128)
 		require.Len(t, result, 2)
 		// Canonical 0 should merge features from engine blocks 0 and 1
 		require.NotNil(t, result[0])
@@ -644,13 +680,132 @@ func TestRealignExtraFeatures(t *testing.T) {
 		assert.Equal(t, "c", result[1].MMHashes[0].Hash)
 	})
 
+	t.Run("many:1 merge (MM item spans several engine blocks)", func(t *testing.T) {
+		// 4 engine blocks → 1 canonical block (ratio 4). The engine tags every
+		// block an item overlaps, so "img" appears on blocks 0-2 and "vid" on 2-3.
+		img := kvblock.MMHash{Hash: "img"}
+		vid := kvblock.MMHash{Hash: "vid"}
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img, vid}},
+			{MMHashes: []kvblock.MMHash{vid}},
+		}
+		result := realignExtraFeatures(features, 64, 64)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{img, vid}, result[0].MMHashes)
+
+		// The request side lists each overlapping item once for the same layout.
+		want := kvblock.ComputeBlockExtraFeatures(
+			map[string][]string{"image": {"img"}, "video": {"vid"}},
+			map[string][]kvblock.PlaceholderRange{
+				"image": {{Offset: 0, Length: 40}},
+				"video": {{Offset: 40, Length: 24}},
+			},
+			64, 64)
+		require.Len(t, want, 1)
+		assert.Equal(t, want[0].MMHashes, result[0].MMHashes)
+	})
+
+	t.Run("many:1 merge matches the request side", func(t *testing.T) {
+		// Engine BS 16, canonical BS 64. The engine tags each 16-token block the
+		// way ComputeBlockExtraFeatures does, so realigning its features must give
+		// what the request side computes at the canonical block size.
+		cases := []struct {
+			name         string
+			hashes       []string
+			placeholders []kvblock.PlaceholderRange
+			numTokens    int
+		}{
+			{
+				name:         "same image twice in one canonical block",
+				hashes:       []string{"img", "img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 0, Length: 20}, {Offset: 20, Length: 20}},
+				numTokens:    64,
+			},
+			{
+				name:         "item crosses a canonical boundary",
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 40, Length: 50}},
+				numTokens:    128,
+			},
+			{
+				name:         "tokens not a multiple of the canonical block size",
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 70, Length: 70}},
+				numTokens:    368,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				mmHashes := map[string][]string{"image": tc.hashes}
+				mmPlaceholders := map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}
+				engine := kvblock.ComputeBlockExtraFeatures(mmHashes, mmPlaceholders, 16, tc.numTokens)
+				want := kvblock.ComputeBlockExtraFeatures(mmHashes, mmPlaceholders, 64, tc.numTokens)
+				assert.Equal(t, want, realignExtraFeatures(engine, 64, tc.numTokens))
+			})
+		}
+	})
+
+	t.Run("many:1 merge keeps the cache salt after the item", func(t *testing.T) {
+		// vLLM appends cache_salt to block 0's extra keys, after its MM hashes,
+		// so the item continuing into block 1 is not block 0's last entry.
+		img := kvblock.MMHash{Hash: "img"}
+		salt := kvblock.MMHash{Hash: "salt"}
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{img, salt}},
+			{MMHashes: []kvblock.MMHash{img}},
+			{MMHashes: []kvblock.MMHash{img}},
+			nil,
+		}
+		result := realignExtraFeatures(features, 64, 64)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{img, salt}, result[0].MMHashes)
+	})
+
+	t.Run("many:1 merge uses the event offset for repeated items", func(t *testing.T) {
+		// Engine BS 16, canonical BS 32. vLLM emits (identifier, offset) with the
+		// offset relative to the block start; a negative offset is a continuation.
+		cases := []struct {
+			name         string
+			raw          [][]any
+			hashes       []string
+			placeholders []kvblock.PlaceholderRange
+		}{
+			{
+				name:         "same image in adjacent engine blocks",
+				raw:          [][]any{{[]any{"img", int64(10)}}, {[]any{"img", int64(6)}}},
+				hashes:       []string{"img", "img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 10, Length: 3}, {Offset: 22, Length: 8}},
+			},
+			{
+				name:         "one image spanning both engine blocks",
+				raw:          [][]any{{[]any{"img", int64(10)}}, {[]any{"img", int64(-6)}}},
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 10, Length: 20}},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				engine, err := kvblock.ParseRawExtraKeys(tc.raw, "")
+				require.NoError(t, err)
+				got := realignExtraFeatures(engine, 32, 32)
+				want := kvblock.ComputeBlockExtraFeatures(map[string][]string{"image": tc.hashes},
+					map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}, 32, 32)
+				assert.Equal(t, want, got)
+			})
+		}
+	})
+
 	t.Run("zero canonical blocks (engine BS < canonical BS)", func(t *testing.T) {
 		// 1 engine block → 0 canonical blocks: tokens < canonical block size.
 		// realignExtraFeatures returns an empty slice instead of panicking.
 		features := []*kvblock.BlockExtraFeatures{
 			{MMHashes: []kvblock.MMHash{{Hash: "img0"}}},
 		}
-		result := realignExtraFeatures(features, 0)
+		result := realignExtraFeatures(features, 64, 16)
 		assert.Empty(t, result)
 	})
 }
@@ -956,6 +1111,55 @@ func TestHMAGroupMetadataLearnedForRejectedKind(t *testing.T) {
 	}
 }
 
+func TestHMAGroupMetadataLearnedForSubCanonicalRejectedKinds(t *testing.T) {
+	for _, kind := range []KVCacheSpecKind{KVCacheSpecKindSlidingWindow, KVCacheSpecKindMamba} {
+		t.Run(string(kind), func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			pool, idx, _ := newTestPool(t, 64)
+			recording := &recordingIndex{Index: idx}
+			pool.index = recording
+			groupIdx := 0
+			metric := metrics.KVEventStoresSkipped.WithLabelValues(string(kind), "unsupported_cache_kind")
+			before := counterValue(t, metric)
+			pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+				BlockHashes: makeEngineKeys(1, 1900), Tokens: makeTokens(4), ParentHash: 999,
+				GroupIdx: &groupIdx, KVCacheSpecKind: kind, BlockSize: 4,
+			}}}, "pod-hma", "test-model")
+
+			meta, found := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+			require.True(t, found)
+			assert.Equal(t, string(kind), meta.Kind)
+			assert.Equal(t, 4, meta.BlockSize)
+			assert.Equal(t, 1.0, counterValue(t, metric)-before)
+			assert.Zero(t, recording.getRequestKeyCalls)
+			_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(1900))
+			assert.Error(t, err)
+		})
+	}
+}
+
+func TestHMAGroupBackfilledKindPreservesSlidingWindowMetadata(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newTestPool(t, 64)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 0
+	slidingWindow := 128
+	expected := kvblock.GroupMetadata{
+		Kind: string(KVCacheSpecKindSlidingWindow), BlockSize: 16, SlidingWindowSize: &slidingWindow,
+	}
+	pool.GroupCatalog().Learn("pod-hma", kvblock.GroupID(groupIdx), expected)
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+		BlockHashes: makeEngineKeys(4, 1910), Tokens: makeTokens(64), ParentHash: 999,
+		GroupIdx: &groupIdx, BlockSize: 16,
+	}}}, "pod-hma", "test-model")
+
+	meta, found := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+	require.True(t, found)
+	assert.Equal(t, expected, meta)
+	assert.Zero(t, recording.getRequestKeyCalls)
+}
+
 func TestHMAGroupKindFilter(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1031,6 +1235,260 @@ func TestHMAGroupFilterRejectsSparseFullAttentionBeforeParentLookup(t *testing.T
 	assert.Zero(t, recording.getRequestKeyCalls)
 	_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(950))
 	assert.Error(t, err)
+}
+
+func TestHMAGroupFilterRejectsConflictingBlockSizeBeforeParentLookup(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newTestPool(t, 16)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 0
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 960),
+			Tokens:          makeTokens(16),
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       16,
+		},
+	}}, "pod-hma", "test-model")
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 961),
+			Tokens:          makeTokens(4),
+			ParentHash:      999,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       4,
+		},
+	}}, "pod-hma", "test-model")
+
+	assert.Zero(t, recording.getRequestKeyCalls)
+	meta, ok := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+	require.True(t, ok)
+	assert.Equal(t, 16, meta.BlockSize)
+}
+
+func TestHMAGroupFilterRecoversCanonicalBlockSizeAfterAuxiliaryEvent(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 256)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 0
+	tokens := makeTokens(512)
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 970),
+			Tokens:          makeTokens(4),
+			ParentHash:      999,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       4,
+		},
+	}}, "pod-hma", "test-model")
+
+	_, ok := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+	require.False(t, ok, "incomplete canonical spans must not teach group geometry")
+	require.Zero(t, recording.getRequestKeyCalls)
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 971),
+			Tokens:          tokens[:256],
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       256,
+		},
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 972),
+			Tokens:          makeTokens(4),
+			ParentHash:      999,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       4,
+		},
+		&BlockStoredEvent{
+			BlockHashes:     makeEngineKeys(1, 973),
+			Tokens:          tokens[256:],
+			ParentHash:      971,
+			GroupIdx:        &groupIdx,
+			KVCacheSpecKind: KVCacheSpecKindMlaAttention,
+			BlockSize:       256,
+		},
+	}}, "pod-hma", "test-model")
+
+	assert.Equal(t, 1, recording.getRequestKeyCalls, "only the canonical child should look up its parent")
+	meta, ok := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+	require.True(t, ok)
+	assert.Equal(t, 256, meta.BlockSize)
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, canonicalKeys, 2)
+	result, err := idx.Lookup(ctx, canonicalKeys, nil)
+	require.NoError(t, err)
+	for i, key := range canonicalKeys {
+		require.Len(t, result[key], 1)
+		assert.Equal(t, "pod-hma", result[key][0].PodIdentifier)
+		assert.Equal(t, kvblock.GroupID(groupIdx), result[key][0].GroupIdx)
+		requestKey, err := idx.GetRequestKey(ctx, kvblock.BlockHash(971+i*2))
+		require.NoError(t, err)
+		assert.Equal(t, key, requestKey)
+	}
+	for _, hash := range []kvblock.BlockHash{970, 972} {
+		_, err := idx.GetRequestKey(ctx, hash)
+		assert.Error(t, err, "auxiliary blocks must not be indexed")
+	}
+}
+
+func TestHMAGroupFilterAcceptsDenseEngineGeometryAfterIncompleteEvents(t *testing.T) {
+	for _, engineBlockSize := range []int{16, 256} {
+		t.Run(fmt.Sprintf("engine_block_size_%d", engineBlockSize), func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			pool, idx, tp := newTestPool(t, 64)
+			recording := &recordingIndex{Index: idx}
+			pool.index = recording
+			groupIdx := 0
+			for i := range 2 {
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+					BlockHashes: makeEngineKeys(1, uint64(1200+i)), Tokens: makeTokens(4),
+					ParentHash: 999, GroupIdx: &groupIdx, KVCacheSpecKind: KVCacheSpecKindMlaAttention, BlockSize: 4,
+				}}}, "pod-hma", "test-model")
+			}
+			assert.Zero(t, recording.getRequestKeyCalls)
+			_, found := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+			require.False(t, found)
+
+			// A smaller geometry learned by another producer must yield to the
+			// dense engine stream, even when it differs from the router block size.
+			pool.GroupCatalog().Learn("pod-hma", kvblock.GroupID(groupIdx), kvblock.GroupMetadata{
+				Kind: string(KVCacheSpecKindMlaAttention), BlockSize: 4,
+			})
+			tokens := makeTokens(256)
+			engineKeys := makeEngineKeys(len(tokens)/engineBlockSize, 1300)
+			pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+				BlockHashes: engineKeys, Tokens: tokens, GroupIdx: &groupIdx,
+				KVCacheSpecKind: KVCacheSpecKindMlaAttention, BlockSize: engineBlockSize,
+			}}}, "pod-hma", "test-model")
+			meta, found := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+			require.True(t, found)
+			assert.Equal(t, engineBlockSize, meta.BlockSize)
+			keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+			require.NoError(t, err)
+			result, err := idx.Lookup(ctx, keys, nil)
+			require.NoError(t, err)
+			for _, key := range keys {
+				require.Len(t, result[key], 1)
+				assert.Equal(t, kvblock.GroupID(groupIdx), result[key][0].GroupIdx)
+			}
+			for _, hash := range []kvblock.BlockHash{1200, 1201} {
+				_, err := idx.GetRequestKey(ctx, hash)
+				assert.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestHMAGroupFilterChecksBackfilledKindBeforeParentLookup(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, _ := newTestPool(t, 64)
+	recording := &recordingIndex{Index: idx}
+	pool.index = recording
+	groupIdx := 0
+	pool.GroupCatalog().Learn("pod-hma", kvblock.GroupID(groupIdx), kvblock.GroupMetadata{
+		Kind: string(KVCacheSpecKindMlaAttention), BlockSize: 256,
+	})
+	metric := metrics.KVEventStoresSkipped.WithLabelValues(string(KVCacheSpecKindMlaAttention), "conflicting_block_size")
+	before := counterValue(t, metric)
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+		BlockHashes: makeEngineKeys(16, 1400), Tokens: makeTokens(64), ParentHash: 999,
+		GroupIdx: &groupIdx, BlockSize: 4,
+	}}}, "pod-hma", "test-model")
+	assert.Zero(t, recording.getRequestKeyCalls)
+	assert.Equal(t, 1.0, counterValue(t, metric)-before)
+	meta, found := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+	require.True(t, found)
+	assert.Equal(t, 256, meta.BlockSize)
+}
+
+func TestHMAGroupFilterInvalidGeometryDoesNotChangeMetadata(t *testing.T) {
+	for _, known := range []bool{false, true} {
+		for _, blockSize := range []int{0, -1} {
+			t.Run(fmt.Sprintf("known_%t_block_size_%d", known, blockSize), func(t *testing.T) {
+				ctx := logging.NewTestLoggerIntoContext(context.Background())
+				pool, idx, _ := newTestPool(t, 64)
+				recording := &recordingIndex{Index: idx}
+				pool.index = recording
+				groupIdx := 0
+				if known {
+					pool.GroupCatalog().Learn("pod-hma", kvblock.GroupID(groupIdx), kvblock.GroupMetadata{
+						Kind: string(KVCacheSpecKindMlaAttention), BlockSize: 256,
+					})
+				}
+				metric := metrics.KVEventStoresSkipped.WithLabelValues(string(KVCacheSpecKindMlaAttention), "invalid_block_size")
+				before := counterValue(t, metric)
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+					BlockHashes: makeEngineKeys(1, 1500), Tokens: makeTokens(64), ParentHash: 999,
+					GroupIdx: &groupIdx, KVCacheSpecKind: KVCacheSpecKindMlaAttention, BlockSize: blockSize,
+				}}}, "pod-hma", "test-model")
+				assert.Zero(t, recording.getRequestKeyCalls)
+				assert.Equal(t, 1.0, counterValue(t, metric)-before)
+				meta, found := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+				assert.Equal(t, known, found)
+				if known {
+					assert.Equal(t, 256, meta.BlockSize)
+				}
+			})
+		}
+	}
+}
+
+func TestHMAGroupOffloadPreservesGeometry(t *testing.T) {
+	for _, blockSize := range []int{0, 4, 256} {
+		for _, kind := range []KVCacheSpecKind{KVCacheSpecKindMlaAttention, ""} {
+			t.Run(fmt.Sprintf("block_size_%d_kind_%s", blockSize, kind), func(t *testing.T) {
+				ctx := logging.NewTestLoggerIntoContext(context.Background())
+				pool, idx, tp := newTestPool(t, 64)
+				groupIdx := 0
+				engineKeys := makeEngineKeys(4, 1600)
+				// Empty stores cannot establish the group's block geometry.
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+					BlockHashes: engineKeys, GroupIdx: &groupIdx, KVCacheSpecKind: kind,
+					BlockSize: blockSize, DeviceTier: "CPU",
+				}}}, "pod-hma", "test-model")
+				_, found := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+				require.False(t, found)
+				tokens := makeTokens(64)
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+					BlockHashes: engineKeys, Tokens: tokens, GroupIdx: &groupIdx,
+					KVCacheSpecKind: KVCacheSpecKindMlaAttention, BlockSize: 16,
+				}}}, "pod-hma", "test-model")
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+					BlockHashes: engineKeys, GroupIdx: &groupIdx, KVCacheSpecKind: kind,
+					BlockSize: blockSize, DeviceTier: "CPU",
+				}}}, "pod-hma", "test-model")
+				meta, found := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(groupIdx))
+				require.True(t, found)
+				assert.Equal(t, 16, meta.BlockSize)
+				keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+				require.NoError(t, err)
+				result, err := idx.Lookup(ctx, keys, nil)
+				require.NoError(t, err)
+				for _, key := range keys {
+					require.Len(t, result[key], 2)
+					tiers := map[string]bool{}
+					for _, entry := range result[key] {
+						tiers[entry.DeviceTier] = true
+					}
+					assert.True(t, tiers["gpu"])
+					assert.True(t, tiers["cpu"])
+				}
+			})
+		}
+	}
 }
 
 func TestHMAGroupFilterIgnoresRejectedGroupRemoval(t *testing.T) {
@@ -1201,6 +1659,8 @@ func TestPool_RetireResetDropsGroupCatalog(t *testing.T) {
 		pool.processEventBatch(ctx, &EventBatch{
 			Events: []GenericEvent{
 				&BlockStoredEvent{
+					BlockHashes:     makeEngineKeys(1, 1),
+					Tokens:          makeTokens(16),
 					GroupIdx:        &groupIdx,
 					KVCacheSpecKind: KVCacheSpecKindFullAttention,
 					BlockSize:       16,
@@ -1482,7 +1942,6 @@ func TestPool_DedupMetricsCountBlockHashes(t *testing.T) {
 // without exercising any engine-specific parsing.
 type stubAdapter struct{}
 
-//nolint:gocritic // unnamed results match the EngineAdapter implementations
 func (stubAdapter) ParseMessage(_ *RawMessage) (string, string, EventBatch, error) {
 	return "pod-1", "model-1", EventBatch{}, nil
 }
@@ -1647,4 +2106,227 @@ func TestBlockStoredEvent_LoRAExtraKeysMatchRequestKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBlockStoredEvent_CacheSaltSeparatesEntries stores the same tokens under
+// two salts, in the first-block extra-keys layout the SGLang and vLLM adapters
+// emit, and checks that each salt's request keys resolve only to its own pod.
+func TestBlockStoredEvent_CacheSaltSeparatesEntries(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 64)
+	tokens := makeTokens(128)
+
+	saltedExtras := func(salt string) []*kvblock.BlockExtraFeatures {
+		return []*kvblock.BlockExtraFeatures{{MMHashes: []kvblock.MMHash{{Hash: salt}}}, nil}
+	}
+
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+		BlockHashes: makeEngineKeys(2, 500),
+		Tokens:      tokens,
+		ExtraKeys:   [][]any{{"salt-a"}, nil},
+	}}}, "pod-a", "test-model")
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+		BlockHashes: makeEngineKeys(2, 600),
+		Tokens:      tokens,
+		ExtraKeys:   [][]any{{"salt-b"}, nil},
+	}}}, "pod-b", "test-model")
+
+	keysA, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", saltedExtras("salt-a"))
+	require.NoError(t, err)
+	keysB, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", saltedExtras("salt-b"))
+	require.NoError(t, err)
+	unsalted, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, keysA, 2)
+	require.Len(t, keysB, 2)
+	for i := range keysA {
+		assert.NotEqual(t, keysA[i], keysB[i], "block %d shares a key across salts", i)
+	}
+
+	for pod, keys := range map[string][]kvblock.BlockHash{"pod-a": keysA, "pod-b": keysB} {
+		result, err := idx.Lookup(ctx, keys, nil)
+		require.NoError(t, err)
+		for _, key := range keys {
+			require.Len(t, result[key], 1, "request key %d for %s", key, pod)
+			assert.Equal(t, pod, result[key][0].PodIdentifier)
+		}
+	}
+
+	result, err := idx.Lookup(ctx, unsalted, nil)
+	require.NoError(t, err)
+	for _, key := range unsalted {
+		assert.Empty(t, result[key], "unsalted request key %d matched a salted block", key)
+	}
+}
+
+// A store whose engine blocks are smaller than the canonical block and whose
+// parent ended mid canonical block cannot be chained. It is counted as skipped
+// rather than logged as an error; a canonical-size store with an unknown parent
+// is not counted under that reason.
+func TestProcessEventBatch_UnresolvedSubCanonicalParent(t *testing.T) {
+	groupIdx := 5
+	tests := []struct {
+		name        string
+		events      []GenericEvent
+		childHash   uint64
+		wantSkipped float64
+	}{
+		{
+			name: "sub-canonical child of a mid-block parent",
+			events: []GenericEvent{
+				&BlockStoredEvent{
+					BlockHashes:     []uint64{7001},
+					Tokens:          makeTokens(16),
+					GroupIdx:        &groupIdx,
+					KVCacheSpecKind: KVCacheSpecKindFullAttention,
+					BlockSize:       16,
+				},
+				&BlockStoredEvent{
+					BlockHashes:     []uint64{7002, 7003, 7004, 7005},
+					Tokens:          makeTokens(80)[16:],
+					ParentHash:      7001,
+					GroupIdx:        &groupIdx,
+					KVCacheSpecKind: KVCacheSpecKindFullAttention,
+					BlockSize:       16,
+				},
+			},
+			childHash:   7002,
+			wantSkipped: 1,
+		},
+		{
+			name: "canonical-size child of an unknown parent",
+			events: []GenericEvent{
+				&BlockStoredEvent{
+					BlockHashes:     []uint64{8002},
+					Tokens:          makeTokens(64),
+					ParentHash:      8001,
+					GroupIdx:        &groupIdx,
+					KVCacheSpecKind: KVCacheSpecKindFullAttention,
+					BlockSize:       64,
+				},
+			},
+			childHash:   8002,
+			wantSkipped: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			pool, idx, _ := newTestPool(t, 64)
+			skipped := metrics.KVEventStoresSkipped.WithLabelValues(
+				cacheKindLabel(KVCacheSpecKindFullAttention), "unresolved_sub_canonical_parent")
+			before := counterValue(t, skipped)
+
+			pool.processEventBatch(ctx, &EventBatch{Events: tt.events}, "pod-a", "test-model")
+
+			assert.Equal(t, tt.wantSkipped, counterValue(t, skipped)-before)
+			_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(tt.childHash))
+			assert.Error(t, err, "a store with an unresolved parent is not indexed")
+		})
+	}
+}
+
+func TestProcessEventBatch_LoRA(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokensA := makeTokens(16)
+	tokensB := makeTokens(32)[16:]
+	tokensC := makeTokens(48)[32:]
+
+	loraID := 1
+	loraName := "sql-lora"
+	emptyName := ""
+
+	skippedMetric := metrics.KVEventStoresSkipped.WithLabelValues(
+		cacheKindLabel(""), "unresolved_lora_adapter")
+	beforeSkipped := counterValue(t, skippedMetric)
+
+	// 1. Base-model event: LoraID == nil. Must be indexed under base model.
+	baseEvent := &BlockStoredEvent{
+		BlockHashes: []uint64{1001},
+		Tokens:      tokensA,
+		BlockSize:   16,
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{baseEvent}}, "pod-a", "test-model")
+
+	baseKeysA, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensA, "test-model", nil)
+	require.NoError(t, err)
+	lookupA, err := idx.Lookup(ctx, baseKeysA, nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, lookupA[baseKeysA[0]], "base-model event must be indexed under base model")
+
+	// 2. Unresolved LoRA events: LoraID != nil and (LoraName == nil or empty).
+	// Must NOT be indexed under base model or adapter, and must increment skipped metric.
+	unresolvedEvents := []GenericEvent{
+		&BlockStoredEvent{
+			BlockHashes: []uint64{2001},
+			Tokens:      tokensB,
+			BlockSize:   16,
+			LoraID:      &loraID,
+			LoraName:    nil,
+		},
+		&BlockStoredEvent{
+			BlockHashes: []uint64{2002},
+			Tokens:      tokensB,
+			BlockSize:   16,
+			LoraID:      &loraID,
+			LoraName:    &emptyName,
+		},
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: unresolvedEvents}, "pod-a", "test-model")
+
+	assert.Equal(t, 2.0, counterValue(t, skippedMetric)-beforeSkipped,
+		"unresolved LoRA events must increment skipped metric")
+
+	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(2001))
+	assert.Error(t, err, "unresolved LoRA engine key must not be mapped")
+	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(2002))
+	assert.Error(t, err, "unresolved LoRA engine key with empty name must not be mapped")
+
+	// Base-model request for tokensB must not hit unresolved LoRA entries
+	baseKeysB, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensB, "test-model", nil)
+	require.NoError(t, err)
+	lookupB, err := idx.Lookup(ctx, baseKeysB, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupB[baseKeysB[0]], "base-model request must not hit unresolved LoRA entry")
+
+	// Adapter request for tokensB must also find nothing
+	loraKeysB, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensB, loraName, nil)
+	require.NoError(t, err)
+	lookupLoraB, err := idx.Lookup(ctx, loraKeysB, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupLoraB[loraKeysB[0]], "adapter request must not hit unresolved LoRA entry")
+
+	// 3. Valid LoRA event: LoraID != nil and valid LoraName.
+	// Must be indexed under LoraName ("sql-lora"), not base model.
+	validLoraEvent := &BlockStoredEvent{
+		BlockHashes: []uint64{3001},
+		Tokens:      tokensC,
+		BlockSize:   16,
+		LoraID:      &loraID,
+		LoraName:    &loraName,
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{validLoraEvent}}, "pod-a", "test-model")
+
+	// Base-model request for tokensC must not hit LoRA entry
+	baseKeysC, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensC, "test-model", nil)
+	require.NoError(t, err)
+	lookupBaseC, err := idx.Lookup(ctx, baseKeysC, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupBaseC[baseKeysC[0]], "base-model request must not hit resolved LoRA entry")
+
+	// Adapter request for tokensC must hit
+	loraKeysC, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokensC, loraName, nil)
+	require.NoError(t, err)
+	lookupLoraC, err := idx.Lookup(ctx, loraKeysC, nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, lookupLoraC[loraKeysC[0]], "adapter request must hit resolved LoRA entry")
+
+	// 4. Removal of unresolved LoRA block must be a safe no-op.
+	removeEvent := &BlockRemovedEvent{
+		BlockHashes: []uint64{2001, 2002},
+	}
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{removeEvent}}, "pod-a", "test-model")
 }

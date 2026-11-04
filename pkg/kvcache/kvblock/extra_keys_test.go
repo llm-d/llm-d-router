@@ -77,7 +77,7 @@ func TestParseRawExtraKeys_BareStringIdentifiers(t *testing.T) {
 }
 
 func TestParseRawExtraKeys_LegacyTuples(t *testing.T) {
-	// Legacy format: [hash, offset] tuples. Offset is ignored.
+	// Legacy format: [hash, offset] tuples.
 	raw := [][]any{
 		{[]any{"hash_A", int64(15)}},
 		{[]any{"hash_A", int64(-1)}},
@@ -105,6 +105,32 @@ func TestParseRawExtraKeys_LegacyTuples(t *testing.T) {
 	require.Len(t, result[4].MMHashes, 2)
 	assert.Equal(t, "hash_B", result[4].MMHashes[0].Hash)
 	assert.Equal(t, "hash_C", result[4].MMHashes[1].Hash)
+}
+
+func TestParseRawExtraKeys_FirstContinuation(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		keys     []any
+		loraName string
+		want     kvblock.MMContinuation
+	}{
+		{"bare identifier", []any{"img"}, "", kvblock.MMContinuationUnknown},
+		{"non-negative offset", []any{[]any{"img", int64(0)}}, "", kvblock.MMContinuationNew},
+		{"negative offset", []any{[]any{"img", int64(-6)}}, "", kvblock.MMContinuationContinues},
+		{"int8 negative (msgpack fixint)", []any{[]any{"img", int8(-6)}}, "", kvblock.MMContinuationContinues},
+		{"int16 negative", []any{[]any{"img", int16(-200)}}, "", kvblock.MMContinuationContinues},
+		{"uint8 positive", []any{[]any{"img", uint8(200)}}, "", kvblock.MMContinuationNew},
+		{"only the first entry counts", []any{[]any{"a", int64(-6)}, []any{"b", int64(4)}}, "", kvblock.MMContinuationContinues},
+		{"after the LoRA name", []any{"adapter-1", []any{"img", int64(-6)}}, "adapter-1", kvblock.MMContinuationContinues},
+		{"skipped pair does not count", []any{[]any{int64(7), int64(3)}, []any{"img", int64(-6)}}, "", kvblock.MMContinuationContinues},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := kvblock.ParseRawExtraKeys([][]any{tt.keys}, tt.loraName)
+			require.NoError(t, err)
+			require.NotNil(t, result[0])
+			assert.Equal(t, tt.want, result[0].FirstContinuation)
+		})
+	}
 }
 
 func TestParseRawExtraKeys_SkipsUnknownEntryTypes(t *testing.T) {

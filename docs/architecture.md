@@ -59,21 +59,45 @@ The design enables:
 
 ### Routing Flow
 
-See the upstream [Request Scheduler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/scheduling.md) doc for the canonical scheduling model.
+See the upstream [Request Scheduler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/scheduling.md) doc for the canonical scheduling model.
 
 #### Request Control
+
+A configured `Responder` may answer a `GET` request locally before this flow starts. A local
+response skips flow-control, endpoint selection, screening, data production, admission
+plugins, and scheduling.
 
 Request control runs once per request before any scheduling profiles:
 
 1. Request headers are processed and flow-control admission completes
 2. Endpoint candidates are located
-3. Global `Screener` plugins perform preliminary filtering of located endpoints
+3. Request handling data producers prepare per-request data using the located candidates
+4. Global `Screener` plugins perform preliminary filtering of located endpoints
    - Each screener receives an independent copy of the same endpoint set, and their returned subsets are intersected
    - Most endpoint-selection plugins should implement a scheduling `Filter`, not a `Screener`
    - Use a `Screener` only for mandatory constraints that must apply to every scheduling profile
-4. Data producers prepare per-request data using the filtered candidate set
-5. Admission plugins may reject the request
-6. The scheduler runs the configured scheduling profiles using the filtered candidate set
+5. The remaining data producers prepare per-request data using the filtered candidate set
+6. Admission plugins may reject the request
+7. The scheduler runs the configured scheduling profiles using the filtered candidate set
+
+A data producer runs in exactly one of steps 3 and 5. `requestHandler.dataProducers` lists the
+producers that run during request handling, in step 3:
+
+```yaml
+requestHandler:
+  dataProducers:
+  - pluginRef: token-producer
+```
+
+A producer not listed also runs in step 3 when a screener or a listed producer consumes its data,
+Required or Optional, directly or through other producers. This includes producers created
+automatically. Every other producer runs in step 5. Producers in step 3 see every located candidate,
+so their per-endpoint work grows with the candidates the screeners remove.
+
+For example, `disaggregatedset-rollout-screener` with `revisionGating.affinity.prefixCache` consumes
+`PrefixCacheMatchInfo`, so `approx-prefix-cache-producer` and the `token-producer` it consumes run in
+step 3 with no `dataProducers` entry; see its
+[producer setup](../pkg/epp/framework/plugins/requesthandling/screener/disaggregatedsetrollout/README.md#producer-setup).
 
 #### Scheduling
 
@@ -90,7 +114,7 @@ Each scheduling profile runs the following stages. Multiple profiles may run for
 
 3. **Pod Selection**
    - The highest-scored pod is selected
-   - If multiple pods share the same score, one is selected at random
+   - If multiple pods share the top score, `max-score-picker` (the default) rotates among them round-robin
 
 ---
 
@@ -98,7 +122,7 @@ Each scheduling profile runs the following stages. Multiple profiles may run for
 
 The llm-d Endpoint Picker relies on a YAML-based configuration—provided either as a file or an in-line parameter—to determine which lifecycle hooks (plugins) are active.
 
-See the upstream [Configuration](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/configuration.md) doc for the canonical schema.
+See the upstream [Configuration](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/configuration.md) doc for the canonical schema.
 
 Specifically, this configuration establishes the following components:
 
@@ -254,14 +278,23 @@ Scheduling:
 - A scorer's `weight` defaults to `1.0` when omitted.
 
 RequestHandler:
-- When no parsers are configured, `openai-parser`, `anthropic-parser`, and `vllmhttp-parser` are used.
+- When no parsers are configured, `openai-parser`, `anthropic-parser`, `vllmhttp-parser`, and
+  `systemone-parser` are used, followed by `passthrough-parser`, which forwards requests on paths
+  none of them claims without interpreting their payloads.
 
 FlowControl:
 - The flow control admission layer itself is off by default; enable it with
   `featureGates: ["flowControl"]` in the configuration, or with
   `--feature-gates=flowControl=true` on the command line.
-- `fcfs-ordering-policy`, `global-strict-fairness-policy`, and `static-usage-limit-policy` are configured when absent.
+- `fcfs-ordering-policy`, `global-strict-fairness-policy`, `static-usage-limit-policy`, and
+  `strict-band-selection-policy` are configured when absent.
 - `utilization-detector` is configured as the saturation detector when none is set.
+- When the saturation detector implements the scheduling filter interface, as `utilization-detector`
+  does, it is also appended as a filter to every scheduling profile that does not list it, whether or
+  not the `flowControl` feature gate is enabled. With default parameters, `utilization-detector`
+  removes endpoints whose metrics are missing or older than 200ms, whose waiting queue is 5 or more,
+  or whose KV cache utilization is 0.8 or more. When that would remove every endpoint, it keeps them
+  all.
 
 DataLayer:
 - `metrics-data-source` and `core-metrics-extractor` are injected and wired together. Skipped when
@@ -272,6 +305,9 @@ DataProducer:
 - When a plugin needs data from a producer but none is configured, the default producer for that data
   is created automatically. Defaults: `token-producer`, `approx-prefix-cache-producer`,
   `mm-embeddings-cache-producer`, `inflight-load-producer`, `predicted-latency-producer`, `session-id-producer`.
+  Creation is transitive, since an auto-created producer can itself require a data key with a default,
+  and is bounded by the number of distinct default producers. Startup fails if a required data key is
+  still unproduced when creation stops.
 
 ### Available plugins
 
@@ -287,7 +323,12 @@ The data layer follows a Source -> Extract -> Attribute lifecycle:
   usage, active adapters) or served models and LoRA adapters (via `/v1/models`); others react to
   endpoint or Kubernetes object change notifications
 - Extractors populate per-endpoint attributes in the shared datastore for scorers
-- Scoring can rely on numerical metrics or metadata (model ID, adapter tags)
+- Screeners and scoring can rely on numerical metrics or metadata (model ID, adapter tags)
+
+The `models-responder` uses the per-endpoint model attributes for both its pool-wide
+OpenAI-compatible `GET /v1/models` response and its request-control screening. The public
+response does not expose endpoint identity. Inference screening uses the endpoint attributes
+before profile selection.
 
 Polling sources share one Collector goroutine per endpoint. The base tick is
 `--refresh-metrics-interval` (default 50ms). Each polling source plugin accepts an
@@ -295,7 +336,7 @@ Polling sources share one Collector goroutine per endpoint. The base tick is
 when omitted, the source runs on every base tick. The runtime converts each source's
 interval to base-tick multiples and schedules dispatches accordingly.
 
-See the upstream [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/datalayer.md) doc for the canonical model.
+See the upstream [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/datalayer.md) doc for the canonical model.
 
 ---
 
@@ -363,8 +404,17 @@ Enable chunked decode via the pd-sidecar flag:
 | `--decode-chunk-size` | `0` (disabled) | Token budget per chunk. Set to a positive integer to enable chunked decode. For best performance use a multiple of the KV cache block size. |
 
 > [!NOTE]
-> If the request's `max_tokens` / `max_completion_tokens` is less than or equal to `--decode-chunk-size`,
-> the sidecar falls back to a single regular decode call without chunking.
+> The sidecar falls back to a single regular decode call without chunking in any of these cases:
+>
+> - the request's `max_tokens` / `max_completion_tokens` is less than or equal to `--decode-chunk-size`.
+> - the request sets `echo: true`, because the decoder would echo the accumulated assistant text on
+>   every chunk.
+> - the request sets `n` greater than 1, because each chunk would continue the text of the first
+>   choice for every choice.
+> - the request declares a non-empty `tools` array and does not set `tool_choice: none`, because a
+>   tool call cannot be reassembled across chunk boundaries.
+> - the request sets `structured_outputs`, or a `response_format` whose `type` is not `text`, because
+>   vLLM applies the constraint to each chunk's output separately.
 
 ---
 
@@ -388,14 +438,15 @@ Enable chunked decode via the pd-sidecar flag:
 - [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
 - [Envoy External Processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)
 - [EPP Container Sizing Guide](./operations.md)
+- [Inference API Routing](./api-routing.md)
 
 ### Canonical llm-d architecture (upstream)
 
-- [Router overview](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/README.md)
-- [Proxy](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/proxy.md)
-- [Endpoint Picker (EPP)](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/README.md)
-- [Configuration](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/configuration.md)
-- [Request Scheduler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/scheduling.md)
-- [Request Handler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/request-handling.md)
-- [Flow Control](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/flow-control.md)
-- [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/core/router/epp/datalayer.md)
+- [Router overview](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/README.md)
+- [Proxy](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/proxy.md)
+- [Endpoint Picker (EPP)](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/epp.md)
+- [Configuration](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/configuration.md)
+- [Request Scheduler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/scheduling.md)
+- [Request Handler](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/request-handling.md)
+- [Flow Control](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/flow-control.md)
+- [Data Layer](https://github.com/llm-d/llm-d/blob/main/docs/architecture/router/datalayer.md)

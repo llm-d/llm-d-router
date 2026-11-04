@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -48,10 +49,11 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix"
+	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/systemone"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
@@ -59,6 +61,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -73,6 +77,7 @@ const (
 	testExtractorType          = "test-extractor"
 	testWithDependencies       = "test-with-dependencies"
 	testWithNestedDependencies = "test-with-nested-dependencies"
+	testDrainFilterType        = "test-drain-filter"
 
 	testFeatureGate = "test-feature-gate"
 )
@@ -83,17 +88,13 @@ func (testCrossReplicaSyncer) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: "test-syncer", Name: "test-syncer"}
 }
 
-func (testCrossReplicaSyncer) Set(context.Context, fwkdl.StateKey, string, any, func([]any) any) error {
-	return nil
-}
+func (testCrossReplicaSyncer) Set(context.Context, fwkdl.CrossReplicaSpec, string) error { return nil }
 
-func (testCrossReplicaSyncer) Get(context.Context, fwkdl.StateKey, string) (any, bool, error) {
+func (testCrossReplicaSyncer) Get(context.Context, fwkdl.CrossReplicaSpec, string) (any, bool, error) {
 	return nil, false, nil
 }
 
-func (testCrossReplicaSyncer) Delete(context.Context, fwkdl.StateKey, string) error {
-	return nil
-}
+func (testCrossReplicaSyncer) Delete(context.Context, fwkdl.StateKey, string) error { return nil }
 
 func (testCrossReplicaSyncer) GetOrSet(_ context.Context, _ fwkdl.StateKey, _ string, candidate any) (any, bool, error) {
 	return candidate, false, nil
@@ -606,6 +607,26 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
+			name:       "Success - composeFairnessIDs defaults off",
+			configText: successSchedulerConfigText,
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.False(t, rawCfg.RequestHandler.ComposeFairnessIDs)
+				require.False(t, cfg.ComposeFairnessIDs)
+			},
+		},
+		{
+			name:       "Success - composeFairnessIDs enabled",
+			configText: successSchedulerConfigText + "\nrequestHandler:\n  composeFairnessIDs: true\n",
+			wantErr:    false,
+			validate: func(t *testing.T, _ fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
+				require.NotNil(t, rawCfg.RequestHandler)
+				require.True(t, rawCfg.RequestHandler.ComposeFairnessIDs)
+				require.True(t, cfg.ComposeFairnessIDs)
+			},
+		},
+		{
 			name:       "Success - Default Scorer Weight",
 			configText: successWithNoWeightText,
 			wantErr:    false,
@@ -753,14 +774,16 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapiv1.EndpointPickerConfig, cfg *config.Config) {
 				require.NotNil(t, cfg.ParserRegistry, "Parser registry should be loaded")
 				parsers := cfg.ParserRegistry.Parsers()
-				require.Len(t, parsers, 4, "Should have the three default parsers plus the passthrough fallback")
+				require.Len(t, parsers, 5, "Should have the four default parsers plus the passthrough fallback")
 				require.Equal(t, "openai-parser", parsers[0].TypedName().Name)
 				require.Equal(t, openai.OpenAIParserType, parsers[0].TypedName().Type)
 				require.Equal(t, "anthropic-parser", parsers[1].TypedName().Name)
 				require.Equal(t, anthropic.AnthropicParserType, parsers[1].TypedName().Type)
 				require.Equal(t, "vllmhttp-parser", parsers[2].TypedName().Name)
 				require.Equal(t, vllmhttp.VllmHTTPParserType, parsers[2].TypedName().Type)
-				require.Equal(t, passthrough.PassthroughParserType, parsers[3].TypedName().Type,
+				require.Equal(t, "systemone-parser", parsers[3].TypedName().Name)
+				require.Equal(t, systemone.SystemOneParserType, parsers[3].TypedName().Type)
+				require.Equal(t, passthrough.PassthroughParserType, parsers[4].TypedName().Type,
 					"Passthrough is last so it does not shadow the claimed parsers")
 			},
 		},
@@ -1187,6 +1210,16 @@ func (m *mockPicker) Pick(context.Context, []*fwksched.ScoredEndpoint) *fwksched
 	return nil
 }
 
+// Mock Filter that removes every endpoint
+type mockDrainFilter struct{ mockPlugin }
+
+// compile-time type assertion
+var _ fwksched.Filter = &mockDrainFilter{}
+
+func (m *mockDrainFilter) Filter(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) []fwksched.Endpoint {
+	return nil
+}
+
 // Mock Handler
 type mockHandler struct{ mockPlugin }
 
@@ -1404,6 +1437,7 @@ func registerTestPlugins(t *testing.T) {
 	fwkplugin.Register(vertexai.VertexAIParserType, fwkplugin.StabilityStable, vertexai.VertexAIParserPluginFactory)
 	fwkplugin.Register(anthropic.AnthropicParserType, fwkplugin.StabilityStable, anthropic.AnthropicParserPluginFactory)
 	fwkplugin.Register(vllmhttp.VllmHTTPParserType, fwkplugin.StabilityStable, vllmhttp.VllmHTTPParserPluginFactory)
+	fwkplugin.Register(systemone.SystemOneParserType, fwkplugin.StabilityStable, systemone.SystemOneParserPluginFactory)
 	fwkplugin.Register(passthrough.PassthroughParserType, fwkplugin.StabilityBeta, passthrough.PassthroughParserPluginFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, fwkplugin.StabilityStable, usagelimits.StaticPolicyFactory)
 	fwkplugin.Register(bandselection.StrictBandSelectionPolicyType, fwkplugin.StabilityStable, bandselection.StrictPolicyFactory)
@@ -1554,7 +1588,60 @@ func TestFilterExecutionOrderFromYAML(t *testing.T) {
 		"Plugins slice must preserve YAML declaration order")
 }
 
+func TestFilterMetricsCarryConfiguredProfileName(t *testing.T) {
+	registerTestPlugins(t)
+	fwkplugin.Register(testDrainFilterType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+		return &mockDrainFilter{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testDrainFilterType}}}, nil
+	})
+	metrics.Register()
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+
+	const text = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: drain
+  type: test-drain-filter
+- type: max-score-picker
+schedulingProfiles:
+- name: decode
+  plugins:
+  - pluginRef: drain
+  - pluginRef: max-score-picker
+`
+	logger := logging.NewTestLogger()
+	rawConfig, _, err := LoadRawConfig([]byte(text), logger)
+	require.NoError(t, err)
+	cfg, err := InstantiateAndConfigure(rawConfig, testutils.NewTestHandle(context.Background()), logger)
+	require.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{}, &fwkdl.Metrics{}, nil)
+	_, err = scheduling.NewSchedulerWithConfig(cfg.SchedulerConfig).Schedule(context.Background(),
+		&fwksched.InferenceRequest{RequestID: "req"}, []fwksched.Endpoint{endpoint})
+	require.Error(t, err, "the drain filter removes the only endpoint")
+
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var profiles []string
+	for _, family := range families {
+		if family.GetName() != "llm_d_epp_scheduler_filter_eliminated_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "profile" {
+					profiles = append(profiles, label.GetValue())
+				}
+			}
+		}
+	}
+	require.Equal(t, []string{"decode"}, profiles)
+}
+
 func TestAllowExperimentalPluginsFlag(t *testing.T) {
+	// Not parallel because it modifies global plugin registry.
+	registerTestPlugins(t)
+
 	const alphaPluginType = "test-alpha-plugin"
 	fwkplugin.Register(alphaPluginType, fwkplugin.StabilityAlpha, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockPlugin{t: fwkplugin.TypedName{Name: name, Type: alphaPluginType}}, nil

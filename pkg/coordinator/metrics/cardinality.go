@@ -46,7 +46,7 @@ func boundModel(modelName string) string {
 // RouteUnknown so a raw path cannot expand the time series set.
 func boundRoute(route string) string {
 	switch route {
-	case RouteChatCompletions, RouteCompletions, RouteGenerate:
+	case RouteChatCompletions, RouteCompletions, RouteResponses, RouteMessages, RouteGenerate:
 		return route
 	default:
 		return RouteUnknown

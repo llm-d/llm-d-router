@@ -19,6 +19,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -29,8 +30,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -85,14 +86,14 @@ func expectGenerateRequestTokenLimits(testInfo *sidecarTestInfo) {
 	req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathVLLMGenerate,
 		bytes.NewReader([]byte(generateRequestBodyWithTokenLimits)))
 	Expect(err).ToNot(HaveOccurred())
-	req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+	addPrefillRouting(req, testInfo.prefillBackend.URL[len("http://"):])
 
 	resp, err := http.DefaultClient.Do(req)
 	Expect(err).ToNot(HaveOccurred())
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		bp, _ := io.ReadAll(resp.Body) //nolint:errcheck
+		bp, _ := io.ReadAll(resp.Body)
 		Fail(string(bp))
 	}
 
@@ -196,7 +197,7 @@ var _ = Describe("Common Connector tests", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				if rp.StatusCode != 200 {
-					bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+					bp, _ := io.ReadAll(rp.Body)
 					Fail(string(bp))
 				}
 
@@ -256,7 +257,7 @@ var _ = Describe("Common Connector tests", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				if rp.StatusCode != 200 {
-					bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+					bp, _ := io.ReadAll(rp.Body)
 					Fail(string(bp))
 				}
 
@@ -310,7 +311,7 @@ var _ = Describe("Common Connector tests", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				if rp.StatusCode != 200 {
-					bp, _ := io.ReadAll(rp.Body) //nolint:errcheck
+					bp, _ := io.ReadAll(rp.Body)
 					Fail(string(bp))
 				}
 
@@ -379,7 +380,7 @@ var _ = Describe("Non-object request body", func() {
 
 			req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
 			Expect(err).ToNot(HaveOccurred())
-			req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+			addPrefillRouting(req, testInfo.prefillBackend.URL[len("http://"):])
 
 			resp, err := http.DefaultClient.Do(req)
 			Expect(err).ToNot(HaveOccurred())
@@ -388,7 +389,7 @@ var _ = Describe("Non-object request body", func() {
 			Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 			respBody, err := io.ReadAll(resp.Body)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(string(respBody)).To(ContainSubstring("BadRequestError"))
+			expectErrorEnvelope(respBody)
 
 			By("verifying neither the prefill nor the decode request was dispatched")
 			Expect(testInfo.prefillHandler.RequestCount.Load()).To(BeZero())
@@ -407,10 +408,10 @@ var _ = Describe("Non-object request body", func() {
 
 // Every entry point reads the client body through readJSONBody before it does
 // anything else, so a client that drops the connection mid-body must get the
-// same vLLM error envelope whichever path the sidecar is configured for. The
+// same error envelope whichever path the sidecar is configured for. The
 // decoder-only paths are covered too: they write into the parsed body as well.
 var _ = Describe("Unreadable request body", func() {
-	DescribeTable("is refused with a vLLM error envelope",
+	DescribeTable("is refused with the OpenAI error envelope",
 		func(config Config, handle func(*Server, http.ResponseWriter, *http.Request)) {
 			proxy := NewProxy(config)
 			w := httptest.NewRecorder()
@@ -423,7 +424,7 @@ var _ = Describe("Unreadable request body", func() {
 		},
 		Entry("nixlv2", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleNIXLV2(w, r, "10.0.0.1:8080", "", reqcommon.APITypeChatCompletions)
+				s.handleNIXLV2(w, r, "10.0.0.1:8080", p2pRouting{}, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
@@ -435,7 +436,7 @@ var _ = Describe("Unreadable request body", func() {
 			}),
 		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleP2P(w, r, "10.0.0.1:8080", "", reqcommon.APITypeChatCompletions)
+				s.handleP2P(w, r, "10.0.0.1:8080", p2pRouting{prefill: &p2pPeer{host: "10.0.0.1", port: p2pConnectorPort}}, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("sglang", Config{Port: "0", KVConnector: constants.KVConnectorSGLang},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
@@ -443,19 +444,85 @@ var _ = Describe("Unreadable request body", func() {
 			}),
 		Entry("ec-nixl", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorNIXL},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
+				s.handleECNIXL(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, p2pRouting{}, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("ec-shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage, ECConnector: constants.ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, reqcommon.APITypeChatCompletions)
+				s.handleECSharedStorage(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, p2pRouting{}, reqcommon.APITypeChatCompletions)
+			}),
+		Entry("ec-mooncake", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorMooncake},
+			func(s *Server, w http.ResponseWriter, r *http.Request) {
+				s.handleECMooncake(w, r, "10.0.0.1:8080", []string{"10.0.0.2:8080"}, p2pRouting{}, reqcommon.APITypeChatCompletions)
 			}),
 		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
-				s.decodeWithP2PSource(w, r, "10.0.0.2:8080")
+				s.decodeWithP2PSource(w, r, p2pRouting{source: &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: "10.0.0.2", port: p2pConnectorPort}}})
 			}),
 		Entry("chunked decode", Config{Port: "0", DecodeChunkSize: 16},
 			func(s *Server, w http.ResponseWriter, r *http.Request) {
 				s.runChunkedDecode(w, r)
+			}),
+	)
+})
+
+// The connectors that wait for prefill relay its error response to the client,
+// so a prefill pod that cannot be reached must still produce an error envelope.
+var _ = Describe("Unreachable prefill", func() {
+	DescribeTable("is answered with a 502 in the Anthropic envelope on the Messages path",
+		func(config Config, handle func(*Server, http.ResponseWriter, *http.Request, string)) {
+			prefill := httptest.NewServer(http.NotFoundHandler())
+			prefillHostPort := prefill.Listener.Addr().String()
+			prefill.Close()
+
+			proxy := NewProxy(config)
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathMessages,
+				strings.NewReader(`{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`))
+			r.Header.Set(reqcommon.RequestIDHeaderKey, "req-1")
+
+			handle(proxy, w, r, prefillHostPort)
+
+			Expect(w.Code).To(Equal(http.StatusBadGateway))
+			Expect(w.Header().Get("Content-Type")).To(Equal("application/json"))
+			var got reqcommon.AnthropicErrorResponse
+			Expect(json.Unmarshal(w.Body.Bytes(), &got)).To(Succeed(), "body=%q", w.Body.String())
+			Expect(got.Type).To(Equal("error"))
+			Expect(got.Error.Type).To(Equal("api_error"))
+			Expect(got.Error.Message).To(Equal("internal error (request_id: req-1)"))
+		},
+		Entry("nixlv2", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2},
+			func(s *Server, w http.ResponseWriter, r *http.Request, prefill string) {
+				s.handleNIXLV2(w, r, prefill, p2pRouting{}, reqcommon.APITypeMessages)
+			}),
+		Entry("shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage},
+			func(s *Server, w http.ResponseWriter, r *http.Request, prefill string) {
+				s.handleSharedStorage(w, r, prefill, reqcommon.APITypeMessages)
+			}),
+		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
+			func(s *Server, w http.ResponseWriter, r *http.Request, prefill string) {
+				s.handleP2P(w, r, prefill, p2pRouting{prefill: &p2pPeer{host: extractHost(prefill), port: p2pConnectorPort}}, reqcommon.APITypeMessages)
+			}),
+		// The concurrent-dispatch connectors relay the prefill response through
+		// the decoder proxy's error handler, so the decode leg needs the real
+		// proxy against a backend that waits for cancellation. The transport
+		// does not close the connection on cancellation, so release the backend
+		// handler for Close.
+		Entry("sglang", Config{Port: "0", KVConnector: constants.KVConnectorSGLang},
+			func(s *Server, w http.ResponseWriter, r *http.Request, prefill string) {
+				release := make(chan struct{})
+				decode := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, dr *http.Request) {
+					select {
+					case <-dr.Context().Done():
+					case <-release:
+					}
+				}))
+				defer decode.Close()
+				defer close(release)
+				decodeURL, err := url.Parse(decode.URL)
+				Expect(err).ToNot(HaveOccurred())
+				s.config.DecoderURL = decodeURL
+				s.decoderProxy = s.createDecoderProxyHandler(decodeURL, false)
+				s.handleSGLang(w, r, prefill)
 			}),
 	)
 })
@@ -503,7 +570,7 @@ var _ = Describe("Stateful Responses fields", func() {
 		},
 		Entry("nixlv2", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleNIXLV2(w, r, upstream, "", reqcommon.APITypeResponses)
+				s.handleNIXLV2(w, r, upstream, p2pRouting{}, reqcommon.APITypeResponses)
 			}),
 		Entry("shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
@@ -515,7 +582,7 @@ var _ = Describe("Stateful Responses fields", func() {
 			}),
 		Entry("p2p", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleP2P(w, r, upstream, "", reqcommon.APITypeResponses)
+				s.handleP2P(w, r, upstream, p2pRouting{prefill: &p2pPeer{host: extractHost(upstream), port: p2pConnectorPort}}, reqcommon.APITypeResponses)
 			}),
 		Entry("sglang", Config{Port: "0", KVConnector: constants.KVConnectorSGLang},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
@@ -523,18 +590,41 @@ var _ = Describe("Stateful Responses fields", func() {
 			}),
 		Entry("ec-nixl", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorNIXL},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleECNIXL(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
+				s.handleECNIXL(w, r, upstream, []string{upstream}, p2pRouting{}, reqcommon.APITypeResponses)
 			}),
 		Entry("ec-shared-storage", Config{Port: "0", KVConnector: constants.KVConnectorSharedStorage, ECConnector: constants.ECExampleConnector},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.handleECSharedStorage(w, r, upstream, []string{upstream}, reqcommon.APITypeResponses)
+				s.handleECSharedStorage(w, r, upstream, []string{upstream}, p2pRouting{}, reqcommon.APITypeResponses)
+			}),
+		Entry("ec-mooncake", Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, ECConnector: constants.ECConnectorMooncake},
+			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
+				s.handleECMooncake(w, r, upstream, []string{upstream}, p2pRouting{}, reqcommon.APITypeResponses)
 			}),
 		Entry("p2p decoder-only pull", Config{Port: "0", KVConnector: constants.KVConnectorOffloading},
 			func(s *Server, w http.ResponseWriter, r *http.Request, upstream string) {
-				s.decodeWithP2PSource(w, r, upstream)
+				s.decodeWithP2PSource(w, r, p2pRouting{source: &kvSource{kvRequestID: "k", p2pPeer: p2pPeer{host: extractHost(upstream), port: p2pConnectorPort}}})
 			}),
 	)
 })
+
+// postChatCompletions sends body to the proxy's chat completions path with
+// headers and fails the spec on a non-200 answer.
+func postChatCompletions(proxyBaseAddr, body string, headers map[string]string) *http.Response {
+	GinkgoHelper()
+	req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions,
+		bytes.NewReader([]byte(body)))
+	Expect(err).ToNot(HaveOccurred())
+	for k, v := range headers {
+		req.Header.Add(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	Expect(err).ToNot(HaveOccurred())
+	if resp.StatusCode != 200 {
+		bp, _ := io.ReadAll(resp.Body)
+		Fail(string(bp))
+	}
+	return resp
+}
 
 func sidecarConnectionTestSetup(connector string) *sidecarTestInfo {
 	testInfo := sidecarTestInfo{}

@@ -183,6 +183,37 @@ func TestMatchBlockKeys(t *testing.T) {
 				podA: {WeightedScore: 2.8, MatchedBlocks: 3, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1, kvcache.SpeculativeTier: 2}},
 			},
 		},
+		{
+			name: "repeated runs flush across tier transitions and dead candidates",
+			entries: map[kvblock.BlockHash][]kvblock.PodEntry{
+				10: {{PodIdentifier: podA, DeviceTier: "gpu"}, {PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podB, DeviceTier: "gpu"}},
+				20: {{PodIdentifier: podA, DeviceTier: "gpu"}, {PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podB, DeviceTier: "gpu"}},
+				30: {{PodIdentifier: podA, DeviceTier: "gpu"}, {PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podB, DeviceTier: "gpu"}},
+				40: {{PodIdentifier: podA, DeviceTier: "cpu"}},
+				50: {{PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podB, DeviceTier: "gpu"}},
+				60: {{PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podB, DeviceTier: "gpu"}},
+				70: {{PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podB, DeviceTier: "gpu"}},
+			},
+			requestKeys: []kvblock.BlockHash{10, 20, 30, 40, 50, 60, 70},
+			want: map[string]kvcache.PodMatch{
+				podA: {WeightedScore: 6.2, MatchedBlocks: 7, ConfirmedBlocks: 7, BlocksByTier: map[string]int{"gpu": 3, "cpu": 7}},
+				podB: {WeightedScore: 3.0, MatchedBlocks: 3, ConfirmedBlocks: 3, BlocksByTier: map[string]int{"gpu": 3}},
+			},
+		},
+		{
+			name: "three tiers per pod spill past inline tier buffer across runs",
+			entries: map[kvblock.BlockHash][]kvblock.PodEntry{
+				10: {{PodIdentifier: podA, DeviceTier: "gpu"}, {PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podA, DeviceTier: "storage"}},
+				20: {{PodIdentifier: podA, DeviceTier: "gpu"}, {PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podA, DeviceTier: "storage"}},
+				30: {{PodIdentifier: podA, DeviceTier: "gpu"}, {PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podA, DeviceTier: "storage"}},
+				40: {{PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podA, DeviceTier: "storage"}},
+				50: {{PodIdentifier: podA, DeviceTier: "cpu"}, {PodIdentifier: podA, DeviceTier: "storage"}},
+			},
+			requestKeys: []kvblock.BlockHash{10, 20, 30, 40, 50},
+			want: map[string]kvcache.PodMatch{
+				podA: {WeightedScore: 4.6, MatchedBlocks: 5, ConfirmedBlocks: 5, BlocksByTier: map[string]int{"gpu": 3, "cpu": 5, "storage": 5}},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -302,6 +333,30 @@ func TestMatchBlockKeysDeviceTierNamedSpeculative(t *testing.T) {
 	}, got)
 }
 
+// A speculative entry whose empty device tier shares ordinal zero with the
+// first-seen confirmed tier must still end the confirmed chain when a run
+// switches from confirmed to speculative entries.
+func TestMatchBlockKeysSpeculativeVsOrdinalZeroRun(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	walked, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{10, 20}, []kvblock.PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}))
+	require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{30, 40}, []kvblock.PodEntry{{PodIdentifier: "pod-a", Speculative: true}}))
+
+	want := map[string]kvcache.PodMatch{
+		"pod-a": {WeightedScore: 4.0, MatchedBlocks: 4, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}},
+	}
+	for name, indexer := range map[string]*kvcache.Indexer{
+		"walked":       walked,
+		"materialized": newMaterializedMatcher(idx, kvcache.DefaultKVCacheBackendConfig()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := indexer.MatchBlockKeys(ctx, []kvblock.BlockHash{10, 20, 30, 40}, nil)
+			require.NoError(t, err)
+			assertPodMatches(t, want, got)
+		})
+	}
+}
+
 func TestMatchBlockKeysConfiguredTierWeights(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -309,6 +364,18 @@ func TestMatchBlockKeysConfiguredTierWeights(t *testing.T) {
 		entry    kvblock.PodEntry
 		want     float64
 	}{
+		{
+			name:     "default backends score SGLang's cpu_pinned host tier at 0.8",
+			backends: kvcache.DefaultKVCacheBackendConfig(),
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "cpu_pinned"},
+			want:     0.8,
+		},
+		{
+			name:     "default backends score storage at 0.6",
+			backends: kvcache.DefaultKVCacheBackendConfig(),
+			entry:    kvblock.PodEntry{PodIdentifier: "pod-a", DeviceTier: "storage"},
+			want:     0.6,
+		},
 		{
 			name:     "default backends score shared_storage at 0.4",
 			backends: kvcache.DefaultKVCacheBackendConfig(),
@@ -509,6 +576,98 @@ func TestMatchBlockKeysMatchesLegacyAlgorithms(t *testing.T) {
 		gotMaterialized, err := newMaterializedMatcher(idx, backends).MatchBlockKeys(ctx, keys, filter)
 		require.NoError(t, err)
 		keyToPods, err := idx.Lookup(ctx, keys, filter)
+		require.NoError(t, err)
+
+		want := map[string]kvcache.PodMatch{}
+		for pod, score := range legacyLongestPrefixScore(keys, keyToPods, weights) {
+			want[pod] = kvcache.PodMatch{
+				WeightedScore:   score,
+				MatchedBlocks:   legacyMatchedBlockCount(keys, keyToPods, pod),
+				ConfirmedBlocks: legacyMatchedConfirmedBlockCount(keys, keyToPods, pod),
+				BlocksByTier:    legacyMatchedBlockCountByTier(keys, keyToPods, pod),
+			}
+		}
+		assertPodMatches(t, want, gotWalked)
+		assertPodMatches(t, want, gotMaterialized)
+	}
+}
+
+// Index runs, consecutive keys that hold the same entries, are what the
+// matcher folds without a full pass. The legacy algorithms decide the
+// expected result on fixtures built from runs, including runs separated by an
+// empty key, keys whose entries match the previous key's only up to order,
+// and pods holding several tiers or ranks at one key.
+func TestMatchBlockKeysMatchesLegacyAlgorithmsOnRuns(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	rng := rand.New(rand.NewSource(2)) //#nosec G404 -- fixed-seed deterministic test fixture
+	tiers := []string{"gpu", "cpu", "disk", kvcache.SpeculativeTier}
+	backends := []*kvcache.KVCacheBackendConfig{{Name: "gpu", Weight: 1.0}, {Name: "cpu", Weight: 0.8}}
+	weights := map[string]float64{"gpu": 1.0, "cpu": 0.8}
+
+	for iter := 0; iter < 300; iter++ {
+		numKeys, numPods := 1+rng.Intn(60), 1+rng.Intn(5)
+		keys := make([]kvblock.BlockHash, numKeys)
+		for i := range keys {
+			keys[i] = kvblock.BlockHash(i + 1)
+		}
+		fixture := make(map[kvblock.BlockHash][]kvblock.PodEntry, numKeys)
+		var prev []kvblock.PodEntry
+		for start := 0; start < numKeys; {
+			end := min(numKeys, start+1+rng.Intn(15))
+			var run []kvblock.PodEntry
+			switch {
+			case len(prev) > 0 && rng.Intn(4) == 0:
+				// The previous run with one entry's speculative flag flipped.
+				run = slices.Clone(prev)
+				i := rng.Intn(len(run))
+				run[i].Speculative = !run[i].Speculative
+			case rng.Intn(8) != 0: // otherwise an empty run, a gap
+				for p := 0; p < numPods; p++ {
+					if rng.Float64() >= 0.6 {
+						continue
+					}
+					entry := kvblock.PodEntry{PodIdentifier: fmt.Sprintf("pod-%d", p), DeviceTier: tiers[rng.Intn(len(tiers))]}
+					if rng.Intn(3) == 0 {
+						entry.HasGroup, entry.GroupIdx = true, kvblock.GroupID(rng.Intn(2))
+					}
+					if rng.Float64() < 0.15 {
+						entry.Speculative = true
+						if rng.Intn(2) == 0 {
+							entry.DeviceTier = "" // otherwise it shares a tier with confirmed entries
+						}
+					}
+					run = append(run, entry)
+					if rng.Intn(4) == 0 {
+						// A second tier or a second rank of the same pod.
+						extra := entry
+						if rng.Intn(2) == 0 {
+							extra.DeviceTier = tiers[rng.Intn(len(tiers))]
+						} else {
+							extra.HasGroup, extra.GroupIdx = true, kvblock.GroupID(2)
+						}
+						run = append(run, extra)
+					}
+				}
+			}
+			prev = run
+			for i := start; i < end && len(run) > 0; i++ {
+				entries := slices.Clone(run)
+				if rng.Intn(10) == 0 {
+					rng.Shuffle(len(entries), func(a, b int) { entries[a], entries[b] = entries[b], entries[a] })
+				}
+				fixture[keys[i]] = entries
+			}
+			start = end
+		}
+
+		walked, idx := newMatcher(t, backends)
+		populateIndex(t, idx, fixture)
+
+		gotWalked, err := walked.MatchBlockKeys(ctx, keys, nil)
+		require.NoError(t, err)
+		gotMaterialized, err := newMaterializedMatcher(idx, backends).MatchBlockKeys(ctx, keys, nil)
+		require.NoError(t, err)
+		keyToPods, err := idx.Lookup(ctx, keys, nil)
 		require.NoError(t, err)
 
 		want := map[string]kvcache.PodMatch{}

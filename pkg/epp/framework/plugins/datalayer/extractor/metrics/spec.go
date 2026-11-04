@@ -34,18 +34,20 @@ import (
 // Field validation (metric name syntax) is delegated to model.LegacyValidation.IsValidMetricName.
 var metricSpecRE = regexp.MustCompile(`^\s*(\S+?)\s*(?:\{([^}]*)\})?\s*$`)
 
-// labelPairRE handles structural parsing: extracts the key and value from a key="value" label pair
-// (after addQuotesToLabelValues normalisation). Field validation (label name syntax) is delegated
-// to model.LegacyValidation.IsValidLabelName.
-var labelPairRE = regexp.MustCompile(`^\s*(\S+?)\s*=\s*"([^"]*)"\s*$`)
+// labelPairRE handles structural parsing: extracts the key, operator, and
+// value from a key="value" or key!="value" label matcher (after
+// addQuotesToLabelValues normalisation). Field validation (label name syntax)
+// is delegated to model.LegacyValidation.IsValidLabelName.
+var labelPairRE = regexp.MustCompile(`^\s*(\S+?)\s*(!=|=)\s*"([^"]*)"\s*$`)
 
 // addQuotesRE is the compiled form of the pattern used by addQuotesToLabelValues.
-var addQuotesRE = regexp.MustCompile(`(\w+)\s*=\s*([^",}\s]+)`)
+var addQuotesRE = regexp.MustCompile(`(\w+)\s*(!=|=)\s*([^",}\s]+)`)
 
 // Spec represents a single metric's specification.
 type Spec struct {
-	Name   string            // the metric's name
-	Labels map[string]string // maps metric's label name to value
+	Name      string            // the metric's name
+	Labels    map[string]string // maps metric's label name to required value
+	NotLabels map[string]string // maps metric's label name to excluded value
 }
 
 // parseStringToSpec converts a string to a metrics.Spec.
@@ -65,23 +67,31 @@ func parseStringToSpec(spec string) (*Spec, error) {
 	}
 
 	metricLabels := make(map[string]string)
+	var metricNotLabels map[string]string
 	if labelBlock := strings.TrimSpace(m[2]); labelBlock != "" {
 		for _, pair := range strings.Split(labelBlock, ",") {
 			lm := labelPairRE.FindStringSubmatch(pair)
 			if lm == nil || !model.LegacyValidation.IsValidLabelName(lm[1]) {
 				return nil, fmt.Errorf("invalid label pair %q in specification: %q", pair, spec)
 			}
-			metricLabels[lm[1]] = lm[2]
+			if lm[2] == "!=" {
+				if metricNotLabels == nil {
+					metricNotLabels = make(map[string]string)
+				}
+				metricNotLabels[lm[1]] = lm[3]
+			} else {
+				metricLabels[lm[1]] = lm[3]
+			}
 		}
 	}
 
-	return &Spec{Name: m[1], Labels: metricLabels}, nil
+	return &Spec{Name: m[1], Labels: metricLabels, NotLabels: metricNotLabels}, nil
 }
 
 // addQuotesToLabelValues wraps label values with quotes, if missing,
 // allowing both {label=value} and {label="value"} inputs.
 func addQuotesToLabelValues(input string) string {
-	return addQuotesRE.ReplaceAllString(input, `$1="$2"`)
+	return addQuotesRE.ReplaceAllString(input, `$1$2"$3"`)
 }
 
 // extract the metric family is common to standard and LoRA spec's.
@@ -122,7 +132,12 @@ func (spec *Spec) getLatestMetric(families sourcemetrics.PrometheusMetricMap) (*
 	}
 
 	if latest == nil {
-		return nil, fmt.Errorf("no matching metric found for %q with labels %v", spec.Name, spec.Labels)
+		return nil, fmt.Errorf(
+			"no matching metric found for %q with labels %v and excluded label values %v",
+			spec.Name,
+			spec.Labels,
+			spec.NotLabels,
+		)
 	}
 
 	if v := extractValue(latest); math.IsNaN(v) || math.IsInf(v, 0) {
@@ -173,7 +188,12 @@ func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, ag
 	}
 
 	if matched == 0 {
-		return 0, fmt.Errorf("no matching metric found for %q with labels %v", spec.Name, spec.Labels)
+		return 0, fmt.Errorf(
+			"no matching metric found for %q with labels %v and excluded label values %v",
+			spec.Name,
+			spec.Labels,
+			spec.NotLabels,
+		)
 	}
 	return result, nil
 }
@@ -191,6 +211,18 @@ func (spec *Spec) labelsMatch(metricLabels []*dto.LabelPair) bool {
 			}
 		}
 		if !found {
+			return false
+		}
+	}
+	for name, value := range spec.NotLabels {
+		actual := ""
+		for _, label := range metricLabels {
+			if label.GetName() == name {
+				actual = label.GetValue()
+				break
+			}
+		}
+		if actual == value {
 			return false
 		}
 	}

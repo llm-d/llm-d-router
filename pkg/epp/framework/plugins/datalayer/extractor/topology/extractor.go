@@ -20,7 +20,7 @@ limitations under the License.
 // Label names for each field are resolved from plugin parameters, defaulting to
 // the standard Kubernetes topology labels. Labels are read from the endpoint's
 // pod metadata at endpoint event time. When the hostname label is absent from
-// the pod, the plugin falls back to spec.hostname from Pod notification events.
+// the pod, the plugin falls back to spec.nodeName from Pod notification events.
 // Zone and region have no fallback.
 package topology
 
@@ -61,7 +61,7 @@ const (
 // params holds the user-facing configuration for the topology extractor.
 // Each field names the pod label used to read the corresponding topology value.
 // When a field is empty, the corresponding default Kubernetes topology label is used.
-// When the hostname label is absent on a pod, spec.hostname is used as a fallback.
+// When the hostname label is absent on a pod, spec.nodeName is used as a fallback.
 // Zone, rack, and region have no fallback.
 type params struct {
 	// Hostname is the pod label name whose value is used as the topology hostname.
@@ -99,7 +99,7 @@ type TopologyExtractor struct {
 	// One pod may have N rank endpoints, each with a distinct inner key.
 	// Only endpoints whose hostname label was absent are tracked here.
 	endpoints map[types.NamespacedName]map[types.NamespacedName]fwkdl.Endpoint
-	// hostnames caches spec.hostname per pod (ready pods only).
+	// hostnames caches spec.nodeName per pod (ready pods only).
 	// Populated by Pod notifications; cleared on pod delete.
 	hostnames map[types.NamespacedName]string
 }
@@ -215,7 +215,7 @@ func (h *endpointHandler) Extract(_ context.Context, event fwkdl.EndpointEvent) 
 	region := meta.Labels[h.ext.regionLabel]
 
 	if hn == "" {
-		// Hostname label absent: track endpoint for spec.hostname fallback via pod notification.
+		// Hostname label absent: track endpoint for spec.nodeName fallback via pod notification.
 		key := podKey(meta)
 		epKey := meta.GetID()
 		h.ext.mu.Lock()
@@ -256,7 +256,7 @@ func (h *endpointHandler) removeEndpoint(meta *fwkdl.EndpointMetadata, _ fwkdl.E
 // podNotificationHandler handles Pod k8s notification events.
 //
 // With hostnameLabel set: no-op.
-// Without hostnameLabel: caches spec.hostname for ready pods and stamps all
+// Without hostnameLabel: caches spec.nodeName for ready pods and stamps all
 // current endpoints for that pod. Evicts the cache entry when the pod is
 // deleted or becomes not-ready.
 type podNotificationHandler struct {
@@ -284,7 +284,7 @@ func (h *podNotificationHandler) Extract(_ context.Context, event fwkdl.Notifica
 		return nil
 	}
 
-	hostname, _, _ := unstructured.NestedString(obj.Object, "spec", "hostname")
+	hostname, _, _ := unstructured.NestedString(obj.Object, "spec", "nodeName")
 	if hostname == "" {
 		return nil
 	}

@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"time"
@@ -38,6 +39,25 @@ import (
 
 const RenderStepName = "render"
 
+// Render request fields. fieldMMPayload selects what a vLLM render response
+// carries for each multimodal item; fieldReturnMMKwargs is its deprecated
+// boolean alias, the only one vLLM v0.32 reads.
+const (
+	fieldMMPayload      = "mm_payload"
+	fieldReturnMMKwargs = "return_mm_kwargs"
+)
+
+// Render step mm_payload values.
+const (
+	// mmPayloadTensors ships the processed tensors as kwargs_data.
+	mmPayloadTensors = "tensors"
+	// mmPayloadNone omits the tensors. Generate-format encode requests carry
+	// the client's media as content_parts, and prefill sends features with
+	// mm_metadata when it has metadata and EC coverage for every entry, else
+	// the client's media as content_parts.
+	mmPayloadNone = "none"
+)
+
 func init() {
 	pipeline.Register(RenderStepName, NewRenderStep)
 }
@@ -46,6 +66,7 @@ type RenderStep struct {
 	serviceAddress            string
 	maxTotalTokens            int
 	maxTotalPlaceholderTokens int
+	mmPayload                 string
 	client                    *http.Client
 }
 
@@ -99,6 +120,21 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		maxPlaceholders = v
 	}
 
+	mmPayload, err := paramString(params, "mm_payload")
+	if err != nil {
+		return nil, err
+	}
+	switch mmPayload {
+	case "":
+		// none is opt-in: its content_parts form fails any model whose
+		// placeholder span is not one repeated token (see checkUniformSpan).
+		mmPayload = mmPayloadTensors
+	case mmPayloadTensors, mmPayloadNone:
+	default:
+		return nil, fmt.Errorf("mm_payload must be %q or %q, got %q",
+			mmPayloadTensors, mmPayloadNone, mmPayload)
+	}
+
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -113,6 +149,7 @@ func NewRenderStep(_ *gateway.Client, params map[string]any) (pipeline.Step, err
 		serviceAddress:            address,
 		maxTotalTokens:            maxTokens,
 		maxTotalPlaceholderTokens: maxPlaceholders,
+		mmPayload:                 mmPayload,
 		client:                    &http.Client{Timeout: timeout, Transport: transport},
 	}, nil
 }
@@ -124,6 +161,14 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	// The pipeline's only check of this invariant: this is the first step to
+	// pair on Modality (see modIndex in applyRenderResponse), replace-media-urls
+	// entries are already in place, and the later readers take whatever this
+	// accepted. The generate path arrives with an empty slice and fills it in
+	// executeGenerate below, where extractMultimodalEntries guards itself.
+	if err := validateEntryModalities(reqCtx.MultimodalEntries); err != nil {
+		return fmt.Errorf("render: %w", err)
+	}
 	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
 	case reqcommon.APITypeVLLMGenerate:
 		return s.executeGenerate(ctx, reqCtx)
@@ -133,6 +178,8 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return s.executeRender(ctx, reqCtx, reqcommon.PathChatCompletions)
 	case reqcommon.APITypeResponses:
 		return s.executeRender(ctx, reqCtx, reqcommon.PathResponses)
+	case reqcommon.APITypeMessages:
+		return s.executeRender(ctx, reqCtx, reqcommon.PathMessages)
 	default:
 		logger := log.FromContext(ctx).WithName(RenderStepName)
 		logger.V(logutil.DEFAULT).Info("skipping render step", "path", reqCtx.OriginalPath)
@@ -145,8 +192,8 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 // reqCtx.TokenIDs and reqCtx.MultimodalEntries, the typed fields every
 // downstream step (encode/prefill/decode) reads instead of the raw body, and
 // enforces the generate-only bounds vLLM does not (validatePlaceholderBounds,
-// token/placeholder limits) before EncodeStep indexes token_ids[offset] and
-// allocates from length.
+// token/placeholder limits) so client-supplied span geometry fails as a bad
+// request at parse time.
 func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
@@ -190,9 +237,21 @@ func (s *RenderStep) executeGenerate(ctx context.Context, reqCtx *pipeline.Reque
 	}
 	reqCtx.MultimodalEntries = entries
 
-	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, len(entries))
+	// Counted per modality: a token-in features map names its own modalities,
+	// so attributing every entry to image would mislabel an audio or video
+	// one. boundMediaType folds anything but image into MediaTypeOther.
+	var imageItems, otherItems int
+	for _, entry := range entries {
+		if entry.Modality == reqcommon.ModalityImage {
+			imageItems++
+			continue
+		}
+		otherItems++
+	}
+	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeImage, imageItems)
+	coordmetrics.RecordMediaItems(coordmetrics.MediaTypeOther, otherItems)
 
-	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs), "images", len(entries))
+	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(tokenIDs), "mm_entries", len(entries))
 	return nil
 }
 
@@ -208,7 +267,7 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 		// decode into a minimal struct so completions stays decoupled from the
 		// chat-completions response shape.
 		var renderResp []completionsRenderResponse
-		if err := s.postRender(ctx, reqCtx, reqcommon.PathCompletions, &renderResp); err != nil {
+		if _, err := s.postRender(ctx, reqCtx, reqcommon.PathCompletions, &renderResp); err != nil {
 			return err
 		}
 		if len(renderResp) != 1 {
@@ -275,15 +334,19 @@ func (s *RenderStep) executeCompletions(ctx context.Context, reqCtx *pipeline.Re
 // own shape.
 func (s *RenderStep) executeRender(ctx context.Context, reqCtx *pipeline.RequestContext, path string) error {
 	var renderResp renderResponse
-	if err := s.postRender(ctx, reqCtx, path, &renderResp); err != nil {
+	askedToOmit, err := s.postRender(ctx, reqCtx, path, &renderResp)
+	if err != nil {
 		return err
 	}
-	return s.applyRenderResponse(ctx, reqCtx, renderResp)
+	return s.applyRenderResponse(ctx, reqCtx, renderResp, askedToOmit)
 }
 
 // applyRenderResponse stores a renderResponse's token_ids and reconciles its
-// per-image features onto reqCtx.MultimodalEntries.
-func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.RequestContext, renderResp renderResponse) error {
+// per-image features onto reqCtx.MultimodalEntries. askedToOmit is postRender's
+// report of whether the render request asked for the tensors to be omitted;
+// a body that sets preprocessing kwargs keeps the tensors form and asks for
+// nothing.
+func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.RequestContext, renderResp renderResponse, askedToOmit bool) error {
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
 	reqCtx.TokenIDs = renderResp.TokenIDs
@@ -291,48 +354,170 @@ func (s *RenderStep) applyRenderResponse(ctx context.Context, reqCtx *pipeline.R
 		return err
 	}
 
-	imageHashes := renderResp.Features.MMHashes[ModalityImage]
-	imagePlaceholders := renderResp.Features.MMPlaceholders[ModalityImage]
-	imageKwargs := renderResp.Features.KwargsData[ModalityImage]
-
+	// Length check: sum of per-modality slice lengths must match len(entries).
+	totalHashes, totalPlaceholders, totalKwargs, totalMetadata := 0, 0, 0, 0
+	for _, hashes := range renderResp.Features.MMHashes {
+		totalHashes += len(hashes)
+	}
+	for _, placeholders := range renderResp.Features.MMPlaceholders {
+		totalPlaceholders += len(placeholders)
+	}
+	for _, kwargs := range renderResp.Features.KwargsData {
+		totalKwargs += len(kwargs)
+	}
+	for _, metadata := range renderResp.Features.MMMetadata {
+		totalMetadata += len(metadata)
+	}
 	expected := len(reqCtx.MultimodalEntries)
-	if len(imageHashes) != expected {
-		return fmt.Errorf("render returned %d mm_hashes but expected %d", len(imageHashes), expected)
+	// A renderer without the mm_payload field ignores it and returns the
+	// tensors, which keep the features path.
+	omitted := askedToOmit && expected > 0 && totalKwargs == 0
+	if totalHashes != expected {
+		return fmt.Errorf("render returned %d mm_hashes but expected %d", totalHashes, expected)
 	}
-	if len(imagePlaceholders) != expected {
-		return fmt.Errorf("render returned %d mm_placeholders but expected %d", len(imagePlaceholders), expected)
+	if totalPlaceholders != expected {
+		return fmt.Errorf("render returned %d mm_placeholders but expected %d", totalPlaceholders, expected)
 	}
-	if len(imageKwargs) != expected {
-		return fmt.Errorf("render returned %d kwargs_data but expected %d", len(imageKwargs), expected)
+	if !omitted && totalKwargs != expected {
+		return fmt.Errorf("render returned %d kwargs_data but expected %d", totalKwargs, expected)
+	}
+	// mm_metadata is optional for backward compatibility with older renderers.
+	// An absent field means the renderer predates it and the request simply
+	// takes the kwargs_data path. But once the renderer emits the field, its
+	// slices are part of the contract: a length mismatch, aggregate or
+	// per-modality, means a broken renderer and no entry trusts it — the
+	// whole map is dropped so a misfiled slice cannot leak into any modality.
+	// The request still succeeds: kwargs_data (validated just above) is on
+	// the same response, or, with the tensors omitted, prefill rebuilds
+	// mm_metadata from the EC descriptors or sends content_parts.
+	// mm_hashes/mm_placeholders/kwargs_data stay strict because they have no
+	// fallback.
+	metadataFallback := "kwargs_data"
+	if omitted {
+		metadataFallback = "EC-rebuilt mm_metadata or content_parts"
+	}
+	if totalMetadata > 0 && totalMetadata != expected {
+		logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata; dropping it",
+			"got", totalMetadata, "expected", expected, "fallback", metadataFallback)
+		renderResp.Features.MMMetadata = nil
+	}
+	// Per-modality pairing, checked before any entry takes its slice: a
+	// renderer that files every item under one modality passes the aggregate
+	// check, and the misfiled extras would pair an entry with another
+	// modality's blob.
+	if renderResp.Features.MMMetadata != nil {
+		seenModality := make(map[reqcommon.Modality]bool)
+		for i := range reqCtx.MultimodalEntries {
+			mod := reqCtx.MultimodalEntries[i].Modality
+			if seenModality[mod] {
+				continue
+			}
+			seenModality[mod] = true
+			metadata := renderResp.Features.MMMetadata[mod]
+			if len(metadata) != len(renderResp.Features.MMHashes[mod]) {
+				logger.V(logutil.DEFAULT).Info("render returned mismatched mm_metadata for modality; dropping it",
+					"modality", mod, "got", len(metadata),
+					"expected", len(renderResp.Features.MMHashes[mod]), "fallback", metadataFallback)
+				renderResp.Features.MMMetadata = nil
+				break
+			}
+		}
 	}
 
+	// Entries in order, each pulling its hash/placeholder/kwargs from the
+	// response slot at its per-modality position. For an image-only request
+	// that is plain positional pairing: modIndex[image] counts 0, 1, 2...
+	modIndex := make(map[reqcommon.Modality]int)
 	for i := range reqCtx.MultimodalEntries {
-		reqCtx.MultimodalEntries[i].Hash = imageHashes[i]
-		reqCtx.MultimodalEntries[i].KwargsData = imageKwargs[i]
-		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
+		mod := reqCtx.MultimodalEntries[i].Modality
+		idx := modIndex[mod]
+		modIndex[mod]++
+		hashes := renderResp.Features.MMHashes[mod]
+		placeholders := renderResp.Features.MMPlaceholders[mod]
+		kwargs := renderResp.Features.KwargsData[mod]
+		metadata := renderResp.Features.MMMetadata[mod]
+		if idx >= len(hashes) || idx >= len(placeholders) || (!omitted && idx >= len(kwargs)) {
+			return fmt.Errorf("render response missing slot %d for modality %s", idx, mod)
+		}
+		reqCtx.MultimodalEntries[i].Hash = hashes[idx]
+		if !omitted {
+			reqCtx.MultimodalEntries[i].KwargsData = kwargs[idx]
+		}
+		reqCtx.MultimodalEntries[i].Placeholder = placeholders[idx]
+		if idx < len(metadata) {
+			reqCtx.MultimodalEntries[i].MMMetadata = metadata[idx]
+		}
 	}
 
 	if err := s.checkPlaceholderLimit(reqCtx.MultimodalEntries); err != nil {
 		return err
 	}
+	if omitted {
+		reqCtx.MMPayload = s.mmPayload
+	}
 
-	logger.V(logutil.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs))
-	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
+	logger.V(logutil.DEBUG).Info("response",
+		"mm_hashes", renderResp.Features.MMHashes,
+		"mm_placeholders", renderResp.Features.MMPlaceholders,
+		"kwargs_data_len", totalKwargs,
+		"mm_metadata_len", totalMetadata)
+	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "mm_entries", totalHashes)
 	return nil
 }
 
-// postRender marshals reqCtx.Body, POSTs it to <serviceAddress><basePath>/render,
-// and decodes the JSON response into out.
-func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestContext, basePath string, out any) error {
+// bodySetsProcessorKwargs reports whether the client body sets either
+// preprocessing kwargs field. Both change preprocessing and feed vLLM's
+// multimodal hash, so a request that sets them cannot run on the
+// content_parts path, which preprocesses media at the deployment defaults.
+// The server keeps both fields as json.RawMessage, so an explicit JSON null
+// arrives as the bytes "null" rather than a nil value.
+func bodySetsProcessorKwargs(body map[string]any) bool {
+	for _, field := range []string{reqcommon.FieldMMProcessorKwargs, reqcommon.FieldMediaIOKwargs} {
+		switch v := body[field].(type) {
+		case nil:
+		case json.RawMessage:
+			if !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// postRender marshals reqCtx.Body, asking for no tensors unless mm_payload is
+// tensors or the body sets preprocessing kwargs, POSTs it to
+// <serviceAddress><basePath>/render, and decodes the JSON response into out.
+// The returned askedToOmit reports whether the request asked the renderer to
+// omit the tensors.
+func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestContext, basePath string, out any) (bool, error) {
 	if s.serviceAddress == "" {
-		return errors.New("render: service address not configured (set 'address' in render step params)")
+		return false, errors.New("render: service address not configured (set 'address' in render step params)")
 	}
 
 	logger := log.FromContext(ctx).WithName(RenderStepName)
 
-	body, err := json.Marshal(reqCtx.Body)
+	askedToOmit := false
+	renderBody := reqCtx.Body
+	if s.mmPayload != mmPayloadTensors {
+		if bodySetsProcessorKwargs(reqCtx.Body) {
+			// The generate format's content_parts path preprocesses media at
+			// the deployment defaults, so the client's preprocessing kwargs
+			// cannot travel with it. Keep the tensors form, whose output
+			// render already processed with them.
+			logger.V(logutil.DEFAULT).Info("body sets mm_processor_kwargs or media_io_kwargs; requesting tensors")
+		} else {
+			// vLLM has no metadata-only render payload; prefill rebuilds it.
+			renderBody = maps.Clone(reqCtx.Body)
+			renderBody[fieldReturnMMKwargs] = false
+			renderBody[fieldMMPayload] = mmPayloadNone
+			askedToOmit = true
+		}
+	}
+	body, err := json.Marshal(renderBody)
 	if err != nil {
-		return fmt.Errorf("marshaling request for render: %w", err)
+		return false, fmt.Errorf("marshaling request for render: %w", err)
 	}
 
 	url := s.serviceAddress + basePath + "/render"
@@ -340,7 +525,7 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("creating render request: %w", err)
+		return false, fmt.Errorf("creating render request: %w", err)
 	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
@@ -352,18 +537,18 @@ func (s *RenderStep) postRender(ctx context.Context, reqCtx *pipeline.RequestCon
 	resp, err := s.client.Do(req)
 	call.Done()
 	if err != nil {
-		return fmt.Errorf("render request failed: %w", err)
+		return false, fmt.Errorf("render request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if err := checkStatus(RenderStepName, resp); err != nil {
-		return err
+		return false, err
 	}
 	reqCtx.CaptureResponseHeaders(resp.Header)
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decoding render response: %w", err)
+		return false, fmt.Errorf("decoding render response: %w", err)
 	}
-	return nil
+	return askedToOmit, nil
 }
 
 type renderResponse struct {
@@ -372,9 +557,10 @@ type renderResponse struct {
 }
 
 type renderFeatures struct {
-	MMHashes       map[string][]string                    `json:"mm_hashes"`
-	MMPlaceholders map[string][]pipeline.PlaceholderRange `json:"mm_placeholders"`
-	KwargsData     map[string][]string                    `json:"kwargs_data"`
+	MMHashes       map[reqcommon.Modality][]string                    `json:"mm_hashes"`
+	MMPlaceholders map[reqcommon.Modality][]pipeline.PlaceholderRange `json:"mm_placeholders"`
+	KwargsData     map[reqcommon.Modality][]string                    `json:"kwargs_data"`
+	MMMetadata     map[reqcommon.Modality][]string                    `json:"mm_metadata"`
 }
 
 // completionsRenderResponse is a minimal view of the per-prompt object returned

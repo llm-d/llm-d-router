@@ -95,10 +95,10 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		return nil, fmt.Errorf("error unmarshaling request body: %w", err)
 	}
 
-	result := &fwkrh.InferenceRequestBody{
-		Payload:         fwkrh.PayloadMap(bodyMap),
+	result := &request.InferenceRequestBody{
+		Payload:         request.PayloadMap(bodyMap),
 		RawBody:         body,
-		MaxOutputTokens: fwkrh.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
+		MaxOutputTokens: request.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
 	}
 	if model, ok := bodyMap["model"].(string); ok {
 		result.Model = model
@@ -108,11 +108,15 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	// through, so only the envelope is read: Messages stays nil, while the model
 	// still resolves and rewrites.
 	if countTokens {
-		return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: true}, nil
+		return &fwkrh.ParseResult{Body: result, JSONValidated: true, SkipResponseProcessing: true}, nil
 	}
 
-	var messagesReq fwkrh.MessagesRequest
+	var messagesReq request.MessagesRequest
 	if err := json.Unmarshal(body, &messagesReq); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) && typeErr.Field != "" {
+			err = &fwkrh.RequestFieldError{Field: typeErr.Field, Err: err}
+		}
 		return nil, fmt.Errorf("error parsing messages request: %w", err)
 	}
 	if len(messagesReq.Messages) == 0 {
@@ -123,12 +127,12 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 		result.Stream = true
 	}
 
-	return &fwkrh.ParseResult{Body: result, SkipResponseProcessing: false}, nil
+	return &fwkrh.ParseResult{Body: result, JSONValidated: true, SkipResponseProcessing: false}, nil
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
-func (p *AnthropicParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
+func (p *AnthropicParser) RewriteModelName(payload request.MarshalablePayload, model string) (request.MarshalablePayload, error) {
+	m, ok := payload.(request.PayloadMap)
 	if !ok {
 		return payload, nil
 	}
@@ -143,7 +147,7 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 
 	isStream := false
 	for k, v := range headers {
-		if strings.ToLower(k) == reqcommon.HeaderContentType && strings.Contains(strings.ToLower(v), request.MediaTypeEventStream) {
+		if strings.ToLower(k) == reqcommon.HeaderContentType && strings.Contains(strings.ToLower(v), reqcommon.MediaTypeEventStream) {
 			isStream = true
 			break
 		}
@@ -159,7 +163,7 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 	return &fwkrh.ParsedResponse{Usage: usage}, nil
 }
 
-func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
+func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	var responseBody map[string]any
 	if err := json.Unmarshal(responseBytes, &responseBody); err != nil {
 		return nil, err
@@ -170,7 +174,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 		return nil, nil //nolint:nilnil
 	}
 
-	usage := fwkrh.Usage{}
+	usage := request.Usage{}
 	applyInputTokens(&usage, usg)
 	usage.CompletionTokens = jsonInt(usg, "output_tokens")
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
@@ -186,21 +190,36 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 // A block reporting none of the three, or reporting them as zero before any count
 // is known, is left alone rather than zeroing what an earlier block set. A
 // zero-token prompt is unreachable on a path that requires at least one message.
-func applyInputTokens(usage *fwkrh.Usage, usg map[string]any) {
-	read := jsonInt(usg, "cache_read_input_tokens")
+func applyInputTokens(usage *request.Usage, usg map[string]any) {
+	read, hasRead := jsonIntPresent(usg, "cache_read_input_tokens")
 	total := jsonInt(usg, "input_tokens") + read + jsonInt(usg, "cache_creation_input_tokens")
 	if total == 0 {
 		return
 	}
 	usage.PromptTokens = total
-	if read != 0 {
-		usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{CachedTokens: read}
+	// An explicit zero is a cache miss, not a missing count: the metrics layer
+	// only records request_cached_tokens when PromptTokenDetails is set, so
+	// dropping the zero leaves the misses out of the histogram and inflates the
+	// reported hit rate. A zero is only recorded while no count is known yet,
+	// so a later frame parsed into the same Usage cannot replace the count an
+	// earlier frame reported. Frames that arrive in separate response chunks
+	// are parsed into fresh Usage values; handlers.mergeUsage applies the same
+	// rule when it folds them together.
+	if hasRead && (read != 0 || usage.PromptTokenDetails == nil) {
+		usage.PromptTokenDetails = &request.PromptTokenDetails{CachedTokens: read}
 	}
 }
 
 func jsonInt(m map[string]any, key string) int {
 	v, _ := m[key].(float64)
 	return int(v)
+}
+
+// jsonIntPresent reports the integer stored under key and whether the key was
+// present, so a caller can tell an explicit zero from a missing field.
+func jsonIntPresent(m map[string]any, key string) (int, bool) {
+	v, ok := m[key].(float64)
+	return int(v), ok
 }
 
 // Anthropic SSE streaming format:
@@ -215,11 +234,24 @@ func jsonInt(m map[string]any, key string) int {
 //	data: {"type":"message_stop"}
 func (p *AnthropicParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
 	usage := extractUsageStreaming(chunk)
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	return &fwkrh.ParsedResponse{
+		Usage:          usage,
+		StreamedEvents: countStreamEvents(chunk),
+	}, nil
 }
 
-func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
-	var result *fwkrh.Usage
+func countStreamEvents(chunk []byte) int {
+	count := 0
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
+		if _, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix)); ok {
+			count++
+		}
+	}
+	return count
+}
+
+func extractUsageStreaming(responseBytes []byte) *request.Usage {
+	var result *request.Usage
 
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
@@ -244,14 +276,14 @@ func extractUsageStreaming(responseBytes []byte) *fwkrh.Usage {
 		case "message_start":
 			if event.Message.Usage != nil {
 				if result == nil {
-					result = &fwkrh.Usage{}
+					result = &request.Usage{}
 				}
 				applyInputTokens(result, event.Message.Usage)
 			}
 		case "message_delta":
 			if event.Usage != nil {
 				if result == nil {
-					result = &fwkrh.Usage{}
+					result = &request.Usage{}
 				}
 				// The delta counts are cumulative and authoritative over message_start.
 				applyInputTokens(result, event.Usage)

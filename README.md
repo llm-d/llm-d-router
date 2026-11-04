@@ -45,7 +45,7 @@ See the [Helm chart documentation] for configuration examples.
 ### 2. Gateway Mode (Inference Gateway)
 The recommended mode for production environments, leveraging the official [Gateway API]. In this mode, the EPP acts as a backend for an `InferencePool`, which is referenced by an `HTTPRoute` on a shared `Gateway`. This enables advanced traffic management, multi-cluster load balancing, and shared infrastructure for both inference and traditional workloads.
 
-For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide]. The [OpenTelemetry JSON stdout logs] document describes the log record format used by the EPP and routing sidecar. The [TLS Documentation] covers the serving and metrics TLS flags of the EPP, the routing sidecar and the coordinator.
+For more details on the router architecture, routing logic, and different plugins (filters and scorers), see the [Architecture Documentation]. For resource provisioning and container sizing recommendations under heavy or long-context workloads, see the [EPP Container Sizing Guide]. The [OpenTelemetry JSON stdout logs] document describes the log record format used by the EPP and routing sidecar. The [Router trace catalog](docs/telemetry.md) lists custom trace attributes and EPP scheduling spans. The [TLS Documentation] covers the serving and metrics TLS flags of the EPP, the routing sidecar and the coordinator.
 
 ---
 

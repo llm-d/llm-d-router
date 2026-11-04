@@ -19,6 +19,7 @@ package kvblock_test
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,8 +75,13 @@ func TestInMemoryIndexSize(t *testing.T) {
 	err = index.Add(ctx, []BlockHash{engineKey3}, []BlockHash{requestKey3}, []PodEntry{{PodIdentifier: "pod3", DeviceTier: "cpu"}})
 	require.NoError(t, err)
 
-	// Lookup should only return the last two keys
-	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1, requestKey2, requestKey3}, nil)
+	// Verify requestKey1 was evicted
+	evicted, err := index.Lookup(ctx, []BlockHash{requestKey1}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, evicted)
+
+	// Lookup should return the remaining keys
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey2, requestKey3}, nil)
 	require.NoError(t, err)
 
 	assert.Len(t, podsPerKey, 2) // Only key2 and key3 should be present
@@ -160,6 +166,54 @@ func TestInMemoryIndexClearIgnoresCancellation(t *testing.T) {
 	for _, key := range keys {
 		assert.Equal(t, []PodEntry{retained}, found[key], "key %v", key)
 	}
+}
+
+func TestInMemoryIndexClearOfUnseenPodKeepsEntries(t *testing.T) {
+	ctx := t.Context()
+	index, err := NewInMemoryIndex(DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+	keys := []BlockHash{1, 2, 3}
+	entries := []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}
+	require.NoError(t, index.Add(ctx, nil, keys, entries))
+
+	require.NoError(t, index.Clear(ctx, "pod-b"))
+	found, err := index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	for _, key := range keys {
+		assert.Equal(t, entries, found[key], "key %v", key)
+	}
+
+	require.NoError(t, index.Clear(ctx, "pod-a"))
+	found, err = index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	assert.Empty(t, found)
+}
+
+// cancelAfterFirstErrCheck reports no error on its first Err call and
+// context.Canceled afterwards, so a lookup sees the cancellation only after
+// its first cancellation checkpoint.
+type cancelAfterFirstErrCheck struct {
+	context.Context
+	calls atomic.Int32
+}
+
+func (c *cancelAfterFirstErrCheck) Err() error {
+	if c.calls.Add(1) == 1 {
+		return nil
+	}
+	return context.Canceled
+}
+
+// A lookup cancelled between a checkpoint and a missing key reports the
+// cancellation instead of the partial prefix read before the miss.
+func TestInMemoryIndexLookupCancelledBeforeMiss(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index := createInMemoryIndexForTesting(t)
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{1}, []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}))
+
+	found, err := index.Lookup(&cancelAfterFirstErrCheck{Context: ctx}, []BlockHash{1, 2}, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, found)
 }
 
 // TestSpeculativeAnnotation tests that speculative and confirmed PodEntries
@@ -350,20 +404,17 @@ func TestInMemoryIndexRecencyPromotion(t *testing.T) {
 				{PodIdentifier: "pod4", DeviceTier: "gpu"},
 			})
 
-			podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey1, requestKey2, requestKey3}, nil)
-			require.NoError(t, err)
-
-			if tc.wantKey1 {
-				assert.Contains(t, podsPerKey, requestKey1)
-			} else {
-				assert.NotContains(t, podsPerKey, requestKey1)
+			// A lookup stops at the first missing key, so each key is looked
+			// up on its own.
+			present := func(key BlockHash) bool {
+				podsPerKey, err := index.Lookup(ctx, []BlockHash{key}, nil)
+				require.NoError(t, err)
+				_, ok := podsPerKey[key]
+				return ok
 			}
-			if tc.wantKey2 {
-				assert.Contains(t, podsPerKey, requestKey2)
-			} else {
-				assert.NotContains(t, podsPerKey, requestKey2)
-			}
-			assert.Contains(t, podsPerKey, requestKey3)
+			assert.Equal(t, tc.wantKey1, present(requestKey1), "requestKey1")
+			assert.Equal(t, tc.wantKey2, present(requestKey2), "requestKey2")
+			assert.True(t, present(requestKey3), "requestKey3")
 
 			if tc.engineKeys {
 				_, err := index.GetRequestKey(ctx, engineKey1)

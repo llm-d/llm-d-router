@@ -27,7 +27,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
+
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -123,7 +127,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
@@ -222,7 +226,7 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
@@ -251,6 +255,72 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 
 	if recorder.Result().StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
+	}
+}
+
+func TestDecodeStep_Messages_NonStreaming(t *testing.T) {
+	var parsed map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != reqcommon.PathMessages {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "message", "content": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-messages",
+		OriginalPath: reqcommon.PathMessages,
+		Model:        "llama-3",
+		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
+		Body: map[string]any{
+			"model":      "llama-3",
+			"max_tokens": 50,
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "describe this"},
+					map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/cat.jpg"}},
+				}},
+			},
+		},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recorder.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
+	}
+
+	kvParams, ok := parsed["kv_transfer_params"].(map[string]any)
+	if !ok || kvParams["block_id"] != "xyz" {
+		t.Fatalf("expected the prefill's kv_transfer_params at the top level, got %v", parsed["kv_transfer_params"])
+	}
+	if parsed["max_tokens"] != float64(50) {
+		t.Fatalf("expected the client's max_tokens preserved, got %v", parsed["max_tokens"])
+	}
+	// vLLM's Anthropic content block defines no uuid, so decode stamps none and
+	// the worker hashes the image itself.
+	content := parsed["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	image := content[1].(map[string]any)
+	if uuid, ok := image["uuid"]; ok {
+		t.Fatalf("expected no uuid on a Messages image block, got %v", uuid)
+	}
+	if source := image["source"].(map[string]any); source["url"] != "https://example.com/cat.jpg" {
+		t.Fatalf("expected the image source preserved, got %v", source)
 	}
 }
 
@@ -293,7 +363,7 @@ func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
 		Model:        "llama-3",
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz"},
 		Body: map[string]any{
@@ -323,6 +393,74 @@ func TestDecodeStep_IgnoresStrayInputOnChatCompletions(t *testing.T) {
 	}
 	if recorder.Result().StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", recorder.Result().StatusCode)
+	}
+}
+
+func TestDecodeStep_InjectUUIDsIntoRawPromptItems(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		path     string
+		field    string
+		modality reqcommon.Modality
+		items    string
+	}{
+		{
+			name:     "chat completions",
+			path:     testChatCompletionsPath,
+			field:    "messages",
+			modality: reqcommon.ModalityImage,
+			items:    `[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]`,
+		},
+		{
+			name:     "responses",
+			path:     reqcommon.PathResponses,
+			field:    "input",
+			modality: reqcommon.ModalityImage,
+			items:    `[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]`,
+		},
+		// The modalities this branch adds walk the same raw-JSON round trip, so
+		// each part shape that names one is stamped here too.
+		{
+			name:     "chat completions audio_url",
+			path:     testChatCompletionsPath,
+			field:    "messages",
+			modality: reqcommon.ModalityAudio,
+			items:    `[{"role":"user","content":[{"type":"audio_url","audio_url":{"url":"https://example.com/a.wav"}}]}]`,
+		},
+		{
+			name:     "chat completions input_audio",
+			path:     testChatCompletionsPath,
+			field:    "messages",
+			modality: reqcommon.ModalityAudio,
+			items:    `[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AA==","format":"wav"}}]}]`,
+		},
+		{
+			name:     "chat completions video_url",
+			path:     testChatCompletionsPath,
+			field:    "messages",
+			modality: reqcommon.ModalityVideo,
+			items:    `[{"role":"user","content":[{"type":"video_url","video_url":{"url":"https://example.com/v.mp4"}}]}]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: tc.path,
+				MultimodalEntries: []pipeline.MultimodalEntry{
+					{Modality: tc.modality, Hash: "hash-raw"},
+				},
+				Body: map[string]any{tc.field: json.RawMessage(tc.items)},
+			}
+			(&DecodeStep{}).injectUUIDs(reqCtx, logr.Discard())
+
+			items, ok := reqCtx.Body[tc.field].([]any)
+			if !ok {
+				t.Fatalf("%s is %T, want the edited array stored back", tc.field, reqCtx.Body[tc.field])
+			}
+			part := items[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+			if part["uuid"] != "hash-raw" {
+				t.Fatalf("expected uuid=hash-raw in %s part, got %v", tc.modality, part["uuid"])
+			}
+		})
 	}
 }
 
@@ -467,28 +605,23 @@ func TestDecodeStep_GenerateFormat_ToplevelKV(t *testing.T) {
 	}
 }
 
-// TestDecodeStep_UnreachableFormat_ReturnsError verifies that request paths
-// for formats prepareDecodeBody's switch does not handle explicitly
-// (APITypeMessages, APITypeSGLangGenerate) fail through
-// its default case, reporting an error instead of sending an unprepared
-// body upstream.
+// TestDecodeStep_UnreachableFormat_ReturnsError verifies that a request path
+// for a format prepareDecodeBody's switch does not handle explicitly
+// (APITypeSGLangGenerate) fails through its default case, reporting an error
+// instead of sending an unprepared body upstream.
 func TestDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
-	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathSGLangGenerate} {
-		t.Run(path, func(t *testing.T) {
-			step, err := NewDecodeStep(gateway.New(config.GatewayConfig{}), map[string]any{ParamKVConnector: kv.NIXL})
-			if err != nil {
-				t.Fatal(err)
-			}
+	step, err := NewDecodeStep(gateway.New(config.GatewayConfig{}), map[string]any{ParamKVConnector: kv.NIXL})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-			reqCtx := &pipeline.RequestContext{
-				OriginalPath:     path,
-				Body:             map[string]any{"model": testModelName},
-				KVTransferParams: map[string]any{"block_id": "block-1"},
-			}
-			if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err == nil {
-				t.Fatal("expected an error for an unreachable request format")
-			}
-		})
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath:     reqcommon.PathSGLangGenerate,
+		Body:             map[string]any{"model": testModelName},
+		KVTransferParams: map[string]any{"block_id": "block-1"},
+	}
+	if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err == nil {
+		t.Fatal("expected an error for an unreachable request format")
 	}
 }
 
@@ -529,7 +662,7 @@ func TestDecodeStep_Streaming(t *testing.T) {
 		Model:        "test",
 		Stream:       true,
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1"},
+			{Modality: reqcommon.ModalityImage, Hash: "h1"},
 		},
 		KVTransferParams: map[string]any{},
 		Body:             map[string]any{"model": "test", "stream": true},
@@ -574,7 +707,7 @@ func TestDecodeStep_GatewayError(t *testing.T) {
 		Model:        "test",
 		Stream:       false,
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1"},
+			{Modality: reqcommon.ModalityImage, Hash: "h1"},
 		},
 		KVTransferParams: map[string]any{},
 		Body:             map[string]any{"model": "test", "stream": false},
@@ -676,6 +809,242 @@ func TestDecodeStep_TransportError(t *testing.T) {
 	}
 }
 
+// ---- injectUUIDs across audio, video, and input_audio ---------------------
+
+// Entry hashes reused across the injectUUIDs tests, extracted so goconst does
+// not flag their repetition.
+const (
+	testHashImage = "H-img"
+	testHashAudio = "H-aud"
+	testHashVideo = "H-vid"
+)
+
+// Every recognized media content-part type receives the uuid of its
+// (modality, local index) entry; non-media parts are left alone.
+func TestInjectUUIDs_TagsAllMediaParts(t *testing.T) {
+	step := &DecodeStep{}
+	imagePart := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-img"}}
+	audioURLPart := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u-aud"}}
+	inputAudioPart := map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "d", "format": "wav"}}
+	videoPart := map[string]any{"type": "video_url", "video_url": map[string]any{"url": "u-vid"}}
+	textPart := map[string]any{"type": "text", "text": "hi"}
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role":    "user",
+					"content": []any{textPart, imagePart, audioURLPart, videoPart, inputAudioPart},
+				},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: testHashImage},
+			{Modality: reqcommon.ModalityAudio, Hash: "H-aud-url"},
+			{Modality: reqcommon.ModalityVideo, Hash: "H-vid"},
+			{Modality: reqcommon.ModalityAudio, Hash: "H-input-audio"},
+		},
+	}
+	step.injectUUIDs(reqCtx, logr.Discard())
+
+	if got := imagePart["uuid"]; got != testHashImage {
+		t.Errorf("image uuid = %v, want H-img", got)
+	}
+	if got := audioURLPart["uuid"]; got != "H-aud-url" {
+		t.Errorf("audio_url uuid = %v, want H-aud-url", got)
+	}
+	if got := inputAudioPart["uuid"]; got != "H-input-audio" {
+		t.Errorf("input_audio uuid = %v, want H-input-audio", got)
+	}
+	if got := videoPart["uuid"]; got != "H-vid" {
+		t.Errorf("video uuid = %v, want H-vid", got)
+	}
+	if _, ok := textPart["uuid"]; ok {
+		t.Errorf("text part must not be tagged: %+v", textPart)
+	}
+}
+
+// Two audio parts in the same request receive the hashes of the two audio
+// entries, in walker order.
+func TestInjectUUIDs_TagsRepeatedModalityInOrder(t *testing.T) {
+	step := &DecodeStep{}
+	aud0 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u0"}}
+	aud1 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u1"}}
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{aud0, aud1}},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityAudio, Hash: "H0"},
+			{Modality: reqcommon.ModalityAudio, Hash: "H1"},
+		},
+	}
+	step.injectUUIDs(reqCtx, logr.Discard())
+	if got := aud0["uuid"]; got != "H0" {
+		t.Errorf("audio[0] uuid = %v, want H0", got)
+	}
+	if got := aud1["uuid"]; got != "H1" {
+		t.Errorf("audio[1] uuid = %v, want H1", got)
+	}
+}
+
+// Every media-typed part consumes a slot, whether or not it still carries usable
+// media: replace-media-urls already rejected the payload-less ones (see
+// collectMediaRefs), so this walk must count the same parts in the same order.
+// Here the part at position 0 gets the position-0 hash even when it is the
+// broken one, and the surplus part is left untagged.
+func TestInjectUUIDs_CountsEveryMediaPart(t *testing.T) {
+	step := &DecodeStep{}
+	brokenImg := map[string]any{"type": "image_url", "image_url": map[string]any{"url": nil}}
+	laterImg := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-img"}}
+	brokenInputAudio := map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "", "format": "wav"}}
+	laterInputAudio := map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "AA==", "format": "wav"}}
+
+	reqCtx := &pipeline.RequestContext{
+		OriginalPath: testChatCompletionsPath,
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{
+					"role":    "user",
+					"content": []any{brokenImg, laterImg, brokenInputAudio, laterInputAudio},
+				},
+			},
+		},
+		// One entry per modality against two parts each, so the second part of
+		// each modality is the surplus one.
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: testHashImage},
+			{Modality: reqcommon.ModalityAudio, Hash: testHashAudio},
+		},
+	}
+	step.injectUUIDs(reqCtx, logr.Discard())
+
+	if got := brokenImg["uuid"]; got != testHashImage {
+		t.Errorf("image[0] uuid = %v, want %s: a broken part still holds its position", got, testHashImage)
+	}
+	if got, tagged := laterImg["uuid"]; tagged {
+		t.Errorf("image[1] has no entry and must stay untagged, got uuid %v", got)
+	}
+	if got := brokenInputAudio["uuid"]; got != testHashAudio {
+		t.Errorf("audio[0] uuid = %v, want %s: a broken part still holds its position", got, testHashAudio)
+	}
+	if got, tagged := laterInputAudio["uuid"]; tagged {
+		t.Errorf("audio[1] has no entry and must stay untagged, got uuid %v", got)
+	}
+}
+
+// A modality with more well-formed parts than entries: the surplus part is left
+// without a uuid and the request proceeds. Degrading rather than failing is
+// deliberate -- uuid is only the decode backend's prefix-cache key, so the
+// request stays correct and the cost is the worker re-processing that media. The
+// encode fanout fails on the same mismatch because it would pair an entry with
+// another part's bytes.
+//
+// Asserting the key's absence, not a non-matching value, is what makes a "tagged
+// with the wrong hash" regression fail here. The image part is a control: an
+// audio overflow must not shift another modality's positions.
+func TestInjectUUIDs_ExtraPartForModalityStaysUntagged(t *testing.T) {
+	step := &DecodeStep{}
+	imagePart := map[string]any{"type": "image_url", "image_url": map[string]any{"url": "u-img"}}
+	aud0 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u0"}}
+	aud1 := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u1"}}
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{imagePart, aud0, aud1}},
+			},
+		},
+		// Two audio parts, one audio entry.
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: testHashImage},
+			{Modality: reqcommon.ModalityAudio, Hash: testHashAudio},
+		},
+	}
+
+	sink := &logCaptureSink{}
+	step.injectUUIDs(reqCtx, logr.New(sink))
+
+	if got := aud0["uuid"]; got != testHashAudio {
+		t.Errorf("audio[0] uuid = %v, want H-aud", got)
+	}
+	if got, tagged := aud1["uuid"]; tagged {
+		t.Errorf("audio[1] has no entry and must stay untagged, got uuid %v", got)
+	}
+	if got := imagePart["uuid"]; got != testHashImage {
+		t.Errorf("image uuid = %v, want H-img; an audio overflow must not shift image positions", got)
+	}
+
+	if len(sink.infos) != 1 {
+		t.Fatalf("expected 1 log line for the miss, got %d (errors: %d)", len(sink.infos), len(sink.errors))
+	}
+	if sink.infos[0].level != logutil.DEBUG {
+		t.Errorf("miss logged at V(%d), want V(%d)", sink.infos[0].level, logutil.DEBUG)
+	}
+	if len(sink.errors) != 0 {
+		t.Errorf("a surplus part is not an error condition, got %d error logs", len(sink.errors))
+	}
+}
+
+// The opposite mismatch, which the stamping walk cannot see: it iterates parts,
+// so an entry with no part to stamp used to pass unrecorded. See
+// injectMediaPartUUIDs for why that direction is the worse one.
+//
+// The whole branch is a log line, so the level is what gets pinned: DEBUG, as
+// for the surplus-part branch. The image entry has no part at all and the audio
+// entry one of its two; the video part is a control that a fully paired modality
+// stays quiet.
+func TestInjectUUIDs_EntryWithNoMediaPartIsLogged(t *testing.T) {
+	step := &DecodeStep{}
+	audioPart := map[string]any{"type": "audio_url", "audio_url": map[string]any{"url": "u-aud"}}
+	videoPart := map[string]any{"type": "video_url", "video_url": map[string]any{"url": "u-vid"}}
+
+	reqCtx := &pipeline.RequestContext{
+		Body: map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": []any{audioPart, videoPart}},
+			},
+		},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			// One image entry and no image part; two audio entries and one
+			// audio part; one video entry and one video part.
+			{Modality: reqcommon.ModalityImage, Hash: testHashImage},
+			{Modality: reqcommon.ModalityAudio, Hash: testHashAudio},
+			{Modality: reqcommon.ModalityAudio, Hash: testHashAudio + "-2"},
+			{Modality: reqcommon.ModalityVideo, Hash: testHashVideo},
+		},
+	}
+
+	sink := &logCaptureSink{}
+	step.injectUUIDs(reqCtx, logr.New(sink))
+
+	if got := audioPart["uuid"]; got != testHashAudio {
+		t.Errorf("audio[0] uuid = %v, want %v; a surplus entry must not stop the parts that do pair", got, testHashAudio)
+	}
+	if got := videoPart["uuid"]; got != testHashVideo {
+		t.Errorf("video uuid = %v, want %v", got, testHashVideo)
+	}
+
+	// Map iteration order is unspecified, so count the lines rather than
+	// indexing them: image and audio each report, video does not.
+	if len(sink.infos) != 2 {
+		t.Fatalf("expected 2 log lines, one per modality with a surplus entry, got %d", len(sink.infos))
+	}
+	for _, got := range sink.infos {
+		if got.msg != "MultimodalEntry with no media part" {
+			t.Errorf("unexpected log line %q", got.msg)
+		}
+		if got.level != logutil.DEBUG {
+			t.Errorf("surplus entry logged at V(%d), want V(%d)", got.level, logutil.DEBUG)
+		}
+	}
+	if len(sink.errors) != 0 {
+		t.Errorf("a surplus entry degrades rather than fails, got %d error logs", len(sink.errors))
+	}
+}
+
 // TestDecodeStep_Responses_StampsFunctionCallOutputImage verifies the uuid
 // stamping walk sees the same image set replace-media-urls built entries from,
 // including an image under a function_call_output's output. An unstamped part
@@ -723,8 +1092,8 @@ func TestDecodeStep_Responses_StampsFunctionCallOutputImage(t *testing.T) {
 		Model:        "llama-3",
 		TokenIDs:     []int{1, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
-			{Index: 1, Hash: outputImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: outputImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
 		},
 		KVTransferParams: map[string]any{"block_id": "xyz"},
 		Body: map[string]any{
@@ -760,7 +1129,7 @@ func TestDecodeStep_Responses_StampsFunctionCallOutputImage(t *testing.T) {
 // it hashes the image itself and never reads the entry primed into the encoder
 // cache. Surplus entries leave mm_hashes naming an image the decode body does
 // not identify.
-func TestInjectImagePartUUIDs_CountMismatch(t *testing.T) {
+func TestInjectMediaPartUUIDs_CountMismatch(t *testing.T) {
 	newInput := func(parts int) []any {
 		content := make([]any, 0, parts)
 		for i := 0; i < parts; i++ {
@@ -774,7 +1143,7 @@ func TestInjectImagePartUUIDs_CountMismatch(t *testing.T) {
 	newEntries := func(n int) []pipeline.MultimodalEntry {
 		entries := make([]pipeline.MultimodalEntry, 0, n)
 		for i := 0; i < n; i++ {
-			entries = append(entries, pipeline.MultimodalEntry{Index: i, Hash: fmt.Sprintf("hash-%d", i)})
+			entries = append(entries, pipeline.MultimodalEntry{Modality: reqcommon.ModalityImage, Hash: fmt.Sprintf("hash-%d", i)})
 		}
 		return entries
 	}
@@ -792,7 +1161,7 @@ func TestInjectImagePartUUIDs_CountMismatch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := newInput(tc.parts)
-			injectImagePartUUIDs(input, reqcommon.APITypeResponses, newEntries(tc.entries))
+			injectMediaPartUUIDs(input, reqcommon.APITypeResponses, newEntries(tc.entries), logr.Discard())
 
 			content := input[0].(map[string]any)["content"].([]any)
 			for i, want := range tc.want {

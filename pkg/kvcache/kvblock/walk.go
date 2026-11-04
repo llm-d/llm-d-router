@@ -73,30 +73,46 @@ type KeyWalker interface {
 		visit func(pos int, found bool, entries []EntryRef) bool) error
 }
 
-// WalkKeys implements KeyWalker. Each key is peeked under the LRU's shared
-// lock and its entries visited under that key's own lock; the visited prefix
-// is promoted in a deferred call, so every exit path refreshes what was read.
+// Walk batches start small and double, so a walk that stops early peeks at
+// most walkBatchMin keys or about twice the keys it visits, whichever is more.
+const (
+	walkBatchMin = 8
+	walkBatchMax = 256
+)
+
+// WalkKeys implements KeyWalker. Keys are peeked in batches under one
+// acquisition of the LRU's shared lock, and each key's entries are visited
+// under that key's own lock after the shared lock is released, since evicting
+// a key takes its lock before the LRU's. The visited prefix is promoted in a
+// deferred call, so every exit path refreshes what was read.
 func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []EntryRef) bool,
 ) error {
 	visited := 0
 	// Every exit, cancellation included, refreshes what was read.
 	defer func() { m.data.Promote(requestKeys[:visited]) }()
-	for pos, key := range requestKeys {
-		if pos&cancellationCheckMask == 0 && ctx.Err() != nil {
-			return ctx.Err()
-		}
-		pc, found := m.data.Peek(key)
-		if !found || pc == nil {
-			if !visit(pos, false, nil) {
+	var buf [walkBatchMax]*PodCache
+	batch := walkBatchMin
+	for start := 0; start < len(requestKeys); {
+		end := min(start+batch, len(requestKeys))
+		for i, pc := range m.data.PeekInto(requestKeys[start:end], buf[:]) {
+			pos := start + i
+			if pos&cancellationCheckMask == 0 && ctx.Err() != nil {
 				return ctx.Err()
 			}
-			continue
+			if pc == nil {
+				if !visit(pos, false, nil) {
+					return ctx.Err()
+				}
+				continue
+			}
+			visited = pos + 1
+			if !pc.visitEntries(pos, visit) {
+				return ctx.Err()
+			}
 		}
-		visited = pos + 1
-		if !pc.visitEntries(pos, visit) {
-			return ctx.Err()
-		}
+		start = end
+		batch = min(2*batch, walkBatchMax)
 	}
 	return ctx.Err()
 }

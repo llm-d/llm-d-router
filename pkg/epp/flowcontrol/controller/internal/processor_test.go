@@ -219,7 +219,7 @@ func (h *testHarness) waitForFinalization(item *FlowItem) (types.QueueOutcome, e
 func (h *testHarness) newTestItem(id string, key flowcontrol.FlowKey, ttl time.Duration) *FlowItem {
 	h.t.Helper()
 	req := fwkfcmocks.NewMockFlowControlRequest(100, id, key)
-	return NewItem(req, ttl, h.clock.Now(), logr.Discard())
+	return NewItem(context.Background(), req, ttl, h.clock.Now(), logr.Discard())
 }
 
 // addQueue centrally registers a new mock queue for a given flow, ensuring all harness components are aware of it.
@@ -752,10 +752,13 @@ func TestProcessor(t *testing.T) {
 		t.Run("hasCapacity", func(t *testing.T) {
 			t.Parallel()
 			testCases := []struct {
-				name         string
-				itemByteSize uint64
-				snapshot     contracts.CapacitySnapshot
-				expectHasCap bool
+				name            string
+				itemByteSize    uint64
+				flowLen         int
+				flowByteSize    uint64
+				snapshot        contracts.CapacitySnapshot
+				expectHasCap    bool
+				expectFlowLimit bool
 			}{
 				{
 					name:         "should deny item if global byte capacity exceeded",
@@ -919,6 +922,72 @@ func TestProcessor(t *testing.T) {
 					},
 					expectHasCap: false,
 				},
+				{
+					name:         "should report the flow limit when it alone refuses the item",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Band:               contracts.CapacityDimension{CapacityRequests: 10, Len: 2},
+						MaxRequestsPerFlow: 2,
+					},
+					expectFlowLimit: true,
+				},
+				{
+					name:         "should report the per-flow byte limit when it alone refuses the item",
+					itemByteSize: 5,
+					flowByteSize: 6,
+					snapshot: contracts.CapacitySnapshot{
+						Band:            contracts.CapacityDimension{CapacityBytes: 100, ByteSize: 6},
+						MaxBytesPerFlow: 10,
+					},
+					expectFlowLimit: true,
+				},
+				{
+					name:         "should report band request capacity when the flow is also at its limit",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Band:               contracts.CapacityDimension{CapacityRequests: 2, Len: 2},
+						MaxRequestsPerFlow: 2,
+					},
+				},
+				{
+					name:         "should report band byte capacity when the flow is also at its limit",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Band:               contracts.CapacityDimension{CapacityBytes: 2, ByteSize: 2},
+						MaxRequestsPerFlow: 2,
+					},
+				},
+				{
+					name:         "should report global request capacity when the flow is also at its limit",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Global:             contracts.CapacityDimension{CapacityRequests: 2, Len: 2},
+						MaxRequestsPerFlow: 2,
+					},
+				},
+				{
+					name:         "should report global byte capacity when the flow is also at its limit",
+					itemByteSize: 1,
+					flowLen:      2,
+					snapshot: contracts.CapacitySnapshot{
+						Global:             contracts.CapacityDimension{CapacityBytes: 2, ByteSize: 2},
+						MaxRequestsPerFlow: 2,
+					},
+				},
+				{
+					name:         "should allow when the flow is one below its limit",
+					itemByteSize: 1,
+					flowLen:      1,
+					snapshot: contracts.CapacitySnapshot{
+						Band:               contracts.CapacityDimension{CapacityRequests: 10, Len: 1},
+						MaxRequestsPerFlow: 2,
+					},
+					expectHasCap: true,
+				},
 			}
 
 			for _, tc := range testCases {
@@ -926,9 +995,11 @@ func TestProcessor(t *testing.T) {
 					t.Parallel()
 					h := newTestHarness(t, testCleanupTick)
 					h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) { return tc.snapshot, nil }
-					hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, tc.itemByteSize)
+					flowQueue := &fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow, LenV: tc.flowLen, ByteSizeV: tc.flowByteSize}
+					hasCap, flowLimit, _, err := h.processor.hasCapacity(flowQueue, tc.itemByteSize)
 					require.NoError(t, err, "hasCapacity should not fail when the snapshot read succeeds")
 					assert.Equal(t, tc.expectHasCap, hasCap, "Capacity check result should match expected value")
+					assert.Equal(t, tc.expectFlowLimit, flowLimit, "Flow-limit attribution should match expected value")
 				})
 			}
 
@@ -938,7 +1009,7 @@ func TestProcessor(t *testing.T) {
 				h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
 					return contracts.CapacitySnapshot{}, contracts.ErrPriorityBandNotFound
 				}
-				hasCap, _, err := h.processor.hasCapacity(testFlow.Priority, 1)
+				hasCap, _, _, err := h.processor.hasCapacity(&fwkfcmocks.MockFlowQueueAccessor{FlowKeyV: testFlow}, 1)
 				require.ErrorIs(t, err, contracts.ErrPriorityBandNotFound, "The lookup error should be propagated")
 				assert.False(t, hasCap, "A failed capacity read should never report available capacity")
 			})
@@ -2129,7 +2200,7 @@ func TestProcessor_QueueWaitBudget(t *testing.T) {
 					regimeSince = base.Add(tc.regimeAfter)
 				}
 
-				item := NewItem(fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, logr.Discard())
+				item := NewItem(context.Background(), fwkfcmocks.NewMockFlowControlRequest(100, "req-budget", testFlow), itemTTL, base, logr.Discard())
 				regime := &regimeSample{empty: tc.poolEmpty, since: regimeSince}
 				expired := isExpired(item, base.Add(tc.elapsed), regime, noEndpoint)
 

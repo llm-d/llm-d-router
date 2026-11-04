@@ -20,9 +20,15 @@ Router deployment name
 Cluster RBAC unique name
 */}}
 {{- define "llm-d-router.cluster-rbac-name" -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 }}
-{{- $ns := .Release.Namespace | default "default" | lower | trim | trunc 40 }}
-{{- printf "%s-%s-epp" $base $ns | quote | trunc 84 }}
+{{- $release := .Release.Name | default "default-pool" | lower | trim }}
+{{- $ns := .Release.Namespace | default "default" | lower | trim }}
+{{- if and (le (len $release) 40) (le (len $ns) 40) }}
+{{- printf "%s-%s-epp" $release $ns | quote }}
+{{- else }}
+{{- /* Truncating alone would let two namespaces share one cluster-scoped name. */ -}}
+{{- $hash := printf "%s/%s" $release $ns | sha256sum | trunc 8 }}
+{{- printf "%s-%s-%s-epp" ($release | trunc 40) ($ns | trunc 40) $hash | quote }}
+{{- end }}
 {{- end -}}
 
 {{/*
@@ -119,14 +125,26 @@ from the EPP selector so the proxy and EPP pods are never co-selected.
 llm-d-router-proxy: {{ include "llm-d-router.proxyName" . }}
 {{- end -}}
 
+{{/* Headless Service for active-active Envoy endpoint discovery. */}}
+{{- define "llm-d-router.proxy.discoveryServiceName" -}}
+{{- $proxy := .Values.router.proxy | default dict -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- if and $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy") (eq (include "llm-d-router.proxyMode" .) "service") (ne (include "llm-d-router.priorityRouting.enabled" .) "true") (not $gkePB.enabled) -}}
+  {{- if eq (include "llm-d-router.epp.allActive" .) "true" -}}
+    {{- printf "%s-discovery" (include "llm-d-router.name" .) -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 ext_proc upstream host the proxy uses to reach EPP. Loopback in sidecar mode;
-the EPP Service FQDN in service mode.
+the discovery or EPP Service FQDN in service mode.
 */}}
 {{- define "llm-d-router.proxy.extProcHost" -}}
 {{- if eq (include "llm-d-router.proxyMode" .) "service" -}}
 {{- $domain := .Values.router.clusterDomain | default "cluster.local" -}}
-{{- printf "%s.%s.svc.%s" (include "llm-d-router.name" .) .Release.Namespace $domain -}}
+{{- $serviceName := include "llm-d-router.proxy.discoveryServiceName" . | default (include "llm-d-router.name" .) -}}
+{{- printf "%s.%s.svc.%s" $serviceName .Release.Namespace $domain -}}
 {{- else -}}
 127.0.0.1
 {{- end -}}
@@ -159,6 +177,57 @@ true
 {{- else -}}
 false
 {{- end -}}
+{{- end -}}
+
+{{/*
+Whether the standalone Envoy proxy renders a fallback route to the model
+servers. With fail-open on, ext_proc is skipped when EPP is unreachable, so
+nothing sets the destination header that original_destination_cluster routes
+on; the fallback route sends those requests to the pool through a headless
+Service instead.
+*/}}
+{{- define "llm-d-router.proxy.failOpenFallback.enabled" -}}
+{{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
+{{- if and (hasPrefix "llm-d-router-standalone" .Chart.Name) $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy") (eq (include "llm-d-router.proxy.failOpen" .) "true") -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
+Name of the headless Service that selects the model-server pods for the
+fail-open fallback route.
+*/}}
+{{- define "llm-d-router.proxy.fallbackServiceName" -}}
+{{- printf "%s-model-servers" (include "llm-d-router.name" .) -}}
+{{- end -}}
+
+{{/*
+Model-server port the fail-open fallback route sends requests to: the first
+entry of router.modelServers.targetPorts.
+*/}}
+{{- define "llm-d-router.proxy.fallbackPort" -}}
+{{- $ports := .Values.router.modelServers.targetPorts | default (list (dict "number" 8000)) -}}
+{{- (first $ports).number -}}
+{{- end -}}
+
+{{/*
+OTLP gRPC collector host and port for the Envoy tracer, from
+router.proxy.tracing.collectorEndpoint or router.tracing.otelExporterEndpoint.
+The port defaults to 4317.
+*/}}
+{{- define "llm-d-router.proxy.tracing.collector" -}}
+{{- $tracing := .Values.router.proxy.tracing | default dict -}}
+{{- $endpoint := $tracing.collectorEndpoint | default (dig "tracing" "otelExporterEndpoint" "" .Values.router) -}}
+{{- $hostPort := regexReplaceAll "^[a-zA-Z][a-zA-Z0-9+.-]*://" $endpoint "" | trimSuffix "/" -}}
+{{- $port := regexFind ":[0-9]+$" $hostPort -}}
+{{- $host := trimSuffix $port $hostPort | trimPrefix "[" | trimSuffix "]" -}}
+{{- if not $host -}}
+{{- fail "router.proxy.tracing.enabled requires router.proxy.tracing.collectorEndpoint or router.tracing.otelExporterEndpoint" -}}
+{{- end -}}
+host: {{ $host | quote }}
+port: {{ trimPrefix ":" $port | default "4317" }}
 {{- end -}}
 
 {{/*
@@ -439,6 +508,13 @@ Helper to retrieve GKE preferredBackends configuration safely across chart conte
 {{- index $gke "preferredBackends" | default dict | toYaml -}}
 {{- end -}}
 
+{{- define "llm-d-router.gkePreferredBackends.totalReplicas" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- $preferred := $gkePB.preferredReplicas | default 1 | int -}}
+{{- $default := $gkePB.defaultReplicas | default 1 | int -}}
+{{- add $preferred $default -}}
+{{- end -}}
+
 {{/*
 EPP generic validations
 */}}
@@ -493,6 +569,22 @@ Helper to check if priorityRouting is enabled across chart contexts.
 {{- add $primary $standby -}}
 {{- end -}}
 
+{{- define "llm-d-router.epp.statefulSetReplicas" -}}
+{{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict -}}
+{{- if $gkePB.enabled -}}
+{{- include "llm-d-router.gkePreferredBackends.totalReplicas" . -}}
+{{- else if eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
+{{- include "llm-d-router.priorityRouting.totalReplicas" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "llm-d-router.epp.healthCheckingRequired" -}}
+{{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
+{{- if or (eq (include "llm-d-router.priorityRouting.enabled" .) "true") (include "llm-d-router.proxy.discoveryServiceName" .) (and (hasPrefix "llm-d-router-standalone" .Chart.Name) $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy")) -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{- define "llm-d-router.validations.epp.autoscaling" -}}
 {{- $autoscaling := .Values.router.epp.autoscaling | default dict -}}
 {{- if $autoscaling.enabled }}
@@ -504,8 +596,8 @@ Helper to check if priorityRouting is enabled across chart contexts.
   {{- if $gkePB.enabled }}
     {{- fail "EPP autoscaling (.Values.router.epp.autoscaling.enabled=true) is not supported when GKE preferredBackends is enabled" }}
   {{- end }}
-  {{- $eppFlags := .Values.router.epp.flags | default dict -}}
-  {{- if regexMatch "^(1|t|T|true|TRUE|True)$" (toString (index $eppFlags "ha-enable-leader-election")) }}
+  {{- $eppFlags := include "llm-d-router.epp.flags" . | fromYaml -}}
+  {{- if index $eppFlags "ha-enable-leader-election" }}
     {{- fail "EPP autoscaling requires active-active replicas: router.epp.flags.ha-enable-leader-election cannot be true when router.epp.autoscaling.enabled=true" }}
   {{- end }}
   {{- $minReplicas := 1 }}
@@ -545,20 +637,28 @@ Helper to check if priorityRouting is enabled across chart contexts.
 {{- include "llm-d-router.validations.epp.resources" . }}
 {{- include "llm-d-router.validations.epp.inferenceObjectives" . }}
 {{- include "llm-d-router.validations.epp.tokenizer" . }}
+{{- include "llm-d-router.validations.epp.latencyPredictor" . }}
 {{- include "llm-d-router.validations.epp.preferredBackends" . }}
 {{- include "llm-d-router.validations.epp.autoscaling" . }}
+{{- include "llm-d-router.validations.epp.podLabels" . }}
 {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
 {{- if and $isPriorityRouting (ne (include "llm-d-router.proxyMode" .) "service") -}}
 {{- fail "priorityRouting is only supported when proxy mode is set to 'service' (router.proxy.mode=service)" -}}
 {{- end -}}
 {{- $eppFlags := .Values.router.epp.flags | default dict -}}
-{{- if and $isPriorityRouting (hasKey $eppFlags "health-checking") -}}
+{{- if and (include "llm-d-router.epp.healthCheckingRequired" .) (hasKey $eppFlags "health-checking") -}}
 {{- $healthChecking := index $eppFlags "health-checking" -}}
 {{- if not (kindIs "bool" $healthChecking) -}}
 {{- fail (printf ".Values.router.epp.flags.health-checking must be a boolean, got %q" (toString $healthChecking)) -}}
 {{- end -}}
 {{- if not $healthChecking -}}
+{{- if $isPriorityRouting -}}
 {{- fail "priorityRouting requires EPP's gRPC health service on port 9002 (router.epp.flags.health-checking cannot be false when priorityRouting.enabled=true)" -}}
+{{- else if include "llm-d-router.proxy.discoveryServiceName" . -}}
+{{- fail "active-active Envoy discovery requires EPP's gRPC health service (router.epp.flags.health-checking cannot be false)" -}}
+{{- else -}}
+{{- fail "Envoy active health checks require EPP's gRPC health service on port 9002 (router.epp.flags.health-checking cannot be false)" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -577,6 +677,34 @@ Tokenizer validations: require modelName and valid flavor for the render sidecar
 {{- fail (printf ".Values.router.tokenizer.flavor must be one of [python, rust], got %q" (dig "flavor" "" $tokenizer)) }}
 {{- end }}
 {{- end }}
+{{- end -}}
+
+{{/*
+podLabels validations: a key that duplicates a chart-owned pod label breaks the selector match or the mode label.
+*/}}
+{{- define "llm-d-router.validations.epp.podLabels" -}}
+{{- $eppLabels := merge (include "llm-d-router.selectorLabels" . | fromYaml) (include "llm-d-router.modeLabels" . | fromYaml) -}}
+{{- range $k, $_ := .Values.router.epp.podLabels -}}
+{{- if hasKey $eppLabels $k -}}
+{{- fail (printf ".Values.router.epp.podLabels must not set chart-owned label %q" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- $proxyLabels := merge (include "llm-d-router.labels" . | fromYaml) (include "llm-d-router.proxySelectorLabels" . | fromYaml) -}}
+{{- range $k, $_ := dig "podLabels" dict (.Values.router.proxy | default dict) -}}
+{{- if hasKey $proxyLabels $k -}}
+{{- fail (printf ".Values.router.proxy.podLabels must not set chart-owned label %q" $k) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Latency predictor validations
+*/}}
+{{- define "llm-d-router.validations.epp.latencyPredictor" -}}
+{{- $mode := include "llm-d-router.latencyPredictor.mode" . -}}
+{{- if not (or (eq $mode "sidecar") (eq $mode "service")) -}}
+{{- fail (printf ".Values.router.latencyPredictor.mode must be one of [sidecar, service], got %q" $mode) -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -617,10 +745,16 @@ The EPP parses its plugin configuration once at startup and never re-reads the
 mounted file, so a helm upgrade that touches only a ConfigMap has to change the
 pod template or the running pod keeps its old configuration. Hash the whole
 config partial rather than one ConfigMap: it renders the plugins, proxy and
-latency-predictor ConfigMaps, and all of them are mounted into this pod.
+latency-predictor ConfigMaps. In service mode the latency-predictor ConfigMaps
+belong to the predictor Deployments, so they are left out and a
+predictor-only change does not restart EPP.
 */}}
 {{- define "llm-d-epp.podAnnotations" -}}
+{{- if eq (include "llm-d-router.latencyPredictor.mode" .) "service" -}}
+checksum/config: {{ include "llm-d-epp.router-config" . | sha256sum }}
+{{- else -}}
 checksum/config: {{ include "llm-d-epp.config" . | sha256sum }}
+{{- end }}
 {{- with .Values.router.epp.podAnnotations }}
 {{- toYaml . | nindent 0 }}
 {{- end }}

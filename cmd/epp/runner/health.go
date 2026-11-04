@@ -78,16 +78,17 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 	// The service name in the request determines which check to perform.
 	var checkName string
 	var isPassing bool
+	isLeader := s.isLeader.Load()
 
 	switch in.Service {
 	case ReadinessCheckService:
 		checkName = "readiness"
-		isPassing = isLive && s.isLeader.Load() && protocolMatches && pluginsReady && !draining
+		isPassing = isLive && isLeader && protocolMatches && pluginsReady && !draining
 	case "": // Handle overall server health for load balancers that use an empty service name.
 		checkName = "empty service name (considered as overall health)"
 		// The overall health for a load balancer should reflect readiness to accept traffic,
 		// which is true only for the leader pod that has synced its data.
-		isPassing = isLive && s.isLeader.Load() && protocolMatches && pluginsReady && !draining
+		isPassing = isLive && isLeader && protocolMatches && pluginsReady && !draining
 	case LivenessCheckService:
 		checkName = "liveness"
 		// Any pod that is running and can respond to this gRPC check is considered "live".
@@ -98,14 +99,18 @@ func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckReques
 	case extProcPb.ExternalProcessor_ServiceDesc.ServiceName:
 		// The main service is considered ready only on the leader.
 		checkName = "ext_proc"
-		isPassing = isLive && s.isLeader.Load() && protocolMatches && pluginsReady && !draining
+		isPassing = isLive && isLeader && protocolMatches && pluginsReady && !draining
 	default:
 		s.logger.Error(nil, "gRPC health check requested unknown service", "available-services", []string{LivenessCheckService, ReadinessCheckService, extProcPb.ExternalProcessor_ServiceDesc.ServiceName}, "requested-service", in.Service)
 		return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_SERVICE_UNKNOWN}, nil
 	}
 
 	if !isPassing {
-		s.logger.Error(pluginReadinessErr, fmt.Sprintf("gRPC %s check not serving", checkName), "service", in.Service, "isLive", isLive, "isLeader", s.isLeader.Load(), "pluginsReady", pluginsReady)
+		if isLive && !isLeader && protocolMatches && pluginsReady && !draining {
+			s.logger.V(logutil.TRACE).Info(fmt.Sprintf("gRPC %s check not serving", checkName), "service", in.Service)
+		} else {
+			s.logger.Error(pluginReadinessErr, fmt.Sprintf("gRPC %s check not serving", checkName), "service", in.Service, "isLive", isLive, "isLeader", isLeader, "pluginsReady", pluginsReady)
+		}
 		return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_NOT_SERVING}, nil
 	}
 

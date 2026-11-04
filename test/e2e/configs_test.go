@@ -39,6 +39,22 @@ schedulingProfiles:
     weight: 2
 `
 
+// modelRolloutConfig adds models-responder, which screens requests by the model
+// lists the Pods report.
+const modelRolloutConfig = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: models-responder
+- type: decode-filter
+- type: max-score-picker
+- type: single-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: decode-filter
+  - pluginRef: max-score-picker
+`
+
 // epdEncodeDecodeConfig configures E/PD (encode + P/D) using disagg-profile-handler.
 // The encode stage is triggered only for multimodal requests (image_url / video_url / input_audio).
 const epdEncodeDecodeConfig = `apiVersion: llm-d.ai/v1
@@ -206,8 +222,15 @@ schedulingProfiles:
     weight: 2
 `
 
+// renderURL is the vllm-render Service URL for the token-producer plugin. The
+// renderer is shared across parallel processes and lives in the base namespace,
+// so the URL has to be fully qualified: a bare hostname resolves against the
+// EPP's own per-process namespace, which has no renderer.
+func renderURL() string {
+	return fmt.Sprintf("http://vllm-render.%s.svc:%s", baseNsName, vllmRenderPort)
+}
+
 // kvConfig returns the EPP config for precise prefix scoring with KV events.
-// The render URL is built from vllmRenderPort so VLLM_RENDER_PORT is respected.
 func kvConfig() string {
 	return fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -216,7 +239,7 @@ plugins:
   parameters:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
-      url: http://vllm-render:%s
+      url: %s
 - type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
@@ -241,12 +264,11 @@ schedulingProfiles:
   - pluginRef: max-score-picker
   - pluginRef: prefix-cache-scorer
     weight: 10
-`, vllmRenderPort)
+`, renderURL())
 }
 
 // kvExternalTokenizerConfig returns the EPP config for the KV-events test that
 // covers both completions and chat completions.
-// The render URL is built from vllmRenderPort so VLLM_RENDER_PORT is respected.
 func kvExternalTokenizerConfig() string {
 	return fmt.Sprintf(`apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -255,7 +277,7 @@ plugins:
   parameters:
     modelName: Qwen/Qwen2.5-1.5B-Instruct
     vllm:
-      url: http://vllm-render:%s
+      url: %s
 - type: precise-prefix-cache-producer
   parameters:
     tokenProcessorConfig:
@@ -279,7 +301,7 @@ schedulingProfiles:
   - pluginRef: max-score-picker
   - pluginRef: prefix-cache-scorer
     weight: 10
-`, vllmRenderPort)
+`, renderURL())
 }
 
 // EPP configuration for running scale model server test
@@ -300,7 +322,7 @@ kind: EndpointPickerConfig
 plugins:
 - type: decode-filter
 - type: max-score-picker
-- type: data-parallel-profile-handler
+- type: single-profile-handler
 schedulingProfiles:
 - name: default
   plugins:

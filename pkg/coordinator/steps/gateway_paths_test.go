@@ -83,7 +83,7 @@ func TestGatewayPaths_EncodePrefillDecode(t *testing.T) {
 		Stream:       false,
 		TokenIDs:     []int{1, 32000, 32000, 32000, 2345},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
 		KVTransferParams: make(map[string]any),
 		Body: map[string]any{
@@ -241,7 +241,7 @@ func TestGatewayPaths_DecodeWithCompletionsEndpoint(t *testing.T) {
 		TokenIDs:         []int{1, 2345, 6789},
 		KVTransferParams: map[string]any{"k": "v"},
 		MultimodalEntries: []pipeline.MultimodalEntry{
-			{Index: 0, Hash: "h1"},
+			{Modality: reqcommon.ModalityImage, Hash: "h1"},
 		},
 		Body:           map[string]any{"model": "test", "stream": false},
 		ResponseWriter: recorder,

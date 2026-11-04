@@ -34,6 +34,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -73,8 +74,11 @@ type AllowlistValidator struct {
 
 	gvr schema.GroupVersionResource // detected GVR
 
-	// allowedTargets maps hostport -> bool for allowed prefill targets
+	// allowedTargets holds the allowed host:port targets, allowedHosts their
+	// hosts for a P2P tier source that dials a port outside the pool target
+	// ports. Both are guarded by allowedTargetsMu.
 	allowedTargets   set.Set[string]
+	allowedHosts     set.Set[string]
 	allowedTargetsMu sync.RWMutex
 
 	// watchers for cleanup
@@ -126,6 +130,7 @@ func NewAllowlistValidator(enabled bool, poolGroup, namespace, poolName string) 
 		poolName:       poolName,
 		gvr:            gvr,
 		allowedTargets: set.New[string](),
+		allowedHosts:   set.New[string](),
 		podInformers:   make(map[string]cache.SharedInformer),
 		podStopChans:   make(map[string]chan struct{}),
 		poolPorts:      make(map[string][]string),
@@ -139,6 +144,21 @@ func (av *AllowlistValidator) Start(ctx context.Context) error {
 		return nil
 	}
 
+	av.podInformersMu.Lock()
+	select {
+	case <-av.stopCh:
+		av.podInformersMu.Unlock()
+		return errors.New("allowlist validator has already been stopped")
+	default:
+	}
+	if av.poolInformer != nil {
+		av.podInformersMu.Unlock()
+		return errors.New("allowlist validator has already been started")
+	}
+	if err := ctx.Err(); err != nil {
+		av.podInformersMu.Unlock()
+		return err
+	}
 	av.logger = log.FromContext(ctx).WithName("allowlist-validator")
 	av.logger.Info("starting SSRF protection allowlist validator",
 		"namespace", av.namespace, "poolName", av.poolName, "gvr", av.gvr.String())
@@ -168,9 +188,23 @@ func (av *AllowlistValidator) Start(ctx context.Context) error {
 
 	// Start the informer
 	go av.poolInformer.Run(av.stopCh)
+	av.podInformersMu.Unlock()
 
 	// Wait for cache sync
-	if !cache.WaitForCacheSync(av.stopCh, av.poolInformer.HasSynced) {
+	syncCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-av.stopCh:
+			cancel()
+		case <-syncCtx.Done():
+		}
+	}()
+	if !cache.WaitForCacheSync(syncCtx.Done(), av.poolInformer.HasSynced) {
+		av.Stop()
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("failed to sync InferencePool cache: %w", err)
+		}
 		return fmt.Errorf("failed to sync InferencePool cache within timeout (check RBAC permissions for inferencepools.%s and that pool '%s' exists)", av.gvr.String(), av.poolName)
 	}
 
@@ -184,10 +218,17 @@ func (av *AllowlistValidator) Stop() {
 		return
 	}
 
+	av.podInformersMu.Lock()
+	defer av.podInformersMu.Unlock()
+	select {
+	case <-av.stopCh:
+		return
+	default:
+	}
+
 	av.logger.Info("stopping allowlist validator")
 
 	// Stop all pod informers first
-	av.podInformersMu.Lock()
 	for poolName, stopCh := range av.podStopChans {
 		av.logger.V(logging.DEBUG).Info("stopping pod informer", "pool", poolName)
 		close(stopCh)
@@ -195,7 +236,7 @@ func (av *AllowlistValidator) Stop() {
 	// Clear the maps
 	av.podStopChans = make(map[string]chan struct{})
 	av.podInformers = make(map[string]cache.SharedInformer)
-	av.podInformersMu.Unlock()
+	av.poolPorts = make(map[string][]string)
 
 	// Stop the main pool informer
 	close(av.stopCh)
@@ -218,6 +259,22 @@ func (av *AllowlistValidator) IsAllowed(hostPort string) bool {
 	return allowed
 }
 
+// IsAllowedHost reports whether host is the IP or name of a pod selected by an
+// InferencePool. A pull over the OffloadingConnector P2P tier dials a tier
+// port that is not a pool target port, so the source is checked by host alone.
+func (av *AllowlistValidator) IsAllowedHost(host string) bool {
+	if !av.enabled {
+		return true
+	}
+
+	av.allowedTargetsMu.RLock()
+	allowed := av.allowedHosts.Has(host)
+	av.allowedTargetsMu.RUnlock()
+
+	av.logger.V(logging.DEBUG).Info("allowlist host check", "host", host, "allowed", allowed)
+	return allowed
+}
+
 // onInferencePoolAdd handles new InferencePool resources
 func (av *AllowlistValidator) onInferencePoolAdd(obj interface{}) {
 	pool := obj.(*unstructured.Unstructured)
@@ -234,8 +291,12 @@ func (av *AllowlistValidator) onInferencePoolUpdate(_, newObj interface{}) {
 
 // onInferencePoolDelete handles deleted InferencePool resources
 func (av *AllowlistValidator) onInferencePoolDelete(obj interface{}) {
-	pool := obj.(*unstructured.Unstructured)
-	poolName := pool.GetName()
+	name, err := cache.DeletionHandlingObjectToName(obj)
+	if err != nil {
+		av.logger.Error(err, "failed to process InferencePool deletion", "objectType", fmt.Sprintf("%T", obj))
+		return
+	}
+	poolName := name.Name
 	av.logger.Info("InferencePool deleted", "name", poolName)
 
 	// Stop watching pods for this pool
@@ -321,6 +382,12 @@ func (av *AllowlistValidator) createPodInformer(poolName string, selector labels
 	av.podInformersMu.Lock()
 	defer av.podInformersMu.Unlock()
 
+	select {
+	case <-av.stopCh:
+		return
+	default:
+	}
+
 	// Stop existing informer if it exists
 	if _, exists := av.podInformers[poolName]; exists {
 		if stopCh, stopExists := av.podStopChans[poolName]; stopExists {
@@ -388,8 +455,12 @@ func (av *AllowlistValidator) onPodUpdate(_, newObj interface{}) {
 
 // onPodDelete handles deleted pods
 func (av *AllowlistValidator) onPodDelete(obj interface{}) {
-	pod := obj.(*unstructured.Unstructured)
-	av.logger.V(logging.DEBUG).Info("Pod deleted", "name", pod.GetName())
+	name, err := cache.DeletionHandlingObjectToName(obj)
+	if err != nil {
+		av.logger.Error(err, "failed to process Pod deletion", "objectType", fmt.Sprintf("%T", obj))
+		return
+	}
+	av.logger.V(logging.DEBUG).Info("Pod deleted", "name", name.Name)
 	av.rebuildAllowlist()
 }
 
@@ -400,6 +471,7 @@ func (av *AllowlistValidator) rebuildAllowlist() {
 
 	// Clear existing allowlist
 	av.allowedTargets = set.New[string]()
+	av.allowedHosts = set.New[string]()
 
 	av.podInformersMu.RLock()
 	defer av.podInformersMu.RUnlock()
@@ -427,12 +499,13 @@ func (av *AllowlistValidator) rebuildAllowlist() {
 func (av *AllowlistValidator) addPodToAllowlist(pod *unstructured.Unstructured, poolName string, ports []string) {
 	podIP, _, _ := unstructured.NestedString(pod.Object, "status", "podIP")
 	podName := pod.GetName()
-	for _, port := range ports {
-		if podIP != "" {
-			av.allowedTargets.Insert(net.JoinHostPort(podIP, port))
+	for _, host := range []string{podIP, podName} {
+		if host == "" {
+			continue
 		}
-		if podName != "" {
-			av.allowedTargets.Insert(net.JoinHostPort(podName, port))
+		av.allowedHosts.Insert(host)
+		for _, port := range ports {
+			av.allowedTargets.Insert(net.JoinHostPort(host, port))
 		}
 	}
 

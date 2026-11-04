@@ -37,11 +37,12 @@ import (
 	"time"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 )
 
 // ThunderAgentPluginType is the plugin type registered with the framework.
@@ -53,12 +54,15 @@ const ThunderAgentPluginType = "thunder-agent"
 var inflightEstimateKey = fwkplugin.NewDataKey("inflight-estimate", ThunderAgentPluginType)
 
 var (
-	_ fwkrc.PreRequest            = &ThunderAgent{}
-	_ fwkrc.ResponseBodyProcessor = &ThunderAgent{}
+	_ fwkrh.PreRequest            = &ThunderAgent{}
+	_ fwkrh.ResponseBodyProcessor = &ThunderAgent{}
 	_ fwkplugin.ConsumerPlugin    = &ThunderAgent{}
 	_ fwkplugin.StateDumper       = &ThunderAgent{}
 	_ fwkdl.Registrant            = &ThunderAgent{}
 	_ fwkdl.EndpointExtractor     = &ThunderAgent{}
+	_ fwksched.Scorer             = &ThunderAgent{}
+	_ fwkfc.SaturationDetector    = &ThunderAgent{}
+	_ fwkfc.FairnessPolicy        = &ThunderAgent{}
 )
 
 // ThunderAgent is a single named instance shared by every hookup, so all of
@@ -66,7 +70,9 @@ var (
 type ThunderAgent struct {
 	typedName fwkplugin.TypedName
 
-	capacityTokens float64
+	capacityTokens       float64
+	utilThreshold        float64
+	headWaitStarvationMs float64
 
 	mgr     *sessionManager
 	metrics *thunderMetrics
@@ -115,10 +121,12 @@ func (a *ThunderAgent) runSweep(ctx context.Context, interval time.Duration) {
 func newThunderAgent(name string, cfg Config) *ThunderAgent {
 	mgr := newSessionManager(cfg)
 	return &ThunderAgent{
-		typedName:      fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
-		capacityTokens: float64(cfg.CapacityTokens),
-		mgr:            mgr,
-		metrics:        newThunderMetrics(mgr),
+		typedName:            fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
+		capacityTokens:       float64(cfg.CapacityTokens),
+		utilThreshold:        cfg.UtilThreshold,
+		headWaitStarvationMs: cfg.HeadWaitStarvationMs,
+		mgr:                  mgr,
+		metrics:              newThunderMetrics(mgr),
 	}
 }
 
@@ -132,6 +140,12 @@ func (a *ThunderAgent) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{agentidentity.AgentIdentityKey: ""},
 	}
+}
+
+// Produces declares the request attribute PreRequest writes for the plugin's own
+// later hooks; the data layer drops undeclared writes and fails the request.
+func (a *ThunderAgent) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{inflightEstimateKey: int64(0)}
 }
 
 // sessionID returns the session identifier published by the agent-identity
@@ -175,6 +189,7 @@ func (a *ThunderAgent) Extract(_ context.Context, event fwkdl.EndpointEvent) err
 type stateDump struct {
 	RunningSessions int                     `json:"runningSessions"`
 	IdleSessions    int                     `json:"idleSessions"`
+	PausedSessions  int                     `json:"pausedSessions"`
 	Endpoints       map[string]endpointDump `json:"endpoints"`
 }
 
@@ -186,10 +201,11 @@ type endpointDump struct {
 // DumpState reports session counts and each endpoint's working set and
 // capacity, the same values as the metrics.
 func (a *ThunderAgent) DumpState() (json.RawMessage, error) {
-	snap := a.mgr.snapshot()
+	snap := a.mgr.snapshot(time.Now())
 	dump := stateDump{
 		RunningSessions: snap.running,
 		IdleSessions:    snap.idle,
+		PausedSessions:  snap.paused,
 		Endpoints:       make(map[string]endpointDump, len(snap.endpoints)),
 	}
 	for id, e := range snap.endpoints {
