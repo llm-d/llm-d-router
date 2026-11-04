@@ -142,6 +142,12 @@ func New(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
 func (s *Step) Name() string { return StepName }
 
 func (s *Step) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	// Async serving applies to JSON HTTP requests only. A gRPC Generate
+	// request has no model field and cannot get an OpenAI JSON error, so the
+	// step leaves it untouched even when it carries the mode header.
+	if reqCtx.GenerateRequest != nil {
+		return nil
+	}
 	headerVal := reqCtx.OriginalHeaders.Get(s.cfg.ModeHeader)
 	if headerVal == "" {
 		// No mode header means the request did not opt into async serving:
