@@ -41,6 +41,10 @@ type (
 		Name string `json:"name"`
 		// QueuedRequestsSpec defines the metric specification string for retrieving queued request count.
 		QueuedRequestsSpec string `json:"queuedRequestsSpec"`
+		// DeferredRequestsSpec defines the metric specification string for the part of the queued
+		// request count that waits on something other than a batch slot, such as a KV transfer, a
+		// LoRA slot or a grammar compile. Published as the DeferredQueueSize attribute. Optional.
+		DeferredRequestsSpec string `json:"deferredRequestsSpec,omitempty"`
 		// RunningRequestsSpec defines the metric specification string for retrieving running requests count.
 		RunningRequestsSpec string `json:"runningRequestsSpec"`
 		// KVUsageSpec defines the metric specification string for retrieving KV cache usage.
@@ -97,12 +101,13 @@ type (
 // Default engine configurations for vLLM, SGLang, ATOM, TokenSpeed, trtllm-serve, triton-tensorrt-llm, and triton.
 var defaultEngineConfigs = []engineConfigParams{
 	{
-		Name:                "vllm",
-		QueuedRequestsSpec:  "vllm:num_requests_waiting",
-		RunningRequestsSpec: "vllm:num_requests_running",
-		KVUsageSpec:         "vllm:kv_cache_usage_perc",
-		LoRASpec:            "vllm:lora_requests_info",
-		CacheInfoSpec:       "vllm:cache_config_info",
+		Name:                 "vllm",
+		QueuedRequestsSpec:   "vllm:num_requests_waiting",
+		DeferredRequestsSpec: `vllm:num_requests_waiting_by_reason{reason="deferred"}`,
+		RunningRequestsSpec:  "vllm:num_requests_running",
+		KVUsageSpec:          "vllm:kv_cache_usage_perc",
+		LoRASpec:             "vllm:lora_requests_info",
+		CacheInfoSpec:        "vllm:cache_config_info",
 		// vLLM reports the tiering counters only when it runs with TieringOffloadingSpec,
 		// and creates each series on its first event.
 		CustomMetrics: []customMetricConfigParams{
@@ -261,6 +266,7 @@ func newCoreMetricsExtractorPlugin(ctx context.Context, name string, params *mod
 
 		mapping, err := NewMappingFromConfig(MappingConfig{
 			Queue:               engineConfig.QueuedRequestsSpec,
+			Deferred:            engineConfig.DeferredRequestsSpec,
 			Running:             engineConfig.RunningRequestsSpec,
 			KVUsage:             engineConfig.KVUsageSpec,
 			Lora:                engineConfig.LoRASpec,
