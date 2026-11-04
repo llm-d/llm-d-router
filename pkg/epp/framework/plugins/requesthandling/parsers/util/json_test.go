@@ -108,6 +108,54 @@ func FuzzJSONMapAcceptance(f *testing.F) {
 	})
 }
 
+func FuzzSplitObjectMatchesUnmarshal(f *testing.F) {
+	for _, input := range []string{
+		`{}`, ` { } `, `null`, `[]`, `"text"`, `{`, `{} {}`,
+		`{"a":1,"a":2}`, `{"model":"x","é":1,"\ud800":2}`,
+		"{\"k\xff\":1}", `{"s":"a\"b\\c]}{[","n":-1.5e+3,"t":true,"f":false,"z":null}`,
+		`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:,"}}]}],"stream":true}`,
+		"{\n\t\"a\" :\r\n[ 1 , {\"b\" : [ ] } ] ,\"c\":{}\n}",
+	} {
+		f.Add([]byte(input))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		got, ok := splitObject(data)
+		var want map[string]json.RawMessage
+		err := json.Unmarshal(data, &want)
+		if !ok {
+			// A declined object falls back to the copying json.Unmarshal path.
+			if err == nil && want != nil {
+				t.Fatalf("splitObject declined object %q", data)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("splitObject accepted %q, json.Unmarshal: %v", data, err)
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Fatalf("splitObject(%q) mismatch (-json.Unmarshal +splitObject):\n%s", data, diff)
+		}
+	})
+}
+
+func TestUnmarshalEnvelopeSharesInput(t *testing.T) {
+	data := []byte(`{"model":"m","messages":[{"role":"user","content":"hello"}],"prompt":"text"}`)
+	got, err := UnmarshalEnvelope(data, "prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"messages", "prompt"} {
+		raw := got[key].(json.RawMessage)
+		start := strings.Index(string(data), string(raw))
+		if &raw[0] != &data[start] {
+			t.Errorf("%s is a copy, want a slice of the input", key)
+		}
+		if cap(raw) != len(raw) {
+			t.Errorf("%s capacity = %d, want %d so an append cannot write into the input", key, cap(raw), len(raw))
+		}
+	}
+}
+
 func TestUnmarshalEnvelopeStringAllocations(t *testing.T) {
 	// Disable GC during measurement so the 240 KiB input does not trigger a GC
 	// cycle that clears encoding/json's sync.Pool mid-sample. Under -race,
