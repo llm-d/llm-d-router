@@ -131,6 +131,9 @@ func InstantiateAndConfigure(
 	if err := validateConfig(rawConfig); err != nil {
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
+	if err := validateProfileReferences(rawConfig, handle); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
 
 	schedulerConfig, err := buildSchedulerConfig(rawConfig.SchedulingProfiles, handle)
 	if err != nil {

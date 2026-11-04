@@ -16,7 +16,7 @@ Supports two algorithms, selected by the `strategy` parameter:
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `strategy` | string | `encoded_endpoint_header` | `encoded_endpoint_header` or `session_id`. Only the config block matching the strategy is used. |
-| `profileName` | string | | The name of the profile this instance is associated with. When set (e.g. `prefill`), the plugin looks up the target pod from the results of that profile in `SchedulingResult`. When empty, it defaults to the primary (decode) pod. |
+| `profileName` | string | | The name of the profile this instance is associated with. When set (e.g. `prefill`), the plugin looks up the target pod from the results of that profile in `SchedulingResult`. It must name a profile in `schedulingProfiles`, or loading the config fails. When empty, it defaults to the primary (decode) pod. |
 | `encodedEndpointHeaderConfig` | object | | Config for `encoded_endpoint_header`; see below. |
 | `sessionIdConfig` | object | | Config for `session_id`; see below. |
 
