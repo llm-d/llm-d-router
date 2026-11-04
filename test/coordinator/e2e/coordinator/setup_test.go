@@ -158,7 +158,7 @@ func testWrapper(test func()) func() {
 			if ginkgo.CurrentSpecReport().Failed() {
 				// Dump the workload before the deletes below remove it.
 				testutils.DumpPodsAndLogs(testConfig, nsName, testutils.WithFullLogs())
-				dumpEnvoyExtProcStats(nsName)
+				dumpGWExtProcStats(nsName)
 				if keepClusterOnFailure {
 					return
 				}
@@ -418,12 +418,17 @@ func waitForPhaseRoutesReady() {
 	}
 }
 
-// dumpEnvoyExtProcStats prints Envoy's ext_proc filter and EPP cluster stats
+// dumpGWExtProcStats prints the gateway's ext_proc filter and EPP cluster stats
 // (stream failures, connect failures, healthy members). Envoy answers a failed
 // ext_proc call with an empty 500 that no EPP or access log line explains, so
 // these counters are what separate an unhealthy EPP from a failed connect or a
-// reset stream.
-func dumpEnvoyExtProcStats(nsName string) {
+// reset stream. agentgateway has no equivalent ext_proc counters, so it only
+// logs that none are available.
+func dumpGWExtProcStats(nsName string) {
+	if gatewayKind == gatewayAgentgateway {
+		ginkgo.GinkgoWriter.Printf("ext_proc stats are not available for %s\n", gatewayKind)
+		return
+	}
 	ctx, cancel := context.WithTimeout(testConfig.Context, 10*time.Second)
 	defer cancel()
 	pods, err := testConfig.KubeCli.CoreV1().Pods(nsName).List(ctx, metav1.ListOptions{LabelSelector: "app=envoy"})
