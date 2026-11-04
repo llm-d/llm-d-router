@@ -48,7 +48,6 @@ const (
 	responseFieldCreated = "created"
 
 	objectChatCompletionChunk = "chat.completion.chunk"
-	fieldIncludeUsage         = "include_usage"
 
 	roleAssistant = "assistant"
 )
@@ -534,7 +533,7 @@ func (e streamEnvelope) apply(event map[string]any) {
 // streamIncludeUsage reports whether the request sets stream_options.include_usage.
 func streamIncludeUsage(body map[string]any) bool {
 	options, _ := body[reqcommon.FieldStreamOptions].(map[string]any)
-	include, _ := options[fieldIncludeUsage].(bool)
+	include, _ := options[reqcommon.FieldIncludeUsage].(bool)
 	return include
 }
 

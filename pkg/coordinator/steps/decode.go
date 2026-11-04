@@ -229,7 +229,7 @@ func injectIncludeUsage(reqCtx *pipeline.RequestContext) bool {
 		return false
 	}
 	options := streamOptions(reqCtx.Body)
-	if include, ok := options[fieldIncludeUsage].(bool); ok && include {
+	if include, ok := options[reqcommon.FieldIncludeUsage].(bool); ok && include {
 		return false
 	}
 	// vLLM reports usage on every chunk when include_usage and
@@ -244,7 +244,7 @@ func injectIncludeUsage(reqCtx *pipeline.RequestContext) bool {
 	for k, v := range options {
 		merged[k] = v
 	}
-	merged[fieldIncludeUsage] = true
+	merged[reqcommon.FieldIncludeUsage] = true
 	reqCtx.Body[reqcommon.FieldStreamOptions] = merged
 	return true
 }
@@ -267,10 +267,7 @@ func streamOptions(body map[string]any) map[string]any {
 	}
 }
 
-const (
-	fieldIncludeUsage         = "include_usage"
-	fieldContinuousUsageStats = "continuous_usage_stats"
-)
+const fieldContinuousUsageStats = "continuous_usage_stats"
 
 // prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike
 // prefill and conditional-decode). decode is the terminal pipeline step: its body

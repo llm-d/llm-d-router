@@ -65,6 +65,7 @@ const (
 	FieldMinTokens            = "min_tokens"
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
+	FieldIncludeUsage         = "include_usage"
 	FieldEcho                 = "echo"
 	FieldTools                = "tools"
 	FieldToolChoice           = "tool_choice"
