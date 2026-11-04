@@ -735,7 +735,9 @@ only when that plugin is configured and records the related prediction, observat
 | `llm_d_epp_request_prediction_failures_total` | Counter | `plugin_name`, `plugin_type`, `reason` | Failed latency prediction attempts (`request_error`, `nil_response`, `length_mismatch`, `predictor_unavailable`). |
 
 `model_name` is the model in the request body and `target_model_name` is the model after any
-InferenceModelRewrite. Both share the model label cap described in [Metrics catalog](#metrics-catalog).
+InferenceModelRewrite. Both share the model label cap described in [Metrics catalog](#metrics-catalog):
+the histograms and the violation counter fold names past the cap into `other`, and the
+`inference_request_metric` gauges skip them.
 
 ### Disaggregation
 

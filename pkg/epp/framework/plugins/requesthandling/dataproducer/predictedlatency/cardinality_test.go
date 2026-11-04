@@ -82,7 +82,7 @@ func TestRecordersBoundModelLabels(t *testing.T) {
 		pluginName = "bound-model-labels"
 	)
 	old := boundModelName
-	boundModelName = metricsutil.NewBoundedLabel(testCap).Bound
+	boundModelName = metricsutil.NewBoundedLabel(testCap).BoundWithOverflow
 	t.Cleanup(func() {
 		boundModelName = old
 		deleteSeriesFor(pluginName)
@@ -107,10 +107,47 @@ func TestRecordersBoundModelLabels(t *testing.T) {
 			values[labels["model_name"]] = true
 			values[labels["target_model_name"]] = true
 		}
+		if vec == llmdInferenceGauges {
+			// Set-value gauges skip overflowed names instead of sharing one series.
+			assert.Falsef(t, values[metricsutil.OverflowValue], "%s: a set-value gauge must not write an %q series", name, metricsutil.OverflowValue)
+			assert.LessOrEqualf(t, len(values), testCap, "%s: only names under the cap may get gauge series", name)
+			continue
+		}
 		// model_name and target_model_name share one cap, as on the core request metrics.
 		assert.Equalf(t, testCap+1, len(values), "%s: 200 distinct model names must fold to cap+overflow label values", name)
 		assert.Truef(t, values[metricsutil.OverflowValue], "%s: names past the cap must report as %q", name, metricsutil.OverflowValue)
 	}
+}
+
+// An overflowed model must not overwrite the SLO violation flag of another model:
+// before, a fast request from one overflowed model reset the shared "other" gauge
+// to 0 while the violation counter still said 1.
+func TestSLOViolationGaugeSkipsOverflowedModels(t *testing.T) {
+	const pluginName = "slo-gauge-overflow"
+	old := boundModelName
+	boundModelName = metricsutil.NewBoundedLabel(2).BoundWithOverflow
+	t.Cleanup(func() {
+		boundModelName = old
+		deleteSeriesFor(pluginName)
+	})
+
+	ctx := t.Context()
+	// model-a and target-a fill the cap; the next two models overflow.
+	recordRequestTTFTWithSLO(ctx, pluginName, "test-type", "model-a", "target-a", 2, 1)
+	recordRequestTTFTWithSLO(ctx, pluginName, "test-type", "model-b", "target-b", 2, 1)
+	recordRequestTTFTWithSLO(ctx, pluginName, "test-type", "model-c", "target-c", 0.5, 1)
+
+	for _, labels := range seriesFor(t, llmdInferenceGauges, pluginName) {
+		assert.NotEqual(t, metricsutil.OverflowValue, labels["model_name"], "overflowed models must not get a gauge series")
+		assert.NotEqual(t, metricsutil.OverflowValue, labels["target_model_name"], "overflowed models must not get a gauge series")
+	}
+	counted := 0
+	for _, labels := range seriesFor(t, llmdSloViolationCounter, pluginName) {
+		if labels["model_name"] == metricsutil.OverflowValue {
+			counted++
+		}
+	}
+	assert.Equal(t, 1, counted, "the violation counter still folds overflowed models into %q", metricsutil.OverflowValue)
 }
 
 // model_name is the model the client asked for, the same value the core request
