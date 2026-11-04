@@ -42,6 +42,12 @@ const (
 	// system.
 	DefaultFairnessID = "default-flow"
 
+	// DefaultTenantID prefixes a composed fairness ID for a request that
+	// carries a derived program root but no fairness-ID header. Such traffic
+	// shares one synthetic tenant, so its programs stay addressable as a
+	// group. A gateway stamping this exact tenant string shares the prefix.
+	DefaultTenantID = "default-tenant"
+
 	// HeaderContentType names the HTTP header that carries the media type of a body.
 	HeaderContentType = "content-type"
 	// ContentTypeJSON is the media type of JSON bodies.

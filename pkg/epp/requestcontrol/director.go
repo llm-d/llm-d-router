@@ -53,6 +53,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentlineage"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -271,30 +272,48 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
-	// Derive the FairnessID from the fairness-ID header (tenant identity) and the
-	// agent-identity attribute (program/session identity). Composition is opt-in
-	// through requestHandler.composeFairnessIDs. When enabled, the tenant is
-	// percent-encoded and joined with the session as "<tenant>/<session>", so flow
-	// control keys one queue per session while the tenant stays visible for
-	// isolation and metric labels. Encoding "%" and "/" keeps the first segment
-	// exactly the tenant, so a tenant carrying either character cannot collide
-	// with another tenant's composed key, and session IDs stay free to contain
-	// the separator. When disabled, the fairness-ID header keys the flow as sent
-	// and the session identity is not part of it. A request carrying neither
-	// identity falls back to the default flow.
+	// Derive the FairnessID from the fairness-ID header (tenant identity) and
+	// the derived-root or agent-identity attribute (program/session identity).
+	// The derived root, published by the agent-lineage plugin, is the session
+	// ID of the root request of the request's tree and takes precedence over
+	// the raw agent identity. Composition is opt-in through
+	// requestHandler.composeFairnessIDs. When enabled, the tenant is
+	// percent-encoded and joined with the root or session as
+	// "<tenant>/<root>", so flow control keys one queue per program while the
+	// tenant stays visible for isolation and metric labels. Encoding "%" and
+	// "/" keeps the first segment exactly the tenant, so a tenant carrying
+	// either character cannot collide with another tenant's composed key, and
+	// root or session IDs stay free to contain the separator. A request with
+	// a root but no fairness header composes onto the default tenant
+	// ("<default-tenant>/<root>"). When disabled, the fairness-ID header keys
+	// the flow as sent, a headerless request keys on its root or session
+	// alone, and a request carrying neither identity falls back to the
+	// default flow.
 	source := tracing.AttributionSourceHeader
 	tenantID := reqCtx.SchedulingRequest.FairnessID
+	root, _ := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentlineage.DerivedRootKey)
 	agentID, _ := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey)
+	programID := root
+	if programID == "" {
+		programID = agentID
+	}
 	switch {
 	case tenantID != "" && d.requestControlPlugins.ComposeFairnessIDs():
 		tenantID = escapeFairnessTenant(tenantID)
-		if agentID != "" {
-			reqCtx.SchedulingRequest.FairnessID = tenantID + metadata.FairnessIDTenantSeparator + agentID
+		if programID != "" {
+			reqCtx.SchedulingRequest.FairnessID = tenantID + metadata.FairnessIDTenantSeparator + programID
 		} else {
 			reqCtx.SchedulingRequest.FairnessID = tenantID
 		}
 	case tenantID != "":
 		// Header-only traffic keys the flow on the tenant fairness ID as sent.
+	case root != "":
+		if d.requestControlPlugins.ComposeFairnessIDs() {
+			reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultTenantID + metadata.FairnessIDTenantSeparator + root
+		} else {
+			reqCtx.SchedulingRequest.FairnessID = root
+		}
+		source = tracing.AttributionSourceDerivedRoot
 	case agentID != "":
 		reqCtx.SchedulingRequest.FairnessID = agentID
 		source = tracing.AttributionSourceAgentIdentity
