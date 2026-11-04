@@ -34,6 +34,8 @@ var SessionStateDataKey = plugin.NewDataKey("SessionStateDataKey", SessionStateP
 // publishes it from RequestHeader, so flow-control and scheduling plugins read
 // the latest counters and token totals while the request waits.
 type SessionState struct {
+	// SessionID is the agent identity that keys this state.
+	SessionID         string
 	TurnsTaken        int64
 	Duration          time.Duration
 	LastSeenAt        time.Time
@@ -43,6 +45,10 @@ type SessionState struct {
 	TotalInputTokens  int64
 	TotalOutputTokens int64
 	TotalCachedTokens int64
+	// ServedInputTokens and ServedOutputTokens count the tokens of every ended
+	// response, including interrupted ones, as a measure of service consumed.
+	ServedInputTokens  int64
+	ServedOutputTokens int64
 }
 
 // ReadSessionState returns the SessionState published by the default producer

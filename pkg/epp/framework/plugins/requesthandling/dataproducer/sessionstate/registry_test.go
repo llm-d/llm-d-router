@@ -245,3 +245,22 @@ func TestRegistryConcurrentUpdates(t *testing.T) {
 	assert.Equal(t, int64(2*requests), state.TotalInputTokens)
 	assert.Equal(t, int64(3*requests), state.TotalOutputTokens)
 }
+
+func TestRegistryServedTotalsIncludeInterruptedResponses(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{}
+	for range 3 {
+		registry.RecordDispatch("session-a", "")
+	}
+	registry.RecordResponse("session-a", true, TurnUsage{InputTokens: 10, OutputTokens: 4, StreamedEvents: 9})
+	registry.RecordResponse("session-a", false, TurnUsage{InputTokens: 20, StreamedEvents: 7})
+	registry.RecordResponse("session-a", true, TurnUsage{InputTokens: 30, StreamedEvents: 5})
+
+	state := registry.GetState("session-a")
+	assert.Equal(t, "session-a", state.SessionID)
+	assert.Equal(t, int64(60), state.ServedInputTokens)
+	assert.Equal(t, int64(4+7+5), state.ServedOutputTokens, "streamed events stand in for missing completion tokens")
+	assert.Equal(t, int64(40), state.TotalInputTokens)
+	assert.Equal(t, int64(4), state.TotalOutputTokens, "reported totals count only naturally completed usage")
+}
