@@ -324,6 +324,11 @@ terminate the plugin -- the datastore retains its previous state.
 Atomic file replacement (write to a temp file then rename) triggers a
 `Create` event and is handled correctly.
 
+On Docker Desktop for macOS, a host-side atomic replace of a bind-mounted
+endpoints file does not reach the watch inside the container, and later
+changes to the file are not reloaded until the EPP restarts. Edit the file in
+place, or restart the EPP after replacing it.
+
 ### Validation rules
 
 The plugin fails at startup (before `Start` returns an error) if:

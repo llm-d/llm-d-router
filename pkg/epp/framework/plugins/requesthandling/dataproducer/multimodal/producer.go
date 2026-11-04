@@ -34,6 +34,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -446,15 +447,18 @@ func itemSlice(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
 
 // recordItemLookups increments the queries counter for each item and, for every
 // endpoint whose cache contains the hash, increments that endpoint's hits counter.
+// The modality label goes through mmobs.MetricLabel because a token-in request
+// names its own modalities.
 func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
 	pluginType, pluginName := p.typedName.Type, p.typedName.Name
 	for _, item := range items {
-		encoderCacheQueriesTotal.WithLabelValues(pluginType, pluginName, item.Modality).Inc()
+		modality := mmobs.MetricLabel(item.Modality)
+		encoderCacheQueriesTotal.WithLabelValues(pluginType, pluginName, modality).Inc()
 		for pod, podCache := range p.caches {
 			if podCache.contains(item.Hash) {
-				encoderCacheHitsTotal.WithLabelValues(pluginType, pluginName, pod, item.Modality).Inc()
+				encoderCacheHitsTotal.WithLabelValues(pluginType, pluginName, pod, modality).Inc()
 			}
 		}
 	}

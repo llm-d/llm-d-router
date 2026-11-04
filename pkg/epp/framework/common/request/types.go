@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/tokenization"
@@ -70,9 +71,10 @@ type PayloadProto struct {
 	proto.Message
 }
 
-func (PayloadProto) isRequestPayload()         {}
-func (PayloadProto) IsParsed() bool            { return true }
-func (PayloadProto) AsMap() (PayloadMap, bool) { return nil, false }
+func (PayloadProto) isRequestPayload()          {}
+func (PayloadProto) IsParsed() bool             { return true }
+func (PayloadProto) AsMap() (PayloadMap, bool)  { return nil, false }
+func (p PayloadProto) Marshal() ([]byte, error) { return grpcframe.MarshalProto(p.Message) }
 
 // RawPayload represents an unparsed request body kept as raw bytes.
 type RawPayload []byte
@@ -167,6 +169,19 @@ func (b *InferenceRequestBody) MutatePayloadMap(fn func(PayloadMap)) {
 	}
 	fn(m)
 	b.Mutated = true
+}
+
+// ResponsePhaseView returns a new body with only the fields that response-phase
+// plugins read. The request handler swaps it in once the body has been forwarded,
+// so a long response does not keep the request content in memory. A new field is
+// left out unless it is added here.
+func (b *InferenceRequestBody) ResponsePhaseView() *InferenceRequestBody {
+	return &InferenceRequestBody{
+		TokenizedRequest: b.TokenizedRequest,
+		Stream:           b.Stream,
+		MaxOutputTokens:  b.MaxOutputTokens,
+		Model:            b.Model,
+	}
 }
 
 // MaxOutputTokensFromPayload returns the client-requested output-token cap read

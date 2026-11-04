@@ -43,6 +43,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
@@ -113,6 +114,7 @@ type Director interface {
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
 	HandleResponseBody(ctx context.Context, reqCtx *RequestContext, endOfStream bool) *RequestContext
 	GetRandomEndpoint() *fwkdl.EndpointMetadata
+	GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata
 }
 
 type Datastore interface {
@@ -253,8 +255,8 @@ const (
 	// The state machine sends an ImmediateResponse(429) to the proxy.
 	requestEvicted
 	// requestResponseProcessingSkipped indicates that EPP response-phase stream interception was skipped for this request.
-	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
-	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
+	// The state machine sends the RequestHeadersResponse, and a RequestBodyResponse when the request has a body,
+	// with the routing decision to the proxy, and then gracefully closes the stream to stop further external processing.
 	requestResponseProcessingSkipped
 	// requestAnsweredLocal indicates a Responder answered the request itself with an
 	// ImmediateResponse rather than routing it to a model server. The state machine sends the
@@ -304,6 +306,17 @@ func (r *RequestContext) apiType() reqcommon.APIType {
 		headers = r.Request.Headers
 	}
 	return reqcommon.DetectAPIType(fwkrequest.GetRequestPath(headers))
+}
+
+// releaseRequestBody drops the request body once it has been forwarded, because
+// a streamed response can last for the whole generation. Body is replaced rather
+// than cleared: a DataProducer that outlived its timeout can still hold a copy of
+// the request and read the original body.
+func (r *RequestContext) releaseRequestBody() {
+	r.Request.RawBody = nil
+	if r.SchedulingRequest != nil && r.SchedulingRequest.Body != nil {
+		r.SchedulingRequest.Body = r.SchedulingRequest.Body.ResponsePhaseView()
+	}
 }
 
 func toolCallingAPIForPath(path string) (reqcommon.APIType, bool) {
@@ -377,8 +390,8 @@ func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrh.Te
 	}
 
 	for _, header := range trailers.GetTrailers().GetHeaders() {
-		if header.Key == "grpc-status" {
-			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != "0" {
+		if header.Key == grpcframe.HeaderStatus {
+			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != grpcframe.StatusOK {
 				return fwkrh.TerminationCauseError
 			}
 			return ""
@@ -895,6 +908,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			return err
 		}
 		if reqCtx.requestState == requestResponseProcessingSkipped {
+			// A header-time skip (e.g. a WebSocket upgrade) never reaches the body
+			// phase, so the request-processing latency is recorded here. OnceFunc
+			// keeps the body-phase skip from recording twice.
+			recordRequestProcessing()
 			logger.V(logutil.DEFAULT).Info("EPP skipped response interception, routed request",
 				"targetEndpoint", reqCtx.TargetEndpoint,
 				"targetModel", reqCtx.TargetModelName)
@@ -1086,6 +1103,7 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		r.requestRunning = true
 		// Dump the response so a new stream message can begin
 		r.reqBodyResp = nil
+		r.releaseRequestBody()
 	}
 	if r.requestState == responseReceived && r.respHeaderResp != nil {
 		loggerTrace.Info("Sending response header response", "obj", r.respHeaderResp)

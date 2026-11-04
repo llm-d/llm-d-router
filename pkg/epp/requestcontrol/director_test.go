@@ -60,6 +60,8 @@ import (
 	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
@@ -351,6 +353,37 @@ func TestRepackagePreservesNativeRenderContent(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestRepackageProtoPayload(t *testing.T) {
+	msg := &sglangapiv1.GenerateRequest{
+		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "prompt"}},
+	}
+	originalBytes, err := grpcframe.MarshalProto(msg)
+	require.NoError(t, err)
+
+	reqCtx := &handlers.RequestContext{Request: &handlers.Request{RawBody: originalBytes}}
+	body := &fwkrequest.InferenceRequestBody{
+		Generate: &fwkrequest.GenerateRequest{Text: "prompt"},
+		Payload:  fwkrequest.PayloadProto{Message: msg},
+	}
+	dir := &Director{}
+
+	require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
+	require.Equal(t, originalBytes, reqCtx.Request.RawBody)
+	require.Equal(t, len(originalBytes), reqCtx.RequestSize)
+
+	priority := int64(3)
+	msg.Priority = &priority
+	body.Mutated = true
+	require.NoError(t, dir.repackage(context.Background(), reqCtx, body))
+
+	payloadBytes, err := grpcframe.ParsePayload(reqCtx.Request.RawBody)
+	require.NoError(t, err)
+	var decoded sglangapiv1.GenerateRequest
+	require.NoError(t, proto.Unmarshal(payloadBytes, &decoded))
+	require.Equal(t, int64(3), decoded.GetPriority())
+	require.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
 }
 
 func TestVideoRawPayloadIsForwardedUnchanged(t *testing.T) {
@@ -2114,6 +2147,97 @@ func TestGetRandomEndpoint(t *testing.T) {
 				}
 				if !test.expectNil && gotEndpoint == nil {
 					t.Errorf("expected non-nil pod, got nil")
+				}
+			})
+		}
+	}
+}
+
+func TestGetRandomDecodeEndpoint(t *testing.T) {
+	tests := []struct {
+		name      string
+		storePods []*corev1.Pod
+		wantNil   bool
+	}{
+		{
+			name:      "No pods available",
+			storePods: []*corev1.Pod{},
+			wantNil:   true,
+		},
+		{
+			name: "Prefill-only pool",
+			storePods: []*corev1.Pod{
+				{ObjectMeta: metav1.ObjectMeta{Name: "pod-prefill", Labels: map[string]string{"llm-d.ai/role": "prefill"}}},
+			},
+			wantNil: true,
+		},
+		{
+			name: "Unlabeled pods count as decode",
+			storePods: []*corev1.Pod{
+				{ObjectMeta: metav1.ObjectMeta{Name: "pod-plain"}},
+			},
+			wantNil: false,
+		},
+		{
+			name: "Mixed pool picks a decode pod",
+			storePods: []*corev1.Pod{
+				{ObjectMeta: metav1.ObjectMeta{Name: "pod-prefill", Labels: map[string]string{"llm-d.ai/role": "prefill"}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "pod-decode", Labels: map[string]string{"llm-d.ai/role": "decode"}}},
+			},
+			wantNil: false,
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = v1alpha2.Install(scheme)
+	_ = v1.Install(scheme)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+	pool := &v1.InferencePool{
+		Spec: v1.InferencePoolSpec{
+			TargetPorts: []v1.Port{
+				{Number: 8000},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		period := time.Millisecond
+		factories := []datalayer.EndpointFactory{
+			datalayer.NewTestRuntime(t, period),
+		}
+		for _, epf := range factories {
+			t.Run(test.name, func(t *testing.T) {
+				endpointPool := poolutil.InferencePoolToEndpointPool(pool)
+				ds := datastore.NewDatastore(t.Context(), epf)
+				err := ds.PoolSet(t.Context(), fakeClient, endpointPool)
+				if err != nil {
+					t.Errorf("unexpected error setting pool: %s", err)
+				}
+				for _, pod := range test.storePods {
+					_ = ds.PodUpdateOrAddIfNotExist(context.Background(), pod)
+				}
+				d := &Director{datastore: ds}
+				// The pick is random, so every draw over a mixed pool must
+				// avoid the prefill pod.
+				for range 20 {
+					gotEndpoint := d.GetRandomDecodeEndpoint()
+					if test.wantNil {
+						if gotEndpoint != nil {
+							t.Errorf("expected nil pod, got: %v", gotEndpoint)
+						}
+						break
+					}
+					if gotEndpoint == nil {
+						t.Errorf("expected non-nil pod, got nil")
+						break
+					}
+					if role := gotEndpoint.Labels["llm-d.ai/role"]; role == "prefill" {
+						t.Errorf("picked a prefill pod: %+v", gotEndpoint)
+						break
+					}
 				}
 			})
 		}

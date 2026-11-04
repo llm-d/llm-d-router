@@ -490,9 +490,11 @@ KV connector returns the prefiller's cached-token count. For every other request
 the primary profile's endpoint, and `endpoint_role` is `decode`.
 
 The `modality` label holds the modalities the request carries as a comma-joined sorted list (`none`
-for text-only), the same value as the `mm.modality` span attribute. Each request is observed once,
-so summing over `modality` keeps the all-requests ratio exact. Per-modality breakdowns filter the
-label, e.g. `modality=~".*image.*"` covers requests carrying an image.
+for text-only), the same value as the `mm.modality` span attribute except that any modality other
+than `image`, `audio` or `video` reports as `other`. A token-in request names its own modality keys,
+so the label would otherwise add series per key; folded, it takes at most 16 values. Each request is
+observed once, so summing over `modality` keeps the all-requests ratio exact. Per-modality breakdowns
+filter the label, e.g. `modality=~".*image.*"` covers requests carrying an image.
 
 The modality split applies to the predicted rate only. The delivered pair, `llm_d_epp_request_cached_tokens`
 divided by `llm_d_epp_request_input_tokens`, carries no modality label, so a per-modality predicted
@@ -612,6 +614,9 @@ cache lookups.
 | `llm_d_epp_encoder_cache_hits_total` | Counter | `plugin_type`, `plugin_name`, `pod`, `modality` | Encoder-cache hits. |
 | `llm_d_epp_encoder_cache_hit_ratio` | Histogram | `plugin_type`, `plugin_name` | Hit ratio. |
 
+The `modality` label is `image`, `audio` or `video`, and `other` for any other modality a token-in
+request names in its `mm_hashes`.
+
 ### Fairness ID resolution
 
 These counters record the fairness ID the EPP resolved for each request and where it came from.
@@ -686,7 +691,8 @@ replica that was removed before Prometheus scraped it. To check the rules after 
 
 These metrics are owned by the `program-aware-fairness` Flow Control policy. They require the
 `flowControl` feature gate and a Flow Control configuration that selects this policy. Enabling Flow
-Control alone does not emit them.
+Control alone does not emit them. `program_id` is the request's fairness ID and shares the
+`fairness_id` label cap. Programs past the cap are not reported on these gauges.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
