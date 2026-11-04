@@ -46,6 +46,7 @@ type DecodeStep struct {
 	promptTokenParity string
 	forceStream       bool
 	budget            *forceStreamBudget
+	forwardTokenIDs   bool
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -67,7 +68,11 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	step := &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity, forceStream: forceStream}
+	forwardTokenIDs, _, err := paramBool(params, ParamForwardPromptTokenIDs)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	step := &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity, forceStream: forceStream, forwardTokenIDs: forwardTokenIDs}
 	if forceStream {
 		budget, err := parseForceStreamBudget(params)
 		if err != nil {
@@ -216,10 +221,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 
 	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
-		// vLLM decode builds the engine input from these ids and skips chat
-		// templating. Engines that predate media detection on this path drop
-		// multimodal data, so multimodal requests keep re-rendering messages.
-		if len(reqCtx.TokenIDs) > 0 && len(reqCtx.MultimodalEntries) == 0 {
+		if sendsPromptTokenIDs(s.forwardTokenIDs, reqCtx, format) {
 			kvParams[reqcommon.FieldPromptTokenIDs] = reqCtx.TokenIDs
 		}
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
