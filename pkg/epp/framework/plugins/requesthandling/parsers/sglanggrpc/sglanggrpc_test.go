@@ -17,12 +17,14 @@ limitations under the License.
 package sglanggrpc
 
 import (
+	"bytes"
 	"context"
 	"math"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -282,9 +284,16 @@ func TestSGLangGRPCParser_ParseRequest(t *testing.T) {
 			require.Equal(t, tt.wantGenerate, got.Body.Generate)
 			require.Equal(t, tt.wantMaxTokens, got.Body.MaxOutputTokens)
 			require.Equal(t, tt.wantStream, got.Body.Stream)
-			pp, ok := got.Body.Payload.(fwkrequest.PayloadProto)
+			// The original bytes are forwarded, not a re-encoded message.
+			wire, ok := got.Body.Payload.(fwkrequest.PayloadBytes)
 			require.True(t, ok)
-			require.True(t, proto.Equal(tt.req, pp.Message))
+			require.Equal(t, raw, []byte(wire))
+			require.Equal(t, raw, got.Body.RawBody)
+			payload, err := grpcframe.ParsePayload(wire)
+			require.NoError(t, err)
+			var decoded sglangapiv1.GenerateRequest
+			require.NoError(t, proto.Unmarshal(payload, &decoded))
+			require.True(t, proto.Equal(tt.req, &decoded))
 		})
 	}
 }
@@ -339,6 +348,14 @@ func TestSGLangGRPCParser_RewritePriority(t *testing.T) {
 	require.NoError(t, proto.Unmarshal(rawPayload, &out))
 	require.Equal(t, int64(5), out.GetPriority())
 	require.Equal(t, "hello", out.GetText().GetOne())
+
+	// The rewrite allocates the new frame and the interface box of the
+	// result, nothing else, and leaves exactly one priority field.
+	rawIn := parsed.Body.Payload.(fwkrequest.PayloadBytes)
+	require.Equal(t, 2.0, testing.AllocsPerRun(100, func() {
+		_, _, _ = parser.RewritePriority(fwkrh.PriorityRewriteContext{}, rawIn, 5)
+	}))
+	require.Equal(t, 1, bytes.Count(rawPayload, protowire.AppendTag(nil, reqPriority, protowire.VarintType)))
 }
 
 func TestSGLangGRPCParser_ParseResponse(t *testing.T) {
