@@ -366,8 +366,9 @@ stateful Filters that perform admission side effects are unsuitable. Guard
 data dependencies run during request handling before screening.
 
 Flow control admits on the average load of the whole pool, so during a rollout
-one revision can be full while the other has room. A fail-closed concurrency
-filter then rejects the request with HTTP 429 although capacity exists.
+one revision can be full while the other has room. If a fail-closed concurrency
+filter leaves a scheduling profile with no endpoints, the EPP returns HTTP 503
+although another revision has capacity.
 
 ```yaml
     - type: concurrency-detector
