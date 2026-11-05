@@ -910,3 +910,95 @@ func TestFactory_RefusesAForeignFlowKeyUser(t *testing.T) {
 type noopRegistrar struct{}
 
 func (noopRegistrar) Register(fwkdl.PendingRegistration) error { return nil }
+
+// ---- B4: a request abandoned before it reaches a pod ---------------------------------------
+
+// TestAbandonReleasesTheMarkerAndTheNextTurnContinues is the reproducer: arrive, abandon (the
+// request left the path before a pod served it), then the client's next turn extending the same tip.
+// Without the release the tip stays BUSY and that turn is forced to FORK — a new thread, a new
+// queue, a new seat, for the same conversation.
+func TestAbandonReleasesTheMarkerAndTheNextTurnContinues(t *testing.T) {
+	p := newTestPlugin(t)
+
+	first := chatReq(user('a', 600))
+	id1, _ := threadOf(t, p, first) // arrival only: queued, never dispatched
+	require.NotEmpty(t, id1)
+
+	// the request is abandoned before any pod saw it
+	p.RequestAbandoned(context.Background(), first)
+
+	// The client's next turn extends the same tip WITHOUT an assistant turn in between (a fan-out
+	// the client builds itself, a retried prompt with a corrected instruction). It must CONTINUE.
+	// The sticky-busy guard cannot mask the bug here: it only fires when the arrival begins with the
+	// tip's assistant reply, and there is none.
+	second := chatReq(user('a', 600), user('c', 60))
+	id2, _ := threadOf(t, p, second)
+	assert.Equal(t, id1, id2, "an abandoned turn must not force its thread's next turn to fork")
+	arrival, ok := fwksched.ReadRequestAttribute[ThreadArrival](second, ThreadArrivalKey)
+	require.True(t, ok)
+	assert.Equal(t, OutcomeMatched, arrival.Outcome)
+}
+
+// TestAbandonIsIdempotent: a second abandon for the same request releases nothing more, and does
+// not disturb the thread's state.
+func TestAbandonIsIdempotent(t *testing.T) {
+	p := newTestPlugin(t)
+	req := chatReq(user('a', 600))
+	id, _ := threadOf(t, p, req)
+	require.NotEmpty(t, id)
+
+	p.RequestAbandoned(context.Background(), req)
+	p.RequestAbandoned(context.Background(), req) // a duplicate callback
+
+	second := chatReq(user('a', 600), assistant('b', 40), user('c', 60))
+	id2, _ := threadOf(t, p, second)
+	assert.Equal(t, id, id2, "a duplicate abandon must not change the derivation")
+	requireInvariants(t, p.idx)
+}
+
+// TestAbandonRacingALaterArrival: an abandon that arrives AFTER the thread's next turn has already
+// been derived must not release that turn's marker — the release is for its own request, not for
+// whatever the thread is doing now.
+func TestAbandonRacingALaterArrival(t *testing.T) {
+	p := newTestPlugin(t)
+
+	first := chatReq(user('a', 600))
+	id, _ := threadOf(t, p, first)
+	// the first turn reached a pod, so its marker is IN FLIGHT (not merely queued): an identical
+	// prompt now cannot be a queued retry, which is what makes the sibling a fork
+	require.NoError(t, p.PreRequest(context.Background(), first, nil))
+
+	// the next turn arrives first: the tip is busy, so it forks
+	sibling := chatReq(user('a', 600))
+	idSib, _ := threadOf(t, p, sibling)
+	require.NotEqual(t, id, idSib, "a second identical prompt on a busy tip forks")
+
+	// now the FIRST request's abandon lands
+	p.RequestAbandoned(context.Background(), first)
+
+	// EXACTLY ONE MARKER WAS RELEASED. The first thread is free again, so an identical prompt
+	// continues IT; the sibling is still outstanding, so it is not the continuation target. A release
+	// that took the sibling's marker too would show up here as the sibling being chosen.
+	next := chatReq(user('a', 600))
+	idNext, _ := threadOf(t, p, next)
+	assert.Equal(t, id, idNext, "the abandoned turn's own thread is the free tip again")
+	assert.NotEqual(t, idSib, idNext, "the sibling's marker was not released: only the abandoner's own")
+	requireInvariants(t, p.idx)
+}
+
+// TestAbandonWithNoMarkerIsANoOp: a request whose marker was already released (a settle then an
+// abandon) is a no-op rather than a panic or a state change.
+func TestAbandonWithNoMarkerIsANoOp(t *testing.T) {
+	p := newTestPlugin(t)
+	req := chatReq(user('a', 600))
+	id, _ := threadOf(t, p, req)
+	require.NotEmpty(t, id)
+	finishTurn(t, p, req) // dispatched, settled: the marker is gone
+
+	p.RequestAbandoned(context.Background(), req)
+
+	next := chatReq(user('a', 600), assistant('b', 40), user('c', 60))
+	idNext, _ := threadOf(t, p, next)
+	assert.Equal(t, id, idNext, "a late abandon changes nothing")
+	requireInvariants(t, p.idx)
+}

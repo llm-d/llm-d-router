@@ -184,6 +184,14 @@ func (r *threadRecord) markDispatched(marker string, now time.Time) {
 // markSettled removes a marker from in flight (response complete or aborted).
 func (r *threadRecord) markSettled(marker string) { delete(r.inflight, marker) }
 
+// markReleased removes a marker from BOTH sets. It is the abandon path's release: a request that
+// left the path before a pod served it was never dispatched, so its marker is still PENDING, and
+// markSettled (in flight only, which is all an end of stream needs) would release nothing.
+func (r *threadRecord) markReleased(marker string) {
+	delete(r.pending, marker)
+	delete(r.inflight, marker)
+}
+
 // pruneMarkers drops markers older than ttl: a request rejected before dispatch
 // or one that never reported an end of stream must not keep its thread busy
 // forever. Pruning errs toward continuation.
@@ -524,6 +532,19 @@ func (ix *threadIndex) Settle(id, marker string, now time.Time) bool {
 		return false
 	}
 	rec.markSettled(marker)
+	rec.lastSeen = now
+	return true
+}
+
+// Release ends a request's marker from either state — the abandon path's counterpart of Settle.
+func (ix *threadIndex) Release(id, marker string, now time.Time) bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	rec, ok := ix.threads[id]
+	if !ok || rec == nil {
+		return false
+	}
+	rec.markReleased(marker)
 	rec.lastSeen = now
 	return true
 }

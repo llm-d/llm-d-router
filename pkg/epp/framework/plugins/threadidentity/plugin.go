@@ -731,6 +731,29 @@ func (p *Plugin) ResponseBody(_ context.Context, request *fwksched.InferenceRequ
 	}
 }
 
+// Produce implements DataProducer ONLY to receive RequestAbandoned: the framework has the event but
+// delivers it to data producers, so the plugin has to be one to hear it. It writes nothing, and it
+// is not a step in the derivation.
+func (p *Plugin) Produce(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) error {
+	return nil
+}
+
+// RequestAbandoned releases the request's marker. A request that leaves the path before a pod serves
+// it never reaches the end of a response, so nothing else would release its marker — and while the
+// marker stands the thread's tip is BUSY, so the client's next turn (which extends the same tip) is
+// forced to FORK: a new thread id, a new flow queue, a new seat, for a turn that is the same
+// conversation. This releases exactly what the end of stream releases, and nothing more.
+func (p *Plugin) RequestAbandoned(_ context.Context, request *fwksched.InferenceRequest) {
+	if request == nil {
+		return
+	}
+	if id, ok := fwksched.ReadRequestAttribute[string](request, ThreadIdentityKey); ok && id != "" {
+		// RELEASE, not Settle: this request was never dispatched, so its marker is still PENDING and
+		// an end-of-stream release (in flight only) would leave it standing.
+		p.idx.Release(id, markerOf(request), p.now())
+	}
+}
+
 // DumpState reports the thread table.
 func (p *Plugin) DumpState() (json.RawMessage, error) {
 	snap := p.idx.Snapshot(time.Now())
