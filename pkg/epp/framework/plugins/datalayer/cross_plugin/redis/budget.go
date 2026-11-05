@@ -81,3 +81,28 @@ func (b *byteBudget) charge(n int) {
 	defer b.mu.Unlock()
 	b.tokens -= float64(n)
 }
+
+// reserve deducts want elements of avg bytes under one lock and reports how
+// many were reserved. Like take, it allows one overdraft when any budget is
+// left. A nil budget is unlimited.
+func (b *byteBudget) reserve(avg, want int64) (count int64, reserved int, ok bool) {
+	if want <= 0 {
+		return 0, 0, true
+	}
+	if avg < 1 {
+		avg = 1
+	}
+	if b == nil {
+		return want, 0, true
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.refillLocked()
+	if b.tokens <= 0 {
+		return 0, 0, false
+	}
+	count = min(max(int64(b.tokens)/avg, 1), want)
+	reserved = int(count * avg)
+	b.tokens -= float64(reserved)
+	return count, reserved, true
+}
