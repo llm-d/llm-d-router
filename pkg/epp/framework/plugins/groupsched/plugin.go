@@ -128,6 +128,10 @@ type GroupScheduler struct {
 func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	cfg := defaultConfig()
 	if rawParameters != nil {
+		// STRICT: an unknown parameter is a configuration error, not something to ignore. A key
+		// that a trim or a rename retired must fail the startup loudly rather than sit in the
+		// config looking effective.
+		rawParameters.DisallowUnknownFields()
 		if err := rawParameters.Decode(&cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' plugin: %w", PluginType, err)
 		}

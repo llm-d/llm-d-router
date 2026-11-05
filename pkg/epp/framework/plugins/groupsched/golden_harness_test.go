@@ -118,9 +118,7 @@ func newGoldenHarness(t *testing.T, pods map[string]int) *goldenHarness {
 func newGoldenHarnessWith(t *testing.T, pods map[string]int, extra string) *goldenHarness {
 	t.Helper()
 	base := fmt.Sprintf(`{"groupBudgetFraction":0.95,"quantum":4,"idleSeconds":20,"inFlightCap":64,`+
-		`"blockSizeTokens":%d,"inflightReapSeconds":9300,`+
-
-		`"victim":"valve"}`, goldenBlocks)
+		`"blockSizeTokens":%d,"inflightReapSeconds":9300}`, goldenBlocks)
 	// extra keys replace the defaults they name, so a scenario can change one knob
 	cfg := base
 	if extra != "" {
