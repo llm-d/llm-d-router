@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -123,7 +124,7 @@ func TestHeaderProfileHandlerFactory(t *testing.T) {
 			wantPrefillProfile: "pf",
 		},
 		{
-			name:               "whitespace-only prefill profile falls back to the default",
+			name:               "whitespace-only prefill profile disables the report",
 			rawParameters:      `{"prefillProfile": "   "}`,
 			wantHeaderName:     reqcommon.EPPProfileHeaderKey,
 			wantDefaultProfile: defaultProfileName,
@@ -200,12 +201,8 @@ func TestHeaderProfileHandlerFactory(t *testing.T) {
 			if handler.defaultProfile != tt.wantDefaultProfile {
 				t.Errorf("Expected defaultProfile %q, got %q", tt.wantDefaultProfile, handler.defaultProfile)
 			}
-			wantPrefill := tt.wantPrefillProfile
-			if wantPrefill == "" {
-				wantPrefill = defaultPrefillProfileName
-			}
-			if handler.prefillProfile != wantPrefill {
-				t.Errorf("Expected prefillProfile %q, got %q", wantPrefill, handler.prefillProfile)
+			if handler.prefillProfile != tt.wantPrefillProfile {
+				t.Errorf("Expected prefillProfile %q, got %q", tt.wantPrefillProfile, handler.prefillProfile)
 			}
 		})
 	}
@@ -564,85 +561,114 @@ func TestHeaderProfileProcessResults(t *testing.T) {
 	}
 }
 
-func TestHeaderProfilePreRequest(t *testing.T) {
-	endpoint := func(address, port string) fwksched.Endpoint {
-		return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{Address: address, Port: port}, nil, nil)
+func TestHeaderProfileResponseHeader(t *testing.T) {
+	endpoint := func(address, port string) *fwkdl.EndpointMetadata {
+		return &fwkdl.EndpointMetadata{Address: address, Port: port}
 	}
-	result := func(profile string, endpoints ...fwksched.Endpoint) *fwksched.SchedulingResult {
-		return &fwksched.SchedulingResult{
-			PrimaryProfileName: profile,
-			ProfileResults:     map[string]*fwksched.ProfileRunResult{profile: {TargetEndpoints: endpoints}},
-		}
+	result := func(profile string) *fwksched.SchedulingResult {
+		return &fwksched.SchedulingResult{PrimaryProfileName: profile}
+	}
+	served := func(hostPort string) map[string]any {
+		return map[string]any{"envoy.lb": map[string]any{"x-gateway-destination-endpoint-served": hostPort}}
 	}
 	tests := []struct {
 		name           string
 		prefillProfile string
-		headers        map[string]string
 		result         *fwksched.SchedulingResult
+		reqMetadata    map[string]any
+		target         *fwkdl.EndpointMetadata
 		wantHeaders    map[string]string
 	}{
 		{
-			name:        "prefill profile stamps the picked endpoint under both spellings",
-			headers:     map[string]string{},
-			result:      result("prefill", endpoint("10.0.0.7", "8000")),
-			wantHeaders: map[string]string{routing.PrefillEndpointHeader: "10.0.0.7:8000", routing.LegacyPrefillEndpointHeader: "10.0.0.7:8000"},
+			name:           "prefill profile reports the served endpoint",
+			prefillProfile: "prefill",
+			result:         result("prefill"),
+			reqMetadata:    served("10.0.0.7:8000"),
+			target:         endpoint("10.0.0.7", "8000"),
+			wantHeaders:    map[string]string{routing.PrefillEndpointHeader: "10.0.0.7:8000"},
 		},
 		{
-			name:        "decode profile stamps nothing and drops a client value",
-			headers:     map[string]string{routing.PrefillEndpointHeader: "spoofed:1", routing.LegacyPrefillEndpointHeader: "spoofed:1"},
-			result:      result("decode", endpoint("10.0.0.9", "8000")),
-			wantHeaders: map[string]string{},
+			name:           "served endpoint wins over the picked endpoint",
+			prefillProfile: "prefill",
+			result:         result("prefill"),
+			reqMetadata:    served("10.0.0.8:8000"),
+			target:         endpoint("10.0.0.7", "8000"),
+			wantHeaders:    map[string]string{routing.PrefillEndpointHeader: "10.0.0.8:8000"},
 		},
 		{
-			name:        "prefill profile replaces a client value",
-			headers:     map[string]string{routing.PrefillEndpointHeader: "spoofed:1"},
-			result:      result("prefill", endpoint("10.0.0.7", "8000")),
-			wantHeaders: map[string]string{routing.PrefillEndpointHeader: "10.0.0.7:8000", routing.LegacyPrefillEndpointHeader: "10.0.0.7:8000"},
+			name:           "picked endpoint when the proxy reports none",
+			prefillProfile: "prefill",
+			result:         result("prefill"),
+			target:         endpoint("fd00::7", "8000"),
+			wantHeaders:    map[string]string{routing.PrefillEndpointHeader: "[fd00::7]:8000"},
 		},
 		{
-			name:        "prefill profile without target endpoints stamps nothing",
-			headers:     map[string]string{},
-			result:      result("prefill"),
-			wantHeaders: map[string]string{},
+			name:           "picked endpoint when the metadata has no served key",
+			prefillProfile: "prefill",
+			result:         result("prefill"),
+			reqMetadata:    map[string]any{"envoy.lb": map[string]any{"x-gateway-destination-endpoint": "10.0.0.7:8000,10.0.0.8:8000"}},
+			target:         endpoint("10.0.0.7", "8000"),
+			wantHeaders:    map[string]string{routing.PrefillEndpointHeader: "10.0.0.7:8000"},
+		},
+		{
+			name:           "nothing to report without served or picked endpoint",
+			prefillProfile: "prefill",
+			result:         result("prefill"),
+			wantHeaders:    map[string]string{},
+		},
+		{
+			name:           "other profile reports nothing",
+			prefillProfile: "prefill",
+			result:         result("decode"),
+			reqMetadata:    served("10.0.0.9:8000"),
+			target:         endpoint("10.0.0.9", "8000"),
+			wantHeaders:    map[string]string{},
 		},
 		{
 			name:           "configured prefill profile name",
 			prefillProfile: "pf",
-			headers:        map[string]string{},
-			result:         result("pf", endpoint("fd00::7", "8000")),
-			wantHeaders:    map[string]string{routing.PrefillEndpointHeader: "[fd00::7]:8000", routing.LegacyPrefillEndpointHeader: "[fd00::7]:8000"},
+			result:         result("pf"),
+			target:         endpoint("10.0.0.7", "8000"),
+			wantHeaders:    map[string]string{routing.PrefillEndpointHeader: "10.0.0.7:8000"},
 		},
 		{
-			name:           "default prefill profile name is not stamped when another is configured",
+			name:           "default prefill name is not reported when another is configured",
 			prefillProfile: "pf",
-			headers:        map[string]string{},
-			result:         result("prefill", endpoint("10.0.0.7", "8000")),
+			result:         result("prefill"),
+			target:         endpoint("10.0.0.7", "8000"),
 			wantHeaders:    map[string]string{},
 		},
 		{
-			name:        "nil scheduling result is a no-op",
-			headers:     map[string]string{"x-other": "kept"},
-			result:      nil,
-			wantHeaders: map[string]string{"x-other": "kept"},
+			name:        "disabled by default",
+			result:      result("prefill"),
+			reqMetadata: served("10.0.0.7:8000"),
+			target:      endpoint("10.0.0.7", "8000"),
+			wantHeaders: map[string]string{},
+		},
+		{
+			name:           "no scheduling result reports nothing",
+			prefillProfile: "prefill",
+			target:         endpoint("10.0.0.7", "8000"),
+			wantHeaders:    map[string]string{},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewHeaderProfileHandler("", "").WithPrefillProfile(tt.prefillProfile)
-			request := &fwksched.InferenceRequest{Headers: tt.headers}
-			if err := h.PreRequest(context.Background(), request, tt.result); err != nil {
-				t.Fatalf("PreRequest() error = %v", err)
-			}
-			if diff := cmp.Diff(tt.wantHeaders, request.Headers); diff != "" {
-				t.Errorf("headers mismatch (-want +got):\n%s", diff)
+			request := &fwksched.InferenceRequest{SchedulingResult: tt.result}
+			response := &fwkrh.Response{Headers: map[string]string{}, ReqMetadata: tt.reqMetadata}
+			h.ResponseHeader(context.Background(), request, response, tt.target)
+			if diff := cmp.Diff(tt.wantHeaders, response.Headers); diff != "" {
+				t.Errorf("response headers mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
 
-	t.Run("nil request is a no-op", func(t *testing.T) {
-		h := NewHeaderProfileHandler("", "")
-		if err := h.PreRequest(context.Background(), nil, result("prefill", endpoint("10.0.0.7", "8000"))); err != nil {
-			t.Fatalf("PreRequest() error = %v", err)
-		}
+	t.Run("nil request, response, and headers map are no-ops", func(t *testing.T) {
+		h := NewHeaderProfileHandler("", "").WithPrefillProfile("prefill")
+		request := &fwksched.InferenceRequest{SchedulingResult: result("prefill")}
+		h.ResponseHeader(context.Background(), nil, &fwkrh.Response{Headers: map[string]string{}}, endpoint("10.0.0.7", "8000"))
+		h.ResponseHeader(context.Background(), request, nil, endpoint("10.0.0.7", "8000"))
+		h.ResponseHeader(context.Background(), request, &fwkrh.Response{}, endpoint("10.0.0.7", "8000"))
 	})
 }
