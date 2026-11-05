@@ -197,6 +197,15 @@ func (s *RedisSyncer) queueStream(ctx context.Context, pipe goredis.Pipeliner, k
 	sent := 0
 	for gen := next.tip; gen < tip; gen++ {
 		n := v.ElementSize(gen)
+		// Readers reject entries above this size; publishing one would stall
+		// every peer until the prompt is trimmed from the window.
+		if n > maxStreamElementBytes {
+			if v := ctrl.LoggerFrom(ctx).V(logutil.DEBUG); v.Enabled() {
+				v.Info("redis-syncer: prompt exceeds stream element limit, waiting for eviction",
+					"key", string(key), "generation", gen, "bytes", n, "limit", maxStreamElementBytes)
+			}
+			break
+		}
 		if !s.publishBudget.take(n) {
 			streamBudgetExhausted.WithLabelValues(string(key), directionPublish).Inc()
 			break
@@ -356,8 +365,11 @@ func (s *RedisSyncer) planRead(ctx context.Context, pipe goredis.Pipeliner, key 
 	proto := pub.value.(fwkdl.SequencedValue)
 	read := &streamRead{pub: pub, next: map[string]*streamPeer{}}
 	var cached map[string]*streamPeer
+	prevLegacy := 0
 	if v, ok := s.cache.Load(pub.hashKey); ok {
-		cached = v.(*aggregateCacheEntry).streams
+		entry := v.(*aggregateCacheEntry)
+		cached = entry.streams
+		prevLegacy = entry.legacyPeers
 	}
 	raw := pub.result.Val()
 	markers := map[string]streamMarker{}
@@ -389,7 +401,7 @@ func (s *RedisSyncer) planRead(ctx context.Context, pipe goredis.Pipeliner, key 
 		}
 		markers[id] = m
 	}
-	if len(read.legacy) > 0 {
+	if len(read.legacy) != prevLegacy {
 		read.changed = true
 	}
 	for id := range cached {
@@ -442,18 +454,8 @@ func (s *RedisSyncer) planRead(ctx context.Context, pipe goredis.Pipeliner, key 
 // from, sized by the marker's average element size, and the bytes reserved.
 func (s *RedisSyncer) reserveRead(m streamMarker, from uint64) (int64, int, bool) {
 	want := clamp.Int64(m.tip - from)
-	if s.readBudget == nil {
-		return want, 0, true
-	}
 	avg := max(clamp.Int64(m.size/(m.tip-m.base)), 1)
-	avail := s.readBudget.available()
-	if avail <= 0 {
-		return 0, 0, false
-	}
-	count := min(max(int64(avail)/avg, 1), want)
-	reserved := int(count * avg)
-	s.readBudget.charge(reserved)
-	return count, reserved, true
+	return s.readBudget.reserve(avg, want)
 }
 
 // applyFetch folds one peer read into read.next and reports whether the peer's
@@ -558,6 +560,35 @@ func (s *RedisSyncer) storeStreamAggregate(read *streamRead, aggregate func([]an
 			value = aggregate(values)
 		}
 	}
-	s.cache.Store(hashKey, &aggregateCacheEntry{value: value, streams: read.next})
+	s.cache.Store(hashKey, &aggregateCacheEntry{value: value, streams: read.next, legacyPeers: len(read.legacy)})
 	return peers
+}
+
+// ensureMarker rewrites this replica's stream marker when HGETALL did not
+// return it. An idle publish skips HSET when the cursor is unchanged, so a
+// deleted marker would otherwise stay missing until the window changes.
+func (s *RedisSyncer) ensureMarker(ctx context.Context, pub *publication) {
+	if pub.stream == nil || pub.stream.resolving || pub.result == nil {
+		return
+	}
+	field := markerField(s.replicaID)
+	if _, ok := pub.result.Val()[field]; ok {
+		return
+	}
+	cur, ok := s.loadCursor(pub.hashKey)
+	if !ok {
+		return
+	}
+	hashKey := pub.hashKey
+	skey := s.streamKey(hashKey, s.replicaID)
+	pipe := s.client.Pipeline()
+	pipe.HSet(ctx, hashKey, field, formatMarker(cur))
+	pipe.HPExpire(ctx, hashKey, s.stateTTL, field)
+	pipe.PExpire(ctx, skey, s.stateTTL)
+	pipe.PExpire(ctx, hashKey, s.stateTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		if v := ctrl.LoggerFrom(ctx).V(logutil.DEBUG); v.Enabled() {
+			v.Info("redis-syncer: restore stream marker failed", "key", hashKey, "error", err)
+		}
+	}
 }

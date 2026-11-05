@@ -90,6 +90,8 @@ type aggregateCacheEntry struct {
 	value any
 	// streams holds the windows rebuilt from peers that publish streams.
 	streams map[string]*streamPeer
+	// legacyPeers is how many whole-value peers the cached aggregate includes.
+	legacyPeers int
 }
 
 func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, error) {
@@ -424,6 +426,9 @@ func (s *RedisSyncer) publishChunk(ctx context.Context, key fwkdl.StateKey, aggr
 		if err != nil {
 			failures[pub.endpointID] = fmt.Errorf("redis-syncer: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", err)
 			continue
+		}
+		if pub.stream != nil {
+			s.ensureMarker(ctx, pub)
 		}
 		if s.readsStreams(pub) {
 			reads = append(reads, pub)
