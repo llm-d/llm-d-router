@@ -664,7 +664,12 @@ func (p *InFlightLoadProducer) ResponseBody(
 		}
 		p.PluginState.Delete(request.RequestID)
 	} else {
+		// Refresh access time before unbinding so a concurrent janitor sweep cannot
+		// reap the first chunk when prefill exceeded stalenessThreshold.
 		p.PluginState.Touch(request.RequestID)
+		if resp.StartOfStream {
+			p.PluginState.UnbindLiveness(request.RequestID)
+		}
 	}
 }
 
