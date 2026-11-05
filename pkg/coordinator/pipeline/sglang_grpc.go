@@ -40,11 +40,14 @@ type SGLangPrefillStream struct {
 	grpcStatus     string
 	grpcMessage    string
 	grpcDetailsBin string
-	// cachedTokens0 holds index 0, the only index unless the request sets
-	// n > 1. cachedTokens is allocated only for other indexes.
+	// cachedTokens0 and promptTokens0 hold index 0, the only index unless the
+	// request sets n > 1. The maps are allocated only for other indexes.
 	cachedTokens0    uint32
 	hasCachedTokens0 bool
 	cachedTokens     map[uint32]uint32
+	promptTokens0    uint32
+	hasPromptTokens0 bool
+	promptTokens     map[uint32]uint32
 	onFail           func(error)
 }
 
@@ -82,6 +85,33 @@ func (s *SGLangPrefillStream) CachedTokens(index uint32) (uint32, bool) {
 		return s.cachedTokens0, s.hasCachedTokens0
 	}
 	tokens, ok := s.cachedTokens[index]
+	return tokens, ok
+}
+
+// RecordPromptTokens stores the prompt token count reported by a prefill
+// GenerateResponse frame for item index.
+func (s *SGLangPrefillStream) RecordPromptTokens(index, tokens uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index == 0 {
+		s.promptTokens0, s.hasPromptTokens0 = tokens, true
+		return
+	}
+	if s.promptTokens == nil {
+		s.promptTokens = make(map[uint32]uint32)
+	}
+	s.promptTokens[index] = tokens
+}
+
+// PromptTokens returns the prompt token count reported by prefill for item
+// index, if any.
+func (s *SGLangPrefillStream) PromptTokens(index uint32) (uint32, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index == 0 {
+		return s.promptTokens0, s.hasPromptTokens0
+	}
+	tokens, ok := s.promptTokens[index]
 	return tokens, ok
 }
 

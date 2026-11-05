@@ -211,12 +211,12 @@ func TestAsyncBrokerSGLangGRPCGenerateIsNoOp(t *testing.T) {
 			step, rdb := newAsyncTestStep(t, nil)
 			rec := httptest.NewRecorder()
 			reqCtx := &pipeline.RequestContext{
-				RequestID:           "req-grpc-1",
-				OriginalPath:        sglangapiv1.SglangService_Generate_FullMethodName,
-				OriginalHeaders:     http.Header{http.CanonicalHeaderKey(defaultModeHeader): {mode}},
-				GRPCGeneratePayload: []byte{},
-				Stream:              true,
-				ResponseWriter:      rec,
+				RequestID:       "req-grpc-1",
+				OriginalPath:    sglangapiv1.SglangService_Generate_FullMethodName,
+				OriginalHeaders: http.Header{http.CanonicalHeaderKey(defaultModeHeader): {mode}},
+				GRPC:            &pipeline.SGLangGRPCRequest{Payload: []byte{}},
+				Stream:          true,
+				ResponseWriter:  rec,
 			}
 
 			require.NoError(t, step.Execute(t.Context(), reqCtx))

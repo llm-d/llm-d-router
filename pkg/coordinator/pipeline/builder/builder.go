@@ -37,6 +37,9 @@ import (
 // that only the render step produces, so both require a render step in the
 // pipeline.
 func validatePipeline(p config.PipelineConfig) error {
+	if err := config.ValidateWorkerProtocol(p.WorkerProtocol); err != nil {
+		return err
+	}
 	hasRender := false
 	for i, s := range p.Steps {
 		if s.Type == asyncbroker.StepName && i > 0 {
