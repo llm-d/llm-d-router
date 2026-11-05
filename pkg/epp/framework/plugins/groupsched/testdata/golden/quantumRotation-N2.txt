@@ -1,0 +1,37 @@
+t=0 EVENT SEAT thread=T1 engine=golden/e0 detail=kind=newcomer wait=0.000 fairness_id=T1 wire_id=- since=2026-01-01T00:00:00Z
+t=0 PICK req=r01 engine=golden/e0
+t=0 STATE golden/e0{seats=1 used=16 stay=16 exiting=0 cold=64 budget=19 periods=T1:0} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE golden/e0{seats=1 used=16 stay=16 exiting=0 cold=64 budget=19 periods=T1:0} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 FILTER req=r01 -> e0
+t=0 PICK req=r02 engine=golden/e0
+t=0 STATE golden/e0{seats=1 used=16 stay=16 exiting=0 cold=0 budget=19 periods=T1:1} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE golden/e0{seats=1 used=16 stay=16 exiting=0 cold=0 budget=19 periods=T1:1} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 FILTER req=r02 -> e0
+t=0 PICK req=r03 engine=golden/e0
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:2} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:2} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 FILTER req=r03 -> e0
+t=0 PICK req=r04 engine=golden/e0
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:3} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:3} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 FILTER req=r04 -> e0
+t=0 PICK req=r05 engine=golden/e0
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:4} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:4} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 FILTER req=r05 -> e0
+t=0 PICK req=r06 engine=golden/e0
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:5} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:5} golden/e1{seats=0 used=0 stay=0 exiting=0 cold=0 budget=19 periods=} waiters=0 recs=1 anomalies[]
+t=0 FILTER req=r06 -> e0
+t=0 EVENT SEAT thread=T2 engine=golden/e1 detail=kind=newcomer wait=0.000 fairness_id=T2 wire_id=- since=2026-01-01T00:00:00Z
+t=0 PICK req=r07 engine=golden/e1
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:6} golden/e1{seats=1 used=8 stay=8 exiting=0 cold=64 budget=19 periods=T2:0} waiters=0 recs=1 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE golden/e0{seats=1 used=17 stay=17 exiting=0 cold=0 budget=19 periods=T1:6} golden/e1{seats=1 used=8 stay=8 exiting=0 cold=64 budget=19 periods=T2:0} waiters=0 recs=1 anomalies[]
+t=0 FILTER req=r07 -> e1

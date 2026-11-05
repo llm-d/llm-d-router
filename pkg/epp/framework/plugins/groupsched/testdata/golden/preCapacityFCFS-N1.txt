@@ -1,0 +1,11 @@
+t=0 PICK req=r01 engine=none
+t=0 STATE  waiters=0 recs=0 anomalies[]
+t=0 PICK req=r02 engine=none
+t=0 STATE  waiters=0 recs=0 anomalies[]
+t=0 PICK req=r03 engine=none
+t=0 STATE  waiters=0 recs=0 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE  waiters=0 recs=0 anomalies[]
+t=0 FILTER req=r01 -> e0
+t=0 FILTER req=r02 -> e0
+t=0 FILTER req=r03 -> e0

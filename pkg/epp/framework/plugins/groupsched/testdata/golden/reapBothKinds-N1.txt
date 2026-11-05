@@ -1,0 +1,14 @@
+t=0 EVENT SEAT thread=T1 engine=golden/e0 detail=kind=newcomer wait=0.000 fairness_id=T1 wire_id=- since=2026-01-01T00:00:00Z
+t=0 PICK req=r01 engine=golden/e0
+t=0 STATE golden/e0{seats=1 used=8 stay=8 exiting=0 cold=64 budget=19 periods=T1:0} waiters=0 recs=1 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE golden/e0{seats=1 used=8 stay=8 exiting=0 cold=64 budget=19 periods=T1:0} waiters=0 recs=1 anomalies[]
+t=0 PICK req=none engine=none
+t=0 STATE golden/e0{seats=1 used=8 stay=8 exiting=0 cold=64 budget=19 periods=T1:0} waiters=1 recs=1 anomalies[]
+t=9400000 EVENT SEAT thread=T2 engine=golden/e0 detail=kind=newcomer wait=9400.000 fairness_id=T2 wire_id=- since=2026-01-01T00:00:00Z
+t=9400000 PICK req=r02 engine=golden/e0
+t=9400000 STATE golden/e0{seats=2 used=16 stay=16 exiting=0 cold=64 budget=19 periods=T1:0,T2:0} waiters=0 recs=1 anomalies[reaped_window=1]
+t=9400000 PICK req=none engine=none
+t=9400000 STATE golden/e0{seats=2 used=16 stay=16 exiting=0 cold=64 budget=19 periods=T1:0,T2:0} waiters=0 recs=1 anomalies[reaped_window=1]
+t=9400000 PICK req=none engine=none
+t=9400000 STATE golden/e0{seats=2 used=16 stay=16 exiting=0 cold=64 budget=19 periods=T1:0,T2:0} waiters=0 recs=1 anomalies[reaped_window=1]
