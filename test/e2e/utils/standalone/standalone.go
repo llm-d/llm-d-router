@@ -66,12 +66,12 @@ type Config struct {
 	MetricsPort int
 	// HTTPNodePort and MetricsNodePort are the router-access Service's NodePorts;
 	// 0 lets the API server allocate them.
-	HTTPNodePort        int
-	MetricsNodePort     int
-	K8sContext          string
-	PodSelector         map[string]string
-	ReleaseName         string
-	KeepOnFailure       bool
+	HTTPNodePort    int
+	MetricsNodePort int
+	K8sContext      string
+	PodSelector     map[string]string
+	ReleaseName     string
+	KeepOnFailure   bool
 	// ProxyMode selects the chart's proxy topology. The zero value keeps the
 	// chart default, which runs Envoy and EPP in one Pod.
 	ProxyMode ProxyMode
