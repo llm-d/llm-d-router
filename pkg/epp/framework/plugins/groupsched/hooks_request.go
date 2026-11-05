@@ -30,6 +30,9 @@ package groupsched
 import (
 	"context"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -128,8 +131,11 @@ func (r *GroupScheduler) Filter(_ context.Context, request *fwksched.InferenceRe
 	return out
 }
 
-// PreRequest runs after the request leaves the queue (dispatch).
-func (r *GroupScheduler) PreRequest(_ context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
+// PreRequest runs after the request leaves the queue (dispatch). It also puts the turn's
+// observability on the request's span, when that ctx carries a RECORDING span — the director runs
+// this hook inside the request_orchestration span (requestcontrol/director.go), so an unrecorded
+// span (tracing off) costs nothing and a recorded one gets the numbers.
+func (r *GroupScheduler) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
 	// the engine the framework chose is authoritative, so it is recorded even for a request
 	// nothing tracks (anonymous traffic): the check below must not depend on trackability.
 	engine := ""
@@ -146,7 +152,8 @@ func (r *GroupScheduler) PreRequest(_ context.Context, request *fwksched.Inferen
 	}
 	// The engine here is AUTHORITATIVE: the seat was placed on the thread's engine at Pick, and
 	// the framework's actual choice moves it if it disagrees.
-	r.sched.AtPod(request.RequestID, engine, r.now())
+	obs := r.sched.AtPod(request.RequestID, engine, r.now())
+	annotateSpan(ctx, engine, obs)
 	return nil
 }
 
@@ -266,3 +273,27 @@ func pickedEndpoint(schedulingResult *fwksched.SchedulingResult) fwksched.Endpoi
 
 // nocapacityEngine is the dispatches_total label for a pre-capacity pass-through dispatch.
 const nocapacityEngine = "nocapacity"
+
+// annotateSpan puts one dispatched turn's observability on the request's span — only when the ctx
+// carries a RECORDING span, so a stack with tracing off builds no attributes at all. Nothing here
+// reads the response: these are dispatch-time facts.
+func annotateSpan(ctx context.Context, engine string, obs dispatchObservables) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(
+		attribute.Float64(spanQueueWaitMs, float64(obs.queueWait.Microseconds())/1000),
+		attribute.Int64(spanPredictedCached, obs.predictedCached),
+		attribute.Int64(spanPromptTokens, obs.promptTokens),
+		attribute.String(spanSeatEngine, engine),
+	)
+}
+
+// spanQueueWaitMs and its neighbours are the span attribute names, in the plugin's namespace.
+const (
+	spanQueueWaitMs     = "llm_d.epp.group.queue_wait_ms"
+	spanPredictedCached = "llm_d.epp.group.predicted_cached_tokens"
+	spanPromptTokens    = "llm_d.epp.group.prompt_tokens"
+	spanSeatEngine      = "llm_d.epp.group.seat_engine"
+)

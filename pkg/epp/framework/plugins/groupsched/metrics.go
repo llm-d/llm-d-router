@@ -40,7 +40,11 @@ type groupMetrics struct {
 	// they answer the same question (how long did admission make this thread wait), and two names
 	// meant two bucket sets and two queries.
 	entryWait *prometheus.HistogramVec
-	served    *prometheus.CounterVec
+	// queueWait and the two token counters are OBSERVABILITY: nothing in the decision reads them.
+	queueWait        *prometheus.HistogramVec
+	predictedCached  *prometheus.CounterVec
+	dispatchedPrompt *prometheus.CounterVec
+	served           *prometheus.CounterVec
 
 	capacityLearned *prometheus.CounterVec
 
@@ -75,6 +79,15 @@ func (g *groupMetrics) register(reg prometheus.Registerer) error {
 	g.entryWait = prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: subsystem, Name: "entry_wait_seconds",
 		Help:    "seat waits by kind (new = a thread's first turn, reentry = a returning thread): how long admission made it wait, TOP BUCKET 13,107 s so nothing lands only in +Inf",
 		Buckets: prometheus.ExponentialBuckets(0.1, 2, 18)}, []string{"engine", "kind"})
+	// OBSERVABILITY ONLY (no decision reads either series): the queue wait a request spent between
+	// arriving and being dispatched, and the cache the engine is PREDICTED to hold for it.
+	g.queueWait = prometheus.NewHistogramVec(prometheus.HistogramOpts{Subsystem: subsystem, Name: "queue_wait_seconds",
+		Help:    "queue waits by kind (new = a thread's first turn, returner = a later turn, untracked = served by the pass-through): dispatch time minus the head's arrival, PER REQUEST. Not the seat wait: seat_wait_seconds is a waiter's wait to be SEATED (arrival to first seat); this is every dispatched turn, including a seated thread's turn waiting on the in-flight cap or the dispatch order. Same buckets, so nothing lands only in +Inf",
+		Buckets: prometheus.ExponentialBuckets(0.1, 2, 18)}, []string{"kind"})
+	g.predictedCached = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: subsystem, Name: "predicted_cached_tokens_total",
+		Help: "prompt tokens this engine was PREDICTED to hold as a resident prefix for the turn, summed over a request's prompts, computed read-only at dispatch BEFORE the charge. Its ratio to dispatched_prompt_tokens_total is the predicted prefix hit rate, comparable with the engine's own prefix-cache hit/query counters"}, engineLabels)
+	g.dispatchedPrompt = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: subsystem, Name: "dispatched_prompt_tokens_total",
+		Help: "prompt tokens of every dispatched turn, summed over a request's prompts — the denominator of predicted_cached_tokens_total"}, engineLabels)
 	g.served = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: subsystem, Name: "dispatches_total",
 		Help: "dispatches served: per engine, by that engine's seats; under engine=\"nocapacity\", the pre-capacity pass-through (no engine had a measured num_gpu_blocks yet, so nothing was seated and the request was served unseated)"}, engineLabels)
 	g.affinityViolations = prometheus.NewCounterVec(prometheus.CounterOpts{Subsystem: subsystem, Name: "affinity_violations_total",
@@ -93,7 +106,7 @@ func (g *groupMetrics) register(reg prometheus.Registerer) error {
 		g.anomalies.WithLabelValues(kind).Add(0)
 	}
 	for _, c := range []prometheus.Collector{g.gauges,
-		g.exits, g.entryWait, g.served,
+		g.exits, g.entryWait, g.served, g.queueWait, g.predictedCached, g.dispatchedPrompt,
 		g.affinityViolations, g.engineGone, g.coldValveHeld, g.anomalies,
 	} {
 		if err := reg.Register(c); err != nil {
@@ -147,6 +160,27 @@ func (g *groupMetrics) ObserveEntry(engine, kind string, waitSeconds float64) {
 		return
 	}
 	g.entryWait.WithLabelValues(engine, kind).Observe(waitSeconds)
+}
+
+// ObserveQueueWait records how long one dispatched request waited in the queue, by kind.
+func (g *groupMetrics) ObserveQueueWait(kind string, seconds float64) {
+	if g == nil || g.queueWait == nil {
+		return
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	g.queueWait.WithLabelValues(kind).Observe(seconds)
+}
+
+// ObservePredictedCache records, for one dispatched turn, the prompt tokens and how many of them
+// this engine was predicted to hold already.
+func (g *groupMetrics) ObservePredictedCache(engine string, predicted, prompt int64) {
+	if g == nil || g.predictedCached == nil {
+		return
+	}
+	g.predictedCached.WithLabelValues(engine).Add(float64(predicted))
+	g.dispatchedPrompt.WithLabelValues(engine).Add(float64(prompt))
 }
 
 // ObserveServed records a dispatch.

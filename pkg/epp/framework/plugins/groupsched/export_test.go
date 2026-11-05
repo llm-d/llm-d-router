@@ -41,7 +41,7 @@ func (s *Scheduler) releaseThread(thread, reqID string, chains []Chain, now time
 	if !ok {
 		return
 	}
-	s.release(m, reqID, chains, now)
+	s.release(m, reqID, chains, now, dispatchObservables{})
 }
 
 // reqOf is the request record a thread holds ("" when none): test scaffolding for a helper that

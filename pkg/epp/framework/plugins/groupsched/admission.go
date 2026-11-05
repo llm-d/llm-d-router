@@ -148,6 +148,13 @@ func newcomerLess(a, b *waiter) bool {
 
 // seat seats one waiting head on the engine the admission pass chose.
 func (s *Scheduler) seat(g *engineGroup, w *waiter, coldTokens int64, now time.Time) bool {
+	// THE TURN'S PREDICTION IS MEASURED HERE, BEFORE THE SEAT RESERVES ANYTHING: from this moment the
+	// thread's blocks are resident by construction, so a measurement taken after the insert would
+	// report the reservation as cache and every seat-entry dispatch would predict its whole prompt.
+	seatObs := dispatchObservables{
+		predictedCached: g.index.CachedTokens(w.chains),
+		promptTokens:    PromptTokens(w.chains),
+	}
 	if ok, cost := g.index.TrySeat(w.id, w.chains, g.budgetBlocks); !ok {
 		// RULE O — AN EMPTY ENGINE ADMITS ONE OVERSIZE HEAD, charging its FULL exact chain.
 		if len(g.threads) != 0 || cost <= g.budgetBlocks {
@@ -172,6 +179,7 @@ func (s *Scheduler) seat(g *engineGroup, w *waiter, coldTokens int64, now time.T
 		wireID:       w.wireID,
 		headChains:   w.chains,
 		headReturner: w.returner,
+		seatObs:      &seatObs,
 	}
 	// EVERY entry carries a cold charge (in tokens), CAPPED at the engine's own stagger cap: the
 	// valve's job is to serialise cold prefills inside the budget's headroom, not to account the

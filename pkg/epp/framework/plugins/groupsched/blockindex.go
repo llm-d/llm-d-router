@@ -119,6 +119,27 @@ func (b *BlockIndex) Cost(chains []Chain) int {
 	return n
 }
 
+// CachedTokens is the complement of ColdTokens: the prompt's tokens the engine already holds as a
+// resident prefix, read BEFORE the seat inserts anything. It IS the seat's own cost computation,
+// taken from the same moment — the reservation the seat is about to make is not residency yet, and
+// counting it would make every seat-entry dispatch predict its whole prompt.
+func (b *BlockIndex) CachedTokens(chains []Chain) int64 {
+	var prompt int64
+	for _, c := range chains {
+		prompt += int64(c.Tokens)
+	}
+	return prompt - b.ColdTokens(chains)
+}
+
+// PromptTokens is the total token count of a chain set: the denominator of the predicted hit rate.
+func PromptTokens(chains []Chain) int64 {
+	var n int64
+	for _, c := range chains {
+		n += int64(c.Tokens)
+	}
+	return n
+}
+
 // ColdTokens is the same cost in TOKENS (the cold valve's unit): the prompt's tokens
 // beyond the resident prefix.
 func (b *BlockIndex) ColdTokens(chains []Chain) int64 {

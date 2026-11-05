@@ -84,6 +84,10 @@ type thread struct {
 	// released EXACTLY once, at the first of: prefill complete, any termination, unseat.
 	coldEntry int64
 	coldDone  bool
+	// seatObs is the observability of the turn that SEATED this thread, measured at the seat before
+	// its own reservation: the first dispatch after the seat reports it instead of a post-insert
+	// view (which would count the reservation as residency). Cleared by that dispatch.
+	seatObs *dispatchObservables
 	// waitingSince is the thread's oldest queued head: the wait its victims and its SEAT event
 	// are measured from, kept OLDEST across fan-out re-arrivals.
 	waitingSince time.Time
@@ -126,6 +130,12 @@ type reqRec struct {
 	released time.Time
 	// pod is when the request reached a pod (PreRequest); zero while it is pending.
 	pod time.Time
+	// the OBSERVABLES of this turn, captured at dispatch for the span PreRequest may set. Nothing
+	// in a decision reads them: the queue wait is dispatch − arrival, and the predicted cache is
+	// the resident prefix read BEFORE the charge (after it, it would always be everything).
+	queueWait       time.Duration
+	predictedCached int64
+	promptTokens    int64
 }
 
 // waiter is one head in the SHARED waiter queue.

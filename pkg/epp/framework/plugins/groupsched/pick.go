@@ -187,6 +187,10 @@ func (s *Scheduler) dispatch(heads []Head, now time.Time) int {
 	if winner != nil {
 		g := s.groups[winner.c.engine]
 		m := g.threads[winner.c.h.Thread]
+		// THE OBSERVABLES ARE READ BEFORE THE CHARGE: the resident prefix as the decision found it.
+		// Read after the Grow it would be the whole chain every time — a 100% predicted hit rate
+		// that measures nothing.
+		obs := s.observablesFor(g, winner.c.h, now)
 		// THE DISPATCHED TURN'S CHAIN IS CHARGED HERE, as the pass's winner — in this pass's
 		// critical section, so the charge is exact and atomic with the decision.
 		if len(winner.c.h.Chains) > 0 {
@@ -194,7 +198,7 @@ func (s *Scheduler) dispatch(heads []Head, now time.Time) int {
 		}
 		// The request is RELEASED: it is neither queued nor in flight until PreRequest records it,
 		// and the record written here is what every later hook resolves it by.
-		s.release(m, winner.c.h.ReqID, winner.c.h.Chains, now)
+		s.release(m, winner.c.h.ReqID, winner.c.h.Chains, now, obs)
 		m.lastActivity = now
 		g.counters.served++
 		s.counters.served++
@@ -211,6 +215,11 @@ func (s *Scheduler) dispatch(heads []Head, now time.Time) int {
 		if fcfs < 0 || h.Arrival.Before(heads[fcfs].Arrival) {
 			fcfs = i
 		}
+	}
+	if fcfs >= 0 {
+		// the pass-through's turn is a request like any other for the queue-wait histogram; it has
+		// no engine, so it contributes nothing to the per-engine cache counters
+		s.metrics.ObserveQueueWait(queueWaitUntracked, nonNegative(now.Sub(heads[fcfs].Arrival)))
 	}
 	return fcfs
 }
@@ -287,4 +296,59 @@ func FCFSPick(heads []Head) int {
 		}
 	}
 	return best
+}
+
+// queueWaitNew, queueWaitReturner and queueWaitUntracked are the queue-wait kinds: a thread's
+// first turn, a later turn, and a head the pass served without seating (anonymous traffic, or a
+// thread head with no rendered tokens).
+const (
+	queueWaitNew       = "new"
+	queueWaitReturner  = "returner"
+	queueWaitUntracked = "untracked"
+)
+
+// nonNegative clamps a duration to zero: a clock that went backwards must not observe a negative
+// wait into an exponential histogram.
+func nonNegative(d time.Duration) float64 {
+	if d < 0 {
+		return 0
+	}
+	return d.Seconds()
+}
+
+// observablesFor is one dispatched turn's observability: the queue wait it just served, and how
+// many of its prompt tokens the engine is PREDICTED to hold as a resident prefix. It READS the
+// index and writes nothing to it, and the caller runs it BEFORE the charge — after the charge the
+// prediction would always be the whole prompt.
+func (s *Scheduler) observablesFor(g *engineGroup, h Head, now time.Time) dispatchObservables {
+	obs := dispatchObservables{queueWait: now.Sub(h.Arrival)}
+	if m := g.threads[h.Thread]; m != nil && m.seatObs != nil {
+		// the turn that SEATED this thread: its prediction was measured at the seat, before the
+		// reservation. Consume it — every later turn measures the index directly.
+		obs.predictedCached, obs.promptTokens = m.seatObs.predictedCached, m.seatObs.promptTokens
+		m.seatObs = nil
+		s.metrics.ObserveQueueWait(queueWaitKind(h), nonNegative(obs.queueWait))
+		s.metrics.ObservePredictedCache(engineLabel(g.id), obs.predictedCached, obs.promptTokens)
+		return obs
+	}
+	for _, c := range h.Chains {
+		obs.promptTokens += int64(c.Tokens)
+		prefix := g.index.residentPrefix(c.Keys)
+		cached := int64(prefix * s.cfg.BlockSizeTokens)
+		if cached > int64(c.Tokens) {
+			cached = int64(c.Tokens) // a partial trailing block is not resident
+		}
+		obs.predictedCached += cached
+	}
+	s.metrics.ObserveQueueWait(queueWaitKind(h), nonNegative(obs.queueWait))
+	s.metrics.ObservePredictedCache(engineLabel(g.id), obs.predictedCached, obs.promptTokens)
+	return obs
+}
+
+// queueWaitKind classifies a dispatched head for the queue-wait histogram.
+func queueWaitKind(h Head) string {
+	if h.Returner {
+		return queueWaitReturner
+	}
+	return queueWaitNew
 }

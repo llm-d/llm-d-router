@@ -32,8 +32,18 @@ import (
 // framework SCOPES: Filter and PreRequest get a request whose attribute access is confined to
 // what this plugin declares, and an undeclared read resolves as absent.
 
-// release records the turn a Pick just released.
-func (s *Scheduler) release(m *thread, reqID string, chains []Chain, now time.Time) {
+// dispatchObservables is what one dispatched turn contributes to the span and the counters. The
+// caller computes it BEFORE the charge, so predictedCached is the engine's resident prefix as it
+// stood at the decision, not as the decision left it.
+type dispatchObservables struct {
+	queueWait       time.Duration
+	predictedCached int64
+	promptTokens    int64
+}
+
+// release opens one request's record: the thread that dispatched it, the chains it was charged
+// with, and the observables PreRequest may put on the span.
+func (s *Scheduler) release(m *thread, reqID string, chains []Chain, now time.Time, obs dispatchObservables) {
 	if reqID == "" {
 		// An id-less request cannot be tracked: nothing names it, so no window opens and the thread
 		// is not held busy by it.
@@ -46,7 +56,8 @@ func (s *Scheduler) release(m *thread, reqID string, chains []Chain, now time.Ti
 		// turn.
 		s.dropRequest(reqID, now)
 	}
-	s.reqs[reqID] = &reqRec{thread: m.id, chains: chains, released: now}
+	s.reqs[reqID] = &reqRec{thread: m.id, chains: chains, released: now,
+		queueWait: obs.queueWait, predictedCached: obs.predictedCached, promptTokens: obs.promptTokens}
 	m.pending++
 }
 
@@ -60,10 +71,10 @@ func (s *Scheduler) windowLive(rec *reqRec, now time.Time) bool {
 }
 
 // atPod closes the released window: the request is running on an engine.
-func (s *Scheduler) atPod(rec *reqRec, m *thread, engine string, now time.Time) {
+func (s *Scheduler) atPod(rec *reqRec, m *thread, engine string, now time.Time) dispatchObservables {
 	if !rec.pod.IsZero() {
 		rec.engine = engine
-		return // a repeated PreRequest: the record is already in flight
+		return dispatchObservables{} // a repeated PreRequest: the record is already in flight
 	}
 	// LIVENESS IS READ BEFORE THE RECORD STOPS BEING PENDING: a window that already outlived S
 	// was never counted (reapRequests adds only live windows to m.pending), so a LATE
@@ -78,6 +89,7 @@ func (s *Scheduler) atPod(rec *reqRec, m *thread, engine string, now time.Time) 
 		}
 		m.inflight++
 	}
+	return dispatchObservables{queueWait: rec.queueWait, predictedCached: rec.predictedCached, promptTokens: rec.promptTokens}
 }
 
 // dropRequest deletes one record and re-derives the counts of the thread that owned it.
@@ -149,19 +161,19 @@ func (s *Scheduler) threadOfRequest(reqID string) string {
 // AtPod records a released request at PreRequest on the endpoint the framework
 // ACTUALLY picked. The thread and the chains come from the request's own record: a request with no
 // record is untracked (anonymous, pre-capacity FCFS, or a thread that has already left).
-func (s *Scheduler) AtPod(reqID, engine string, now time.Time) {
+func (s *Scheduler) AtPod(reqID, engine string, now time.Time) dispatchObservables {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec := s.reqs[reqID]
 	if rec == nil {
-		return // untracked: anonymous traffic, a pre-capacity FCFS dispatch, or a thread that left
+		return dispatchObservables{} // untracked: anonymous traffic, a pre-capacity FCFS dispatch, or a thread that left
 	}
 	id := rec.thread
 	if engine != "" && engine != s.bindings[id] {
 		// the observed endpoint is authoritative
 		s.rebind(id, engine, now)
 	}
-	s.atPod(rec, s.groups[s.bindings[id]].threads[id], engine, now)
+	return s.atPod(rec, s.groups[s.bindings[id]].threads[id], engine, now)
 }
 
 // Abandon ends a request's record from OUTSIDE the decision path: the request is gone before a
