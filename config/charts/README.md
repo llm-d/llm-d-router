@@ -496,6 +496,11 @@ Configures metrics scraping via Prometheus (compatible with Google Managed Prome
 | `router.tracing.sampling.sampler` | Trace sampler type. | `parentbased_traceidratio` |
 | `router.tracing.sampling.samplerArg` | Sampler argument (e.g., sampling ratio `"0.1"`). | `"0.1"` |
 
+With `prometheusoperator`, the ServiceMonitor takes the scrape `job` from the EPP Services'
+`app.kubernetes.io/name` label, `<release>-epp`. All EPP replicas of a release share that job,
+including the per-replica Services of GKE preferred backends; the `service` and `instance`
+labels tell the replicas apart.
+
 When tracing is enabled, EPP request-associated spans carry `llm_d.epp.fairness.id` and
 `llm_d.epp.fairness.source` together. The value is the fairness identity the EPP resolved
 for the request, and the source records which branch resolved it: `header` for the
