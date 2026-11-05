@@ -32,6 +32,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 type fakeSchedulerProfile struct{}
@@ -569,7 +570,7 @@ func TestHeaderProfileResponseHeader(t *testing.T) {
 		return &fwksched.SchedulingResult{PrimaryProfileName: profile}
 	}
 	served := func(hostPort string) map[string]any {
-		return map[string]any{"envoy.lb": map[string]any{"x-gateway-destination-endpoint-served": hostPort}}
+		return map[string]any{metadata.DestinationEndpointNamespace: map[string]any{metadata.DestinationEndpointServedKey: hostPort}}
 	}
 	tests := []struct {
 		name           string
@@ -606,7 +607,7 @@ func TestHeaderProfileResponseHeader(t *testing.T) {
 			name:           "picked endpoint when the metadata has no served key",
 			prefillProfile: "prefill",
 			result:         result("prefill"),
-			reqMetadata:    map[string]any{"envoy.lb": map[string]any{"x-gateway-destination-endpoint": "10.0.0.7:8000,10.0.0.8:8000"}},
+			reqMetadata:    map[string]any{metadata.DestinationEndpointNamespace: map[string]any{metadata.DestinationEndpointKey: "10.0.0.7:8000,10.0.0.8:8000"}},
 			target:         endpoint("10.0.0.7", "8000"),
 			wantHeaders:    map[string]string{routing.PrefillEndpointHeader: "10.0.0.7:8000"},
 		},

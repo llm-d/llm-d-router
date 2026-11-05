@@ -242,7 +242,7 @@ func (h *HeaderProfileHandler) ResponseHeader(_ context.Context, request *fwksch
 	if request.SchedulingResult.PrimaryProfileName != h.prefillProfile {
 		return
 	}
-	hostPort := servedEndpoint(response.ReqMetadata)
+	hostPort, _ := metadata.ServedEndpoint(response.ReqMetadata)
 	if hostPort == "" && targetEndpoint != nil {
 		hostPort = net.JoinHostPort(targetEndpoint.GetIPAddress(), targetEndpoint.GetPort())
 	}
@@ -250,12 +250,4 @@ func (h *HeaderProfileHandler) ResponseHeader(_ context.Context, request *fwksch
 		return
 	}
 	response.Headers[routing.PrefillEndpointHeader] = hostPort
-}
-
-// servedEndpoint returns the host:port the proxy reports it sent the request to,
-// or "" when the proxy reports none.
-func servedEndpoint(reqMetadata map[string]any) string {
-	lb, _ := reqMetadata[metadata.DestinationEndpointNamespace].(map[string]any)
-	served, _ := lb[metadata.DestinationEndpointServedKey].(string)
-	return served
 }
