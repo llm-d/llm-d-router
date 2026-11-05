@@ -51,8 +51,8 @@ import (
 	"testing"
 	"time"
 
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 
@@ -174,8 +174,8 @@ func (c *tokenCorpus) tokenize(_ context.Context, request *fwksched.InferenceReq
 		return fmt.Errorf("render drifted from the engine for %q: %d rendered, %d recorded",
 			request.RequestID, len(rec.Tokens), rec.InTokens)
 	}
-	request.Body.TokenizedRequest = &fwkrh.TokenizedRequest{
-		Prompts: []fwkrh.PromptTokens{{TokenIDs: rec.Tokens}},
+	request.Body.TokenizedRequest = &fwkrequest.TokenizedRequest{
+		Prompts: []fwkrequest.PromptTokens{{TokenIDs: rec.Tokens}},
 	}
 	return nil
 }

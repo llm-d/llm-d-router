@@ -32,9 +32,9 @@ import (
 	"testing"
 	"time"
 
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,7 +52,7 @@ func fingerprintCorpus(t *testing.T) map[string]*fwksched.InferenceRequest {
 		"one token less": chatRequest("e", 1, 255),
 	}
 	multi := chatRequest("f", 1, 200)
-	multi.Body.TokenizedRequest = &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{
+	multi.Body.TokenizedRequest = &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{
 		{TokenIDs: promptTokensFor(300)},
 		{TokenIDs: promptTokensFor(70)},
 	}}

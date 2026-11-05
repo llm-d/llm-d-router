@@ -29,11 +29,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/threadidentity"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -182,10 +182,10 @@ func chainsOfTokens(tokens []uint32, blockSize int) []Chain {
 	req := &fwksched.InferenceRequest{
 		RequestID: "chain-of-tokens",
 		Headers:   map[string]string{},
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{},
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: tokens}},
+		Body: &fwkrequest.InferenceRequestBody{
+			ChatCompletions: &fwkrequest.ChatCompletionsRequest{},
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens}},
 			},
 		},
 	}
@@ -298,9 +298,9 @@ func chatRequest(logical string, turn, promptLen int) *fwksched.InferenceRequest
 	return &fwksched.InferenceRequest{
 		RequestID: fmt.Sprintf("%s-t%d", logical, turn),
 		Headers:   map[string]string{},
-		Body: &fwkrh.InferenceRequestBody{
-			ChatCompletions: &fwkrh.ChatCompletionsRequest{},
-			Payload:         fwkrh.PayloadMap{"model": "test-model", "messages": msgs},
+		Body: &fwkrequest.InferenceRequestBody{
+			ChatCompletions: &fwkrequest.ChatCompletionsRequest{},
+			Payload:         fwkrequest.PayloadMap{"model": "test-model", "messages": msgs},
 		},
 	}
 }

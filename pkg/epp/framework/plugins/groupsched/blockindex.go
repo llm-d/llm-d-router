@@ -22,7 +22,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/threadidentity"
 )
 

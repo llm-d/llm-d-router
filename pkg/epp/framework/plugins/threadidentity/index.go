@@ -54,7 +54,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
 )
 
 // idHexLen is the number of hex characters a derived id keeps: an id can become a metric label,

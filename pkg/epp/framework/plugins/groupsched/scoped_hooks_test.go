@@ -30,12 +30,12 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fcTypes "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/threadidentity"
 	epmetadata "github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -90,10 +90,10 @@ func labelValue(m *dto.Metric, name string) string {
 func bareRequest(id string, blocks uint64, headers map[string]string) *intRequest {
 	size := blocks * 256 // the wire size a prompt of this length has at 4 bytes/token
 	ir := &fwksched.InferenceRequest{RequestID: id, RequestSizeBytes: int(size), Headers: headers}
-	ir.Body = &fwkrh.InferenceRequestBody{
-		ChatCompletions: &fwkrh.ChatCompletionsRequest{},
-		TokenizedRequest: &fwkrh.TokenizedRequest{
-			Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenRun(int(seedFor(id)%1000003)+1, int(blocks)*64)}},
+	ir.Body = &fwkrequest.InferenceRequestBody{
+		ChatCompletions: &fwkrequest.ChatCompletionsRequest{},
+		TokenizedRequest: &fwkrequest.TokenizedRequest{
+			Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokenRun(int(seedFor(id)%1000003)+1, int(blocks)*64)}},
 		},
 	}
 	return &intRequest{id: id, size: size, infReq: ir}
@@ -303,11 +303,18 @@ func TestAgentIdentityOnlyConfigIsRefused(t *testing.T) {
 		gs.handle.AddPlugin("bi", &stubPlugin{tn: fwkplugin.TypedName{Type: threadidentity.PluginType, Name: "bi"}})
 		require.NoError(t, gs.validateThreadProducer())
 	})
-	t.Run("thread identity beside agent identity passes", func(t *testing.T) {
+	t.Run("thread identity beside agent identity: allowed HERE, refused by thread identity", func(t *testing.T) {
+		// One rule, one owner. This gate answers only "is the thread source present and is its
+		// block length ours". The flow-key attribute's single-owner rule belongs to the plugin
+		// that publishes it: thread identity's RegisterDependencies refuses any other plugin
+		// declaring it — agent-identity, thunderagent, sessionstate, or anything later — and is
+		// where the startup actually stops (see threadidentity's
+		// TestFactory_RefusesAForeignFlowKeyUser).
 		gs := build(t)
 		gs.handle.AddPlugin("bi", &stubPlugin{tn: fwkplugin.TypedName{Type: threadidentity.PluginType, Name: "bi"}})
 		gs.handle.AddPlugin("agent", &stubPlugin{tn: fwkplugin.TypedName{Type: agentidentity.PluginType, Name: "agent"}})
-		require.NoError(t, gs.validateThreadProducer())
+		require.NoError(t, gs.validateThreadProducer(),
+			"the pair is not this gate's business: the flow-key ownership check is thread identity's")
 	})
 	t.Run("nil handle skips the gate (unit/test mode)", func(t *testing.T) {
 		p, err := Factory("gs", nil, nil)
@@ -334,6 +341,55 @@ func TestThreadIdentityIsScopeClean(t *testing.T) {
 
 	require.Equal(t, before, scopeViolations(t, bi.TypedName().Name),
 		"thread identity recorded a scope violation under a real scope")
+}
+
+// TestThreadIdentityRequestHeaderUnderTheDirectorsScope is the #3157 end-to-end gate: the
+// director scopes RequestHeader (a shallow copy sharing only the attribute store), so the
+// arrival hook's ATTRIBUTE writes must survive the scope while a plain struct-field write
+// cannot. This test runs the REAL render inside the REAL scope and pins both facts.
+func TestThreadIdentityRequestHeaderUnderTheDirectorsScope(t *testing.T) {
+	bi := newThreadIdentity(t)
+	// A chat body with NO tokens yet, so the arrival hook drives the REAL render (the
+	// httptest /render backend newThreadIdentity wires) inside the scope.
+	original := &fwksched.InferenceRequest{RequestID: "bi-scope-1", Headers: map[string]string{}}
+	original.Body = &fwkrequest.InferenceRequestBody{
+		ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+			Messages: []fwkrequest.Message{{Role: "user", Content: fwkrequest.Content{Raw: `"render me"`}}},
+		},
+		// the wire payload the renderer posts: native vLLM rendering requires an HTTP JSON
+		// payload (RawBody or Payload), which the parser sets in production.
+		Payload: fwkrequest.PayloadMap{"model": "test-model", "messages": []any{
+			map[string]any{"role": "user", "content": "render me"},
+		}},
+	}
+	before := scopeViolations(t, bi.TypedName().Name)
+
+	// The director's own call: scope, then invoke (director.go runRequestHeaderProcessors).
+	scopedReq, violations := datalayer.ScopeRequest(logr.Discard(),
+		fwkrc.RequestHeaderExtensionPoint, bi, original)
+	require.NoError(t, violations.Write(), "thread identity wrote an undeclared attribute at RequestHeader")
+	require.NoError(t, bi.RequestHeader(context.Background(), scopedReq))
+
+	// The five published keys are visible through the scope's shared store — on the
+	// ORIGINAL request, which is what every later hook reads.
+	id, ok := fwksched.ReadRequestAttribute[string](original, threadidentity.ThreadIdentityKey)
+	require.True(t, ok, "the thread id attribute must be published through the scope")
+	require.NotEmpty(t, id)
+	_, ok = fwksched.ReadRequestAttribute[[]Chain](original, threadidentity.ThreadBlocksKey)
+	require.True(t, ok, "the block-key attribute must be published through the scope")
+	_, ok = fwksched.ReadRequestAttribute[threadidentity.ThreadArrival](original, threadidentity.ThreadArrivalKey)
+	require.True(t, ok, "the arrival attribute must be published through the scope")
+	require.Equal(t, before, scopeViolations(t, bi.TypedName().Name),
+		"the real render inside the scope recorded a violation")
+
+	// The render itself ran (the tokens are on the shared body).
+	require.NotNil(t, original.Body.TokenizedRequest, "the render must populate the tokens")
+
+	// A struct-field write does NOT survive the scope: the scoped request is a shallow
+	// copy. The queue key the flow controller reads is the ORIGINAL's FairnessID field —
+	// so a fairness id the plugin writes on its scoped copy never reaches the queue.
+	require.Empty(t, original.FairnessID,
+		"the FairnessID field write on the scoped copy was lost — the queue key cannot be set from a scoped RequestHeader")
 }
 
 // newScopedPlugin builds the plugin with n engines of measured capacity.

@@ -28,7 +28,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 var goldenCoverageScenarios = []goldenScenario{

@@ -65,9 +65,9 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/threadidentity"
 )
 
@@ -220,8 +220,9 @@ func (r *GroupScheduler) otherDetectors() []string {
 }
 
 // validateThreadProducer is the fail-closed thread-source gate: the thread-identity plugin
-// must be in the same config, it is the ONLY source accepted, and its block length must be
-// ours. Both plugins charge the SAME blocks — thread identity hashes them once at arrival and
+// must be in the same config, it is the ONLY source accepted (thread identity owns the flow-key
+// attribute and refuses every other user of it at startup — see its RegisterDependencies), and
+// its block length must be ours. Both plugins charge the SAME blocks — thread identity hashes them once at arrival and
 // this policy reads them — so a block-size disagreement would charge every request the wrong
 // cost, silently. It is checked here, at startup, not discovered under load.
 func (r *GroupScheduler) validateThreadProducer() error {
@@ -257,7 +258,9 @@ func (r *GroupScheduler) validateThreadProducer() error {
 			PluginType, threadidentity.PluginType, theirBlockSize, r.cfg.BlockSizeTokens)
 	}
 	if agent {
-		r.logger.V(logutil.DEBUG).Info("group-scheduler: agent identity is configured but unused — the thread is thread identity's derived thread on every request")
+		// Thread identity will refuse to start beside this plugin: the flow-key attribute has one
+		// owner. Say why here, so the log names the conflict from this side too.
+		r.logger.V(logutil.DEBUG).Info("group-scheduler: agent identity is also configured — thread identity owns the flow-key attribute and will refuse to start beside it (its startup check names the conflict)")
 	}
 	return nil
 }

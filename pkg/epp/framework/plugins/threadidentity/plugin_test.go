@@ -39,10 +39,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -50,27 +53,27 @@ import (
 // so this controls how many blocks a body spans at the default block size (64).
 func filler(seed byte, n int) string { return strings.Repeat(string(seed), n) }
 
-func user(seed byte, n int) fwkrh.Message {
-	return fwkrh.Message{Role: "user", Content: fwkrh.Content{Raw: filler(seed, n)}}
+func user(seed byte, n int) fwkrequest.Message {
+	return fwkrequest.Message{Role: "user", Content: fwkrequest.Content{Raw: filler(seed, n)}}
 }
 
-func assistant(seed byte, n int) fwkrh.Message {
-	return fwkrh.Message{Role: "assistant", Content: fwkrh.Content{Raw: filler(seed, n)}}
+func assistant(seed byte, n int) fwkrequest.Message {
+	return fwkrequest.Message{Role: "assistant", Content: fwkrequest.Content{Raw: filler(seed, n)}}
 }
 
 // reqSeq makes every test request a distinct request id: a thread's outstanding
 // set is keyed by request id.
 var reqSeq atomic.Uint64
 
-func chatReq(msgs ...fwkrh.Message) *fwksched.InferenceRequest {
+func chatReq(msgs ...fwkrequest.Message) *fwksched.InferenceRequest {
 	return chatReqID(fmt.Sprintf("req-%d", reqSeq.Add(1)), msgs...)
 }
 
-func chatReqID(id string, msgs ...fwkrh.Message) *fwksched.InferenceRequest {
+func chatReqID(id string, msgs ...fwkrequest.Message) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: id,
 		Headers:   map[string]string{},
-		Body:      &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{Messages: msgs}},
+		Body:      &fwkrequest.InferenceRequestBody{ChatCompletions: &fwkrequest.ChatCompletionsRequest{Messages: msgs}},
 	}
 }
 
@@ -88,15 +91,15 @@ func testRenderer(stub int) func(context.Context, *fwksched.InferenceRequest) er
 		if len(ids) == 0 {
 			return nil
 		}
-		request.Body.TokenizedRequest = &fwkrh.TokenizedRequest{
-			Prompts:   []fwkrh.PromptTokens{{TokenIDs: ids}},
+		request.Body.TokenizedRequest = &fwkrequest.TokenizedRequest{
+			Prompts:   []fwkrequest.PromptTokens{{TokenIDs: ids}},
 			CacheSalt: tokenizer.CacheSaltFromBody(request.Body),
 		}
 		return nil
 	}
 }
 
-func testTokenIDs(body *fwkrh.InferenceRequestBody, stub int) []uint32 {
+func testTokenIDs(body *fwkrequest.InferenceRequestBody, stub int) []uint32 {
 	var ids []uint32
 	switch {
 	case body.ChatCompletions != nil:
@@ -189,14 +192,15 @@ func newTestPlugin(t *testing.T) *Plugin {
 }
 
 // threadOf runs the header hook and returns the derived id and the fairness id.
-func threadOf(t *testing.T, p *Plugin, req *fwksched.InferenceRequest) (threadID, fairnessID string) {
+func threadOf(t *testing.T, p *Plugin, req *fwksched.InferenceRequest) (threadID, flowKey string) {
 	t.Helper()
 	require.NoError(t, p.RequestHeader(context.Background(), req))
+	flowKey, _ = fwksched.ReadRequestAttribute[string](req, agentidentity.AgentIdentityKey)
 	id, ok := fwksched.ReadRequestAttribute[string](req, ThreadIdentityKey)
 	if !ok {
-		return "", req.FairnessID
+		return "", flowKey
 	}
-	return id, req.FairnessID
+	return id, flowKey
 }
 
 // finishTurn models a full turn: the request leaves the queue and its response
@@ -210,27 +214,35 @@ func finishTurn(t *testing.T, p *Plugin, req *fwksched.InferenceRequest) {
 	}, nil)
 }
 
-// TestRequestHeader_SetsTheQueueKey: the derived thread id is the request's
-// fairness id, so it exists before the request enqueues.
-func TestRequestHeader_SetsTheQueueKey(t *testing.T) {
+// TestRequestHeader_PublishesTheFlowKey: the derived thread id is published on the flow-key
+// attribute the director turns into the queue key, so it exists before the request enqueues.
+// The plugin does NOT write the request's FairnessID field: under the director's scope a
+// RequestHeader processor holds a copy of the request, so a field write would be lost.
+func TestRequestHeader_PublishesTheFlowKey(t *testing.T) {
 	p := newTestPlugin(t)
 
-	id, fairness := threadOf(t, p, chatReq(user('a', 600)))
+	req := chatReq(user('a', 600))
+	id, flowKey := threadOf(t, p, req)
 	require.NotEmpty(t, id)
-	assert.Equal(t, id, fairness, "the thread id must be the flow-control queue key")
+	assert.Equal(t, id, flowKey, "the thread id must be the flow key attribute")
+	assert.Empty(t, req.FairnessID, "the fairness id field is the director's to derive, not ours to write")
 	assert.Len(t, id, idHexLen)
 	assert.Regexp(t, "^[0-9a-f]+$", id, "thread ids are opaque, short hex")
 }
 
-// TestRequestHeader_ExplicitFairnessHeaderWins: an operator override still wins.
-func TestRequestHeader_ExplicitFairnessHeaderWins(t *testing.T) {
+// TestRequestHeader_ExplicitFairnessHeaderIsLeftAloneButTheThreadIsStillPublished: an operator
+// override is the tenant and is not touched — and the thread is STILL published on the flow-key
+// attribute, because the director composes "tenant/thread" from it when the pool turns
+// composition on. Skipping the publish under a header would collapse each tenant into one queue.
+func TestRequestHeader_ExplicitFairnessHeaderIsLeftAloneButTheThreadIsStillPublished(t *testing.T) {
 	p := newTestPlugin(t)
 	req := chatReq(user('a', 600))
 	req.FairnessID = "client-thread-1"
 
-	id, fairness := threadOf(t, p, req)
+	id, flowKey := threadOf(t, p, req)
 	require.NotEmpty(t, id)
-	assert.Equal(t, "client-thread-1", fairness, "the explicit id is not overwritten")
+	assert.Equal(t, "client-thread-1", req.FairnessID, "the explicit id is not overwritten")
+	assert.Equal(t, id, flowKey, "the thread is published even under a tenant header")
 }
 
 // TestLifecycle_ContinuationIsTheSameID: a finished turn's successor continues it.
@@ -287,7 +299,7 @@ func TestArrivalRecord_DoesNotChangeTheDerivation(t *testing.T) {
 	replay := func(drop bool) []string {
 		p := newTestPlugin(t)
 		var ids []string
-		for _, msgs := range [][]fwkrh.Message{
+		for _, msgs := range [][]fwkrequest.Message{
 			{user('a', 300)},
 			{user('a', 300), assistant('b', 40), user('c', 50)},
 			{user('a', 300), assistant('b', 40), user('c', 50), assistant('d', 30), user('e', 20)},
@@ -355,7 +367,7 @@ func TestSessionIsAnAttributeNotAQueueKey(t *testing.T) {
 	session, ok := fwksched.ReadRequestAttribute[string](req, ThreadSessionKey)
 	require.True(t, ok)
 	assert.Equal(t, "session-7", session)
-	assert.Equal(t, id, fairness, "the thread, not the session, is the queue key")
+	assert.Equal(t, id, fairness, "the thread, not the session, is the flow key")
 	assert.NotEqual(t, "session-7", id)
 
 	// A request under another session is a different thread.
@@ -399,7 +411,7 @@ func TestRerenderedHistorySplitsTheThread(t *testing.T) {
 	finishTurn(t, p, first)
 
 	// The same conversation with that assistant turn's reasoning stripped.
-	stripped := chatReq(user('a', 600), fwkrh.Message{Role: "assistant", Content: fwkrh.Content{Raw: ""}}, user('c', 60))
+	stripped := chatReq(user('a', 600), fwkrequest.Message{Role: "assistant", Content: fwkrequest.Content{Raw: ""}}, user('c', 60))
 	id2, _ := threadOf(t, p, stripped)
 	assert.NotEqual(t, id1, id2, "re-rendered history is a different token prefix")
 }
@@ -464,7 +476,7 @@ func TestRenderFailure_StartsItsOwnThread(t *testing.T) {
 	first := chatReq(user('a', 600))
 	id1, fairness1 := threadOf(t, p, first)
 	require.NotEmpty(t, id1)
-	assert.Equal(t, id1, fairness1, "a failed render still yields a queue key")
+	assert.Equal(t, id1, fairness1, "a failed render still yields a flow key")
 	require.NotNil(t, p.metrics.renderFailure)
 	assert.EqualValues(t, 1, testutil.ToFloat64(p.metrics.renderFailure))
 
@@ -479,7 +491,7 @@ func TestRenderFailure_StartsItsOwnThread(t *testing.T) {
 func TestEmptyRender_StartsItsOwnThread(t *testing.T) {
 	p := newTestPlugin(t)
 	req := &fwksched.InferenceRequest{RequestID: "r-empty", Headers: map[string]string{},
-		Body: &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{}}}
+		Body: &fwkrequest.InferenceRequestBody{ChatCompletions: &fwkrequest.ChatCompletionsRequest{}}}
 
 	id, _ := threadOf(t, p, req)
 	require.NotEmpty(t, id)
@@ -510,7 +522,7 @@ func TestArrivalRendersOnceAndDispatchSkips(t *testing.T) {
 	req := chatReq(user('a', 600))
 	// The renderer receives the wire payload, which a hand-built body carries only
 	// once Payload is set.
-	req.Body.Payload = fwkrh.PayloadMap{"model": "m", "messages": []any{
+	req.Body.Payload = fwkrequest.PayloadMap{"model": "m", "messages": []any{
 		map[string]any{"role": "user", "content": strings.Repeat("a", 600)},
 	}}
 	_, _ = threadOf(t, p, req)
@@ -518,7 +530,7 @@ func TestArrivalRendersOnceAndDispatchSkips(t *testing.T) {
 	require.NotNil(t, req.Body.TokenizedRequest)
 
 	// The dispatch-time token producer finds the tokens and returns early.
-	require.NoError(t, p.producer.Tokenize(context.Background(), req))
+	require.NoError(t, p.tokens.Produce(context.Background(), req, nil))
 	assert.Equal(t, int64(1), renders.Load(), "no second render")
 }
 
@@ -528,7 +540,7 @@ func TestArrivalRendersOnceAndDispatchSkips(t *testing.T) {
 func TestMultiPromptConcatenatesChains(t *testing.T) {
 	p := newTestPlugin(t)
 	p.tokenize = func(_ context.Context, request *fwksched.InferenceRequest) error {
-		request.Body.TokenizedRequest = &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{
+		request.Body.TokenizedRequest = &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{
 			{TokenIDs: tokens(1, testBlockSize)},
 			{TokenIDs: tokens(2, testBlockSize)},
 		}}
@@ -756,7 +768,7 @@ func TestLogHeadersKeepResolveOutcomeIdentical(t *testing.T) {
 	run := func(params string) []string {
 		p := newTestPluginWith(t, params)
 		var ids []string
-		for _, msgs := range [][]fwkrh.Message{
+		for _, msgs := range [][]fwkrequest.Message{
 			{user('a', 300)},
 			{user('a', 300), assistant('b', 40), user('c', 50)},
 			{user('z', 300)},
@@ -828,3 +840,75 @@ func firstDiff(a, b []uint32) int {
 	}
 	return min(len(a), len(b))
 }
+
+// ---- the flow-key ownership check ------------------------------------------------
+
+// declaringStub is a plugin that DECLARES the flow-key attribute (as a producer or a
+// consumer) without any behavior: the ownership check reads declarations, not types.
+type declaringStub struct {
+	tn      fwkplugin.TypedName
+	produce bool
+	consume bool
+}
+
+func (s *declaringStub) TypedName() fwkplugin.TypedName { return s.tn }
+
+func (s *declaringStub) Produces() map[fwkplugin.DataKey]any {
+	if !s.produce {
+		return nil
+	}
+	return map[fwkplugin.DataKey]any{agentidentity.AgentIdentityKey: ""}
+}
+
+func (s *declaringStub) Consumes() fwkplugin.DataDependencies {
+	if !s.consume {
+		return fwkplugin.DataDependencies{}
+	}
+	return fwkplugin.DataDependencies{Required: map[fwkplugin.DataKey]any{agentidentity.AgentIdentityKey: ""}}
+}
+
+// TestFactory_RefusesAForeignFlowKeyUser: the flow-key attribute has exactly one owner, and the
+// check is generic — any configured plugin that declares the key, as a producer or a consumer,
+// stops the process. This covers agent-identity, thunderagent and sessionstate today and any
+// later reader or writer, without naming types.
+func TestFactory_RefusesAForeignFlowKeyUser(t *testing.T) {
+	cases := map[string]*declaringStub{
+		"a second producer (e.g. agent-identity)": {tn: fwkplugin.TypedName{Type: "agent-identity", Name: "agent"}, produce: true},
+		"a consumer (e.g. sessionstate)":          {tn: fwkplugin.TypedName{Type: "session-state", Name: "state"}, consume: true},
+		"both":                                    {tn: fwkplugin.TypedName{Type: "x", Name: "x"}, produce: true, consume: true},
+	}
+	for name, other := range cases {
+		t.Run(name, func(t *testing.T) {
+			handle := testutils.NewTestHandle(t.Context())
+			built, err := Factory("thread", json.NewDecoder(strings.NewReader(withTestProducer(t, ""))), handle)
+			require.NoError(t, err)
+			p := built.(*Plugin)
+			require.NoError(t, p.RegisterDependencies(&noopRegistrar{}))
+			handle.AddPlugin(other.tn.Name, other)
+			err = p.RegisterDependencies(&noopRegistrar{})
+			require.Error(t, err, "a foreign user of the flow-key attribute must refuse the startup")
+			require.Contains(t, err.Error(), other.tn.String())
+			require.Contains(t, err.Error(), "flow-key attribute")
+		})
+	}
+
+	t.Run("a plugin that declares neither is not our business", func(t *testing.T) {
+		handle := testutils.NewTestHandle(t.Context())
+		built, err := Factory("thread", json.NewDecoder(strings.NewReader(withTestProducer(t, ""))), handle)
+		require.NoError(t, err)
+		handle.AddPlugin("plain", &declaringStub{tn: fwkplugin.TypedName{Type: "plain", Name: "plain"}})
+		require.NoError(t, built.(*Plugin).RegisterDependencies(&noopRegistrar{}))
+	})
+
+	t.Run("thread identity alone starts", func(t *testing.T) {
+		handle := testutils.NewTestHandle(t.Context())
+		built, err := Factory("thread", json.NewDecoder(strings.NewReader(withTestProducer(t, ""))), handle)
+		require.NoError(t, err)
+		require.NoError(t, built.(*Plugin).RegisterDependencies(&noopRegistrar{}))
+	})
+}
+
+// noopRegistrar is a Registrar that records nothing.
+type noopRegistrar struct{}
+
+func (noopRegistrar) Register(fwkdl.PendingRegistration) error { return nil }

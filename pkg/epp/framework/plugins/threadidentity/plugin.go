@@ -17,6 +17,7 @@ limitations under the License.
 package threadidentity
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,28 +27,29 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 
 	"github.com/cespare/xxhash/v2"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 )
 
 // PluginType is the canonical type name used to register the plugin.
 const PluginType = "thread-identity"
 
-// ThreadIdentityKey is the request-attribute key carrying the DERIVED thread id.
-// The director uses it as the fairness id (the flow-control queue key) when the
-// request carried no explicit fairness header.
+// ThreadIdentityKey is the request-attribute key carrying the DERIVED thread id,
+// for the readers that want the thread by name (the group scheduler). The queue key
+// travels on a different attribute: see agentidentity.AgentIdentityKey, below.
 var ThreadIdentityKey = fwkplugin.NewDataKey("thread-identity", "")
 
 // ThreadSessionKey is the request-attribute key carrying the client's session id,
@@ -270,10 +272,13 @@ type Plugin struct {
 
 	idx     *threadIndex
 	metrics *threadMetrics
-	// producer renders the request's real tokens (the token producer, as a
-	// library); tokenize is the call site, so a test can substitute a
-	// deterministic renderer.
-	producer  *tokenizer.Producer
+	// handle is the runtime's plugin set (nil in a standalone build): the flow-key ownership
+	// check reads the sibling plugins' declarations from it at startup.
+	handle fwkplugin.Handle
+	// tokens renders the request's real tokens: the upstream token-producer
+	// plugin, driven as a library through its exported Plugin API; tokenize is
+	// the call site, so a test can substitute a deterministic renderer.
+	tokens    *tokenizer.Plugin
 	tokenize  func(ctx context.Context, request *fwksched.InferenceRequest) error
 	blockSize int
 
@@ -316,22 +321,41 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		ctx = handle.Context()
 	}
 	typedName := fwkplugin.TypedName{Type: PluginType, Name: name}
-	producer, err := tokenizer.NewProducer(ctx, typedName, params.TokenProducer)
+	// The token producer is the upstream plugin itself, built through its exported
+	// factory so its configuration language, render backend, warmup and endpoint
+	// discovery are the ones every other token consumer gets. A nil handle (a
+	// standalone build in a test) still works: the shim below only supplies the
+	// context the factory reads.
+	runtimeHandle := handle
+	if handle == nil {
+		handle = backgroundHandle{}
+	}
+	built, err := tokenizer.PluginFactory(name, json.NewDecoder(bytes.NewReader(params.TokenProducer)), handle)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build the token producer of the '%s' plugin: %w", PluginType, err)
+	}
+	producer, ok := built.(*tokenizer.Plugin)
+	if !ok {
+		return nil, fmt.Errorf("the token producer of the '%s' plugin built a %T", PluginType, built)
 	}
 	// FAIL CLOSED: a non-rendering backend leaves the identity in byte space, which
 	// is the retired v1 key. A missing block is caught in validate(); this catches a
 	// block that parses but selects no renderer.
-	if producer.BackendName() != tokenizer.BackendVLLM {
+	if producer.Backend() != tokenizer.BackendVLLM {
 		return nil, fmt.Errorf("invalid parameters of the '%s' plugin: tokenProducer selected the %q backend — "+
-			"identity is a token-space key, so the block must render (modelName/vllm)", PluginType, producer.BackendName())
+			"identity is a token-space key, so the block must render (modelName/vllm)", PluginType, producer.Backend())
 	}
 
 	p := &Plugin{
-		typedName:      typedName,
-		producer:       producer,
-		tokenize:       producer.Tokenize,
+		typedName: typedName,
+		handle:    runtimeHandle,
+		tokens:    producer,
+		tokenize: func(ctx context.Context, request *fwksched.InferenceRequest) error {
+			// nil endpoints: the render looks the request's own body up, it never
+			// scores candidates — the same call the director's data-producer phase
+			// makes at dispatch, so both find the same one-render-per-request skip.
+			return producer.Produce(ctx, request, nil)
+		},
 		blockSize:      params.BlockSizeTokens,
 		markerTTL:      time.Duration(params.MarkerTTLSeconds * float64(time.Second)),
 		sweep:          time.Duration(params.SweepSeconds * float64(time.Second)),
@@ -396,14 +420,21 @@ func (p *Plugin) BlockSize() int { return p.blockSize }
 // TypedName returns the type and name of the plugin.
 func (p *Plugin) TypedName() fwkplugin.TypedName { return p.typedName }
 
-// Produces declares the attributes written at the request-header hook.
+// Produces declares the attributes written at the request-header hook. The thread id is
+// published twice: under its own key, and under the flow-key attribute
+// (agentidentity.AgentIdentityKey) — the one attribute the director turns into the request's
+// flow key. The key carries no producer name by design ("any plugin able to resolve an agent
+// identity is an acceptable source"), and the director's derivation runs on a request this
+// hook can only reach through its attribute store: the scope hands a RequestHeader processor a
+// copy whose struct fields are not shared, so a fairness id written to the field would be lost.
 func (p *Plugin) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
-		ThreadIdentityKey: "",
-		ThreadSessionKey:  "",
-		ThreadArrivalKey:  ThreadArrival{},
-		ThreadBlocksKey:   []PromptBlocks{},
-		threadMarkerKey:   "",
+		agentidentity.AgentIdentityKey: "",
+		ThreadIdentityKey:              "",
+		ThreadSessionKey:               "",
+		ThreadArrivalKey:               ThreadArrival{},
+		ThreadBlocksKey:                []PromptBlocks{},
+		threadMarkerKey:                "",
 	}
 }
 
@@ -411,12 +442,60 @@ func (p *Plugin) Produces() map[fwkplugin.DataKey]any {
 // discovery-backed renderer sees the endpoint lifecycle like the token-producer
 // plugin's does.
 func (p *Plugin) RegisterDependencies(r fwkdl.Registrar) error {
-	return p.producer.RegisterDependencies(r)
+	if err := p.refuseForeignFlowKeyUsers(); err != nil {
+		return err
+	}
+	return p.tokens.RegisterDependencies(r)
 }
 
-// RequestHeader derives the thread id before admission control and makes it the
-// request's fairness id — the flow-control queue key must exist before the
-// request enqueues, and this hook runs after body parsing but before Admit.
+// refuseForeignFlowKeyUsers is the fail-closed ownership check for the flow-key attribute. This
+// plugin publishes its thread id on agentidentity.AgentIdentityKey because that is the one
+// attribute the director turns into a request's flow key, so it must be the attribute's ONLY
+// owner: no other configured plugin may produce it (a second writer overwrites the queue key,
+// by configuration order, with no error from the framework) or consume it (a reader of that
+// key would take thread ids for session ids). It reads the siblings' DECLARATIONS, not their
+// types, so it covers agent-identity, thunderagent and sessionstate today and any later
+// reader or writer. A plugin that reads the key without declaring it cannot be seen here — the
+// README lists that as a drawback.
+func (p *Plugin) refuseForeignFlowKeyUsers() error {
+	if p.handle == nil {
+		return nil // standalone build: there are no siblings to ask
+	}
+	var conflicts []string
+	for _, other := range p.handle.GetAllPlugins() {
+		if other == nil || other.TypedName() == p.typedName {
+			continue
+		}
+		if producer, ok := other.(fwkplugin.ProducerPlugin); ok {
+			if _, declared := producer.Produces()[agentidentity.AgentIdentityKey]; declared {
+				conflicts = append(conflicts, other.TypedName().String()+" produces it")
+			}
+		}
+		if consumer, ok := other.(fwkplugin.ConsumerPlugin); ok {
+			deps := consumer.Consumes()
+			_, required := deps.Required[agentidentity.AgentIdentityKey]
+			_, optional := deps.Optional[agentidentity.AgentIdentityKey]
+			if required || optional {
+				conflicts = append(conflicts, other.TypedName().String()+" consumes it")
+			}
+		}
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	sort.Strings(conflicts)
+	return fmt.Errorf("the '%s' plugin owns the flow-key attribute '%s': the director turns that one attribute into every request's flow key, "+
+		"so there is exactly one owner. Remove the conflicting plugin(s) from the configuration — a second writer would silently overwrite the "+
+		"queue key by configuration order, and a reader would take thread ids for session ids: %s",
+		PluginType, agentidentity.AgentIdentityKey, strings.Join(conflicts, "; "))
+}
+
+// RequestHeader derives the thread id before admission control and publishes it as the
+// request's flow key — the flow-control queue key must exist before the request enqueues,
+// and this hook runs after body parsing but before Admit. The director reads the flow-key
+// attribute after the header processors and keys the request's queue on it; an explicit
+// fairness header still wins, and a tenant header composes with it ("tenant/thread") when
+// the pool turns composition on.
 //
 // It renders the request's tokens HERE, on arrival, so the dispatch-time token
 // producer finds them already present and skips: one render per request, shared
@@ -429,9 +508,9 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceR
 	if request == nil || request.Body == nil {
 		return nil
 	}
-	// An explicit x-llm-d-inference-fairness-id header wins (operators keep a
-	// manual override). It is counted, because a harness that sets it turns the
-	// whole derivation into a no-op with no other visible signal.
+	// An explicit x-llm-d-inference-fairness-id header is the tenant (the director's derivation
+	// gives it precedence, or composes it with the flow-key attribute). It is counted, because a
+	// harness that sets it overrides the thread as the queue key with no other visible signal.
 	explicit := request.FairnessID != ""
 
 	blocks, c, ok := p.chainFor(ctx, request)
@@ -452,13 +531,15 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceR
 	}
 
 	request.PutAttribute(ThreadIdentityKey, res.ID)
+	// ALWAYS published, header or not: with no header the thread is the flow key; with a
+	// tenant header and composition on it is the second half of "tenant/thread" (skipping it
+	// here would collapse each tenant into one queue); with composition off the director keys
+	// the tenant as sent and never reads it.
+	request.PutAttribute(agentidentity.AgentIdentityKey, res.ID)
 	request.PutAttribute(ThreadArrivalKey, ThreadArrival{Outcome: res.Outcome, Turn: res.Turn})
 	request.PutAttribute(threadMarkerKey, marker)
 	if explicit {
 		p.metrics.observeExplicitOverride()
-	} else {
-		// Otherwise the derived thread IS the queue key.
-		request.FairnessID = res.ID
 	}
 	if scope != "" {
 		request.PutAttribute(ThreadSessionKey, scope)
@@ -748,7 +829,7 @@ func sessionHeaders(extras []string) []string {
 // messageRoles returns the request's message roles in wire order. Body shapes
 // without a message array return nil: H1 needs message structure and cannot fire
 // for them.
-func messageRoles(body *fwkrh.InferenceRequestBody) []string {
+func messageRoles(body *fwkrequest.InferenceRequestBody) []string {
 	if body == nil {
 		return nil
 	}
@@ -776,3 +857,39 @@ func messageRoles(body *fwkrh.InferenceRequestBody) []string {
 	}
 	return nil
 }
+
+// backgroundHandle is the nil-handle fallback for a plugin built without a runtime handle (a
+// standalone test build): the tokenizer factory reads the context and the metrics recorder, so
+// both answer without a runtime, and every other method is a no-op. A plugin built WITH a handle
+// uses the real one.
+type backgroundHandle struct{}
+
+// Context is the process context the tokenizer factory and the warmup read.
+func (backgroundHandle) Context() context.Context { return context.Background() }
+
+// Metrics reports no recorder: a standalone build registers no series.
+func (backgroundHandle) Metrics() fwkplugin.MetricsRecorder { return nil }
+
+// Plugin reports no plugin under any name: there is no runtime plugin set.
+func (backgroundHandle) Plugin(string) fwkplugin.Plugin { return nil }
+
+// AddPlugin ignores the addition: a standalone build has no plugin set to maintain.
+func (backgroundHandle) AddPlugin(string, fwkplugin.Plugin) {}
+
+// GetAllPlugins reports none: there is no runtime plugin set.
+func (backgroundHandle) GetAllPlugins() []fwkplugin.Plugin { return nil }
+
+// GetAllPluginsWithNames reports none: there is no runtime plugin set.
+func (backgroundHandle) GetAllPluginsWithNames() map[string]fwkplugin.Plugin { return nil }
+
+// PodList reports no pods: a standalone build has no datastore behind it.
+func (backgroundHandle) PodList() []types.NamespacedName { return nil }
+
+// CrossReplicaSyncer reports none: a standalone build has no cross-replica sync.
+func (backgroundHandle) CrossReplicaSyncer() fwkplugin.Plugin { return nil }
+
+// SetCrossReplicaSyncer ignores the assignment: there is no runtime to hold it.
+func (backgroundHandle) SetCrossReplicaSyncer(fwkplugin.Plugin) {}
+
+// RefreshMetricsInterval reports zero: a standalone build polls nothing.
+func (backgroundHandle) RefreshMetricsInterval() time.Duration { return 0 }

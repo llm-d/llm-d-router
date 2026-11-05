@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // the two release-path extension points this plugin takes part in.

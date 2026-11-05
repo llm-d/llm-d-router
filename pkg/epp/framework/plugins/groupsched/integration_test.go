@@ -33,15 +33,15 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fcTypes "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/threadidentity"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
@@ -89,10 +89,10 @@ func newIntRequest(thread, id string, blocks uint64) *intRequest {
 	ir.PutAttribute(agentidentity.AgentIdentityKey, thread)
 	ir.PutAttribute(threadidentity.ThreadArrivalKey, threadidentity.ThreadArrival{
 		Outcome: threadidentity.OutcomeNew, Turn: 1})
-	ir.Body = &fwkrh.InferenceRequestBody{
-		ChatCompletions: &fwkrh.ChatCompletionsRequest{},
-		TokenizedRequest: &fwkrh.TokenizedRequest{
-			Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenRun(int(seedFor(thread)%1000003)+1, int(blocks)*64)}},
+	ir.Body = &fwkrequest.InferenceRequestBody{
+		ChatCompletions: &fwkrequest.ChatCompletionsRequest{},
+		TokenizedRequest: &fwkrequest.TokenizedRequest{
+			Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokenRun(int(seedFor(thread)%1000003)+1, int(blocks)*64)}},
 		},
 	}
 	// the blocks thread identity publishes for these tokens: the cost the policy charges

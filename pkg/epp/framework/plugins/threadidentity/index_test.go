@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -51,12 +51,12 @@ func grown(base []uint32, n int, seed uint32) []uint32 {
 // hook does (one prompt per list position).
 func chainOf(t *testing.T, prompts ...[]uint32) chain {
 	t.Helper()
-	promptTokens := make([]fwkrh.PromptTokens, len(prompts))
+	promptTokens := make([]fwkrequest.PromptTokens, len(prompts))
 	for i, p := range prompts {
-		promptTokens[i] = fwkrh.PromptTokens{TokenIDs: p}
+		promptTokens[i] = fwkrequest.PromptTokens{TokenIDs: p}
 	}
-	req := &fwksched.InferenceRequest{Body: &fwkrh.InferenceRequestBody{
-		TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: promptTokens},
+	req := &fwksched.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{
+		TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: promptTokens},
 	}}
 	return identityChain(promptBlocks(context.Background(), req, testBlockSize), testBlockSize)
 }

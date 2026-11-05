@@ -43,11 +43,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/threadidentity"
 )
@@ -391,9 +391,9 @@ func (h *goldenHarness) settle(req *fwksched.InferenceRequest, at string, prompt
 	h.r.ResponseBody(context.Background(), scopedReq, &fwkrc.Response{
 		RequestID: req.RequestID, EndOfStream: true,
 		TerminationCause: fwkrc.TerminationCauseNatural,
-		Usage: fwkrh.Usage{
+		Usage: fwkrequest.Usage{
 			PromptTokens:       prompt,
-			PromptTokenDetails: &fwkrh.PromptTokenDetails{CachedTokens: cached},
+			PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: cached},
 			CompletionTokens:   completion,
 		},
 	}, h.target(at))
@@ -417,7 +417,7 @@ func (h *goldenHarness) settleCause(req *fwksched.InferenceRequest, at string, c
 	}
 	h.r.ResponseBody(context.Background(), scopedReq, &fwkrc.Response{
 		RequestID: req.RequestID, EndOfStream: true, TerminationCause: cause,
-		Usage: fwkrh.Usage{PromptTokens: 300, CompletionTokens: 10},
+		Usage: fwkrequest.Usage{PromptTokens: 300, CompletionTokens: 10},
 	}, h.target(at))
 }
 
@@ -451,7 +451,7 @@ func (h *goldenHarness) request(turn int, promptLens ...int) *fwksched.Inference
 		arrays[i] = growTokens(h.seq*10000, n)
 	}
 	req := &fwksched.InferenceRequest{RequestID: id}
-	req.Body = &fwkrh.InferenceRequestBody{TokenizedRequest: fwkrh.NewTokenizedRequest(arrays)}
+	req.Body = &fwkrequest.InferenceRequestBody{TokenizedRequest: fwkrequest.NewTokenizedRequest(arrays)}
 	return req
 }
 
