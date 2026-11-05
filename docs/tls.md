@@ -28,8 +28,8 @@ them. Which sources supply its value differs: see
 | Behavior | EPP | Sidecar | Coordinator |
 |---|---|---|---|
 | Reloading the certificate key pair | requires `--enable-cert-reload` | whenever a certificate directory is configured | whenever a certificate directory is configured |
-| Accepted cipher suite names | the names `crypto/tls` reports, from `tls.CipherSuites()` and `tls.InsecureCipherSuites()` | same as the EPP | also accepts the legacy spellings `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305` and `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305`, which `crypto/tls` spells with a `_SHA256` suffix |
-| Rejecting an unknown cipher suite name | `unknown cipher suite "NAME"` | same as the EPP | `Cipher suite NAME not supported or doesn't exist` |
+| Accepted cipher suite names | the names `crypto/tls` reports from `tls.CipherSuites()`; insecure suites are rejected with `insecure cipher suite "NAME" is not supported` | same as the EPP | also accepts the names from `tls.InsecureCipherSuites()` and the legacy spellings `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305` and `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305`, which `crypto/tls` spells with a `_SHA256` suffix |
+| Rejecting an unknown cipher suite name | `Cipher suite NAME not supported or doesn't exist` | same as the EPP | same as the EPP |
 
 ## Metrics endpoint (/metrics)
 
