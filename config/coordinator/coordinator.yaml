@@ -72,7 +72,10 @@ server:
 
   # tls_cipher_suites are the cipher suites the inference listener accepts, by
   # Go crypto/tls name. Empty uses the crypto/tls default. Only effective for
-  # TLS 1.2 and below; TLS 1.3 cipher suites are not configurable.
+  # TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. Insecure
+  # suites are rejected. Unless tls_min_version is VersionTLS13, the list must
+  # include TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 or
+  # TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, which HTTP/2 requires.
   # The --tls-cipher-suites CLI flag overrides this field.
   # env: COORDINATOR_SERVER_TLS_CIPHER_SUITES
   # tls_cipher_suites: []

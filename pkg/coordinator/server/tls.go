@@ -19,8 +19,10 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 
 	"k8s.io/component-base/cli/flag"
 
@@ -53,6 +55,19 @@ func parseTLSProfile(minVersion string, cipherSuites []string) (tlsProfile, erro
 	suites, err := flag.TLSCipherSuites(cipherSuites)
 	if err != nil {
 		return tlsProfile{}, fmt.Errorf("invalid tls-cipher-suites: %w", err)
+	}
+	// flag.TLSCipherSuites also resolves the names in tls.InsecureCipherSuites().
+	for _, s := range tls.InsecureCipherSuites() {
+		if slices.Contains(suites, s.ID) {
+			return tlsProfile{}, fmt.Errorf("invalid tls-cipher-suites: insecure cipher suite %q", s.Name)
+		}
+	}
+	// net/http's HTTP/2 server refuses to start without one of these when
+	// TLS 1.2 is allowed, so reject the list here instead of at Serve.
+	if len(suites) > 0 && profile.minVersion < tls.VersionTLS13 &&
+		!slices.Contains(suites, tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256) &&
+		!slices.Contains(suites, tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256) {
+		return tlsProfile{}, errors.New("invalid tls-cipher-suites: HTTP/2 requires TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 or TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256")
 	}
 	profile.cipherSuites = suites
 	return profile, nil
