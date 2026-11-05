@@ -19,6 +19,7 @@ package steps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 
@@ -39,7 +40,8 @@ func init() {
 }
 
 type ConditionalDecodeStep struct {
-	gwClient *gateway.Client
+	gwClient          *gateway.Client
+	promptTokenParity string
 }
 
 func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -49,7 +51,11 @@ func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (
 	if err := rejectUseOpenAIFormatOverride(ConditionalDecodeStepName, params); err != nil {
 		return nil, err
 	}
-	return &ConditionalDecodeStep{gwClient: gwClient}, nil
+	parity, err := parsePromptTokenParity(params)
+	if err != nil {
+		return nil, fmt.Errorf("conditional-decode: %w", err)
+	}
+	return &ConditionalDecodeStep{gwClient: gwClient, promptTokenParity: parity}, nil
 }
 
 func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName }
@@ -65,6 +71,11 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		return err
 	}
 
+	// A served hit is the KV-reuse case the parity check exists for; body is a
+	// clone, so an injected include_usage does not reach the decode step on a
+	// miss. On a 412 nothing is written, so the writer stays idle.
+	parity, injectedUsage := setupParity(ConditionalDecodeStepName, s.promptTokenParity, logger, reqCtx, body)
+
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
 
 	proxyReq, err := newDecodeProxyRequest(ctx, logger, ConditionalDecodeStepName, reqCtx, s.gwClient, body, map[string]string{"Prefer": "if-available"})
@@ -72,8 +83,9 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		return err
 	}
 
+	writer, finalize := parityResponseWriter(reqCtx, parity, injectedUsage)
 	var cacheMiss bool
-	out := serveDecode(logger, s.gwClient.Transport(), reqCtx.ResponseWriter, proxyReq, coordmetrics.UpstreamConditionalDecode, func(resp *http.Response) error {
+	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamConditionalDecode, func(resp *http.Response) error {
 		switch {
 		case resp.StatusCode == http.StatusPreconditionFailed:
 			cacheMiss = true
@@ -88,6 +100,10 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		}
 		return nil
 	})
+
+	if err := finalize(); err != nil {
+		logger.Error(err, "flushing the rewritten usage block failed: client received a partial response")
+	}
 
 	if cacheMiss {
 		logger.V(logutil.DEFAULT).Info("cache miss (412), continuing pipeline")
@@ -116,7 +132,7 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext) (ma
 		// forwarded as-is.
 	case reqcommon.APITypeCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
-			body["prompt"] = reqCtx.TokenIDs
+			body[reqcommon.FieldPrompt] = reqCtx.TokenIDs
 		}
 	case reqcommon.APITypeVLLMGenerate:
 		// The client's generate body already carries token_ids.

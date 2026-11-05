@@ -396,7 +396,7 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 	}
 
 	// The client asked for a non-streaming reply, so no include_usage was injected.
-	writer, finalize := s.responseWriter(reqCtx, parity, false)
+	writer, finalize := parityResponseWriter(reqCtx, parity, false)
 	copyUpstreamHeaders(writer.Header(), upstreamHeader)
 	return writeForcedResponse(ctx, logger, reqCtx, writer, finalize, reassembler)
 }
@@ -553,7 +553,7 @@ func forceStreamBody(src map[string]any, shape sseShape) map[string]any {
 	// to keep. The Responses and Messages streams carry usage on their own events
 	// and take no stream_options.
 	if shape == sseShapeChat || shape == sseShapeText || shape == sseShapeGenerate {
-		body[reqcommon.FieldStreamOptions] = map[string]any{fieldIncludeUsage: true}
+		body[reqcommon.FieldStreamOptions] = map[string]any{reqcommon.FieldIncludeUsage: true}
 	}
 	return body
 }

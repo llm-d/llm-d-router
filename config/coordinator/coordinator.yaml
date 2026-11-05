@@ -425,6 +425,9 @@ pipeline:
     # decode as normal. Uncomment to enable.
     # -------------------------------------------------------------------
     # - type: conditional-decode
+    #   params:
+    #     prompt_token_parity: warn   # off | warn | error; a served cache hit is
+    #                                 # checked like a decode response (see decode)
 
     # -------------------------------------------------------------------
     # encode: fans out one POST per multimodal entry to the encoder pods,
@@ -505,7 +508,11 @@ pipeline:
       #
       #   prompt_token_parity compares the prompt token count the decode
       #   worker reports in its usage block with the number of token IDs the
-      #   render step produced, which is what prefill ran on. A difference
+      #   render step produced. It needs a render step ahead of it: without
+      #   rendered token IDs there is nothing to compare and the parameter
+      #   does nothing. The same
+      #   parameter exists on conditional-decode, whose served cache hits
+      #   are checked the same way. A difference
       #   means decode rendered a different prompt than prefill did: the
       #   worker ignored forwarded token IDs, or the render service and the
       #   worker disagree (tokenizer, chat template, processor version,
