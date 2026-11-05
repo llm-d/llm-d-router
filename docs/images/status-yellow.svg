@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 72 20" width="72" height="20" role="img" aria-label="Partial">
+  <rect x="0.75" y="0.75" width="70.5" height="18.5" rx="9.25" ry="9.25" fill="#fff8c5" stroke="#bf8700" stroke-width="1.2"/>
+  <circle cx="11.5" cy="10" r="3.5" fill="#bf8700"/>
+  <text x="20" y="13.8" font-family='Helvetica, Arial, "Liberation Sans", sans-serif' font-size="11" font-weight="700" fill="#7d4e00">Partial</text>
+</svg>
