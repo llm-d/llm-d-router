@@ -249,7 +249,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllminference-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. Ignored when `router.epp.autoscaling.enabled` is `true`. | `1` |
 | `router.epp.haMode` | `leader-elected` or `all-active`. Empty preserves automatic election for fixed replicas > 1, except when cross-replica sync is enabled. Explicit modes must agree with the leader-election flag and cannot be combined with priority routing or GKE preferred backends. | `""` |
 | `router.epp.crossReplica.enabled` | Configure the Alpha Redis syncer, select all-active mode, and allow experimental plugins. | `false` |
@@ -429,6 +429,7 @@ Configuration for the backend model servers that EPP routes traffic to. These se
 | `router.modelServers.protocol` | Protocol used by model servers. Options: `[http, grpc]`. | `http` |
 | `router.modelServers.targetPorts` | Port(s) EPP routes traffic to on the model servers. | `[{number: 8000}]` |
 | `router.modelServers.targetPortNumber` | Legacy fallback port number for GKE health check policies. | `8000` |
+| `router.modelServers.grpcServiceName` | Service name passed to `grpc.health.v1.Health/Check` in GKE `HealthCheckPolicy` when `type=vllm` and `protocol=grpc`. | `vllm.Inference` |
 
 #### Complete Model Server Example
 

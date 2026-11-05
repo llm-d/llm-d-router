@@ -18,10 +18,10 @@
     {{- $modelServerProtocol := $modelServers.protocol | default "http" }}
     {{- $modelServerType := $modelServers.type | default "vllm" }}
     {{- $parsers := list }}
-    {{- if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
-      {{- $parsers = append $parsers "vllmgrpc-parser" }}
-    {{- else if .Values.router.epp.parsers }}
+    {{- if .Values.router.epp.parsers }}
       {{- $parsers = .Values.router.epp.parsers }}
+    {{- else if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
+      {{- $parsers = list "vllminference-parser" "vllmgrpc-parser" "passthrough-parser" }}
     {{- else if eq (lower $modelServerType) "triton" }}
       {{- $parsers = append $parsers "passthrough-parser" }}
     {{- end }}
