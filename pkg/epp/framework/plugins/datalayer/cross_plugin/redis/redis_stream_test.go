@@ -451,6 +451,49 @@ func TestStreamReaderAcceptsWholeValuePeers(t *testing.T) {
 	require.ElementsMatch(t, [][]uint64{{1}}, full.peers(t), "a whole-value replica reads stream peers")
 }
 
+func TestStreamDropsExpiredWholeValuePeers(t *testing.T) {
+	server := miniredis.RunT(t)
+	a := newStreamReplica(t, server, "epp-a", true)
+	full := newStreamReplica(t, server, "epp-c", false)
+	a.append([]uint64{1})
+	full.append([]uint64{2})
+	full.publish(t)
+	a.publish(t)
+	require.ElementsMatch(t, [][]uint64{{2}}, a.peers(t))
+
+	require.NoError(t, a.syncer.client.HDel(context.Background(), a.hashKey(), full.syncer.replicaID).Err())
+	a.publish(t)
+	require.Empty(t, a.peers(t), "an expired whole-value peer must leave the aggregate")
+}
+
+func TestStreamRestoresMissingMarker(t *testing.T) {
+	server := miniredis.RunT(t)
+	a := newStreamReplica(t, server, "epp-a", true)
+	a.append([]uint64{1, 2})
+	a.publish(t)
+	require.NoError(t, a.syncer.client.HDel(context.Background(), a.hashKey(), markerField("epp-a")).Err())
+
+	a.publish(t)
+	exists, err := a.syncer.client.HExists(context.Background(), a.hashKey(), markerField("epp-a")).Result()
+	require.NoError(t, err)
+	require.True(t, exists, "an idle publish restores a deleted marker")
+}
+
+func TestStreamSkipsOversizedPrompt(t *testing.T) {
+	server := miniredis.RunT(t)
+	a := newStreamReplica(t, server, "epp-a", true)
+	huge := make([]uint64, maxStreamElementBytes/8+1)
+	a.window = &attrprefix.PrefixHashSet{Prompts: [][]uint64{huge}}
+	a.publish(t)
+	require.Zero(t, a.log.take("xadd"))
+	require.Equal(t, uint64(0), a.cursor(t).tip)
+
+	a.window = &attrprefix.PrefixHashSet{Base: 1, Prompts: [][]uint64{{7, 8}}}
+	a.publish(t)
+	require.Equal(t, 1, a.log.take("xadd"))
+	require.Equal(t, uint64(2), a.cursor(t).tip)
+}
+
 func TestStreamDeleteRemovesStreamAndMarker(t *testing.T) {
 	server := miniredis.RunT(t)
 	a := newStreamReplica(t, server, "epp-a", true)
