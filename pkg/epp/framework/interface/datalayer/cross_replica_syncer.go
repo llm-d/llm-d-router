@@ -70,6 +70,31 @@ type CrossReplicaBatchSyncer interface {
 	SetBatch(ctx context.Context, spec CrossReplicaSpec, endpointIDs []string, timeout time.Duration) map[string]error
 }
 
+// SequencedValue is an optional interface for a Read value made of elements at
+// consecutive generations, appended at the newest end and dropped from the
+// oldest end. A generation is not reused for different content while the
+// value's generations keep increasing. A syncer can replicate such a value by
+// sending only the elements it has not sent before. Methods do not modify the
+// receiver.
+type SequencedValue interface {
+	Cloneable
+	// SequenceBase is the generation of the oldest element.
+	SequenceBase() uint64
+	// SequenceTip is one past the generation of the newest element.
+	SequenceTip() uint64
+	// ElementSize is the encoded size in bytes of the element at gen.
+	ElementSize(gen uint64) int
+	// AppendElement appends the encoding of the element at gen to dst.
+	AppendElement(dst []byte, gen uint64) []byte
+	// Advance returns a value holding the receiver's elements at or above base
+	// followed by elems, the encoded elements starting at the larger of base and
+	// SequenceTip.
+	Advance(base uint64, elems [][]byte) (SequencedValue, error)
+	// NewSequence returns a value of the receiver's type holding elems, the
+	// encoded elements starting at generation base.
+	NewSequence(base uint64, elems [][]byte) (SequencedValue, error)
+}
+
 // CrossReplicaContributor is an opt-in interface for endpoint extractors that
 // want their installed attributes to reflect cross-replica aggregate state.
 // The plugin's Extract method is unchanged; the runtime detects this interface

@@ -43,6 +43,40 @@ func TestFactoryUsesIndependentStateAndCoordinationTTLs(t *testing.T) {
 	require.Equal(t, 3*time.Minute, syncer.coordinationTTL)
 }
 
+func TestFactoryWindowReplication(t *testing.T) {
+	server := miniredis.RunT(t)
+	for _, tc := range []struct {
+		name            string
+		params          string
+		wantErr         string
+		wantIncremental bool
+		wantRate        float64
+	}{
+		{name: "defaults", params: `{}`, wantRate: defaultMaxBytesPerSecond},
+		{name: "full", params: `{"windowReplication": "full"}`, wantRate: defaultMaxBytesPerSecond},
+		{name: "incremental", params: `{"windowReplication": "incremental", "maxBytesPerSecond": 1000}`, wantIncremental: true, wantRate: 1000},
+		{name: "unknown mode", params: `{"windowReplication": "delta"}`, wantErr: "must be one of full|incremental"},
+		{name: "negative rate", params: `{"maxBytesPerSecond": -1}`, wantErr: "maxBytesPerSecond must be positive"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := strings.Replace(tc.params, "{", fmt.Sprintf(`{"address": %q,`, server.Addr()), 1)
+			params = strings.Replace(params, ",}", "}", 1)
+			plugin, err := RedisSyncerFactory("redis", json.NewDecoder(strings.NewReader(params)), nil)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				require.Nil(t, plugin)
+				return
+			}
+			require.NoError(t, err)
+			syncer := plugin.(*RedisSyncer)
+			t.Cleanup(func() { require.NoError(t, syncer.client.Close()) })
+			require.Equal(t, tc.wantIncremental, syncer.incremental)
+			require.Equal(t, tc.wantRate, syncer.publishBudget.rate)
+			require.Equal(t, tc.wantRate, syncer.readBudget.rate)
+		})
+	}
+}
+
 func TestFactoryReadsPasswordFromEnvironment(t *testing.T) {
 	server := miniredis.RunT(t)
 	t.Setenv("TEST_REDIS_PASSWORD", "environment-secret")
