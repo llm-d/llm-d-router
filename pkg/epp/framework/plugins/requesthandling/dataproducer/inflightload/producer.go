@@ -76,7 +76,8 @@ type Config struct {
 	// PrefillCompletionFromKVEvents stamps each request with a session id the
 	// engines echo on their KV events and releases the request's prefill load
 	// when the engine that decodes the request has stored the prompt's last
-	// full block: the decode engine after pulling the blocks in disaggregated
+	// full block, or a block beyond the prompt when the stamp is the request's
+	// own: the decode engine after pulling the blocks in disaggregated
 	// serving, the computing engine otherwise. The producer must be bound to a
 	// kv-events-source covering those engines. The first response byte remains
 	// the fallback release.
@@ -465,9 +466,10 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	}
 
 	var stamp string
+	var ownStamp bool
 	var targets map[string]fwksched.Endpoint
 	if p.prefillFromKVEvents {
-		if stamp, _ = sessionStamp(request); stamp != "" {
+		if stamp, ownStamp, _ = sessionStamp(request); stamp != "" {
 			targets = make(map[string]fwksched.Endpoint, len(result.ProfileResults))
 		}
 	}
@@ -517,7 +519,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		tracked = true
 	}
 	if stamp != "" && tracked {
-		p.watchPrefill(ctx, request, result, stamp, targets)
+		p.watchPrefill(ctx, request, result, stamp, ownStamp, targets)
 	}
 
 	// ctx is the ext_proc stream context: it stays alive for the request's full
