@@ -23,7 +23,6 @@ package sglangwire
 import (
 	"encoding/binary"
 	"errors"
-	"math"
 
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -147,19 +146,18 @@ type Bootstrap struct {
 // so the prefill and decode legs share them. When b is nil, tail is empty.
 // head and tail come from one allocation.
 func LegEnvelope(payloadLen int, b *Bootstrap) (head, tail []byte, err error) {
-	const maxPayload = min(math.MaxUint32, math.MaxInt-grpcframe.HeaderLen)
 	tailLen := 0
 	if b != nil {
 		tailLen = bootstrapSize(b)
 	}
-	if payloadLen < 0 || payloadLen > maxPayload-tailLen {
+	if payloadLen < 0 || payloadLen > grpcframe.MaxPayloadLen-tailLen {
 		return nil, nil, errors.New("sglangwire: GenerateRequest too large for a gRPC frame")
 	}
 	buf := make([]byte, grpcframe.HeaderLen, grpcframe.HeaderLen+tailLen)
 	if b != nil {
 		buf = appendBootstrap(buf, b)
 	}
-	binary.BigEndian.PutUint32(buf[1:grpcframe.HeaderLen], uint32(payloadLen+tailLen)) //#nosec G115 -- guarded by maxPayload check above
+	binary.BigEndian.PutUint32(buf[1:grpcframe.HeaderLen], uint32(payloadLen+tailLen)) //#nosec G115 -- guarded by MaxPayloadLen check above
 	return buf[:grpcframe.HeaderLen:grpcframe.HeaderLen], buf[grpcframe.HeaderLen:], nil
 }
 

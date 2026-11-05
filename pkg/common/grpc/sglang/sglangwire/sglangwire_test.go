@@ -42,7 +42,9 @@ func testRequest() *sglangapiv1.GenerateRequest {
 		Rid:      &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "rid-1"}},
 		InputIds: &sglangapiv1.TokenIdsOrList{Value: &sglangapiv1.TokenIdsOrList_One{One: &sglangapiv1.TokenIds{Ids: []int64{1, 2, 300000}}}},
 		Stream:   proto.Bool(true),
-		// Client-supplied bootstrap fields must never reach a worker.
+		// Client-supplied bootstrap_host, bootstrap_port, and bootstrap_room
+		// must never reach a worker: the coordinator sets them. Other
+		// bootstrap_* fields, such as bootstrap_pair_key, pass through.
 		BootstrapHost:    optStr("spoofed"),
 		BootstrapPort:    optInt(1),
 		BootstrapRoom:    optInt(2),

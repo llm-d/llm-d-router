@@ -23,7 +23,9 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
@@ -407,4 +409,92 @@ func TestReadMessage(t *testing.T) {
 	got, err = ReadMessage(bytes.NewReader(frame), math.MaxInt64)
 	require.NoError(t, err)
 	require.Equal(t, frame, got)
+}
+
+// stallReader yields prefix and then blocks until the test ends, like a client
+// that sends a frame header and stops.
+type stallReader struct {
+	prefix []byte
+	done   <-chan struct{}
+}
+
+func (r *stallReader) Read(p []byte) (int, error) {
+	if len(r.prefix) > 0 {
+		n := copy(p, r.prefix)
+		r.prefix = r.prefix[n:]
+		return n, nil
+	}
+	<-r.done
+	return 0, io.ErrClosedPipe
+}
+
+// A 5-byte header that declares a large frame must not reserve the declared
+// size before the payload arrives: a stalled client would pin that memory
+// until the read timeout, once per HTTP/2 stream.
+func TestReadMessageDoesNotPreallocateDeclaredSize(t *testing.T) {
+	const declared = 64 << 20
+	header := []byte{0, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(header[1:], declared)
+
+	done := make(chan struct{})
+	defer close(done)
+	started := make(chan struct{})
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	go func() {
+		close(started)
+		_, _ = ReadMessage(&stallReader{prefix: header, done: done}, 2*declared)
+	}()
+	<-started
+	// Let the goroutine read the header and block on the payload.
+	require.Eventually(t, func() bool {
+		runtime.ReadMemStats(&after)
+		return true
+	}, time.Second, 10*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	runtime.ReadMemStats(&after)
+	grew := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	require.Less(t, grew, int64(readMessageInitialCap)*2, "stalled header must not reserve the declared %d bytes", declared)
+}
+
+// A frame larger than the initial capacity is read whole and ends at its exact size.
+func TestReadMessageGrowsToDeclaredSize(t *testing.T) {
+	payload := bytes.Repeat([]byte("p"), 3*readMessageInitialCap+17)
+	frame, err := FramePayload(payload)
+	require.NoError(t, err)
+	got, err := ReadMessage(bytes.NewReader(frame), int64(len(frame)))
+	require.NoError(t, err)
+	require.Equal(t, frame, got)
+	require.Equal(t, len(frame), cap(got), "last allocation is exact")
+
+	// Truncated after growing past the initial capacity.
+	_, err = ReadMessage(bytes.NewReader(frame[:2*readMessageInitialCap]), int64(len(frame)))
+	require.ErrorIs(t, err, ErrMalformed)
+}
+
+// A header followed by end of stream is a truncated frame, not a clean end.
+func TestReadFrameHeaderWithoutPayloadIsUnexpectedEOF(t *testing.T) {
+	header := []byte{0, 0, 0, 0, 7}
+	_, err := ReadFrame(bytes.NewReader(header), 64)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.NotErrorIs(t, err, io.EOF)
+
+	fr := NewReader(bytes.NewReader(header), 64)
+	defer fr.Release()
+	_, err = fr.Next()
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.NotErrorIs(t, err, io.EOF)
+
+	// A complete frame followed by a bare header: the frame is returned, then
+	// the truncation is reported.
+	frame, err := FramePayload([]byte("ok"))
+	require.NoError(t, err)
+	fr2 := NewReader(bytes.NewReader(append(frame, header...)), 64)
+	defer fr2.Release()
+	got, err := fr2.Next()
+	require.NoError(t, err)
+	require.Equal(t, frame, got)
+	_, err = fr2.Next()
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }

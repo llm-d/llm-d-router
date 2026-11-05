@@ -849,6 +849,55 @@ func TestSGLangGRPC_MissingGRPCStatusReturnsInternal(t *testing.T) {
 		}
 	})
 
+	t.Run("decode stream cut off after a frame header is not a clean end", func(t *testing.T) {
+		// The upstream sends one whole frame, then a 5-byte header that
+		// declares a second frame, then ends the stream with grpc-status 0.
+		// The truncated frame must surface as an error, not be dropped with
+		// the OK status forwarded.
+		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+			w.WriteHeader(http.StatusOK)
+			frameBytes, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+				Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{Text: "chunk-1"}},
+			})
+			if err != nil {
+				t.Errorf("MarshalProto: %v", err)
+				return
+			}
+			_, _ = w.Write(frameBytes)
+			_, _ = w.Write([]byte{0, 0, 0, 0, 9})
+			w.Header().Set(http.TrailerPrefix+grpcframe.HeaderStatus, grpcframe.StatusOK)
+		}))
+		gwClient := gateway.New(config.GatewayConfig{Address: gw.URL})
+		decodeStep, err := steps.NewDecodeStep(gwClient, map[string]any{"kv_connector": kv.SGLang})
+		if err != nil {
+			t.Fatalf("NewDecodeStep: %v", err)
+		}
+		addr := startCoordinatorH2C(t, config.ServerConfig{}, pipeline.New([]pipeline.Step{decodeStep}), gwClient)
+
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("grpc.NewClient: %v", err)
+		}
+		defer conn.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(ctx, &sglangapiv1.GenerateRequest{
+			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "truncated"}},
+		})
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		item, err := stream.Recv()
+		if err != nil || item.GetFrame().GetText() != "chunk-1" {
+			t.Fatalf("first Recv = (%v, %v), want chunk-1", item, err)
+		}
+		if _, recvErr := stream.Recv(); status.Code(recvErr) != codes.Unavailable {
+			t.Fatalf("Recv after truncated frame code = %v (%v), want Unavailable", status.Code(recvErr), recvErr)
+		}
+	})
+
 	t.Run("decode stream after frame without grpc-status trailer", func(t *testing.T) {
 		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
