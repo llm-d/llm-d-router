@@ -84,6 +84,11 @@ func (s *Scheduler) atPod(rec *reqRec, m *thread, engine string, now time.Time) 
 	rec.engine = engine
 	rec.pod = now
 	if m != nil && rec.thread == m.id {
+		// THE ACTIVITY STAMP (baseline, scheduler.go:1023): a request arriving at a pod is activity on
+		// its thread. Without it, a thread that dispatches but has not yet finished its turn can be
+		// read as silent and evicted for idleness between the stamp its Pick wrote and the one its
+		// settle writes — the gap the baseline's PreRequest stamp covered.
+		m.lastActivity = now
 		if live {
 			m.pending = max(m.pending-1, 0)
 		}

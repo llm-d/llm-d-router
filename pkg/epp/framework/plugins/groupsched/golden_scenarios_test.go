@@ -325,6 +325,35 @@ var goldenScenarios = []goldenScenario{
 		},
 	},
 	{
+		// A REQUEST ARRIVING AT A POD IS ACTIVITY (B5). The baseline stamped the thread at PreRequest;
+		// without that stamp, a thread whose record is dropped before its settle is measured silent
+		// from its PICK, not from its arrival at the pod — so it becomes idle-eligible early and a
+		// newcomer evicts it. Here T1 is dispatched, reaches its pod 15 s later and is abandoned; a
+		// newcomer arrives at t=25 s. With the stamp T1 is silent for 10 s (< S) and keeps its seat;
+		// without it, 25 s (> S) and the newcomer takes it by the idle rule.
+		name: "preRequestStampsActivity", blocks: 9, sizes: []int{1},
+		run: func(h *goldenHarness, n int) {
+			h.learn()
+			t1 := h.request(1, 300)
+			h.identify(t1, "T1", 1)
+			out := h.arrive(t1)
+			require.Len(h.t, out, 1)
+			h.advance(15 * time.Second)
+			h.toPod(out[0], "") // PreRequest at t=15: the stamp under test
+			h.advance(time.Second)
+			h.abandon(t1)              // the record goes; no settle, so no later stamp
+			h.advance(9 * time.Second) // t=25: 10 s since the pod, 25 s since the pick
+			newcomer := h.request(1, 300)
+			h.identify(newcomer, "T2", 1)
+			for _, d := range h.arrive(newcomer) {
+				h.toPod(d, "")
+				h.finish(d, 300, 0, 20)
+			}
+			h.saturate(true)
+			h.pickLoop()
+		},
+	},
+	{
 		// AN ENDPOINT NAME THAT FLAPS: deleted (a readiness flap) and re-added under the same name.
 		// The re-added endpoint must learn its capacity again and take a seat. Before B3 the second
 		// learn was skipped by the remembered mark: no group, no seats, and at N=1 the pool served
