@@ -2,7 +2,7 @@
 
 llm-d Router. Go service that routes inference requests to model-serving pods via an Endpoint Picker (EPP), with a sidecar that coordinates disaggregated inference. Multi-vendor open source under the llm-d project. Review bandwidth is a shared community resource, so scope work tightly and discuss substantive changes in the open before code lands.
 
-`make help` lists targets. `make presubmit` is the pre-merge gate. All targets run inside a builder container; host Go is not required.
+`make help` lists targets. `make presubmit` is the pre-merge gate. Build, lint, and test targets run inside a builder container; `make tidy`, `make upgrade-deps`, and the code generation targets call the host Go toolchain.
 
 ## Agent operating rules
 
@@ -15,6 +15,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 ## Working in the codebase
 
 - Add trace attributes and span names in `pkg/common/observability/semconv/registry/` and run `make update-telemetry` to generate `llm_d.go` and `spans.go`; do not edit generated files directly.
+- When a change alters a contract in [docs/review/](docs/review/index.md), moves a path in its routing table, or settles an open question there, update `docs/review/` and run `python3 hack/render_playbook.py` in the same PR (`make verify-review-playbook`). See [maintain_review_bundle.md](docs/review/playbooks/maintain_review_bundle.md).
 - State your interpretation before coding. When the task has multiple valid reads, ask; don't pick one silently. For clear failure signals (logs, failing tests, reproducer), act; the ask rule is about unclear requirements, not unclear bugs.
 - Define success as a checkable outcome: "add validation" becomes "write failing tests for invalid inputs, then make them pass". Where the issue is reproducible, the failing test IS the success criterion; write it first and let it gate the implementation.
 - Before changing or extending a component, read an analogous one in the repository. The closest existing implementation is the canonical pattern; follow its structure, naming, and tests rather than introducing new conventions.
@@ -28,6 +29,9 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 ## Code review
 
 - Check every constant the change adds: grep its value across the repository and report any that already exists under another name for the same contract, any that declares a shared contract's value locally rather than importing it, and any declared away from its only reader.
+- Execute a two-pass additive review per [review_a_pull_request.md](docs/review/playbooks/review_a_pull_request.md):
+  - **Pass 1 (Code and full-repo search first):** Inspect the diff, read modified files in full, and search the repository (`rg`/`grep` callers, sibling implementations, `pkg/common/`, `config/charts/`, tests, and docs) to catch logic bugs, edge cases, concurrency races, and contract mismatches directly from source code. Record all verified Pass-1 code findings before opening any Stage-1 rule file.
+  - **Pass 2 (Targeted non-code decisions - supplement only):** Route changed paths through [review_a_pull_request.md](docs/review/playbooks/review_a_pull_request.md) and load only the `0` to `2` matching rule files under `docs/review/rules/` (`0` rule files for test-only, doc-only, build, or CI diffs; never load `docs/review_playbook.md` or `docs/review/provenance.json`). Apply a rule only when its `When:` condition appears in the diff; Stage-1 rules are strictly additive to Pass 1, and matching `0` `When:` triggers must never drop, suppress, or downgrade verified Pass-1 code, concurrency, caller/callee, or test defects. Write natural code-focused review comments without citing internal `docs/review/` rule IDs.
 
 ## Pull requests
 
@@ -76,7 +80,8 @@ The codebase uses `go-logr` via controller-runtime. Verbosity constants are defi
 
 **Level conventions:**
 
-- `logger.Info(...)` for once-per-request operational signals.
+- `logger.Info(...)` for one-time startup or lifecycle signals.
+- `logger.V(logging.DEFAULT).Info(...)` for once-per-request operational signals.
 - `logger.V(logging.DEBUG).Info(...)` for per-item or per-loop signals that fire multiple times per request.
 - `logger.V(logging.TRACE).Info(...)` for detailed state transitions (cache operations, index updates).
 - `logger.Error(err, "msg", ...)` for recoverable errors that carry an underlying `error` value.

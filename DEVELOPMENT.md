@@ -984,7 +984,7 @@ If using coding agents, please ensure that the agent uses the PR template format
 The template contains a `release-notes` section which must be filled for any change that has
 user facing impact; a required check validates it on the PR.
 
-For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md)
+For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md), the compiled human [review playbook](docs/review_playbook.md), and the source review bundle in [docs/review/](docs/review/index.md).
 
 ### Presubmit
 
@@ -994,5 +994,4 @@ Before opening a PR, run:
 make presubmit
 ```
 
-This runs the same lint, vet, and test checks as the CI pipeline. Fixing failures locally
-saves a round-trip through GitHub Actions.
+This runs the same lint, vet, test, and review-playbook checks as the CI pipeline (`make verify-review-playbook` verifies `docs/review_playbook.md` against `docs/review/`). Fixing failures locally saves a round-trip through GitHub Actions.
