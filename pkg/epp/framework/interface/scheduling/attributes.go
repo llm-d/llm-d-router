@@ -96,6 +96,34 @@ func (r *InferenceRequest) PutAttribute(key fwkplugin.DataKey, value any) {
 	r.attributes.Store(key, value)
 }
 
+// DynamicRequestAttribute wraps a getter that GetAttribute resolves on every
+// read, mirroring the endpoint DynamicAttribute. A producer stores it when the
+// value lives in the producer's own store and can change after it is written,
+// for example session state that responses of other requests of the same
+// session update. GetAttribute resolves a pointer or a value. A nil getter or
+// nil result resolves as absent.
+//
+// Get runs on the reader's goroutine without framework locking, and several
+// readers can call it at once, so it must be safe for concurrent use. It can
+// run on the flow-control dispatch goroutine, so it must also be cheap and must
+// not block.
+type DynamicRequestAttribute struct {
+	Get func() any
+}
+
+// resolve returns the getter's current value, or nil and false when the getter
+// or its result is nil.
+func (d DynamicRequestAttribute) resolve() (any, bool) {
+	if d.Get == nil {
+		return nil, false
+	}
+	resolved := d.Get()
+	if resolved == nil {
+		return nil, false
+	}
+	return resolved, true
+}
+
 // GetAttribute returns the value stored at key, or nil and false if absent.
 // A read the request's scope rejects resolves as absent.
 // Prefer ReadRequestAttribute for type-safe access.
@@ -106,7 +134,22 @@ func (r *InferenceRequest) GetAttribute(key fwkplugin.DataKey) (any, bool) {
 	if r.attributes == nil {
 		return nil, false
 	}
-	return r.attributes.Load(key)
+	val, ok := r.attributes.Load(key)
+	if !ok {
+		return nil, false
+	}
+	// PutAttribute takes any, so a producer can store the wrapper by value as
+	// well as by pointer; both resolve.
+	switch dynamic := val.(type) {
+	case *DynamicRequestAttribute:
+		if dynamic == nil {
+			return nil, false
+		}
+		return dynamic.resolve()
+	case DynamicRequestAttribute:
+		return dynamic.resolve()
+	}
+	return val, true
 }
 
 // AttributeKeys returns the keys currently present in the request's attribute store.
