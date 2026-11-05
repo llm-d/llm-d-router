@@ -49,7 +49,26 @@ type blockHash = prefixhash.BlockHash
 type server struct {
 	ServerID
 	NumOfGPUBlocks int
+	// CapacityFromMetrics reports whether NumOfGPUBlocks was derived from the
+	// endpoint's metrics rather than from configuration or the default. The
+	// indexer lets a metrics-derived capacity replace any earlier capacity,
+	// but never lets a fallback capacity replace a metrics-derived one.
+	CapacityFromMetrics bool
+	// OffloadCapacityUnknown reports that the endpoint offloads KV cache to a
+	// tier whose capacity it does not report, so NumOfGPUBlocks covers the HBM
+	// tier only and undercounts the cache. The indexer warns when it sizes a
+	// pod's index from such a capacity.
+	OffloadCapacityUnknown bool
 }
+
+// Values of config.CapacityTier.
+const (
+	// capacityTierAll sizes the per-pod index to the largest KV cache tier the
+	// model server reports, including an offload tier.
+	capacityTierAll = "all"
+	// capacityTierHBM sizes the per-pod index to the GPU tier only.
+	capacityTierHBM = "hbm"
+)
 
 // ServerID is a unique identifier for a server, based on its NamespacedName.
 type ServerID k8stypes.NamespacedName
@@ -175,6 +194,13 @@ type config struct {
 	MaxPrefixTokensToMatch int `json:"maxPrefixTokensToMatch"`
 	// Max capacity size of the LRU indexer in number of entries per server (pod).
 	LRUCapacityPerServer int `json:"lruCapacityPerServer"`
+	// CapacityTier selects the KV cache tiers the auto-tuned per-pod capacity
+	// covers. "all" (the default) sizes the index to the largest tier the model
+	// server reports, which includes an offload tier such as SGLang's HiCache
+	// host pool or vLLM's CPU offload tier. "hbm" sizes it to the GPU tier
+	// only, for a producer that tracks the GPU cache next to another producer
+	// tracking the offload tier. Ignored when AutoTune is false.
+	CapacityTier string `json:"capacityTier,omitempty"`
 	// SyncCrossReplicaState controls whether recent per-prompt prefix hashes are
 	// published through a configured CrossReplicaSyncer. Unset defaults to true.
 	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
@@ -197,5 +223,6 @@ var defaultConfig = config{
 	MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 	MaxPrefixTokensToMatch: defaultMaxPrefixTokens,
 	LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	CapacityTier:           capacityTierAll,
 	MaxSyncedTokens:        defaultMaxSyncedTokens,
 }

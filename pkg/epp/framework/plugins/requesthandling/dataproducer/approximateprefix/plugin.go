@@ -194,6 +194,11 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	if config.MaxPrefixBlocksToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixBlocksToMatch must be >= 0 (current value: %d)", config.MaxPrefixBlocksToMatch)
 	}
+	switch config.CapacityTier {
+	case "", capacityTierAll, capacityTierHBM:
+	default:
+		return nil, fmt.Errorf("invalid configuration: CapacityTier must be %q or %q (current value: %q)", capacityTierAll, capacityTierHBM, config.CapacityTier)
+	}
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
 	}
@@ -684,22 +689,47 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 	return nil
 }
 
+// makeserver sizes the pod's prefix index. With AutoTune, the capacity is the
+// largest KV cache tier the endpoint reports, in router blocks: the HBM tier
+// from CacheNumBlocks and, unless CapacityTier is "hbm", the offload-extended
+// tier from KvCacheMaxTokenCapacity. An offload tier holds a copy of what the
+// HBM tier holds (SGLang HiCache, vLLM CPU offloading), so the tiers are
+// compared rather than added. Without metrics the configured capacity applies.
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
-	gpuBlocks := defaultLRUCapacityPerServer
-	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
-		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
-		// CacheNumBlocks counts engine blocks, but each LRU entry is one router
-		// block, which minBlockSizeTokens can make larger. Size the LRU to the
-		// engine's token capacity so it does not outlive the engine's cache.
-		if engineBlockSize := targetEndpoint.GetMetrics().CacheBlockSize; engineBlockSize > 0 {
-			gpuBlocks = max(1, gpuBlocks*engineBlockSize/p.GetBlockSize([]fwksched.Endpoint{targetEndpoint}))
+	capacity := defaultLRUCapacityPerServer
+	fromMetrics := false
+	offloadCapacityUnknown := false
+	if m := targetEndpoint.GetMetrics(); p.config.AutoTune && m != nil {
+		// Each LRU entry is one router block, which minBlockSizeTokens can make
+		// larger than the engine's block, so capacities convert through tokens
+		// and the index does not outlive the engine's cache.
+		routerBlockSize := p.GetBlockSize([]fwksched.Endpoint{targetEndpoint})
+		if m.CacheNumBlocks > 0 {
+			capacity = m.CacheNumBlocks
+			if engineBlockSize := m.CacheBlockSize; engineBlockSize > 0 {
+				capacity = max(1, capacity*engineBlockSize/routerBlockSize)
+			}
+			fromMetrics = true
 		}
-	} else if p.config.LRUCapacityPerServer > 0 {
-		gpuBlocks = p.config.LRUCapacityPerServer
+		if p.config.CapacityTier != capacityTierHBM {
+			if m.KvCacheMaxTokenCapacity > 0 {
+				if blocks := max(1, m.KvCacheMaxTokenCapacity/routerBlockSize); blocks > capacity || !fromMetrics {
+					capacity = blocks
+				}
+				fromMetrics = true
+			} else if m.KvCacheOffloadDetected && fromMetrics {
+				offloadCapacityUnknown = true
+			}
+		}
+	}
+	if !fromMetrics && p.config.LRUCapacityPerServer > 0 {
+		capacity = p.config.LRUCapacityPerServer
 	}
 	return server{
-		ServerID:       ServerID(targetEndpoint.GetMetadata().ID),
-		NumOfGPUBlocks: gpuBlocks,
+		ServerID:               ServerID(targetEndpoint.GetMetadata().ID),
+		NumOfGPUBlocks:         capacity,
+		CapacityFromMetrics:    fromMetrics,
+		OffloadCapacityUnknown: offloadCapacityUnknown,
 	}
 }
 
