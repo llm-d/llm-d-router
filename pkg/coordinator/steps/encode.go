@@ -81,7 +81,13 @@ func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 func (s *EncodeStep) Name() string { return EncodeStepName }
 
 func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.IsSGLangGRPC() || len(reqCtx.MultimodalEntries) == 0 {
+	switch g := reqCtx.GRPC.(type) {
+	case *pipeline.VLLMGRPCRequest:
+		return s.executeVLLMGRPC(ctx, reqCtx, g)
+	case *pipeline.SGLangGRPCRequest:
+		return nil
+	}
+	if len(reqCtx.MultimodalEntries) == 0 {
 		return nil
 	}
 

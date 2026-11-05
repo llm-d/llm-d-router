@@ -204,7 +204,7 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		// valid empty prompt array in the completions branch), so gate on the
 		// step having run rather than on len > 0. gRPC Generate skips render
 		// and leaves TokenIDs unset.
-		if executed["render"] && !reqCtx.IsSGLangGRPC() {
+		if executed["render"] && !reqCtx.IsGRPC() {
 			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
 		}
 		coordmetrics.RecordEncodeSubrequests(reqCtx.Route, reqCtx.EncodeFanout)

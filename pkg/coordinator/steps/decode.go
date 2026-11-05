@@ -28,6 +28,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -43,6 +44,7 @@ func init() {
 type DecodeStep struct {
 	gwClient          *gateway.Client
 	kv                kv.Connector
+	ec                ec.Connector
 	promptTokenParity string
 	forceStream       bool
 	budget            *forceStreamBudget
@@ -59,6 +61,10 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
+	ecConn, err := buildECConnector(params)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
 	parity, err := parsePromptTokenParity(params)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
@@ -67,7 +73,7 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	step := &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity, forceStream: forceStream}
+	step := &DecodeStep{gwClient: gwClient, kv: kvConn, ec: ecConn, promptTokenParity: parity, forceStream: forceStream}
 	if forceStream {
 		budget, err := parseForceStreamBudget(params)
 		if err != nil {
@@ -81,8 +87,11 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 func (s *DecodeStep) Name() string { return DecodeStepName }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.IsSGLangGRPC() {
-		return s.executeSGLangGRPC(ctx, reqCtx)
+	switch g := reqCtx.GRPC.(type) {
+	case *pipeline.SGLangGRPCRequest:
+		return s.executeSGLangGRPC(ctx, reqCtx, g)
+	case *pipeline.VLLMGRPCRequest:
+		return s.executeVLLMGRPC(ctx, reqCtx, g)
 	}
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 

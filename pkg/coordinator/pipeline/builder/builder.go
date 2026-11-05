@@ -36,6 +36,9 @@ import (
 // format (use_openai_format=false) sends token IDs that only the render step
 // produces, so it requires a render step in the pipeline.
 func validatePipeline(p config.PipelineConfig) error {
+	if err := config.ValidateWorkerProtocol(p.WorkerProtocol); err != nil {
+		return err
+	}
 	for i, s := range p.Steps {
 		if s.Type == asyncbroker.StepName && i > 0 {
 			return fmt.Errorf("the %q step must be the first pipeline step, found it at position %d", asyncbroker.StepName, i+1)

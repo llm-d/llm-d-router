@@ -32,6 +32,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -303,16 +304,10 @@ func TestClient_BaseURLAndTransport(t *testing.T) {
 // and keep JSON calls on HTTP/1.1 for upstreams that do not speak HTTP/2.
 func TestClient_PlaintextGRPCUsesH2CAndJSONStaysHTTP1(t *testing.T) {
 	protos := make(chan int, 2)
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		protos <- r.ProtoMajor
 		w.WriteHeader(http.StatusOK)
 	}))
-	protocols := new(http.Protocols)
-	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true)
-	srv.Config.Protocols = protocols
-	srv.Start()
-	t.Cleanup(srv.Close)
 
 	c := New(config.GatewayConfig{Address: srv.URL})
 
@@ -343,16 +338,11 @@ func TestClient_StreamGRPCSegmentedBody(t *testing.T) {
 		contentLength int64
 	}
 	gotCh := make(chan got, 1)
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		gotCh <- got{body: body, contentLength: r.ContentLength}
 		w.WriteHeader(http.StatusOK)
 	}))
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	srv.Config.Protocols = protocols
-	srv.Start()
-	t.Cleanup(srv.Close)
 
 	c := New(config.GatewayConfig{Address: srv.URL})
 	head, payload, tail := []byte{0, 0, 0, 0, 7}, []byte("payload"), []byte(nil)

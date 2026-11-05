@@ -29,6 +29,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -112,8 +113,15 @@ func TestServerRouteDispatch(t *testing.T) {
 		{http.MethodPost, "/sglang.api.v1.SglangService/Generate", served, "/sglang.api.v1.SglangService/Generate"},
 		{http.MethodPost, "/sglang.api.v1.SglangService/Generate/", served, "/sglang.api.v1.SglangService/Generate"},
 		{http.MethodPost, "/sglang.api.v1.SglangService%2FGenerate", served, "/sglang.api.v1.SglangService/Generate"},
+		{http.MethodPost, "/vllm.Inference/Generate", served, "/vllm.Inference/Generate"},
+		{http.MethodPost, "/vllm.Inference/Generate/", served, "/vllm.Inference/Generate"},
+		{http.MethodPost, "/vllm.Inference%2FGenerate", served, "/vllm.Inference/Generate"},
+		{http.MethodPost, "/vllm.Inference/GenerateStream", served, "/vllm.Inference/GenerateStream"},
+		{http.MethodPost, "/vllm.Inference/GenerateStream/", served, "/vllm.Inference/GenerateStream"},
+		{http.MethodPost, "/vllm.Inference%2FGenerateStream", served, "/vllm.Inference/GenerateStream"},
 
 		{http.MethodPost, "/sglang.api.v1.SglangService/HealthCheck", passthrough, "/sglang.api.v1.SglangService/HealthCheck"},
+		{http.MethodPost, "/vllm.Control/GetServerInfo", passthrough, "/vllm.Control/GetServerInfo"},
 		{http.MethodPut, "/generate", passthrough, "/generate"},
 		{http.MethodPost, "/generate", passthrough, "/generate"},
 		{http.MethodPost, "/generate/", passthrough, "/generate/"},
@@ -164,7 +172,7 @@ func TestServerRouteDispatch(t *testing.T) {
 				t.Fatalf("New: %v", err)
 			}
 			var reqBody io.Reader = strings.NewReader(`{"model":"m"}`)
-			if strings.Contains(tt.path, "SglangService") {
+			if strings.Contains(tt.path, "SglangService") || strings.Contains(tt.path, "vllm.") {
 				reqBody = bytes.NewReader(make([]byte, grpcframe.HeaderLen))
 			}
 			req := httptest.NewRequest(tt.method, tt.path, reqBody)
@@ -206,6 +214,8 @@ func TestServerRouteMethodNotAllowed(t *testing.T) {
 		{http.MethodGet, "/v1/responses", http.MethodPost},
 		{http.MethodHead, "/v1/messages", http.MethodPost},
 		{http.MethodGet, "/sglang.api.v1.SglangService/Generate", http.MethodPost},
+		{http.MethodGet, "/vllm.Inference/Generate", http.MethodPost},
+		{http.MethodGet, "/vllm.Inference/GenerateStream", http.MethodPost},
 		{http.MethodPost, "/healthz", http.MethodGet},
 		{http.MethodHead, "/readyz", http.MethodGet},
 		{"PROPFIND", "/v1/files", ""},
@@ -241,6 +251,8 @@ func TestCanonicalizeInferencePath(t *testing.T) {
 	routes := chi.NewRouter()
 	routes.Post("/v1/responses", func(http.ResponseWriter, *http.Request) {})
 	routes.Post(sglangapiv1.SglangService_Generate_FullMethodName, func(http.ResponseWriter, *http.Request) {})
+	routes.Post(vllmpb.Inference_Generate_FullMethodName, func(http.ResponseWriter, *http.Request) {})
+	routes.Post(vllmpb.Inference_GenerateStream_FullMethodName, func(http.ResponseWriter, *http.Request) {})
 	routes.Post("/v1/requests/{id}/cancel", func(http.ResponseWriter, *http.Request) {})
 	tests := []struct {
 		name        string
@@ -254,6 +266,9 @@ func TestCanonicalizeInferencePath(t *testing.T) {
 		{name: "exact path", method: http.MethodPost, target: "/v1/responses", wantPath: "/v1/responses"},
 		{name: "sglang grpc generate trailing slash", method: http.MethodPost, target: "/sglang.api.v1.SglangService/Generate/", wantPath: "/sglang.api.v1.SglangService/Generate"},
 		{name: "sglang grpc healthcheck unserved", method: http.MethodPost, target: "/sglang.api.v1.SglangService/HealthCheck/", wantPath: "/sglang.api.v1.SglangService/HealthCheck/"},
+		{name: "vllm grpc generate trailing slash", method: http.MethodPost, target: "/vllm.Inference/Generate/", wantPath: "/vllm.Inference/Generate"},
+		{name: "vllm grpc generate stream trailing slash", method: http.MethodPost, target: "/vllm.Inference/GenerateStream/", wantPath: "/vllm.Inference/GenerateStream"},
+		{name: "vllm grpc control unserved", method: http.MethodPost, target: "/vllm.Control/GetServerInfo/", wantPath: "/vllm.Control/GetServerInfo/"},
 		{name: "other method", method: http.MethodGet, target: "/v1/responses/", wantPath: "/v1/responses/"},
 		{name: "unserved path", method: http.MethodPost, target: "/generate/", wantPath: "/generate/"},
 		{name: "step route", method: http.MethodPost, target: "/v1/requests/abc/cancel/", wantPath: "/v1/requests/abc/cancel/"},
