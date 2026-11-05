@@ -174,7 +174,7 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 		// Streaming chunks often leave this empty until the final chunk.
 		promptToken, completionToken, cachedToken := int(v.Chunk.PromptTokens), int(v.Chunk.CompletionTokens), int(v.Chunk.CachedTokens)
 		if promptToken > 0 || completionToken > 0 {
-			result.Usage = requestControlUsage(promptToken, completionToken, cachedToken)
+			result.Usage = parsers.NewUsage(promptToken, completionToken, cachedToken)
 		}
 
 	case *pb.GenerateResponse_Complete:
@@ -182,7 +182,7 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 		// Populate Usage for complete, non-streaming responses.
 		promptToken, completionToken, cachedToken := int(v.Complete.PromptTokens), int(v.Complete.CompletionTokens), int(v.Complete.CachedTokens)
 		if promptToken > 0 || completionToken > 0 {
-			result.Usage = requestControlUsage(promptToken, completionToken, cachedToken)
+			result.Usage = parsers.NewUsage(promptToken, completionToken, cachedToken)
 		}
 
 	default:
@@ -190,17 +190,6 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 	}
 
 	return result, nil
-}
-
-func requestControlUsage(promptToken, completionToken, cachedToken int) *fwkrequest.Usage {
-	return &fwkrequest.Usage{
-		PromptTokens:     promptToken,
-		CompletionTokens: completionToken,
-		TotalTokens:      promptToken + completionToken,
-		PromptTokenDetails: &fwkrequest.PromptTokenDetails{
-			CachedTokens: cachedToken,
-		},
-	}
 }
 
 func toGenerateResponse(payload []byte, resp *pb.GenerateResponse) error {

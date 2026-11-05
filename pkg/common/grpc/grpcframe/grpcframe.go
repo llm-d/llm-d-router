@@ -378,13 +378,29 @@ func ParsePayloads(data []byte) ([][]byte, error) {
 	return payloads, nil
 }
 
+// PutHeader writes an uncompressed 5-byte gRPC frame header for a payload of
+// payloadLen bytes into dst[:HeaderLen].
+func PutHeader(dst []byte, payloadLen int) error {
+	if len(dst) < HeaderLen {
+		return fmt.Errorf("gRPC header buffer length %d is less than %d", len(dst), HeaderLen)
+	}
+	if payloadLen < 0 || payloadLen > MaxPayloadLen {
+		return fmt.Errorf("gRPC payload length %d exceeds maximum %d", payloadLen, MaxPayloadLen)
+	}
+	dst[0] = 0
+	binary.BigEndian.PutUint32(dst[1:HeaderLen], uint32(payloadLen)) //#nosec G115 -- guarded by [0, MaxPayloadLen] check above
+	return nil
+}
+
 // FramePayload wraps payload in an uncompressed 5-byte gRPC frame.
 func FramePayload(payload []byte) ([]byte, error) {
 	if len(payload) > MaxPayloadLen {
 		return nil, fmt.Errorf("gRPC payload length %d exceeds maximum %d", len(payload), MaxPayloadLen)
 	}
 	framed := make([]byte, HeaderLen+len(payload))
-	binary.BigEndian.PutUint32(framed[1:HeaderLen], uint32(len(payload))) //#nosec G115 -- guarded by MaxPayloadLen check above
+	if err := PutHeader(framed, len(payload)); err != nil {
+		return nil, err
+	}
 	copy(framed[HeaderLen:], payload)
 	return framed, nil
 }
@@ -404,6 +420,8 @@ func MarshalProto(msg proto.Message) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	binary.BigEndian.PutUint32(framed[1:HeaderLen], uint32(len(framed)-HeaderLen)) //#nosec G115 -- guarded by MaxPayloadLen check above
+	if err := PutHeader(framed, len(framed)-HeaderLen); err != nil {
+		return nil, err
+	}
 	return framed, nil
 }

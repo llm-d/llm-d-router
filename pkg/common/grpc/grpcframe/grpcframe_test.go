@@ -167,6 +167,18 @@ func TestMarshalProtoRoundTrip(t *testing.T) {
 	require.True(t, proto.Equal(req, &decoded))
 }
 
+func TestPutHeader(t *testing.T) {
+	buf := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 'a', 'b', 'c'}
+	require.NoError(t, PutHeader(buf, 3))
+	require.Equal(t, []byte{0, 0, 0, 0, 3, 'a', 'b', 'c'}, buf)
+
+	require.ErrorContains(t, PutHeader(make([]byte, HeaderLen-1), 0), "less than 5")
+	require.ErrorContains(t, PutHeader(buf, -1), "exceeds maximum")
+	if int64(MaxPayloadLen) < math.MaxInt {
+		require.ErrorContains(t, PutHeader(buf, MaxPayloadLen+1), "exceeds maximum")
+	}
+}
+
 func TestIsContentType(t *testing.T) {
 	tests := []struct {
 		contentType string

@@ -31,6 +31,19 @@ const (
 	MethodPathKey = ":path"
 )
 
+// NewUsage builds a Usage struct from prompt, completion, and cached prompt
+// token counts.
+func NewUsage(promptTokens, completionTokens, cachedTokens int) *fwkrequest.Usage {
+	return &fwkrequest.Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+		PromptTokenDetails: &fwkrequest.PromptTokenDetails{
+			CachedTokens: cachedTokens,
+		},
+	}
+}
+
 // ComposeSGLangCacheSalt combines SGLang's extra_key and cache_salt into the
 // canonical cache_salt string used for prefix-cache indexing. SGLang partitions
 // its cache on (extra_key, cache_salt) while publishing only cache_salt in KV

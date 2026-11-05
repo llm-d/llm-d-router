@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
@@ -583,6 +584,11 @@ func TestFullDuplexStreamed_SGLangGRPC(t *testing.T) {
 			),
 			fwkepp.NewResponseStreamChunk(string(combinedResp[:splitIdx]), false),
 			fwkepp.NewResponseStreamChunk(string(combinedResp[splitIdx:]), false),
+			&extProcPb.ProcessingResponse{
+				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
+					ResponseTrailers: &extProcPb.TrailersResponse{},
+				},
+			},
 		)
 
 		responses, err := fwkepp.StreamedRequest(t, h.Client, reqs, len(wantResponses))
@@ -600,6 +606,15 @@ func TestFullDuplexStreamed_SGLangGRPC(t *testing.T) {
 		h.ExpectMetrics(map[string]string{
 			"llm_d_epp_request_total": CleanMetric(MetricReqTotal("", "", 4)),
 		})
+		for name, wantSum := range map[string]float64{
+			"llm_d_epp_request_input_tokens":  3,
+			"llm_d_epp_request_output_tokens": 5,
+			"llm_d_epp_request_cached_tokens": 2,
+		} {
+			count, sum := gatheredHistogramCountAndSum(t, name)
+			require.Equal(t, uint64(1), count, name)
+			require.Equal(t, wantSum, sum, name)
+		}
 	})
 
 	t.Run("control RPC falls back to passthrough-parser", func(t *testing.T) {
@@ -644,4 +659,24 @@ func TestFullDuplexStreamed_SGLangGRPC(t *testing.T) {
 			t.Fatalf("Response mismatch (-want +got): %v", diff)
 		}
 	})
+}
+
+func gatheredHistogramCountAndSum(t *testing.T, name string) (uint64, float64) {
+	t.Helper()
+	families, err := crmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var count uint64
+	var sum float64
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			if h := m.GetHistogram(); h != nil {
+				count += h.GetSampleCount()
+				sum += h.GetSampleSum()
+			}
+		}
+	}
+	return count, sum
 }

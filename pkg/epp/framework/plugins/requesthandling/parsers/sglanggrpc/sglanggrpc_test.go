@@ -151,6 +151,36 @@ func TestSGLangGRPCParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "video modality inferred when image_data is an empty many list",
+			path: sglangapiv1.SglangService_Generate_FullMethodName,
+			req: &sglangapiv1.GenerateRequest{
+				Text: &sglangapiv1.StringOrList{
+					Value: &sglangapiv1.StringOrList_One{One: "describe video"},
+				},
+				ImageData: &sglangapiv1.MediaInput{
+					Value: &sglangapiv1.MediaInput_Many{Many: &sglangapiv1.MediaItems{}},
+				},
+				VideoData: &sglangapiv1.MediaInput{
+					Value: &sglangapiv1.MediaInput_Item{
+						Item: &sglangapiv1.MediaItem{Value: &sglangapiv1.MediaItem_Source{Source: "https://example.com/v.mp4"}},
+					},
+				},
+				MmHashes: &sglangapiv1.StringListOrList{
+					Value: &sglangapiv1.StringListOrList_One{
+						One: &sglangapiv1.StringList{Items: []string{"vid-hash-1"}},
+					},
+				},
+			},
+			wantGenerate: &fwkrequest.GenerateRequest{
+				Text: "describe video",
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{
+						string(reqcommon.ModalityVideo): {"vid-hash-1"},
+					},
+				},
+			},
+		},
+		{
 			name:            "rejects unsupported path",
 			path:            sglangapiv1.SglangService_HealthCheck_FullMethodName,
 			req:             &sglangapiv1.GenerateRequest{},
@@ -262,6 +292,39 @@ func TestSGLangGRPCParser_ParseRequest(t *testing.T) {
 			},
 			wantErrContains: "extra_key must be a single string",
 		},
+		{
+			name: "rejects batched image_data",
+			path: sglangapiv1.SglangService_Generate_FullMethodName,
+			req: &sglangapiv1.GenerateRequest{
+				Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "hi"}},
+				ImageData: &sglangapiv1.MediaInput{
+					Value: &sglangapiv1.MediaInput_Nested{Nested: &sglangapiv1.MediaItemsList{}},
+				},
+			},
+			wantErrContains: "batched image_data is not supported",
+		},
+		{
+			name: "rejects batched video_data",
+			path: sglangapiv1.SglangService_Generate_FullMethodName,
+			req: &sglangapiv1.GenerateRequest{
+				Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "hi"}},
+				VideoData: &sglangapiv1.MediaInput{
+					Value: &sglangapiv1.MediaInput_Nested{Nested: &sglangapiv1.MediaItemsList{}},
+				},
+			},
+			wantErrContains: "batched video_data is not supported",
+		},
+		{
+			name: "rejects batched audio_data",
+			path: sglangapiv1.SglangService_Generate_FullMethodName,
+			req: &sglangapiv1.GenerateRequest{
+				Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "hi"}},
+				AudioData: &sglangapiv1.MediaInput{
+					Value: &sglangapiv1.MediaInput_Nested{Nested: &sglangapiv1.MediaItemsList{}},
+				},
+			},
+			wantErrContains: "batched audio_data is not supported",
+		},
 	}
 
 	parser := NewSGLangGRPCParser()
@@ -355,7 +418,22 @@ func TestSGLangGRPCParser_RewritePriority(t *testing.T) {
 	require.Equal(t, 2.0, testing.AllocsPerRun(100, func() {
 		_, _, _ = parser.RewritePriority(fwkrh.PriorityRewriteContext{}, rawIn, 5)
 	}))
-	require.Equal(t, 1, bytes.Count(rawPayload, protowire.AppendTag(nil, reqPriority, protowire.VarintType)))
+	prioFieldNum := (&sglangapiv1.GenerateRequest{}).ProtoReflect().Descriptor().Fields().ByName("priority").Number()
+	require.Equal(t, 1, bytes.Count(rawPayload, protowire.AppendTag(nil, prioFieldNum, protowire.VarintType)))
+}
+
+func TestParseResponseTokenFrameDoesNotDecode(t *testing.T) {
+	ids := make([]int64, 256)
+	framed, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{
+		Text: " hello", OutputIds: &sglangapiv1.TokenIds{Ids: ids},
+		MetaInfo: &sglangapiv1.GenerateMetaInfo{PromptTokens: 8192, CompletionTokens: 256},
+	}}})
+	require.NoError(t, err)
+	parser := NewSGLangGRPCParser()
+	// One allocation: the ParsedResponse itself.
+	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() {
+		_, _ = parser.ParseResponse(context.Background(), framed, nil, false)
+	}))
 }
 
 func TestSGLangGRPCParser_ParseResponse(t *testing.T) {

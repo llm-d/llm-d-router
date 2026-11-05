@@ -31,6 +31,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/sglangwire"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -107,7 +108,7 @@ func (p *SGLangGRPCParser) ParseRequest(ctx context.Context, body []byte, header
 		return nil, fmt.Errorf("invalid gRPC generate request: %w", err)
 	}
 
-	scan, err := scanGenerateRequest(payload)
+	scan, err := sglangwire.ScanRequestFields(payload)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshaling GenerateRequest: %w", err)
 	}
@@ -122,13 +123,13 @@ func (p *SGLangGRPCParser) ParseRequest(ctx context.Context, body []byte, header
 	return &fwkrh.ParseResult{Body: extracted, SkipResponseProcessing: false}, nil
 }
 
-func convertGenerateRequest(scan *generateRequestScan) (*fwkrequest.InferenceRequestBody, error) {
+func convertGenerateRequest(scan *sglangwire.RequestFields) (*fwkrequest.InferenceRequestBody, error) {
 	if err := rejectBatchFields(scan); err != nil {
 		return nil, err
 	}
 
-	hasInputIDs := scan.inputIDs.present
-	hasText := scan.text.present
+	hasInputIDs := scan.InputIDs.Present
+	hasText := scan.Text.Present
 	if !hasInputIDs && !hasText {
 		return nil, errors.New("invalid generate request: input_ids or text must be provided")
 	}
@@ -136,7 +137,7 @@ func convertGenerateRequest(scan *generateRequestScan) (*fwkrequest.InferenceReq
 	var tokenIDs []uint32
 	var text string
 	if hasInputIDs {
-		ids, err := scanTokenIDs(scan.inputIDs.one)
+		ids, err := sglangwire.ScanTokenIDs(scan.InputIDs.One)
 		if err != nil {
 			return nil, fmt.Errorf("invalid generate request: %w", err)
 		}
@@ -145,20 +146,20 @@ func convertGenerateRequest(scan *generateRequestScan) (*fwkrequest.InferenceReq
 		}
 		tokenIDs = ids
 	} else {
-		text = string(scan.text.one)
+		text = string(scan.Text.One)
 		if text == "" {
 			return nil, errors.New("invalid generate request: text cannot be empty")
 		}
 	}
 
-	cacheSalt, err := parsers.ComposeSGLangCacheSalt(string(scan.extraKey.one), string(scan.cacheSalt.one))
+	cacheSalt, err := parsers.ComposeSGLangCacheSalt(string(scan.ExtraKey.One), string(scan.CacheSalt.One))
 	if err != nil {
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
 	var maxTokens *int64
-	if scan.samplingParams.present {
-		v, ok, err := scanMaxNewTokens(scan.samplingParams.one)
+	if scan.SamplingParams.Present {
+		v, ok, err := sglangwire.ScanMaxNewTokens(scan.SamplingParams.One)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshaling GenerateRequest: %w", err)
 		}
@@ -180,46 +181,55 @@ func convertGenerateRequest(scan *generateRequestScan) (*fwkrequest.InferenceReq
 			Features:  features,
 		},
 		MaxOutputTokens: maxTokens,
-		Stream:          scan.stream,
+		Stream:          scan.Stream,
 	}, nil
 }
 
-func rejectBatchFields(scan *generateRequestScan) error {
+func rejectBatchFields(scan *sglangwire.RequestFields) error {
 	switch {
-	case scan.rid.many:
+	case scan.Rid.Many:
 		return errors.New("unsupported generate request: batched rid is not supported")
-	case scan.inputIDs.many:
+	case scan.InputIDs.Many:
 		return errors.New("unsupported generate request: batched input_ids is not supported")
-	case scan.text.many:
+	case scan.Text.Many:
 		return errors.New("unsupported generate request: batched text is not supported")
-	case scan.cacheSalt.many:
+	case scan.CacheSalt.Many:
 		return errors.New("unsupported generate request: cache_salt must be a single string")
-	case scan.extraKey.many:
+	case scan.ExtraKey.Many:
 		return errors.New("unsupported generate request: extra_key must be a single string")
-	case scan.samplingParams.many:
+	case scan.SamplingParams.Many:
 		return errors.New("unsupported generate request: batched sampling_params is not supported")
-	case scan.mmHashes.many:
+	case scan.MMHashes.Many:
 		return errors.New("unsupported generate request: batched mm_hashes is not supported")
+	case scan.ImageData.Nested:
+		return errors.New("unsupported generate request: batched image_data is not supported")
+	case scan.VideoData.Nested:
+		return errors.New("unsupported generate request: batched video_data is not supported")
+	case scan.AudioData.Nested:
+		return errors.New("unsupported generate request: batched audio_data is not supported")
 	}
 	return nil
 }
 
-func extractMMFeatures(scan *generateRequestScan) (*tokenization.MultiModalFeatures, error) {
-	if !scan.mmHashes.present {
+func extractMMFeatures(scan *sglangwire.RequestFields) (*tokenization.MultiModalFeatures, error) {
+	if !scan.MMHashes.Present {
 		return nil, nil //nolint:nilnil
 	}
-	hashes, err := scanStringList(scan.mmHashes.one)
+	hashes, err := sglangwire.ScanStringList(scan.MMHashes.One)
 	if err != nil {
 		return nil, err
 	}
 	if len(hashes) == 0 {
 		return nil, nil //nolint:nilnil
 	}
+	hasImage := scan.ImageData.Present
+	hasVideo := scan.VideoData.Present
+	hasAudio := scan.AudioData.Present
 	modality := reqcommon.ModalityImage
 	switch {
-	case scan.hasVideo && !scan.hasImage && !scan.hasAudio:
+	case hasVideo && !hasImage && !hasAudio:
 		modality = reqcommon.ModalityVideo
-	case scan.hasAudio && !scan.hasImage && !scan.hasVideo:
+	case hasAudio && !hasImage && !hasVideo:
 		modality = reqcommon.ModalityAudio
 	}
 	return &tokenization.MultiModalFeatures{
@@ -239,7 +249,7 @@ func (p *SGLangGRPCParser) RewritePriority(_ fwkrh.PriorityRewriteContext, paylo
 	if err != nil {
 		return nil, false, fmt.Errorf("invalid gRPC generate request: %w", err)
 	}
-	framed, err := framePriority(body, int64(priority))
+	framed, err := sglangwire.FramePriority(body, int64(priority))
 	if err != nil {
 		return nil, false, fmt.Errorf("rewriting priority: %w", err)
 	}
@@ -252,7 +262,7 @@ func (p *SGLangGRPCParser) RewritePriority(_ fwkrh.PriorityRewriteContext, paylo
 //
 // A request with sampling_params.n > 1 ends with one terminal frame per
 // index. The usage reported here is that of the last terminal frame in the
-// chunk; the handler merges chunks with last-wins semantics, so output tokens
+// chunk. The handler merges chunks with last-wins semantics, so output tokens
 // of the other indexes are not counted.
 func (p *SGLangGRPCParser) ParseResponse(_ context.Context, body []byte, _ map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {
 	if len(body) == 0 {
@@ -269,7 +279,7 @@ func (p *SGLangGRPCParser) ParseResponse(_ context.Context, body []byte, _ map[s
 		}
 		body = body[grpcframe.HeaderLen+len(payload):]
 
-		item, err := scanStreamItem(payload)
+		item, err := sglangwire.ScanStreamItem(payload)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("unmarshaling GenerateStreamItem: %w", err))
 			continue
@@ -277,24 +287,17 @@ func (p *SGLangGRPCParser) ParseResponse(_ context.Context, body []byte, _ map[s
 		if result == nil {
 			result = &fwkrh.ParsedResponse{}
 		}
-		if !item.hasFrame {
+		if !item.HasFrame {
 			continue
 		}
 		result.StreamedEvents++
-		if !item.finished {
+		if !item.Finished {
 			continue
 		}
-		promptTokens := clampUint64ToInt(uint64(item.promptTokens))
-		completionTokens := clampUint64ToInt(item.completionTokens)
+		promptTokens := clampUint64ToInt(uint64(item.PromptTokens))
+		completionTokens := clampUint64ToInt(item.CompletionTokens)
 		if promptTokens > 0 || completionTokens > 0 {
-			result.Usage = &fwkrequest.Usage{
-				PromptTokens:     promptTokens,
-				CompletionTokens: completionTokens,
-				TotalTokens:      promptTokens + completionTokens,
-				PromptTokenDetails: &fwkrequest.PromptTokenDetails{
-					CachedTokens: clampUint64ToInt(uint64(item.cachedTokens)),
-				},
-			}
+			result.Usage = parsers.NewUsage(promptTokens, completionTokens, clampUint64ToInt(uint64(item.CachedTokens)))
 		}
 	}
 	return result, errors.Join(errs...)

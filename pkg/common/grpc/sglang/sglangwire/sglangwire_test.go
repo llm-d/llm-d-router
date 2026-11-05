@@ -18,10 +18,13 @@ package sglangwire
 
 import (
 	"bytes"
+	"math"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 
@@ -175,6 +178,280 @@ func TestLegEnvelopeMatchesProto(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestScanTokenIDsMatchesProto(t *testing.T) {
+	ids := make([]int64, 1000)
+	for i := range ids {
+		ids[i] = int64(i * 131)
+	}
+	ids[999] = math.MaxUint32
+	packed := mustMarshal(t, &sglangapiv1.TokenIds{Ids: ids})
+
+	got, err := ScanTokenIDs(packed)
+	require.NoError(t, err)
+	require.Len(t, got, len(ids))
+	for i, id := range ids {
+		require.Equal(t, uint32(id), got[i])
+	}
+	require.Equal(t, len(got), cap(got), "one exact-size allocation")
+	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() { _, _ = ScanTokenIDs(packed) }))
+
+	// Unpacked encoding (one varint field per element) is valid proto3 input.
+	var unpacked []byte
+	for _, id := range ids[:5] {
+		unpacked = protowire.AppendTag(unpacked, tokenIDsIDs, protowire.VarintType)
+		unpacked = protowire.AppendVarint(unpacked, uint64(id))
+	}
+	got, err = ScanTokenIDs(unpacked)
+	require.NoError(t, err)
+	require.Equal(t, []uint32{0, 131, 262, 393, 524}, got)
+
+	_, err = ScanTokenIDs(mustMarshal(t, &sglangapiv1.TokenIds{Ids: []int64{1, -1}}))
+	require.ErrorContains(t, err, "input_ids[1] out of uint32 range: -1")
+	_, err = ScanTokenIDs(mustMarshal(t, &sglangapiv1.TokenIds{Ids: []int64{math.MaxUint32 + 1}}))
+	require.ErrorContains(t, err, "input_ids[0] out of uint32 range")
+
+	_, err = ScanTokenIDs([]byte{0x0a, 0x05, 0x80})
+	require.ErrorIs(t, err, ErrMalformed)
+}
+
+func TestScanRequestFieldsAliasesPayload(t *testing.T) {
+	req := &sglangapiv1.GenerateRequest{
+		Text:      &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "hello"}},
+		CacheSalt: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "salt"}},
+		ImageData: &sglangapiv1.MediaInput{Value: &sglangapiv1.MediaInput_Item{Item: &sglangapiv1.MediaItem{
+			Value: &sglangapiv1.MediaItem_Source{Source: string(bytes.Repeat([]byte("x"), 1<<16))},
+		}}},
+		Stream: proto.Bool(true),
+	}
+	payload := mustMarshal(t, req)
+	scan, err := ScanRequestFields(payload)
+	require.NoError(t, err)
+	require.True(t, scan.Text.Present)
+	require.Equal(t, "hello", string(scan.Text.One))
+	require.Equal(t, "salt", string(scan.CacheSalt.One))
+	require.Equal(t, MediaScan{Present: true}, scan.ImageData)
+	require.Equal(t, MediaScan{}, scan.VideoData)
+	require.True(t, scan.Stream)
+	require.False(t, scan.InputIDs.Present)
+
+	// The media bytes are not copied: the scan allocates nothing.
+	require.Zero(t, testing.AllocsPerRun(100, func() { _, _ = ScanRequestFields(payload) }))
+
+	// An empty text.one is present but empty, matching GetValue() != nil.
+	payload = mustMarshal(t, &sglangapiv1.GenerateRequest{Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: ""}}})
+	scan, err = ScanRequestFields(payload)
+	require.NoError(t, err)
+	require.True(t, scan.Text.Present)
+	require.Empty(t, scan.Text.One)
+
+	_, err = ScanRequestFields([]byte{0x12, 0x05, 'a'})
+	require.ErrorIs(t, err, ErrMalformed)
+}
+
+func protoMediaScan(m *sglangapiv1.MediaInput) MediaScan {
+	if m == nil {
+		return MediaScan{}
+	}
+	switch v := m.GetValue().(type) {
+	case *sglangapiv1.MediaInput_Item:
+		return MediaScan{Present: v.Item != nil}
+	case *sglangapiv1.MediaInput_Many:
+		return MediaScan{Present: len(v.Many.GetItems()) > 0}
+	case *sglangapiv1.MediaInput_Nested:
+		return MediaScan{Nested: v.Nested != nil}
+	default:
+		return MediaScan{}
+	}
+}
+
+func TestScanRequestFieldsMediaInput(t *testing.T) {
+	itemMedia := &sglangapiv1.MediaInput{
+		Value: &sglangapiv1.MediaInput_Item{
+			Item: &sglangapiv1.MediaItem{Value: &sglangapiv1.MediaItem_Source{Source: "https://example.com/a.png"}},
+		},
+	}
+	emptyManyMedia := &sglangapiv1.MediaInput{
+		Value: &sglangapiv1.MediaInput_Many{Many: &sglangapiv1.MediaItems{}},
+	}
+	nonEmptyManyMedia := &sglangapiv1.MediaInput{
+		Value: &sglangapiv1.MediaInput_Many{
+			Many: &sglangapiv1.MediaItems{Items: []*sglangapiv1.OptionalMediaItem{{}}},
+		},
+	}
+	nestedMedia := &sglangapiv1.MediaInput{
+		Value: &sglangapiv1.MediaInput_Nested{Nested: &sglangapiv1.MediaItemsList{}},
+	}
+
+	reqWithImage := func(img *sglangapiv1.MediaInput) []byte {
+		return mustMarshal(t, &sglangapiv1.GenerateRequest{ImageData: img})
+	}
+
+	tests := []struct {
+		name    string
+		payload []byte
+		want    MediaScan
+	}{
+		{name: "unset", payload: reqWithImage(nil), want: MediaScan{}},
+		{name: "empty MediaInput wrapper", payload: reqWithImage(&sglangapiv1.MediaInput{}), want: MediaScan{}},
+		{name: "single item", payload: reqWithImage(itemMedia), want: MediaScan{Present: true}},
+		{name: "empty many list (JSON [])", payload: reqWithImage(emptyManyMedia), want: MediaScan{}},
+		{name: "non-empty many list", payload: reqWithImage(nonEmptyManyMedia), want: MediaScan{Present: true}},
+		{name: "nested batch list", payload: reqWithImage(nestedMedia), want: MediaScan{Nested: true}},
+		{
+			name:    "item then empty many switches oneof and clears Present",
+			payload: slices.Concat(reqWithImage(itemMedia), reqWithImage(emptyManyMedia)),
+			want:    MediaScan{},
+		},
+		{
+			name:    "non-empty many then empty many merges without clearing Present",
+			payload: slices.Concat(reqWithImage(nonEmptyManyMedia), reqWithImage(emptyManyMedia)),
+			want:    MediaScan{Present: true},
+		},
+		{
+			name:    "nested then item switches oneof and clears Nested",
+			payload: slices.Concat(reqWithImage(nestedMedia), reqWithImage(itemMedia)),
+			want:    MediaScan{Present: true},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ScanRequestFields(tc.payload)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got.ImageData)
+
+			var decoded sglangapiv1.GenerateRequest
+			require.NoError(t, proto.Unmarshal(tc.payload, &decoded))
+			require.Equal(t, protoMediaScan(decoded.GetImageData()), got.ImageData)
+			require.Zero(t, testing.AllocsPerRun(100, func() { _, _ = ScanRequestFields(tc.payload) }))
+		})
+	}
+}
+
+func TestScanRequestFieldsSubmessageMerge(t *testing.T) {
+	t.Run("repeated sampling_params merges max_new_tokens", func(t *testing.T) {
+		p1 := mustMarshal(t, &sglangapiv1.GenerateRequest{
+			SamplingParams: &sglangapiv1.SamplingParamsOrList{
+				Value: &sglangapiv1.SamplingParamsOrList_One{One: &sglangapiv1.SamplingParams{MaxNewTokens: proto.Int64(256)}},
+			},
+		})
+		p2 := mustMarshal(t, &sglangapiv1.GenerateRequest{
+			SamplingParams: &sglangapiv1.SamplingParamsOrList{
+				Value: &sglangapiv1.SamplingParamsOrList_One{One: &sglangapiv1.SamplingParams{Temperature: proto.Float64(0.2)}},
+			},
+		})
+		merged := slices.Concat(p1, p2)
+
+		fields, err := ScanRequestFields(merged)
+		require.NoError(t, err)
+		require.True(t, fields.SamplingParams.Present)
+		require.False(t, fields.SamplingParams.Many)
+		gotMax, ok, err := ScanMaxNewTokens(fields.SamplingParams.One)
+		require.NoError(t, err)
+		require.True(t, ok)
+
+		var decoded sglangapiv1.GenerateRequest
+		require.NoError(t, proto.Unmarshal(merged, &decoded))
+		require.Equal(t, decoded.GetSamplingParams().GetOne().GetMaxNewTokens(), gotMax)
+		require.Equal(t, int64(256), gotMax)
+	})
+
+	t.Run("repeated input_ids and mm_hashes merge across one fields and reset on oneof switch", func(t *testing.T) {
+		first := mustMarshal(t, &sglangapiv1.GenerateRequest{
+			InputIds: &sglangapiv1.TokenIdsOrList{
+				Value: &sglangapiv1.TokenIdsOrList_One{One: &sglangapiv1.TokenIds{Ids: []int64{10, 20}}},
+			},
+			MmHashes: &sglangapiv1.StringListOrList{
+				Value: &sglangapiv1.StringListOrList_One{One: &sglangapiv1.StringList{Items: []string{"h1"}}},
+			},
+		})
+		second := mustMarshal(t, &sglangapiv1.GenerateRequest{
+			InputIds: &sglangapiv1.TokenIdsOrList{
+				Value: &sglangapiv1.TokenIdsOrList_One{One: &sglangapiv1.TokenIds{Ids: []int64{30, 40}}},
+			},
+			MmHashes: &sglangapiv1.StringListOrList{
+				Value: &sglangapiv1.StringListOrList_One{One: &sglangapiv1.StringList{Items: []string{"h2"}}},
+			},
+		})
+		merged := slices.Concat(first, second)
+
+		fields, err := ScanRequestFields(merged)
+		require.NoError(t, err)
+		ids, err := ScanTokenIDs(fields.InputIDs.One)
+		require.NoError(t, err)
+		hashes, err := ScanStringList(fields.MMHashes.One)
+		require.NoError(t, err)
+
+		var decoded sglangapiv1.GenerateRequest
+		require.NoError(t, proto.Unmarshal(merged, &decoded))
+		require.Equal(t, []int64{10, 20, 30, 40}, decoded.GetInputIds().GetOne().GetIds())
+		require.Equal(t, []uint32{10, 20, 30, 40}, ids)
+		require.Equal(t, decoded.GetMmHashes().GetOne().GetItems(), hashes)
+
+		// Switching one -> many -> one discards the earlier one.
+		many := mustMarshal(t, &sglangapiv1.GenerateRequest{
+			InputIds: &sglangapiv1.TokenIdsOrList{
+				Value: &sglangapiv1.TokenIdsOrList_Many{Many: &sglangapiv1.TokenIdsList{}},
+			},
+		})
+		switched := bytes.Join([][]byte{first, many, second}, nil)
+		fields, err = ScanRequestFields(switched)
+		require.NoError(t, err)
+		ids, err = ScanTokenIDs(fields.InputIDs.One)
+		require.NoError(t, err)
+		decoded.Reset()
+		require.NoError(t, proto.Unmarshal(switched, &decoded))
+		require.Equal(t, []int64{30, 40}, decoded.GetInputIds().GetOne().GetIds())
+		require.Equal(t, []uint32{30, 40}, ids)
+	})
+
+	t.Run("empty OrList wrapper after populated field preserves earlier value without allocating", func(t *testing.T) {
+		populated := mustMarshal(t, &sglangapiv1.GenerateRequest{
+			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "keep-me"}},
+		})
+		empty := protowire.AppendBytes(protowire.AppendTag(nil, reqText, protowire.BytesType), nil)
+		merged := slices.Concat(populated, empty)
+
+		fields, err := ScanRequestFields(merged)
+		require.NoError(t, err)
+		require.True(t, fields.Text.Present)
+		require.Equal(t, "keep-me", string(fields.Text.One))
+		require.Zero(t, testing.AllocsPerRun(100, func() { _, _ = ScanRequestFields(merged) }))
+	})
+}
+
+func TestFramePriority(t *testing.T) {
+	clientPrio := int64(99)
+	req := &sglangapiv1.GenerateRequest{
+		Text:     &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "hello"}},
+		Priority: &clientPrio,
+		Stream:   proto.Bool(true),
+	}
+	payload := mustMarshal(t, req)
+	// Two client priority fields: both must go.
+	payload = protowire.AppendVarint(protowire.AppendTag(payload, reqPriority, protowire.VarintType), 7)
+
+	for _, prio := range []int64{5, 0, -3, math.MaxInt64} {
+		framed, err := FramePriority(payload, prio)
+		require.NoError(t, err)
+		body, err := grpcframe.ParsePayload(framed)
+		require.NoError(t, err)
+		require.Len(t, framed, grpcframe.HeaderLen+len(body))
+		var out sglangapiv1.GenerateRequest
+		require.NoError(t, proto.Unmarshal(body, &out))
+		want := proto.Clone(req).(*sglangapiv1.GenerateRequest)
+		want.Priority = proto.Int64(prio)
+		require.True(t, proto.Equal(want, &out), "priority %d", prio)
+		require.Equal(t, 1, bytes.Count(body, protowire.AppendTag(nil, reqPriority, protowire.VarintType)))
+		// One allocation, sized before the client fields are dropped.
+		require.Equal(t, grpcframe.HeaderLen+len(payload)+protowire.SizeTag(reqPriority)+protowire.SizeVarint(uint64(prio)), cap(framed))
+	}
+	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() { _, _ = FramePriority(payload, 5) }))
+
+	_, err := FramePriority([]byte{0xff}, 1)
+	require.ErrorIs(t, err, ErrMalformed)
+}
+
 func TestScanStreamItem(t *testing.T) {
 	stop := &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Stop{Stop: &sglangapiv1.FinishStop{}}}
 	tests := []struct {
@@ -186,29 +463,34 @@ func TestScanStreamItem(t *testing.T) {
 			name: "token frame",
 			item: &sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{
 				Text:      "hi",
-				MetaInfo:  &sglangapiv1.GenerateMetaInfo{PromptTokens: 9, CachedTokens: 3},
+				MetaInfo:  &sglangapiv1.GenerateMetaInfo{PromptTokens: 9, CompletionTokens: 4, CachedTokens: 3},
 				OutputIds: &sglangapiv1.TokenIds{Ids: []int64{42}},
 			}}},
-			want: StreamItem{HasMetaInfo: true, CachedTokens: 3},
+			want: StreamItem{HasFrame: true, HasMetaInfo: true, PromptTokens: 9, CompletionTokens: 4, CachedTokens: 3},
 		},
 		{
 			name: "terminal frame with index",
 			item: &sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{
 				Index:    proto.Uint32(2),
-				MetaInfo: &sglangapiv1.GenerateMetaInfo{FinishReason: stop, CachedTokens: 48},
+				MetaInfo: &sglangapiv1.GenerateMetaInfo{FinishReason: stop, PromptTokens: 64, CompletionTokens: 12, CachedTokens: 48},
 			}}},
-			want: StreamItem{Index: 2, HasMetaInfo: true, Finished: true, CachedTokens: 48},
+			want: StreamItem{HasFrame: true, Index: 2, HasMetaInfo: true, Finished: true, PromptTokens: 64, CompletionTokens: 12, CachedTokens: 48},
 		},
 		{
 			name: "empty finish_reason is still set",
 			item: &sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{
 				MetaInfo: &sglangapiv1.GenerateMetaInfo{FinishReason: &sglangapiv1.FinishReason{}},
 			}}},
-			want: StreamItem{HasMetaInfo: true, Finished: true},
+			want: StreamItem{HasFrame: true, HasMetaInfo: true, Finished: true},
 		},
 		{
 			name: "frame without meta_info",
 			item: &sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{Text: "x"}}},
+			want: StreamItem{HasFrame: true},
+		},
+		{
+			name: "empty item",
+			item: &sglangapiv1.GenerateStreamItem{},
 			want: StreamItem{},
 		},
 		{
@@ -231,10 +513,13 @@ func TestScanStreamItem(t *testing.T) {
 			var decoded sglangapiv1.GenerateStreamItem
 			require.NoError(t, proto.Unmarshal(payload, &decoded))
 			frame := decoded.GetFrame()
+			require.Equal(t, frame != nil, got.HasFrame)
 			require.Equal(t, decoded.GetError() != nil, got.IsError)
 			require.Equal(t, frame.GetIndex(), got.Index)
 			require.Equal(t, frame.GetMetaInfo() != nil, got.HasMetaInfo)
 			require.Equal(t, frame.GetMetaInfo().GetFinishReason() != nil, got.Finished)
+			require.Equal(t, frame.GetMetaInfo().GetPromptTokens(), got.PromptTokens)
+			require.Equal(t, frame.GetMetaInfo().GetCompletionTokens(), got.CompletionTokens)
 			require.Equal(t, frame.GetMetaInfo().GetCachedTokens(), got.CachedTokens)
 
 			allocs := testing.AllocsPerRun(100, func() { _, _ = ScanStreamItem(payload) })
@@ -261,6 +546,7 @@ func TestScanStreamItemOneofSwitchDiscardsEarlierFields(t *testing.T) {
 		Index: proto.Uint32(3),
 		MetaInfo: &sglangapiv1.GenerateMetaInfo{
 			FinishReason: &sglangapiv1.FinishReason{Kind: &sglangapiv1.FinishReason_Stop{Stop: &sglangapiv1.FinishStop{}}},
+			PromptTokens: 64,
 			CachedTokens: 48,
 		},
 	}}})
@@ -268,15 +554,22 @@ func TestScanStreamItemOneofSwitchDiscardsEarlierFields(t *testing.T) {
 		Error: &sglangapiv1.ErrorBody{Message: "boom"},
 	}}})
 	noMeta := marshal(&sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{Text: "x"}}})
+	complMeta := marshal(&sglangapiv1.GenerateStreamItem{Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{
+		MetaInfo: &sglangapiv1.GenerateMetaInfo{CompletionTokens: 9},
+	}}})
 
 	tests := []struct {
 		name    string
 		payload []byte
 		want    StreamItem
 	}{
-		{name: "frame, error, frame", payload: bytes.Join([][]byte{terminal, errItem, noMeta}, nil), want: StreamItem{}},
+		{name: "frame, error, frame", payload: bytes.Join([][]byte{terminal, errItem, noMeta}, nil), want: StreamItem{HasFrame: true}},
 		{name: "frame, error", payload: bytes.Join([][]byte{terminal, errItem}, nil), want: StreamItem{IsError: true}},
-		{name: "frame, frame merges", payload: bytes.Join([][]byte{terminal, noMeta}, nil), want: StreamItem{Index: 3, HasMetaInfo: true, Finished: true, CachedTokens: 48}},
+		{
+			name:    "frame, frame merges",
+			payload: bytes.Join([][]byte{terminal, complMeta}, nil),
+			want:    StreamItem{HasFrame: true, Index: 3, HasMetaInfo: true, Finished: true, PromptTokens: 64, CompletionTokens: 9, CachedTokens: 48},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -287,10 +580,13 @@ func TestScanStreamItemOneofSwitchDiscardsEarlierFields(t *testing.T) {
 			var decoded sglangapiv1.GenerateStreamItem
 			require.NoError(t, proto.Unmarshal(tc.payload, &decoded))
 			frame := decoded.GetFrame()
+			require.Equal(t, frame != nil, got.HasFrame)
 			require.Equal(t, decoded.GetError() != nil, got.IsError)
 			require.Equal(t, frame.GetIndex(), got.Index)
 			require.Equal(t, frame.GetMetaInfo() != nil, got.HasMetaInfo)
 			require.Equal(t, frame.GetMetaInfo().GetFinishReason() != nil, got.Finished)
+			require.Equal(t, frame.GetMetaInfo().GetPromptTokens(), got.PromptTokens)
+			require.Equal(t, frame.GetMetaInfo().GetCompletionTokens(), got.CompletionTokens)
 			require.Equal(t, frame.GetMetaInfo().GetCachedTokens(), got.CachedTokens)
 		})
 	}
