@@ -450,14 +450,31 @@ is read once on the first prefill request that uses the connector; a non-integer
 rejected in favor of the default and logged at error level.
 
 On `POST /sglang.api.v1.SglangService/Generate`, `GenerateResponse` carries no bootstrap
-host field. The gateway must set `x-llm-d-prefiller-host-port` on prefill responses to
-the selected pod address (`host:port`). In Envoy, add `response_headers_to_add` with
-`key: x-llm-d-prefiller-host-port`, `value: "%UPSTREAM_HOST%"`, and
-`append_action: OVERWRITE_IF_EXISTS_OR_ADD` on the prefill route. Both
-[envoy.yaml](../test/e2e/artifacts/environments/dev/coordinator-e2e-infra/envoy.yaml) and
-[envoy-3-epp.yaml](../test/e2e/artifacts/environments/dev/coordinator-e2e-infra/envoy-3-epp.yaml)
-include this rule. The coordinator strips this internal header from client responses and
-fails the request before decode when a prefill response omits it.
+host field, so the prefill EPP reports the picked prefill pod on the prefill response
+instead. Configure the prefill EPP with `header-profile-handler`, whose `PreRequest`
+stamps the picked pod on the prefill request as `x-llm-d-prefiller-host-port`, and with
+`request-header-copy-handler` naming that header, which copies it onto the response. The
+EPP `ext_proc` filter needs `response_header_mode: SEND`. This needs no gateway route
+rule and works on any gateway that runs the EPP, including Gateway API `HTTPRoute`
+deployments. A role-scoped prefill EPP that runs one profile can use
+`header-profile-handler` too: with a single configured profile named `prefill`, it runs
+that profile for every request and stamps the header.
+
+```yaml
+plugins:
+- type: header-profile-handler
+- type: request-header-copy-handler
+  parameters:
+    headers:
+    - x-llm-d-prefiller-host-port
+```
+
+The `prefill` step reads the header, strips it from client responses, and fails the
+request before decode is sent when a prefill response omits it. See the
+[header-profile-handler README](../pkg/epp/framework/plugins/scheduling/profilehandler/headerprofile/README.md#reporting-the-picked-prefill-pod-to-the-coordinator)
+and the [header copy README](../pkg/epp/framework/plugins/requesthandling/responsereceived/headercopy/README.md).
+The SGLang worker must send its response headers before its first frame; the
+`sglang-server` gRPC server does, so prefill headers arrive before decode starts.
 
 `kv-offloading` has no setting of its own. The prefill EPP computes every P2P tier port:
 its `p2p-source-producer` sets the prefill pod's P2P tier address on the
