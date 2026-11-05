@@ -42,10 +42,11 @@ itself.
 
 When the sidecar reads a request body and refuses it, it answers with a
 vLLM-style JSON 400, including on `/v1/messages`. On
-`/sglang.api.v1.SglangService/Generate`, the sidecar answers errors with gRPC
-status trailers. The coordinator answers in the error envelope of the request's
-API. It returns Anthropic errors for `/v1/messages`, gRPC status trailers for
-gRPC routes, and OpenAI errors for the other HTTP paths.
+`/sglang.api.v1.SglangService/Generate`, `/vllm.Inference/Generate`, and
+`/vllm.Inference/GenerateStream`, the sidecar answers errors with gRPC status
+trailers. The coordinator answers in the error envelope of the request's API. It
+returns Anthropic errors for `/v1/messages`, gRPC status trailers for gRPC
+routes, and OpenAI errors for the other HTTP paths.
 
 ## Path forms
 
@@ -53,9 +54,9 @@ Paths are case-sensitive. The coordinator runs before EPP and the sidecar runs
 after it, so they accept different forms of the six inference API paths:
 `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`,
 `/inference/v1/generate` and `/generate`. Both components also serve the gRPC
-path `/sglang.api.v1.SglangService/Generate` (on the sidecar, when
-`--kv-connector=sglang`). The coordinator also serves `/vllm.Inference/Generate`
-and `/vllm.Inference/GenerateStream`.
+paths `/sglang.api.v1.SglangService/Generate` (on the sidecar, when
+`--kv-connector=sglang`), `/vllm.Inference/Generate`, and
+`/vllm.Inference/GenerateStream`.
 
 The coordinator cleans the path of a POST request with Go's `path.Clean`. When
 the result is an inference API path it serves, the request is routed, checked
@@ -102,7 +103,7 @@ table.
 | POST | `/generate` | served | passthrough [1] | no route |
 | POST | `/sglang.api.v1.SglangService/Generate` | served when `--kv-connector=sglang`, otherwise passthrough | served | no route |
 | POST | `/sglang.api.v1.SglangService/{other}` | passthrough | passthrough | no route |
-| POST | `/vllm.Inference/Generate`, `/vllm.Inference/GenerateStream` | passthrough | served | no route |
+| POST | `/vllm.Inference/Generate`, `/vllm.Inference/GenerateStream` | served | served | no route |
 | POST | `/vllm.Inference/{other}`, `/vllm.Control/{any}` | passthrough | passthrough | no route |
 | not POST | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, `/sglang.api.v1.SglangService/Generate`, `/vllm.Inference/Generate`, `/vllm.Inference/GenerateStream` | passthrough [3] | 405 | terminates `GET /v1/responses` (WebSocket) |
 | not POST | `/generate` | passthrough [3] | passthrough [3] | no route |

@@ -107,6 +107,10 @@ func (s *Server) fanoutEncoderCollect(
 // response's ec_transfer_params into the prefill request body, and hands
 // off to the configured P/D connector.
 func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, p2p p2pRouting, apiType reqcommon.APIType) {
+	if isVLLMGRPCRequest(r) {
+		s.handleECNIXLVLLMGRPC(w, r, prefillEndPoint, encodeEndPoints, p2p)
+		return
+	}
 	logger := log.FromContext(r.Context())
 	logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
