@@ -18,6 +18,7 @@ package sessionaffinity
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -399,6 +400,60 @@ func TestSessionIDHeader_RunEvictionSparesRefreshedBinding(t *testing.T) {
 
 	if got, want := s.boundPod("s1"), podKey("pod-a"); got != want {
 		t.Errorf("boundPod(s1) = %q, want %q: a refreshed binding must not be evicted", got, want)
+	}
+}
+
+// Choose records, per request, whether the bound pod was a candidate; PreRequest
+// is its only reader and must release it, or it stays until the janitor reaps it.
+func TestSessionIDHeader_PreRequest_ReleasesPresenceRecord(t *testing.T) {
+	endpointA := newTestEndpoint("pod-a")
+	endpointB := newTestEndpoint("pod-b")
+
+	tests := []struct {
+		name       string
+		candidates []scheduling.Endpoint
+		result     *scheduling.SchedulingResult
+		wantPod    string
+	}{
+		{
+			name:       "bound pod present and picked",
+			candidates: []scheduling.Endpoint{endpointA, endpointB},
+			result:     schedulingResultFor(endpointA),
+			wantPod:    podKey("pod-a"),
+		},
+		{
+			name:       "bound pod absent, session migrates",
+			candidates: []scheduling.Endpoint{endpointB},
+			result:     schedulingResultFor(endpointB),
+			wantPod:    podKey("pod-b"),
+		},
+		{
+			name:       "profile not scheduled",
+			candidates: []scheduling.Endpoint{endpointA, endpointB},
+			result:     nil,
+			wantPod:    podKey("pod-a"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestSessionIDHeader(t, nil)
+			s.PreRequest(context.Background(), requestWithSession("s1"), schedulingResultFor(endpointA))
+
+			req := requestWithSession("s1")
+			s.Choose(context.Background(), req, tt.candidates)
+			if _, err := plugin.ReadPluginStateKey[*boundPodPresence](s.pluginState, req.RequestID, testPluginKey); err != nil {
+				t.Fatalf("Choose did not record the bound pod's presence: %v", err)
+			}
+
+			s.PreRequest(context.Background(), req, tt.result)
+
+			if got := s.boundPod("s1"); got != tt.wantPod {
+				t.Errorf("boundPod(s1) = %q, want %q", got, tt.wantPod)
+			}
+			if _, err := plugin.ReadPluginStateKey[*boundPodPresence](s.pluginState, req.RequestID, testPluginKey); !errors.Is(err, plugin.ErrNotFound) {
+				t.Errorf("presence record after PreRequest: err = %v, want %v", err, plugin.ErrNotFound)
+			}
+		})
 	}
 }
 
