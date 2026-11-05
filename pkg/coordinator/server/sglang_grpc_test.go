@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -50,6 +51,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/server"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
@@ -256,7 +259,7 @@ func TestSGLangGRPC_ConcurrentPrefillDecodeStreamsAndRewritesCachedTokens(t *tes
 	defer conn.Close()
 
 	client := sglangapiv1.NewSglangServiceClient(conn)
-	callCtx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs(
+	callCtx := metadata.NewOutgoingContext(testCtx(t), metadata.Pairs(
 		routing.PrefillEndpointHeader, "spoofed:9999",
 		reqcommon.PeerTopologyHeaderKey, "host=spoofed",
 	))
@@ -368,7 +371,7 @@ func TestSGLangGRPC_PrefillStreamErrorCancelsDecodeAndSurfacesGRPCStatus(t *test
 	defer conn.Close()
 
 	client := sglangapiv1.NewSglangServiceClient(conn)
-	stream, err := client.Generate(context.Background(), &sglangapiv1.GenerateRequest{
+	stream, err := client.Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "fail prefill"}},
 	})
 	if err != nil {
@@ -439,7 +442,7 @@ func TestSGLangGRPC_DecodeOnlyAndControlRPCPassthrough(t *testing.T) {
 		t.Fatalf("HealthCheck profile = %q, want %q", got, gateway.PhaseDecode)
 	}
 
-	stream, err := client.Generate(context.Background(), &sglangapiv1.GenerateRequest{
+	stream, err := client.Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "decode only"}},
 	})
 	if err != nil {
@@ -608,7 +611,7 @@ func TestSGLangGRPC_JSONOnlyStepsNoOp(t *testing.T) {
 
 	// The async mode header would make async-broker answer with a JSON
 	// error if it ran on this request.
-	callCtx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("x-llm-d-async-mode", "enqueue"))
+	callCtx := metadata.NewOutgoingContext(testCtx(t), metadata.Pairs("x-llm-d-async-mode", "enqueue"))
 	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(callCtx, &sglangapiv1.GenerateRequest{
 		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "skip json steps"}},
 	})
@@ -675,6 +678,7 @@ func assertErrorBodyDetail(t *testing.T, err error, wantCode uint32, wantMsg str
 }
 
 func TestSGLangGRPC_MissingPrefillEndpointHeaderReturnsInternal(t *testing.T) {
+	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
 	var decodeCalled atomic.Bool
 	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
@@ -697,7 +701,9 @@ func TestSGLangGRPC_MissingPrefillEndpointHeaderReturnsInternal(t *testing.T) {
 	}
 	defer conn.Close()
 
-	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(ctx, &sglangapiv1.GenerateRequest{
 		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "missing header"}},
 	})
 	if err != nil {
@@ -710,6 +716,38 @@ func TestSGLangGRPC_MissingPrefillEndpointHeaderReturnsInternal(t *testing.T) {
 	if decodeCalled.Load() {
 		t.Fatal("decode must not be called when prefill omits x-llm-d-prefiller-host-port")
 	}
+	// The prefill step, not decode's bootstrap guard, must be the step that
+	// failed: it is the one that names the missing header in its log.
+	if got := stepErrors(t, reg, steps.PrefillStepName); got != 1 {
+		t.Fatalf("prefill step_errors_total = %v, want 1", got)
+	}
+	if got := stepErrors(t, reg, steps.DecodeStepName); got != 0 {
+		t.Fatalf("decode step_errors_total = %v, want 0", got)
+	}
+}
+
+// stepErrors returns the step_errors_total count recorded for step across all
+// error codes, 0 when the step recorded none.
+func stepErrors(t *testing.T, reg *prometheus.Registry, step string) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0.0
+	for _, family := range families {
+		if family.GetName() != "llm_d_coordinator_step_errors_total" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "step" && l.GetValue() == step {
+					total += m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return total
 }
 
 func TestSGLangGRPC_TrailersOnlyOKAndErrorsPreserveDetails(t *testing.T) {
@@ -732,7 +770,7 @@ func TestSGLangGRPC_TrailersOnlyOKAndErrorsPreserveDetails(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "empty ok"}},
 		})
 		if err != nil {
@@ -767,7 +805,7 @@ func TestSGLangGRPC_TrailersOnlyOKAndErrorsPreserveDetails(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "bad lora"}},
 		})
 		if err != nil {
@@ -805,7 +843,7 @@ func TestSGLangGRPC_TrailersOnlyOKAndErrorsPreserveDetails(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "decode err"}},
 		})
 		if err != nil {
@@ -838,7 +876,7 @@ func TestSGLangGRPC_MissingGRPCStatusReturnsInternal(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "no status"}},
 		})
 		if err != nil {
@@ -926,7 +964,7 @@ func TestSGLangGRPC_MissingGRPCStatusReturnsInternal(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "dropped trailer"}},
 		})
 		if err != nil {
@@ -965,7 +1003,7 @@ func TestSGLangGRPC_MissingGRPCStatusReturnsInternal(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "prefill no status"}},
 		})
 		if err != nil {
@@ -1024,7 +1062,7 @@ func TestSGLangGRPC_PrefillFailureAfterDecodeStartedWritesErrorTrailer(t *testin
 	}
 	defer conn.Close()
 
-	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "midstream prefill fail"}},
 	})
 	if err != nil {
@@ -1091,7 +1129,7 @@ func TestSGLangGRPC_PrefillInStreamErrorEncodesMessageAndMapsCode(t *testing.T) 
 	}
 	defer conn.Close()
 
-	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 		Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "in-stream error"}},
 	})
 	if err != nil {
@@ -1192,7 +1230,7 @@ func TestSGLangGRPC_PerIndexCachedTokensAndTerminalWait(t *testing.T) {
 	}
 	defer conn.Close()
 
-	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 		Text: &sglangapiv1.StringOrList{
 			Value: &sglangapiv1.StringOrList_Many{Many: &sglangapiv1.StringList{Items: []string{"p0", "p1"}}},
 		},
@@ -1319,7 +1357,7 @@ func TestSGLangGRPC_ClientCancellationAndTLSServing(t *testing.T) {
 		}
 		defer conn.Close()
 
-		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(context.Background(), &sglangapiv1.GenerateRequest{
+		stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
 			Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "over tls"}},
 		})
 		if err != nil {
@@ -1333,4 +1371,13 @@ func TestSGLangGRPC_ClientCancellationAndTLSServing(t *testing.T) {
 			t.Fatalf("expected EOF over TLS, got %v", err)
 		}
 	})
+}
+
+// testCtx bounds a client call so a regression that leaves the coordinator
+// waiting on a blocked mock fails with an assertion instead of a test timeout.
+func testCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	return ctx
 }

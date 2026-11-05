@@ -50,10 +50,11 @@ const (
 	// sglangPrefillWaitOnTerminal bounds how long decode waits for prefill's
 	// cached_tokens frame before emitting decode's terminal frame.
 	sglangPrefillWaitOnTerminal = 100 * time.Millisecond
-	// sglangPrefillGrace limits how long a concurrent prefill stream may linger
-	// after decode has already finished.
-	sglangPrefillGrace = 30 * time.Second
 )
+
+// sglangPrefillGrace limits how long a concurrent prefill stream may linger
+// after decode has already finished. A variable so tests can shorten it.
+var sglangPrefillGrace = 30 * time.Second
 
 type grpcStatusWire struct {
 	status     string
@@ -423,6 +424,11 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 	}
 
 	if ps != nil {
+		// A prefill failure that lands as decode ends must not be masked by
+		// decode's OK trailer. Prefill normally finishes long before decode,
+		// so this wait is a no-op; when it is still running, give it the same
+		// bounded time as the terminal cached_tokens wait.
+		ps.Wait(decodeCtx, sglangPrefillWaitOnTerminal)
 		if pStatus, pMsg, pDetails, prefillErr := ps.Failure(); prefillErr != nil {
 			pWire := grpcStatusWire{status: pStatus, message: pMsg, detailsBin: pDetails}
 			if !committed {
