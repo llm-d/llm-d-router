@@ -158,6 +158,10 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 	}
 	v, _ := p.statuses.LoadAndDelete(request.RequestID)
 	status, _ := v.(string)
+	// llm_d_epp_request_outcome_total leaves out a request whose ending the EPP did not see.
+	if response.TerminationCause == requesthandling.TerminationCauseNotObserved {
+		return
+	}
 
 	priority := request.Objectives.Priority
 	if p.priorities != nil {

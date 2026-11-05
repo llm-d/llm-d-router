@@ -3,6 +3,8 @@
 # Extract upstream CRD versions from go.mod so references stay in sync with Go dependencies.
 GIE_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api-inference-extension)
 GATEWAY_API_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api)
+# Pinned sgl-project/sglang ref (tag or commit SHA) for SGLang .proto schemas.
+SGLANG_REF ?= 93a936d007ada66544cb5ac855de540a596c2ca4
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
@@ -10,12 +12,14 @@ $(LOCALBIN):
 	[ -d $@ ] || mkdir -p $@
 
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+BUF ?= $(LOCALBIN)/buf
 PROTOC ?= protoc
 PROTOC_GEN_GO = $(LOCALBIN)/protoc-gen-go
 PROTOC_GEN_GO_GRPC = $(LOCALBIN)/protoc-gen-go-grpc
 
 ## Tool Versions
 CONTROLLER_TOOLS_VERSION ?= v0.19.0
+BUF_VERSION ?= v1.75.0
 PROTOC_GEN_GO_VERSION ?= v1.34.2
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.5.1
 
@@ -66,14 +70,40 @@ controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessar
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
-.PHONY: generate-proto
-generate-proto: protoc-gen-go protoc-gen-go-grpc ## Generate Golang code from protobuf files.
+SGLANG_GRPC_DIR := pkg/common/grpc/sglang
+
+.PHONY: generate-proto generate-proto-vllm generate-proto-sglang
+generate-proto: generate-proto-vllm generate-proto-sglang ## Generate Golang code from protobuf files.
+
+generate-proto-vllm: protoc-gen-go protoc-gen-go-grpc
 	PATH="$(LOCALBIN):$$PATH" $(PROTOC) \
 		-I pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto \
 		-I . \
 		--go_out=module=github.com/llm-d/llm-d-router:. \
 		--go-grpc_out=module=github.com/llm-d/llm-d-router:. \
 		pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto/*.proto
+
+generate-proto-sglang: buf protoc-gen-go protoc-gen-go-grpc ## Generate SGLang Go bindings from sgl-project/sglang@$(SGLANG_REF).
+	PATH="$(LOCALBIN):$$PATH" $(BUF) generate \
+		--template $(SGLANG_GRPC_DIR)/buf.gen.yaml \
+		--path sglang/api/v1 \
+		--path sglang/json/v1 \
+		"https://github.com/sgl-project/sglang.git#ref=$(SGLANG_REF),subdir=proto,depth=1"
+
+.PHONY: verify-sglang-proto
+verify-sglang-proto: generate-proto-sglang ## Check that SGLang Go bindings match sgl-project/sglang@$(SGLANG_REF).
+	@status="$$(git status --porcelain -- $(SGLANG_GRPC_DIR))"; \
+	if [ -n "$$status" ]; then \
+		echo "ERROR: $(SGLANG_GRPC_DIR) differs from sgl-project/sglang@$(SGLANG_REF). Run 'make generate-proto-sglang' and commit the result:"; \
+		echo "$$status"; \
+		git diff -- $(SGLANG_GRPC_DIR); \
+		exit 1; \
+	fi
+
+.PHONY: buf
+buf: $(BUF) ## Download buf locally if necessary.
+$(BUF): $(LOCALBIN)
+	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
 
 .PHONY: protoc-gen-go
 protoc-gen-go: $(PROTOC_GEN_GO) ## Download protoc-gen-go locally if necessary.

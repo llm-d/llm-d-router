@@ -20,6 +20,7 @@ extend-exclude = [
     # Generated CRDs; controller-gen embeds upstream Kubernetes API descriptions
     "config/crd/bases/",
     # Generated protobuf files
+    "pkg/common/grpc/sglang/gen/",
     "pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen/",
 ]
 

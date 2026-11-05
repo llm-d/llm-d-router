@@ -57,7 +57,10 @@ const (
 	PseudoHeaderStatus = ":status"
 	HeaderStatus       = "status"
 
-	FieldKVTransferParams     = "kv_transfer_params"
+	FieldKVTransferParams = "kv_transfer_params"
+	// FieldPromptTokenIDs is the kv_transfer_params field carrying
+	// pre-tokenized prompt token IDs.
+	FieldPromptTokenIDs       = "prompt_token_ids"
 	FieldECTransferParams     = "ec_transfer_params"
 	FieldECDescriptorMetadata = "metadata" // ec_transfer_params descriptor field: the item's placeholder metadata
 	FieldMaxTokens            = "max_tokens"
@@ -67,6 +70,7 @@ const (
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldEcho                 = "echo"
+	FieldTruncatePromptTokens = "truncate_prompt_tokens" //#nosec G101 -- request field name, not a credential
 	FieldTools                = "tools"
 	FieldToolChoice           = "tool_choice"
 	FieldResponseFormat       = "response_format"
@@ -187,6 +191,7 @@ const (
 	PartTypeText               = "text"
 	PartTypeInputText          = "input_text"
 	PartTypeOutputText         = "output_text"
+	PartTypeRefusal            = "refusal"
 	PartTypeImageURL           = "image_url"
 	PartTypeAudioURL           = "audio_url"
 	PartTypeVideoURL           = "video_url"

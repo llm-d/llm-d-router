@@ -470,6 +470,19 @@ func TestSGLangHTTPParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
+			name: "non-streaming parallel sampling response",
+			body: `[{"text":"a","meta_info":{"prompt_tokens":8,"completion_tokens":3,"cached_tokens":2}},` +
+				`{"text":"b","meta_info":{"prompt_tokens":8,"completion_tokens":4,"cached_tokens":8}}]`,
+			want: &fwkrequest.Usage{
+				PromptTokens:     8,
+				CompletionTokens: 7,
+				TotalTokens:      15,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{
+					CachedTokens: 2,
+				},
+			},
+		},
+		{
 			name:    "streaming — only final chunk (finish_reason set) is used",
 			headers: map[string]string{"Content-Type": "text/event-stream"},
 			body: "data: {\"text\":\"he\",\"meta_info\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n" +

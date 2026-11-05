@@ -209,6 +209,7 @@ func TestNativeRenderDoesNotReconstructNonHTTPInput(t *testing.T) {
 	defer srv.Close()
 	for _, body := range []*fwkrequest.InferenceRequestBody{
 		{ChatCompletions: &fwkrequest.ChatCompletionsRequest{}},
+		{ChatCompletions: &fwkrequest.ChatCompletionsRequest{}, Payload: fwkrequest.PayloadProto{}},
 		{Messages: &fwkrequest.MessagesRequest{}},
 		{Completions: &fwkrequest.CompletionsRequest{}},
 	} {

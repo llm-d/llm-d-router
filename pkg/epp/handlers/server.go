@@ -43,6 +43,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
@@ -376,6 +377,8 @@ func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCau
 	switch {
 	case reqCtx.requestState == requestEvicted:
 		return fwkrh.TerminationCauseEvicted
+	case reqCtx.requestState == requestResponseProcessingSkipped:
+		return fwkrh.TerminationCauseNotObserved
 	case ctxErr != nil:
 		return fwkrh.TerminationCauseClientDisconnect
 	default:
@@ -389,8 +392,8 @@ func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrh.Te
 	}
 
 	for _, header := range trailers.GetTrailers().GetHeaders() {
-		if header.Key == "grpc-status" {
-			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != "0" {
+		if header.Key == grpcframe.HeaderStatus {
+			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != grpcframe.StatusOK {
 				return fwkrh.TerminationCauseError
 			}
 			return ""
