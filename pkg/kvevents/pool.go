@@ -69,15 +69,35 @@ func cacheKindLabel(kind KVCacheSpecKind) string {
 	return string(kind)
 }
 
-// subCanonicalStore reports whether ev's engine blocks are smaller than the
-// canonical block size. Events without a declared block size fall back to
-// tokens per block hash.
-func subCanonicalStore(ev *BlockStoredEvent, canonicalBlockSize int) bool {
-	engineBlockSize := ev.BlockSize
-	if engineBlockSize <= 0 && len(ev.BlockHashes) > 0 {
-		engineBlockSize = len(ev.Tokens) / len(ev.BlockHashes)
+// engineBlockSize returns ev's declared block size. Events without one fall
+// back to tokens per block hash.
+func engineBlockSize(ev *BlockStoredEvent) int {
+	if ev.BlockSize <= 0 && len(ev.BlockHashes) > 0 {
+		return len(ev.Tokens) / len(ev.BlockHashes)
 	}
-	return engineBlockSize > 0 && engineBlockSize < canonicalBlockSize
+	return ev.BlockSize
+}
+
+// subCanonicalStore reports whether ev's engine blocks are smaller than the
+// canonical block size.
+func subCanonicalStore(ev *BlockStoredEvent, canonicalBlockSize int) bool {
+	size := engineBlockSize(ev)
+	return size > 0 && size < canonicalBlockSize
+}
+
+// coveredEngineKeys drops the engine keys of a sub-canonical store that start
+// past its last full canonical block. Index.Add maps engine keys to request
+// keys by their count ratio, which matches token positions only once those
+// trailing keys are gone.
+func coveredEngineKeys(ev *BlockStoredEvent, engineKeys []kvblock.BlockHash,
+	numRequestKeys, canonicalBlockSize int,
+) []kvblock.BlockHash {
+	if !subCanonicalStore(ev, canonicalBlockSize) {
+		return engineKeys
+	}
+	size := engineBlockSize(ev)
+	covered := (numRequestKeys*canonicalBlockSize + size - 1) / size
+	return engineKeys[:min(covered, len(engineKeys))]
 }
 
 func blockStoredEventDigestible(ev *BlockStoredEvent, canonicalBlockSize int) (bool, string) {
@@ -799,6 +819,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			// Index.Add infers the engine->request mapping from the ratio of
 			// len(engineKeys) to len(requestKeys) (1:1, many:1, or 1:many).
+			engineKeys = coveredEngineKeys(ev, engineKeys, len(requestKeys), format.BlockSize)
 			if err := p.index.Add(ctx, engineKeys, requestKeys, podEntries); err != nil {
 				debugLogger.Error(err, "Failed to add event to index",
 					"podIdentifier", podIdentifier, "event", ev)
