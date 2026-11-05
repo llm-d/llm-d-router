@@ -206,9 +206,10 @@ func TestScanTokenIDsMatchesProto(t *testing.T) {
 	require.Equal(t, []uint32{0, 131, 262, 393, 524}, got)
 
 	_, err = ScanTokenIDs(mustMarshal(t, &sglangapiv1.TokenIds{Ids: []int64{1, -1}}))
-	require.ErrorContains(t, err, "input_ids[1] out of uint32 range: -1")
+	require.ErrorContains(t, err, "input_ids: value[1] out of uint32 range: -1")
+	require.ErrorIs(t, err, ErrMalformed)
 	_, err = ScanTokenIDs(mustMarshal(t, &sglangapiv1.TokenIds{Ids: []int64{math.MaxUint32 + 1}}))
-	require.ErrorContains(t, err, "input_ids[0] out of uint32 range")
+	require.ErrorContains(t, err, "input_ids: value[0] out of uint32 range")
 
 	_, err = ScanTokenIDs([]byte{0x0a, 0x05, 0x80})
 	require.ErrorIs(t, err, ErrMalformed)
@@ -420,7 +421,7 @@ func TestScanRequestFieldsSubmessageMerge(t *testing.T) {
 	})
 }
 
-func TestFramePriority(t *testing.T) {
+func TestRewritePriority(t *testing.T) {
 	clientPrio := int64(99)
 	req := &sglangapiv1.GenerateRequest{
 		Text:     &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "hello"}},
@@ -430,9 +431,11 @@ func TestFramePriority(t *testing.T) {
 	payload := mustMarshal(t, req)
 	// Two client priority fields: both must go.
 	payload = protowire.AppendVarint(protowire.AppendTag(payload, reqPriority, protowire.VarintType), 7)
+	frame, err := grpcframe.FramePayload(payload)
+	require.NoError(t, err)
 
 	for _, prio := range []int64{5, 0, -3, math.MaxInt64} {
-		framed, err := FramePriority(payload, prio)
+		framed, err := RewritePriority(frame, prio)
 		require.NoError(t, err)
 		body, err := grpcframe.ParsePayload(framed)
 		require.NoError(t, err)
@@ -443,13 +446,28 @@ func TestFramePriority(t *testing.T) {
 		want.Priority = proto.Int64(prio)
 		require.True(t, proto.Equal(want, &out), "priority %d", prio)
 		require.Equal(t, 1, bytes.Count(body, protowire.AppendTag(nil, reqPriority, protowire.VarintType)))
-		// One allocation, sized before the client fields are dropped.
-		require.Equal(t, grpcframe.HeaderLen+len(payload)+protowire.SizeTag(reqPriority)+protowire.SizeVarint(uint64(prio)), cap(framed))
+		// One exact-size allocation.
+		require.Equal(t, len(framed), cap(framed))
 	}
-	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() { _, _ = FramePriority(payload, 5) }))
+	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() { _, _ = RewritePriority(frame, 5) }))
 
-	_, err := FramePriority([]byte{0xff}, 1)
+	// An optional field keeps an explicit zero, so a request without priority
+	// still gets one.
+	noPrio, err := grpcframe.FramePayload(mustMarshal(t, &sglangapiv1.GenerateRequest{Stream: proto.Bool(true)}))
+	require.NoError(t, err)
+	framed, err := RewritePriority(noPrio, 0)
+	require.NoError(t, err)
+	var out sglangapiv1.GenerateRequest
+	require.NoError(t, proto.Unmarshal(framed[grpcframe.HeaderLen:], &out))
+	require.NotNil(t, out.Priority)
+	require.Zero(t, out.GetPriority())
+
+	malformed, err := grpcframe.FramePayload([]byte{0xff})
+	require.NoError(t, err)
+	_, err = RewritePriority(malformed, 1)
 	require.ErrorIs(t, err, ErrMalformed)
+	_, err = RewritePriority([]byte{0, 0}, 1)
+	require.Error(t, err)
 }
 
 func TestScanStreamItem(t *testing.T) {

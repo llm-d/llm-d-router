@@ -167,6 +167,21 @@ func TestMarshalProtoRoundTrip(t *testing.T) {
 	require.True(t, proto.Equal(req, &decoded))
 }
 
+func TestFinishFrame(t *testing.T) {
+	buf := make([]byte, HeaderLen, HeaderLen+3)
+	buf[0] = 1 // a stale compression flag is cleared
+	buf = append(buf, 'a', 'b', 'c')
+	got, err := FinishFrame(buf)
+	require.NoError(t, err)
+	payload, err := ParsePayload(got)
+	require.NoError(t, err)
+	require.Equal(t, "abc", string(payload))
+	require.Equal(t, byte(0), got[0])
+
+	_, err = FinishFrame([]byte{0, 0})
+	require.Error(t, err)
+}
+
 func TestPutHeader(t *testing.T) {
 	buf := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 'a', 'b', 'c'}
 	require.NoError(t, PutHeader(buf, 3))
@@ -254,6 +269,70 @@ func TestCopyTrailersAndWriteError(t *testing.T) {
 	dstFromProxy := make(http.Header)
 	CopyTrailers(dstFromProxy, fromReverseProxy)
 	require.Equal(t, "14", dstFromProxy.Get(http.TrailerPrefix+HeaderStatus))
+}
+
+func TestStatusMessageAndDetailsBin(t *testing.T) {
+	direct := make(http.Header)
+	direct.Set(HeaderMessage, " boom ")
+	direct.Set(HeaderStatusDetailsBin, "AAEC")
+	require.Equal(t, "boom", Message(direct))
+	require.Equal(t, "AAEC", StatusDetailsBin(direct))
+
+	// httputil.ReverseProxy stores unannounced trailers under a canonical
+	// key, and direct callers under the raw key.
+	trailers := make(http.Header)
+	trailers[http.TrailerPrefix+http.CanonicalHeaderKey(HeaderMessage)] = []string{"proxied"}
+	trailers[http.TrailerPrefix+HeaderStatusDetailsBin] = []string{"raw"}
+	require.Equal(t, "proxied", Message(trailers))
+	require.Equal(t, "raw", StatusDetailsBin(trailers))
+
+	require.Empty(t, Message(http.Header{}))
+	require.Empty(t, StatusDetailsBin(http.Header{}))
+	require.Zero(t, testing.AllocsPerRun(100, func() {
+		_ = Message(trailers)
+		_ = StatusDetailsBin(trailers)
+	}))
+}
+
+func TestCopyStatusHeaders(t *testing.T) {
+	src := make(http.Header)
+	src[http.TrailerPrefix+http.CanonicalHeaderKey(HeaderStatus)] = []string{"14"}
+	src[http.TrailerPrefix+HeaderMessage] = []string{"unavailable"}
+	src.Set(HeaderStatusDetailsBin, "AAEC")
+	src.Set("X-Other", "ignored")
+
+	dst := make(http.Header)
+	CopyStatusHeaders(dst, src)
+	require.Equal(t, http.Header{
+		"Grpc-Status":             {"14"},
+		"Grpc-Message":            {"unavailable"},
+		"Grpc-Status-Details-Bin": {"AAEC"},
+	}, dst)
+}
+
+func TestForEachPayload(t *testing.T) {
+	f1, err := FramePayload([]byte("first"))
+	require.NoError(t, err)
+	f2, err := FramePayload(nil)
+	require.NoError(t, err)
+	f3, err := FramePayload([]byte("third"))
+	require.NoError(t, err)
+
+	var got []string
+	require.NoError(t, ForEachPayload(bytes.Join([][]byte{f1, f2, f3}, nil), func(p []byte) {
+		got = append(got, string(p))
+	}))
+	require.Equal(t, []string{"first", "", "third"}, got)
+
+	// A truncated frame stops the walk after the frames before it.
+	got = nil
+	err = ForEachPayload(append(append([]byte{}, f1...), f3[:4]...), func(p []byte) {
+		got = append(got, string(p))
+	})
+	require.Error(t, err)
+	require.Equal(t, []string{"first"}, got)
+
+	require.NoError(t, ForEachPayload(nil, func([]byte) { t.Fatal("unexpected call") }))
 }
 
 func TestReadFrame(t *testing.T) {

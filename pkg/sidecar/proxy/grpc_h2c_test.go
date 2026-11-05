@@ -28,6 +28,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -36,28 +38,6 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
-
-func newH2CTestServer(t *testing.T, handler http.Handler) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewUnstartedServer(handler)
-	protocols := new(http.Protocols)
-	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true)
-	srv.Config.Protocols = protocols
-	srv.Start()
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func newH2CClient() *http.Client {
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	return &http.Client{
-		Transport: &http.Transport{
-			Protocols: protocols,
-		},
-	}
-}
 
 func startTestSidecar(t *testing.T, cfg Config) string {
 	t.Helper()
@@ -89,7 +69,7 @@ func TestPlaintextH2CPassthroughStreamsFramesAndTrailers(t *testing.T) {
 	require.NoError(t, err)
 
 	var backendSawProtoMajor atomic.Int32
-	decoder := newH2CTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	decoder := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		backendSawProtoMajor.Store(int32(r.ProtoMajor))
 		_, _ = io.Copy(io.Discard, r.Body)
 		if grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
@@ -122,7 +102,7 @@ func TestPlaintextH2CPassthroughStreamsFramesAndTrailers(t *testing.T) {
 	require.NoError(t, err)
 	req.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
 
-	resp, err := newH2CClient().Do(req)
+	resp, err := grpctest.NewH2CClient().Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -194,7 +174,7 @@ func TestRunConcurrentPDRelaysGRPCPrefillError(t *testing.T) {
 			defer cancel()
 
 			decodeStarted := make(chan struct{})
-			prefill := newH2CTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			prefill := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = io.Copy(io.Discard, r.Body)
 				select {
 				case <-decodeStarted:
@@ -203,7 +183,7 @@ func TestRunConcurrentPDRelaysGRPCPrefillError(t *testing.T) {
 				}
 				tt.writeError(w)
 			}))
-			decode := newH2CTestServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			decode := grpctest.NewH2CServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 				_, _ = io.Copy(io.Discard, r.Body)
 				close(decodeStarted)
 				<-r.Context().Done()
@@ -240,7 +220,7 @@ func TestRunConcurrentPDRelaysGRPCPrefillError(t *testing.T) {
 			require.NoError(t, err)
 			req.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
 
-			resp, err := newH2CClient().Do(req)
+			resp, err := grpctest.NewH2CClient().Do(req)
 			require.NoError(t, err)
 			respBody, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
@@ -277,7 +257,7 @@ func TestRunConcurrentPDRelaysGRPCPrefillError(t *testing.T) {
 func TestRunConcurrentPDDecodeGRPCErrorCancelsPrefill(t *testing.T) {
 	prefillStarted := make(chan struct{})
 	var prefillCancelled atomic.Bool
-	prefill := newH2CTestServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	prefill := grpctest.NewH2CServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		close(prefillStarted)
 		<-r.Context().Done()
@@ -286,7 +266,7 @@ func TestRunConcurrentPDDecodeGRPCErrorCancelsPrefill(t *testing.T) {
 	prefillURL, err := url.Parse(prefill.URL)
 	require.NoError(t, err)
 
-	decode := newH2CTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	decode := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		<-prefillStarted
 		grpcframe.WriteError(w, codes.Internal, "decode engine failure")
