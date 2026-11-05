@@ -50,6 +50,10 @@ func newKVEventsProducer(t testing.TB, name string) *InFlightLoadProducer {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	// The metric vectors are process-global; each test reads its own label set from zero.
+	prefillCompletions.DeleteLabelValues(name, signalKVEvent)
+	prefillCompletions.DeleteLabelValues(name, signalFirstByte)
+	prefillPending.DeleteLabelValues(name)
 	p, err := InFlightLoadProducerFactory(name, json.NewDecoder(bytes.NewReader(raw)), testutils.NewTestHandle(ctx))
 	require.NoError(t, err)
 	return p.(*InFlightLoadProducer)
