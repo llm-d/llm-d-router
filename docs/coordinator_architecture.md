@@ -450,29 +450,26 @@ is read once on the first prefill request that uses the connector; a non-integer
 rejected in favor of the default and logged at error level.
 
 On `POST /sglang.api.v1.SglangService/Generate`, `GenerateResponse` carries no bootstrap
-host field, so the prefill EPP reports the picked prefill pod on the prefill response
-instead. Configure the prefill EPP with `header-profile-handler`, whose `PreRequest`
-stamps the picked pod on the prefill request as `x-llm-d-prefiller-host-port`, and with
-`request-header-copy-handler` naming that header, which copies it onto the response. The
-EPP `ext_proc` filter needs `response_header_mode: SEND`. This needs no gateway route
-rule and works on any gateway that runs the EPP, including Gateway API `HTTPRoute`
-deployments. A role-scoped prefill EPP that runs one profile can use
-`header-profile-handler` too: with a single configured profile named `prefill`, it runs
-that profile for every request and stamps the header.
+host field, so the prefill EPP reports the prefill pod on the prefill response instead.
+Configure the prefill EPP with `header-profile-handler` and set `prefillProfile` to the
+prefill profile name. When that profile ran, the handler adds
+`x-llm-d-prefiller-host-port` to the response with the endpoint the proxy reports it
+served, or the picked endpoint when the proxy reports none. The EPP `ext_proc` filter
+needs `response_header_mode: SEND`. This needs no gateway route rule and works on any
+gateway that runs the EPP, including Gateway API `HTTPRoute` deployments. A role-scoped
+prefill EPP that runs one profile can use `header-profile-handler` too: with a single
+configured profile it runs that profile for every request.
 
 ```yaml
 plugins:
 - type: header-profile-handler
-- type: request-header-copy-handler
   parameters:
-    headers:
-    - x-llm-d-prefiller-host-port
+    prefillProfile: prefill
 ```
 
 The `prefill` step reads the header, strips it from client responses, and fails the
 request before decode is sent when a prefill response omits it. See the
-[header-profile-handler README](../pkg/epp/framework/plugins/scheduling/profilehandler/headerprofile/README.md#reporting-the-picked-prefill-pod-to-the-coordinator)
-and the [header copy README](../pkg/epp/framework/plugins/requesthandling/responsereceived/headercopy/README.md).
+[header-profile-handler README](../pkg/epp/framework/plugins/scheduling/profilehandler/headerprofile/README.md#reporting-the-prefill-pod-to-the-coordinator).
 The SGLang worker must send its response headers before its first frame; the
 `sglang-server` gRPC server does, so prefill headers arrive before decode starts.
 
