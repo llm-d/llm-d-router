@@ -557,6 +557,18 @@ func (h *goldenHarness) digest() {
 		periods := make([]string, 0, len(threads))
 		for _, b := range threads {
 			periods = append(periods, fmt.Sprintf("%s:%d", b, g.threads[b].busyPeriods))
+			// THE PENDING INVARIANT (B6): a thread's pending count IS the number of its records that
+			// currently count. A count that drifts from the records is exactly how a dead window kept
+			// a thread busy across passes.
+			counted := 0
+			for _, rec := range h.r.sched.reqs {
+				if rec.thread == b && rec.counted {
+					counted++
+				}
+			}
+			if m := g.threads[b]; m.pending != counted {
+				h.t.Fatalf("thread %s: pending=%d but %d of its records count — the count has drifted from the records", b, m.pending, counted)
+			}
 		}
 		parts = append(parts, fmt.Sprintf("%s{seats=%d used=%d stay=%d exiting=%d cold=%d budget=%d periods=%s}",
 			id, len(g.threads), used, stay, exiting, cold, g.budgetBlocks, strings.Join(periods, ",")))

@@ -84,6 +84,10 @@ type thread struct {
 	// released EXACTLY once, at the first of: prefill complete, any termination, unseat.
 	coldEntry int64
 	coldDone  bool
+	// windows are this thread's released-but-not-yet-at-a-pod records, so the END of a turn can
+	// expire its own dead windows without scanning the whole record map: a window stops counting
+	// when it outlives S, which is a fact about TIME, not about whether a pass has run since.
+	windows []*reqRec
 	// seatObs is the observability of the turn that SEATED this thread, measured at the seat before
 	// its own reservation: the first dispatch after the seat reports it instead of a post-insert
 	// view (which would count the reservation as residency). Cleared by that dispatch.
@@ -130,6 +134,11 @@ type reqRec struct {
 	released time.Time
 	// pod is when the request reached a pod (PreRequest); zero while it is pending.
 	pod time.Time
+	// counted is whether this record currently contributes to its thread's pending count. It is set
+	// when the record is opened, and corrected by the SAME liveness test at every decrement, so
+	// pending is always exactly "the records that counted at their last evaluation" — never a number
+	// that depends on whether a pass happened to run while the window was expiring.
+	counted bool
 	// the OBSERVABLES of this turn, captured at dispatch for the span PreRequest may set. Nothing
 	// in a decision reads them: the queue wait is dispatch − arrival, and the predicted cache is
 	// the resident prefix read BEFORE the charge (after it, it would always be everything).

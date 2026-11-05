@@ -16,9 +16,9 @@ t=0 PICK req=none engine=none
 t=0 STATE golden/e0{seats=1 used=7 stay=7 exiting=0 cold=64 budget=19 periods=T1:0} waiters=2 recs=2 anomalies[]
 t=25000 EVENT SEAT thread=T2 engine=golden/e0 detail=kind=newcomer wait=25.000 fairness_id=T2 wire_id=- since=2026-01-01T00:00:00Z
 t=25000 PICK req=r02 engine=golden/e0
-t=25000 STATE golden/e0{seats=2 used=15 stay=15 exiting=0 cold=64 budget=19 periods=T1:0,T2:0} waiters=1 recs=2 anomalies[]
+t=25000 STATE golden/e0{seats=2 used=15 stay=15 exiting=0 cold=64 budget=19 periods=T1:1,T2:0} waiters=1 recs=2 anomalies[]
 t=25000 PICK req=r03 engine=golden/e0
-t=25000 STATE golden/e0{seats=2 used=29 stay=29 exiting=0 cold=64 budget=19 periods=T1:0,T2:0} waiters=1 recs=3 anomalies[]
+t=25000 STATE golden/e0{seats=2 used=29 stay=29 exiting=0 cold=64 budget=19 periods=T1:1,T2:0} waiters=1 recs=3 anomalies[]
 t=25000 EVENT EXIT thread=T1 engine=golden/e0 detail=reason=budget-noqueue turns=1 fairness_id=T1 wire_id=-
 t=25000 PICK req=none engine=none
 t=25000 STATE golden/e0{seats=1 used=22 stay=22 exiting=0 cold=64 budget=19 periods=T2:0} waiters=1 recs=2 anomalies[]

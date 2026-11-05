@@ -57,8 +57,33 @@ func (s *Scheduler) release(m *thread, reqID string, chains []Chain, now time.Ti
 		s.dropRequest(reqID, now)
 	}
 	s.reqs[reqID] = &reqRec{thread: m.id, chains: chains, released: now,
-		queueWait: obs.queueWait, predictedCached: obs.predictedCached, promptTokens: obs.promptTokens}
+		queueWait: obs.queueWait, predictedCached: obs.predictedCached, promptTokens: obs.promptTokens,
+		counted: true}
 	m.pending++
+	m.windows = append(m.windows, s.reqs[reqID])
+}
+
+// expireWindows drops the thread's windows that have outlived S from its count, and forgets the
+// records that are no longer windows. It is the busy() read's own liveness pass: the settle asks
+// "has this thread's work drained" at ITS time, so a window that died since the last pass must stop
+// counting HERE — otherwise a dead window keeps the thread busy, the turn's busy period is lost, and
+// the thread is never rotated at its quantum.
+func (s *Scheduler) expireWindows(m *thread, now time.Time) {
+	if m == nil || len(m.windows) == 0 {
+		return
+	}
+	kept := m.windows[:0]
+	for _, rec := range m.windows {
+		if !rec.pod.IsZero() {
+			continue // it reached a pod: not a window any more (its own hook closed it)
+		}
+		if rec.counted && now.Sub(rec.released) > time.Duration(s.cfg.IdleSeconds*float64(time.Second)) {
+			rec.counted = false
+			m.pending = max(m.pending-1, 0)
+		}
+		kept = append(kept, rec)
+	}
+	m.windows = kept
 }
 
 // windowLive reports whether a released record's window is still inside S: the thread is
@@ -80,7 +105,11 @@ func (s *Scheduler) atPod(rec *reqRec, m *thread, engine string, now time.Time) 
 	// was never counted (reapRequests adds only live windows to m.pending), so a LATE
 	// PreRequest must not decrement the thread — it would take a count away from another live
 	// window of the same thread and read the thread as not busy until the next pass re-derives.
-	live := s.windowLive(rec, now)
+	// THE COUNT IS THE RECORD'S OWN, not a guess about whether a pass ran: a window that has expired
+	// no longer counts (reapWindows or the pass's derive cleared it), so decrementing for it would
+	// take a count from another live window of the same thread.
+	live := rec.counted
+	rec.counted = false
 	rec.engine = engine
 	rec.pod = now
 	if m != nil && rec.thread == m.id {
@@ -111,7 +140,9 @@ func (s *Scheduler) dropRequest(reqID string, now time.Time) {
 	if g := s.groupOf(rec.thread); g != nil {
 		if m := g.threads[rec.thread]; m != nil {
 			if rec.pod.IsZero() {
-				if s.windowLive(rec, now) {
+				if rec.counted {
+					// a window already expired was cleared by the derive that noticed
+					rec.counted = false
 					m.pending = max(m.pending-1, 0)
 				}
 			} else {
@@ -256,6 +287,10 @@ func (s *Scheduler) Settle(reqID, engine string, now time.Time) {
 	s.dropRequest(reqID, now)
 	m.lastActivity = now
 	s.releaseCold(g, id) // any termination releases the charge
+	// THE WINDOWS THAT DIED SINCE THE LAST PASS STOP COUNTING HERE, at this settle's own time: busy()
+	// below asks whether the thread's work has drained NOW, and a window cannot be "live" because no
+	// pass has run to notice it expired.
+	s.expireWindows(m, now)
 	// THE BUSY PERIOD: the thread's work reached zero, and one thread is one chain, so that is the
 	// whole of it draining — the rotation quantum's unit. busy(), not the at-a-pod count: a turn a
 	// Pick has released and PreRequest has not brought to a pod is work too, and it closes the
@@ -344,11 +379,16 @@ func (s *Scheduler) reapRequests(now time.Time) {
 				s.noteAnomaly(anomalyReapedWindow)
 				continue
 			}
-			if s.windowLive(rec, now) {
+			// THE RECORD'S COUNT IS RECONCILED HERE, at the pass's own time: a window that has
+			// outlived S no longer counts, and one still inside it does. `counted` records the
+			// outcome so every later decrement (a late PreRequest, a drop) agrees with this pass.
+			rec.counted = s.windowLive(rec, now)
+			if rec.counted && m != nil {
 				m.pending++
 			}
 			continue
 		}
+		rec.counted = false
 		if now.Sub(rec.pod) > limit {
 			delete(s.reqs, rid)
 			reaped[rec.thread] = m

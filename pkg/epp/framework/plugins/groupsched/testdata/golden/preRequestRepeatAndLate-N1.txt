@@ -9,4 +9,4 @@ t=0 STATE golden/e0{seats=1 used=5 stay=5 exiting=0 cold=64 budget=19 periods=T1
 t=0 PICK req=none engine=none
 t=0 STATE golden/e0{seats=1 used=5 stay=5 exiting=0 cold=64 budget=19 periods=T1:0} waiters=0 recs=2 anomalies[]
 t=25000 PICK req=none engine=none
-t=25000 STATE golden/e0{seats=1 used=5 stay=5 exiting=0 cold=0 budget=19 periods=T1:0} waiters=0 recs=0 anomalies[]
+t=25000 STATE golden/e0{seats=1 used=5 stay=5 exiting=0 cold=0 budget=19 periods=T1:1} waiters=0 recs=0 anomalies[]
