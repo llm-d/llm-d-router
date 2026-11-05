@@ -21,13 +21,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net"
 	"slices"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -38,10 +41,17 @@ const (
 	// defaultProfileName is the scheduling profile run when parameters.DefaultProfile is
 	// empty.
 	defaultProfileName = "decode"
+
+	// defaultPrefillProfileName is the scheduling profile whose picked endpoint
+	// PreRequest stamps on the request when parameters.PrefillProfile is empty.
+	defaultPrefillProfileName = "prefill"
 )
 
-// compile-time type assertion
-var _ fwksched.ProfileHandler = &HeaderProfileHandler{}
+// compile-time type assertions
+var (
+	_ fwksched.ProfileHandler = &HeaderProfileHandler{}
+	_ fwkrh.PreRequest        = &HeaderProfileHandler{}
+)
 
 // parameters configures the HeaderProfileHandler.
 type parameters struct {
@@ -53,6 +63,10 @@ type parameters struct {
 	// carry the header at all - pass-through calls (e.g. /models) or a deployment that
 	// doesn't disaggregate.
 	DefaultProfile string `json:"defaultProfile"`
+	// PrefillProfile names the scheduling profile whose picked endpoint PreRequest
+	// stamps on the request as x-llm-d-prefiller-host-port. Defaults to
+	// defaultPrefillProfileName when empty.
+	PrefillProfile string `json:"prefillProfile"`
 }
 
 // HeaderProfileHandlerFactory defines the factory function for HeaderProfileHandler.
@@ -64,7 +78,8 @@ func HeaderProfileHandlerFactory(name string, rawParameters *json.Decoder, _ fwk
 		}
 	}
 
-	return NewHeaderProfileHandler(params.HeaderName, params.DefaultProfile).WithName(name), nil
+	return NewHeaderProfileHandler(params.HeaderName, params.DefaultProfile).
+		WithPrefillProfile(params.PrefillProfile).WithName(name), nil
 }
 
 // NewHeaderProfileHandler trims and defaults both arguments, additionally
@@ -88,6 +103,7 @@ func NewHeaderProfileHandler(headerName, defaultProfile string) *HeaderProfileHa
 		typedName:      fwkplugin.TypedName{Type: HeaderProfileHandlerType, Name: HeaderProfileHandlerType},
 		headerName:     headerName,
 		defaultProfile: defaultProfile,
+		prefillProfile: defaultPrefillProfileName,
 	}
 }
 
@@ -99,6 +115,7 @@ type HeaderProfileHandler struct {
 	typedName      fwkplugin.TypedName
 	headerName     string
 	defaultProfile string
+	prefillProfile string
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -109,6 +126,15 @@ func (h *HeaderProfileHandler) TypedName() fwkplugin.TypedName {
 // WithName sets the name of the profile handler.
 func (h *HeaderProfileHandler) WithName(name string) *HeaderProfileHandler {
 	h.typedName.Name = name
+	return h
+}
+
+// WithPrefillProfile sets the profile whose picked endpoint PreRequest stamps on the
+// request. An empty or blank name keeps the default.
+func (h *HeaderProfileHandler) WithPrefillProfile(name string) *HeaderProfileHandler {
+	if name = strings.TrimSpace(name); name != "" {
+		h.prefillProfile = name
+	}
 	return h
 }
 
@@ -206,4 +232,35 @@ func (h *HeaderProfileHandler) ProcessResults(_ context.Context, request *fwksch
 		ProfileResults:     profileResults,
 		PrimaryProfileName: profileName,
 	}, nil
+}
+
+// PreRequest stamps the picked prefill endpoint on the request as
+// x-llm-d-prefiller-host-port when the profile that ran is the prefill profile.
+//
+// The coordinator makes one scheduling call per phase and cannot see which pod the
+// gateway forwarded its prefill request to. A prefill response body carries the
+// address for some KV connectors (vLLM returns it in kv_transfer_params), but not
+// for all: sglang.api.v1.GenerateResponse has no such field. With this header on
+// the prefill request, request-header-copy-handler copies it onto the prefill
+// response, and the coordinator reads the prefill pod address from there with no
+// gateway-specific configuration. The decode sidecar reads nothing from the header
+// on the coordinator path, so other profiles stamp nothing.
+//
+// A client value under any spelling of the header is dropped first, as EPP drops
+// it on ingress, so only a pod this EPP picked can be named.
+func (h *HeaderProfileHandler) PreRequest(_ context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
+	if request == nil || request.Headers == nil || schedulingResult == nil {
+		return nil
+	}
+	routing.DeleteRoutingHeader(request.Headers, routing.PrefillEndpointHeader)
+	if schedulingResult.PrimaryProfileName != h.prefillProfile {
+		return nil
+	}
+	result := schedulingResult.ProfileResults[h.prefillProfile]
+	if result == nil || len(result.TargetEndpoints) == 0 {
+		return nil
+	}
+	target := result.TargetEndpoints[0].GetMetadata()
+	routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, net.JoinHostPort(target.Address, target.Port))
+	return nil
 }
