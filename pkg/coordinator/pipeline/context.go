@@ -36,13 +36,14 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
-// internalForwardingHeaders are set only by the coordinator or read by it
-// from a phase response; a client copy is dropped, and so is a value of
+// internalForwardingHeaders are set by the coordinator on outbound phase calls
+// or stamped by EPP or the gateway and read by the coordinator from a phase
+// response; a client copy is dropped, and so is a value of
 // forward_response_headers under these names. EPP routes on epp-profile and
 // x-llm-d-pin-host-port, and answers Prefer: if-available, the
 // conditional-decode probe's signal, with 412 on any other leg. The prefill
-// P2P address names the prefill pod a decode request pulls from, so a client
-// cannot choose it.
+// P2P address and prefill endpoint headers name the prefill pod a decode
+// request pulls from, so a client cannot choose them.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
@@ -50,6 +51,8 @@ var internalForwardingHeaders = map[string]bool{
 	routing.EndpointPinHeader:             true,
 	routing.PreferHeader:                  true,
 	routing.KVCachePrefillHeader:          true,
+	routing.PrefillEndpointHeader:         true,
+	routing.LegacyPrefillEndpointHeader:   true,
 }
 
 func isForwardableHeader(name string) bool {
@@ -242,6 +245,30 @@ type RequestContext struct {
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
+
+	// GRPCGeneratePayload holds the unframed protobuf payload of an SGLang
+	// native gRPC Generate request with client bootstrap fields removed. It
+	// aliases OriginalBody unless a field was removed. The prefill and decode
+	// steps send it as is, between a frame header and their bootstrap
+	// fields, so neither copies it. Nil for JSON HTTP requests. Use
+	// IsSGLangGRPC to test for a gRPC Generate request.
+	GRPCGeneratePayload []byte
+	// PrefillStream holds the active concurrent SGLang gRPC prefill stream
+	// started by PrefillStep and coordinated with DecodeStep.
+	PrefillStream *SGLangPrefillStream
+}
+
+// IsSGLangGRPC reports whether the request is an SGLang native gRPC Generate
+// request. An empty GenerateRequest has an empty but non-nil payload.
+func (rc *RequestContext) IsSGLangGRPC() bool {
+	return rc.GRPCGeneratePayload != nil
+}
+
+// ClosePrefillStream cancels and releases any active concurrent prefill stream.
+func (rc *RequestContext) ClosePrefillStream() {
+	if rc != nil && rc.PrefillStream != nil {
+		rc.PrefillStream.Close()
+	}
 }
 
 // MultimodalEntry describes one multimodal item in the request and where it

@@ -222,7 +222,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, and `/inference/v1/generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, and `/sglang.api.v1.SglangService/Generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `x-llm-d-epp-profile` header constants. |
@@ -423,6 +423,11 @@ combination at startup. When `kv_connector` is `kv-sglang`, leave the step out a
 the `prefill` step. Every request then runs remote prefill and a KV transfer, including
 short or already-cached prompts.
 
+On `POST /sglang.api.v1.SglangService/Generate`, `conditional-decode` does nothing and
+the pipeline continues to the next step. A pipeline that includes the step for HTTP
+requests therefore runs `prefill` and `decode` on every gRPC Generate request. The
+`render`, `replace-media-urls`, `encode`, and `async-broker` steps also do nothing on this path.
+
 ### KV and EC transfer protocols
 
 Because the coordinator builds the prefill and decode request bodies itself, it must
@@ -443,6 +448,34 @@ The `kv-sglang` `bootstrap_port` advertised to prefill pods defaults to 8998 and
 overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. The value
 is read once on the first prefill request that uses the connector; a non-integer value is
 rejected in favor of the default and logged at error level.
+
+On `POST /sglang.api.v1.SglangService/Generate`, `GenerateResponse` carries no bootstrap
+host field, so the prefill EPP reports the prefill pod on the prefill response instead.
+Configure the prefill EPP with `header-profile-handler` and set `prefillProfile` to the
+prefill profile name. When that profile ran, the handler adds
+`x-llm-d-prefiller-host-port` to the response with the endpoint the proxy reports it
+served, or the picked endpoint when the proxy reports none. The EPP `ext_proc` filter
+needs `response_header_mode: SEND`. This needs no gateway route rule and works on any
+gateway that runs the EPP, including Gateway API `HTTPRoute` deployments. A role-scoped
+prefill EPP that runs one profile can use `header-profile-handler` too: with a single
+configured profile it runs that profile for every request.
+
+```yaml
+plugins:
+- type: header-profile-handler
+  parameters:
+    prefillProfile: prefill
+```
+
+The `prefill` step reads the header, strips it from client responses, and fails the
+request before decode is sent when a prefill response omits it. See the
+[header-profile-handler README](../pkg/epp/framework/plugins/scheduling/profilehandler/headerprofile/README.md#reporting-the-prefill-pod-to-the-coordinator).
+The SGLang worker must send its response headers before its first frame, so that
+prefill headers arrive before decode starts. The `sglang-server` gRPC server does this
+for both `stream: true` and `stream: false`: `Generate` returns its response stream once
+the request is admitted, and a `stream: false` request is a one-frame stream. This
+differs from HTTP `/generate`, where a non-streaming response sends its headers with the
+body after generation.
 
 `kv-offloading` has no setting of its own. The prefill EPP computes every P2P tier port:
 its `p2p-source-producer` sets the prefill pod's P2P tier address on the
