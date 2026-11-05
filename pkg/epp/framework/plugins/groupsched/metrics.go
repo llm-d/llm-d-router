@@ -27,7 +27,7 @@ import (
 )
 
 // groupMetrics exports the MINIMAL set an operator needs to see liveness and fairness or to
-// diagnose a known failure class — nineteen names, and nothing else.
+// diagnose a known failure class — twenty names, and nothing else.
 type groupMetrics struct {
 	sched *Scheduler
 
@@ -45,8 +45,6 @@ type groupMetrics struct {
 	predictedCached  *prometheus.CounterVec
 	dispatchedPrompt *prometheus.CounterVec
 	served           *prometheus.CounterVec
-
-	capacityLearned *prometheus.CounterVec
 
 	// affinityViolations counts requests that landed off their thread's seat engine.
 	affinityViolations *prometheus.CounterVec

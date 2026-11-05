@@ -97,11 +97,11 @@ No response content is read except the end of stream, which releases the thread'
 | `forkOnBusy` | bool | `true` | The continuation rule's busy half. `false` makes every match a continuation, which is a measurement arm, not a deployment. |
 | `stickyBusyGuard` | bool | `true` | H1, above. |
 | `retryRule` | bool | `true` | S2, above. |
-| `logRequests` | bool | `false` | One JSON line per request at the default log level. A scoring instrument; it changes no state and no decision. |
+| `logRequests` | bool | `false` | One JSON line per request, at **`V(DEBUG)`** — it is an instrument for scoring a shadow arm, so it is silent unless the EPP runs at debug verbosity. It changes no state and no decision. |
 | `logHeaders` | bool | `false` | Adds the client's own identity headers to that line (an observer only: no header here is ever read by the identity). |
 | `logHeaderNames` | list | `[]` | Extra headers for that whitelist. |
 
-The parameters are decoded **strictly**: an unknown key fails the startup. That matters here — the plugin's surface shrank when session scoping was removed, and a stale `sessionHeaders` key must fail loudly rather than do nothing.
+The parameters are decoded **strictly**: an unknown key fails the startup rather than being ignored, so a configuration written for another version of the plugin cannot load and run half-configured.
 
 ### Which parameters to set
 
@@ -158,6 +158,7 @@ The outcome counters should sum to the arrival rate. A `forks_total` that stays 
 ## Trade-offs
 
 *   **Content is the whole identity.** Two clients whose conversations are identical so far share one thread, and therefore one queue and one seat. In practice a prompt is a conversation's own text, so this is rare; when it happens the two turns continue each other and the second sees the first's queue position. That is the accepted cost of needing no client cooperation.
+*   **"Identical so far" has one tolerance, and it is deliberate.** Matching is by whole blocks of `blockSizeTokens`, so two prompts that differ only inside the tip's LAST full block (and its trailing partial block) also match: the earlier history is what the KV cache shares, and the differing tail is exactly what the engine has to prefill. The consequence is the same as above — the second client's first turn becomes a continuation, and the first client's next turn then starts a NEW thread. Two prompts that differ earlier than the last block do not match.
 *   **A render on the arrival path.** Turning content into tokens costs a `/render` round trip per request (~a hundred milliseconds on a loaded sidecar). It is one render for the whole stack — the dispatch-time producer and every prefix scorer reuse it — but it is on the critical path of the request's first admission.
 *   **The identity is only as good as the tokenizer agreement.** If the render backend's chat template differs from the engine's, the chain differs from what the engine prefills and the cache hit the scheduler charges for does not exist. Both must be the same model and template.
 *   **A cap is an eviction, not a bound on memory.** `maxThreads` keeps the table finite by evicting idle threads, so a conversation that returns after eviction starts a new thread — with the correctness that its queue key is new, and the cost that its seat (if any) is re-decided.
