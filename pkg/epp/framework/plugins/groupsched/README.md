@@ -1,241 +1,178 @@
-# groupsched — GSCH-CORE
+# Group Scheduler
 
-One group-fairness scheduler for **one engine and N engines with the same code**: a
-single-pod stack is the N=1 case of the per-engine state, never a branch of its own.
+**Type:** `group-scheduler`
 
-This file is the module map, the pass order, the metric and config surface, and the list of
-what was deliberately removed. It is written for someone arriving with no context: read §1
-(what the policy does), then §2 (the two rules that are not obvious), then §4 (every knob).
-The design record lives in the knowledge bank
-(`explore/ring-window-v2/tier-design-data/SCHEDULER-REDESIGN.md`, `…-AS-BUILT.md`,
-`SCHEDULER-TRIM-DESIGN.md`, `BRANCH-IDENTITY-V2-DESIGN.md`); this file describes the code as
-it is, and the bank describes how it got here.
+The Group Scheduler is a fairness policy that admits requests **per conversation**. It derives nothing itself: the thread-identity plugin reads every request's content, renders it through the model's own tokenizer and publishes a thread id, and this policy seats one *thread* per engine and charges that engine's KV budget with the thread's exact prefill blocks. A thread keeps its seat across turns, so a conversation's KV cache is not thrashed by the turns of other conversations; when several threads want the same engine, they rotate a fixed tenure rather than compete per request.
 
-## 1. What the policy does
+One plugin instance answers three questions: it is the band's **FairnessPolicy** (which request to dispatch), the **Filter** (which endpoint may serve it — the thread's seat) and the **SaturationDetector** (whether the pool is full). The three answers come from one state, so they cannot disagree.
 
-A **branch** (branch identity's derived id — the flow queue key) is **seated** on exactly one
-engine, and its seat is its footprint on that engine's block index: the exact prefill chain of
-its queued turn, deduped against what the engine already holds. Each engine's **seat budget**
-is its own measured KV capacity × `groupBudgetFraction` — **the seat budget is the whole
-admission control**. A branch with a queued head and no seat waits in ONE shared queue;
-newcomers go before returning branches, then the oldest arrival; when room frees, the head
-goes to the engine with the most free budget left AFTER the seat (tie → lowest engine id) and
-stays there while seated. A resident becomes rotation-eligible after **Q** completed busy
-periods (or S of silence), and memory pressure evicts in the budget valve's order.
+Registered at **Alpha** stability, so the EPP requires `--allow-experimental-plugins`. Without the flag the EPP refuses to start.
 
-One external answer, then plain functions: the queue key comes from the thread-identity
-plugin; everything else the pass decides is a function of the state it already holds.
+## Why choose this policy?
 
-| seam | where | answers |
-|---|---|---|
-| identity | *(the thread-identity plugin)* | who is the branch (= the queue key) |
+Consider a pool of two model servers and a workload of multi-turn conversations — coding agents, chat sessions, anything where a later turn re-sends the history of the earlier ones.
 
-**One pass, one order** (`Pass`, and the only place a decision is taken):
+**Under FCFS or a load-balancing policy**, consecutive turns of one conversation land wherever has room. Each turn's prompt contains the previous turns' tokens, so the KV blocks a turn just computed are useful to the next turn only if the next turn runs on the same engine. Spread across engines, a warm cache is hit at random, prefill is repeated, and TTFT carries the cost. The scheduler cannot see the difference: every request looks equally cheap.
 
-    reap → drainExiting → syncWaiters → deriveColdCharges → enforce (per engine)
-         → rotate / seat → dispatch (+ charge the winner's exact chain)
+**Under a prefix-cache or affinity score**, a request is placed where its prefix is likely cached, but placement is still decided per request and nothing bounds how many conversations share one engine. Under load the cache is larger than the KV budget, so every new turn evicts another conversation's blocks; the engines preempt, and the cache the scoring relied on is gone by the time it is used again.
 
-Everything the pass decides on is derived from state in that pass: the request counts from
-the request map, the cold charges from the branches, the queue view from the heads this pass
-was handed. Nothing accumulates across passes and no timer decides anything.
+**Under the Group Scheduler**, the unit is the conversation. A thread is seated once, its blocks are charged to the engine's budget for as long as it stays, and its later turns are pinned there. The seat budget (`groupBudgetFraction` of the engine's measured `num_gpu_blocks`) bounds how many conversations an engine holds, so the resident set fits the cache the engines actually have. A thread that has used its tenure (or gone quiet) leaves, and the next waiting thread takes the seat — so a burst of new conversations is admitted in a bounded number of rotations rather than by evicting everything at once.
 
-### Files
+## What it does
 
-| file | contents |
-|---|---|
-| `scheduler.go` | `Config`, the state machine, the pass, the request map, settle/abandon/chunk, the snapshot, the event ring |
-| `admission.go` | the shared waiter queue: the seat loop, the per-engine candidate facts |
-| `blockindex.go` | the per-engine block index: two refcounts (used / stay), the exact cost, the seat |
-| `filter.go` | the placement Filter (pin dispatch to the seat engine) + the lock-light pin/request table |
-| `plugin.go` | the framework plugin: FairnessPolicy + Filter + SaturationDetector, capacity learning, every hook |
-| `metrics.go` | the nineteen Prometheus series |
-| tests | `scoped_hooks_test.go` (the F13 class, §2b), `rule_o_test.go` (§2c), `invariant_test.go` (randomized, N=1 and N=2, every invariant after every event), `released_window_test.go`, `chargeddrain_test.go`, `cascade_test.go`, `coldcap_test.go`, `blockindex_test.go`, `multipod_test.go`, `scheduler_test.go`, `replay_test.go`, `config_conformance_test.go`, `metrics_events_test.go`, `metrics_wire_test.go`, `observability_test.go`, `integration_test.go` |
+1.  **Tidy**: the pass reconciles its accounting with the requests it can see — a released turn whose window outlived the reap threshold is closed and counted (`anomalies_total{kind="reaped_window"}`), an in-flight turn likewise (`reaped_inflight`), and an engine whose endpoints are gone is torn down.
+2.  **Queue**: the heads this pass was handed are reconciled with the shared admission queue. A seated thread's head stays on its engine; an unseated thread's head waits in **one** queue for any engine.
+3.  **Derive the cold charges**: each seated thread's un-prefilled tokens (`ColdTokens`) are what it would have to prefill if served now. They feed the cold-start stagger.
+4.  **Enforce the budget**: each engine's charged blocks (`ne_blocks`) are brought back under its seat budget by evicting residents in a fixed class order — a thread with no queued turn first, then one past its tenure, then the longest-waiting — with the engine's smallest-cost victim chosen inside each class. Exiting threads keep their blocks until their in-flight requests drain, and enforcement no longer evicts for them.
+5.  **Seat waiters**: free budget admits waiting threads, newcomers before returners and then oldest first, with a cold-start stagger: an engine's outstanding cold-entry charge is capped at `(1 − groupBudgetFraction)` of its KV, so a burst of large prompts cannot make every resident prefill at once. **Rule O**: an empty engine admits one oversize head, charging its full exact chain, rather than refusing it — an over-budget counter is recoverable, an idle engine is not.
+6.  **Dispatch**: among seated threads with a dispatchable head, the engine with the fewest queued turns per seat wins; ties go to the older head. The dispatched turn's chain is charged to that engine in the same critical section as the decision, and the turn is handed to the framework. A head with no engine to serve it — anonymous traffic, a thread whose render produced no tokens, a stack whose capacity has not been measured yet — is served last, in arrival order, unseated and uncharged.
 
-## 2. The rules that are not obvious
+**Rotation.** A seat is held for `quantum` completed busy periods (a busy period is one turn's work: released, run, settled) or until the thread has been idle for `idleSeconds`. Either makes the resident rotation-eligible; enforcement then releases the seat so a waiting thread can take it. A thread that returns finds its seat if it is still there, and re-enters as a returner if it is not.
 
-### 2a. The released window counts as IN FLIGHT
+**The observed engine wins.** If a request's `PreRequest` reports an endpoint other than the seat, the thread is moved to the observed engine and the blocks are re-seated there (`affinity_violations_total` counts the event). The framework's choice is authoritative about where the request ran; the policy's model follows it.
 
-A request that a Pick has released and PreRequest has not yet brought to a pod is a turn ON
-ITS WAY, and it counts as in flight everywhere: tenure eligibility, the engine-idle rule,
-every victim class, the drain, the cold-charge derivation, the in-flight cap. The window is
-the COMMON case — every dispatch passes through it and Pick runs at ~1 kHz — so a branch on
-its way to the pod looks IDLE to any rule that ignores it (measured at N=1 and N=2: evicted
-and re-seated by the observed seat, used 1200 against a 950-block budget; a marked branch
-drained before its request ran, used 1500 against 1100; a quantum-complete branch rotated out
-mid-window).
+## Unit of Fairness
 
-A window is **live for at most S** (`idleSeconds`, the tenure rule's own silence bound),
-evaluated in the decision pass — no timer, no new constant. Past S it is presumed dead: it
-stops counting, the branch becomes evictable on demand, and the cold charge it held is
-released by the derivation. **A valve-held head therefore waits at most S**, not "within one
-Pick" — that is the bounded cost of the rule, and it is the honest bound.
+**The thread** — one conversation, from thread identity. A thread is one FIFO of turns on one engine, so fairness is per conversation, not per request: a conversation with many short turns does not get a larger share of an engine than one with few long turns, it just uses its seat more often.
 
-One request is one record (`reqRec`), keyed by request id: it opens at the Pick that released
-it (carrying the branch, the exact chain and the engine the observation later names) and ends
-at its settle, its abandon, its branch's exit or the reap. Every hook the framework SCOPES
-(Filter, PreRequest, ResponseBody, RequestAbandoned) resolves its branch from that record —
-see §2b.
+*   **Newcomers before returners.** Within a waiter queue, a thread's first turn precedes a returning thread's next turn, and among equals the older arrival goes first. A newcomer is a conversation that has not been served; a returner already has a seat's worth of history on the fleet.
+*   **The session is an attribute, not a unit.** Thread identity may publish a session id, and this policy carries it for the `SEAT`/`EXIT` events, but it never groups threads by it. One session's parallel threads are independent units.
+*   **The engine is the resource.** A thread's seat is on one engine; the budget it draws from is that engine's. Two engines are two budgets, and a thread does not span them.
 
-### 2b. The scoped hooks, and where the branch comes from
+## Inputs consumed
 
-**The framework confines a plugin's request attributes.** `datalayer.ScopeRequest` /
-`ScopeInvocation` hand a plugin a request whose attribute access is limited to the keys the
-plugin declares: an undeclared read RESOLVES AS ABSENT, an undeclared write is DROPPED. That
-is applied at `Filter`, `Scorer`, `PreRequest`, the profile/scheduling points and every
-`DataProducer`. The flow-control `Pick` path applies NO scope (`processor.go:
-fairnessP.Pick(ctx, flowGroup)`).
+*   **Thread identity's attributes**: the thread id (the queue key and the seat identity), the arrival record (first turn or later, and which turn), and the rendered block keys the thread's prompt hashes to.
+*   **The rendered tokens**: the block keys are hashed once, at arrival, by thread identity; this policy charges exactly those blocks. It performs no rendering of its own.
+*   **Endpoint metrics**: `num_gpu_blocks` and the block size, read from the engine's own metric endpoint, once per engine, at discovery or on a refresh — **the only two things this policy ever takes from vLLM**. No live metric (queue depth, KV utilization, TTFT) enters any decision.
+*   **Lifecycle events**: an endpoint appearing or disappearing; a request's `PreRequest` (which engine actually served it), its first response chunk (prefill done) and its end of stream.
 
-**So the policy reads a request attribute in exactly one hook.** `Pick` takes the branch id,
-the arrival class and the client's own request id from the flow controller's own queue item —
-the only place they are readable. Every later hook resolves the branch from the scheduler's
-OWN record of the release, by request id; the Filter resolves it through the pin table's
-request mirror, which the same release writes, so it still never takes the scheduler's mutex.
-The plugin declares `Produces() = nil` and `Consumes()` empty — honestly: it publishes nothing
-onto a request, and the one key it reads (branch identity's) cannot be declared, because the
-DAG's layer validator rejects a consumer whose producer sits in a later layer (branch identity
-is a `PreRequest` plugin, this policy is flow-control layer 0). That is the upstream draft in
-§6; until it lands, the request map IS the design.
+## Configuration
 
-**Branch identity is REQUIRED, and it is the only accepted source.** `validateBranchProducer`
-refuses to start without it, and refuses an agent-identity-only config explicitly: an agent (a
-session) id is a MULTI-CHAIN member — its parallel sub-agents are separate chains — while the
-index keeps ONE chain per tracked id (R3), so seating by agent id would charge the sub-agents'
-blocks to one record and UNDER-ACCOUNT the engine. Without branch identity every request is
-anonymous and Pick passes every head through unseated, which looks healthy in every outcome
-metric — hence fail closed rather than a degraded queue key.
+```yaml
+- type: group-scheduler
+  name: group
+  parameters:
+    groupBudgetFraction: 0.95    # seat budget = fraction x the engine's num_gpu_blocks
+    quantum: 4                   # completed busy periods a seat is held before rotation
+    idleSeconds: 20              # silence after which a seat is rotation-eligible
+    inFlightCap: 64              # how many of one thread's requests may be in flight
+    blockSizeTokens: 64          # must equal vLLM's --block-size and thread-identity's
+    inflightReapSeconds: 9300    # a tracked request older than this is closed by the reap
+```
 
-Why this matters: reading the branch from an attribute under a scope returns `""`, and the
-policy then looks perfectly healthy — nothing seated, nothing starved, pass-through in every
-outcome metric. It shipped once. `scoped_hooks_test.go` is the test class that catches it: at
-N=1 and N=2, for an arm's request, an explicit-fairness-header request, an anonymous request
-and a branch-plus-agent-identity config, it drives Pick through the REAL flow controller and
-Filter/PreRequest/ResponseBody/Abandon through the REAL scope, and fails on any violation
-counted or any branch that fails to resolve.
+| Parameter | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `groupBudgetFraction` | float | `0.95` | Fraction of an engine's measured `num_gpu_blocks` that may be charged to seats. Must be in (0, 1]. |
+| `quantum` | int | `4` | Q: completed busy periods a seat is held before it becomes rotation-eligible. Must be ≥ 1. |
+| `idleSeconds` | float | `20` | S: silence after which a resident becomes rotation-eligible (it is not going to use its seat). Must be > 0. |
+| `inFlightCap` | int | `64` | Maximum in-flight requests of one thread. Must be ≥ 1. |
+| `blockSizeTokens` | int | `64` | The engine's KV block size in tokens. Must equal vLLM's `--block-size` and thread identity's `blockSizeTokens`; the startup refuses a disagreement, naming both numbers. |
+| `inflightReapSeconds` | float | `9300` | Age beyond which a tracked request is closed by the reap. Must exceed the client's request timeout. |
 
-### 2c. RULE O — the empty engine admits one
+The parameters are decoded **strictly**: an unknown key fails the startup instead of being ignored.
 
-A head whose **exact cost exceeds every engine's seat budget** cannot fit an engine that is
-empty, because the budget is 0.95 of the cache — and vLLM itself refuses to start unless the
-model's max-model-len fits its own KV capacity, so any request the engine accepts physically
-fits its WHOLE cache. Without the rule such a head waited for ever, and (strict head-of-line)
-so did every branch behind it. The rule, in the order the code applies it:
+### Which parameters to set
 
-1. **trigger** — the cost exceeds the budget on EVERY engine; otherwise placement is
-   unchanged;
-2. an **empty engine** takes it, subject to the cold valve as usual (an empty engine holds no
-   charge and a capped charge always fits the cap, so the valve is never the blocker);
-3. with no empty engine, the ordinary demand-driven rotation runs on the engine placement
-   picks anyway (most free budget, then id), and it **converges on that one engine**: every
-   eviction raises its free budget, so it stays the pick until it is empty;
-4. the seat charges the **full exact chain** — no capping trick, the index stays exact, and
-   the engine reads over budget, which is the truth;
-5. **no thrash** — pressure never takes an engine's SOLE staying resident whose own footprint
-   exceeds the budget (victim selection returns nil and the pass ends); it leaves by TENURE,
-   like everyone else;
-6. while it is seated the engine's free budget is negative, so nothing else seats there.
+Most deployments set **one** of these.
 
-The separate "wait, never evict" guard is dropped for this case (an eviction leads to a seat);
-it stays for the valve-held head, where evicting frees budget and never the valve.
+*   **Set `blockSizeTokens` whenever the engine's `--block-size` is not 64.** It is the only parameter that can silently corrupt every cost: the policy charges the block keys thread identity hashed, so a disagreement means every charge is wrong. Both plugins refuse to start if they disagree.
+*   **Leave `groupBudgetFraction` alone** unless the engine is shared with something else. `0.95` leaves 5% of the KV for the engine's own working room; the remainder doubles as the cold-start stagger cap.
+*   **Leave `inFlightCap` alone** unless a single conversation is expected to fan out wider than 64 parallel turns.
+*   **`quantum` is a workload choice.** It trades locality for the wait of others: a larger Q keeps a conversation's cache resident longer (better hit rate) and makes a waiting conversation wait longer to be admitted. 4 fits conversational traffic; a fan-out agentic workload with many short conversations wants 1–2.
+*   **`idleSeconds` is a workload choice.** Set it above the client's typical gap between turns — a tool call, a human reading — or a conversation's seat is released between its own turns. It is measured from the last activity, not from the last completion.
+*   **`inflightReapSeconds` is a safety belt.** Set it above the client's request timeout. It exists for a termination no callback reported; a value below the timeout closes live requests.
 
-Declared, not a defect: **a seated branch whose head has no rendered tokens** is served
-through its SEAT (a seat is an admission right), not by the pass-through that a no-token head
-of an unseated branch takes. It is the render-failure case, it is counted
-(`anomalies_total{kind="no_tokens_head"}`) and its growth is uncharged — the rare path where
-the index learns the turn's cost one settle late.
+### Required wiring
 
-## 3. The metric surface
+The policy is one plugin but it answers three interfaces, and it needs thread identity beside it. A configuration that omits any of these refuses to start rather than running a degraded policy.
 
-**Nineteen series**, all `llm_d_epp_group_*`; every per-engine one carries `engine` = the
-endpoint id, so `sum(...)` is the whole-policy number with one engine and with N.
+```yaml
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl
+plugins:
+- type: thread-identity
+  parameters:
+    blockSizeTokens: 64
+    tokenProducer:
+      modelName: your-model
+      vllm:
+        url: http://localhost:8000
+- type: group-scheduler
+  name: group
+  parameters:
+    groupBudgetFraction: 0.95
+    quantum: 4
+    idleSeconds: 20
+    inFlightCap: 64
+    blockSizeTokens: 64
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: group
+flowControl:
+  defaultRequestTTL: 0s
+  maxBytes: "1000000000"
+  maxRequests: 5000
+  priorityBands:
+  - priority: 0
+    maxBytes: "1000000000"
+    maxRequests: 5000
+    fairnessPolicyRef: group
+  saturationDetector:
+    pluginRef: group
+```
 
-| series | what it says |
-|---|---|
-| `seats{engine}` | seated branches (residencies) |
-| `ne_blocks{engine}` | distinct blocks charged to the budget: every seated branch's set, **exiting included** until they drain (the USED side) |
-| `budget_blocks{engine}` | the seat budget (fraction × this engine's num_gpu_blocks) |
-| `waiters_shared` | the ONE shared admission queue's depth (no engine label: a waiter belongs to no engine) |
-| `exiting_branches{engine}` / `exiting_blocks{engine}` / `exiting_oldest_age_seconds{engine}` | the exiting ledger: who is on the way out, how much of `ne_blocks` they hold, and how long the oldest has been leaving (a value that only grows is a drain that is not happening) |
-| `cold_inflight_tokens{engine}` / `cold_cap_tokens{engine}` | the cold-entry charge and its DERIVED cap (the budget's own headroom) |
-| `cold_valve_held_total{engine}` | Pick PASSES in which the head was held by that engine's valve (a pass count: Pick runs at ~1 kHz) |
-| `capacity_missing{engine}` / `capacity_learned_total{via,engine}` | the startup liveness alarm and the acquisition audit |
-| `dispatches_total{engine}` | dispatches served per engine; `engine="nocapacity"` counts the pre-capacity pass-through (no engine served those) |
-| `exits_total{engine,reason}` | DEPARTURES by reason: `quantum-complete`, `idle`, `engine-idle`, `exiting-drain`, `budget-idle`, `budget-noqueue`, `budget-exiting`, `engine-gone`. A mid-flight mark is a STATE (the exiting ledger), never an exit: the departure is booked once, as `exiting-drain` |
-| `entry_wait_seconds{engine,kind}` | seat waits, `kind=` `new` or `reentry`, ONE histogram (top bucket 13,107 s so nothing lands only in `+Inf`) |
-| `engine_gone_total` / `rebinds_total` | engine teardowns / seat moves that repaired an affinity violation |
-| `affinity_violations_total{from,to}` | requests that landed on an engine other than the one they were charged to — fired from BOTH sites (the PreRequest observation, which rebinds, and the settle). An invariant: must be 0 |
-| `anomalies_total{kind}` | the should-be-zero ledger: `no_tokens_head`, `no_request_id`, `stray_settle`. Each names its EVENT; all three read 0 on a healthy stack |
+*   **`thread-identity` must be in the same config.** Without it every request is anonymous, Pick serves every head through the pass-through, and the stack looks healthy in every outcome metric while nothing is seated.
+*   **The band's `fairnessPolicyRef` and the `saturationDetector` slot both name the instance**, and the instance also appears in the scheduling profile as its Filter. One instance behind three references is the supported shape; the loader's DAG validation rejects a reference whose producer sits in a later layer.
+*   **The queue limits belong at the maximum** (the defaults shown). This policy decides admission; a flow-control TTL or a byte cap that binds first would deny requests the policy had decided to serve, and the denial would be invisible to it.
+*   **`defaultRequestTTL: 0s`** means no queue TTL: a request waits for a seat rather than being dropped, which is the policy's own decision to make.
+*   **No `token-producer` plugin is needed.** Thread identity renders the request's tokens itself, through the same upstream tokenizer, at arrival; a second producer in the chain would find the tokens already present.
 
-The SEAT/EXIT event ring (dumped in `DumpState`, logged at V(DEBUG)) carries the branch id, the
-engine, `fairness_id` (the queue key) and `wire_id` (the client's own `x-correlation-id`, else
-`x-request-id`) — the field that joins a seat to a request record, since the derived branch id
-joins to nothing on the harness side.
+## Observability
 
-## 4. Every config key (14)
+All series are under `llm_d_epp_group_`. Gauges are rendered at scrape from one snapshot; each engine's counters keep their series after the engine is gone, because totals sum them.
 
-| key | default | what it is |
-|---|---|---|
-| `groupBudgetFraction` | 0.95 | THE one policy constant, with two readers: the seat budget (fraction × measured KV), and the cold-entry stagger cap, which is its complement. The wave sweeps it |
-| `quantum` | 4 | the tenure bound in completed busy periods. Q8 is the same code with 8 |
-| `idleSeconds` (S) | 20 | the silence bound: a resident with no queued turn and no activity for S is rotation-eligible. It is also the released window's bound (§2a) |
-| `inFlightCap` | 64 | one branch's concurrent requests (a request-count safety valve) |
-| `blockSizeTokens` | 64 | a WIRING FACT, not a knob: it must equal the engine's `--block-size`; a measured mismatch fails loudly per engine |
-| `inflightReapSeconds` | 9300 | the belt over a termination nobody reported: a request record older than this is dropped. It MUST sit above the client's own timeout (the campaign harness runs 9000 s; every pin sets 9300)|
+| Metric | Type | Labels | Meaning | Healthy reading |
+| --- | --- | --- | --- | --- |
+| `seats` | gauge | `engine` | seated threads on this engine | between 1 and the budget's capacity; a floor of 0 on a busy stack means nothing is being admitted |
+| `ne_blocks` | gauge | `engine` | distinct blocks charged to the engine's budget | ≤ `budget_blocks`; above it is a transient the enforcement pass is correcting |
+| `budget_blocks` | gauge | `engine` | the seat budget: `groupBudgetFraction` × `num_gpu_blocks` | constant per engine |
+| `exiting_threads` | gauge | `engine` | threads marked exiting that still hold their seat until their requests drain | returns to 0; a value that persists is a drain that is not happening |
+| `exiting_blocks` | gauge | `engine` | the part of `ne_blocks` that belongs to exiting threads | bounded by `ne_blocks` |
+| `exiting_oldest_age_seconds` | gauge | `engine` | how long the oldest exiting thread has been on its way out | stays small; only growing means a stuck drain |
+| `cold_inflight_tokens` | gauge | `engine` | outstanding cold-entry charge against the stagger cap | ≤ `cold_cap_tokens` |
+| `cold_cap_tokens` | gauge | `engine` | derived stagger cap: `floor((1 − groupBudgetFraction) × num_gpu_blocks) × blockSizeTokens` | constant per engine |
+| `capacity_missing` | gauge | `engine` | 1 while the engine's `num_gpu_blocks` is unknown | 0 once the metrics arrive; 1 for long means the engine serves FCFS only |
+| `waiters_shared` | gauge | — | heads waiting in the one shared admission queue | the queue depth the policy sees |
+| `dispatches_total` | counter | `engine` | dispatches served by each engine's seats; `engine="nocapacity"` counts the pre-capacity pass-through | sum is the request rate |
+| `exits_total` | counter | `engine`, `reason` | thread exits by reason (`rotation`, `ttl`, `engine-gone`, `exiting-drain`, …) | the mix shows whether tenure or silence is doing the releasing |
+| `entry_wait_seconds` | histogram | `engine`, `kind` (`new`, `reentry`) | **seat** waits: how long admission made a thread wait, arrival to first seat | p99 well below the client's patience |
+| `queue_wait_seconds` | histogram | `kind` (`new`, `returner`, `untracked`) | **queue** waits: dispatch time minus the head's arrival, per request — every dispatched turn, including a seated thread's turn waiting on the in-flight cap or the dispatch order | the wait a request actually experiences; its difference from `entry_wait_seconds` is what the seats cost |
+| `dispatched_prompt_tokens_total` | counter | `engine` | prompt tokens of every dispatched turn, summed over a request's prompts | the denominator of the predicted hit rate |
+| `predicted_cached_tokens_total` | counter | `engine` | prompt tokens the engine was predicted to hold as a resident prefix, measured read-only **before** the turn's own charge | ratio to the line above is the predicted prefix hit rate |
+| `cold_valve_held_total` | counter | `engine` | Pick passes in which the head was held by this engine's cold-entry valve | a rate, not a count: Pick runs at ~1 kHz |
+| `anomalies_total` | counter | `kind` | should-be-zero events the policy could not act on (below) | `no_tokens_head` 0, `no_request_id` 0 in practice, `reaped_*` 0 |
+| `affinity_violations_total` | counter | `from`, `to` | requests that landed on an engine other than the thread's seat (the thread was rebound) | 0 is the invariant; a value means the placement and the seat disagreed |
+| `engine_gone_total` | counter | — | engines torn down by an endpoint delete | follows endpoint churn |
 
+**Anomaly kinds.** `no_tokens_head` — one Pick **pass** saw a thread head with no rendered tokens, so it could not be seated or charged; a render failure, and a rate rather than a request count. `no_request_id` — a turn was released for a request with no id; a boundary guard, 0 in practice because the router assigns every request one. `reaped_inflight` / `reaped_window` — a request (or a released window) outlived the reap and had to be closed by it; these are the leak signals.
 
-A key the strict decoder does not know is a CrashLoop, so `config_conformance_test.go` pins
-the emitter's blocks against `Config` in both directions, values included.
+**Span attributes** (set at `PreRequest`, only when the request's span is recording): `llm_d.epp.group.queue_wait_ms`, `llm_d.epp.group.predicted_cached_tokens`, `llm_d.epp.group.prompt_tokens`, `llm_d.epp.group.seat_engine`. Nothing from the response is read for them.
 
-### Constants in the code
+## Trade-offs
 
-| constant | value | where | why |
-|---|---|---|---|
-| `eventRingSize` | 2048 | `scheduler.go` | the SEAT/EXIT ring bound (memory). A wrap is COUNTED in `Snapshot.EventRingDropped` (a dump field, not a series) |
-| cold-entry cap | DERIVED | `engineGroup.coldCapTokens` | `floor((1 − fraction) × num_gpu_blocks) × blockSizeTokens` per engine; the CHARGE is capped at it, which makes `cold_inflight_tokens ≤ cold_cap_tokens` an invariant and "one cold entry is always allowed" a consequence |
-| `maxChainBlocks` | 2^20 | `plugin.go` | effectively unbounded: a cap would silently stop counting a long prompt's tail |
-| `defaultInflightReapSeconds` | 9300 | `scheduler.go` | the harness timeout (9000 s) + headroom |
-| the released window | S | `scheduler.windowLive` | not a new number: the tenure rule's own silence bound |
+*   **A returner's tail can wait behind newcomers.** Newcomers go before returners by design — a fresh conversation should not starve behind a fleet of established ones — so under saturation a conversation's next turn may wait for an admission while newer conversations are admitted. That is the choice; if returner latency matters more than newcomer fairness, a smaller `quantum` releases seats sooner.
+*   **Nothing is admitted until capacity is measured.** Before an engine reports `num_gpu_blocks`, every request is served FCFS and unseated (`dispatches_total{engine="nocapacity"}`, `capacity_missing=1`). The policy cannot size a budget it does not know.
+*   **One KV domain per endpoint.** The budget counts blocks on the endpoint it measures. An endpoint whose blocks are shared with another replica, or a deployment where two endpoints front one engine, breaks the model: the policy will over-count and under-admit.
+*   **Prefix caching must be on.** The policy charges a thread's full block set and relies on the engine's prefix cache to make a later turn's shared blocks cheap. With `--no-enable-prefix-caching` (or a KV-cache-aware-off engine) the blocks are charged but not reused, so seats cost more than they return.
+*   **The state is in-process, one instance per EPP.** Seats, the queue and the block index live in this process; a second EPP replica beside the first keeps its own, so two replicas will make independent admission decisions over the same pool and can each admit up to the full budget. Run one EPP per pool, or size the budget for the number of replicas.
+*   **The seat is a prediction, not a reservation.** The engine may preempt a thread, and the observed placement can differ from the seat; the policy follows the observation and counts the violation, but a preemption it cannot see costs a re-prefill it did not budget for.
 
-Rule: a new number in a decision path needs a table row saying why it cannot be derived.
+## Related Documentation
 
-## 5. What was removed (and where it lives)
-
-Everything below was deleted from this branch and still exists on the archive branch
-`dsai/groupsched-tier-aware` — nothing was deleted from git history. Each may return only as
-a NEW IMPLEMENTATION of ONE module interface plus ONE config value, with evidence.
-
-* **entry orders**: HRRN (F5) and hrrn-bounded (F5′), and `hrrn-tier` with the CPU-offload tier
-  shadow — one implementation per module.
-* **tenure variants**: dyn-size quantum, quantum ceilings, MLFQ-2 pools, rotate-when-free, PAT,
-  the ledger model.
-* **victim variants**: spec order, the F6″ residue order, the residue model, member-stable
-  homing.
-* **sizing variants**: the byte-derived entry estimate, `sizing: "gpu-plus-tier"` /
-  `"tier-inclusive"`, `cpuTierBytes`/`kvBlockBytes`. The seat budget is not a module any more:
-  it is `groupBudgetFraction × num_gpu_blocks`, inline where the capacity is learned.
-* **a dispatch gate and a safety net**: the seat budget is the admission control and an admitted
-  turn runs; the framework's stock utilisation detector is not in a core arm.
-* **the goldens and the byte-equality replay machinery**: replaced by
-  `TestDeterminism_OneAndTwoEngines` and the randomized invariant suite.
-* **`ttlSeconds`**: no timer frees a seat nobody asked for, and a waiting head keeps its place.
-
-## 6. Known live risk / open items
-
-* **UPSTREAM DRAFT (not opened).** The DAG's layer validator
-  (`datalayer/data_graph.go`, `pluginToLayerExecutionOrder`) rejects a dependency whose
-  producer sits in a LATER layer than its consumer, which is why this policy may not declare
-  branch identity's keys: branch identity writes them at `RequestHeader` (a request-control
-  hook) while the policy is flow-control layer 0 — even though `RequestHeader` runs BEFORE
-  admission, so the value is always there in time. The layer model should admit "a producer
-  whose hook runs before my hook", not just "a producer in my layer or lower".
-* **RULE O is new** (§2c): it changes placement for one class of head, and its no-thrash
-  clause means an engine can sit over budget for a residency. Watch `ne_blocks − budget_blocks`
-  per engine and `exits_total{reason="quantum-complete"}` when a deployment's requests can
-  exceed 0.95 of the cache.
-* **The cold valve bound is S** (§2a): a leaked release window delays admission by at most S,
-  engine-local.
-* The evidence behind the memory-only detector: vLLM's `kv_cache_usage_perc` is `ref_cnt > 0`
-  blocks, so it is a valid preemption-headroom signal — but it LAGS newly admitted large
-  requests and can read LOW against a seat × exact-chain accounting (prefix sharing). It is
-  off by default, and it is not wired.
-* `idleSeconds` is a time constant. Its measured replacement candidate (a branch's own
-  think-gap history) was retired with the F-arms; it stays a knob.
+*   [Thread Identity](../threadidentity/README.md): the producer this policy depends on — it defines what a thread is
+*   [Fairness Overview](../../fairness/README.md)
+*   [Weighted Fair Share](../../fairness/weightedfairshare/README.md): the other fairness policy that divides a band by a declared weight
+*   [Flow Control User Guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/v1.5.0/site-src/guides/flow-control.md)
