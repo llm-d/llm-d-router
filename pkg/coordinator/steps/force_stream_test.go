@@ -305,24 +305,28 @@ func TestForceStreamLossy_RawMessageFields(t *testing.T) {
 // for the chat and text shapes, requests include_usage while preserving any
 // stream_options the client already sent, without mutating the source body.
 func TestForceStreamBody_StreamOptions(t *testing.T) {
-	t.Run("preserves existing stream_options and adds include_usage", func(t *testing.T) {
+	t.Run("replaces the client's stream_options with include_usage only", func(t *testing.T) {
+		// The handler leaves stream_options undecoded, as json.RawMessage. vLLM
+		// rejects stream_options on a non-streaming request, so a non-streaming
+		// client has none worth keeping: the forced body asks for usage only.
 		src := map[string]any{
 			"model":          "m",
 			"stream":         false,
-			"stream_options": map[string]any{"continuous_usage_stats": true},
+			"stream_options": json.RawMessage(`{"continuous_usage_stats":true}`),
 		}
 		body := forceStreamBody(src, sseShapeChat)
 
 		require.Equal(t, true, body["stream"])
-		opts := body["stream_options"].(map[string]any)
-		require.Equal(t, true, opts["include_usage"], "include_usage is added")
-		require.Equal(t, true, opts["continuous_usage_stats"], "the client's existing option is kept")
+		require.Equal(t, map[string]any{"include_usage": true}, body["stream_options"])
 
-		// The shared source body is left untouched: still non-streaming, its
-		// stream_options unchanged.
+		// The shared source body is left untouched.
 		require.Equal(t, false, src["stream"])
-		srcOpts := src["stream_options"].(map[string]any)
-		require.NotContains(t, srcOpts, "include_usage", "the source stream_options is not mutated")
+		require.Equal(t, json.RawMessage(`{"continuous_usage_stats":true}`), src["stream_options"])
+
+		// A decoded map is replaced the same way: no client option is carried into
+		// the forced request.
+		decoded := forceStreamBody(map[string]any{"model": "m", "stream_options": map[string]any{"continuous_usage_stats": true}}, sseShapeChat)
+		require.Equal(t, map[string]any{"include_usage": true}, decoded["stream_options"])
 	})
 
 	t.Run("adds stream_options when the client sent none", func(t *testing.T) {
@@ -406,6 +410,7 @@ func TestForceStream_ClientRequestedStreaming_Skipped(t *testing.T) {
 		coordmetrics.ForceStreamResultFallbackBudget,
 		coordmetrics.ForceStreamResultFallbackUnbounded,
 		coordmetrics.ForceStreamResultFallbackUnsupported,
+		coordmetrics.ForceStreamResultFallbackLossyFrame,
 		coordmetrics.ForceStreamResultFallbackUnreadable,
 	} {
 		require.InDelta(t, 0.0, forceStreamCount(t, reg, rv), 1e-9, "no force-stream outcome for a streaming client: %s", rv)
@@ -795,7 +800,7 @@ func TestForceStream_Messages_ReassemblesToJSON(t *testing.T) {
 
 // A Messages stream carrying a non-text block (server-side tool_use the request did
 // not declare) is detected mid-stream and falls back to the pass-through, which
-// preserves the block. Counted fallback_unsupported.
+// preserves the block. Counted fallback_lossy_frame.
 func TestForceStream_Messages_NonTextFallsBack(t *testing.T) {
 	passthroughReply := `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"get_weather","input":{}}],"stop_reason":"tool_use"}`
 	var streams []any
@@ -839,7 +844,7 @@ func TestForceStream_Messages_NonTextFallsBack(t *testing.T) {
 	body, _ := io.ReadAll(result.Body)
 	require.JSONEq(t, passthroughReply, string(body), "the pass-through reply keeps the tool_use block")
 	require.Equal(t, []any{true, false}, streams, "a forced attempt (stream:true) then a pass-through (stream:false)")
-	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9)
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackLossyFrame), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
 }
@@ -883,12 +888,12 @@ func TestForceStream_Text_ReassemblesToJSON(t *testing.T) {
 func TestForceStream_Generate_ReassemblesToJSON(t *testing.T) {
 	// vLLM's tokens-in generate API streams raw token ids: each chunk carries one
 	// choices[].token_ids entry under a request_id envelope with no object/id/model,
-	// a trailing choices:[] usage frame closes the stream, and the non-streaming
-	// reply folds the tokens into a request_id envelope with prompt_logprobs and
-	// kv_transfer_params null, no object, and no usage block. The request body
-	// places max_tokens under sampling_params, where OutputTokenLimit reads it for
-	// this API; a top-level cap would be invisible and the request would fall back
-	// to the pass-through instead of force-streaming.
+	// and a trailing choices:[] usage frame closes the stream. The reassembled reply
+	// folds the tokens into a request_id envelope with prompt_logprobs and
+	// kv_transfer_params null, no object, and the usage block. The request places
+	// max_tokens under sampling_params, where OutputTokenLimit reads it for this
+	// API; a request with no token limit there still force-streams, against the
+	// per-request cap.
 	frames := []string{
 		`{"request_id":"generate-tokens-g1","choices":[{"index":0,"logprobs":null,"finish_reason":null,"token_ids":[28715]}],"usage":null}`,
 		`{"request_id":"generate-tokens-g1","choices":[{"index":0,"logprobs":null,"finish_reason":null,"token_ids":[314]}],"usage":null}`,
@@ -1214,7 +1219,7 @@ func TestForceStream_LossyRequest_PassThrough(t *testing.T) {
 // gate: a plain chat request (no tools, no reasoning signal) whose pod streams
 // reasoning by default. forceStreamLossy cannot see this in the request, so
 // the forced attempt starts, detects the unfoldable delta mid-stream, and falls back
-// to the pass-through, which preserves reasoning. Counted fallback_unsupported.
+// to the pass-through, which preserves reasoning. Counted fallback_lossy_frame.
 func TestForceStream_ServerDefaultReasoning_FallsBack(t *testing.T) {
 	passthroughReply := `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Paris","reasoning":"let me think"}}]}`
 	var streams []any
@@ -1260,7 +1265,7 @@ func TestForceStream_ServerDefaultReasoning_FallsBack(t *testing.T) {
 	body, _ := io.ReadAll(result.Body)
 	require.JSONEq(t, passthroughReply, string(body), "the pass-through reply keeps reasoning")
 	require.Equal(t, []any{true, false}, streams, "a forced attempt (stream:true) then a pass-through (stream:false)")
-	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9)
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackLossyFrame), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
 }
@@ -1768,7 +1773,7 @@ func TestForceStream_LossyFrameSpentHandoff_Recomputes(t *testing.T) {
 	body, _ := io.ReadAll(recorder.Result().Body)
 	require.JSONEq(t, passthroughReply, string(body),
 		"the reply keeps the reasoning the fold would drop, and the recompute's own cached count, not prefill's")
-	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9)
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackLossyFrame), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
 }

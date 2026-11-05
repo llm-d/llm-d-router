@@ -90,6 +90,7 @@ const (
 	ForceStreamResultFallbackBudget      = "fallback_budget"
 	ForceStreamResultFallbackUnbounded   = "fallback_unbounded"
 	ForceStreamResultFallbackUnsupported = "fallback_unsupported"
+	ForceStreamResultFallbackLossyFrame  = "fallback_lossy_frame"
 	ForceStreamResultFallbackOversize    = "fallback_oversize"
 	ForceStreamResultFallbackUnreadable  = "fallback_unreadable"
 	ForceStreamResultErrorCeiling        = "error_ceiling"

@@ -195,8 +195,10 @@ var (
 					"forced (reassembled from a streamed upstream into one reply and written to the client), "+
 					"fallback_budget (budget full), "+
 					"fallback_unbounded (the reply estimate exceeds the per-request cap: a declared token limit too large for it, or an n whose per-choice overhead alone exceeds it), "+
-					"fallback_unsupported (the reply carries a field the reassembler drops, declared in the request or seen on a frame; the engine would not serve the request as a stream; "+
+					"fallback_unsupported (declined before any upstream call: the request declares a field the reassembler drops, the engine would not serve it as a stream, "+
 					"or the kv-sglang connector, whose decode server cannot recompute a prompt on fallback), "+
+					"fallback_lossy_frame (a streamed frame carried a field the reassembler drops, such as reasoning from a server-side parser, so the request is re-sent after one upstream attempt; "+
+					"with a one-shot KV handoff the decode pod recomputes the prompt), "+
 					"fallback_oversize (Responses completed frame larger than the reservation plus the request body), "+
 					"fallback_unreadable (upstream 200 but a stream it could not parse), "+
 					"error_ceiling (buffered reply exceeded its reserved budget, usually a short byte estimate), "+

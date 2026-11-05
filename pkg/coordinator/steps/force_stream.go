@@ -542,21 +542,18 @@ func forceStreamHeaders(reqCtx *pipeline.RequestContext) map[string]string {
 
 // forceStreamBody clones the prepared decode body, enables streaming, and asks
 // the upstream to emit a trailing usage frame. The clone keeps the shared
-// reqCtx.Body (and any nested stream_options the client sent) unmutated.
+// reqCtx.Body unmutated.
 func forceStreamBody(src map[string]any, shape sseShape) map[string]any {
 	body := maps.Clone(src)
 	body[reqcommon.FieldStream] = true
 
 	// The chat, text and generate streams report usage only when asked, so request
-	// it for them. The Responses and Messages streams carry usage on their own
-	// events and take no stream_options.
+	// it for them. The client's stream_options is replaced, not merged: vLLM rejects
+	// stream_options on a non-streaming request, so a non-streaming client has none
+	// to keep. The Responses and Messages streams carry usage on their own events
+	// and take no stream_options.
 	if shape == sseShapeChat || shape == sseShapeText || shape == sseShapeGenerate {
-		opts := map[string]any{}
-		if existing, ok := body[reqcommon.FieldStreamOptions].(map[string]any); ok {
-			maps.Copy(opts, existing)
-		}
-		opts[fieldIncludeUsage] = true
-		body[reqcommon.FieldStreamOptions] = opts
+		body[reqcommon.FieldStreamOptions] = map[string]any{fieldIncludeUsage: true}
 	}
 	return body
 }

@@ -649,9 +649,9 @@ func TestSSEReassemble_MessagesNoTerminalNotTerminated(t *testing.T) {
 // Frames mirror the real vLLM /inference/v1/generate stream: one token_id per
 // frame under a generate-tokens-* request_id, finish_reason on the final content
 // frame, then a trailing choices:[] usage frame (data: [DONE] follows upstream).
-// The reassembled reply must match the endpoint's non-streaming reply: a
-// request_id envelope with prompt_logprobs and kv_transfer_params null, per
-// choice only {index, logprobs, finish_reason, token_ids}, and no usage block.
+// The reassembled reply matches the endpoint's non-streaming reply: a request_id
+// envelope with prompt_logprobs and kv_transfer_params null, per choice {index,
+// logprobs, finish_reason, stop_reason, token_ids}, and the usage block.
 func TestSSEReassemble_Generate(t *testing.T) {
 	r := newSSEReassembler(sseShapeGenerate, 0)
 	r.add(frame(t, `{"request_id":"generate-tokens-abc","choices":[{"index":0,"logprobs":null,"finish_reason":null,"token_ids":[576]}],"usage":null}`))

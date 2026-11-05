@@ -216,7 +216,10 @@ func forceStreamFallbackResult(err error) (result string, ok bool) {
 	case errors.Is(err, errForceStreamUnreadable):
 		return coordmetrics.ForceStreamResultFallbackUnreadable, true
 	case errors.Is(err, errForceStreamLossyFrame):
-		return coordmetrics.ForceStreamResultFallbackUnsupported, true
+		// Its own label: unlike fallback_unsupported, which declines before any
+		// upstream call, the pod already ran one attempt, and a non-replay-safe
+		// handoff makes the fallback recompute the prompt.
+		return coordmetrics.ForceStreamResultFallbackLossyFrame, true
 	case errors.Is(err, errForceStreamCeiling):
 		// A ceiling abort falls back like the others; it keeps the error_ceiling
 		// label so the byte-estimate shortfall stays visible for alerting.
