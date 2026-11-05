@@ -21,12 +21,12 @@ The plugin runs after request assembly and before admission control. It resolves
       5. `x-session-affinity` (opencode cache affinity — the parent one hop up, not the session's own ID; a fallback for traffic without the own-ID header)
 2. Resolve the parent ID from the parent header list: `x-parent-session-id` (shared convention) then `x-opencode-parent-session-id` (opencode's vendor form of the same link; opencode sends both). Codex's `x-codex-parent-thread-id` is deliberately not read: it names a thread ID while the parent map is keyed by session IDs, and Codex needs no map because its turn metadata carries the root on every request.
 3. Derive the root:
-   - Parent present: record the link in the parent map, then walk from the named parent until an ancestor has no live link. A parent absent from the map (a stray child after a replica affinity miss) is itself the root.
-   - No parent: walk from the session; a session with no recorded link is its own root.
+   - With a session: walk from the session through its recorded links. While a link is live it is authoritative — a session's parent is fixed when the child is spawned, so a declaration naming a different parent is ignored until the entry expires.
+   - Without a session but with a parent: walk from the named parent; a parent absent from the map (a stray child after a replica affinity miss) is itself the root.
    - Neither: publish nothing.
 4. Publish the root via `request.PutAttribute(DerivedRootKey, root)`.
 
-The parent map is scoped by the fairness-ID header value (the tenant, `""` when absent), so links never cross tenants. Reading a link refreshes it, so an in-use program never expires; a link unused for `parentEntryTtlSeconds` is dropped. At `maxParentEntries` the least-recently-used link is evicted. A lineage cycle ends the walk at the current node with a stable result, and the walk follows at most 64 links, so a client chaining links up to the map bound cannot extend the walk's cost.
+The parent map is scoped by the fairness-ID header value (the tenant, `""` when absent), so links never cross tenants. Reading a link refreshes it, so an in-use program never expires; a link unused for `parentEntryTtlSeconds` is dropped. At `maxParentEntries` the least-recently-used link is evicted — never for a key already in the map, since harnesses resend both headers every turn and re-declaring a recorded session does not grow the map. A lineage cycle ends the walk at the current node with a stable result, and the walk follows at most 64 links, so a client chaining links up to the map bound cannot extend the walk's cost.
 
 After the plugin returns, the Director derives `FairnessID` (`requestHandler.composeFairnessIDs` opt-in):
 
@@ -56,11 +56,13 @@ The plugin does not read or write the `"agent-identity"` attribute: for opencode
 **Location:** Top-level `plugins:` list in the `EndpointPickerConfig`.
 **Enabled by default:** No. Add a `- type: agent-lineage` entry to enable; the runner discovers it as a `RequestHeaderProcessor` and wires it in.
 
+This plugin does not replace `agent-identity`: consumers of the `agent-identity` attribute (`session-state-producer`, `thunder-agent`, session-affinity attribute sources) still require it, so run both plugins together when those are in use.
+
 ### Parameters
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `additionalSessionHeaders` | `[]string` | No | `[]` | Extra header names to check before the built-in session defaults. The first non-empty match wins. |
+| `additionalSessionHeaders` | `[]string` | No | `[]` | Extra header names to check before the built-in session defaults. The first non-empty match wins. The Codex turn-metadata header is parsed before every session header, including these. |
 | `additionalParentHeaders` | `[]string` | No | `[]` | Extra header names to check before the built-in parent defaults. |
 | `maxParentEntries` | `int` | No | `4096` | Bound on the per-replica parent map. The least-recently-used link is evicted at the bound. Interim value: the per-tenant program cap replaces it once it lands. |
 | `parentEntryTtlSeconds` | `float` | No | `1800` | How long a parent link survives unused. Interim value: the program-end window replaces it once sized from trace idle-gap distributions. |

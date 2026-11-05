@@ -500,8 +500,9 @@ When tracing is enabled, EPP request-associated spans carry `llm_d.epp.fairness.
 `llm_d.epp.fairness.source` together. The value is the fairness identity the EPP resolved
 for the request, and the source records which branch resolved it: `header` for the
 `x-llm-d-inference-fairness-id` header or its deprecated alias
-`x-gateway-inference-fairness-id`, `agent_identity` when the agent-identity plugin supplies
-the client's session identifier, or `default` for the `default-flow` sentinel. Source
+`x-gateway-inference-fairness-id`, `derived_root` when the agent-lineage plugin derives a
+program root, `agent_identity` when the agent-identity plugin supplies the client's session
+identifier, or `default` for the `default-flow` sentinel. Source
 `header` identifies the resolution branch, not producer authentication. Requests that fail
 before the identity resolves keep the value set at ingress: the fairness header value, or
 `default-flow` with source `default` when the header is absent, even if the agent-identity

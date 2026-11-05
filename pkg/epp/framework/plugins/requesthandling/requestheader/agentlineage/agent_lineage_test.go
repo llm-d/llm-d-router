@@ -429,12 +429,56 @@ func TestRequestHeader_MapBound(t *testing.T) {
 func TestRequestHeader_CycleTerminates(t *testing.T) {
 	p := newPlugin(t, "")
 
-	// A names B; B is unknown, so the walk from B stops there.
+	// A names B; B is unknown, so the walk from A stops there.
 	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "A", ParentSessionHeader: "B"}, "B")
 	// B names A: the map now holds A -> B and B -> A.
-	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "B", ParentSessionHeader: "A"}, "B")
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "B", ParentSessionHeader: "A"}, "A")
 	// A later child naming A gets the same stable root.
 	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "C", ParentSessionHeader: "A"}, "B")
+}
+
+// TestRequestHeader_ReDeclarationDoesNotEvict pins the bound's behavior for
+// harnesses that resend both headers on every turn: re-declaring a recorded
+// session must not evict an unrelated live link, because overwriting an
+// existing key does not grow the map.
+func TestRequestHeader_ReDeclarationDoesNotEvict(t *testing.T) {
+	p := newPlugin(t, `{"maxParentEntries": 2}`)
+	now, advance := newClock()
+	p.now = now
+
+	declare := func(session, parent string) {
+		wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: session, ParentSessionHeader: parent}, parent)
+	}
+
+	declare("S1", "R")
+	advance(time.Second)
+	declare("S2", "R")
+	advance(time.Second)
+	declare("S3", "R") // bound reached: S1 is the least recently used
+
+	// A turn of the recorded S2 re-declares its parent; S3 must survive it.
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S2", ParentSessionHeader: "R"}, "R")
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S3"}, "R")
+}
+
+// TestRequestHeader_FirstLiveParentWins pins that a live link is
+// authoritative: a session's parent is fixed when the child is spawned, so a
+// declaration naming a different parent is ignored until the entry expires.
+func TestRequestHeader_FirstLiveParentWins(t *testing.T) {
+	p := newPlugin(t, `{"parentEntryTtlSeconds": 10}`)
+	now, advance := newClock()
+	p.now = now
+
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R"}, "R")
+
+	// A conflicting parent declaration does not move the session's root.
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "EVIL"}, "R")
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "R")
+
+	// Once the entry expires, a different parent is accepted.
+	advance(11 * time.Second)
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R2"}, "R2")
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "R2")
 }
 
 // TestRequestHeader_DoesNotTouchFairnessIDOrAgentIdentity pins the contract
@@ -562,12 +606,26 @@ func TestPluginFactory_RejectsInvalidParameters(t *testing.T) {
 	for _, raw := range []string{
 		`{"maxParentEntries":-1}`,
 		`{"parentEntryTtlSeconds":-1}`,
+		// A positive value too small to represent as a duration must not
+		// silently become the default.
+		`{"parentEntryTtlSeconds": 1e-12}`,
+		// A value beyond the duration range must not overflow negative and
+		// disable the map.
+		`{"parentEntryTtlSeconds": 1e18}`,
 		`{"unknown-field": 1}`,
 		`{"maxParentEntries": not-json}`,
 	} {
 		if _, err := PluginFactory("test", fwkplugin.StrictDecoder(json.RawMessage(raw)), nil); err == nil {
 			t.Errorf("PluginFactory(%s) succeeded, want error", raw)
 		}
+	}
+}
+
+func TestPluginFactory_TrimsExtraHeaders(t *testing.T) {
+	p := newPlugin(t, `{"additionalParentHeaders":["  X-Parent  ","","x-keep"]}`)
+	wantParent := append([]string{"x-parent", "x-keep"}, defaultParentHeaders...)
+	if !reflect.DeepEqual(p.parentHeaders, wantParent) {
+		t.Errorf("parentHeaders mismatch:\n got=%v\nwant=%v", p.parentHeaders, wantParent)
 	}
 }
 

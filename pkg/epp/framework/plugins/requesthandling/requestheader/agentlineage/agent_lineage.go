@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -136,13 +137,19 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 	if params.ParentEntryTTLSeconds < 0 {
 		return nil, fmt.Errorf("agent-lineage: parentEntryTtlSeconds must be >= 0, got %v", params.ParentEntryTTLSeconds)
 	}
+	ttl := defaultParentEntryTTL
+	if params.ParentEntryTTLSeconds != 0 {
+		if params.ParentEntryTTLSeconds > float64(math.MaxInt64)/float64(time.Second) {
+			return nil, fmt.Errorf("agent-lineage: parentEntryTtlSeconds %v exceeds the representable duration", params.ParentEntryTTLSeconds)
+		}
+		ttl = time.Duration(params.ParentEntryTTLSeconds * float64(time.Second))
+		if ttl <= 0 {
+			return nil, fmt.Errorf("agent-lineage: parentEntryTtlSeconds %v is too small to represent as a duration", params.ParentEntryTTLSeconds)
+		}
+	}
 	maxEntries := params.MaxParentEntries
 	if maxEntries == 0 {
 		maxEntries = defaultMaxParentEntries
-	}
-	ttl := time.Duration(params.ParentEntryTTLSeconds * float64(time.Second))
-	if ttl == 0 {
-		ttl = defaultParentEntryTTL
 	}
 	return &Plugin{
 		typedName:        plugin.TypedName{Type: PluginType, Name: name},
@@ -155,14 +162,17 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 	}, nil
 }
 
-// mergeHeaders returns extras followed by defaults, lowercased. Request
-// headers are stored with lowercased keys (see handlers.HandleRequestHeaders),
-// so both lists must match. Duplicates and empty strings are left in — the
-// request-time loop short-circuits on first match.
+// mergeHeaders returns extras followed by defaults, lowercased. Empty and
+// whitespace-only extras are dropped. Request headers are stored with
+// lowercased keys (see handlers.HandleRequestHeaders), so both lists must
+// match. Duplicates are left in — the request-time loop short-circuits on
+// first match.
 func mergeHeaders(extras, defaults []string) []string {
 	merged := make([]string, 0, len(extras)+len(defaults))
 	for _, h := range extras {
-		merged = append(merged, strings.ToLower(h))
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			merged = append(merged, h)
+		}
 	}
 	for _, h := range defaults {
 		merged = append(merged, strings.ToLower(h))
@@ -214,15 +224,10 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	}
 	parent := firstHeaderValue(request.Headers, p.parentHeaders)
 
-	switch {
-	case parent != "":
-		if session != "" {
-			p.recordLink(request.FairnessID, session, parent)
-		}
-		request.PutAttribute(DerivedRootKey, p.walkToRoot(request.FairnessID, parent))
-	case session != "":
-		request.PutAttribute(DerivedRootKey, p.walkToRoot(request.FairnessID, session))
+	if session == "" && parent == "" {
+		return nil
 	}
+	request.PutAttribute(DerivedRootKey, p.resolveRoot(request.FairnessID, session, parent))
 	return nil
 }
 
@@ -254,44 +259,66 @@ func codexTurnMetadataSession(value string) string {
 	return strings.TrimSpace(payload.SessionID)
 }
 
-// recordLink stores child -> parent under the tenant scope. A link naming
-// the session's own ID is dropped: it carries no lineage. At the bound the
-// least-recently-used link is evicted; expired links are the oldest, so the
-// bound also reclaims them. The eviction scan is O(len(parents)), kept small
-// by the bound.
-func (p *Plugin) recordLink(tenant, session, parent string) {
-	if session == parent {
-		return
-	}
+// resolveRoot records the child -> parent link when a parent is named and
+// returns the root reached by walking recorded links from the request's
+// session, or from its parent when the request carries no session. One
+// critical section covers record and walk, so a concurrent request cannot
+// evict or rewrite a link between the two.
+func (p *Plugin) resolveRoot(tenant, session, parent string) string {
 	now := p.now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if len(p.parents) >= p.maxParentEntries {
+	if parent != "" && session != "" {
+		p.recordLinkLocked(tenant, session, parent, now)
+	}
+	start := session
+	if start == "" {
+		start = parent
+	}
+	return p.walkToRootLocked(tenant, start, now)
+}
+
+// recordLinkLocked stores child -> parent under the tenant scope. A link
+// naming the session's own ID is dropped: it carries no lineage. A session's
+// parent is fixed when the child is spawned, so a live entry keeps its first
+// parent — a declaration naming a different parent is ignored until the
+// entry expires, which keeps a caller sharing the default tenant from
+// splicing a live session onto another program or cycling a root. At the
+// bound the least-recently-used link is evicted, but never for a key already
+// in the map: harnesses resend both headers every turn, and overwriting an
+// existing key does not grow the map. The eviction scan is O(len(parents)),
+// kept small by the bound.
+func (p *Plugin) recordLinkLocked(tenant, session, parent string, now time.Time) {
+	if session == parent {
+		return
+	}
+	key := lineageKey{tenant: tenant, session: session}
+	if link, ok := p.parents[key]; ok {
+		if now.Sub(link.updatedAt) <= p.parentEntryTTL && link.parent != parent {
+			return
+		}
+	} else if len(p.parents) >= p.maxParentEntries {
 		var oldestKey lineageKey
 		var oldest time.Time
 		first := true
-		for key, link := range p.parents {
+		for k, link := range p.parents {
 			if first || link.updatedAt.Before(oldest) {
-				oldestKey, oldest, first = key, link.updatedAt, false
+				oldestKey, oldest, first = k, link.updatedAt, false
 			}
 		}
 		if !first {
 			delete(p.parents, oldestKey)
 		}
 	}
-	p.parents[lineageKey{tenant: tenant, session: session}] = parentLink{parent: parent, updatedAt: now}
+	p.parents[key] = parentLink{parent: parent, updatedAt: now}
 }
 
-// walkToRoot follows recorded parent links from start to the first ancestor
-// with no live link, at most maxWalkHops links. Reading a link refreshes it,
-// so an in-use program never expires; an expired link is deleted and treated
-// as absent. A cycle ends the walk at the current node.
-func (p *Plugin) walkToRoot(tenant, start string) string {
-	now := p.now()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
+// walkToRootLocked follows recorded parent links from start to the first
+// ancestor with no live link, at most maxWalkHops links. Reading a link
+// refreshes it, so an in-use program never expires; an expired link is
+// deleted and treated as absent. A cycle ends the walk at the current node.
+func (p *Plugin) walkToRootLocked(tenant, start string, now time.Time) string {
 	current := start
 	// visited is allocated only when a link is followed: a request that
 	// walks nothing must not pay a map allocation.

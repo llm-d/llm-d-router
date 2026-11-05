@@ -19,6 +19,7 @@ package epp
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -75,10 +76,11 @@ type lineageRequest struct {
 }
 
 // runLineageRequests drives each request through the harness and returns the
-// composed fairness ID each request handed to the sidecar, in order. A
-// request is admitted when the router forwards it, so a returned ID for
-// every request also asserts identical admission across the header shapes.
-func runLineageRequests(t *testing.T, h *TestHarness, reqs []lineageRequest) []string {
+// composed fairness ID and source each request handed to the sidecar, in
+// order. A request is admitted when the router forwards it, so a returned ID
+// for every request also asserts identical admission across the header
+// shapes.
+func runLineageRequests(t *testing.T, h *TestHarness, reqs []lineageRequest) (ids, sources []string) {
 	t.Helper()
 
 	bodyMap := map[string]any{
@@ -87,7 +89,8 @@ func runLineageRequests(t *testing.T, h *TestHarness, reqs []lineageRequest) []s
 	body, err := json.Marshal(bodyMap)
 	require.NoError(t, err)
 
-	ids := make([]string, 0, len(reqs))
+	ids = make([]string, 0, len(reqs))
+	sources = make([]string, 0, len(reqs))
 	for i, lr := range reqs {
 		t.Run(lr.name, func(t *testing.T) {
 			headers := map[string]string{
@@ -110,10 +113,13 @@ func runLineageRequests(t *testing.T, h *TestHarness, reqs []lineageRequest) []s
 			setHeaders := responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders()
 			id := headerValue(setHeaders, tracing.FairnessIDHandoffHeader)
 			require.NotEmpty(t, id, "request %q carries no fairness-ID handoff", lr.name)
+			source := headerValue(setHeaders, tracing.FairnessSourceHandoffHeader)
+			require.NotEmpty(t, source, "request %q carries no fairness-source handoff", lr.name)
 			ids = append(ids, id)
+			sources = append(sources, source)
 		})
 	}
-	return ids
+	return ids, sources
 }
 
 // TestAgentLineage_ComposedEquivalence drives the same agent tree through
@@ -171,10 +177,12 @@ func TestAgentLineage_ComposedEquivalence(t *testing.T) {
 		P(2, 10, 0.2),
 	}).WaitForSync(3, modelMyModel).WaitForReadyPodsMetric(3)
 
-	ids := runLineageRequests(t, h, append(append([]lineageRequest{}, stamped...), unstamped...))
+	ids, sources := runLineageRequests(t, h, append(append([]lineageRequest{}, stamped...), unstamped...))
 
 	stampedIDs := ids[:len(stamped)]
 	unstampedIDs := ids[len(stamped):]
+	stampedSources := sources[:len(stamped)]
+	unstampedSources := sources[len(stamped):]
 
 	want := []string{
 		tenantP + "/cc-root",      // claude-code root
@@ -199,6 +207,13 @@ func TestAgentLineage_ComposedEquivalence(t *testing.T) {
 		reqcommon.DefaultFairnessID,
 	}
 	require.Equal(t, wantUnstamped, unstampedIDs, "unstamped traffic: the fork collapses onto the default tenant and headerless lands in the default flow")
+
+	wantSources := append(
+		slices.Repeat([]string{tracing.AttributionSourceHeader}, len(stamped)),
+		slices.Repeat([]string{tracing.AttributionSourceDerivedRoot}, len(unstamped)-1)...,
+	)
+	wantSources = append(wantSources, tracing.AttributionSourceDefault)
+	require.Equal(t, wantSources, append(stampedSources, unstampedSources...), "attribution source follows the resolution branch")
 }
 
 // TestAgentLineage_CompositionDisabled drives the same fork with
@@ -220,7 +235,7 @@ func TestAgentLineage_CompositionDisabled(t *testing.T) {
 		P(2, 10, 0.2),
 	}).WaitForSync(3, modelMyModel).WaitForReadyPodsMetric(3)
 
-	ids := runLineageRequests(t, h, reqs)
+	ids, sources := runLineageRequests(t, h, reqs)
 
 	require.Equal(t, []string{
 		"oc3-root",
@@ -228,4 +243,10 @@ func TestAgentLineage_CompositionDisabled(t *testing.T) {
 		"oc3-root",
 		"tenant-z",
 	}, ids, "composition disabled: the fork collapses on the bare root and the fairness header keys the flow as sent")
+	require.Equal(t, []string{
+		tracing.AttributionSourceDerivedRoot,
+		tracing.AttributionSourceDerivedRoot,
+		tracing.AttributionSourceDerivedRoot,
+		tracing.AttributionSourceHeader,
+	}, sources, "composition disabled: the source follows the resolution branch")
 }
