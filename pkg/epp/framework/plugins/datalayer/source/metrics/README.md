@@ -25,7 +25,8 @@ The plugin config supports:
 -   `path` (default "/metrics"): The URL path to use for metrics retrieval.
 -   `insecureSkipVerify` (default true): Whether to skip TLS certificate verification when using the "https" scheme.
 -   `caCertPath`: PEM CA bundle to verify the target's server cert.
--   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together.
+-   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together. A rotated
+    certificate is picked up without a restart; the CA bundle is read once at startup.
 -   `interval` (string, optional): Scrape period (e.g. `"1s"`). Rounded to the nearest
     multiple of `--refresh-metrics-interval` (default 50ms). Omit to scrape every
     base tick.

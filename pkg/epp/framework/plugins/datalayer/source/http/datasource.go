@@ -34,8 +34,10 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -76,6 +78,10 @@ type HTTPDataSource[T any] struct {
 
 	mu   sync.RWMutex
 	exts []fwkdl.PollingExtractor[T]
+
+	// certWatcher, when set, hot-reloads the mTLS client certificate. Start runs it.
+	certWatcher *certwatcher.CertWatcher
+	startOnce   sync.Once
 }
 
 // TLSOptions configures the https transport. The zero value verifies the target
@@ -185,14 +191,22 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 			Transport: baseTransport,
 		},
 	}
+	var watcher *certwatcher.CertWatcher
 	if scheme == "https" {
-		tlsCfg, err := tlsClientConfig(tlsOpts)
+		tlsCfg, cw, err := tlsClientConfig(tlsOpts)
 		if err != nil {
 			return nil, err
 		}
 		httpsTransport := baseTransport.Clone()
 		httpsTransport.TLSClientConfig = tlsCfg
 		cl.Transport = httpsTransport
+		if cw != nil {
+			rt := &rotatingTransport{}
+			rt.current.Store(httpsTransport)
+			cw.RegisterCallback(func(tls.Certificate) { rt.rotate() })
+			cl.Transport = rt
+			watcher = cw
+		}
 	}
 	return &HTTPDataSource[T]{
 		typedName:      fwkplugin.TypedName{Type: pluginType, Name: pluginName},
@@ -204,7 +218,45 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		onExtractor:    cfg.onExtractor,
 		client:         cl,
 		parser:         parser,
+		certWatcher:    watcher,
 	}, nil
+}
+
+// rotatingTransport delegates to a transport that is replaced whenever the client
+// certificate rotates, so keep-alive connections handshaken with the previous
+// certificate are not reused. Connections in flight at rotation finish on the old
+// transport and are then reaped by its idle timeout.
+type rotatingTransport struct {
+	mu      sync.Mutex // serializes rotate
+	current atomic.Pointer[http.Transport]
+}
+
+func (t *rotatingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.current.Load().RoundTrip(req)
+}
+
+func (t *rotatingTransport) rotate() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	old := t.current.Load()
+	t.current.Store(old.Clone())
+	old.CloseIdleConnections()
+}
+
+// Start runs the client certificate watcher, if any, until ctx is done. It does
+// not block, and calls after the first are no-ops.
+func (s *HTTPDataSource[T]) Start(ctx context.Context) error {
+	if s.certWatcher == nil {
+		return nil
+	}
+	s.startOnce.Do(func() {
+		go func() {
+			if err := s.certWatcher.Start(ctx); err != nil {
+				log.FromContext(ctx).Error(err, "client certificate watcher stopped", "source", s.typedName)
+			}
+		}()
+	})
+	return nil
 }
 
 var (
@@ -229,24 +281,29 @@ func caCertPool(path string) (*x509.CertPool, error) {
 }
 
 // tlsClientConfig builds a tls.Config: server verification via CACertPath (or the
-// system pool), plus an mTLS client certificate when ClientCertPath is set.
-func tlsClientConfig(opts TLSOptions) (*tls.Config, error) {
+// system pool), plus an mTLS client certificate when ClientCertPath is set. The
+// client certificate is served from the returned watcher so rotations on disk are
+// picked up once it is started; the CA pool is loaded once.
+func tlsClientConfig(opts TLSOptions) (*tls.Config, *certwatcher.CertWatcher, error) {
 	cfg := &tls.Config{InsecureSkipVerify: opts.SkipVerify} //#nosec -- see TLSOptions doc; operator-supplied flag with documented threat model
 	if !opts.SkipVerify && opts.CACertPath != "" {
 		pool, err := caCertPool(opts.CACertPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		cfg.RootCAs = pool
 	}
-	if opts.ClientCertPath != "" || opts.ClientKeyPath != "" {
-		cert, err := tls.LoadX509KeyPair(opts.ClientCertPath, opts.ClientKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
-		}
-		cfg.Certificates = []tls.Certificate{cert}
+	if opts.ClientCertPath == "" && opts.ClientKeyPath == "" {
+		return cfg, nil, nil
 	}
-	return cfg, nil
+	cw, err := certwatcher.New(opts.ClientCertPath, opts.ClientKeyPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", ErrLoadClientCert, err)
+	}
+	cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		return cw.GetCertificate(nil)
+	}
+	return cfg, cw, nil
 }
 
 func (s *HTTPDataSource[T]) TypedName() fwkplugin.TypedName { return s.typedName }

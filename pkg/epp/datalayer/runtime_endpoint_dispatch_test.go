@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -201,4 +202,31 @@ func TestUpdateEndpointRecoversPanickingExtractor(t *testing.T) {
 
 	events := working.GetEvents()
 	require.Len(t, events, 1, "the dispatch loop must continue to the next extractor after the panic")
+}
+
+// startablePollingSource records the context its Start was called with.
+type startablePollingSource struct {
+	toggleSource
+	startCtx context.Context
+}
+
+func (s *startablePollingSource) Interval() time.Duration { return time.Second }
+func (s *startablePollingSource) Start(ctx context.Context) error {
+	s.startCtx = ctx
+	return nil
+}
+
+// TestRuntimeStartStartsPollingSources verifies that Start runs the background
+// work of polling sources, including ones wrapped for a slower interval.
+func TestRuntimeStartStartsPollingSources(t *testing.T) {
+	src := &startablePollingSource{}
+	r := NewRuntime(50 * time.Millisecond)
+	require.NoError(t, r.Configure(&Config{Sources: []DataSourceConfig{{Plugin: src}}}, newTestLogger(t)))
+	disp, ok := r.dispatchers.Get(src.TypedName().Name)
+	require.True(t, ok)
+	require.IsType(t, &intervalDispatcher{}, disp, "source should be wrapped so Start must unwrap it")
+
+	ctx := context.Background()
+	require.NoError(t, r.Start(ctx, nil))
+	assert.Equal(t, ctx, src.startCtx)
 }
