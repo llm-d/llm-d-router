@@ -752,9 +752,18 @@ func (p *InFlightLoadProducer) Produces() map[fwkplugin.DataKey]any {
 // (approximate by default, or a precise-prefix-cache producer). The outlen
 // bucket is optional too: without it the output estimate falls back to UNKNOWN.
 func (p *InFlightLoadProducer) Consumes() fwkplugin.DataDependencies {
+	var tokenized any = fwkrequest.TokenizedRequest{}
+	if p.prefillFromKVEvents {
+		// The event match compares the request's token ids with the engine's,
+		// so estimated ids would never complete a request.
+		tokenized = fwkplugin.ConsumedData{
+			Type:    fwkrequest.TokenizedRequest{},
+			Matches: fwkplugin.MatchKeyValues(map[string]string{"backend": tokenproducer.BackendVLLM}),
+		}
+	}
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
+			tokenproducer.TokenizedPromptDataKey: tokenized,
 		},
 		Optional: map[fwkplugin.DataKey]any{
 			p.prefixMatchInfoDK:       attrprefix.PrefixCacheMatchInfo{},

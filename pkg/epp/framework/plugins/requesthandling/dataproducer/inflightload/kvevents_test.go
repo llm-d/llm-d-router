@@ -27,8 +27,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -405,6 +407,15 @@ func TestKVEventPrefillCompletion_SingleEngineCompletesOnItsOwnEvents(t *testing
 	require.Equal(t, int64(0), producer.tokenTracker.get(engineID))
 	require.Equal(t, int64(1), producer.requestTracker.get(engineID))
 	require.Equal(t, float64(1), completions(name, signalKVEvent))
+}
+
+func TestKVEventPrefillCompletion_RequiresVLLMTokenBackend(t *testing.T) {
+	t.Parallel()
+	dep := newKVEventsProducer(t, "kv-backend").Consumes().Required[tokenproducer.TokenizedPromptDataKey]
+	consumed, ok := dep.(fwkplugin.ConsumedData)
+	require.True(t, ok, "the tokenized request dependency carries a producer matcher")
+	require.NoError(t, consumed.Matches(map[string]string{"backend": tokenproducer.BackendVLLM}))
+	require.Error(t, consumed.Matches(map[string]string{"backend": tokenproducer.BackendEstimate}))
 }
 
 func TestKVEventPrefillCompletion_OffByDefault(t *testing.T) {
