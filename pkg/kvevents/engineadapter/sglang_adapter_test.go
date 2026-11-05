@@ -166,19 +166,25 @@ func testSGLangBigramEventIndex(t *testing.T, indexConfig *kvblock.IndexConfig) 
 		kvblock.CacheFormat{Bigram: true, BlockSize: 2})
 	require.NoError(t, err)
 	require.Len(t, requestKeys, 2)
+	// Wait on the request-key lookup, not on the engine-key mapping. The Redis
+	// index writes both in one non-transactional pipeline, so another
+	// connection can see the engine-key mapping before the pod entry.
+	var matches map[kvblock.BlockHash][]kvblock.PodEntry
 	require.Eventually(t, func() bool {
-		key, err := index.GetRequestKey(ctx, kvblock.BlockHash(101))
-		return err == nil && key == requestKeys[1]
+		var err error
+		matches, err = index.Lookup(ctx, requestKeys, nil)
+		return err == nil && len(matches[requestKeys[1]]) == 1
 	}, time.Second, time.Millisecond)
-	parentKey, err := index.GetRequestKey(ctx, kvblock.BlockHash(100))
-	require.NoError(t, err)
-	require.Equal(t, requestKeys[0], parentKey)
-	matches, err := index.Lookup(ctx, requestKeys, nil)
-	require.NoError(t, err)
 	for _, key := range requestKeys {
 		require.Len(t, matches[key], 1)
 		require.Equal(t, "pod-1", matches[key][0].PodIdentifier)
 	}
+	childKey, err := index.GetRequestKey(ctx, kvblock.BlockHash(101))
+	require.NoError(t, err)
+	require.Equal(t, requestKeys[1], childKey)
+	parentKey, err := index.GetRequestKey(ctx, kvblock.BlockHash(100))
+	require.NoError(t, err)
+	require.Equal(t, requestKeys[0], parentKey)
 
 	payload, err := msgpack.Marshal([]any{0.0, []any{[]any{
 		eventTagBlockStored, []uint64{102}, nil, [][]uint32{{11, 22}, {22, 44}}, 2, nil, "GPU",
