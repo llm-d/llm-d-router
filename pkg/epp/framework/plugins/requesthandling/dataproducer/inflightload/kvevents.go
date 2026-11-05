@@ -60,17 +60,25 @@ type pendingPrefill struct {
 	// prefill engine's own when the request has no other target.
 	endpoints []string
 	stamp     string
+	// ownStamp is set when the producer chose the stamp (the request id), so
+	// no other request's blocks carry it.
+	ownStamp bool
 
 	mu      sync.Mutex
 	prompts [][]uint32
 	done    []bool
 }
 
-// markStored records a store event for the request and reports whether every
-// prompt with at least one full block has had its last full block stored.
-// Prompts shorter than the engine block store no prompt block; a request made
-// only of such prompts never completes from events, since the blocks the
-// engine then stores hold generated tokens.
+// markStored records a store event for the request and reports whether its
+// prefill is complete: every prompt with at least one full block has had its
+// last full block stored, or, under the producer's own stamp, the engine
+// stored a block that belongs to no prompt. Such a block holds the prompt's
+// tail and generated tokens, which the engine produces only once it has read
+// the prompt; it is the signal for a prompt the engine already held in full
+// and stored nothing new for. A client-chosen stamp may be shared with other
+// requests, whose blocks must not complete this one. Prompts shorter than
+// the engine block store no prompt block; a request made only of such
+// prompts never completes from events.
 func (p *pendingPrefill) markStored(tokens []uint32, blockSize int) bool {
 	if blockSize <= 0 || len(tokens) < blockSize {
 		return false
@@ -78,35 +86,55 @@ func (p *pendingPrefill) markStored(tokens []uint32, blockSize int) bool {
 	tail := tokens[len(tokens)-blockSize:]
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	complete := false
+	complete, hasFullBlock := true, false
 	for i, prompt := range p.prompts {
 		if len(prompt) < blockSize {
 			continue
 		}
+		hasFullBlock = true
 		if !p.done[i] {
 			end := len(prompt) / blockSize * blockSize
 			p.done[i] = slices.Equal(prompt[end-blockSize:end], tail)
 		}
 		if !p.done[i] {
-			return false
+			complete = false
 		}
-		complete = true
 	}
-	return complete
+	if !hasFullBlock {
+		return false
+	}
+	if complete || !p.ownStamp {
+		return complete
+	}
+	return !p.promptBlock(tail, blockSize)
+}
+
+// promptBlock reports whether tail is one of the prompts' full blocks.
+func (p *pendingPrefill) promptBlock(tail []uint32, blockSize int) bool {
+	for _, prompt := range p.prompts {
+		for start := 0; start+blockSize <= len(prompt); start += blockSize {
+			if slices.Equal(prompt[start:start+blockSize], tail) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // prefillWatch indexes pending requests by event endpoint and stamp, and by
 // request id for release. pending reports the number of watched requests.
 type prefillWatch struct {
-	mu         sync.Mutex
-	byEndpoint map[string]map[string]*pendingPrefill
+	mu sync.Mutex
+	// byEndpoint maps endpoint, stamp and request id; a client-chosen stamp
+	// may be shared by concurrent requests.
+	byEndpoint map[string]map[string]map[string]*pendingPrefill
 	byRequest  map[string]*pendingPrefill
 	pending    prometheus.Gauge
 }
 
 func newPrefillWatch(pending prometheus.Gauge) *prefillWatch {
 	return &prefillWatch{
-		byEndpoint: map[string]map[string]*pendingPrefill{},
+		byEndpoint: map[string]map[string]map[string]*pendingPrefill{},
 		byRequest:  map[string]*pendingPrefill{},
 		pending:    pending,
 	}
@@ -119,18 +147,32 @@ func (w *prefillWatch) add(pending *pendingPrefill) {
 	for _, endpoint := range pending.endpoints {
 		stamps := w.byEndpoint[endpoint]
 		if stamps == nil {
-			stamps = map[string]*pendingPrefill{}
+			stamps = map[string]map[string]*pendingPrefill{}
 			w.byEndpoint[endpoint] = stamps
 		}
-		stamps[pending.stamp] = pending
+		requests := stamps[pending.stamp]
+		if requests == nil {
+			requests = map[string]*pendingPrefill{}
+			stamps[pending.stamp] = requests
+		}
+		requests[pending.requestID] = pending
 	}
 	w.pending.Set(float64(len(w.byRequest)))
 }
 
-func (w *prefillWatch) lookup(endpoint, stamp string) *pendingPrefill {
+// lookup returns the requests awaiting events carrying stamp from endpoint.
+func (w *prefillWatch) lookup(endpoint, stamp string) []*pendingPrefill {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.byEndpoint[endpoint][stamp]
+	requests := w.byEndpoint[endpoint][stamp]
+	if len(requests) == 0 {
+		return nil
+	}
+	out := make([]*pendingPrefill, 0, len(requests))
+	for _, pending := range requests {
+		out = append(out, pending)
+	}
+	return out
 }
 
 // remove drops the request's watch and reports whether one was pending.
@@ -144,7 +186,9 @@ func (w *prefillWatch) remove(requestID string) bool {
 	delete(w.byRequest, requestID)
 	for _, endpoint := range pending.endpoints {
 		stamps := w.byEndpoint[endpoint]
-		if stamps[pending.stamp] == pending {
+		requests := stamps[pending.stamp]
+		delete(requests, requestID)
+		if len(requests) == 0 {
 			delete(stamps, pending.stamp)
 		}
 		if len(stamps) == 0 {
@@ -169,35 +213,36 @@ func (w *prefillWatch) reset(endpoint string) int {
 // sessionStamp returns the session id the engine will echo for the request,
 // following vLLM's precedence: body session_id, then the session header,
 // then vllm_xargs.session_id. With none present it sets the header to the
-// request id. ok is false when the request carries no headers to stamp.
-func sessionStamp(request *fwksched.InferenceRequest) (stamp string, ok bool) {
+// request id and reports own. ok is false when the request carries no headers
+// to stamp.
+func sessionStamp(request *fwksched.InferenceRequest) (stamp string, own, ok bool) {
 	var payload fwkrequest.PayloadMap
 	if request.Body != nil {
 		payload, _ = request.Body.Payload.(fwkrequest.PayloadMap)
 	}
-	if s, ok := payload[sessionIDField].(string); ok && s != "" {
-		return s, true
+	if s, found := payload[sessionIDField].(string); found && s != "" {
+		return s, false, true
 	}
 	for key, value := range request.Headers {
 		if value != "" && strings.EqualFold(key, sessionIDHeader) {
-			return value, true
+			return value, false, true
 		}
 	}
 	switch xargs := payload[extraArgsField].(type) {
 	case map[string]any:
-		if s, ok := xargs[sessionIDField].(string); ok && s != "" {
-			return s, true
+		if s, found := xargs[sessionIDField].(string); found && s != "" {
+			return s, false, true
 		}
 	case fwkrequest.PayloadMap:
-		if s, ok := xargs[sessionIDField].(string); ok && s != "" {
-			return s, true
+		if s, found := xargs[sessionIDField].(string); found && s != "" {
+			return s, false, true
 		}
 	}
 	if request.Headers == nil {
-		return "", false
+		return "", false, false
 	}
 	request.Headers[sessionIDHeader] = request.RequestID
-	return request.RequestID, true
+	return request.RequestID, true, true
 }
 
 // eventEndpoint is the endpoint identity under which the KV events source
@@ -219,7 +264,7 @@ func eventEndpoint(endpoint fwksched.Endpoint) string {
 // the end of the request's prefill footprint; a single engine serving both
 // phases stores the blocks as it computes them.
 func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksched.InferenceRequest,
-	result *fwksched.SchedulingResult, stamp string, targets map[string]fwksched.Endpoint,
+	result *fwksched.SchedulingResult, stamp string, ownStamp bool, targets map[string]fwksched.Endpoint,
 ) {
 	tokenized := request.Body.TokenizedRequest
 	if tokenized == nil {
@@ -229,6 +274,7 @@ func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksch
 		requestID: request.RequestID,
 		result:    result,
 		stamp:     stamp,
+		ownStamp:  ownStamp,
 		done:      make([]bool, len(tokenized.Prompts)),
 	}
 	for _, prompt := range tokenized.Prompts {
@@ -259,19 +305,18 @@ func (p *InFlightLoadProducer) watchPrefill(ctx context.Context, request *fwksch
 
 // ProcessEvents implements kvevents.EventConsumer. A store event stamped with
 // a watched request's session id on one of its endpoints completes the
-// request's prefill when it carries the prompt's last full block.
+// request's prefill when it carries the prompt's last full block or, under
+// the producer's own stamp, a block beyond the prompt.
 func (p *InFlightLoadProducer) ProcessEvents(ctx context.Context, source kvevents.EventSource, batch kvevents.EventBatch) error {
 	for _, event := range batch.Events {
 		stored, ok := event.(*kvevents.BlockStoredEvent)
 		if !ok || stored.SessionID == nil || *stored.SessionID == "" {
 			continue
 		}
-		pending := p.watch.lookup(source.Endpoint, *stored.SessionID)
-		if pending == nil {
-			continue
-		}
-		if pending.markStored(stored.Tokens, stored.BlockSize) {
-			p.onPrefillComplete(ctx, pending.requestID, pending.result, signalKVEvent)
+		for _, pending := range p.watch.lookup(source.Endpoint, *stored.SessionID) {
+			if pending.markStored(stored.Tokens, stored.BlockSize) {
+				p.onPrefillComplete(ctx, pending.requestID, pending.result, signalKVEvent)
+			}
 		}
 	}
 	return nil

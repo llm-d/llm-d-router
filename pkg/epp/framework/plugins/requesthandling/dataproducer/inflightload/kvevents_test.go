@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -201,21 +202,80 @@ func TestSessionStampPrecedence(t *testing.T) {
 	header := newStampedRequest("req-h", seq(0, 64))
 	header.Headers["X-Session-ID"] = "from-header"
 	header.Body.Payload = fwkrequest.PayloadMap{extraArgsField: map[string]any{sessionIDField: "from-xargs"}}
-	stamp, ok := sessionStamp(header)
+	stamp, own, ok := sessionStamp(header)
 	require.True(t, ok)
+	require.False(t, own)
 	require.Equal(t, "from-header", stamp)
 
 	xargs := newStampedRequest("req-x", seq(0, 64))
 	xargs.Body.Payload = fwkrequest.PayloadMap{extraArgsField: map[string]any{sessionIDField: "from-xargs"}}
-	stamp, ok = sessionStamp(xargs)
+	stamp, own, ok = sessionStamp(xargs)
 	require.True(t, ok)
+	require.False(t, own)
 	require.Equal(t, "from-xargs", stamp)
 	require.Empty(t, xargs.Headers[sessionIDHeader])
 
+	fresh := newStampedRequest("req-f", seq(0, 64))
+	stamp, own, ok = sessionStamp(fresh)
+	require.True(t, ok)
+	require.True(t, own, "the producer's own stamp is the request id")
+	require.Equal(t, "req-f", stamp)
+	require.Equal(t, "req-f", fresh.Headers[sessionIDHeader])
+
 	none := newStampedRequest("req-n", seq(0, 64))
 	none.Headers = nil
-	_, ok = sessionStamp(none)
+	_, _, ok = sessionStamp(none)
 	require.False(t, ok, "no header map to stamp")
+}
+
+func TestKVEventPrefillCompletion_SharedClientSessionKeepsEveryRequest(t *testing.T) {
+	t.Parallel()
+	producer := newKVEventsProducer(t, "kv-shared-session")
+	ctx := context.Background()
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+	prefillID := fullEndpointName("prefill-0")
+
+	promptA, promptB := seq(0, 200), seq(1000, 200)
+	for id, prompt := range map[string][]uint32{"req-a": promptA, "req-b": promptB} {
+		req := newStampedRequest(id, prompt)
+		req.Body.Payload = fwkrequest.PayloadMap{sessionIDField: "shared"}
+		require.NoError(t, producer.PreRequest(ctx, req, pdResult(prefill, decode)))
+	}
+	require.Equal(t, int64(2), producer.requestTracker.get(prefillID))
+	require.Equal(t, float64(2), pendingWatch("kv-shared-session"))
+
+	source := kvevents.EventSource{Endpoint: decodeSource}
+	require.NoError(t, producer.ProcessEvents(ctx, source, storeBatch("shared", promptB[128:192])))
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID), "B's last block completes B only")
+	require.Equal(t, float64(1), pendingWatch("kv-shared-session"))
+	require.NoError(t, producer.ProcessEvents(ctx, source, storeBatch("shared", seq(5000, 64))))
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID), "a block outside the prompt under a shared stamp belongs to another request")
+	require.NoError(t, producer.ProcessEvents(ctx, source, storeBatch("shared", promptA[128:192])))
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+	require.Equal(t, float64(0), pendingWatch("kv-shared-session"))
+}
+
+func TestKVEventPrefillCompletion_GeneratedBlockCompletesHeldPrompt(t *testing.T) {
+	t.Parallel()
+	producer := newKVEventsProducer(t, "kv-generated-block")
+	ctx := context.Background()
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+	prefillID := fullEndpointName("prefill-0")
+
+	prompt := seq(0, 200)
+	req := newStampedRequest("req-g", prompt)
+	require.NoError(t, producer.PreRequest(ctx, req, pdResult(prefill, decode)))
+	source := kvevents.EventSource{Endpoint: decodeSource}
+	require.NoError(t, producer.ProcessEvents(ctx, source, storeBatch("req-g", prompt[64:128])))
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID), "a prompt block other than the last leaves the request pending")
+
+	generated := append(slices.Clone(prompt[192:]), seq(9000, 56)...)
+	require.NoError(t, producer.ProcessEvents(ctx, source, storeBatch("req-g", generated)))
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID), "the block after the prompt completes a prompt the engine already held")
+	require.Equal(t, float64(1), completions("kv-generated-block", signalKVEvent))
+	require.Equal(t, float64(0), pendingWatch("kv-generated-block"))
 }
 
 func TestKVEventPrefillCompletion_ResetFallsBackToFirstByte(t *testing.T) {
