@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
@@ -246,28 +247,101 @@ type RequestContext struct {
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
 
-	// GRPCGeneratePayload holds the unframed protobuf payload of an SGLang
-	// native gRPC Generate request with client bootstrap fields removed. It
-	// aliases OriginalBody unless a field was removed. The prefill and decode
-	// steps send it as is, between a frame header and their bootstrap
-	// fields, so neither copies it. Nil for JSON HTTP requests. Use
-	// IsSGLangGRPC to test for a gRPC Generate request.
-	GRPCGeneratePayload []byte
+	// GRPC holds protocol-specific gRPC request state when worker legs execute
+	// over gRPC (native SGLang gRPC, native vLLM gRPC, or HTTP
+	// /inference/v1/generate translated onto vLLM gRPC). Nil for HTTP worker
+	// pipelines.
+	GRPC GRPCRequest
+}
+
+// GRPC protocol names returned by GRPCRequest.Protocol.
+const (
+	GRPCProtocolSGLang = "sglang"
+	GRPCProtocolVLLM   = "vllm"
+)
+
+// GRPCRequest carries protocol-specific gRPC state on RequestContext.
+type GRPCRequest interface {
+	Protocol() string
+	isNativeGRPC() bool
+	closeStream()
+}
+
+// SGLangGRPCRequest carries state for a native SGLang gRPC Generate request.
+type SGLangGRPCRequest struct {
+	// Payload holds the unframed protobuf payload of an SGLang native gRPC
+	// Generate request with client bootstrap fields removed. It aliases
+	// OriginalBody unless a field was removed. The prefill and decode steps
+	// send it as is, between a frame header and their bootstrap fields, so
+	// neither copies it.
+	Payload []byte
 	// PrefillStream holds the active concurrent SGLang gRPC prefill stream
 	// started by PrefillStep and coordinated with DecodeStep.
 	PrefillStream *SGLangPrefillStream
 }
 
-// IsSGLangGRPC reports whether the request is an SGLang native gRPC Generate
-// request. An empty GenerateRequest has an empty but non-nil payload.
-func (rc *RequestContext) IsSGLangGRPC() bool {
-	return rc.GRPCGeneratePayload != nil
+func (*SGLangGRPCRequest) Protocol() string   { return GRPCProtocolSGLang }
+func (*SGLangGRPCRequest) isNativeGRPC() bool { return true }
+func (r *SGLangGRPCRequest) closeStream() {
+	if r != nil && r.PrefillStream != nil {
+		r.PrefillStream.Close()
+	}
+}
+
+// HTTPGenerateReply carries response-formatting options when an inbound HTTP
+// POST /inference/v1/generate request is executed over vllm.Inference gRPC.
+type HTTPGenerateReply struct {
+	// IncludeUsage reports whether the HTTP stream requested
+	// stream_options.include_usage.
+	IncludeUsage bool
+	// ReturnTokenIDs reports whether the HTTP request asked to echo prompt
+	// token IDs in the response.
+	ReturnTokenIDs bool
+	// ClientRequestID holds a request_id supplied in the HTTP JSON body so
+	// translated responses echo the client's identifier when present.
+	ClientRequestID string
+}
+
+// VLLMGRPCRequest carries state for a request whose worker legs execute over
+// vllm.Inference gRPC.
+type VLLMGRPCRequest struct {
+	// Req holds the scanned vllm.Inference GenerateRequest with client
+	// kv_transfer_params and ec_transfer_params stripped.
+	Req vllmwire.Request
+	// HTTP is non-nil when Req was translated from an inbound HTTP POST
+	// /inference/v1/generate request rather than a native gRPC RPC.
+	HTTP *HTTPGenerateReply
+	// EncodeRan reports whether EncodeStep ran on this request, so downstream
+	// legs strip preprocessed media bytes to metadata-only.
+	EncodeRan bool
+	// PrefillRan reports whether PrefillStep ran on this request,
+	// distinguishing P/D handoff from decode-only or encode->decode.
+	PrefillRan bool
+	// PrefillPromptTokens holds prefill's PromptInfo.num_prompt_tokens when
+	// reported, so DecodeStep can run the prompt_token_parity check.
+	PrefillPromptTokens *uint32
+}
+
+func (*VLLMGRPCRequest) Protocol() string     { return GRPCProtocolVLLM }
+func (r *VLLMGRPCRequest) isNativeGRPC() bool { return r != nil && r.HTTP == nil }
+func (*VLLMGRPCRequest) closeStream()         {}
+
+// IsGRPC reports whether worker stages execute via a gRPC worker protocol
+// (SGLang or vLLM).
+func (rc *RequestContext) IsGRPC() bool {
+	return rc != nil && rc.GRPC != nil
+}
+
+// IsNativeGRPC reports whether the inbound client request itself is a native
+// gRPC RPC rather than an HTTP JSON request.
+func (rc *RequestContext) IsNativeGRPC() bool {
+	return rc != nil && rc.GRPC != nil && rc.GRPC.isNativeGRPC()
 }
 
 // ClosePrefillStream cancels and releases any active concurrent prefill stream.
 func (rc *RequestContext) ClosePrefillStream() {
-	if rc != nil && rc.PrefillStream != nil {
-		rc.PrefillStream.Close()
+	if rc != nil && rc.GRPC != nil {
+		rc.GRPC.closeStream()
 	}
 }
 
