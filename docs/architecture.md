@@ -393,7 +393,9 @@ chunk continues seamlessly from where the previous one left off.
    response. The `usage` field reports the original `prompt_tokens` (from the first chunk) and the
    total `completion_tokens` across all chunks.
 6. For **streaming** requests, each chunk's tokens are re-emitted as SSE delta events in real time,
-   and a `[DONE]` sentinel closes the stream once all chunks are complete.
+   and a `[DONE]` sentinel closes the stream once all chunks are complete. Every event is a
+   `chat.completion.chunk` with the `id` and `created` of the first chunk. When the request sets
+   `stream_options.include_usage`, a final event before `[DONE]` reports the cumulative `usage`.
 
 ### Configuration
 

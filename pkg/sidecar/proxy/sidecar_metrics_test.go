@@ -1904,7 +1904,8 @@ func TestChunkedDecodeToolCallingMetrics(t *testing.T) {
 				if tt.failChunk == 0 && !tt.fallback && !tt.bypass {
 					if tt.stream {
 						require.Equal(t, "text/event-stream", rw.Header().Get("Content-Type"))
-						require.Equal(t, 4, strings.Count(rw.Body.String(), reqcommon.SSEDataPrefix))
+						// Two chunk events and [DONE]; no usage event without include_usage.
+						require.Equal(t, 3, strings.Count(rw.Body.String(), reqcommon.SSEDataPrefix))
 						require.Contains(t, rw.Body.String(), reqcommon.SSEDone)
 					} else {
 						var response map[string]any

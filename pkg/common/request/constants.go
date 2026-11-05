@@ -69,6 +69,7 @@ const (
 	FieldMinTokens            = "min_tokens"
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
+	FieldIncludeUsage         = "include_usage"
 	FieldEcho                 = "echo"
 	FieldTruncatePromptTokens = "truncate_prompt_tokens" //#nosec G101 -- request field name, not a credential
 	FieldTools                = "tools"
