@@ -15,8 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package weightedrandom implements a scheduling picker that selects endpoints randomly, where the
-// probability of an endpoint being selected is proportional to its score.
+// Package weightedrandom implements weighted random selection with optional zero-score exploration.
 //
 // For detailed behavioral intent and configuration, see the package README.
 package weightedrandom
@@ -49,19 +48,36 @@ type weightedScoredEndpoint struct {
 	key float64
 }
 
+type weightedRandomParameters struct {
+	picker.PickerParameters
+	ExplorationBudget float64 `json:"explorationBudget"`
+}
+
+func (p weightedRandomParameters) validate() error {
+	if p.ExplorationBudget < 0 || p.ExplorationBudget > 1 || math.IsNaN(p.ExplorationBudget) || math.IsInf(p.ExplorationBudget, 0) {
+		return fmt.Errorf("picker %q: explorationBudget must be finite and in [0,1], got %g", WeightedRandomPickerType, p.ExplorationBudget)
+	}
+	return nil
+}
+
 // compile-time type validation
 var _ fwksched.Picker = &WeightedRandomPicker{}
 
 // WeightedRandomPickerFactory defines the factory function for WeightedRandomPicker.
 func WeightedRandomPickerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	parameters := picker.PickerParameters{MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints}
+	parameters := weightedRandomParameters{PickerParameters: picker.PickerParameters{MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints}}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' picker - %w", WeightedRandomPickerType, err)
 		}
 	}
 
-	return NewWeightedRandomPicker(parameters.MaxNumOfEndpoints).WithName(name), nil
+	if err := parameters.validate(); err != nil {
+		return nil, err
+	}
+	p := NewWeightedRandomPicker(parameters.MaxNumOfEndpoints).WithName(name)
+	p.explorationBudget = parameters.ExplorationBudget
+	return p, nil
 }
 
 // NewWeightedRandomPicker initializes a new WeightedRandomPicker and returns its pointer.
@@ -93,6 +109,7 @@ func NewWeightedRandomPicker(maxNumOfEndpoints int) *WeightedRandomPicker {
 type WeightedRandomPicker struct {
 	typedName         fwkplugin.TypedName
 	maxNumOfEndpoints int
+	explorationBudget float64
 	randomPicker      *random.RandomPicker // fallback for zero weights
 }
 
@@ -107,8 +124,7 @@ func (p *WeightedRandomPicker) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-// Pick selects the endpoint(s) randomly from the list of candidates, where the probability of the endpoint to get picked is derived
-// from its weighted score.
+// Pick selects a weighted positive-score sample with optional zero-score exploration.
 func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	logger := log.FromContext(ctx)
 	// Check if there is at least one endpoint with Score > 0, if not let random picker run
@@ -149,12 +165,41 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 		return weightedEndpoints[i].key > weightedEndpoints[j].key
 	})
 
-	// Select top k endpoints
-	selectedCount := min(p.maxNumOfEndpoints, len(weightedEndpoints))
+	// Admit at most one zero-score endpoint per list, independently of list size.
+	var exploration *fwksched.ScoredEndpoint
+	if p.explorationBudget > 0 && picker.PickerRand.Float64() < p.explorationBudget {
+		zeroCount := 0
+		for _, endpoint := range scoredEndpoints {
+			if endpoint.Score == 0 {
+				zeroCount++
+			}
+		}
+		if zeroCount > 0 {
+			index := int(picker.PickerRand.Float64() * float64(zeroCount))
+			for _, endpoint := range scoredEndpoints {
+				if endpoint.Score != 0 {
+					continue
+				}
+				if index == 0 {
+					exploration = endpoint
+					break
+				}
+				index--
+			}
+		}
+	}
+	offset := 0
+	if exploration != nil {
+		offset = 1
+	}
+	selectedCount := min(p.maxNumOfEndpoints-offset, len(weightedEndpoints))
 
-	targetEndpoints := make([]fwksched.Endpoint, selectedCount)
+	targetEndpoints := make([]fwksched.Endpoint, selectedCount+offset)
+	if exploration != nil {
+		targetEndpoints[0] = exploration
+	}
 	for i := range selectedCount {
-		targetEndpoints[i] = weightedEndpoints[i].ScoredEndpoint
+		targetEndpoints[i+offset] = weightedEndpoints[i].ScoredEndpoint
 	}
 
 	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
