@@ -32,6 +32,12 @@ import (
 // reads. A larger response is forwarded unchanged and never cached.
 const maxCapturedResponseBytes = 16 << 20
 
+// Wire values of a tool call in the reply the capture reconstructs.
+const (
+	toolCallFieldType    = "type"
+	toolCallTypeFunction = "function"
+)
+
 // decodeCapture observes a Chat Completions decode response while it streams to
 // the client and records what bidirectional KV transfer needs from it: the
 // decode engine's kv_transfer_params and the assistant message it generated.
@@ -143,7 +149,7 @@ func newDecodeCapture(w http.ResponseWriter) (http.ResponseWriter, *decodeCaptur
 func (c *decodeCapture) observe(p []byte) {
 	if !c.started {
 		c.started = true
-		c.sse = strings.HasPrefix(c.header.Get("Content-Type"), "text/event-stream")
+		c.sse = strings.HasPrefix(c.header.Get("Content-Type"), reqcommon.MediaTypeEventStream)
 	}
 	if c.overflow {
 		return

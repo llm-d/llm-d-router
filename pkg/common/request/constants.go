@@ -46,13 +46,23 @@ const (
 	HeaderContentType = "content-type"
 	// ContentTypeJSON is the media type of JSON bodies.
 	ContentTypeJSON = "application/json"
+	// MediaTypeEventStream is the SSE media type without optional parameters.
+	MediaTypeEventStream = "text/event-stream"
 	// HeaderContentTypeOptions names the HTTP header that controls MIME sniffing of a body.
 	HeaderContentTypeOptions = "x-content-type-options"
 	// ContentTypeOptionsNoSniff disables MIME sniffing; http.Error sets it on every body it writes.
 	ContentTypeOptionsNoSniff = "nosniff"
+	// PseudoHeaderStatus names the pseudo-header Envoy reports a response's
+	// status in. HeaderStatus is the bare name, which the EPP also accepts.
+	PseudoHeaderStatus = ":status"
+	HeaderStatus       = "status"
 
-	FieldKVTransferParams     = "kv_transfer_params"
+	FieldKVTransferParams = "kv_transfer_params"
+	// FieldPromptTokenIDs is the kv_transfer_params field carrying
+	// pre-tokenized prompt token IDs.
+	FieldPromptTokenIDs       = "prompt_token_ids"
 	FieldECTransferParams     = "ec_transfer_params"
+	FieldECDescriptorMetadata = "metadata" // ec_transfer_params descriptor field: the item's placeholder metadata
 	FieldMaxTokens            = "max_tokens"
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
@@ -60,13 +70,27 @@ const (
 	FieldStream               = "stream"
 	FieldStreamOptions        = "stream_options"
 	FieldEcho                 = "echo"
+	FieldTruncatePromptTokens = "truncate_prompt_tokens" //#nosec G101 -- request field name, not a credential
+	FieldTools                = "tools"
+	FieldToolChoice           = "tool_choice"
+	FieldResponseFormat       = "response_format"
 	FieldSamplingParams       = "sampling_params"
+	FieldN                    = "n"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
 	FieldRemoteEngineID       = "remote_engine_id"
 	FieldRemoteHost           = "remote_host"
 	FieldRemotePort           = "remote_port"
+	// OffloadingConnector P2P tier roles, carried inside kv_transfer_params. The
+	// role is encoded by the nesting key, named for the remote party it
+	// describes: remote_decoder on the prefill request, remote_prefiller on the
+	// decode request, remote_kv_source for a cached-prefix pull. Each block
+	// carries its own kv_request_id.
+	FieldRemoteDecoder        = "remote_decoder"
+	FieldRemotePrefiller      = "remote_prefiller"
+	FieldRemoteKVSource       = "remote_kv_source"
+	FieldKVRequestID          = "kv_request_id"
 	FieldCacheHitThreshold    = "cache_hit_threshold"
 	FieldContinueFinalMessage = "continue_final_message"
 	FieldAddGenerationPrompt  = "add_generation_prompt"
@@ -74,13 +98,16 @@ const (
 	FieldConversation         = "conversation"
 	FieldBackground           = "background"
 	FieldInput                = "input"
+	FieldInstructions         = "instructions"
 	FieldContent              = "content"
 	FieldFileID               = "file_id"
 	FieldMessages             = "messages"
 	FieldModel                = "model"
 	FieldRole                 = "role"
+	FieldText                 = "text"
 	FieldType                 = "type"
 	FieldURL                  = "url"
+	FieldUUID                 = "uuid" // content part field vLLM keys a multimodal item's hash on
 	FieldImageURL             = "image_url"
 	FieldStore                = "store"
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
@@ -119,6 +146,9 @@ const (
 	SSEDone       = SSEDataPrefix + SSEDoneMarker
 )
 
+// ToolChoiceNone is the tool_choice value that forbids the model from calling a tool.
+const ToolChoiceNone = "none"
+
 // Content part types, the values a content part's FieldType takes. A
 // chat-completions *_url part nests its URL and options under one object keyed
 // by the part type, so PartTypeImageURL and FieldImageURL hold the same string
@@ -131,6 +161,10 @@ const (
 // part is still collected and primed. FieldFileID on an input_image, input_file
 // or computer_screenshot names a Files API upload the serving engine must fetch.
 const (
+	PartTypeText               = "text"
+	PartTypeInputText          = "input_text"
+	PartTypeOutputText         = "output_text"
+	PartTypeRefusal            = "refusal"
 	PartTypeImageURL           = "image_url"
 	PartTypeAudioURL           = "audio_url"
 	PartTypeVideoURL           = "video_url"
@@ -139,6 +173,10 @@ const (
 	PartTypeInputFile          = "input_file"
 	PartTypeComputerScreenshot = "computer_screenshot"
 )
+
+// ResponsesItemTypeMessage is the Responses input item type of a role-tagged
+// message. An item that omits FieldType is a message too.
+const ResponsesItemTypeMessage = "message"
 
 // Anthropic Messages block types. An image block holds its image in a
 // FieldSource object; a tool_result block holds the tool's output under

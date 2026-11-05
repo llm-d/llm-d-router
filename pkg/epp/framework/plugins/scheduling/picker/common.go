@@ -24,6 +24,7 @@ limitations under the License.
 package picker
 
 import (
+	"hash/fnv"
 	"math"
 	"math/rand/v2"
 	"sync"
@@ -43,10 +44,13 @@ type PickerParameters struct {
 	MaxNumOfEndpoints int `json:"maxNumOfEndpoints"`
 }
 
+// maxTieCounters caps the per-pool state as pods come and go.
+const maxTieCounters = 1024
+
 type lockedRand struct {
-	mu      sync.Mutex
-	rand    *rand.Rand
-	counter int // round-robin counter for deterministic tie-breaking
+	mu       sync.Mutex
+	rand     *rand.Rand
+	counters map[uint64]int // round-robin position per candidate pool
 }
 
 func newLockedRand() *lockedRand {
@@ -71,15 +75,33 @@ func (r *lockedRand) Shuffle(n int, swap func(i, j int)) {
 	r.rand.Shuffle(n, swap)
 }
 
-// NextCounter returns a monotonically increasing counter for deterministic
-// round-robin tie-breaking across requests.
-func (r *lockedRand) NextCounter() int {
+// NextCounter returns the next round-robin position for the candidate pool poolKey.
+// Prefill and decode share one picker but rotate independently unless they see the same pods.
+func (r *lockedRand) NextCounter(poolKey uint64) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	c := r.counter
-	r.counter = (r.counter + 1) % math.MaxInt
+	if r.counters == nil || len(r.counters) >= maxTieCounters {
+		r.counters = make(map[uint64]int)
+	}
+	c := r.counters[poolKey]
+	r.counters[poolKey] = (c + 1) % math.MaxInt
 	return c
+}
+
+// PoolKey hashes the endpoint names of a candidate set, independent of their order.
+func PoolKey(scoredEndpoints []*fwksched.ScoredEndpoint) uint64 {
+	var key uint64
+	var buf []byte
+	h := fnv.New64a()
+	for _, ep := range scoredEndpoints {
+		id := ep.GetMetadata().GetNamespacedName()
+		buf = append(append(append(buf[:0], id.Namespace...), '/'), id.Name...)
+		h.Reset()
+		_, _ = h.Write(buf)
+		key += h.Sum64()
+	}
+	return key
 }
 
 // PickerRand is a thread-safe random number generator shared by all pickers to avoid seeding

@@ -129,6 +129,7 @@ pipeline:
   #   kv-nixl           - NIXL P2P RDMA
   #   kv-shared-storage - shared filesystem / object store (default)
   #   kv-sglang         - SGLang-style KV bootstrap
+  #   kv-offloading     - vLLM OffloadingConnector P2P tier
   kv_connector: kv-shared-storage
 
   # ec_connector picks the protocol used to ship encoded multimodal embedding
@@ -397,6 +398,24 @@ pipeline:
         # 0 (or omitted) = unlimited.
         # max_total_placeholder_tokens: 4096
 
+        # mm_payload selects what the rendering service returns for multimodal
+        # entries. tensors: the processed tensors (kwargs_data). none: only
+        # token ids, hashes and placeholders. Generate-format encode requests
+        # (use_openai_format: false) then carry the client's media as
+        # content_parts, and the prefill request carries features whose
+        # mm_metadata comes from the render response or is rebuilt from the
+        # encode response's EC descriptors when every entry has metadata and
+        # EC coverage, else the client's media as content_parts. A renderer
+        # that ignores the field returns the tensors, and the request takes
+        # the tensors path. A body that sets mm_processor_kwargs or
+        # media_io_kwargs is rendered with the tensors either way: the
+        # content_parts path preprocesses media at the deployment defaults.
+        # none requires every placeholder span to be one repeated token
+        # (Qwen-VL images); models that interleave other tokens in the span
+        # (Gemma3, Pixtral, Idefics3, Qwen3-VL video) fail the request.
+        # Default tensors.
+        # mm_payload: none
+
     # -------------------------------------------------------------------
     # conditional-decode: optional shortcut for text-only chats. When
     # the request has no multimodal entries, the coordinator probes the
@@ -450,3 +469,22 @@ pipeline:
     - type: decode
       # params:
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+      #
+      #   prompt_token_parity compares the prompt token count the decode
+      #   worker reports in its usage block with the number of token IDs the
+      #   render step produced, which is what prefill ran on. A difference
+      #   means decode rendered a different prompt than prefill did: the
+      #   worker ignored forwarded token IDs, or the render service and the
+      #   worker disagree (tokenizer, chat template, processor version,
+      #   chat_template_kwargs). Prefill's KV cache then does not match and
+      #   decode recomputes the prompt; the request still succeeds. Streamed
+      #   chat and completions legs are asked for include_usage when the
+      #   client did not, and that trailing frame is dropped from the
+      #   client's stream; a client that set continuous_usage_stats is left
+      #   alone and not checked. On Messages the cached part of the prompt
+      #   (cache_read_input_tokens, cache_creation_input_tokens) counts
+      #   toward the prompt. The response is never changed otherwise.
+      #     off   - no check
+      #     warn  - count (prompt_token_mismatch_total) and log   (default)
+      #     error - also record a decode step error
+      #   prompt_token_parity: warn

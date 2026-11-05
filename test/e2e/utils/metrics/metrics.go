@@ -75,8 +75,6 @@ func scrapeMetrics(metricsURL string) ([]byte, error) {
 
 // GetCounterMetric fetches the current value of a Prometheus counter metric from the given metrics URL.
 // Missing series parse as 0. Connection retries live in GetMetrics.
-//
-//nolint:unparam // metricName may vary in future test cases
 func GetCounterMetric(metricsURL, metricName, labelMatch string) int {
 	for _, line := range GetMetrics(metricsURL) {
 		if strings.HasPrefix(line, metricName) && strings.Contains(line, labelMatch) {

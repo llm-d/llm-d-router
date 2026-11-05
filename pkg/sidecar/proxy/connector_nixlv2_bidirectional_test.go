@@ -20,27 +20,37 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive
 	. "github.com/onsi/gomega"    // nolint:revive
+	"github.com/onsi/gomega/types"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
+	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
 
 var _ = Describe("NIXL Connector (v2) bidirectional KV transfer", func() {
 	const (
-		kvCacheSource = "10.9.9.9:8000"
-		reply         = "Hi there"
+		reply = "Hi there"
+		// The prefix-cache peer EPP names in the request body and header.
+		sourceHost        = "10.9.9.9"
+		sourcePort        = 7778
+		sourceKVRequestID = "k2-from-epp"
 	)
 
 	var (
 		testInfo      *sidecarTestInfo
 		proxyBaseAddr string
+		// sendSource makes chat carry the P2P source EPP's p2p-source-producer writes.
+		sendSource bool
 	)
 
 	// The decode engine's response to every turn: the generated reply plus the
@@ -61,6 +71,7 @@ var _ = Describe("NIXL Connector (v2) bidirectional KV transfer", func() {
 	}
 
 	BeforeEach(func() {
+		sendSource = true
 		testInfo = sidecarConnectionTestSetup(constants.KVConnectorNIXLV2)
 		testInfo.prefillHandler.BidirectionalKVMode = true
 		testInfo.decodeHandler.RawResponse = decodeJSON
@@ -69,7 +80,8 @@ var _ = Describe("NIXL Connector (v2) bidirectional KV transfer", func() {
 			DecoderURL:                 testInfo.decodeURL,
 			KVConnector:                constants.KVConnectorNIXLV2,
 			EnableP2PPull:              true,
-			P2PConnectorPort:           7777,
+			PrefillMaxRetries:          1,
+			PrefillRetryBackoff:        time.Millisecond,
 			BidirectionalKVXfer:        true,
 			BidirectionalSessionHeader: sessionutil.DefaultHeader,
 			BidirectionalCacheSize:     16,
@@ -90,22 +102,35 @@ var _ = Describe("NIXL Connector (v2) bidirectional KV transfer", func() {
 		})
 	}
 
-	// chat posts a chat completion with the given history, routed to the test
-	// prefiller, carrying the session token the EPP issued for rank 0 of pod. An
-	// empty pod sends no token, as the first turn of a conversation does.
-	chat := func(pod string, stream bool, messages ...any) {
+	// chatVia posts a chat completion with the given history, routed to the
+	// prefiller at prefillURL, carrying the session token the EPP issued for rank
+	// 0 of pod. An empty pod sends no token, as the first turn of a conversation
+	// does.
+	chatVia := func(prefillURL, pod string, stream bool, messages ...any) {
 		GinkgoHelper()
-		body, err := json.Marshal(map[string]any{
+		request := map[string]any{
 			"model":      "Qwen/Qwen2-0.5B",
 			"messages":   messages,
 			"max_tokens": 50,
 			"stream":     stream,
-		})
+		}
+		if sendSource {
+			request[reqcommon.FieldKVTransferParams] = map[string]any{
+				reqcommon.FieldRemoteKVSource: map[string]any{
+					reqcommon.FieldKVRequestID: sourceKVRequestID,
+					reqcommon.FieldRemoteHost:  sourceHost,
+					reqcommon.FieldRemotePort:  sourcePort,
+				},
+			}
+		}
+		body, err := json.Marshal(request)
 		Expect(err).ToNot(HaveOccurred())
 		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader(body))
 		Expect(err).ToNot(HaveOccurred())
-		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
-		req.Header.Add(routing.KVCacheSourceHeader, kvCacheSource)
+		req.Header.Add(routing.PrefillEndpointHeader, prefillURL[len("http://"):])
+		if sendSource {
+			req.Header.Add(routing.KVCacheSourceHeader, net.JoinHostPort(sourceHost, strconv.Itoa(sourcePort)))
+		}
 		if pod != "" {
 			req.Header.Add(sessionutil.DefaultHeader, eppSessionToken(testPodNamespace, pod, 0))
 		}
@@ -117,15 +142,35 @@ var _ = Describe("NIXL Connector (v2) bidirectional KV transfer", func() {
 		Expect(resp.StatusCode).To(Equal(http.StatusOK), string(b))
 	}
 
+	chat := func(pod string, stream bool, messages ...any) {
+		GinkgoHelper()
+		chatVia(testInfo.prefillBackend.URL, pod, stream, messages...)
+	}
+
+	// kvOf returns the kv_transfer_params of a recorded prefill request.
+	kvOf := func(req map[string]any) map[string]any {
+		GinkgoHelper()
+		kv, ok := req[reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(ok).To(BeTrue())
+		return kv
+	}
+
 	// prefillKV returns the kv_transfer_params of the i-th prefill request, which
 	// must be the most recent one.
 	prefillKV := func(i int) map[string]any {
 		GinkgoHelper()
 		reqs := testInfo.prefillHandler.GetCompletionRequests()
 		Expect(reqs).To(HaveLen(i + 1))
-		kv, ok := reqs[i][reqcommon.FieldKVTransferParams].(map[string]any)
-		Expect(ok).To(BeTrue())
-		return kv
+		return kvOf(reqs[i])
+	}
+
+	// theSource matches the remote_kv_source block the prefill request must carry.
+	theSource := func() types.GomegaMatcher {
+		return And(
+			HaveKeyWithValue(reqcommon.FieldKVRequestID, sourceKVRequestID),
+			HaveKeyWithValue(reqcommon.FieldRemoteHost, sourceHost),
+			HaveKeyWithValue(reqcommon.FieldRemotePort, BeNumerically("==", sourcePort)),
+		)
 	}
 
 	turn1 := func() []any { return []any{chatMessage("user", "Hello")} }
@@ -136,7 +181,9 @@ var _ = Describe("NIXL Connector (v2) bidirectional KV transfer", func() {
 	It("replays the previous turn's decode-side blocks next to the P2P source", func() {
 		start()
 		chat("", false, turn1()...)
-		Expect(prefillKV(0)).To(HaveKeyWithValue(reqcommon.FieldRemoteEngineID, BeNil()), "a cold conversation has nothing to replay")
+		cold := prefillKV(0)
+		Expect(cold).To(HaveKeyWithValue(reqcommon.FieldRemoteEngineID, BeNil()), "a cold conversation has nothing to replay")
+		Expect(cold).To(HaveKeyWithValue(reqcommon.FieldRemoteKVSource, theSource()), "the P2P pull does not depend on a replay")
 
 		chat(testPodName, false, turn2()...)
 		kv := prefillKV(1)
@@ -149,9 +196,20 @@ var _ = Describe("NIXL Connector (v2) bidirectional KV transfer", func() {
 		Expect(kv).To(HaveKeyWithValue(requestFieldRemoteNumTokens, BeNumerically("==", 192)))
 		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldRemoteBlockIDs, ConsistOf(ConsistOf(BeNumerically("==", 1), BeNumerically("==", 2), BeNumerically("==", 3)))))
 		Expect(kv).ToNot(HaveKey("not_part_of_the_contract"))
-		// Both sources stay on the request; the engine's MultiConnector picks
-		// the first one that reports a hit.
-		Expect(kv).To(HaveKey(requestFieldRemoteKVSource))
+		// Both sources stay on the request, unchanged: the engine's MultiConnector
+		// takes the first connector that reports a hit and applies
+		// kv_recompute_threshold to the NIXL read itself.
+		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldRemoteKVSource, theSource()))
+	})
+
+	It("replays without a P2P source when the request names none", func() {
+		sendSource = false
+		start()
+		chat("", false, turn1()...)
+		chat(testPodName, false, turn2()...)
+		kv := prefillKV(1)
+		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldRemoteEngineID, "decode-engine"))
+		Expect(kv).ToNot(HaveKey(reqcommon.FieldRemoteKVSource))
 	})
 
 	It("replays an entry once", func() {
@@ -164,6 +222,36 @@ var _ = Describe("NIXL Connector (v2) bidirectional KV transfer", func() {
 		// first read.
 		chat(testPodName, false, turn2()...)
 		Expect(prefillKV(2)).To(HaveKeyWithValue(reqcommon.FieldRemoteEngineID, BeNil()))
+	})
+
+	It("retries a failed prefill without the replayed blocks and keeps the P2P source", func() {
+		// The first attempt fails before the engine records it, so the recorded
+		// request is the retry. The failed attempt may already have read and
+		// released the decode-side blocks, so the retry recomputes the prefill.
+		flaky := &mock.ChatCompletionHandler{
+			Connector:           constants.KVConnectorNIXLV2,
+			Role:                mock.RolePrefill,
+			BidirectionalKVMode: true,
+			FailForFirstN:       1,
+			FailStatusCode:      http.StatusServiceUnavailable,
+		}
+		flakyBackend := httptest.NewServer(flaky)
+		DeferCleanup(flakyBackend.Close)
+
+		start()
+		chat("", false, turn1()...)
+		chatVia(flakyBackend.URL, testPodName, false, turn2()...)
+
+		Expect(flaky.RequestCount.Load()).To(BeEquivalentTo(2), "one failed attempt and one retry")
+		reqs := flaky.GetCompletionRequests()
+		Expect(reqs).To(HaveLen(1))
+		kv := kvOf(reqs[0])
+		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldRemoteEngineID, BeNil()))
+		Expect(kv).To(HaveKeyWithValue(reqcommon.FieldRemoteKVSource, theSource()))
+
+		// The entry was consumed by the first attempt and is not offered again.
+		chat(testPodName, false, turn2()...)
+		Expect(prefillKV(1)).To(HaveKeyWithValue(reqcommon.FieldRemoteEngineID, BeNil()))
 	})
 
 	It("does not replay into a conversation whose history differs", func() {

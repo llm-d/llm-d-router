@@ -22,11 +22,64 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
+
+func TestRequestMetricsBoundAPISurface(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	received := time.Now()
+	record := func(surface reqcommon.APISurface) {
+		RecordRequestCounter("model", "target", surface, "", 0)
+		RecordRequestErrCounter(context.Background(), "model", "target", surface, "", "0", "502")
+		require.True(t, RecordRequestLatencies(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second)))
+		RecordRequestSizes("model", "target", surface, "", "0", 100)
+		RecordResponseSizes("model", "target", surface, "", "0", 200)
+		RecordInputTokens("model", "target", surface, "", "0", 10)
+		RecordOutputTokens("model", "target", surface, "", "0", 10)
+		RecordPromptCachedTokens("model", "target", surface, "", "0", 5)
+		require.True(t, RecordNormalizedTimePerOutputToken(context.Background(), "model", "target", surface, "", "0", received, received.Add(time.Second), 10))
+		require.True(t, RecordRequestTTFT(context.Background(), "model", "target", surface, "", "0", true, received, received.Add(time.Millisecond)))
+		require.True(t, RecordRequestTPOT(context.Background(), "model", "target", surface, "", "0", true, received, received.Add(time.Millisecond), received.Add(time.Second), 10))
+		require.True(t, RecordInterTokenLatency(context.Background(), "model", "target", surface, "", "0", 0.01))
+		IncRunningRequests("model", "target", surface, "", "0")
+		DecRunningRequests("model", "target", surface, "", "0")
+		RecordRequestOutcome("model", "target", surface, "", "0", "completed", "")
+		RecordRequestProcessingLatency(surface, time.Millisecond)
+		RecordResponseProcessingLatency(surface, time.Millisecond)
+	}
+	for _, apiType := range []reqcommon.APIType{
+		reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions, reqcommon.APITypeResponses,
+		reqcommon.APITypeMessages, reqcommon.APITypeVLLMGenerate, reqcommon.APITypeSGLangGenerate,
+	} {
+		record(apiType.Surface())
+	}
+	for i := 0; i < 1000; i++ {
+		record(reqcommon.DetectAPISurface(fmt.Sprintf("/unrecognized/%d", i)))
+		record(reqcommon.APISurface(1000 + i))
+	}
+	for _, collector := range []prometheus.Collector{
+		llmdRequestCounter, llmdRequestErrCounter, llmdRequestOutcomeCounter, llmdRequestLatencies, llmdRequestSizes, llmdResponseSizes,
+		llmdInputTokens, llmdOutputTokens, llmdPromptCachedTokens, llmdNormalizedTimePerOutputToken,
+		llmdRequestTTFT, llmdRequestTPOT, llmdInterTokenLatency, llmdRunningRequests,
+		llmdRequestProcessingLatency, llmdResponseProcessingLatency,
+	} {
+		require.Equal(t, 7, promtestutil.CollectAndCount(collector), "six supported surfaces plus unknown must bound the series count")
+	}
+	require.Equal(t, float64(2000), promtestutil.ToFloat64(llmdRequestCounter.WithLabelValues(
+		boundModel("model"), boundModel("target"), "", "0", reqcommon.APISurfaceUnknown.String(),
+	)))
+	for _, surface := range []string{reqcommon.APITypeMessages.String(), reqcommon.APISurfaceUnknown.String()} {
+		require.Zero(t, promtestutil.ToFloat64(llmdRunningRequests.WithLabelValues(
+			boundModel("model"), boundModel("target"), "", "0", surface,
+		)))
+	}
+}
 
 // resetFairnessLabelLimit restores the shared fairness cap to its default after a test.
 func resetFairnessLabelLimit(t *testing.T) {
@@ -48,9 +101,9 @@ func TestPreAdmitModelLabelsSurvivesFlood(t *testing.T) {
 
 	PreAdmitModelLabels("llama-70b", "llama-70b-canary")
 	for i := 0; i < 1000; i++ {
-		RecordRequestCounter(fmt.Sprintf("junk-%d", i), "target", "fairness", 0)
+		RecordRequestCounter(fmt.Sprintf("junk-%d", i), "target", reqcommon.APISurfaceUnknown, "fairness", 0)
 	}
-	RecordRequestCounter("llama-70b", "llama-70b-canary", "fairness", 0)
+	RecordRequestCounter("llama-70b", "llama-70b-canary", reqcommon.APISurfaceUnknown, "fairness", 0)
 
 	series := promtestutil.CollectAndCount(llmdRequestCounter)
 	require.LessOrEqualf(t, series, testCap+2, "cardinality must stay bounded, got %d series", series)
@@ -73,7 +126,7 @@ func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 	})
 
 	for i := 0; i < 1000; i++ {
-		RecordRequestCounter(fmt.Sprintf("model-%d", i), "target", "fairness", 0)
+		RecordRequestCounter(fmt.Sprintf("model-%d", i), "target", reqcommon.APISurfaceUnknown, "fairness", 0)
 	}
 
 	count := promtestutil.CollectAndCount(llmdRequestCounter)
@@ -140,7 +193,7 @@ func TestFairnessLabelBoundOnRequestMetrics(t *testing.T) {
 	})
 
 	for i := 0; i < 100; i++ {
-		RecordRequestCounter("model-a", "model-a", fmt.Sprintf("tenant-%d", i), 0)
+		RecordRequestCounter("model-a", "model-a", reqcommon.APISurfaceUnknown, fmt.Sprintf("tenant-%d", i), 0)
 	}
 
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdRequestCounter),
@@ -168,6 +221,26 @@ func TestQueueDurationBoundsModelLabels(t *testing.T) {
 
 	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdFlowControlRequestQueueDuration),
 		"100 distinct model names must collapse to cap+overflow series, not one series each")
+}
+
+// RecordSchedulerAttempt's target_model_name falls back to the request-body model when no
+// rewrite rule matches, so it must go through the model limiter like the other record functions.
+func TestSchedulerAttemptBoundsTargetModelLabel(t *testing.T) {
+	const testCap = 3
+	oldModels := modelLabelLimiter
+	modelLabelLimiter = metricsutil.NewBoundedLabel(testCap)
+	llmdSchedulerAttemptsTotal.Reset()
+	t.Cleanup(func() {
+		modelLabelLimiter = oldModels
+		llmdSchedulerAttemptsTotal.Reset()
+	})
+
+	for i := 0; i < 100; i++ {
+		RecordSchedulerAttempt(nil, fmt.Sprintf("model-%d", i), nil)
+	}
+
+	require.Equal(t, testCap+1, promtestutil.CollectAndCount(llmdSchedulerAttemptsTotal),
+		"100 distinct target models must collapse to cap+overflow series, not one series each")
 }
 
 // A client can choose the overflow value itself as its fairness ID; GC of that flow must not
@@ -222,4 +295,48 @@ func TestFairnessIDLabelLimitAppliesToRecordedMetrics(t *testing.T) {
 			require.Equal(t, test.wantSeries, promtestutil.CollectAndCount(llmdFlowControlRequestEnqueueDuration))
 		})
 	}
+}
+
+// Each resolution is counted under its bounded ID, and folded IDs also count as overflow
+// for their source.
+func TestRecordFairnessIDResolution(t *testing.T) {
+	resetFairnessLabelLimit(t)
+	metricsutil.SetFairnessIDLabelLimit(1)
+	llmdFairnessIDResolvedCounter.Reset()
+	llmdFairnessIDOverflowCounter.Reset()
+	t.Cleanup(func() {
+		llmdFairnessIDResolvedCounter.Reset()
+		llmdFairnessIDOverflowCounter.Reset()
+	})
+
+	InitFairnessIDResolutionMetrics("pool-a")
+	RecordFairnessIDResolution("pool-a", "team-a", "header")
+	RecordFairnessIDResolution("pool-a", "team-b", "header")
+	RecordFairnessIDResolution("pool-a", "session-1", "agent_identity")
+	RecordFairnessIDResolution("pool-a", "default-flow", "default")
+
+	resolved := func(id, source string) float64 {
+		return promtestutil.ToFloat64(llmdFairnessIDResolvedCounter.WithLabelValues(id, source, "pool-a"))
+	}
+	overflow := func(source string) float64 {
+		return promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues(source, "pool-a"))
+	}
+	require.Equal(t, 1.0, resolved("team-a", "header"))
+	require.Equal(t, 1.0, resolved(metricsutil.OverflowValue, "header"))
+	require.Equal(t, 1.0, resolved(metricsutil.OverflowValue, "agent_identity"))
+	require.Equal(t, 1.0, resolved("default-flow", "default"))
+	require.Equal(t, 1.0, overflow("header"))
+	require.Equal(t, 1.0, overflow("agent_identity"))
+	require.Equal(t, 0.0, overflow("default"))
+}
+
+// The overflow series exist at 0 before any request, so increase() sees the first overflow.
+func TestInitFairnessIDResolutionMetricsCreatesOverflowSeries(t *testing.T) {
+	llmdFairnessIDOverflowCounter.Reset()
+	t.Cleanup(llmdFairnessIDOverflowCounter.Reset)
+
+	InitFairnessIDResolutionMetrics("pool-a")
+
+	require.Equal(t, 3, promtestutil.CollectAndCount(llmdFairnessIDOverflowCounter))
+	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues("header", "pool-a")))
 }

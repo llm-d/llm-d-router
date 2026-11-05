@@ -16,7 +16,10 @@ limitations under the License.
 
 package coordinate2e
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // coordinatorConfigNIXL is the coordinator pipeline config for the e-p-d-pools topology.
 // ${NAMESPACE}, ${RENDER_NAMESPACE}, and ${VLLM_RENDER_PORT} are substituted by
@@ -63,8 +66,24 @@ pipeline:
 // the native generate wire format on the encode and prefill steps, which build a
 // fresh sampling_params carrying only max_tokens: 1. This exercises a different
 // min_tokens-stripping path than the OpenAI clone-and-cap path.
-var coordinatorConfigNIXLGenerate = strings.Replace(
-	coordinatorConfigNIXL, "use_openai_format: true", "use_openai_format: false", 1)
+var coordinatorConfigNIXLGenerate = mustReplace(
+	coordinatorConfigNIXL, "use_openai_format: true", "use_openai_format: false")
+
+// coordinatorConfigNIXLGenerateMMPayload is coordinatorConfigNIXLGenerate with
+// the render step asking the renderer for no tensors (mm_payload: none).
+var coordinatorConfigNIXLGenerateMMPayload = mustReplace(
+	coordinatorConfigNIXLGenerate, "timeout: 60s\n    - type: encode",
+	"timeout: 60s\n        mm_payload: none\n    - type: encode")
+
+// mustReplace is strings.Replace that fails at initialization when old is
+// absent from s, so a base-config edit cannot silently turn a derived config
+// into the base and leave a spec exercising the wrong pipeline.
+func mustReplace(s, old, new string) string {
+	if !strings.Contains(s, old) {
+		panic(fmt.Sprintf("coordinator config: base no longer contains %q", old))
+	}
+	return strings.Replace(s, old, new, 1)
+}
 
 // eppConfig is the scheduling config for the single EPP that serves all three
 // phases. Each request runs exactly one scheduling profile, named by its

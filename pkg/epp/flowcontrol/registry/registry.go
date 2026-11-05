@@ -425,9 +425,12 @@ func (fr *FlowRegistry) CapacitySnapshot(priority int) (contracts.CapacitySnapsh
 		return contracts.CapacitySnapshot{}, fmt.Errorf("failed to get capacity snapshot for priority %d: %w",
 			priority, contracts.ErrPriorityBandNotFound)
 	}
+	band := val.(*priorityBand)
 	return contracts.CapacitySnapshot{
-		Band:   val.(*priorityBand).capacityDimension(),
-		Global: fr.globalCapacityDimension(),
+		Band:               band.capacityDimension(),
+		Global:             fr.globalCapacityDimension(),
+		MaxBytesPerFlow:    band.config.MaxBytesPerFlow,
+		MaxRequestsPerFlow: band.config.MaxRequestsPerFlow,
 	}, nil
 }
 

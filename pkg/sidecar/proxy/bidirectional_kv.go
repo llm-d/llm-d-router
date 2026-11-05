@@ -70,11 +70,9 @@ const (
 	messageFieldToolCalls  = "tool_calls"
 	messageFieldToolCallID = "tool_call_id"
 	toolCallFieldID        = "id"
-	toolCallFieldType      = "type"
 	toolCallFieldFunction  = "function"
 	toolCallFieldName      = "name"
 	toolCallFieldArguments = "arguments"
-	toolCallTypeFunction   = "function"
 )
 
 // bidirectionalKVParamFields lists the decode-response fields copied into the
@@ -100,8 +98,8 @@ var bidirectionalKVParamFields = []string{
 var kvReuseScopeFields = []string{
 	reqcommon.FieldModel,
 	"cache_salt",
-	"tools",
-	"tool_choice",
+	reqcommon.FieldTools,
+	reqcommon.FieldToolChoice,
 	"chat_template",
 	"chat_template_kwargs",
 	"documents",
@@ -112,10 +110,6 @@ var kvReuseScopeFields = []string{
 	reqcommon.FieldMMProcessorKwargs,
 	reqcommon.FieldMediaIOKwargs,
 }
-
-// fieldTruncatePromptTokens shifts token positions when it truncates, so a
-// request that sets it takes no part.
-const fieldTruncatePromptTokens = "truncate_prompt_tokens" //#nosec G101 -- JSON field name, not a credential
 
 // kvReuseEntry is one cached decode response. used makes the entry single-use
 // even when two requests with identical history race for it.
@@ -190,7 +184,8 @@ func (s *Server) newKVReuse(r *http.Request, body map[string]any, apiType reqcom
 			return nil
 		}
 	}
-	if v, present := body[fieldTruncatePromptTokens]; present {
+	// Truncation shifts token positions, so a request that truncates takes no part.
+	if v, present := body[reqcommon.FieldTruncatePromptTokens]; present {
 		if truncate, ok := plainJSON(v); !ok || truncate != nil {
 			return nil
 		}

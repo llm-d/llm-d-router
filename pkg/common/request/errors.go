@@ -18,6 +18,7 @@ package request
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -108,4 +109,14 @@ func WriteAPIError(w http.ResponseWriter, apiType APIType, status int, msg strin
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	return enc.Encode(ErrorEnvelope(apiType, status, msg))
+}
+
+// InternalErrorMessage is the client answer the coordinator and the sidecar
+// give for an internal error that hides upstream detail, carrying the request
+// ID for correlation. The ID is omitted when there is none.
+func InternalErrorMessage(requestID string) string {
+	if requestID == "" {
+		return "internal error"
+	}
+	return fmt.Sprintf("internal error (request_id: %s)", requestID)
 }

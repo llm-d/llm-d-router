@@ -196,8 +196,6 @@ func (sm *SubscriberManager) Shutdown(ctx context.Context) {
 }
 
 // GetActiveSubscribers returns the list of active pod identifiers and their endpoints.
-//
-//nolint:gocritic
 func (sm *SubscriberManager) GetActiveSubscribers() ([]string, []string) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()

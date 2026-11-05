@@ -451,7 +451,7 @@ func verifyMetrics(infPoolName string, numTargetPorts int) {
 	_, decodePods := k8s.GetModelServerPods(testConfig, podSelector, prefillSelector, decodeSelector, getNamespace())
 
 	// Define the metrics we expect to see
-	preset := []string{ //nolint:prealloc
+	preset := []string{
 		// llm_d metrics
 		"llm_d_epp_request_total",
 		"llm_d_epp_request_error_total",

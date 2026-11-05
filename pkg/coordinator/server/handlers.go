@@ -129,12 +129,30 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	// kv_transfer_params tells a model server which pod to pull KV from, so
+	// only the KV connector and the EPP may write it, but not every step
+	// rebuilds the body, so a client copy is dropped once here.
+	_, clientKVTransferParams := parsed[reqcommon.FieldKVTransferParams]
+	delete(parsed, reqcommon.FieldKVTransferParams)
 	parseDuration = time.Since(parseStart)
 	parseDone = true
 
-	stream, _ = parsed[reqcommon.FieldStream].(bool)
 	if m, ok := parsed["model"].(string); ok && m != "" {
 		model = m
+	}
+	if v, present := parsed[reqcommon.FieldStream]; present {
+		b, isBool := v.(bool)
+		if !isBool {
+			// A non-bool stream is re-marshalled into the worker body unchanged,
+			// and a worker that coerces it to true would stream while the
+			// coordinator ran the request as non-streaming (write deadline kept,
+			// whole-document usage rewrite). Reject it like the other field
+			// parse failures.
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+			rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "stream must be a boolean")
+			return
+		}
+		stream = b
 	}
 	if model != inflightModel {
 		coordmetrics.DecRequestRunning(inflightModel)
@@ -144,9 +162,8 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	// DetectAPIType gates this so the check follows the same classification
 	// every pipeline step uses. Any other path it reads as Responses reaches
-	// the passthrough catch-all, which never parses a body. Which paths and
-	// methods each API serves is settled in
-	// https://github.com/llm-d/llm-d-router/issues/3091.
+	// the passthrough catch-all, which never parses a body.
+	// docs/api-routing.md lists the paths and methods each API serves.
 	if apiType == reqcommon.APITypeResponses {
 		// The router serves only stateless Responses requests, disaggregated
 		// or not; the rest is resolved upstream of it. err names a field from
@@ -191,6 +208,10 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		// attacker-controlled content into the log.
 		logger.V(logutil.DEFAULT).Info("replaced invalid client request ID", "rejectedLength", len(clientRequestID))
 	}
+	if clientKVTransferParams {
+		// Presence only: the value carries a host, a port and a request id.
+		logger.V(logutil.DEFAULT).Info("dropped client-supplied kv_transfer_params")
+	}
 
 	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)
 
@@ -205,6 +226,10 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
+		if pipeline.IsClientCancellation(ctx, err) {
+			logger.V(logutil.VERBOSE).Info("pipeline aborted: client cancelled", "error", err)
+			return
+		}
 		logger.Error(err, "pipeline execution failed")
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 		var streamed *pipeline.UpstreamStreamedError
@@ -292,7 +317,7 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 	if errors.As(err, &upstream) && upstream.StatusCode >= http.StatusBadRequest && upstream.StatusCode < http.StatusInternalServerError {
 		return upstream.StatusCode, fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 	}
-	return http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID)
+	return http.StatusBadGateway, reqcommon.InternalErrorMessage(requestID)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

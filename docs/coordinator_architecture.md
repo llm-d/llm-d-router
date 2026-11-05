@@ -195,7 +195,7 @@ sequenceDiagram
             end
         end
 
-        Note over Prefill,Decode: Shown here: kv-nixl. Other KV connectors (kv-shared-storage,<br/>kv-sglang) transfer KV differently - see KV and EC transfer protocols.
+        Note over Prefill,Decode: Shown here: kv-nixl. Other KV connectors (kv-shared-storage,<br/>kv-sglang, kv-offloading) transfer KV differently - see KV and EC transfer protocols.
         Coordinator->>Gateway: Call (x-llm-d-epp-profile: prefill)
         Gateway->>EPP: ext_proc: pick pod (profile=prefill)
         EPP-->>Gateway: Chosen prefill pod
@@ -246,6 +246,8 @@ completions prompt is already a token array). See
      the Gateway) is forwarded with that same `4xx`, since the request was the root cause;
    - any other error, including an upstream `5xx`, returns `502 Bad Gateway`.
 
+   A client disconnect is logged at verbosity `VERBOSE`, not as an error.
+
    Upstream response bodies are logged server-side only and never returned to the client.
    A step returning `ErrPipelineDone` instead stops the pipeline and reports success, used
    by `conditional-decode` when the decode worker serves the request directly. A step that
@@ -272,17 +274,26 @@ steps read and mutate. The load-bearing fields:
 | `MultimodalEntries` | `replace-media-urls` (seeded), `render` (enriched) | `encode`, `prefill`, `decode` |
 | `ECTransferParams` | `encode` (via the EC connector) | `prefill` |
 | `KVTransferParams` | `prefill` (via the KV connector) | `decode` |
+| `PrefillCachedTokens` | `prefill` (from the prefill response `usage` block) | `decode` |
 | Downstream headers | `render`, `encode`, and `prefill` responses | later upstream requests |
 | `ResponseWriter` | server | `conditional-decode`, `decode` |
 
 `RequestContext.ForwardedHeaders()` returns the inbound headers with hop-by-hop headers,
-`Host`, `Content-Length`, and `Content-Type` removed, normalized to lowercase. Steps use
-it as the base header set, then stamp the request ID and `x-llm-d-epp-profile`. The
+`Host`, `Content-Length`, `Content-Type`, and `Accept-Encoding` removed, normalized to
+lowercase. Steps use it as the base header set, then stamp the request ID and
+`x-llm-d-epp-profile`. The
 pipeline generates a coordinator-owned `x-llm-d-revision-decision-id` for every
-request. Any client-provided value under that name is discarded.
-A client-provided `x-llm-d-pin-host-port` is also discarded, on the pipeline and on
-the passthrough, because EPP routes on it
-(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requestcontrol/screener/endpointpin/README.md)).
+request. Client-provided values of the coordinator-owned headers are discarded: EPP
+routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
+`x-llm-d-peer-topology`, and `x-llm-d-pin-host-port`
+(see [endpoint-pin-screener](../pkg/epp/framework/plugins/requesthandling/screener/endpointpin/README.md)),
+and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
+any other leg. The same headers are removed from the upstream response before it
+reaches the client. Both apply on the pipeline and on the passthrough.
+A client-provided `kv_transfer_params` body field is dropped on the inference routes,
+which parse the body, because it names the pod a model server pulls KV from and
+`p2p-source-producer` treats a request that carries `remote_prefiller` as a decode request.
+The passthrough forwards the body verbatim, so the field reaches EPP on every other path.
 The pipeline can allowlist response headers with `forward_response_headers`;
 values returned by any response-producing step are stored on the request context
 for later requests. A fan-out step selects the most frequent value for each
@@ -323,7 +334,7 @@ each EPP call is single-phase scheduling.
 Each profile filters the shared pod pool down to its own role with a role
 filter (`encode-filter`/`prefill-filter`/`decode-filter`), the same
 `schedulingProfiles`/role-filter pattern used in
-[deploy/config/sim-e-p-d-epp-config.yaml](../deploy/config/sim-e-p-d-epp-config.yaml).
+[test/e2e/artifacts/config/sim-e-p-d-epp-config.yaml](../test/e2e/artifacts/config/sim-e-p-d-epp-config.yaml).
 That file targets the sidecar model, though, so it picks profiles via
 `disagg-profile-handler` deciders rather than the `x-llm-d-epp-profile` header; header-based
 selection swaps in `header-profile-handler` for that one plugin.
@@ -404,6 +415,14 @@ default for any `Prefer: if-available` request so a missing gate surfaces as the
 cache-miss fallback rather than a silent forward. See
 [disaggregation.md](disaggregation.md#prefix-based-pd-decider) for configuration.
 
+`conditional-decode` is not supported with `kv-sglang`. The step sends the decode
+request without bootstrap fields, and an SGLang decode server rejects such a request
+with HTTP 400 instead of serving it. When the router forwards the request (the gate
+does not answer 412), the client gets that error. The coordinator does not reject the
+combination at startup. When `kv_connector` is `kv-sglang`, leave the step out and keep
+the `prefill` step. Every request then runs remote prefill and a KV transfer, including
+short or already-cached prompts.
+
 ### KV and EC transfer protocols
 
 Because the coordinator builds the prefill and decode request bodies itself, it must
@@ -418,11 +437,34 @@ KV connector protocols ([pkg/coordinator/connectors/kv/](../pkg/coordinator/conn
 | `kv-nixl` | `nixlv2` | NIXL P2P RDMA: prefill stores KV for remote decode; decode pulls it via `remote_engine_id` / `remote_block_ids` / `remote_host` / `remote_port`. |
 | `kv-sglang` | `sglang` | SGLang bootstrap: `bootstrap_host`, `bootstrap_port`, `bootstrap_room`. |
 | `kv-shared-storage` | `shared-storage` | Shared filesystem / object store: prefill writes KV, decode reads it; no transfer descriptor on the wire. |
+| `kv-offloading` | `offloading` | vLLM `OffloadingConnector` P2P tier: prefill stores KV in its P2P tier under `remote_decoder.kv_request_id`; decode pulls it with `remote_prefiller` (`kv_request_id`, `remote_host`, `remote_port`). |
 
 The `kv-sglang` `bootstrap_port` advertised to prefill pods defaults to 8998 and can be
 overridden process-wide with the `SGLANG_BOOTSTRAP_PORT` environment variable. The value
 is read once on the first prefill request that uses the connector; a non-integer value is
 rejected in favor of the default and logged at error level.
+
+`kv-offloading` has no setting of its own. The prefill EPP computes every P2P tier port:
+its `p2p-source-producer` sets the prefill pod's P2P tier address on the
+`x-llm-d-kv-cache-prefill-p2p-host-port` request header, and its
+`request-header-copy-handler` copies it onto the prefill response, which needs
+`response_header_mode: SEND` on the EPP `ext_proc` filter. The `prefill` step reads it,
+and the decode request names the prefill pod with it. A prefill response without the
+header, or with a value that is not a `host:port` with a TCP port, fails the request
+before decode is sent.
+
+`p2p-source-producer` writes the prefill pod's P2P address only when its
+`prefillProfileName` parameter (default `prefill`) names the profile the prefill EPP ran,
+which `header-profile-handler` picks from `x-llm-d-epp-profile: prefill`. See
+[Prefill profile name](../pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/README.md#prefill-profile-name).
+
+A cached-prefix pull from a third pod is written by the same EPP plugin into
+the prefill request body, so the coordinator never handles it; on a decode request it
+writes nothing next to `remote_prefiller`. A pipeline without a `prefill` step sends an
+empty `kv_transfer_params`, which the plugin may fill with a cached-prefix source on the
+decode request. See the
+[plugin README](../pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/README.md)
+and the [header copy README](../pkg/epp/framework/plugins/requesthandling/responsereceived/headercopy/README.md).
 
 EC connector protocols ([pkg/coordinator/connectors/ec/](../pkg/coordinator/connectors/ec/)) ship encoder
 embeddings from encode pods to the prefill pod:
@@ -444,7 +486,18 @@ State produced by one phase and consumed by a later one is carried on the
 | :---- | :---- | :---- |
 | `render` | `TokenIDs`, multimodal hashes/placeholders | encode, prefill, decode (EPP uses token IDs for prefix matching) |
 | `encode` | `ECTransferParams` (merged per `mm_hash`) | prefill |
-| `prefill` | `KVTransferParams` (from the prefill response body) | decode |
+| `prefill` | `KVTransferParams` (from the response body), `PrefillCachedTokens` (from its `usage` block) | decode |
+
+A decode worker counts the KV blocks transferred from prefill as prompt-cache hits
+of its own, so the cached-token count it reports describes the handoff rather than
+the prompt cache. The `decode` step substitutes the prefill worker's count into the
+usage block it streams to the client, in the single JSON document or in the SSE usage
+frame, so a disaggregated request reports the cache hits a single-worker request
+would. The count is written to the field the route documents:
+`prompt_tokens_details`, or `input_tokens_details` on the Responses routes. Where no
+prefill measurement applies, the decode worker's own count reaches the client
+unchanged; `PrefillCachedTokens` documents those cases. The rewriting lives in
+[pkg/common/usage](../pkg/common/usage) and is shared with the routing sidecar.
 
 ## Coordinator vs. the llm-d-router sidecar model
 
@@ -624,7 +677,7 @@ edit: registration is the only wiring step.
   step can read them without the operator repeating them per step. The constants are
   `steps.ParamKVConnector` and `steps.ParamECConnector`.
 - Shared parsing helpers live in [pkg/coordinator/steps/utils.go](../pkg/coordinator/steps/utils.go)
-  (`parseUseOpenAIFormat`, `resolveFormat`, `buildMMFeatures`, `copyBody`,
+  (`parseUseOpenAIFormat`, `resolveFormat`, `buildPrefillMMFeatures`, `copyBody`,
   `coerceParamsMap`). Reuse them rather than re-implementing.
 
 ### Dependency injection
@@ -720,7 +773,7 @@ connector. They must agree with the connector configured on the vLLM pods.
 
 | Key | Values | Default |
 | :---- | :---- | :---- |
-| `kv_connector` | `kv-nixl`, `kv-shared-storage`, `kv-sglang` | `kv-shared-storage` |
+| `kv_connector` | `kv-nixl`, `kv-shared-storage`, `kv-sglang`, `kv-offloading` | `kv-shared-storage` |
 | `ec_connector` | `ec-nixl`, `ec-shared-storage` | `ec-shared-storage` |
 
 KV and EC are independent: `ec-nixl` can pair with `kv-shared-storage`, and so on. A
@@ -796,11 +849,11 @@ only the request carrier differs.
 | :---- | :---- | :---- |
 | `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` on the listener. Full doc: [coordinator_async_broker.md](coordinator_async_broker.md). | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
 | `replace-media-urls` | Download `image_url`, `audio_url`, and `video_url` references (chat completions) or `input_image` references (Responses) and accept inline `input_audio`, inline each as a base64 `data:` URI, seed one `MultimodalEntries` item per part tagged with its modality. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries`, `max_download_size`, `max_image_download_size`, `max_audio_download_size`, `max_video_download_size`, `allowed_image_content_types`, `allowed_audio_content_types`, `allowed_video_content_types`, `allow_private_networks`, `allowed_domains` |
-| `render` | Tokenize via the render service; populate `TokenIDs` and each entry's hash/placeholder/kwargs from the per-modality `mm_hashes` / `mm_placeholders` / `kwargs_data` maps. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens` |
+| `render` | Tokenize via the render service; populate `TokenIDs` and each entry's hash/placeholder/kwargs from the per-modality `mm_hashes` / `mm_placeholders` / `kwargs_data` maps. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens`, `mm_payload` |
 | `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. | (none) |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
 | `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
-| `decode` | Stream the final completion to the client. | `kv_connector` |
+| `decode` | Stream the final completion to the client. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). | `kv_connector`, `prompt_token_parity` |
 
 Parameter semantics and defaults are documented inline in
 [config/coordinator/coordinator.yaml](../config/coordinator/coordinator.yaml). The wire formats each step

@@ -33,11 +33,13 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2" // nolint:revive
-	. "github.com/onsi/gomega"    // nolint:revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive
+	. "github.com/onsi/gomega"    //nolint:revive
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -47,6 +49,7 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	clientfeatures "k8s.io/client-go/features"
 	clientfeaturestesting "k8s.io/client-go/features/testing"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/set"
 )
@@ -119,6 +122,46 @@ var _ = Describe("AllowlistValidator", func() {
 		})
 	})
 
+	DescribeTable("should interrupt cache synchronization", func(stopValidator bool) {
+		validator := newTestAllowlistValidator()
+		client := validator.dynamicClient.(*dynamicfake.FakeDynamicClient)
+		listStarted := make(chan struct{}, 1)
+		client.PrependReactor("list", inferencePoolResource, func(clienttesting.Action) (bool, runtime.Object, error) {
+			select {
+			case listStarted <- struct{}{}:
+			default:
+			}
+			return true, nil, errors.New("pool list failed")
+		})
+		ctx, cancel := context.WithCancel(newTestContext())
+		done := make(chan struct{})
+		var startErr error
+		go func() {
+			defer close(done)
+			startErr = validator.Start(ctx)
+		}()
+		DeferCleanup(func() {
+			cancel()
+			validator.Stop()
+			Eventually(done, time.Second).Should(BeClosed())
+		})
+		Eventually(listStarted, 3*time.Second).Should(Receive())
+		if stopValidator {
+			validator.Stop()
+		} else {
+			cancel()
+		}
+		Eventually(done, time.Second).Should(BeClosed())
+		Expect(startErr).To(HaveOccurred())
+		Expect(validator.stopCh).To(BeClosed())
+		if !stopValidator {
+			Expect(startErr).To(MatchError(context.Canceled))
+		}
+	},
+		Entry("when the context is canceled", false),
+		Entry("when the validator is stopped", true),
+	)
+
 	Context("when SSRF protection is disabled", func() {
 		var validator *AllowlistValidator
 
@@ -132,6 +175,7 @@ var _ = Describe("AllowlistValidator", func() {
 			Expect(validator.IsAllowed("malicious.example.com:8080")).To(BeTrue())
 			Expect(validator.IsAllowed("10.0.0.1:8000")).To(BeTrue())
 			Expect(validator.IsAllowed("http://evil.host/ssrf")).To(BeTrue())
+			Expect(validator.IsAllowedHost("malicious.example.com")).To(BeTrue())
 		})
 	})
 
@@ -304,6 +348,7 @@ var _ = Describe("AllowlistValidator", func() {
 				enabled:        true,
 				namespace:      "test-namespace",
 				allowedTargets: set.New[string](),
+				allowedHosts:   set.New[string](),
 			}
 			pod := &unstructured.Unstructured{
 				Object: map[string]interface{}{
@@ -329,6 +374,14 @@ var _ = Describe("AllowlistValidator", func() {
 		It("should block allowlisted hosts on ports outside the pool target ports", func() {
 			Expect(validator.IsAllowed("10.244.1.100:9090")).To(BeFalse())
 			Expect(validator.IsAllowed("valid-pod:9999")).To(BeFalse())
+		})
+
+		It("should allow pod hosts on any port when checked by host", func() {
+			Expect(validator.IsAllowedHost("10.244.1.100")).To(BeTrue())
+			Expect(validator.IsAllowedHost("valid-pod")).To(BeTrue())
+			Expect(validator.IsAllowedHost("10.0.0.1")).To(BeFalse())
+			Expect(validator.IsAllowedHost("evil-pod")).To(BeFalse())
+			Expect(validator.IsAllowedHost("")).To(BeFalse())
 		})
 
 		It("should block targets without a port", func() {

@@ -468,6 +468,18 @@ func TestReplaceMediaURLsStep_RawPromptItems(t *testing.T) {
 			items: `[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + imageServer.URL + `/photo.jpg"}}]}]`,
 		},
 		{
+			name:  "chat completions untyped image object",
+			path:  reqcommon.PathChatCompletions,
+			field: "messages",
+			items: `[{"role":"user","content":[{"image_url":{"url":"` + imageServer.URL + `/photo.jpg"}}]}]`,
+		},
+		{
+			name:  "chat completions untyped image string",
+			path:  reqcommon.PathChatCompletions,
+			field: "messages",
+			items: `[{"role":"user","content":[{"image_url":"` + imageServer.URL + `/photo.jpg"}]}]`,
+		},
+		{
 			name:  "responses",
 			path:  reqcommon.PathResponses,
 			field: "input",
@@ -498,6 +510,52 @@ func TestReplaceMediaURLsStep_RawPromptItems(t *testing.T) {
 			url, _ := reqcommon.MediaPartURLRef(part)
 			if !strings.HasPrefix(url, "data:image/jpeg;base64,") {
 				t.Fatalf("expected data URI, got %s", url)
+			}
+		})
+	}
+}
+
+func TestReplaceMediaURLsToRender_UntypedImage(t *testing.T) {
+	renderServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_ids": []int{1, 32000},
+			"features": map[string]any{
+				"mm_hashes":       map[string]any{"image": []string{"image-hash"}},
+				"mm_placeholders": map[string]any{"image": []any{map[string]any{"offset": 1, "length": 1}}},
+				"kwargs_data":     map[string]any{"image": []string{"image-data"}},
+			},
+		})
+	}))
+	defer renderServer.Close()
+
+	for _, tc := range []struct {
+		name     string
+		imageURL string
+	}{
+		{"object", `{"url":"data:image/jpeg;base64,/9j/4AAQSkZJRg=="}`},
+		{"string", `"data:image/jpeg;base64,/9j/4AAQSkZJRg=="`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath: reqcommon.PathChatCompletions,
+				Body: map[string]any{
+					"messages": json.RawMessage(`[{"role":"user","content":[{"image_url":` + tc.imageURL + `}]}]`),
+				},
+			}
+			replaceStep := newLoopbackStep(t, nil)
+			if err := replaceStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatal(err)
+			}
+			renderStep, err := NewRenderStep(nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			renderStep.(*RenderStep).SetServiceAddress(renderServer.URL)
+			if err := renderStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("render failed after replace-media-urls: %v", err)
+			}
+			if len(reqCtx.MultimodalEntries) != 1 || reqCtx.MultimodalEntries[0].Hash != "image-hash" {
+				t.Fatalf("expected one rendered image, got %+v", reqCtx.MultimodalEntries)
 			}
 		})
 	}

@@ -157,6 +157,12 @@ type PriorityBandConfig struct {
 	// the bound, set an explicit large value.
 	MaxRequests uint64
 
+	// MaxBytesPerFlow bounds queued bytes in each flow. Zero disables the limit.
+	MaxBytesPerFlow uint64
+
+	// MaxRequestsPerFlow bounds queued requests in each flow. Zero disables the limit.
+	MaxRequestsPerFlow uint64
+
 	// DefaultRequestTTL bounds queue wait for requests in this band. A pointer to zero makes queue wait
 	// unbounded. Nil inherits the global default at request time.
 	DefaultRequestTTL *time.Duration
@@ -295,6 +301,22 @@ func WithBandMaxBytes(maxBytes uint64) PriorityBandConfigOption {
 func WithBandMaxRequests(maxRequests uint64) PriorityBandConfigOption {
 	return func(p *PriorityBandConfig) error {
 		p.MaxRequests = maxRequests
+		return nil
+	}
+}
+
+// WithBandMaxBytesPerFlow sets the byte limit for each flow in this priority band.
+func WithBandMaxBytesPerFlow(maxBytes uint64) PriorityBandConfigOption {
+	return func(p *PriorityBandConfig) error {
+		p.MaxBytesPerFlow = maxBytes
+		return nil
+	}
+}
+
+// WithBandMaxRequestsPerFlow sets the request limit for each flow in this priority band.
+func WithBandMaxRequestsPerFlow(maxRequests uint64) PriorityBandConfigOption {
+	return func(p *PriorityBandConfig) error {
+		p.MaxRequestsPerFlow = maxRequests
 		return nil
 	}
 }

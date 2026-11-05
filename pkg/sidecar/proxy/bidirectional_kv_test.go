@@ -32,7 +32,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	sessionutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
@@ -61,7 +61,7 @@ func newBidirectionalTestServer(t *testing.T, dataParallelSize int) *Server {
 // eppSessionToken returns the session token the EPP's encoded-endpoint
 // session affinity writes for the given rank endpoint of a pod.
 func eppSessionToken(namespace, pod string, rank int) string {
-	resp := &fwkrc.Response{}
+	resp := &fwkrh.Response{}
 	endpoint := &fwkdl.EndpointMetadata{ID: fwkdl.ID{Namespace: namespace, Name: routing.EndpointName(pod, rank)}}
 	sessionutil.WriteResponseHeader(context.Background(), "test", sessionutil.DefaultHeader, resp, endpoint)
 	return resp.Headers[sessionutil.DefaultHeader]
