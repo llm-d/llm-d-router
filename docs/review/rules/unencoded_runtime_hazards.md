@@ -11,7 +11,7 @@ When changing header-only or skipped-body exits in Envoy `ext_proc` handlers: re
 When parsing streamed responses, folding usage, or wrapping `http.ResponseWriter`: `ext_proc` chunks split SSE events at any byte, so every SSE parser carries partial lines per request, capping each assembled line, keep the last cumulative usage event in a chunk, and do not let later zeros overwrite counts. Implement `Unwrap() http.ResponseWriter` so `http.Flusher` works.
 
 ## Multi-worker DP endpoint keys by host, port, and rank
-When keying per-endpoint maps, prefix-cache indexes, ZMQ sockets, or SSRF allowlists: key by `(host, port, rank)` not IP alone: multi-worker DP ranks share one pod IP.
+When keying per-endpoint maps, prefix-cache indexes, ZMQ sockets, or SSRF allowlists: key by `(host, port, rank)` because multi-worker DP ranks share one pod IP.
 
 ## Bounded metric labels and series cleanup
 When adding Prometheus `*Vec` labels or configurable buckets: wrap caller-controlled values (`model_name`, `fairness_id`) in `BoundedLabel` at every record site, plugin metrics included, delete series when their endpoint or flow is removed, and cap configurable bucket counts.

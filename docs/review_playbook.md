@@ -80,7 +80,7 @@ When parsing streamed responses, folding usage, or wrapping `http.ResponseWriter
 
 ### Multi-worker DP endpoint keys by host, port, and rank
 
-When keying per-endpoint maps, prefix-cache indexes, ZMQ sockets, or SSRF allowlists: key by `(host, port, rank)` not IP alone: multi-worker DP ranks share one pod IP.
+When keying per-endpoint maps, prefix-cache indexes, ZMQ sockets, or SSRF allowlists: key by `(host, port, rank)` because multi-worker DP ranks share one pod IP.
 
 - **Why it matters:** Keying endpoint state by pod IP alone collides across multi-worker data-parallel ranks sharing one pod network namespace.
 - **Examples:** Observed in 13 PRs: [#841](https://github.com/llm-d/llm-d-router/issues/841), [#1112](https://github.com/llm-d/llm-d-router/pull/1112#discussion_r3242332547), [#2831](https://github.com/llm-d/llm-d-router/pull/2831#discussion_r4033597903)
