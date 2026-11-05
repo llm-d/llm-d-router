@@ -25,6 +25,7 @@ import (
 
 	"github.com/felixge/httpsnoop"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
@@ -65,6 +66,7 @@ func (w *bufferedResponseWriter) bodyBytes() []byte {
 // streamed response (SSE included) can be observed for error metrics without
 // buffering its body.
 type responseStatus struct {
+	header      http.Header
 	statusCode  int
 	writeFailed bool
 }
@@ -74,7 +76,7 @@ type responseStatus struct {
 // optional interfaces as w (http.Flusher, http.Hijacker, io.ReaderFrom), so
 // wrappers stacked on top of it keep their own hooks for those interfaces.
 func captureResponseStatus(w http.ResponseWriter) (http.ResponseWriter, *responseStatus) {
-	s := &responseStatus{}
+	s := &responseStatus{header: w.Header()}
 	writer := httpsnoop.Wrap(w, httpsnoop.Hooks{
 		WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {
 			return func(statusCode int) {
@@ -160,7 +162,7 @@ func stampFailedStage(w http.ResponseWriter, summary *requestSummary) http.Respo
 // as failed: the stage produced nothing, and net/http would send the client an
 // empty 200.
 func (s *responseStatus) failed() bool {
-	return s.statusCode == 0 || isHTTPError(s.statusCode) || s.writeFailed
+	return s.statusCode == 0 || isHTTPError(s.statusCode) || s.writeFailed || grpcframe.HasErrorStatus(s.header)
 }
 
 // deferredCommitWriter holds all writes until the caller decides the outcome
@@ -345,7 +347,10 @@ func (w *deferredCommitWriter) abort() {
 func (w *deferredCommitWriter) failed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return isHTTPError(w.statusCode) || w.writeFailed
+	if isHTTPError(w.statusCode) || w.writeFailed || grpcframe.HasErrorStatus(w.header) {
+		return true
+	}
+	return w.headerFlushed && grpcframe.HasErrorStatus(w.dst.Header())
 }
 
 // responseStarted reports whether decode's status/headers have reached the
