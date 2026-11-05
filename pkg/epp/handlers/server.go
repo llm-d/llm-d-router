@@ -195,6 +195,11 @@ type RequestContext struct {
 	sseLineCarry      []byte
 	sseLineDiscarding bool
 
+	// grpcFrameCarry holds trailing bytes of an incomplete gRPC frame across response chunks.
+	grpcFrameCarry         []byte
+	grpcFrameSkipRemaining uint64
+	grpcStreamCorrupted    bool
+
 	toolCallingSurface             reqcommon.APIType
 	toolCallingRequest             bool
 	toolCallingResponseEventStream bool

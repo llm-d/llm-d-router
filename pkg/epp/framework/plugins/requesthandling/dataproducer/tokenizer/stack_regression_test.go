@@ -25,12 +25,15 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanggrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanghttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
@@ -51,6 +54,11 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 	framed := make([]byte, 5+len(msg))
 	binary.BigEndian.PutUint32(framed[1:5], uint32(len(msg))) //#nosec G115 -- test fixture, small proto messages
 	copy(framed[5:], msg)
+	sglangFramed, err := grpcframe.MarshalProto(&sglangapiv1.GenerateRequest{
+		InputIds:  &sglangapiv1.TokenIdsOrList{Value: &sglangapiv1.TokenIdsOrList_One{One: &sglangapiv1.TokenIds{Ids: []int64{1, 2, 3}}}},
+		CacheSalt: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "tenant-a"}},
+	})
+	require.NoError(t, err)
 	features := []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "image-hash", Offset: 1, Length: 2}}
 	for _, tc := range []struct {
 		name, path, salt string
@@ -61,6 +69,10 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 		{
 			name: "sglang", path: "/generate", salt: "tenant-a", parser: sglanghttp.NewSGLangHTTPParser(),
 			body: []byte(`{"input_ids":[1,2,3],"cache_salt":"tenant-a","sampling_params":{"max_new_tokens":1}}`),
+		},
+		{
+			name: "sglang gRPC", path: sglangapiv1.SglangService_Generate_FullMethodName, salt: "tenant-a", parser: sglanggrpc.NewSGLangGRPCParser(),
+			body: sglangFramed,
 		},
 		{
 			name: "vllm HTTP", path: "/inference/v1/generate", salt: "tenant-a", parser: vllmhttp.NewVllmHTTPParser(),

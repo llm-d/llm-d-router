@@ -20,6 +20,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -78,8 +80,11 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 
 	var parsedResp *fwkrh.ParsedResponse
 	parseBytes := responseBytes
-	if isEventStream(reqCtx.Response.Headers[reqcommon.HeaderContentType]) {
+	contentType := reqCtx.Response.Headers[reqcommon.HeaderContentType]
+	if isEventStream(contentType) {
 		parseBytes = completeSSELines(ctx, reqCtx, responseBytes, endOfStream)
+	} else if grpcframe.IsContentType(contentType) {
+		parseBytes = completeGRPCFrames(ctx, reqCtx, responseBytes, endOfStream)
 	}
 	parser, err := s.getOrResolveParser(reqCtx)
 	if err != nil {
@@ -209,6 +214,108 @@ func dropSSELine(ctx context.Context, reqCtx *RequestContext, endOfStream bool) 
 
 func logSSELineDrop(ctx context.Context) {
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized SSE line from response parsing", "limit", maxSSELineBytes)
+}
+
+// maxGRPCFrameBytes caps one buffered gRPC message payload during response parsing.
+const maxGRPCFrameBytes = 4 << 20
+
+// completeGRPCFrames returns contiguous complete gRPC frames from chunk, carrying any
+// trailing partial frame to the next chunk. Frames whose payload exceeds maxGRPCFrameBytes
+// are skipped by exact byte length without buffering so later frames stay aligned.
+func completeGRPCFrames(ctx context.Context, reqCtx *RequestContext, chunk []byte, endOfStream bool) []byte {
+	if reqCtx.grpcStreamCorrupted {
+		return nil
+	}
+	if reqCtx.grpcFrameSkipRemaining > 0 {
+		if uint64(len(chunk)) < reqCtx.grpcFrameSkipRemaining {
+			reqCtx.grpcFrameSkipRemaining -= uint64(len(chunk))
+			if endOfStream {
+				reqCtx.grpcFrameSkipRemaining = 0
+			}
+			return nil
+		}
+		chunk = chunk[reqCtx.grpcFrameSkipRemaining:]
+		reqCtx.grpcFrameSkipRemaining = 0
+	}
+
+	hadCarry := len(reqCtx.grpcFrameCarry) > 0
+	data := chunk
+	if hadCarry {
+		reqCtx.grpcFrameCarry = append(reqCtx.grpcFrameCarry, chunk...)
+		data = reqCtx.grpcFrameCarry
+		reqCtx.grpcFrameCarry = nil
+	}
+
+	var kept []byte
+	copied := false
+	offset := 0
+	for offset < len(data) {
+		rem := data[offset:]
+		if len(rem) < grpcframe.HeaderLen {
+			kept, offset = finishPartialGRPCFrame(reqCtx, rem, kept, offset, len(data), offset == 0 && hadCarry, copied, endOfStream)
+			break
+		}
+		if rem[0] != 0 {
+			reqCtx.grpcStreamCorrupted = true
+			if copied {
+				kept = append(kept, rem...)
+			} else {
+				offset = len(data)
+			}
+			break
+		}
+		msgLen := binary.BigEndian.Uint32(rem[1:grpcframe.HeaderLen])
+		frameLen := uint64(grpcframe.HeaderLen) + uint64(msgLen)
+		if msgLen > maxGRPCFrameBytes {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized gRPC frame from response parsing", "limit", maxGRPCFrameBytes)
+			if !copied {
+				kept = append(kept, data[:offset]...)
+				copied = true
+			}
+			if uint64(len(rem)) < frameLen {
+				if !endOfStream {
+					reqCtx.grpcFrameSkipRemaining = frameLen - uint64(len(rem))
+				}
+				break
+			}
+			payload := rem[grpcframe.HeaderLen : grpcframe.HeaderLen+msgLen]
+			offset += grpcframe.HeaderLen + len(payload)
+			continue
+		}
+		if uint64(len(rem)) < frameLen {
+			kept, offset = finishPartialGRPCFrame(reqCtx, rem, kept, offset, len(data), offset == 0 && hadCarry, copied, endOfStream)
+			break
+		}
+		payload := rem[grpcframe.HeaderLen : grpcframe.HeaderLen+msgLen]
+		step := grpcframe.HeaderLen + len(payload)
+		if copied {
+			kept = append(kept, rem[:step]...)
+		}
+		offset += step
+	}
+	if copied {
+		return kept
+	}
+	return data[:offset]
+}
+
+func finishPartialGRPCFrame(
+	reqCtx *RequestContext,
+	rem, kept []byte,
+	offset, dataLen int,
+	reuseCarry, copied, endOfStream bool,
+) ([]byte, int) {
+	switch {
+	case endOfStream && copied:
+		return append(kept, rem...), offset
+	case endOfStream:
+		return kept, dataLen
+	case reuseCarry:
+		reqCtx.grpcFrameCarry = rem
+	default:
+		reqCtx.grpcFrameCarry = bytes.Clone(rem)
+	}
+	return kept, offset
 }
 
 // mergeUsage folds a parsed usage block into the usage accumulated for the request.
