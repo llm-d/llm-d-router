@@ -470,8 +470,12 @@ plugins:
 The `prefill` step reads the header, strips it from client responses, and fails the
 request before decode is sent when a prefill response omits it. See the
 [header-profile-handler README](../pkg/epp/framework/plugins/scheduling/profilehandler/headerprofile/README.md#reporting-the-prefill-pod-to-the-coordinator).
-The SGLang worker must send its response headers before its first frame; the
-`sglang-server` gRPC server does, so prefill headers arrive before decode starts.
+The SGLang worker must send its response headers before its first frame, so that
+prefill headers arrive before decode starts. The `sglang-server` gRPC server does this
+for both `stream: true` and `stream: false`: `Generate` returns its response stream once
+the request is admitted, and a `stream: false` request is a one-frame stream. This
+differs from HTTP `/generate`, where a non-streaming response sends its headers with the
+body after generation.
 
 `kv-offloading` has no setting of its own. The prefill EPP computes every P2P tier port:
 its `p2p-source-producer` sets the prefill pod's P2P tier address on the
