@@ -117,11 +117,21 @@ type GroupScheduler struct {
 	endpoints map[string]struct{} // the KNOWN endpoints (capacity may still be unknown)
 	// learned and rejected make Saturation's hot path cheap and quiet: a learned engine needs no
 	// second look, and a REJECTED one (its measured block size disagrees with the configured one)
-	// is not worth a scheduler lock and a log line a thousand times a second. A pod's geometry is
-	// fixed for its life and a rollout brings a new endpoint name, so a rejection is once per
-	// engine, not forever.
+	// is not worth a scheduler lock and a log line a thousand times a second. Both are cleared when
+	// the endpoint is DELETED: an endpoint name is not tied to a pod's lifetime. The reconciler
+	// deletes a pod on every not-ready state and the same name comes back on the next ready one, so
+	// a remembered "learned" would outlive the group it described and the re-added endpoint would
+	// never learn capacity again — no group, no seats, FCFS for that engine for the rest of the run.
 	learned  map[string]struct{}
 	rejected map[string]struct{}
+	// learnHook is a TEST-ONLY seam: nil in production, called once per learn attempt between the
+	// learn and the mark, which is the window the delete-while-learning race lives in.
+	learnHook func(key string)
+	// epoch is bumped for a key when its endpoint is deleted, so a capacity learn that is in flight
+	// across the delete can tell: it must not mark the key learned (the group it just made is not
+	// the endpoint's) and it must UNDO the learn, or the group of a deleted endpoint outlives its
+	// only delete and nothing ever tears it down.
+	epoch map[string]uint64
 }
 
 // Factory builds a GroupScheduler.
@@ -156,6 +166,7 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		endpoints: map[string]struct{}{},
 		learned:   map[string]struct{}{},
 		rejected:  map[string]struct{}{},
+		epoch:     map[string]uint64{},
 		// the handle is held for the RegisterDependencies-time gate: plugin construction order is
 		// NOT the config order (the runner may build the fairness policy first), so the sibling
 		// checks cannot run at Factory time — RegisterDependencies runs after ALL plugins are

@@ -87,7 +87,7 @@ func newTestPlugin(t *testing.T, cfg Config, n, blocks int) *GroupScheduler {
 	}
 	p := &GroupScheduler{typedName: fwkplugin.TypedName{Type: PluginType, Name: "gs"},
 		cfg: cfg, sched: s, metrics: newUnitMetrics(s), now: time.Now,
-		endpoints: map[string]struct{}{}, learned: map[string]struct{}{}, rejected: map[string]struct{}{}}
+		endpoints: map[string]struct{}{}, learned: map[string]struct{}{}, rejected: map[string]struct{}{}, epoch: map[string]uint64{}}
 	return p
 }
 
@@ -155,7 +155,7 @@ func BenchmarkSaturationNoop(b *testing.B) {
 		b.Fatal(err)
 	}
 	p := &GroupScheduler{cfg: cfg, sched: s, metrics: newUnitMetrics(s),
-		endpoints: map[string]struct{}{}, learned: map[string]struct{}{}, rejected: map[string]struct{}{}}
+		endpoints: map[string]struct{}{}, learned: map[string]struct{}{}, rejected: map[string]struct{}{}, epoch: map[string]uint64{}}
 	now := time.Now()
 	eps := make([]fwkdl.Endpoint, 0, 2)
 	for i := 0; i < 2; i++ {

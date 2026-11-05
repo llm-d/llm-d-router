@@ -325,6 +325,30 @@ var goldenScenarios = []goldenScenario{
 		},
 	},
 	{
+		// AN ENDPOINT NAME THAT FLAPS: deleted (a readiness flap) and re-added under the same name.
+		// The re-added endpoint must learn its capacity again and take a seat. Before B3 the second
+		// learn was skipped by the remembered mark: no group, no seats, and at N=1 the pool served
+		// FCFS for the rest of the run — the reason this scenario exists and the one trace in the
+		// freeze that the pre-fix code cannot reproduce.
+		name: "endpointFlapRelearns", blocks: 20, sizes: []int{1},
+		run: func(h *goldenHarness, n int) {
+			h.learn()
+			a := h.request(1, 300)
+			h.identify(a, "T1", 1)
+			h.cycle(a, 300, 0, 20) // T1 is seated on e0 and finishes
+			h.deletePod("e0")      // the pod goes not-ready
+			h.addPod("e0", 20)     // the same name comes back ready
+			h.saturate(true)       // the candidates are handed to the detector: capacity is learned again
+			b := h.request(1, 300)
+			h.identify(b, "T2", 1)
+			out := h.arrive(b)
+			require.Len(h.t, out, 1)
+			h.toPod(out[0], "")
+			h.finish(out[0], 300, 0, 20)
+			h.saturate(true)
+		},
+	},
+	{
 		// the in-flight cap bounds how many of one thread's requests are out at once
 		name: "inFlightCap", blocks: 20, sizes: []int{1},
 		run: func(h *goldenHarness, n int) {

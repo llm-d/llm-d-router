@@ -55,6 +55,7 @@ func (r *GroupScheduler) learnFromCandidates(cands []fwkdl.Endpoint) {
 		r.capMu.Lock()
 		_, done := r.learned[key]
 		_, bad := r.rejected[key]
+		at := r.epoch[key] // the key's generation BEFORE the learn: see below
 		r.capMu.Unlock()
 		if done || bad {
 			continue // nothing to do, and no lock taken
@@ -67,13 +68,31 @@ func (r *GroupScheduler) learnFromCandidates(cands []fwkdl.Endpoint) {
 		// scheduler is asked what it now holds BEFORE capMu is taken again.
 		err := r.learnCapacity(key, m)
 		learned := err == nil && r.sched.HasCapacityFor(key)
+		if r.learnHook != nil {
+			r.learnHook(key) // test-only seam: the window this race lives in
+		}
 		r.capMu.Lock()
-		if err != nil {
+		// DID THE ENDPOINT DIE WHILE WE WERE LEARNING IT? The epoch moves on a delete, so a moved
+		// epoch means the group this learn just created belongs to an endpoint that is gone. It must
+		// not be marked (the re-added endpoint has to learn again) and it must be TORN DOWN here,
+		// because the delete's own teardown ran before the group existed — nothing else would.
+		stale := r.epoch[key] != at
+		switch {
+		case stale:
+			// no mark of either kind: the key returns to "never looked at"
+		case err != nil:
 			r.rejected[key] = struct{}{}
-		} else if learned {
+		case learned:
 			r.learned[key] = struct{}{}
 		}
 		r.capMu.Unlock()
+		if stale {
+			// capMu is NOT held here: RemoveEngine takes the scheduler's own lock
+			r.sched.RemoveEngine(key, r.now())
+			r.logger.V(logutil.DEBUG).Info("group-scheduler: capacity learn discarded — the endpoint was deleted while it was being learned",
+				"engine", key)
+			continue
+		}
 		if err != nil {
 			r.logger.V(logutil.DEFAULT).Info("group-scheduler: CAPACITY REJECTED from the live detector",
 				"engine", r.sched.GroupLabel(key), "err", err.Error())
@@ -193,6 +212,14 @@ func (r *GroupScheduler) forgetEndpoint(md *fwkdl.EndpointMetadata) {
 	key := endpointKey(md)
 	r.capMu.Lock()
 	delete(r.endpoints, key)
+	// THE MARKS ARE PART OF THE DELETION. A pod is deleted on every not-ready state and the same
+	// name comes back on the next ready one, so a surviving "learned" would describe a group that no
+	// longer exists: the re-added endpoint would never be learned again and would run with no seats
+	// (FCFS at N=1) for the rest of the run. Clearing them, and bumping the epoch, is what makes a
+	// flap a re-learn rather than a permanent hole.
+	delete(r.learned, key)
+	delete(r.rejected, key)
+	r.epoch[key]++
 	r.capMu.Unlock()
 	// tear the engine's group down: its threads are exited, their seats and bindings dropped, its
 	// budget/index gone (leaving charges on a dead engine poisons every later budget decision on a

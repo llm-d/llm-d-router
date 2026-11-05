@@ -429,6 +429,18 @@ func (h *goldenHarness) abandon(req *fwksched.InferenceRequest) {
 }
 
 // deletePod is the endpoint DELETE event: the engine's group is torn down.
+// addPod brings a pod back under a name that was deleted: the readiness flap the reconciler makes
+// on every not-ready state. The event carries no metrics (capacity is learned from the candidates),
+// exactly as in production.
+func (h *goldenHarness) addPod(id string, blocks int) {
+	h.pods[id] = blocks
+	if err := h.r.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type: fwkdl.EventAddOrUpdate, Endpoint: goldenDLEndpoint(id, 0, 0),
+	}); err != nil {
+		h.t.Fatalf("Extract add %s: %v", id, err)
+	}
+}
+
 func (h *goldenHarness) deletePod(id string) {
 	if err := h.r.Extract(context.Background(), fwkdl.EndpointEvent{
 		Type: fwkdl.EventDelete, Endpoint: goldenDLEndpoint(id, 0, 0),
