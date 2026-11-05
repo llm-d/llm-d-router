@@ -223,3 +223,34 @@ func TestSGLangGRPC_PrefillFailureAfterDecodeEOFIsReported(t *testing.T) {
 	require.Equal(t, "14", rec.Header().Get(http.TrailerPrefix+grpcframe.HeaderStatus))
 	require.Equal(t, "prefill unavailable", rec.Header().Get(http.TrailerPrefix+grpcframe.HeaderMessage))
 }
+
+// A prefill stream that ends inside a frame is a failure, not a clean end,
+// even when the upstream closes it with an OK trailer.
+func TestSGLangGRPC_PrefillStreamTruncatedInsideFrameFails(t *testing.T) {
+	decodeFinished := make(chan struct{})
+	f := newSGLangPDFixture(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writePrefillHeaders(w)
+			select {
+			case <-decodeFinished:
+			case <-r.Context().Done():
+				return
+			}
+			// A frame header that declares 10 payload bytes, then nothing.
+			_, _ = w.Write([]byte{0, 0, 0, 0, 10})
+			w.Header().Set(http.TrailerPrefix+grpcframe.HeaderStatus, grpcframe.StatusOK)
+		},
+		func(w http.ResponseWriter, _ *http.Request) {
+			writeDecodeOK(t, w)
+			close(decodeFinished)
+		},
+	)
+
+	rec, err := f.run(context.Background(), t)
+	require.Error(t, err)
+	var streamed *pipeline.UpstreamStreamedError
+	require.ErrorAs(t, err, &streamed)
+	require.Equal(t, PrefillStepName, streamed.Step)
+	require.Equal(t, "14", rec.Header().Get(http.TrailerPrefix+grpcframe.HeaderStatus))
+	require.Contains(t, rec.Header().Get(http.TrailerPrefix+grpcframe.HeaderMessage), "prefill stream interrupted")
+}

@@ -413,9 +413,12 @@ func TestReadMessage(t *testing.T) {
 
 // stallReader yields prefix and then blocks until the test ends, like a client
 // that sends a frame header and stops.
+// stallReader serves prefix, then blocks until done. It closes blocked once,
+// on the first read past prefix, so a test knows the reader is stalled.
 type stallReader struct {
-	prefix []byte
-	done   <-chan struct{}
+	prefix  []byte
+	done    <-chan struct{}
+	blocked chan struct{}
 }
 
 func (r *stallReader) Read(p []byte) (int, error) {
@@ -423,6 +426,10 @@ func (r *stallReader) Read(p []byte) (int, error) {
 		n := copy(p, r.prefix)
 		r.prefix = r.prefix[n:]
 		return n, nil
+	}
+	if r.blocked != nil {
+		close(r.blocked)
+		r.blocked = nil
 	}
 	<-r.done
 	return 0, io.ErrClosedPipe
@@ -438,21 +445,20 @@ func TestReadMessageDoesNotPreallocateDeclaredSize(t *testing.T) {
 
 	done := make(chan struct{})
 	defer close(done)
-	started := make(chan struct{})
+	blocked := make(chan struct{})
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	go func() {
-		close(started)
-		_, _ = ReadMessage(&stallReader{prefix: header, done: done}, 2*declared)
+		_, _ = ReadMessage(&stallReader{prefix: header, done: done, blocked: blocked}, 2*declared)
 	}()
-	<-started
-	// Let the goroutine read the header and block on the payload.
-	require.Eventually(t, func() bool {
-		runtime.ReadMemStats(&after)
-		return true
-	}, time.Second, 10*time.Millisecond)
-	time.Sleep(50 * time.Millisecond)
+	// ReadMessage has read the header and allocated its buffer once the
+	// reader blocks on the payload.
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadMessage did not block on the payload read")
+	}
 	runtime.ReadMemStats(&after)
 	grew := int64(after.HeapAlloc) - int64(before.HeapAlloc)
 	require.Less(t, grew, int64(readMessageInitialCap)*2, "stalled header must not reserve the declared %d bytes", declared)

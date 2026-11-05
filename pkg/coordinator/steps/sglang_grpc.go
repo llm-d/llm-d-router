@@ -428,7 +428,9 @@ func (s *DecodeStep) executeSGLangGRPC(ctx context.Context, reqCtx *pipeline.Req
 		// decode's OK trailer. Prefill normally finishes long before decode,
 		// so this wait is a no-op; when it is still running, give it the same
 		// bounded time as the terminal cached_tokens wait.
-		ps.Wait(decodeCtx, sglangPrefillWaitOnTerminal)
+		if !ps.Wait(decodeCtx, sglangPrefillWaitOnTerminal) {
+			logger.V(logutil.DEBUG).Info("prefill stream still open after decode ended", "waited", sglangPrefillWaitOnTerminal)
+		}
 		if pStatus, pMsg, pDetails, prefillErr := ps.Failure(); prefillErr != nil {
 			pWire := grpcStatusWire{status: pStatus, message: pMsg, detailsBin: pDetails}
 			if !committed {
