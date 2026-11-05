@@ -134,8 +134,10 @@ func TestPreRequest(t *testing.T) {
 func TestResponseBody(t *testing.T) {
 	ctx := context.Background()
 
-	// dispatch primes a request as if Produce and PreRequest had run.
+	// dispatch primes a request as if Produce and PreRequest had run, on an
+	// endpoint the observer knows.
 	dispatch := func(p *Observer, at time.Time) {
+		p.stateFor(testEndpointID)
 		p.PluginState.Write("req-1", dispatchStateKey, &dispatchInfo{
 			endpointID: testEndpointID, inflight: 6, dispatchedAt: at,
 		})
@@ -168,6 +170,20 @@ func TestResponseBody(t *testing.T) {
 		state.mu.Lock()
 		defer state.mu.Unlock()
 		assert.Zero(t, state.observations, "e2e latency must not be recorded as a TTFT")
+	})
+
+	// The endpoint is deleted while the request is in flight: its first chunk
+	// must not bring the endpoint's state back.
+	t.Run("a first chunk after the endpoint was deleted is dropped", func(t *testing.T) {
+		p := newObserver(t)
+		dispatch(p, time.Now().Add(-250*time.Millisecond))
+		endpoint := newDataEndpoint()
+		require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: endpoint}))
+
+		p.ResponseBody(ctx, newRequest(), &fwkrh.Response{StartOfStream: true}, nil)
+		require.NoError(t, p.Dispatch(ctx, endpoint))
+
+		assert.Empty(t, p.snapshotDebugState().Endpoints, "the deleted endpoint must stay gone")
 	})
 
 	t.Run("middle chunks are ignored and end of stream releases the record", func(t *testing.T) {

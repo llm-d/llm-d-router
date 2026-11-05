@@ -74,6 +74,7 @@ func TestFlush(t *testing.T) {
 
 	t.Run("publishes the load anchors from the short window", func(t *testing.T) {
 		p := newObserverWithConfig(t, flushConfig())
+		p.stateFor(testEndpointID)
 		// TTFT rises with the in-flight count it was dispatched at, which is the
 		// relationship the scorer's curve captures.
 		for i := range 10 {
@@ -92,6 +93,7 @@ func TestFlush(t *testing.T) {
 
 	t.Run("the floor arrives only once a bucket closes", func(t *testing.T) {
 		p := newObserverWithConfig(t, flushConfig())
+		p.stateFor(testEndpointID)
 		for i := range 10 {
 			ttft := 1.0
 			if i < 2 {
@@ -113,6 +115,7 @@ func TestFlush(t *testing.T) {
 
 	t.Run("Floor withholds the value below minRequests", func(t *testing.T) {
 		p := newObserverWithConfig(t, flushConfig()) // minRequests 4
+		p.stateFor(testEndpointID)
 		for i := range 2 {
 			p.record(testEndpointID, 0.1, 1, now.Add(time.Duration(i)*time.Millisecond))
 		}
@@ -130,6 +133,7 @@ func TestFlush(t *testing.T) {
 func TestDispatch(t *testing.T) {
 	ctx := context.Background()
 	p := newObserverWithConfig(t, flushConfig())
+	p.stateFor(testEndpointID)
 	p.record(testEndpointID, 0.3, 1, time.Now())
 
 	require.NoError(t, p.Dispatch(ctx, newDataEndpoint()))
