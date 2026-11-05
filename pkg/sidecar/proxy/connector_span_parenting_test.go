@@ -236,7 +236,7 @@ func TestConcurrentPDPrefillSpanCarriesRequestID(t *testing.T) {
 			if tc.requestID != "" {
 				req.Header.Set(reqcommon.RequestIDHeaderKey, tc.requestID)
 			}
-			s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
+			s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
 			forward.End()
 
 			require.Eventually(t, func() bool {
