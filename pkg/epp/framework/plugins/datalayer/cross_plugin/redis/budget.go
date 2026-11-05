@@ -17,7 +17,6 @@ limitations under the License.
 package redis
 
 import (
-	"math"
 	"sync"
 	"time"
 )
@@ -59,17 +58,6 @@ func (b *byteBudget) take(n int) bool {
 	}
 	b.tokens -= float64(n)
 	return true
-}
-
-// available returns the bytes left, which is negative while in debt.
-func (b *byteBudget) available() float64 {
-	if b == nil {
-		return math.Inf(1)
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.refillLocked()
-	return b.tokens
 }
 
 // charge adds n bytes to what was spent. A negative n refunds.
