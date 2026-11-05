@@ -88,6 +88,35 @@ func TestRecentWindowRemovePrompt(t *testing.T) {
 	require.Equal(t, [][]blockHash{{1, 2}}, w.snapshot("ep"))
 }
 
+func TestRecentWindowGenerationAdvancesWithTrimmedPrompts(t *testing.T) {
+	w := newRecentWindow(4)
+	w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3})
+	prompts, base := w.snapshotWindow("ep")
+	require.Equal(t, [][]blockHash{{1, 2}, {3}}, prompts)
+	require.Zero(t, base)
+
+	w.record("ep", []blockHash{4, 5, 6})
+	prompts, base = w.snapshotWindow("ep")
+	require.Equal(t, [][]blockHash{{3}, {4, 5, 6}}, prompts)
+	require.Equal(t, uint64(1), base, "generation 1 still names prompt {3}")
+
+	w.forget("ep")
+	_, base = w.snapshotWindow("ep")
+	require.Zero(t, base)
+}
+
+func TestRecentWindowRemovePromptAdvancesBase(t *testing.T) {
+	w := newRecentWindow(10)
+	w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3, 4})
+	w.record("ep", []blockHash{5, 6})
+	w.removePrompt("ep", []blockHash{1, 2})
+	prompts, base := w.snapshotWindow("ep")
+	require.Equal(t, [][]blockHash{{3, 4}, {5, 6}}, prompts)
+	require.Equal(t, uint64(1), base, "leading removal keeps later generations")
+}
+
 func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	syncOn := true
 	cfg := defaultConfig
