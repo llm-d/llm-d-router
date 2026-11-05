@@ -325,6 +325,87 @@ var goldenScenarios = []goldenScenario{
 		},
 	},
 	{
+		// THE OBSERVED ENGINE WINS, INCLUDING ITS BLOCKS (X10): a request lands on an engine that is
+		// not its seat, the thread is rebound there, and the blocks are FORCE-SEATED on the new
+		// engine — the engine is serving the thread, so its blocks are there whether the budget agrees
+		// or not. Without the forced seat the thread looks uncharged on the engine that is running it.
+		name: "rebindToObservedEngine", blocks: 20, sizes: []int{2},
+		run: func(h *goldenHarness, n int) {
+			h.learn()
+			a := h.request(1, 300)
+			h.identify(a, "T1", 1)
+			out := h.arrive(a)
+			require.Len(h.t, out, 1)
+			// it lands on the OTHER engine: the framework's choice is authoritative
+			other := "e1"
+			if out[0].engine == "e1" {
+				other = "e0"
+			}
+			h.toPod(out[0], other)
+			h.saturate(true)
+			h.pickLoop()
+			h.finish(out[0], 300, 0, 20)
+			h.saturate(true)
+		},
+	},
+	{
+		// THE ENGINE-IDLE VICTIM IS THE LEAST RECENTLY ACTIVE THREAD (X6). Two threads hold the
+		// engine's only two seats and neither is busy; a third thread is blocked for a seat, so the
+		// livelock guard gives one up — the thread that has been quiet longest.
+		name: "engineIdlePicksLeastRecent", blocks: 12, sizes: []int{1},
+		run: func(h *goldenHarness, n int) {
+			h.learn()
+			t1 := h.request(1, 300)
+			h.identify(t1, "T1", 1)
+			h.cycle(t1, 300, 0, 20)
+			h.advance(10 * time.Second)
+			t2 := h.request(1, 300)
+			h.identify(t2, "T2", 1)
+			h.cycle(t2, 300, 0, 20)
+			h.advance(time.Second)
+			t3 := h.request(1, 300)
+			h.identify(t3, "T3", 1)
+			for _, d := range h.arrive(t3) {
+				h.toPod(d, "")
+				h.finish(d, 300, 0, 20)
+			}
+			h.saturate(true)
+			h.pickLoop()
+		},
+	},
+	{
+		// THE ROTATION VICTIM IS THE EARLIEST-SEATED ELIGIBLE THREAD WITH A QUEUED TURN (X9). Both
+		// residents have spent their quantum and both ask for another turn; the seat that frees must be
+		// the one seated FIRST, so rotation is a queue and not a lottery.
+		name: "rotationVictimEarliestSeat", blocks: 12, sizes: []int{1},
+		run: func(h *goldenHarness, n int) {
+			h.learn()
+			q := defaultConfig().Quantum
+			for i, id := range []string{"T1", "T2"} {
+				if i == 1 {
+					// a LATER seat for the second thread: with equal seat times the id breaks the tie
+					// and this scenario could not tell the order apart
+					h.advance(5 * time.Second)
+				}
+				for turn := 1; turn <= q; turn++ {
+					req := h.request(1, 300)
+					h.identify(req, id, turn)
+					h.cycle(req, 300, 0, 20)
+				}
+			}
+			for _, id := range []string{"T1", "T2"} {
+				next := h.request(1, 300)
+				h.identify(next, id, q+1)
+				h.enqueue(next)
+			}
+			t3 := h.request(1, 300)
+			h.identify(t3, "T3", 1)
+			h.enqueue(t3)
+			h.saturate(true)
+			h.pickLoop()
+		},
+	},
+	{
 		// A REQUEST ARRIVING AT A POD IS ACTIVITY (B5). The baseline stamped the thread at PreRequest;
 		// without that stamp, a thread whose record is dropped before its settle is measured silent
 		// from its PICK, not from its arrival at the pod — so it becomes idle-eligible early and a

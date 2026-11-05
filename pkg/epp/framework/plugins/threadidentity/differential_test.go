@@ -83,7 +83,11 @@ type diffDumpLine struct {
 	ThreadID string   `json:"id"`
 	Blocks   []uint64 `json:"blocks"`
 	Tokens   int      `json:"tokens"`
-	Err      string   `json:"err,omitempty"`
+	// Salt is the cache salt the tokenized request carries: F-P11's parity check. The salt must
+	// reach the tokenized request the same way through either tokenizer route, and must not change a
+	// token or an identity (it is a cache-key prefix, not prompt content).
+	Salt string `json:"salt"`
+	Err  string `json:"err,omitempty"`
 }
 
 // deterministicRender is the fake /render backend. It renders the SHAPE a chat template
@@ -229,6 +233,7 @@ func TestDifferentialIdentityDump(t *testing.T) {
 				for _, pr := range req.Body.TokenizedRequest.Prompts {
 					dump.Tokens += len(pr.TokenIDs)
 				}
+				dump.Salt = req.Body.TokenizedRequest.CacheSalt
 			}
 			_ = p.PreRequest(context.Background(), req, nil)
 			// HALF the turns stay in flight, so the next arrival on the same conversation meets

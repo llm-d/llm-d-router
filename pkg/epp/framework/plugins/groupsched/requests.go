@@ -75,7 +75,7 @@ func (s *Scheduler) expireWindows(m *thread, now time.Time) {
 	kept := m.windows[:0]
 	for _, rec := range m.windows {
 		if !rec.pod.IsZero() {
-			continue // it reached a pod: not a window any more (its own hook closed it)
+			continue // it reached a pod: not a window any more
 		}
 		if rec.counted && now.Sub(rec.released) > time.Duration(s.cfg.IdleSeconds*float64(time.Second)) {
 			rec.counted = false
@@ -106,17 +106,14 @@ func (s *Scheduler) atPod(rec *reqRec, m *thread, engine string, now time.Time) 
 	// PreRequest must not decrement the thread — it would take a count away from another live
 	// window of the same thread and read the thread as not busy until the next pass re-derives.
 	// THE COUNT IS THE RECORD'S OWN, not a guess about whether a pass ran: a window that has expired
-	// no longer counts (reapWindows or the pass's derive cleared it), so decrementing for it would
-	// take a count from another live window of the same thread.
+	// no longer counts, so decrementing for it would take a count from another live window.
 	live := rec.counted
 	rec.counted = false
 	rec.engine = engine
 	rec.pod = now
 	if m != nil && rec.thread == m.id {
 		// THE ACTIVITY STAMP (baseline, scheduler.go:1023): a request arriving at a pod is activity on
-		// its thread. Without it, a thread that dispatches but has not yet finished its turn can be
-		// read as silent and evicted for idleness between the stamp its Pick wrote and the one its
-		// settle writes — the gap the baseline's PreRequest stamp covered.
+		// its thread, so the idle rule measures silence from the arrival, not from the Pick.
 		m.lastActivity = now
 		if live {
 			m.pending = max(m.pending-1, 0)
@@ -141,7 +138,7 @@ func (s *Scheduler) dropRequest(reqID string, now time.Time) {
 		if m := g.threads[rec.thread]; m != nil {
 			if rec.pod.IsZero() {
 				if rec.counted {
-					// a window already expired was cleared by the derive that noticed
+					// a window already expired was cleared by whatever noticed
 					rec.counted = false
 					m.pending = max(m.pending-1, 0)
 				}
@@ -287,9 +284,7 @@ func (s *Scheduler) Settle(reqID, engine string, now time.Time) {
 	s.dropRequest(reqID, now)
 	m.lastActivity = now
 	s.releaseCold(g, id) // any termination releases the charge
-	// THE WINDOWS THAT DIED SINCE THE LAST PASS STOP COUNTING HERE, at this settle's own time: busy()
-	// below asks whether the thread's work has drained NOW, and a window cannot be "live" because no
-	// pass has run to notice it expired.
+	// THE WINDOWS THAT DIED SINCE THE LAST PASS STOP COUNTING HERE, at this settle's own time.
 	s.expireWindows(m, now)
 	// THE BUSY PERIOD: the thread's work reached zero, and one thread is one chain, so that is the
 	// whole of it draining — the rotation quantum's unit. busy(), not the at-a-pod count: a turn a
@@ -379,9 +374,6 @@ func (s *Scheduler) reapRequests(now time.Time) {
 				s.noteAnomaly(anomalyReapedWindow)
 				continue
 			}
-			// THE RECORD'S COUNT IS RECONCILED HERE, at the pass's own time: a window that has
-			// outlived S no longer counts, and one still inside it does. `counted` records the
-			// outcome so every later decrement (a late PreRequest, a drop) agrees with this pass.
 			rec.counted = s.windowLive(rec, now)
 			if rec.counted && m != nil {
 				m.pending++

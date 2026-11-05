@@ -136,8 +136,7 @@ type reqRec struct {
 	pod time.Time
 	// counted is whether this record currently contributes to its thread's pending count. It is set
 	// when the record is opened, and corrected by the SAME liveness test at every decrement, so
-	// pending is always exactly "the records that counted at their last evaluation" — never a number
-	// that depends on whether a pass happened to run while the window was expiring.
+	// pending is always exactly "the records that counted at their last evaluation".
 	counted bool
 	// the OBSERVABLES of this turn, captured at dispatch for the span PreRequest may set. Nothing
 	// in a decision reads them: the queue wait is dispatch − arrival, and the predicted cache is
