@@ -73,6 +73,14 @@ type Config struct {
 	// synchronized across EPP replicas when a cross-replica syncer is configured.
 	// Unset defaults to true; set false to keep the load local to this replica.
 	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
+	// PrefillCompletionFromKVEvents stamps each request with a session id the
+	// engines echo on their KV events and releases the request's prefill load
+	// when the engine that decodes the request has stored the prompt's last
+	// full block: the decode engine after pulling the blocks in disaggregated
+	// serving, the computing engine otherwise. The producer must be bound to a
+	// kv-events-source covering those engines. The first response byte remains
+	// the fallback release.
+	PrefillCompletionFromKVEvents bool `json:"prefillCompletionFromKVEvents,omitempty"`
 }
 
 func defaultConfig() Config {
@@ -120,6 +128,8 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		uncachedRequestTokensSlot: datalayer.NewSlot[*attrconcurrency.UncachedRequestTokens](attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name)),
 		syncCrossReplicaState:     syncCrossReplicaState,
 		PluginState:               fwkplugin.NewPluginState(ctx),
+		prefillFromKVEvents:       cfg.PrefillCompletionFromKVEvents,
+		watch:                     newPrefillWatch(prefillPending.WithLabelValues(name)),
 	}, nil
 }
 
@@ -154,6 +164,8 @@ type InFlightLoadProducer struct {
 	// enabled but no outlen-bucket attribute is present on requests (the outlen-bucket
 	// plugin is not configured or is ordered after this producer).
 	outlenBucketMissingWarn sync.Once
+	prefillFromKVEvents     bool
+	watch                   *prefillWatch
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -176,6 +188,9 @@ type addedTokensEntry struct {
 	// or decrement a replacement endpoint's series with the same labels.
 	tokenGauge   prometheus.Gauge
 	requestGauge prometheus.Gauge
+	// onRelease drops the request's KV-event watch when the entry is evicted
+	// by any path, so a watch never outlives the load it would release.
+	onRelease func()
 }
 
 var _ fwkplugin.EvictableStateData = (*addedTokensEntry)(nil)
@@ -193,6 +208,7 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 		requestCounter: e.requestCounter,
 		tokenGauge:     e.tokenGauge,
 		requestGauge:   e.requestGauge,
+		onRelease:      e.onRelease,
 	}
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
@@ -207,6 +223,9 @@ func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
 	if e.requests.Swap(0) != 0 {
 		decrementClamped(e.requestCounter, 1)
 		e.requestGauge.Dec()
+	}
+	if e.onRelease != nil {
+		e.onRelease()
 	}
 }
 
@@ -445,6 +464,14 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		}
 	}
 
+	var stamp string
+	var targets map[string]fwksched.Endpoint
+	if p.prefillFromKVEvents {
+		if stamp, _ = sessionStamp(request); stamp != "" {
+			targets = make(map[string]fwksched.Endpoint, len(result.ProfileResults))
+		}
+	}
+
 	tracked := false
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
@@ -481,12 +508,16 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		}
 		entry.tokens.Store(tokens)
 		entry.requests.Store(1)
-		p.PluginState.Write(
-			request.RequestID,
-			fwkplugin.StateKey(addedTokensKey(eid, profileName)),
-			entry,
-		)
+		key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
+		if stamp != "" {
+			entry.onRelease = func() { p.watch.remove(request.RequestID) }
+			targets[profileName] = endpoint
+		}
+		p.PluginState.Write(request.RequestID, key, entry)
 		tracked = true
+	}
+	if stamp != "" && tracked {
+		p.watchPrefill(ctx, request, result, stamp, targets)
 	}
 
 	// ctx is the ext_proc stream context: it stays alive for the request's full
@@ -577,41 +608,11 @@ func (p *InFlightLoadProducer) ResponseBody(
 		return
 	}
 
-	// When output tokens are excluded, the in-flight token estimate represents only
-	// the prompt cost, which is consumed by prefill. As soon as the first chunk
-	// arrives (StartOfStream), prefill is done across all profiles, so free the
-	// token counters for every targeted endpoint regardless of profile name.
-	// The prefill profile's entry is released in full (request counter included):
-	// the first chunk means the prefill worker has finished and handed off, so
-	// the request is no longer in flight on that endpoint. Other profiles'
-	// request counters are released on EndOfStream below via PluginState.Delete.
-	if !p.addEstimatedOutputTokens && resp.StartOfStream {
-		for profileName, profileResult := range result.ProfileResults {
-			if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
-				continue
-			}
-			endpoint := profileResult.TargetEndpoints[0]
-			if endpoint == nil || endpoint.GetMetadata() == nil {
-				continue
-			}
-			if profileName == profilePrefill {
-				p.release(endpoint, request, profileName)
-			} else {
-				p.releaseTokensEarly(endpoint, request, profileName)
-			}
-		}
-	}
-
-	// Early prefill release (on first chunk). Frees the primary profile's
-	// prefill contribution as soon as prefill completes, while other profiles'
-	// entries remain until EndOfStream.
-	if p.addEstimatedOutputTokens && resp.StartOfStream {
-		if prefillResult, ok := result.ProfileResults[profilePrefill]; ok && len(prefillResult.TargetEndpoints) > 0 {
-			endpoint := prefillResult.TargetEndpoints[0]
-			if endpoint != nil && endpoint.GetMetadata() != nil {
-				p.release(endpoint, request, profilePrefill)
-			}
-		}
+	// The first response byte means the prefill worker has finished and handed
+	// off. It is the fallback completion signal; with PrefillCompletionFromKVEvents
+	// the engine's store events usually report completion before it.
+	if resp.StartOfStream {
+		p.onPrefillComplete(ctx, request.RequestID, result, signalFirstByte)
 	}
 
 	// Full cleanup on completion vs. lifetime extension on an intermediate chunk.
@@ -638,8 +639,8 @@ func (p *InFlightLoadProducer) ResponseBody(
 // triggering OnEvicted to roll back that profile's counter contribution.
 // Used at StartOfStream when a single profile needs to be released ahead of
 // the EndOfStream bulk Delete.
-func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, profileName string) {
-	if endpoint == nil || request == nil || request.RequestID == "" || p.PluginState == nil {
+func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, requestID string, profileName string) {
+	if endpoint == nil || requestID == "" || p.PluginState == nil {
 		return
 	}
 	meta := endpoint.GetMetadata()
@@ -651,15 +652,15 @@ func (p *InFlightLoadProducer) release(endpoint fwksched.Endpoint, request *fwks
 
 	// DeleteKey triggers OnEvicted, which decrements the counters exactly once.
 	// If the janitor already reaped the request, this is a no-op.
-	p.PluginState.DeleteKey(request.RequestID, key)
+	p.PluginState.DeleteKey(requestID, key)
 }
 
 // releaseTokensEarly frees only the token portion of a profile's entry
 // (request counter stays held), used at StartOfStream for the
 // addEstimatedOutputTokens=false path where prefill completion frees tokens
 // but the request remains in-flight until EndOfStream.
-func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, profileName string) {
-	if endpoint == nil || request == nil || request.RequestID == "" || p.PluginState == nil {
+func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, requestID string, profileName string) {
+	if endpoint == nil || requestID == "" || p.PluginState == nil {
 		return
 	}
 	meta := endpoint.GetMetadata()
@@ -669,7 +670,7 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 	eid := meta.ID.String()
 
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
-	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
+	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, requestID, key); err == nil {
 		if t := entry.tokens.Swap(0); t != 0 {
 			decrementClamped(entry.tokenCounter, t)
 			entry.tokenGauge.Sub(float64(t))
