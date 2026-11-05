@@ -29,10 +29,41 @@ import (
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 )
 
-// This file reads sglang.api.v1 messages at the protobuf wire level. The EPP
-// needs a few fields of a GenerateRequest and of every streamed
-// GenerateStreamItem. A full proto.Unmarshal copies every field, media and
-// token IDs included, and on the response path runs once per token.
+// This file reads sglang.api.v1 messages at the protobuf wire level instead of
+// with proto.Unmarshal. It is a hot-path optimization: the parser works
+// without it, at a higher per-request and per-token cost.
+//
+// What the EPP needs from each message:
+//   - GenerateRequest: text or input_ids, extra_key and cache_salt, mm_hashes,
+//     sampling_params.max_new_tokens. It also writes priority.
+//   - GenerateStreamItem (one per streamed token): meta_info.finish_reason,
+//     prompt_tokens, completion_tokens, cached_tokens.
+//
+// What proto.Unmarshal costs: it decodes the whole message, every token ID,
+// media blob, and logprob included. On the response path that runs once per
+// token. Measured on an 8k-token request with a 1 MiB image: 318 µs and
+// 1.16 MB per request for a full decode, 66 µs and 49 KB with this scan. A
+// streamed token frame costs 908 ns and 9 allocations with a full decode, one
+// allocation (the result) with this scan.
+//
+// How this file avoids that cost:
+//   - scanGenerateRequest returns slices that alias the request bytes. It
+//     copies nothing, so the original request is forwarded as received.
+//   - scanTokenIDs decodes packed input_ids into []uint32 in one allocation.
+//   - framePriority drops any client priority field and appends the EPP value,
+//     producing the outgoing gRPC frame in one allocation instead of
+//     unmarshal, mutate, re-marshal.
+//   - scanStreamItem reads the usage fields of a response frame without
+//     allocating.
+//
+// Correctness guards: field numbers are read from the generated descriptors
+// at init, so a renumbered field in a future sglang.api.v1 fails the tests
+// instead of reading the wrong field. wire_test.go checks every scan against
+// proto.Unmarshal on the same bytes, including the oneof merge rule (the last
+// member wins and discards the fields of the other).
+//
+// The vllmgrpc parser still uses proto.Unmarshal. The same treatment for it is
+// tracked in llm-d/llm-d-router#3961.
 
 // errMalformed reports bytes that are not valid protobuf wire data.
 var errMalformed = errors.New("malformed protobuf wire data")
