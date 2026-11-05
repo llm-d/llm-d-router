@@ -19,6 +19,8 @@ package approximateprefix
 import (
 	"encoding/binary"
 	"sync"
+
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 )
 
 // recentWindow buffers recently recorded prompt hash sequences per endpoint.
@@ -30,10 +32,16 @@ type recentWindow struct {
 	max     int
 }
 
+// endpointWindow holds one endpoint's prompts. prompts[start:] are live. Trimmed
+// prompts stay in front of start until compaction moves the live tail to the
+// front, so trimming is amortized constant per prompt.
 type endpointWindow struct {
 	prompts [][]blockHash
 	start   int
 	total   int
+	// base is the generation of prompts[start]. It advances by one for each
+	// prompt trimmed, so a generation always names the same prompt.
+	base uint64
 }
 
 func newRecentWindow(max int) *recentWindow {
@@ -72,8 +80,9 @@ func (w *recentWindow) record(endpointID string, hashes []blockHash) {
 		buf.total -= len(buf.prompts[buf.start])
 		buf.prompts[buf.start] = nil
 		buf.start++
+		buf.base++
 	}
-	// Compact only after enough evictions to amortize copying the retained records.
+	// Compact only after enough trims to amortize copying the retained prompts.
 	if buf.start > 0 && buf.start >= len(buf.prompts)-buf.start {
 		n := copy(buf.prompts, buf.prompts[buf.start:])
 		clear(buf.prompts[n:])
@@ -85,16 +94,22 @@ func (w *recentWindow) record(endpointID string, hashes []blockHash) {
 }
 
 // snapshot returns a deep copy of pending prompts for endpointID without clearing.
-// The syncer replaces each replica field on every Set, so draining would wipe
+// Peers read the window as a whole on every publish, so draining would wipe
 // peer-visible hashes on the next idle publish tick.
 func (w *recentWindow) snapshot(endpointID string) [][]blockHash {
+	prompts, _ := w.snapshotWindow(endpointID)
+	return prompts
+}
+
+// snapshotWindow is snapshot plus the generation of the first prompt.
+func (w *recentWindow) snapshotWindow(endpointID string) ([][]blockHash, uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	buf := w.pending[endpointID]
 	if buf == nil {
-		return nil
+		return nil, 0
 	}
-	return copyPromptHashes(buf.prompts[buf.start:])
+	return copyPromptHashes(buf.prompts[buf.start:]), buf.base
 }
 
 // forget drops the buffer for endpointID when the endpoint leaves the pool.
@@ -108,6 +123,7 @@ func (w *recentWindow) forget(endpointID string) {
 // that failed stops being published to peers. hashes are normalized with the
 // same head-cap record applies, so a recording that was capped is still
 // matched. A prompt already trimmed out by a later record is a no-op.
+// Leading removals advance base so remaining prompts keep their generations.
 func (w *recentWindow) removePrompt(endpointID string, hashes []blockHash) {
 	if len(hashes) == 0 {
 		return
@@ -124,15 +140,22 @@ func (w *recentWindow) removePrompt(endpointID string, hashes []blockHash) {
 		return
 	}
 	out := make([][]blockHash, 0, len(buf.prompts)-buf.start)
+	leadingDropped := 0
+	stillLeading := true
 	for _, p := range buf.prompts[buf.start:] {
-		if promptKey(p) != key {
-			out = append(out, p)
-		} else {
+		if promptKey(p) == key {
 			buf.total -= len(p)
+			if stillLeading {
+				leadingDropped++
+			}
+			continue
 		}
+		stillLeading = false
+		out = append(out, p)
 	}
 	buf.prompts = out
 	buf.start = 0
+	buf.base += clamp.Uint64(leadingDropped)
 }
 
 func copyPromptHashes(prompts [][]blockHash) [][]blockHash {

@@ -43,6 +43,8 @@ var PrefixHashSetDataKey = plugin.NewDataKey("PrefixHashSetDataKey", approxprefi
 // are ordered oldest to newest.
 type PrefixHashSet struct {
 	Prompts [][]uint64
+	// Base is the generation of Prompts[0]. Prompts[i] is at generation Base+i.
+	Base uint64
 	// digest caches ContentDigest for the Produce hot path. Not serialized.
 	digest       uint64
 	digestCached bool
@@ -85,7 +87,7 @@ func (s *PrefixHashSet) Clone() fwkdl.Cloneable {
 	if s == nil {
 		return nil
 	}
-	out := &PrefixHashSet{Prompts: make([][]uint64, len(s.Prompts))}
+	out := &PrefixHashSet{Prompts: make([][]uint64, len(s.Prompts)), Base: s.Base}
 	for i, p := range s.Prompts {
 		cp := make([]uint64, len(p))
 		copy(cp, p)

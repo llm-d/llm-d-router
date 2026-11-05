@@ -41,6 +41,14 @@ Parameters:
   `2s` and must be at least `1ms`.
 - `coordinationTTL`: Expiration for request-level coordination values. Defaults
   to `180s` and must be at least `1ms`.
+- `windowReplication`: How sequenced values such as approximate-prefix windows
+  are published. `full` (default) writes the whole value every tick.
+  `incremental` appends only new generations to a per-replica Redis stream.
+  See [Incremental replication](#incremental-replication).
+- `maxBytesPerSecond`: Stream bytes each replica may write, and separately
+  read, per second in `incremental` mode. Defaults to `8388608` (8 MiB/s) and
+  must not be negative; `0` selects the default. Unused budget accumulates up to
+  one second. Values that are not sequenced ignore this limit.
 
 ### Publisher timing
 
@@ -99,6 +107,37 @@ replaces it. A replica that stops publishing loses its field `stateTTL` after
 its last write, and the next refresh drops it from the aggregate. `Get` reads
 the cache without accessing Redis and combines it with the contributor's live
 local value. If no peer value is available, `Get` returns the local value.
+
+### Incremental replication
+
+With `windowReplication: incremental`, a replica publishes a sequenced value
+as a stream next to the hash, `{<hash key>}:stream:<replica field>`. Entry
+`0-(g+1)` holds generation `g`; for approximate-prefix windows a generation is
+one prompt, packed as little-endian 8-byte hashes. The replica's hash field
+`stream:<replica field>` holds the marker `epoch base tip size`, naming the
+generations `[base, tip)` the stream holds and their total bytes. Each tick
+appends generations the replica has not written, trims entries below `base`
+when the window evicts prompts, and refreshes the TTLs of the hash, marker
+field, and stream. An unchanged window costs a few commands and no payload.
+
+Readers fetch only the generations past the last tip they hold. When a write
+is lost or a stream is missing or truncated, the writer starts a new epoch and
+republishes from `base`; readers that see a new epoch or a gap reread from
+`base`. When the byte budget is spent the writer stops appending and readers
+stop fetching for that tick, and peers catch up on later ticks. A cold
+window, after a restart or reset, reaches peers over several ticks.
+
+Readers in either mode merge stream peers and whole-value peers, so a fleet
+can switch modes one replica at a time: roll out the new version in `full`
+mode, then switch replicas to `incremental`.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `redis_syncer_stream_bytes_total` | `state_key`, `direction` | Stream payload bytes written or read. |
+| `redis_syncer_stream_budget_exhausted_total` | `state_key`, `direction` | Ticks that deferred stream work because the byte budget was spent. |
+| `redis_syncer_stream_resets_total` | `state_key` | New epochs started by the writer. |
+| `redis_syncer_stream_peer_lag_generations` | `state_key` | Generations a peer read was behind the peer's tip. |
+| `redis_syncer_set_batch_duration_seconds` | `state_key` | Duration of one batched publication. |
 
 Request-level coordination uses separate string keys and `SET NX GET` so the
 first value stored for a request is selected atomically across EPP replicas.
