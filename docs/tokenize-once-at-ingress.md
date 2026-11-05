@@ -3,7 +3,7 @@
 - **Status:** Proposal
 - **Date:** 2026-11-04
 - **Tracking issue:** [llm-d-router#3991](https://github.com/llm-d/llm-d-router/issues/3991)
-- **Primary issues:** [llm-d-router#3656](https://github.com/llm-d/llm-d-router/issues/3656), [llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758), [llm-d-router#3901](https://github.com/llm-d/llm-d-router/issues/3901), [llm-d-router#3617](https://github.com/llm-d/llm-d-router/issues/3617)
+- **Primary issues:** [llm-d-router#3656](https://github.com/llm-d/llm-d-router/issues/3656), [llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758), [llm-d-router#3993](https://github.com/llm-d/llm-d-router/issues/3993), [llm-d-router#3901](https://github.com/llm-d/llm-d-router/issues/3901), [llm-d-router#3617](https://github.com/llm-d/llm-d-router/issues/3617)
 - **Target components:** `llm-d-router` (Coordinator, Endpoint Picker [EPP], prefill/decode [P/D] sidecar), upstream `vllm-project/vllm`, upstream `sgl-project/sglang`
 
 ---
@@ -165,9 +165,9 @@ The tables below consolidate every gap across **vLLM**, **SGLang**, and **llm-d*
 
 The critical path per mode, in delivery order:
 
-1. **`EPP-Tok-Tok` and `Coord-Tok-Tok`:** [#3805](https://github.com/llm-d/llm-d-router/issues/3805), [#3982](https://github.com/llm-d/llm-d-router/issues/3982), and the token routes in [#3758](https://github.com/llm-d/llm-d-router/issues/3758) and [#3901](https://github.com/llm-d/llm-d-router/issues/3901).
-2. **`EPP-Text-Text` on vLLM:** [vllm#65502](https://github.com/vllm-project/vllm/issues/65502), PR [#3706](https://github.com/llm-d/llm-d-router/pull/3706), [#3979](https://github.com/llm-d/llm-d-router/issues/3979), [#3980](https://github.com/llm-d/llm-d-router/issues/3980), [#3984](https://github.com/llm-d/llm-d-router/issues/3984).
-3. **`Coord-Text-Text` on vLLM:** [vllm#65503](https://github.com/vllm-project/vllm/issues/65503), [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3985](https://github.com/llm-d/llm-d-router/issues/3985).
+1. **`EPP-Tok-Tok` and `Coord-Tok-Tok`:** [#3805](https://github.com/llm-d/llm-d-router/issues/3805), [#3982](https://github.com/llm-d/llm-d-router/issues/3982), and the upstream gRPC parsers, sidecar P/D, and Coordinator token routes in [#3993](https://github.com/llm-d/llm-d-router/issues/3993) and [#3901](https://github.com/llm-d/llm-d-router/issues/3901).
+2. **`EPP-Text-Text` on vLLM:** [vllm#65502](https://github.com/vllm-project/vllm/issues/65502), PR [#3706](https://github.com/llm-d/llm-d-router/pull/3706), [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3979](https://github.com/llm-d/llm-d-router/issues/3979), [#3980](https://github.com/llm-d/llm-d-router/issues/3980), [#3984](https://github.com/llm-d/llm-d-router/issues/3984).
+3. **`Coord-Text-Text` on vLLM:** [vllm#65503](https://github.com/vllm-project/vllm/issues/65503), [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3985](https://github.com/llm-d/llm-d-router/issues/3985).
 4. **`Coord-Text-Text` on SGLang:** the `sglang-render` host in [sglang#48232](https://github.com/sgl-project/sglang/issues/48232), [#3901](https://github.com/llm-d/llm-d-router/issues/3901).
 5. **`EPP-Text-Text` on SGLang:** `--trust-input-ids` in [sglang#48232](https://github.com/sgl-project/sglang/issues/48232), [sglang#48581](https://github.com/sgl-project/sglang/issues/48581), [#3656](https://github.com/llm-d/llm-d-router/issues/3656).
 6. **`Coord-Text-Tok` on both engines:** [vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [sglang#40920](https://github.com/sgl-project/sglang/issues/40920) items 3-4, [sglang#48580](https://github.com/sgl-project/sglang/issues/48580), and the stop-string cancel in [#3758](https://github.com/llm-d/llm-d-router/issues/3758) and [#3901](https://github.com/llm-d/llm-d-router/issues/3901), after the benchmark in [Section 6.1](#61-coordinator--epp).
@@ -214,20 +214,20 @@ The critical path per mode, in delivery order:
 
 | Gap | Engine | Stage | Modes | Issue / PR |
 | :--- | :--- | :--- | :--- | :--- |
-| **Coordinator:** Add UDS gRPC clients for `vllm.Render` and `SglangRender`. | Both | `Render`, `Derender` | `Coord-Text-Tok`, `Coord-Text-Text` | [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3901](https://github.com/llm-d/llm-d-router/issues/3901), PR [#3906](https://github.com/llm-d/llm-d-router/pull/3906) |
+| **Coordinator:** Add UDS gRPC clients for `vllm.Render` and `SglangRender`. | Both | `Render`, `Derender` | `Coord-Text-Tok`, `Coord-Text-Text` | [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3901](https://github.com/llm-d/llm-d-router/issues/3901), PR [#3906](https://github.com/llm-d/llm-d-router/pull/3906) |
 | **Coordinator:** Add an interim builder for Chat envelopes until `vllm.Render` emits `CLIENT_EVENTS`. | vLLM | `Derender` | `Coord-Text-Tok`, `Coord-Text-Text` | PR [#3708](https://github.com/llm-d/llm-d-router/pull/3708) |
-| **Coordinator:** Add a `vllm.Inference` client and port `conditional-decode`, `KVConnector`, `ECConnector`, and error responses. | vLLM | `Generate` | `Coord-Text-Tok`, `Coord-Text-Text`, `Coord-Tok-Tok` | [#3758](https://github.com/llm-d/llm-d-router/issues/3758) |
+| **Coordinator:** Add a `vllm.Inference` client and port `conditional-decode`, `KVConnector`, `ECConnector`, and error responses. | vLLM | `Generate` | `Coord-Text-Tok`, `Coord-Text-Text`, `Coord-Tok-Tok` | [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3758](https://github.com/llm-d/llm-d-router/issues/3758) |
 | **Coordinator:** Add a `sglang.api.v1` client with concurrent P/D, `Abort` on disconnect, and error responses. | SGLang | `Generate` | `Coord-Text-Tok`, `Coord-Text-Text`, `Coord-Tok-Tok` | [#3872](https://github.com/llm-d/llm-d-router/issues/3872), [#3901](https://github.com/llm-d/llm-d-router/issues/3901), PR [#3906](https://github.com/llm-d/llm-d-router/pull/3906) |
 | **Coordinator:** Lower `response_format`, `tool_choice`, `bad_words`, and single-token `stop` from `Render` output into gRPC sampling fields. | Both | `Render`, `Generate` | `Coord-Text-Tok`, `Coord-Text-Text` | [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3901](https://github.com/llm-d/llm-d-router/issues/3901) |
 | **Coordinator:** Enforce `max_model_len` and `truncate_prompt_tokens` at `Render` before routing. | Both | `Render` | `Coord-Text-Tok`, `Coord-Text-Text` | [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3901](https://github.com/llm-d/llm-d-router/issues/3901) |
 | **Coordinator:** When a buffered multi-token stop string matches, cancel the worker gRPC stream. | Both | `Generate`, `Derender` | `Coord-Text-Tok` | [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3901](https://github.com/llm-d/llm-d-router/issues/3901) |
-| **Coordinator:** Map HTTP `/inference/v1/generate` and `/generate` plus `VllmEngine` and `SglangScheduler` gRPC to worker gRPC. | Both | `Generate` | `Coord-Tok-Tok` | [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3901](https://github.com/llm-d/llm-d-router/issues/3901), [#3981](https://github.com/llm-d/llm-d-router/issues/3981) |
+| **Coordinator:** Map HTTP `/inference/v1/generate` and `/generate` plus `VllmEngine` and `SglangScheduler` gRPC to worker gRPC. | Both | `Generate` | `Coord-Tok-Tok` | [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3901](https://github.com/llm-d/llm-d-router/issues/3901), [#3981](https://github.com/llm-d/llm-d-router/issues/3981) |
 | **Coordinator, EPP:** [Strip client](#72-security-and-trust-boundaries) `prompt_token_ids`, `prompt_render_fingerprint`, `kv_transfer_params`, and `input_ids` on text routes. | Both | `Render` | `Coord-Text-Tok`, `Coord-Text-Text`, `EPP-Text-Text` | [#3979](https://github.com/llm-d/llm-d-router/issues/3979) |
 | **Coordinator:** [Fetch media once](#71-multimodal-requests) in the render sidecar (domain allowlist, size caps) and forward bytes to `encode`. | Both | `Render`, `Generate` | `Coord-Text-Tok`, `Coord-Text-Text` | [#3988](https://github.com/llm-d/llm-d-router/issues/3988) |
 | **EPP:** Add an SGLang render backend and retire the cross-engine vLLM render pool. | SGLang | `Render` | `EPP-Text-Text` | [#3656](https://github.com/llm-d/llm-d-router/issues/3656) |
 | **EPP:** Inject `prompt_token_ids`, `input_ids`, `prompt: []int`, and [`render_fingerprint`](#74-skew-detection-parity-and-pool-topology) into forwarded text requests. | Both | `Render`, `Generate` | `EPP-Text-Text` | [#3656](https://github.com/llm-d/llm-d-router/issues/3656), PR [#3706](https://github.com/llm-d/llm-d-router/pull/3706) |
 | **EPP:** Add a [`multimodalTokenInjection`](#71-multimodal-requests) gate for media requests. | Both | `Render`, `Generate` | `EPP-Text-Text` | PR [#3706](https://github.com/llm-d/llm-d-router/pull/3706), [#3980](https://github.com/llm-d/llm-d-router/issues/3980) |
-| **EPP:** Add a `vllm.Inference` parser (with body mutation on text routes). | vLLM | `Generate` | `All` | [#3758](https://github.com/llm-d/llm-d-router/issues/3758) |
+| **EPP:** Add a `vllm.Inference` parser (with body mutation on text routes). | vLLM | `Generate` | `All` | [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3758](https://github.com/llm-d/llm-d-router/issues/3758) |
 | **EPP:** Merge `sglanggrpc-parser` for `sglang.api.v1`. | SGLang | `Generate` | `All` | [#3901](https://github.com/llm-d/llm-d-router/issues/3901), PR [#3904](https://github.com/llm-d/llm-d-router/pull/3904) |
 | **EPP:** Enable `sglanghttp-parser` by default and extract [`mm_hashes`](#71-multimodal-requests). | SGLang | `Generate` | `EPP-Text-Text`, `EPP-Tok-Tok` | [#3901](https://github.com/llm-d/llm-d-router/issues/3901), [#3983](https://github.com/llm-d/llm-d-router/issues/3983) |
 | **EPP:** Add a parser for legacy `SglangScheduler` gRPC. | SGLang | `Generate` | `EPP-Tok-Tok` | [#3981](https://github.com/llm-d/llm-d-router/issues/3981) |
@@ -237,6 +237,7 @@ The critical path per mode, in delivery order:
 | **EPP:** Decouple `precise-prefix-cache-producer` from `backend: vllm`. | Both | `Generate` | `All` | [#3982](https://github.com/llm-d/llm-d-router/issues/3982) |
 | **EPP:** Add [LoRA extra keys](#74-skew-detection-parity-and-pool-topology) (`lora_name`, adapter path) to `precise-prefix-cache-producer` and the gRPC parsers. | Both | `Generate` | `All` | [#3989](https://github.com/llm-d/llm-d-router/issues/3989) |
 | **P/D sidecar:** Preserve `prompt_token_ids` in `kv_transfer_params` across connector merges. | vLLM | `Generate` | `EPP-Text-Text` | PR [#3706](https://github.com/llm-d/llm-d-router/pull/3706) |
+| **P/D sidecar:** Add `vllm.Inference` gRPC P/D support. | vLLM | `Generate` | `EPP-Text-Text`, `EPP-Tok-Tok` | [#3993](https://github.com/llm-d/llm-d-router/issues/3993) |
 | **P/D sidecar:** Merge SGLang gRPC P/D support. | SGLang | `Generate` | `EPP-Text-Text`, `EPP-Tok-Tok` | [#3901](https://github.com/llm-d/llm-d-router/issues/3901), PRs [#3905](https://github.com/llm-d/llm-d-router/pull/3905), [#3908](https://github.com/llm-d/llm-d-router/pull/3908) |
 | **Coordinator, EPP:** Merge `conditional-decode` parity checks and extend [`prompt_token_mismatch_total`](#74-skew-detection-parity-and-pool-topology) to gRPC and `EPP-Text-Text` (read worker response headers). | Both | `Generate` | `Coord-Text-Tok`, `Coord-Text-Text`, `Coord-Tok-Tok`, `EPP-Text-Text` | PR [#3889](https://github.com/llm-d/llm-d-router/pull/3889), [#3984](https://github.com/llm-d/llm-d-router/issues/3984) |
 | **Coordinator, EPP:** [Screen endpoints](#74-skew-detection-parity-and-pool-topology) by `render_fingerprint` per request during rollouts (sidecar fingerprint in gRPC metadata). | Both | `Generate` | `Coord-Text-Tok`, `Coord-Text-Text`, `EPP-Text-Text` | [#3984](https://github.com/llm-d/llm-d-router/issues/3984) |
@@ -246,7 +247,7 @@ The critical path per mode, in delivery order:
 | **Helm:** Derive worker and renderer CLI flags and pinned image tags from [one values block](#76-helm-capacity-and-rollout). | Both | `Render`, `Generate`, `Derender` | `Coord-Text-Tok`, `Coord-Text-Text`, `EPP-Text-Text` | [#3986](https://github.com/llm-d/llm-d-router/issues/3986) |
 | **Helm:** Define CPU and memory requests and [`ContainerResource` HPA targets](#76-helm-capacity-and-rollout) for Coordinator and render sidecar containers. | Both | `Render`, `Derender` | `Coord-Text-Tok`, `Coord-Text-Text` | [#3986](https://github.com/llm-d/llm-d-router/issues/3986) |
 | **CI:** Run a [render-parity corpus](#76-helm-capacity-and-rollout) and IPC benchmarks against the sidecar and worker images from one Helm values file. | Both | `Render`, `Derender` | `Coord-Text-Tok`, `Coord-Text-Text`, `EPP-Text-Text` | [#3990](https://github.com/llm-d/llm-d-router/issues/3990) |
-| **Coordinator, EPP:** Add [`injectTokenIDs`](#76-helm-capacity-and-rollout) and [`protocol: grpc`](#76-helm-capacity-and-rollout) rollback flags (plus optional HTTP decode bridge). | Both | `Render`, `Generate` | `Coord-Text-Tok`, `Coord-Text-Text`, `Coord-Tok-Tok`, `EPP-Text-Text` | [#3656](https://github.com/llm-d/llm-d-router/issues/3656), PRs [#3706](https://github.com/llm-d/llm-d-router/pull/3706), [#3741](https://github.com/llm-d/llm-d-router/pull/3741), [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3901](https://github.com/llm-d/llm-d-router/issues/3901) |
+| **Coordinator, EPP:** Add [`injectTokenIDs`](#76-helm-capacity-and-rollout) and [`protocol: grpc`](#76-helm-capacity-and-rollout) rollback flags (plus optional HTTP decode bridge). | Both | `Render`, `Generate` | `Coord-Text-Tok`, `Coord-Text-Text`, `Coord-Tok-Tok`, `EPP-Text-Text` | [#3656](https://github.com/llm-d/llm-d-router/issues/3656), PRs [#3706](https://github.com/llm-d/llm-d-router/pull/3706), [#3741](https://github.com/llm-d/llm-d-router/pull/3741), [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3901](https://github.com/llm-d/llm-d-router/issues/3901) |
 
 ---
 
@@ -276,8 +277,8 @@ This section evaluates stage support (`Render`, `Generate`, `Derender`) and trac
   - Accept `prompt_render_fingerprint` on `vllm.Inference.GenerateRequest` and enforce `--on-fingerprint-mismatch` on gRPC ([vllm#65502](https://github.com/vllm-project/vllm/issues/65502)).
 - **llm-d gaps**
   - **Coordinator**
-    - Add gRPC clients for `vllm.Inference` and `vllm.Render` ([llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
-    - Port `conditional-decode`, `KVConnector`, `ECConnector`, and error responses to `vllm.Inference` ([llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
+    - Add gRPC clients for `vllm.Inference` and `vllm.Render` ([llm-d-router#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
+    - Port `conditional-decode`, `KVConnector`, `ECConnector`, and error responses to `vllm.Inference` ([llm-d-router#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
     - Lower `response_format`, `tool_choice`, `bad_words`, and single-token `stop` from `Render` output into `GenerateRequest` ([llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
     - Enforce `max_model_len` and `truncate_prompt_tokens` at `Render` before routing ([llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
     - When a buffered multi-token stop string matches, cancel `GenerateStream` ([llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
@@ -285,7 +286,7 @@ This section evaluates stage support (`Render`, `Generate`, `Derender`) and trac
     - Strip client `prompt_token_ids`, `prompt_render_fingerprint`, and `kv_transfer_params` on text routes ([llm-d-router#3979](https://github.com/llm-d/llm-d-router/issues/3979)).
     - Fetch media once in the render sidecar and forward bytes to `encode` ([llm-d-router#3988](https://github.com/llm-d/llm-d-router/issues/3988)).
   - **EPP**
-    - Add a `vllm.Inference` parser ([llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
+    - Add a `vllm.Inference` parser ([llm-d-router#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
     - Reassemble gRPC chunks across frames ([llm-d-router#3644](https://github.com/llm-d/llm-d-router/issues/3644)).
     - Pass DP rank metadata over gRPC ([llm-d-router#3757](https://github.com/llm-d/llm-d-router/issues/3757)).
     - When requests carry token IDs, skip `token-producer` ([llm-d-router#3805](https://github.com/llm-d/llm-d-router/issues/3805)).
@@ -356,7 +357,7 @@ This section evaluates stage support (`Render`, `Generate`, `Derender`) and trac
   - Only the `vllm.Inference` worker gaps in [Section 6.1.1](#611-coord-text-tok-on-vllm-tokens---tokens-server) apply (`n>1` and `mm_processor_kwargs` / `media_io_kwargs` in [vllm#65841](https://github.com/vllm-project/vllm/issues/65841)).
   - Sidecar `vllm.Render` gaps do not apply.
 - **llm-d gaps (deltas from [Section 6.1.1](#611-coord-text-tok-on-vllm-tokens---tokens-server))**
-  - Map HTTP `/inference/v1/generate` to `vllm.Inference` in Coordinator ([llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
+  - Map HTTP `/inference/v1/generate` to `vllm.Inference` in Coordinator ([llm-d-router#3993](https://github.com/llm-d/llm-d-router/issues/3993)).
   - Route `VllmEngine` (`vllm.grpc.engine`) clients through Coordinator ([llm-d-router#3981](https://github.com/llm-d/llm-d-router/issues/3981)).
   - All EPP gaps plus the Coordinator `vllm.Inference` client and P/D connector updates in [Section 6.1.1](#611-coord-text-tok-on-vllm-tokens---tokens-server) apply. Sidecar, stop-cancel, lowering, length-validation, media-fetch, and sanitization items do not apply.
 
@@ -397,10 +398,11 @@ This section evaluates stage support (`Render`, `Generate`, `Derender`) and trac
     - Inject `prompt_token_ids` into forwarded requests ([llm-d-router#3656](https://github.com/llm-d/llm-d-router/issues/3656), PR [#3706](https://github.com/llm-d/llm-d-router/pull/3706)).
     - Strip client `prompt_token_ids`, `prompt_render_fingerprint`, and `kv_transfer_params` on text routes ([llm-d-router#3979](https://github.com/llm-d/llm-d-router/issues/3979)).
     - Add a `multimodalTokenInjection` gate for media requests ([llm-d-router#3980](https://github.com/llm-d/llm-d-router/issues/3980), PR [#3706](https://github.com/llm-d/llm-d-router/pull/3706)).
-    - Parse and mutate `vllm.Inference` requests ([llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758)).
+    - Parse and mutate `vllm.Inference` requests ([llm-d-router#3993](https://github.com/llm-d/llm-d-router/issues/3993)).
     - Reassemble gRPC chunks across frames ([llm-d-router#3644](https://github.com/llm-d/llm-d-router/issues/3644)).
   - **P/D sidecar**
     - Preserve `prompt_token_ids` in `kv_transfer_params` across connector merges ([llm-d-router#3706](https://github.com/llm-d/llm-d-router/pull/3706)).
+    - Support `vllm.Inference` gRPC P/D ([llm-d-router#3993](https://github.com/llm-d/llm-d-router/issues/3993)).
 
 #### 6.2.2 `EPP-Text-Text` on SGLang (`Tokens -> Text` Server)
 
@@ -442,7 +444,7 @@ This section evaluates stage support (`Render`, `Generate`, `Derender`) and trac
     - When requests carry token IDs or `prompt: []int`, skip `token-producer` ([llm-d-router#3805](https://github.com/llm-d/llm-d-router/issues/3805), PR [#3806](https://github.com/llm-d/llm-d-router/pull/3806)).
     - Decouple `precise-prefix-cache-producer` from `backend: vllm` ([llm-d-router#3982](https://github.com/llm-d/llm-d-router/issues/3982)).
     - Pass DP rank metadata over gRPC ([llm-d-router#3757](https://github.com/llm-d/llm-d-router/issues/3757)).
-    - This mode also requires the `vllm.Inference` parser and gRPC frame reassembly updates in [Section 6.2.1](#621-epp-text-text-on-vllm-tokens---text-server) ([llm-d-router#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3644](https://github.com/llm-d/llm-d-router/issues/3644)).
+    - This mode also requires the `vllm.Inference` parser, P/D sidecar, and gRPC frame reassembly updates in [Section 6.2.1](#621-epp-text-text-on-vllm-tokens---text-server) ([llm-d-router#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3644](https://github.com/llm-d/llm-d-router/issues/3644)).
 
 #### 6.2.4 `EPP-Tok-Tok` (Passthrough) on SGLang (`Tokens -> Tokens` Server)
 
@@ -551,5 +553,5 @@ Go Coordinator is network I/O bound (~1-2 vCPU per replica). The Rust render sid
   - Derive render CLI flags and pinned image tags for workers and renderers from one Helm values block ([llm-d-router#3986](https://github.com/llm-d/llm-d-router/issues/3986)).
   - Define CPU and memory requests and `ContainerResource` HPA targets for Coordinator and render sidecar containers in Helm ([llm-d-router#3986](https://github.com/llm-d/llm-d-router/issues/3986)).
   - Run a CI render-parity corpus and IPC benchmarks against sidecar and worker images from one Helm values file ([llm-d-router#3990](https://github.com/llm-d/llm-d-router/issues/3990)).
-  - Add `injectTokenIDs` and `protocol: grpc` config flags for sub-minute rollback ([llm-d-router#3706](https://github.com/llm-d/llm-d-router/pull/3706), [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3901](https://github.com/llm-d/llm-d-router/issues/3901)).
+  - Add `injectTokenIDs` and `protocol: grpc` config flags for sub-minute rollback ([llm-d-router#3706](https://github.com/llm-d/llm-d-router/pull/3706), [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3758](https://github.com/llm-d/llm-d-router/issues/3758), [#3901](https://github.com/llm-d/llm-d-router/issues/3901)).
   - If HTTP Coordinator pools ship before gRPC, merge the interim decode bridge ([llm-d-router#3656](https://github.com/llm-d/llm-d-router/issues/3656), PR [#3741](https://github.com/llm-d/llm-d-router/pull/3741)).
