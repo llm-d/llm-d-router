@@ -245,48 +245,57 @@ func TestServe_TLSMinVersionRejectsOlderClient(t *testing.T) {
 
 func TestNew_RejectsInvalidTLSProfile(t *testing.T) {
 	tests := []struct {
-		name string
-		cfg  config.ServerConfig
+		name            string
+		cfg             config.ServerConfig
+		wantErrContains string
 	}{
 		{
-			name: "unknown TLS version",
-			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS99"},
+			name:            "unknown TLS version",
+			cfg:             config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS99"},
+			wantErrContains: "unknown TLS version",
 		},
 		{
-			name: "TLS 1.0 below the floor",
-			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS10"},
+			name:            "TLS 1.0 below the floor",
+			cfg:             config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS10"},
+			wantErrContains: "below the TLS 1.2 minimum",
 		},
 		{
-			name: "TLS 1.1 below the floor",
-			cfg:  config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS11"},
+			name:            "TLS 1.1 below the floor",
+			cfg:             config.ServerConfig{SecureServing: true, TLSMinVersion: "VersionTLS11"},
+			wantErrContains: "below the TLS 1.2 minimum",
 		},
 		{
-			name: "unknown cipher suite",
-			cfg:  config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_NOT_A_CIPHER"}},
+			name:            "unknown cipher suite",
+			cfg:             config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_NOT_A_CIPHER"}},
+			wantErrContains: "Cipher suite TLS_NOT_A_CIPHER not supported",
 		},
 		{
 			name: "insecure RC4 cipher suite",
 			cfg: config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{
 				"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_RC4_128_SHA"}},
+			wantErrContains: `insecure cipher suite "TLS_ECDHE_RSA_WITH_RC4_128_SHA"`,
 		},
 		{
 			name: "insecure CBC_SHA256 cipher suite",
 			cfg: config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{
 				"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"}},
+			wantErrContains: `insecure cipher suite "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"`,
 		},
 		{
-			name: "suites without the HTTP/2-required AES_128_GCM_SHA256",
-			cfg:  config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}},
+			name:            "suites without the HTTP/2-required AES_128_GCM_SHA256",
+			cfg:             config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"}},
+			wantErrContains: "HTTP/2 requires",
 		},
 		{
-			name: "only TLS 1.3 suites with a TLS 1.2 minimum",
-			cfg:  config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_AES_128_GCM_SHA256"}},
+			name:            "only TLS 1.3 suites with a TLS 1.2 minimum",
+			cfg:             config.ServerConfig{SecureServing: true, TLSCipherSuites: []string{"TLS_AES_128_GCM_SHA256"}},
+			wantErrContains: "HTTP/2 requires",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := New(tt.cfg, pipeline.New(nil), gateway.NewWithTransport(nil, "http://gateway-stub.invalid"))
-			require.Error(t, err)
+			require.ErrorContains(t, err, tt.wantErrContains)
 		})
 	}
 }
@@ -296,6 +305,12 @@ func TestParseTLSProfile_EmptyUsesTLS12(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint16(tls.VersionTLS12), profile.minVersion, "empty tls_min_version must use TLS 1.2")
 	require.Empty(t, profile.cipherSuites, "empty tls_cipher_suites must leave the crypto/tls default")
+}
+
+func TestParseTLSProfile_AcceptsECDSAHTTP2Suite(t *testing.T) {
+	profile, err := parseTLSProfile("", []string{"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"})
+	require.NoError(t, err)
+	require.Equal(t, []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256}, profile.cipherSuites)
 }
 
 func TestParseTLSProfile_RejectsBelowFloor(t *testing.T) {
@@ -339,6 +354,15 @@ func TestServe_TLSWithConfiguredCipherSuites(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, conn.ConnectionState().CipherSuite)
 	require.NoError(t, conn.Close())
+
+	// CHACHA20 is in the crypto/tls default list, so the handshake fails only
+	// if the configured list reaches the listener.
+	_, err = tls.Dial("tcp", addr, &tls.Config{
+		InsecureSkipVerify: true, //#nosec -- self-signed cert under test
+		MaxVersion:         tls.VersionTLS12,
+		CipherSuites:       []uint16{tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256},
+	})
+	require.Error(t, err)
 }
 
 func TestServe_TLS13MinVersionSkipsHTTP2CipherRequirement(t *testing.T) {
