@@ -373,7 +373,7 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 		case errors.Is(err, errForceStreamOversize):
 			// decode records fallback_oversize and runs the pass-through.
 		case errors.Is(err, errForceStreamLossyFrame):
-			// decode records fallback_unsupported and runs the pass-through, which
+			// decode records fallback_lossy_frame and runs the pass-through, which
 			// preserves the field the fold would drop.
 		default:
 			// A request whose context already ended (client disconnected, or a
