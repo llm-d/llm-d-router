@@ -54,6 +54,12 @@ so with a shared head sampler always-on event spans crowd request traces out of
 the exported volume. The EPP `--tracing` flag gates tracing as a whole, so this
 field has no effect while that is off.
 
+Set `kvEventsConfig.indexSlidingWindowGroups` to `true` to index the
+sliding-window KV cache groups of hybrid models (for example gpt-oss) once a
+group's events report its window size. Their stores and removals go to a
+separate in-memory window index, keyed by group, which scoring does not read.
+It defaults to `false`, and sliding-window stores are then skipped.
+
 Set `kvEventsConfig.podDiscoveryConfig.snapshotSocketPort` to the port where
 vLLM serves KV-event snapshots (offset by data-parallel rank like `socketPort`)
 to warm a pod's index from its current cache state. This is experimental: it
