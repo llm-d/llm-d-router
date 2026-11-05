@@ -335,6 +335,13 @@ router:
                         - max_connections: 40000
                           max_pending_requests: 40000
                           max_requests: 40000
+                    {{- if eq (lower ((.Values.router.modelServers | default dict).protocol | default "http")) "grpc" }}
+                    typed_extension_protocol_options:
+                      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+                        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+                        explicit_http_config:
+                          http2_protocol_options: {}
+                    {{- end }}
                     original_dst_lb_config:
                       use_http_header: true
                       http_header_name: x-gateway-destination-endpoint
@@ -350,6 +357,13 @@ router:
                         - max_connections: 40000
                           max_pending_requests: 40000
                           max_requests: 40000
+                    {{- if eq (lower ((.Values.router.modelServers | default dict).protocol | default "http")) "grpc" }}
+                    typed_extension_protocol_options:
+                      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+                        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+                        explicit_http_config:
+                          http2_protocol_options: {}
+                    {{- end }}
                     outlier_detection:
                       split_external_local_origin_errors: true
                       consecutive_local_origin_failure: 5

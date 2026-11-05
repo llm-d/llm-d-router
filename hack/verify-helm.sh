@@ -67,6 +67,9 @@ test_cases_llm_d_router_gateway["active-active-redis"]="--set router.modelServer
 test_cases_llm_d_router_gateway["active-active-redis-hpa"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.pluginsConfigFile=payload-agnostic.yaml --set router.epp.crossReplica.enabled=true --set router.epp.crossReplica.redis.address=redis.example:6379 --set router.epp.crossReplica.redis.passwordSecretRef.name=redis-auth --set router.epp.crossReplica.redis.passwordSecretRef.key=password --set router.epp.autoscaling.enabled=true --set router.epp.autoscaling.minReplicas=2"
 test_cases_llm_d_router_gateway["basic-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["vllm-grpc-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["vllm-grpc-override-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=GRPC --set router.modelServers.grpcServiceName=vllm.grpc.engine.VllmEngine --set router.epp.parsers[0]=vllmgrpc-parser --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["vllm-grpc-empty-service-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.grpcServiceName= --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["pdb"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
@@ -108,6 +111,48 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
   if [ "${key}" == "triton" ]; then
     if ! grep -q "passthrough-parser" "${output_dir}/llm-d-router-gateway/templates/inferenceextension.yaml"; then
       echo "Validation failed: passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "vllm-grpc-gke" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "pluginRef: vllminference-parser" "${epp_yaml}" || ! grep -q "pluginRef: vllmgrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: vllminference-parser, vllmgrpc-parser, and passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'appProtocol: "kubernetes.io/h2c"' "${epp_yaml}"; then
+      echo "Validation failed: h2c appProtocol not found in InferencePool for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'grpcServiceName: "vllm.Inference"' "${gke_yaml}"; then
+      echo "Validation failed: vLLM gRPC HealthCheckPolicy not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "vllm-grpc-override-gke" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "pluginRef: vllmgrpc-parser" "${epp_yaml}" || grep -q "pluginRef: vllminference-parser" "${epp_yaml}"; then
+      echo "Validation failed: explicit router.epp.parsers override not respected for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'appProtocol: "kubernetes.io/h2c"' "${epp_yaml}"; then
+      echo "Validation failed: uppercase protocol=GRPC did not set h2c appProtocol for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'grpcServiceName: "vllm.grpc.engine.VllmEngine"' "${gke_yaml}"; then
+      echo "Validation failed: explicit router.modelServers.grpcServiceName override not respected for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "vllm-grpc-empty-service-gke" ]; then
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "type: GRPC" "${gke_yaml}" || grep -q "grpcServiceName:" "${gke_yaml}"; then
+      echo "Validation failed: empty router.modelServers.grpcServiceName did not omit grpcServiceName on GRPC HealthCheckPolicy for test: ${key}"
       exit 1
     fi
   fi
@@ -272,6 +317,7 @@ test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.m
 test_cases_llm_d_router_standalone["proxy-autoscaling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.autoscaling.enabled=true --set router.proxy.autoscaling.minReplicas=2 --set router.proxy.autoscaling.maxReplicas=6 --set router.proxy.autoscaling.targetCPUUtilizationPercentage=70"
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+test_cases_llm_d_router_standalone["vllm-grpc"]="--set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.targetPorts[0].number=50051 --set router.epp.metricsDataSource.port=8000 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_standalone["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
@@ -310,6 +356,25 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
   if [ "${key}" == "tokenizer-python" ]; then
     if ! grep -q "vllm" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "launch" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
       echo "Validation failed: vllm launch not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "vllm-grpc" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "pluginRef: vllminference-parser" "${epp_yaml}" || ! grep -q "pluginRef: vllmgrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: vllminference-parser, vllmgrpc-parser, and passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+    if [ "$(grep -c 'http2_protocol_options: {}' "${epp_yaml}")" -lt 2 ]; then
+      echo "Validation failed: standalone Envoy model-server clusters missing http2_protocol_options for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q "appProtocol: kubernetes.io/h2c" "${epp_yaml}"; then
+      echo "Validation failed: standalone fallback Service missing h2c appProtocol for test: ${key}"
+      exit 1
+    fi
+    if ! grep -Eq "^[[:space:]]+port: 8000$" "${epp_yaml}"; then
+      echo "Validation failed: metricsDataSource.port not rendered in standalone EPP config for test: ${key}"
       exit 1
     fi
   fi
@@ -771,6 +836,35 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
     eval "${skip_verify_render_command}"
     if ! grep -Eq -- "^[[:space:]]+insecureSkipVerify: ${skip_verify_want}$" "${skip_verify_render_output}"; then
       echo "${chart} did not render insecureSkipVerify: ${skip_verify_want} for router.epp.metricsDataSource.insecureSkipVerify=${skip_verify_set}"
+      exit 1
+    fi
+  done
+done
+
+echo "Verifying router.epp.metricsDataSource.port renders and validates the configured value..."
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  for metrics_port_case in "default:absent" "null:absent" "8000:8000"; do
+    metrics_port_set="${metrics_port_case%%:*}"
+    metrics_port_want="${metrics_port_case##*:}"
+    metrics_port_args=""
+    if [ "${metrics_port_set}" != "default" ]; then
+      metrics_port_args="--set router.epp.metricsDataSource.port=${metrics_port_set}"
+    fi
+    metrics_port_render_output="${TEMP_DIR}/${chart}-metrics-port-${metrics_port_set}-render.yaml"
+    ${HELM} template "${SCRIPT_ROOT}/config/charts/${chart}" --set router.modelServers.matchLabels.app=llm-instance-gateway ${metrics_port_args} > "${metrics_port_render_output}" || exit 1
+    if [ "${metrics_port_want}" = "absent" ]; then
+      if awk '/- type: metrics-data-source/{m=1; next} m && /^    - /{m=0} m && /^[[:space:]]+port:/{found=1} END{exit !found}' "${metrics_port_render_output}"; then
+        echo "${chart} unexpectedly rendered metrics-data-source port for router.epp.metricsDataSource.port=${metrics_port_set}"
+        exit 1
+      fi
+    elif ! awk -v want="${metrics_port_want}" '/- type: metrics-data-source/{m=1; next} m && /^    - /{m=0} m && $1 == "port:" && $2 == want {found=1} END{exit !found}' "${metrics_port_render_output}"; then
+      echo "${chart} did not render port: ${metrics_port_want} under metrics-data-source for router.epp.metricsDataSource.port=${metrics_port_set}"
+      exit 1
+    fi
+  done
+  for bad_metrics_port in 0 -1 65536 abc; do
+    if ${HELM} template "${SCRIPT_ROOT}/config/charts/${chart}" --set router.modelServers.matchLabels.app=llm-instance-gateway --set "router.epp.metricsDataSource.port=${bad_metrics_port}" >/dev/null 2>&1; then
+      echo "${chart} accepted invalid router.epp.metricsDataSource.port=${bad_metrics_port}"
       exit 1
     fi
   done
