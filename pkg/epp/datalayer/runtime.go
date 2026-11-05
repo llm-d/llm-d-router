@@ -472,32 +472,34 @@ func (r *Runtime) NewEndpoint(ctx context.Context, endpointMetadata *fwkdl.Endpo
 		dispatchers = append(dispatchers, d)
 	}
 	key := endpointMetadata.GetID()
+	// The collector is registered before the cross-replica publisher: a
+	// ReleaseEndpoint of the same endpoint holds the collector until it has
+	// deleted the registration, so an overlapping NewEndpoint is rejected here
+	// and never re-registers the endpoint with the publisher mid-release.
+	var collector *Collector
+	if len(dispatchers) > 0 {
+		collector = NewCollector()
+		if !r.collectors.Register(key, collector) {
+			logger.V(logging.DEFAULT).Info("collector already running for endpoint", "endpoint", key)
+			return nil
+		}
+		ticker := NewTimeTicker(r.pollingInterval)
+		if err := collector.Start(ctx, ticker, endpoint, dispatchers); err != nil {
+			logger.Error(err, "failed to start collector for endpoint", "endpoint", key)
+			r.collectors.Remove(key)
+			return nil
+		}
+	}
 	if r.crossReplicaPub != nil && !r.crossReplicaPub.registerEndpoint(key) {
 		logger.V(logging.DEFAULT).Info("endpoint already registered for cross-replica publishing", "endpoint", key)
+		if collector != nil {
+			r.collectors.Remove(key)
+			collector.Stop()
+		}
 		return nil
 	}
 	if len(dispatchers) == 0 {
 		logger.Info("No polling sources configured, creating endpoint without collector")
-		r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})
-		return endpoint
-	}
-
-	collector := NewCollector()
-	if !r.collectors.Register(key, collector) {
-		logger.V(logging.DEFAULT).Info("collector already running for endpoint", "endpoint", key)
-		return nil
-	}
-
-	ticker := NewTimeTicker(r.pollingInterval)
-	if err := collector.Start(ctx, ticker, endpoint, dispatchers); err != nil {
-		logger.Error(err, "failed to start collector for endpoint", "endpoint", key)
-		r.collectors.Remove(key)
-		if r.crossReplicaPub != nil {
-			if _, err := r.crossReplicaPub.delete(ctx, key); err != nil {
-				logger.Error(err, "failed to delete cross-replica state")
-			}
-		}
-		return nil
 	}
 
 	r.dispatchEndpointEvent(ctx, logger, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: endpoint})
