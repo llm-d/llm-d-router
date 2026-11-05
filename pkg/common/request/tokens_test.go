@@ -283,6 +283,237 @@ func TestCapSingleToken(t *testing.T) {
 	}
 }
 
+func TestOutputTokenLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiType APIType
+		body    map[string]any
+		want    int
+		wantOK  bool
+	}{
+		{
+			name:    "chat completions reads max_tokens",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": float64(128)},
+			want:    128,
+			wantOK:  true,
+		},
+		{
+			name:    "chat completions prefers the first field present",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_completion_tokens": float64(64)},
+			want:    64,
+			wantOK:  true,
+		},
+		{
+			name:    "chat completions prefers max_completion_tokens over max_tokens",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": float64(16), "max_completion_tokens": float64(4000)},
+			want:    4000,
+			wantOK:  true,
+		},
+		{
+			name:    "completions reads max_tokens",
+			apiType: APITypeCompletions,
+			body:    map[string]any{"max_tokens": float64(256)},
+			want:    256,
+			wantOK:  true,
+		},
+		{
+			name:    "responses reads max_output_tokens",
+			apiType: APITypeResponses,
+			body:    map[string]any{"max_output_tokens": float64(800)},
+			want:    800,
+			wantOK:  true,
+		},
+		{
+			name:    "generate reads max_tokens from sampling_params",
+			apiType: APITypeVLLMGenerate,
+			body:    map[string]any{"sampling_params": map[string]any{"max_tokens": float64(50)}},
+			want:    50,
+			wantOK:  true,
+		},
+		{
+			name:    "generate without sampling_params has no limit",
+			apiType: APITypeVLLMGenerate,
+			body:    map[string]any{"model": "m"},
+			wantOK:  false,
+		},
+		{
+			name:    "generate with a non-object sampling_params has no limit",
+			apiType: APITypeVLLMGenerate,
+			body:    map[string]any{"sampling_params": "nope"},
+			wantOK:  false,
+		},
+		{
+			name:    "absent field has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"model": "m"},
+			wantOK:  false,
+		},
+		{
+			name:    "null field has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": nil},
+			wantOK:  false,
+		},
+		{
+			name:    "negative value has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": float64(-1)},
+			wantOK:  false,
+		},
+		{
+			name:    "non-integral value has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": float64(1.5)},
+			wantOK:  false,
+		},
+		{
+			name:    "zero is a usable limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": float64(0)},
+			want:    0,
+			wantOK:  true,
+		},
+		{
+			name:    "json.Number is read",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": json.Number("42")},
+			want:    42,
+			wantOK:  true,
+		},
+		{
+			name:    "raw json bytes are read",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": json.RawMessage(`321`)},
+			want:    321,
+			wantOK:  true,
+		},
+		{
+			name:    "a Go int is read",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": 77},
+			want:    77,
+			wantOK:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := OutputTokenLimit(tt.body, tt.apiType)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && got != tt.want {
+				t.Fatalf("limit = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOutputChoiceCount(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiType APIType
+		body    map[string]any
+		want    int
+	}{
+		{
+			name:    "absent n defaults to one",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"model": "m"},
+			want:    1,
+		},
+		{
+			name:    "chat completions reads n",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"n": float64(4)},
+			want:    4,
+		},
+		{
+			name:    "generate reads n from sampling_params",
+			apiType: APITypeVLLMGenerate,
+			body:    map[string]any{"sampling_params": map[string]any{"n": float64(3)}},
+			want:    3,
+		},
+		{
+			name:    "generate without sampling_params defaults to one",
+			apiType: APITypeVLLMGenerate,
+			body:    map[string]any{"model": "m"},
+			want:    1,
+		},
+		{
+			name:    "zero clamps to one",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"n": float64(0)},
+			want:    1,
+		},
+		{
+			name:    "negative clamps to one",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"n": float64(-2)},
+			want:    1,
+		},
+		{
+			name:    "non-integral clamps to one",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"n": float64(2.5)},
+			want:    1,
+		},
+		{
+			name:    "json.Number is read",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"n": json.Number("5")},
+			want:    5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := OutputChoiceCount(tt.body, tt.apiType); got != tt.want {
+				t.Fatalf("count = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNonNegativeInt(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      any
+		want   int
+		wantOK bool
+	}{
+		{"float64", float64(3), 3, true},
+		{"zero", float64(0), 0, true},
+		{"json.Number", json.Number("7"), 7, true},
+		{"int", 5, 5, true},
+		{"int64", int64(9), 9, true},
+		{"negative float64", float64(-1), 0, false},
+		{"negative int", -1, 0, false},
+		{"negative int64", int64(-1), 0, false},
+		{"non-integral", 1.5, 0, false},
+		{"non-integral json.Number", json.Number("1.5"), 0, false},
+		{"malformed json.Number", json.Number("x"), 0, false},
+		{"out of range", 1e300, 0, false},
+		// 2^63 is the first float64 past MaxInt64; converting it to int is
+		// platform-defined (negative on amd64, saturated on arm64).
+		{"float64 at 2^63", float64(1 << 63), 0, false},
+		{"json.Number at 2^63", json.Number("9223372036854775808"), 0, false},
+		{"string", "3", 0, false},
+		{"nil", nil, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NonNegativeInt(tc.v)
+			if got != tc.want || (err == nil) != tc.wantOK {
+				t.Errorf("NonNegativeInt(%#v) = (%d, %v), want (%d, ok=%v)", tc.v, got, err, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestRejectStatefulResponsesFields(t *testing.T) {
 	tests := []struct {
 		name      string

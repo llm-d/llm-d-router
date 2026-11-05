@@ -87,32 +87,43 @@ const (
 	// describes: remote_decoder on the prefill request, remote_prefiller on the
 	// decode request, remote_kv_source for a cached-prefix pull. Each block
 	// carries its own kv_request_id.
-	FieldRemoteDecoder        = "remote_decoder"
-	FieldRemotePrefiller      = "remote_prefiller"
-	FieldRemoteKVSource       = "remote_kv_source"
-	FieldKVRequestID          = "kv_request_id"
-	FieldCacheHitThreshold    = "cache_hit_threshold"
-	FieldContinueFinalMessage = "continue_final_message"
-	FieldAddGenerationPrompt  = "add_generation_prompt"
-	FieldPreviousResponseID   = "previous_response_id"
-	FieldConversation         = "conversation"
-	FieldBackground           = "background"
-	FieldInput                = "input"
-	FieldInstructions         = "instructions"
-	FieldContent              = "content"
-	FieldFileID               = "file_id"
-	FieldMessages             = "messages"
-	FieldModel                = "model"
-	FieldRole                 = "role"
-	FieldText                 = "text"
-	FieldType                 = "type"
-	FieldURL                  = "url"
-	FieldUUID                 = "uuid" // content part field vLLM keys a multimodal item's hash on
-	FieldImageURL             = "image_url"
-	FieldStore                = "store"
-	FieldMMProcessorKwargs    = "mm_processor_kwargs"
-	FieldMediaIOKwargs        = "media_io_kwargs"
-	FieldOutput               = "output"
+	FieldRemoteDecoder         = "remote_decoder"
+	FieldRemotePrefiller       = "remote_prefiller"
+	FieldRemoteKVSource        = "remote_kv_source"
+	FieldKVRequestID           = "kv_request_id"
+	FieldCacheHitThreshold     = "cache_hit_threshold"
+	FieldContinueFinalMessage  = "continue_final_message"
+	FieldAddGenerationPrompt   = "add_generation_prompt"
+	FieldPreviousResponseID    = "previous_response_id"
+	FieldConversation          = "conversation"
+	FieldBackground            = "background"
+	FieldInput                 = "input"
+	FieldInstructions          = "instructions"
+	FieldContent               = "content"
+	FieldFileID                = "file_id"
+	FieldMessages              = "messages"
+	FieldModel                 = "model"
+	FieldRole                  = "role"
+	FieldText                  = "text"
+	FieldType                  = "type"
+	FieldURL                   = "url"
+	FieldUUID                  = "uuid" // content part field vLLM keys a multimodal item's hash on
+	FieldImageURL              = "image_url"
+	FieldStore                 = "store"
+	FieldMMProcessorKwargs     = "mm_processor_kwargs"
+	FieldMediaIOKwargs         = "media_io_kwargs"
+	FieldOutput                = "output"
+	FieldFunctions             = "functions"
+	FieldLogprobs              = "logprobs"
+	FieldReturnTokenIDs        = "return_token_ids"
+	FieldUseBeamSearch         = "use_beam_search"
+	FieldReturnPromptText      = "return_prompt_text"
+	FieldPromptLogprobTokenIDs = "prompt_logprob_token_ids" //#nosec G101 -- JSON field name, not a credential
+	FieldPromptLogprobs        = "prompt_logprobs"
+	FieldReasoningEffort       = "reasoning_effort"
+	FieldChatTemplateKwargs    = "chat_template_kwargs"
+	FieldEnableThinking        = "enable_thinking"
+	FieldThinking              = "thinking" // Anthropic Messages thinking config
 
 	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
 	// The prefill pod echoes them back so the decode pod can open the bootstrap
@@ -120,6 +131,22 @@ const (
 	FieldBootstrapHost = "bootstrap_host"
 	FieldBootstrapPort = "bootstrap_port"
 	FieldBootstrapRoom = "bootstrap_room"
+)
+
+// Role values, the strings a message's FieldRole takes.
+const (
+	RoleAssistant = "assistant"
+)
+
+// Choice fields of a Chat Completions or Completions response, streamed or not.
+// A non-streaming chat reply holds each choice's output under FieldMessage; a
+// streamed chunk holds the increment under FieldDelta.
+const (
+	FieldChoices      = "choices"
+	FieldIndex        = "index"
+	FieldFinishReason = "finish_reason"
+	FieldMessage      = "message"
+	FieldDelta        = "delta"
 )
 
 // Usage fields in a response body. Chat Completions and Completions report

@@ -97,6 +97,8 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		return err
 	}
 
+	// A hit ends the pipeline before the decode step, so force-streaming does not
+	// apply to it; the client's stream value is forwarded verbatim.
 	logger.V(logutil.DEFAULT).Info("cache hit, response forwarded")
 	return pipeline.ErrPipelineDone
 }

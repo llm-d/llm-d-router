@@ -58,6 +58,8 @@ type DecodeStep struct {
 	gwClient          *gateway.Client
 	kv                kv.Connector
 	promptTokenParity string
+	forceStream       bool
+	budget            *forceStreamBudget
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -75,7 +77,19 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity}, nil
+	forceStream, _, err := paramBool(params, ParamForceStream)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	step := &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity, forceStream: forceStream}
+	if forceStream {
+		budget, err := parseForceStreamBudget(params)
+		if err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+		step.budget = budget
+	}
+	return step, nil
 }
 
 func parsePromptTokenParity(params map[string]any) (string, error) {
@@ -105,6 +119,63 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	parity := s.newParityCheck(logger, reqCtx)
 	injectedUsage := parity != nil && injectIncludeUsage(reqCtx)
 
+	// Force-streaming applies only to a non-streaming request. A request whose
+	// reply may carry fields the reassembler drops (tool calls, logprobs,
+	// reasoning), or that the engine would not serve as a stream, takes the
+	// pass-through; forceStreamLossy catches what the request declares up front,
+	// and a server-side default is caught on the frame mid-stream (both fall back
+	// here). Every other candidate
+	// reserves budget and reassembles the whole reply; one whose estimate exceeds
+	// the per-request cap, or that finds the budget full, falls through to the
+	// pass-through below, which buffers nothing.
+	if s.forceStream && !reqCtx.Stream {
+		if shape, shapeOK := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); shapeOK {
+			switch {
+			case s.kv.Name() == kv.SGLang, forceStreamLossy(shape, reqCtx.Body):
+				// An SGLang decode server has no local-prefill path, so a fallback
+				// could not recompute a prompt whose handoff the forced attempt used.
+				coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnsupported)
+			default:
+				generated, ok := s.estimateReservation(reqCtx)
+				if !ok {
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnbounded)
+					break
+				}
+				// The forced body is built before the reservation because the
+				// Responses reservation includes its size (see responsesEchoBytes).
+				bodyBytes, err := json.Marshal(forceStreamBody(reqCtx.Body, shape))
+				if err != nil {
+					return fmt.Errorf("%s: force-stream marshal: %w", DecodeStepName, err)
+				}
+				reserved := generated + responsesEchoBytes(shape, bodyBytes)
+				switch {
+				case s.budget.tryReserve(reserved):
+					err := s.executeForceStream(ctx, logger, reqCtx, shape, bodyBytes, generated, reserved, parity)
+					fallbackResult, isFallback := forceStreamFallbackResult(err)
+					if !isFallback {
+						return err
+					}
+					// The attempt failed with nothing written to the client. Falling back
+					// re-sends reqCtx.Body through the pass-through, so the pod may run the
+					// request twice. Unless the connector is replay-safe, the forced attempt
+					// already used the one-shot handoff the body names, so the fallback
+					// drops it and the decode pod recomputes the prompt; the reply is slower
+					// but correct.
+					if !kvHandoffReplaySafe(s.kv) {
+						logger.Info("force-stream failed and its KV block handoff is spent; decode will recompute the prompt", "error", err.Error())
+						delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
+						// The prefill cache-hit count describes the handoff just dropped.
+						reqCtx.PrefillCachedTokens = nil
+					}
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, fallbackResult)
+					// Fell back with nothing written; continue to the pass-through below.
+				default:
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackBudget)
+				}
+			}
+		}
+	}
+
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
 	proxyReq, err := newDecodeProxyRequest(ctx, logger, DecodeStepName, reqCtx, s.gwClient, reqCtx.Body, nil)
@@ -121,6 +192,41 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		logger.Error(err, "flushing the rewritten usage block failed: client received a partial response")
 	}
 	return out.streamedError(DecodeStepName)
+}
+
+// kvHandoffReplaySafe reports whether a decode body's kv_transfer_params may be
+// sent a second time. Only kv-shared-storage qualifies: its decode pod re-reads
+// the shared store, so a replay finds the KV again. The other connectors name a
+// one-shot handoff: the NIXL blocks the prefiller frees once pulled, the
+// kv-offloading P2P batch the prefiller releases once fetched, or the SGLang
+// bootstrap room. A connector not listed here is treated as one-shot too.
+func kvHandoffReplaySafe(conn kv.Connector) bool {
+	return conn.Name() == kv.SharedStorage
+}
+
+// forceStreamFallbackResult classifies a force-stream error as fallback-eligible,
+// returning the outcome label to record when the request takes the pass-through. It
+// leaves the client uncommitted, so the caller may fall back; nil (a forced
+// success) and every other error are not fallbacks, so ok is false and the caller
+// returns them directly.
+func forceStreamFallbackResult(err error) (result string, ok bool) {
+	switch {
+	case errors.Is(err, errForceStreamOversize):
+		return coordmetrics.ForceStreamResultFallbackOversize, true
+	case errors.Is(err, errForceStreamUnreadable):
+		return coordmetrics.ForceStreamResultFallbackUnreadable, true
+	case errors.Is(err, errForceStreamLossyFrame):
+		// Its own label: unlike fallback_unsupported, which declines before any
+		// upstream call, the pod already ran one attempt, and a non-replay-safe
+		// handoff makes the fallback recompute the prompt.
+		return coordmetrics.ForceStreamResultFallbackLossyFrame, true
+	case errors.Is(err, errForceStreamCeiling):
+		// A ceiling abort falls back like the others; it keeps the error_ceiling
+		// label so the byte-estimate shortfall stays visible for alerting.
+		return coordmetrics.ForceStreamResultErrorCeiling, true
+	default:
+		return "", false
+	}
 }
 
 // responseWriter returns the writer the decode response is streamed through,

@@ -68,6 +68,14 @@ func StripInternalHeaders(headers http.Header) {
 	}
 }
 
+// StripHopByHopHeaders removes the hop-by-hop headers, which describe one
+// connection and must not be relayed to the next.
+func StripHopByHopHeaders(headers http.Header) {
+	for key := range hopByHopHeaders {
+		headers.Del(key)
+	}
+}
+
 // ForwardedHeaders returns original request headers suitable for forwarding
 // to upstream services, excluding hop-by-hop headers, Content-Length, Host,
 // Content-Type, Accept-Encoding, and coordinator-owned routing headers.
