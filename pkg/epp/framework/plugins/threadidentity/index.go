@@ -126,8 +126,7 @@ func (c chain) lastHash() prefixhash.BlockHash {
 
 // threadRecord is one live thread: its tip and its liveness.
 type threadRecord struct {
-	id    string
-	scope string // client session id at creation, "" when the client sent none
+	id string
 
 	// The tip. (fullBlocks, lastHash, tokens) is the S2 exact key: two requests
 	// with the same triple are identical up to the whole rendered prompt.
@@ -212,8 +211,6 @@ type Arrival struct {
 	// Chain is the request's identity chain; the zero value means the request
 	// has no identity (a failed render), which never continues anything.
 	Chain chain
-	// Scope is the client session id, "" when the client sent none.
-	Scope string
 	// Roles is the request's message roles in wire order (nil for body shapes
 	// without messages — H1 then cannot fire).
 	Roles []string
@@ -278,7 +275,7 @@ func newThreadIndex(blockSize int, markerTTL time.Duration, maxThreads int) *thr
 // Resolve identifies the thread for an arriving request and records the arrival.
 //
 // The decision, in order:
-//  1. the tip with the longest verified prefix, in the same scope.
+//  1. the tip with the longest verified prefix.
 //  2. tip not outstanding → continue (a repeat of a finished turn).
 //  3. H1 (when enabled): the first message past the tip is an assistant message,
 //     so the request contains the tip's reply → continue.
@@ -291,7 +288,7 @@ func (ix *threadIndex) Resolve(now time.Time, a Arrival, forkOnBusy, stickyGuard
 	defer ix.mu.Unlock()
 	start := time.Now()
 
-	rec, matched := ix.matchLocked(now, a.Chain, a.Scope)
+	rec, matched := ix.matchLocked(now, a.Chain)
 	if rec == nil {
 		fresh := ix.mintLocked(now, nil, a)
 		return ResolveResult{ID: fresh.id, Outcome: OutcomeNew, Turn: 1, Blocks: a.Chain.fullBlocks, Elapsed: time.Since(start)}
@@ -336,19 +333,18 @@ func (ix *threadIndex) Resolve(now time.Time, a Arrival, forkOnBusy, stickyGuard
 }
 
 // matchLocked returns the thread whose verified prefix is the longest prefix of
-// the arrival's chain, and that prefix's length in blocks. Scoped tips only
-// match their own session; unscoped tips match any (the floor the design accepts
-// when the client sends no session header).
+// the arrival's chain, and that prefix's length in blocks. The identity is CONTENT ONLY: a tip
+// matches on its blocks, and nothing about the client's session narrows the search.
 //
 // The probe DESCENDS over the arrival's own block hashes because the tip index is
 // NOT prefix-closed: a tip may exist at k=7 with none at k=5, so an early stop at
 // the first miss would lose it.
-func (ix *threadIndex) matchLocked(now time.Time, c chain, scope string) (*threadRecord, int) {
+func (ix *threadIndex) matchLocked(now time.Time, c chain) (*threadRecord, int) {
 	for k := min(c.fullBlocks, len(c.blocks)); k >= 1; k-- {
 		var best *threadRecord
 		bestOutstanding := true
 		for _, cand := range ix.byPrefix[c.blocks[k-1]] {
-			if cand.prefixLen != k || !sameScope(cand.scope, scope) {
+			if cand.prefixLen != k {
 				continue
 			}
 			cand.pruneMarkers(now, ix.markerTTL)
@@ -455,7 +451,7 @@ func (ix *threadIndex) unindexLocked(rec *threadRecord) {
 }
 
 // mintLocked creates a thread. Its id is derived from the creating request's tip
-// commitment, the fork ordinal and the scope: the same thread yields the same id
+// commitment and the fork ordinal: the same thread yields the same id
 // on any instance without a registry, and a thread keeps its id as it continues.
 //
 // An id the table already holds belongs to a LIVE thread and is never
@@ -472,7 +468,7 @@ func (ix *threadIndex) mintLocked(now time.Time, parent *threadRecord, a Arrival
 	if parent != nil {
 		ordinal = parent.forks + 1
 	}
-	seed := mintSeed(tip, ordinal, a.Scope)
+	seed := mintSeed(tip, ordinal)
 	id := threadID(seed)
 	for attempt := 0; ; attempt++ {
 		if _, clash := ix.threads[id]; !clash {
@@ -480,27 +476,21 @@ func (ix *threadIndex) mintLocked(now time.Time, parent *threadRecord, a Arrival
 		}
 		if attempt < maxMintAttempts {
 			ordinal++
-			seed = mintSeed(tip, ordinal, a.Scope)
+			seed = mintSeed(tip, ordinal)
 		} else {
 			// Every ordinal in the window is taken by a live id (astronomically
 			// unlikely): salt with a process-unique nonce rather than reuse.
-			seed = mintSeed(tip, ordinal, a.Scope) ^ prefixhash.BlockHash(mintFallbackSeq.Add(1))
+			seed = mintSeed(tip, ordinal) ^ prefixhash.BlockHash(mintFallbackSeq.Add(1))
 		}
 		id = threadID(seed)
 	}
 
 	rec := &threadRecord{
 		id:       id,
-		scope:    a.Scope,
 		msgCount: len(a.Roles),
 		created:  now,
 		lastSeen: now,
 		turns:    1,
-	}
-	if parent != nil && rec.scope == "" {
-		// A fork inherits its parent's scope when the request carried none:
-		// siblings belong to the same session.
-		rec.scope = parent.scope
 	}
 	ix.threads[id] = rec
 	ix.setTipLocked(rec, a.Chain)
@@ -640,10 +630,9 @@ type threadTable struct {
 	Rows      []threadRow `json:"rows"`
 }
 
-// threadRow is one tracked thread as the index holds it (its id, scope, spans and outcome).
+// threadRow is one tracked thread as the index holds it (its id, span and outcome).
 type threadRow struct {
 	ID          string  `json:"id"`
-	Scope       string  `json:"scope,omitempty"`
 	Blocks      int     `json:"blocks"`
 	Tokens      int     `json:"tokens"`
 	MsgCount    int     `json:"msgCount"`
@@ -670,7 +659,6 @@ func (ix *threadIndex) Snapshot(now time.Time) threadTable {
 		snap.Pending += len(rec.pending)
 		rows = append(rows, threadRow{
 			ID:          rec.id,
-			Scope:       rec.scope,
 			Blocks:      rec.fullBlocks,
 			Tokens:      rec.tokens,
 			MsgCount:    rec.msgCount,
@@ -716,13 +704,6 @@ func startsWithReply(tipMsgCount int, roles []string) bool {
 	return roles[tipMsgCount] == "assistant"
 }
 
-// sameScope reports whether a tip is visible to a request in scope. An absent
-// scope on either side matches (no session header → no scoping); two different
-// sessions never match.
-func sameScope(threadScope, requestScope string) bool {
-	return threadScope == "" || requestScope == "" || threadScope == requestScope
-}
-
 // threadID mints the opaque thread id: the first 10 hex chars of a hash over the
 // mint seed.
 func threadID(seed prefixhash.BlockHash) string {
@@ -734,12 +715,15 @@ func threadID(seed prefixhash.BlockHash) string {
 
 // mintSeed hashes the thread id's inputs: the tip commitment, the fork ordinal
 // (siblings of the same content get distinct ids) and the session scope.
-func mintSeed(tip prefixhash.BlockHash, ordinal int, scope string) prefixhash.BlockHash {
+// mintSeed is the id's seed: the tip block, the fork ordinal, and the scope — which is ALWAYS
+// empty now that the identity reads no session header, and stays in the hash so every id minted
+// on unscoped traffic is byte-identical to the ids minted before scoping was removed.
+func mintSeed(tip prefixhash.BlockHash, ordinal int) prefixhash.BlockHash {
 	h := sha256.New()
 	var b [16]byte
 	binary.LittleEndian.PutUint64(b[:8], uint64(tip))
 	binary.LittleEndian.PutUint64(b[8:], uint64(ordinal)) //#nosec G115 -- ordinal is a bounded counter
 	h.Write(b[:])
-	h.Write([]byte(scope))
+	h.Write([]byte("")) // the scope byte: present, empty, so the seed is unchanged
 	return prefixhash.BlockHash(binary.LittleEndian.Uint64(h.Sum(nil)[:8]))
 }

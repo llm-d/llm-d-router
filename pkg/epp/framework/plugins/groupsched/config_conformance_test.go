@@ -64,8 +64,7 @@ forkOnBusy: true
 stickyBusyGuard: true
 retryRule: false
 logRequests: true
-logHeaders: false
-sessionHeaders: []`,
+logHeaders: false`,
 	},
 }
 

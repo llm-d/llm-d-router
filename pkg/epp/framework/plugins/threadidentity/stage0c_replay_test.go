@@ -61,8 +61,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// stage0cScopeHeader is the header the replay uses as the client session id. It is
-// NOT one of the built-in provider headers, so the plugin reads it explicitly.
+// stage0cScopeHeader is the header the recorded window carried as the client session id. The
+// identity is CONTENT ONLY now, so the replay still sets it (the recorded header set is part of
+// the replay) and the plugin ignores it — which is what makes the two arms' dumps identical.
 const stage0cScopeHeader = "x-session-scope"
 
 // stage0cProducer is the render backend the replayed arm must declare: the plugin
@@ -261,7 +262,7 @@ func TestStage0CReplay(t *testing.T) {
 	}
 	handle := testutils.NewTestHandle(ctx)
 	built, err := Factory("stage0c", json.NewDecoder(bytes.NewReader(
-		[]byte(`{"sessionHeaders":["`+stage0cScopeHeader+`"],"retryRule":`+retryRule+`,"tokenProducer":`+stage0cProducer+`}`))), handle)
+		[]byte(`{"retryRule":`+retryRule+`,"tokenProducer":`+stage0cProducer+`}`))), handle)
 	if err != nil {
 		t.Fatalf("build plugin: %v", err)
 	}

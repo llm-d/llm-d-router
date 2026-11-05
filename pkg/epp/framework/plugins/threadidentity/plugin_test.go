@@ -355,26 +355,25 @@ func TestH1_ReplyGuard(t *testing.T) {
 	assert.EqualValues(t, 1, testutil.ToFloat64(p.metrics.sticky))
 }
 
-// TestSessionIsAnAttributeNotAQueueKey: the session header is published on its own
-// key and never overwrites the thread id.
-func TestSessionIsAnAttributeNotAQueueKey(t *testing.T) {
-	p := newTestPluginWith(t, `{"sessionHeaders":["x-session-scope"]}`)
+// TestSessionHeadersAreGone: the identity reads NO session signal, so the config key that used
+// to name one is rejected by the strict decoder rather than silently ignored, and a request
+// carrying a session header is derived from its content alone.
+func TestSessionHeadersAreGone(t *testing.T) {
+	_, err := Factory("thread", json.NewDecoder(strings.NewReader(
+		withTestProducer(t, `{"sessionHeaders":["x-session-scope"]}`))), testutils.NewTestHandle(t.Context()))
+	require.Error(t, err, "sessionHeaders is no longer a parameter: the decoder must refuse it")
 
-	req := chatReq(user('a', 600))
-	req.Headers["x-session-scope"] = "session-7"
-	id, fairness := threadOf(t, p, req)
+	p := newTestPlugin(t)
+	plain := chatReq(user('a', 600))
+	withHeader := chatReq(user('a', 600))
+	withHeader.Headers["x-session-scope"] = "session-7"
 
-	session, ok := fwksched.ReadRequestAttribute[string](req, ThreadSessionKey)
-	require.True(t, ok)
-	assert.Equal(t, "session-7", session)
-	assert.Equal(t, id, fairness, "the thread, not the session, is the flow key")
-	assert.NotEqual(t, "session-7", id)
-
-	// A request under another session is a different thread.
-	other := chatReq(user('a', 600), assistant('b', 40), user('c', 60))
-	other.Headers["x-session-scope"] = "session-8"
-	id2, _ := threadOf(t, p, other)
-	assert.NotEqual(t, id, id2)
+	id1, flow1 := threadOf(t, p, plain)
+	finishTurn(t, p, plain)
+	id2, flow2 := threadOf(t, p, withHeader)
+	require.NotEmpty(t, id1)
+	assert.Equal(t, id1, id2, "a session header changes nothing: the content is the identity")
+	assert.Equal(t, flow1, flow2)
 }
 
 // TestToolSetChangeSplitsTheThread is declared class (i): the identity follows the
@@ -744,17 +743,16 @@ func TestRetryIsContainedAndCounted(t *testing.T) {
 	assert.EqualValues(t, 1, testutil.ToFloat64(p.metrics.retried))
 }
 
-// TestLogRequests: with the instrument on, one JSON line per request carries the
-// scope, the derived id and the outcome; with it off nothing is printed.
+// TestLogRequests: with the instrument on, one JSON line per request carries the derived id and
+// the outcome; with it off nothing is printed.
 func TestLogRequests(t *testing.T) {
-	on := newTestPluginWith(t, `{"sessionHeaders":["x-session-scope"],"logRequests":true}`)
+	on := newTestPluginWith(t, `{"logRequests":true}`)
 	req := chatReq(user('a', 600))
-	req.Headers["x-session-scope"] = "session-3"
 	var id string
 	lines := captureLogs(t, on, func() { id, _ = threadOf(t, on, req) })
 	require.Len(t, lines, 1, "one line per request, and only when the instrument is on")
 	out := lines[0]
-	assert.Contains(t, out, `"scope"="session-3"`)
+	assert.NotContains(t, out, `"scope"`, "the identity reads no session signal, so the instrument has no scope to report")
 	assert.Contains(t, out, `"derived"="`+id+`"`)
 	assert.Contains(t, out, `"outcome"="new"`)
 

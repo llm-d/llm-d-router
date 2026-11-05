@@ -62,9 +62,11 @@ func chainOf(t *testing.T, prompts ...[]uint32) chain {
 }
 
 // arr builds an arrival from token streams (multi-prompt when several are given).
-func arr(t *testing.T, scope string, roles []string, marker string, prompts ...[]uint32) Arrival {
+func arr(t *testing.T, _ string, roles []string, marker string, prompts ...[]uint32) Arrival {
 	t.Helper()
-	return Arrival{Chain: chainOf(t, prompts...), Scope: scope, Roles: roles, Marker: marker}
+	// the scope argument is retained only so existing call sites read the same; the identity is
+	// content only and the arrival carries no scope.
+	return Arrival{Chain: chainOf(t, prompts...), Roles: roles, Marker: marker}
 }
 
 var clockZero = time.Unix(1_700_000_000, 0)
@@ -396,32 +398,27 @@ func TestResolve_ForkOnBusyDisabled(t *testing.T) {
 	assert.Equal(t, first.ID, res.ID)
 }
 
-// TestResolve_SessionScope: tips of another session never match; an unscoped tip
-// matches any session.
-func TestResolve_SessionScope(t *testing.T) {
+// TestResolve_IsContentOnly: the identity reads NO session signal. A tip is visible to any
+// request whose blocks extend it, whatever the clients' sessions were, and a fork inherits
+// nothing but its content — the same prompt under another session continues the same thread.
+// (This replaced TestResolve_SessionScope when scoping was removed: the trade-off is recorded in
+// the README — two clients whose conversations are identical so far share one thread.)
+func TestResolve_IsContentOnly(t *testing.T) {
 	tip := tokens(1, 2*testBlockSize)
 
-	// Another session's tip is invisible.
 	ix := newTestIndex()
-	complete(t, ix, clockZero, arr(t, "session-a", nil, "r1", tip))
+	first := complete(t, ix, clockZero, arr(t, "session-a", nil, "r1", tip))
+	// the same profile under what USED to be another session: it is the same thread
 	other := turn(ix, clockZero.Add(time.Second), arr(t, "session-b", nil, "r2", grown(tip, 100, 2)))
-	assert.Equal(t, OutcomeNew, other.Outcome)
+	assert.Equal(t, OutcomeMatched, other.Outcome, "content is the only key")
+	assert.Equal(t, first.ID, other.ID)
 
-	// A request without a session header matches a scoped tip (no header → no
-	// scoping, the design's accepted floor).
+	// and a fork is minted from content alone
 	ix2 := newTestIndex()
-	free := complete(t, ix2, clockZero, arr(t, "session-a", nil, "r1", tip))
-	unscoped := turn(ix2, clockZero.Add(time.Second), arr(t, "", nil, "r2", grown(tip, 100, 2)))
-	assert.Equal(t, OutcomeMatched, unscoped.Outcome)
-	assert.Equal(t, free.ID, unscoped.ID)
-
-	// A fork inherits the parent's scope when the request carries none.
-	ix3 := newTestIndex()
-	parent := turn(ix3, clockZero, arr(t, "session-a", nil, "r1", tip))
-	require.True(t, ix3.Dispatch(parent.ID, "r1", clockZero))
-	child := turn(ix3, clockZero.Add(time.Second), arr(t, "", nil, "r2", grown(tip, 100, 2)))
+	parent := turn(ix2, clockZero, arr(t, "session-a", nil, "r1", tip))
+	require.True(t, ix2.Dispatch(parent.ID, "r1", clockZero))
+	child := turn(ix2, clockZero.Add(time.Second), arr(t, "session-b", nil, "r2", grown(tip, 100, 2)))
 	assert.Equal(t, OutcomeForked, child.Outcome)
-	assert.Equal(t, "session-a", ix3.threads[child.ID].scope)
 }
 
 // TestResolve_NoChainIsANewThread: a request with no identity (a failed render)
@@ -431,12 +428,12 @@ func TestResolve_NoChainIsANewThread(t *testing.T) {
 	tip := tokens(1, 2*testBlockSize)
 	first := turn(ix, clockZero, arr(t, "", nil, "r1", tip))
 
-	res := turn(ix, clockZero.Add(time.Second), Arrival{Scope: "", Marker: "r2"})
+	res := turn(ix, clockZero.Add(time.Second), Arrival{Marker: "r2"})
 	assert.Equal(t, OutcomeNew, res.Outcome)
 	assert.NotEqual(t, first.ID, res.ID)
 
 	// And it is not continuable in turn.
-	again := turn(ix, clockZero.Add(2*time.Second), Arrival{Scope: "", Marker: "r3"})
+	again := turn(ix, clockZero.Add(2*time.Second), Arrival{Marker: "r3"})
 	assert.Equal(t, OutcomeNew, again.Outcome)
 	assert.NotEqual(t, res.ID, again.ID)
 	requireInvariants(t, ix)

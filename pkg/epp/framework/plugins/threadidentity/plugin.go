@@ -52,11 +52,6 @@ const PluginType = "thread-identity"
 // travels on a different attribute: see agentidentity.AgentIdentityKey, below.
 var ThreadIdentityKey = fwkplugin.NewDataKey("thread-identity", "")
 
-// ThreadSessionKey is the request-attribute key carrying the client's session id,
-// when it sent one. It is deliberately SEPARATE from the thread id: the session is
-// an attribute for the session fairness layer, the thread is the queue key.
-var ThreadSessionKey = fwkplugin.NewDataKey("thread-session", "")
-
 // ThreadArrivalKey is the request-attribute key carrying the ARRIVAL RECORD: which
 // of the three outcomes this request was (continued / forked / new) and its turn
 // number on its thread. It is a pure OUTPUT — the scheduler reads it to tell a
@@ -126,16 +121,6 @@ const (
 	defaultMaxThreads = 100000
 )
 
-// defaultSessionHeaders are the client session headers read for scoping, in
-// priority order: the provider headers the agent-identity plugin resolves, so the
-// session attribute is the session the rest of the system already sees.
-var defaultSessionHeaders = []string{
-	agentidentity.ClaudeCodeSessionHeader,
-	agentidentity.OpenCodeSessionHeader,
-	agentidentity.CodexSessionHeader,
-	agentidentity.CodexSessionHeaderLegacy,
-}
-
 // Parameters is the plugin's configuration block.
 type Parameters struct {
 	// BlockSizeTokens is the identity block length in tokens — the prefix
@@ -161,8 +146,6 @@ type Parameters struct {
 	// MaxThreads caps the thread table: the only eviction path, idlest
 	// non-outstanding threads first.
 	MaxThreads int `json:"maxThreads,omitempty"`
-	// SessionHeaders are client session headers prepended to the built-in list.
-	SessionHeaders []string `json:"sessionHeaders,omitempty"`
 	// ForkOnBusy is the continuation rule's busy half: extend a busy tip → fork a
 	// new thread. Default true (the design's rule). False makes every match a
 	// continuation — a measurement arm only.
@@ -290,7 +273,6 @@ type Plugin struct {
 	logRequests    bool
 	logHeaders     bool
 	logHeadersList []string
-	sessions       []string
 	// now is the clock seam: the stage-0c replay drives recorded arrival /
 	// dispatch / settle times through the real hooks.
 	now func() time.Time
@@ -308,6 +290,10 @@ type Plugin struct {
 func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	params := Parameters{}
 	if rawParameters != nil {
+		// STRICT: an unknown parameter is a configuration error, not something to ignore. The
+		// identity's surface shrank when scoping was removed (no sessionHeaders), and a stale
+		// key must fail the startup loudly instead of silently doing nothing.
+		rawParameters.DisallowUnknownFields()
 		if err := rawParameters.Decode(&params); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' plugin: %w", PluginType, err)
 		}
@@ -365,7 +351,6 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		logRequests:    params.LogRequests,
 		logHeaders:     params.LogRequests && params.LogHeaders,
 		logHeadersList: loggedHeaderList(params.LogHeaderNames),
-		sessions:       sessionHeaders(params.SessionHeaders),
 		logger:         log.FromContext(ctx).WithName(PluginType + "/" + name),
 		now:            time.Now,
 	}
@@ -431,7 +416,6 @@ func (p *Plugin) Produces() map[fwkplugin.DataKey]any {
 	return map[fwkplugin.DataKey]any{
 		agentidentity.AgentIdentityKey: "",
 		ThreadIdentityKey:              "",
-		ThreadSessionKey:               "",
 		ThreadArrivalKey:               ThreadArrival{},
 		ThreadBlocksKey:                []PromptBlocks{},
 		threadMarkerKey:                "",
@@ -518,10 +502,9 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceR
 		request.PutAttribute(ThreadBlocksKey, blocks)
 	}
 	roles := messageRoles(request.Body)
-	scope := p.sessionID(request)
 	marker := p.markerID(request)
 
-	res := p.idx.Resolve(p.now(), Arrival{Chain: c, Scope: scope, Roles: roles, Marker: marker},
+	res := p.idx.Resolve(p.now(), Arrival{Chain: c, Roles: roles, Marker: marker},
 		p.forkOnBusy, p.sticky, p.retry)
 	p.metrics.observeResolve(res)
 	if !ok {
@@ -541,10 +524,7 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceR
 	if explicit {
 		p.metrics.observeExplicitOverride()
 	}
-	if scope != "" {
-		request.PutAttribute(ThreadSessionKey, scope)
-	}
-	p.logRequest(request, res, scope, explicit, c)
+	p.logRequest(request, res, explicit, c)
 	return nil
 }
 
@@ -657,7 +637,7 @@ func tokenizedPrompts(request *fwksched.InferenceRequest) int {
 // logRequest emits the per-request instrument line when Parameters.LogRequests is
 // on (off by default): one write per line, in arrival order, carrying the client
 // scope, the derived thread, the outcome and the identity size.
-func (p *Plugin) logRequest(request *fwksched.InferenceRequest, res ResolveResult, scope string, explicit bool, c chain) {
+func (p *Plugin) logRequest(request *fwksched.InferenceRequest, res ResolveResult, explicit bool, c chain) {
 	if !p.logRequests {
 		return
 	}
@@ -671,7 +651,6 @@ func (p *Plugin) logRequest(request *fwksched.InferenceRequest, res ResolveResul
 	kv := []any{
 		"seq", p.logSeq.Add(1),
 		"ts", p.now().UTC().Format(time.RFC3339Nano),
-		"scope", scope,
 		"derived", res.ID,
 		"outcome", string(res.Outcome),
 		"turn", res.Turn,
@@ -759,19 +738,6 @@ func (p *Plugin) DumpState() (json.RawMessage, error) {
 	return json.Marshal(snap)
 }
 
-// sessionID returns the client's session id from the configured header list.
-func (p *Plugin) sessionID(request *fwksched.InferenceRequest) string {
-	if request == nil {
-		return ""
-	}
-	for _, header := range p.sessions {
-		if id := strings.TrimSpace(request.Headers[header]); id != "" {
-			return id
-		}
-	}
-	return ""
-}
-
 // runSweeper is the background sweep that drops markers whose TTL has passed.
 func (p *Plugin) runSweeper(ctx context.Context) {
 	ticker := time.NewTicker(p.sweep)
@@ -814,16 +780,6 @@ func markerOf(request *fwksched.InferenceRequest) string {
 		return marker
 	}
 	return request.RequestID
-}
-
-// sessionHeaders returns the operator's extras followed by the defaults,
-// lower-cased (request headers are stored lowercased).
-func sessionHeaders(extras []string) []string {
-	out := make([]string, 0, len(extras)+len(defaultSessionHeaders))
-	for _, h := range extras {
-		out = append(out, strings.ToLower(h))
-	}
-	return append(out, defaultSessionHeaders...)
 }
 
 // messageRoles returns the request's message roles in wire order. Body shapes
