@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
@@ -90,6 +91,11 @@ func (s *Server) runConcurrentPD(
 		semconv.LLMDPDProxyConnector(connector),
 		semconv.LLMDPDProxyPrefillAsync(true),
 	)
+	// Lets a consumer of the span (for example the scheduler, which cannot see the prefill response) tie it to the
+	// request it routed. The nixlv2 connector sets the same attribute on its own prefill span.
+	if requestID := r.Header.Get(reqcommon.RequestIDHeaderKey); requestID != "" {
+		prefillSpan.SetAttributes(semconv.LLMDPDProxyRequestID(requestID))
+	}
 	prefillStart := time.Now()
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
