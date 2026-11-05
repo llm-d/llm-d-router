@@ -30,8 +30,12 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/stretchr/testify/assert"
+	grpccodes "google.golang.org/grpc/codes"
 	"k8s.io/utils/set"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
@@ -315,6 +319,89 @@ func TestServer_createRoutes(t *testing.T) {
 	}
 }
 
+func TestServer_createRoutesVLLMGRPC(t *testing.T) {
+	decoder := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Forwarded-URI", r.URL.RequestURI())
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	decoderURL, err := url.Parse(decoder.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, grpcPath := range []string{
+		vllmpb.Inference_Generate_FullMethodName,
+		vllmpb.Inference_GenerateStream_FullMethodName,
+	} {
+		for _, tt := range []struct {
+			name    string
+			method  string
+			suffix  string
+			prefill bool
+		}{
+			{name: "canonical", method: http.MethodPost, prefill: true},
+			{name: "trailing_slash", method: http.MethodPost, suffix: "/", prefill: true},
+			{name: "subpath", method: http.MethodPost, suffix: "/extra"},
+			{name: "get", method: http.MethodGet},
+		} {
+			t.Run(grpcPath+"/"+tt.name, func(t *testing.T) {
+				s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL})
+				s.allowlistValidator = &AllowlistValidator{}
+				s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, hostPort string, _ p2pRouting, gotAPI reqcommon.APIType) {
+					if gotAPI != reqcommon.APITypeVLLMGenerate || hostPort != "127.0.0.1:9000" {
+						t.Errorf("connector received API %v and host %q, want %v and 127.0.0.1:9000", gotAPI, hostPort, reqcommon.APITypeVLLMGenerate)
+					}
+					if r.URL.Path != grpcPath || r.URL.RawPath != "" {
+						t.Errorf("connector received URL %v, want %s", r.URL, grpcPath)
+					}
+					w.WriteHeader(http.StatusNoContent)
+				}
+
+				uri := grpcPath + tt.suffix
+				req := httptest.NewRequest(tt.method, uri, strings.NewReader("frame"))
+				req.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+				req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+				recorder := httptest.NewRecorder()
+				s.createRoutes().ServeHTTP(recorder, req)
+
+				if tt.prefill {
+					assert.Equal(t, http.StatusNoContent, recorder.Code)
+				} else {
+					assert.Equal(t, http.StatusAccepted, recorder.Code)
+					assert.Equal(t, uri, recorder.Header().Get("X-Forwarded-URI"))
+				}
+			})
+		}
+	}
+}
+
+func TestServer_SSRFDeniedPrefillVLLMGRPCAnswersWithGRPCStatus(t *testing.T) {
+	for _, grpcPath := range []string{
+		vllmpb.Inference_Generate_FullMethodName,
+		vllmpb.Inference_GenerateStream_FullMethodName,
+	} {
+		t.Run(grpcPath, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000"})
+			s.allowlistValidator = &AllowlistValidator{enabled: true, allowedTargets: set.New[string]()}
+			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, p2pRouting, reqcommon.APIType) {
+				t.Error("P/D connector must not run for a denied prefill target")
+			}
+			req := httptest.NewRequest(http.MethodPost, grpcPath, strings.NewReader(""))
+			req.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+			req.Header.Set(routing.PrefillEndpointHeader, "10.0.0.1:8000")
+			recorder := httptest.NewRecorder()
+
+			s.disaggregatedPrefillHandler(reqcommon.APITypeVLLMGenerate)(recorder, req)
+
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			assert.Equal(t, grpcframe.MediaType, recorder.Header().Get(reqcommon.HeaderContentType))
+			gotStatus, ok := grpcframe.Status(recorder.Header())
+			assert.True(t, ok)
+			assert.Equal(t, "7", gotStatus, "PermissionDenied is gRPC code %d", grpccodes.PermissionDenied)
+		})
+	}
+}
+
 func TestServer_createRoutesResponsesRejectsStatefulFields(t *testing.T) {
 	for _, suffix := range []string{"", "/"} {
 		t.Run("path"+suffix, func(t *testing.T) {
@@ -472,6 +559,10 @@ func TestServer_createRoutesDocumentedPaths(t *testing.T) {
 		{http.MethodPost, "/v1/messages%2F", http.StatusTemporaryRedirect, "/v1/messages"},
 		{http.MethodPost, "/v1/respons%65s", http.StatusTemporaryRedirect, "/v1/responses"},
 		{http.MethodPost, "/v1/chat/completion%73", http.StatusTemporaryRedirect, "/v1/chat/completions"},
+		{http.MethodPost, "/vllm.Inference%2FGenerate", http.StatusTemporaryRedirect, vllmpb.Inference_Generate_FullMethodName},
+		{http.MethodPost, "/vllm.Inference%2FGenerateStream", http.StatusTemporaryRedirect, vllmpb.Inference_GenerateStream_FullMethodName},
+		{http.MethodPost, "/vllm.Inference/Generate%2F?x=1", http.StatusTemporaryRedirect, vllmpb.Inference_Generate_FullMethodName + "?x=1"},
+		{http.MethodPost, vllmpb.Control_GetServerInfo_FullMethodName, http.StatusAccepted, ""},
 		{http.MethodGet, "/v1%2Fresponses", http.StatusAccepted, ""},
 		{http.MethodOptions, "/v1%2Fchat%2Fcompletions", http.StatusAccepted, ""},
 		{http.MethodGet, "/health", http.StatusOK, ""},
