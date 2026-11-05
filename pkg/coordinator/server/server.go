@@ -231,7 +231,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Post(reqcommon.PathResponses, s.handleInference)
 	r.Post(reqcommon.PathMessages, s.handleInference)
 	r.Post(reqcommon.PathVLLMGenerate, s.handleInference)
-	// r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
+	r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
 	r.Get(pathHealthz, s.handleHealth)
 	r.Get(pathReadyz, s.handleHealth)
 	r.NotFound(s.passthrough.ServeHTTP)
