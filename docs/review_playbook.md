@@ -6,52 +6,59 @@
 
 ## Contents
 
-- [External wire and engine contracts](#external-wire-and-engine-contracts) (4 rules)
-- [Unencoded runtime hazards](#unencoded-runtime-hazards) (4 rules)
+- [External wire and engine contracts](#external-wire-and-engine-contracts) (5 rules)
+- [Unencoded runtime hazards](#unencoded-runtime-hazards) (6 rules)
 - [Governance and compatibility policy](#governance-and-compatibility-policy) (4 rules)
 - [Settled architectural boundaries](#settled-architectural-boundaries) (5 rules)
 
 ## External wire and engine contracts
 
-External API token semantics, engine streaming and render wire contracts, HTTP header invariants, and ZMQ KV-event sequence recovery not visible in router Go structs.
+External API token semantics, engine streaming and render wire contracts, HTTP header invariants, router-built P/D transfer params, and ZMQ KV-event sequence recovery not visible in router Go structs.
 
 ### Anthropic split prompt tokens and vLLM streaming usage flags
 
-When parsing or forwarding token usage and `stream_options`: sum Anthropic `/v1/messages` prompt tokens as `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` (unlike OpenAI nested `cached_tokens`), and treat vLLM `stream_options.continuous_usage_stats` (per-chunk cumulative usage) as separate from one-shot `include_usage` without injecting `include_usage` beside it.
+When parsing or forwarding token usage and `stream_options`: sum Anthropic `/v1/messages` prompt tokens as `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` (OpenAI nests `cached_tokens` instead), and treat vLLM `stream_options.continuous_usage_stats` (cumulative usage on every chunk) as separate from one-shot `include_usage` without injecting `include_usage` beside it.
 
 - **Why it matters:** Ignoring Anthropic cache token fields undercounts prompt tokens, and injecting include_usage alongside continuous_usage_stats duplicates or corrupts streaming usage.
 - **Examples:** Observed in 63 PRs: [#848](https://github.com/llm-d/llm-d-router/issues/848), [#932](https://github.com/llm-d/llm-d-router/pull/932#discussion_r3178050269), [#2391](https://github.com/llm-d/llm-d-router/pull/2391#discussion_r3798712574)
 
 ### Client JSON passthrough, Content-Length, and Connection upgrade
 
-When decoding JSON bodies, rewriting HTTP payloads, or checking proxy upgrade headers: unmarshal only router-inspected keys so unrecognized client fields and uninspected or malformed sub-objects pass through unchanged when not rewriting. Delete or recompute `Content-Length` on body rewrite while preserving it when untouched, and scan all `Connection` header lines and comma-separated tokens case-insensitively per RFC 9110 for `upgrade`.
+When decoding JSON bodies, rewriting payloads, or copying client headers upstream: unmarshal only router-inspected keys so other fields pass through, delete or recompute `Content-Length` on rewrite, and scan every `Connection` line and token case-insensitively (RFC 9110) for `upgrade`. Do not forward client `Accept-Encoding` to legs whose responses the router decodes; Go `http.Transport` only decompresses gzip it requested itself.
 
-- **Why it matters:** Full-struct JSON re-serialization drops unknown client fields, stale Content-Length headers truncate or hang HTTP streams after body rewrites, and single-line Connection checks miss RFC 9110 upgrades.
+- **Why it matters:** Full-struct JSON re-serialization drops unknown client fields, stale Content-Length headers truncate or hang streams after body rewrites, single-line Connection checks miss RFC 9110 upgrades, and a forwarded client Accept-Encoding lets upstreams return gzip the router then fails to decode.
 - **Settled decision:** [Opt-in backend request priority rewrite via PriorityRewriter interface](review/decisions/opt_in_backend_priority_rewrite.md).
-- **Examples:** Observed in 51 PRs: [#1045](https://github.com/llm-d/llm-d-router/issues/1045), [#1072](https://github.com/llm-d/llm-d-router/issues/1072), [#1092](https://github.com/llm-d/llm-d-router/issues/1092)
+- **Examples:** Observed in 52 PRs: [#1045](https://github.com/llm-d/llm-d-router/issues/1045), [#1092](https://github.com/llm-d/llm-d-router/issues/1092), [#3638](https://github.com/llm-d/llm-d-router/pull/3638#pullrequestreview-5665600572)
 
 ### Native engine render passthrough and stateful Responses rejection
 
 When integrating inference APIs, prompt rendering, or `/v1/responses`: forward raw client payloads to native engine `/render` routes (`/v1/responses/render`, `/v1/messages/render`) instead of translating schemas in the router, and reject `/v1/responses` `previous_response_id` and `conversation` fields with an explicit error.
 
 - **Why it matters:** Router-side prompt translation drifts from backend tokenizer templates, and silently ignoring previous_response_id or conversation fields drops prior multi-turn context.
-- **Reviewers accept:** Contained interim translation while the backend engine lacks a native `/render` endpoint ([#1896](https://github.com/llm-d/llm-d-router/pull/1896#issuecomment-4924616643), [#1896](https://github.com/llm-d/llm-d-router/pull/1896#pullrequestreview-4657668118)).
+- **Reviewers accept:** Interim translation while the engine lacks a native `/render` endpoint ([#1896](https://github.com/llm-d/llm-d-router/pull/1896#issuecomment-4924616643), [#1896](https://github.com/llm-d/llm-d-router/pull/1896#pullrequestreview-4657668118)).
 - **Examples:** Observed in 23 PRs: [#850](https://github.com/llm-d/llm-d-router/issues/850), [#860](https://github.com/llm-d/llm-d-router/pull/860#discussion_r3279332668), [#1364](https://github.com/llm-d/llm-d-router/issues/1364#issuecomment-4587275492)
+
+### Router-built P/D transfer params
+
+When a sidecar connector builds decode-leg `kv_transfer_params` itself instead of forwarding prefill's response: set every key that engine's connector reads unconditionally (vLLM NIXL: `remote_request_id`), never carry one engine's keys into another engine's connector (SGLang uses `bootstrap_host`/`port`/`room` and has no `remote_request_id`), and drop encoder `ec_transfer_params` from decode bodies.
+
+- **Why it matters:** Router-built decode params that omit a key the engine connector reads unconditionally, or carry another engine's keys, crash the decode engine or break its KV transfer, and forwarded encoder ec_transfer_params trigger connector errors on decode workers.
+- **Examples:** Observed in 2 PRs: [#3607](https://github.com/llm-d/llm-d-router/issues/3607), [#3608](https://github.com/llm-d/llm-d-router/pull/3608#pullrequestreview-5627567379), [#3732](https://github.com/llm-d/llm-d-router/pull/3732#pullrequestreview-5701261477)
 
 ### ZMQ KV-events sequence gaps and worker epoch resets
 
-When consuming ZMQ KV-event streams in `pkg/kvevents` or `pkg/kvcache`: track per-endpoint sequence numbers to detect gaps (`seq > lastSeq + 1`) and worker-restart epoch resets (`seq < lastSeq`), purging stale index entries and loading a base snapshot before applying deltas.
+When consuming ZMQ KV-event streams: track per-endpoint sequence numbers to detect gaps (`seq > lastSeq + 1`) and worker-restart epoch resets (`seq < lastSeq`), purging stale index entries and loading a base snapshot before applying deltas.
 
 - **Why it matters:** Applying KV-event deltas across dropped packets or worker restarts leaves stale block hashes in the prefix-cache index and misroutes requests.
 - **Examples:** Observed in 27 PRs: [#1737](https://github.com/llm-d/llm-d-router/issues/1737), [#1887](https://github.com/llm-d/llm-d-router/pull/1887#discussion_r3684757376), [#2946](https://github.com/llm-d/llm-d-router/pull/2946#pullrequestreview-5438730630)
 
 ## Unencoded runtime hazards
 
-Non-local concurrency, Envoy ext_proc skip-path, streaming accumulation, ResponseWriter wrapper, and multi-worker DP endpoint-key hazards not visible in local function signatures.
+Non-local concurrency, Envoy ext_proc skip-path, SSE chunk-boundary accumulation, ResponseWriter wrapper, multi-worker DP endpoint-key, metric cardinality, and lock-across-network hazards not visible in local function signatures.
 
 ### Unjoined timed-out DataProducer goroutines and buffer lifetimes
 
-When writing `DataProducer` plugins or body handling around `dataProducerPluginsWithTimeout`: timeout returns without joining the producer goroutine, so check `ctx.Err()` before writes, do not mutate shared `*InferenceRequestBody` fields in place after timeout, and do not recycle `sync.Pool` buffers while an unjoined producer or snapshot reader aliases their bytes.
+When writing `DataProducer` plugins or body handling around `dataProducerPluginsWithTimeout`: timeout returns without joining the producer goroutine, so check `ctx.Err()` before writes, and never mutate shared `*InferenceRequestBody` fields in place after timeout or recycle `sync.Pool` buffers while an unjoined producer or snapshot reader aliases their bytes.
 
 - **Why it matters:** Unjoined producer goroutines that outlive timeout mutate request bodies or recycled sync.Pool buffers concurrently with downstream scheduling.
 - **Open question:** Whether the plugin framework recovers plugin panics at the invocation boundary and reports them per request ([#2105](https://github.com/llm-d/llm-d-router/issues/2105)) or lets a panicking plugin stop the process ([#2098](https://github.com/llm-d/llm-d-router/issues/2098#issuecomment-5032265086)) ([details](review/open_questions/plugin_panic_isolation.md)).
@@ -59,24 +66,38 @@ When writing `DataProducer` plugins or body handling around `dataProducerPlugins
 
 ### Envoy ext_proc early header-skip metrics and decode-pod filtering
 
-When modifying header-only or skipped-body exit paths in Envoy `ext_proc` handlers: record request latency and one terminal outcome on early-skip branches, and filter fallback endpoint selection in disaggregated pools to decode-only or decode-capable pods.
+When changing header-only or skipped-body exits in Envoy `ext_proc` handlers: record request latency and one terminal outcome on early-skip branches, and restrict fallback endpoint selection in disaggregated pools to decode-capable pods.
 
 - **Why it matters:** Skipping latency recording on header-only exit branches skews request histograms, and unfiltered fallback selection can route client traffic to prefill-only pods.
 - **Examples:** Observed in 37 PRs: [#1553](https://github.com/llm-d/llm-d-router/issues/1553), [#1658](https://github.com/llm-d/llm-d-router/pull/1658#discussion_r3618566988), [#1444](https://github.com/llm-d/llm-d-router/pull/1444#discussion_r3346561765)
 
-### Stateless ParseResponse, mergeUsage, and ResponseWriter Unwrap
+### SSE chunk boundaries, usage folding, and ResponseWriter Unwrap
 
-When implementing streaming response parsers, usage folding, or `http.ResponseWriter` wrappers: keep `ParseResponse` stateless per SSE chunk while accumulating cross-chunk state in `mergeUsage` so later zeros do not overwrite reported counts, and implement `Unwrap() http.ResponseWriter` so `http.Flusher` works.
+When parsing streamed responses, folding usage, or wrapping `http.ResponseWriter`: `ext_proc` chunks split SSE events at any byte, so every SSE parser carries partial lines per request, capping each assembled line, keep the last cumulative usage event in a chunk, and do not let later zeros overwrite counts. Implement `Unwrap() http.ResponseWriter` so `http.Flusher` works.
 
-- **Why it matters:** Per-chunk parser state leaks across streams, zero-valued trailing SSE chunks erase accumulated token counts, and missing Unwrap breaks SSE flushing.
-- **Examples:** Observed in 15 PRs: [#822](https://github.com/llm-d/llm-d-router/pull/822#discussion_r3182740743), [#916](https://github.com/llm-d/llm-d-router/pull/916#discussion_r3161138182), [#2391](https://github.com/llm-d/llm-d-router/pull/2391#discussion_r3798712574)
+- **Why it matters:** SSE events split across ext_proc chunks or several usage events in one chunk record zero or stale token usage, unbounded carry buffers grow on malformed streams, and missing Unwrap breaks SSE flushing.
+- **Examples:** Observed in 17 PRs: [#3650](https://github.com/llm-d/llm-d-router/pull/3650#discussion_r4402061735), [#3650](https://github.com/llm-d/llm-d-router/pull/3650#discussion_r4402061747), [#822](https://github.com/llm-d/llm-d-router/pull/822#discussion_r3182740743)
 
 ### Multi-worker DP endpoint keys by host, port, and rank
 
-When keying per-endpoint maps, prefix-cache indexes, ZMQ sockets, or SSRF allowlists: key by `(host, port, rank)` rather than IP alone because multi-worker DP ranks share a single pod IP.
+When keying per-endpoint maps, prefix-cache indexes, ZMQ sockets, or SSRF allowlists: key by `(host, port, rank)` because multi-worker DP ranks share one pod IP.
 
 - **Why it matters:** Keying endpoint state by pod IP alone collides across multi-worker data-parallel ranks sharing one pod network namespace.
 - **Examples:** Observed in 13 PRs: [#841](https://github.com/llm-d/llm-d-router/issues/841), [#1112](https://github.com/llm-d/llm-d-router/pull/1112#discussion_r3242332547), [#2831](https://github.com/llm-d/llm-d-router/pull/2831#discussion_r4033597903)
+
+### Bounded metric labels and series cleanup
+
+When adding Prometheus `*Vec` labels or configurable buckets: wrap caller-controlled values (`model_name`, `fairness_id`) in `BoundedLabel` at every record site, plugin metrics included, delete series when their endpoint or flow is removed, and cap configurable bucket counts.
+
+- **Why it matters:** Caller-controlled label values, series never deleted after endpoint or flow removal, and unbounded configurable buckets grow Prometheus series without limit and freeze stale values in aggregates.
+- **Examples:** Observed in 4 PRs: [#2106](https://github.com/llm-d/llm-d-router/issues/2106), [#2529](https://github.com/llm-d/llm-d-router/issues/2529), [#3539](https://github.com/llm-d/llm-d-router/pull/3539#discussion_r4347141065)
+
+### No locks held across network calls
+
+When a mutex guards scheduling-path state: never hold it (read lock included) across Redis, HTTP, or gRPC calls. A waiting writer blocks new `RWMutex` readers, so a slow call becomes request latency; copy state under the lock and call after release with a bounded context.
+
+- **Why it matters:** Holding a scheduling-path mutex across a Redis or network round trip queues every reader behind a waiting writer and turns backend latency or outages into request latency.
+- **Examples:** Observed in 1 PR: [#2837](https://github.com/llm-d/llm-d-router/pull/2837#discussion_r4225473471), [#2837](https://github.com/llm-d/llm-d-router/pull/2837#discussion_r4225473477)
 
 ## Governance and compatibility policy
 
@@ -100,18 +121,18 @@ When registering plugins, changing plugin parameters, or editing `test/testdata/
 
 ### Unmerged upstream engine contracts and versioned GIE CRDs
 
-When targeting backend engine flags or endpoints, or updating GIE CRDs and protos: hold or close router PRs coupled to unmerged upstream engine flags or endpoints, and consume versioned upstream GIE CRDs and protos without vendoring (`deploy/components/crds-istio` is the sole local-dev exception).
+When targeting backend engine flags or endpoints, or updating GIE CRDs and protos: hold or close router PRs coupled to unmerged upstream engine flags or endpoints, and consume versioned upstream GIE CRDs and protos without vendoring (`test/e2e/artifacts/components/crds-istio` is the sole local-dev exception).
 
 - **Why it matters:** Merging router support against unmerged engine flags or vendored upstream CRDs strands incompatible wire shapes when upstream lands differently.
 - **Open question:** Whether unmodified upstream CRDs used by tests are fetched from GitHub on every run ([#1482](https://github.com/llm-d/llm-d-router/pull/1482#issuecomment-4633716490)) or cached in the repository to avoid rate-limited fetch failures ([#1482](https://github.com/llm-d/llm-d-router/pull/1482#issuecomment-4661288603)) ([details](review/open_questions/upstream_test_crd_caching.md)).
 - **Examples:** Observed in 20 PRs: [#3359](https://github.com/llm-d/llm-d-router/pull/3359#discussion_r4361817276), [#968](https://github.com/llm-d/llm-d-router/issues/968#issuecomment-4602495714), [#1035](https://github.com/llm-d/llm-d-router/pull/1035#discussion_r3244818645)
 
-### Helm charts in config/charts/ and local Kustomize in deploy/
+### Helm charts in config/charts/ and local Kustomize in test/e2e/artifacts/
 
-When changing deployment manifests or component flags under `config/charts/` or `deploy/`: ship end-user deployment surfaces solely via `config/charts/` Helm charts and structured config, keeping `deploy/` Kustomize for local kind and E2E only.
+When changing deployment manifests or component flags under `config/charts/` or `test/e2e/artifacts/`: ship end-user deployment surfaces solely via `config/charts/` Helm charts and structured config, keeping `test/e2e/artifacts/` Kustomize for local kind and E2E only.
 
-- **Why it matters:** Shipping production flags only in deploy/ Kustomize overlays leaves Helm chart installations missing supported configuration.
-- **Reviewers accept:** Updating `deploy/` Kustomize manifests for local kind and E2E suites ([Helm charts for end-user releases and deploy Kustomize manifests for local kind and E2E](review/decisions/helm_release_charts_with_dev_kustomize_manifests.md), [#1177](https://github.com/llm-d/llm-d-router/issues/1177#issuecomment-4478503514), [#2048](https://github.com/llm-d/llm-d-router/pull/2048#discussion_r3596786577)).
+- **Why it matters:** Shipping production flags only in test/e2e/artifacts/ Kustomize overlays leaves Helm chart installations missing supported configuration.
+- **Reviewers accept:** Updating `test/e2e/artifacts/` Kustomize manifests for local kind and E2E suites ([Helm charts for end-user releases and test/e2e/artifacts Kustomize manifests for local kind and E2E](review/decisions/helm_release_charts_with_dev_kustomize_manifests.md), [#1177](https://github.com/llm-d/llm-d-router/issues/1177#issuecomment-4478503514), [#2048](https://github.com/llm-d/llm-d-router/pull/2048#discussion_r3596786577)).
 - **Examples:** Observed in 30 PRs: [#634](https://github.com/llm-d/llm-d-router/issues/634), [#930](https://github.com/llm-d/llm-d-router/pull/930#issuecomment-4366069128), [#1550](https://github.com/llm-d/llm-d-router/pull/1550#issuecomment-4656209920)
 
 ## Settled architectural boundaries
@@ -151,10 +172,10 @@ When placing disaggregated multi-stage logic across `pkg/coordinator` and `pkg/s
 - **Open question:** Whether the disaggregation sidecar should watch `InferencePool` and `Pod` objects from every decode pod to build its SSRF allowlist ([#1145](https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4479522771)) or avoid API-server watches from workload pods ([#1145](https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4489027953)) ([details](review/open_questions/sidecar_ssrf_allowlist_watches.md)).
 - **Examples:** Observed in 14 PRs: [#1104](https://github.com/llm-d/llm-d-router/issues/1104#issuecomment-4449848790), [#1145](https://github.com/llm-d/llm-d-router/pull/1145#issuecomment-4489027953), [#1653](https://github.com/llm-d/llm-d-router/pull/1653#discussion_r3412845630)
 
-### Ingress-only header stripping and shared constant pointers
+### Ingress-only header stripping
 
-When stripping headers, forwarding `kv_transfer_params`, or adding wire constants: strip spoofing headers and client `kv_transfer_params` at external client ingress while treating internal EPP, Coordinator, and Sidecar `kv_transfer_params` and routing metadata hops as trusted. Grep `pkg/epp/framework/plugins/scheduling/profilehandler/disagg`, `pkg/common/request`, and `pkg/common/routing` before declaring shared constants.
+When stripping headers or forwarding `kv_transfer_params`: strip spoofing headers and client `kv_transfer_params` at every external client entry point, passthrough routes included, while treating internal EPP, Coordinator, and Sidecar `kv_transfer_params` and routing metadata hops as trusted.
 
 - **Why it matters:** Failing to strip internal headers at client ingress enables routing spoofing, while stripping kv_transfer_params on internal hops breaks disaggregated KV transfer.
 - **Open question:** Whether session affinity should be carried by a standard `Set-Cookie` response ([#28](https://github.com/llm-d/llm-d-router/issues/28)) or by a request header such as `x-session-token` ([#600](https://github.com/llm-d/llm-d-router/pull/600#discussion_r3156539950)) ([details](review/open_questions/session_affinity_cookie_vs_header.md)).
-- **Examples:** Observed in 34 PRs: [#979](https://github.com/llm-d/llm-d-router/issues/979#issuecomment-5944114560), [#1027](https://github.com/llm-d/llm-d-router/pull/1027#discussion_r3219971477), [#2319](https://github.com/llm-d/llm-d-router/pull/2319#discussion_r3758140767)
+- **Examples:** Observed in 35 PRs: [#3523](https://github.com/llm-d/llm-d-router/pull/3523#pullrequestreview-5584533523), [#979](https://github.com/llm-d/llm-d-router/issues/979#issuecomment-5944114560), [#2319](https://github.com/llm-d/llm-d-router/pull/2319#discussion_r3758140767)
