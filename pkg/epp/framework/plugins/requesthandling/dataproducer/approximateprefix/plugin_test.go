@@ -28,6 +28,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -37,6 +38,8 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 )
 
 func testHandle() plugin.Handle {
@@ -58,6 +61,134 @@ func disableMinBlockSizeClamp(t *testing.T) {
 func tokenizedBody(tokenIDs []uint32) *fwkrequest.InferenceRequestBody {
 	return &fwkrequest.InferenceRequestBody{
 		TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokenIDs}}},
+	}
+}
+
+func TestARTTSConditioningCacheMatches(t *testing.T) {
+	for _, salt := range []string{"", "tenant-a"} {
+		t.Run("salt="+salt, func(t *testing.T) {
+			ctx := t.Context()
+			handle := testHandle()
+			tok, err := tokenizer.PluginFactory("tokens", plugin.StrictDecoder(json.RawMessage(
+				`{"backend":"estimate","estimate":{"arTTS":true}}`)), handle)
+			require.NoError(t, err)
+			plain, err := tokenizer.PluginFactory("plain", nil, handle)
+			require.NoError(t, err)
+			cfg := config{
+				BlockSizeTokens:        64,
+				MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+				LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+			}
+			p, err := newDataProducer(ctx, ApproxPrefixCachePluginType, cfg, handle)
+			require.NoError(t, err)
+			ep := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "warm"}},
+				fwkdl.NewMetrics(), fwkdl.NewAttributes())
+			endpoints := []fwksched.Endpoint{ep}
+			input := strings.Repeat("a shared text prefix ", 32)
+			makeRequest := func(overrides map[string]any) *fwksched.InferenceRequest {
+				t.Helper()
+				payload := map[string]any{
+					"model": "tts", "input": input, "voice": "vivian", "cache_salt": salt,
+				}
+				for key, value := range overrides {
+					payload[key] = value
+				}
+				raw, err := json.Marshal(payload)
+				require.NoError(t, err)
+				parsed, err := openai.NewOpenAIParser().ParseRequest(ctx, raw, map[string]string{":path": "/v1/audio/speech"})
+				require.NoError(t, err)
+				req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "tts", Body: parsed.Body}
+				require.NoError(t, tok.(*tokenizer.Plugin).Produce(ctx, req, nil))
+				forwarded, err := json.Marshal(req.Body.Payload)
+				require.NoError(t, err)
+				require.Equal(t, raw, forwarded)
+				require.False(t, req.Body.Mutated)
+
+				estimated := req.Body.TokenizedRequest
+				req.Body.TokenizedRequest = nil
+				require.NoError(t, plain.(*tokenizer.Plugin).Produce(ctx, req, nil))
+				require.Equal(t, req.Body.TokenizedRequest.Prompts, estimated.Prompts, "conditioning must not alter token estimates")
+				req.Body.TokenizedRequest = estimated
+				return req
+			}
+			warm := makeRequest(nil)
+			require.NoError(t, p.Produce(ctx, warm, endpoints))
+			result := &fwksched.SchedulingResult{
+				PrimaryProfileName: "default",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"default": {TargetEndpoints: endpoints},
+				},
+			}
+			require.NoError(t, p.PreRequest(ctx, warm, result))
+			p.wg.Wait()
+
+			for _, tc := range []struct {
+				name      string
+				overrides map[string]any
+				hit       bool
+			}{
+				{name: "identical conditioning", hit: true},
+				{name: "output format only", overrides: map[string]any{"response_format": "mp3"}, hit: true},
+				{name: "shared prefix", overrides: map[string]any{"input": input + "a different suffix"}},
+				{name: "different voice", overrides: map[string]any{"voice": "ryan"}},
+				{name: "voice object", overrides: map[string]any{"voice": map[string]any{"id": "ryan"}}},
+				{name: "different caller", overrides: map[string]any{"cache_salt": "tenant-b"}},
+				{name: "different instructions", overrides: map[string]any{"instructions": "speak softly"}},
+				{name: "different reference text", overrides: map[string]any{"ref_text": "reference transcript"}},
+				{name: "reference audio", overrides: map[string]any{"ref_audio": "data:audio/wav;base64,UklGRg=="}},
+				{name: "reference audio list", overrides: map[string]any{"ref_audio": []string{"data:audio/wav;base64,UklGRg=="}}},
+				{name: "different language", overrides: map[string]any{"language": "Chinese"}},
+				{name: "different task", overrides: map[string]any{"task_type": "VoiceDesign"}},
+				{name: "speaker embedding", overrides: map[string]any{"speaker_embedding": []float64{0.1, 0.2}}},
+				{name: "x vector mode", overrides: map[string]any{"x_vector_only_mode": true}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					req := makeRequest(tc.overrides)
+					require.NoError(t, p.Produce(ctx, req, endpoints))
+					info, ok := ep.Get(p.dk)
+					require.True(t, ok)
+					match := info.(*attrprefix.PrefixCacheMatchInfo)
+					require.Positive(t, match.TotalBlocks())
+					if tc.hit {
+						require.Equal(t, match.TotalBlocks(), match.MatchBlocks())
+						require.Equal(t, match.TotalBlocks(), match.CachedBlockCount())
+					} else {
+						require.Zero(t, match.MatchBlocks())
+						require.Zero(t, match.CachedBlockCount())
+					}
+				})
+			}
+
+			for _, useRandom := range []bool{false, true} {
+				t.Run(fmt.Sprintf("use_random=%t", useRandom), func(t *testing.T) {
+					overrides := map[string]any{
+						"ref_audio":    "https://example.com/reference.wav",
+						"extra_params": map[string]any{"use_random": useRandom},
+					}
+					first := makeRequest(overrides)
+					namespace := first.Body.TokenizedRequest.CacheSalt
+					require.NoError(t, tok.(*tokenizer.Plugin).Produce(ctx, first, nil))
+					require.Equal(t, namespace, first.Body.TokenizedRequest.CacheSalt, "reprocessing one request must preserve its namespace")
+					require.NoError(t, p.Produce(ctx, first, endpoints))
+					require.NoError(t, p.PreRequest(ctx, first, result))
+					p.wg.Wait()
+
+					repeated := makeRequest(overrides)
+					require.NoError(t, p.Produce(ctx, repeated, endpoints))
+					info, ok := ep.Get(p.dk)
+					require.True(t, ok)
+					match := info.(*attrprefix.PrefixCacheMatchInfo)
+					require.Positive(t, match.TotalBlocks())
+					if useRandom {
+						require.Zero(t, match.MatchBlocks())
+						require.Zero(t, match.CachedBlockCount())
+					} else {
+						require.Equal(t, match.TotalBlocks(), match.MatchBlocks())
+						require.Equal(t, match.TotalBlocks(), match.CachedBlockCount())
+					}
+				})
+			}
+		})
 	}
 }
 
