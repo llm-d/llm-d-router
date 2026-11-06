@@ -682,10 +682,10 @@ included. Requests that fail earlier, such as a body that cannot be parsed, are 
 pool metrics. Flow Control metrics leave `inference_pool` empty when the EPP runs without
 `--pool-name`, so the two do not join in that case.
 
-The current header name is read first. If it is present, even with an empty value, the deprecated
-name is ignored, and an empty value falls back to agent identity or `default-flow`. A gateway in
-front of the EPP should set the fairness ID itself and overwrite any client-supplied value under
-both header names.
+The current header name is read first. An empty value is skipped, so an empty current name falls back
+to the deprecated name, and a request with no non-empty value under either name falls back to agent
+identity or `default-flow`. A gateway in front of the EPP should set the fairness ID itself and
+overwrite any client-supplied value under both header names.
 
 When `requestHandler.composeFairnessIDs` is enabled, a request carrying both the header and an
 agent identity is recorded under the composed `<tenant>/<session>` ID with `source="header"`. The
