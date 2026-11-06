@@ -1,5 +1,0 @@
-t=0 PICK req= engine=none
-t=0 STATE golden/e0{seats=0 used=0 stay=0 exiting=0 cold=0 budget=950 periods=} waiters=0 recs=0 anomalies[]
-t=0 PICK req=none engine=none
-t=0 STATE golden/e0{seats=0 used=0 stay=0 exiting=0 cold=0 budget=950 periods=} waiters=0 recs=0 anomalies[]
-t=0 FILTER req= -> e0
