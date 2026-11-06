@@ -52,6 +52,34 @@ Backend selection:
   mTLS. The HTTP renderer uses either one configured URL or endpoints
   supplied by data-layer discovery.
 
+## AR TTS cache estimation
+
+For vLLM Omni AR TTS deployments, enable `estimate.arTTS` on the explicit
+`token-producer`:
+
+```yaml
+parameters:
+  backend: estimate
+  estimate:
+    arTTS: true
+```
+
+Speech cache estimates use a hash of the full input, caller `cache_salt`, and
+request conditioning fields, including voice, instructions, language, task,
+reference audio/text/codes, and speaker embeddings. Differences in these fields
+prevent prefix-cache matches even when the spoken text shares a prefix.
+Output-only fields such as `response_format` do not affect this identity.
+Token-count estimation and the forwarded request are unchanged.
+
+With `extra_params.use_random: true`, each request gets a distinct cache
+namespace, matching IndexTTS2's random-conditioning isolation.
+
+The setting defaults to `false` and affects only `/v1/audio/speech`. Enable it
+only for AR TTS deployments, not diffusion TTS. The hash is a router-local
+estimate, not the engine's exact salt. EPP cannot observe uploaded-voice
+revisions or reference-audio content changes behind the same locator. Use
+versioned voice IDs and immutable reference-audio locators for those inputs.
+
 ## Messages rendering
 
 `vllm.messagesRenderMode: auto` probes `/v1/messages/render` with a small text

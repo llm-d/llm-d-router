@@ -97,9 +97,10 @@ type tokenizerPluginConfig struct {
 	ModelName string `json:"modelName"`
 }
 
-// estimateConfig configures the estimation backend. Multimodal image, video,
-// and audio estimation are the only tunables; an empty config uses built-in defaults.
+// estimateConfig configures estimation with built-in defaults for an empty config.
 type estimateConfig struct {
+	// ARTTS isolates speech cache estimates by request-visible conditioning.
+	ARTTS bool `json:"arTTS,omitempty"`
 	// Image tunes multimodal image placeholder-token estimation.
 	Image *imageEstimateConfig `json:"image,omitempty"`
 	// Video tunes multimodal video placeholder-token estimation.
@@ -359,7 +360,10 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
 		}
 	default:
-		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate), aud: newAudioEstimator(config.Estimate)}
+		backend = estimateBackend{
+			img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate), aud: newAudioEstimator(config.Estimate),
+			arTTS: config.Estimate != nil && config.Estimate.ARTTS,
+		}
 	}
 
 	typedName := plugin.TypedName{Type: PluginType, Name: name}
@@ -511,7 +515,9 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 		}
 		return nil
 	}
-	tp.CacheSalt = CacheSaltFromBody(request.Body)
+	if tp.CacheSalt == "" {
+		tp.CacheSalt = CacheSaltFromBody(request.Body)
+	}
 	request.Body.TokenizedRequest = tp
 
 	if tracingActive {
