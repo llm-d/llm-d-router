@@ -268,6 +268,19 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
+	// Producers may hold per-request state between RequestHeader or Produce and
+	// PreRequest, where they normally release it. Release it here for every path
+	// that leaves HandleRequest without reaching PreRequest: a RequestHeader
+	// error, a flow-control rejection, no endpoint candidates, screeners
+	// eliminating every candidate, an Admitter denial, a scheduler error, or a
+	// prepareRequest failure.
+	reachedPreRequest := false
+	defer func() {
+		if !reachedPreRequest {
+			d.releaseProducerState(ctx, reqCtx.SchedulingRequest)
+		}
+	}()
+
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
@@ -335,18 +348,6 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		}
 	}
-
-	// Producers may hold per-request state between Produce and PreRequest, where
-	// they normally release it. Release it here for every path that leaves
-	// HandleRequest without reaching PreRequest: screeners eliminating every
-	// candidate after RequestHandling producers ran, an Admitter denial, a scheduler
-	// error, or a prepareRequest failure.
-	reachedPreRequest := false
-	defer func() {
-		if !reachedPreRequest {
-			d.releaseProducerState(ctx, reqCtx.SchedulingRequest)
-		}
-	}()
 
 	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
 	// A producer whose RequestHandling run fails leaves its keys missing for the
