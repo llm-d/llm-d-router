@@ -18,6 +18,7 @@ package tokenizer
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -101,6 +102,21 @@ func newImageEstimator(cfg *estimateConfig) imageEstimator {
 func (e imageEstimator) placeholderCount(url string) int {
 	w, h, ok := imageDimensionsFromBase64(url)
 	return e.countFromDims(w, h, ok)
+}
+
+// placeholderCountFromHead estimates placeholder tokens for an uploaded image
+// file part whose leading bytes are head. WebP is peeked by hand, since no Go
+// decoder is registered for it; other formats decode their dimension header,
+// and anything else falls back to the default resolution.
+func (e imageEstimator) placeholderCountFromHead(head []byte) int {
+	if w, h, is := webpDimensions(head); is {
+		return e.countFromDims(w, h, true)
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(head))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return e.countFromDims(0, 0, false)
+	}
+	return e.countFromDims(cfg.Width, cfg.Height, true)
 }
 
 // placeholderForAnthropicImage returns the content (URL or raw base64) and
