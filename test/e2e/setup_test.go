@@ -37,15 +37,17 @@ import (
 // router helpers.
 func standaloneConfig() standalone.Config {
 	return standalone.Config{
-		TestConfig:    testConfig,
-		Namespace:     getNamespace(),
-		EPPImage:      eppImage,
-		HTTPPort:      getPort(),
-		MetricsPort:   getMetricsPort(),
-		K8sContext:    k8sContext,
-		PodSelector:   podSelector,
-		ReleaseName:   poolName,
-		KeepOnFailure: keepClusterOnFailure,
+		TestConfig:      testConfig,
+		Namespace:       getNamespace(),
+		EPPImage:        eppImage,
+		HTTPPort:        getPort(),
+		MetricsPort:     getMetricsPort(),
+		HTTPNodePort:    getNodePort(),
+		MetricsNodePort: getMetricsNodePort(),
+		K8sContext:      k8sContext,
+		PodSelector:     podSelector,
+		ReleaseName:     poolName,
+		KeepOnFailure:   keepClusterOnFailure,
 	}
 }
 
@@ -63,9 +65,9 @@ func createModelServersFromKustomize(kustomizeDir string, extra map[string]strin
 		"${EPP_NAME}":                eppName,
 		"${NAMESPACE}":               nsName,
 		"${HF_TOKEN}":                os.Getenv("HF_TOKEN"),
-		"${VLLM_EXTRA_ARGS_E}":       "",
-		"${VLLM_EXTRA_ARGS_P}":       "",
-		"${VLLM_EXTRA_ARGS_D}":       "",
+		"${VLLM_EXTRA_ARGS_E}":       testutils.VLLMExtraArgs(testutils.VLLMStrictArg),
+		"${VLLM_EXTRA_ARGS_P}":       testutils.VLLMExtraArgs(testutils.VLLMStrictArg),
+		"${VLLM_EXTRA_ARGS_D}":       testutils.VLLMExtraArgs(testutils.VLLMStrictArg),
 		// keep empty to force dummy tokenizer
 		"${VLLM_RENDER_URL}":  "",
 		"${VLLM_RENDER_PORT}": vllmRenderPort,
@@ -132,16 +134,16 @@ func createModelServersDecodeKV(replicas int) {
 }
 
 func createModelServersDecodeDP(replicas int) []string {
-	return createModelServersFromKustomize("../../deploy/components/vllm-decode", map[string]string{
+	return createModelServersFromKustomize("artifacts/components/vllm-decode", map[string]string{
 		"${VLLM_REPLICA_COUNT_D}":    strconv.Itoa(replicas),
 		"${VLLM_DATA_PARALLEL_SIZE}": "2",
 		"${DECODE_ROLE}":             "decode",
-		"${VLLM_EXTRA_ARGS_D}":       testutils.VLLMExtraArgs("--mode=echo"),
+		"${VLLM_EXTRA_ARGS_D}":       testutils.VLLMExtraArgs("--mode=echo", testutils.VLLMStrictArg),
 	})
 }
 
-func createModelServersPDWithConnector(prefillReplicas, decodeReplicas int, connector string) []string {
-	return createModelServersFromKustomize(pdDisaggDir, map[string]string{
+func createModelServersPDWithConnector(prefillReplicas, decodeReplicas int, connector string) {
+	createModelServersFromKustomize(pdDisaggDir, map[string]string{
 		"${KV_CACHE_ENABLED}":     "false",
 		"${CONNECTOR_TYPE}":       connector,
 		"${VLLM_REPLICA_COUNT_D}": strconv.Itoa(decodeReplicas),
@@ -149,8 +151,8 @@ func createModelServersPDWithConnector(prefillReplicas, decodeReplicas int, conn
 	})
 }
 
-func createModelServersPDNixlV2(prefillReplicas, decodeReplicas int) []string {
-	return createModelServersPDWithConnector(prefillReplicas, decodeReplicas, constants.KVConnectorNIXLV2)
+func createModelServersPDNixlV2(prefillReplicas, decodeReplicas int) {
+	createModelServersPDWithConnector(prefillReplicas, decodeReplicas, constants.KVConnectorNIXLV2)
 }
 
 func createModelServersPDSharedStorage(decodeReplicas int) {

@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"slices"
 
@@ -153,6 +152,54 @@ func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	return reqcommon.APITypeVLLMGenerate
 }
 
+// buildPrefillMMFeatures builds features for the prefill request, deciding
+// per entry whether to ship mm_metadata or kwargs_data. An entry whose hash
+// has a descriptor in ecTransferParams and carries non-empty MMMetadata is
+// emitted as mm_metadata with a null kwargs_data slot; every other entry is
+// emitted as kwargs_data with a null mm_metadata slot. Both fields are
+// always present so vLLM's per-item merge (merge_mm_kwargs_items) can
+// reconstruct each entry from whichever side is non-null.
+//
+// The choice is per entry because a single encode sub-request can return no
+// descriptor for its image (nixlEC.MergeEncodeResponse logs a warning and
+// continues rather than failing the request): that entry has no EC path, so
+// its tensor data stays inline. vLLM's _require_ec_for_metadata_only is a
+// request-level check and does not catch partial coverage, so the coverage
+// reconciliation lives here.
+//
+// Entries are grouped by Modality: a mixed-modality request has one key per
+// modality in each feature map.
+func buildPrefillMMFeatures(entries []pipeline.MultimodalEntry, ecTransferParams map[string]any) map[string]any {
+	if len(entries) == 0 {
+		return nil
+	}
+	hashesByMod := make(map[reqcommon.Modality][]string)
+	placeholdersByMod := make(map[reqcommon.Modality][]any)
+	kwargsByMod := make(map[reqcommon.Modality][]any)
+	metadataByMod := make(map[reqcommon.Modality][]any)
+	for _, entry := range entries {
+		mod := entry.Modality
+		hashesByMod[mod] = append(hashesByMod[mod], entry.Hash)
+		placeholdersByMod[mod] = append(placeholdersByMod[mod], map[string]any{
+			"offset": entry.Placeholder.Offset,
+			"length": entry.Placeholder.Length,
+		})
+		if _, ok := ecDescriptor(ecTransferParams, entry.Hash); ok && entry.MMMetadata != "" {
+			kwargsByMod[mod] = append(kwargsByMod[mod], nil)
+			metadataByMod[mod] = append(metadataByMod[mod], kwargsSentinel(entry.MMMetadata))
+		} else {
+			kwargsByMod[mod] = append(kwargsByMod[mod], kwargsSentinel(entry.KwargsData))
+			metadataByMod[mod] = append(metadataByMod[mod], nil)
+		}
+	}
+	return map[string]any{
+		"mm_hashes":       hashesByMod,
+		"mm_placeholders": placeholdersByMod,
+		"kwargs_data":     kwargsByMod,
+		"mm_metadata":     metadataByMod,
+	}
+}
+
 // promptItemsField returns the body field an API carries its prompt items in:
 // messages for chat completions and Messages, input for Responses. ok is false
 // for an API that carries no item array.
@@ -249,6 +296,9 @@ func collectMediaParts(items []any, apiType reqcommon.APIType) []mediaPart {
 					continue
 				}
 				partType, _ := partMap[reqcommon.FieldType].(string)
+				if apiType == reqcommon.APITypeChatCompletions {
+					partType = reqcommon.NormalizeChatPart(partMap)
+				}
 				modality, ok := modalityOf(partType)
 				if !ok {
 					continue
@@ -318,45 +368,6 @@ func modalityLocalIndexes(entries []pipeline.MultimodalEntry) []int {
 	return local
 }
 
-// buildMMFeatures builds the multimodal features map (mm_hashes, mm_placeholders,
-// and optionally kwargs_data) from the request's multimodal entries. It returns
-// nil when there are no entries. Entries are grouped by Modality, so a
-// mixed-modality request has one key per modality in each feature map. Those
-// maps are keyed by reqcommon.Modality rather than string: encoding/json keys a
-// map by any string-kind type, so the wire body is identical.
-func buildMMFeatures(entries []pipeline.MultimodalEntry, includeKwargs bool) map[string]any {
-	if len(entries) == 0 {
-		return nil
-	}
-	hashesByMod := make(map[reqcommon.Modality][]string)
-	placeholdersByMod := make(map[reqcommon.Modality][]any)
-	// Left nil unless the caller asked for kwargs_data: the decode and
-	// conditional-decode bodies never carry it.
-	var kwargsByMod map[reqcommon.Modality][]any
-	if includeKwargs {
-		kwargsByMod = make(map[reqcommon.Modality][]any)
-	}
-	for _, entry := range entries {
-		mod := entry.Modality
-		hashesByMod[mod] = append(hashesByMod[mod], entry.Hash)
-		placeholdersByMod[mod] = append(placeholdersByMod[mod], map[string]any{
-			"offset": entry.Placeholder.Offset,
-			"length": entry.Placeholder.Length,
-		})
-		if includeKwargs {
-			kwargsByMod[mod] = append(kwargsByMod[mod], kwargsSentinel(entry.KwargsData))
-		}
-	}
-	features := map[string]any{
-		"mm_hashes":       hashesByMod,
-		"mm_placeholders": placeholdersByMod,
-	}
-	if includeKwargs {
-		features["kwargs_data"] = kwargsByMod
-	}
-	return features
-}
-
 // validateEntryModalities rejects a MultimodalEntry with no Modality. Render is
 // the only caller, as the first step that pairs on the field; the later readers
 // inherit the entries it passed. Not ErrBadRequest: both producers set the
@@ -387,6 +398,118 @@ func kwargsSentinel(k string) any {
 	return k
 }
 
+// generateContentPartTypes maps a modality to its /inference/v1/generate
+// content_parts type.
+var generateContentPartTypes = map[reqcommon.Modality]string{
+	reqcommon.ModalityImage: reqcommon.PartTypeImageURL,
+	reqcommon.ModalityAudio: reqcommon.PartTypeAudioURL,
+	reqcommon.ModalityVideo: reqcommon.PartTypeVideoURL,
+}
+
+// generateContentParts returns one /inference/v1/generate content part per
+// entry, in entry order. See generateContentPart.
+func generateContentParts(reqCtx *pipeline.RequestContext) ([]map[string]any, error) {
+	partsByMod := clientMediaParts(reqCtx)
+	localIdx := modalityLocalIndexes(reqCtx.MultimodalEntries)
+	parts := make([]map[string]any, len(reqCtx.MultimodalEntries))
+	for i, entry := range reqCtx.MultimodalEntries {
+		part, err := generateContentPart(entry, localIdx[i], partsByMod)
+		if err != nil {
+			return nil, err
+		}
+		parts[i] = part
+	}
+	return parts, nil
+}
+
+// clientMediaParts groups the media parts of the client's own request body.
+func clientMediaParts(reqCtx *pipeline.RequestContext) map[reqcommon.Modality][]mediaPart {
+	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
+	items, ok := promptItems(reqCtx.Body, apiType)
+	if !ok {
+		return nil
+	}
+	return groupMediaPartsByModality(collectMediaParts(items, apiType))
+}
+
+// generateContentPart builds the content part that carries entry's media from
+// the client request to /inference/v1/generate. The part is flat
+// ({"type", "url", "uuid"}), the shape vLLM's generate route parses, and its
+// uuid is the render hash so the worker keys the item as render did. Errors
+// mean entries and parts got out of line inside the coordinator.
+func generateContentPart(entry pipeline.MultimodalEntry, localIdx int, partsByMod map[reqcommon.Modality][]mediaPart) (map[string]any, error) {
+	partType, ok := generateContentPartTypes[entry.Modality]
+	if !ok {
+		return nil, fmt.Errorf("no content_parts type for modality %s", entry.Modality)
+	}
+	parts := partsByMod[entry.Modality]
+	if localIdx < 0 || localIdx >= len(parts) {
+		return nil, fmt.Errorf("no %s media part at index %d, request has %d", entry.Modality, localIdx, len(parts))
+	}
+	part := parts[localIdx].part
+	url := reqcommon.MediaPartURL(part)
+	if data, format, isInline := inlineAudioData(part); isInline {
+		mime, err := audioFormatToMIME(format)
+		if err != nil {
+			return nil, err
+		}
+		url = dataURIPrefix + mime + ";base64," + data
+	}
+	if url == "" {
+		return nil, fmt.Errorf("%s media part at index %d carries no media", entry.Modality, localIdx)
+	}
+	return map[string]any{
+		reqcommon.FieldType: partType,
+		reqcommon.FieldURL:  url,
+		reqcommon.FieldUUID: entry.Hash,
+	}, nil
+}
+
+// checkUniformSpan verifies span sits inside tokenIDs and is a run of one
+// repeated token, the shape the Qwen-VL family produces. A model whose parser
+// interleaves other tokens inside a range cannot have the span collapsed to
+// its first token: the worker would expand a different prompt than render
+// produced.
+func checkUniformSpan(tokenIDs []int, span pipeline.PlaceholderRange) error {
+	if span.Offset < 0 || span.Length < 1 || span.Offset > len(tokenIDs) || span.Length > len(tokenIDs)-span.Offset {
+		return fmt.Errorf("placeholder (offset %d, length %d) exceeds %d token_ids",
+			span.Offset, span.Length, len(tokenIDs))
+	}
+	for i := span.Offset + 1; i < span.Offset+span.Length; i++ {
+		if tokenIDs[i] != tokenIDs[span.Offset] {
+			return fmt.Errorf("placeholder (offset %d, length %d) is not a uniform run of one token, which mm_payload none requires",
+				span.Offset, span.Length)
+		}
+	}
+	return nil
+}
+
+// collapsePlaceholders shrinks every entry's placeholder span in tokenIDs to
+// its first token. A generate request that carries content_parts takes an
+// unexpanded prompt: the worker's multimodal processor expands each
+// placeholder itself, so every span must pass checkUniformSpan.
+func collapsePlaceholders(tokenIDs []int, entries []pipeline.MultimodalEntry) ([]int, error) {
+	ranges := make([]pipeline.PlaceholderRange, len(entries))
+	for i, entry := range entries {
+		ranges[i] = entry.Placeholder
+	}
+	slices.SortFunc(ranges, func(a, b pipeline.PlaceholderRange) int { return a.Offset - b.Offset })
+	collapsed := make([]int, 0, len(tokenIDs))
+	pos := 0
+	for _, r := range ranges {
+		if r.Offset < pos {
+			return nil, fmt.Errorf("placeholder (offset %d, length %d) overlaps another placeholder",
+				r.Offset, r.Length)
+		}
+		if err := checkUniformSpan(tokenIDs, r); err != nil {
+			return nil, err
+		}
+		collapsed = append(collapsed, tokenIDs[pos:r.Offset+1]...)
+		pos = r.Offset + r.Length
+	}
+	return append(collapsed, tokenIDs[pos:]...), nil
+}
+
 // singleEntryKwargs builds a kwargs_data value for one entry: each encode
 // fanout sub-request carries exactly one entry's kwargs under its modality key.
 func singleEntryKwargs(modality reqcommon.Modality, kwargs string) map[reqcommon.Modality][]any {
@@ -412,48 +535,19 @@ func coerceParamsMap(logger logr.Logger, v any, label string) map[string]any {
 }
 
 // toIntSlice converts a JSON-unmarshalled []any of numeric elements to []int.
-// Each element must be a non-negative integer represented as float64 or json.Number.
+// Each element must be a non-negative integer (see reqcommon.NonNegativeInt).
 // The returned error identifies the offending element by index and wraps
 // pipeline.ErrBadRequest.
 func toIntSlice(values []any) ([]int, error) {
 	out := make([]int, 0, len(values))
 	for i, v := range values {
-		n, err := anyToNonNegativeInt(v)
+		n, err := reqcommon.NonNegativeInt(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid token at index %d: %v: %w", i, err, pipeline.ErrBadRequest)
 		}
 		out = append(out, n)
 	}
 	return out, nil
-}
-
-// anyToNonNegativeInt converts a single JSON-unmarshalled numeric value to a non-negative int.
-func anyToNonNegativeInt(v any) (int, error) {
-	switch n := v.(type) {
-	case float64:
-		if n < 0 || n != math.Trunc(n) {
-			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
-		}
-		// An in-range integer-valued float64 round-trips through int; a value
-		// too large to fit does not (the conversion saturates), so this rejects
-		// overflow without depending on the fragile float64(MaxInt) boundary.
-		i := int(n)
-		if float64(i) != n {
-			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
-		}
-		return i, nil
-	case json.Number:
-		i, err := n.Int64()
-		if err != nil {
-			return 0, err
-		}
-		if i < 0 || i > math.MaxInt {
-			return 0, fmt.Errorf("expected non-negative integer, got %d", i)
-		}
-		return int(i), nil
-	default:
-		return 0, fmt.Errorf("expected number, got %T", v)
-	}
 }
 
 // extractTokenIDs converts body["token_ids"] from a JSON-unmarshalled value to []int.
@@ -629,16 +723,14 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 			if !ok {
 				return nil, fmt.Errorf("mm_placeholders[%s][%d] must be an object: %w", mod, i, pipeline.ErrBadRequest)
 			}
-			// The non-negative guarantee is load-bearing:
-			// EncodeStep.buildEncodeTokenIDs indexes fullTokenIDs[offset]
-			// (upper-bound guarded only) and allocates make([]int, 1+length),
-			// which panics on a negative. vLLM accepts negatives here, so this
-			// is deliberately stricter; do not relax it to a plain int parse.
-			offset, err := anyToNonNegativeInt(pMap["offset"])
+			// vLLM accepts negatives here; the coordinator does not, so a bad
+			// span fails as a 400 at parse time instead of resurfacing as a
+			// span error in encode. Do not relax this to a plain int parse.
+			offset, err := reqcommon.NonNegativeInt(pMap["offset"])
 			if err != nil {
 				return nil, fmt.Errorf("mm_placeholders[%s][%d].offset: %v: %w", mod, i, err, pipeline.ErrBadRequest)
 			}
-			length, err := anyToNonNegativeInt(pMap["length"])
+			length, err := reqcommon.NonNegativeInt(pMap["length"])
 			if err != nil {
 				return nil, fmt.Errorf("mm_placeholders[%s][%d].length: %v: %w", mod, i, err, pipeline.ErrBadRequest)
 			}
@@ -672,13 +764,12 @@ func extractMultimodalEntries(features map[string]any) ([]pipeline.MultimodalEnt
 
 // validatePlaceholderBounds checks that every placeholder span [offset,
 // offset+length) lies within a prompt of tokenCount tokens. It guards the
-// generate path, where the client supplies placeholder geometry directly:
-// EncodeStep.buildEncodeTokenIDs indexes token_ids[offset] and allocates
-// make([]int, 1+length), so an out-of-range offset reads the wrong token and an
-// unbounded length (a tiny request can claim billions) is a memory-exhaustion
-// vector. vLLM declares offset/length as plain unbounded ints on the generate
-// endpoint and does not enforce this, so the coordinator does. offset and
-// length are already guaranteed non-negative by extractMultimodalEntries.
+// generate path, where the client supplies placeholder geometry directly and a
+// bad span is a bad request: without it the same mistake surfaces later as a
+// span error in encode or prefill. vLLM declares offset/length as plain
+// unbounded ints on the generate endpoint and does not enforce this, so the
+// coordinator does. offset and length are already guaranteed non-negative by
+// extractMultimodalEntries.
 func validatePlaceholderBounds(entries []pipeline.MultimodalEntry, tokenCount int) error {
 	for i, e := range entries {
 		off := e.Placeholder.Offset

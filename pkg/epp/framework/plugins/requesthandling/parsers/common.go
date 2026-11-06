@@ -18,8 +18,10 @@ limitations under the License.
 package parsers
 
 import (
+	"encoding/json"
 	"strings"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
 )
@@ -29,6 +31,35 @@ const (
 	MethodPathKey = ":path"
 )
 
+// NewUsage builds a Usage struct from prompt, completion, and cached prompt
+// token counts.
+func NewUsage(promptTokens, completionTokens, cachedTokens int) *fwkrequest.Usage {
+	return &fwkrequest.Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+		PromptTokenDetails: &fwkrequest.PromptTokenDetails{
+			CachedTokens: cachedTokens,
+		},
+	}
+}
+
+// ComposeSGLangCacheSalt combines SGLang's extra_key and cache_salt into the
+// canonical cache_salt string used for prefix-cache indexing. SGLang partitions
+// its cache on (extra_key, cache_salt) while publishing only cache_salt in KV
+// events; encoding the pair keeps extra_key requests from matching blocks
+// indexed under a bare cache_salt.
+func ComposeSGLangCacheSalt(extraKey, cacheSalt string) (string, error) {
+	if extraKey == "" {
+		return cacheSalt, nil
+	}
+	pair, err := json.Marshal([]string{extraKey, cacheSalt})
+	if err != nil {
+		return "", err
+	}
+	return string(pair), nil
+}
+
 // RewritePriority strips any client-supplied priority from a JSON-map payload and
 // writes the EPP-resolved priority; it reports whether the payload changed.
 // Non-map payloads are returned unchanged. Callers decide whether priority
@@ -37,8 +68,8 @@ const (
 // more urgent), matching the InferenceObjective convention; vLLM's native
 // scheduler is the opposite (lower = more urgent), so the value is negated for
 // vLLM targets to keep the same relative ordering across backends.
-func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
+func RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrequest.MarshalablePayload, priority int) (fwkrequest.MarshalablePayload, bool, error) {
+	m, ok := payload.(fwkrequest.PayloadMap)
 	if !ok {
 		return payload, false, nil
 	}

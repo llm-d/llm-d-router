@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -260,6 +261,34 @@ func TestClient_RequestBuffersBodyOnlyAtTrace(t *testing.T) {
 	})
 }
 
+// A declared Content-Length longer than the body ends the TRACE pre-read in
+// io.ErrUnexpectedEOF; the caller must still see the status and that error.
+func TestClient_RequestTraceReplaysInterruptedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, "partial")
+	}))
+	defer srv.Close()
+
+	logger := funcr.NewJSON(func(string) {}, funcr.Options{Verbosity: logutil.TRACE})
+	resp, err := New(config.GatewayConfig{Address: srv.URL}).Post(log.IntoContext(context.Background(), logger), "/v1/chat/completions", []byte(`{}`), nil)
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	got, readErr := io.ReadAll(resp.Body)
+	if string(got) != "partial" {
+		t.Errorf("body = %q, want the bytes that arrived", got)
+	}
+	if !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		t.Errorf("read error = %v, want io.ErrUnexpectedEOF", readErr)
+	}
+}
+
 func TestClient_BaseURLAndTransport(t *testing.T) {
 	c := New(config.GatewayConfig{Address: "http://gw:80"})
 	if c.BaseURL() != "http://gw:80" {
@@ -267,5 +296,97 @@ func TestClient_BaseURLAndTransport(t *testing.T) {
 	}
 	if c.Transport() == nil {
 		t.Error("Transport must not be nil")
+	}
+}
+
+// A plaintext gateway client must send gRPC over h2c, which gRPC requires,
+// and keep JSON calls on HTTP/1.1 for upstreams that do not speak HTTP/2.
+func TestClient_PlaintextGRPCUsesH2CAndJSONStaysHTTP1(t *testing.T) {
+	protos := make(chan int, 2)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protos <- r.ProtoMajor
+		w.WriteHeader(http.StatusOK)
+	}))
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	srv.Config.Protocols = protocols
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	c := New(config.GatewayConfig{Address: srv.URL})
+
+	resp, err := c.Post(context.Background(), "/v1/completions", []byte(`{}`), nil)
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := <-protos; got != 1 {
+		t.Errorf("JSON request used HTTP/%d, want HTTP/1", got)
+	}
+
+	resp, err = c.StreamGRPC(context.Background(), "/sglang.api.v1.SglangService/Generate", nil, []byte{0, 0, 0, 0, 0})
+	if err != nil {
+		t.Fatalf("StreamGRPC: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := <-protos; got != 2 {
+		t.Errorf("gRPC request used HTTP/%d, want HTTP/2 (h2c)", got)
+	}
+}
+
+// StreamGRPC sends its segments in order as one body, with the total length,
+// and the body can be replayed through GetBody for an HTTP/2 retry.
+func TestClient_StreamGRPCSegmentedBody(t *testing.T) {
+	type got struct {
+		body          []byte
+		contentLength int64
+	}
+	gotCh := make(chan got, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotCh <- got{body: body, contentLength: r.ContentLength}
+		w.WriteHeader(http.StatusOK)
+	}))
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	srv.Config.Protocols = protocols
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	c := New(config.GatewayConfig{Address: srv.URL})
+	head, payload, tail := []byte{0, 0, 0, 0, 7}, []byte("payload"), []byte(nil)
+	resp, err := c.StreamGRPC(context.Background(), "/x", nil, head, nil, payload, tail)
+	if err != nil {
+		t.Fatalf("StreamGRPC: %v", err)
+	}
+	_ = resp.Body.Close()
+	g := <-gotCh
+	if want := append(append([]byte{}, head...), payload...); !bytes.Equal(g.body, want) {
+		t.Fatalf("body = %q, want %q", g.body, want)
+	}
+	if g.contentLength != int64(len(head)+len(payload)) {
+		t.Fatalf("Content-Length = %d, want %d", g.contentLength, len(head)+len(payload))
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "http://x/", nil)
+	if n := setSegmentedBody(req, [][]byte{head, payload}); n != int64(len(head)+len(payload)) {
+		t.Fatalf("setSegmentedBody = %d", n)
+	}
+	if req.GetBody == nil {
+		t.Fatal("GetBody not set: the HTTP/2 transport cannot replay the body")
+	}
+	for i := range 2 {
+		rc, err := req.GetBody()
+		if err != nil {
+			t.Fatalf("GetBody: %v", err)
+		}
+		replay, _ := io.ReadAll(rc)
+		if !bytes.Equal(replay, g.body) {
+			t.Fatalf("GetBody replay %d = %q, want %q", i, replay, g.body)
+		}
+	}
+	if n := setSegmentedBody(req, nil); n != 0 || req.Body != http.NoBody || req.ContentLength != 0 {
+		t.Fatalf("empty body: n=%d body=%v len=%d", n, req.Body, req.ContentLength)
 	}
 }

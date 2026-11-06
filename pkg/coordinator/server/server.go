@@ -22,6 +22,8 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
+	"path"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -30,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -107,6 +110,41 @@ func otelHandler(next http.Handler) http.Handler {
 			return r.URL == nil || (r.URL.Path != pathHealthz && r.URL.Path != pathReadyz)
 		}),
 	)
+}
+
+func isServedInferencePath(cleanPath string) bool {
+	return reqcommon.DetectAPIType(cleanPath).Path() == cleanPath ||
+		cleanPath == sglangapiv1.SglangService_Generate_FullMethodName
+}
+
+// canonicalizeInferencePath rewrites a POST whose path, cleaned by path.Clean,
+// is an inference API path and a POST route of routes, so a trailing slash,
+// repeated slashes, dot segments or an encoded slash reach that route, its
+// request checks, and the pipeline. Any other request reaches next as sent. The
+// request is copied, as http.StripPrefix does, so middleware outside this one
+// keeps the client's path.
+func canonicalizeInferencePath(routes chi.Routes) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				next.ServeHTTP(w, r)
+				return
+			}
+			c := path.Clean(r.URL.Path)
+			if (c == r.URL.Path && r.URL.RawPath == "") || !isServedInferencePath(c) ||
+				!routes.Match(chi.NewRouteContext(), http.MethodPost, c) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			r2 := new(http.Request)
+			*r2 = *r
+			r2.URL = new(url.URL)
+			*r2.URL = *r.URL
+			r2.URL.Path = c
+			r2.URL.RawPath = ""
+			next.ServeHTTP(w, r2)
+		})
+	}
 }
 
 // routeSpanName names the server span after the matched route template and
@@ -191,6 +229,8 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Use(middleware.RealIP) //nolint:staticcheck // coordinator runs behind a trusted gateway that sets the forwarded-IP headers
 	r.Use(middleware.Recoverer)
 	r.Use(logRequestResponse)
+	// After logRequestResponse, so the log keeps the path the client sent.
+	r.Use(canonicalizeInferencePath(r))
 
 	r.Post(reqcommon.PathChatCompletions, s.handleInference)
 	r.Post(reqcommon.PathCompletions, s.handleInference)
@@ -198,6 +238,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Post(reqcommon.PathMessages, s.handleInference)
 	r.Post(reqcommon.PathVLLMGenerate, s.handleInference)
 	// r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
+	r.Post(sglangapiv1.SglangService_Generate_FullMethodName, s.handleSGLangGRPC)
 	r.Get(pathHealthz, s.handleHealth)
 	r.Get(pathReadyz, s.handleHealth)
 	r.NotFound(s.passthrough.ServeHTTP)
@@ -213,6 +254,12 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 		Handler:      otelHandler(r),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
+	}
+	if !cfg.SecureServing {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		s.httpServer.Protocols = protocols
 	}
 
 	return s, nil

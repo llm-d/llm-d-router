@@ -32,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/systemone"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
@@ -245,11 +246,11 @@ func ensureFlowControlLayer(cfg *configapiv1.EndpointPickerConfig, handle fwkplu
 }
 
 // ensureParsers guarantees that at least one parser is configured.
-// If no parsers are configured, the openAI, anthropic and vllmHTTP parsers are
-// configured by default, followed by the passthrough parser so a path claimed by
-// none of them is forwarded without interpretation instead of rejected. The
-// passthrough parser is last because the registry stops at the first parser
-// claiming no paths.
+// If no parsers are configured, the openAI, anthropic, vllmHTTP and systemone
+// parsers are configured by default, followed by the passthrough parser so a
+// path claimed by none of them is forwarded without interpretation instead of
+// rejected. The passthrough parser is last because the registry stops at the
+// first parser claiming no paths.
 func ensureParsers(
 	cfg *configapiv1.EndpointPickerConfig,
 	handle fwkplugin.Handle,
@@ -263,6 +264,7 @@ func ensureParsers(
 			{PluginRef: openai.OpenAIParserType},
 			{PluginRef: anthropic.AnthropicParserType},
 			{PluginRef: vllmhttp.VllmHTTPParserType},
+			{PluginRef: systemone.SystemOneParserType},
 			{PluginRef: passthrough.PassthroughParserType},
 		}
 	}

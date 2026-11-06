@@ -137,6 +137,56 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch commit point", fun
 		Expect(body).ToNot(ContainSubstring("decode-should-be-discarded"))
 	})
 
+	It("returns decode's 503 and cancels an outstanding prefill", func() {
+		prefillStarted := make(chan struct{})
+		prefillCanceled := make(chan struct{})
+		stop := make(chan struct{})
+		decodeBody := `{"error":"decoder unavailable"}`
+		prefill := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			defer GinkgoRecover()
+			// Consume the body so net/http can detect the closed connection.
+			_, err := io.Copy(io.Discard, r.Body)
+			Expect(err).ToNot(HaveOccurred())
+			close(prefillStarted)
+			select {
+			case <-r.Context().Done():
+				close(prefillCanceled)
+			case <-stop:
+			}
+		})
+		decode := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer GinkgoRecover()
+			_, err := io.Copy(io.Discard, r.Body)
+			Expect(err).ToNot(HaveOccurred())
+			select {
+			case <-prefillStarted:
+			case <-r.Context().Done():
+				return
+			case <-stop:
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, err = io.WriteString(w, decodeBody)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		env := startParallelCommitProxy(prefill, decode, func(cfg *Config) {
+			cfg.MoRIIOParallelDecodeWaitTimeout = 5 * time.Second
+		})
+		DeferCleanup(func() { close(stop) })
+
+		// The client deadline is shorter than the prefill backstop.
+		status, hdr, body, err := env.send(2 * time.Second)
+		Expect(err).ToNot(HaveOccurred(), "decode's error must arrive without waiting for prefill")
+		Expect(status).To(Equal(http.StatusServiceUnavailable))
+		Expect(hdr.Get("Content-Type")).To(Equal("application/json"))
+		Expect(hdr.Get("Retry-After")).To(Equal("1"))
+		Expect(body).To(Equal(decodeBody))
+		Eventually(prefillCanceled, time.Second).Should(BeClosed())
+	})
+
 	It("does not hang when prefill and decode both block: the KV-wait backstop returns 504", func() {
 		// Both requests block (KV that never arrives) until either the sidecar
 		// cancels their request context or the test tears down. The bounded
@@ -163,12 +213,13 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch commit point", fun
 		start := time.Now()
 		// Client timeout is far larger than the backstop, so a 504 means the
 		// backstop fired; a client-side timeout error would mean it hung.
-		status, hdr, _, err := env.send(8 * time.Second)
+		status, hdr, body, err := env.send(8 * time.Second)
 		elapsed := time.Since(start)
 
 		Expect(err).ToNot(HaveOccurred(), "request must return via the backstop, not hang")
 		Expect(status).To(Equal(http.StatusGatewayTimeout))
 		Expect(hdr.Get("Content-Type")).To(Equal("application/json"))
+		Expect(body).To(MatchJSON(`{"error":{"message":"decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout","type":"server_error","code":504}}`))
 		Expect(elapsed).To(BeNumerically("<", 5*time.Second), "should return shortly after the 300ms backstop")
 	})
 

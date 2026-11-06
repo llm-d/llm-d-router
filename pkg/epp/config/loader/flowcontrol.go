@@ -154,7 +154,7 @@ func buildPriorityBand(
 	band *configapiv1.PriorityBandConfig,
 	label string,
 ) (*registry.PriorityBandConfig, error) {
-	bandOpts := make([]registry.PriorityBandConfigOption, 0, 5)
+	bandOpts := make([]registry.PriorityBandConfigOption, 0, 7)
 
 	if band.DefaultRequestTTL != nil {
 		bandOpts = append(bandOpts, registry.WithBandDefaultRequestTTL(band.DefaultRequestTTL.Duration))
@@ -175,6 +175,18 @@ func buildPriorityBand(
 	if maxRequests > 0 {
 		bandOpts = append(bandOpts, registry.WithBandMaxRequests(maxRequests))
 	}
+
+	maxBytesPerFlow, err := resolveQuantity(band.MaxBytesPerFlow, label+" MaxBytesPerFlow")
+	if err != nil {
+		return nil, err
+	}
+	bandOpts = append(bandOpts, registry.WithBandMaxBytesPerFlow(maxBytesPerFlow))
+
+	maxRequestsPerFlow, err := resolveQuantity(band.MaxRequestsPerFlow, label+" MaxRequestsPerFlow")
+	if err != nil {
+		return nil, err
+	}
+	bandOpts = append(bandOpts, registry.WithBandMaxRequestsPerFlow(maxRequestsPerFlow))
 
 	if band.OrderingPolicyRef != "" {
 		policy, err := resolvePlugin[fwkfc.OrderingPolicy](handle, band.OrderingPolicyRef)

@@ -168,6 +168,27 @@ func TestInMemoryIndexClearIgnoresCancellation(t *testing.T) {
 	}
 }
 
+func TestInMemoryIndexClearOfUnseenPodKeepsEntries(t *testing.T) {
+	ctx := t.Context()
+	index, err := NewInMemoryIndex(DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+	keys := []BlockHash{1, 2, 3}
+	entries := []PodEntry{{PodIdentifier: "pod-a", DeviceTier: "gpu"}}
+	require.NoError(t, index.Add(ctx, nil, keys, entries))
+
+	require.NoError(t, index.Clear(ctx, "pod-b"))
+	found, err := index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	for _, key := range keys {
+		assert.Equal(t, entries, found[key], "key %v", key)
+	}
+
+	require.NoError(t, index.Clear(ctx, "pod-a"))
+	found, err = index.Lookup(ctx, keys, nil)
+	require.NoError(t, err)
+	assert.Empty(t, found)
+}
+
 // cancelAfterFirstErrCheck reports no error on its first Err call and
 // context.Canceled afterwards, so a lookup sees the cancellation only after
 // its first cancellation checkpoint.
