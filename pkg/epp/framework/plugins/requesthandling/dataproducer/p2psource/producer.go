@@ -89,6 +89,11 @@ type Config struct {
 	// pull saves against the transfer and the waits a pull pays on busy pods,
 	// after the MinCachedTokenDelta floor. Nil keeps the fixed-delta decision.
 	CostModel *CostModelConfig `json:"costModel,omitempty"`
+	// TTFTByDecision records the TTFT of each streaming request whose stream
+	// ends naturally in p2p_source_request_ttft_seconds, labelled with this
+	// producer's decision.
+	// It adds a response-body hook, so it is off by default.
+	TTFTByDecision bool `json:"ttftByDecision,omitempty"`
 }
 
 // CostModelConfig holds the calibrated constants of the pull cost model. The
@@ -190,9 +195,57 @@ func (c *CostModelConfig) evaluate(delta, sourceWaiting, computingWaiting, compu
 
 // compile-time type assertions
 var (
-	_ fwkrh.DataProducer = &Producer{}
-	_ fwkrh.PreRequest   = &Producer{}
+	_ fwkrh.DataProducer          = &Producer{}
+	_ fwkrh.PreRequest            = &Producer{}
+	_ fwkrh.ResponseBodyProcessor = &ttftRecorder{}
 )
+
+// decisionStateKey keys the decision PreRequest stores for ResponseBody.
+const decisionStateKey = plugin.StateKey("p2p-decision")
+
+// decisionState is one request's decision, the labels of its TTFT
+// observation.
+type decisionState struct {
+	role       string
+	outcome    string
+	costMargin string
+}
+
+// Clone implements [plugin.StateData].
+func (d *decisionState) Clone() plugin.StateData {
+	if d == nil {
+		return nil
+	}
+	cp := *d
+	return &cp
+}
+
+// ttftRecorder is the producer with ttftByDecision set. Only it implements
+// ResponseBodyProcessor, so a producer without the option adds no
+// response-body hook.
+type ttftRecorder struct {
+	*Producer
+}
+
+// ResponseBody records the TTFT of a streaming response under the decision
+// PreRequest stored, and releases that decision when the stream ends. The
+// director sets the receipt and first-token times on the end-of-stream call
+// only, the timestamps the EPP's request TTFT uses. A stream that does not end
+// naturally (a disconnect, error or eviction), or whose first byte is not
+// after receipt, is not recorded.
+func (r *ttftRecorder) ResponseBody(_ context.Context, request *scheduling.InferenceRequest,
+	response *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
+	if request == nil || response == nil || !response.EndOfStream || request.RequestID == "" {
+		return
+	}
+	decision, err := plugin.ReadPluginStateKey[*decisionState](r.pluginState, request.RequestID, decisionStateKey)
+	r.pluginState.Delete(request.RequestID)
+	if err != nil || !response.Streaming || response.TerminationCause != fwkrh.TerminationCauseNatural ||
+		response.FirstTokenTimestamp.IsZero() || !response.FirstTokenTimestamp.After(response.ReceivedTimestamp) {
+		return
+	}
+	recordRequestTTFT(r.typedName.Name, decision, response.FirstTokenTimestamp.Sub(response.ReceivedTimestamp).Seconds())
+}
 
 // Producer stashes a pull-source candidate holding within one block of the
 // most cached prefix tokens and publishes a reusable-prefix floor during
@@ -211,10 +264,13 @@ type Producer struct {
 	p2pConnectorPort            int
 	attrKeyValue                plugin.DataKey
 	costModel                   *CostModelConfig
+	// pluginState carries each request's decision to ResponseBody. Nil
+	// unless ttftByDecision is set.
+	pluginState *plugin.PluginState
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
-// Producer.
+// Producer, wrapped to record TTFT by decision when ttftByDecision is set.
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := Config{MinCachedTokenDelta: defaultMinCachedTokenDelta, P2PConnectorPort: defaultP2PConnectorPort}
 	if rawParameters != nil {
@@ -238,7 +294,16 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 			return nil, err
 		}
 	}
-	return New(name, cfg), nil
+	p := New(name, cfg)
+	if !cfg.TTFTByDecision {
+		return p, nil
+	}
+	ctx := context.Background()
+	if handle != nil && handle.Context() != nil {
+		ctx = handle.Context()
+	}
+	p.pluginState = plugin.NewPluginState(ctx)
+	return &ttftRecorder{Producer: p}, nil
 }
 
 // New constructs a p2p-source-producer bound to the configured
@@ -508,6 +573,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	dlog := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.DEFAULT)
 	logDecision := dlog.Enabled()
 	outcome := "no-best-match"
+	costMargin := costMarginNone
 	var kv []any
 	if logDecision {
 		kv = []any{"requestID", request.RequestID}
@@ -516,6 +582,14 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	defer func() {
 		recordDecision(p.typedName.Name, role, outcome)
 		request.PutAttribute(p.decisionDataKey, attrprefix.P2PSourceDecision{Outcome: outcome, EndpointRole: role})
+		if p.pluginState != nil && request.RequestID != "" {
+			p.pluginState.Write(request.RequestID, decisionStateKey,
+				&decisionState{role: role, outcome: outcome, costMargin: costMargin})
+			// ctx is the ext_proc stream context: binding it keeps the janitor
+			// from reaping the decision of a stream that outlasts the
+			// staleness threshold before its end-of-stream call.
+			p.pluginState.BindLiveness(ctx, request.RequestID)
+		}
 		if logDecision {
 			dlog.Info("p2p decision", append(kv, "outcome", outcome)...)
 		}
@@ -576,6 +650,9 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	delta := best.cachedTokens - computingCached
 	if delta < p.minCachedTokenDelta {
 		outcome = "below-floor"
+		if delta > 0 {
+			recordUnpulledTokens(p.typedName.Name, role, outcome, delta)
+		}
 		return nil
 	}
 	params := kvTransferParams(request.Body)
@@ -588,8 +665,10 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		if logDecision {
 			kv = append(kv, "gainMs", gain, "costMs", cost)
 		}
+		costMargin = costMarginBucket(gain - cost)
 		if gain <= cost {
 			outcome = "declined"
+			recordUnpulledTokens(p.typedName.Name, role, outcome, delta)
 			return nil
 		}
 	}

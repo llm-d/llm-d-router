@@ -74,6 +74,7 @@ available.
 - `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. If the profile has no target, the primary profile target is used. See [Prefill profile name](#prefill-profile-name).
 - `p2pConnectorPort` (int, optional, default: `7777`): `OffloadingConnector` P2P tier port of data parallel rank 0 on every endpoint; rank `r` listens on `p2pConnectorPort + r`, which must stay within 1-65535: an endpoint beyond that is skipped as a source, and a request to a prefill endpoint beyond it fails. Must match the P2P tier's configured port.
 - `costModel` (object, optional): When set, the source is written only when the pull's gain exceeds its cost, evaluated after the `minCachedTokenDelta` floor. Omitted, the fixed-delta decision applies. See [Cost model](#cost-model).
+- `ttftByDecision` (bool, optional, default: `false`): Records the TTFT of each streaming request whose stream ends naturally in `llm_d_epp_p2p_source_request_ttft_seconds`, labelled with this producer's decision. Adds a response-body hook to the producer.
 
 ## Cost model
 
@@ -228,6 +229,10 @@ For cache-aware prefill-work routing, follow the
   (`pulled`, `self`, `below-floor`, `declined`, and the cases that leave no decision to make).
 - `llm_d_epp_p2p_source_predicted_pulled_tokens`: prompt tokens the selected source holds beyond
   the computing endpoint, per request sent to pull.
+- `llm_d_epp_p2p_source_unpulled_tokens`: the same gap, per request the producer did not send to
+  pull, labelled by `outcome` (`declined`, `below-floor`).
+- `llm_d_epp_p2p_source_request_ttft_seconds`: TTFT of streaming requests by decision and cost-model
+  margin, with `ttftByDecision`.
 
 See [P2P KV-cache source](../../../../../../../docs/metrics.md#p2p-kv-cache-source) for every
 outcome, how `endpoint_role` is assigned under a renamed prefill profile, and the vLLM metrics that
