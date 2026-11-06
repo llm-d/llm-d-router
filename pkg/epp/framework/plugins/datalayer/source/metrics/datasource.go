@@ -49,7 +49,8 @@ const (
 type metricsDatasourceParams struct {
 	// Scheme defines the protocol scheme used in metrics retrieval (e.g., "http").
 	Scheme string `json:"scheme"`
-	// Path defines the URL path used in metrics retrieval (e.g., "/metrics").
+	// Path defines the URL path used in metrics retrieval (e.g., "/metrics"). It may
+	// carry a query string (e.g., "/v1/loads?format=prometheus").
 	Path string `json:"path"`
 	// Port, when set, overrides the endpoint's inference port for metrics retrieval.
 	// Use when the model server exposes metrics on a port other than the InferencePool target port.

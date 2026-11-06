@@ -56,6 +56,8 @@ type HTTPDataSource[T any] struct {
 	typedName fwkplugin.TypedName
 	scheme    string
 	path      string
+	// rawQuery is the query string of the configured path, if any.
+	rawQuery string
 	// portOverride, when non-zero, replaces the port in the endpoint's
 	// MetricsHost with this value. This allows a source to target a
 	// different port on the same pod (e.g. DCGM Exporter on :9400)
@@ -178,6 +180,13 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	if cfg.interval < 0 {
 		return nil, fmt.Errorf("interval must be non-negative, got %s", cfg.interval)
 	}
+	target, err := url.Parse(path)
+	if err == nil {
+		_, err = url.ParseQuery(target.RawQuery)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid path %q: %w", path, err)
+	}
 
 	cl := &client{
 		Client: http.Client{
@@ -197,7 +206,8 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 	return &HTTPDataSource[T]{
 		typedName:      fwkplugin.TypedName{Type: pluginType, Name: pluginName},
 		scheme:         scheme,
-		path:           path,
+		path:           target.Path,
+		rawQuery:       target.RawQuery,
 		portOverride:   cfg.portOverride,
 		useNodeAddress: cfg.useNodeAddress,
 		interval:       cfg.interval,
@@ -347,5 +357,5 @@ func (s *HTTPDataSource[T]) getEndpoint(ep Addressable) *url.URL {
 		}
 		host = net.JoinHostPort(ip, strconv.Itoa(s.portOverride))
 	}
-	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path}
+	return &url.URL{Scheme: s.scheme, Host: host, Path: s.path, RawQuery: s.rawQuery}
 }
