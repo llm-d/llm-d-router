@@ -536,12 +536,14 @@ func parseDecisionsRequest(body []byte) (*fwkrh.ParseResult, error) {
 }
 
 func parseMultipartFields(body []byte, headers map[string]string, kind string, visit func(string, []byte) error) error {
-	return parseMultipartForm(body, headers, kind, visit, nil)
+	return parseMultipartForm(body, headers, kind, visit, nil, nil)
 }
 
-// parseMultipartForm walks a multipart/form-data body, handing scalar fields to
-// visit and file parts to visitFile. A nil visitFile discards file parts.
-func parseMultipartForm(body []byte, headers map[string]string, kind string, visit func(string, []byte) error, visitFile func(string, request.UploadedMedia) error) error {
+// parseMultipartForm walks a multipart/form-data body, handing scalar fields
+// to visit and file parts whose name wantFile accepts to visitFile. File parts
+// no callback accepts are drained without capture.
+func parseMultipartForm(body []byte, headers map[string]string, kind string, visit func(string, []byte) error,
+	wantFile func(name string) bool, visitFile func(name string, media request.UploadedMedia) error) error {
 	contentTypeValue, _ := headerValue(headers, reqcommon.HeaderContentType)
 	mediaType, params, err := mime.ParseMediaType(contentTypeValue)
 	if err != nil || mediaType != "multipart/form-data" {
@@ -562,7 +564,7 @@ func parseMultipartForm(body []byte, headers map[string]string, kind string, vis
 			return fmt.Errorf("error reading %s multipart body: %w", kind, err)
 		}
 		if part.FileName() != "" {
-			if visitFile == nil {
+			if visitFile == nil || wantFile == nil || !wantFile(part.FormName()) {
 				if _, err := io.Copy(io.Discard, part); err != nil {
 					return fmt.Errorf("error reading %s file part %q: %w", kind, part.FormName(), err)
 				}
@@ -658,10 +660,10 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 			extractedBody.Stream = stream
 		}
 		return nil
-	}, func(name string, media request.UploadedMedia) error {
-		if name == "image" {
-			images.Image = media
-		}
+	}, func(name string) bool {
+		return name == "image"
+	}, func(_ string, media request.UploadedMedia) error {
+		images.Image = media
 		return nil
 	})
 	if err != nil {

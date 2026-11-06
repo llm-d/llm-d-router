@@ -175,6 +175,21 @@ func TestImagesEstimator_UndecodableHeadUsesDefaultResolution(t *testing.T) {
 	assert.Equal(t, imageTokens(defaultImageWidth, defaultImageHeight), features[0].Length)
 }
 
+// TestImagesEstimator_WebPHeadDimensions asserts a WebP upload resolves to its
+// real dimensions the way chat webp content does, by hand-peeking the header
+// no Go decoder is registered for.
+func TestImagesEstimator_WebPHeadDimensions(t *testing.T) {
+	head := webpHeader("VP8L", 512, 256)
+	media := fwkrequest.UploadedMedia{ContentType: "image/webp", SizeBytes: int64(len(head)), Head: head, Hash: xxhash.Sum64(head)}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+	})
+	require.NoError(t, err)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, imageTokens(512, 256), features[0].Length)
+}
+
 // TestImagesEstimator_GenerationsCarriesNoFeature asserts a request without an
 // uploaded image (images-generations shares the typed body) estimates the text
 // alone and reports no features.
