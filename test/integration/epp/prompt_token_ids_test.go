@@ -263,6 +263,13 @@ dataLayer:
 		}, body)
 		// The EPP reads the subset hint from the end-of-stream body message.
 		requests[len(requests)-1].MetadataContext = &envoyCorev3.Metadata{FilterMetadata: fwkepp.GenerateRequestMetadata(subset)}
+		// The response phase completes the stream. A stream closed after the
+		// request phase reports an aborted request, and the prefix entries it
+		// indexed are removed.
+		requests = append(requests, ReqResponseOnly(
+			map[string]string{"content-type": "application/json", "status": "200"},
+			`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"ok","role":"assistant"}}],"usage":{"completion_tokens":1,"prompt_tokens":16,"total_tokens":17}}`,
+		)...)
 		for _, req := range requests {
 			require.NoError(t, client.Send(req))
 		}
@@ -270,8 +277,10 @@ dataLayer:
 		require.NoError(t, err)
 		endpoint := headerValue(headersResp.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
 		require.NotEmpty(t, endpoint)
-		_, err = client.Recv()
-		require.NoError(t, err)
+		for range 3 {
+			_, err = client.Recv()
+			require.NoError(t, err)
+		}
 		require.NoError(t, client.CloseSend())
 		return endpoint
 	}

@@ -136,6 +136,24 @@ func (i *indexer) Add(hashes []blockHash, pod server) {
 	}
 }
 
+// Remove deletes hashes from pod's LRU. A hash another prompt also added is
+// deleted with it: the LRU holds no reference counts, so removal errs toward
+// dropping an entry a pod still holds. The cost of that error is a lost
+// affinity match, which re-prefills, never a match for a prefix no pod holds.
+func (i *indexer) Remove(hashes []blockHash, pod ServerID) {
+	i.mu.RLock()
+	pc := i.pods[pod]
+	i.mu.RUnlock()
+	if pc == nil {
+		return
+	}
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	for _, hash := range hashes {
+		pc.lru.Remove(hash)
+	}
+}
+
 // MatchLongestPrefix finds each candidate's run by galloping search over its
 // LRU.
 func (i *indexer) MatchLongestPrefix(hashes []blockHash, candidates []ServerID) []int {
