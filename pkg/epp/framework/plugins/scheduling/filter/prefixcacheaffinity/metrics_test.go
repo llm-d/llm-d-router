@@ -50,44 +50,44 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 		{
 			name:   "single candidate is not applicable",
 			config: Config{AffinityThreshold: 0.80},
-			input:  []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0)},
+			input:  []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0, -1)},
 			// A single candidate has no set to narrow.
 			outcome: outcomeNotApplicable,
 		},
 		{
 			name:    "disabled threshold is not applicable",
 			config:  Config{AffinityThreshold: 0},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0), makeEndpoint("b", 10, 10, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0, -1), makeEndpoint("b", 10, 10, 0, -1)},
 			outcome: outcomeNotApplicable,
 		},
 		{
 			name:    "exploration skip",
 			config:  Config{AffinityThreshold: 0.80, ExplorationProbability: 1.0},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 100, 0), makeEndpoint("b", 10, 50, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 100, 0, -1), makeEndpoint("b", 10, 50, 0, -1)},
 			outcome: outcomeExploration,
 		},
 		{
 			name:    "no endpoint meets the threshold",
 			config:  Config{AffinityThreshold: 0.80},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 10, 10, 0), makeEndpoint("b", 20, 20, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 10, 10, 0, -1), makeEndpoint("b", 20, 20, 0, -1)},
 			outcome: outcomeNoMatch,
 		},
 		{
 			name:    "sticky set kept",
 			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourceLatencyPredictor},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 100, 0), makeEndpoint("b", 85, 120, 0), makeEndpoint("c", 10, 50, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 100, 0, -1), makeEndpoint("b", 85, 120, 0, -1), makeEndpoint("c", 10, 50, 0, -1)},
 			outcome: outcomeSticky,
 		},
 		{
 			name:    "load gate reopens the set",
 			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 500, 0), makeEndpoint("b", 10, 50, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 500, 0, -1), makeEndpoint("b", 10, 50, 0, -1)},
 			outcome: outcomeLoadOverride,
 		},
 		{
 			name:    "missing signal returns all endpoints",
 			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, -1, 0), makeEndpoint("b", 10, 50, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, -1, 0, -1), makeEndpoint("b", 10, 50, 0, -1)},
 			outcome: outcomeMissingSignal,
 		},
 	}
