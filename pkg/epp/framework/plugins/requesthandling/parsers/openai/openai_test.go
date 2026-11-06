@@ -2982,6 +2982,41 @@ func TestOpenAIParser_ParseRequestTranscriptionsHeadBound(t *testing.T) {
 	}
 }
 
+// response_format selects the reply's shape; only the JSON formats carry a
+// body whose usage response processing can read, so the plain-text formats
+// skip it instead of logging a parse error per response.
+func TestOpenAIParser_ParseRequestTranscriptionsResponseFormat(t *testing.T) {
+	for _, tc := range []struct {
+		format string
+		skip   bool
+	}{
+		{format: "", skip: false},
+		{format: "json", skip: false},
+		{format: "verbose_json", skip: false},
+		{format: "diarized_json", skip: false},
+		{format: "text", skip: true},
+		{format: "srt", skip: true},
+		{format: "vtt", skip: true},
+	} {
+		parts := []videoFormPart{
+			{name: "file", value: "audio", filename: "a.wav", mediaType: "audio/wav"},
+			{name: "model", value: "whisper-large-v3"},
+		}
+		if tc.format != "" {
+			parts = append(parts, videoFormPart{name: "response_format", value: tc.format})
+		}
+		body, ct := buildVideoForm(t, parts...)
+		result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+			map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.SkipResponseProcessing != tc.skip {
+			t.Errorf("response_format %q: SkipResponseProcessing = %v, want %v", tc.format, result.SkipResponseProcessing, tc.skip)
+		}
+	}
+}
+
 func TestOpenAIParser_ParseRequestTranscriptionsInvalidForms(t *testing.T) {
 	parser := NewOpenAIParser()
 	headersFor := func(ct string) map[string]string {
