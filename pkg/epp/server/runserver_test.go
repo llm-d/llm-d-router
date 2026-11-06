@@ -69,12 +69,12 @@ func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	opts.AddFlags(pflag.NewFlagSet("t", pflag.ContinueOnError))
 	opts.GRPCPort, opts.CertPath = 19002, "/tmp/certs"
 	opts.SecureServing, opts.HealthChecking, opts.EnableCertReload = true, true, true
-	opts.EnableGRPCStreamMetrics, opts.EmitEndpointScores = true, true
+	opts.EnableGRPCStreamMetrics, opts.EmitEndpointScores, opts.EnableToolCallingTelemetry = true, true, true
 	opts.TLSMinVersion, opts.TLSCipherSuites = "VersionTLS13", []string{"TLS_AES_128_GCM_SHA256"}
 	opts.RefreshPrometheusMetricsInterval, opts.MetricsStalenessThreshold = 7*time.Second, 11*time.Second
 	require.NoError(t, opts.Complete()) // parses the TLS strings into the unexported fields
 	// Set after Complete(): the *Str flags are empty, so Complete() leaves these alone.
-	opts.GRPCMaxRecvMsgSize, opts.GRPCMaxSendMsgSize = 4<<20, 5<<20
+	opts.GRPCMaxRecvMsgSize, opts.GRPCMaxSendMsgSize, opts.MaxRequestBodySize = 4<<20, 5<<20, 6<<20
 
 	ds, sd := &stubDatastore{}, &fwkfcmocks.MockSaturationDetector{}
 	director, registry, bands := &requestcontrol.Director{}, &handlers.ParserRegistry{}, &stubBands{}
@@ -93,11 +93,12 @@ func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	}
 
 	// IsZero cannot see two fields wired to each other's source, so pin every field that
-	// shares its type with another one: the two ints, the two uint16s, the two durations,
+	// shares its type with another one: the three ints, the two uint16s, the two durations,
 	// and each dependency. The bools cannot be told apart by value and are covered by
 	// TestNewExtProcServerRunnerMapsEachBoolOption below.
 	require.Equal(t, 4<<20, r.GRPCMaxRecvMsgSize)
 	require.Equal(t, 5<<20, r.GRPCMaxSendMsgSize)
+	require.Equal(t, 6<<20, r.MaxRequestBodySize)
 	require.Equal(t, uint16(19002), r.GrpcPort)
 	require.Equal(t, uint16(tls.VersionTLS13), r.TLSMinVersion)
 	require.Equal(t, 7*time.Second, r.RefreshPrometheusMetricsInterval)
@@ -131,6 +132,9 @@ var boolOptions = []struct {
 	{"EmitEndpointScores",
 		func(o *server.Options, v bool) { o.EmitEndpointScores = v },
 		func(r *server.ExtProcServerRunner) bool { return r.EmitEndpointScores }},
+	{"EnableToolCallingTelemetry",
+		func(o *server.Options, v bool) { o.EnableToolCallingTelemetry = v },
+		func(r *server.ExtProcServerRunner) bool { return r.EnableToolCallingTelemetry }},
 }
 
 // TestNewExtProcServerRunnerMapsEachBoolOption sets one boolean option at a time and

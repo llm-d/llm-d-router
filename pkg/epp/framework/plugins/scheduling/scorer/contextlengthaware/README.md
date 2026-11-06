@@ -5,7 +5,8 @@
 Routes inference requests based on a token count, with optional filtering.
 Scoring is always applied; filtering is off by default. The routing length is
 the total prompt length unless `reusableTokensProducerName` enables P2P cache
-subtraction.
+subtraction. With the default label, a multi-prompt request routes on its
+longest prompt, as described in [Token Counting](#token-counting).
 
 **Use Cases:**
 - Route short prompts to pods with smaller GPU memory.
@@ -58,19 +59,26 @@ schedulingProfiles:
 
 #### Token Counting
 
-Reads total prompt tokens from `request.Body.TokenizedRequest.TokenCount()`.
-A `token-producer` populates this data and is auto-created with the
+Reads per-prompt tokens from `request.Body.TokenizedRequest`. A
+`token-producer` populates this data and is auto-created with the
 tokenizer-free `estimate` backend when none is configured.
+
+A request can carry several prompts, for example a `/v1/completions` prompt
+array. The default label `llm-d.ai/context-length-range` describes the context
+length a pod supports, and the model server checks each prompt against its
+maximum model length separately, so with that label the routing length is the
+token count of the longest prompt. Any other label, such as a prefill work
+range or an accelerator capability range, routes on the total across prompts.
 
 When `reusableTokensProducerName` is configured, the plugin requires the
 name-bound attribute from that `p2p-source-producer`. Missing request data at
 runtime leaves the total prompt length unchanged. This includes requests for
 which the producer finds no pullable source. The default configuration does
-not consume this attribute and always uses total prompt length.
+not consume this attribute.
 
 #### P2P Cache-Aware Prefill Work
 
-The named [P2P source producer](../../../requestcontrol/dataproducer/p2psource/README.md)
+The named [P2P source producer](../../../requesthandling/dataproducer/p2psource/README.md)
 publishes a request-wide reusable-prefix floor `G` from confirmed CPU-tier
 cache data. The context-length-aware plugin uses:
 
@@ -108,7 +116,7 @@ by a pod. Label every candidate in the prefill profile because unlabeled pods
 are retained by filtering as general-purpose candidates.
 
 Configure `p2p-cache-source` as shown in the
-[producer configuration](../../../requestcontrol/dataproducer/p2psource/README.md#configuration).
+[producer configuration](../../../requesthandling/dataproducer/p2psource/README.md#configuration).
 Its `prefillProfileName` must match both the profile selected by
 `disagg-profile-handler` and the profile that references the work classifier.
 The profile's picker is omitted here. Threshold parameters for the gate are
@@ -151,7 +159,7 @@ filter has the opposite cost: every cached follow-up migrates, including when
 the holder is idle and the transfer buys nothing.
 
 The producer and serving pods must satisfy the
-[deployment requirements](../../../requestcontrol/dataproducer/p2psource/README.md#deployment-requirements).
+[deployment requirements](../../../requesthandling/dataproducer/p2psource/README.md#deployment-requirements).
 With `D = 1`, a short-work class for up to 8192 new tokens can use:
 
 ```yaml
@@ -219,3 +227,37 @@ metadata:
   labels:
     llm-d.ai/context-length-range: "2048-8192"
 ```
+
+#### Static GPU and MIG capability ranges
+
+Use this plugin's configurable `label` to route by static accelerator profiles.
+A separate accelerator scorer would apply the same token-count signal twice.
+Configure one instance in a scheduling profile, using ranges measured for the
+model and accelerator configuration deployed on each endpoint.
+
+```yaml
+plugins:
+  - type: context-length-aware
+    name: accelerator-router
+    parameters:
+      label: llm-d.ai/accelerator-capability-range
+      enableFiltering: true
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: accelerator-router
+        weight: 3
+```
+
+For example, label a smaller MIG profile with
+`llm-d.ai/accelerator-capability-range: "0-2048"` and a larger profile with
+`llm-d.ai/accelerator-capability-range: "2049-8192"`. These ranges are inclusive
+and illustrative, not hardware memory limits. Unlabeled endpoints still pass
+filtering and receive a neutral score, so label every endpoint when the range
+must be enforced.
+
+This uses the token producer's prompt length, including any image-token
+estimates supplied by its backend. It does not inspect GPU model, MIG layout,
+free memory, or DCGM metrics, and a token estimate alone does not guarantee a
+request fits in accelerator memory. Use `enableFiltering: false` when the ranges
+express a preference instead of a strict eligibility rule.

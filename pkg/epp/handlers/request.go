@@ -21,6 +21,7 @@ import (
 	"context"
 	"maps"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,8 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
@@ -55,6 +58,24 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 		return s.fallbackToRandomEndpoint(ctx, reqCtx, 0)
 	}
 
+	// Envoy sends the body of a WebSocket upgrade, and then the connection's
+	// frames, with no EndOfStream, so the body-end scheduling trigger never
+	// arrives. Route a GET upgrade now and close the ext_proc stream.
+	if isWebSocketUpgrade(req) {
+		// RFC 6455 section 4.1 requires GET. Other methods would carry a body
+		// past admission control.
+		if envoy.ExtractHeaderValue(req, ":method") != http.MethodGet {
+			return errcommon.Error{Code: errcommon.BadRequest, Msg: "WebSocket upgrade requires the GET method"}
+		}
+		// The session needs one pod for its lifetime, and that pod must serve
+		// decode; a prefill-only pod fails every session after the handshake.
+		if err := s.fallbackToEndpoint(ctx, reqCtx, s.director.GetRandomDecodeEndpoint(), 0); err != nil {
+			return err
+		}
+		reqCtx.requestState = requestResponseProcessingSkipped
+		return nil
+	}
+
 	for _, header := range req.RequestHeaders.Headers.Headers {
 		key := strings.ToLower(header.Key)
 		if request.InternalRoutingHeaders.Has(key) {
@@ -69,10 +90,42 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 	return nil
 }
 
+// isWebSocketUpgrade reports whether req asks to upgrade to WebSocket (RFC 6455
+// section 4.1). Connection and Upgrade are list fields and may arrive split
+// across several header lines (RFC 9110 section 5.3), so every line is scanned.
+func isWebSocketUpgrade(req *extProcPb.ProcessingRequest_RequestHeaders) bool {
+	toWebSocket := false
+	connectionUpgrades := false
+	for _, header := range req.RequestHeaders.Headers.Headers {
+		switch strings.ToLower(header.Key) {
+		case "upgrade":
+			if strings.EqualFold(strings.TrimSpace(envoy.GetHeaderValue(header)), "websocket") {
+				toWebSocket = true
+			}
+		case "connection":
+			for _, token := range strings.Split(envoy.GetHeaderValue(header), ",") {
+				if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+					connectionUpgrades = true
+				}
+			}
+		}
+	}
+	return toWebSocket && connectionUpgrades
+}
+
 func (s *StreamingServer) fallbackToRandomEndpoint(ctx context.Context, reqCtx *RequestContext, requestSize int) error {
-	endpoint := s.director.GetRandomEndpoint()
+	return s.fallbackToEndpoint(ctx, reqCtx, s.director.GetRandomEndpoint(), requestSize)
+}
+
+// fallbackToEndpoint routes reqCtx to endpoint, answering with the no-endpoints
+// rejection when endpoint is nil.
+func (s *StreamingServer) fallbackToEndpoint(ctx context.Context, reqCtx *RequestContext, endpoint *fwkdl.EndpointMetadata, requestSize int) error {
 	if endpoint == nil {
-		return errcommon.Error{Code: errcommon.Internal, Msg: "no pods available in datastore"}
+		return errcommon.Error{
+			Code:    errcommon.ServiceUnavailable,
+			Msg:     "no pods available in datastore",
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+		}
 	}
 	reqCtx.TargetEndpoint = net.JoinHostPort(endpoint.GetIPAddress(), endpoint.GetPort())
 	reqCtx.RequestSize = requestSize
@@ -107,7 +160,7 @@ func (s *StreamingServer) generateRequestHeaderResponse(ctx context.Context, req
 					ClearRouteCache: true,
 					HeaderMutation: &extProcPb.HeaderMutation{
 						SetHeaders:    s.generateHeaders(ctx, reqCtx),
-						RemoveHeaders: unsetRoutingHeaders(reqCtx),
+						RemoveHeaders: unsetRoutingHeaders(ctx, reqCtx),
 					},
 				},
 			},
@@ -150,6 +203,14 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 		})
 	}
 
+	// Hand the resolved fairness identity to the P/D sidecar so its spans carry it.
+	if id, source, ok := tracing.AttributionHandoff(ctx); ok {
+		headers = append(headers,
+			&configPb.HeaderValueOption{Header: &configPb.HeaderValue{Key: tracing.FairnessIDHandoffHeader, RawValue: []byte(id)}},
+			&configPb.HeaderValueOption{Header: &configPb.HeaderValue{Key: tracing.FairnessSourceHandoffHeader, RawValue: []byte(source)}},
+		)
+	}
+
 	// Include any non-system-owned headers.
 	for key, value := range reqCtx.Request.Headers {
 		if request.IsSystemOwnedHeader(key) {
@@ -166,10 +227,11 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 }
 
 // unsetRoutingHeaders lists the headers Envoy removes before forwarding: the
-// screening headers, and the routing headers no plugin set, so no
-// client-supplied value reaches the model server.
-func unsetRoutingHeaders(reqCtx *RequestContext) []string {
-	remove := make([]string, 0, len(request.ScreeningHeaders)+len(request.InternalRoutingHeaders))
+// screening headers, the routing headers no plugin set, and the attribution
+// handoff when EPP does not send it, so no client-supplied value reaches the
+// sidecar or the model server.
+func unsetRoutingHeaders(ctx context.Context, reqCtx *RequestContext) []string {
+	remove := make([]string, 0, len(request.ScreeningHeaders)+len(request.InternalRoutingHeaders)+2)
 	for key := range request.ScreeningHeaders {
 		remove = append(remove, key)
 	}
@@ -177,6 +239,9 @@ func unsetRoutingHeaders(reqCtx *RequestContext) []string {
 		if _, ok := reqCtx.Request.Headers[key]; !ok {
 			remove = append(remove, key)
 		}
+	}
+	if _, _, ok := tracing.AttributionHandoff(ctx); !ok {
+		remove = append(remove, tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader)
 	}
 	return remove
 }

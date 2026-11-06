@@ -54,9 +54,16 @@ func NewSchedulerProfile() *SchedulerProfile {
 
 // SchedulerProfile provides a profile configuration for the scheduler which influence routing decisions.
 type SchedulerProfile struct {
+	name    string
 	filters []fwksched.Filter
 	scorers []*WeightedScorer
 	picker  fwksched.Picker
+}
+
+// WithName sets the profile name that labels the profile's scheduler metrics.
+func (p *SchedulerProfile) WithName(name string) *SchedulerProfile {
+	p.name = name
+	return p
 }
 
 // WithFilters sets the given filter plugins as the Filter plugins.
@@ -159,7 +166,7 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		debug.Info("Before running filter plugins", "endpoints", filteredEndpoints)
 	}
 
-	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "filter_endpoints",
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanFilterEndpoints,
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
@@ -181,9 +188,15 @@ func (p *SchedulerProfile) runFilterPlugins(ctx context.Context, request *fwksch
 		// surfaces in production. Producers run under executePluginsAsDAG, which
 		// does fail the request on one.
 		scopedRequest, scoped, _ := datalayer.ScopeInvocation(logger, filterExtensionPoint, filter, request, filteredEndpoints)
+		candidates := len(filteredEndpoints)
 		before := time.Now()
 		filteredEndpoints = datalayer.Unscope(filter.Filter(ctx, scopedRequest, scoped))
 		metrics.RecordPluginProcessingLatency(filterExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
+		// A counter panics on a negative Add, and a filter may return more
+		// endpoints than it received.
+		if eliminated := candidates - len(filteredEndpoints); eliminated > 0 {
+			metrics.RecordSchedulerFilterEliminated(p.name, typedName.Type, typedName.Name, eliminated)
+		}
 		if debugEnabled {
 			debug.Info("Completed running filter plugin successfully", "plugin", typedName, "endpoints", filteredEndpoints)
 		}
@@ -226,7 +239,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 	// The tracer is resolved once and threaded into runScorer so the per-scorer
 	// spans reuse it rather than rebuilding instrumentation options per scorer.
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "scoring", internalSpanKind)
+	ctx, span := tracer.Start(ctx, semconv.LLMDEPPSpanScoring, internalSpanKind)
 	defer span.End()
 	// On the default (tracing-disabled) path Start returns a non-recording span;
 	// skip all attribute and child-span construction so the scoring hot path
@@ -352,11 +365,21 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	n := len(weightedScorePerEndpoint)
 	storage := make([]fwksched.ScoredEndpoint, n)
 	scoredEndpoints := make([]*fwksched.ScoredEndpoint, n)
+	endpoints := make([]fwksched.Endpoint, n)
 	i := 0
 	for endpoint, score := range weightedScorePerEndpoint {
-		storage[i] = fwksched.ScoredEndpoint{Endpoint: endpoint, Score: score}
+		endpoints[i] = endpoint
+		storage[i].Score = score
 		scoredEndpoints[i] = &storage[i]
 		i++
+	}
+	// The picker sees each candidate through a scope until it returns; storage
+	// is then restored in place, so ScoredCandidates and any target pointing
+	// into storage carry the underlying endpoint. Violations dropped: Pick has
+	// no error return, see runFilterPlugins.
+	scoped, _ := datalayer.Scope(logger, pickerExtensionPoint, p.picker, endpoints)
+	for i := range storage {
+		storage[i].Endpoint = scoped[i]
 	}
 	typedName := p.picker.TypedName()
 	debug := logger.V(logutil.DEBUG)
@@ -368,7 +391,7 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 		debug.Info("Candidate pods for picking", "endpoints-weighted-score", scoredEndpoints)
 	}
 
-	ctx, span := tracing.Tracer(TracerScope).Start(ctx, "pick_endpoints",
+	ctx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanPickEndpoints,
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
@@ -392,11 +415,15 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 	before := time.Now()
 	result := p.picker.Pick(ctx, scoredEndpoints)
 	metrics.RecordPluginProcessingLatency(pickerExtensionPoint, typedName.Type, typedName.Name, time.Since(before))
+	for i := range storage {
+		storage[i].Endpoint = endpoints[i]
+	}
 	if debugEnabled {
 		debug.Info("Completed running picker plugin successfully", "plugin", typedName, "result", result)
 	}
 
 	if result != nil {
+		result.TargetEndpoints = datalayer.Unscope(result.TargetEndpoints)
 		// Record the complete candidate set, which pickers narrow to their
 		// selection. Pickers reorder and truncate the pointer slice, never the
 		// backing array, so storage still holds every scored candidate.

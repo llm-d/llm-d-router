@@ -29,6 +29,12 @@ func TestLLMDSemanticConventions(t *testing.T) {
 		wantKey  string
 		wantType attribute.Type
 	}{
+		{
+			name:     "LLMDEPPAPISurface",
+			got:      LLMDEPPAPISurface("messages"),
+			wantKey:  "llm_d.epp.api_surface",
+			wantType: attribute.STRING,
+		},
 		// EPP Fairness attribution
 		{
 			name:     "LLMDEPPFairnessID",

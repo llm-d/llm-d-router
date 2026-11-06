@@ -31,7 +31,8 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // mockProcessServer implements ExternalProcessor_ProcessServer for testing.
@@ -86,7 +87,7 @@ func TestUpdateStateAndSendIfNeeded_Evicted(t *testing.T) {
 				requestDroppedReason: tt.requestDroppedReason,
 			}
 
-			err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
+			err := reqCtx.updateStateAndSendIfNeeded(srv, logger, nil)
 			require.NoError(t, err)
 
 			require.Len(t, srv.sentResponses, 1, "Should send exactly one response")
@@ -119,7 +120,7 @@ func TestUpdateStateAndSendIfNeeded_NotEvicted(t *testing.T) {
 		requestState: requestReceived,
 	}
 
-	err := reqCtx.updateStateAndSendIfNeeded(srv, logger)
+	err := reqCtx.updateStateAndSendIfNeeded(srv, logger, nil)
 	require.NoError(t, err)
 	assert.Empty(t, srv.sentResponses, "Should not send any response for normal state without queued responses")
 }
@@ -131,29 +132,35 @@ func TestTerminationCause(t *testing.T) {
 		name   string
 		state  streamRequestState
 		ctxErr error
-		want   fwkrc.TerminationCause
+		want   fwkrh.TerminationCause
 	}{
 		{
 			name:   "evicted outranks a cancelled context",
 			state:  requestEvicted,
 			ctxErr: context.Canceled,
-			want:   fwkrc.TerminationCauseEvicted,
+			want:   fwkrh.TerminationCauseEvicted,
 		},
 		{
 			name:   "a cancelled context is the client going away",
 			state:  responseReceived,
 			ctxErr: context.Canceled,
-			want:   fwkrc.TerminationCauseClientDisconnect,
+			want:   fwkrh.TerminationCauseClientDisconnect,
 		},
 		{
 			name:  "anything else is an error",
 			state: responseReceived,
-			want:  fwkrc.TerminationCauseError,
+			want:  fwkrh.TerminationCauseError,
 		},
 		{
 			name:  "skipped response processing never observes completion",
 			state: requestResponseProcessingSkipped,
-			want:  fwkrc.TerminationCauseError,
+			want:  fwkrh.TerminationCauseNotObserved,
+		},
+		{
+			name:   "skipped response processing with a cancelled context",
+			state:  requestResponseProcessingSkipped,
+			ctxErr: context.Canceled,
+			want:   fwkrh.TerminationCauseNotObserved,
 		},
 	}
 
@@ -171,22 +178,22 @@ func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 		name     string
 		status   string
 		useValue bool
-		want     fwkrc.TerminationCause
+		want     fwkrh.TerminationCause
 	}{
 		{
 			name:   "OK",
-			status: "0",
+			status: grpcframe.StatusOK,
 			want:   "",
 		},
 		{
 			name:   "internal error",
 			status: "13",
-			want:   fwkrc.TerminationCauseError,
+			want:   fwkrh.TerminationCauseError,
 		},
 		{
 			name:   "cancelled",
 			status: "1",
-			want:   fwkrc.TerminationCauseError,
+			want:   fwkrh.TerminationCauseError,
 		},
 		{
 			name: "missing grpc status",
@@ -196,7 +203,7 @@ func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 			name:     "internal error from value",
 			status:   "13",
 			useValue: true,
-			want:     fwkrc.TerminationCauseError,
+			want:     fwkrh.TerminationCauseError,
 		},
 	}
 
@@ -208,7 +215,7 @@ func TestTerminationCauseFromGRPCTrailers(t *testing.T) {
 
 			if tt.status != "" {
 				header := &corev3.HeaderValue{
-					Key: "grpc-status",
+					Key: grpcframe.HeaderStatus,
 				}
 				if tt.useValue {
 					header.Value = tt.status

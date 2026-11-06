@@ -48,6 +48,10 @@ const (
 	ErrorCodeUpstream5xx       = "upstream_5xx"
 	ErrorCodeUpstreamTransport = "upstream_transport"
 	ErrorCodeInternal          = "internal"
+	// ErrorCodePromptTokenMismatch is recorded on step_errors_total by the
+	// decode step when prompt_token_parity is "error" and the decode worker
+	// reported a prompt token count different from the rendered one.
+	ErrorCodePromptTokenMismatch = "prompt_token_mismatch"
 )
 
 // Upstream label values for the upstream_request_* metrics. Step names come
@@ -74,6 +78,24 @@ const (
 	ProbeResultDeferred       = "deferred"
 	ProbeResultError          = "error"
 	ProbeResultTransportError = "transport_error"
+)
+
+// Result label values for force_stream_total, one per candidate outcome. The
+// forced outcome is a reassembled reply; the fallback_* outcomes and error_ceiling
+// take the non-forced pass-through; error_upstream and error_transport are also
+// classified by step_errors_total. The metric's Help string is the canonical
+// description of what each value means.
+const (
+	ForceStreamResultForced              = "forced"
+	ForceStreamResultFallbackBudget      = "fallback_budget"
+	ForceStreamResultFallbackUnbounded   = "fallback_unbounded"
+	ForceStreamResultFallbackUnsupported = "fallback_unsupported"
+	ForceStreamResultFallbackLossyFrame  = "fallback_lossy_frame"
+	ForceStreamResultFallbackOversize    = "fallback_oversize"
+	ForceStreamResultFallbackUnreadable  = "fallback_unreadable"
+	ForceStreamResultErrorCeiling        = "error_ceiling"
+	ForceStreamResultErrorUpstream       = "error_upstream"
+	ForceStreamResultErrorTransport      = "error_transport"
 )
 
 // Route label values for orchestration_overhead_seconds. These name the
@@ -121,6 +143,10 @@ var (
 	mediaTypeLabel = []string{"media_type"}
 	resultLabel    = []string{"result"}
 	streamLabel    = []string{"stream"}
+	// parityLabels are model_name, the client's api type and whether the
+	// decode leg carried the rendered token IDs (so a mismatch means the
+	// worker ignored them) or rendered the prompt itself (renderer drift).
+	parityLabels = []string{"model_name", "api_type", "ids_forwarded"}
 )
 
 // withLabel returns a fresh slice of base followed by extra. It allocates a
@@ -159,11 +185,14 @@ func allCollectors() []resettableCollector {
 		upstreamRequestDuration,
 		executionPathTotal,
 		conditionalDecodeProbesTotal,
+		forceStreamBufferedBytes,
+		forceStreamTotal,
 		encodeSubrequests,
 		orchestrationOverhead,
 		mediaItems,
 		mediaDownloadDuration,
 		responseSize,
+		promptTokenMismatchTotal,
 	}
 }
 

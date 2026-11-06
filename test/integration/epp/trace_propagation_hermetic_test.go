@@ -25,9 +25,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
-	"github.com/llm-d/llm-d-router/test/integration"
+	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
 
 // TestTraceContextDownstreamPropagation verifies that EPP joins an upstream
@@ -51,9 +52,13 @@ func TestTraceContextDownstreamPropagation(t *testing.T) {
 		reqcommon.RequestIDHeaderKey: "trace-propagation-req",
 		metadata.ObjectiveKey:        modelMyModel,
 		metadata.ModelNameRewriteKey: modelMyModelTarget,
+		metadata.FlowFairnessIDKey:   "team-a",
 		"traceparent":                upstreamTraceparent,
+		// A client copy of the handoff must not reach the sidecar.
+		tracing.FairnessIDHandoffHeader:     "forged",
+		tracing.FairnessSourceHandoffHeader: tracing.AttributionSourceAgentIdentity,
 	}
-	requests := integration.ReqRaw(headers, string(body))
+	requests := fwkepp.ReqRaw(headers, string(body))
 
 	ctx := t.Context()
 	h := NewTestHarness(ctx, t, WithTracing(), WithStandardMode()).WithBaseResources()
@@ -63,7 +68,7 @@ func TestTraceContextDownstreamPropagation(t *testing.T) {
 		P(2, 10, 0.2),
 	}).WaitForSync(3, modelMyModel).WaitForReadyPodsMetric(3)
 
-	responses, err := integration.StreamedRequest(t, h.Client, requests, 2)
+	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)
 	require.NoError(t, err)
 	require.Len(t, responses, 2)
 
@@ -82,6 +87,13 @@ func TestTraceContextDownstreamPropagation(t *testing.T) {
 		"downstream traceparent must stay in the upstream trace")
 	require.NotContains(t, outboundTraceparent, upstreamSpanID,
 		"downstream traceparent must not reuse the upstream span id")
+
+	// The sampled trace hands the identity EPP resolved to the sidecar, replacing the client copy.
+	assert.Equal(t, "team-a", headerValue(setHeaders, tracing.FairnessIDHandoffHeader))
+	assert.Equal(t, tracing.AttributionSourceHeader, headerValue(setHeaders, tracing.FairnessSourceHandoffHeader))
+	removed := responses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetRemoveHeaders()
+	assert.NotContains(t, removed, tracing.FairnessIDHandoffHeader)
+	assert.NotContains(t, removed, tracing.FairnessSourceHandoffHeader)
 
 	_ = h.Client.CloseSend()
 	assert.Eventually(t, func() bool {

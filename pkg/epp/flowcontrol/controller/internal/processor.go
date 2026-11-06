@@ -30,6 +30,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
@@ -336,7 +337,8 @@ func (p *Processor) enqueue(item *FlowItem) {
 
 	// --- Capacity Check ---
 	// This check is safe because it is performed by the single-writer Run goroutine.
-	ok, stats, err := p.hasCapacity(key.Priority, req.ByteSize())
+	flowQueue := managedQ.FlowQueueAccessor()
+	ok, flowLimit, stats, err := p.hasCapacity(flowQueue, req.ByteSize())
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %v", key.Priority, err)
 		p.logger.Error(finalErr, "Rejecting request, capacity lookup failed", "flowKey", key, "requestID", req.ID())
@@ -357,12 +359,17 @@ func (p *Processor) enqueue(item *FlowItem) {
 			return
 		}
 		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
-			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
+			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(), "flowAtLimit", flowLimit,
+			"maxRequestsPerFlow", stats.MaxRequestsPerFlow, "maxBytesPerFlow", stats.MaxBytesPerFlow,
 			"bandLen", stats.Band.Len, "bandCapacityRequests", stats.Band.CapacityRequests,
 			"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
 			"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
 			"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
-		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, types.ErrQueueAtCapacity))
+		rejectErr := types.ErrQueueAtCapacity
+		if flowLimit {
+			rejectErr = fmt.Errorf("%w: %w", types.ErrQueueAtCapacity, types.ErrFlowAtCapacity)
+		}
+		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, rejectErr))
 		return
 	}
 
@@ -379,30 +386,48 @@ func (p *Processor) enqueue(item *FlowItem) {
 		"flowKey", key, "requestID", req.ID())
 }
 
-// hasCapacity checks if the global limits and the specific priority band have enough capacity.
+// hasCapacity checks the global, priority-band, and per-flow queue limits.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
+// flowLimit reports that the flow's own per-flow limit is the only limit refusing the item.
 // A non-nil error means the capacity could not be read (the priority band is not configured), not that capacity is
 // exhausted.
-func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contracts.CapacitySnapshot, error) {
-	snapshot, err := p.registry.CapacitySnapshot(priority)
+func (p *Processor) hasCapacity(flowQueue flowcontrol.FlowQueueAccessor, itemByteSize uint64) (ok, flowLimit bool, snapshot contracts.CapacitySnapshot, err error) {
+	snapshot, err = p.registry.CapacitySnapshot(flowQueue.FlowKey().Priority)
 	if err != nil {
-		return false, snapshot, err
+		return false, false, snapshot, err
 	}
 	global, band := snapshot.Global, snapshot.Band
 	if global.CapacityBytes > 0 && global.ByteSize+itemByteSize > global.CapacityBytes {
-		return false, snapshot, nil
+		return false, false, snapshot, nil
 	}
 	if global.CapacityRequests > 0 && global.Len+1 > global.CapacityRequests {
-		return false, snapshot, nil
+		return false, false, snapshot, nil
 	}
 	if band.CapacityBytes > 0 && band.ByteSize+itemByteSize > band.CapacityBytes {
-		return false, snapshot, nil
+		return false, false, snapshot, nil
 	}
 	if band.CapacityRequests > 0 && band.Len+1 > band.CapacityRequests {
-		return false, snapshot, nil
+		return false, false, snapshot, nil
 	}
-	return true, snapshot, nil
+	// Read the flow's occupancy once: only Run adds items, but the cleanup sweep can remove finalized ones concurrently,
+	// and the reported reason must match this decision.
+	flowLimit = flowAtLimit(snapshot, flowQueue, itemByteSize)
+	return !flowLimit, flowLimit, snapshot, nil
+}
+
+// flowAtLimit reports whether admitting an item of itemByteSize would exceed the flow's own per-flow request or byte
+// limit.
+func flowAtLimit(snapshot contracts.CapacitySnapshot, flowQueue flowcontrol.FlowQueueAccessor, itemByteSize uint64) bool {
+	if snapshot.MaxRequestsPerFlow > 0 && clamp.Uint64(flowQueue.Len()) >= snapshot.MaxRequestsPerFlow {
+		return true
+	}
+	if limit := snapshot.MaxBytesPerFlow; limit > 0 {
+		used := flowQueue.ByteSize()
+		// Subtract from the limit to avoid overflowing on an oversized request.
+		return used > limit || itemByteSize > limit-used
+	}
+	return false
 }
 
 // recordCapacityUtilization emits occupancy/effective-capacity ratio gauges per priority band (aggregated over every

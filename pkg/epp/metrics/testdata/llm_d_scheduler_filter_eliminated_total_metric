@@ -1,0 +1,4 @@
+# HELP llm_d_epp_scheduler_filter_eliminated_total [ALPHA] Total number of candidate endpoints removed by scheduling filters, by scheduler profile, plugin type and plugin name.
+# TYPE llm_d_epp_scheduler_filter_eliminated_total counter
+llm_d_epp_scheduler_filter_eliminated_total{plugin_name="f1",plugin_type="test-filter",profile="decode"} 5
+llm_d_epp_scheduler_filter_eliminated_total{plugin_name="f1",plugin_type="test-filter",profile="prefill"} 1

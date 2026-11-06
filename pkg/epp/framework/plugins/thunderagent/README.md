@@ -85,7 +85,7 @@ both in one profile.
 
 ## Configuration
 
-See `deploy/config/thunderagent-config.yaml` for the full pipeline. All
+See `test/e2e/artifacts/config/thunderagent-config.yaml` for the full pipeline. All
 parameters:
 
 | Field | Default | Description |

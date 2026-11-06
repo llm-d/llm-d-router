@@ -27,6 +27,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -120,23 +121,100 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, d
 	}()
 	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().GetIPAddress())
 
+	statuses := make([]pollStatusRecorder, len(dispatchers))
+	for i, disp := range dispatchers {
+		statuses[i].key = fwkdl.PollStatusDataKey(disp.TypedName().Name)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.Channel():
-			for _, disp := range dispatchers {
+			for i, disp := range dispatchers {
 				if ctx.Err() != nil {
 					return
 				}
+				// Only polls that run are recorded, so a source with a longer
+				// interval does not report a success on the ticks it skips.
+				if interval, ok := disp.(*intervalDispatcher); ok {
+					if !interval.due() {
+						continue
+					}
+					// due has advanced the countdown for this tick, and the
+					// wrapper's Dispatch would advance it again.
+					disp = interval.PollingDispatcher
+				}
 				dispCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
-				if err := disp.Dispatch(dispCtx, ep); err != nil {
+				err := disp.Dispatch(dispCtx, ep)
+				cancel()
+				// A poll cut short by Stop says nothing about the endpoint.
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
 					tn := disp.TypedName()
 					metrics.RecordDataLayerPollError(tn.Type)
 					logger.V(logging.DEBUG).Info("dispatch failed", "source", tn, "err", err)
 				}
-				cancel()
+				statuses[i].record(ep, err, time.Now())
 			}
 		}
 	}
 }
+
+// pollStatusRecorder tracks one source's failure run for one endpoint and
+// writes it to the endpoint as a PollStatus attribute. It writes only when the
+// status changes, so a source that keeps succeeding costs nothing.
+type pollStatusRecorder struct {
+	key    fwkplugin.DataKey
+	status fwkdl.PollStatus
+}
+
+func (r *pollStatusRecorder) record(ep fwkdl.Endpoint, err error, now time.Time) {
+	if err == nil {
+		if r.status.ConsecutiveFailures == 0 {
+			return
+		}
+		r.status = fwkdl.PollStatus{}
+	} else {
+		if r.status.ConsecutiveFailures == 0 {
+			r.status.FailingSince = now
+		}
+		r.status.ConsecutiveFailures++
+	}
+	// AttributeMap does not require Put to clone, so pass a copy the next
+	// record cannot modify.
+	status := r.status
+	ep.GetAttributes().Put(r.key, &status)
+}
+
+const pollStatusProducerName = "datalayer-poll-status"
+
+// pollStatusProducer declares the PollStatus the collector records for each
+// polling source in the data layer configuration.
+type pollStatusProducer struct {
+	keys map[fwkplugin.DataKey]any
+}
+
+// NewPollStatusProducer returns a plugin that declares the PollStatus of each
+// polling source in cfg. Added to the plugin handle before data dependencies
+// are validated, it makes a consumer of a source's PollStatus fail startup
+// unless the runtime polls that source.
+func NewPollStatusProducer(cfg *Config) fwkplugin.ProducerPlugin {
+	keys := map[fwkplugin.DataKey]any{}
+	if cfg != nil {
+		for _, src := range cfg.Sources {
+			if _, ok := src.Plugin.(fwkdl.PollingDispatcher); ok {
+				keys[fwkdl.PollStatusDataKey(src.Plugin.TypedName().Name)] = &fwkdl.PollStatus{}
+			}
+		}
+	}
+	return &pollStatusProducer{keys: keys}
+}
+
+func (p *pollStatusProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: pollStatusProducerName, Name: pollStatusProducerName}
+}
+
+func (p *pollStatusProducer) Produces() map[fwkplugin.DataKey]any { return p.keys }

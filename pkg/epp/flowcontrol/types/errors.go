@@ -47,6 +47,9 @@ var (
 	// ErrQueueAtCapacity indicates that a request could not be enqueued because queue capacity limits were met.
 	ErrQueueAtCapacity = errors.New("queue at capacity")
 
+	// ErrFlowAtCapacity indicates that only the flow's own maxRequestsPerFlow or maxBytesPerFlow limit blocked admission.
+	ErrFlowAtCapacity = errors.New("per-flow limit reached")
+
 	// ErrNoEndpoints indicates that a request was rejected at the queue-capacity boundary while the candidate pool had no
 	// endpoints. The queue acts as a scale-from-zero waiting room; when it fills with no backends to drain it, the
 	// rejection reflects genuine unavailability rather than backpressure against a contended pool.

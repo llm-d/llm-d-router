@@ -20,6 +20,7 @@ Fairness policies must often maintain state (e.g., Round Robin cursors) for each
 
 *   **[Round Robin](./roundrobin/README.md)** (`round-robin-fairness-policy`): Cycles through active flows one by one to guarantee no single flow can starve others.
 *   **[Global Strict](./globalstrict/README.md)** (`global-strict-fairness-policy`): A greedy strategy that ignores flow boundaries and picks the absolute "best" request globally.
+*   **[Weighted Fair Share](./weightedfairshare/README.md)** (`weighted-fair-share-fairness-policy`): Serves the flow with the smallest virtual service (completed cost divided by a share weight declared per fairness ID in the policy's configuration), so shares of cost converge on the ratio of those weights. A flow returning from idle rejoins at the band's virtual service without credit for the gap. The unit of service is a configurable cost function over prompt and completion tokens, so it can share total work, generation throughput, or request counts.
 
 ## Conformance Testing
 

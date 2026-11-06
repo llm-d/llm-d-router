@@ -59,17 +59,19 @@ The `step` and `upstream` labels carry the same values, but measure different bo
 
 ## Error classes
 
-The `error_code` label on `request_error_total` and `step_errors_total` uses five values:
+The `error_code` label on `request_error_total` and `step_errors_total` uses six values:
 
 - **`bad_request`**: Client-side errors (e.g., malformed body).
 - **`upstream_4xx`**: 4xx errors from upstream (e.g., render, prefill, encode).
 - **`upstream_5xx`**: 5xx errors from upstream.
 - **`upstream_transport`**: The round trip failed before a response arrived (connection refused, timeout, TCP reset), so no status code was received.
 - **`internal`**: All other coordinator-internal faults. Not used for reachability failures, which are `upstream_transport`.
+- **`prompt_token_mismatch`**: Recorded on `step_errors_total` only, by the decode and conditional-decode steps with `prompt_token_parity: error`, when the worker's prompt token count differed from the rendered one. The request itself succeeds; see `prompt_token_mismatch_total`.
 
 **Key behaviors:**
 - The conditional-decode probe's HTTP 412 (the worker declined to serve it) is handled internally and is **not** an error. It is tracked separately by [`conditional_decode_probes_total`](#conditional_decode_probes_total-counter).
-- An error response that a pipeline step writes to the client itself counts in `request_error_total` and `step_errors_total`. The `async-broker` step does this for its validation 400s (`bad_request`), a failed enqueue (503, `upstream_transport`), the hold deadline (504, `upstream_5xx`), and every error status it relays from a stored result (`upstream_4xx` / `upstream_5xx` by band, including the 499 it writes for a cancelled result). A client that disconnects while the coordinator still holds the request is not counted, on either the enqueue or the hold path.
+- A client disconnect is not counted in `request_error_total` or `step_errors_total`. A step error that does not derive from the disconnect, such as an upstream status received before the client left, keeps its own `error_code`.
+- An error response that a pipeline step writes to the client itself counts in `request_error_total` and `step_errors_total`. The `async-broker` step does this for its validation 400s (`bad_request`), a failed enqueue (503, `upstream_transport`), the hold deadline (504, `upstream_5xx`), and every error status it relays from a stored result (`upstream_4xx` / `upstream_5xx` by band, including the 499 it writes for a cancelled result).
 - `upstream_4xx`, `upstream_5xx` and `upstream_transport` are recorded for every step that calls out, including `decode` and `conditional-decode`: their reverse proxy captures the upstream status in `ModifyResponse` and transport failures in `ErrorHandler`, and both steps translate a 4xx/5xx or transport error into an `UpstreamStreamedError` before any bytes are forwarded. A transport failure carries no status code, so it classifies as `upstream_transport` instead of by status band. What stays uncountable is a failure that surfaces after streaming has begun, since the 200 and a partial body are already on the wire.
 
 ## Metrics catalog
@@ -102,7 +104,7 @@ Recorded by the pipeline executor, which brackets every step it runs. This famil
 
 | Name | Type | Notes |
 |---|---|---|
-| `step_duration_seconds` | Histogram | Per-step latency; `GeneralLatencyBuckets` (5 ms to 1 h). |
+| `step_duration_seconds` | Histogram | Per-step latency; `GeneralLatencyBuckets` (5 ms to 1 h). Carries a trace exemplar; see [Exemplars](metrics.md#exemplars). |
 | `step_errors_total` | Counter | Step failures; adds label `error_code`. |
 | `step_running` | Gauge | Requests currently executing the step. Saturation rather than latency: `decode` stays in flight for the whole stream, so its value is the number of active streams. |
 
@@ -129,7 +131,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 
 #### `execution_path_total` (Counter)
 *   **Labels:** `model_name`, `path` (`decode-only`, `prefill-decode`, `encode-prefill-decode`)
-*   **Description:** Records which set of disaggregation phases actually ran for a client request. `encode-decode` is intentionally unreachable because encode implies prefill in the coordinator.
+*   **Description:** Records which set of disaggregation phases actually ran for a client request. `encode-decode` is intentionally unreachable because encode implies prefill in the coordinator. A conditional-decode probe counts as the decode phase unless the worker answers 412 or the client abandons the probe before the worker answers; in those cases a path is recorded only once the decode step starts.
 
 #### `conditional_decode_probes_total` (Counter)
 *   **Labels:** `result` (`served`, `deferred`, `error`, or `transport_error`)
@@ -138,7 +140,25 @@ Recorded by every step that calls out: render to the renderer service, replace-m
     *   `deferred`: The worker returned HTTP 412. The pipeline continues to encode/prefill/decode.
     *   `error`: Any other 4xx/5xx status. The step returns an `UpstreamStreamedError` carrying that status, and the request is classified as `upstream_4xx` or `upstream_5xx`.
     *   `transport_error`: No response arrived (connection refused, timeout, TCP reset). The step returns an `UpstreamStreamedError` with no status code, and the request is classified as `upstream_transport`.
+*   A probe the client abandons before the worker answers records no result.
 *   **Note:** Not redundant with `execution_path_total` since a deferred probe does not indicate whether the subsequent path was `prefill-decode` or `encode-prefill-decode`.
+
+#### `prompt_token_mismatch_total` (Counter)
+*   **Labels:** `model_name`, `api_type` (`chat_completions`, `completions`, `responses`, `messages`, `vllm_generate`; the values of `APIType.String()` for the routes the coordinator serves), `ids_forwarded` (`true` when the leg's body carried the rendered token IDs: the generate route, completions with the IDs as the prompt, or `kv_transfer_params.prompt_token_ids` on the chat-shaped routes; `false` when it forwarded the client's text)
+*   **Description:** Decode responses whose `usage` prompt token count (`prompt_tokens`; `input_tokens` on Responses; on Messages `input_tokens` plus `cache_read_input_tokens` and `cache_creation_input_tokens`, since vLLM reports the cached part separately there) differed from the number of token IDs the render step produced. With `ids_forwarded=true` the worker ignored the IDs; with `false` the render service and the worker rendered the prompt differently. Either way the worker computed a prompt other than the rendered one, so a prefilled KV cache did not match it. Recorded by the decode step, and by conditional-decode on a served cache hit, when the step's `prompt_token_parity` parameter is `warn` (default) or `error`; `error` also records `step_errors_total{error_code="prompt_token_mismatch"}` under the step's own `step` label. The check needs a `render` step ahead of it: without rendered token IDs there is nothing to compare and the parameter does nothing. For a rate, divide by `upstream_request_total{upstream="decode"}` plus `conditional_decode_probes_total{result="served"}`: a served hit is counted under `upstream="conditional-decode"`, together with the deferred probes, so `upstream="decode"` alone undercounts the checked responses.
+
+### Force-stream
+
+Recorded by the decode step when its `force_stream` parameter is on, which sends a non-streaming client request upstream with streaming enabled and reassembles the streamed reply into one non-streaming response.
+
+#### `force_stream_total` (Counter)
+*   **Labels:** `model_name`, `result`
+*   **Description:** Counts force-stream candidates, the non-streaming requests on a route the decode step can reassemble, by outcome. The metric's Help string defines each `result` value. `forced` is a reassembled reply. The `fallback_*` values and `error_ceiling` take the non-forced pass-through. `error_upstream` (an upstream 4xx/5xx, or an error frame streamed after the 200) and `error_transport` fail the request and are also counted by `step_errors_total`.
+*   When the forced attempt already consumed a one-shot KV block handoff (`kv-nixl`, `kv-offloading`), the fallback pass-through drops the handoff and the decode worker recomputes the prompt. The request is slower but still served, and is counted under its fallback outcome.
+
+#### `force_stream_buffered_bytes` (Gauge)
+*   **Labels:** None
+*   **Description:** Bytes currently reserved against the shared `force_stream_buffer_size` budget by in-flight forced requests. A request reserves for its generated reply and, on the Responses API, also its own body size, since the reply echoes the request fields. It returns to 0 when no forced request is in flight. It counts wire bytes, not process memory.
 
 ## Relationship to EPP metrics
 
@@ -146,7 +166,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 |---|---|---|
 | Request family (`llm_d_coordinator_request_total`, etc.) | `llm_d_epp_*` (same names) | Coordinator counts single client requests at entry; EPP counts every sub-request reaching the gateway. EPP adds flow-control labels (`fairness_id`, `priority`). |
 | `llm_d_coordinator_execution_path_total` | `llm_d_epp_disagg_decision_total` | Coordinator observes the phases that actually ran on the client request; EPP records the routing decision that was made and adds plugin labels. The coordinator's `path` and the EPP's `decision_type` take the same values. |
-| `llm_d_coordinator_step_*`, `llm_d_coordinator_upstream_request_*`, `llm_d_coordinator_conditional_decode_probes_total` | None | Unique to coordinator. |
+| `llm_d_coordinator_step_*`, `llm_d_coordinator_upstream_request_*`, `llm_d_coordinator_conditional_decode_probes_total`, `llm_d_coordinator_force_stream_*` | None | Unique to coordinator. |
 
 **EPP-only metrics:** Scheduling, flow control, and pool aggregates have no coordinator counterpart. EPP's token counts and TTFT do, but they are per request: the same prompt reaches EPP on more than one request, and decode-request TTFT starts after render, encode, and prefill have finished, so neither describes a client request. Only the coordinator sees a client request as one request. See [Deliberate omissions](#deliberate-omissions) for what it could report and why it does not today.
 
@@ -154,7 +174,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 
 ### Output and cached token counts
 
-The coordinator emits no output or cached token-count metrics. Those values live in the vLLM `usage` block, and reading them means parsing the streamed SSE response. The decode step parses the usage frame only on a disaggregated request, and only to rewrite the cached-token count, in the schema the route documents, to the prefill worker's; every other frame is proxied straight to the client and no count is extracted. Input tokens are recorded (see [`request_input_tokens`](#request-family)): the renderer returns the token IDs, so the count is in hand after render, with no response parsing and no dependency on EPP.
+The coordinator emits no output or cached token-count metrics. Those values live in the vLLM `usage` block, and reading them means parsing the streamed SSE response. The decode step parses the usage frame only on a disaggregated request, and only to rewrite the cached-token count, in the schema the route documents, to the prefill worker's; every other frame is proxied straight to the client and no count is extracted. A force-streamed request is parsed whole to reassemble it, but its usage block is passed to the client without recording a count. Input tokens are recorded (see [`request_input_tokens`](#request-family)): the renderer returns the token IDs, so the count is in hand after render, with no response parsing and no dependency on EPP.
 
 ### Time to first token
 
@@ -175,8 +195,8 @@ Neither the coordinator nor EPP tracks per-request image count or size. Image co
 
 ## Cardinality
 
-`model_name` labels every request-family metric and `execution_path_total`, which together are
-every metric that carries it. The handler takes the value straight from the request body without
+`model_name` labels every request-family metric, `execution_path_total`, and `force_stream_total`,
+which together are every metric that carries it. The handler takes the value straight from the request body without
 validation. Each distinct value creates its own set of series, and a histogram multiplies that by
 its bucket count, so a client looping over invented model names grows the coordinator's memory
 without bound. This is reachable by any client, and it is a mitigation the implementation has to
