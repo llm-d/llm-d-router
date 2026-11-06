@@ -1412,7 +1412,13 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	g.Add("metrics", func(ctx context.Context) error {
 		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.PluginHandle)
 	})
-	return g.Run(ctx)
+	// A canceled context is the normal shutdown. Any other error ends the
+	// process with exit status 1, and no other line names it.
+	err = g.Run(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		setupLog.Error(err, "EPP stopped")
+	}
+	return err
 }
 
 // metricsShutdownTimeout bounds graceful shutdown of the metrics server so a
