@@ -432,9 +432,10 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 			Input        *string `json:"input"`
 			Instructions string  `json:"instructions,omitempty"`
 			RefText      string  `json:"ref_text,omitempty"`
+			CacheSalt    string  `json:"cache_salt,omitempty"`
 		}
 		if err := json.Unmarshal(rawBody, &speechRequest); err != nil {
-			return nil, requestBodyDecodeError(err, errors.New("invalid text to speech request: input, instructions, and ref_text must be strings"))
+			return nil, requestBodyDecodeError(err, errors.New("invalid text to speech request: input, instructions, ref_text, and cache_salt must be strings"))
 		}
 		if speechRequest.Input == nil {
 			return nil, errors.New("invalid text to speech request: must have string input field")
@@ -444,6 +445,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 				Input:        *speechRequest.Input,
 				Instructions: speechRequest.Instructions,
 				RefText:      speechRequest.RefText,
+				CacheSalt:    speechRequest.CacheSalt,
 			},
 		}, nil
 
