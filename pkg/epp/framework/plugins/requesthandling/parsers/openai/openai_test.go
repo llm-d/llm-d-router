@@ -2885,7 +2885,7 @@ func TestOpenAIParser_ParseRequestTranscriptionsFileOnly(t *testing.T) {
 // A file part larger than the head bound retains only its leading bytes, while
 // the size and hash cover the full stream.
 func TestOpenAIParser_ParseRequestTranscriptionsHeadBound(t *testing.T) {
-	content := strings.Repeat("a", uploadedFileHeadBytes+4096)
+	content := strings.Repeat("a", request.UploadedMediaHeadBytes+4096)
 	body, ct := buildVideoForm(t,
 		videoFormPart{name: "file", value: content, filename: "a.wav", mediaType: "audio/wav"})
 	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
@@ -2897,11 +2897,46 @@ func TestOpenAIParser_ParseRequestTranscriptionsHeadBound(t *testing.T) {
 	if audio.SizeBytes != int64(len(content)) {
 		t.Errorf("SizeBytes = %d, want %d", audio.SizeBytes, len(content))
 	}
-	if len(audio.Head) != uploadedFileHeadBytes {
-		t.Errorf("len(Head) = %d, want %d", len(audio.Head), uploadedFileHeadBytes)
+	if len(audio.Head) != request.UploadedMediaHeadBytes {
+		t.Errorf("len(Head) = %d, want %d", len(audio.Head), request.UploadedMediaHeadBytes)
 	}
 	if audio.Hash != xxhash.Sum64String(content) {
 		t.Error("Hash does not cover the full file part")
+	}
+}
+
+// response_format selects the reply's shape; only the JSON formats carry a
+// body whose usage response processing can read, so the plain-text formats
+// skip it instead of logging a parse error per response.
+func TestOpenAIParser_ParseRequestTranscriptionsResponseFormat(t *testing.T) {
+	for _, tc := range []struct {
+		format string
+		skip   bool
+	}{
+		{format: "", skip: false},
+		{format: "json", skip: false},
+		{format: "verbose_json", skip: false},
+		{format: "diarized_json", skip: false},
+		{format: "text", skip: true},
+		{format: "srt", skip: true},
+		{format: "vtt", skip: true},
+	} {
+		parts := []videoFormPart{
+			{name: "file", value: "audio", filename: "a.wav", mediaType: "audio/wav"},
+			{name: "model", value: "whisper-large-v3"},
+		}
+		if tc.format != "" {
+			parts = append(parts, videoFormPart{name: "response_format", value: tc.format})
+		}
+		body, ct := buildVideoForm(t, parts...)
+		result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+			map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.SkipResponseProcessing != tc.skip {
+			t.Errorf("response_format %q: SkipResponseProcessing = %v, want %v", tc.format, result.SkipResponseProcessing, tc.skip)
+		}
 	}
 }
 

@@ -553,10 +553,6 @@ func parseMultipartFields(body []byte, headers map[string]string, kind string, v
 	return parseMultipartForm(body, headers, kind, visit, nil)
 }
 
-// uploadedFileHeadBytes bounds how much of a file part is retained. It covers
-// the WAV chunk walk the tokenizer's estimator performs.
-const uploadedFileHeadBytes = 1024
-
 // parseMultipartForm walks a multipart/form-data body, handing scalar fields to
 // visit and file parts to visitFile. A nil visitFile discards file parts.
 func parseMultipartForm(body []byte, headers map[string]string, kind string, visit func(string, []byte) error, visitFile func(string, request.UploadedMedia) error) error {
@@ -611,7 +607,7 @@ func parseMultipartForm(body []byte, headers map[string]string, kind string, vis
 func readUploadedMedia(part *multipart.Part) (request.UploadedMedia, error) {
 	media := request.UploadedMedia{ContentType: part.Header.Get(reqcommon.HeaderContentType)}
 	digest := xxhash.New()
-	head := make([]byte, 0, uploadedFileHeadBytes)
+	head := make([]byte, 0, request.UploadedMediaHeadBytes)
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := part.Read(buf)
@@ -620,8 +616,8 @@ func readUploadedMedia(part *multipart.Part) (request.UploadedMedia, error) {
 			if _, err := digest.Write(buf[:n]); err != nil {
 				return request.UploadedMedia{}, err
 			}
-			if len(head) < uploadedFileHeadBytes {
-				head = append(head, buf[:min(n, uploadedFileHeadBytes-len(head))]...)
+			if len(head) < request.UploadedMediaHeadBytes {
+				head = append(head, buf[:min(n, request.UploadedMediaHeadBytes-len(head))]...)
 			}
 		}
 		if errors.Is(err, io.EOF) {
@@ -755,12 +751,15 @@ func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]
 		Transcriptions: transcriptions,
 		Payload:        request.RawPayload(body),
 	}
+	var responseFormat string
 	err := parseMultipartForm(body, headers, apiType, func(name string, value []byte) error {
 		switch name {
 		case reqcommon.FieldModel:
 			extractedBody.Model = string(value)
 		case "prompt":
 			transcriptions.Prompt = string(value)
+		case "response_format":
+			responseFormat = string(value)
 		case "stream":
 			stream, err := strconv.ParseBool(string(value))
 			if err != nil {
@@ -778,7 +777,16 @@ func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+	// response_format selects the reply's shape. json, verbose_json and
+	// diarized_json carry a JSON body whose usage ParseResponse can read;
+	// text, srt and vtt are plain text, where usage extraction would only
+	// log a parse error per response.
+	skipResponseProcessing := true
+	switch responseFormat {
+	case "", "json", "verbose_json", "diarized_json":
+		skipResponseProcessing = false
+	}
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: skipResponseProcessing}, nil
 }
 
 func requestBodyDecodeError(err, validationErr error) error {

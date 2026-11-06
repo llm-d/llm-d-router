@@ -740,8 +740,7 @@ type TranscriptionRequest struct {
 
 // UploadedMedia describes one uploaded multipart file part without retaining
 // its body: Hash covers the full stream, SizeBytes its length, and Head its
-// leading bytes for container sniffing. The retention bound for Head is the
-// one the tokenizer's WAV chunk walk reads.
+// leading bytes for container sniffing.
 type UploadedMedia struct {
 	// ContentType is the file part's declared MIME type.
 	ContentType string `json:"-"`
@@ -752,6 +751,11 @@ type UploadedMedia struct {
 	// Hash is the xxhash of the file part's full byte stream.
 	Hash uint64 `json:"-"`
 }
+
+// UploadedMediaHeadBytes bounds how many leading bytes of a media payload are
+// retained for container sniffing: the parser captures this many bytes of an
+// uploaded file part, and the estimator's WAV chunk walk reads within it.
+const UploadedMediaHeadBytes = 1024
 
 // GenerateRequest holds pre-tokenized input for native generate endpoints
 // (vLLM /inference/v1/generate and SGLang /generate). Unlike OpenAI-compatible
