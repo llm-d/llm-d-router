@@ -17,10 +17,13 @@ limitations under the License.
 package tokenizer
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"image"
+	"image/png"
 	"strconv"
 	"strings"
 	"testing"
@@ -114,6 +117,74 @@ func TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt(t *testing.T)
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
+}
+
+// pngBytes encodes a width x height PNG so a captured image head carries a
+// decodable dimension header.
+func pngBytes(t *testing.T, width, height int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
+}
+
+// imageTokens is the expected placeholder count for pixel dimensions under the
+// built-in defaults, spelled out so each case states its own resolution.
+func imageTokens(w, h int) int {
+	n := (w * h) / imageTokenFactor
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// TestImagesEstimator_CapturedImageDimensionTokens asserts an edits request's
+// uploaded image is estimated from its decoded dimensions: a 128x64 PNG yields
+// 128*64/factor placeholder tokens, reported as an image feature behind the
+// conditioning text and counted in the request's tokens.
+func TestImagesEstimator_CapturedImageDimensionTokens(t *testing.T) {
+	png := pngBytes(t, 128, 64)
+	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: int64(len(png)), Head: png, Hash: xxhash.Sum64(png)}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, reqcommon.ModalityImage, features[0].Modality)
+	assert.Equal(t, imageTokens(128, 64), features[0].Length)
+	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
+	assert.Equal(t, len(packBytes([]byte("add a hat"))), features[0].Offset)
+	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
+}
+
+// TestImagesEstimator_UndecodableHeadUsesDefaultResolution asserts an image
+// head that carries no readable dimension header falls back to the default
+// resolution, so the request still carries image weight.
+func TestImagesEstimator_UndecodableHeadUsesDefaultResolution(t *testing.T) {
+	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: 4096, Head: []byte("not an image header")}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+	})
+	require.NoError(t, err)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, imageTokens(defaultImageWidth, defaultImageHeight), features[0].Length)
+}
+
+// TestImagesEstimator_GenerationsCarriesNoFeature asserts a request without an
+// uploaded image (images-generations shares the typed body) estimates the text
+// alone and reports no features.
+func TestImagesEstimator_GenerationsCarriesNoFeature(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "a cat wearing a hat"},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Empty(t, tp.Prompts[0].MultiModalFeatures)
 	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
 }
 
