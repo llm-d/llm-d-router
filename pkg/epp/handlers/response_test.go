@@ -977,6 +977,32 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 			},
 			wantUsage: fwkrequest.Usage{}, // Zero values
 		},
+		{
+			name: "Inclusive prompt_tokens with cached_tokens only on second usage chunk",
+			chunks: []chunkStream{
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101,"prompt_tokens_details":null}}` + "\n"), endOfStream: false},
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":64}}}` + "\n" + `data: [DONE]`), endOfStream: true},
+			},
+			wantUsage: fwkrequest.Usage{
+				PromptTokens:       100,
+				CompletionTokens:   10,
+				TotalTokens:        110,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 64},
+			},
+		},
+		{
+			name: "Inclusive prompt_tokens with cached_tokens only on first usage chunk",
+			chunks: []chunkStream{
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101,"prompt_tokens_details":{"cached_tokens":64}}}` + "\n"), endOfStream: false},
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":0}}}` + "\n" + `data: [DONE]`), endOfStream: true},
+			},
+			wantUsage: fwkrequest.Usage{
+				PromptTokens:       100,
+				CompletionTokens:   10,
+				TotalTokens:        110,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 64},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1003,10 +1029,10 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	}
 }
 
-// A cache read reported by message_start must survive a later message_delta
-// that serializes a placeholder zero. Each chunk is parsed into a fresh Usage,
-// so this depends on mergeUsage applying the same "a zero never replaces a
-// known count" rule as the parser does within one Usage.
+// Cache read and cache creation counts reported by message_start must survive
+// a later message_delta delivered in a separate HTTP body chunk. The request
+// response session retains the three Anthropic input buckets across chunks so
+// PromptTokens, TotalTokens, and CachedTokens reflect the combined usage.
 func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
 	t.Parallel()
 
@@ -1030,11 +1056,22 @@ func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
 		{
 			name:         "delta omitting cache fields keeps cache read and creation in prompt and total tokens",
 			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
-			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15}}`,
 			want: fwkrequest.Usage{
 				PromptTokens:       2130,
 				CompletionTokens:   15,
 				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "delta increasing input tokens below start plus cache creation",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":80,"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2180,
+				CompletionTokens:   15,
+				TotalTokens:        2195,
 				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
 			},
 		},
@@ -1047,6 +1084,28 @@ func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
 				CompletionTokens:   510,
 				TotalTokens:        11992,
 				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 800},
+			},
+		},
+		{
+			name:         "delta superseding input tokens with cache creation",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":2679,"cache_read_input_tokens":800,"cache_creation_input_tokens":500}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":10682,"output_tokens":510,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       11982,
+				CompletionTokens:   510,
+				TotalTokens:        12492,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 800},
+			},
+		},
+		{
+			name:         "delta with output tokens only",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2130,
+				CompletionTokens:   15,
+				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
 			},
 		},
 	}

@@ -42,8 +42,9 @@ const (
 
 // compile-time type validation
 var (
-	_ fwkrh.Parser            = &AnthropicParser{}
-	_ fwkrh.ModelNameRewriter = &AnthropicParser{}
+	_ fwkrh.Parser                 = &AnthropicParser{}
+	_ fwkrh.ModelNameRewriter      = &AnthropicParser{}
+	_ fwkrh.StatefulResponseParser = &AnthropicParser{}
 )
 
 type AnthropicParser struct {
@@ -140,7 +141,22 @@ func (p *AnthropicParser) RewriteModelName(payload request.MarshalablePayload, m
 	return m, nil
 }
 
-func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {
+// NewResponseSession returns a per-request response parser that accumulates the
+// three Messages API input token buckets across streamed chunks.
+func (p *AnthropicParser) NewResponseSession() fwkrh.ResponseSession {
+	return &responseSession{}
+}
+
+func (p *AnthropicParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endOfStream bool) (*fwkrh.ParsedResponse, error) {
+	var s responseSession
+	return s.ParseResponse(ctx, body, headers, endOfStream)
+}
+
+type responseSession struct {
+	tokens inputTokens
+}
+
+func (s *responseSession) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {
 	if len(body) == 0 {
 		return nil, nil //nolint:nilnil
 	}
@@ -153,7 +169,7 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 		}
 	}
 	if isStream {
-		return p.parseStreamResponse(body)
+		return s.parseStreamResponse(body)
 	}
 
 	usage, err := extractUsage(body)
@@ -189,7 +205,7 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 // written to the prompt cache, so the prompt the server processed is
 // input_tokens + cache_read_input_tokens + cache_creation_input_tokens.
 //
-// Each bucket is updated only by a non-zero value so a later frame that omits
+// Each bucket is updated only by a positive value so a later frame that omits
 // or zeroes a bucket keeps the count an earlier frame reported.
 type inputTokens struct {
 	input         int
@@ -199,26 +215,24 @@ type inputTokens struct {
 }
 
 func (t *inputTokens) add(usg map[string]any) {
-	if input := jsonInt(usg, reqcommon.FieldInputTokens); input != 0 {
+	if input := jsonInt(usg, reqcommon.FieldInputTokens); input > 0 {
 		t.input = input
 	}
 	if read, ok := jsonIntPresent(usg, reqcommon.FieldCacheReadInputTokens); ok {
 		t.hasRead = true
-		if read != 0 {
+		if read > 0 {
 			t.cacheRead = read
 		}
 	}
-	if creation := jsonInt(usg, reqcommon.FieldCacheCreationInputTokens); creation != 0 {
+	if creation := jsonInt(usg, reqcommon.FieldCacheCreationInputTokens); creation > 0 {
 		t.cacheCreation = creation
 	}
 }
 
 func (t inputTokens) apply(usage *request.Usage) {
-	total := t.input + t.cacheRead + t.cacheCreation
-	if total == 0 {
-		return
+	if total := t.input + t.cacheRead + t.cacheCreation; total > 0 {
+		usage.PromptTokens = total
 	}
-	usage.PromptTokens = total
 	// An explicit zero is a cache miss, not a missing count: the metrics layer
 	// only records request_cached_tokens when PromptTokenDetails is set, so
 	// dropping the zero leaves the misses out of the histogram and inflates the
@@ -251,7 +265,12 @@ func jsonIntPresent(m map[string]any, key string) (int, bool) {
 //	event: message_stop
 //	data: {"type":"message_stop"}
 func (p *AnthropicParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
-	usage := extractUsageStreaming(chunk)
+	var s responseSession
+	return s.parseStreamResponse(chunk)
+}
+
+func (s *responseSession) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
+	usage := s.extractUsageStreaming(chunk)
 	return &fwkrh.ParsedResponse{
 		Usage:          usage,
 		StreamedEvents: countStreamEvents(chunk),
@@ -268,9 +287,8 @@ func countStreamEvents(chunk []byte) int {
 	return count
 }
 
-func extractUsageStreaming(responseBytes []byte) *request.Usage {
+func (s *responseSession) extractUsageStreaming(responseBytes []byte) *request.Usage {
 	var result *request.Usage
-	var tokens inputTokens
 
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
@@ -297,21 +315,21 @@ func extractUsageStreaming(responseBytes []byte) *request.Usage {
 				if result == nil {
 					result = &request.Usage{}
 				}
-				tokens.add(event.Message.Usage)
+				s.tokens.add(event.Message.Usage)
 			}
 		case "message_delta":
 			if event.Usage != nil {
 				if result == nil {
 					result = &request.Usage{}
 				}
-				tokens.add(event.Usage)
+				s.tokens.add(event.Usage)
 				result.CompletionTokens = jsonInt(event.Usage, reqcommon.FieldOutputTokens)
 			}
 		}
 	}
 
 	if result != nil {
-		tokens.apply(result)
+		s.tokens.apply(result)
 		result.TotalTokens = result.PromptTokens + result.CompletionTokens
 	}
 

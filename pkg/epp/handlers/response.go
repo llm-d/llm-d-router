@@ -90,8 +90,15 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	if err != nil {
 		logger.Error(err, "parsing response: failed to resolve parser")
 	} else if len(parseBytes) > 0 || endOfStream {
+		if reqCtx.responseSession == nil {
+			if sp, ok := parser.(fwkrh.StatefulResponseParser); ok {
+				reqCtx.responseSession = sp.NewResponseSession()
+			} else {
+				reqCtx.responseSession = parser
+			}
+		}
 		before := time.Now()
-		parsedResp, err = parser.ParseResponse(ctx, parseBytes, reqCtx.Response.Headers, endOfStream)
+		parsedResp, err = reqCtx.responseSession.ParseResponse(ctx, parseBytes, reqCtx.Response.Headers, endOfStream)
 		metrics.RecordPluginProcessingLatency(fwkrh.ResponseParsingExtensionPoint, parser.TypedName().Type, parser.TypedName().Name, time.Since(before))
 		if err != nil {
 			logger.Error(err, "parsing response")
@@ -324,10 +331,9 @@ func finishPartialGRPCFrame(
 // leaves the accumulated value alone. Parsers that emit usage once with every field
 // populated are unaffected.
 func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
-	// PromptTokens includes CachedTokens, so a later chunk that zeroes or omits
-	// the cache fields carries only the uncached portion in src.PromptTokens.
-	// Merge the uncached portion and the cached count separately, then recombine.
-	uncached := max(dst.PromptTokens-cachedTokens(dst), src.PromptTokens-cachedTokens(&src))
+	if src.PromptTokens != 0 {
+		dst.PromptTokens = src.PromptTokens
+	}
 	if src.CompletionTokens != 0 {
 		dst.CompletionTokens = src.CompletionTokens
 	}
@@ -338,22 +344,13 @@ func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 		(src.PromptTokenDetails.CachedTokens != 0 || dst.PromptTokenDetails == nil) {
 		dst.PromptTokenDetails = src.PromptTokenDetails
 	}
-	dst.PromptTokens = uncached + cachedTokens(dst)
-	// A block reporting the full usage owns the total it came with; a partial
+	// A block reporting both halves of the usage owns the total it came with; a partial
 	// block carries a total covering only its own fields, so derive it from the merge.
-	if dst.PromptTokens == src.PromptTokens && dst.CompletionTokens == src.CompletionTokens &&
-		src.PromptTokens != 0 && src.CompletionTokens != 0 && src.TotalTokens != 0 {
+	if src.PromptTokens != 0 && src.CompletionTokens != 0 && src.TotalTokens != 0 {
 		dst.TotalTokens = src.TotalTokens
 		return
 	}
 	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
-}
-
-func cachedTokens(u *fwkrequest.Usage) int {
-	if u.PromptTokenDetails == nil {
-		return 0
-	}
-	return u.PromptTokenDetails.CachedTokens
 }
 
 func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *RequestContext, resp *extProcPb.ProcessingRequest_ResponseHeaders) *RequestContext {

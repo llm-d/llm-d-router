@@ -802,6 +802,21 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 			},
 		},
 		{
+			name:  "message_delta explicit zero cache read with output tokens only",
+			chunk: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":15,\"cache_read_input_tokens\":0}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
+					PromptTokens:     0,
+					CompletionTokens: 15,
+					TotalTokens:      15,
+					PromptTokenDetails: &request.PromptTokenDetails{
+						CachedTokens: 0,
+					},
+				},
+				StreamedEvents: 1,
+			},
+		},
+		{
 			name:  "message_delta cache tokens",
 			chunk: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":50,\"cache_read_input_tokens\":100000,\"cache_creation_input_tokens\":248,\"output_tokens\":10}}"),
 			want: &fwkrh.ParsedResponse{

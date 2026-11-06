@@ -96,6 +96,19 @@ type PriorityRewriter interface {
 	RewritePriority(ctx PriorityRewriteContext, payload fwkrequest.MarshalablePayload, priority int) (fwkrequest.MarshalablePayload, bool, error)
 }
 
+// ResponseSession parses the response chunks of a single request so parsers
+// whose streamed usage is split across events can retain per-request state
+// across chunks without mutating the shared Parser instance.
+type ResponseSession interface {
+	ParseResponse(ctx context.Context, body []byte, headers map[string]string, endOfStream bool) (*ParsedResponse, error)
+}
+
+// StatefulResponseParser is implemented by parsers whose streamed usage spans
+// multiple events that may arrive in separate response chunks.
+type StatefulResponseParser interface {
+	NewResponseSession() ResponseSession
+}
+
 // Claims defines the matching criteria for a parser.
 type Claims struct {
 	Paths     []string         // path patterns this parser claims (e.g., "chat/completions")
