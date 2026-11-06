@@ -288,6 +288,7 @@ func (h *goldenHarness) pickLoop() []dispatched {
 		h.digest()
 		out = append(out, dispatched{reqID: req.RequestID, engine: engine, req: req})
 		gq.drop()
+		h.checkCounts("Pick")
 	}
 }
 
@@ -367,6 +368,7 @@ func (h *goldenHarness) preRequest(req *fwksched.InferenceRequest, landing strin
 	if err := h.r.PreRequest(context.Background(), scopedReq, res); err != nil {
 		h.t.Fatalf("PreRequest: %v", err)
 	}
+	h.checkCounts("PreRequest")
 }
 
 // firstChunk is ResponseBody at the start of the stream (the cold charge is released there).
@@ -378,6 +380,7 @@ func (h *goldenHarness) firstChunk(req *fwksched.InferenceRequest, at string) {
 	h.r.ResponseBody(context.Background(), scopedReq, &fwkrc.Response{
 		RequestID: req.RequestID, StartOfStream: true,
 	}, h.target(at))
+	h.checkCounts("ResponseBody(first chunk)")
 }
 
 // settle ends the stream: prompt/cached/completion usage, the termination cause, the endpoint.
@@ -395,6 +398,7 @@ func (h *goldenHarness) settle(req *fwksched.InferenceRequest, at string, prompt
 			CompletionTokens:   completion,
 		},
 	}, h.target(at))
+	h.checkCounts("ResponseBody(total settle)")
 }
 
 func (h *goldenHarness) target(pod string) *fwkdl.EndpointMetadata {
@@ -417,6 +421,7 @@ func (h *goldenHarness) settleCause(req *fwksched.InferenceRequest, at string, c
 		RequestID: req.RequestID, EndOfStream: true, TerminationCause: cause,
 		Usage: fwkrequest.Usage{PromptTokens: 300, CompletionTokens: 10},
 	}, h.target(at))
+	h.checkCounts("ResponseBody(settle with a cause)")
 }
 
 // abandon runs RequestAbandoned: a request that left the path before reaching a pod.
@@ -426,6 +431,7 @@ func (h *goldenHarness) abandon(req *fwksched.InferenceRequest) {
 		h.t.Fatalf("RequestAbandoned wrote an undeclared attribute: %v", err)
 	}
 	h.r.RequestAbandoned(context.Background(), scopedReq)
+	h.checkCounts("RequestAbandoned")
 }
 
 // deletePod is the endpoint DELETE event: the engine's group is torn down.
@@ -439,6 +445,7 @@ func (h *goldenHarness) addPod(id string, blocks int) {
 	}); err != nil {
 		h.t.Fatalf("Extract add %s: %v", id, err)
 	}
+	h.checkCounts("Extract(add)")
 }
 
 func (h *goldenHarness) deletePod(id string) {
@@ -448,6 +455,7 @@ func (h *goldenHarness) deletePod(id string) {
 		h.t.Fatalf("Extract delete %s: %v", id, err)
 	}
 	delete(h.pods, id)
+	h.checkCounts("Extract(delete)")
 }
 
 // request builds one inference request the way thread identity would leave it: the derived
@@ -491,6 +499,35 @@ func growTokens(seed, n int) []uint32 {
 
 // digest is the per-decision state line: read straight from the scheduler's internals by ONE
 // helper, so a later rename touches only this function.
+// checkCounts asserts THE PENDING INVARIANT (B6) — a thread's pending IS the number of its records
+// that currently count — at ANY moment, not only at the end of a pass. Checking it only after a pass
+// is near-tautological: every pass re-derives the counts from the records, so a hook that corrupted
+// them during the pass would be repaired before the check ever looked. Called after EVERY hook.
+func (h *goldenHarness) checkCounts(after string) {
+	s := h.r.sched
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, g := range s.groups {
+		for id, m := range g.threads {
+			counted := 0
+			for _, rec := range s.reqs {
+				if rec.thread == id && rec.counted {
+					counted++
+				}
+			}
+			if m.pending != counted {
+				h.t.Fatalf("after %s: thread %s pending=%d but %d of its records count — the count drifted from the records", after, id, m.pending, counted)
+			}
+			// and a record must not survive in the windows slice after it stopped existing
+			for _, w := range m.windows {
+				if w == nil {
+					h.t.Fatalf("after %s: thread %s holds a nil window", after, id)
+				}
+			}
+		}
+	}
+}
+
 func (h *goldenHarness) digest() {
 	s := h.r.sched
 	s.mu.Lock()

@@ -123,6 +123,25 @@ func (s *Scheduler) atPod(rec *reqRec, m *thread, engine string, now time.Time) 
 	return dispatchObservables{queueWait: rec.queueWait, predictedCached: rec.predictedCached, promptTokens: rec.promptTokens}
 }
 
+// unlinkWindow forgets a record's entry in its thread's window slice. The slice is the thread's own
+// liveness list and records are dropped by IDENTITY: a pointer left there after the record has
+// stopped existing is a count waiting to be taken off a live window.
+func (s *Scheduler) unlinkWindow(m *thread, rec *reqRec) {
+	if m == nil || rec == nil || len(m.windows) == 0 {
+		return
+	}
+	kept := m.windows[:0]
+	for _, w := range m.windows {
+		if w != rec {
+			kept = append(kept, w)
+		}
+	}
+	for i := len(kept); i < len(m.windows); i++ {
+		m.windows[i] = nil // let the dropped record go; the slice is reused, not leaked
+	}
+	m.windows = kept
+}
+
 // dropRequest deletes one record and re-derives the counts of the thread that owned it.
 func (s *Scheduler) dropRequest(reqID string, now time.Time) {
 	rec, ok := s.reqs[reqID]
@@ -136,6 +155,7 @@ func (s *Scheduler) dropRequest(reqID string, now time.Time) {
 	// the thread, so there is nothing to correct — but the guard is what makes that non-event.
 	if g := s.groupOf(rec.thread); g != nil {
 		if m := g.threads[rec.thread]; m != nil {
+			s.unlinkWindow(m, rec)
 			if rec.pod.IsZero() {
 				if rec.counted {
 					// a window already expired was cleared by whatever noticed
@@ -370,6 +390,14 @@ func (s *Scheduler) reapRequests(now time.Time) {
 		}
 		if rec.pod.IsZero() {
 			if now.Sub(rec.released) > limit {
+				// I1 ON THE REAP PATH: the record is about to stop existing, so its count and its
+				// place in the thread's window slice go FIRST. A record older than the reap bound is
+				// never counted in this pass (the bound is far longer than S), so there is nothing to
+				// decrement here — but `counted` left TRUE is a count with no owner: the next settle
+				// walks the slice, still finds this record, and takes one off a LIVE window, after
+				// which the thread reads not-busy and is rotated (or exits) early.
+				rec.counted = false
+				s.unlinkWindow(m, rec)
 				delete(s.reqs, rid)
 				s.noteAnomaly(anomalyReapedWindow)
 				continue

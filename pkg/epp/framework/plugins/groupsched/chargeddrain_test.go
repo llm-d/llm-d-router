@@ -19,6 +19,7 @@ package groupsched
 // THE CHARGED DRAIN'S RELEASE INVARIANT, ONE TEST PER EXIT PATH.
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -429,6 +430,127 @@ func TestReapPathsIncrementTheirOwnAnomaly(t *testing.T) {
 		}
 		if got := fx.s.counters.anomalies["reaped_window"]; got != 1 {
 			t.Fatalf("reaped_window = %d, want 1 (only the first thread's window reap; the in-flight reap must not fire the window kind)", got)
+		}
+	})
+}
+
+// TestReapDoesNotStealALiveWindow is the re-checker's probe for I1 on the REAP path. A record can
+// stop existing without a settle (a window nobody observed dying), and when the reap deletes it the
+// record's count and its place in the thread's window slice must go with it. The bug this pins: the
+// reap left `counted` true behind and the record in m.windows, so the NEXT settle's expireWindows
+// found the dead record and took one off a LIVE window — the thread then read not-busy and exited
+// (or rotated) under work that was still in flight.
+func TestReapDoesNotStealALiveWindow(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.InflightReapSeconds = 60 // scaled down; the bound only has to exceed S for the probe
+	cfg.IdleSeconds = 20
+	chargedPath(t, cfg, "reap-live-window", func(t *testing.T, fx *engineSet, g *engineGroup) {
+		fx.s.mu.Lock()
+		m := g.threads["gone"]
+		// TWO windows on one thread: an OLD one the reap will take, and a LIVE one it must not.
+		fx.s.release(m, "r-old", nil, fx.clock.Add(-120*time.Second), dispatchObservables{})
+		fx.s.release(m, "r-live", nil, fx.clock.Add(-5*time.Second), dispatchObservables{})
+		before := m.pending
+		fx.s.mu.Unlock()
+		if before != 2 {
+			t.Fatalf("fixture: two live windows must count twice, got pending=%d", before)
+		}
+
+		fx.tick(1 * time.Second) // r-old is already 121 s old (past the 60 s bound); r-live is 2 s old
+		fx.s.mu.Lock()
+		_, oldExists := fx.s.reqs["r-old"]
+		_, liveExists := fx.s.reqs["r-live"]
+		after := m.pending
+		windows := len(m.windows)
+		fx.s.mu.Unlock()
+		if oldExists {
+			t.Fatal("the reap must delete the record that outlived the bound")
+		}
+		if !liveExists {
+			t.Fatal("the reap must not delete a record inside the bound")
+		}
+		// r-live is 2 s old: inside S, so it counts, and the reap must have left exactly that one.
+		counted := 0
+		fx.s.mu.Lock()
+		for _, rec := range fx.s.reqs {
+			if rec.thread == m.id && rec.counted {
+				counted++
+			}
+		}
+		fx.s.mu.Unlock()
+		if after != counted {
+			t.Fatalf("pending=%d but only %d record(s) count: the reap took a count that belonged to another window", after, counted)
+		}
+		if after != 1 {
+			t.Fatalf("pending=%d after the reap: the live window's count was taken", after)
+		}
+		if windows != counted+1 { // r-live is the thread's only remaining window record
+			t.Fatalf("the window slice holds %d pointer(s) for 1 window record (+%d counted): a dead pointer survived", windows, counted)
+		}
+	})
+
+	// THE EXIT PROBE: with the reap bound configured, a thread holding a LIVE window must not be
+	// released by an exit decision — the reap of another record must not have moved its count.
+	chargedPath(t, cfg, "reap-exit-over-live-window", func(t *testing.T, fx *engineSet, g *engineGroup) {
+		fx.s.mu.Lock()
+		m := g.threads["gone"]
+		fx.s.release(m, "r-old", nil, fx.clock.Add(-120*time.Second), dispatchObservables{})
+		fx.s.release(m, "r-live", nil, fx.clock.Add(-1*time.Second), dispatchObservables{})
+		g.index.MarkExiting("gone")
+		fx.s.mu.Unlock()
+		fx.tick(1 * time.Second) // r-old reaped (121 s); r-live is 2 s old and still inside S
+		if fx.pick() != -1 {
+			t.Fatal("no heads: nothing to dispatch")
+		}
+		if !fx.s.Seated("gone") {
+			t.Fatal("a thread whose reap left the counts consistent must still be seated here")
+		}
+	})
+}
+
+// TestWindowsSliceIsBounded pins the other half of the reap fix: the windows slice is the thread's
+// liveness list, so a record that stops existing must leave it. Before the fix 1000 abandons left
+// 1000 dead pointers behind (len 1000, 0 records) — a memory leak on the per-request path that also
+// re-ran a dead pointer on every settle.
+func TestWindowsSliceIsBounded(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.InflightReapSeconds = 60
+	forEngines(t, cfg, func(t *testing.T, fx *engineSet) {
+		fx.seatOne(t, "gone", 300, 5*time.Second)
+		fx.s.mu.Lock()
+		m := fx.g().threads["gone"]
+		// start from an empty record set: the seat's own dispatch left one released window behind,
+		// and this probe counts only the abandons it makes.
+		for rid, rec := range fx.s.reqs {
+			if rec.thread == m.id {
+				delete(fx.s.reqs, rid)
+			}
+		}
+		m.pending, m.inflight, m.windows = 0, 0, nil
+		for i := 0; i < 1000; i++ {
+			id := fmt.Sprintf("r%d", i)
+			fx.s.reqs[id] = &reqRec{thread: m.id, released: fx.clock, counted: true}
+			m.pending++
+			m.windows = append(m.windows, fx.s.reqs[id])
+			// the abandon: the record drops with nobody having settled it
+			fx.s.dropRequest(id, fx.clock)
+		}
+		left := 0
+		for _, rec := range fx.s.reqs {
+			if rec.thread == m.id {
+				left++
+			}
+		}
+		pending, windows := m.pending, len(m.windows)
+		fx.s.mu.Unlock()
+		if left != 0 {
+			t.Fatalf("%d record(s) left after 1000 abandons", left)
+		}
+		if pending != 0 {
+			t.Fatalf("pending=%d after 1000 abandons: the count outlived its records", pending)
+		}
+		if windows != 0 {
+			t.Fatalf("the windows slice holds %d dead pointer(s): it must be pruned on every drop", windows)
 		}
 	})
 }
