@@ -27,12 +27,18 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
@@ -150,6 +156,124 @@ func TestScheduleDefaultProfileFilterWithPrefixAffinity(t *testing.T) {
 			require.Len(t, gotScores, len(test.wantScores))
 			for name, want := range test.wantScores {
 				assert.InDelta(t, want, gotScores[name], 1e-9, "score of %s", name)
+			}
+		})
+	}
+}
+
+func TestScheduleFallbackWithInjectedSaturationDetector(t *testing.T) {
+	registerTestPlugins(t)
+	fwkplugin.Register(utilization.UtilizationDetectorType, fwkplugin.StabilityStable, utilization.UtilizationDetectorFactory)
+	fwkplugin.Register(concurrency.ConcurrencyDetectorType, fwkplugin.StabilityStable, concurrency.ConcurrencyDetectorFactory)
+	fwkplugin.Register(bylabel.LabelSelectorFilterType, fwkplugin.StabilityStable, bylabel.SelectorFactory)
+	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityStable,
+		disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
+
+	for _, tc := range []struct {
+		name           string
+		detectorType   string
+		parameters     []byte
+		wantDecodeBusy string
+		wantBothBusy   string
+	}{
+		{
+			name:           "default utilization fails open",
+			detectorType:   utilization.UtilizationDetectorType,
+			wantDecodeBusy: "decode",
+			wantBothBusy:   "decode",
+		},
+		{
+			name:           "concurrency fails closed",
+			detectorType:   concurrency.ConcurrencyDetectorType,
+			parameters:     []byte(`{"maxConcurrency":1,"failOpen":false}`),
+			wantDecodeBusy: "fallback",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const configText = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: dedicated-decode
+  type: label-selector-filter
+  parameters: {matchLabels: {llm-d.ai/role: decode}}
+- name: aggregated-worker
+  type: label-selector-filter
+  parameters: {matchLabels: {llm-d.ai/role: prefill-decode}}
+- type: disagg-profile-handler
+  parameters: {profiles: {fallback: fallback}}
+schedulingProfiles:
+- name: decode
+  plugins:
+  - pluginRef: dedicated-decode
+- name: fallback
+  plugins:
+  - pluginRef: aggregated-worker
+`
+			logger := logging.NewTestLogger()
+			raw, _, err := LoadRawConfig([]byte(configText), logger)
+			require.NoError(t, err)
+			if len(tc.parameters) > 0 {
+				raw.Plugins = append(raw.Plugins, configapiv1.PluginSpec{Name: tc.detectorType, Type: tc.detectorType, Parameters: tc.parameters})
+				raw.FlowControl = &configapiv1.FlowControlConfig{SaturationDetector: &configapiv1.SaturationDetectorConfig{PluginRef: tc.detectorType}}
+			}
+			cfg, err := InstantiateAndConfigure(raw, testutils.NewTestHandle(t.Context()), logger)
+			require.NoError(t, err)
+			for _, profile := range raw.SchedulingProfiles {
+				pluginRefs := make([]string, 0, len(profile.Plugins))
+				for _, plugin := range profile.Plugins {
+					pluginRefs = append(pluginRefs, plugin.PluginRef)
+				}
+				require.Contains(t, pluginRefs, tc.detectorType)
+			}
+			scheduler := scheduling.NewSchedulerWithConfig(cfg.SchedulerConfig)
+
+			for _, phase := range []struct {
+				name         string
+				decodeBusy   bool
+				fallbackBusy bool
+				wantPrimary  string
+			}{
+				{name: "healthy", wantPrimary: "decode"},
+				{name: "decode saturated", decodeBusy: true, wantPrimary: tc.wantDecodeBusy},
+				{name: "both saturated", decodeBusy: true, fallbackBusy: true, wantPrimary: tc.wantBothBusy},
+				{name: "recovered", wantPrimary: "decode"},
+			} {
+				t.Run(phase.name, func(t *testing.T) {
+					endpoints := make([]fwksched.Endpoint, 0, 2)
+					for _, spec := range []struct {
+						name string
+						role string
+						busy bool
+					}{
+						{name: "decode", role: bylabel.RoleDecode, busy: phase.decodeBusy},
+						{name: "fallback", role: bylabel.RolePrefillDecode, busy: phase.fallbackBusy},
+					} {
+						metrics := &fwkdl.Metrics{UpdateTime: time.Now()}
+						load := &attrconcurrency.InFlightLoad{}
+						if spec.busy {
+							metrics.WaitingQueueSize = 1000
+							load.Requests = 1
+						}
+						endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+							ID:     k8stypes.NamespacedName{Name: spec.name},
+							Labels: map[string]string{bylabel.RoleLabel: spec.role},
+						}, metrics, fwkdl.NewAttributes())
+						endpoint.Put(attrconcurrency.InFlightLoadDataKey, load)
+						endpoints = append(endpoints, endpoint)
+					}
+					result, err := scheduler.Schedule(t.Context(), &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "test-model"}, endpoints)
+					if phase.wantPrimary == "" {
+						var rejection errcommon.Error
+						require.ErrorAs(t, err, &rejection)
+						assert.Equal(t, errcommon.ServiceUnavailable, rejection.Code)
+						assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), rejection.Headers[errcommon.RequestDroppedReasonHeaderKey])
+						return
+					}
+					require.NoError(t, err)
+					assert.Equal(t, phase.wantPrimary, result.PrimaryProfileName)
+					require.NotNil(t, result.PrimaryEndpoint())
+					assert.Equal(t, phase.wantPrimary, result.PrimaryEndpoint().GetMetadata().ID.Name)
+				})
 			}
 		})
 	}
