@@ -195,6 +195,11 @@ type RequestContext struct {
 	sseLineCarry      []byte
 	sseLineDiscarding bool
 
+	// grpcFrameCarry holds trailing bytes of an incomplete gRPC frame across response chunks.
+	grpcFrameCarry         []byte
+	grpcFrameSkipRemaining uint64
+	grpcStreamCorrupted    bool
+
 	toolCallingSurface             reqcommon.APIType
 	toolCallingRequest             bool
 	toolCallingResponseEventStream bool
@@ -460,9 +465,16 @@ func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 
 func (s *StreamingServer) putBuffer(buf *bytes.Buffer) {
 	buf.Reset()
-	if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+	if s.poolKeeps(buf) {
 		s.bufferPool.Put(buf)
 	}
+}
+
+// poolKeeps reports whether putBuffer returns buf to the pool. The request body
+// handler relies on this rule: RawBody takes the memory of a buffer the pool
+// does not keep, so such a buffer must never be reused.
+func (s *StreamingServer) poolKeeps(buf *bytes.Buffer) bool {
+	return s.maxPoolBufferSize == 0 || buf.Cap() <= s.maxPoolBufferSize
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
@@ -691,14 +703,21 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if v.RequestBody.EndOfStream {
 				loggerTrace.Info("decoding")
 				reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
-				// Keep the buffer intact through comparison. RawBody is a copy
-				// so parser and Director edits cannot change the baseline.
 				inboundBody := buf.Bytes()
-				reqCtx.Request.RawBody = make([]byte, buf.Len())
-				copy(reqCtx.Request.RawBody, inboundBody)
+				if !s.poolKeeps(buf) {
+					// putBuffer drops this buffer, so RawBody takes its memory.
+					// Parsers and the Director replace RawBody on a rewrite and never
+					// write into it, so inboundBody stays the comparison baseline.
+					reqCtx.Request.RawBody = inboundBody
+					buf = nil
+				} else {
+					// RawBody is a copy so the pooled buffer can be reused.
+					reqCtx.Request.RawBody = make([]byte, len(inboundBody))
+					copy(reqCtx.Request.RawBody, inboundBody)
+				}
 
 				// Body stream complete. Capture raw size for flow control.
-				reqCtx.RequestSize = buf.Len()
+				reqCtx.RequestSize = len(inboundBody)
 				reqCtx.bodyReceived = true
 
 				parser, resolveErr := s.getOrResolveParser(reqCtx)
@@ -778,12 +797,14 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				// The response phase can last for the whole generation, so return
 				// the buffer here unless the tool-calling snapshot in ctx still
-				// references its bytes.
-				if hasInboundToolSnapshot {
-					buf.Reset()
-				} else {
-					s.putBuffer(buf)
-					buf = nil
+				// references its bytes. A buffer above the pool cap is already nil.
+				if buf != nil {
+					if hasInboundToolSnapshot {
+						buf.Reset()
+					} else {
+						s.putBuffer(buf)
+						buf = nil
+					}
 				}
 
 				// After scheduling, look up the eviction channel for eviction support.

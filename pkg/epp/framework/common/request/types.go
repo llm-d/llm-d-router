@@ -83,6 +83,19 @@ func (RawPayload) isRequestPayload()         {}
 func (RawPayload) IsParsed() bool            { return false }
 func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 
+// PayloadBytes is a request body kept in its wire encoding by a parser that
+// rewrites it at the byte level instead of decoding it, for example a protobuf
+// message whose fields are spliced. Unlike RawPayload it implements Marshaler,
+// so the director's rewrite hooks accept it. A parser that returns it must
+// perform every rewrite it declares (PriorityRewriter, ModelNameRewriter) on
+// the bytes themselves.
+type PayloadBytes []byte
+
+func (PayloadBytes) isRequestPayload()          {}
+func (PayloadBytes) IsParsed() bool             { return true }
+func (PayloadBytes) AsMap() (PayloadMap, bool)  { return nil, false }
+func (p PayloadBytes) Marshal() ([]byte, error) { return p, nil }
+
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
 // An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest,
@@ -519,6 +532,8 @@ type TextToSpeechRequest struct {
 	// RefText is the transcript of a reference audio clip for voice cloning
 	// and is tokenized alongside Input.
 	RefText string `json:"ref_text,omitempty"`
+	// CacheSalt isolates prefix caches for security.
+	CacheSalt string `json:"cache_salt,omitempty"`
 }
 
 func (r *TextToSpeechRequest) String() string {

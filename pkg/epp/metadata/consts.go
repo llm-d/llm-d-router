@@ -123,3 +123,15 @@ func GetLowerCaseHeaderValue(headers map[string]string, key string) (string, boo
 func IsFiniteFloat(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
+
+// ServedEndpoint returns the host:port of the endpoint the proxy reports it sent
+// the request to, read from the response-phase dynamic metadata. ok is false when
+// the proxy reports none.
+func ServedEndpoint(reqMetadata map[string]any) (served string, ok bool) {
+	lb, ok := reqMetadata[DestinationEndpointNamespace].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	served, ok = lb[DestinationEndpointServedKey].(string)
+	return served, ok
+}

@@ -695,10 +695,12 @@ For more details, see the
 
 ### RBAC and Permissions
 
-EPP is namespace-scoped. Its `Role` grants `get/watch/list` on `inferencepools` and `pods`,
-plus `create` on `tokenreviews`/`subjectaccessreviews` for metrics auth
-(`--metrics-endpoint-auth=true`, the default). To disable metrics auth and avoid the
-cluster-scoped RBAC requirement, use `--metrics-endpoint-auth=false`.
+The development environment grants EPP a `Role` with `get/watch/list` on pods and the inference CRDs. It has no
+`ClusterRole`, and `create` rules for `tokenreviews`/`subjectaccessreviews` in a `Role` have no effect, so metrics
+auth cannot work there. The `kubernetes-kgateway` overlay sets the EPP `args` without `--metrics-endpoint-auth` or
+`--ha-enable-leader-election`, so `make env-dev-kubernetes` needs no extra environment variables.
+Add `--metrics-endpoint-auth=false` to the EPP args to scrape `/metrics`.
+For Helm installs see [RBAC](config/charts/README.md#7-rbac).
 
 ### Developer Setup
 
@@ -982,7 +984,7 @@ If using coding agents, please ensure that the agent uses the PR template format
 The template contains a `release-notes` section which must be filled for any change that has
 user facing impact; a required check validates it on the PR.
 
-For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md)
+For additional information and context, please refer to the [llm-d contributing guide](https://github.com/llm-d/llm-d/blob/main/CONTRIBUTING.md), the compiled human [review playbook](docs/review_playbook.md), and the source review bundle in [docs/review/](docs/review/index.md).
 
 ### Presubmit
 
@@ -992,5 +994,4 @@ Before opening a PR, run:
 make presubmit
 ```
 
-This runs the same lint, vet, and test checks as the CI pipeline. Fixing failures locally
-saves a round-trip through GitHub Actions.
+This runs the same lint, vet, test, and review-playbook checks as the CI pipeline (`make verify-review-playbook` verifies `docs/review_playbook.md` against `docs/review/`). Fixing failures locally saves a round-trip through GitHub Actions.

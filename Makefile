@@ -233,7 +233,7 @@ check-latest-tags-strict: ## Check ':latest' image tags in YAML (strict; fails o
 
 .PHONY: presubmit
 presubmit: LINT_NEW_ONLY=true
-presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate verify-telemetry
+presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate verify-telemetry verify-review-playbook
 
 .PHONY: update-telemetry verify-telemetry test-telemetry
 update-telemetry: image-build-builder ## Generate trace attributes, span names, and the catalog.
@@ -303,7 +303,7 @@ test-unit: test-unit-epp test-unit-sidecar test-unit-framework ## Run unit tests
 test-unit-%: image-build-builder
 	@mkdir -p $(COVERAGE_DIR)
 	@printf "\033[33;1m==== Running $* Unit Tests ====\033[0m\n"
-	$(BUILDER_RUN) "go test -v -race -coverprofile=$(COVERAGE_DIR)/$*.out -covermode=atomic $($*_TEST_PACKAGES)"
+	$(BUILDER_RUN) "go test -v -race -coverprofile=$(COVERAGE_DIR)/$*.out -covermode=atomic $($*_TEST_PACKAGES) && sed -i -E '/(\\.pb\\.go|\\/zz_generated[^/]*\\.go):/d' $(COVERAGE_DIR)/$*.out"
 	$(BUILDER_RUN) 'go tool cover -func=$(COVERAGE_DIR)/$*.out | tail -1'
 
 .PHONY: test-filter
@@ -374,6 +374,10 @@ verify-manifests: kubectl-validate ## Validate deployment manifests.
 .PHONY: verify-boilerplate
 verify-boilerplate: ## Check that .go and .sh files carry a copyright notice.
 	hack/copyright.sh verify
+
+.PHONY: verify-review-playbook
+verify-review-playbook: image-build-builder ## Check that docs/review/ is valid and docs/review_playbook.md is in sync.
+	$(BUILDER_RUN) 'python3 hack/render_playbook.py --check'
 
 ##@ Helm
 

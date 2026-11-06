@@ -562,6 +562,46 @@ self-consistent, but CJK, code, and chat-template-heavy inputs shift it against 
 compare with these metrics: it counts blocks rather than tokens, only the precise producer feeds it,
 and it accumulates once per prompt rather than once per request.
 
+### P2P KV-cache source
+
+The `p2p-source-producer` emits these metrics, labelled by the producer instance. Each request that
+reaches its `PreRequest` records one decision.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_p2p_source_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `outcome` | One per request, with the outcome the producer's `p2p decision` log line names. |
+| `llm_d_epp_p2p_source_predicted_pulled_tokens` | Histogram | `plugin_name`, `endpoint_role` | Prompt tokens the selected source holds beyond the endpoint computing the prefix, per request sent to pull. |
+
+A request records the first outcome in this table that applies to it.
+
+| `outcome` | Meaning |
+|---|---|
+| `prefill-port-invalid` | The prefill endpoint's P2P port is outside 1-65535, and the request fails. |
+| `no-best-match` | No candidate held a cached prefix to pull. |
+| `no-endpoint` | No computing endpoint is available, or the selected endpoint has no metadata. |
+| `self` | The best-cached endpoint is one of the endpoints selected to compute the prefix. |
+| `below-floor` | The source holds fewer than `minCachedTokenDelta` tokens beyond the computing endpoint. |
+| `decode-request` | The body already pulls from a prefill pod (`kv_transfer_params.remote_prefiller`). |
+| `declined` | The cost model priced the pull at or above the prefill time it saves. |
+| `unparsed-body` | The body was kept as raw bytes and cannot carry the source. |
+| `pulled` | The request carries `kv_transfer_params.remote_kv_source` and the source header. |
+
+`endpoint_role` follows the prefix cache prediction metrics: `prefill` for a request with a target in
+the profile named `prefill`, `decode` otherwise when the primary profile has a target, and empty when
+neither has one. The role does not read `prefillProfileName`. On a P/D deployment whose prefill
+profile has another name, both metric families label its requests `decode`, where the P2P metrics
+describe the prefill endpoint and the prefix cache prediction metrics the decode endpoint.
+
+On an aggregated deployment, or a P/D deployment whose prefill profile is named `prefill`, the share
+of prompt tokens the router sent to pull is `llm_d_epp_p2p_source_predicted_pulled_tokens_sum`
+divided by `llm_d_epp_prefix_prompt_tokens_sum` of the prefix producer named in
+`prefixMatchInfoProducerName`, matched on `endpoint_role`. The share vLLM served from a peer is
+`vllm:prompt_tokens_cached_by_source_total{source="p2p"}` divided by `vllm:prompt_tokens_total` on the
+endpoints that compute the prefix, the prefill pods under P/D disaggregation. vLLM observes each
+promotion job from its P2P tier (`tier=~".*:p2p"`) in `vllm:kv_offload_tiering_promotion_latency_seconds`,
+labelled `result="success"` or `result="failure"`. As with the prefix prediction, the cohorts differ:
+a pull that fails or falls back to local prefill is counted on the router side only.
+
 ### Token producer render
 
 These metrics belong to the `token-producer` when it uses the vLLM render backend. The metric
@@ -632,8 +672,9 @@ included. Requests that fail earlier, such as a body that cannot be parsed, are 
 
 - `header`: the `x-llm-d-inference-fairness-id` header, its deprecated name
   `x-gateway-inference-fairness-id`, or the ID derived from it (percent-encoded, and
-  composed with the agent identity when present) when `requestHandler.composeFairnessIDs`
-  is enabled.
+  composed with the derived program root or the agent identity when present) when
+  `requestHandler.composeFairnessIDs` is enabled.
+- `derived_root`: no header, and the agent-lineage plugin derived a program root.
 - `agent_identity`: no header, and the agent identity plugin supplied an ID.
 - `default`: neither, so the request uses `default-flow`.
 
@@ -680,7 +721,7 @@ distinct fairness IDs per pool, deduplicated across EPP replicas:
 |---|---|
 | `llm_d:epp_named_fairness_ids:count5m` | Header IDs, including composed `<tenant>/<session>` IDs, that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
 | `llm_d:epp_named_fairness_ids:incomplete5m` | 1 when header IDs were folded in the same window, so the count is a lower bound; otherwise 0. |
-| `llm_d:epp_agent_sessions:count5m` | Agent identity IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source="agent_identity"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
+| `llm_d:epp_agent_sessions:count5m` | Agent identity or derived-root IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source=~"agent_identity\|derived_root"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
 
 The rules group by `namespace` and `inference_pool`, so the scrape must attach a `namespace`
 label. Change `5m` for a different window. An ID is missed when all of its requests went to a

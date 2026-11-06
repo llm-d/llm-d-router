@@ -21,6 +21,7 @@ extend-exclude = [
     "config/crd/bases/",
     # Generated protobuf files
     "pkg/common/grpc/sglang/gen/",
+    "pkg/common/grpc/vllm/gen/",
     "pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen/",
 ]
 

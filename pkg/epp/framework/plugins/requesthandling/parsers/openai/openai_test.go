@@ -1175,6 +1175,16 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "text to speech request with non-string cache_salt",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":      "test",
+				"input":      "hello",
+				"cache_salt": 42,
+			},
+			wantErr: true,
+		},
+		{
 			name:    "text to speech request with non-string instructions",
 			headers: map[string]string{":path": "/v1/audio/speech"},
 			body: map[string]any{

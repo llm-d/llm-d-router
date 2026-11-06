@@ -41,12 +41,42 @@ type hashLRU struct {
 
 func newHashLRU(capacity int) *hashLRU {
 	return &hashLRU{
-		index: make(map[blockHash]uint32),
-		// The clamp runs in uint64 because nodeNil does not fit in a 32-bit int.
-		capacity: int(min(uint64(max(capacity, 0)), uint64(nodeNil))), // #nosec G115 -- bounded by capacity, an int.
+		index:    make(map[blockHash]uint32),
+		capacity: clampCapacity(capacity),
 		head:     nodeNil,
 		tail:     nodeNil,
 	}
+}
+
+// clampCapacity bounds capacity to [0, nodeNil] so node indexes fit in uint32.
+// The clamp runs in uint64 because nodeNil does not fit in a 32-bit int.
+func clampCapacity(capacity int) int {
+	return int(min(uint64(max(capacity, 0)), uint64(nodeNil))) // #nosec G115 -- bounded by capacity, an int.
+}
+
+func (c *hashLRU) Cap() int { return c.capacity }
+
+// Resize sets the capacity. Growing, or shrinking to no fewer than the
+// allocated nodes, only updates the limit: nodes are allocated lazily. Below
+// that, it rebuilds with the capacity most recent hashes in their recency
+// order. The rebuild keeps nodes dense, which Add relies on: once nodes reaches
+// capacity, Add only reuses the tail node, so freeing nodes in place would
+// strand them.
+func (c *hashLRU) Resize(capacity int) {
+	capacity = clampCapacity(capacity)
+	if capacity >= len(c.nodes) {
+		c.capacity = capacity
+		return
+	}
+	keep := make([]blockHash, 0, capacity)
+	for i := c.head; i != nodeNil && len(keep) < capacity; i = c.nodes[i].next {
+		keep = append(keep, c.nodes[i].key)
+	}
+	rebuilt := newHashLRU(capacity)
+	for j := len(keep) - 1; j >= 0; j-- { // oldest first, so the newest ends at head
+		rebuilt.Add(keep[j])
+	}
+	*c = *rebuilt
 }
 
 func (c *hashLRU) Len() int { return len(c.index) }

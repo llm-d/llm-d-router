@@ -22,6 +22,8 @@ tests:
         values: '0 1 2 3 4 5 6 7 8 9 10'
       - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="other",source="agent_identity"}'
         values: '0 1 2 3 4 5 6 7 8 9 10'
+      - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a2",fairness_id="root-1",source="derived_root"}'
+        values: '0 1 2 3 4 5 6 7 8 9 10'
       - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a1",fairness_id="default-flow",source="default"}'
         values: '0 1 2 3 4 5 6 7 8 9 10'
       - series: 'llm_d_epp_fairness_id_resolved_total{namespace="ns",inference_pool="pool-a",pod="a2",fairness_id="other",source="header"}'
@@ -59,7 +61,7 @@ tests:
         eval_time: 10m
         exp_samples:
           - labels: 'llm_d:epp_agent_sessions:count5m{namespace="ns",inference_pool="pool-a"}'
-            value: 1
+            value: 2
   # Edge A: burst on a replica deleted before eval -> counted
   - interval: 1m
     input_series:

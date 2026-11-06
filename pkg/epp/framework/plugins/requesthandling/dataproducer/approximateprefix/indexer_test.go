@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -255,4 +256,53 @@ func (i *indexer) Get(hash blockHash) podSet {
 		}
 	}
 	return res
+}
+
+func TestIndexer_ResizePolicy(t *testing.T) {
+	id := ServerID{Namespace: "default", Name: "server1"}
+	fallback := func(n int) server { return server{ServerID: id, NumOfGPUBlocks: n} }
+	metrics := func(n int) server { return server{ServerID: id, NumOfGPUBlocks: n, CapacityFromMetrics: true} }
+
+	tests := []struct {
+		name  string
+		steps []server
+		want  int
+	}{
+		{name: "fallback then metrics grows", steps: []server{fallback(4), metrics(8)}, want: 8},
+		{name: "fallback then metrics shrinks", steps: []server{fallback(8), metrics(4)}, want: 4},
+		{name: "metrics then metrics resizes", steps: []server{metrics(4), metrics(8)}, want: 8},
+		{name: "metrics then fallback is ignored", steps: []server{metrics(8), fallback(4)}, want: 8},
+		{name: "metrics, fallback, metrics", steps: []server{metrics(8), fallback(4), metrics(6)}, want: 6},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			i := newIndexer(context.Background(), 100, "test-name", "test-type").(*indexer)
+			next := blockHash(0)
+			for _, s := range tc.steps {
+				i.Add([]blockHash{next}, s)
+				next++
+			}
+			assert.Equal(t, tc.want, i.pods[id].lru.Cap())
+		})
+	}
+}
+
+func TestIndexer_ShrinkEvictsOldestPrompts(t *testing.T) {
+	id := ServerID{Namespace: "default", Name: "server1"}
+	i := newIndexer(context.Background(), 100, "test-name", "test-type").(*indexer)
+
+	old := []blockHash{1, 2}
+	recent := []blockHash{3, 4}
+	i.Add(old, server{ServerID: id, NumOfGPUBlocks: 10})
+	i.Add(recent, server{ServerID: id, NumOfGPUBlocks: 10})
+	i.Add(nil, server{ServerID: id, NumOfGPUBlocks: 2, CapacityFromMetrics: true})
+
+	assert.Equal(t, []int{0}, i.MatchLongestPrefix(old, []ServerID{id}), "older prompt should be evicted by the shrink")
+	assert.Equal(t, []int{2}, i.MatchLongestPrefix(recent, []ServerID{id}), "recent prompt should survive the shrink intact")
+}
+
+func TestPodCacheIsOneCacheLine(t *testing.T) {
+	if got := unsafe.Sizeof(podCache{}); got != 64 {
+		t.Fatalf("podCache is %d bytes, want 64", got)
+	}
 }

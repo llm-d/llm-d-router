@@ -82,6 +82,12 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		ReadHeaderTimeout: 30 * time.Second,  // Reasonable for headers only
 		MaxHeaderBytes:    1 << 20,           // 1 MB for headers is sufficient
 	}
+	if !s.config.SecureServing {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		server.Protocols = protocols
+	}
 
 	var cert *tls.Certificate
 	if s.config.SecureServing {
@@ -178,6 +184,9 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.As(context.Cause(r.Context()), &prefillErr):
 			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
 				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			// A key with http.TrailerPrefix is sent as a trailer whether it is
+			// set before or after WriteHeader, so a buffered gRPC status relays
+			// as the HTTP/2 trailer the backend sent.
 			maps.Copy(res.Header(), prefillErr.response.headers)
 			res.WriteHeader(prefillErr.response.statusCode)
 			_, writeError = res.Write(prefillErr.response.bodyBytes())

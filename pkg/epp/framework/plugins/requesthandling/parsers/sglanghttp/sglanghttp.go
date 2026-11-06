@@ -137,15 +137,9 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 	if err != nil {
 		return nil, fmt.Errorf("unsupported generate request: %w", err)
 	}
-	// SGLang partitions its cache on (extra_key, cache_salt) but publishes only
-	// cache_salt in KV events. Encoding the pair keeps extra_key requests from
-	// matching blocks indexed under a bare cache_salt.
-	if extraKey != "" {
-		pair, err := json.Marshal([]string{extraKey, cacheSalt})
-		if err != nil {
-			return nil, fmt.Errorf("invalid generate request: %w", err)
-		}
-		cacheSalt = string(pair)
+	cacheSalt, err = parsers.ComposeSGLangCacheSalt(extraKey, cacheSalt)
+	if err != nil {
+		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
 	var tokenIDs []uint32
