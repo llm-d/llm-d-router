@@ -800,6 +800,20 @@ This plugin records the routing decision for each request.
     disaggregation mode. Sudden ratio changes may indicate configuration issues, workload shifts, or
     problems in the decision logic.
 
+#### `kv-compat-pd-decider`
+
+This Alpha plugin records requests it serves decode-only for KV compatibility.
+
+#### `llm_d_epp_kv_compat_prefill_declined_total`
+
+*   **Type:** Counter
+*   **Labels:**
+    *   `plugin_name`: the `kv-compat-pd-decider` plugin instance
+*   **Description:** Counts requests for which no prefill endpoint could exchange KV with the
+    selected decode endpoint, so remote prefill was declined.
+*   **Actionability:** A sustained rate means the prefill pool has no endpoint whose
+    compatibility key the decode endpoints accept. Check the keys on both pools.
+
 #### `disaggregatedset-rollout-screener`
 
 This Alpha plugin records revision-match failures and revision-gating state.

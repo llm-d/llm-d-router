@@ -38,6 +38,19 @@ var (
 		},
 		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
 	)
+
+	// LlmdKVCompatDeclinedCount records remote prefill declined by kv-compat-pd-decider because no
+	// prefill endpoint can exchange KV with the decode endpoint.
+	LlmdKVCompatDeclinedCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "kv_compat_prefill_declined_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Total number of requests served decode-only because no prefill endpoint could exchange KV with the decode endpoint",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_name"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
@@ -46,6 +59,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	}
 	for _, collector := range []prometheus.Collector{
 		LlmdDisaggDecisionCount,
+		LlmdKVCompatDeclinedCount,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -88,4 +102,9 @@ func DisaggDecisionType(encodeUsed, prefillUsed bool) string {
 	default:
 		return metricsutil.DisaggPathDecodeOnly
 	}
+}
+
+// recordKVCompatDeclined increments the counter of remote prefill declined for KV compatibility.
+func recordKVCompatDeclined(pluginName string) {
+	LlmdKVCompatDeclinedCount.WithLabelValues(pluginName).Inc()
 }
