@@ -125,6 +125,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllminference"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentlineage"
@@ -835,6 +836,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(requestattributereporter.RequestAttributeReporterType, fwkplugin.StabilityBeta, requestattributereporter.RequestAttributeReporterPluginFactory)
 	fwkplugin.Register(openai.OpenAIParserType, fwkplugin.StabilityBeta, openai.OpenAIParserPluginFactory)
 	fwkplugin.Register(vllmgrpc.VllmGRPCParserType, fwkplugin.StabilityBeta, vllmgrpc.VllmGRPCParserPluginFactory)
+	fwkplugin.Register(vllminference.VllmInferenceParserType, fwkplugin.StabilityBeta, vllminference.VllmInferenceParserPluginFactory)
 	fwkplugin.Register(passthrough.PassthroughParserType, fwkplugin.StabilityBeta, passthrough.PassthroughParserPluginFactory)
 	fwkplugin.Register(anthropic.AnthropicParserType, fwkplugin.StabilityBeta, anthropic.AnthropicParserPluginFactory)
 	fwkplugin.Register(vllmhttp.VllmHTTPParserType, fwkplugin.StabilityBeta, vllmhttp.VllmHTTPParserPluginFactory)
