@@ -31,7 +31,7 @@ The plugin runs after request assembly and before admission control. It resolves
    - Neither: publish nothing.
 5. Publish the root and the resolved band via `request.PutAttribute`.
 
-The node map is scoped by the fairness-ID header value (the tenant, `""` when absent), so records never cross tenants. Reading a record refreshes it, so an in-use program never expires; a record unused for `parentEntryTtlSeconds` is dropped. At `maxParentEntries` the least-recently-used node is evicted — never for a key already in the map, since harnesses resend both headers every turn and re-declaring a recorded session does not grow the map, and never for a parentless node, since a link carries lineage a bare band does not. A lineage cycle ends the walk at the current node with a stable result, and the walk follows at most 64 links, so a client chaining links up to the map bound cannot extend the walk's cost.
+The node map is scoped by the fairness-ID header value (the tenant, `""` when absent), so records never cross tenants. Reading a record refreshes it — including the terminal root of a walk, so an idle root with active children stays alive — so an in-use program never expires; a record unused for `parentEntryTtlSeconds` is dropped. At `maxParentEntries` a node is evicted — never for a key already in the map, since harnesses resend both headers every turn and re-declaring a recorded session does not grow the map — and eviction prefers parentless nodes, since a link carries lineage a bare band does not and one-off sessions die before live links. A parentless node is not recorded at the bound at all. A lineage cycle ends the walk at the current node with a stable result, and the walk follows at most 64 links, so a client chaining links up to the map bound cannot extend the walk's cost.
 
 After the plugin returns, the Director applies the resolved band as the request's priority once, before admission: bands resolve once and queued requests never migrate across them.
 
@@ -52,12 +52,12 @@ The tenant part is percent-encoded (`%` becomes `%25`, `/` becomes `%2F`) so the
 - `scheduling.InferenceRequest.Headers` — read-only lookup of the headers above (built-in defaults plus any from `additionalSessionHeaders` / `additionalParentHeaders`). Keys are expected lowercase (Envoy normalizes inbound headers).
 - `scheduling.InferenceRequest.FairnessID` — read-only: the fairness-ID header value at classification time, used as the node map's tenant scope. The plugin never rewrites it.
 - `scheduling.InferenceRequest.Objectives.Priority` — read-only: the seeded objective priority the Director resolved before request header processors run.
-- the `x-llm-d-inference-objective` header — read-only: its presence marks an explicit objective, which selects `min(explicit, parent band)` for a parented child.
+- the `x-llm-d-inference-objective` header (or its deprecated alias `x-gateway-inference-objective`) — read-only: its presence marks an explicit objective, which selects `min(explicit, parent band)` for a parented child.
 
 ## Outputs Produced
 
 - `scheduling.InferenceRequest` attribute `"derived-root"` (`string`) — set when the request carries a session or parent header.
-- `scheduling.InferenceRequest` attribute `"resolved-band"` (`int`) — set when the request carries a session or parent header; the Director applies it as the request's priority before admission.
+- `scheduling.InferenceRequest` attribute `"resolved-band"` (`int`) — set when lineage resolves a band different from the seeded priority; the Director applies it as the request's priority before admission.
 
 The plugin does not read or write the `"agent-identity"` attribute: for opencode that attribute carries the parent one hop up (the cache-affinity value), which is not the session's own ID and would corrupt the parent map's child keys.
 

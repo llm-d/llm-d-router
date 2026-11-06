@@ -574,14 +574,24 @@ func sendBand(t *testing.T, p *Plugin, fairnessID, session string, seeded int, e
 	return scheduling.ReadRequestAttribute[int](req, ResolvedBandKey)
 }
 
+// wantBand asserts the resolved band and that the attribute is published
+// exactly when lineage changed the band: the Director overrides the priority
+// only for inheritance, so an echoed seed could clobber a priority another
+// processor adjusted in between.
 func wantBand(t *testing.T, p *Plugin, fairnessID, session string, seeded int, explicit bool, extra map[string]string, want int) {
 	t.Helper()
 	got, ok := sendBand(t, p, fairnessID, session, seeded, explicit, extra)
-	if !ok {
-		t.Fatalf("session %s: resolved-band attribute not found; want %d", session, want)
+	if want != seeded {
+		if !ok {
+			t.Fatalf("session %s: resolved-band attribute not found; want %d", session, want)
+		}
+		if got != want {
+			t.Fatalf("session %s: resolved band = %d, want %d", session, got, want)
+		}
+		return
 	}
-	if got != want {
-		t.Fatalf("session %s: resolved band = %d, want %d", session, got, want)
+	if ok {
+		t.Fatalf("session %s: resolved-band published as %d with the seeded band, want absent", session, got)
 	}
 }
 
@@ -619,9 +629,50 @@ func TestRequestHeader_BandResolution(t *testing.T) {
 	// A conflicting re-declaration keeps the recorded parent's band.
 	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "EVIL"}, 5)
 
+	// An objective sent under the deprecated alias still counts as explicit:
+	// min(seeded, parent band) instead of full inheritance.
+	wantBand(t, p, "", "S6", 3, false, map[string]string{
+		ParentSessionHeader:      "R",
+		metadata.OldObjectiveKey: "batch",
+	}, 3)
+
 	// A child of a sheddable-band parent inherits the sheddable band.
 	wantBand(t, p, "", "P2", -1, false, nil, -1)
 	wantBand(t, p, "", "S5", 0, false, map[string]string{ParentSessionHeader: "P2"}, -1)
+}
+
+// TestRequestHeader_BandRootStaysAliveThroughChildWalks pins that child
+// arrivals refresh the root's node: an idle root with active children is the
+// normal agentic shape, and the root's band must survive past the root's
+// own last arrival.
+func TestRequestHeader_BandRootStaysAliveThroughChildWalks(t *testing.T) {
+	p := newPlugin(t, `{"parentEntryTtlSeconds": 10}`)
+	now, advance := newClock()
+	p.now = now
+
+	wantBand(t, p, "", "R", 5, false, nil, 5) // the root arrives once, at t0
+	advance(5 * time.Second)
+	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	advance(6 * time.Second) // 11s since the root's own arrival
+	wantBand(t, p, "", "S2", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+}
+
+// TestRequestHeader_EvictionPrefersParentless pins that eviction at the
+// bound displaces a one-off parentless session before a live link, even when
+// the link is older.
+func TestRequestHeader_EvictionPrefersParentless(t *testing.T) {
+	p := newPlugin(t, `{"maxParentEntries": 2}`)
+	now, advance := newClock()
+	p.now = now
+
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1", ParentSessionHeader: "R"}, "R")
+	advance(time.Second)
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "C1"}, "C1")
+	advance(time.Second)
+	// Bound reached: the newer parentless node is evicted, not the older link.
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S2", ParentSessionHeader: "R"}, "R")
+
+	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "R")
 }
 
 // TestRequestHeader_BandChainInheritance pins that chains inherit through

@@ -249,7 +249,6 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	span.SetAttributes(
 		attribute.String("target_model", reqCtx.TargetModelName),
-		attribute.Int("request_prio", priority),
 	)
 
 	fairnessID, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
@@ -347,6 +346,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		reqCtx.Priority = resolvedBand
 		reqCtx.SchedulingRequest.Objectives.Priority = resolvedBand
 	}
+	span.SetAttributes(attribute.Int("request_prio", priority))
 
 	admitting = true
 	// Admit may block until flow control admits the request.

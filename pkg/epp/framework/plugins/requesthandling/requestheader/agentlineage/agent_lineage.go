@@ -240,10 +240,16 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 		return nil
 	}
 	seeded := request.Objectives.Priority
-	explicit := strings.TrimSpace(request.Headers[metadata.ObjectiveKey]) != ""
+	objective, _ := metadata.GetLowerCaseHeaderValue(request.Headers, metadata.ObjectiveKey)
+	explicit := strings.TrimSpace(objective) != ""
 	root, band := p.resolveRoot(request.FairnessID, session, parent, seeded, explicit)
 	request.PutAttribute(DerivedRootKey, root)
-	request.PutAttribute(ResolvedBandKey, band)
+	if band != seeded {
+		// Published only when lineage changed the band: the Director
+		// overrides the priority for inheritance alone, and an echoed seed
+		// could revert a priority another processor adjusted in between.
+		request.PutAttribute(ResolvedBandKey, band)
+	}
 	return nil
 }
 
@@ -323,12 +329,12 @@ func (p *Plugin) resolveRoot(tenant, session, parent string, seeded int, explici
 // a declaration naming a different parent is ignored until the node expires,
 // which keeps a caller sharing the default tenant from splicing a live
 // session onto another program or cycling a root. The band always refreshes
-// to the latest resolution. At the bound the least-recently-used node is
-// evicted, but never for a key already in the map: harnesses resend both
-// headers every turn, and overwriting an existing key does not grow the
-// map. A parentless node is not recorded at the bound at all: a link
-// carries lineage a bare band does not, so parentless arrivals must not
-// evict live links. The eviction scan is O(len(nodes)), kept small by the
+// to the latest resolution. At the bound a node is evicted, but never for a
+// key already in the map: harnesses resend both headers every turn, and
+// overwriting an existing key does not grow the map. A parentless node is
+// not recorded at the bound at all, and eviction prefers parentless nodes:
+// a link carries lineage a bare band does not, so one-off sessions die
+// before live links. The eviction scan is O(len(nodes)), kept small by the
 // bound.
 func (p *Plugin) recordNodeLocked(tenant, session, parent string, band int, now time.Time) {
 	if parent == session {
@@ -343,25 +349,38 @@ func (p *Plugin) recordNodeLocked(tenant, session, parent string, band int, now 
 	} else if parent == "" && len(p.nodes) >= p.maxParentEntries {
 		return
 	} else if len(p.nodes) >= p.maxParentEntries {
-		var oldestKey lineageKey
-		var oldest time.Time
-		first := true
-		for k, record := range p.nodes {
-			if first || record.updatedAt.Before(oldest) {
-				oldestKey, oldest, first = k, record.updatedAt, false
-			}
-		}
-		if !first {
-			delete(p.nodes, oldestKey)
+		if evictKey, ok := lruKey(p.nodes, true); ok {
+			delete(p.nodes, evictKey)
+		} else if evictKey, ok := lruKey(p.nodes, false); ok {
+			delete(p.nodes, evictKey)
 		}
 	}
 	p.nodes[key] = nodeRecord{parent: parent, band: band, updatedAt: now}
 }
 
+// lruKey returns the least recently updated node in the map, considering
+// only parentless nodes when parentlessOnly is set.
+func lruKey(nodes map[lineageKey]nodeRecord, parentlessOnly bool) (lineageKey, bool) {
+	var oldestKey lineageKey
+	var oldest time.Time
+	first := true
+	for k, record := range nodes {
+		if parentlessOnly && record.parent != "" {
+			continue
+		}
+		if first || record.updatedAt.Before(oldest) {
+			oldestKey, oldest, first = k, record.updatedAt, false
+		}
+	}
+	return oldestKey, !first
+}
+
 // walkToRootLocked follows recorded parent links from start to the first
 // ancestor with no live parent link, at most maxWalkHops links. Reading a
-// node refreshes it, so an in-use program never expires; an expired node is
-// deleted and treated as absent. A cycle ends the walk at the current node.
+// node refreshes it — including the terminal root, so an idle root with
+// active children stays alive — so an in-use program never expires; an
+// expired node is deleted and treated as absent. A cycle ends the walk at
+// the current node.
 func (p *Plugin) walkToRootLocked(tenant, start string, now time.Time) string {
 	current := start
 	// visited is allocated only when a link is followed: a request that
@@ -381,6 +400,7 @@ func (p *Plugin) walkToRootLocked(tenant, start string, now time.Time) string {
 			return current
 		}
 		if record.parent == "" {
+			p.nodes[key] = nodeRecord{parent: record.parent, band: record.band, updatedAt: now}
 			return current
 		}
 		if visited == nil {
