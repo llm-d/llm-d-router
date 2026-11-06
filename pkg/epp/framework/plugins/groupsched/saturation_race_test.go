@@ -49,6 +49,8 @@ func TestSaturationIsConcurrencySafe(t *testing.T) {
 	late := metaEndpoint(refEngine(2), 64, 1000) // joins mid-flight
 	bad := metaEndpoint(refEngine(3), 32, 1000)  // 32 measured against 64 configured
 
+	know(t, p, ready0, ready1, late, bad)
+
 	stop := make(chan struct{})
 	var work, scrape sync.WaitGroup
 

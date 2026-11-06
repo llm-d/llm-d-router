@@ -124,9 +124,11 @@ type GroupScheduler struct {
 	// never learn capacity again — no group, no seats, FCFS for that engine for the rest of the run.
 	learned  map[string]struct{}
 	rejected map[string]struct{}
-	// learnHook is a TEST-ONLY seam: nil in production, called once per learn attempt between the
-	// learn and the mark, which is the window the delete-while-learning race lives in.
-	learnHook func(key string)
+	// learnHook is a TEST-ONLY seam: nil in production, called per learn attempt at both points a
+	// delete can interleave with it — after the candidate snapshot's known-set read (`learnStart`)
+	// and after the learn, immediately before the mark (`learnLearned`). A delete that lands after
+	// the mark is not a race: the mark and the teardown both take capMu, so that order is serial.
+	learnHook func(key string, phase learnPhase)
 	// epoch is bumped for a key when its endpoint is deleted, so a capacity learn that is in flight
 	// across the delete can tell: it must not mark the key learned (the group it just made is not
 	// the endpoint's) and it must UNDO the learn, or the group of a deleted endpoint outlives its

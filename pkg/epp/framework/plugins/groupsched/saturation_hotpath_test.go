@@ -41,6 +41,7 @@ func TestSaturationTakesNoSchedulerLock(t *testing.T) {
 	ep1 := liveEndpoint(engineID(1), 0.1, 500, 64, 1000, time.Now())
 	key0, key1 := endpointKey(ep0.GetMetadata()), endpointKey(ep1.GetMetadata())
 	pods := livePods(ep0, ep1)
+	know(t, p, ep0, ep1)
 	// first call: learns both engines (this is the only time it may take the lock)
 	if got := p.Saturation(context.Background(), pods); got != 0 {
 		t.Fatalf("Saturation must stay 0, got %v", got)
@@ -79,6 +80,7 @@ func TestRejectedGeometryIsTriedOnce(t *testing.T) {
 	// 32 measured against 64 configured: a mismatch
 	bad := liveEndpoint(engineID(0), 0.1, 500, 32, 1000, time.Now())
 	badKey := endpointKey(bad.GetMetadata())
+	know(t, p, bad)
 	_ = p.Saturation(context.Background(), livePods(bad))
 	p.capMu.Lock()
 	_, rejected := p.rejected[badKey]
@@ -94,6 +96,7 @@ func TestRejectedGeometryIsTriedOnce(t *testing.T) {
 	// and a NEW endpoint key (a rollout: a new pod name) gets its own attempt
 	rolled := liveEndpoint("rolled", 0.1, 500, 64, 1000, time.Now())
 	rolledKey := endpointKey(rolled.GetMetadata())
+	know(t, p, rolled)
 	_ = p.Saturation(context.Background(), livePods(rolled))
 	if !p.sched.HasCapacityFor(rolledKey) {
 		t.Fatal("a new endpoint's geometry must get its own attempt after a rollout")

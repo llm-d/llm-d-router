@@ -133,8 +133,9 @@ func TestCapacityLearnedFromLiveSamples(t *testing.T) {
 	if p.sched.HasCapacity() {
 		t.Fatal("no capacity yet")
 	}
-	p.Saturation(context.Background(), livePods(liveEndpoint("a", 0.1, 0, 64, 1000, time.Now()),
-		liveEndpoint("b", 0.1, 0, 64, 2000, time.Now())))
+	epA, epB := liveEndpoint("a", 0.1, 0, 64, 1000, time.Now()), liveEndpoint("b", 0.1, 0, 64, 2000, time.Now())
+	know(t, p, epA, epB)
+	p.Saturation(context.Background(), livePods(epA, epB))
 	if !p.sched.HasCapacityFor(engineID(0)) || !p.sched.HasCapacityFor(engineID(1)) {
 		t.Fatal("both engines' capacity must be learned from the live samples")
 	}

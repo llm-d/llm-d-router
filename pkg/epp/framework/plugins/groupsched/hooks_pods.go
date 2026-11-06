@@ -53,11 +53,16 @@ func (r *GroupScheduler) learnFromCandidates(cands []fwkdl.Endpoint) {
 			continue
 		}
 		r.capMu.Lock()
+		// KNOWN-SET GATE, PART ONE. The candidate slice is a SNAPSHOT: it can be older than a
+		// delete that has already been processed, so a key in `cands` is not proof that the
+		// endpoint is still ours. Learning for a key this plugin does not know creates a group for
+		// an engine that has no delete left to come — a phantom group that takes seats forever.
+		_, known := r.endpoints[key]
 		_, done := r.learned[key]
 		_, bad := r.rejected[key]
 		at := r.epoch[key] // the key's generation BEFORE the learn: see below
 		r.capMu.Unlock()
-		if done || bad {
+		if !known || done || bad {
 			continue // nothing to do, and no lock taken
 		}
 		m := e.GetMetrics()
@@ -66,17 +71,21 @@ func (r *GroupScheduler) learnFromCandidates(cands []fwkdl.Endpoint) {
 		}
 		// The one scheduler lock on this path, per engine, ONCE. capMu is NOT held across it, and the
 		// scheduler is asked what it now holds BEFORE capMu is taken again.
+		r.learnHookFn(key, learnStart)
 		err := r.learnCapacity(key, m)
 		learned := err == nil && r.sched.HasCapacityFor(key)
-		if r.learnHook != nil {
-			r.learnHook(key) // test-only seam: the window this race lives in
-		}
+		r.learnHookFn(key, learnLearned)
 		r.capMu.Lock()
-		// DID THE ENDPOINT DIE WHILE WE WERE LEARNING IT? The epoch moves on a delete, so a moved
-		// epoch means the group this learn just created belongs to an endpoint that is gone. It must
-		// not be marked (the re-added endpoint has to learn again) and it must be TORN DOWN here,
-		// because the delete's own teardown ran before the group existed — nothing else would.
-		stale := r.epoch[key] != at
+		// DID THE ENDPOINT DIE WHILE WE WERE LEARNING IT? Two independent ways to tell, and BOTH
+		// are needed. The epoch moves on a delete, which catches a delete that lands inside this
+		// learn. The known-set catches the other order: the delete was processed BEFORE this learn
+		// started (the epoch had already moved when it was read, so it cannot move again), and the
+		// candidate slice that is driving this learn predates it. Either way the group this learn
+		// just created belongs to an endpoint that is gone: it must not be marked (the re-added
+		// endpoint has to learn again) and it must be TORN DOWN here, because the delete's own
+		// teardown ran before the group existed — nothing else would.
+		_, stillKnown := r.endpoints[key]
+		stale := !stillKnown || r.epoch[key] != at
 		switch {
 		case stale:
 			// no mark of either kind: the key returns to "never looked at"
@@ -97,6 +106,22 @@ func (r *GroupScheduler) learnFromCandidates(cands []fwkdl.Endpoint) {
 			r.logger.V(logutil.DEFAULT).Info("group-scheduler: CAPACITY REJECTED from the live detector",
 				"engine", r.sched.GroupLabel(key), "err", err.Error())
 		}
+	}
+}
+
+// learnPhase names the point in a capacity learn where the test-only seam is called: the two
+// places a delete can interleave with it.
+type learnPhase int
+
+const (
+	learnStart   learnPhase = iota // after the candidate snapshot's known-set read, before the learn
+	learnLearned                   // after the learn, immediately before the mark
+)
+
+// learnHookFn calls the test-only seam if one is installed.
+func (r *GroupScheduler) learnHookFn(key string, phase learnPhase) {
+	if r.learnHook != nil {
+		r.learnHook(key, phase)
 	}
 }
 

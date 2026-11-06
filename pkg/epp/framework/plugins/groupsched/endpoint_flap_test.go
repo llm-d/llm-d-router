@@ -143,7 +143,7 @@ func TestDeleteDuringLearnLeavesNoMarkAndNoPhantom(t *testing.T) {
 
 	flapAdd(t, p)
 	// the seam runs inside the learn window, after the scheduler took the capacity
-	p.learnHook = func(string) {
+	p.learnHook = func(string, learnPhase) {
 		p.learnHook = nil // once
 		flapDelete(t, p, 64)
 	}
@@ -170,7 +170,7 @@ func TestDeleteAfterLearnBeforeMarkIsDiscarded(t *testing.T) {
 	key := engineID(0)
 
 	flapAdd(t, p)
-	p.learnHook = func(string) {
+	p.learnHook = func(string, learnPhase) {
 		p.learnHook = nil
 		// the group exists at this instant; the delete tears it down and bumps the epoch
 		require.Equal(t, 1, groupCount(p, key), "the learn has created the group by now")
@@ -205,4 +205,18 @@ func TestRelearnAfterFlapIsNotSkippedWhenRejected(t *testing.T) {
 	flapLearn(p)
 	require.True(t, p.sched.HasCapacityFor(key),
 		"the re-added pod with the right block size must be learned, not skipped by the old rejection")
+}
+
+// know registers endpoints the way the reconciler does before any candidate can carry them. The
+// learn gate checks the KNOWN set, so a test that hands Saturation a candidate for an endpoint the
+// plugin was never told about is modelling a state the plugin cannot reach — and, since the gate
+// exists to refuse exactly that, the test must say so explicitly.
+func know(t *testing.T, p *GroupScheduler, eps ...fwkdl.Endpoint) {
+	t.Helper()
+	for _, e := range eps {
+		require.NoError(t, p.Extract(context.Background(), fwkdl.EndpointEvent{
+			Type:     fwkdl.EventAddOrUpdate,
+			Endpoint: e,
+		}))
+	}
 }
