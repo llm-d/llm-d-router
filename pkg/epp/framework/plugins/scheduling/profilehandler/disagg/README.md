@@ -47,7 +47,7 @@ The handler is invoked repeatedly by the framework until all stages are complete
 | `profiles.decode` | `string` | No | `"decode"` | Name of the decode scheduling profile. |
 | `profiles.prefill` | `string` | No | `"prefill"` | Name of the prefill scheduling profile. |
 | `profiles.encode` | `string` | No | `"encode"` | Name of the encode scheduling profile. |
-| `profiles.fallback` | `string` | No | — | Enables [experimental aggregated P/D fallback](#experimental-aggregated-pd-fallback) using this scheduling profile. |
+| `profiles.fallback` | `string` | No | — | Name of the aggregated fallback scheduling profile. |
 | `deciders.prefill` | `string` | No | — | Name of the prefill decider plugin. When set, enables P/D disaggregation. |
 | `deciders.encode` | `string` | No | — | Name of the encode decider plugin. When set, enables E disaggregation. |
 
@@ -80,10 +80,17 @@ plugins:
 
 #### Experimental Aggregated P/D Fallback
 
-Set `profiles.fallback` to enable this experimental feature with `stageOrder: decode-first`. Omitting it preserves the default scheduling behavior. `prefill-first` is unsupported.
+##### What it does
+
+Requests fail when Decode or a required Prefill stage has no available target. A fallback profile lets the router send the complete request to a backup worker that can run Prefill and Decode locally. This can be a spare worker or a capable worker reassigned from the Prefill pool.
+
+##### Configuration
+
+Set `profiles.fallback` to the backup profile defined in `schedulingProfiles`. Keep normal and backup worker selections separate. This example always requires Prefill; cache-aware routing is optional.
 
 ```yaml
 plugins:
+  # Exclude backup workers from normal Decode/Prefill routing.
   - name: dedicated-decode
     type: label-selector-filter
     parameters:
@@ -101,28 +108,25 @@ plugins:
         - key: llm-d.ai/role
           operator: In
           values: [prefill-decode, encode-prefill-decode]
-  - type: approx-prefix-cache-producer
-  - type: prefix-cache-scorer
-  - type: prefix-based-pd-decider
-    parameters:
-      nonCachedTokens: 16
+  - type: always-disagg-pd-decider
   - type: max-score-picker
   - type: disagg-profile-handler
     parameters:
       profiles:
+        decode: decode
+        prefill: prefill
+        # Enable fallback by referencing the backup profile below.
         fallback: aggregated-fallback
       deciders:
-        prefill: prefix-based-pd-decider
+        prefill: always-disagg-pd-decider
 schedulingProfiles:
   - name: decode
     plugins:
       - pluginRef: dedicated-decode
-      - pluginRef: prefix-cache-scorer
       - pluginRef: max-score-picker
   - name: prefill
     plugins:
       - pluginRef: dedicated-prefill
-      - pluginRef: prefix-cache-scorer
       - pluginRef: max-score-picker
   - name: aggregated-fallback
     plugins:
@@ -130,11 +134,13 @@ schedulingProfiles:
       - pluginRef: max-score-picker
 ```
 
-Use dedicated selectors to keep the fallback workers out of the normal P/D profiles. The built-in `decode-filter` and `prefill-filter` both accept the aggregated roles in this example. The fallback profile must exist in `schedulingProfiles` at startup.
+##### Limitations
 
-Each request starts with the normal decode-first path. When Decode or a required Prefill stage has no target, the handler attempts the fallback profile once. A profile-level capacity filter can trigger fallback by removing every candidate. For example, `utilization-filter` can do this with `fallbackOnEmpty: false`. A decider declining Prefill continues on the normal Decode path. Admission or flow-control rejections return before scheduling. A failed fallback returns a scheduling error.
-
-The fallback result becomes the primary profile and routes the complete request to one endpoint in the same candidate pool. This happens before forwarding. Configure the fallback workers to execute all stages locally, including Encode for multimodal requests. Verify local execution for the deployed engine and connector before selecting workers by role label.
+- Supported only with `stageOrder: decode-first`. Each request tries normal routing first and attempts fallback at most once. Skipping Prefill by a decider does not trigger fallback.
+- Normal Decode and Prefill profiles must exclude fallback workers. The built-in role filters also match `prefill-decode` and `encode-prefill-decode`; using them can route normal traffic to backup workers and prevent fallback from triggering when dedicated workers disappear.
+- A fallback worker must run the complete request locally. A role label does not enable missing engine capabilities. For multimodal requests, the worker must also handle the required encoding.
+- Encode unavailability alone does not trigger fallback. Normal P/D continues without a remote Encode result; completion depends on the selected workers' capabilities.
+- Capacity filters, including automatically injected saturation detector filters, can trigger fallback when they remove all candidates. Admission rejections before scheduling do not. If fallback also has no target, the request returns `503 rejected-no-endpoints`.
 
 #### Limitations
 

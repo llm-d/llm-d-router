@@ -28,7 +28,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -427,7 +427,7 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	decodeRes := profileResults[h.decodeProfile]
 	if h.fallbackProfile != "" {
 		if _, ran := profileResults[h.fallbackProfile]; ran {
-			return nil
+			return map[string]scheduling.SchedulerProfile{}
 		}
 		if decodeRes.FirstEndpoint() == nil || h.prefillRequiredButFailed(request, profileResults) {
 			if fallback, exists := profiles[h.fallbackProfile]; exists && ctx.Err() == nil {
@@ -585,7 +585,7 @@ func (h *Handler) ProcessResults(
 			return nil, fmt.Errorf("fallback profile %q produced no target", h.fallbackProfile)
 		}
 		RecordDisaggDecision(h.typedName.Name, h.typedName.Type, request.TargetModel, metricsutil.DisaggPathAggregatedFallback)
-		log.FromContext(ctx).V(logging.VERBOSE).Info("Routing request to aggregated fallback", "profile", h.fallbackProfile, "model", request.TargetModel, "request", request.RequestID)
+		log.FromContext(ctx).V(logutil.VERBOSE).Info("Routing request to aggregated fallback", "profile", h.fallbackProfile, "model", request.TargetModel, "request", request.RequestID)
 		return &scheduling.SchedulingResult{
 			PrimaryProfileName: h.fallbackProfile,
 			ProfileResults:     map[string]*scheduling.ProfileRunResult{h.fallbackProfile: fallback},
