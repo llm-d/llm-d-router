@@ -763,12 +763,15 @@ func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]
 		Transcriptions: transcriptions,
 		Payload:        request.RawPayload(body),
 	}
+	var responseFormat string
 	err := parseMultipartForm(body, headers, apiType, func(name string, value []byte) error {
 		switch name {
 		case reqcommon.FieldModel:
 			extractedBody.Model = string(value)
 		case "prompt":
 			transcriptions.Prompt = string(value)
+		case "response_format":
+			responseFormat = string(value)
 		case "stream":
 			stream, err := strconv.ParseBool(string(value))
 			if err != nil {
@@ -786,7 +789,16 @@ func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+	// response_format selects the reply's shape. json, verbose_json and
+	// diarized_json carry a JSON body whose usage ParseResponse can read;
+	// text, srt and vtt are plain text, where usage extraction would only
+	// log a parse error per response.
+	skipResponseProcessing := true
+	switch responseFormat {
+	case "", "json", "verbose_json", "diarized_json":
+		skipResponseProcessing = false
+	}
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: skipResponseProcessing}, nil
 }
 
 // requestBodyDecodeError reports a JSON type error in an api request by the

@@ -1256,8 +1256,8 @@ func uploadedWAV(t *testing.T, sampleRate, channels, dataLen int) fwkrequest.Upl
 	raw, err := base64.StdEncoding.DecodeString(wavBase64(sampleRate, channels, dataLen))
 	require.NoError(t, err)
 	head := raw
-	if len(head) > 1024 {
-		head = head[:1024]
+	if len(head) > fwkrequest.UploadedMediaHeadBytes {
+		head = head[:fwkrequest.UploadedMediaHeadBytes]
 	}
 	return fwkrequest.UploadedMedia{ContentType: "audio/wav", SizeBytes: int64(len(raw)), Head: head, Hash: xxhash.Sum64(raw)}
 }

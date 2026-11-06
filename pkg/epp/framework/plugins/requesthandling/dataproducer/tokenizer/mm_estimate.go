@@ -394,10 +394,6 @@ const (
 	// defaultAudioBytesPerSecond converts a payload length into seconds for clips
 	// that are not PCM WAV, modeling ~128kbps compressed audio.
 	defaultAudioBytesPerSecond = 16000
-	// wavHeaderBytes bounds how much of a payload is decoded while looking for the
-	// WAV format and data chunk headers. Real headers are far smaller; a payload
-	// whose data chunk starts past this is treated as unreadable.
-	wavHeaderBytes = 1024
 	// WAV chunk ids read while resolving a clip's duration.
 	wavFmtChunkID  = "fmt "
 	wavDataChunkID = "data"
@@ -539,7 +535,7 @@ func (e audioEstimator) bytesPerSecond(meta audioMetadata) int {
 func wavDurationFromBase64(data string) (seconds float64, ok bool) {
 	payload := audioBase64Payload(data)
 	// Only the headers are needed, so decoding is streamed and bounded.
-	head := make([]byte, wavHeaderBytes)
+	head := make([]byte, fwkrequest.UploadedMediaHeadBytes)
 	n, err := io.ReadFull(base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload)), head)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return 0, false
