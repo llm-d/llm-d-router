@@ -602,6 +602,25 @@ promotion job from its P2P tier (`tier=~".*:p2p"`) in `vllm:kv_offload_tiering_p
 labelled `result="success"` or `result="failure"`. As with the prefix prediction, the cohorts differ:
 a pull that fails or falls back to local prefill is counted on the router side only.
 
+### Prefix-cache affinity filter and P2P
+
+A `prefix-cache-affinity-filter` with `p2pSourceProducerName` set emits this counter, labelled by the
+filter instance. Each request the instance filtered that reaches `PreRequest` records one count.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `affinity_outcome`, `p2p_outcome` | The filter's outcome for the request, with the decision of the `p2p-source-producer` that `p2pSourceProducerName` names. |
+
+`affinity_outcome` is the filter's outcome, or `multiple` for a request the instance decided more
+than once because it runs in more than one scheduling profile. `p2p_outcome` and `endpoint_role` are
+the producer's `outcome` and `endpoint_role` (see [P2P KV-cache source](#p2p-kv-cache-source)).
+`p2p_outcome="unreported"` marks a request with no published P2P decision, and its `endpoint_role`
+is empty. A likely cause is a `p2pSourceProducerName` that names no configured `p2p-source-producer`,
+which startup accepts because the dependency is optional.
+
+`self` and `below-floor` occur whether or not the selected endpoint is in the filter's sticky set,
+so `p2p_outcome` does not show whether a `load_override` moved the request off it.
+
 ### Token producer render
 
 These metrics belong to the `token-producer` when it uses the vLLM render backend. The metric
