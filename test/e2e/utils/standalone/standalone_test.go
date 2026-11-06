@@ -34,8 +34,9 @@ import (
 )
 
 const (
-	poolName = "food-review-inference-pool"
-	eppName  = poolName + "-epp"
+	poolName           = "food-review-inference-pool"
+	eppName            = poolName + "-epp"
+	proxyConfigMapName = poolName + "-envoy"
 
 	simpleConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -98,7 +99,7 @@ func TestStandaloneChart(t *testing.T) {
 			for _, name := range []string{
 				"Deployment/" + eppName, "Service/" + eppName,
 				"ServiceAccount/" + eppName, "ConfigMap/" + eppName,
-				"ConfigMap/envoy", "InferencePool/" + poolName,
+				"ConfigMap/" + proxyConfigMapName, "InferencePool/" + poolName,
 				"Role/" + eppName + "-sa", "RoleBinding/" + eppName + "-sa",
 				"Role/" + eppName + "-non-sa", "RoleBinding/" + eppName + "-non-sa",
 			} {
@@ -151,7 +152,7 @@ func TestStandaloneChart(t *testing.T) {
 			if strings.TrimSpace(config) != strings.TrimSpace(simpleConfig) {
 				t.Fatal("plugin configuration changed during rendering")
 			}
-			envoy, _, _ := unstructured.NestedString(objects["ConfigMap/envoy"].Object, "data", "envoy.yaml")
+			envoy, _, _ := unstructured.NestedString(objects["ConfigMap/"+proxyConfigMapName].Object, "data", "envoy.yaml")
 			failOpen := tc.failOpen != nil && *tc.failOpen
 			if !strings.Contains(envoy, fmt.Sprintf("failure_mode_allow: %t", failOpen)) || !strings.Contains(envoy, "address: 127.0.0.1") {
 				t.Fatal("unexpected sidecar proxy configuration")
@@ -162,6 +163,22 @@ func TestStandaloneChart(t *testing.T) {
 			}
 			if !strings.Contains(envoy, "interval: "+healthCheckInterval) {
 				t.Fatalf("Envoy health-check interval must be %s", healthCheckInterval)
+			}
+			volumes, _, _ := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "volumes")
+			var mountedConfigMap string
+			for _, volume := range volumes {
+				v := volume.(map[string]any)
+				if v["name"] != "config" {
+					continue
+				}
+				configMap, ok := v["configMap"].(map[string]any)
+				if !ok {
+					t.Fatal("config volume is not backed by a ConfigMap")
+				}
+				mountedConfigMap, _ = configMap["name"].(string)
+			}
+			if mountedConfigMap != proxyConfigMapName {
+				t.Fatalf("proxy mounts ConfigMap %q, want %q", mountedConfigMap, proxyConfigMapName)
 			}
 			pool := objects["InferencePool/"+poolName]
 			ports, _, _ := unstructured.NestedSlice(pool.Object, "spec", "targetPorts")
@@ -217,7 +234,7 @@ func TestStandaloneChartDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, obj := range router.objects {
-		if obj.GetKind() == "ConfigMap" && obj.GetName() == "envoy" {
+		if obj.GetKind() == "ConfigMap" && obj.GetName() == cfg.ReleaseName+"-envoy" {
 			envoy, _, _ := unstructured.NestedString(obj.Object, "data", "envoy.yaml")
 			if !strings.Contains(envoy, "failure_mode_allow: true") {
 				t.Fatal("unset fail-open must preserve the chart default")
