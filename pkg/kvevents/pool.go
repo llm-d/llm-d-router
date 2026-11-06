@@ -16,6 +16,7 @@ package kvevents
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"slices"
@@ -23,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/cespare/xxhash/v2"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -51,6 +53,21 @@ func normalizeDeviceTier(deviceTier string) string {
 		return defaultEventSourceDeviceTier
 	}
 	return strings.ToLower(deviceTier)
+}
+
+// namespacedEngineKey namespaces an engine block hash by the model in the pod's
+// KV-events topic, so the index keeps one engine-to-request mapping per model.
+// vLLM's block hash does not include the model, and with a fixed hash seed (the
+// sha256 default since vLLM v0.29, or a shared PYTHONHASHSEED) pods of two
+// models that share a tokenizer report the same hash for the same prompt while
+// their request keys differ. The topic model is used rather than the LoRA name
+// because removal events carry no adapter; vLLM already hashes the adapter into
+// the block.
+func namespacedEngineKey(modelSeed, hash uint64) kvblock.BlockHash {
+	var b [16]byte
+	binary.LittleEndian.PutUint64(b[:8], modelSeed)
+	binary.LittleEndian.PutUint64(b[8:], hash)
+	return kvblock.BlockHash(xxhash.Sum64(b[:]))
 }
 
 func isPrefixIndexableSpecKind(kind KVCacheSpecKind) bool {
@@ -613,6 +630,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 		"podID", podIdentifier,
 		"modelName", modelName,
 		"eventCount", len(batch.Events))
+	modelSeed := xxhash.Sum64String(modelName)
 
 	// Process each event in the batch
 	for _, genericEvent := range batch.Events {
@@ -697,12 +715,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			engineKeys := make([]kvblock.BlockHash, len(ev.BlockHashes))
 			for i, hash := range ev.BlockHashes {
-				engineKeys[i] = kvblock.BlockHash(hash)
+				engineKeys[i] = namespacedEngineKey(modelSeed, hash)
 			}
 
 			parentRequestKey := kvblock.EmptyBlockHash
 			if ev.ParentHash != 0 {
-				parentEngineKey := kvblock.BlockHash(ev.ParentHash)
+				parentEngineKey := namespacedEngineKey(modelSeed, ev.ParentHash)
 				key, err := p.index.GetRequestKey(ctx, parentEngineKey)
 				if err != nil {
 					// Engine blocks smaller than the canonical block that end mid
@@ -716,6 +734,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 							"groupIdx", ev.GroupIdx,
 							"cacheKind", ev.KVCacheSpecKind,
 							"reason", reason,
+							"parentHash", ev.ParentHash,
 							"parentEngineKey", parentEngineKey,
 							"numTokens", len(ev.Tokens),
 							"numBlockHashes", len(ev.BlockHashes),
@@ -723,6 +742,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						continue
 					}
 					debugLogger.Error(err, "Failed to get request key for parent block",
+						"parentHash", ev.ParentHash,
 						"parentEngineKey", parentEngineKey,
 						"effectiveModelName", effectiveModelName,
 						"groupIdx", ev.GroupIdx,
@@ -887,7 +907,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			// both 1:1 (legacy) and 1:many (canonical) mappings.
 			engineKeys := make([]kvblock.BlockHash, len(hashesToEvict))
 			for i, hash := range hashesToEvict {
-				engineKeys[i] = kvblock.BlockHash(hash)
+				engineKeys[i] = namespacedEngineKey(modelSeed, hash)
 			}
 			if err := p.index.Evict(ctx, kvblock.EngineKey, engineKeys, podEntries); err != nil {
 				debugLogger.Error(err, "Failed to evict engine keys from index",
