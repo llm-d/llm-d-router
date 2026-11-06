@@ -632,6 +632,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 		}
 		p.PluginState.Delete(request.RequestID)
 	} else {
+		p.PluginState.UnbindLiveness(request.RequestID)
 		p.PluginState.Touch(request.RequestID)
 	}
 }
