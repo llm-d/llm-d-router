@@ -1030,9 +1030,8 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 }
 
 // Cache read and cache creation counts reported by message_start must survive
-// a later message_delta delivered in a separate HTTP body chunk. The request
-// response session retains the three Anthropic input buckets across chunks so
-// PromptTokens, TotalTokens, and CachedTokens reflect the combined usage.
+// a later message_delta delivered in a separate HTTP body chunk, including when
+// Envoy sends end of stream as a separate final frame.
 func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
 	t.Parallel()
 
@@ -1110,31 +1109,43 @@ func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
 		},
 	}
 
+	stop := "event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"
+	blockDelta := "event: content_block_delta\ndata: " + `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}` + "\n\n"
+	layouts := []struct {
+		name   string
+		chunks func(start, delta string) []string
+	}{
+		{"message_delta in final frame", func(start, delta string) []string { return []string{start, blockDelta, delta + stop} }},
+		{"message_stop final frame", func(start, delta string) []string { return []string{start, delta, stop} }},
+		{"empty final frame", func(start, delta string) []string { return []string{start, delta, ""} }},
+	}
+
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			server := &StreamingServer{
-				parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
-				director:       &mockDirector{},
-			}
-			reqCtx := &RequestContext{
-				Response: &Response{
-					Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream},
-				},
-				Request:           &Request{Headers: map[string]string{":path": reqcommon.APITypeMessages.Path()}},
-				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
-			}
+		for _, layout := range layouts {
+			t.Run(tc.name+"/"+layout.name, func(t *testing.T) {
+				server := &StreamingServer{
+					parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+					director:       &mockDirector{},
+				}
+				reqCtx := &RequestContext{
+					Response: &Response{
+						Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream},
+					},
+					Request:           &Request{Headers: map[string]string{":path": reqcommon.APITypeMessages.Path()}},
+					SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+				}
 
-			chunks := [][]byte{
-				[]byte("event: message_start\ndata: " + tc.messageStart + "\n\n"),
-				[]byte("event: message_delta\ndata: " + tc.messageDelta + "\n\n"),
-				[]byte("event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"),
-			}
-			for i, chunk := range chunks {
-				server.HandleResponseBody(t.Context(), reqCtx, chunk, i == len(chunks)-1)
-			}
+				chunks := layout.chunks(
+					"event: message_start\ndata: "+tc.messageStart+"\n\n",
+					"event: message_delta\ndata: "+tc.messageDelta+"\n\n",
+				)
+				for i, chunk := range chunks {
+					server.HandleResponseBody(t.Context(), reqCtx, []byte(chunk), i == len(chunks)-1)
+				}
 
-			assert.Equal(t, tc.want, reqCtx.Usage)
-		})
+				assert.Equal(t, tc.want, reqCtx.Usage)
+			})
+		}
 	}
 }
 

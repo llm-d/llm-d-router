@@ -90,15 +90,8 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	if err != nil {
 		logger.Error(err, "parsing response: failed to resolve parser")
 	} else if len(parseBytes) > 0 || endOfStream {
-		if reqCtx.responseSession == nil {
-			if sp, ok := parser.(fwkrh.StatefulResponseParser); ok {
-				reqCtx.responseSession = sp.NewResponseSession()
-			} else {
-				reqCtx.responseSession = parser
-			}
-		}
 		before := time.Now()
-		parsedResp, err = reqCtx.responseSession.ParseResponse(ctx, parseBytes, reqCtx.Response.Headers, endOfStream)
+		parsedResp, err = parser.ParseResponse(ctx, parseBytes, reqCtx.Response.Headers, endOfStream)
 		metrics.RecordPluginProcessingLatency(fwkrh.ResponseParsingExtensionPoint, parser.TypedName().Type, parser.TypedName().Name, time.Since(before))
 		if err != nil {
 			logger.Error(err, "parsing response")

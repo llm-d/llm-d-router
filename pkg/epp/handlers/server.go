@@ -191,10 +191,6 @@ type RequestContext struct {
 	// bodyReceived is set once the full request body is buffered; only such requests get an outcome.
 	bodyReceived bool
 
-	// responseSession holds the per-request response parser for protocols whose
-	// streamed usage spans multiple response chunks.
-	responseSession fwkrh.ResponseSession
-
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
 	sseLineDiscarding bool

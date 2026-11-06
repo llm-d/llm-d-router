@@ -20,8 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
@@ -871,7 +874,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 }
 
 func BenchmarkAnthropicParser_ParseResponse_Streaming(b *testing.B) {
-	parser := NewAnthropicParser()
+	start := []byte(sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}`))
 	tests := []struct {
 		name  string
 		chunk []byte
@@ -888,14 +891,395 @@ func BenchmarkAnthropicParser_ParseResponse_Streaming(b *testing.B) {
 
 	for _, tt := range tests {
 		b.Run(tt.name, func(b *testing.B) {
+			parser := NewAnthropicParser()
+			ctx := b.Context()
+			if _, err := parser.ParseResponse(ctx, start, sseHeaders, false); err != nil {
+				b.Fatal(err)
+			}
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := parser.parseStreamResponse(tt.chunk); err != nil {
+				if _, err := parser.ParseResponse(ctx, tt.chunk, sseHeaders, false); err != nil {
 					b.Fatal(err)
 				}
 			}
 		})
 	}
+}
+
+var sseHeaders = map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}
+
+func sseEvent(event, data string) string {
+	return "event: " + event + "\ndata: " + data + "\n\n"
+}
+
+func streamCount(p *AnthropicParser) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.streams)
+}
+
+type streamStep struct {
+	body        string
+	endOfStream bool
+	want        *request.Usage
+}
+
+func TestAnthropicParser_ParseResponse_MultiChunkStream(t *testing.T) {
+	start := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100,"output_tokens":1}}}`)
+	blockDelta := sseEvent("content_block_delta", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`)
+	delta := sseEvent("message_delta", `{"type":"message_delta","usage":{"output_tokens":15,"cache_read_input_tokens":0}}`)
+	stop := sseEvent("message_stop", `{"type":"message_stop"}`)
+
+	startUsage := &request.Usage{PromptTokens: 2130, TotalTokens: 2130, PromptTokenDetails: &request.PromptTokenDetails{CachedTokens: 2000}}
+	finalUsage := &request.Usage{PromptTokens: 2130, CompletionTokens: 15, TotalTokens: 2145, PromptTokenDetails: &request.PromptTokenDetails{CachedTokens: 2000}}
+
+	tests := []struct {
+		name  string
+		steps []streamStep
+	}{
+		{
+			name: "message_delta in the final frame",
+			steps: []streamStep{
+				{body: start, want: startUsage},
+				{body: blockDelta},
+				{body: delta + stop, endOfStream: true, want: finalUsage},
+			},
+		},
+		{
+			name: "message_delta before a message_stop final frame",
+			steps: []streamStep{
+				{body: start, want: startUsage},
+				{body: delta, want: finalUsage},
+				{body: stop, endOfStream: true},
+			},
+		},
+		{
+			name: "message_delta before an empty final frame",
+			steps: []streamStep{
+				{body: start, want: startUsage},
+				{body: blockDelta},
+				{body: delta, want: finalUsage},
+				{body: "", endOfStream: true},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := NewAnthropicParser()
+			ctx := t.Context()
+			for i, step := range tt.steps {
+				got, err := parser.ParseResponse(ctx, []byte(step.body), sseHeaders, step.endOfStream)
+				require.NoError(t, err)
+				var gotUsage *request.Usage
+				if got != nil {
+					gotUsage = got.Usage
+				}
+				if diff := cmp.Diff(step.want, gotUsage); diff != "" {
+					t.Errorf("step %d usage mismatch (-want +got):\n%s", i, diff)
+				}
+			}
+			assert.Zero(t, streamCount(parser), "stream state must be released at end of stream")
+		})
+	}
+}
+
+func TestAnthropicParser_ParseResponse_SingleFrameStreamKeepsNoState(t *testing.T) {
+	parser := NewAnthropicParser()
+	body := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}`) +
+		sseEvent("message_delta", `{"type":"message_delta","usage":{"output_tokens":15}}`)
+
+	got, err := parser.ParseResponse(t.Context(), []byte(body), sseHeaders, true)
+	require.NoError(t, err)
+	assert.Equal(t, 2030, got.Usage.PromptTokens)
+	assert.Nil(t, parser.streams)
+}
+
+func TestAnthropicParser_ParseResponse_ConcurrentStreams(t *testing.T) {
+	parser := NewAnthropicParser()
+	const streams = 32
+
+	var wg sync.WaitGroup
+	errs := make(chan error, streams)
+	for i := range streams {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			input, read, creation := 10+i, 1000*(i+1), 7*i
+			start := sseEvent("message_start", fmt.Sprintf(`{"type":"message_start","message":{"usage":{"input_tokens":%d,"cache_read_input_tokens":%d,"cache_creation_input_tokens":%d}}}`, input, read, creation))
+			delta := sseEvent("message_delta", fmt.Sprintf(`{"type":"message_delta","usage":{"output_tokens":%d}}`, i+1))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			if _, err := parser.ParseResponse(ctx, []byte(start), sseHeaders, false); err != nil {
+				errs <- err
+				return
+			}
+			got, err := parser.ParseResponse(ctx, []byte(delta), sseHeaders, false)
+			if err != nil {
+				errs <- err
+				return
+			}
+			want := &request.Usage{
+				PromptTokens:       input + read + creation,
+				CompletionTokens:   i + 1,
+				TotalTokens:        input + read + creation + i + 1,
+				PromptTokenDetails: &request.PromptTokenDetails{CachedTokens: read},
+			}
+			if diff := cmp.Diff(want, got.Usage); diff != "" {
+				errs <- fmt.Errorf("stream %d usage mismatch (-want +got):\n%s", i, diff)
+				return
+			}
+			if _, err := parser.ParseResponse(ctx, nil, sseHeaders, true); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	assert.Zero(t, streamCount(parser))
+}
+
+func TestAnthropicParser_ParseResponse_CancelReleasesStream(t *testing.T) {
+	parser := NewAnthropicParser()
+	ctx, cancel := context.WithCancel(t.Context())
+	start := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30}}}`)
+
+	_, err := parser.ParseResponse(ctx, []byte(start), sseHeaders, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, streamCount(parser))
+
+	cancel()
+	assert.Eventually(t, func() bool { return streamCount(parser) == 0 }, time.Second, time.Millisecond)
+}
+
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+func TestAnthropicParser_ParseResponse_SweepsStaleStreams(t *testing.T) {
+	type key struct{}
+	start := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":5000}}}`)
+	delta := sseEvent("message_delta", `{"type":"message_delta","usage":{"output_tokens":15}}`)
+
+	parents := map[string]func(t *testing.T) context.Context{
+		"uncancellable parent": func(t *testing.T) context.Context { return context.WithoutCancel(t.Context()) },
+		// Each stream ctx derives from a parent that outlives it, so an aborted
+		// stream leaves its ctx uncancelled.
+		"long-lived cancellable parent": func(t *testing.T) context.Context {
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+			return ctx
+		},
+	}
+	for name, parent := range parents {
+		t.Run(name, func(t *testing.T) {
+			clock := &fakeClock{t: time.Unix(1_000_000, 0)}
+			parser := NewAnthropicParser()
+			parser.now = clock.now
+			base := parent(t)
+
+			stale := context.WithValue(base, key{}, "stale")
+			_, err := parser.ParseResponse(stale, []byte(start), sseHeaders, false)
+			require.NoError(t, err)
+
+			clock.advance(2 * fwkplugin.DefaultStalenessThreshold)
+			fresh := context.WithValue(base, key{}, "fresh")
+			_, err = parser.ParseResponse(fresh, []byte(start), sseHeaders, false)
+			require.NoError(t, err)
+
+			got, err := parser.ParseResponse(stale, []byte(delta), sseHeaders, false)
+			require.NoError(t, err)
+			assert.Equal(t, &request.Usage{CompletionTokens: 15, TotalTokens: 15}, got.Usage,
+				"a stale stream must not keep the expired cache read")
+
+			got, err = parser.ParseResponse(fresh, []byte(delta), sseHeaders, false)
+			require.NoError(t, err)
+			assert.Equal(t, &request.Usage{
+				PromptTokens:       5030,
+				CompletionTokens:   15,
+				TotalTokens:        5045,
+				PromptTokenDetails: &request.PromptTokenDetails{CachedTokens: 5000},
+			}, got.Usage)
+
+			_, err = parser.ParseResponse(fresh, nil, sseHeaders, true)
+			require.NoError(t, err)
+			assert.Zero(t, streamCount(parser))
+		})
+	}
+}
+
+func TestAnthropicParser_ParseResponse_CapsTrackedStreams(t *testing.T) {
+	type key struct{}
+	start := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":5000}}}`)
+	delta := sseEvent("message_delta", `{"type":"message_delta","usage":{"output_tokens":15}}`)
+	clock := &fakeClock{t: time.Unix(1_000_000, 0)}
+	parser := NewAnthropicParser()
+	parser.now = clock.now
+
+	const streams = maxTrackedStreams + 100
+	streamCtx := func(i int) context.Context { return context.WithValue(t.Context(), key{}, i) }
+	ctxs := make([]context.Context, 0, streams)
+	for i := range streams {
+		ctx := streamCtx(i)
+		ctxs = append(ctxs, ctx)
+		_, err := parser.ParseResponse(ctx, []byte(start), sseHeaders, false)
+		require.NoError(t, err)
+		clock.advance(time.Millisecond)
+	}
+	assert.Equal(t, maxTrackedStreams, streamCount(parser))
+
+	got, err := parser.ParseResponse(ctxs[0], []byte(delta), sseHeaders, false)
+	require.NoError(t, err)
+	assert.Equal(t, &request.Usage{CompletionTokens: 15, TotalTokens: 15}, got.Usage,
+		"the oldest stream is evicted at capacity")
+
+	got, err = parser.ParseResponse(ctxs[streams-1], []byte(delta), sseHeaders, false)
+	require.NoError(t, err)
+	assert.Equal(t, 5030, got.Usage.PromptTokens, "the newest stream is kept at capacity")
+}
+
+func TestAnthropicParser_ParseResponse_ReusedContextAfterAbortedStream(t *testing.T) {
+	aborted := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}`)
+	delta := sseEvent("message_delta", `{"type":"message_delta","usage":{"output_tokens":5}}`)
+
+	tests := []struct {
+		name      string
+		start     string
+		wantStart *request.Usage
+		wantDelta *request.Usage
+	}{
+		{
+			name:      "next message_start with uncached input",
+			start:     sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":40}}}`),
+			wantStart: &request.Usage{PromptTokens: 40, TotalTokens: 40},
+			wantDelta: &request.Usage{PromptTokens: 40, CompletionTokens: 5, TotalTokens: 45},
+		},
+		{
+			name:      "next message_start without usage",
+			start:     sseEvent("message_start", `{"type":"message_start","message":{"id":"msg_2"}}`),
+			wantDelta: &request.Usage{CompletionTokens: 5, TotalTokens: 5},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := NewAnthropicParser()
+			ctx := t.Context()
+			_, err := parser.ParseResponse(ctx, []byte(aborted), sseHeaders, false)
+			require.NoError(t, err)
+
+			got, err := parser.ParseResponse(ctx, []byte(tt.start), sseHeaders, false)
+			require.NoError(t, err)
+			if diff := cmp.Diff(tt.wantStart, got.Usage); diff != "" {
+				t.Errorf("message_start usage mismatch (-want +got):\n%s", diff)
+			}
+			got, err = parser.ParseResponse(ctx, []byte(delta), sseHeaders, false)
+			require.NoError(t, err)
+			if diff := cmp.Diff(tt.wantDelta, got.Usage); diff != "" {
+				t.Errorf("message_delta usage mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestAnthropicParser_ParseResponse_ContentTypeBoundaries(t *testing.T) {
+	start := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30}}}`)
+
+	t.Run("end of stream without headers releases the stream", func(t *testing.T) {
+		parser := NewAnthropicParser()
+		_, err := parser.ParseResponse(t.Context(), []byte(start), sseHeaders, false)
+		require.NoError(t, err)
+		require.Equal(t, 1, streamCount(parser))
+
+		got, err := parser.ParseResponse(t.Context(), nil, nil, true)
+		require.NoError(t, err)
+		assert.Nil(t, got)
+		assert.Zero(t, streamCount(parser))
+	})
+
+	t.Run("event stream parameter in a JSON media type", func(t *testing.T) {
+		got, err := NewAnthropicParser().ParseResponse(t.Context(),
+			[]byte(`{"usage":{"input_tokens":3,"output_tokens":2}}`),
+			map[string]string{reqcommon.HeaderContentType: "application/json; note=text/event-stream"}, true)
+		require.NoError(t, err)
+		assert.Equal(t, &fwkrh.ParsedResponse{Usage: &request.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}}, got)
+	})
+
+	t.Run("mixed case header and media type with parameters", func(t *testing.T) {
+		got, err := NewAnthropicParser().ParseResponse(t.Context(), []byte(start),
+			map[string]string{"Content-Type": "Text/Event-Stream; charset=utf-8"}, true)
+		require.NoError(t, err)
+		assert.Equal(t, &fwkrh.ParsedResponse{Usage: &request.Usage{PromptTokens: 30, TotalTokens: 30}, StreamedEvents: 1}, got)
+	})
+}
+
+// uncomparableCtx cannot key a map; the slice field makes the struct type uncomparable.
+type uncomparableCtx struct {
+	context.Context
+	_ []int
+}
+
+func TestAnthropicParser_ParseResponse_UntrackableContexts(t *testing.T) {
+	start := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}`)
+	delta := sseEvent("message_delta", `{"type":"message_delta","usage":{"output_tokens":15}}`)
+	var nilCtx context.Context
+
+	for name, ctx := range map[string]context.Context{
+		"uncomparable": uncomparableCtx{Context: t.Context()},
+		"nil":          nilCtx,
+		"interface field holding a map": struct {
+			context.Context
+			meta any
+		}{t.Context(), map[string]string{"a": "b"}},
+		"embedded uncomparable ctx": struct{ context.Context }{uncomparableCtx{Context: t.Context()}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			parser := NewAnthropicParser()
+			got, err := parser.ParseResponse(ctx, []byte(start), sseHeaders, false)
+			require.NoError(t, err)
+			assert.Equal(t, 2030, got.Usage.PromptTokens)
+
+			got, err = parser.ParseResponse(ctx, []byte(delta), sseHeaders, false)
+			require.NoError(t, err)
+			assert.Equal(t, &request.Usage{CompletionTokens: 15, TotalTokens: 15}, got.Usage)
+
+			_, err = parser.ParseResponse(ctx, nil, sseHeaders, true)
+			require.NoError(t, err)
+			assert.Zero(t, streamCount(parser))
+		})
+	}
+}
+
+func TestAnthropicParser_ParseResponse_ZeroValueParser(t *testing.T) {
+	parser := &AnthropicParser{}
+	ctx := t.Context()
+	start := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}`)
+	delta := sseEvent("message_delta", `{"type":"message_delta","usage":{"output_tokens":15}}`)
+
+	_, err := parser.ParseResponse(ctx, []byte(start), sseHeaders, false)
+	require.NoError(t, err)
+	got, err := parser.ParseResponse(ctx, []byte(delta), sseHeaders, false)
+	require.NoError(t, err)
+	assert.Equal(t, 2030, got.Usage.PromptTokens)
+	_, err = parser.ParseResponse(ctx, nil, sseHeaders, true)
+	require.NoError(t, err)
+	assert.Zero(t, streamCount(parser))
 }
 
 func TestAnthropicParser_Claims(t *testing.T) {

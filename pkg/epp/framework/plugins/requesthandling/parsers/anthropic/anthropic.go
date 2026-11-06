@@ -22,7 +22,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"reflect"
 	"strings"
+	"sync"
+	"time"
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -38,17 +42,34 @@ const (
 
 	messagesAPI    = "messages"
 	countTokensAPI = "messages/count_tokens"
+
+	eventMessageStart = "message_start"
+	eventMessageDelta = "message_delta"
+
+	// maxTrackedStreams bounds the stream map when streams end without a
+	// final frame faster than the staleness sweep releases them.
+	maxTrackedStreams = 4096
+	// compactMinPeak is the peak map size below which the map is never
+	// reallocated to release empty buckets.
+	compactMinPeak = 64
 )
 
 // compile-time type validation
 var (
-	_ fwkrh.Parser                 = &AnthropicParser{}
-	_ fwkrh.ModelNameRewriter      = &AnthropicParser{}
-	_ fwkrh.StatefulResponseParser = &AnthropicParser{}
+	_ fwkrh.Parser            = &AnthropicParser{}
+	_ fwkrh.ModelNameRewriter = &AnthropicParser{}
 )
 
 type AnthropicParser struct {
 	typedName fwkplugin.TypedName
+
+	// now is the stream staleness clock; nil uses time.Now.
+	now func() time.Time
+
+	mu          sync.Mutex
+	streams     map[context.Context]*streamState
+	peakStreams int
+	lastSweep   time.Time
 }
 
 func NewAnthropicParser() *AnthropicParser {
@@ -141,42 +162,201 @@ func (p *AnthropicParser) RewriteModelName(payload request.MarshalablePayload, m
 	return m, nil
 }
 
-// NewResponseSession returns a per-request response parser that accumulates the
-// three Messages API input token buckets across streamed chunks.
-func (p *AnthropicParser) NewResponseSession() fwkrh.ResponseSession {
-	return &responseSession{}
-}
-
+// ParseResponse extracts usage from a response body. For an event stream, ctx
+// identifies the response across chunks: the input token buckets seen before
+// end of stream are kept per ctx and released at end of stream, when ctx is
+// done, or when the stream goes stale.
 func (p *AnthropicParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endOfStream bool) (*fwkrh.ParsedResponse, error) {
-	var s responseSession
-	return s.ParseResponse(ctx, body, headers, endOfStream)
-}
+	if !isEventStream(headers) {
+		if endOfStream {
+			p.updateStream(ctx, chunkSummary{}, true)
+		}
+		if len(body) == 0 {
+			return nil, nil //nolint:nilnil
+		}
+		usage, err := extractUsage(body)
+		if err != nil {
+			return nil, err
+		}
+		return &fwkrh.ParsedResponse{Usage: usage}, nil
+	}
 
-type responseSession struct {
-	tokens inputTokens
-}
-
-func (s *responseSession) ParseResponse(_ context.Context, body []byte, headers map[string]string, _ bool) (*fwkrh.ParsedResponse, error) {
+	s := scanChunk(body)
+	if !endOfStream && !s.sawStart && !s.sawDelta {
+		if len(body) == 0 {
+			return nil, nil //nolint:nilnil
+		}
+		return &fwkrh.ParsedResponse{StreamedEvents: s.events}, nil
+	}
+	// The final frame is often an empty body, so the stream entry is released
+	// before the empty check.
+	tok := p.updateStream(ctx, s, endOfStream)
 	if len(body) == 0 {
 		return nil, nil //nolint:nilnil
 	}
+	return &fwkrh.ParsedResponse{Usage: s.usage(tok), StreamedEvents: s.events}, nil
+}
 
-	isStream := false
+func isEventStream(headers map[string]string) bool {
 	for k, v := range headers {
-		if strings.ToLower(k) == reqcommon.HeaderContentType && strings.Contains(strings.ToLower(v), reqcommon.MediaTypeEventStream) {
-			isStream = true
-			break
+		if !strings.EqualFold(k, reqcommon.HeaderContentType) {
+			continue
+		}
+		mediaType, _, _ := strings.Cut(v, ";")
+		if strings.EqualFold(strings.TrimSpace(mediaType), reqcommon.MediaTypeEventStream) {
+			return true
 		}
 	}
-	if isStream {
-		return s.parseStreamResponse(body)
+	return false
+}
+
+// streamState carries the input token buckets of one streamed response across
+// its body chunks. message_start reports the cache buckets and message_delta
+// may omit them, and the two events often arrive in separate chunks.
+type streamState struct {
+	tok       inputTokens
+	updatedAt time.Time
+	// stop deregisters the ctx cancellation hook; nil when ctx is never done.
+	stop func() bool
+}
+
+// trackable reports whether ctx can key the stream map without panicking. The
+// dynamic value is checked because a comparable struct type can hold an
+// interface field whose value is a map, slice, or func.
+func trackable(ctx context.Context) bool {
+	return ctx != nil && reflect.ValueOf(ctx).Comparable()
+}
+
+func (p *AnthropicParser) clock() time.Time {
+	if p.now == nil {
+		return time.Now()
+	}
+	return p.now()
+}
+
+// updateStream folds a chunk carrying message_start, a message_delta usage, or
+// end of stream into the state kept for ctx, and returns the input token
+// buckets of the stream so far.
+func (p *AnthropicParser) updateStream(ctx context.Context, s chunkSummary, endOfStream bool) inputTokens {
+	if !trackable(ctx) {
+		return s.tok
+	}
+	var stops []func() bool
+	defer func() {
+		for _, stop := range stops {
+			stop()
+		}
+	}()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	entry := p.streams[ctx]
+	tok := s.tok
+	if entry != nil && !s.sawStart {
+		tok = entry.tok
+		tok.merge(s.tok)
+	}
+	if endOfStream || ctx.Err() != nil || tok == (inputTokens{}) {
+		if entry != nil {
+			stops = p.removeLocked(ctx, entry, stops)
+		}
+		return tok
 	}
 
-	usage, err := extractUsage(body)
-	if err != nil {
-		return nil, err
+	now := p.clock()
+	if entry != nil {
+		entry.tok = tok
+		entry.updatedAt = now
+		return tok
 	}
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	stops = p.sweepStaleLocked(now, len(p.streams) >= maxTrackedStreams, stops)
+	if len(p.streams) >= maxTrackedStreams {
+		stops = p.evictOldestLocked(stops)
+	}
+	entry = &streamState{tok: tok, updatedAt: now}
+	if ctx.Done() != nil {
+		entry.stop = context.AfterFunc(ctx, func() { p.deleteStream(ctx, entry) })
+	}
+	if p.streams == nil {
+		p.streams = make(map[context.Context]*streamState)
+	}
+	p.streams[ctx] = entry
+	p.peakStreams = max(p.peakStreams, len(p.streams))
+	return tok
+}
+
+// deleteStream removes entry only if it still owns ctx, so a late cancellation
+// hook cannot drop a newer entry stored under the same ctx.
+func (p *AnthropicParser) deleteStream(ctx context.Context, entry *streamState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.streams[ctx] == entry {
+		delete(p.streams, ctx)
+		p.compactLocked()
+	}
+}
+
+// removeLocked deletes the entry for ctx and appends its cancellation hook
+// deregistration to stops, which the caller runs after releasing p.mu.
+func (p *AnthropicParser) removeLocked(ctx context.Context, entry *streamState, stops []func() bool) []func() bool {
+	delete(p.streams, ctx)
+	p.compactLocked()
+	if entry.stop != nil {
+		stops = append(stops, entry.stop)
+	}
+	return stops
+}
+
+// sweepStaleLocked drops every entry that saw no chunk within the staleness
+// threshold, including entries with a cancellation hook: a per-request ctx
+// derived from a long-lived parent is never cancelled when its stream aborts.
+// Unless force is set, it runs at most once per threshold.
+func (p *AnthropicParser) sweepStaleLocked(now time.Time, force bool, stops []func() bool) []func() bool {
+	if !force && now.Sub(p.lastSweep) < fwkplugin.DefaultStalenessThreshold {
+		return stops
+	}
+	p.lastSweep = now
+	for ctx, entry := range p.streams {
+		if now.Sub(entry.updatedAt) > fwkplugin.DefaultStalenessThreshold {
+			delete(p.streams, ctx)
+			if entry.stop != nil {
+				stops = append(stops, entry.stop)
+			}
+		}
+	}
+	p.compactLocked()
+	return stops
+}
+
+func (p *AnthropicParser) evictOldestLocked(stops []func() bool) []func() bool {
+	var oldest *streamState
+	for _, entry := range p.streams {
+		if oldest == nil || entry.updatedAt.Before(oldest.updatedAt) {
+			oldest = entry
+		}
+	}
+	for ctx, entry := range p.streams {
+		if entry == oldest {
+			return p.removeLocked(ctx, entry, stops)
+		}
+	}
+	return stops
+}
+
+// compactLocked releases the map once it empties, and reallocates it once it
+// shrinks well below its peak, because a Go map never frees its buckets.
+func (p *AnthropicParser) compactLocked() {
+	if len(p.streams) == 0 {
+		p.streams = nil
+		p.peakStreams = 0
+		return
+	}
+	if p.peakStreams > compactMinPeak && len(p.streams)*4 < p.peakStreams {
+		n := make(map[context.Context]*streamState, len(p.streams))
+		maps.Copy(n, p.streams)
+		p.streams = n
+		p.peakStreams = len(n)
+	}
 }
 
 func extractUsage(responseBytes []byte) (*request.Usage, error) {
@@ -229,14 +409,28 @@ func (t *inputTokens) add(usg map[string]any) {
 	}
 }
 
+// merge folds o, accumulated from later frames, onto t with the same rule as add.
+func (t *inputTokens) merge(o inputTokens) {
+	if o.input > 0 {
+		t.input = o.input
+	}
+	if o.cacheRead > 0 {
+		t.cacheRead = o.cacheRead
+	}
+	if o.cacheCreation > 0 {
+		t.cacheCreation = o.cacheCreation
+	}
+	t.hasRead = t.hasRead || o.hasRead
+}
+
 func (t inputTokens) apply(usage *request.Usage) {
 	if total := t.input + t.cacheRead + t.cacheCreation; total > 0 {
 		usage.PromptTokens = total
 	}
-	// An explicit zero is a cache miss, not a missing count: the metrics layer
-	// only records request_cached_tokens when PromptTokenDetails is set, so
-	// dropping the zero leaves the misses out of the histogram and inflates the
-	// reported hit rate.
+	// An explicit zero records a cache miss in PromptTokenDetails. The metrics
+	// layer only records request_cached_tokens when PromptTokenDetails is set,
+	// so dropping the zero leaves the misses out of the histogram and inflates
+	// the reported hit rate.
 	if t.hasRead {
 		usage.PromptTokenDetails = &request.PromptTokenDetails{CachedTokens: t.cacheRead}
 	}
@@ -254,6 +448,31 @@ func jsonIntPresent(m map[string]any, key string) (int, bool) {
 	return int(v), ok
 }
 
+// chunkSummary is what one stream chunk reports, read without touching the
+// per-stream state.
+type chunkSummary struct {
+	events int
+	// sawStart reports a message_start event; tok then holds only the buckets
+	// reported from the last message_start on.
+	sawStart bool
+	// sawDelta reports a message_delta event carrying usage.
+	sawDelta bool
+	// sawUsage reports any usage object, which makes the chunk report Usage.
+	sawUsage   bool
+	tok        inputTokens
+	completion int
+}
+
+func (s chunkSummary) usage(tok inputTokens) *request.Usage {
+	if !s.sawUsage {
+		return nil
+	}
+	usage := &request.Usage{CompletionTokens: s.completion}
+	tok.apply(usage)
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	return usage
+}
+
 // Anthropic SSE streaming format:
 //
 //	event: message_start
@@ -264,37 +483,16 @@ func jsonIntPresent(m map[string]any, key string) (int, bool) {
 //
 //	event: message_stop
 //	data: {"type":"message_stop"}
-func (p *AnthropicParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
-	var s responseSession
-	return s.parseStreamResponse(chunk)
-}
-
-func (s *responseSession) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
-	usage := s.extractUsageStreaming(chunk)
-	return &fwkrh.ParsedResponse{
-		Usage:          usage,
-		StreamedEvents: countStreamEvents(chunk),
-	}, nil
-}
-
-func countStreamEvents(chunk []byte) int {
-	count := 0
+func scanChunk(chunk []byte) chunkSummary {
+	var s chunkSummary
 	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
-		if _, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix)); ok {
-			count++
-		}
-	}
-	return count
-}
-
-func (s *responseSession) extractUsageStreaming(responseBytes []byte) *request.Usage {
-	var result *request.Usage
-
-	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
-	for line := range lines {
 		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
-		// Safe because only message_start/message_delta carry usage, both with a literal "usage" key.
-		if !ok || !bytes.Contains(content, []byte(reqcommon.FieldUsage)) {
+		if !ok || bytes.Equal(bytes.TrimSuffix(content, []byte("\r")), []byte(reqcommon.SSEDoneMarker)) {
+			continue
+		}
+		s.events++
+		// message_start may omit usage but still begins a new stream on ctx.
+		if !bytes.Contains(content, []byte(reqcommon.FieldUsage)) && !bytes.Contains(content, []byte(eventMessageStart)) {
 			continue
 		}
 
@@ -310,28 +508,21 @@ func (s *responseSession) extractUsageStreaming(responseBytes []byte) *request.U
 		}
 
 		switch event.Type {
-		case "message_start":
+		case eventMessageStart:
+			s.sawStart = true
+			s.tok = inputTokens{}
 			if event.Message.Usage != nil {
-				if result == nil {
-					result = &request.Usage{}
-				}
-				s.tokens.add(event.Message.Usage)
+				s.sawUsage = true
+				s.tok.add(event.Message.Usage)
 			}
-		case "message_delta":
+		case eventMessageDelta:
 			if event.Usage != nil {
-				if result == nil {
-					result = &request.Usage{}
-				}
-				s.tokens.add(event.Usage)
-				result.CompletionTokens = jsonInt(event.Usage, reqcommon.FieldOutputTokens)
+				s.sawDelta = true
+				s.sawUsage = true
+				s.tok.add(event.Usage)
+				s.completion = jsonInt(event.Usage, reqcommon.FieldOutputTokens)
 			}
 		}
 	}
-
-	if result != nil {
-		s.tokens.apply(result)
-		result.TotalTokens = result.PromptTokens + result.CompletionTokens
-	}
-
-	return result
+	return s
 }
