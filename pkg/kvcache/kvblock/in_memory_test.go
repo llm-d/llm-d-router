@@ -216,6 +216,84 @@ func TestInMemoryIndexLookupCancelledBeforeMiss(t *testing.T) {
 	assert.Nil(t, found)
 }
 
+func TestInMemoryIndexEvictPreservesSharedOneToManyRequestKeys(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	index := createInMemoryIndexForTesting(t)
+	pod := []PodEntry{{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu", HasGroup: true, GroupIdx: 0}}
+
+	oldEngineKey := BlockHash(1001)
+	liveEngineKey := BlockHash(1002)
+	oldRequestKeys := []BlockHash{11, 12, 13, 14}
+	liveRequestKeys := []BlockHash{11, 12, 23, 24}
+	require.NoError(t, index.Add(ctx, []BlockHash{oldEngineKey}, oldRequestKeys, pod))
+	require.NoError(t, index.Add(ctx, []BlockHash{liveEngineKey}, liveRequestKeys, pod))
+
+	require.NoError(t, index.Evict(ctx, EngineKey, []BlockHash{oldEngineKey}, pod))
+
+	for _, requestKey := range []BlockHash{11, 12, 23, 24} {
+		found, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+		require.NoError(t, err)
+		assert.Len(t, found[requestKey], 1, "shared/live request key %d should remain", requestKey)
+	}
+	for _, requestKey := range []BlockHash{13, 14} {
+		found, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+		require.NoError(t, err)
+		assert.Empty(t, found[requestKey], "request key %d should be evicted", requestKey)
+	}
+
+	require.NoError(t, index.Evict(ctx, EngineKey, []BlockHash{liveEngineKey}, pod))
+	for _, requestKey := range liveRequestKeys {
+		found, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+		require.NoError(t, err)
+		assert.Empty(t, found[requestKey], "request key %d should be empty after the live sibling is evicted", requestKey)
+	}
+}
+
+func TestInMemoryIndexEvictDoesNotPreserveDifferentOneToManyEntry(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	tests := []struct {
+		name      string
+		oldEntry  PodEntry
+		liveEntry PodEntry
+	}{
+		{
+			name:      "different tier",
+			oldEntry:  PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu", HasGroup: true, GroupIdx: 0},
+			liveEntry: PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "cpu", HasGroup: true, GroupIdx: 0},
+		},
+		{
+			name:      "different group",
+			oldEntry:  PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu", HasGroup: true, GroupIdx: 0},
+			liveEntry: PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu", HasGroup: true, GroupIdx: 1},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			index := createInMemoryIndexForTesting(t)
+			oldEngineKey := BlockHash(2001)
+			liveEngineKey := BlockHash(2002)
+			oldRequestKeys := []BlockHash{31, 32, 33, 34}
+			liveRequestKeys := []BlockHash{31, 32, 43, 44}
+			require.NoError(t, index.Add(ctx, []BlockHash{oldEngineKey}, oldRequestKeys, []PodEntry{tc.oldEntry}))
+			require.NoError(t, index.Add(ctx, []BlockHash{liveEngineKey}, liveRequestKeys, []PodEntry{tc.liveEntry}))
+
+			require.NoError(t, index.Evict(ctx, EngineKey, []BlockHash{oldEngineKey}, []PodEntry{tc.oldEntry}))
+
+			for _, requestKey := range []BlockHash{31, 32, 43, 44} {
+				found, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+				require.NoError(t, err)
+				assert.Equal(t, []PodEntry{tc.liveEntry}, found[requestKey], "request key %d should retain only the live entry", requestKey)
+			}
+			for _, requestKey := range []BlockHash{33, 34} {
+				found, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+				require.NoError(t, err)
+				assert.Empty(t, found[requestKey], "request key %d should be evicted with the old entry", requestKey)
+			}
+		})
+	}
+}
+
 // TestSpeculativeAnnotation tests that speculative and confirmed PodEntries
 // are treated as separate entries due to the Speculative field, and that
 // evicting one does not affect the other.

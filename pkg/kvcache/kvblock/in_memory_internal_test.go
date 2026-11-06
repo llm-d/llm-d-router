@@ -253,3 +253,17 @@ func TestInMemoryIndexConcurrentWritersMatchSequentialModel(t *testing.T) {
 		})
 	}
 }
+
+func TestInMemoryIndexEngineKeyLRUEvictionRemovesOneToManyReferences(t *testing.T) {
+	index, err := NewInMemoryIndex(&InMemoryIndexConfig{Size: 1})
+	require.NoError(t, err)
+
+	entry := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu"}
+	require.NoError(t, index.Add(t.Context(), []BlockHash{1}, []BlockHash{11, 12}, []PodEntry{entry}))
+	require.Contains(t, index.oneToManyEntries[11], BlockHash(1))
+
+	require.NoError(t, index.Add(t.Context(), []BlockHash{2}, []BlockHash{21}, []PodEntry{entry}))
+
+	assert.NotContains(t, index.oneToManyEntries, BlockHash(11))
+	assert.NotContains(t, index.oneToManyEntries, BlockHash(12))
+}
