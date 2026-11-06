@@ -31,6 +31,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -1151,4 +1152,65 @@ func TestDumpStateEmpty(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(payload, &got))
 	assert.Equal(t, 0, got.TotalPods)
 	assert.Empty(t, got.Pods)
+}
+
+// TestPrefixPluginMultiModalPrefixMatch covers prompts rendered by vLLM, where
+// every same-size image is the same run of placeholder token IDs and only the
+// feature hash identifies the image. Adopted from #4089.
+func TestPrefixPluginMultiModalPrefixMatch(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config{
+		BlockSizeTokens:        4,
+		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	}, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	endpoints := []fwksched.Endpoint{endpoint}
+
+	// Three 4-token blocks: text in tokens 0-3, a 6-token image in tokens 4-9,
+	// and text in tokens 10-11.
+	const placeholder = 9
+	newReq := func(imageHash string) *fwksched.InferenceRequest {
+		return &fwksched.InferenceRequest{
+			RequestID:   uuid.NewString(),
+			TargetModel: "test-model",
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+					TokenIDs: []uint32{1, 2, 3, 4, placeholder, placeholder, placeholder, placeholder, placeholder, placeholder, 5, 6},
+					MultiModalFeatures: []fwkrequest.MultiModalFeature{
+						{Modality: reqcommon.ModalityImage, Hash: imageHash, Offset: 4, Length: 6},
+					},
+				}}},
+			},
+		}
+	}
+
+	req1 := newReq("image-a")
+	_ = p.Produce(context.Background(), req1, endpoints)
+	_ = p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults:     map[string]*fwksched.ProfileRunResult{"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}}},
+	})
+	p.wg.Wait()
+
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType)
+	for _, tc := range []struct {
+		name        string
+		imageHash   string
+		wantMatched int
+	}{
+		{name: "same image matches every block", imageHash: "image-a", wantMatched: 3},
+		{name: "different image matches only the text before it", imageHash: "image-b", wantMatched: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = p.Produce(context.Background(), newReq(tc.imageHash), endpoints)
+			info, ok := endpoint.Get(key)
+			assert.True(t, ok)
+			prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
+			assert.Equal(t, tc.wantMatched, prefixInfo.MatchBlocks())
+			assert.Equal(t, 3, prefixInfo.TotalBlocks())
+		})
+	}
 }

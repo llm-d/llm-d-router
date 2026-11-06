@@ -308,3 +308,166 @@ func TestKVCacheBlock_Hash(t *testing.T) {
 		})
 	}
 }
+
+// A render-backend prompt's media regions carry the model's content-blind
+// placeholder tokens: any media of the same size yields the same token IDs.
+// Two prompts that differ only in media content must therefore hash
+// differently, which requires the multimodal feature hashes to reach the
+// blocks that span them.
+func TestGetBlockHashes_MediaContentChangesBlockHashes(t *testing.T) {
+	prompt := func(hash string) *fwksched.InferenceRequest {
+		return &fwksched.InferenceRequest{
+			TargetModel: "m",
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{
+						// Tokens 4..11 are the media region: content-blind
+						// padding, identical for any media of this size.
+						TokenIDs:           []uint32{1, 2, 3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 9, 10, 11, 12},
+						MultiModalFeatures: []fwkrequest.MultiModalFeature{{Modality: "image", Hash: hash, Offset: 4, Length: 8}},
+					}},
+				},
+			},
+		}
+	}
+
+	cat := GetBlockHashes(context.Background(), prompt("hash-of-a-cat"), 4, testMaxPrefixBlocks)
+	dog := GetBlockHashes(context.Background(), prompt("hash-of-a-dog"), 4, testMaxPrefixBlocks)
+	require.NotEmpty(t, cat)
+	assert.NotEqual(t, cat, dog, "different media content must change the block hashes")
+
+	same := GetBlockHashes(context.Background(), prompt("hash-of-a-cat"), 4, testMaxPrefixBlocks)
+	assert.Equal(t, cat, same, "the same media content must hash stably")
+}
+
+// Blocks outside a media span keep the featureless formula, and features that
+// hold no tokens (zero length, or a span past the prompt) are ignored.
+func TestGetBlockHashes_EmptyAndOutOfRangeFeaturesIgnored(t *testing.T) {
+	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8}
+	base := &fwksched.InferenceRequest{
+		TargetModel: "m",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens}},
+			},
+		},
+	}
+	withJunk := &fwksched.InferenceRequest{
+		TargetModel: "m",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{
+					TokenIDs: tokens,
+					MultiModalFeatures: []fwkrequest.MultiModalFeature{
+						{Modality: "image", Hash: "zero-length", Offset: 2, Length: 0},
+						{Modality: "image", Hash: "past-the-end", Offset: 100, Length: 4},
+					},
+				}},
+			},
+		},
+	}
+
+	baseHashes := GetBlockHashes(context.Background(), base, 4, testMaxPrefixBlocks)
+	junkHashes := GetBlockHashes(context.Background(), withJunk, 4, testMaxPrefixBlocks)
+	assert.Equal(t, baseHashes, junkHashes, "features holding no tokens must not change any block hash")
+}
+
+// A feature spanning a block boundary reaches both blocks' encodings, and two
+// features in one block encode in position order.
+func TestGetBlockHashes_FeaturesAcrossBlockBoundaries(t *testing.T) {
+	request := &fwksched.InferenceRequest{
+		TargetModel: "m",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{
+					TokenIDs: []uint32{1, 2, 3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 9, 10, 11, 12},
+					// Spans blocks 1 and 2 (tokens 4..15 of 20, block size 4).
+					MultiModalFeatures: []fwkrequest.MultiModalFeature{
+						{Modality: "image", Hash: "spans-two-blocks", Offset: 4, Length: 12},
+					},
+				}},
+			},
+		},
+	}
+	hashes := GetBlockHashes(context.Background(), request, 4, testMaxPrefixBlocks)
+	require.Len(t, hashes, 1)
+	require.Len(t, hashes[0], 5)
+
+	// Changing the spanning feature's content must change both blocks it
+	// covers, and through the chain every block after them.
+	changed := *request
+	changed.Body = &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{
+		Prompts: []fwkrequest.PromptTokens{{
+			TokenIDs:           request.Body.TokenizedRequest.Prompts[0].TokenIDs,
+			MultiModalFeatures: []fwkrequest.MultiModalFeature{{Modality: "image", Hash: "other-content", Offset: 4, Length: 12}},
+		}},
+	}}
+	changedHashes := GetBlockHashes(context.Background(), &changed, 4, testMaxPrefixBlocks)
+	assert.Equal(t, hashes[0][0], changedHashes[0][0], "the block before the media span is unchanged")
+	for i := 1; i < len(hashes[0]); i++ {
+		assert.NotEqual(t, hashes[0][i], changedHashes[0][i], "block %d spans or chains after the media", i)
+	}
+}
+
+// The block encoding must not depend on the order a parser produced the
+// feature list in: the same media at the same positions hashes identically
+// however the features are ordered on arrival.
+func TestGetBlockHashes_FeatureOrderIndependent(t *testing.T) {
+	tokens := []uint32{1, 2, 3, 4, 5, 5, 5, 5, 6, 7, 7, 7, 8, 9, 10, 11}
+	features := func(first, second fwkrequest.MultiModalFeature) []fwkrequest.MultiModalFeature {
+		return []fwkrequest.MultiModalFeature{first, second}
+	}
+	a := fwkrequest.MultiModalFeature{Modality: "image", Hash: "left-media", Offset: 4, Length: 4}
+	b := fwkrequest.MultiModalFeature{Modality: "image", Hash: "right-media", Offset: 8, Length: 4}
+
+	sorted := GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+		TargetModel: "m",
+		Body: &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{
+			Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens, MultiModalFeatures: features(a, b)}},
+		}},
+	}, 4, testMaxPrefixBlocks)
+	reversed := GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+		TargetModel: "m",
+		Body: &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{
+			Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens, MultiModalFeatures: features(b, a)}},
+		}},
+	}, 4, testMaxPrefixBlocks)
+
+	assert.Equal(t, sorted, reversed, "feature arrival order must not change the block hashes")
+}
+
+// A feature that starts past the prompt's end but inside the final partial
+// block's nominal range spans no tokens, so it must not change any block hash:
+// the block end is clamped to the prompt length, not the block size.
+func TestGetBlockHashes_FeaturePastPartialFinalBlockIgnored(t *testing.T) {
+	tokens := []uint32{1, 2, 3, 4, 5, 6}
+	feature := func(offset int) *fwksched.InferenceRequest {
+		return &fwksched.InferenceRequest{
+			TargetModel: "m",
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{
+						TokenIDs:           tokens,
+						MultiModalFeatures: []fwkrequest.MultiModalFeature{{Modality: "image", Hash: "ghost", Offset: offset, Length: 2}},
+					}},
+				},
+			},
+		}
+	}
+
+	featureless := GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+		TargetModel: "m",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens}}},
+		},
+	}, 4, testMaxPrefixBlocks)
+	require.Len(t, featureless[0], 2, "6 tokens at block size 4 end in a partial block")
+
+	// Offset 7 sits inside block 1's nominal range [4, 8) but past the
+	// 6-token prompt; offset 100 sits past the nominal range entirely. Both
+	// must leave the hashes featureless.
+	for _, offset := range []int{7, 100} {
+		assert.Equal(t, featureless, GetBlockHashes(context.Background(), feature(offset), 4, testMaxPrefixBlocks),
+			"a feature at offset %d spans no tokens and must not change any block hash", offset)
+	}
+}
