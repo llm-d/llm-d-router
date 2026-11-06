@@ -269,7 +269,7 @@ func (p *SchedulerProfile) runScorerPlugins(ctx context.Context, request *fwksch
 		}
 		scores := runScorer(ctx, tracer, tracingActive, scorer, request, endpoints)
 		if c := decisionhistory.CollectorFromContext(ctx); c != nil {
-			c.ScorerRan(typedName.Type, typedName.Name, scorer.Weight(), endpointScoresByID(scores))
+			c.ScorerRan(typedName, scorer.Weight(), endpointScoresByID(scores))
 		}
 		for endpoint, score := range scores { // weight is relative to the sum of weights
 			if debugEnabled {

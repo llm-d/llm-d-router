@@ -14,11 +14,11 @@ The endpoint is disabled by default. Enable it by starting the EPP with:
 --scheduling-decisions-history=100
 ```
 
-The value is the number of recent decisions retained in a fixed-capacity ring buffer. `--scheduling-decisions-top-endpoints` (default 5) caps how many of a profile's highest-scoring endpoints are recorded per decision. Both bounds keep the retained state bounded regardless of traffic.
+The value is the number of recent decisions retained in a fixed-capacity ring buffer. `--scheduling-decisions-top-endpoints` (default 5) caps how many of a profile's highest-scoring endpoints are recorded per decision. The recorded model string is truncated to 1024 bytes. These bounds keep the retained state bounded regardless of traffic.
 
 The endpoint is registered on the same metrics/admin server as the metrics endpoint and pprof handlers. Operators should use the existing metrics/admin server exposure and authentication controls to restrict access. When metrics endpoint authentication is enabled, the metrics/admin server authentication and authorization filters apply to this endpoint.
 
-This endpoint is available in the EPP controller-manager server path. The standalone file-discovery mode does not expose scheduling decision history.
+This endpoint is available in the EPP controller-manager server path. The standalone file-discovery mode does not serve it: its metrics server applies no metrics-endpoint authentication, so the EPP refuses to start when `--scheduling-decisions-history` is set on that path.
 
 ## Response format
 
@@ -36,8 +36,8 @@ This endpoint is available in the EPP controller-manager server path. The standa
           "candidatesBeforeFilters": 12,
           "filters": [
             {
-              "type": "lora-affinity-filter",
-              "name": "lora-affinity-filter",
+              "type": "decode-filter",
+              "name": "decode-filter",
               "before": 12,
               "after": 4
             }
@@ -51,17 +51,17 @@ This endpoint is available in the EPP controller-manager server path. The standa
           ],
           "topEndpoints": [
             {
-              "endpoint": "pod1",
+              "endpoint": "default/pod1",
               "weightedScore": 0.83,
               "scorerScores": {
                 "kv-cache-utilization-scorer/kv-cache-utilization-scorer": 0.83
               }
             }
           ],
-          "targetEndpoints": ["pod1"]
+          "targetEndpoints": ["default/pod1"]
         }
       ],
-      "targetEndpoint": "pod1"
+      "targetEndpoint": "default/pod1"
     }
   ]
 }

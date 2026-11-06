@@ -162,3 +162,16 @@ func TestScheduleWithoutDecisionRecorder(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, result)
 }
+
+// An endpoint that carries no metadata must not panic the decision commit.
+func TestPrimaryEndpointIDNilMetadata(t *testing.T) {
+	nilMeta := fwksched.NewEndpoint(nil, &fwkdl.Metrics{}, nil)
+	result := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{nilMeta}},
+		},
+	}
+	require.Equal(t, "", primaryEndpointID(result))
+	require.Equal(t, "", primaryEndpointID(nil))
+}
