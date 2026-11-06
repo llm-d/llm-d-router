@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -37,6 +38,18 @@ const (
 	weightOutputToken = 2
 )
 
+// servedBaselineTTL is how long LAS keeps a session's served-token baseline
+// after the session was last read at a queue head. It matches the default idle
+// eviction TTL of session-state-producer.
+const servedBaselineTTL = time.Hour
+
+// servedBaseline is a session's served totals as of its last SyncSession.
+type servedBaseline struct {
+	input    int64
+	output   int64
+	syncedAt time.Time
+}
+
 type lasState struct {
 	mu              sync.Mutex
 	attainedService float64
@@ -45,6 +58,13 @@ type lasState struct {
 	// service ages out in wall-clock time without the program ever being visited by Pick, and it
 	// accrues continuously, including while requests are in flight.
 	decayAnchor time.Time
+	// served holds each session's served totals as of its last SyncSession,
+	// keyed by SessionState.SessionID. A flow can hold several sessions, for
+	// example sub-agents of one program or sessions sharing a tenant fairness
+	// ID, so each session keeps its own baseline.
+	served map[string]servedBaseline
+	// prunedAt is when served was last scanned for stale baselines.
+	prunedAt time.Time
 }
 
 // decayLocked folds in the decay accrued since decayAnchor and advances the anchor to now.
@@ -80,6 +100,52 @@ func (s *lasState) AddService(cost float64, now time.Time, halfLifeSeconds float
 	s.decayLocked(now, halfLifeSeconds)
 	s.attainedService += cost
 	return s.attainedService
+}
+
+// SyncSession folds in the service a session recorded since the previous sync
+// and returns the new total. The new cost is aged from LastResponseAt, the end
+// of the most recent response, which approximates when it was served.
+func (s *lasState) SyncSession(state sessionstate.SessionState, now time.Time, halfLifeSeconds float64) (float64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.decayLocked(now, halfLifeSeconds)
+	prev := s.served[state.SessionID]
+	deltaInput := state.ServedInputTokens - prev.input
+	deltaOutput := state.ServedOutputTokens - prev.output
+	if deltaInput < 0 || deltaOutput < 0 {
+		// The session record was evicted and recreated.
+		deltaInput, deltaOutput = state.ServedInputTokens, state.ServedOutputTokens
+	}
+	if s.served == nil {
+		s.served = make(map[string]servedBaseline)
+	}
+	s.served[state.SessionID] = servedBaseline{input: state.ServedInputTokens, output: state.ServedOutputTokens, syncedAt: now}
+	s.pruneServedLocked(now)
+	cost := float64(weightInputToken*deltaInput + weightOutputToken*deltaOutput)
+	if cost <= 0 {
+		return s.attainedService, false
+	}
+	if age := now.Sub(state.LastResponseAt).Seconds(); halfLifeSeconds > 0 && age > 0 {
+		cost *= math.Exp2(-age / halfLifeSeconds)
+	}
+	s.attainedService += cost
+	return s.attainedService, true
+}
+
+// pruneServedLocked drops baselines of sessions not read for servedBaselineTTL,
+// scanning at most once per minute. A session that returns after its baseline
+// was dropped is charged its full served totals, aged from LastResponseAt.
+// The caller must hold mu.
+func (s *lasState) pruneServedLocked(now time.Time) {
+	if now.Sub(s.prunedAt) < time.Minute {
+		return
+	}
+	s.prunedAt = now
+	for id, baseline := range s.served {
+		if now.Sub(baseline.syncedAt) > servedBaselineTTL {
+			delete(s.served, id)
+		}
+	}
 }
 
 var attainedServiceTokens = prometheus.NewGaugeVec(
@@ -138,9 +204,19 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) flowcontrol.FlowQ
 			continue
 		}
 
-		service := s.getOrCreateState(id).Service(now, s.halfLifeSeconds)
+		head := qi.Queue.Peek()
+		st := s.getOrCreateState(id)
+		var service float64
+		if session, ok := headSessionState(head); ok {
+			var changed bool
+			if service, changed = st.SyncSession(session, now, s.halfLifeSeconds); changed {
+				attainedServiceTokens.WithLabelValues(id).Set(service)
+			}
+		} else {
+			service = st.Service(now, s.halfLifeSeconds)
+		}
 		var headWaitMs float64
-		if head := qi.Queue.Peek(); head != nil {
+		if head != nil {
 			headWaitMs = float64(time.Since(head.EnqueueTime()).Milliseconds())
 		}
 
@@ -181,8 +257,14 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) flowcontrol.FlowQ
 
 func (s *LASStrategy) OnPreRequest(_ *ProgramMetrics, _ *fwksched.InferenceRequest) {}
 
+// OnCompleted charges the response to its program when no session state is
+// published. With session state, the registry records the served tokens and
+// Pick folds them in.
 func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrh.Response) {
 	if request == nil || response == nil {
+		return
+	}
+	if _, ok := sessionstate.ReadSessionState(request); ok {
 		return
 	}
 	promptTokens := int64(response.Usage.PromptTokens)
@@ -194,6 +276,22 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	id := programIDFor(request)
 	service := s.getOrCreateState(id).AddService(cost, time.Now(), s.halfLifeSeconds)
 	setProgramGauge(attainedServiceTokens, id, service)
+}
+
+// headSessionState returns the session state of a queue head, if published.
+func headSessionState(head flowcontrol.QueueItemAccessor) (sessionstate.SessionState, bool) {
+	if head == nil {
+		return sessionstate.SessionState{}, false
+	}
+	orig := head.OriginalRequest()
+	if orig == nil {
+		return sessionstate.SessionState{}, false
+	}
+	req := orig.InferenceRequest()
+	if req == nil {
+		return sessionstate.SessionState{}, false
+	}
+	return sessionstate.ReadSessionState(req)
 }
 
 func (s *LASStrategy) EvictProgram(id string) {

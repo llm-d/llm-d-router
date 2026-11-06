@@ -185,9 +185,10 @@ func (p *Producer) ResponseBody(
 		identity,
 		response.TerminationCause == fwkrh.TerminationCauseNatural,
 		TurnUsage{
-			InputTokens:  int64(response.Usage.PromptTokens),
-			OutputTokens: int64(response.Usage.CompletionTokens),
-			CachedTokens: cachedTokens,
+			InputTokens:    int64(response.Usage.PromptTokens),
+			OutputTokens:   int64(response.Usage.CompletionTokens),
+			CachedTokens:   cachedTokens,
+			StreamedEvents: int64(response.StreamedEvents),
 		},
 	)
 }

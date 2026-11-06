@@ -28,6 +28,7 @@ import (
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 )
 
 func makeQueue(id string, length int, headEnqueue time.Time) *fwkfcmocks.MockFlowQueueAccessor {
@@ -279,4 +280,127 @@ func TestRangeNormalize(t *testing.T) {
 	assert.Equal(t, 1.0, rangeNormalize(10, 0, 10))
 	assert.InDelta(t, 0.25, rangeNormalize(2.5, 0, 10), 0.001)
 	assert.True(t, math.IsNaN(rangeNormalize(0, 1, 1)) || rangeNormalize(0, 1, 1) == 0.5)
+}
+
+func makeSessionInfo(id string, headEnqueue time.Time, state func() sessionstate.SessionState) (string, QueueInfo) {
+	req := &fwksched.InferenceRequest{FairnessID: id}
+	req.PutAttribute(sessionstate.SessionStateDataKey, &fwksched.DynamicRequestAttribute{Get: func() any { return state() }})
+	q := &fwkfcmocks.MockFlowQueueAccessor{
+		LenV:     1,
+		FlowKeyV: flowcontrol.FlowKey{ID: id},
+		PeekV: &fwkfcmocks.MockQueueItemAccessor{
+			EnqueueTimeV:     headEnqueue,
+			OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{InferenceRequestV: req},
+		},
+	}
+	return id, QueueInfo{Queue: q, Metrics: &ProgramMetrics{}, Len: 1}
+}
+
+func TestLAS_Pick_ReadsServedTokensFromSessionState(t *testing.T) {
+	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0}
+	now := time.Now()
+
+	idA, qA := makeSessionInfo("alpha", now, func() sessionstate.SessionState {
+		return sessionstate.SessionState{ServedInputTokens: 900, ServedOutputTokens: 50, LastResponseAt: now}
+	})
+	idB, qB := makeSessionInfo("beta", now, func() sessionstate.SessionState {
+		return sessionstate.SessionState{ServedInputTokens: 10, ServedOutputTokens: 5, LastResponseAt: now}
+	})
+
+	got := s.Pick(0, map[string]QueueInfo{idA: qA, idB: qB})
+	require.NotNil(t, got)
+	assert.Equal(t, "beta", got.FlowKey().ID)
+	// cost = 1*900 + 2*50
+	assert.Equal(t, 1000.0, s.getOrCreateState("alpha").Service(now, 0))
+}
+
+func TestLAS_Pick_SyncsOnlyNewServedTokens(t *testing.T) {
+	s := &LASStrategy{weightService: 1.0}
+	now := time.Now()
+	served := sessionstate.SessionState{ServedInputTokens: 100, LastResponseAt: now}
+	id, q := makeSessionInfo("alpha", now, func() sessionstate.SessionState { return served })
+	queues := map[string]QueueInfo{id: q}
+
+	s.Pick(0, queues)
+	s.Pick(0, queues)
+	assert.Equal(t, 100.0, s.getOrCreateState("alpha").Service(now, 0), "a repeated sync must not charge the same tokens twice")
+
+	served.ServedInputTokens = 150
+	served.ServedOutputTokens = 10
+	s.Pick(0, queues)
+	assert.Equal(t, 170.0, s.getOrCreateState("alpha").Service(now, 0))
+}
+
+func TestLAS_Pick_AgesNewServiceFromLastResponse(t *testing.T) {
+	s := &LASStrategy{weightService: 1.0, halfLifeSeconds: 1}
+	now := time.Now()
+	id, q := makeSessionInfo("alpha", now, func() sessionstate.SessionState {
+		return sessionstate.SessionState{ServedInputTokens: 200, LastResponseAt: now.Add(-time.Second)}
+	})
+
+	s.Pick(0, map[string]QueueInfo{id: q})
+	assert.InDelta(t, 100.0, s.getOrCreateState("alpha").Service(time.Now(), 0), 1.0,
+		"tokens served one half-life ago count for half")
+}
+
+func TestLAS_Pick_RecreatedSessionRestartsServedTotals(t *testing.T) {
+	s := &LASStrategy{weightService: 1.0}
+	now := time.Now()
+	served := sessionstate.SessionState{ServedInputTokens: 500, LastResponseAt: now}
+	id, q := makeSessionInfo("alpha", now, func() sessionstate.SessionState { return served })
+	queues := map[string]QueueInfo{id: q}
+	s.Pick(0, queues)
+
+	served.ServedInputTokens = 20
+	s.Pick(0, queues)
+	assert.Equal(t, 520.0, s.getOrCreateState("alpha").Service(now, 0))
+}
+
+func TestLAS_Pick_KeepsBaselinePerSessionInSharedFlow(t *testing.T) {
+	s := &LASStrategy{weightService: 1.0}
+	now := time.Now()
+	// Two sessions share one flow, for example sub-agents of one program, and
+	// take turns at the queue head.
+	sessionA := sessionstate.SessionState{SessionID: "a", ServedInputTokens: 500, LastResponseAt: now}
+	sessionB := sessionstate.SessionState{SessionID: "b", ServedInputTokens: 20, LastResponseAt: now}
+	head := sessionA
+	id, q := makeSessionInfo("tenant", now, func() sessionstate.SessionState { return head })
+	queues := map[string]QueueInfo{id: q}
+
+	s.Pick(0, queues)
+	head = sessionB
+	s.Pick(0, queues)
+	head = sessionA
+	s.Pick(0, queues)
+	assert.Equal(t, 520.0, s.getOrCreateState("tenant").Service(now, 0),
+		"alternating heads must not charge a session's served totals again")
+
+	sessionB.ServedInputTokens = 50
+	head = sessionB
+	s.Pick(0, queues)
+	assert.Equal(t, 550.0, s.getOrCreateState("tenant").Service(now, 0))
+}
+
+func TestLAS_PrunesStaleSessionBaselines(t *testing.T) {
+	st := &lasState{}
+	now := time.Now()
+	st.SyncSession(sessionstate.SessionState{SessionID: "old", ServedInputTokens: 1}, now, 0)
+	later := now.Add(servedBaselineTTL + time.Minute)
+	st.SyncSession(sessionstate.SessionState{SessionID: "new", ServedInputTokens: 1}, later, 0)
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	assert.NotContains(t, st.served, "old")
+	assert.Contains(t, st.served, "new")
+}
+
+func TestLAS_OnCompleted_SkipsRequestsWithSessionState(t *testing.T) {
+	s := &LASStrategy{}
+	req := &fwksched.InferenceRequest{FairnessID: "alpha"}
+	req.PutAttribute(sessionstate.SessionStateDataKey, &fwksched.DynamicRequestAttribute{Get: func() any { return sessionstate.SessionState{} }})
+	resp := &fwkrh.Response{EndOfStream: true}
+	resp.Usage.PromptTokens = 100
+
+	s.OnCompleted(nil, req, resp)
+	assert.Zero(t, s.getOrCreateState("alpha").Service(time.Now(), 0), "the registry records the tokens of a session-tracked request")
 }

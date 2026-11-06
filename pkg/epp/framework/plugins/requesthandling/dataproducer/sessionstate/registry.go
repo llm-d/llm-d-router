@@ -117,10 +117,15 @@ type TurnUsage struct {
 	InputTokens  int64
 	OutputTokens int64
 	CachedTokens int64
+	// StreamedEvents stands in for OutputTokens in the served totals when the
+	// response reports no completion tokens, for example a stream cut short
+	// before its usage block.
+	StreamedEvents int64
 }
 
 // RecordResponse records the end of a dispatched request's response lifecycle.
-// Only naturally completed responses contribute completion and token totals.
+// Every end contributes to the served totals; only naturally completed
+// responses contribute to the completion count and the reported token totals.
 func (r *SessionStateRegistry) RecordResponse(identity string, naturallyCompleted bool, usage TurnUsage) {
 	now := time.Now()
 	r.mu.Lock()
@@ -132,6 +137,12 @@ func (r *SessionStateRegistry) RecordResponse(identity string, naturallyComplete
 	}
 	record.state.InFlightRequests--
 	record.state.LastResponseAt = now
+	servedOutput := usage.OutputTokens
+	if servedOutput <= 0 {
+		servedOutput = max(usage.StreamedEvents, 0)
+	}
+	record.state.ServedInputTokens += max(usage.InputTokens, 0)
+	record.state.ServedOutputTokens += servedOutput
 	if naturallyCompleted {
 		record.state.CompletedRequests++
 		record.state.TotalInputTokens += usage.InputTokens
@@ -192,6 +203,7 @@ func (r *SessionStateRegistry) getOrCreate(identity string, now time.Time) *sess
 	}
 	record := &sessionRecord{
 		state: SessionState{
+			SessionID:  identity,
 			LastSeenAt: now,
 		},
 		firstSeenAt: now,

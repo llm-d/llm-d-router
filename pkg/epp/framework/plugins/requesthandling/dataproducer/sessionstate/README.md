@@ -39,6 +39,7 @@ meantime. Read it with `sessionstate.ReadSessionState`. `Produce` is a no-op.
 
 The `sessionstate.SessionState` value contains:
 
+- `SessionID`: the agent identity that keys the state.
 - `TurnsTaken`: requests of the session dispatched so far.
 - `Duration`: elapsed time from the first observation of the session to the
   observation of the current request.
@@ -55,6 +56,10 @@ The `sessionstate.SessionState` value contains:
   responses.
 - `TotalCachedTokens`: cached prompt tokens (`prompt_tokens_details.cached_tokens`)
   reported by naturally completed responses.
+- `ServedInputTokens`, `ServedOutputTokens`: tokens of every ended response,
+  including interrupted ones, as a measure of service consumed. Output falls
+  back to the number of streamed events when the response reports no
+  completion tokens.
 
 A turn is counted in `PreRequest` only after scheduling selects at least one
 target. Multiple scheduling profiles still count as one turn. The request is
