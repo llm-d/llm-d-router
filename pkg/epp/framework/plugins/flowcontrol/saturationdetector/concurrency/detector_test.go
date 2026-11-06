@@ -1005,7 +1005,7 @@ func (f *liveSchedulingEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable
 	case attrconcurrency.InFlightLoadDataKey:
 		return f.reg.get(f.id), true
 	case attrconcurrency.UncachedRequestTokensDataKey:
-		return &attrconcurrency.UncachedRequestTokens{Tokens: f.incomingTokens}, true
+		return &attrconcurrency.UncachedRequestTokens{Tokens: attrconcurrency.TokenLoad{Text: f.incomingTokens}}, true
 	}
 	return nil, false
 }
