@@ -55,14 +55,8 @@ func normalizeDeviceTier(deviceTier string) string {
 	return strings.ToLower(deviceTier)
 }
 
-// namespacedEngineKey namespaces an engine block hash by the model in the pod's
-// KV-events topic, so the index keeps one engine-to-request mapping per model.
-// vLLM's block hash does not include the model, and with a fixed hash seed (the
-// sha256 default since vLLM v0.29, or a shared PYTHONHASHSEED) pods of two
-// models that share a tokenizer report the same hash for the same prompt while
-// their request keys differ. The topic model is used rather than the LoRA name
-// because removal events carry no adapter; vLLM already hashes the adapter into
-// the block.
+// namespacedEngineKey scopes an engine hash to the pod's model; vLLM's hash omits it.
+// Uses the topic model, not the LoRA name, because removal events carry no adapter.
 func namespacedEngineKey(modelSeed, hash uint64) kvblock.BlockHash {
 	var b [16]byte
 	binary.LittleEndian.PutUint64(b[:8], modelSeed)
