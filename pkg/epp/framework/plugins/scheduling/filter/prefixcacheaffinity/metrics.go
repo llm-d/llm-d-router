@@ -35,6 +35,8 @@ const (
 	outcomeSticky = "sticky"
 	// outcomeNoMatch: no endpoint met the affinity threshold, so all were kept.
 	outcomeNoMatch = "no_match"
+	// outcomeMissingPrefixSignal: no endpoint had cache metadata with complete blocks.
+	outcomeMissingPrefixSignal = "missing_prefix_signal"
 	// outcomeLoadOverride: the TTFT load gate discarded a non-empty sticky set
 	// because those endpoints were too slow, reopening all endpoints.
 	outcomeLoadOverride = "load_override"

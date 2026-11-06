@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
 func TestRegisterMetrics(t *testing.T) {
@@ -36,6 +37,41 @@ func TestRegisterMetrics(t *testing.T) {
 	require.NoError(t, registerMetrics(registry))
 	require.NoError(t, registerMetrics(registry), "re-registering the same collector is tolerated")
 	require.NoError(t, registerMetrics(nil), "a nil registerer is a no-op")
+}
+
+func TestMissingPrefixSignalIsNotACacheMiss(t *testing.T) {
+	for _, producer := range []string{"", "custom-prefix"} {
+		t.Run("producer="+producer, func(t *testing.T) {
+			for _, tc := range []struct {
+				name    string
+				info    *attrprefix.PrefixCacheMatchInfo
+				outcome string
+			}{
+				{"absent", nil, outcomeMissingPrefixSignal},
+				{"no complete blocks", attrprefix.NewPrefixCacheMatchInfo(0, 0, 16), outcomeMissingPrefixSignal},
+				{"observed zero match", attrprefix.NewPrefixCacheMatchInfo(0, 100, 16), outcomeNoMatch},
+				{"observed partial match", attrprefix.NewPrefixCacheMatchInfo(40, 100, 16), outcomeNoMatch},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					resetMetrics()
+					t.Cleanup(resetMetrics)
+					p := newTestPlugin(Config{AffinityThreshold: 0.8, PrefixMatchInfoProducerName: producer})
+					endpoints := []fwksched.Endpoint{makeEndpoint("a", -1, 10, 0), makeEndpoint("b", -1, 10, 0)}
+					if tc.info != nil {
+						endpoints[0].Put(p.prefixMatchDataKey, tc.info)
+					}
+					require.Equal(t, endpoints, p.Filter(context.Background(), nil, endpoints))
+					for _, outcome := range []string{outcomeMissingPrefixSignal, outcomeNoMatch} {
+						want := float64(0)
+						if outcome == tc.outcome {
+							want = 1
+						}
+						require.Equal(t, want, testutil.ToFloat64(filterDecisions.WithLabelValues("test", outcome)), outcome)
+					}
+				})
+			}
+		})
+	}
 }
 
 // Each Filter branch records exactly one decision outcome, so the counter labels
@@ -92,7 +128,7 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 		},
 	}
 
-	allOutcomes := []string{outcomeSticky, outcomeNoMatch, outcomeLoadOverride, outcomeExploration, outcomeNotApplicable, outcomeMissingSignal}
+	allOutcomes := []string{outcomeSticky, outcomeNoMatch, outcomeLoadOverride, outcomeExploration, outcomeNotApplicable, outcomeMissingSignal, outcomeMissingPrefixSignal}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -211,8 +211,11 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 
 	// Find sticky and non-sticky endpoints.
 	var sticky, nonSticky []fwksched.Endpoint
+	hasPrefixSignal := false
 	for _, ep := range endpoints {
-		if p.prefixCacheScore(ep) >= p.config.AffinityThreshold {
+		score, observed := p.prefixCacheScore(ep)
+		hasPrefixSignal = hasPrefixSignal || observed
+		if score >= p.config.AffinityThreshold {
 			sticky = append(sticky, ep)
 		} else {
 			nonSticky = append(nonSticky, ep)
@@ -225,8 +228,12 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	if len(sticky) == 0 {
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: no sticky endpoints",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
-		recordDecision(p.typedName.Name, outcomeNoMatch)
-		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeNoMatch))
+		outcome := outcomeNoMatch
+		if !hasPrefixSignal {
+			outcome = outcomeMissingPrefixSignal
+		}
+		recordDecision(p.typedName.Name, outcome)
+		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcome))
 		return endpoints
 	}
 
@@ -274,17 +281,17 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{Required: required}
 }
 
-func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
+func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) (float64, bool) {
 	if raw, ok := ep.Get(p.prefixMatchDataKey); ok {
-		info := raw.(*attrprefix.PrefixCacheMatchInfo)
-		if info.TotalBlocks() > 0 {
+		info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+		if ok && info != nil && info.TotalBlocks() > 0 {
 			score := float64(info.MatchBlocks()) / float64(info.TotalBlocks())
 			if !math.IsNaN(score) {
-				return score
+				return score, true
 			}
 		}
 	}
-	return 0
+	return 0, false
 }
 
 // bestTTFT returns the lowest per-endpoint TTFT (ms) across endpoints.
