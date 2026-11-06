@@ -164,8 +164,8 @@ func SetupCluster(ctx context.Context, cs kubernetes.Interface, t Topology) erro
 }
 
 // Reconcile plays ECP: it reads the control node's linked-runner annotations
-// and publishes the headless Services and EndpointSlices. roleLabels adds
-// exos/role to the slice labels (ECP does not do this today; set false to
+// and publishes the headless Services and EndpointSlices. roleLabels adds the
+// llm-d.ai/role label the EPP role filters read (ECP does not do this today; set false to
 // reproduce today's ECP exactly).
 func Reconcile(ctx context.Context, cs kubernetes.Interface, t Topology, roleLabels bool) error {
 	node, err := cs.CoreV1().Nodes().Get(ctx, t.ControlNode, metav1.GetOptions{})
@@ -196,7 +196,7 @@ func Reconcile(ctx context.Context, cs kubernetes.Interface, t Topology, roleLab
 		}
 		extra := map[string]string{}
 		if roleLabels && r.Role != "" {
-			extra["exos/role"] = r.Role
+			extra["llm-d.ai/role"] = r.Role
 		}
 		if err := ensureHeadlessService(ctx, cs, BorgNamespace, r.userCell()); err != nil {
 			return err

@@ -74,6 +74,7 @@ import (
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/redis"
+	discoveryendpointslice "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/endpointslice"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/attribute"
@@ -857,6 +858,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(discoveryfile.MultiClusterPluginType, fwkplugin.StabilityAlpha, discoveryfile.MultiClusterFactory)
 	// Alpha
 	fwkplugin.Register(k8speer.PluginType, fwkplugin.StabilityAlpha, k8speer.Factory)
+	fwkplugin.Register(discoveryendpointslice.PluginType, fwkplugin.StabilityAlpha, discoveryendpointslice.Factory)
 
 	// register request header processor plugins
 	// Alpha

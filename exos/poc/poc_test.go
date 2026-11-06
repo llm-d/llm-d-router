@@ -20,7 +20,7 @@ limitations under the License.
 // It starts a real kube-apiserver+etcd (envtest), reproduces the Exos cluster
 // state (control node + linked-runner annotations + hostNetwork model pods +
 // ECP-style headless Services/EndpointSlices, see simecp), runs the real
-// exos-epp binary in standalone/custom-discovery mode against it, and talks
+// EPP binary (cmd/epp) in standalone/custom-discovery mode against it, and talks
 // ext_proc to it like Envoy would.
 //
 // Run: KUBEBUILDER_ASSETS=$(setup-envtest use 1.36.2 -p path) go test -v ./exos/poc/
@@ -66,17 +66,12 @@ const eppConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: exos-disc
-  type: exos-endpointslice-discovery
+  type: endpointslice-discovery
   parameters:
     namespace: default
-    labelSelector: kubernetes.io/service-name=glm52-server
+    selector: kubernetes.io/service-name=glm52-server
     portName: http
     kubeconfig: %s
-    labelMappings:
-      exos/role: llm-d.ai/role
-    staticLabels:
-      llm-d.ai/engine-type: sglang
-    attributeAnnotations: ["exos/k8s-fqdn"]
 - type: decode-filter
 - type: random-picker
 schedulingProfiles:
@@ -131,7 +126,7 @@ func TestEPPDiscoversExosEndpointSlices(t *testing.T) {
 		}
 	}
 
-	// --- 3. Run the real exos-epp binary in custom-discovery (standalone) mode.
+	// --- 3. Run the real EPP binary in custom-discovery (standalone) mode.
 	kubeconfig := writeKubeconfig(t, env, restCfg, work)
 	cfgPath := filepath.Join(work, "epp.yaml")
 	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf(eppConfig, kubeconfig)), 0o600); err != nil {
@@ -160,16 +155,14 @@ func TestEPPDiscoversExosEndpointSlices(t *testing.T) {
 		}
 	}()
 
-	// --- 4. EPP's own view of its datastore (plugin StateDumper).
+	// --- 4. EPP's own view of its datastore (plugin StateDumper reports endpoint IDs only;
+	// addresses are checked through ext_proc below).
 	state := waitForDiscovery(t, metricsPort, len(topo.Runners))
 	t.Logf("EPP discovery state: %s", state)
 	for _, r := range topo.Runners {
-		if !strings.Contains(state, r.IPv6) {
-			t.Errorf("runner %s (%s) not in EPP datastore", r.Name, r.IPv6)
+		if id := "default/glm52-server." + r.Name; !strings.Contains(state, id) {
+			t.Errorf("runner %s (endpoint %s) not in EPP datastore", r.Name, id)
 		}
-	}
-	if strings.Contains(state, topo.ControlNodeIP) {
-		t.Errorf("EPP datastore contains the control node IP %s", topo.ControlNodeIP)
 	}
 
 	// --- 5. Envoy-style ext_proc: EPP must route to a decode runner's Borneo IPv6.
@@ -301,15 +294,15 @@ func writeKubeconfig(t *testing.T, env *envtest.Environment, _ any, dir string) 
 
 func buildEPP(t *testing.T, dir string) string {
 	t.Helper()
-	out := filepath.Join(dir, "exos-epp")
+	out := filepath.Join(dir, "epp")
 	root, err := exec.Command("go", "env", "GOMOD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("go", "build", "-o", out, "./exos/cmd/exos-epp")
+	cmd := exec.Command("go", "build", "-o", out, "./cmd/epp")
 	cmd.Dir = filepath.Dir(strings.TrimSpace(string(root)))
 	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building exos-epp: %v\n%s", err, b)
+		t.Fatalf("building epp: %v\n%s", err, b)
 	}
 	return out
 }

@@ -1,57 +1,52 @@
-# Exos PoC — step 1: EPP discovery from Exos EndpointSlices
+# Exos PoC: EPP discovery from Exos EndpointSlices
 
-Question: can a standalone llm-d EPP, using the custom-discovery extension point
-(`dataLayer.discovery.endpoints`, see `docs/discovery.md`), discover Borneo
-linked-runner model servers from the EndpointSlices ECP publishes?
+Question: can a standalone EPP, using the `endpointslice-discovery` plugin
+(`pkg/epp/framework/plugins/datalayer/discovery/endpointslice`), discover
+Borneo linked-runner model servers from the EndpointSlices ECP publishes?
 
-**Answer: yes.** `go test ./exos/poc/` passes against a real kube-apiserver.
+`go test ./exos/poc/` answers this against a real kube-apiserver.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `discovery/endpointslice/` | `exos-endpointslice-discovery` plugin (`fwkdl.EndpointDiscovery`): informer on EndpointSlices → `DiscoveryNotifier` Upsert/Delete; label mapping (`exos/role` → `llm-d.ai/role`), static labels, `StateDumper` |
-| `cmd/exos-epp/` | Stock EPP runner + out-of-tree registration of the plugin |
-| `poc/simecp/` | Reproduces the Exos cluster: control node with `linked-runner.runner-instance/<runner>` annotations, hostNetwork model pods (podIP = control node IP), and ECP's headless Services + EndpointSlices (same fields as `ecp/server_main.go applyEndpointSliceInNamespace`) |
-| `poc/poc_test.go` | envtest apiserver + simecp + real `exos-epp` subprocess + Envoy-style ext_proc client |
+| `poc/simecp/` | Reproduces the Exos cluster: control node with `linked-runner.runner-instance/<runner>` annotations, hostNetwork model pods (podIP = control node IP), and ECP's headless Services and EndpointSlices (fields follow `ecp/server_main.go applyEndpointSliceInNamespace`) |
+| `poc/poc_test.go` | envtest apiserver + simecp + `cmd/epp` subprocess + ext_proc client acting as Envoy |
 
 ## Run
 
 ```bash
-# once: envtest binaries (kube-apiserver + etcd)
 go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.25
 export KUBEBUILDER_ASSETS=$(setup-envtest use 1.36.2 -p path)
-
-go test -race ./exos/discovery/...     # unit tests (fake clientset)
-go test -v ./exos/poc/                 # end-to-end
+go test -v ./exos/poc/
 ```
 
-## What the e2e test verifies
+## What the test checks
 
-1. Pod-based view (EPP default): all three model pods report `podIP=10.128.0.5`
-   (control node) → unusable for discovery.
-2. With the plugin, the EPP datastore (`/debug/plugins/state` on the metrics
-   port) holds the 3 runners with their **Borneo IPv6** addresses, port 9080,
-   `llm-d.ai/role` and `llm-d.ai/engine-type=sglang` labels, and never the
-   control node IP.
-3. ext_proc (`/v1/chat/completions`, profile = `decode-filter` + `random-picker`)
-   returns `x-gateway-destination-endpoint: [2606:ec80:10:263d::20]:9080` or
-   `...::21]:9080` — only decode runners, IPv6 correctly bracketed.
-4. Setting a runner's slice `ready=false` removes it from the datastore and from
-   routing.
+1. All model pods report the control node IP as `podIP`, so Pod-based
+   discovery cannot tell the runners apart.
+2. The EPP datastore (`/debug/plugins/state`) holds one endpoint per runner.
+3. ext_proc for `/v1/chat/completions` (profile `decode-filter` +
+   `random-picker`) returns `x-gateway-destination-endpoint` set to a decode
+   runner's Borneo IPv6 and port 9080 (`[2606:ec80:10:263d::20]:9080` or
+   `[...::21]:9080`).
+4. Setting a runner's slice `ready=false` removes it from routing.
 
-## Findings to carry into ECP / later steps
+## Required ECP changes
 
-- **Readiness**: today's ECP hard-codes `ready/serving=true` on the slice
-  (runner RUNNING ≠ model ready). The plugin honors the condition; ECP must set
-  it from `exos.google.com/model-ready` (or use proxy-pod readiness instead).
-- **Role**: today's ECP slices have no `exos/role`. `decode-filter` *accepts
-  endpoints without a role*, so with today's slices every runner (including
-  prefill) would be a decode candidate. The PoC adds `exos/role` to the slices
-  (`simecp.Reconcile(..., roleLabels=true)`); ECP needs the same change.
-- Custom-discovery mode starts no controller manager, so the plugin builds its
-  own client (in-cluster config, `parameters.kubeconfig`, or `$KUBECONFIG`).
-  The EPP ServiceAccount needs `get/list/watch` on `discovery.k8s.io/endpointslices`.
-- The plugin type is registered as Alpha → run EPP with `--allow-experimental-plugins`.
-- Not covered yet: metrics scraping (IPv6 targets are unreachable in the test;
-  in Exos it needs mTLS or `MetricsHost` → proxy pod), Envoy, routing-proxy/PD.
+- ECP writes `ready/serving=true` unconditionally. The plugin honors the
+  condition, so ECP must derive it from model readiness
+  (`exos.google.com/model-ready`).
+- ECP slices carry no role label. `decode-filter` accepts endpoints without a
+  role, so prefill runners would be decode candidates. The plugin copies slice
+  labels unchanged, so ECP must write `llm-d.ai/role` (`prefill` or `decode`)
+  on each slice (simecp does this with `roleLabels=true`).
+- The metrics extractor defaults to vLLM metric names. Set
+  `defaultEngine: sglang` on `core-metrics-extractor`, or have ECP write
+  `llm-d.ai/engine-type: sglang` on the slices.
+- The EPP ServiceAccount needs `get/list/watch` on
+  `discovery.k8s.io/endpointslices`, and the EPP runs with
+  `--allow-experimental-plugins` (the plugin is Alpha).
+
+Not covered: metrics scraping (needs mTLS or a proxy-pod metrics host), Envoy,
+routing-proxy and P/D.
