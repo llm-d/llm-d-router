@@ -672,8 +672,9 @@ included. Requests that fail earlier, such as a body that cannot be parsed, are 
 
 - `header`: the `x-llm-d-inference-fairness-id` header, its deprecated name
   `x-gateway-inference-fairness-id`, or the ID derived from it (percent-encoded, and
-  composed with the agent identity when present) when `requestHandler.composeFairnessIDs`
-  is enabled.
+  composed with the derived program root or the agent identity when present) when
+  `requestHandler.composeFairnessIDs` is enabled.
+- `derived_root`: no header, and the agent-lineage plugin derived a program root.
 - `agent_identity`: no header, and the agent identity plugin supplied an ID.
 - `default`: neither, so the request uses `default-flow`.
 
@@ -720,7 +721,7 @@ distinct fairness IDs per pool, deduplicated across EPP replicas:
 |---|---|
 | `llm_d:epp_named_fairness_ids:count5m` | Header IDs, including composed `<tenant>/<session>` IDs, that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
 | `llm_d:epp_named_fairness_ids:incomplete5m` | 1 when header IDs were folded in the same window, so the count is a lower bound; otherwise 0. |
-| `llm_d:epp_agent_sessions:count5m` | Agent identity IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source="agent_identity"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
+| `llm_d:epp_agent_sessions:count5m` | Agent identity or derived-root IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source=~"agent_identity\|derived_root"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
 
 The rules group by `namespace` and `inference_pool`, so the scrape must attach a `namespace`
 label. Change `5m` for a different window. An ID is missed when all of its requests went to a
