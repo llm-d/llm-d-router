@@ -170,6 +170,33 @@ var _ = Describe("prompt_token_ids carry-over", func() {
 	})
 })
 
+// The sidecar flag defaults to false: a client-supplied prompt_token_ids is
+// dropped (today's behavior without the flag).
+var _ = Describe("prompt_token_ids default-off", func() {
+	It("drops client IDs when ForwardPromptTokenIDs is not set", func() {
+		testInfo := sidecarConnectionTestSetup(constants.KVConnectorOffloading)
+		// ForwardPromptTokenIDs intentionally left false
+		proxyBaseAddr := testInfo.startProxy()
+		prefillHostPort := testInfo.prefillBackend.URL[len("http://"):]
+		sendPromptTokenIDs(proxyBaseAddr, map[string]string{
+			routing.PrefillEndpointHeader: prefillHostPort,
+			routing.KVCachePrefillHeader:  prefillHostPort,
+		})
+		Eventually(func() int { return len(testInfo.prefillHandler.GetCompletionRequests()) }).Should(Equal(1))
+		preq := testInfo.prefillHandler.GetCompletionRequests()[0]
+		kv, ok := preq[reqcommon.FieldKVTransferParams].(map[string]any)
+		if ok {
+			Expect(kv).ToNot(HaveKey("prompt_token_ids"))
+		}
+		Eventually(func() int { return len(testInfo.decodeHandler.GetCompletionRequests()) }).Should(Equal(1))
+		dreq := testInfo.decodeHandler.GetCompletionRequests()[0]
+		dkv, ok := dreq[reqcommon.FieldKVTransferParams].(map[string]any)
+		if ok {
+			Expect(dkv).ToNot(HaveKey("prompt_token_ids"))
+		}
+	})
+})
+
 // shared-storage and sglang forward the client's kv_transfer_params as sent.
 var _ = Describe("prompt_token_ids passthrough", func() {
 	for _, connector := range []string{constants.KVConnectorSharedStorage, constants.KVConnectorSGLang} {

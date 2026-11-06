@@ -39,8 +39,7 @@ const (
 	// PluginType is the registered type name of the token forwarding plugin.
 	PluginType = "forward-prompt-token-ids"
 
-	fieldReturnPromptText = "return_prompt_text"
-	fieldSuffix           = "suffix"
+	fieldSuffix = "suffix"
 )
 
 var (
@@ -59,8 +58,10 @@ type Config struct {
 	// pattern: an end user supplying the field makes the server serve those IDs
 	// instead of rendering messages, bypassing every messages-level gateway
 	// policy (injected system prompts, guardrails, prompt-token limits).
-	// Defaults to false: the caller's list is removed before the token-producer
-	// renders, and the EPP's own render is forwarded.
+	// Defaults to false: the caller's list is stripped in PreRequest (after
+	// the token-producer rendered, because vLLM's render returns the caller's
+	// list), forwarding is skipped for that request, and the engine renders
+	// from messages. When true, the caller's list is kept as sent.
 	TrustCallerTokenIDs bool `json:"trustCallerTokenIDs,omitempty"`
 }
 
@@ -115,34 +116,25 @@ func (p *Plugin) Consumes() plugin.DataDependencies {
 	}
 }
 
-// PreRequest adds the rendered token IDs to a single-prompt JSON request. For chat-shaped APIs other
-// kv_transfer_params fields are preserved, and an ID list the client sent is kept.
+// PreRequest adds the rendered token IDs to a single-prompt JSON request. For
+// chat-shaped APIs other kv_transfer_params fields are preserved. A client-sent
+// prompt_token_ids list is stripped and forwarding is skipped unless
+// trustCallerTokenIDs is set; the sidecar carry-over additionally requires the
+// sidecar's --forward-prompt-token-ids flag.
 func (p *Plugin) PreRequest(ctx context.Context, request *scheduling.InferenceRequest,
 	_ *scheduling.SchedulingResult) error {
-	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil {
+	if request == nil || request.Body == nil {
 		return nil
 	}
 	body := request.Body
-	if len(body.TokenizedRequest.Prompts) != 1 {
-		return nil
-	}
-	prompt := body.TokenizedRequest.Prompts[0]
-	if len(prompt.TokenIDs) == 0 || len(prompt.TokenIDs) < p.minTokens {
-		return nil
-	}
-	// The token-producer's legacy /v1/messages and /v1/responses translations
-	// do not guarantee token parity with what vLLM renders from the client's
-	// request (they drop fields like thinking, reasoning and tool_choice), so
-	// their IDs must not be forwarded as authoritative.
-	if body.TokenizedRequest.LegacyTranslated {
-		return nil
-	}
 	// An untrusted caller-supplied kv_transfer_params.prompt_token_ids taints
 	// the render: vLLM's render returns the caller's list instead of rendering
 	// messages, so the token-producer's IDs are the caller's IDs. Strip the
 	// field and skip forwarding; the engine renders from messages, which is
-	// the behavior without this plugin. Trusted coordinators (vLLM #48145's
-	// decode-leg pattern) set trustCallerTokenIDs to keep today's behavior.
+	// the behavior without this plugin. This runs before every other check so
+	// the IDs are removed regardless of prompt length, tokenization state, or
+	// translation mode. Trusted coordinators (vLLM #48145's decode-leg
+	// pattern) set trustCallerTokenIDs to keep today's behavior.
 	if !p.trustCallerTokenIDs {
 		if payload, isMap := body.Payload.(fwkrequest.PayloadMap); isMap {
 			if stripped := stripCallerTokenIDs(payload); stripped {
@@ -152,6 +144,23 @@ func (p *Plugin) PreRequest(ctx context.Context, request *scheduling.InferenceRe
 				return nil
 			}
 		}
+	}
+	if body.TokenizedRequest == nil {
+		return nil
+	}
+	if len(body.TokenizedRequest.Prompts) != 1 {
+		return nil
+	}
+	prompt := body.TokenizedRequest.Prompts[0]
+	if len(prompt.TokenIDs) == 0 || len(prompt.TokenIDs) < p.minTokens {
+		return nil
+	}
+	// The token-producer's legacy /v1/messages or /v1/responses translations
+	// do not guarantee token parity with what vLLM renders from the client's
+	// request (they drop fields like thinking, reasoning and tool_choice), so
+	// their IDs must not be forwarded as authoritative.
+	if body.TokenizedRequest.LegacyTranslated {
+		return nil
 	}
 	// Multimodal prompts are skipped: vLLM only reuses forwarded IDs for
 	// non-text content when the processed multimodal features are forwarded
@@ -190,7 +199,7 @@ func (p *Plugin) forwardChat(ctx context.Context, request *scheduling.InferenceR
 	// with return_prompt_text the reuse branch skips templating, so the
 	// response's prompt_text would silently be null; with echo vLLM discards
 	// the forwarded IDs and re-renders anyway, so forwarding is pure overhead.
-	if hasField(payload, commonrequest.FieldEcho) || hasField(payload, fieldReturnPromptText) {
+	if hasField(payload, commonrequest.FieldEcho) || hasField(payload, commonrequest.FieldReturnPromptText) {
 		return
 	}
 	params, clientHasIDs, ok := kvTransferParams(payload)
@@ -247,54 +256,18 @@ func hasField(payload fwkrequest.PayloadMap, field string) bool {
 // server-side state the router's render does not include, or requests a
 // background mode the forwarded IDs cannot carry. previous_response_id and
 // conversation come from the parser-decoded typed body; background is a
-// top-level parameter checked from the payload (one field lookup, no input
-// decode); file references require walking the parser-decoded input array.
+// top-level parameter checked from the payload (hasField treats null and
+// false as absent); file references use the shared ReferencesFile walk on
+// the parser-decoded input, which type-gates on hydration objects and
+// treats a null file_id as absent.
 func rejectStatefulResponses(responses *fwkrequest.ResponsesRequest, payload fwkrequest.PayloadMap) bool {
 	if responses.PreviousResponseID != "" || responses.Conversation != nil {
 		return true
 	}
-	// Background is a top-level Responses parameter, never an input-item key.
-	if bg, exists := payload[commonrequest.FieldBackground]; exists && bg != nil {
+	if hasField(payload, commonrequest.FieldBackground) {
 		return true
 	}
-	// File references live at arbitrary depth in input items (input[].content[],
-	// function_call_output.output[], computer_call_output.output). Walk the
-	// parser-decoded input, not the raw payload bytes.
-	if inputList, ok := responses.Input.([]any); ok {
-		for _, item := range inputList {
-			if m, ok := item.(map[string]any); ok {
-				if hasFileReference(m) {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-// hasFileReference reports whether a decoded input item references a server-side
-// file at any nesting depth, matching RejectStatefulResponsesFields' walk.
-func hasFileReference(item map[string]any) bool {
-	for key, val := range item {
-		if key == commonrequest.FieldFileID {
-			return true
-		}
-		if nested, ok := val.(map[string]any); ok {
-			if hasFileReference(nested) {
-				return true
-			}
-		}
-		if list, ok := val.([]any); ok {
-			for _, elem := range list {
-				if m, ok := elem.(map[string]any); ok {
-					if hasFileReference(m) {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
+	return commonrequest.ReferencesFile(responses.Input)
 }
 
 // isChatShaped reports whether vLLM renders the request through its chat path, the only path

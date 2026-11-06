@@ -194,6 +194,20 @@ func TestStatefulResponsesBackgroundAndFiles(t *testing.T) {
 	}
 }
 
+// Background as an empty string is not a background request under any
+// coercion pydantic applies; it is treated as absent and forwarded.
+func TestStatefulResponsesBackgroundEmptyString(t *testing.T) {
+	p, _ := New("fwd", Config{})
+	payload := fwkrequest.PayloadMap{"input": "hi", "background": ""}
+	body := &fwkrequest.InferenceRequestBody{
+		Responses: &fwkrequest.ResponsesRequest{Input: "hi"},
+		Payload:   payload, TokenizedRequest: tokenized(1, 2),
+	}
+	run(t, p, body)
+	// Not stateful: forwarding proceeds.
+	assert.True(t, body.Mutated)
+}
+
 // With trustCallerTokenIDs, the caller's list is kept as sent.
 func TestTrustedCallerTokenIDsKept(t *testing.T) {
 	p, _ := New("fwd", Config{TrustCallerTokenIDs: true})
