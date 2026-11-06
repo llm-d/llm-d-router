@@ -551,8 +551,11 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	pr, disaggregated := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]
 	disaggregated = disaggregated && pr != nil && len(pr.TargetEndpoints) > 0
 	servers := make([]server, 0, 2)
+	var decode *server
 	if !disaggregated || !p.config.ExcludeDecodeWhenDisaggregated {
-		servers = append(servers, p.makeserver(targetEndpoint))
+		d := p.makeserver(targetEndpoint)
+		servers = append(servers, d)
+		decode = &d
 	}
 	// Also record for prefill node if present in P/D disaggregated mode.
 	if disaggregated {
@@ -566,7 +569,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		p.pluginState.Delete(request.RequestID)
 		return nil
 	}
-	promptIndexed := p.trackContinuation(ctx, request, servers[0], state.BlockSize)
+	promptIndexed := p.trackContinuation(ctx, request, decode, state.BlockSize)
 
 	record := &indexUpdateRecord{
 		servers:         servers,
@@ -579,19 +582,23 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	// Update indexer asynchronously to avoid blocking the request path. The
 	// cell guards against a rollback that lands before this goroutine runs.
 	p.wg.Go(func() {
+		var decodeEntry []blockHash
 		if promptIndexed != nil {
-			defer close(promptIndexed)
+			defer func() { promptIndexed <- decodeEntry }()
 		}
 		record.cell.mu.Lock()
 		defer record.cell.mu.Unlock()
 		if record.cell.rolledBack {
 			return
 		}
-		for _, s := range servers {
+		for i, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
 				record.inserted[s.ServerID] = append(record.inserted[s.ServerID], p.indexerInst.Add(hashes, s))
 				if p.syncerActive() {
-					p.recent.record(s.String(), hashes)
+					entry := p.recent.record(s.String(), hashes)
+					if i == 0 && decode != nil {
+						decodeEntry = entry
+					}
 				}
 			}
 		}
