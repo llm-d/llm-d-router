@@ -138,6 +138,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/selectivekv"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
+	coldsessionfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/coldsession"
 	endpointattributefilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointattribute"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/endpointhealth"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/prefixcacheaffinity"
@@ -697,6 +698,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(bylabel.PrefillRoleType, fwkplugin.StabilityBeta, bylabel.PrefillRoleFactory)
 	// Alpha
 	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, fwkplugin.StabilityAlpha, sessionaffinityfilter.Factory)
+	fwkplugin.Register(coldsessionfilter.ColdSessionFilterType, fwkplugin.StabilityAlpha, coldsessionfilter.Factory)
 	fwkplugin.Register(endpointattributefilter.EndpointAttributeFilterType, fwkplugin.StabilityAlpha, endpointattributefilter.EndpointAttributeFilterFactory)
 	fwkplugin.Register(topologyaffinityfilter.FilterType, fwkplugin.StabilityAlpha, topologyaffinityfilter.Factory)
 	fwkplugin.Register(utilizationfilter.UtilizationFilterType, fwkplugin.StabilityAlpha, utilizationfilter.Factory)
