@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,13 +55,15 @@ var _ fwkdl.CrossReplicaSyncer = (*RedisSyncer)(nil)
 var _ fwkdl.CrossReplicaBatchSyncer = (*RedisSyncer)(nil)
 
 type redisConfig struct {
-	Address         string `json:"address"`
-	Password        string `json:"password"`
-	PasswordEnv     string `json:"passwordEnv"`
-	PasswordFile    string `json:"passwordFile"`
-	DB              int    `json:"db"`
-	StateTTL        string `json:"stateTTL"`
-	CoordinationTTL string `json:"coordinationTTL"`
+	Address           string `json:"address"`
+	Password          string `json:"password"`
+	PasswordEnv       string `json:"passwordEnv"`
+	PasswordFile      string `json:"passwordFile"`
+	DB                int    `json:"db"`
+	StateTTL          string `json:"stateTTL"`
+	CoordinationTTL   string `json:"coordinationTTL"`
+	WindowReplication string `json:"windowReplication"`
+	MaxBytesPerSecond int64  `json:"maxBytesPerSecond"`
 }
 
 // RedisSyncer is a CrossReplicaSyncer backed by Redis for cross-replica
@@ -74,10 +77,21 @@ type RedisSyncer struct {
 	stateTTL        time.Duration
 	coordinationTTL time.Duration
 	cache           sync.Map
+	// incremental publishes SequencedValues as streams instead of whole values.
+	incremental bool
+	// cursors maps a hash key to the streamCursor of this replica's stream.
+	cursors       sync.Map
+	epochs        atomic.Uint64
+	publishBudget *byteBudget
+	readBudget    *byteBudget
 }
 
 type aggregateCacheEntry struct {
 	value any
+	// streams holds the windows rebuilt from peers that publish streams.
+	streams map[string]*streamPeer
+	// legacyPeers is how many whole-value peers the cached aggregate includes.
+	legacyPeers int
 }
 
 func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, error) {
@@ -142,6 +156,25 @@ func RedisSyncerFactory(name string, params *json.Decoder, handle fwkplugin.Hand
 	if err != nil {
 		return nil, err
 	}
+	var incremental bool
+	switch cfg.WindowReplication {
+	case "", windowReplicationFull:
+	case windowReplicationIncremental:
+		incremental = true
+	default:
+		return nil, fmt.Errorf("redis-syncer: windowReplication %q must be one of %s|%s", cfg.WindowReplication, windowReplicationFull, windowReplicationIncremental)
+	}
+	if cfg.MaxBytesPerSecond < 0 {
+		return nil, fmt.Errorf("redis-syncer: maxBytesPerSecond must be positive, got %d", cfg.MaxBytesPerSecond)
+	}
+	if cfg.MaxBytesPerSecond == 0 {
+		cfg.MaxBytesPerSecond = defaultMaxBytesPerSecond
+	}
+	if handle != nil && handle.Metrics() != nil {
+		if err := registerMetrics(handle.Metrics()); err != nil {
+			return nil, err
+		}
+	}
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "unknown"
@@ -164,6 +197,9 @@ func RedisSyncerFactory(name string, params *json.Decoder, handle fwkplugin.Hand
 		client:          client,
 		stateTTL:        stateTTL,
 		coordinationTTL: coordinationTTL,
+		incremental:     incremental,
+		publishBudget:   newByteBudget(cfg.MaxBytesPerSecond),
+		readBudget:      newByteBudget(cfg.MaxBytesPerSecond),
 	}, nil
 }
 
@@ -267,10 +303,16 @@ func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, va
 }
 
 func (s *RedisSyncer) Set(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) error {
-	return s.set(ctx, spec.StateKey, endpointID, spec.Read(endpointID), spec.Aggregate)
+	value := spec.Read(endpointID)
+	if _, ok := value.(fwkdl.SequencedValue); ok {
+		read := func(string) any { return value }
+		return s.publishChunk(ctx, spec.StateKey, spec.Aggregate, []string{endpointID}, read)[endpointID]
+	}
+	return s.set(ctx, spec.StateKey, endpointID, value, spec.Aggregate)
 }
 
 func (s *RedisSyncer) SetBatch(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointIDs []string, timeout time.Duration) map[string]error {
+	defer observeSetBatch(spec.StateKey, time.Now())
 	failures := make(map[string]error)
 	slots := make(chan struct{}, batchConcurrency)
 	var mu sync.Mutex
@@ -309,6 +351,21 @@ dispatch:
 }
 
 func (s *RedisSyncer) setBatchChunk(ctx context.Context, spec fwkdl.CrossReplicaSpec, chunk []string) map[string]error {
+	read := func(endpointID string) any { return spec.Read(endpointID) }
+	return s.publishChunk(ctx, spec.StateKey, spec.Aggregate, chunk, read)
+}
+
+type publication struct {
+	endpointID string
+	hashKey    string
+	value      any
+	commands   []goredis.Cmder
+	result     *goredis.MapStringStringCmd
+	// stream is set when value is published as a stream.
+	stream *streamPublication
+}
+
+func (s *RedisSyncer) publishChunk(ctx context.Context, key fwkdl.StateKey, aggregate func([]any) any, chunk []string, read func(string) any) map[string]error {
 	failures := make(map[string]error)
 	if err := ctx.Err(); err != nil {
 		for _, endpointID := range chunk {
@@ -319,56 +376,71 @@ func (s *RedisSyncer) setBatchChunk(ctx context.Context, spec fwkdl.CrossReplica
 	logger := ctrl.LoggerFrom(ctx)
 
 	pipe := s.client.TxPipeline()
-	type publication struct {
-		endpointID string
-		value      any
-		commands   []goredis.Cmder
-		result     *goredis.MapStringStringCmd
-	}
-	publications := make([]publication, 0, len(chunk))
+	publications := make([]*publication, 0, len(chunk))
 	for _, endpointID := range chunk {
-		value := spec.Read(endpointID)
-		data, err := encodeValue(value)
-		if err != nil {
-			failures[endpointID] = fmt.Errorf("redis-syncer: encode: %w", err)
-			continue
+		value := read(endpointID)
+		pub := &publication{endpointID: endpointID, hashKey: s.hashKey(key, endpointID), value: value}
+		if sequenced, ok := value.(fwkdl.SequencedValue); ok && s.incremental {
+			pub.stream, pub.commands = s.queueStream(ctx, pipe, key, pub.hashKey, sequenced)
+		} else {
+			data, err := encodeValue(value)
+			if err != nil {
+				failures[endpointID] = fmt.Errorf("redis-syncer: encode: %w", err)
+				continue
+			}
+			pub.commands = []goredis.Cmder{
+				pipe.HSet(ctx, pub.hashKey, s.replicaID, data),
+				pipe.HPExpire(ctx, pub.hashKey, s.stateTTL, s.replicaID),
+				pipe.PExpire(ctx, pub.hashKey, s.stateTTL),
+			}
 		}
-		hashKey := s.hashKey(spec.StateKey, endpointID)
-		hset := pipe.HSet(ctx, hashKey, s.replicaID, data)
-		hpexpire := pipe.HPExpire(ctx, hashKey, s.stateTTL, s.replicaID)
-		pexpire := pipe.PExpire(ctx, hashKey, s.stateTTL)
-		result := pipe.HGetAll(ctx, hashKey)
-		publications = append(publications, publication{
-			endpointID: endpointID, value: value,
-			commands: []goredis.Cmder{hset, hpexpire, pexpire, result}, result: result,
-		})
+		pub.result = pipe.HGetAll(ctx, pub.hashKey)
+		pub.commands = append(pub.commands, pub.result)
+		publications = append(publications, pub)
 	}
 	if len(publications) == 0 {
 		return failures
 	}
 	commands, execErr := pipe.Exec(ctx)
 	if execFailedWholeChunk(execErr, commands) {
-		for _, publication := range publications {
-			failures[publication.endpointID] = fmt.Errorf("redis-syncer: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", execErr)
+		for _, pub := range publications {
+			if pub.stream != nil {
+				s.unknownStreamOutcome(pub)
+			}
+			failures[pub.endpointID] = fmt.Errorf("redis-syncer: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", execErr)
 		}
 		return failures
 	}
-	for _, publication := range publications {
+	var reads []*publication
+	for _, pub := range publications {
 		var err error
-		for _, cmd := range publication.commands {
+		for _, cmd := range pub.commands {
 			if cmd.Err() != nil {
 				err = cmd.Err()
 				break
 			}
 		}
+		if pub.stream != nil {
+			s.finishStream(ctx, key, pub, err)
+		}
 		if err != nil {
-			failures[publication.endpointID] = fmt.Errorf("redis-syncer: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", err)
+			failures[pub.endpointID] = fmt.Errorf("redis-syncer: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", err)
 			continue
 		}
-		peerCount := s.cachePeerAggregate(ctx, s.hashKey(spec.StateKey, publication.endpointID), publication.value, publication.result.Val(), spec.Aggregate)
-		if v := logger.V(logutil.DEBUG); v.Enabled() {
-			v.Info("redis-syncer: Set", "key", string(spec.StateKey), "endpoint", publication.endpointID, "replica", s.replicaID, "numReplicas", peerCount+1)
+		if pub.stream != nil {
+			s.ensureMarker(ctx, pub)
 		}
+		if s.readsStreams(pub) {
+			reads = append(reads, pub)
+			continue
+		}
+		peerCount := s.cachePeerAggregate(ctx, pub.hashKey, pub.value, pub.result.Val(), aggregate)
+		if v := logger.V(logutil.DEBUG); v.Enabled() {
+			v.Info("redis-syncer: Set", "key", string(key), "endpoint", pub.endpointID, "replica", s.replicaID, "numReplicas", peerCount+1)
+		}
+	}
+	if len(reads) > 0 {
+		s.readStreams(ctx, key, aggregate, reads)
 	}
 	return failures
 }
@@ -410,7 +482,17 @@ func (s *RedisSyncer) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endp
 func (s *RedisSyncer) delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
 	hashKey := s.hashKey(key, endpointID)
 	s.cache.Delete(hashKey)
-	return s.client.HDel(ctx, hashKey, s.replicaID).Err()
+	if !s.incremental {
+		return s.client.HDel(ctx, hashKey, s.replicaID).Err()
+	}
+	s.cursors.Delete(hashKey)
+	pipe := s.client.Pipeline()
+	hdel := pipe.HDel(ctx, hashKey, s.replicaID, markerField(s.replicaID))
+	pipe.Del(ctx, s.streamKey(hashKey, s.replicaID))
+	if _, err := pipe.Exec(ctx); err != nil {
+		return err
+	}
+	return hdel.Err()
 }
 
 func (s *RedisSyncer) Delete(ctx context.Context, key fwkdl.StateKey, endpointID string) error {
