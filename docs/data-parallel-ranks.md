@@ -13,7 +13,7 @@ When the scheduler picks a rank endpoint, the EPP:
 
 Requests to endpoints without ranks keep their headers and fallbacks.
 
-Each rank endpoint reads its own engine's metrics series (see the [metrics extractor](../pkg/epp/framework/plugins/datalayer/extractor/metrics/README.md#families-with-several-series)).
+Each rank endpoint reads its own engine's metrics series (see the [metrics extractor](../pkg/epp/framework/plugins/datalayer/extractor/metrics/README.md#families-with-several-series)) and, with the [precise prefix cache](../pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/README.md), its own KV events.
 
 ## SGLang
 
@@ -27,7 +27,6 @@ Envoy forwards request headers to a gRPC upstream as metadata, so the same heade
 
 ## Limitations
 
-- **Precise prefix cache.** KV events are keyed by the pod's address, so the ranks of a pod share one index entry.
 - **P/D through the sidecar.** The sidecar sends the decode rank to the prefill worker.
 - **Ranks are per pod.** Each pod's ranks run from 0 to N-1, so a data-parallel group that spans pods is not addressed correctly.
 - **Rank count is configured, not discovered.** The EPP does not check the annotation or the flag against the model server. A rank count above the server's sends requests to ranks the server rejects; a count below it leaves engines unscheduled.
