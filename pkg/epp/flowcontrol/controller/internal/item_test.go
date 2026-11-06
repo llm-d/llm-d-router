@@ -24,12 +24,16 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	testclock "k8s.io/utils/clock/testing"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 func TestFlowItem_New(t *testing.T) {
@@ -243,4 +247,45 @@ func TestFlowItem_Finalize_OutcomeClassification(t *testing.T) {
 			assert.ErrorIs(t, finalState.Err, tc.expectErrIs, "Unexpected error type")
 		})
 	}
+}
+
+func TestFlowItem_Finalize_RecordsQueueDurationFromClock(t *testing.T) {
+	t.Parallel()
+	metrics.Register()
+
+	const (
+		flowID       = "fake-clock-duration-flow"
+		simulatedLag = 250 * time.Millisecond
+	)
+	baseTime := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	fakeClock := testclock.NewFakeClock(baseTime)
+
+	req := mocks.NewMockFlowControlRequest(100, "req-clock", flowcontrol.FlowKey{ID: flowID, Priority: 0})
+	item := NewItem(context.Background(), req, time.Minute, fakeClock.Now(), logr.Discard())
+	item.SetClock(fakeClock)
+
+	fakeClock.Step(simulatedLag)
+	item.FinalizeWithError(nil)
+
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+
+	var hist *dto.Histogram
+	for _, mf := range families {
+		if mf.GetName() != "llm_d_epp_flow_control_request_queue_duration_seconds" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "fairness_id" && lp.GetValue() == flowID {
+					hist = m.GetHistogram()
+					break
+				}
+			}
+		}
+	}
+	require.NotNil(t, hist, "expected queue duration histogram series for flow %q", flowID)
+	assert.Equal(t, uint64(1), hist.GetSampleCount())
+	assert.InDelta(t, simulatedLag.Seconds(), hist.GetSampleSum(), 1e-6,
+		"queue duration should be computed from the injected FakeClock rather than wall-clock time.Since")
 }

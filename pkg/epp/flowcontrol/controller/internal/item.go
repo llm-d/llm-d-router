@@ -27,6 +27,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/utils/clock"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -70,6 +71,9 @@ type FlowItem struct {
 	// Distinguishing between pre-admission (Rejection) and post-admission (Eviction) during asynchronous finalization
 	// relies on whether this handle is nil or non-nil.
 	handle atomic.Pointer[flowcontrol.QueueItemHandle]
+
+	// clock stores the optional PassiveClock used to measure queue duration on finalization.
+	clock atomic.Pointer[clock.PassiveClock]
 
 	// finalState holds the result of the finalization. Stored atomically once.
 	// Use FinalState() for safe access.
@@ -135,6 +139,16 @@ func (fi *FlowItem) Handle() flowcontrol.QueueItemHandle {
 // Safe for concurrent access.
 func (fi *FlowItem) SetHandle(handle flowcontrol.QueueItemHandle) { fi.handle.Store(&handle) }
 
+// SetClock sets the clock used to compute queue duration upon finalization.
+// Safe for concurrent access.
+func (fi *FlowItem) SetClock(c clock.PassiveClock) {
+	if c == nil {
+		fi.clock.Store(nil)
+		return
+	}
+	fi.clock.Store(&c)
+}
+
 // Finalize determines the item's terminal state based on the provided cause (e.g., Context error) and the item's
 // current admission status (queued or not).
 //
@@ -179,6 +193,9 @@ func (fi *FlowItem) finalizeInternal(err error) {
 	fi.finalState.Store(finalState)
 
 	duration := time.Since(fi.enqueueTime)
+	if c := fi.clock.Load(); c != nil && *c != nil {
+		duration = (*c).Since(fi.enqueueTime)
+	}
 	flowKey := fi.originalRequest.FlowKey()
 	metrics.RecordFlowControlRequestQueueDuration(
 		trace.ContextWithSpan(context.Background(), fi.span),
