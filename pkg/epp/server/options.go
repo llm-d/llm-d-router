@@ -118,37 +118,37 @@ type Options struct {
 	//
 	// Diagnostics.
 	//
-	logging.LoggingOptions            // Logging configuration.
-	Tracing                    bool   // Enables emitting traces.
-	EnableToolCallingTelemetry bool   // Enables tool-calling request and response telemetry.
-	HealthChecking             bool   // Enables health checking.
-	MetricsPort                uint16 // The metrics port exposed by EPP.
-	GRPCHealthPort             uint16 // The port used for gRPC liveness and readiness probes.
-	EnablePprof                bool   // Enables pprof handlers.
-	// SchedulingDecisionsHistory is the number of recent scheduling decisions retained for
-	// /debug/scheduling/recent. 0 disables the endpoint and decision collection.
-	SchedulingDecisionsHistory int
-	// SchedulingDecisionsTopEndpoints is the number of highest-scoring endpoints recorded per
-	// profile in each retained decision.
-	SchedulingDecisionsTopEndpoints int
-	CertPath                        string   // The path to the certificate for secure serving.
-	EnableCertReload                bool     // Enables certificate reloading of the certificates specified in --cert-path.
-	SecureServing                   bool     // Enables secure serving.
-	TLSMinVersion                   string   // Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13).
-	TLSCipherSuites                 []string // TLS cipher suites (Go crypto/tls names). Only effective for TLS 1.2 and below.
-	tlsMinVersionValue              uint16   // Parsed TLS min version value.
-	tlsCipherSuiteValues            []uint16 // Parsed TLS cipher suite values.
-	MetricsEndpointAuth             bool     // Enables authentication and authorization of the metrics endpoint.
-	MetricsClientCAFile             string   // PEM CA that requires a verified client cert on the metrics endpoint.
-	ClientCAFile                    string   // PEM CA that requires a verified client cert on the serving listener.
-	MetricsCertDir                  string   // Directory with the metrics server certificates that enables metrics TLS.
-	EnableGRPCStreamMetrics         bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
+	logging.LoggingOptions              // Logging configuration.
+	Tracing                    bool     // Enables emitting traces.
+	EnableToolCallingTelemetry bool     // Enables tool-calling request and response telemetry.
+	HealthChecking             bool     // Enables health checking.
+	MetricsPort                uint16   // The metrics port exposed by EPP.
+	GRPCHealthPort             uint16   // The port used for gRPC liveness and readiness probes.
+	EnablePprof                bool     // Enables pprof handlers.
+	CertPath                   string   // The path to the certificate for secure serving.
+	EnableCertReload           bool     // Enables certificate reloading of the certificates specified in --cert-path.
+	SecureServing              bool     // Enables secure serving.
+	TLSMinVersion              string   // Minimum TLS version for secure serving (e.g., VersionTLS12, VersionTLS13).
+	TLSCipherSuites            []string // TLS cipher suites (Go crypto/tls names). Only effective for TLS 1.2 and below.
+	tlsMinVersionValue         uint16   // Parsed TLS min version value.
+	tlsCipherSuiteValues       []uint16 // Parsed TLS cipher suite values.
+	MetricsEndpointAuth        bool     // Enables authentication and authorization of the metrics endpoint.
+	MetricsClientCAFile        string   // PEM CA that requires a verified client cert on the metrics endpoint.
+	ClientCAFile               string   // PEM CA that requires a verified client cert on the serving listener.
+	MetricsCertDir             string   // Directory with the metrics server certificates that enables metrics TLS.
+	EnableGRPCStreamMetrics    bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
 	// clientCAs is the CA pool parsed from ClientCAFile.
 	clientCAs *x509.CertPool
 	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
 	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. default-flow does not count
 	// against the cap. Bounds metric cardinality in deployments with many distinct fairness IDs.
 	FairnessIDMetricLabelLimit int
+	// SchedulingDecisionsHistory is the number of recent scheduling decisions retained for
+	// /debug/scheduling/recent. 0 disables the endpoint and decision collection.
+	SchedulingDecisionsHistory int
+	// SchedulingDecisionsTopEndpoints is the number of highest-scoring endpoints recorded per
+	// profile in each retained decision.
+	SchedulingDecisionsTopEndpoints int
 	//
 	// Configuration.
 	//

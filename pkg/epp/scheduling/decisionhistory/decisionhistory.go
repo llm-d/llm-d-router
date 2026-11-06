@@ -23,8 +23,12 @@ package decisionhistory
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 // FilterStage records one filter's effect on a profile's candidate set.
@@ -64,7 +68,8 @@ type ProfileDecision struct {
 
 // Decision records one scheduling attempt: the request identity, each
 // profile's run, and the outcome. Entries hold no request payloads or
-// headers.
+// headers. The model string is truncated to maxModelLength, and every slice
+// field is non-nil so entries always serialize as JSON arrays.
 type Decision struct {
 	Timestamp      time.Time         `json:"timestamp"`
 	RequestID      string            `json:"requestID"`
@@ -72,6 +77,24 @@ type Decision struct {
 	Profiles       []ProfileDecision `json:"profiles"`
 	TargetEndpoint string            `json:"targetEndpoint,omitempty"`
 	FailureReason  string            `json:"failureReason,omitempty"`
+}
+
+// maxModelLength caps the model string stored in a decision. The model is
+// request-derived and its length is unbounded under the default
+// --max-request-body-size, so the cap keeps each entry's size bounded.
+const maxModelLength = 1024
+
+// truncateModel shortens model to at most maxModelLength bytes, backing off to
+// a rune boundary so the stored string stays valid UTF-8.
+func truncateModel(model string) string {
+	if len(model) <= maxModelLength {
+		return model
+	}
+	end := maxModelLength
+	for end > 0 && !utf8.RuneStart(model[end]) {
+		end--
+	}
+	return model[:end]
 }
 
 // Recorder retains the most recent scheduling decisions in a fixed-capacity
@@ -105,7 +128,8 @@ func (r *Recorder) Begin(requestID, model string) *Collector {
 	}
 	return &Collector{recorder: r, decision: Decision{
 		RequestID: requestID,
-		Model:     model,
+		Model:     truncateModel(model),
+		Profiles:  []ProfileDecision{},
 	}}
 }
 
@@ -154,12 +178,14 @@ type Collector struct {
 	current  *profileCollector
 }
 
-// profileCollector holds the profile being collected. scorerScores is
-// index-aligned with the profile's Scorers and maps endpoint ID to the raw
-// score that scorer assigned; entries are trimmed to the top endpoints at
+// profileCollector holds the profile being collected. scorerKeys and
+// scorerScores are index-aligned with the profile's Scorers; scorerKeys holds
+// each scorer's TypedName.String(), and scorerScores maps endpoint ID to the
+// raw score that scorer assigned. Entries are trimmed to the top endpoints at
 // pick time.
 type profileCollector struct {
 	profile      ProfileDecision
+	scorerKeys   []string
 	scorerScores []map[string]float64
 }
 
@@ -172,6 +198,10 @@ func (c *Collector) ProfileStarted(profile string, candidates int) {
 	c.current = &profileCollector{profile: ProfileDecision{
 		Profile:                 profile,
 		CandidatesBeforeFilters: candidates,
+		Filters:                 []FilterStage{},
+		Scorers:                 []ScorerEntry{},
+		TopEndpoints:            []EndpointScore{},
+		TargetEndpoints:         []string{},
 	}}
 }
 
@@ -189,37 +219,50 @@ func (c *Collector) FilterRan(pluginType, name string, before, after int) {
 }
 
 // ScorerRan records a scorer's identity, weight, and raw per-endpoint scores
-// keyed by endpoint ID.
-func (c *Collector) ScorerRan(pluginType, name string, weight float64, scores map[string]float64) {
+// keyed by endpoint ID. Non-finite raw scores are dropped: a scorer that
+// returns NaN or Inf must not make the retained entry unmarshalable.
+func (c *Collector) ScorerRan(typedName fwkplugin.TypedName, weight float64, scores map[string]float64) {
 	if c == nil || c.current == nil {
 		return
 	}
 	c.current.profile.Scorers = append(c.current.profile.Scorers, ScorerEntry{
-		Type:   pluginType,
-		Name:   name,
+		Type:   typedName.Type,
+		Name:   typedName.Name,
 		Weight: weight,
 	})
-	c.current.scorerScores = append(c.current.scorerScores, scores)
+	c.current.scorerKeys = append(c.current.scorerKeys, typedName.String())
+	bounded := make(map[string]float64, len(scores))
+	for endpoint, score := range scores {
+		if math.IsNaN(score) || math.IsInf(score, 0) {
+			continue
+		}
+		bounded[endpoint] = score
+	}
+	c.current.scorerScores = append(c.current.scorerScores, bounded)
 }
 
 // Picked finishes the profile: topNames and topScores are the highest
 // weighted scores index-aligned in descending order, and targets holds the
 // picked endpoint IDs. Per-scorer scores are kept only for the top
-// endpoints.
+// endpoints. A non-finite weighted score is recorded as 0.
 func (c *Collector) Picked(topNames []string, topScores []float64, targets []string) {
 	if c == nil || c.current == nil {
 		return
 	}
 	pc := c.current
 	for i, name := range topNames {
+		weighted := topScores[i]
+		if math.IsNaN(weighted) || math.IsInf(weighted, 0) {
+			weighted = 0
+		}
 		es := EndpointScore{
 			Endpoint:      name,
-			WeightedScore: topScores[i],
+			WeightedScore: weighted,
 			ScorerScores:  make(map[string]float64, len(pc.profile.Scorers)),
 		}
-		for j, scorer := range pc.profile.Scorers {
+		for j := range pc.profile.Scorers {
 			if score, ok := pc.scorerScores[j][name]; ok {
-				es.ScorerScores[scorer.Name+"/"+scorer.Type] = score
+				es.ScorerScores[pc.scorerKeys[j]] = score
 			}
 		}
 		pc.profile.TopEndpoints = append(pc.profile.TopEndpoints, es)

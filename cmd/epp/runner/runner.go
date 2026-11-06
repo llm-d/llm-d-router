@@ -1285,6 +1285,16 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	r.servingCtx, r.cancelServing = context.WithCancel(context.WithoutCancel(ctx))
 	defer r.cancelServing()
 
+	// The standalone metrics server serves its handlers without the
+	// metrics-endpoint authentication and authorization filters, and a
+	// scheduling decision exposes request IDs and model names, so decision
+	// history is refused here rather than served unauthenticated.
+	if opts.SchedulingDecisionsHistory > 0 {
+		err := fmt.Errorf("flag %q is not supported in file-discovery mode: the standalone metrics server serves the decision endpoint without metrics-endpoint authentication", "scheduling-decisions-history")
+		setupLog.Error(err, "Failed to start EPP")
+		return err
+	}
+
 	epf := r.setupMetricsCollection(opts)
 
 	namespace := resolvePoolNamespace(opts.PoolNamespace)

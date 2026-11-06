@@ -17,11 +17,17 @@ limitations under the License.
 package decisionhistory
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
+
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 func TestRecorderRingRetainsNewestFirst(t *testing.T) {
@@ -46,8 +52,8 @@ func TestCollectorRecordsProfileRun(t *testing.T) {
 	c := r.Begin("req-1", "model-a")
 	c.ProfileStarted("default", 3)
 	c.FilterRan("test-filter", "my-filter", 3, 2)
-	c.ScorerRan("test-scorer", "scorer-a", 0.25, map[string]float64{"pod1": 1, "pod2": 0.5})
-	c.ScorerRan("test-scorer", "scorer-b", 0.75, map[string]float64{"pod1": 0, "pod2": 1})
+	c.ScorerRan(fwkplugin.TypedName{Type: "test-scorer", Name: "scorer-a"}, 0.25, map[string]float64{"pod1": 1, "pod2": 0.5})
+	c.ScorerRan(fwkplugin.TypedName{Type: "test-scorer", Name: "scorer-b"}, 0.75, map[string]float64{"pod1": 0, "pod2": 1})
 	c.Picked([]string{"pod2", "pod1"}, []float64{0.875, 0.25}, []string{"pod2"})
 	r.Commit(c, ts, "pod2", "")
 
@@ -86,7 +92,7 @@ func TestCollectorTrimsToTopK(t *testing.T) {
 	r := NewRecorder(10, 1)
 	c := r.Begin("req-1", "model-a")
 	c.ProfileStarted("default", 3)
-	c.ScorerRan("test-scorer", "scorer-a", 1, map[string]float64{"pod1": 1, "pod2": 0.5, "pod3": 0.25})
+	c.ScorerRan(fwkplugin.TypedName{Type: "test-scorer", Name: "scorer-a"}, 1, map[string]float64{"pod1": 1, "pod2": 0.5, "pod3": 0.25})
 	c.Picked([]string{"pod1"}, []float64{1}, []string{"pod1"})
 	r.Commit(c, time.Now(), "pod1", "")
 
@@ -122,7 +128,7 @@ func TestNilRecorderAndCollectorAreNoOps(t *testing.T) {
 	require.Equal(t, 0, c.TopK())
 	c.ProfileStarted("default", 1)
 	c.FilterRan("test-filter", "my-filter", 1, 0)
-	c.ScorerRan("test-scorer", "scorer-a", 1, nil)
+	c.ScorerRan(fwkplugin.TypedName{Type: "test-scorer", Name: "scorer-a"}, 1, nil)
 	c.Picked([]string{"pod1"}, []float64{1}, []string{"pod1"})
 	c.ProfileFailed("boom")
 }
@@ -144,4 +150,69 @@ func TestContextCarriesCollector(t *testing.T) {
 
 	// A nil collector leaves the context unchanged.
 	require.Nil(t, CollectorFromContext(ContextWithCollector(t.Context(), nil)))
+}
+
+func TestCollectorSanitizesNonFiniteScores(t *testing.T) {
+	r := NewRecorder(10, 5)
+	c := r.Begin("req-1", "model-a")
+	c.ProfileStarted("default", 3)
+	c.ScorerRan(fwkplugin.TypedName{Type: "test-scorer", Name: "scorer-a"}, 1, map[string]float64{
+		"pod1": math.NaN(),
+		"pod2": math.Inf(1),
+		"pod3": 0.5,
+	})
+	c.Picked([]string{"pod1", "pod3"}, []float64{math.NaN(), 0.5}, []string{"pod3"})
+	r.Commit(c, time.Now(), "pod3", "")
+
+	d := r.Snapshot()[0]
+	require.Len(t, d.Profiles, 1)
+	p := d.Profiles[0]
+	require.Len(t, p.TopEndpoints, 2)
+
+	// A non-finite weighted score is recorded as 0, and the non-finite raw
+	// scores are dropped, so the entry stays marshalable.
+	require.InDelta(t, 0, p.TopEndpoints[0].WeightedScore, 0)
+	require.Empty(t, p.TopEndpoints[0].ScorerScores)
+	require.InDelta(t, 0.5, p.TopEndpoints[1].WeightedScore, 1e-9)
+	require.Equal(t, map[string]float64{"scorer-a/test-scorer": 0.5}, p.TopEndpoints[1].ScorerScores)
+
+	_, err := json.Marshal(d)
+	require.NoError(t, err)
+}
+
+func TestBeginTruncatesModel(t *testing.T) {
+	r := NewRecorder(2, 5)
+
+	c := r.Begin("req-1", strings.Repeat("a", maxModelLength+10))
+	r.Commit(c, time.Now(), "", "")
+	require.Len(t, r.Snapshot()[0].Model, maxModelLength)
+
+	// Truncation lands on a rune boundary so the stored string stays valid
+	// UTF-8.
+	c = r.Begin("req-2", strings.Repeat("é", maxModelLength))
+	r.Commit(c, time.Now(), "", "")
+	model := r.Snapshot()[0].Model
+	require.LessOrEqual(t, len(model), maxModelLength)
+	require.True(t, utf8.ValidString(model))
+}
+
+func TestEmptyFieldsSerializeAsArrays(t *testing.T) {
+	r := NewRecorder(2, 5)
+
+	// A request the profile handler rejected before any profile ran.
+	c := r.Begin("req-1", "model-a")
+	r.Commit(c, time.Now(), "", "no_profile_selected")
+
+	// A profile that failed before any plugin ran.
+	c = r.Begin("req-2", "model-a")
+	c.ProfileStarted("default", 2)
+	c.ProfileFailed("no endpoints available")
+	r.Commit(c, time.Now(), "", "all_filtered")
+
+	payload, err := json.Marshal(r.Snapshot())
+	require.NoError(t, err)
+	for _, field := range []string{`"profiles":[]`, `"filters":[]`, `"scorers":[]`, `"topEndpoints":[]`, `"targetEndpoints":[]`} {
+		require.Contains(t, string(payload), field)
+	}
+	require.NotContains(t, string(payload), "null")
 }

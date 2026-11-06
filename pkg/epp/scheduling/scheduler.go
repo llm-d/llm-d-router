@@ -90,7 +90,16 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 			// path; the decision history records failure reasons only.
 			failureReason = ""
 		}
-		s.decisionHistory.Commit(collector, time.Now(), primaryEndpointID(result), failureReason)
+		// Guarded so a disabled recorder adds no time.Now or endpoint-ID
+		// evaluation to the hot path, and so a non-nil result returned with
+		// an error records a failure reason only, never a target.
+		if collector != nil {
+			target := ""
+			if err == nil {
+				target = primaryEndpointID(result)
+			}
+			s.decisionHistory.Commit(collector, time.Now(), target, failureReason)
+		}
 	}()
 
 	profileRunResults := map[string]*fwksched.ProfileRunResult{}
@@ -208,11 +217,16 @@ func runSchedulerProfile(ctx context.Context, name string, profile fwksched.Sche
 }
 
 // primaryEndpointID returns the ID of the primary profile's first picked
-// endpoint, or an empty string when the attempt picked none.
+// endpoint, or an empty string when the attempt picked none or the endpoint
+// carries no metadata.
 func primaryEndpointID(result *fwksched.SchedulingResult) string {
 	endpoint := result.PrimaryEndpoint()
 	if endpoint == nil {
 		return ""
 	}
-	return endpoint.GetMetadata().ID.String()
+	metadata := endpoint.GetMetadata()
+	if metadata == nil {
+		return ""
+	}
+	return metadata.ID.String()
 }
