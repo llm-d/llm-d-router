@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,6 +36,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -334,6 +337,7 @@ func TestPDSchedule(t *testing.T) {
 
 func TestPDSchedule_AggregatedFallback(t *testing.T) {
 	const fallback = "fallback"
+	const encode = "encode"
 	ctx := context.Background()
 
 	fallbackEndpoint := fwksched.NewEndpoint(
@@ -363,6 +367,14 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 		&fwkdl.Metrics{WaitingQueueSize: 0},
 		fwkdl.NewAttributes(),
 	)
+	encodeEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:     k8stypes.NamespacedName{Name: "encode-endpoint"},
+			Labels: map[string]string{bylabel.RoleLabel: bylabel.RoleEncode},
+		},
+		&fwkdl.Metrics{},
+		fwkdl.NewAttributes(),
+	)
 
 	prefillFilter, err := bylabel.NewSelector("strict-prefill", &metav1.LabelSelector{
 		MatchLabels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
@@ -390,12 +402,17 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 	fallbackProfile := scheduling.NewSchedulerProfile().
 		WithFilters(fallbackFilter, capacityFilter.(fwksched.Filter)).
 		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	encodeProfile := scheduling.NewSchedulerProfile().
+		WithFilters(bylabel.NewEncodeRole()).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
 
 	for _, tc := range []struct {
 		name             string
 		hasDecode        bool
 		hasPrefill       bool
 		hasFallback      bool
+		encodeConfigured bool
+		hasEncode        bool
 		decodeBusy       bool
 		fallbackBusy     bool
 		prefillDeclined  bool
@@ -412,10 +429,17 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 		{name: "decode busy", hasDecode: true, hasFallback: true, decodeBusy: true, wantPrimary: fallback, wantFallbackRuns: 1},
 		{name: "both workers busy", hasDecode: true, hasFallback: true, decodeBusy: true, fallbackBusy: true, wantFallbackRuns: 1},
 		{name: "request cancelled", hasFallback: true, cancelled: true},
+		{name: "encode unavailable retains PD", hasDecode: true, hasPrefill: true, hasFallback: true, encodeConfigured: true, wantPrimary: decode},
+		{name: "all stages available", hasDecode: true, hasPrefill: true, hasFallback: true, encodeConfigured: true, hasEncode: true, wantPrimary: decode},
+		{name: "encode succeeds before prefill fails", hasDecode: true, hasFallback: true, encodeConfigured: true, hasEncode: true, wantPrimary: fallback, wantFallbackRuns: 1},
+		{name: "encode succeeds but fallback unavailable", hasDecode: true, encodeConfigured: true, hasEncode: true, wantFallbackRuns: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decider := &disagg.AlwaysDisaggPDDecider{}
 			handler := disagg.NewDisaggProfileHandler(decode, prefill, "", decider, nil).WithFallbackProfile(fallback)
+			if tc.encodeConfigured {
+				handler = disagg.NewDisaggProfileHandler(decode, prefill, encode, decider, disagg.NewAlwaysDisaggEncodeDecider()).WithFallbackProfile(fallback)
+			}
 			if tc.prefillDeclined {
 				handler = disagg.NewDisaggProfileHandler(decode, prefill, "", nil, nil).WithFallbackProfile(fallback)
 			}
@@ -429,6 +453,9 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 			if tc.hasFallback {
 				endpoints = append(endpoints, fallbackEndpoint)
 			}
+			if tc.hasEncode {
+				endpoints = append(endpoints, encodeEndpoint)
+			}
 			decodeEndpoint.GetMetrics().RunningRequestsSize = 0
 			fallbackEndpoint.GetMetrics().RunningRequestsSize = 0
 			if tc.decodeBusy {
@@ -439,25 +466,50 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 			}
 
 			fallbackRuns := 0
-			scheduler := scheduling.NewSchedulerWithConfig(scheduling.NewSchedulerConfig(handler, map[string]fwksched.SchedulerProfile{
-				decode:  decodeProfile,
-				prefill: prefillProfile,
+			profiles := map[string]fwksched.SchedulerProfile{
+				decode: decodeProfile,
+				prefill: profileFunc(func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+					_, hasPeer := fwksched.ReadRequestAttribute[fwksched.Endpoint](req, disagg.PeerEndpointAttributeKey)
+					assert.True(t, hasPeer)
+					return prefillProfile.Run(ctx, req, endpoints)
+				}),
 				fallback: profileFunc(func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 					fallbackRuns++
 					_, hasPeer := fwksched.ReadRequestAttribute[fwksched.Endpoint](req, disagg.PeerEndpointAttributeKey)
 					assert.False(t, hasPeer)
 					return fallbackProfile.Run(ctx, req, endpoints)
 				}),
-			}))
+			}
+			encodeRuns := 0
+			if tc.encodeConfigured {
+				profiles[encode] = profileFunc(func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+					encodeRuns++
+					return encodeProfile.Run(ctx, req, endpoints)
+				})
+			}
+			scheduler := scheduling.NewSchedulerWithConfig(scheduling.NewSchedulerConfig(handler, profiles))
 
 			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			if tc.cancelled {
 				cancel()
 			}
-			req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "critical", Body: completionsBody("12345678901"), Headers: map[string]string{}}
+			req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "critical", Body: completionsBody("12345678901"), Headers: map[string]string{reqcommon.RequestIDHeaderKey: "test-request"}}
+			if tc.encodeConfigured {
+				req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "image", Length: 1}}
+			}
+			counter := disagg.LlmdDisaggDecisionCount.WithLabelValues(handler.TypedName().Name, handler.TypedName().Type, req.TargetModel, metricsutil.DisaggPathAggregatedFallback)
+			before := testutil.ToFloat64(counter)
 			got, err := scheduler.Schedule(ctx, req, endpoints)
 			assert.Equal(t, tc.wantFallbackRuns, fallbackRuns)
+			wantDecisions := 0.0
+			if tc.wantPrimary == fallback {
+				wantDecisions = 1
+			}
+			assert.Equal(t, before+wantDecisions, testutil.ToFloat64(counter))
+			if tc.encodeConfigured {
+				assert.Equal(t, 1, encodeRuns)
+			}
 			if tc.wantPrimary == "" {
 				require.Error(t, err)
 				assert.Nil(t, got)
@@ -478,11 +530,12 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 					routing.SetRoutingHeader(req.Headers, header, "stale-endpoint")
 				}
 				require.NoError(t, handler.PreRequest(ctx, req, got))
-				require.Empty(t, req.Headers)
+				require.Equal(t, map[string]string{reqcommon.RequestIDHeaderKey: "test-request"}, req.Headers)
 			case tc.prefillDeclined:
 				assert.NotContains(t, got.ProfileResults, prefill)
 			default:
 				assert.Contains(t, got.ProfileResults, prefill)
+				assert.Equal(t, tc.hasEncode, got.ProfileResults[encode] != nil)
 			}
 		})
 	}
