@@ -20,6 +20,7 @@ limitations under the License.
 package sglanghttp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -136,15 +137,9 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 	if err != nil {
 		return nil, fmt.Errorf("unsupported generate request: %w", err)
 	}
-	// SGLang partitions its cache on (extra_key, cache_salt) but publishes only
-	// cache_salt in KV events. Encoding the pair keeps extra_key requests from
-	// matching blocks indexed under a bare cache_salt.
-	if extraKey != "" {
-		pair, err := json.Marshal([]string{extraKey, cacheSalt})
-		if err != nil {
-			return nil, fmt.Errorf("invalid generate request: %w", err)
-		}
-		cacheSalt = string(pair)
+	cacheSalt, err = parsers.ComposeSGLangCacheSalt(extraKey, cacheSalt)
+	if err != nil {
+		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
 	var tokenIDs []uint32
@@ -169,13 +164,13 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 		return nil, fmt.Errorf("invalid generate request: %w", err)
 	}
 
-	body := &fwkrh.InferenceRequestBody{
-		Generate: &fwkrh.GenerateRequest{
+	body := &request.InferenceRequestBody{
+		Generate: &request.GenerateRequest{
 			TokenIDs:  tokenIDs,
 			Text:      text,
 			CacheSalt: cacheSalt,
 		},
-		Payload:         fwkrh.PayloadMap(bodyMap),
+		Payload:         request.PayloadMap(bodyMap),
 		MaxOutputTokens: maxOutputTokens(wire.SamplingParams),
 		Stream:          wire.Stream,
 	}
@@ -186,8 +181,8 @@ func (p *SGLangHTTPParser) parseGenerateRequest(rawBody []byte) (*fwkrh.ParseRes
 }
 
 // RewriteModelName writes the resolved model into the request payload map.
-func (p *SGLangHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, model string) (fwkrh.MarshalablePayload, error) {
-	m, ok := payload.(fwkrh.PayloadMap)
+func (p *SGLangHTTPParser) RewriteModelName(payload request.MarshalablePayload, model string) (request.MarshalablePayload, error) {
+	m, ok := payload.(request.PayloadMap)
 	if !ok {
 		return payload, nil
 	}
@@ -199,7 +194,7 @@ func (p *SGLangHTTPParser) RewriteModelName(payload fwkrh.MarshalablePayload, mo
 // payload and writes the resolved EPP priority. The director only calls this when
 // priority propagation is enabled; see parsers.RewritePriority for the
 // cross-backend priority semantics.
-func (p *SGLangHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload fwkrh.MarshalablePayload, priority int) (fwkrh.MarshalablePayload, bool, error) {
+func (p *SGLangHTTPParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload request.MarshalablePayload, priority int) (request.MarshalablePayload, bool, error) {
 	return parsers.RewritePriority(ctx, payload, priority)
 }
 
@@ -230,7 +225,7 @@ func parseText(data json.RawMessage) (string, error) {
 }
 
 func parseInputIDs(data json.RawMessage) ([]uint32, error) {
-	if ids, ok := fwkrh.ParseCanonicalTokenIDs(data); ok {
+	if ids, ok := request.ParseCanonicalTokenIDs(data); ok {
 		return ids, nil
 	}
 
@@ -278,17 +273,50 @@ func (p *SGLangHTTPParser) ParseResponse(_ context.Context, body []byte, headers
 	if isEventStream(headers) {
 		return &fwkrh.ParsedResponse{Usage: extractStreamingUsage(body)}, nil
 	}
-	usage, err := parseMetaInfoUsage(body)
+	usage, err := parseGenerateResponseUsage(body)
 	if err != nil {
 		return nil, err
 	}
 	return &fwkrh.ParsedResponse{Usage: usage}, nil
 }
 
+// parseGenerateResponseUsage reads usage from a non-streaming /generate
+// response. With sampling_params.n above 1, SGLang returns an array with one
+// object per sample. The samples share one prompt, so prompt and cached tokens
+// are counted once and completion tokens are summed.
+func parseGenerateResponseUsage(body []byte) (*request.Usage, error) {
+	if trimmed := bytes.TrimSpace(body); len(trimmed) == 0 || trimmed[0] != '[' {
+		return parseMetaInfoUsage(body)
+	}
+	var samples []json.RawMessage
+	if err := json.Unmarshal(body, &samples); err != nil {
+		return nil, err
+	}
+	var usage *request.Usage
+	for _, sample := range samples {
+		u, err := parseMetaInfoUsage(sample)
+		if err != nil {
+			return nil, err
+		}
+		if u == nil {
+			continue
+		}
+		if usage == nil {
+			usage = u
+			continue
+		}
+		usage.CompletionTokens += u.CompletionTokens
+	}
+	if usage != nil {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	return usage, nil
+}
+
 func isEventStream(headers map[string]string) bool {
 	for key, value := range headers {
 		if strings.EqualFold(key, reqcommon.HeaderContentType) &&
-			strings.Contains(strings.ToLower(value), request.MediaTypeEventStream) {
+			strings.Contains(strings.ToLower(value), reqcommon.MediaTypeEventStream) {
 			return true
 		}
 	}
@@ -296,7 +324,7 @@ func isEventStream(headers map[string]string) bool {
 }
 
 // extractStreamingUsage reads usage from SGLang SSE data lines.
-func extractStreamingUsage(body []byte) *fwkrh.Usage {
+func extractStreamingUsage(body []byte) *request.Usage {
 	text := strings.TrimSpace(string(body))
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -322,7 +350,7 @@ func extractStreamingUsage(body []byte) *fwkrh.Usage {
 	return nil
 }
 
-func parseMetaInfoUsage(data []byte) (*fwkrh.Usage, error) {
+func parseMetaInfoUsage(data []byte) (*request.Usage, error) {
 	var resp sgLangResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
@@ -330,13 +358,13 @@ func parseMetaInfoUsage(data []byte) (*fwkrh.Usage, error) {
 	if resp.MetaInfo.PromptTokens == nil && resp.MetaInfo.CompletionTokens == nil {
 		return nil, nil //nolint:nilnil
 	}
-	u := &fwkrh.Usage{
+	u := &request.Usage{
 		PromptTokens:     intValue(resp.MetaInfo.PromptTokens),
 		CompletionTokens: intValue(resp.MetaInfo.CompletionTokens),
 	}
 	u.TotalTokens = u.PromptTokens + u.CompletionTokens
 	if resp.MetaInfo.CachedTokens != nil {
-		u.PromptTokenDetails = &fwkrh.PromptTokenDetails{
+		u.PromptTokenDetails = &request.PromptTokenDetails{
 			CachedTokens: *resp.MetaInfo.CachedTokens,
 		}
 	}

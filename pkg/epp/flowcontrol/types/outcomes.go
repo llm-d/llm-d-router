@@ -45,7 +45,8 @@ const (
 	// For these outcomes, the error from `FlowController.EnqueueAndWait()` will wrap `ErrRejected`.
 
 	// QueueOutcomeRejectedCapacity indicates rejection because queue capacity limits were met.
-	// The associated error will wrap `ErrQueueAtCapacity` (and `ErrRejected`).
+	// The associated error will wrap `ErrQueueAtCapacity` (and `ErrRejected`). It also wraps `ErrFlowAtCapacity` when
+	// the flow's own per-flow limit blocked admission and no band or global limit did.
 	QueueOutcomeRejectedCapacity
 
 	// QueueOutcomeRejectedNoEndpoints indicates rejection at the queue-capacity boundary while the candidate pool had no

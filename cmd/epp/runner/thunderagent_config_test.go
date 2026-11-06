@@ -38,7 +38,7 @@ func TestThunderAgentSampleConfigLoads(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	configBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "config", "thunderagent-config.yaml"))
+	configBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "test", "e2e", "artifacts", "config", "thunderagent-config.yaml"))
 	require.NoError(t, err)
 
 	opts := runserver.NewOptions()

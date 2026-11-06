@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 )
 
 // endpointStaleAfter drops a pod entry that holds no sessions and has not been
@@ -266,7 +266,7 @@ func estimateTokens(sizeBytes int) int64 {
 	if sizeBytes <= 0 {
 		return 0
 	}
-	return int64(sizeBytes / fwkrh.BytesPerToken)
+	return int64(sizeBytes / fwkrequest.BytesPerToken)
 }
 
 // gaugeSnapshot is the ledger state the metrics collector reports.

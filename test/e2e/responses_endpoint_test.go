@@ -29,10 +29,10 @@ import (
 	"github.com/llm-d/llm-d-router/test/e2e/utils/standalone"
 )
 
-// responsesTextInput is the prompt every Responses spec sends. Long enough to
-// clear the prefix-based-pd-decider nonCachedTokens threshold so a P/D setup
+// pdTextInput is the prompt the Responses and Messages specs send. Long enough
+// to clear the prefix-based-pd-decider nonCachedTokens threshold so a P/D setup
 // disaggregates on a cold cache rather than serving from decode alone.
-const responsesTextInput = "Describe in detail what a router does when it disaggregates an inference request across pods."
+const pdTextInput = "Describe in detail what a router does when it disaggregates an inference request across pods."
 
 var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper(func() {
 	// The sidecar refuses a stateful Responses field in readJSONBody, before
@@ -61,15 +61,15 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 			body  map[string]any
 		}{
 			{reqcommon.FieldPreviousResponseID, map[string]any{
-				"model": simModelName, "input": responsesTextInput,
+				"model": simModelName, "input": pdTextInput,
 				reqcommon.FieldPreviousResponseID: "resp-e2e-123",
 			}},
 			{reqcommon.FieldConversation, map[string]any{
-				"model": simModelName, "input": responsesTextInput,
+				"model": simModelName, "input": pdTextInput,
 				reqcommon.FieldConversation: "conv-e2e-123",
 			}},
 			{reqcommon.FieldBackground, map[string]any{
-				"model": simModelName, "input": responsesTextInput,
+				"model": simModelName, "input": pdTextInput,
 				reqcommon.FieldBackground: true,
 			}},
 			{reqcommon.FieldFileID, map[string]any{
@@ -121,7 +121,7 @@ var _ = ginkgo.Describe("P/D gateway /v1/responses", ginkgo.Ordered, testWrapper
 		ginkgo.By("POST a supported /v1/responses body")
 		resp, raw := doResponses(map[string]any{
 			"model":             simModelName,
-			"input":             responsesTextInput,
+			"input":             pdTextInput,
 			"max_output_tokens": echoOutputTokens,
 		})
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),

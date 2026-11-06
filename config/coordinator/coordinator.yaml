@@ -72,7 +72,10 @@ server:
 
   # tls_cipher_suites are the cipher suites the inference listener accepts, by
   # Go crypto/tls name. Empty uses the crypto/tls default. Only effective for
-  # TLS 1.2 and below; TLS 1.3 cipher suites are not configurable.
+  # TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. Insecure
+  # suites are rejected. Unless tls_min_version is VersionTLS13, the list must
+  # include TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 or
+  # TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, which HTTP/2 requires.
   # The --tls-cipher-suites CLI flag overrides this field.
   # env: COORDINATOR_SERVER_TLS_CIPHER_SUITES
   # tls_cipher_suites: []
@@ -129,6 +132,7 @@ pipeline:
   #   kv-nixl           - NIXL P2P RDMA
   #   kv-shared-storage - shared filesystem / object store (default)
   #   kv-sglang         - SGLang-style KV bootstrap
+  #   kv-offloading     - vLLM OffloadingConnector P2P tier
   kv_connector: kv-shared-storage
 
   # ec_connector picks the protocol used to ship encoded multimodal embedding
@@ -397,6 +401,24 @@ pipeline:
         # 0 (or omitted) = unlimited.
         # max_total_placeholder_tokens: 4096
 
+        # mm_payload selects what the rendering service returns for multimodal
+        # entries. tensors: the processed tensors (kwargs_data). none: only
+        # token ids, hashes and placeholders. Generate-format encode requests
+        # (use_openai_format: false) then carry the client's media as
+        # content_parts, and the prefill request carries features whose
+        # mm_metadata comes from the render response or is rebuilt from the
+        # encode response's EC descriptors when every entry has metadata and
+        # EC coverage, else the client's media as content_parts. A renderer
+        # that ignores the field returns the tensors, and the request takes
+        # the tensors path. A body that sets mm_processor_kwargs or
+        # media_io_kwargs is rendered with the tensors either way: the
+        # content_parts path preprocesses media at the deployment defaults.
+        # none requires every placeholder span to be one repeated token
+        # (Qwen-VL images); models that interleave other tokens in the span
+        # (Gemma3, Pixtral, Idefics3, Qwen3-VL video) fail the request.
+        # Default tensors.
+        # mm_payload: none
+
     # -------------------------------------------------------------------
     # conditional-decode: optional shortcut for text-only chats. When
     # the request has no multimodal entries, the coordinator probes the
@@ -406,6 +428,9 @@ pipeline:
     # decode as normal. Uncomment to enable.
     # -------------------------------------------------------------------
     # - type: conditional-decode
+    #   params:
+    #     prompt_token_parity: warn   # off | warn | error; a served cache hit is
+    #                                 # checked like a decode response (see decode)
 
     # -------------------------------------------------------------------
     # encode: fans out one POST per multimodal entry to the encoder pods,
@@ -450,3 +475,59 @@ pipeline:
     - type: decode
       # params:
       #   kv_connector: kv-nixl     # overrides pipeline.kv_connector
+      #
+      #   force_stream opts a non-streaming client request into streaming
+      #   upstream, reassembling the streamed reply into one non-streaming
+      #   response. Off by default (streaming and non-streaming replies can
+      #   carry different fields). A forced request reserves from the budget
+      #   below and falls back to the pass-through when it is full. Like a
+      #   streaming request, a forced request is not bounded by
+      #   server.write_timeout, nor is the pass-through it falls back to; the
+      #   gateway timeout still bounds the wait for the upstream's response
+      #   headers. With kv_connector: kv-sglang, force_stream is
+      #   accepted but forces no request: an SGLang decode server has no
+      #   local-prefill path, so a fallback could not recompute the prompt, and
+      #   every request takes the pass-through, counted fallback_unsupported.
+      #   Warning: when the model server adds a field the reassembler drops by
+      #   default (a reasoning parser that emits reasoning the request did not
+      #   ask for), every forced request falls back after one upstream attempt,
+      #   counted fallback_lossy_frame; with a one-shot KV handoff (kv-nixl,
+      #   kv-offloading) each fallback also recomputes the prompt on decode.
+      #   Leave force_stream off for such a model.
+      #   force_stream: true
+      #
+      #   force_stream_buffer_size caps the wire bytes concurrent forced requests
+      #   may reserve at once (human-readable, default 1GiB). Peak heap runs
+      #   higher, so this is not an RSS cap.
+      #   force_stream_buffer_size: 1GiB
+      #
+      #   force_stream_max_request_size caps the bytes one forced request may
+      #   reserve for its generated reply (human-readable, default 256KiB, capped
+      #   to the buffer size). It must exceed the fixed 2KiB reply-envelope
+      #   overhead, or no output could be buffered; a smaller value fails config
+      #   load. A Responses request also reserves its own body size from the
+      #   buffer, outside this cap, since its reply echoes the request fields.
+      #   force_stream_max_request_size: 256KiB
+      #
+      #   prompt_token_parity compares the prompt token count the decode
+      #   worker reports in its usage block with the number of token IDs the
+      #   render step produced. It needs a render step ahead of it: without
+      #   rendered token IDs there is nothing to compare and the parameter
+      #   does nothing. The same
+      #   parameter exists on conditional-decode, whose served cache hits
+      #   are checked the same way. A difference
+      #   means decode rendered a different prompt than prefill did: the
+      #   worker ignored forwarded token IDs, or the render service and the
+      #   worker disagree (tokenizer, chat template, processor version,
+      #   chat_template_kwargs). Prefill's KV cache then does not match and
+      #   decode recomputes the prompt; the request still succeeds. Streamed
+      #   chat and completions legs are asked for include_usage when the
+      #   client did not, and that trailing frame is dropped from the
+      #   client's stream; a client that set continuous_usage_stats is left
+      #   alone and not checked. On Messages the cached part of the prompt
+      #   (cache_read_input_tokens, cache_creation_input_tokens) counts
+      #   toward the prompt. The response is never changed otherwise.
+      #     off   - no check
+      #     warn  - count (prompt_token_mismatch_total) and log   (default)
+      #     error - also record a decode step error
+      #   prompt_token_parity: warn

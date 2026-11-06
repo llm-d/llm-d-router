@@ -19,74 +19,58 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
 var errInvalidJSON = errors.New("invalid JSON")
 
-// errDecodeAborted reports a decode request that aborted before relaying any of
-// its response, leaving the caller to write a status on its behalf.
-var errDecodeAborted = errors.New("decode aborted before sending a response")
+// errPrefillAborted reports a prefill response whose body failed to arrive
+// after its status did.
+var errPrefillAborted = errors.New("prefill response interrupted")
 
-// vLLM error response
-type errorResponse struct {
-	Object  string `json:"object"`
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Param   string `json:"param"`
-	Code    int    `json:"code"`
-}
-
-var decoderServiceUnavailableResponseJSON []byte
-
-func init() {
-	response := errorResponse{
-		Object:  "error",
-		Message: "The decode node is not ready. Please check that the vLLM service is running and the port configuration is correct.",
-		Type:    "ServiceUnavailable",
-		Code:    http.StatusServiceUnavailable,
+// JSON errors can contain payload values and client-supplied field paths.
+func jsonErrorForLog(err error) error {
+	var syntaxError *json.SyntaxError
+	if errors.As(err, &syntaxError) {
+		return fmt.Errorf("invalid JSON syntax at byte %d", syntaxError.Offset)
 	}
-	decoderServiceUnavailableResponseJSON, _ = json.Marshal(response)
-}
-
-func errorJSONInvalid(err error, w http.ResponseWriter) error {
-	return sendError(err, "BadRequestError", http.StatusBadRequest, w)
-}
-
-func errorBadGateway(err error, w http.ResponseWriter) error {
-	return sendError(err, "BadGateway", http.StatusBadGateway, w)
-}
-
-func errorInternalServerError(err error, w http.ResponseWriter) error {
-	return sendError(err, "InternalServerError", http.StatusInternalServerError, w)
-}
-
-// sendError simulates vLLM errors
-//
-// Example:
-//
-//	 {
-//		  "object": "error",
-//		  "message": "[{'type': 'json_invalid', 'loc': ('body', 167), 'msg': 'JSON decode error', 'input': {}, 'ctx': {'error': 'Invalid control character at'}}]",
-//		  "type": "BadRequestError",
-//		  "param": null,
-//		  "code": 400
-//	 }
-func sendError(err error, errorType string, code int, w http.ResponseWriter) error {
-	er := errorResponse{
-		Object:  "error",
-		Message: err.Error(),
-		Type:    errorType,
-		Code:    code,
+	var typeError *json.UnmarshalTypeError
+	if errors.As(err, &typeError) {
+		return fmt.Errorf("invalid JSON value at byte %d", typeError.Offset)
 	}
-
-	b, err := json.Marshal(er)
-	if err != nil {
-		return err
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_, err = w.Write(b)
 	return err
+}
+
+func errorJSONInvalid(w http.ResponseWriter, r *http.Request, err error) error {
+	return sendError(w, r, http.StatusBadRequest, err.Error())
+}
+
+// errorBadGateway answers a failed call to another pod (prefill, decoder,
+// encoder, bootstrap). The raw error can carry internal routing details such
+// as dial addresses, so callers log it and the client gets the fixed message
+// the coordinator answers upstream connection failures with.
+func errorBadGateway(w http.ResponseWriter, r *http.Request) error {
+	reqID := ""
+	if r != nil {
+		reqID = r.Header.Get(reqcommon.RequestIDHeaderKey)
+	}
+	return sendError(w, r, http.StatusBadGateway, reqcommon.InternalErrorMessage(reqID))
+}
+
+func errorInternalServerError(w http.ResponseWriter, r *http.Request, err error) error {
+	return sendError(w, r, http.StatusInternalServerError, err.Error())
+}
+
+// sendError writes msg in the error envelope of the API r was sent to. A path
+// that is not an inference route, which only the decoder catch-all serves, and
+// a request or URL net/http never produces both get the OpenAI envelope.
+func sendError(w http.ResponseWriter, r *http.Request, status int, msg string) error {
+	path := ""
+	if r != nil && r.URL != nil {
+		path = r.URL.Path
+	}
+	return reqcommon.WriteAPIError(w, reqcommon.DetectAPIType(path), status, msg)
 }

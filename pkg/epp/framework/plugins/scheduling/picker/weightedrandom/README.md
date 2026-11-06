@@ -11,7 +11,10 @@ Selects endpoint(s) randomly, where the probability of an endpoint being selecte
 3.  Uses the **A-Res (Algorithm for Reservoir Sampling)** algorithm to perform mathematically correct weighted random sampling.
     - Generates a random key for each endpoint based on its score: $key_i = U_i^{(1/w_i)}$ where $U_i$ is a random number in $(0,1)$ and $w_i$ is the endpoint's score.
     - Selects the candidates with the largest keys.
-4.  Returns the top `maxNumOfEndpoints` candidates.
+4.  Returns the top `maxNumOfEndpoints` candidates. Only candidates with a
+    positive score are eligible: zero and negative-score endpoints are never
+    returned, including as lower-priority fallback entries when
+    `maxNumOfEndpoints` exceeds the number of positive-score candidates.
 
 ## Behavioral Intent
 

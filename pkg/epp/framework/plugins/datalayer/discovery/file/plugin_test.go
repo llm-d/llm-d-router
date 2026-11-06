@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -181,6 +182,29 @@ endpoints:
 
 	require.NoError(t, newFD(path, false).Start(ctx, notifier))
 	assert.Equal(t, "10.0.0.1:8000", notifier.upserted[0].MetricsHost)
+}
+
+func TestStart_AttributesSectionCarriedIntoMetadata(t *testing.T) {
+	path := writeTemp(t, `
+endpoints:
+  - name: ep1
+    address: "10.0.0.1"
+    port: "8000"
+    attributes:
+      pathPrefix: /laneA
+      model: fp8
+  - name: ep2
+    address: "10.0.0.2"
+    port: "8000"
+`)
+	notifier := &recordingNotifier{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, newFD(path, false).Start(ctx, notifier))
+	require.Len(t, notifier.upserted, 2)
+	assert.Equal(t, map[string]string{"pathPrefix": "/laneA", "model": "fp8"}, notifier.upserted[0].Attributes)
+	assert.Empty(t, notifier.upserted[1].Attributes)
 }
 
 func TestStart_MissingFile(t *testing.T) {
@@ -360,6 +384,177 @@ endpoints:
 		}
 		return false
 	}, 2*time.Second, 50*time.Millisecond)
+
+	cancel()
+	assert.NoError(t, <-done)
+}
+
+func TestStart_WatchFileReloadsAfterAtomicReplace(t *testing.T) {
+	path := writeTemp(t, validYAML)
+	fd := newFD(path, true)
+	notifier := &recordingNotifier{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- fd.Start(ctx, notifier) }()
+
+	upserted := func(name string) bool {
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		for _, m := range notifier.upserted {
+			if m.ID.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+	endpointYAML := func(name string) []byte {
+		return []byte("endpoints:\n  - name: " + name + "\n    address: \"10.0.0.9\"\n    port: \"9000\"\n")
+	}
+
+	// An in-place write confirms the watcher is attached.
+	require.Eventually(t, func() bool {
+		if err := os.WriteFile(path, endpointYAML("in-place-1"), 0o600); err != nil {
+			return false
+		}
+		return upserted("in-place-1")
+	}, 2*time.Second, 50*time.Millisecond)
+
+	// Write a sibling file and rename it over the watched path, as editors
+	// and config tools do for atomic saves.
+	tmp := path + ".tmp"
+	require.Eventually(t, func() bool {
+		if err := os.WriteFile(tmp, endpointYAML("replaced"), 0o600); err != nil {
+			return false
+		}
+		if err := os.Rename(tmp, path); err != nil {
+			return false
+		}
+		return upserted("replaced")
+	}, 2*time.Second, 50*time.Millisecond, "reload missed after atomic replace")
+
+	// The watch must follow the new file, so later in-place writes still reload.
+	require.Eventually(t, func() bool {
+		if err := os.WriteFile(path, endpointYAML("in-place-2"), 0o600); err != nil {
+			return false
+		}
+		return upserted("in-place-2")
+	}, 2*time.Second, 50*time.Millisecond, "reload missed for in-place write after atomic replace")
+
+	cancel()
+	assert.NoError(t, <-done)
+}
+
+// TestStart_WatchFileReloadsAfterConfigMapSwap reproduces the kubelet ConfigMap
+// volume layout, where the endpoints file is a symlink through ..data into a
+// timestamped directory and an update swaps ..data without touching the file
+// symlink itself.
+func TestStart_WatchFileReloadsAfterConfigMapSwap(t *testing.T) {
+	dir := t.TempDir()
+	endpointYAML := func(name string) []byte {
+		return []byte("endpoints:\n  - name: " + name + "\n    address: \"10.0.0.9\"\n    port: \"9000\"\n")
+	}
+
+	generation := 0
+	current := ""
+	// swap follows the kubelet atomic writer: write a new timestamped
+	// directory, repoint ..data at it with a rename, then remove the old one.
+	swap := func(name string) error {
+		generation++
+		next := fmt.Sprintf("..gen_%d", generation)
+		if err := os.Mkdir(filepath.Join(dir, next), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, next, "endpoints.yaml"), endpointYAML(name), 0o600); err != nil {
+			return err
+		}
+		tmpLink := filepath.Join(dir, "..data_tmp")
+		if err := os.Symlink(next, tmpLink); err != nil {
+			return err
+		}
+		if err := os.Rename(tmpLink, filepath.Join(dir, "..data")); err != nil {
+			return err
+		}
+		if current != "" {
+			if err := os.RemoveAll(filepath.Join(dir, current)); err != nil {
+				return err
+			}
+		}
+		current = next
+		return nil
+	}
+
+	require.NoError(t, swap("initial"))
+	path := filepath.Join(dir, "endpoints.yaml")
+	require.NoError(t, os.Symlink(filepath.Join("..data", "endpoints.yaml"), path))
+
+	fd := newFD(path, true)
+	notifier := &recordingNotifier{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- fd.Start(ctx, notifier) }()
+	// A swap before the initial load would be read by it and pass without a watch.
+	<-fd.Ready()
+
+	upserted := func(name string) bool {
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		for _, m := range notifier.upserted {
+			if m.ID.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	require.Eventually(t, func() bool {
+		return swap("swapped-1") == nil && upserted("swapped-1")
+	}, 2*time.Second, 50*time.Millisecond, "reload missed after ConfigMap swap")
+
+	// A second swap confirms the watch follows the new target.
+	require.Eventually(t, func() bool {
+		return swap("swapped-2") == nil && upserted("swapped-2")
+	}, 2*time.Second, 50*time.Millisecond, "reload missed after second ConfigMap swap")
+
+	cancel()
+	assert.NoError(t, <-done)
+}
+
+func TestStart_WatchFileReloadsOnSymlinkTargetWrite(t *testing.T) {
+	target := writeTemp(t, validYAML)
+	path := filepath.Join(t.TempDir(), "endpoints.yaml")
+	require.NoError(t, os.Symlink(target, path))
+
+	fd := newFD(path, true)
+	notifier := &recordingNotifier{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- fd.Start(ctx, notifier) }()
+	// A write before the initial load would be read by it and pass without a watch.
+	<-fd.Ready()
+
+	newContent := []byte("endpoints:\n  - name: ep3\n    address: \"10.0.0.3\"\n    port: \"9000\"\n")
+	require.Eventually(t, func() bool {
+		if err := os.WriteFile(target, newContent, 0o600); err != nil {
+			return false
+		}
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		for _, m := range notifier.upserted {
+			if m.ID.Name == "ep3" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 50*time.Millisecond, "reload missed for write to symlink target in another directory")
 
 	cancel()
 	assert.NoError(t, <-done)

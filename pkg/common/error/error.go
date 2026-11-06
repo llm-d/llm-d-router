@@ -42,6 +42,7 @@ type RequestDroppedReason string
 const (
 	// Rejected — request never reached an inference server.
 	RequestDroppedReasonSaturated        RequestDroppedReason = "rejected-saturated"
+	RequestDroppedReasonFlowLimit        RequestDroppedReason = "rejected-flow-limit"
 	RequestDroppedReasonNoEndpoints      RequestDroppedReason = "rejected-no-endpoints"
 	RequestDroppedReasonTTLExpired       RequestDroppedReason = "rejected-ttl-expired"
 	RequestDroppedReasonContextCancelled RequestDroppedReason = "rejected-context-cancelled"
@@ -70,6 +71,7 @@ const (
 	Forbidden          = "Forbidden"
 	NotFound           = "NotFound"
 	PreconditionFailed = "PreconditionFailed"
+	PayloadTooLarge    = "PayloadTooLarge"
 	Internal           = "Internal"
 	ServiceUnavailable = "ServiceUnavailable"
 	ModelServerError   = "ModelServerError"
@@ -98,6 +100,7 @@ var httpCodes = map[string]envoyTypePb.StatusCode{
 	Forbidden:          envoyTypePb.StatusCode_Forbidden,
 	NotFound:           envoyTypePb.StatusCode_NotFound,
 	PreconditionFailed: envoyTypePb.StatusCode_PreconditionFailed,
+	PayloadTooLarge:    envoyTypePb.StatusCode_PayloadTooLarge,
 	ResourceExhausted:  envoyTypePb.StatusCode_TooManyRequests,
 	Internal:           envoyTypePb.StatusCode_InternalServerError,
 	ServiceUnavailable: envoyTypePb.StatusCode_ServiceUnavailable,

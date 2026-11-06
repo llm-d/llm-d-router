@@ -57,6 +57,11 @@ func (nixlEC) PreparePrefillECParams(ctx context.Context, reqCtx *pipeline.Reque
 	params := make(map[string]any, len(reqCtx.ECTransferParams))
 	for _, entry := range reqCtx.ECTransferParams {
 		for k, v := range entry {
+			if k == "" {
+				logger.Info("dropping ec_transfer_params entry with empty hash key",
+					"type", fmt.Sprintf("%T", v))
+				continue
+			}
 			if v == nil {
 				// A hash with no descriptor carries nothing to transfer; drop it
 				// so the prefill body never sends "<mm_hash>": null.
@@ -64,18 +69,24 @@ func (nixlEC) PreparePrefillECParams(ctx context.Context, reqCtx *pipeline.Reque
 					"mmHash", k)
 				continue
 			}
-			desc := copyDescriptor(v)
+			desc, ok := v.(map[string]any)
+			if !ok || len(desc) == 0 {
+				logger.Info("dropping ec_transfer_params entry with unusable descriptor",
+					"mmHash", k, "type", fmt.Sprintf("%T", v))
+				continue
+			}
+			copied := copyDescriptor(desc)
 			if existing, exists := params[k]; exists {
 				// Two encoder replicas answered for the same mm_hash. Identical
 				// descriptors are harmless; conflicting ones are not. Picking
 				// one (last-write-wins) would point the prefill pull at a peer
 				// that may have rotated its buffers, so reject the request.
-				if !reflect.DeepEqual(existing, desc) {
+				if !reflect.DeepEqual(existing, copied) {
 					return nil, fmt.Errorf("ec_transfer_params: conflicting descriptors for mm_hash %q across encoder responses", k)
 				}
 				continue
 			}
-			params[k] = desc
+			params[k] = copied
 		}
 	}
 	logger.V(logutil.TRACE).Info("preparing prefill ec params", "entries", len(params))
@@ -83,13 +94,8 @@ func (nixlEC) PreparePrefillECParams(ctx context.Context, reqCtx *pipeline.Reque
 }
 
 // copyDescriptor returns a shallow copy of a descriptor map so the prepared
-// prefill params do not alias reqCtx.ECTransferParams. Non-map values carry no
-// mutable aliasing risk and are returned unchanged.
-func copyDescriptor(v any) any {
-	m, ok := v.(map[string]any)
-	if !ok {
-		return v
-	}
+// prefill params do not alias reqCtx.ECTransferParams.
+func copyDescriptor(m map[string]any) map[string]any {
 	cp := make(map[string]any, len(m))
 	for key, val := range m {
 		cp[key] = val

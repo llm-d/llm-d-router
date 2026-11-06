@@ -36,34 +36,52 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
-// internalForwardingHeaders are set only by the coordinator; a client copy is
-// dropped, and so is a value of forward_response_headers under these names.
-// EPP routes on epp-profile and x-llm-d-pin-host-port.
+// internalForwardingHeaders are set by the coordinator on outbound phase calls
+// or stamped by EPP or the gateway and read by the coordinator from a phase
+// response; a client copy is dropped, and so is a value of
+// forward_response_headers under these names. EPP routes on epp-profile and
+// x-llm-d-pin-host-port, and answers Prefer: if-available, the
+// conditional-decode probe's signal, with 412 on any other leg. The prefill
+// P2P address and prefill endpoint headers name the prefill pod a decode
+// request pulls from, so a client cannot choose them.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
 	routing.EndpointPinHeader:             true,
+	routing.PreferHeader:                  true,
+	routing.KVCachePrefillHeader:          true,
+	routing.PrefillEndpointHeader:         true,
+	routing.LegacyPrefillEndpointHeader:   true,
 }
 
 func isForwardableHeader(name string) bool {
-	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type"
+	// accept-encoding: http.Transport decompresses only the gzip it negotiated itself.
+	return !hopByHopHeaders[name] && !internalForwardingHeaders[name] && name != "content-length" && name != "host" && name != "content-type" && name != "accept-encoding"
 }
 
-// StripInternalHeaders removes headers the coordinator alone injects into
-// requests it forwards (e.g. x-llm-d-peer-topology, copied from the prefill
-// response onto the decode request). Call this on a client request's headers
-// as soon as they are received, so a client-supplied value is never mistaken
-// for one the coordinator generated itself.
+// StripInternalHeaders removes the internalForwardingHeaders. Call it on a
+// client request as soon as it is received, so a client-supplied value is
+// never mistaken for one the coordinator generated, and on an upstream
+// response before it is copied to the client, so a value stamped by an EPP
+// plugin is not exposed.
 func StripInternalHeaders(headers http.Header) {
 	for key := range internalForwardingHeaders {
 		headers.Del(key)
 	}
 }
 
+// StripHopByHopHeaders removes the hop-by-hop headers, which describe one
+// connection and must not be relayed to the next.
+func StripHopByHopHeaders(headers http.Header) {
+	for key := range hopByHopHeaders {
+		headers.Del(key)
+	}
+}
+
 // ForwardedHeaders returns original request headers suitable for forwarding
-// to upstream services, excluding hop-by-hop headers, Content-Length/Host, and
-// coordinator-owned routing headers.
+// to upstream services, excluding hop-by-hop headers, Content-Length, Host,
+// Content-Type, Accept-Encoding, and coordinator-owned routing headers.
 // Keys are normalized to lowercase so they do not collide by case with headers
 // stamped explicitly by forwarding steps (e.g. x-request-id).
 func (rc *RequestContext) ForwardedHeaders() map[string]string {
@@ -132,6 +150,13 @@ func (rc *RequestContext) CaptureResponseHeaders(responses ...http.Header) {
 	}
 }
 
+// P2PPeer is a pod's OffloadingConnector P2P tier address, the one a KV pull
+// dials. The pod's serving address is a different port.
+type P2PPeer struct {
+	Host string
+	Port int
+}
+
 // RequestContext carries all state for a single request through the pipeline.
 //
 // OriginalBody is never re-marshalled from Body, so a step reading it after
@@ -167,6 +192,10 @@ type RequestContext struct {
 
 	TokenIDs          []int
 	MultimodalEntries []MultimodalEntry
+	// MMPayload is the render step's mm_payload when render returned no
+	// kwargs_data for the entries: "none". Empty when the entries
+	// carry kwargs_data or render did not populate them.
+	MMPayload string
 	// ECTransferParams is an ordered list (one entry per encode response).
 	// Each entry is a single-key map: mm_hash -> opaque per-encoding transfer
 	// descriptor (see the ec.Connector interface doc for the descriptor shape).
@@ -203,12 +232,43 @@ type RequestContext struct {
 	// forwarded onto the decode request by newDecodeProxyRequest. Empty when
 	// the prefill EPP's config has no topology-stamp-handler.
 	PeerTopology string
+	// KVRequestID is the kv-offloading transfer id. Set by the connector's
+	// PreparePrefillKVParams; empty with any other connector.
+	KVRequestID string
+	// PrefillPeer is the prefill pod's P2P tier address. Set by the
+	// kv-offloading connector's ReadPrefillResponse; nil before the prefill
+	// response and with any other connector.
+	PrefillPeer *P2PPeer
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
+
+	// GRPCGeneratePayload holds the unframed protobuf payload of an SGLang
+	// native gRPC Generate request with client bootstrap fields removed. It
+	// aliases OriginalBody unless a field was removed. The prefill and decode
+	// steps send it as is, between a frame header and their bootstrap
+	// fields, so neither copies it. Nil for JSON HTTP requests. Use
+	// IsSGLangGRPC to test for a gRPC Generate request.
+	GRPCGeneratePayload []byte
+	// PrefillStream holds the active concurrent SGLang gRPC prefill stream
+	// started by PrefillStep and coordinated with DecodeStep.
+	PrefillStream *SGLangPrefillStream
+}
+
+// IsSGLangGRPC reports whether the request is an SGLang native gRPC Generate
+// request. An empty GenerateRequest has an empty but non-nil payload.
+func (rc *RequestContext) IsSGLangGRPC() bool {
+	return rc.GRPCGeneratePayload != nil
+}
+
+// ClosePrefillStream cancels and releases any active concurrent prefill stream.
+func (rc *RequestContext) ClosePrefillStream() {
+	if rc != nil && rc.PrefillStream != nil {
+		rc.PrefillStream.Close()
+	}
 }
 
 // MultimodalEntry describes one multimodal item in the request and where it
@@ -219,6 +279,12 @@ type RequestContext struct {
 // The bytes stay in the request body (data URI or input_audio.data) rather than
 // on the entry, so a large audio or video payload is not duplicated on reqCtx.
 //
+// KwargsData is the full MultiModalKwargsItem blob (encoder tensors plus
+// metadata). MMMetadata is the sibling metadata-only blob from render
+// (placeholder_metadata_fields and keep_on_cpu fields such as image_grid_thw),
+// without encoder inputs like pixel_values. Prefill may send MMMetadata with
+// ec_transfer_params instead of KwargsData.
+//
 // An entry's position in this slice means nothing on its own: steps pair an
 // entry with its content part by counting entries of the same Modality. See
 // steps.collectMediaParts for the invariant that keeps the two lined up.
@@ -226,6 +292,7 @@ type MultimodalEntry struct {
 	Modality    reqcommon.Modality
 	Hash        string
 	KwargsData  string
+	MMMetadata  string
 	Placeholder PlaceholderRange
 }
 

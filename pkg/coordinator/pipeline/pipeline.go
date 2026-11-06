@@ -57,6 +57,9 @@ type UpstreamError struct {
 }
 
 func (e *UpstreamError) Error() string {
+	if e.StatusCode == 0 {
+		return e.Step + ": upstream transport error"
+	}
 	return fmt.Sprintf("%s: upstream returned HTTP %d", e.Step, e.StatusCode)
 }
 
@@ -174,6 +177,8 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 	timings := make([]stepTiming, len(p.steps))
 	started := map[string]bool{}
 	executed := map[string]bool{}
+	cancelledIn := ""
+	doneBy := ""
 	defer func() {
 		stats := make([]any, 0, (len(timings)+1)*2)
 		if reqCtx.ParseDuration > 0 {
@@ -191,14 +196,15 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 		// to path totals. This defer is registered after the one that ends
 		// the span, so it runs first and the attribute lands while the span
 		// is still open.
-		if path, ok := classifyExecutionPath(started); ok {
+		if path, ok := classifyExecutionPath(started, executed, doneBy, cancelledIn); ok {
 			coordmetrics.IncExecutionPath(reqCtx.Model, path)
 			span.SetAttributes(semconv.LLMDCoordinatorPipelineExecutionPath(path))
 		}
-		// Render populates TokenIDs on every success path (including a valid
-		// empty prompt array in the completions branch), so gate on the step
-		// having run rather than on len > 0.
-		if executed["render"] {
+		// Render populates TokenIDs on every JSON success path (including a
+		// valid empty prompt array in the completions branch), so gate on the
+		// step having run rather than on len > 0. gRPC Generate skips render
+		// and leaves TokenIDs unset.
+		if executed["render"] && !reqCtx.IsSGLangGRPC() {
 			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
 		}
 		coordmetrics.RecordEncodeSubrequests(reqCtx.Route, reqCtx.EncodeFanout)
@@ -217,10 +223,15 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 			if errors.Is(err, ErrPipelineDone) {
 				// Clean early exit (e.g. conditional-decode cache hit); not an error.
 				executed[name] = true
+				doneBy = name
 				return nil
 			}
-			coordmetrics.IncStepErrorTotal(name, coordmetrics.ClassifyErrorCode(err, ClassifyOpts))
 			failed := fmt.Errorf("step %q failed: %w", name, err)
+			if IsClientCancellation(ctx, err) {
+				cancelledIn = name
+				return failed
+			}
+			coordmetrics.IncStepErrorTotal(name, coordmetrics.ClassifyErrorCode(err, ClassifyOpts))
 			// UpstreamError.Error omits the response body, so the status
 			// message carries no prompt or user data.
 			span.SetStatus(codes.Error, failed.Error())
@@ -255,7 +266,7 @@ func (p *Pipeline) runStep(
 	start := time.Now()
 	defer func() {
 		d := time.Since(start)
-		coordmetrics.RecordStepDuration(name, d)
+		coordmetrics.RecordStepDuration(ctx, name, d)
 		coordmetrics.DecStepRunning(name)
 		reqCtx.StepDuration += d
 		timings[idx] = stepTiming{name: name, duration: d}
@@ -271,11 +282,20 @@ func (p *Pipeline) runStep(
 	}()
 
 	err := step.Execute(ctx, reqCtx)
-	// ErrPipelineDone is the cache-hit early exit and must not show as failed.
-	if err != nil && !errors.Is(err, ErrPipelineDone) {
+	// ErrPipelineDone is the cache-hit early exit and a client cancellation is
+	// not the step's failure; neither shows as failed.
+	if err != nil && !errors.Is(err, ErrPipelineDone) && !IsClientCancellation(ctx, err) {
 		span.SetStatus(codes.Error, err.Error())
 	}
 	return err
+}
+
+// IsClientCancellation reports whether err derives from the request context
+// ending. It relies on steps wrapping the context error with %w, which the
+// outbound HTTP calls and the decode proxy's Cancelled outcome do.
+func IsClientCancellation(ctx context.Context, err error) bool {
+	ctxErr := ctx.Err()
+	return ctxErr != nil && errors.Is(err, ctxErr)
 }
 
 // classifyExecutionPath maps the set of steps that ran (success or failure)
@@ -285,15 +305,21 @@ func (p *Pipeline) runStep(
 // cannot import the steps package without introducing a dependency cycle.
 // They match each step file's own StepName constant by contract; keep the
 // two in sync.
-func classifyExecutionPath(executed map[string]bool) (string, bool) {
-	decodeIsh := executed["decode"] || executed["conditional-decode"]
-	if !decodeIsh {
+func classifyExecutionPath(started, executed map[string]bool, doneBy, cancelledIn string) (string, bool) {
+	// A conditional-decode probe is the decode phase unless it deferred to
+	// prefill (412) or the client abandoned it before the worker answered; in
+	// those cases the decode phase is the decode step, so the path is unknown
+	// until that step starts.
+	probeDeferred := executed["conditional-decode"] && doneBy != "conditional-decode"
+	probeAbandoned := cancelledIn == "conditional-decode"
+	probeIsDecode := started["conditional-decode"] && !probeDeferred && !probeAbandoned
+	if !started["decode"] && !probeIsDecode {
 		return "", false
 	}
 	switch {
-	case executed["encode"] && executed["prefill"]:
+	case started["encode"] && started["prefill"]:
 		return metricsutil.DisaggPathEncodePrefillDecode, true
-	case executed["prefill"]:
+	case started["prefill"]:
 		return metricsutil.DisaggPathPrefillDecode, true
 	default:
 		return metricsutil.DisaggPathDecodeOnly, true

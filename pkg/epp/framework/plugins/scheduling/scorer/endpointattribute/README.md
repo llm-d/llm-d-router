@@ -21,7 +21,7 @@ The `[min, max]` range comes from the configured normalization strategy:
 
 In both strategies, an endpoint missing the attribute receives score `0.0` (and, for `adaptiveRange`, does not participate in the range computation).
 
-The attribute is expected to be a numeric custom metric produced by the core metrics extractor (see the [metrics extractor](../../../datalayer/extractor/metrics/README.md)), stored as a `ScalarMetricValue` endpoint attribute.
+The attribute is expected to be a numeric metric produced by the core metrics extractor (see the [metrics extractor](../../../datalayer/extractor/metrics/README.md)), either a built-in scalar metric (`WaitingQueueSize`, `RunningRequestsSize`, `KVCacheUsagePercent`) or a configured `customMetrics` entry, stored as a `ScalarMetricValue` endpoint attribute.
 
 ## Scheduling intent
 
@@ -37,7 +37,7 @@ The plugin consumes:
 
 | Parameter                                    | Required | Description                                                                    |
 |----------------------------------------------|----------|--------------------------------------------------------------------------------|
-| `attributeKey`                               | yes      | Endpoint attribute to read, e.g. `custom.queue_depth`.                          |
+| `attributeKey`                               | yes      | Endpoint attribute to read, e.g. `WaitingQueueSize` or `custom.queue_depth`.   |
 | `producer`                                   | no       | Plugin publishing the attribute. Omitted defaults to the core metrics extractor; set to e.g. `dcgm-extractor` to read another producer's attribute, or to `""` for a producer-agnostic attribute. An `attributeKey` containing `/` is rejected unless `producer` is set explicitly. |
 | `algorithm.type`                             | yes      | `linear_lower_is_better` or `linear_higher_is_better`.                          |
 | `algorithm.normalization`                    | no       | At most one strategy: `adaptiveRange` (the default) or `fixedRange`.            |

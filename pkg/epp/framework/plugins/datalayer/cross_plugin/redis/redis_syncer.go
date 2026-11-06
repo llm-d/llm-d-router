@@ -46,9 +46,12 @@ const (
 	defaultStateTTL        = 2 * time.Second
 	defaultCoordinationTTL = 180 * time.Second
 	minimumTTL             = time.Millisecond
+	batchSize              = 100
+	batchConcurrency       = 8
 )
 
 var _ fwkdl.CrossReplicaSyncer = (*RedisSyncer)(nil)
+var _ fwkdl.CrossReplicaBatchSyncer = (*RedisSyncer)(nil)
 
 type redisConfig struct {
 	Address         string `json:"address"`
@@ -62,7 +65,8 @@ type redisConfig struct {
 
 // RedisSyncer is a CrossReplicaSyncer backed by Redis for cross-replica
 // state sharing. Set prepares each endpoint's peer aggregate, and Get combines
-// it with the live local value.
+// it with the live local value. Only a successful Set replaces the aggregate, so
+// while Redis is unreachable the last known peer state keeps counting.
 type RedisSyncer struct {
 	typedName       fwkplugin.TypedName
 	replicaID       string
@@ -73,8 +77,7 @@ type RedisSyncer struct {
 }
 
 type aggregateCacheEntry struct {
-	value     any
-	expiresAt time.Time
+	value any
 }
 
 func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, error) {
@@ -208,7 +211,6 @@ func gobDecode(data []byte, prototype any) (any, error) {
 // by get.
 func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
 	logger := ctrl.LoggerFrom(ctx)
-	now := time.Now()
 
 	data, err := encodeValue(value)
 	if err != nil {
@@ -229,6 +231,16 @@ func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID st
 	if err != nil {
 		return fmt.Errorf("redis-syncer: hgetall: %w", err)
 	}
+	peerCount := s.cachePeerAggregate(ctx, hashKey, value, raw, aggregate)
+
+	if v := logger.V(logutil.DEBUG); v.Enabled() {
+		v.Info("redis-syncer: Set", "key", string(key), "endpoint", endpointID, "replica", s.replicaID, "numReplicas", peerCount+1)
+	}
+	return nil
+}
+
+func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, value any, raw map[string]string, aggregate func([]any) any) int {
+	logger := ctrl.LoggerFrom(ctx)
 	remoteValues := make([]any, 0, len(raw))
 	for _, field := range slices.Sorted(maps.Keys(raw)) {
 		if field == s.replicaID {
@@ -248,20 +260,137 @@ func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID st
 	if len(remoteValues) == 0 {
 		s.cache.Delete(hashKey)
 	} else {
-		s.cache.Store(hashKey, &aggregateCacheEntry{
-			value:     aggregate(remoteValues),
-			expiresAt: now.Add(s.stateTTL),
-		})
+		s.cache.Store(hashKey, &aggregateCacheEntry{value: aggregate(remoteValues)})
 	}
 
-	if v := logger.V(logutil.DEBUG); v.Enabled() {
-		v.Info("redis-syncer: Set", "key", string(key), "endpoint", endpointID, "replica", s.replicaID, "numReplicas", len(remoteValues)+1)
-	}
-	return nil
+	return len(remoteValues)
 }
 
 func (s *RedisSyncer) Set(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) error {
 	return s.set(ctx, spec.StateKey, endpointID, spec.Read(endpointID), spec.Aggregate)
+}
+
+func (s *RedisSyncer) SetBatch(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointIDs []string, timeout time.Duration) map[string]error {
+	failures := make(map[string]error)
+	slots := make(chan struct{}, batchConcurrency)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	remaining := endpointIDs
+dispatch:
+	for start := 0; start < len(endpointIDs); start += batchSize {
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			break dispatch
+		}
+		end := min(start+batchSize, len(endpointIDs))
+		chunk := endpointIDs[start:end]
+		remaining = endpointIDs[end:]
+		wg.Go(func() {
+			defer func() { <-slots }()
+			chunkCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			errs := s.setBatchChunk(chunkCtx, spec, chunk)
+			mu.Lock()
+			maps.Copy(failures, errs)
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		for _, endpointID := range remaining {
+			failures[endpointID] = err
+		}
+	}
+	return failures
+}
+
+func (s *RedisSyncer) setBatchChunk(ctx context.Context, spec fwkdl.CrossReplicaSpec, chunk []string) map[string]error {
+	failures := make(map[string]error)
+	if err := ctx.Err(); err != nil {
+		for _, endpointID := range chunk {
+			failures[endpointID] = err
+		}
+		return failures
+	}
+	logger := ctrl.LoggerFrom(ctx)
+
+	pipe := s.client.TxPipeline()
+	type publication struct {
+		endpointID string
+		value      any
+		commands   []goredis.Cmder
+		result     *goredis.MapStringStringCmd
+	}
+	publications := make([]publication, 0, len(chunk))
+	for _, endpointID := range chunk {
+		value := spec.Read(endpointID)
+		data, err := encodeValue(value)
+		if err != nil {
+			failures[endpointID] = fmt.Errorf("redis-syncer: encode: %w", err)
+			continue
+		}
+		hashKey := s.hashKey(spec.StateKey, endpointID)
+		hset := pipe.HSet(ctx, hashKey, s.replicaID, data)
+		hpexpire := pipe.HPExpire(ctx, hashKey, s.stateTTL, s.replicaID)
+		pexpire := pipe.PExpire(ctx, hashKey, s.stateTTL)
+		result := pipe.HGetAll(ctx, hashKey)
+		publications = append(publications, publication{
+			endpointID: endpointID, value: value,
+			commands: []goredis.Cmder{hset, hpexpire, pexpire, result}, result: result,
+		})
+	}
+	if len(publications) == 0 {
+		return failures
+	}
+	commands, execErr := pipe.Exec(ctx)
+	if execFailedWholeChunk(execErr, commands) {
+		for _, publication := range publications {
+			failures[publication.endpointID] = fmt.Errorf("redis-syncer: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", execErr)
+		}
+		return failures
+	}
+	for _, publication := range publications {
+		var err error
+		for _, cmd := range publication.commands {
+			if cmd.Err() != nil {
+				err = cmd.Err()
+				break
+			}
+		}
+		if err != nil {
+			failures[publication.endpointID] = fmt.Errorf("redis-syncer: set and get aggregate; Redis 7.4 or newer with HPEXPIRE is required: %w", err)
+			continue
+		}
+		peerCount := s.cachePeerAggregate(ctx, s.hashKey(spec.StateKey, publication.endpointID), publication.value, publication.result.Val(), spec.Aggregate)
+		if v := logger.V(logutil.DEBUG); v.Enabled() {
+			v.Info("redis-syncer: Set", "key", string(spec.StateKey), "endpoint", publication.endpointID, "replica", s.replicaID, "numReplicas", peerCount+1)
+		}
+	}
+	return failures
+}
+
+// execFailedWholeChunk reports whether a TxPipeline Exec error means every
+// command in the transaction failed. go-redis returns the first command error
+// from Exec: when that error is a Redis error attached to one command (for
+// example WRONGTYPE on one key), the other commands still ran and only that
+// endpoint failed. EXECABORT, transport errors, context errors, and Redis
+// errors attached to no command mean the transaction did not run or its
+// outcome is unknown, so the whole chunk fails and caches stay.
+func execFailedWholeChunk(execErr error, cmds []goredis.Cmder) bool {
+	if execErr == nil {
+		return false
+	}
+	var redisErr goredis.Error
+	if !errors.As(execErr, &redisErr) || goredis.HasErrorPrefix(execErr, "EXECABORT") {
+		return true
+	}
+	return !slices.ContainsFunc(cmds, func(cmd goredis.Cmder) bool {
+		return errors.Is(cmd.Err(), execErr)
+	})
 }
 
 // get combines the live local value with the peer aggregate prepared by set.
@@ -271,12 +400,7 @@ func (s *RedisSyncer) get(_ context.Context, key fwkdl.StateKey, endpointID stri
 	if !ok {
 		return local
 	}
-	entry := cached.(*aggregateCacheEntry)
-	if !entry.expiresAt.After(time.Now()) {
-		s.cache.CompareAndDelete(hashKey, cached)
-		return local
-	}
-	return aggregate([]any{local, entry.value})
+	return aggregate([]any{local, cached.(*aggregateCacheEntry).value})
 }
 
 func (s *RedisSyncer) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {

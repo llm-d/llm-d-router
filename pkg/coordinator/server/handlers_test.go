@@ -31,12 +31,15 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	ctrl "sigs.k8s.io/controller-runtime"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -520,6 +523,15 @@ func TestDecodeRequestBody(t *testing.T) {
 	}
 }
 
+func TestDecodeRequestBody_PreservesLargeIntegers(t *testing.T) {
+	body := `{"model":"m","response_format":{"json_schema":{"schema":{"enum":[9007199254740993]}}},"seed":9007199254740993}`
+	parsed, err := decodeRequestBody([]byte(body))
+	require.NoError(t, err)
+	out, err := json.Marshal(parsed)
+	require.NoError(t, err)
+	require.Equal(t, body, string(out))
+}
+
 func TestHandleInference_BodyOverConfiguredCapMapsTo413(t *testing.T) {
 	// A body larger than server.max_request_body_size (in MB) is rejected before parsing.
 	// Use a 1 MB cap and send 1 MB + 1 byte to trigger the limit.
@@ -648,10 +660,11 @@ func TestHandleInference_OverlongRequestIDIsRejected(t *testing.T) {
 }
 
 func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
-	// x-llm-d-peer-topology and epp-profile are headers the coordinator alone injects
-	// (copied from the prefill response, or set to select a profile); a
-	// client-supplied value must never survive into OriginalHeaders, since a
-	// later step trusts it as coordinator-generated.
+	// x-llm-d-peer-topology, epp-profile and Prefer are headers the coordinator
+	// alone injects (copied from the prefill response, set to select a profile,
+	// or set on the conditional-decode probe); a client-supplied value must
+	// never survive into OriginalHeaders, since a later step trusts it as
+	// coordinator-generated and EPP answers a client Prefer: if-available with 412.
 	step := &capturingStep{}
 	p := pipeline.New([]pipeline.Step{step})
 	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
@@ -661,6 +674,7 @@ func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
 	req.Header.Set(reqcommon.PeerTopologyHeaderKey, "host=attacker,zone=evil")
 	req.Header.Set(reqcommon.EPPProfileHeaderKey, "decode")
+	req.Header.Set("Prefer", "if-available")
 	req.Header.Set("x-user-data", "keep-me")
 	rec := httptest.NewRecorder()
 	srv.handleInference(rec, req)
@@ -674,8 +688,88 @@ func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
 	if got := step.captured.OriginalHeaders.Get(reqcommon.EPPProfileHeaderKey); got != "" {
 		t.Fatalf("client-supplied epp-profile must be stripped, got %q", got)
 	}
+	if got := step.captured.OriginalHeaders.Get("Prefer"); got != "" {
+		t.Fatalf("client-supplied Prefer must be stripped, got %q", got)
+	}
 	if got := step.captured.OriginalHeaders.Get("x-user-data"); got != "keep-me" {
 		t.Fatalf("unrelated headers must pass through, got %q", got)
+	}
+}
+
+// handlerLog captures the request-scoped handler logger, which hangs off the
+// process-wide controller-runtime logger. That logger is fulfilled once per
+// process, so the capture is installed once and tests read it by position.
+var handlerLog struct {
+	once  sync.Once
+	mu    sync.Mutex
+	lines []string
+}
+
+func handlerLogLines(t *testing.T, run func()) []string {
+	t.Helper()
+	handlerLog.once.Do(func() {
+		ctrl.SetLogger(funcr.New(func(_, args string) {
+			handlerLog.mu.Lock()
+			defer handlerLog.mu.Unlock()
+			handlerLog.lines = append(handlerLog.lines, args)
+		}, funcr.Options{Verbosity: logutil.DEFAULT}))
+	})
+	handlerLog.mu.Lock()
+	start := len(handlerLog.lines)
+	handlerLog.mu.Unlock()
+	run()
+	handlerLog.mu.Lock()
+	defer handlerLog.mu.Unlock()
+	return append([]string(nil), handlerLog.lines[start:]...)
+}
+
+// The drop is logged by presence only: the value carries a host, a port and a
+// request id, so none of it may reach the log.
+func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
+	const dropped = "dropped client-supplied kv_transfer_params"
+	const host = "10.9.9.9"
+	cases := map[string]struct {
+		body     string
+		wantDrop bool
+	}{
+		"client block": {body: `{"model":"m","messages":[],"kv_transfer_params":{"remote_prefiller":` +
+			`{"kv_request_id":"x","remote_host":"` + host + `","remote_port":7777}}}`, wantDrop: true},
+		"no block": {body: `{"model":"m","messages":[]}`},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			step := &capturingStep{}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+			lines := handlerLogLines(t, func() { srv.handleInference(httptest.NewRecorder(), req) })
+
+			if step.captured == nil {
+				t.Fatal("pipeline step did not run")
+			}
+			if _, ok := step.captured.Body[reqcommon.FieldKVTransferParams]; ok {
+				t.Fatalf("client-supplied kv_transfer_params must be dropped, body: %v", step.captured.Body)
+			}
+			for _, field := range []string{"model", "messages"} {
+				if _, ok := step.captured.Body[field]; !ok {
+					t.Fatalf("%s must be kept, body: %v", field, step.captured.Body)
+				}
+			}
+			var drops int
+			for _, line := range lines {
+				if strings.Contains(line, dropped) {
+					drops++
+				}
+				if strings.Contains(line, host) {
+					t.Fatalf("log line carries the client value: %s", line)
+				}
+			}
+			if want := map[bool]int{true: 1, false: 0}[tc.wantDrop]; drops != want {
+				t.Fatalf("%d drop lines, want %d: %v", drops, want, lines)
+			}
+		})
 	}
 }
 
@@ -804,6 +898,74 @@ func TestHandleInference_StepWrittenErrorClassifiedAndNotOverwritten(t *testing.
 		promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": coordmetrics.ErrorCodeBadRequest})),
 		1e-9,
 	)
+}
+
+// A step returns after the client's request context ended; only the context
+// error itself goes uncounted.
+func TestHandleInference_AbortedRequestAccounting(t *testing.T) {
+	cases := []struct {
+		name       string
+		returns    error  // error the step returns; nil returns the context error
+		wantCode   string // request_error_total{wantCode}; "" counts nothing
+		wantStatus int    // status written; 0 writes nothing
+	}{
+		{name: "step returns the context error"},
+		{
+			name:     "decode streamed a 500 before the client left",
+			returns:  &pipeline.UpstreamStreamedError{Step: "decode", StatusCode: http.StatusInternalServerError},
+			wantCode: coordmetrics.ErrorCodeUpstream5xx,
+		},
+		{
+			name:       "upstream answered 503 before the client left",
+			returns:    &pipeline.UpstreamError{Step: "decode", StatusCode: http.StatusServiceUnavailable},
+			wantCode:   coordmetrics.ErrorCodeUpstream5xx,
+			wantStatus: http.StatusBadGateway,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newMetricsRegistry(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			step := stubStep{name: "decode", fn: func(ctx context.Context, _ *pipeline.RequestContext) error {
+				cancel()
+				if tc.returns != nil {
+					return tc.returns
+				}
+				return ctx.Err()
+			}}
+			srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(nil, stubGatewayURL))
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			srv.handleInference(rec, req)
+
+			if tc.wantStatus == 0 {
+				require.Empty(t, rec.Body.String())
+			} else {
+				require.Equal(t, tc.wantStatus, rec.Code)
+			}
+			if tc.wantCode == "" {
+				require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_request_error_total"))
+				require.Zero(t, seriesCount(t, reg, "llm_d_coordinator_step_errors_total"))
+			} else {
+				require.InDelta(t, 1.0,
+					promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_error_total", map[string]string{"model_name": "m", "error_code": tc.wantCode})),
+					1e-9,
+				)
+				require.Equal(t, 1, seriesCount(t, reg, "llm_d_coordinator_step_errors_total"))
+			}
+			require.InDelta(t, 1.0,
+				promtestutil.ToFloat64(mustCounter(t, reg, "llm_d_coordinator_request_total", map[string]string{"model_name": "m"})),
+				1e-9,
+			)
+			require.InDelta(t, 0.0,
+				promtestutil.ToFloat64(mustRequestRunningGauge(t, reg, map[string]string{"model_name": "m"})),
+				1e-9,
+			)
+		})
+	}
 }
 
 func TestHandleInference_PipelineDoneRecordsNoError(t *testing.T) {

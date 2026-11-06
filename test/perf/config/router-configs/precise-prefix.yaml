@@ -15,7 +15,7 @@ router:
     image:
       registry: docker.io
       repository: vllm/vllm-openai-cpu
-      tag: v0.21.0
+      tag: v0.31.0
       pullPolicy: IfNotPresent
     env:
     - name: HF_HOME

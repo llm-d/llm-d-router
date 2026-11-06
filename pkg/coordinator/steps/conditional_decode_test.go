@@ -481,6 +481,47 @@ func TestConditionalDecodeStep_TransportError(t *testing.T) {
 	}
 }
 
+// The client leaves while the worker is silent: the context error, not
+// ErrPipelineDone, and no probe result.
+func TestConditionalDecodeStep_ClientCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	// The worker never answers; release lets srv.Close finish.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cancel()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: srv.URL})
+	step, err := NewConditionalDecodeStep(gwClient, nil)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:      "req-1",
+		OriginalPath:   testChatCompletionsPath,
+		Body:           map[string]any{"model": testModelName},
+		ResponseWriter: recorder,
+	}
+
+	err = step.Execute(ctx, reqCtx)
+	require.ErrorIs(t, err, context.Canceled, "a cancelled probe must not read as a cache hit")
+	for _, result := range []string{
+		coordmetrics.ProbeResultServed,
+		coordmetrics.ProbeResultDeferred,
+		coordmetrics.ProbeResultError,
+		coordmetrics.ProbeResultTransportError,
+	} {
+		require.InDelta(t, 0.0, probeCount(t, reg, result), 1e-9, "no probe result for %q on client cancel", result)
+	}
+}
+
 // TestConditionalDecodeStep_NilClientTransport builds a step around a
 // gateway.Client whose Transport() returns nil. gateway.NewWithTransport
 // documents that as valid and leaves the default-transport fallback to

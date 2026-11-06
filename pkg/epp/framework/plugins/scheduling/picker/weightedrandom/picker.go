@@ -125,13 +125,10 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 	}
 
 	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ)
-	weightedEndpoints := make([]weightedScoredEndpoint, len(scoredEndpoints))
+	weightedEndpoints := make([]weightedScoredEndpoint, 0, len(scoredEndpoints))
 
-	for i, scoredEndpoint := range scoredEndpoints {
-		// Handle zero score
+	for _, scoredEndpoint := range scoredEndpoints {
 		if scoredEndpoint.Score <= 0 {
-			// Assign key=0 for zero-score endpoints (effectively excludes them from selection)
-			weightedEndpoints[i] = weightedScoredEndpoint{ScoredEndpoint: scoredEndpoint, key: 0}
 			continue
 		}
 
@@ -141,7 +138,10 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 			u = 1e-10 // Avoid 0 to ensure positive key
 		}
 
-		weightedEndpoints[i] = weightedScoredEndpoint{ScoredEndpoint: scoredEndpoint, key: math.Pow(u, 1.0/scoredEndpoint.Score)} // key = U^(1/weight)
+		weightedEndpoints = append(weightedEndpoints, weightedScoredEndpoint{
+			ScoredEndpoint: scoredEndpoint,
+			key:            math.Pow(u, 1.0/scoredEndpoint.Score),
+		})
 	}
 
 	// Sort by key in descending order (largest keys first)

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -52,6 +53,12 @@ type asyncSubmitter interface {
 	SubmitRequest(ctx context.Context, req api.Request) error
 	CancelRequests(ctx context.Context, requestIDs []string) error
 }
+
+// maxTimeoutSeconds is the largest timeout that fits in a time.Duration without
+// overflowing. Enqueue mode sets no MaxSeconds, so a client value above this
+// would wrap to a negative or tiny deadline that the producer rejects as a
+// transport failure.
+const maxTimeoutSeconds = int64(math.MaxInt64) / int64(time.Second)
 
 // waitPollInterval is the poll cadence when the multiplexed wake-up is
 // unavailable (Redis without keyspace notifications, or wakeup_mode: poll).
@@ -135,6 +142,12 @@ func New(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
 func (s *Step) Name() string { return StepName }
 
 func (s *Step) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	// Async serving applies to JSON HTTP requests only. A gRPC Generate
+	// request has no model field and cannot get an OpenAI JSON error, so the
+	// step leaves it untouched even when it carries the mode header.
+	if reqCtx.IsSGLangGRPC() {
+		return nil
+	}
 	headerVal := reqCtx.OriginalHeaders.Get(s.cfg.ModeHeader)
 	if headerVal == "" {
 		// No mode header means the request did not opt into async serving:
@@ -239,6 +252,9 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	if bounds.MaxSeconds > 0 && timeoutSecs > bounds.MaxSeconds {
 		timeoutSecs = bounds.MaxSeconds
 	}
+	if timeoutSecs > maxTimeoutSeconds {
+		timeoutSecs = maxTimeoutSeconds
+	}
 	timeout := time.Duration(timeoutSecs) * time.Second
 
 	// A client-chosen id names a logical request, so a re-POST reattaches
@@ -290,24 +306,53 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 		RequestQueueName: queue,
 		ResultQueueName:  resultKey(tenant, reqCtx.RequestID),
 	}
+	// A client gone before the submit has nothing queued under this
+	// submission, and the cancel below could hit a live copy of a retried id.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s: enqueue: %w", StepName, err)
+	}
 	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamAsyncBroker)
 	err = s.sub.SubmitRequest(ctx, msg)
 	call.Done()
 	if err != nil {
+		if ctx.Err() != nil {
+			// go-redis retries the enqueue after a failed reply read, and the
+			// wait before the retry returns the context error, so the submit
+			// can have landed.
+			s.cancelAbandoned(ctx, tenant, reqCtx.RequestID)
+			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
+		}
 		log.FromContext(ctx).WithName(StepName).Error(err, "failed to enqueue request", "id", reqCtx.RequestID)
 		writeOpenAIError(w, http.StatusServiceUnavailable, "api_error", "ENQUEUE_FAILED",
 			"failed to enqueue request")
-		if ctx.Err() != nil {
-			return pipeline.ErrPipelineDone
-		}
 		return responded(http.StatusServiceUnavailable, &pipeline.UpstreamError{Step: StepName, StatusCode: 0})
 	}
 
 	if mode == asyncModeEnqueue {
+		if ctx.Err() != nil {
+			// The client left before the 202, so it may not hold the id: a
+			// gateway can mint one for a client that sent none.
+			s.cancelAbandoned(ctx, tenant, reqCtx.RequestID)
+			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
+		}
 		writePending(w, reqCtx.RequestID)
 		return pipeline.ErrPipelineDone
 	}
 	return s.waitForResult(ctx, reqCtx, tenant, timeout)
+}
+
+// cancelAbandoned cancels, pre-dispatch and best effort, a request whose
+// client disconnected. A later retry with the same id reattaches:
+// reattachRetry revives a still-queued copy, and an already-dropped one
+// leaves a cancelled tombstone that routes the retry to a fresh enqueue.
+// CancelRequests skips an id with no active token, so it is safe when the
+// submit did not land.
+func (s *Step) cancelAbandoned(ctx context.Context, tenant, id string) {
+	cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFn()
+	if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
+		log.FromContext(ctx).WithName(StepName).Error(err, "failed to cancel abandoned request", "id", id)
+	}
 }
 
 // unCancelScript revives a cancelled request that is still queued. The
@@ -336,6 +381,9 @@ func (s *Step) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContex
 	id := reqCtx.RequestID
 	state, res, err := lookupResult(ctx, s.rdb, tenant, id)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s: reattach: %w", StepName, ctx.Err())
+		}
 		logger.Error(err, "retry state lookup failed, enqueueing fresh", "id", id)
 		return nil
 	}
@@ -433,18 +481,8 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 		select {
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
-				// Client disconnected: nobody will fetch this result, so
-				// cancel pre-dispatch (best effort, per the producer's
-				// cancellation contract). A later retry with the same id
-				// reattaches: reattachRetry revives a still-queued copy, and
-				// an already-dropped one leaves a cancelled tombstone that
-				// routes the retry to a fresh enqueue.
-				cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancelFn()
-				if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
-					logger.Error(err, "failed to cancel abandoned request", "id", id)
-				}
-				return pipeline.ErrPipelineDone
+				s.cancelAbandoned(ctx, tenant, id)
+				return fmt.Errorf("%s: wait: %w", StepName, ctx.Err())
 			}
 			if holdIsDeadline {
 				// Past the deadline the AP refuses the work at gate, pop,

@@ -76,6 +76,9 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	if reqCtx.IsSGLangGRPC() {
+		return s.executeSGLangGRPC(ctx, reqCtx)
+	}
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
@@ -106,6 +109,11 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	defer resp.Body.Close()
 
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
+	if reader, ok := s.kv.(kv.PrefillResponseReader); ok {
+		if err := reader.ReadPrefillResponse(reqCtx, resp.Header); err != nil {
+			return fmt.Errorf("prefill: %w", err)
+		}
+	}
 
 	var prefillResp prefillResponse
 	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {
@@ -166,9 +174,7 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
 		reqcommon.CapSingleToken(body, format)
-		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
-			body["features"] = features
-		}
+		// Completions never carries multimodal entries (see render.executeCompletions).
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams
 		}
@@ -182,8 +188,8 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 			reqcommon.FieldKVTransferParams: kvParams,
 		}
 		reqcommon.CapSingleToken(body, format)
-		if features := buildMMFeatures(reqCtx.MultimodalEntries, true); features != nil {
-			body["features"] = features
+		if err := s.applyGenerateMMInputs(ctx, reqCtx, ecParams, body); err != nil {
+			return nil, err
 		}
 		if len(ecParams) > 0 {
 			body[reqcommon.FieldECTransferParams] = ecParams
@@ -196,6 +202,42 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 		// changes.
 		return nil, unreachableFormatError(format)
 	}
+}
+
+// applyGenerateMMInputs sets the multimodal input on a generate prefill body:
+// features when the entries carry tensors, or when the tensors were omitted but
+// every entry has mm_metadata and EC coverage; otherwise the client's media as
+// content_parts with the collapsed token_ids. The two forms are exclusive on
+// the wire; see docs/communication.md stage 5.
+func (s *PrefillStep) applyGenerateMMInputs(ctx context.Context, reqCtx *pipeline.RequestContext, ecParams map[string]any, body map[string]any) error {
+	entries := reqCtx.MultimodalEntries
+	if reqCtx.MMPayload == "" {
+		// The only consumer of the per-entry mm_metadata/kwargs_data choice;
+		// see buildPrefillMMFeatures. A text-only request omits features
+		// entirely.
+		if features := buildPrefillMMFeatures(entries, ecParams); features != nil {
+			body["features"] = features
+		}
+		return nil
+	}
+	withMetadata, err := entriesWithECMetadata(entries, ecParams)
+	if err == nil {
+		body["features"] = buildPrefillMMFeatures(withMetadata, ecParams)
+		return nil
+	}
+	log.FromContext(ctx).WithName(PrefillStepName).V(logutil.DEFAULT).Info(
+		"cannot send features with mm_metadata; sending media as content_parts", "reason", err.Error())
+	tokenIDs, err := collapsePlaceholders(reqCtx.TokenIDs, entries)
+	if err != nil {
+		return err
+	}
+	parts, err := generateContentParts(reqCtx)
+	if err != nil {
+		return err
+	}
+	body["token_ids"] = tokenIDs
+	body["content_parts"] = parts
+	return nil
 }
 
 type prefillResponse struct {

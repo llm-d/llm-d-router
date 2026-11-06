@@ -53,6 +53,13 @@ func boundModel(modelName string) string {
 	return modelLabelLimiter.Bound(modelName)
 }
 
+// BoundModelName caps a request-derived model-name label with the same limiter
+// as the EPP request metrics. Plugins that emit a model_name label call this so
+// their series share one cap and keep the names pinned by PreAdmitModelLabels.
+func BoundModelName(modelName string) string {
+	return modelLabelLimiter.Bound(modelName)
+}
+
 // boundModels caps the model-name labels shared by request metrics.
 func boundModels(modelName, targetModelName string) (string, string) {
 	return modelLabelLimiter.Bound(modelName), modelLabelLimiter.Bound(targetModelName)
