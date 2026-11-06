@@ -1028,6 +1028,171 @@ func TestMatchBlockKeysRetrievalSpanSpeculativeBreakKeepsConfirmed(t *testing.T)
 	}, got)
 }
 
+// TestMatchBlockKeysRetrievalSpanStartsAfterFirstKey covers a multi-span tier
+// that is absent from the first key. The unit still scores when it completes.
+// BlocksByTier keeps only the tier that was present on the first key.
+func TestMatchBlockKeysRetrievalSpanStartsAfterFirstKey(t *testing.T) {
+	ctx := context.Background()
+	pod := "pod-gpu-then-cpu"
+	keys := []kvblock.BlockHash{10, 20, 30, 40, 50}
+
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{keys[0]}, []kvblock.PodEntry{
+		{PodIdentifier: pod, DeviceTier: "gpu"},
+	}))
+	for _, key := range keys[1:] {
+		require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{key}, []kvblock.PodEntry{
+			{PodIdentifier: pod, DeviceTier: "cpu", RetrievalSpan: 4},
+		}))
+	}
+
+	got, err := indexer.MatchBlockKeys(ctx, keys[:3], nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {WeightedScore: 1.0, MatchedBlocks: 1, ConfirmedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}},
+	}, got)
+
+	got, err = indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			WeightedScore:   1.0 + 0.8*4,
+			MatchedBlocks:   5,
+			ConfirmedBlocks: 5,
+			BlocksByTier:    map[string]int{"gpu": 1},
+		},
+	}, got)
+}
+
+// TestMatchBlockKeysRetrievalSpanResumesAfterGap covers a tier that completes
+// once, misses a key, then completes a later unit. The later unit scores.
+// BlocksByTier stays at the first contiguous run.
+func TestMatchBlockKeysRetrievalSpanResumesAfterGap(t *testing.T) {
+	ctx := context.Background()
+	pod := "pod-cpu-gap"
+	keys := []kvblock.BlockHash{10, 20, 30, 40, 50, 60, 70, 80, 90}
+
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	for i, key := range keys {
+		entry := kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "cpu", RetrievalSpan: 4}
+		if i == 4 {
+			entry = kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "gpu"}
+		}
+		require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{key}, []kvblock.PodEntry{entry}))
+	}
+
+	got, err := indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			WeightedScore:   0.8*4 + 1.0 + 0.8*4,
+			MatchedBlocks:   9,
+			ConfirmedBlocks: 9,
+			BlocksByTier:    map[string]int{"cpu": 4},
+		},
+	}, got)
+}
+
+// TestMatchBlockKeysRetrievalSpanDropsAbortedUnit covers an aborted multi-span
+// unit whose weight must not be credited when a later unit of the same tier
+// completes. The gap key is span-1, which is where the old pending check
+// could not see past a non-empty uncredited slice.
+func TestMatchBlockKeysRetrievalSpanDropsAbortedUnit(t *testing.T) {
+	ctx := context.Background()
+	pod := "pod-abort-span1"
+	keys := []kvblock.BlockHash{10, 20, 30, 40, 50, 60}
+
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	for i, key := range keys {
+		entry := kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "cpu", RetrievalSpan: 4}
+		if i == 1 {
+			entry = kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "gpu"}
+		}
+		require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{key}, []kvblock.PodEntry{entry}))
+	}
+
+	got, err := indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			WeightedScore:   1.0 + 0.8*4,
+			MatchedBlocks:   5,
+			ConfirmedBlocks: 5,
+			BlocksByTier:    map[string]int{"cpu": 0},
+		},
+	}, got)
+}
+
+// TestMatchBlockKeysRetrievalSpanDropsAbortedUnitOnMultiGap is the same abort
+// when the gap key itself belongs to a different multi-span unit, so the
+// clear cannot hide in the span-1 branch.
+func TestMatchBlockKeysRetrievalSpanDropsAbortedUnitOnMultiGap(t *testing.T) {
+	ctx := context.Background()
+	pod := "pod-abort-multi"
+	keys := []kvblock.BlockHash{10, 20, 30, 40, 50}
+
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{keys[0]}, []kvblock.PodEntry{
+		{PodIdentifier: pod, DeviceTier: "cpu", RetrievalSpan: 4},
+	}))
+	for _, key := range keys[1:] {
+		require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{key}, []kvblock.PodEntry{
+			{PodIdentifier: pod, DeviceTier: "gpu", RetrievalSpan: 4},
+		}))
+	}
+
+	got, err := indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			WeightedScore:   1.0 * 4,
+			MatchedBlocks:   4,
+			ConfirmedBlocks: 4,
+			BlocksByTier:    map[string]int{"cpu": 0},
+		},
+	}, got)
+}
+
+// TestMatchBlockKeysRetrievalSpanShorterUnitCompletesFirst credits keys as soon
+// as one of the overlapping units finishes, and does not credit them again
+// when the longer unit finishes.
+func TestMatchBlockKeysRetrievalSpanShorterUnitCompletesFirst(t *testing.T) {
+	ctx := context.Background()
+	pod := "pod-overlap"
+	keys := []kvblock.BlockHash{10, 20, 30, 40}
+
+	indexer, idx := newMatcher(t, kvcache.DefaultKVCacheBackendConfig())
+	for i, key := range keys {
+		entries := []kvblock.PodEntry{{PodIdentifier: pod, DeviceTier: "gpu", RetrievalSpan: 4}}
+		if i < 2 {
+			entries = append(entries, kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "cpu", RetrievalSpan: 2})
+		}
+		require.NoError(t, idx.Add(ctx, nil, []kvblock.BlockHash{key}, entries))
+	}
+
+	got, err := indexer.MatchBlockKeys(ctx, keys[:2], nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			WeightedScore:   2.0,
+			MatchedBlocks:   2,
+			ConfirmedBlocks: 2,
+			BlocksByTier:    map[string]int{"gpu": 0, "cpu": 2},
+		},
+	}, normalizeZeroTier(got, "gpu"))
+
+	got, err = indexer.MatchBlockKeys(ctx, keys, nil)
+	require.NoError(t, err)
+	assertPodMatches(t, map[string]kvcache.PodMatch{
+		pod: {
+			WeightedScore:   4.0,
+			MatchedBlocks:   4,
+			ConfirmedBlocks: 4,
+			BlocksByTier:    map[string]int{"gpu": 4, "cpu": 2},
+		},
+	}, got)
+}
+
 // normalizeZeroTier ensures a missing tier is present as 0 so assertPodMatches
 // can compare partial-credit cases where the matcher omits empty tiers.
 func normalizeZeroTier(got map[string]kvcache.PodMatch, tiers ...string) map[string]kvcache.PodMatch {
