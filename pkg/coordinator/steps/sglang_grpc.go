@@ -47,14 +47,17 @@ import (
 const (
 	// maxSGLangGRPCFrameBytes bounds individual upstream SGLang gRPC stream frames.
 	maxSGLangGRPCFrameBytes = 64 << 20
-	// sglangPrefillWaitOnTerminal bounds how long decode waits for prefill's
-	// cached_tokens frame before emitting decode's terminal frame.
-	sglangPrefillWaitOnTerminal = 100 * time.Millisecond
 )
 
-// sglangPrefillGrace limits how long a concurrent prefill stream may linger
-// after decode has already finished. A variable so tests can shorten it.
-var sglangPrefillGrace = 30 * time.Second
+var (
+	// sglangPrefillWaitOnTerminal bounds how long decode waits for prefill's
+	// cached_tokens frame or trailing status before finishing the stream.
+	// A variable so tests can widen it under race-detector load.
+	sglangPrefillWaitOnTerminal = 100 * time.Millisecond
+	// sglangPrefillGrace limits how long a concurrent prefill stream may linger
+	// after decode has already finished. A variable so tests can shorten it.
+	sglangPrefillGrace = 30 * time.Second
+)
 
 type grpcStatusWire struct {
 	status     string
