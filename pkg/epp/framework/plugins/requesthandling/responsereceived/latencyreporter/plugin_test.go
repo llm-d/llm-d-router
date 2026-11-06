@@ -334,6 +334,34 @@ func TestLatencyObservations(t *testing.T) {
 		n1, _ := histogram(t, latencyTTFT, "74", "le1024", pathLocal, "false")
 		assert.Equal(t, n0, n1)
 	})
+
+	t.Run("non-positive decode duration records TTFT only", func(t *testing.T) {
+		n0, s0 := histogram(t, latencyTTFT, "76", "le1024", pathLocal, "true")
+		m0, _ := histogram(t, latencyTPOT, "76", pathLocal)
+		c0 := count("76", "le1024", pathLocal, true, outcomeCompleted)
+		run(p, "obs-decode-neg", reqSpec{priority: 76, prompt: 100, completion: 10, ttft: 100 * time.Millisecond, decode: -50 * time.Millisecond, streaming: true})
+		run(p, "obs-decode-zero", reqSpec{priority: 76, prompt: 100, completion: 10, ttft: 100 * time.Millisecond, decode: 0, streaming: true})
+		n1, s1 := histogram(t, latencyTTFT, "76", "le1024", pathLocal, "true")
+		m1, _ := histogram(t, latencyTPOT, "76", pathLocal)
+		assert.Equal(t, n0+2, n1)
+		assert.InDelta(t, 0.2, s1-s0, 1e-9)
+		assert.Equal(t, m0, m1)
+		assert.Equal(t, c0+2, count("76", "le1024", pathLocal, true, outcomeCompleted))
+	})
+
+	t.Run("non-positive TTFT duration records neither TTFT nor TPOT", func(t *testing.T) {
+		n0, _ := histogram(t, latencyTTFT, "77", "le1024", pathLocal, "true")
+		m0, _ := histogram(t, latencyTPOT, "77", pathLocal)
+		c0 := count("77", "le1024", pathLocal, true, outcomeCompleted)
+		run(p, "obs-ttft-neg", reqSpec{priority: 77, prompt: 100, completion: 10, ttft: -100 * time.Millisecond, decode: 200 * time.Millisecond, streaming: true})
+		run(p, "obs-ttft-zero", reqSpec{priority: 77, prompt: 100, completion: 10, ttft: 0, decode: 200 * time.Millisecond, streaming: true})
+		run(p, "obs-both-zero", reqSpec{priority: 77, prompt: 100, completion: 10, ttft: 0, decode: 0, streaming: true})
+		n1, _ := histogram(t, latencyTTFT, "77", "le1024", pathLocal, "true")
+		m1, _ := histogram(t, latencyTPOT, "77", pathLocal)
+		assert.Equal(t, n0, n1)
+		assert.Equal(t, m0, m1)
+		assert.Equal(t, c0+3, count("77", "le1024", pathLocal, true, outcomeCompleted))
+	})
 }
 
 func TestPriorityFilter(t *testing.T) {
