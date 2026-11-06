@@ -75,13 +75,21 @@ func newContinuationFixture(t *testing.T, tokenProducerConfig string) *continuat
 
 func newContinuationFixtureWithCapacity(t *testing.T, tokenProducerConfig string, lruCapacity int) *continuationFixture {
 	t.Helper()
+	return newContinuationFixtureWithParams(t, tokenProducerConfig, lruCapacity, `{"indexCompletions":true}`, testHandle())
+}
+
+// newContinuationFixtureWithParams decodes params onto the fixture's base
+// config with the strict decoder the plugin factory uses.
+func newContinuationFixtureWithParams(t *testing.T, tokenProducerConfig string, lruCapacity int, params string, handle plugin.Handle) *continuationFixture {
+	t.Helper()
 	disableMinBlockSizeClamp(t)
-	handle := testHandle()
-	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config{
+	cfg := config{
 		BlockSizeTokens:        contBlockSize,
 		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
 		LRUCapacityPerServer:   lruCapacity,
-	}, handle)
+	}
+	require.NoError(t, plugin.StrictDecoder(json.RawMessage(params)).Decode(&cfg))
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, handle)
 	require.NoError(t, err)
 	if tokenProducerConfig != "" {
 		tp, err := tokenproducer.PluginFactory(tokenproducer.PluginType, plugin.StrictDecoder(json.RawMessage(tokenProducerConfig)), handle)
@@ -381,4 +389,143 @@ func TestEstimateContinuationKeys(t *testing.T) {
 		shared++
 	}
 	assert.Equal(t, fullPromptBlocks, shared)
+}
+
+func TestContinuationOffByDefault(t *testing.T) {
+	f := newContinuationFixtureWithParams(t, estimateTokenProducer, defaultLRUCapacityPerServer, `{}`, testHandle())
+	f.serve(t, completionsRequest(contPrompt), &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"}, fwkrh.TerminationCauseNatural)
+
+	decode, prefill := f.nextTurn(t)
+	assert.Equal(t, fullPromptBlocks, decode, "decode endpoint credited for the prompt only")
+	assert.Equal(t, fullPromptBlocks, prefill)
+}
+
+// TestContinuationNotCreditedToPrefillWhenDecodeExcluded covers a disaggregated
+// request recorded on the prefill endpoint only. The prefill endpoint does not
+// hold the generated text's KV.
+func TestContinuationNotCreditedToPrefillWhenDecodeExcluded(t *testing.T) {
+	f := newContinuationFixtureWithParams(t, estimateTokenProducer, defaultLRUCapacityPerServer,
+		`{"indexCompletions":true,"excludeDecodeWhenDisaggregated":true}`, testHandle())
+	f.serve(t, completionsRequest(contPrompt), &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"}, fwkrh.TerminationCauseNatural)
+
+	decode, prefill := f.nextTurn(t)
+	assert.Equal(t, 0, decode)
+	assert.Equal(t, fullPromptBlocks, prefill, "prefill endpoint credited for the prompt only")
+}
+
+// contKeys returns the block hashes of a single-prompt request carrying text.
+func contKeys(text string) []blockHash {
+	return prefixhash.GetBlockHashes(context.Background(), completionsRequest(text), contBlockSize, defaultMaxPrefixBlocks)[0]
+}
+
+// newSyncedContinuationFixture opts into continuation indexing with a
+// CrossReplicaSyncer configured and a recent window of windowHashes hashes.
+func newSyncedContinuationFixture(t *testing.T, windowHashes int) *continuationFixture {
+	t.Helper()
+	params, err := json.Marshal(map[string]any{"indexCompletions": true, "maxSyncedTokens": windowHashes * contBlockSize})
+	require.NoError(t, err)
+	return newContinuationFixtureWithParams(t, estimateTokenProducer, defaultLRUCapacityPerServer, string(params), testHandleWithSyncer())
+}
+
+func (f *continuationFixture) window(endpoint fwksched.Endpoint) [][]blockHash {
+	return f.p.recent.snapshot(f.p.makeserver(endpoint).String())
+}
+
+func TestContinuationReplacesPromptInRecentWindow(t *testing.T) {
+	f := newSyncedContinuationFixture(t, 100)
+	f.serve(t, completionsRequest(contPrompt), &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"}, fwkrh.TerminationCauseNatural)
+
+	assert.Equal(t, [][]blockHash{contKeys(contPrompt + contCompletion)}, f.window(f.decode),
+		"decode window holds the continuation in place of the prompt")
+	assert.Equal(t, [][]blockHash{contKeys(contPrompt)}, f.window(f.prefill))
+}
+
+// TestContinuationReplacesOnlyItsOwnPromptInRecentWindow serves two requests
+// with the same prompt on the same endpoint and ends them out of order.
+func TestContinuationReplacesOnlyItsOwnPromptInRecentWindow(t *testing.T) {
+	f := newSyncedContinuationFixture(t, 100)
+	first, second := completionsRequest(contPrompt), completionsRequest(contPrompt)
+	f.schedule(t, first)
+	f.p.wg.Wait()
+	f.schedule(t, second)
+	f.p.wg.Wait()
+	prompt, continuation := contKeys(contPrompt), contKeys(contPrompt+contCompletion)
+
+	f.endStream(t, second, &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"}, fwkrh.TerminationCauseNatural)
+	assert.Equal(t, [][]blockHash{prompt, continuation}, f.window(f.decode))
+	f.endStream(t, first, &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"}, fwkrh.TerminationCauseNatural)
+	assert.Equal(t, [][]blockHash{continuation, continuation}, f.window(f.decode))
+}
+
+// TestContinuationSkipsRecentWindowAfterPromptTrimmed ends a request whose
+// prompt entry has left the window. An identical prompt entry of another
+// request and newer entries stay as they are.
+func TestContinuationSkipsRecentWindowAfterPromptTrimmed(t *testing.T) {
+	prompt, other := contKeys(contPrompt), contKeys("Pack my box with five dozen liquor jugs. ")
+	f := newSyncedContinuationFixture(t, len(prompt)+len(other))
+	first, second := completionsRequest(contPrompt), completionsRequest(contPrompt)
+	f.schedule(t, first)
+	f.p.wg.Wait()
+	f.schedule(t, second)
+	f.p.wg.Wait()
+	f.p.recent.record(f.p.makeserver(f.decode).String(), other)
+	require.Equal(t, [][]blockHash{prompt, other}, f.window(f.decode))
+
+	f.endStream(t, first, &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"}, fwkrh.TerminationCauseNatural)
+	assert.Equal(t, [][]blockHash{prompt, other}, f.window(f.decode))
+	decode, _ := f.nextTurn(t)
+	assert.Equal(t, nextTurnBlocks(), decode, "local indexer still credits the continuation")
+}
+
+func TestContinuationLeavesRecentWindowWhenNotIndexed(t *testing.T) {
+	tests := []struct {
+		name string
+		end  func(*continuationFixture, *fwksched.InferenceRequest)
+	}{
+		{name: "abandoned", end: func(f *continuationFixture, req *fwksched.InferenceRequest) {
+			f.p.RequestAbandoned(context.Background(), req)
+			f.endStream(t, req, &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"}, fwkrh.TerminationCauseNatural)
+		}},
+		{name: "client disconnect", end: func(f *continuationFixture, req *fwksched.InferenceRequest) {
+			f.endStream(t, req, &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"}, fwkrh.TerminationCauseClientDisconnect)
+		}},
+		{name: "late response after release", end: func(f *continuationFixture, req *fwksched.InferenceRequest) {
+			f.endStream(t, req, nil, fwkrh.TerminationCauseNatural)
+			f.endStream(t, req, &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"}, fwkrh.TerminationCauseNatural)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSyncedContinuationFixture(t, 100)
+			req := completionsRequest(contPrompt)
+			f.schedule(t, req)
+			tt.end(f, req)
+			assert.Equal(t, [][]blockHash{contKeys(contPrompt)}, f.window(f.decode))
+		})
+	}
+}
+
+// TestContinuationReplacesLatePromptEntry holds PreRequest's prompt insert
+// until the response has ended, with a CrossReplicaSyncer configured.
+func TestContinuationReplacesLatePromptEntry(t *testing.T) {
+	f := newSyncedContinuationFixture(t, 100)
+	gate := &gatedIndexer{indexerInterface: f.p.indexerInst, waiting: make(chan struct{}), release: make(chan struct{})}
+	f.p.indexerInst = gate
+	req := completionsRequest(contPrompt)
+
+	f.schedule(t, req)
+	<-gate.waiting
+	f.p.ResponseBody(context.Background(), req, &fwkrh.Response{
+		RequestID:        req.RequestID,
+		StartOfStream:    true,
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+		Completion:       &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"},
+	}, f.decode.GetMetadata())
+	time.Sleep(50 * time.Millisecond)
+	close(gate.release)
+	f.p.wg.Wait()
+
+	assert.Equal(t, [][]blockHash{contKeys(contPrompt + contCompletion)}, f.window(f.decode))
+	assert.Equal(t, [][]blockHash{contKeys(contPrompt)}, f.window(f.prefill))
 }
