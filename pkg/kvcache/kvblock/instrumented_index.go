@@ -92,3 +92,11 @@ func (m *instrumentedIndex) GetRequestKey(ctx context.Context, engineKey BlockHa
 func (m *instrumentedIndex) Clear(ctx context.Context, podIdentifier string) error {
 	return m.next.Clear(ctx, podIdentifier)
 }
+
+func (m *instrumentedIndex) AddByEngineKeys(ctx context.Context, engineKeys []BlockHash, entries []PodEntry) (int, error) {
+	count, err := AddByEngineKeys(ctx, m.next, engineKeys, entries)
+	if err == nil {
+		metrics.Admissions.Add(float64(count))
+	}
+	return count, err
+}
