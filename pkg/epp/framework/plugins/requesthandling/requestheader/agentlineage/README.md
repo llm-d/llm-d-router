@@ -107,6 +107,7 @@ Client setup for each harness is the same as for `agent-identity`; see that plug
 
 - **Per-replica map.** A program split across EPP replicas derives independently on each: a stray child roots at the parent ID it names. There is no cross-replica parent store by design (it would put a network round trip on the admission path).
 - **Interim bounds.** `maxParentEntries` and `parentEntryTtlSeconds` are per-replica stand-ins for the per-tenant program cap and program-end window from the Flow Control: Workload design.
+- **Bound pressure under flooding.** A caller flooding distinct linked sessions can evict live links once no parentless node remains to displace. The map size bounds the damage and affected programs degrade to their seeded bands (queue keys survive through the named-parent fallback). The per-tenant program cap and the SessionStateRegistry fold bound this per tenant.
 - **Workload kind is not read.** `x-openai-subagent` and similar kind headers are left to the eviction-class step of the design.
 
 ## Related Documentation

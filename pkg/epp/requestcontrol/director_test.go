@@ -1377,6 +1377,37 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantAdmitPriority:      intPtr(2),
 		},
 		{
+			name: "propagated body priority carries the resolved band",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(100),
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			parser:                 newOpenAIParserWithPriorityPropagation(t),
+			propagatePriority:      true,
+			inferenceObjectiveName: objectiveName,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-lineage-band",
+				attributeKey:   agentlineage.DerivedRootKey,
+				attributeValue: "root-abc",
+				extraProduces:  []fwkplugin.DataKey{agentlineage.ResolvedBandKey},
+				modifyFn: func(req *fwksched.InferenceRequest) {
+					req.PutAttribute(agentlineage.ResolvedBandKey, 5)
+				},
+			},
+			wantMutatedBody: map[string]any{
+				"model":    model,
+				"prompt":   "critical prompt",
+				"priority": float64(5),
+			},
+			wantAdmitPriority: intPtr(5),
+		},
+		{
 			name: "successful request with preRequest plugin adding key",
 			reqBodyMap: map[string]any{
 				"model":  model,
