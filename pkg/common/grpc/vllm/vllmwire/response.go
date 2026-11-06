@@ -161,11 +161,7 @@ func mergeRaw(cur, body []byte, seen bool, copied *bool) []byte {
 	if !seen {
 		return body
 	}
-	if !*copied {
-		cur = append(make([]byte, 0, len(cur)+len(body)), cur...)
-		*copied = true
-	}
-	return append(cur, body...)
+	return appendDetached(cur, body, copied)
 }
 
 // RewriteTerminalCachedTokens substitutes cachedTokens onto

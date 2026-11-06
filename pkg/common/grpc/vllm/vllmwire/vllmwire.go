@@ -23,6 +23,7 @@ package vllmwire
 
 import (
 	"fmt"
+	"slices"
 
 	"google.golang.org/protobuf/encoding/protowire"
 
@@ -493,12 +494,19 @@ func (r *Request) scanStopping(body []byte) error {
 		r.stoppingBody = body
 		return nil
 	}
-	if !r.stoppingCopied {
-		r.stoppingBody = append(make([]byte, 0, len(r.stoppingBody)+len(body)), r.stoppingBody...)
-		r.stoppingCopied = true
-	}
-	r.stoppingBody = append(r.stoppingBody, body...)
+	r.stoppingBody = appendDetached(r.stoppingBody, body, &r.stoppingCopied)
 	return nil
+}
+
+// appendDetached returns cur with body appended. When copied is false, cur
+// aliases the scanned payload, so the first append moves it to a buffer of
+// its own and sets copied.
+func appendDetached(cur, body []byte, copied *bool) []byte {
+	if !*copied {
+		*copied = true
+		return slices.Concat(cur, body)
+	}
+	return append(cur, body...)
 }
 
 // scanKV validates a KVCacheParameters body, records cache_salt,
@@ -573,11 +581,13 @@ func (r *Request) scanKV(body []byte) error {
 	return err
 }
 
+// copyKVBody moves kvBody, which aliases the scanned payload, to a buffer
+// of its own with room for extra more bytes.
 func (r *Request) copyKVBody(extra int) {
 	if r.kvCopied {
 		return
 	}
-	r.kvBody = append(make([]byte, 0, len(r.kvBody)+extra), r.kvBody...)
+	r.kvBody = slices.Grow(r.kvBody[:len(r.kvBody):len(r.kvBody)], extra)
 	r.kvCopied = true
 }
 
