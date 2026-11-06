@@ -541,14 +541,38 @@ type TextToSpeechRequest struct {
 	RefText string `json:"ref_text,omitempty"`
 	// CacheSalt isolates prefix caches for security.
 	CacheSalt string `json:"cache_salt,omitempty"`
+	// Voice is the speaker to synthesize with. The engine's prefix cache
+	// holds a different prompt per conditioning, so the fingerprint salt
+	// covers it; the token estimate does not.
+	Voice string `json:"voice,omitempty"`
+	// Language is the spoken language of Input.
+	Language string `json:"language,omitempty"`
+	// TaskType is the synthesis task the engine selects conditioning by.
+	TaskType string `json:"task_type,omitempty"`
+	// RefAudio is the raw reference-audio field of a voice-cloning request,
+	// carried for fingerprinting only.
+	RefAudio json.RawMessage `json:"ref_audio,omitempty"`
+	// RefAudioCodes is the raw pre-computed reference-codes field (fish omni),
+	// carried for fingerprinting only.
+	RefAudioCodes json.RawMessage `json:"ref_audio_codes,omitempty"`
+	// ExtraParams is the raw extra-params object, whose entries the engine's
+	// adapters fold into their conditioning (indextts2's emotion settings and
+	// use_random among them), carried for fingerprinting only.
+	ExtraParams json.RawMessage `json:"extra_params,omitempty"`
+	// SpeakerEmbedding is the raw speaker-embedding field, carried for
+	// fingerprinting only.
+	SpeakerEmbedding json.RawMessage `json:"speaker_embedding,omitempty"`
+	// XVectorOnlyMode selects x-vector-only speaker conditioning; nil keeps
+	// the engine default. Absent and false salt differently.
+	XVectorOnlyMode *bool `json:"x_vector_only_mode,omitempty"`
 }
 
 func (r *TextToSpeechRequest) String() string {
 	if r == nil {
 		return nilStr
 	}
-	return fmt.Sprintf("{InputLength: %d, InstructionsLength: %d, RefTextLength: %d}",
-		len(r.Input), len(r.Instructions), len(r.RefText))
+	return fmt.Sprintf("{InputLength: %d, InstructionsLength: %d, RefTextLength: %d, Voice: %s, Language: %s, TaskType: %s}",
+		len(r.Input), len(r.Instructions), len(r.RefText), r.Voice, r.Language, r.TaskType)
 }
 
 // AudioGenerateRequest represents the fields parsed from a vLLM Omni

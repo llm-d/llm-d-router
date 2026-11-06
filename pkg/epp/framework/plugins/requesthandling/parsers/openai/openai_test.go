@@ -928,8 +928,10 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			},
 			want: &request.InferenceRequestBody{
 				TextToSpeech: &request.TextToSpeechRequest{
-					Input:   "Hello from llm-d.",
-					RefText: "Hello.",
+					Input:    "Hello from llm-d.",
+					RefText:  "Hello.",
+					Voice:    "default",
+					RefAudio: json.RawMessage(`"data:audio/wav;base64,UklGRg=="`),
 				},
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
@@ -973,6 +975,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			want: &request.InferenceRequestBody{
 				TextToSpeech: &request.TextToSpeechRequest{
 					Input: "Stream this response.",
+					Voice: "ryan",
 				},
 				Payload: request.PayloadMap{
 					"model":  "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
@@ -2972,5 +2975,79 @@ func TestOpenAIParser_ParseDecisionsResponse(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got.Usage); diff != "" {
 		t.Errorf("Usage mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The speech request's conditioning fields reach the typed body: they carry no
+// input weight but the prefix-cache salt derives from them.
+func TestOpenAIParser_ParseRequestTextToSpeechConditioning(t *testing.T) {
+	body := `{
+		"model": "qwen3-tts",
+		"input": "hello",
+		"instructions": "cheerfully",
+		"ref_text": "sample transcript",
+		"cache_salt": "tenant-a",
+		"voice": "vivian",
+		"language": "en",
+		"task_type": "CustomVoice",
+		"ref_audio": "https://example.com/voice.wav",
+		"x_vector_only_mode": false
+	}`
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+		map[string]string{":path": "/v1/audio/speech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	speech := result.Body.TextToSpeech
+	if speech.Voice != "vivian" || speech.Language != "en" || speech.TaskType != "CustomVoice" {
+		t.Errorf("conditioning = {Voice:%q Language:%q TaskType:%q}, want the request's fields", speech.Voice, speech.Language, speech.TaskType)
+	}
+	if string(speech.RefAudio) != `"https://example.com/voice.wav"` {
+		t.Errorf("RefAudio = %s, want the raw field", speech.RefAudio)
+	}
+	if speech.XVectorOnlyMode == nil || *speech.XVectorOnlyMode {
+		t.Errorf("XVectorOnlyMode = %v, want false", speech.XVectorOnlyMode)
+	}
+	if speech.CacheSalt != "tenant-a" {
+		t.Errorf("CacheSalt = %q, want tenant-a", speech.CacheSalt)
+	}
+}
+
+// The engine accepts "speaker" as an alias of "voice"; either name fills the
+// same field.
+func TestOpenAIParser_ParseRequestTextToSpeechSpeakerAlias(t *testing.T) {
+	for name, field := range map[string]string{"voice": "voice", "speaker": "speaker"} {
+		body := `{"input": "hello", "` + field + `": "ryan"}`
+		result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+			map[string]string{":path": "/v1/audio/speech"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Body.TextToSpeech.Voice != "ryan" {
+			t.Errorf("%s: Voice = %q, want ryan", name, result.Body.TextToSpeech.Voice)
+		}
+	}
+}
+
+// An explicit JSON null and an absent conditioning field are the same None to
+// the engine, so the parser keeps them the same typed body, and the salt
+// derived from it is a pure function of that body.
+func TestOpenAIParser_ParseRequestTextToSpeechNullFields(t *testing.T) {
+	withNull, err := NewOpenAIParser().ParseRequest(context.Background(),
+		[]byte(`{"input": "hello", "ref_audio": null, "speaker_embedding": null}`),
+		map[string]string{":path": "/v1/audio/speech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withNull.Body.TextToSpeech.RefAudio != nil || withNull.Body.TextToSpeech.SpeakerEmbedding != nil {
+		t.Errorf("null fields = {%v %v}, want both nil", withNull.Body.TextToSpeech.RefAudio, withNull.Body.TextToSpeech.SpeakerEmbedding)
+	}
+	absent, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(`{"input": "hello"}`),
+		map[string]string{":path": "/v1/audio/speech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(absent.Body.TextToSpeech, withNull.Body.TextToSpeech); diff != "" {
+		t.Errorf("null and absent conditioning must parse to the same body (-absent +null):\n%s", diff)
 	}
 }
