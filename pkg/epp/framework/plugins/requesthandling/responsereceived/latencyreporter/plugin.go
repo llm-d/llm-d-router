@@ -181,7 +181,7 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 	if result != outcomeCompleted {
 		return
 	}
-	if !response.FirstTokenTimestamp.IsZero() && !response.ReceivedTimestamp.IsZero() {
+	if !response.FirstTokenTimestamp.IsZero() && !response.ReceivedTimestamp.IsZero() && response.FirstTokenTimestamp.After(response.ReceivedTimestamp) {
 		latencyTTFT.WithLabelValues(prio, bucket, path, streaming).Observe(response.FirstTokenTimestamp.Sub(response.ReceivedTimestamp).Seconds())
 	}
 	if tpot, ok := meanTPOT(response); ok {
@@ -211,7 +211,7 @@ func outcome(status string, cause requesthandling.TerminationCause) string {
 // at least two output tokens.
 func meanTPOT(response *requesthandling.Response) (time.Duration, bool) {
 	n := response.Usage.CompletionTokens
-	if !response.Streaming || n < 2 || response.FirstTokenTimestamp.IsZero() || response.CompleteTimestamp.IsZero() {
+	if !response.Streaming || n < 2 || response.FirstTokenTimestamp.IsZero() || response.CompleteTimestamp.IsZero() || !response.CompleteTimestamp.After(response.FirstTokenTimestamp) {
 		return 0, false
 	}
 	return response.CompleteTimestamp.Sub(response.FirstTokenTimestamp) / time.Duration(n-1), true

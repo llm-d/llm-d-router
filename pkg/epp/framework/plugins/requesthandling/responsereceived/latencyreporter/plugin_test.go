@@ -334,6 +334,19 @@ func TestLatencyObservations(t *testing.T) {
 		n1, _ := histogram(t, latencyTTFT, "74", "le1024", pathLocal, "false")
 		assert.Equal(t, n0, n1)
 	})
+
+	t.Run("non-positive durations record no latency", func(t *testing.T) {
+		n0, _ := histogram(t, latencyTTFT, "76", "le1024", pathLocal, "true")
+		m0, _ := histogram(t, latencyTPOT, "76", pathLocal)
+		c0 := count("76", "le1024", pathLocal, true, outcomeCompleted)
+		run(p, "obs-inverted", reqSpec{priority: 76, prompt: 100, completion: 10, ttft: -100 * time.Millisecond, decode: -50 * time.Millisecond, streaming: true})
+		run(p, "obs-zero", reqSpec{priority: 76, prompt: 100, completion: 10, ttft: 0, decode: 0, streaming: true})
+		n1, _ := histogram(t, latencyTTFT, "76", "le1024", pathLocal, "true")
+		m1, _ := histogram(t, latencyTPOT, "76", pathLocal)
+		assert.Equal(t, n0, n1)
+		assert.Equal(t, m0, m1)
+		assert.Equal(t, c0+2, count("76", "le1024", pathLocal, true, outcomeCompleted))
+	})
 }
 
 func TestPriorityFilter(t *testing.T) {
