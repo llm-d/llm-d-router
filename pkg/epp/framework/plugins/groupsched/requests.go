@@ -119,6 +119,11 @@ func (s *Scheduler) atPod(rec *reqRec, m *thread, engine string, now time.Time) 
 	rec.counted = false
 	rec.engine = engine
 	rec.pod = now
+	// THE WINDOW CLOSES HERE, and m.windows drops the record as it does: the slice is EXACTLY the
+	// thread's OPEN windows, so no other path has to remember to remove an entry once a request has
+	// reached a pod. With this, an at-a-pod record can be deleted by the reap without leaving a
+	// dangling pointer behind.
+	s.unlinkWindow(m, rec)
 	if m != nil && rec.thread == m.id {
 		// THE ACTIVITY STAMP (baseline, scheduler.go:1023): a request arriving at a pod is activity on
 		// its thread, so the idle rule measures silence from the arrival, not from the Pick.
@@ -418,6 +423,8 @@ func (s *Scheduler) reapRequests(now time.Time) {
 		}
 		rec.counted = false
 		if now.Sub(rec.pod) > limit {
+			// nothing to unlink: atPod closed the window when this record reached a pod, so m.windows
+			// has not held it since. The delete is the whole removal.
 			delete(s.reqs, rid)
 			reaped[rec.thread] = m
 			s.noteAnomaly(anomalyReaped)

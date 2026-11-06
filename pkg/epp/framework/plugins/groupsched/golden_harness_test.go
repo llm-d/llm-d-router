@@ -518,11 +518,30 @@ func (h *goldenHarness) checkCounts(after string) {
 			if m.pending != counted {
 				h.t.Fatalf("after %s: thread %s pending=%d but %d of its records count — the count drifted from the records", after, id, m.pending, counted)
 			}
-			// and a record must not survive in the windows slice after it stopped existing
+			// THE WINDOW SLICE IS EXACTLY THE THREAD'S OPEN WINDOWS: the set of m.windows must equal
+			// {records r in s.reqs : r.thread == id && r.pod is zero}, with no duplicates — a dangling
+			// pointer, a missing entry or a double entry is all the same class of bug.
+			open := map[*reqRec]bool{}
+			for _, rec := range s.reqs {
+				if rec.thread == id && rec.pod.IsZero() {
+					open[rec] = true
+				}
+			}
+			seen := map[*reqRec]bool{}
 			for _, w := range m.windows {
 				if w == nil {
 					h.t.Fatalf("after %s: thread %s holds a nil window", after, id)
 				}
+				if seen[w] {
+					h.t.Fatalf("after %s: thread %s holds a DUPLICATE window entry", after, id)
+				}
+				seen[w] = true
+				if !open[w] {
+					h.t.Fatalf("after %s: thread %s holds a window entry for %q, which is not one of its open windows (it reached a pod, or stopped existing)", after, id, w.thread)
+				}
+			}
+			if len(seen) != len(open) {
+				h.t.Fatalf("after %s: thread %s holds %d window entries for %d open windows", after, id, len(seen), len(open))
 			}
 		}
 	}

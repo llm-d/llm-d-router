@@ -484,8 +484,8 @@ func TestReapDoesNotStealALiveWindow(t *testing.T) {
 		if after != 1 {
 			t.Fatalf("pending=%d after the reap: the live window's count was taken", after)
 		}
-		if windows != counted+1 { // r-live is the thread's only remaining window record
-			t.Fatalf("the window slice holds %d pointer(s) for 1 window record (+%d counted): a dead pointer survived", windows, counted)
+		if windows != 1 { // r-live is the thread's only open window
+			t.Fatalf("the window slice holds %d pointer(s) for 1 open window: a dead pointer survived", windows)
 		}
 	})
 
@@ -551,6 +551,48 @@ func TestWindowsSliceIsBounded(t *testing.T) {
 		}
 		if windows != 0 {
 			t.Fatalf("the windows slice holds %d dead pointer(s): it must be pruned on every drop", windows)
+		}
+	})
+}
+
+// TestReapOfAnInFlightRecordLeavesNoWindowPointer pins the last path that closed a window without
+// leaving the slice: a record that REACHED A POD is not a window, so the thread's window slice must
+// have dropped it at PreRequest — and the reap of that record at the bound must therefore change
+// neither the slice nor any count. Before atPod unlinked, a reaped in-flight record left a dangling
+// pointer in m.windows until the thread exited (rare at 9300 s, same class as the reap bug).
+func TestReapOfAnInFlightRecordLeavesNoWindowPointer(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.InflightReapSeconds = 60
+	chargedPath(t, cfg, "reap-inflight-window", func(t *testing.T, fx *engineSet, g *engineGroup) {
+		fx.s.mu.Lock()
+		m := g.threads["gone"]
+		// one OPEN window and one record that reached a pod, both on the same thread
+		fx.s.release(m, "r-open", nil, fx.clock, dispatchObservables{})
+		fx.s.release(m, "r-at-pod", nil, fx.clock.Add(-120*time.Second), dispatchObservables{})
+		rec := fx.s.reqs["r-at-pod"]
+		fx.s.atPod(rec, m, g.id, fx.clock.Add(-120*time.Second)) // reached the pod long ago
+		windowsBefore, pendingBefore := len(m.windows), m.pending
+		fx.s.mu.Unlock()
+		if windowsBefore != 1 {
+			t.Fatalf("fixture: only the open window may sit in the slice, got %d", windowsBefore)
+		}
+		if pendingBefore != 1 {
+			t.Fatalf("fixture: one open window counts once, got pending=%d", pendingBefore)
+		}
+
+		fx.tick(1 * time.Second) // the in-flight record is 121 s old and is reaped; the open window is 1 s old
+		fx.s.mu.Lock()
+		_, stillThere := fx.s.reqs["r-at-pod"]
+		windowsAfter, pendingAfter := len(m.windows), m.pending
+		fx.s.mu.Unlock()
+		if stillThere {
+			t.Fatal("the in-flight record must be reaped at the bound")
+		}
+		if windowsAfter != windowsBefore {
+			t.Fatalf("the reap of an at-a-pod record moved the window slice: %d -> %d", windowsBefore, windowsAfter)
+		}
+		if pendingAfter != pendingBefore {
+			t.Fatalf("the reap of an at-a-pod record moved the count: %d -> %d", pendingBefore, pendingAfter)
 		}
 	})
 }
