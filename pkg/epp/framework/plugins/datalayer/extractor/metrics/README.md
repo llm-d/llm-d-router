@@ -45,6 +45,8 @@ The plugin populates several standard fields on the endpoint's `Metrics` struct:
 
 The three scalar load and utilization metrics (`WaitingQueueSize`, `RunningRequestsSize`, and `KVCacheUsagePercent`) are also published to the endpoint's attribute map (`ep.GetAttributes()`) as `ScalarMetricValue` under `ScalarMetricDataKey`, so `endpoint-attribute-scorer` and `endpoint-attribute-filter` can consume them directly without duplicating them in `customMetrics`. When a `customMetrics` entry uses one of those built-in keys as its `attributeKey`, that entry exclusively owns the attribute on `ep.GetAttributes()` while the built-in spec continues to populate `Metrics`.
 
+An engine config may name a `deferredRequestsSpec`: the part of `queuedRequestsSpec` that waits on something other than a batch slot, such as a KV transfer, a LoRA slot or a grammar compile. The extractor publishes it as the `DeferredQueueSize` scalar attribute, 0 on a scrape without the series, and leaves `WaitingQueueSize` as the queue total. The built-in `vllm` config reads `vllm:num_requests_waiting_by_reason{reason="deferred"}`, which vLLM exposes next to `vllm:num_requests_waiting` (the sum of both reasons); an `engineConfigs` entry named `vllm` replaces the built-in config, so set `deferredRequestsSpec` there to keep the attribute. The `utilization-detector` subtracts `DeferredQueueSize` from its queue-depth term.
+
 The built-in `vllm` config also stores the NIXL KV transfer failure counters as scalar attributes. vLLM reports them only when it runs with the NixlConnector, and an endpoint that has never reported them carries none of these attributes.
 
 | Attribute | vLLM metric | Counted on |
@@ -163,6 +165,7 @@ parameters:
     - name: "vllm"
       # Standard specs (required, since overriding replaces the built-in config)
       queuedRequestsSpec: "vllm:num_requests_waiting"
+      deferredRequestsSpec: 'vllm:num_requests_waiting_by_reason{reason="deferred"}'
       runningRequestsSpec: "vllm:num_requests_running"
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
@@ -200,6 +203,7 @@ parameters:
     - name: "vllm"
       # Standard specs (required, overriding replaces the built-in config)
       queuedRequestsSpec: "vllm:num_requests_waiting"
+      deferredRequestsSpec: 'vllm:num_requests_waiting_by_reason{reason="deferred"}'
       runningRequestsSpec: "vllm:num_requests_running"
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
