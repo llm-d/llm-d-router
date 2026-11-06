@@ -11,6 +11,7 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
   - [AlwaysDisaggPDDecider](#alwaysdisaggpddecider)
   - [AlwaysDisaggMultimodalDecider](#alwaysdisaggmultimodaldecider)
   - [KVCompatPDDecider](#kvcompatpddecider)
+  - [HeteroPDDecider](#heteropddecider)
 - [Filter Plugins](#filter-plugins)
   - [KVCompatFilter](#kvcompatfilter)
 
@@ -273,6 +274,93 @@ schedulingProfiles:
 - Once any endpoint carries a key, an endpoint without one is never paired.
 - Declined requests are counted in `llm_d_epp_kv_compat_prefill_declined_total`, and exclusions in `llm_d_epp_kv_compat_pair_exclusions_total`.
 - A failure is counted against the pair even when its cause lies elsewhere, such as a request that fails on any path. A one-off failure does not exclude a pair, since exclusion needs `failureThreshold` consecutive failures.
+
+---
+
+### HeteroPDDecider
+
+**Type:** `hetero-pd-decider` (Alpha)
+
+Decides per request whether P/D disaggregation should run by comparing the estimated time to first token of both paths, for pools whose endpoints differ in prefill speed or load.
+
+#### What it does
+
+For the uncached part `U` of the prompt, with `R` the prefill throughput of an endpoint:
+
+- keep: `U/R_decode`, plus a charge for the streams already running on the decode endpoint, which a local prefill slows down: `stallWeight * stallFraction * running * U/R_decode`.
+- move: `U/R_prefill`, plus the prefill endpoint's queue (`waiting * avgQueuedPromptTokens / R_prefill`), the KV transfer (`U * kvBytesPerToken / bandwidth`), and `handoffOverheadMs`.
+
+With `strategy: auto` the decider starts from the answer of the prefix-based rule (`stockNonCachedTokens`) and overrules it only when the other path is at least `overrideMargin` cheaper, and for a move only when it meets `ttftSLOMs`. It keeps a request local when the decode endpoint's KV cache usage is at least `maxDecodeKVUsage`, or when an endpoint opts out with the `llm-d.ai/hetero-pd-disabled=true` label. When the decode endpoint's class has no profile it applies `fallbackNonCachedTokens`.
+
+#### How It Works
+
+Every `refreshInterval` the decider ranks the prefill-capable endpoints by their estimated cost for a prompt of `stockNonCachedTokens` tokens, from their latest metrics, and keeps for each decode endpoint the `maxCandidates` cheapest. A decision prices only those candidates and reads the decode endpoint's own metrics, so its cost does not depend on the pool size and it does not allocate. When it is wrapped by `kv-compat-pd-decider`, the candidates are limited to the endpoints that rule allows, excluded pairs included.
+
+A prefill throughput comes from the endpoint's `llm-d.ai/prefill-tokens-per-sec` label when present, else from the profile of its accelerator class (`llm-d.ai/accelerator-class`).
+
+#### Inputs consumed
+
+- `PrefixCacheMatchInfo` on the decode endpoint, and the tokenized prompt, as `prefix-based-pd-decider`.
+- Endpoint metrics: running and waiting requests, KV cache usage.
+- Endpoint labels: role, accelerator class, measured speed, opt-out.
+
+#### Configuration
+
+##### Parameters
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `strategy` | `string` | No | `auto` | `auto`, `model` (always compare the estimates) or `guarded-stock` (apply the threshold and veto splits that cannot help). |
+| `stockNonCachedTokens` | `int` | No | `1024` | Threshold of the prefix-based rule that `auto` and `guarded-stock` start from. |
+| `overrideMargin` | `float` | No | `0.25` | How much cheaper the other path must be before `auto` overrules the threshold. |
+| `ttftSLOMs` | `float` | No | `0` | A move must be estimated under this time to first token. `0` disables the check. |
+| `profiles` | `map` | No | | Prefill tokens per second by accelerator class, for example `nvidia-l4: {prefillTokensPerSec: 13000}`. |
+| `kvBytesPerToken` | `int` | No | `131072` | KV cache size of one token across all layers. |
+| `bandwidthGbps` | `float` | No | `10` | KV transfer bandwidth between classes. |
+| `sameClassBandwidthGbps` | `float` | No | `0` | Bandwidth within one class. `0` uses `bandwidthGbps`. |
+| `handoffOverheadMs` | `float` | No | `0` | Fixed cost of the remote path beyond the transfer. |
+| `stallWeight` | `float` | No | `0.25` | Cost of one second of decode stall relative to one second of time to first token. |
+| `stallFraction` | `float` | No | `1` | Share of a local prefill the running streams lose. With chunked prefill it is small. |
+| `safetyMargin` | `float` | No | `0.1` | How much cheaper a move must be under `strategy: model`. |
+| `maxDecodeKVUsage` | `float` | No | `0.9` | Keep requests local at or above this decode KV cache usage. |
+| `minUncachedTokens` | `int` | No | `256` | Keep requests with fewer uncached tokens local. |
+| `avgQueuedPromptTokens` | `int` | No | `1024` | Prefill work assumed behind each waiting request. |
+| `idleRunningRequests` | `int` | No | `2` | Running streams at which `guarded-stock` treats the decode endpoint as idle. |
+| `fallbackNonCachedTokens` | `int` | No | `1024` | Threshold used when the decode class has no profile. `0` keeps such requests local. |
+| `maxCandidates` | `int` | No | `8` | Prefill endpoints priced per decode endpoint. |
+| `refreshInterval` | `duration` | No | `100ms` | How often the candidates are re-ranked. |
+| `acceleratorLabel` | `string` | No | `llm-d.ai/accelerator-class` | Label holding the accelerator class. |
+| `speedLabel` | `string` | No | `llm-d.ai/prefill-tokens-per-sec` | Label holding an endpoint's measured prefill speed. Empty disables it. |
+| `disableLabel` | `string` | No | `llm-d.ai/hetero-pd-disabled` | Label that opts an endpoint out of remote prefill. |
+| `prefixMatchInfoProducerName` | `string` | No | `approx-prefix-cache-producer` | Prefix-cache producer whose `PrefixCacheMatchInfo` the decider reads. |
+
+##### Example
+```yaml
+plugins:
+  - type: hetero-pd-decider
+    parameters:
+      kvBytesPerToken: 28672
+      bandwidthGbps: 25
+      handoffOverheadMs: 80
+      profiles:
+        nvidia-l4: {prefillTokensPerSec: 13000}
+        nvidia-a10g: {prefillTokensPerSec: 15000}
+  - type: kv-compat-pd-decider
+    parameters:
+      decider: hetero-pd-decider
+  - type: kv-compat-filter
+    parameters:
+      decider: kv-compat-pd-decider
+  - type: disagg-profile-handler
+    parameters:
+      deciders:
+        prefill: kv-compat-pd-decider
+```
+
+#### Limitations
+
+- The estimates are only as good as the profiles, bandwidth and handoff cost. Measure them for the model and the hardware.
+- The prefill profile still picks the prefill endpoint with its own scorers. The decider's estimate assumes one of the ranked candidates.
+- Decisions are counted in `llm_d_epp_hetero_pd_decision_total`.
 
 ---
 

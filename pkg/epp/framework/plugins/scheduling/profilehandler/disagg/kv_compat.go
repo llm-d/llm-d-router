@@ -235,6 +235,9 @@ func KVCompatPDDeciderPluginFactory(name string, rawParameters *json.Decoder, ha
 	}
 	d.typedName.Name = name
 	d.spec = d.buildSpec()
+	if aware, ok := inner.(kvCompatAware); ok {
+		aware.useKVCompat(d)
+	}
 	d.handle = handle
 	d.pluginState = plugin.NewPluginState(handle.Context())
 	return d, nil
