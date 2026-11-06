@@ -214,6 +214,12 @@ Each endpoint carries a compatibility key in a label (`llm-d.ai/kv-compat-key` b
 
 The decider keeps a count of prefill-capable endpoints per key, updated from endpoint lifecycle events, so a decision reads a few map entries and does not scan the pool. Use it together with `kv-compat-filter` in the prefill profile, so the prefill profile picks one of the compatible endpoints.
 
+##### Failed requests
+
+A key can be wrong, or two endpoints with equal keys can still fail to exchange KV. The decider records the outcome of every disaggregated request against its pair: the prefill key and the decode endpoint, or the prefill endpoint itself when it has no key. A request counts as failed when its response status is in `failureCodes`, when its stream ends with an error, or when it ends normally after reading the prompt without generating a token. After `failureThreshold` consecutive failed requests the pair is excluded for `exclusionDuration`: the decider and the filter treat it as incompatible, so requests for that decode endpoint use another prefill endpoint or run decode-only. A successful request resets the count. Responses that arrive during an exclusion do not extend it.
+
+When a cross-replica syncer is configured, each replica publishes its exclusions per decode endpoint and reads the union of all replicas' exclusions, so an exclusion observed by one replica applies on every replica after the next sync. Without a syncer, each replica excludes pairs from its own requests only.
+
 #### Inputs consumed
 
 - Endpoint labels: `llm-d.ai/role`, the key label and the accept labels, from endpoint lifecycle events and from the decode endpoint.
@@ -228,6 +234,10 @@ The decider keeps a count of prefill-capable endpoints per key, updated from end
 | `keyLabel` | `string` | No | `llm-d.ai/kv-compat-key` | Endpoint label holding the compatibility key. |
 | `acceptLabelPrefix` | `string` | No | `accept.kv-compat.llm-d.ai/` | Prefix of the decode endpoint labels that accept another prefill key. `-` disables these labels. |
 | `approvedPairs` | `[]string` | No | | `prefillKey->decodeKey` pairs that may exchange KV although their keys differ, in that direction only. |
+| `failureThreshold` | `int` | No | `3` | Consecutive failed disaggregated requests that exclude a pair. `0` disables exclusion. |
+| `exclusionDuration` | `duration` | No | `5m` | How long an excluded pair stays excluded. |
+| `failureCodes` | `[]int` | No | `[500, 502, 503]` | Response statuses counted as a failed request. Each must be a 4xx or 5xx status. |
+| `prefillProfile` | `string` | No | `prefill` | Scheduling profile that picks the prefill endpoint. |
 
 ##### Example
 ```yaml
@@ -261,7 +271,8 @@ schedulingProfiles:
 
 - The key is only as accurate as the settings it is computed from. An endpoint labelled with the wrong key can still be paired with an incompatible one.
 - Once any endpoint carries a key, an endpoint without one is never paired.
-- Declined requests are counted in `llm_d_epp_kv_compat_prefill_declined_total`.
+- Declined requests are counted in `llm_d_epp_kv_compat_prefill_declined_total`, and exclusions in `llm_d_epp_kv_compat_pair_exclusions_total`.
+- A failure is counted against the pair even when its cause lies elsewhere, such as a request that fails on any path. A one-off failure does not exclude a pair, since exclusion needs `failureThreshold` consecutive failures.
 
 ---
 
@@ -275,7 +286,7 @@ Keeps the prefill candidates that can exchange KV with the decode endpoint picke
 
 #### What it does
 
-Reads the decode endpoint that `disagg-profile-handler` publishes before it runs the prefill profile, and keeps the candidates whose key the decode endpoint accepts. When no decode endpoint was published, or no endpoint carries a key, it keeps every candidate. It never keeps an incompatible candidate, so an empty result means no candidate can take the KV.
+Reads the decode endpoint that `disagg-profile-handler` publishes before it runs the prefill profile, and keeps the candidates whose key the decode endpoint accepts and whose pair with it is not excluded. When no decode endpoint was published, or no endpoint carries a key and no pair is excluded, it keeps every candidate. It never keeps an incompatible candidate, so an empty result means no candidate can take the KV.
 
 #### Inputs consumed
 

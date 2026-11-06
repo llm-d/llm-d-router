@@ -23,12 +23,15 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
@@ -70,6 +73,17 @@ type KVCompatPDDeciderParameters struct {
 	// ApprovedPairs lists "prefillKey->decodeKey" pairs that may exchange KV although their keys
 	// differ. An approval applies in the listed direction only.
 	ApprovedPairs []string `json:"approvedPairs,omitempty"`
+	// FailureThreshold is the number of consecutive failed disaggregated requests between a
+	// prefill key and a decode endpoint that excludes the pair. 0 disables exclusion. Defaults to 3.
+	FailureThreshold *int `json:"failureThreshold,omitempty"`
+	// ExclusionDuration is how long an excluded pair stays excluded. Defaults to 5m.
+	ExclusionDuration *metav1.Duration `json:"exclusionDuration,omitempty"`
+	// FailureCodes are the response statuses counted as a failed request. Defaults to 500, 502
+	// and 503.
+	FailureCodes []int `json:"failureCodes,omitempty"`
+	// PrefillProfile names the scheduling profile that picks the prefill endpoint. Defaults to
+	// "prefill".
+	PrefillProfile string `json:"prefillProfile,omitempty"`
 }
 
 // KVCompatFilterParameters configures the kv-compat-filter.
@@ -151,18 +165,32 @@ type KVCompatPDDecider struct {
 	prefillKeys map[string]int
 	// keyed counts endpoints that carry a compatibility key.
 	keyed int
+
+	exclusion   kvCompatExclusionConfig
+	state       kvCompatExclusionState
+	spec        fwkdl.CrossReplicaSpec
+	pluginState *plugin.PluginState
+	handle      plugin.Handle
+	now         func() time.Time
 }
 
 type kvCompatEntry struct {
 	key     string
 	prefill bool
+	// id is the endpoint ID as a string, kept so a decision can look up shared state without
+	// building the string.
+	id string
 }
 
 var (
-	_ deciderPlugin           = &KVCompatPDDecider{}
-	_ prefixMatchInfoConsumer = &KVCompatPDDecider{}
-	_ fwkdl.EndpointExtractor = &KVCompatPDDecider{}
-	_ fwkdl.Registrant        = &KVCompatPDDecider{}
+	_ deciderPlugin                 = &KVCompatPDDecider{}
+	_ prefixMatchInfoConsumer       = &KVCompatPDDecider{}
+	_ fwkdl.EndpointExtractor       = &KVCompatPDDecider{}
+	_ fwkdl.Registrant              = &KVCompatPDDecider{}
+	_ fwkdl.CrossReplicaContributor = &KVCompatPDDecider{}
+	_ fwkrh.PreRequest              = &KVCompatPDDecider{}
+	_ fwkrh.ResponseHeaderProcessor = &KVCompatPDDecider{}
+	_ fwkrh.ResponseBodyProcessor   = &KVCompatPDDecider{}
 )
 
 // KVCompatPDDeciderConfigParser parses the parameters, so the loader can resolve the decider
@@ -206,6 +234,9 @@ func KVCompatPDDeciderPluginFactory(name string, rawParameters *json.Decoder, ha
 		return nil, err
 	}
 	d.typedName.Name = name
+	d.spec = d.buildSpec()
+	d.handle = handle
+	d.pluginState = plugin.NewPluginState(handle.Context())
 	return d, nil
 }
 
@@ -219,13 +250,23 @@ func NewKVCompatPDDecider(inner deciderPlugin, params KVCompatPDDeciderParameter
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", KVCompatPDDeciderPluginType, err)
 	}
-	return &KVCompatPDDecider{
+	exclusion, err := newKVCompatExclusionConfig(params)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", KVCompatPDDeciderPluginType, err)
+	}
+	d := &KVCompatPDDecider{
 		typedName:   plugin.TypedName{Type: KVCompatPDDeciderPluginType, Name: KVCompatPDDeciderPluginType},
 		decider:     inner,
 		rule:        rule,
 		endpoints:   map[fwkdl.ID]kvCompatEntry{},
 		prefillKeys: map[string]int{},
-	}, nil
+		exclusion:   exclusion,
+		state:       kvCompatExclusionState{pairs: map[string]map[string]*kvCompatPairHealth{}},
+		pluginState: plugin.NewPluginState(context.Background()),
+		now:         time.Now,
+	}
+	d.spec = d.buildSpec()
+	return d, nil
 }
 
 // TypedName returns the typed name of the plugin.
@@ -246,7 +287,7 @@ func (d *KVCompatPDDecider) disaggregate(ctx context.Context, request *schedulin
 	if endpoint == nil || endpoint.GetMetadata() == nil {
 		return false
 	}
-	if !d.hasCompatiblePrefill(endpoint.GetMetadata().Labels) {
+	if !d.hasCompatiblePrefill(ctx, endpoint.GetMetadata()) {
 		recordKVCompatDeclined(d.typedName.Name)
 		log.FromContext(ctx).V(logging.DEBUG).Info("kv-compat-pd-decider: no prefill endpoint can exchange KV with the decode endpoint",
 			"decode", endpoint.GetMetadata().ID)
@@ -256,30 +297,41 @@ func (d *KVCompatPDDecider) disaggregate(ctx context.Context, request *schedulin
 }
 
 // hasCompatiblePrefill reports whether a prefill-capable endpoint exists whose key the decode
-// endpoint accepts.
-func (d *KVCompatPDDecider) hasCompatiblePrefill(decodeLabels map[string]string) bool {
+// endpoint accepts and whose pair with the decode endpoint is not excluded.
+func (d *KVCompatPDDecider) hasCompatiblePrefill(ctx context.Context, decode *fwkdl.EndpointMetadata) bool {
+	excl := d.exclusionsFor(ctx, decode.ID)
+	nowMs := d.now().UnixMilli()
+	usable := func(key string) bool { return d.prefillKeys[key] > 0 && !excl.excluded(key, nowMs) }
+	decodeLabels := decode.Labels
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.keyed == 0 {
-		return true
+		if len(excl.Until) == 0 {
+			return true
+		}
+		for id, e := range d.endpoints {
+			if e.prefill && !excl.excluded(kvCompatEndpointPairPrefix+id.String(), nowMs) {
+				return true
+			}
+		}
+		return false
 	}
 	decodeKey := decodeLabels[d.rule.keyLabel]
 	if decodeKey == "" {
 		return false
 	}
-	if d.prefillKeys[decodeKey] > 0 {
+	if usable(decodeKey) {
 		return true
 	}
 	if d.rule.acceptPrefix != "" {
 		for label, value := range decodeLabels {
-			if value == "true" && strings.HasPrefix(label, d.rule.acceptPrefix) &&
-				d.prefillKeys[label[len(d.rule.acceptPrefix):]] > 0 {
+			if value == "true" && strings.HasPrefix(label, d.rule.acceptPrefix) && usable(label[len(d.rule.acceptPrefix):]) {
 				return true
 			}
 		}
 	}
 	for _, k := range d.rule.approved[decodeKey] {
-		if d.prefillKeys[k] > 0 {
+		if usable(k) {
 			return true
 		}
 	}
@@ -315,10 +367,11 @@ func (d *KVCompatPDDecider) Extract(_ context.Context, event fwkdl.EndpointEvent
 		delete(d.endpoints, md.ID)
 	}
 	if event.Type == fwkdl.EventDelete {
+		d.forgetEndpoint(md.ID)
 		return nil
 	}
 	_, prefill := prefillCapableRoles[md.Labels[bylabel.RoleLabel]]
-	entry := kvCompatEntry{key: md.Labels[d.rule.keyLabel], prefill: prefill}
+	entry := kvCompatEntry{key: md.Labels[d.rule.keyLabel], prefill: prefill, id: md.ID.String()}
 	d.endpoints[md.ID] = entry
 	if entry.key != "" {
 		d.keyed++
@@ -414,21 +467,30 @@ func (f *KVCompatFilter) Consumes() plugin.DataDependencies {
 	}
 }
 
-// Filter keeps the candidates that can hand KV to the decode endpoint.
-func (f *KVCompatFilter) Filter(_ context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
+// Filter keeps the candidates that can hand KV to the decode endpoint and whose pair with it is
+// not excluded.
+func (f *KVCompatFilter) Filter(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	if request == nil {
 		return endpoints
 	}
 	peer, ok := scheduling.ReadRequestAttribute[scheduling.Endpoint](request, PeerEndpointAttributeKey)
-	if !ok || peer == nil || peer.GetMetadata() == nil || !f.decider.keysInUse() {
+	if !ok || peer == nil || peer.GetMetadata() == nil {
 		return endpoints
 	}
+	excl := f.decider.exclusionsFor(ctx, peer.GetMetadata().ID)
+	if !f.decider.keysInUse() && len(excl.Until) == 0 {
+		return endpoints
+	}
+	nowMs := f.decider.now().UnixMilli()
 	decodeLabels := peer.GetMetadata().Labels
 	kept := make([]scheduling.Endpoint, 0, len(endpoints))
 	for _, ep := range endpoints {
-		if md := ep.GetMetadata(); md != nil && f.decider.compatible(md.Labels, decodeLabels) {
-			kept = append(kept, ep)
+		md := ep.GetMetadata()
+		if md == nil || !f.decider.compatible(md.Labels, decodeLabels) ||
+			excl.excluded(kvCompatPairOf(f.decider.rule, md), nowMs) {
+			continue
 		}
+		kept = append(kept, ep)
 	}
 	return kept
 }

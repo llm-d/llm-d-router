@@ -51,6 +51,19 @@ var (
 		},
 		[]string{"plugin_name"},
 	)
+
+	// LlmdKVCompatExclusionCount records prefill/decode pairs excluded by kv-compat-pd-decider
+	// after consecutive failed requests.
+	LlmdKVCompatExclusionCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "kv_compat_pair_exclusions_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Total number of prefill/decode pairs excluded after consecutive failed disaggregated requests",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_name"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
@@ -60,6 +73,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	for _, collector := range []prometheus.Collector{
 		LlmdDisaggDecisionCount,
 		LlmdKVCompatDeclinedCount,
+		LlmdKVCompatExclusionCount,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -107,4 +121,9 @@ func DisaggDecisionType(encodeUsed, prefillUsed bool) string {
 // recordKVCompatDeclined increments the counter of remote prefill declined for KV compatibility.
 func recordKVCompatDeclined(pluginName string) {
 	LlmdKVCompatDeclinedCount.WithLabelValues(pluginName).Inc()
+}
+
+// recordKVCompatExclusion increments the counter of excluded prefill/decode pairs.
+func recordKVCompatExclusion(pluginName string) {
+	LlmdKVCompatExclusionCount.WithLabelValues(pluginName).Inc()
 }
