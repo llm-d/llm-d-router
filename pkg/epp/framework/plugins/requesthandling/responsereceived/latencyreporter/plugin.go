@@ -31,10 +31,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 )
 
@@ -54,6 +56,7 @@ const (
 )
 
 var (
+	_ plugin.ConsumerPlugin                   = &Plugin{}
 	_ requesthandling.ResponseHeaderProcessor = &Plugin{}
 	_ requesthandling.ResponseBodyProcessor   = &Plugin{}
 )
@@ -138,6 +141,19 @@ func newPlugin(name string, params Parameters) (*Plugin, error) {
 
 // TypedName returns the type and name tuple of this plugin instance.
 func (p *Plugin) TypedName() plugin.TypedName { return p.typedName }
+
+// Consumes declares TokenizedPromptDataKey when promptBuckets is configured so the
+// framework instantiates the default tokenizer for the promptTokens fallback.
+func (p *Plugin) Consumes() plugin.DataDependencies {
+	if len(p.buckets) == 0 {
+		return plugin.DataDependencies{}
+	}
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			tokenizer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
+		},
+	}
+}
 
 // ResponseHeader records the response status for use at end of stream.
 func (p *Plugin) ResponseHeader(_ context.Context, request *scheduling.InferenceRequest, response *requesthandling.Response, _ *datalayer.EndpointMetadata) {
