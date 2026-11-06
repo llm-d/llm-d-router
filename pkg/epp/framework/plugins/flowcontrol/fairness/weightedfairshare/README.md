@@ -29,7 +29,7 @@ Both teams send more requests than the pool can serve, so requests queue in the 
 
 ## What it does
 
-1.  **Charging**: When a request completes (`ResponseBody`, at end of stream), its flow's virtual service advances by `cost / weight`, using the configured cost function over the server-reported prompt and completion token counts.
+1.  **Charging**: When a request completes (`ResponseBody`, at end of stream), its flow's virtual service advances by `cost / weight`, using the configured cost function.
 2.  **Picking**: `Pick` serves the active flow with the smallest virtual service. Among flows with equal virtual service, the one whose head request has waited longest wins. Head wait does not otherwise affect the ranking.
 3.  **No idle credit**: Each band keeps a minimum virtual service, set to the virtual service of the flow it last picked (the smallest among the flows competing at that pick). Before ranking, any candidate below it is raised to it. A flow that stayed backlogged is already at or ahead of it. A flow that was idle, or is new, rejoins level with the band instead of arriving with credit for the time it was absent, so it cannot take every dispatch in a burst on return. A flow that used capacity while others were idle is not penalized for it afterwards.
 4.  **Weight resolution**: The weight is looked up in the `flowWeights` table by the flow's fairness ID, falling back to `defaultFlowWeight` for any ID the table does not name. Requests carry no weight.
@@ -43,7 +43,7 @@ Both teams send more requests than the pool can serve, so requests queue in the 
 cost = costPerRequest + costPerInputToken * promptTokens + costPerOutputToken * completionTokens
 ```
 
-`completionTokens` is the model server's total of generated tokens, so it includes reasoning (thinking) tokens; they are charged at `costPerOutputToken` like any other output.
+`completionTokens` is the output token count used for charging, as described in [Inputs consumed](#inputs-consumed). Server-reported completion tokens include reasoning (thinking) tokens, which are charged at `costPerOutputToken` like any other output.
 
 The default `0 / 1 / 2` weights an output token at twice an input token. The coefficients select which resource the weights divide. With `0 / 0 / 1` cost is completion tokens alone, so weights 7:3 target a 70:30 split of output tokens and prompt processing is free. With `1 / 0 / 0` cost is a flat charge per request, so the same weights target a 70:30 split of requests regardless of their size. Choose the coefficients from the SLO being divided; see [Choosing the cost coefficients](#choosing-the-cost-coefficients).
 
@@ -57,7 +57,7 @@ The default `0 / 1 / 2` weights an output token at twice an input token. The coe
 *   **Minimum virtual service**: Reads and advances the minimum virtual service stored on the priority band, which a flow returning from idle is raised to.
 *   **Request headers**: `x-llm-d-inference-fairness-id` only, which supplies the flow id and falls back to a single default id when absent. No weight is read from the request.
 *   **Policy configuration**: the `flowWeights` table and `defaultFlowWeight`, which together resolve every flow's weight.
-*   **Response usage**: `PromptTokens` and `CompletionTokens` from the final response chunk. A streaming response carries usage only if the request set `stream_options.include_usage`, or the model server forces it (vLLM: `--enable-force-include-usage`). Without usage, only `costPerRequest` is charged, so under the default coefficients the flow's virtual service never advances.
+*   **Response usage**: `PromptTokens` and `CompletionTokens` from `Response.Usage` at stream completion. A streaming response carries usage only if the request set `stream_options.include_usage`, or the model server forces it (vLLM: `--enable-force-include-usage`). Positive `CompletionTokens` supplies the output token count. Otherwise, positive `Response.StreamedEvents` is used as an output-token estimate. This fallback also applies to streams cut short by a disconnect or error. If neither usage nor observed events are available, only `costPerRequest` is charged.
 
 ## Configuration
 
