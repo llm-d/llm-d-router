@@ -429,10 +429,17 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 
 	case audioSpeechAPI:
 		var speechRequest struct {
-			Input        *string `json:"input"`
-			Instructions string  `json:"instructions,omitempty"`
-			RefText      string  `json:"ref_text,omitempty"`
-			CacheSalt    string  `json:"cache_salt,omitempty"`
+			Input            *string         `json:"input"`
+			Instructions     string          `json:"instructions,omitempty"`
+			RefText          string          `json:"ref_text,omitempty"`
+			CacheSalt        string          `json:"cache_salt,omitempty"`
+			Voice            string          `json:"voice,omitempty"`
+			Speaker          string          `json:"speaker,omitempty"`
+			Language         string          `json:"language,omitempty"`
+			TaskType         string          `json:"task_type,omitempty"`
+			RefAudio         json.RawMessage `json:"ref_audio,omitempty"`
+			SpeakerEmbedding json.RawMessage `json:"speaker_embedding,omitempty"`
+			XVectorOnlyMode  *bool           `json:"x_vector_only_mode,omitempty"`
 		}
 		if err := json.Unmarshal(rawBody, &speechRequest); err != nil {
 			return nil, requestBodyDecodeError(err, errors.New("invalid text to speech request: input, instructions, ref_text, and cache_salt must be strings"))
@@ -440,12 +447,27 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		if speechRequest.Input == nil {
 			return nil, errors.New("invalid text to speech request: must have string input field")
 		}
+		// The engine treats an explicit JSON null and an absent field as the
+		// same None conditioning; keep the raw fields that way too.
+		refAudio := rawFieldOrNull(speechRequest.RefAudio)
+		speakerEmbedding := rawFieldOrNull(speechRequest.SpeakerEmbedding)
+		// The engine accepts "speaker" as an alias of "voice"; one field.
+		voice := speechRequest.Voice
+		if voice == "" {
+			voice = speechRequest.Speaker
+		}
 		return &request.InferenceRequestBody{
 			TextToSpeech: &request.TextToSpeechRequest{
-				Input:        *speechRequest.Input,
-				Instructions: speechRequest.Instructions,
-				RefText:      speechRequest.RefText,
-				CacheSalt:    speechRequest.CacheSalt,
+				Input:            *speechRequest.Input,
+				Instructions:     speechRequest.Instructions,
+				RefText:          speechRequest.RefText,
+				CacheSalt:        speechRequest.CacheSalt,
+				Voice:            voice,
+				Language:         speechRequest.Language,
+				TaskType:         speechRequest.TaskType,
+				RefAudio:         refAudio,
+				SpeakerEmbedding: speakerEmbedding,
+				XVectorOnlyMode:  speechRequest.XVectorOnlyMode,
 			},
 		}, nil
 
@@ -695,6 +717,15 @@ func validateChatCompletionsMessages(messages []request.Message) error {
 		return errors.New("chat-completions request must have at least one message")
 	}
 	return nil
+}
+
+// rawFieldOrNull returns nil for a raw JSON field holding a literal null, so
+// it salts and fingerprints the same as an absent field.
+func rawFieldOrNull(raw json.RawMessage) json.RawMessage {
+	if string(raw) == "null" {
+		return nil
+	}
+	return raw
 }
 
 // toInt coerces a JSON-decoded number-ish value into an int. JSON numbers

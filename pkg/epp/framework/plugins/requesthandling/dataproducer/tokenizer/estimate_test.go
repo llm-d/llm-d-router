@@ -33,6 +33,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -1475,4 +1477,78 @@ func TestEstimateBackend_ChatToolCallsAffectPrefix(t *testing.T) {
 
 	long := chatEstimate(t, turn("write_file", strings.Repeat("x", 4000)))
 	assert.Greater(t, len(long), len(noCall)+900, "tool call arguments must count toward the estimate")
+}
+
+// speechPrefixHashes estimates a speech body and returns its prefix block
+// hashes, applying the cache salt the way Plugin.Produce does.
+func speechPrefixHashes(t *testing.T, speech *fwkrequest.TextToSpeechRequest) [][]prefixhash.BlockHash {
+	t.Helper()
+	body := &fwkrequest.InferenceRequestBody{TextToSpeech: speech}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	body.TokenizedRequest = tp
+	tp.CacheSalt = CacheSaltFromBody(body)
+	return prefixhash.GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+		TargetModel: "qwen3-tts",
+		Body:        body,
+	}, 16, 2048)
+}
+
+// The engine salts a speech request's prefix cache on its full conditioning,
+// so the router's fingerprint must separate requests that differ only in
+// conditioning: the estimate carries the spoken text alone, and without the
+// salt two voices over the same text would fingerprint identically and the
+// prefix-cache-affinity-filter would stick them to an endpoint holding no
+// shared prefix.
+func TestSpeechPrefixFingerprint_SeparatesConditioning(t *testing.T) {
+	base := func() *fwkrequest.TextToSpeechRequest {
+		return &fwkrequest.TextToSpeechRequest{Input: "hello there", Instructions: "cheerfully"}
+	}
+
+	vivian := speechPrefixHashes(t, base())
+	ryan := base()
+	ryan.Voice = "ryan"
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, ryan), "a different voice must change the fingerprint")
+
+	french := base()
+	french.Language = "fr"
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, french), "a different language must change the fingerprint")
+
+	clone := base()
+	clone.RefAudio = json.RawMessage(`"https://example.com/voice.wav"`)
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, clone), "reference-audio conditioning must change the fingerprint")
+
+	assert.Equal(t, vivian, speechPrefixHashes(t, base()), "the same conditioning must fingerprint stably")
+
+	salted := base()
+	salted.CacheSalt = "tenant-a"
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, salted), "a client salt must compose into the fingerprint")
+}
+
+// The conditioning salt composes with a client-supplied one rather than
+// replacing it, mirroring the engine's composition.
+func TestSpeechCacheSalt_ComposesClientSalt(t *testing.T) {
+	base := &fwkrequest.TextToSpeechRequest{Input: "hello", Voice: "vivian"}
+	salted := *base
+	salted.CacheSalt = "tenant-a"
+
+	derived := CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: base})
+	composed := CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: &salted})
+	assert.Equal(t, "tenant-a:"+derived, composed)
+	assert.NotEqual(t, derived, composed)
+}
+
+// Conditioning changes the fingerprint but not the input weight: the salt
+// seeds block hashes only, so the token estimate stays the spoken text.
+func TestSpeechPrefixFingerprint_ConditioningLeavesWeightUnchanged(t *testing.T) {
+	plain := &fwkrequest.TextToSpeechRequest{Input: "hello there"}
+	voiced := &fwkrequest.TextToSpeechRequest{Input: "hello there", Voice: "ryan", Language: "en", TaskType: "CustomVoice"}
+
+	plainTP, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{TextToSpeech: plain})
+	require.NoError(t, err)
+	voicedTP, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{TextToSpeech: voiced})
+	require.NoError(t, err)
+
+	assert.Equal(t, plainTP.Prompts[0].TokenIDs, voicedTP.Prompts[0].TokenIDs)
+	assert.Equal(t, plainTP.TokenCount(), voicedTP.TokenCount())
 }

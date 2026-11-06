@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -207,10 +209,50 @@ func CacheSaltFromBody(body *fwkrequest.InferenceRequestBody) string {
 	case body.Generate != nil:
 		return body.Generate.CacheSalt
 	case body.TextToSpeech != nil:
-		return body.TextToSpeech.CacheSalt
+		return speechCacheSalt(body.TextToSpeech)
 	default:
 		return ""
 	}
+}
+
+// speechCacheSalt derives the prefix-cache salt for a speech request from its
+// conditioning, mirroring the engine's conditioning salt. The talker's prompt
+// token IDs are content-blind placeholders and the router's estimate carries
+// only the spoken text, so without a salt two requests differing only in
+// voice, language, or reference audio fingerprint identically while the
+// engine, which salts on the full conditioning, holds no shared prefix for
+// them. A client-supplied salt composes with the derived one, the way the
+// engine composes them. Server-side conditioning the request cannot carry,
+// such as a re-uploaded voice's creation time, stays outside the router's
+// fingerprint.
+func speechCacheSalt(tts *fwkrequest.TextToSpeechRequest) string {
+	d := xxhash.New()
+	for _, part := range []string{
+		tts.Input,
+		tts.Instructions,
+		tts.RefText,
+		tts.Voice,
+		tts.Language,
+		tts.TaskType,
+	} {
+		_, _ = d.WriteString(part)
+		_, _ = d.WriteString("\x00")
+	}
+	for _, raw := range [][]byte{tts.RefAudio, tts.SpeakerEmbedding} {
+		_, _ = d.Write(raw)
+		_, _ = d.WriteString("\x00")
+	}
+	xVector := ""
+	if tts.XVectorOnlyMode != nil {
+		xVector = strconv.FormatBool(*tts.XVectorOnlyMode)
+	}
+	_, _ = d.WriteString(xVector)
+	_, _ = d.WriteString("\x00")
+	derived := strconv.FormatUint(d.Sum64(), 16)
+	if tts.CacheSalt == "" {
+		return derived
+	}
+	return tts.CacheSalt + ":" + derived
 }
 
 // renderCompletions delegates every prompt shape, including token IDs, to vLLM.
