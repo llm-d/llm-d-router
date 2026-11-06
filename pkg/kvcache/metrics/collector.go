@@ -120,6 +120,24 @@ var (
 			"Total number of KV-cache removal events skipped for groups excluded from prefix indexing",
 			compbasemetrics.ALPHA),
 	}, []string{cacheKindLabel, reasonLabel})
+	KVEventStoresPending = prometheus.NewGauge(prometheus.GaugeOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_pending_stores",
+		Help: metricsutil.HelpMsgWithStability(
+			"Number of block store events waiting for a parent mapping",
+			compbasemetrics.ALPHA),
+	})
+	KVEventStoresPendingEnqueued = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_pending_stores_enqueued_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of block store events queued while waiting for a parent mapping",
+			compbasemetrics.ALPHA),
+	})
+	KVEventStoresPendingReplayed = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_pending_stores_replayed_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of pending block store events replayed after their parent mapping appeared",
+			compbasemetrics.ALPHA),
+	})
 
 	// SubscriberActive tracks the number of ZMQ subscribers currently managed by
 	// the SubscriberManager. A subscriber is counted from creation until it is
@@ -176,6 +194,8 @@ func Collectors() []prometheus.Collector {
 		LookupRequests, LookupHits, LookupLatency, MaxPodHitCount,
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
+		KVEventStoresPending, KVEventStoresPendingEnqueued,
+		KVEventStoresPendingReplayed,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
 		PoolQueueDepth, PoolCapacity,
 	}
