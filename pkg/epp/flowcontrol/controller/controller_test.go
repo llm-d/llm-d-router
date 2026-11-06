@@ -317,7 +317,6 @@ func newTestRequest(key flowcontrol.FlowKey) *fwkfcmocks.MockFlowControlRequest 
 
 func TestCreateRequestContextResolvesTTL(t *testing.T) {
 	t.Parallel()
-	enqueueTime := time.Now()
 
 	testCases := []struct {
 		name       string
@@ -345,7 +344,7 @@ func TestCreateRequestContextResolvesTTL(t *testing.T) {
 			req.InitialEffectiveTTLV = tc.requestTTL
 
 			_, cancel, effectiveTTL := fc.createRequestContext(
-				context.Background(), req, tc.bandTTL, tc.bandSet, enqueueTime,
+				context.Background(), req, tc.bandTTL, tc.bandSet,
 			)
 			defer cancel()
 			assert.Equal(t, tc.wantTTL, effectiveTTL)
@@ -361,14 +360,15 @@ func TestCreateRequestContextPreservesEarlierParentDeadline(t *testing.T) {
 	defer parentCancel()
 	fc := &FlowController{config: &Config{DefaultRequestTTL: time.Minute}}
 
-	ctx, cancel, effectiveTTL := fc.createRequestContext(
-		parent, newTestRequest(defaultFlowKey), 5*time.Second, true, enqueueTime,
+	ctx, cancel, saturationTTL := fc.createRequestContext(
+		parent, newTestRequest(defaultFlowKey), 5*time.Second, true,
 	)
 	defer cancel()
 	deadline, ok := ctx.Deadline()
 	require.True(t, ok)
-	assert.Equal(t, parentDeadline, deadline)
-	assert.Equal(t, time.Second, effectiveTTL)
+	assert.Equal(t, parentDeadline, deadline, "derived context must preserve the caller-supplied deadline")
+	assert.Equal(t, 5*time.Second, saturationTTL,
+		"queue-wait budget must not be clamped to caller deadline so the sweep does not misclassify caller abandonment as TTL expiry")
 }
 
 // --- Test Cases ---
@@ -855,9 +855,8 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 
 		// Validates the asynchronous finalization path due to TTL expiry.
 		// Note: This relies on real time passing, as context.WithDeadline timers cannot be controlled by FakeClock.
-		t.Run("OnReqCtxTimeoutAfterDistribution", func(t *testing.T) {
+		t.Run("OnCallerDeadlineExpiredAfterDistribution", func(t *testing.T) {
 			t.Parallel()
-			// Configure a short TTL to keep the test reasonably fast.
 
 			itemSubmitted := make(chan *internal.FlowItem, 1)
 
@@ -870,15 +869,10 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				},
 			}
 
-			const requestTTL = 50 * time.Millisecond
-			// Both budgets are set so a backstop is derived at all, and it spans the longer of the two: leaving the
-			// no-endpoint budget unbounded would leave this request bounded only by the mock processor, which never
-			// finalizes it. The backstop's margin over that budget scales with the sweep interval, so a short interval
-			// keeps the deadline inside the test's window. No sweep runs behind a mock processor, so the context is
-			// still the only finalizer.
+			const callerDeadline = 50 * time.Millisecond
 			h := newUnitHarness(t.Context(), t, &Config{
-				DefaultRequestTTL:     requestTTL,
-				NoEndpointRequestTTL:  requestTTL,
+				DefaultRequestTTL:     time.Minute,
+				NoEndpointRequestTTL:  time.Minute,
 				ExpiryCleanupInterval: 10 * time.Millisecond,
 			}, nil, processor, withHarnessClock(clock.RealClock{}))
 
@@ -890,15 +884,15 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			}
 
 			req := newTestRequest(defaultFlowKey)
-			// Use a context for the call itself that won't time out independently.
-			enqueueCtx, enqueueCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			// A caller-supplied deadline that fires while the request is queued.
+			enqueueCtx, enqueueCancel := context.WithTimeout(context.Background(), callerDeadline)
 			defer enqueueCancel()
 
 			var outcome types.QueueOutcome
 			var err error
 			done := make(chan struct{})
 
-			startTime := time.Now() // Capture start time to validate duration.
+			startTime := time.Now()
 			go func() {
 				outcome, err = h.fc.EnqueueAndWait(enqueueCtx, req)
 				close(done)
@@ -912,28 +906,26 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 				t.Fatal("timed out waiting for item to be submitted to the processor")
 			}
 
-			// 2.Wait for the TTL to expire (Real time). We do NOT call Step().
-			// Wait for EnqueueAndWait to return due to the TTL expiry.
+			// 2. Wait for caller deadline to expire.
 			select {
 			case <-done:
-				// Success. Now validate that enough time actually passed.
 				duration := time.Since(startTime)
-				assert.GreaterOrEqual(t, duration, requestTTL-30*time.Millisecond, // tolerance for CI environments
-					"EnqueueAndWait returned faster than the TTL allows, indicating the timer did not function correctly")
+				assert.GreaterOrEqual(t, duration, callerDeadline-30*time.Millisecond,
+					"EnqueueAndWait returned faster than caller deadline allows")
 			case <-time.After(1 * time.Second):
-				t.Fatal("timed out waiting for EnqueueAndWait to return after TTL expiry")
+				t.Fatal("timed out waiting for EnqueueAndWait to return after caller deadline expiry")
 			}
 
-			// 4. Assertions for EnqueueAndWait's return values.
-			require.Error(t, err, "EnqueueAndWait should return an error when TTL expires post-distribution")
+			// 3. Caller-supplied context deadline expiry while queued is reclassified as EvictedContextCancelled.
+			require.Error(t, err, "EnqueueAndWait should return an error when caller deadline expires post-distribution")
 			assert.ErrorIs(t, err, types.ErrEvicted, "error should wrap ErrEvicted")
-			assert.ErrorIs(t, err, types.ErrTTLExpired, "error should wrap the underlying cause (types.ErrTTLExpired)")
-			assert.Equal(t, types.QueueOutcomeEvictedTTL, outcome, "outcome should be EvictedTTL")
+			assert.ErrorIs(t, err, types.ErrContextCancelled, "error should wrap ErrContextCancelled")
+			assert.Equal(t, types.QueueOutcomeEvictedContextCancelled, outcome, "outcome should be EvictedContextCancelled")
 
-			// 5. Assert FlowItem final state.
+			// 4. Assert FlowItem final state.
 			finalState := item.FinalState()
 			require.NotNil(t, finalState, "Item should have been finalized asynchronously by the controller")
-			assert.Equal(t, types.QueueOutcomeEvictedTTL, finalState.Outcome,
+			assert.Equal(t, types.QueueOutcomeEvictedContextCancelled, finalState.Outcome,
 				"Item's internal outcome must match the returned outcome")
 		})
 

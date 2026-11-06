@@ -121,7 +121,7 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 
 	return &realFlowControlHarness{
 		cancel: cancel,
-		ac:     NewFlowControlAdmissionController(fc, "test-pool", candidates),
+		ac:     NewFlowControlAdmissionController(fc, "test-pool"),
 		reg:    reg,
 	}
 }
@@ -303,6 +303,23 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
 			time.Second, time.Millisecond, "request should be queued before cancelling")
 		admitCancel()
+
+		err := waitAdmit(t, result)
+		requireDropped(t, err, errcommon.ServiceUnavailable, errcommon.RequestDroppedReasonContextCancelled)
+	})
+
+	t.Run("evicted_caller_deadline_returns_503_context_cancelled", func(t *testing.T) {
+		t.Parallel()
+		// A caller-supplied timeout expiring while queued is reclassified as caller abandonment
+		// (503 ContextCancelled), distinguishing it from router queue-wait TTL expiry (429).
+		h := newRealFlowControlHarness(t, realFlowControlOpts{
+			saturation: 1.0,
+			candidates: nonEmptyEndpoints(),
+		})
+
+		admitCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		result := admitAsync(admitCtx, h.ac, "deadline-req")
 
 		err := waitAdmit(t, result)
 		requireDropped(t, err, errcommon.ServiceUnavailable, errcommon.RequestDroppedReasonContextCancelled)
