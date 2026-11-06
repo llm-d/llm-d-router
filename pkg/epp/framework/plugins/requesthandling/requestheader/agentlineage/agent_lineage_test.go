@@ -29,6 +29,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
 // newPlugin builds a Plugin from raw JSON parameters; "" means no parameters.
@@ -532,15 +533,144 @@ func TestRequestHeader_WalkHopCap(t *testing.T) {
 }
 
 // TestRequestHeader_SelfLinkNotRecorded pins that a parent header naming the
-// request's own session is dropped rather than stored: it carries no lineage
-// and only consumes a map entry.
+// request's own session is stored parentless rather than linked: it carries
+// no lineage.
 func TestRequestHeader_SelfLinkNotRecorded(t *testing.T) {
 	p := newPlugin(t, "")
 	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S", ParentSessionHeader: "S"}, "S")
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.parents) != 0 {
-		t.Fatalf("parent map holds %d entries after a self-link, want 0", len(p.parents))
+	record, ok := p.nodes[lineageKey{tenant: "", session: "S"}]
+	if !ok {
+		t.Fatal("node for S not recorded")
+	}
+	if record.parent != "" {
+		t.Fatalf("node parent = %q, want empty: a self-link carries no lineage", record.parent)
+	}
+}
+
+// sendBand drives one request carrying a seeded priority and an optional
+// explicit objective header, returning the resolved band. The seeded
+// priority stands in for the objective the Director resolved before request
+// header processors run; the objective header's presence marks an explicit
+// objective, whatever priority it selects.
+func sendBand(t *testing.T, p *Plugin, fairnessID, session string, seeded int, explicit bool, extra map[string]string) (int, bool) {
+	t.Helper()
+	headers := map[string]string{OpenCodeSessionHeader: session}
+	for k, v := range extra {
+		headers[k] = v
+	}
+	if explicit {
+		headers[metadata.ObjectiveKey] = "explicit-objective"
+	}
+	req := &scheduling.InferenceRequest{
+		Headers:    headers,
+		FairnessID: fairnessID,
+		Objectives: scheduling.RequestObjectives{Priority: seeded},
+	}
+	if err := p.RequestHeader(context.Background(), req); err != nil {
+		t.Fatalf("RequestHeader: %v", err)
+	}
+	return scheduling.ReadRequestAttribute[int](req, ResolvedBandKey)
+}
+
+func wantBand(t *testing.T, p *Plugin, fairnessID, session string, seeded int, explicit bool, extra map[string]string, want int) {
+	t.Helper()
+	got, ok := sendBand(t, p, fairnessID, session, seeded, explicit, extra)
+	if !ok {
+		t.Fatalf("session %s: resolved-band attribute not found; want %d", session, want)
+	}
+	if got != want {
+		t.Fatalf("session %s: resolved band = %d, want %d", session, got, want)
+	}
+}
+
+// TestRequestHeader_BandResolution pins the design's band resolution table:
+// a parented child never runs above its parent, lowers only through an
+// explicit objective, and a declared kind is not a band input.
+func TestRequestHeader_BandResolution(t *testing.T) {
+	p := newPlugin(t, "")
+
+	// The root arrives at priority 5 and records its band.
+	wantBand(t, p, "", "R", 5, false, nil, 5)
+
+	// A parented child without an explicit objective inherits the parent's band.
+	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+
+	// An explicit objective opts below the parent.
+	wantBand(t, p, "", "S2", 3, true, map[string]string{ParentSessionHeader: "R"}, 3)
+
+	// An explicit objective never runs above the parent.
+	wantBand(t, p, "", "S3", 7, true, map[string]string{ParentSessionHeader: "R"}, 5)
+
+	// A declared kind is not a band input: a background child of an
+	// interactive parent keeps the parent's band.
+	wantBand(t, p, "", "S4", 0, false, map[string]string{
+		ParentSessionHeader: "R",
+		"x-workload-kind":   "background",
+	}, 5)
+
+	// A stray child whose parent never arrived falls back to its own band.
+	wantBand(t, p, "", "S9", 2, false, map[string]string{ParentSessionHeader: "UNKNOWN"}, 2)
+
+	// A parentless request keeps its own band.
+	wantBand(t, p, "", "chat", 1, false, nil, 1)
+
+	// A conflicting re-declaration keeps the recorded parent's band.
+	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "EVIL"}, 5)
+
+	// A child of a sheddable-band parent inherits the sheddable band.
+	wantBand(t, p, "", "P2", -1, false, nil, -1)
+	wantBand(t, p, "", "S5", 0, false, map[string]string{ParentSessionHeader: "P2"}, -1)
+}
+
+// TestRequestHeader_BandChainInheritance pins that chains inherit through
+// resolved bands: the grandchild receives the band its parent resolved, not
+// the seed its parent arrived with.
+func TestRequestHeader_BandChainInheritance(t *testing.T) {
+	p := newPlugin(t, "")
+
+	wantBand(t, p, "", "R", 5, false, nil, 5)
+	// S1 seeds at 0 and resolves to 5 by inheritance.
+	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	// SS1 names S1 and inherits S1's resolved band, not its 0 seed.
+	wantBand(t, p, "", "SS1", 0, false, map[string]string{ParentSessionHeader: "S1"}, 5)
+}
+
+// TestRequestHeader_BandExpiry pins that a child falls back to its own band
+// once the parent's node has expired.
+func TestRequestHeader_BandExpiry(t *testing.T) {
+	p := newPlugin(t, `{"parentEntryTtlSeconds": 10}`)
+	now, advance := newClock()
+	p.now = now
+
+	wantBand(t, p, "", "R", 5, false, nil, 5)
+	advance(11 * time.Second)
+	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 0)
+}
+
+// TestRequestHeader_BandTenantScoping pins that a parent's band never leaks
+// across tenant scopes.
+func TestRequestHeader_BandTenantScoping(t *testing.T) {
+	p := newPlugin(t, "")
+
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+	wantBand(t, p, "tenant-b", "S1", 2, false, map[string]string{ParentSessionHeader: "R"}, 2)
+}
+
+// TestRequestHeader_BandWithoutSession pins that a request carrying no
+// session publishes no resolved band: the Director keeps its own priority.
+func TestRequestHeader_BandWithoutSession(t *testing.T) {
+	p := newPlugin(t, "")
+	req := &scheduling.InferenceRequest{
+		Headers:    map[string]string{"x-unrelated": "v"},
+		Objectives: scheduling.RequestObjectives{Priority: 3},
+	}
+	if err := p.RequestHeader(context.Background(), req); err != nil {
+		t.Fatalf("RequestHeader: %v", err)
+	}
+	if _, ok := scheduling.ReadRequestAttribute[int](req, ResolvedBandKey); ok {
+		t.Fatal("resolved-band attribute found for a session-less request, want absent")
 	}
 }
 
@@ -637,6 +767,13 @@ func TestProducesDerivedRoot(t *testing.T) {
 	}
 	if _, ok := produced.(string); !ok {
 		t.Fatalf("Produces()[%s] has type %T, want string", DerivedRootKey, produced)
+	}
+	band, ok := p.Produces()[ResolvedBandKey]
+	if !ok {
+		t.Fatalf("Produces() does not declare %s", ResolvedBandKey)
+	}
+	if _, ok := band.(int); !ok {
+		t.Fatalf("Produces()[%s] has type %T, want int", ResolvedBandKey, band)
 	}
 }
 
