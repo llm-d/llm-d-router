@@ -32,9 +32,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -190,6 +194,63 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 			if tt.wantFailed != "" {
 				assert.Contains(t, line, `"failedStage"="`+tt.wantFailed+`"`)
 			}
+			assert.NotContains(t, line, `"grpcStatus"=`, "a JSON response has no grpc-status")
 		})
 	}
+}
+
+// A gRPC error is an HTTP 200 with a grpc-status, so the summary line and the
+// request span must report the grpc-status to show the failure.
+func TestRequestFinishedLineReportsGRPCStatus(t *testing.T) {
+	spans := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
+	prevProvider := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevProvider)
+		_ = provider.Shutdown(context.Background())
+	})
+
+	var mu sync.Mutex
+	var logged []string
+	logger := funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: 0})
+
+	decoderURL, err := url.Parse("http://127.0.0.1:1")
+	require.NoError(t, err)
+	s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: constants.KVConnectorSGLang})
+	s.logger = logger
+	s.allowlistValidator = &AllowlistValidator{}
+
+	// A compressed frame is rejected with Unimplemented before any upstream call.
+	req := httptest.NewRequest(http.MethodPost, sglangapiv1.SglangService_Generate_FullMethodName, strings.NewReader("\x01\x00\x00\x00\x00"))
+	req.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+	req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+	rec := httptest.NewRecorder()
+	s.createRoutes().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "12", rec.Header().Get(grpcframe.HeaderStatus))
+
+	mu.Lock()
+	var line string
+	for _, l := range logged {
+		if strings.Contains(l, `"msg"="request finished"`) {
+			line = l
+		}
+	}
+	mu.Unlock()
+	assert.Contains(t, line, `"status"=200`)
+	assert.Contains(t, line, `"grpcStatus"="12"`)
+
+	var found bool
+	for _, span := range spans.Ended() {
+		if span.Name() == "forward_request" {
+			found = true
+			assert.Equal(t, otelcodes.Error, span.Status().Code)
+		}
+	}
+	assert.True(t, found, "forward_request span not recorded")
 }

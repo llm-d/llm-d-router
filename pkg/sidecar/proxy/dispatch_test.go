@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"k8s.io/utils/set"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 )
@@ -313,6 +314,42 @@ func TestServer_createRoutes(t *testing.T) {
 			})
 		}
 	}
+
+	for _, suffix := range []string{"", "/"} {
+		t.Run("sglang_grpc_generate"+suffix, func(t *testing.T) {
+			s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: constants.KVConnectorSGLang})
+			s.allowlistValidator = &AllowlistValidator{}
+			s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, hostPort string, _ p2pRouting, gotAPI reqcommon.APIType) {
+				if gotAPI != reqcommon.APITypeSGLangGenerate || hostPort != "127.0.0.1:9000" {
+					t.Errorf("connector received API %v and host %q, want %v and 127.0.0.1:9000", gotAPI, hostPort, reqcommon.APITypeSGLangGenerate)
+				}
+				if r.URL.Path != sglangapiv1.SglangService_Generate_FullMethodName || r.URL.RawPath != "" {
+					t.Errorf("connector received URL %v, want %s", r.URL, sglangapiv1.SglangService_Generate_FullMethodName)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, sglangapiv1.SglangService_Generate_FullMethodName+suffix, strings.NewReader(""))
+			req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+			recorder := httptest.NewRecorder()
+			s.createRoutes().ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusNoContent {
+				t.Errorf("expected prefill connector, got status %d: %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+
+	t.Run("sglang_grpc_generate_encoded", func(t *testing.T) {
+		s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: constants.KVConnectorSGLang})
+		s.allowlistValidator = &AllowlistValidator{}
+		req := httptest.NewRequest(http.MethodPost, "/sglang.api.v1.SglangService%2FGenerate", strings.NewReader(""))
+		recorder := httptest.NewRecorder()
+		s.createRoutes().ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusTemporaryRedirect || recorder.Header().Get("Location") != sglangapiv1.SglangService_Generate_FullMethodName {
+			t.Errorf("got status %d location %q, want 307 to %s", recorder.Code, recorder.Header().Get("Location"), sglangapiv1.SglangService_Generate_FullMethodName)
+		}
+	})
 }
 
 func TestServer_createRoutesResponsesRejectsStatefulFields(t *testing.T) {
@@ -472,6 +509,11 @@ func TestServer_createRoutesDocumentedPaths(t *testing.T) {
 		{http.MethodPost, "/v1/messages%2F", http.StatusTemporaryRedirect, "/v1/messages"},
 		{http.MethodPost, "/v1/respons%65s", http.StatusTemporaryRedirect, "/v1/responses"},
 		{http.MethodPost, "/v1/chat/completion%73", http.StatusTemporaryRedirect, "/v1/chat/completions"},
+		// Only kv-connector=sglang serves gRPC Generate. Other connectors
+		// forward it to the decoder unchanged.
+		{http.MethodPost, sglangapiv1.SglangService_Generate_FullMethodName, http.StatusAccepted, ""},
+		{http.MethodPost, "/sglang.api.v1.SglangService%2FGenerate", http.StatusAccepted, ""},
+		{http.MethodPost, sglangapiv1.SglangService_HealthCheck_FullMethodName, http.StatusAccepted, ""},
 		{http.MethodGet, "/v1%2Fresponses", http.StatusAccepted, ""},
 		{http.MethodOptions, "/v1%2Fchat%2Fcompletions", http.StatusAccepted, ""},
 		{http.MethodGet, "/health", http.StatusOK, ""},
