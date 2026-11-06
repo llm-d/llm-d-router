@@ -447,6 +447,7 @@ func NewImmediateErrorResponse(code envoyTypePb.StatusCode, body string, headers
 var unsetRoutingHeaders = routing.AllHeaderNames(
 	routing.PrefillEndpointHeader,
 	routing.KVCachePrefillHeader,
+	routing.PrefillDataParallelRankHeader,
 	routing.KVCacheSourceHeader,
 	routing.EncoderEndpointsHeader,
 	routing.DataParallelEndpointHeader,
