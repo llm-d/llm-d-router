@@ -229,7 +229,10 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 // such as tools[].function.parameters that chat templates render into the
 // prompt verbatim.
 var inspectedRequestFields = map[string]struct{}{
-	reqcommon.FieldKVTransferParams:     {},
+	// kv_transfer_params is deliberately NOT decoded as Go values: the only
+	// reader, clientPromptTokenIDs, handles the raw json.RawMessage form, and
+	// decoding it would materialize a long prompt_token_ids array (one boxed
+	// value per token) only to serialize it right back.
 	reqcommon.FieldECTransferParams:     {},
 	reqcommon.FieldMaxTokens:            {},
 	reqcommon.FieldMaxCompletionTokens:  {},
