@@ -37,10 +37,11 @@ type continuationState struct {
 	prompt    string
 	server    server
 	blockSize int
-	// promptIndexed is closed once PreRequest has inserted the request's prompt
+	// promptIndexed receives once PreRequest has inserted the request's prompt
 	// keys. At LRU capacity, a later prompt insert would evict continuation
-	// blocks with the prompt's zero-padded last block.
-	promptIndexed <-chan struct{}
+	// blocks with the prompt's zero-padded last block. The value is the prompt's
+	// recent-window entry for the endpoint, or nil when none was recorded.
+	promptIndexed chan []blockHash
 }
 
 func (c *continuationState) Clone() plugin.StateData {
@@ -85,25 +86,28 @@ func continuationPrompt(request *fwksched.InferenceRequest) (string, bool) {
 }
 
 // trackContinuation records continuation state for an eligible request, or
-// releases the request's plugin state otherwise. For an eligible request it
-// returns the channel PreRequest closes after inserting the prompt keys.
-func (p *dataProducer) trackContinuation(ctx context.Context, request *fwksched.InferenceRequest, target server, blockSize int) chan struct{} {
+// releases the request's plugin state otherwise. A nil target is a decode
+// endpoint that is not recorded. For an eligible request it returns the channel
+// PreRequest sends the prompt's recent-window entry on after inserting the
+// prompt keys.
+func (p *dataProducer) trackContinuation(ctx context.Context, request *fwksched.InferenceRequest, target *server, blockSize int) chan []blockHash {
 	prompt, ok := continuationPrompt(request)
-	if !ok || !p.estimateTokens.Load() {
+	if !p.config.IndexCompletions || target == nil || !ok || !p.estimateTokens.Load() {
 		p.pluginState.Delete(request.RequestID)
 		return nil
 	}
-	promptIndexed := make(chan struct{})
-	p.pluginState.Write(request.RequestID, continuationStateKey, &continuationState{prompt: prompt, server: target, blockSize: blockSize, promptIndexed: promptIndexed})
+	promptIndexed := make(chan []blockHash, 1)
+	p.pluginState.Write(request.RequestID, continuationStateKey, &continuationState{prompt: prompt, server: *target, blockSize: blockSize, promptIndexed: promptIndexed})
 	p.pluginState.BindLiveness(ctx, request.RequestID)
 	return promptIndexed
 }
 
 // ResponseBody indexes the prompt followed by the generated text for the
-// endpoint that served the request. The prefill endpoint of a disaggregated
+// endpoint that served the request, and replaces the prompt's entry in the
+// endpoint's recent window with it. The prefill endpoint of a disaggregated
 // request is not credited.
 func (p *dataProducer) ResponseBody(_ context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
-	if request == nil || response == nil || !response.EndOfStream {
+	if !p.config.IndexCompletions || request == nil || response == nil || !response.EndOfStream {
 		return
 	}
 	state, err := plugin.ReadPluginStateKey[*continuationState](p.pluginState, request.RequestID, continuationStateKey)
@@ -124,10 +128,15 @@ func (p *dataProducer) ResponseBody(_ context.Context, request *fwksched.Inferen
 		return
 	}
 	p.wg.Go(func() {
-		<-state.promptIndexed
+		promptEntry := <-state.promptIndexed
 		p.indexerInst.Add(hashes[0], state.server)
-		if p.syncerActive() {
+		if !p.syncerActive() {
+			return
+		}
+		if promptEntry == nil {
 			p.recent.record(state.server.String(), hashes[0])
+		} else {
+			p.recent.replace(state.server.String(), promptEntry, hashes[0])
 		}
 	})
 }

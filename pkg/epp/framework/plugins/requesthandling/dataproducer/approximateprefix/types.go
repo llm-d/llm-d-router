@@ -194,6 +194,10 @@ type config struct {
 	// for hybrid Mamba/GDN models whose decode endpoints cannot reuse KV received over the P/D
 	// transfer. It also removes decode-side prefix affinity for disaggregated requests.
 	ExcludeDecodeWhenDisaggregated bool `json:"excludeDecodeWhenDisaggregated,omitempty"`
+	// IndexCompletions records the prompt followed by the generated text of a
+	// non-streamed /v1/completions request on the decode endpoint that served it.
+	// It applies only with the estimate token-producer backend.
+	IndexCompletions bool `json:"indexCompletions,omitempty"`
 }
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.

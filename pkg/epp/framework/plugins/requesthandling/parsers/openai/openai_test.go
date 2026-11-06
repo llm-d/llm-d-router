@@ -2942,3 +2942,50 @@ func TestOpenAIParser_ParseResponse_Completion(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenAIParser_ParseResponse_UsageWithUnexpectedChoices checks that the
+// completion fields decoded alongside usage do not change what usage returns.
+func TestOpenAIParser_ParseResponse_UsageWithUnexpectedChoices(t *testing.T) {
+	parser := NewOpenAIParser()
+	wantUsage := &request.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3}
+	usage := `"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}`
+	for name, body := range map[string]string{
+		"choices not an array": `{"object":"text_completion","choices":"x",` + usage + `}`,
+		"text not a string":    `{"object":"text_completion","choices":[{"text":7,"finish_reason":"stop"}],` + usage + `}`,
+		"object not a string":  `{"object":1,"choices":[{"text":"a","finish_reason":"stop"}],` + usage + `}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := parser.ParseResponse(context.Background(), []byte(body), nil, true)
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v", err)
+			}
+			if diff := cmp.Diff(wantUsage, got.Usage); diff != "" {
+				t.Errorf("Usage mismatch (-want +got):\n%s", diff)
+			}
+			if got.Completion != nil {
+				t.Errorf("Completion = %+v, want nil", got.Completion)
+			}
+		})
+	}
+	if _, err := parser.ParseResponse(context.Background(), []byte(`{"usage":"x"}`), nil, true); err == nil {
+		t.Error("ParseResponse() error = nil for a usage field that is not an object")
+	}
+}
+
+func BenchmarkOpenAIParser_ParseResponse(b *testing.B) {
+	parser := NewOpenAIParser()
+	text := strings.Repeat("lorem ipsum ", 2000)
+	for name, body := range map[string][]byte{
+		"completions": []byte(`{"object":"text_completion","choices":[{"index":0,"text":"` + text + `","finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`),
+		"chat":        []byte(`{"object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"` + text + `"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`),
+	} {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := parser.ParseResponse(context.Background(), body, nil, true); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
