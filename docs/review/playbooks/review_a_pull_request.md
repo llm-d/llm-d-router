@@ -2,12 +2,11 @@
 
 ## Procedure
 
-1. **Pass 1 (Code and full-repo search first):** Inspect the diff, read modified files in full, check `pr_description.md` claims against the code, apply [AGENTS.md](../../../AGENTS.md), and search the repository (`grep`/`rg` callers, sibling implementations, `pkg/common/`, `config/charts/`, tests, and docs) for logic bugs, concurrency and lock hazards, buffer and slice capacity retention, metric cardinality and bucket mismatches, wire and header contract mismatches, and missing or non-failing behavioral tests. Record all verified Pass-1 code findings before opening any Stage-1 rule file.
+1. **Pass 1 (Code and full-repo search first):** Inspect the diff, read modified files in full, apply [AGENTS.md](../../../AGENTS.md), and search the repository (`rg`/`grep` callers, sibling implementations, `pkg/common/`, `config/charts/`, tests, and docs) to catch logic bugs, edge cases, concurrency races, and contract mismatches directly from source code. Record all verified Pass-1 code findings before opening any Stage-1 rule file.
 2. **Pass 2 (Targeted non-code decisions - supplement only):** Match `git diff --name-only` against `# Diff-path to rule-section routing`, ignoring paths routed to `None (AGENTS.md and repo search only)`. Load `0` rule files when all touched paths route to `None (AGENTS.md and repo search only)` (including test-only, doc-only, build, and CI diffs); otherwise load only the `1` to `2` matching rule files under `docs/review/rules/` (capping at the `2` files for the primary changed packages on cross-cutting diffs; there is no always-load file).
 3. Apply a Stage-1 rule only when its `When:` condition appears in the diff. Stage-1 rules are strictly additive to Pass 1: matching `0` Stage-1 `When:` triggers means only that no non-code rule fired, and must never drop, suppress, or downgrade verified Pass-1 code, concurrency, caller/callee, or test defects.
 4. Respect settled exceptions on `- Accept:` lines, and do not enforce unsettled debates on `- Open:` lines as policy (mention them at most as a neutral note when directly touched).
 5. Write natural code-focused review comments without citing internal `docs/review/` rule IDs or filenames. Never load `docs/review_playbook.md` or `docs/review/provenance.json`, and do not glob `docs/review/**` or open unreferenced files under `decisions/` or `open_questions/`.
-6. **High-signal filter:** Before posting, drop comments that only restyle code, reword comments, rename, or restructure tests without changing what they verify. Keep missing or non-failing tests for changed behavior, user-facing doc errors, and every verified Pass-1 defect.
 
 ## Diff-path to rule-section routing
 

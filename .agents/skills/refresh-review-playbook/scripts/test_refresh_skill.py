@@ -496,12 +496,6 @@ class ValidateMutationTest(unittest.TestCase):
         self.assertRegex(errs, r"AGENTS\.md:\d+: cites PR 999999 above --max-pr 999990")
         self.assertRegex(errs, r"AGENTS\.md:\d+: cites issue 999998 above --max-pr 999990")
 
-    def test_high_signal_filter_removed(self) -> None:
-        rel = validate_refresh.HIGH_SIGNAL_FILTER_FILE
-        self.assertNotIn("High-Signal Filter phrase missing", self._errors())
-        self._edit(rel, "drop comments that only restyle code", "flag comments that restyle code")
-        self.assertIn(f"{rel}: High-Signal Filter phrase missing", self._errors())
-
     def test_unknown_top_level_watermark_key(self) -> None:
         path = self.bundle / "provenance.json"
         prov = json.loads(path.read_text(encoding="utf-8"))

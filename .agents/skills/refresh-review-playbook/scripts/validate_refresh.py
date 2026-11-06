@@ -5,7 +5,7 @@ Stdlib-only CLI. Reuses the parsers in <repo-root>/hack/render_playbook.py so
 this script checks the same rule-file grammar the repository CI enforces, then
 adds the refresh-specific invariants: the four canonical Stage-1 rule files,
 rule triggers and citations, the Stage-1 byte budget, the per-row routing cap,
-the Pass-1 Retention Guard and High-Signal Filter, zero U+2014 characters, and
+the Pass-1 Retention Guard, zero U+2014 characters, and
 the optional --max-pr temporal holdout firewall.
 """
 
@@ -50,11 +50,6 @@ RETENTION_GUARD_PHRASES = (
     "never drop, suppress, or downgrade verified Pass-1 code",
 )
 RETENTION_GUARD_FILES = ("docs/review/playbooks/review_a_pull_request.md", "AGENTS.md")
-HIGH_SIGNAL_FILTER_PHRASE = (
-    "Before posting, drop comments that only restyle code, reword comments, rename, "
-    "or restructure tests without changing what they verify."
-)
-HIGH_SIGNAL_FILTER_FILE = "docs/review/playbooks/review_a_pull_request.md"
 EM_DASH = "\u2014"
 DEFAULT_PRDRAFT_PATH = pathlib.Path.home() / ".config/prdraft/knowledge/llm-d-router/review-playbook.md"
 
@@ -226,8 +221,6 @@ def check_retention_guard(repo_root: pathlib.Path) -> List[str]:
         for phrase in RETENTION_GUARD_PHRASES:
             if phrase not in text:
                 errs.append(f"{rel}: Pass-1 Retention Guard phrase missing: {phrase!r}")
-        if rel == HIGH_SIGNAL_FILTER_FILE and HIGH_SIGNAL_FILTER_PHRASE not in text:
-            errs.append(f"{rel}: High-Signal Filter phrase missing: {HIGH_SIGNAL_FILTER_PHRASE!r}")
     return errs
 
 
