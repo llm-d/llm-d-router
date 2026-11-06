@@ -625,8 +625,14 @@ func isSelected(hostPort string, endpoints []scheduling.Endpoint) bool {
 // p2pPort returns the endpoint's OffloadingConnector P2P tier port, the rank-0
 // port plus the endpoint's data parallel rank, and false when the sum is not a
 // TCP port, which the bound on p2pConnectorPort alone does not rule out.
+// vLLM offsets the port by the global rank, which a rank endpoint carries in
+// DataParallelRank.
 func (p *Producer) p2pPort(md *fwkdl.EndpointMetadata) (int, bool) {
-	return routing.RankPort(p.p2pConnectorPort, md.GetRankIndex())
+	rank := md.GetRankIndex()
+	if md.RanksPerPort > 1 {
+		rank = md.DataParallelRank
+	}
+	return routing.RankPort(p.p2pConnectorPort, rank)
 }
 
 // cpuDeviceTier is the CachedBlocksByTier key for the CPU tier (device tiers
