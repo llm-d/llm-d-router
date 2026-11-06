@@ -406,8 +406,9 @@ decode serve this directly" question. The step sends the decode request with the
   the 412 as a cache miss, swallows it, and continues the pipeline to encode, prefill,
   and decode.
 
-The 412 response may carry scheduling or cache-locality hints in headers or body; these
-are not yet consumed by the coordinator.
+The coordinator captures the 412 response headers listed in `forward_response_headers`
+and sends them on the later phases, as it does for encode and prefill responses. Hints in
+the 412 body are not consumed.
 
 The 412 is enforced router-side by the `prefix-based-pd-decider` plugin's conditional-decode
 gate when configured. When no gate plugin is configured, the router still returns 412 by

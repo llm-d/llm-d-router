@@ -89,6 +89,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		switch {
 		case resp.StatusCode == http.StatusPreconditionFailed:
 			cacheMiss = true
+			reqCtx.CaptureResponseHeaders(resp.Header)
 			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
 			return errCacheMiss
 		case resp.StatusCode >= http.StatusBadRequest:
