@@ -153,6 +153,25 @@ var (
 		Help: metricsutil.HelpMsgWithStability(
 			"Total number of ZMQ subscriber errors", compbasemetrics.ALPHA),
 	}, []string{podIdentifierLabel, "operation"})
+	// LiveOnly is 1 for a pod whose subscriber has a snapshot or replay endpoint
+	// but no base, so its index is built from live events alone, and 0 once the
+	// subscriber follows a complete event sequence. A pod without either
+	// endpoint is indexed from live events by design and has no series.
+	LiveOnly = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_live_only",
+		Help: metricsutil.HelpMsgWithStability(
+			"1 while a pod with a snapshot or replay endpoint is indexed from live events only, 0 once it follows a complete event sequence",
+			compbasemetrics.ALPHA),
+	}, []string{podIdentifierLabel})
+	// SnapshotLoadDuration observes successful snapshot loads, the window in
+	// which a restarted router rebuilds a pod's index before following live events.
+	SnapshotLoadDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_snapshot_load_duration_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Duration of successful KV-cache snapshot loads in seconds",
+			compbasemetrics.ALPHA),
+		Buckets: prometheus.DefBuckets,
+	})
 	// PoolQueueDepth tracks the total number of messages queued across all
 	// worker shards of the event processing pool.
 	PoolQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -177,6 +196,7 @@ func Collectors() []prometheus.Collector {
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
+		LiveOnly, SnapshotLoadDuration,
 		PoolQueueDepth, PoolCapacity,
 	}
 }
@@ -188,6 +208,7 @@ func Collectors() []prometheus.Collector {
 func CleanupSubscriber(podIdentifier string) {
 	SubscriberReconnections.DeleteLabelValues(podIdentifier)
 	MessagesReceived.DeleteLabelValues(podIdentifier)
+	LiveOnly.DeleteLabelValues(podIdentifier)
 	ZMQErrors.DeletePartialMatch(prometheus.Labels{podIdentifierLabel: podIdentifier})
 }
 
