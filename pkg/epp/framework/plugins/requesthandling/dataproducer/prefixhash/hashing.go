@@ -23,12 +23,14 @@ package prefixhash
 import (
 	"context"
 	"encoding/binary"
+	"slices"
 	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -87,7 +89,7 @@ func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.Inf
 	var result [][]BlockHash
 	var promptTokens []int
 	for _, p := range tp.Prompts {
-		hashes := computeBlockHashes(request, p.TokenIDs, blockSizeTokens, maxPrefixBlocks)
+		hashes := computeBlockHashes(request, p.TokenIDs, blockSizeTokens, maxPrefixBlocks, p.MultiModalFeatures)
 		if len(hashes) > 0 {
 			result = append(result, hashes)
 			promptTokens = append(promptTokens, len(p.TokenIDs))
@@ -102,14 +104,28 @@ func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.Inf
 
 // computeBlockHashes hashes a prompt in blocks of blockSizeTokens tokens, the
 // last possibly partial, up to maxPrefixBlocks blocks. Block i's hash is xxhash
-// over its content hash and block i-1's hash, both little-endian; block 0
-// chains from a seed hashed over the target model and cache salt.
-func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, blockSizeTokens, maxPrefixBlocks int) []BlockHash {
+// over its content hash, block i-1's hash, and, for blocks spanning multimodal
+// content, that content's feature hashes; block 0 chains from a seed hashed
+// over the target model and cache salt.
+func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, blockSizeTokens, maxPrefixBlocks int,
+	mmFeatures []fwkrequest.MultiModalFeature) []BlockHash {
 	if len(tokens) == 0 || blockSizeTokens <= 0 || maxPrefixBlocks <= 0 {
 		return nil
 	}
 	count := min((len(tokens)-1)/blockSizeTokens+1, maxPrefixBlocks)
 	blockHashes := make([]BlockHash, 0, count)
+
+	// The block encoding below reads the features in slice order, and the
+	// same media must hash stably regardless of which parser produced the
+	// list, so order by position here rather than trust every producer to.
+	if len(mmFeatures) > 1 {
+		sorted := make([]fwkrequest.MultiModalFeature, len(mmFeatures))
+		copy(sorted, mmFeatures)
+		slices.SortStableFunc(sorted, func(a, b fwkrequest.MultiModalFeature) int {
+			return a.Offset - b.Offset
+		})
+		mmFeatures = sorted
+	}
 
 	// Different models should have different hashes even with the same body.
 	// Length-prefixing each field keeps distinct model and salt pairs from
@@ -127,11 +143,55 @@ func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, b
 		block := HashBlock{Tokens: tokens[i*blockSizeTokens : min((i+1)*blockSizeTokens, len(tokens))]}
 		PutBlockHash(buf[:8], BlockHash(block.Hash()))
 		PutBlockHash(buf[8:], prevBlockHash)
-		prevBlockHash = BlockHash(xxhash.Sum64(buf[:]))
+		if extra := mmBlockExtra(mmFeatures, i, blockSizeTokens, len(tokens)); len(extra) > 0 {
+			var d xxhash.Digest
+			d.Reset()
+			_, _ = d.Write(buf[:])
+			_, _ = d.Write(extra)
+			prevBlockHash = BlockHash(d.Sum64())
+		} else {
+			prevBlockHash = BlockHash(xxhash.Sum64(buf[:]))
+		}
 		blockHashes = append(blockHashes, prevBlockHash)
 	}
 
 	return blockHashes
+}
+
+// mmBlockExtra encodes the multimodal features overlapping block index i as
+// bytes mixed into that block's hash, in token-position order. A prompt's
+// media regions hold the model's content-blind placeholder tokens -- any media
+// of the same size yields the same IDs -- so the feature hash is what
+// distinguishes blocks that span media. Each feature contributes its hash and
+// the offset at which it enters the block, length-prefixed the way the seed
+// strings are, so distinct sequences of features cannot encode to the same
+// bytes. The block's end is clamped to the prompt length, so a span past the
+// end of a partial final block is ignored, matching the featureless formula.
+func mmBlockExtra(features []fwkrequest.MultiModalFeature, block, blockSizeTokens, promptLen int) []byte {
+	if len(features) == 0 {
+		return nil
+	}
+	blockStart := block * blockSizeTokens
+	blockEnd := min(blockStart+blockSizeTokens, promptLen)
+	var out []byte
+	var lenBuf [8]byte
+	for _, f := range features {
+		if f.Length <= 0 {
+			continue
+		}
+		featStart, featEnd := f.Offset, f.Offset+f.Length
+		if featEnd <= blockStart || featStart >= blockEnd {
+			continue
+		}
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(f.Hash)))
+		out = append(out, lenBuf[:]...)
+		out = append(out, f.Hash...)
+		// The offset is clamped to the block, so the value is in
+		// [0, blockSizeTokens); the conversion cannot overflow.
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(max(featStart, blockStart)-blockStart)) //#nosec G115 -- clamped non-negative by max(), bounded by the block size
+		out = append(out, lenBuf[:]...)
+	}
+	return out
 }
 
 // PutBlockHash writes h into the first 8 bytes of buf in little-endian order.
