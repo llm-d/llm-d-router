@@ -229,7 +229,7 @@ func TestRunConcurrentPDRelaysGRPCPrefillError(t *testing.T) {
 				Protocols: protocols,
 				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					_, _ = io.Copy(io.Discard, r.Body)
-					s.runConcurrentPD(w, r, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
+					s.runConcurrentPD(w, r, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
 				}),
 			}
 			go func() { _ = front.Serve(ln) }()
@@ -305,7 +305,7 @@ func TestRunConcurrentPDDecodeGRPCErrorCancelsPrefill(t *testing.T) {
 
 	before := snapshotStageMetrics(t)
 	rec := httptest.NewRecorder()
-	s.runConcurrentPD(rec, req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
+	s.runConcurrentPD(rec, req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
 
 	require.Eventually(t, prefillCancelled.Load, concurrentPDTestWait, 10*time.Millisecond, "prefill was not cancelled after decode gRPC error")
 	var delta stageMetrics

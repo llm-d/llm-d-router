@@ -776,7 +776,7 @@ func TestSidecarFailureLogPrivacy(t *testing.T) {
 			s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[]}`)
 			rw := httptest.NewRecorder()
 			s.runConcurrentPD(rw, withContextLogger(s, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, nil)),
-				[]byte(`{}`), []byte(`{}`), "prefill:8000", constants.KVConnectorSGLang, nil, nil)
+				[]byte(`{}`), []byte(`{}`), "prefill:8000", constants.KVConnectorSGLang, nil)
 			select {
 			case <-panicLogged:
 			case <-time.After(time.Second):
@@ -1360,7 +1360,7 @@ func TestRunConcurrentPDToolCallingMetrics(t *testing.T) {
 					done := make(chan struct{})
 					go func() {
 						defer close(done)
-						s.runConcurrentPD(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, constants.KVConnectorSGLang, nil, toolFields)
+						s.runConcurrentPD(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, constants.KVConnectorSGLang, toolFields)
 					}()
 					select {
 					case <-done:
@@ -1438,7 +1438,7 @@ func TestRunConcurrentPDMetrics(t *testing.T) {
 			before := snapshotStageMetrics(t)
 			body := []byte(`{"model":"m","messages":[]}`)
 			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, bytes.NewReader(body))
-			s.runConcurrentPD(tt.client(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
+			s.runConcurrentPD(tt.client(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
 
 			// Prefill runs in a goroutine; wait for its sample so it cannot leak
 			// into a later test's delta.
@@ -1478,7 +1478,7 @@ func TestRunConcurrentPDDecodeAbortMetrics(t *testing.T) {
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
-		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, toolFields)
+		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, toolFields)
 	}()
 	assert.Equal(t, http.ErrAbortHandler, recovered, "abort panic must propagate")
 
