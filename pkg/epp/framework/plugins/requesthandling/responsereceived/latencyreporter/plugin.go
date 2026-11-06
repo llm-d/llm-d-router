@@ -27,7 +27,6 @@ import (
 	"slices"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -185,7 +184,7 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 		latencyTTFT.WithLabelValues(prio, bucket, path, streaming).Observe(response.FirstTokenTimestamp.Sub(response.ReceivedTimestamp).Seconds())
 	}
 	if tpot, ok := meanTPOT(response); ok {
-		latencyTPOT.WithLabelValues(prio, path).Observe(tpot.Seconds())
+		latencyTPOT.WithLabelValues(prio, path).Observe(tpot)
 	}
 }
 
@@ -207,14 +206,14 @@ func outcome(status string, cause requesthandling.TerminationCause) string {
 	}
 }
 
-// meanTPOT is the per-request mean gap between output tokens. It needs a streamed response with
-// at least two output tokens.
-func meanTPOT(response *requesthandling.Response) (time.Duration, bool) {
+// meanTPOT is the per-request mean gap between output tokens, in seconds. It needs a streamed
+// response with at least two output tokens and strictly increasing timestamps.
+func meanTPOT(response *requesthandling.Response) (float64, bool) {
 	n := response.Usage.CompletionTokens
-	if !response.Streaming || n < 2 || response.FirstTokenTimestamp.IsZero() || response.CompleteTimestamp.IsZero() || !response.CompleteTimestamp.After(response.FirstTokenTimestamp) {
+	if !response.Streaming || n < 2 || response.ReceivedTimestamp.IsZero() || response.FirstTokenTimestamp.IsZero() || response.CompleteTimestamp.IsZero() || !response.FirstTokenTimestamp.After(response.ReceivedTimestamp) || !response.CompleteTimestamp.After(response.FirstTokenTimestamp) {
 		return 0, false
 	}
-	return response.CompleteTimestamp.Sub(response.FirstTokenTimestamp) / time.Duration(n-1), true
+	return response.CompleteTimestamp.Sub(response.FirstTokenTimestamp).Seconds() / float64(n-1), true
 }
 
 func promptTokens(request *scheduling.InferenceRequest, response *requesthandling.Response) int {
