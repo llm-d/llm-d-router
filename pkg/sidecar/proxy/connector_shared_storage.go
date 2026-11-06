@@ -89,7 +89,7 @@ func (s *Server) handleSharedStorage(w http.ResponseWriter, r *http.Request, pre
 	body[reqcommon.FieldCacheHitThreshold] = 0
 	decodeRequestBody, err := json.Marshal(body)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send Invalid JSON error response to client")
 		}
 		return
@@ -145,7 +145,7 @@ func (s *Server) tryDecodeBuffered(w http.ResponseWriter, r *http.Request) (bool
 	if err := json.Unmarshal(dw.buffer.Bytes(), &response); err != nil {
 		logger.Error(jsonErrorForLog(err), "failed to unmarshal decode response", logBodyBytesKey, dw.buffer.Len())
 
-		if err := errorInternalServerError(err, w); err != nil {
+		if err := errorInternalServerError(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return false, err
@@ -253,7 +253,7 @@ func (s *Server) hasCacheThresholdFinishReason(response map[string]any) bool {
 		}
 	}
 
-	choices, ok := response[responseFieldChoices].([]any)
+	choices, ok := response[reqcommon.FieldChoices].([]any)
 	if !ok || len(choices) == 0 {
 		return false
 	}
@@ -263,7 +263,7 @@ func (s *Server) hasCacheThresholdFinishReason(response map[string]any) bool {
 		if !ok {
 			continue
 		}
-		finishReason, ok := choice[responseFieldFinishReason].(string)
+		finishReason, ok := choice[reqcommon.FieldFinishReason].(string)
 		if ok && finishReason == finishReasonCacheThreshold {
 			return true
 		}
@@ -304,7 +304,7 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 
 	pbody, err := json.Marshal(body)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send Invalid JSON error response to client")
 		}
 		return err
@@ -313,7 +313,8 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		logger.Error(err, "failed to create prefill handler")
+		if err := errorBadGateway(w, r); err != nil {
 			logger.Error(err, "failed to send Bad Gateway error response to client")
 		}
 		return err

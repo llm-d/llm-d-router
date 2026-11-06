@@ -170,6 +170,49 @@ var (
 	)
 )
 
+// Force-stream family. Recorded by the decode step when force-streaming is
+// enabled: it streams the upstream response and reassembles it into one
+// non-streaming reply. The gauge tracks bytes reserved against the shared
+// buffer budget by in-flight forced requests, so an operator can see how close
+// they run to the limit; the counter records each candidate's outcome, as the
+// Help string defines.
+var (
+	forceStreamBufferedBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "force_stream_buffered_bytes",
+			Help:      metricsutil.HelpMsgWithStability("Bytes currently reserved against the force-stream buffer budget by in-flight forced requests.", compbasemetrics.ALPHA),
+		},
+		[]string{},
+	)
+
+	forceStreamTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "force_stream_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Total number of force-stream candidate requests by model and outcome: "+
+					"forced (reassembled from a streamed upstream into one reply and written to the client), "+
+					"fallback_budget (budget full), "+
+					"fallback_unbounded (the reply estimate exceeds the per-request cap: a declared token limit too large for it, or an n whose per-choice overhead alone exceeds it), "+
+					"fallback_unsupported (declined before any upstream call: the request declares a field the reassembler drops, the engine would not serve it as a stream, "+
+					"or the kv-sglang connector, whose decode server cannot recompute a prompt on fallback), "+
+					"fallback_lossy_frame (a streamed frame carried a field the reassembler drops, such as reasoning from a server-side parser, so the request is re-sent after one upstream attempt; "+
+					"with a one-shot KV handoff the decode pod recomputes the prompt), "+
+					"fallback_oversize (Responses completed frame larger than the reservation plus the request body), "+
+					"fallback_unreadable (upstream 200 but a stream it could not parse), "+
+					"error_ceiling (buffered reply exceeded its reserved budget, usually a short byte estimate), "+
+					"error_upstream (upstream 4xx/5xx, or an error frame streamed after the 200, forwarded to the client), "+
+					"or error_transport (no upstream response). "+
+					"The fallback outcomes and error_ceiling take the non-forced pass-through; when the forced attempt already "+
+					"consumed a one-shot KV block handoff, the pass-through drops it and decode recomputes the prompt; "+
+					"error_upstream and error_transport are also classified generically by step_errors_total.",
+				compbasemetrics.ALPHA),
+		},
+		withLabel(modelLabel, "result"),
+	)
+)
+
 // Per-request pipeline amplification, orchestration cost, media processing,
 // and outbound response size. Recorded once per client request except
 // media_download_duration_seconds, which is one observation per download
@@ -226,15 +269,17 @@ var (
 	)
 )
 
-// Prompt-token parity. Recorded by the decode step when the decode worker's
-// usage reports a prompt token count different from the number of token IDs
-// the render step produced and the coordinator sent to prefill. Compare
-// against upstream_request_total{upstream="decode"} for a rate.
+// Prompt-token parity. Recorded by the decode step, and by conditional-decode
+// on a served hit, when the worker's usage reports a prompt token count
+// different from the number of token IDs the render step produced. A hit is
+// counted in upstream_request_total under upstream="conditional-decode", so
+// the rate's denominator is upstream_request_total{upstream="decode"} plus
+// conditional_decode_probes_total{result="served"}.
 var promptTokenMismatchTotal = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Subsystem: LLMDRouterCoordinatorSubsystem,
 		Name:      "prompt_token_mismatch_total",
-		Help:      metricsutil.HelpMsgWithStability("Total number of decode responses whose prompt token count differed from the rendered token count sent to prefill.", compbasemetrics.ALPHA),
+		Help:      metricsutil.HelpMsgWithStability("Total number of decode responses, including served conditional-decode hits, whose prompt token count differed from the rendered token count.", compbasemetrics.ALPHA),
 	},
 	parityLabels,
 )

@@ -142,8 +142,8 @@ func createModelServersDecodeDP(replicas int) []string {
 	})
 }
 
-func createModelServersPDWithConnector(prefillReplicas, decodeReplicas int, connector string) []string {
-	return createModelServersFromKustomize(pdDisaggDir, map[string]string{
+func createModelServersPDWithConnector(prefillReplicas, decodeReplicas int, connector string) {
+	createModelServersFromKustomize(pdDisaggDir, map[string]string{
 		"${KV_CACHE_ENABLED}":     "false",
 		"${CONNECTOR_TYPE}":       connector,
 		"${VLLM_REPLICA_COUNT_D}": strconv.Itoa(decodeReplicas),
@@ -151,8 +151,8 @@ func createModelServersPDWithConnector(prefillReplicas, decodeReplicas int, conn
 	})
 }
 
-func createModelServersPDNixlV2(prefillReplicas, decodeReplicas int) []string {
-	return createModelServersPDWithConnector(prefillReplicas, decodeReplicas, constants.KVConnectorNIXLV2)
+func createModelServersPDNixlV2(prefillReplicas, decodeReplicas int) {
+	createModelServersPDWithConnector(prefillReplicas, decodeReplicas, constants.KVConnectorNIXLV2)
 }
 
 func createModelServersPDSharedStorage(decodeReplicas int) {

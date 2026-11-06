@@ -266,8 +266,36 @@ func TestNewDecodeProxy_TransportErrorsUseOpenAIEnvelope(t *testing.T) {
 	}
 }
 
-func TestNewDecodeProxy_NonOpenAITransportErrorsKeepEmptyBody(t *testing.T) {
-	for _, path := range []string{reqcommon.PathMessages, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
+func TestNewDecodeProxy_TransportErrorsUseAnthropicEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "connection failure", err: errors.New("connection refused at private gateway")},
+		{name: "response header timeout", err: backendTimeoutErr{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {
+				return nil, tc.err
+			})
+			proxy, outcome := newDecodeProxy(logr.Discard(), transport, nil)
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathMessages, nil)
+			req.Header.Set(reqcommon.RequestIDHeaderKey, "req-1")
+			rec := httptest.NewRecorder()
+
+			proxy.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusBadGateway, rec.Code)
+			require.Equal(t, reqcommon.ContentTypeJSON, rec.Header().Get(reqcommon.HeaderContentType))
+			require.Equal(t, reqcommon.ContentTypeOptionsNoSniff, rec.Header().Get(reqcommon.HeaderContentTypeOptions))
+			require.JSONEq(t, `{"type":"error","error":{"type":"api_error","message":"internal error (request_id: req-1)"}}`, rec.Body.String())
+			require.ErrorIs(t, outcome.TransportErr, tc.err)
+		})
+	}
+}
+
+func TestNewDecodeProxy_GenerateTransportErrorsKeepEmptyBody(t *testing.T) {
+	for _, path := range []string{reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
 		t.Run(path, func(t *testing.T) {
 			transportErr := errors.New("connection refused")
 			transport := roundTripperFunc(func(_ *http.Request) (*http.Response, error) {

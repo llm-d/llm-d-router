@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -36,6 +38,7 @@ import (
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -422,6 +425,44 @@ type dummyAlphaPlugin struct {
 
 func (p *dummyAlphaPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: p.pluginType, Name: p.name}
+}
+
+func TestServeMetrics_ServesPluginState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handle := testutils.NewTestHandle(ctx)
+	handle.AddPlugin("dummy", &dummyAlphaPlugin{name: "dummy", pluginType: "dummy-type"})
+
+	port, err := fwknet.GetFreePort()
+	require.NoError(t, err)
+	errCh := make(chan error, 1)
+	go func() { errCh <- serveMetrics(ctx, uint16(port), false, handle) }() //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, runserver.PluginStateDebugPath)
+	client := &http.Client{Timeout: 2 * time.Second}
+	var body []byte
+	require.Eventually(t, func() bool {
+		resp, err := client.Get(url)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		body, err = io.ReadAll(resp.Body)
+		return err == nil
+	}, 2*time.Second, 20*time.Millisecond, "plugin state endpoint should return 200")
+
+	var state struct {
+		Plugins map[string]json.RawMessage `json:"plugins"`
+	}
+	require.NoError(t, json.Unmarshal(body, &state))
+	assert.Contains(t, state.Plugins, "dummy")
+
+	cancel()
+	require.NoError(t, <-errCh)
 }
 
 // TestRunWithFileDiscovery_InvalidObjectivesFile checks that --objectives-file is

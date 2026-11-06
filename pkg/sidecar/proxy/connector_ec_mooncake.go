@@ -361,7 +361,7 @@ func flattenECMetadata(md map[string]any) map[string]any {
 // handleECMooncake fans out per-item encoder requests that push embeddings to
 // the consumer over Mooncake, rewrites the request to reference them, and
 // hands off to the configured P/D connector.
-func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, kvCacheSource string, apiType reqcommon.APIType) {
+func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, p2p p2pRouting, apiType reqcommon.APIType) {
 	logger := log.FromContext(r.Context())
 	logger.V(logging.DEBUG).Info("running EC-Mooncake protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
@@ -372,7 +372,8 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 
 	reqUUID, err := uuid.NewUUID()
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
+		logger.Error(err, "failed to generate request ID")
+		if err := errorBadGateway(w, r); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -383,7 +384,7 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 		fail := func(err error) {
 			observeStageError(r.Context(), metrics.StageEncode)
 			logger.Error(err, "encoder processing failed", "requestID", requestID)
-			if err := errorBadGateway(err, w); err != nil {
+			if err := errorBadGateway(w, r); err != nil {
 				logger.Error(err, "failed to send error response to client")
 			}
 		}
@@ -412,5 +413,5 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 		}
 	}
 
-	s.runPDPipeline(w, r, body, prefillEndPoint, kvCacheSource, requestID, apiType)
+	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, p2p, apiType)
 }

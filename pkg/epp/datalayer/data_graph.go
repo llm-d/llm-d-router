@@ -272,17 +272,26 @@ func producedKeySet(handle plugin.Handle) map[string]bool {
 
 // Define constants for layer execution order. Lower value means earlier execution.
 const (
-	FlowControlLayer = 0
+	// RequestHeaderLayer holds RequestHeaderProcessors, which run after request
+	// assembly and before flow control admission.
+	RequestHeaderLayer = 0
+	FlowControlLayer   = 1
 	// RequestHandlingProducerLayer holds DataProducers in DataProducerPhaseRequestHandling.
-	RequestHandlingProducerLayer = 1
+	RequestHandlingProducerLayer = 2
 	// ScreenerLayer holds screeners, which run between the two DataProducer phases.
-	ScreenerLayer       = 2
-	RequestControlLayer = 3
-	SchedulingLayer     = 4
+	ScreenerLayer       = 3
+	RequestControlLayer = 4
+	SchedulingLayer     = 5
 	DefaultLayer        = -1 // For plugins that don't fit into a known layer
 )
 
 func pluginToLayerExecutionOrder(plugin plugin.Plugin, producerPhases map[string]fwkrh.DataProducerPhase) int {
+	// A RequestHeaderProcessor publishes its attributes before flow control,
+	// ahead of any later extension point it also implements.
+	if _, ok := plugin.(fwkrh.RequestHeaderProcessor); ok {
+		return RequestHeaderLayer
+	}
+
 	// Flow control plugins
 	if _, ok := plugin.(fwkfc.FairnessPolicy); ok {
 		return FlowControlLayer

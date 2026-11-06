@@ -27,7 +27,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"slices"
 	"strconv"
 	"time"
 
@@ -310,36 +309,13 @@ func NewRequestBufferedResponse(
 	rewrittenBody []byte,
 	otherHeaders ...*envoyCorev3.HeaderValueOption,
 ) []*extProcPb.ProcessingResponse {
-	setHeaders := make([]*envoyCorev3.HeaderValueOption, 0, 2+len(otherHeaders))
-	setHeaders = append(setHeaders,
-		&envoyCorev3.HeaderValueOption{
-			Header: &envoyCorev3.HeaderValue{
-				Key:      metadata.DestinationEndpointKey,
-				RawValue: []byte(destinationEndpoint),
-			},
+	contentLength := &envoyCorev3.HeaderValueOption{
+		Header: &envoyCorev3.HeaderValue{
+			Key:      headerKeyContentLength,
+			RawValue: []byte(strconv.Itoa(len(rewrittenBody))),
 		},
-		&envoyCorev3.HeaderValueOption{
-			Header: &envoyCorev3.HeaderValue{
-				Key:      headerKeyContentLength,
-				RawValue: []byte(strconv.Itoa(len(rewrittenBody))),
-			},
-		})
-	setHeaders = append(setHeaders, otherHeaders...)
-
-	headerResponse := &extProcPb.ProcessingResponse{
-		Response: &extProcPb.ProcessingResponse_RequestHeaders{
-			RequestHeaders: &extProcPb.HeadersResponse{
-				Response: &extProcPb.CommonResponse{
-					ClearRouteCache: true,
-					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders:    setHeaders,
-						RemoveHeaders: unsetRoutingHeaders,
-					},
-				},
-			},
-		},
-		DynamicMetadata: makeDestinationMetadata(destinationEndpoint),
 	}
+	headerResponses := NewRequestHeaderResponse(destinationEndpoint, append([]*envoyCorev3.HeaderValueOption{contentLength}, otherHeaders...)...)
 
 	bodyResponse := &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_RequestBody{
@@ -358,7 +334,38 @@ func NewRequestBufferedResponse(
 		},
 	}
 
-	return []*extProcPb.ProcessingResponse{headerResponse, bodyResponse}
+	return append(headerResponses, bodyResponse)
+}
+
+// NewRequestHeaderResponse creates the Header response that routes a request to destinationEndpoint.
+// A request routed without a body response, such as a WebSocket upgrade, gets only this message.
+func NewRequestHeaderResponse(
+	destinationEndpoint string,
+	otherHeaders ...*envoyCorev3.HeaderValueOption,
+) []*extProcPb.ProcessingResponse {
+	setHeaders := make([]*envoyCorev3.HeaderValueOption, 0, 1+len(otherHeaders))
+	setHeaders = append(setHeaders, &envoyCorev3.HeaderValueOption{
+		Header: &envoyCorev3.HeaderValue{
+			Key:      metadata.DestinationEndpointKey,
+			RawValue: []byte(destinationEndpoint),
+		},
+	})
+	setHeaders = append(setHeaders, otherHeaders...)
+
+	return []*extProcPb.ProcessingResponse{{
+		Response: &extProcPb.ProcessingResponse_RequestHeaders{
+			RequestHeaders: &extProcPb.HeadersResponse{
+				Response: &extProcPb.CommonResponse{
+					ClearRouteCache: true,
+					HeaderMutation: &extProcPb.HeaderMutation{
+						SetHeaders:    setHeaders,
+						RemoveHeaders: unsetRoutingHeaders,
+					},
+				},
+			},
+		},
+		DynamicMetadata: makeDestinationMetadata(destinationEndpoint),
+	}}
 }
 
 // NewResponseBufferedResponse creates a complete set of responses for the Response phase.
@@ -434,16 +441,18 @@ func NewImmediateErrorResponse(code envoyTypePb.StatusCode, body string, headers
 
 // makeDestinationMetadata helper to construct the Envoy dynamic metadata for routing.
 // unsetRoutingHeaders lists every spelling of the internal routing headers Envoy
-// is told to strip when no plugin set them, deprecated aliases included, plus
-// the screening headers it always strips and the attribution handoff EPP only
-// sends on sampled traces.
-var unsetRoutingHeaders = slices.Concat(
-	routing.HeaderNames(routing.PrefillEndpointHeader),
-	routing.HeaderNames(routing.EncoderEndpointsHeader),
-	routing.HeaderNames(routing.DataParallelEndpointHeader),
-	routing.HeaderNames(routing.KVCacheSourceHeader),
-	[]string{routing.EndpointPinHeader},
-	[]string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader},
+// is told to strip when no plugin set them, deprecated aliases and retired
+// names included, plus the screening headers it always strips and the
+// attribution handoff EPP only sends on sampled traces.
+var unsetRoutingHeaders = routing.AllHeaderNames(
+	routing.PrefillEndpointHeader,
+	routing.KVCachePrefillHeader,
+	routing.KVCacheSourceHeader,
+	routing.EncoderEndpointsHeader,
+	routing.DataParallelEndpointHeader,
+	routing.EndpointPinHeader,
+	tracing.FairnessIDHandoffHeader,
+	tracing.FairnessSourceHandoffHeader,
 )
 
 func makeDestinationMetadata(endpoint string) *structpb.Struct {

@@ -80,6 +80,8 @@ type PreRequest interface {
 // ResponseHeaderProcessor is called by the director after the response headers are successfully received
 // which indicates the beginning of the response handling by the model server.
 // The given pod argument is the pod that served the request.
+// The request content has been released by then: request.Body holds only Model,
+// Stream, MaxOutputTokens and TokenizedRequest.
 type ResponseHeaderProcessor interface {
 	plugin.Plugin
 	ResponseHeader(ctx context.Context, request *fwksched.InferenceRequest, response *Response, targetEndpoint *datalayer.EndpointMetadata)
@@ -95,6 +97,9 @@ type ResponseHeaderProcessor interface {
 //   - Plugins must treat the call where response.EndOfStream == true as the final lifecycle hook
 //     to perform cleanup or final logging.
 //   - The end-of-stream call carries response.TerminationCause; earlier calls leave it empty.
+//
+// The request content has been released by then: request.Body holds only Model,
+// Stream, MaxOutputTokens and TokenizedRequest.
 //
 // TODO(https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2079):
 // Upstream proposes passing error/termination state through the signature. Response.TerminationCause
@@ -134,12 +139,14 @@ type TimeoutAwareProducer interface {
 }
 
 // RequestAbandoned is an optional interface for DataProducer implementations that
-// keep per-request state between Produce and PreRequest. The Director calls it when
-// a request leaves HandleRequest without reaching PreRequest, so the producer can
-// release that state immediately instead of waiting for the staleness janitor.
+// keep per-request state between RequestHeader or Produce and PreRequest. The
+// Director calls it when a request leaves HandleRequest after RequestHeader
+// without reaching PreRequest, including a flow-control rejection, so the
+// producer can release that state immediately instead of waiting for the
+// staleness janitor.
 type RequestAbandoned interface {
-	// RequestAbandoned releases any per-request state written by Produce for the
-	// given request. It must be safe to call when no state exists.
+	// RequestAbandoned releases any per-request state written by RequestHeader or
+	// Produce for the given request. It must be safe to call when no state exists.
 	RequestAbandoned(ctx context.Context, request *fwksched.InferenceRequest)
 }
 

@@ -76,6 +76,9 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	if reqCtx.IsSGLangGRPC() {
+		return s.executeSGLangGRPC(ctx, reqCtx)
+	}
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
@@ -106,6 +109,11 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	defer resp.Body.Close()
 
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
+	if reader, ok := s.kv.(kv.PrefillResponseReader); ok {
+		if err := reader.ReadPrefillResponse(reqCtx, resp.Header); err != nil {
+			return fmt.Errorf("prefill: %w", err)
+		}
+	}
 
 	var prefillResp prefillResponse
 	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {

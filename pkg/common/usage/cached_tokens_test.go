@@ -426,6 +426,47 @@ func TestResponseWriter_PreservesReaderFrom(t *testing.T) {
 	}
 }
 
+// A passthrough writer has already forwarded an unterminated last line when
+// the flush runs, so the flush may only observe it: writing it again would
+// send the client the line twice, and skipping the observer would lose a
+// usage block that arrived without a trailing newline.
+func TestResponseWriter_PassthroughFlushObservesUnterminatedTailOnce(t *testing.T) {
+	tests := []struct {
+		name      string
+		tail      string
+		wantSeen  int
+		wantCount float64
+	}{
+		{name: "usage frame", tail: `data: {"choices":[],"usage":{"prompt_tokens":64}}`, wantSeen: 1, wantCount: 64},
+		{name: "done marker", tail: `data: [DONE]`, wantSeen: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			var seen []map[string]any
+			writer, finalize := NewResponseWriter(recorder, Options{OnUsage: func(block map[string]any) {
+				seen = append(seen, block)
+			}}, true)
+
+			body := "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n" + test.tail
+			writeChunk(t, writer, body)
+			if err := finalize(); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := recorder.Body.String(); got != body {
+				t.Fatalf("passthrough body changed or duplicated the tail:\n got %q\nwant %q", got, body)
+			}
+			if len(seen) != test.wantSeen {
+				t.Fatalf("observer saw %d usage blocks, want %d", len(seen), test.wantSeen)
+			}
+			if test.wantSeen == 1 && seen[0][reqcommon.FieldPromptTokens] != test.wantCount {
+				t.Fatalf("observed prompt_tokens = %v, want %v", seen[0][reqcommon.FieldPromptTokens], test.wantCount)
+			}
+		})
+	}
+}
+
 func writeChunk(t *testing.T, w http.ResponseWriter, chunk string) {
 	t.Helper()
 	n, err := w.Write([]byte(chunk))

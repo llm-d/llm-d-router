@@ -27,6 +27,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -68,7 +69,7 @@ func outcomeGRPCResponse(grpcStatus string) []*extProcPb.ProcessingRequest {
 		}},
 		{Request: &extProcPb.ProcessingRequest_ResponseTrailers{
 			ResponseTrailers: &extProcPb.HttpTrailers{Trailers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
-				{Key: "grpc-status", RawValue: []byte(grpcStatus)},
+				{Key: grpcframe.HeaderStatus, RawValue: []byte(grpcStatus)},
 			}}},
 		}},
 	}
@@ -109,7 +110,7 @@ func TestProcessRecordsRequestOutcome(t *testing.T) {
 		},
 		{
 			name:        "gRPC OK in trailers",
-			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCResponse("0")...),
+			reqs:        append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeGRPCResponse(grpcframe.StatusOK)...),
 			wantOutcome: "completed",
 		},
 		{

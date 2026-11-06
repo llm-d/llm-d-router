@@ -18,7 +18,9 @@ limitations under the License.
 package handlers
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"strconv"
@@ -38,12 +40,15 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
@@ -54,6 +59,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanggrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -165,6 +171,10 @@ func (m *mockDirector) HandleResponseHeader(ctx context.Context, reqCtx *Request
 	return reqCtx
 }
 func (m *mockDirector) GetRandomEndpoint() *fwkdl.EndpointMetadata {
+	return &fwkdl.EndpointMetadata{}
+}
+
+func (m *mockDirector) GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata {
 	return &fwkdl.EndpointMetadata{}
 }
 func (m *mockDirector) HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
@@ -1803,4 +1813,105 @@ func TestRequestContextLifecycleAccessors(t *testing.T) {
 	assert.Equal(t, first, reqCtx.FirstTokenTimestamp())
 	assert.Equal(t, complete, reqCtx.ResponseCompleteTimestamp())
 	assert.True(t, reqCtx.ModelServerStreaming())
+}
+
+func TestHandleResponseBody_GRPCFrameCarryAndOversizedSkip(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	frame1, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+		Item: &sglangapiv1.GenerateStreamItem_Frame{
+			Frame: &sglangapiv1.GenerateResponse{
+				Text: "Hi",
+				MetaInfo: &sglangapiv1.GenerateMetaInfo{
+					PromptTokens:     15,
+					CompletionTokens: 2,
+					CachedTokens:     9,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	frame2, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+		Item: &sglangapiv1.GenerateStreamItem_Frame{
+			Frame: &sglangapiv1.GenerateResponse{
+				Text: "Hello",
+				MetaInfo: &sglangapiv1.GenerateMetaInfo{
+					PromptTokens:     15,
+					CompletionTokens: 6,
+					CachedTokens:     9,
+					FinishReason: &sglangapiv1.FinishReason{
+						Kind: &sglangapiv1.FinishReason_Length{
+							Length: &sglangapiv1.FinishLength{Length: proto.Uint64(6)},
+						},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	t.Run("frames split across header and payload boundaries", func(t *testing.T) {
+		server := &StreamingServer{
+			parserRegistry: NewParserRegistry([]fwkrh.Parser{sglanggrpc.NewSGLangGRPCParser()}, logr.Discard()),
+			director:       &mockDirector{},
+		}
+		combined := append(append([]byte{}, frame1...), frame2...)
+		reqCtx := &RequestContext{
+			Request:              &Request{Headers: map[string]string{":path": sglangapiv1.SglangService_Generate_FullMethodName}},
+			Response:             &Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType + "+proto"}},
+			SchedulingRequest:    &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+			modelServerStreaming: true,
+		}
+		// Cut inside the 5-byte header of frame1, then inside frame2's payload, then finish on trailer.
+		cut1 := 3
+		cut2 := len(frame1) + 4
+		server.HandleResponseBody(ctx, reqCtx, combined[:cut1], false)
+		assert.Equal(t, 0, reqCtx.StreamedEvents)
+		server.HandleResponseBody(ctx, reqCtx, combined[cut1:cut2], false)
+		assert.Equal(t, 1, reqCtx.StreamedEvents)
+		server.HandleResponseBody(ctx, reqCtx, combined[cut2:], false)
+		assert.Equal(t, 2, reqCtx.StreamedEvents)
+		server.HandleResponseBody(ctx, reqCtx, nil, true)
+
+		assert.Equal(t, fwkrequest.Usage{
+			PromptTokens:     15,
+			CompletionTokens: 6,
+			TotalTokens:      21,
+			PromptTokenDetails: &fwkrequest.PromptTokenDetails{
+				CachedTokens: 9,
+			},
+		}, reqCtx.Usage)
+	})
+
+	t.Run("oversized frame skipped without buffering while preserving subsequent terminal frame", func(t *testing.T) {
+		server := &StreamingServer{
+			parserRegistry: NewParserRegistry([]fwkrh.Parser{sglanggrpc.NewSGLangGRPCParser()}, logr.Discard()),
+			director:       &mockDirector{},
+		}
+		reqCtx := &RequestContext{
+			Request:              &Request{Headers: map[string]string{":path": sglangapiv1.SglangService_Generate_FullMethodName}},
+			Response:             &Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}},
+			SchedulingRequest:    &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+			modelServerStreaming: true,
+		}
+		oversizedLen := uint32(maxGRPCFrameBytes + 32)
+		headerAndHead := make([]byte, grpcframe.HeaderLen+16)
+		binary.BigEndian.PutUint32(headerAndHead[1:grpcframe.HeaderLen], oversizedLen)
+
+		// First chunk: valid frame1 followed by start of oversized frame.
+		server.HandleResponseBody(ctx, reqCtx, append(append([]byte{}, frame1...), headerAndHead...), false)
+		assert.Equal(t, 1, reqCtx.StreamedEvents)
+		assert.Empty(t, reqCtx.grpcFrameCarry)
+		assert.Equal(t, uint64(oversizedLen)-16, reqCtx.grpcFrameSkipRemaining)
+
+		// Second chunk: rest of oversized frame followed by valid terminal frame2.
+		secondChunk := append(bytes.Repeat([]byte{0}, int(oversizedLen)-16), frame2...)
+		server.HandleResponseBody(ctx, reqCtx, secondChunk, false)
+		server.HandleResponseBody(ctx, reqCtx, nil, true)
+
+		assert.Equal(t, 2, reqCtx.StreamedEvents)
+		assert.Equal(t, 6, reqCtx.Usage.CompletionTokens)
+		assert.Equal(t, 15, reqCtx.Usage.PromptTokens)
+	})
 }
