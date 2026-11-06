@@ -26,6 +26,17 @@ Because the plugin is Alpha, the EPP process must include `--allow-experimental-
 `minTokens` skips prompts shorter than the given count, where re-tokenizing costs the server little and the
 ID list only grows the body. `0`, the default, forwards every prompt.
 
+`trustCallerTokenIDs` (default `false`) keeps a caller-supplied
+`kv_transfer_params.prompt_token_ids` instead of stripping it. Only enable it when every
+caller is a trusted coordinator: an end user supplying the field makes the server serve
+those IDs instead of rendering `messages`, bypassing every messages-level gateway policy.
+When `false` (the default), the caller's list is stripped and forwarding is skipped for
+that request; the engine renders from `messages`.
+
+The P/D sidecar carries the IDs onto prefill and decode only when its own
+`--forward-prompt-token-ids` flag (or the `forward-prompt-token-ids` YAML key) is set.
+Both the EPP plugin and the sidecar flag must be enabled for end-to-end forwarding.
+
 The plugin requires a `token-producer` with a `vllm` backend. The EPP refuses to start with the `estimate`
 backend, including the one it auto-creates when no `token-producer` is configured: its IDs are packed bytes,
 not engine tokens.
@@ -81,8 +92,8 @@ The plugin forwards IDs only for single-prompt, text-only requests. It skips:
 - chat requests with `echo` or `return_prompt_text` set: the former makes vLLM discard the
   forwarded IDs anyway, and the latter would return `null` prompt text on the reuse branch;
 - payloads that are not mutable JSON, or whose `kv_transfer_params` is not an object;
-- requests whose `kv_transfer_params` already carries `prompt_token_ids`, which are kept as
-  sent (an explicit `null` counts as absent and is replaced).
+- requests whose `kv_transfer_params` already carries `prompt_token_ids`: stripped by default, or
+  kept as sent when `trustCallerTokenIDs` is `true` (an explicit `null` counts as absent and is replaced).
 
 Other `kv_transfer_params` fields are preserved.
 

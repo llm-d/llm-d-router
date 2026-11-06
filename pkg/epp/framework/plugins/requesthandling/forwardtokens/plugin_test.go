@@ -172,6 +172,24 @@ func TestUntrustedCallerTokenIDsStrippedRaw(t *testing.T) {
 	assert.Equal(t, true, params["do_remote_prefill"])
 }
 
+// The strip must fire before every guard that would otherwise return early:
+// short prompts, missing tokenization and legacy-translated requests all
+// still have the caller's IDs removed.
+func TestUntrustedCallerTokenIDsStrippedBeforeGuards(t *testing.T) {
+	for name, body := range map[string]*fwkrequest.InferenceRequestBody{
+		"below minTokens": chat(fwkrequest.PayloadMap{"kv_transfer_params": json.RawMessage(`{"prompt_token_ids": [9]}`)}, tokenized(1, 2)),
+		"no tokenization": chat(fwkrequest.PayloadMap{"kv_transfer_params": json.RawMessage(`{"prompt_token_ids": [9]}`)}, nil),
+		"legacy translated": chat(fwkrequest.PayloadMap{"kv_transfer_params": json.RawMessage(`{"prompt_token_ids": [9]}`)},
+			&fwkrequest.TokenizedRequest{LegacyTranslated: true, Prompts: []fwkrequest.PromptTokens{{TokenIDs: []uint32{1, 2}}}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, _ := New("fwd", Config{MinTokens: 10})
+			run(t, p, body)
+			assert.NotContains(t, string(body.Payload.(fwkrequest.PayloadMap)["kv_transfer_params"].(json.RawMessage)), "prompt_token_ids")
+		})
+	}
+}
+
 // Background at the top level and file references nested in input must be
 // rejected, matching RejectStatefulResponsesFields' coverage.
 func TestStatefulResponsesBackgroundAndFiles(t *testing.T) {
@@ -192,6 +210,20 @@ func TestStatefulResponsesBackgroundAndFiles(t *testing.T) {
 			assert.False(t, body.Mutated)
 		})
 	}
+}
+
+// Background as an empty string is not a background request under any
+// coercion pydantic applies; it is treated as absent and forwarded.
+func TestStatefulResponsesBackgroundEmptyString(t *testing.T) {
+	p, _ := New("fwd", Config{})
+	payload := fwkrequest.PayloadMap{"input": "hi", "background": ""}
+	body := &fwkrequest.InferenceRequestBody{
+		Responses: &fwkrequest.ResponsesRequest{Input: "hi"},
+		Payload:   payload, TokenizedRequest: tokenized(1, 2),
+	}
+	run(t, p, body)
+	// Not stateful: forwarding proceeds.
+	assert.True(t, body.Mutated)
 }
 
 // With trustCallerTokenIDs, the caller's list is kept as sent.
