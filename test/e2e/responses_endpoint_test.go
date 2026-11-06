@@ -17,8 +17,11 @@ limitations under the License.
 package e2e
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -174,6 +177,61 @@ var _ = ginkgo.Describe("E/P/D gateway /v1/responses encoder-cache fanout", gink
 		gomega.Expect(encodeAfter).To(gomega.BeNumerically(">", encodeBefore),
 			"encode pod should have been primed from the Responses input_image; the fanout must "+
 				"read input rather than messages when the client sends a Responses request")
+	})
+}))
+
+var _ = ginkgo.Describe("non-PD gateway /v1/responses streaming", ginkgo.Ordered, testWrapper(func() {
+	ginkgo.BeforeAll(func() {
+		createModelServersDecode(1)
+		standalone.Create(standaloneConfig(), simpleConfig, 1, 8000)
+	})
+
+	ginkgo.It("streams SSE events and terminates with a completed response", func() {
+		ginkgo.By("POST /v1/responses with stream:true")
+		resp, sseBody := doResponses(map[string]any{
+			"model":  simModelName,
+			"input":  responsesTextInput,
+			"stream": true,
+		})
+		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusOK),
+			"non-200 from gateway: status=%d body=%s", resp.StatusCode, string(sseBody))
+
+		ginkgo.By("Parsing SSE event stream")
+		var events []map[string]any
+		scanner := bufio.NewScanner(strings.NewReader(string(sseBody)))
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, reqcommon.SSEDataPrefix) {
+				continue
+			}
+			data := strings.TrimPrefix(line, reqcommon.SSEDataPrefix)
+			if data == reqcommon.SSEDoneMarker {
+				break
+			}
+			var event map[string]any
+			if err := json.Unmarshal([]byte(data), &event); err == nil {
+				events = append(events, event)
+			}
+		}
+		gomega.Expect(events).ShouldNot(gomega.BeEmpty(), "expected at least one SSE event before %s%s",
+			reqcommon.SSEDataPrefix, reqcommon.SSEDoneMarker)
+
+		ginkgo.By("Verifying terminal event carries a completed response")
+		var terminal map[string]any
+		for i := len(events) - 1; i >= 0; i-- {
+			if events[i]["type"] == "response.completed" {
+				if r, ok := events[i]["response"].(map[string]any); ok {
+					terminal = r
+					break
+				}
+			}
+		}
+		gomega.Expect(terminal).ShouldNot(gomega.BeNil(), "expected a response.completed event in the SSE stream")
+		gomega.Expect(terminal["status"]).Should(gomega.Equal("completed"))
+
+		output, ok := terminal["output"].([]any)
+		gomega.Expect(ok).Should(gomega.BeTrue(), "output must be an array in the terminal response")
+		gomega.Expect(output).ShouldNot(gomega.BeEmpty())
 	})
 }))
 
