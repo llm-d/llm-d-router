@@ -97,16 +97,24 @@ func (s *Scheduler) windowLive(rec *reqRec, now time.Time) bool {
 
 // atPod closes the released window: the request is running on an engine.
 func (s *Scheduler) atPod(rec *reqRec, m *thread, engine string, now time.Time) dispatchObservables {
-	if !rec.pod.IsZero() {
-		rec.engine = engine
-		return dispatchObservables{} // a repeated PreRequest: the record is already in flight
-	}
 	// LIVENESS IS READ BEFORE THE RECORD STOPS BEING PENDING: a window that already outlived S
 	// was never counted (reapRequests adds only live windows to m.pending), so a LATE
 	// PreRequest must not decrement the thread — it would take a count away from another live
 	// window of the same thread and read the thread as not busy until the next pass re-derives.
 	// THE COUNT IS THE RECORD'S OWN, not a guess about whether a pass ran: a window that has expired
 	// no longer counts, so decrementing for it would take a count from another live window.
+	if rec == nil || !rec.pod.IsZero() {
+		// A REPEATED PreRequest: the record is already in flight, so nothing about the counts moves —
+		// but the activity stamp DOES, and it is taken before the return, exactly as the baseline's
+		// PreRequest does (baseline, scheduler.go:1023): an arrival is activity even when it is the
+		// second arrival of a request already at the pod, and the idle rule measures silence from the
+		// LAST one.
+		if m != nil {
+			m.lastActivity = now
+		}
+		rec.engine = engine
+		return dispatchObservables{}
+	}
 	live := rec.counted
 	rec.counted = false
 	rec.engine = engine
