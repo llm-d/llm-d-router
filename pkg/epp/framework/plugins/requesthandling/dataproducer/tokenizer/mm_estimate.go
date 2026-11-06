@@ -379,10 +379,6 @@ const (
 	// defaultAudioBytesPerSecond converts a payload length into seconds for clips
 	// that are not PCM WAV, modeling ~128kbps compressed audio.
 	defaultAudioBytesPerSecond = 16000
-	// wavHeaderBytes bounds how much of a payload is decoded while looking for the
-	// WAV format and data chunk headers. Real headers are far smaller; a payload
-	// whose data chunk starts past this is treated as unreadable.
-	wavHeaderBytes = 1024
 	// WAV chunk ids read while resolving a clip's duration.
 	wavFmtChunkID  = "fmt "
 	wavDataChunkID = "data"
@@ -422,6 +418,22 @@ func newAudioEstimator(cfg *estimateConfig) audioEstimator {
 // inline base64 payload of an input_audio block and is empty for a clip carried
 // by URL. Always >= 1 so every clip carries weight.
 func (e audioEstimator) placeholderCount(data string, meta audioMetadata) int {
+	return e.tokensForDuration(e.durationSeconds(data, meta))
+}
+
+// placeholderCountUploaded estimates placeholder tokens for an uploaded audio
+// file part described by head and size. Duration resolution mirrors
+// placeholderCount: a header value wins, then the payload (exact for PCM WAV,
+// size/bytesPerSecond otherwise), then configuration, then the built-in
+// default.
+func (e audioEstimator) placeholderCountUploaded(head []byte, size int64, meta audioMetadata) int {
+	return e.tokensForDuration(e.durationSecondsUploaded(head, size, meta))
+}
+
+// tokensForDuration converts a clip's length in seconds into a placeholder
+// token count: duration*tokensPerSecond, capped, plus the model's begin/end
+// overhead. Always >= 1.
+func (e audioEstimator) tokensForDuration(seconds float64) int {
 	tokensPerSec := e.tokensPerSec
 	if tokensPerSec <= 0 {
 		tokensPerSec = defaultAudioTokensPerSecond
@@ -434,7 +446,7 @@ func (e audioEstimator) placeholderCount(data string, meta audioMetadata) int {
 
 	// The cap applies to the tower's tokens only. Models add their begin/end
 	// markers outside their own limit, so the overhead goes on after it.
-	tokens := int(tokensPerSec * e.durationSeconds(data, meta))
+	tokens := int(tokensPerSec * seconds)
 	if e.maxTokens > 0 {
 		tokens = min(tokens, e.maxTokens)
 	}
@@ -468,6 +480,26 @@ func (e audioEstimator) durationSeconds(data string, meta audioMetadata) float64
 	return defaultAudioDuration
 }
 
+// durationSecondsUploaded resolves an uploaded file part's length in seconds,
+// with the same precedence as durationSeconds: a header value wins, then the
+// payload, which is exact for PCM WAV and size/bytesPerSecond for everything
+// else, then configuration, then the built-in default.
+func (e audioEstimator) durationSecondsUploaded(head []byte, size int64, meta audioMetadata) float64 {
+	if meta.duration > 0 {
+		return meta.duration
+	}
+	if size > 0 {
+		if seconds, ok := wavDurationFromHead(head, size); ok {
+			return seconds
+		}
+		return float64(size) / float64(e.bytesPerSecond(meta))
+	}
+	if e.defDuration > 0 {
+		return e.defDuration
+	}
+	return defaultAudioDuration
+}
+
 // bytesPerSecond resolves the byte rate used to turn a payload length into
 // seconds. The clip's own header wins, then the configured default, then the
 // built-in one. Only clips that are not PCM WAV reach this: a WAV payload
@@ -488,12 +520,19 @@ func (e audioEstimator) bytesPerSecond(meta audioMetadata) int {
 func wavDurationFromBase64(data string) (seconds float64, ok bool) {
 	payload := audioBase64Payload(data)
 	// Only the headers are needed, so decoding is streamed and bounded.
-	head := make([]byte, wavHeaderBytes)
+	head := make([]byte, fwkrequest.UploadedMediaHeadBytes)
 	n, err := io.ReadFull(base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload)), head)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return 0, false
 	}
-	head = head[:n]
+	return wavDurationFromHead(head[:n], int64(reqcommon.Base64DecodedLen(payload)))
+}
+
+// wavDurationFromHead walks the RIFF chunk list of a PCM WAV whose leading
+// bytes are head and whose full stream is total bytes, returning the data
+// chunk divided by the byte rate the header declares. ok is false when the
+// payload is not a readable WAV, leaving the caller on the byte-rate estimate.
+func wavDurationFromHead(head []byte, total int64) (seconds float64, ok bool) {
 	if len(head) < 12 || string(head[0:4]) != "RIFF" || string(head[8:12]) != "WAVE" {
 		return 0, false
 	}
@@ -516,7 +555,7 @@ func wavDurationFromBase64(data string) (seconds float64, ok bool) {
 			}
 			// A streamed WAV can declare a placeholder size, so what the payload
 			// actually carries bounds the data chunk.
-			available := int64(reqcommon.Base64DecodedLen(payload)) - body
+			available := total - body
 			if size <= 0 || size > available {
 				size = available
 			}

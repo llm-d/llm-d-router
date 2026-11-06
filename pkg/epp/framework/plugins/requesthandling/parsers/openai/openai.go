@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cespare/xxhash/v2"
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -71,6 +72,11 @@ const (
 	// audioGenerateAPI is the vLLM Omni text-to-audio generation endpoint (e.g.
 	// Stable Audio), distinct from audioSpeechAPI's text-to-speech.
 	audioGenerateAPI = "audio/generate"
+	// audioTranscriptionsAPI and audioTranslationsAPI are the OpenAI-compatible
+	// speech-to-text endpoints. Both take multipart/form-data with the same
+	// scalar fields, so one parser serves both.
+	audioTranscriptionsAPI = "audio/transcriptions"
+	audioTranslationsAPI   = "audio/translations"
 
 	octetStreamType = "application/octet-stream"
 
@@ -124,6 +130,8 @@ func (p *OpenAIParser) Claims() fwkrh.Claims {
 			videosAPI,
 			videosSyncAPI,
 			audioSpeechAPI,
+			audioTranscriptionsAPI,
+			audioTranslationsAPI,
 			request.DecisionsPathSuffix,
 			audioGenerateAPI,
 		},
@@ -152,6 +160,9 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 	}
 	if apiType == videosAPI || apiType == videosSyncAPI {
 		return parseVideosRequest(body, headers)
+	}
+	if apiType == audioTranscriptionsAPI || apiType == audioTranslationsAPI {
+		return parseTranscriptionsRequest(apiType, body, headers)
 	}
 	if apiType == request.DecisionsPathSuffix {
 		return parseDecisionsRequest(body)
@@ -393,6 +404,12 @@ func determineAPITypeFromPath(path string) string {
 	if request.MatchPathSuffix(path, "/audio/speech") {
 		return audioSpeechAPI
 	}
+	if request.MatchPathSuffix(path, "/"+audioTranscriptionsAPI) {
+		return audioTranscriptionsAPI
+	}
+	if request.MatchPathSuffix(path, "/"+audioTranslationsAPI) {
+		return audioTranslationsAPI
+	}
 	if request.MatchPathSuffix(path, request.DecisionsPathSuffix) {
 		return request.DecisionsPathSuffix
 	}
@@ -535,6 +552,12 @@ func parseDecisionsRequest(body []byte) (*fwkrh.ParseResult, error) {
 }
 
 func parseMultipartFields(body []byte, headers map[string]string, kind string, visit func(string, []byte) error) error {
+	return parseMultipartForm(body, headers, kind, visit, nil)
+}
+
+// parseMultipartForm walks a multipart/form-data body, handing scalar fields to
+// visit and file parts to visitFile. A nil visitFile discards file parts.
+func parseMultipartForm(body []byte, headers map[string]string, kind string, visit func(string, []byte) error, visitFile func(string, request.UploadedMedia) error) error {
 	contentTypeValue, _ := headerValue(headers, reqcommon.HeaderContentType)
 	mediaType, params, err := mime.ParseMediaType(contentTypeValue)
 	if err != nil || mediaType != "multipart/form-data" {
@@ -555,8 +578,18 @@ func parseMultipartFields(body []byte, headers map[string]string, kind string, v
 			return fmt.Errorf("error reading %s multipart body: %w", kind, err)
 		}
 		if part.FileName() != "" {
-			if _, err := io.Copy(io.Discard, part); err != nil {
+			if visitFile == nil {
+				if _, err := io.Copy(io.Discard, part); err != nil {
+					return fmt.Errorf("error reading %s file part %q: %w", kind, part.FormName(), err)
+				}
+				continue
+			}
+			media, err := readUploadedMedia(part)
+			if err != nil {
 				return fmt.Errorf("error reading %s file part %q: %w", kind, part.FormName(), err)
+			}
+			if err := visitFile(part.FormName(), media); err != nil {
+				return err
 			}
 			continue
 		}
@@ -568,6 +601,37 @@ func parseMultipartFields(body []byte, headers map[string]string, kind string, v
 			return err
 		}
 	}
+}
+
+// readUploadedMedia streams a file part into its routing-relevant properties
+// without retaining the body: size, content type, a bounded head for container
+// sniffing, and a hash of the full stream.
+func readUploadedMedia(part *multipart.Part) (request.UploadedMedia, error) {
+	media := request.UploadedMedia{ContentType: part.Header.Get(reqcommon.HeaderContentType)}
+	digest := xxhash.New()
+	head := make([]byte, 0, request.UploadedMediaHeadBytes)
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := part.Read(buf)
+		if n > 0 {
+			media.SizeBytes += int64(n)
+			if _, err := digest.Write(buf[:n]); err != nil {
+				return request.UploadedMedia{}, err
+			}
+			if len(head) < request.UploadedMediaHeadBytes {
+				head = append(head, buf[:min(n, request.UploadedMediaHeadBytes-len(head))]...)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return request.UploadedMedia{}, err
+		}
+	}
+	media.Head = head
+	media.Hash = digest.Sum64()
+	return media, nil
 }
 
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
@@ -676,6 +740,55 @@ func parseVideosRequest(body []byte, headers map[string]string) (*fwkrh.ParseRes
 		return nil, errors.New("invalid videos request: must have prompt field")
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// parseTranscriptionsRequest parses a multipart/form-data /v1/audio/transcriptions
+// or /v1/audio/translations request. The audio file part drives the engine's
+// cost, so it is captured as UploadedMedia for input-cost estimation; the
+// engine is authoritative for the required file field, and the original body is
+// forwarded unchanged.
+func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
+	transcriptions := &request.TranscriptionRequest{}
+	extractedBody := &request.InferenceRequestBody{
+		Transcriptions: transcriptions,
+		Payload:        request.RawPayload(body),
+	}
+	var responseFormat string
+	err := parseMultipartForm(body, headers, apiType, func(name string, value []byte) error {
+		switch name {
+		case reqcommon.FieldModel:
+			extractedBody.Model = string(value)
+		case "prompt":
+			transcriptions.Prompt = string(value)
+		case "response_format":
+			responseFormat = string(value)
+		case "stream":
+			stream, err := strconv.ParseBool(string(value))
+			if err != nil {
+				return fmt.Errorf("invalid %s stream field: %w", apiType, err)
+			}
+			extractedBody.Stream = stream
+		}
+		return nil
+	}, func(name string, media request.UploadedMedia) error {
+		if name == "file" {
+			transcriptions.Audio = media
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// response_format selects the reply's shape. json, verbose_json and
+	// diarized_json carry a JSON body whose usage ParseResponse can read;
+	// text, srt and vtt are plain text, where usage extraction would only
+	// log a parse error per response.
+	skipResponseProcessing := true
+	switch responseFormat {
+	case "", "json", "verbose_json", "diarized_json":
+		skipResponseProcessing = false
+	}
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: skipResponseProcessing}, nil
 }
 
 func requestBodyDecodeError(err, validationErr error) error {
