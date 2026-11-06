@@ -134,3 +134,55 @@ func TestPeerDiscoveryFullWiring(t *testing.T) {
 	cancel()
 	assert.NoError(t, <-errCh)
 }
+
+// TestPeerDiscoveryReachesSyncer completes the pipeline
+// TestPeerDiscoveryFullWiring covers: a syncer holding the store as a
+// PeerSource sees peers discovery delivers after it was wired, and sees them
+// leave again.
+func TestPeerDiscoveryReachesSyncer(t *testing.T) {
+	store := NewMemoryPeerStore()
+	syncer := &peerAwareSyncer{}
+
+	// Wiring happens at startup, before discovery has produced anything.
+	syncer.SetPeerSource(store)
+	require.NotNil(t, syncer.source)
+	assert.Empty(t, syncer.source.Peers())
+
+	disc := &fakePeerDiscovery{
+		typedName: fwkplugin.TypedName{Type: "fake-peer-discovery", Name: "test"},
+		peers: []fwkdl.PeerMetadata{
+			{ID: types.NamespacedName{Name: "epp-1", Namespace: "ns"}, Address: "10.0.0.1", Port: "9002"},
+			{ID: types.NamespacedName{Name: "epp-2", Namespace: "ns"}, Address: "10.0.0.2", Port: "9002"},
+		},
+		ready: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	notifier := fwkdl.NewPeerNotifier(store)
+	errCh := make(chan error, 1)
+	go func() { errCh <- disc.Start(ctx, notifier) }()
+	<-disc.Ready()
+
+	peers := syncer.source.Peers()
+	require.Len(t, peers, 2, "the syncer reads the live set through the source")
+	assert.Equal(t, "10.0.0.1", peers[0].Address)
+	assert.Equal(t, "10.0.0.2", peers[1].Address)
+
+	notifier.Delete(types.NamespacedName{Namespace: "ns", Name: "epp-1"})
+	peers = syncer.source.Peers()
+	require.Len(t, peers, 1, "a departing replica leaves the syncer's view")
+	assert.Equal(t, "10.0.0.2", peers[0].Address)
+
+	cancel()
+	assert.NoError(t, <-errCh)
+}
+
+// peerAwareSyncer stands in for a peer-to-peer syncer with no external store:
+// it holds the source and reads the live set through it.
+type peerAwareSyncer struct {
+	source fwkdl.PeerSource
+}
+
+func (s *peerAwareSyncer) SetPeerSource(source fwkdl.PeerSource) { s.source = source }
+
+var _ fwkdl.PeerConsumer = (*peerAwareSyncer)(nil)

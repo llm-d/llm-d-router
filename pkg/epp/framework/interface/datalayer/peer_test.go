@@ -127,3 +127,78 @@ func (f *fakePeerStore) PeerUpsert(_ context.Context, meta *PeerMetadata) {
 func (f *fakePeerStore) PeerDelete(id types.NamespacedName) {
 	f.deleted = append(f.deleted, id)
 }
+
+// A store that satisfies PeerStore and PeerSource is both halves of the
+// pipeline: discovery writes through the notifier, a consumer reads the result.
+func TestPeerSourceReadsWhatTheNotifierWrote(t *testing.T) {
+	store := &fakePeerSource{peers: map[types.NamespacedName]PeerMetadata{}}
+	notifier := NewPeerNotifier(store)
+	id := types.NamespacedName{Name: "epp-1", Namespace: "ns"}
+
+	notifier.Upsert(&PeerMetadata{ID: id, Address: "10.0.0.1", Port: "9002"})
+	require.Len(t, store.Peers(), 1)
+	assert.Equal(t, "10.0.0.1", store.Peers()[0].Address)
+
+	notifier.Delete(id)
+	assert.Empty(t, store.Peers())
+}
+
+// A syncer that consumes peers receives the source and reads through it, so a
+// peer discovered after wiring is visible without re-wiring.
+func TestPeerConsumerReadsThroughTheSource(t *testing.T) {
+	store := &fakePeerSource{peers: map[types.NamespacedName]PeerMetadata{}}
+	syncer := &fakePeerConsumer{}
+
+	var consumer PeerConsumer = syncer
+	consumer.SetPeerSource(store)
+	require.NotNil(t, syncer.source)
+	assert.Empty(t, syncer.source.Peers())
+
+	NewPeerNotifier(store).Upsert(&PeerMetadata{
+		ID:      types.NamespacedName{Name: "epp-1", Namespace: "ns"},
+		Address: "10.0.0.1",
+	})
+	assert.Len(t, syncer.source.Peers(), 1, "the consumer holds the source, not a snapshot")
+}
+
+// fakePeerSource implements both halves of the peer pipeline.
+type fakePeerSource struct {
+	mu    sync.Mutex
+	peers map[types.NamespacedName]PeerMetadata
+}
+
+func (f *fakePeerSource) PeerUpsert(_ context.Context, meta *PeerMetadata) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.peers[meta.ID] = *meta
+}
+
+func (f *fakePeerSource) PeerDelete(id types.NamespacedName) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.peers, id)
+}
+
+func (f *fakePeerSource) Peers() []PeerMetadata {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]PeerMetadata, 0, len(f.peers))
+	for _, p := range f.peers {
+		out = append(out, p)
+	}
+	return out
+}
+
+var (
+	_ PeerStore  = (*fakePeerSource)(nil)
+	_ PeerSource = (*fakePeerSource)(nil)
+)
+
+// fakePeerConsumer records the source it is given.
+type fakePeerConsumer struct {
+	source PeerSource
+}
+
+func (f *fakePeerConsumer) SetPeerSource(source PeerSource) { f.source = source }
+
+var _ PeerConsumer = (*fakePeerConsumer)(nil)
