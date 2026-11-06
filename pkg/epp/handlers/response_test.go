@@ -1010,30 +1010,73 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
 	t.Parallel()
 
-	server := &StreamingServer{
-		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
-		director:       &mockDirector{},
-	}
-	reqCtx := &RequestContext{
-		Response: &Response{
-			Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream},
+	tests := []struct {
+		name         string
+		messageStart string
+		messageDelta string
+		want         fwkrequest.Usage
+	}{
+		{
+			name:         "delta placeholder zero keeps cache read in prompt and total tokens",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2030,
+				CompletionTokens:   15,
+				TotalTokens:        2045,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
 		},
-		Request:           &Request{Headers: map[string]string{":path": reqcommon.APITypeMessages.Path()}},
-		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+		{
+			name:         "delta omitting cache fields keeps cache read and creation in prompt and total tokens",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2130,
+				CompletionTokens:   15,
+				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "delta superseding input tokens keeps earlier cache read",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":2679,"cache_read_input_tokens":800}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":10682,"output_tokens":510,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       11482,
+				CompletionTokens:   510,
+				TotalTokens:        11992,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 800},
+			},
+		},
 	}
 
-	chunks := [][]byte{
-		[]byte("event: message_start\ndata: " + `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}` + "\n\n"),
-		[]byte("event: message_delta\ndata: " + `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}` + "\n\n"),
-		[]byte("event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"),
-	}
-	for i, chunk := range chunks {
-		server.HandleResponseBody(context.Background(), reqCtx, chunk, i == len(chunks)-1)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+				director:       &mockDirector{},
+			}
+			reqCtx := &RequestContext{
+				Response: &Response{
+					Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream},
+				},
+				Request:           &Request{Headers: map[string]string{":path": reqcommon.APITypeMessages.Path()}},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+			}
 
-	require.NotNil(t, reqCtx.Usage.PromptTokenDetails)
-	assert.Equal(t, 2000, reqCtx.Usage.PromptTokenDetails.CachedTokens,
-		"a delta placeholder zero must not replace the cache read from message_start")
+			chunks := [][]byte{
+				[]byte("event: message_start\ndata: " + tc.messageStart + "\n\n"),
+				[]byte("event: message_delta\ndata: " + tc.messageDelta + "\n\n"),
+				[]byte("event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"),
+			}
+			for i, chunk := range chunks {
+				server.HandleResponseBody(t.Context(), reqCtx, chunk, i == len(chunks)-1)
+			}
+
+			assert.Equal(t, tc.want, reqCtx.Usage)
+		})
+	}
 }
 
 // A large response.completed event split across chunks must still yield usage.

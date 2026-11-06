@@ -169,30 +169,52 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 		return nil, err
 	}
 
-	usg, ok := responseBody["usage"].(map[string]any)
+	usg, ok := responseBody[reqcommon.FieldUsage].(map[string]any)
 	if !ok {
 		return nil, nil //nolint:nilnil
 	}
 
-	usage := request.Usage{}
-	applyInputTokens(&usage, usg)
-	usage.CompletionTokens = jsonInt(usg, "output_tokens")
+	var tokens inputTokens
+	tokens.add(usg)
+	var usage request.Usage
+	tokens.apply(&usage)
+	usage.CompletionTokens = jsonInt(usg, reqcommon.FieldOutputTokens)
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
 	return &usage, nil
 }
 
-// applyInputTokens sums the Messages API input counts into usage.PromptTokens.
-// input_tokens counts only the tokens that were neither read from nor written to
-// the prompt cache, so the input the server processed is input_tokens +
-// cache_read_input_tokens + cache_creation_input_tokens.
+// inputTokens accumulates the three Messages API input counts across stream
+// frames. input_tokens counts only the tokens that were neither read from nor
+// written to the prompt cache, so the prompt the server processed is
+// input_tokens + cache_read_input_tokens + cache_creation_input_tokens.
 //
-// A block reporting none of the three, or reporting them as zero before any count
-// is known, is left alone rather than zeroing what an earlier block set. A
-// zero-token prompt is unreachable on a path that requires at least one message.
-func applyInputTokens(usage *request.Usage, usg map[string]any) {
-	read, hasRead := jsonIntPresent(usg, "cache_read_input_tokens")
-	total := jsonInt(usg, "input_tokens") + read + jsonInt(usg, "cache_creation_input_tokens")
+// Each bucket is updated only by a non-zero value so a later frame that omits
+// or zeroes a bucket keeps the count an earlier frame reported.
+type inputTokens struct {
+	input         int
+	cacheRead     int
+	cacheCreation int
+	hasRead       bool
+}
+
+func (t *inputTokens) add(usg map[string]any) {
+	if input := jsonInt(usg, reqcommon.FieldInputTokens); input != 0 {
+		t.input = input
+	}
+	if read, ok := jsonIntPresent(usg, reqcommon.FieldCacheReadInputTokens); ok {
+		t.hasRead = true
+		if read != 0 {
+			t.cacheRead = read
+		}
+	}
+	if creation := jsonInt(usg, reqcommon.FieldCacheCreationInputTokens); creation != 0 {
+		t.cacheCreation = creation
+	}
+}
+
+func (t inputTokens) apply(usage *request.Usage) {
+	total := t.input + t.cacheRead + t.cacheCreation
 	if total == 0 {
 		return
 	}
@@ -200,13 +222,9 @@ func applyInputTokens(usage *request.Usage, usg map[string]any) {
 	// An explicit zero is a cache miss, not a missing count: the metrics layer
 	// only records request_cached_tokens when PromptTokenDetails is set, so
 	// dropping the zero leaves the misses out of the histogram and inflates the
-	// reported hit rate. A zero is only recorded while no count is known yet,
-	// so a later frame parsed into the same Usage cannot replace the count an
-	// earlier frame reported. Frames that arrive in separate response chunks
-	// are parsed into fresh Usage values; handlers.mergeUsage applies the same
-	// rule when it folds them together.
-	if hasRead && (read != 0 || usage.PromptTokenDetails == nil) {
-		usage.PromptTokenDetails = &request.PromptTokenDetails{CachedTokens: read}
+	// reported hit rate.
+	if t.hasRead {
+		usage.PromptTokenDetails = &request.PromptTokenDetails{CachedTokens: t.cacheRead}
 	}
 }
 
@@ -252,12 +270,13 @@ func countStreamEvents(chunk []byte) int {
 
 func extractUsageStreaming(responseBytes []byte) *request.Usage {
 	var result *request.Usage
+	var tokens inputTokens
 
 	lines := bytes.SplitSeq(responseBytes, []byte("\n"))
 	for line := range lines {
 		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
 		// Safe because only message_start/message_delta carry usage, both with a literal "usage" key.
-		if !ok || !bytes.Contains(content, []byte("usage")) {
+		if !ok || !bytes.Contains(content, []byte(reqcommon.FieldUsage)) {
 			continue
 		}
 
@@ -278,21 +297,21 @@ func extractUsageStreaming(responseBytes []byte) *request.Usage {
 				if result == nil {
 					result = &request.Usage{}
 				}
-				applyInputTokens(result, event.Message.Usage)
+				tokens.add(event.Message.Usage)
 			}
 		case "message_delta":
 			if event.Usage != nil {
 				if result == nil {
 					result = &request.Usage{}
 				}
-				// The delta counts are cumulative and authoritative over message_start.
-				applyInputTokens(result, event.Usage)
-				result.CompletionTokens = jsonInt(event.Usage, "output_tokens")
+				tokens.add(event.Usage)
+				result.CompletionTokens = jsonInt(event.Usage, reqcommon.FieldOutputTokens)
 			}
 		}
 	}
 
 	if result != nil {
+		tokens.apply(result)
 		result.TotalTokens = result.PromptTokens + result.CompletionTokens
 	}
 

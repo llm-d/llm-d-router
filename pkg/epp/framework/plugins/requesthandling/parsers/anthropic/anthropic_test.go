@@ -759,11 +759,43 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":30,\"output_tokens\":15,\"cache_read_input_tokens\":0}}"),
 			want: &fwkrh.ParsedResponse{
 				Usage: &request.Usage{
+					PromptTokens:     2030,
+					CompletionTokens: 15,
+					TotalTokens:      2045,
+					PromptTokenDetails: &request.PromptTokenDetails{
+						CachedTokens: 2000,
+					},
+				},
+				StreamedEvents: 2,
+			},
+		},
+		{
+			name: "message_delta omitting cache fields keeps the earlier cache read and creation",
+			chunk: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"cache_read_input_tokens\":2000,\"cache_creation_input_tokens\":100}}}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":30,\"output_tokens\":15}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
+					PromptTokens:     2130,
+					CompletionTokens: 15,
+					TotalTokens:      2145,
+					PromptTokenDetails: &request.PromptTokenDetails{
+						CachedTokens: 2000,
+					},
+				},
+				StreamedEvents: 2,
+			},
+		},
+		{
+			name: "message_delta explicit zero cache read with no earlier read",
+			chunk: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"cache_read_input_tokens\":0}}}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":30,\"output_tokens\":15,\"cache_read_input_tokens\":0}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
 					PromptTokens:     30,
 					CompletionTokens: 15,
 					TotalTokens:      45,
 					PromptTokenDetails: &request.PromptTokenDetails{
-						CachedTokens: 2000,
+						CachedTokens: 0,
 					},
 				},
 				StreamedEvents: 2,

@@ -324,9 +324,10 @@ func finishPartialGRPCFrame(
 // leaves the accumulated value alone. Parsers that emit usage once with every field
 // populated are unaffected.
 func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
-	if src.PromptTokens != 0 {
-		dst.PromptTokens = src.PromptTokens
-	}
+	// PromptTokens includes CachedTokens, so a later chunk that zeroes or omits
+	// the cache fields carries only the uncached portion in src.PromptTokens.
+	// Merge the uncached portion and the cached count separately, then recombine.
+	uncached := max(dst.PromptTokens-cachedTokens(dst), src.PromptTokens-cachedTokens(&src))
 	if src.CompletionTokens != 0 {
 		dst.CompletionTokens = src.CompletionTokens
 	}
@@ -337,13 +338,22 @@ func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 		(src.PromptTokenDetails.CachedTokens != 0 || dst.PromptTokenDetails == nil) {
 		dst.PromptTokenDetails = src.PromptTokenDetails
 	}
-	// A block reporting both halves of the usage owns the total it came with; a partial
+	dst.PromptTokens = uncached + cachedTokens(dst)
+	// A block reporting the full usage owns the total it came with; a partial
 	// block carries a total covering only its own fields, so derive it from the merge.
-	if src.PromptTokens != 0 && src.CompletionTokens != 0 && src.TotalTokens != 0 {
+	if dst.PromptTokens == src.PromptTokens && dst.CompletionTokens == src.CompletionTokens &&
+		src.PromptTokens != 0 && src.CompletionTokens != 0 && src.TotalTokens != 0 {
 		dst.TotalTokens = src.TotalTokens
 		return
 	}
 	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
+}
+
+func cachedTokens(u *fwkrequest.Usage) int {
+	if u.PromptTokenDetails == nil {
+		return 0
+	}
+	return u.PromptTokenDetails.CachedTokens
 }
 
 func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *RequestContext, resp *extProcPb.ProcessingRequest_ResponseHeaders) *RequestContext {
