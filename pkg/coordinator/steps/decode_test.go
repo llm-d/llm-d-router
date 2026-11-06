@@ -542,6 +542,69 @@ func TestDecodeStep_CompletionsFormat_RewritesPromptAndTopLevelKV(t *testing.T) 
 	}
 }
 
+// TestDecodeStep_PromptTokenIDsInKVParams verifies that with
+// forward_prompt_token_ids set, chat-shaped decode requests carry the rendered
+// token ids in kv_transfer_params.prompt_token_ids, except for multimodal
+// requests and requests render did not tokenize, and that nothing is sent
+// when the parameter is unset.
+func TestDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
+	image := []pipeline.MultimodalEntry{{Modality: reqcommon.ModalityImage, Hash: testImageHash}}
+	forward := map[string]any{ParamForwardPromptTokenIDs: true}
+	tests := []struct {
+		name    string
+		params  map[string]any
+		path    string
+		tokens  []int
+		entries []pipeline.MultimodalEntry
+		want    bool
+	}{
+		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
+		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
+		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
+		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
+		{name: "not rendered", params: forward, path: reqcommon.PathChatCompletions},
+		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
+		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
+		{name: "off by default", params: map[string]any{}, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
+		{name: "off", params: map[string]any{ParamForwardPromptTokenIDs: false}, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), tc.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:      tc.path,
+				TokenIDs:          tc.tokens,
+				MultimodalEntries: tc.entries,
+				KVTransferParams:  map[string]any{"block_id": "xyz"},
+				Body:              map[string]any{"model": "m"},
+			}
+			if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err != nil {
+				t.Fatal(err)
+			}
+			kvParams := reqCtx.Body[reqcommon.FieldKVTransferParams].(map[string]any)
+			got, ok := kvParams[reqcommon.FieldPromptTokenIDs]
+			if ok != tc.want {
+				t.Fatalf("prompt_token_ids present = %v, want %v (params %v)", ok, tc.want, kvParams)
+			}
+			if tc.want && fmt.Sprint(got) != fmt.Sprint(tc.tokens) {
+				t.Fatalf("prompt_token_ids = %v, want %v", got, tc.tokens)
+			}
+			if kvParams["do_remote_prefill"] != true {
+				t.Fatalf("do_remote_prefill = %v, want true", kvParams["do_remote_prefill"])
+			}
+		})
+	}
+}
+
+func TestDecodeStep_ForwardPromptTokenIDs_RejectsNonBool(t *testing.T) {
+	if _, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), map[string]any{ParamForwardPromptTokenIDs: "yes"}); err == nil {
+		t.Fatal("expected an error for a non-bool forward_prompt_token_ids")
+	}
+}
+
 // TestDecodeStep_GenerateFormat_ToplevelKV verifies that for the
 // /inference/v1/generate format the decode step places kv_transfer_params at the
 // top level of the request body, and preserves the client's sampling_params so
