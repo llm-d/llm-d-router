@@ -82,6 +82,7 @@ func (p *parameters) validate() error {
 
 // compile-time type assertion
 var _ scheduling.Filter = &SessionAffinity{}
+var _ scheduling.ProfileReferencer = &SessionAffinity{}
 var _ fwkrh.ResponseHeaderProcessor = &SessionAffinity{}
 var _ fwkrh.PreRequest = &SessionAffinity{}
 
@@ -99,8 +100,9 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 	}
 
 	return &SessionAffinity{
-		typedName: plugin.TypedName{Type: SessionAffinityType, Name: name},
-		strategy:  newStrategy(params, handle),
+		typedName:   plugin.TypedName{Type: SessionAffinityType, Name: name},
+		profileName: params.ProfileName,
+		strategy:    newStrategy(params, handle),
 	}, nil
 }
 
@@ -108,7 +110,8 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 // When sessionHeader is empty the default x-session-token header is used.
 func NewSessionAffinity(name, sessionHeader, profileName string) *SessionAffinity {
 	return &SessionAffinity{
-		typedName: plugin.TypedName{Type: SessionAffinityType, Name: name},
+		typedName:   plugin.TypedName{Type: SessionAffinityType, Name: name},
+		profileName: profileName,
 		strategy: &encodedEndpointHeaderStrategy{
 			sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
 			profileName:   profileName,
@@ -139,13 +142,22 @@ func newStrategy(params parameters, handle plugin.Handle) strategy {
 // session to the same pod the first request in the session was sent to, per
 // whichever algorithm strategy implements.
 type SessionAffinity struct {
-	typedName plugin.TypedName
-	strategy  strategy
+	typedName   plugin.TypedName
+	profileName string
+	strategy    strategy
 }
 
 // TypedName returns the typed name of the plugin.
 func (s *SessionAffinity) TypedName() plugin.TypedName {
 	return s.typedName
+}
+
+// ReferencedProfiles returns the configured profileName, if set.
+func (s *SessionAffinity) ReferencedProfiles() []string {
+	if s.profileName == "" {
+		return nil
+	}
+	return []string{s.profileName}
 }
 
 // Consumes reports the request attributes the configured strategy reads.
