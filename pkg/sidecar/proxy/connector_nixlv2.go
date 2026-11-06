@@ -744,7 +744,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Decode writes into a deferred writer that buffers everything until we
 	// commit() (prefill succeeded -> flush + stream on) or abort() (prefill
 	// failed -> discard); it never writes to the client directly.
-	dcw := newDeferredCommitWriter(w)
+	dcw := newDeferredCommitWriter()
+	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
+	var finalizeDecodeWriter func() error
 
 	// Prefill goroutine: body is buffered so it can be returned to the client
 	// verbatim on failure. On ANY non-2xx status (transport errors surface as
@@ -854,13 +856,22 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			}
 			cancel()
 			if !decodeAborted.Load() {
-				dcw.commit()
+				dcw.commit(w)
 			}
 			<-prefillDone
 		case <-prefillDone:
 			if prefillResp != nil && !isHTTPError(prefillResp.statusCode) {
-				// Prefill succeeded: commit decode's buffered response and stream on.
-				if !dcw.commit() {
+				// Rewrite decode's usage with the prefill cache count, as in serial dispatch.
+				var prefillerResponse map[string]any
+				if err := json.Unmarshal(prefillResp.bodyBytes(), &prefillerResponse); err != nil {
+					logger.Error(err, "concurrent-dispatch: failed to parse prefill response", "request_id", uuidStr)
+				}
+				pUsage := prefillerResponse[reqcommon.FieldUsage]
+				pKVParams, _ := prefillerResponse[reqcommon.FieldKVTransferParams].(map[string]any)
+				pCachedTokens, _ := usage.CachedTokens(pUsage)
+				decodeWriter, finalize := decodeResponseWriter(w, pCachedTokens, pUsage != nil && len(pKVParams) > 0, streamingEnabled)
+				finalizeDecodeWriter = finalize
+				if !dcw.commit(decodeWriter) {
 					logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
 						"request_id", uuidStr)
 				}
@@ -915,6 +926,13 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Wait for decode to finish (streamed on success, or promptly aborted) so
 	// we never leak the decode goroutine or its response body.
 	<-decodeDone
+	var finalizeErr error
+	if finalizeDecodeWriter != nil && !decodeAborted.Load() {
+		if finalizeErr = finalizeDecodeWriter(); finalizeErr != nil {
+			logger.Error(finalizeErr, "failed to flush cached token response writer (concurrent-dispatch)",
+				"request_id", uuidStr)
+		}
+	}
 
 	// Decode errors are attributed only when the commit point let decode's
 	// response reach the client. When the commit point wrote the response
@@ -923,7 +941,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// sampled on the KV-wait timeout, where decode waited the full timeout.
 	if !clientResponded {
 		observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
-		if decodeAborted.Load() || dcw.failed() {
+		if decodeAborted.Load() || dcw.failed() || finalizeErr != nil {
 			observeStageError(r.Context(), metrics.StageDecode)
 		}
 	} else if decodeTimedOut {

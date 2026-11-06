@@ -123,14 +123,15 @@ func (s *responseStatus) failed() bool {
 	return s.statusCode == 0 || isHTTPError(s.statusCode) || s.writeFailed
 }
 
-// deferredCommitWriter wraps a client http.ResponseWriter and holds all writes
-// until the caller decides the outcome (the "commit point"). It is used by the
-// MoRI-IO parallel WRITE dispatch so decode can run concurrently with prefill
-// yet never surface a response to the client before prefill has succeeded:
+// deferredCommitWriter holds all writes until the caller decides the outcome
+// (the "commit point"). It is used by the MoRI-IO parallel WRITE dispatch so
+// decode can run concurrently with prefill yet never surface a response to the
+// client before prefill has succeeded:
 //
-//   - commit(): relay the buffered status/headers/body to the client and switch
-//     to pass-through mode, so any further decode writes stream straight to the
-//     client (SSE/streaming is preserved after the commit point).
+//   - commit(dst): relay the buffered status/headers/body to dst and switch
+//     to pass-through mode, so any further decode writes stream straight to
+//     dst (SSE/streaming is preserved after the commit point). dst is chosen
+//     at the commit point because it can depend on prefill's response.
 //   - abort():  discard the buffered output and drop every subsequent write, so
 //     a failed prefill can never let decode emit a (possibly 200) response; the
 //     caller then writes the prefill error to the client directly.
@@ -157,9 +158,8 @@ type deferredCommitWriter struct {
 	buffer      bytes.Buffer
 }
 
-func newDeferredCommitWriter(dst http.ResponseWriter) *deferredCommitWriter {
+func newDeferredCommitWriter() *deferredCommitWriter {
 	return &deferredCommitWriter{
-		dst:    dst,
 		header: make(http.Header),
 	}
 }
@@ -261,12 +261,12 @@ func (w *deferredCommitWriter) flushCommitLocked() {
 	}
 }
 
-// commit allows decode's response to reach the client, preserving decode's own
+// commit allows decode's response to reach dst, preserving decode's own
 // status, headers, and body. If decode has already produced output it is flushed
 // immediately; otherwise the flush is deferred until decode emits its header, so
 // a fast-succeeding prefill never clobbers decode's status/headers with a
 // synthesized default. Returns false if the writer had already been aborted.
-func (w *deferredCommitWriter) commit() bool {
+func (w *deferredCommitWriter) commit(dst http.ResponseWriter) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.aborted {
@@ -276,6 +276,7 @@ func (w *deferredCommitWriter) commit() bool {
 		return true
 	}
 	w.committed = true
+	w.dst = dst
 	// Only flush now if decode already emitted its header/body; otherwise wait
 	// for decode's WriteHeader/Write so we relay its real status and headers.
 	if w.wroteHeader || w.buffer.Len() > 0 {
