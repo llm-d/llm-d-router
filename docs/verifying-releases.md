@@ -14,8 +14,10 @@ the SBOM enumerates what the image contains.
 | `ghcr.io/llm-d/llm-d-router-coordinator` | yes | yes |
 | Helm charts under `ghcr.io/llm-d/charts/` | no | no |
 
-Development images built from `main` use the same names with a `-dev` suffix
-(`llm-d-router-endpoint-picker-dev`) and are covered identically.
+Images built from `main` use the same names, tagged `main` and
+`sha-<short commit SHA>`, and are covered identically. Images published to the
+staging registry `quay.io/llm-d` for open pull requests carry no attestation
+and no SBOM.
 
 Release images tagged `v0.10.0` and earlier carry neither an attestation nor
 an SBOM. The commands below report a missing attestation for them.
@@ -41,7 +43,7 @@ digest is published. A tag based verification run in that window fails against a
 correctly signed image.
 
 ```console
-$ IMAGE=ghcr.io/llm-d/llm-d-router-endpoint-picker-dev
+$ IMAGE=ghcr.io/llm-d/llm-d-router-endpoint-picker
 $ DIGEST=$(docker buildx imagetools inspect "$IMAGE:main" --format '{{.Manifest.Digest}}')
 $ echo "$DIGEST"
 sha256:0dc1fdbd6de4dc6f0cb542561f3ecdde2bea0a66407adabea20a1948e608d265
@@ -54,7 +56,7 @@ Use `$IMAGE@$DIGEST` for every command below.
 ### The signing identity is the reusable workflow
 
 Images are built by `.github/workflows/ci-build-images.yaml` which runs as a
-reusable workflow called by `ci-dev.yaml` and `ci-release.yaml`. The OIDC
+reusable workflow called by `ci-main.yaml` and `ci-release.yaml`. The OIDC
 certificate identity is the reusable workflow's path, not the caller's.
 Verification commands must name it. A command that names `ci-release.yaml`
 fails against a correctly signed release image.
@@ -65,7 +67,7 @@ fails against a correctly signed release image.
 $ gh attestation verify "oci://$IMAGE@$DIGEST" \
     --repo llm-d/llm-d-router \
     --signer-workflow llm-d/llm-d-router/.github/workflows/ci-build-images.yaml
-Loaded digest sha256:0dc1fdbd6de4dc6f0cb542561f3ecdde2bea0a66407adabea20a1948e608d265 for oci://ghcr.io/llm-d/llm-d-router-endpoint-picker-dev@sha256:0dc1fdbd6de4dc6f0cb542561f3ecdde2bea0a66407adabea20a1948e608d265
+Loaded digest sha256:0dc1fdbd6de4dc6f0cb542561f3ecdde2bea0a66407adabea20a1948e608d265 for oci://ghcr.io/llm-d/llm-d-router-endpoint-picker@sha256:0dc1fdbd6de4dc6f0cb542561f3ecdde2bea0a66407adabea20a1948e608d265
 Loaded 1 attestation from GitHub API
 
 The following policy criteria will be enforced:
@@ -101,7 +103,7 @@ $ cosign verify-attestation \
     --certificate-identity-regexp '^https://github\.com/llm-d/llm-d-router/\.github/workflows/ci-build-images\.yaml@.*$' \
     "$IMAGE@$DIGEST"
 
-Verification for ghcr.io/llm-d/llm-d-router-endpoint-picker-dev@sha256:0dc1fdbd6de4dc6f0cb542561f3ecdde2bea0a66407adabea20a1948e608d265 --
+Verification for ghcr.io/llm-d/llm-d-router-endpoint-picker@sha256:0dc1fdbd6de4dc6f0cb542561f3ecdde2bea0a66407adabea20a1948e608d265 --
 The following checks were performed on each of these signatures:
   - The cosign claims were validated
   - Existence of the claims in the transparency log was verified offline

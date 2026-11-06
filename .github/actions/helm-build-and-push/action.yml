@@ -15,6 +15,18 @@ inputs:
     description: 'EPP image repository name (e.g. llm-d-router-endpoint-picker)'
     required: false
     default: 'llm-d-router-endpoint-picker'
+  pr_number:
+    description: 'Pull request number. When set, the chart is versioned as <chart_version_base>-pr.<n> (plus an immutable +sha.<pr_sha> snapshot).'
+    required: false
+    default: ''
+  pr_sha:
+    description: 'Short SHA of the pull request head, used for the immutable chart version snapshot.'
+    required: false
+    default: ''
+  chart_version_base:
+    description: 'Latest release tag used as the version base for pull request charts.'
+    required: false
+    default: ''
 runs:
   using: 'composite'
   steps:
@@ -24,5 +36,8 @@ runs:
         EXTRA_TAG: "${{ inputs.extra_tag }}"
         CHART_SUFFIX: "${{ inputs.chart_suffix }}"
         EPP_RELEASE_IMAGE_REPOSITORY: "${{ inputs.epp_image_repository }}"
+        PR_NUMBER: "${{ inputs.pr_number }}"
+        PR_SHA: "${{ inputs.pr_sha }}"
+        CHART_VERSION_BASE: "${{ inputs.chart_version_base }}"
       run: |
         make helm-push CHART="${{ inputs.chart_name }}"
