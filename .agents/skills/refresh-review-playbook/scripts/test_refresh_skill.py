@@ -236,13 +236,7 @@ class WatermarkTest(unittest.TestCase):
         wm = mine_delta.extract_watermarks(WORKTREE)
         prov = json.loads((WORKTREE / "docs/review/provenance.json").read_text(encoding="utf-8"))
         self.assertEqual(wm["mined_through_date"], prov["corpus"]["window_end"])
-        cited = [
-            int(ex["url"].split("/pull/")[1].split("#")[0])
-            for r in prov["rules"].values()
-            for ex in r["examples"]
-            if "/pull/" in ex["url"]
-        ]
-        self.assertGreaterEqual(wm["mined_through_pr"], max(cited))
+        self.assertEqual(wm["mined_through_pr"], prov["corpus"]["mined_through_pr"])
 
     def test_foreign_repo_urls_ignored_and_corpus_override_wins(self) -> None:
         prov = {
