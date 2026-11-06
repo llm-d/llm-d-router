@@ -28,9 +28,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -1151,4 +1153,52 @@ func TestDumpStateEmpty(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(payload, &got))
 	assert.Equal(t, 0, got.TotalPods)
 	assert.Empty(t, got.Pods)
+}
+
+func TestPreRequestConditionalDoesNotSpeculate(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	for _, tc := range []struct {
+		name       string
+		headers    map[string]string
+		wantBlocks int
+	}{
+		{name: "regular request", wantBlocks: 2},
+		{name: "unrelated preference", headers: map[string]string{routing.PreferHeader: "return=minimal"}, wantBlocks: 2},
+		{name: "conditional request", headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+			p, err := newDataProducer(ctx, ApproxPrefixCachePluginType, config{
+				BlockSizeTokens:        1,
+				MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+				LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+			}, testHandle())
+			require.NoError(t, err)
+			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "worker"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+			request := &fwksched.InferenceRequest{
+				RequestID: uuid.NewString(),
+				Body:      tokenizedBody([]uint32{1, 2}),
+				Headers:   tc.headers,
+			}
+			require.NoError(t, p.Produce(ctx, request, []fwksched.Endpoint{endpoint}))
+			result := &fwksched.SchedulingResult{
+				PrimaryProfileName: "default",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+				},
+			}
+			require.NoError(t, p.PreRequest(ctx, request, result))
+			p.wg.Wait()
+			_, err = plugin.ReadPluginStateKey[*SchedulingContextState](p.PluginState(), request.RequestID, plugin.StateKey(p.typedName.Name))
+			require.Error(t, err)
+
+			next := &fwksched.InferenceRequest{RequestID: uuid.NewString(), Body: tokenizedBody([]uint32{1, 2})}
+			require.NoError(t, p.Produce(ctx, next, []fwksched.Endpoint{endpoint}))
+			key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType)
+			raw, ok := endpoint.Get(key)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantBlocks, raw.(*attrprefix.PrefixCacheMatchInfo).MatchBlocks())
+		})
+	}
 }

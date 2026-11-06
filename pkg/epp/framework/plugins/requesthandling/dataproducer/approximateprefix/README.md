@@ -6,7 +6,9 @@ Prepares per-endpoint prefix cache match data consumed by the `prefix-cache-affi
 
 **When it runs.** By default the producer runs after screeners, on the screened endpoints, before admission and scheduling. When a screener consumes `PrefixCacheMatchInfo`, or the producer is listed under `requestHandler.dataProducers`, it runs during request handling instead, on every located endpoint before screeners, and its `token-producer` moves with it. It runs once per request either way: in request handling, filters and scorers read the match info it wrote there. Running during request handling matches more endpoints per request, so per-endpoint work grows with the candidates the screeners remove. See [Request Control](../../../../../../../docs/architecture.md#request-control).
 
-For each request, the plugin consumes `request.Body.TokenizedPrompt` (token IDs), hashes the token IDs into fixed-size blocks, and looks up which endpoints have recently served requests with a matching prefix. It writes a `PrefixCacheMatchInfo` attribute onto each candidate endpoint, then records the selected endpoint(s) in the index after scheduling completes (via `PreRequest`).
+For each request, the plugin consumes `request.Body.TokenizedPrompt` (token IDs), hashes the token IDs into fixed-size blocks, and looks up predicted prefix matches for each endpoint. It writes a `PrefixCacheMatchInfo` attribute onto each candidate endpoint, then records the selected endpoint(s) in the index after scheduling completes (via `PreRequest`).
+
+Conditional decode requests (`Prefer: if-available`) do not update the predicted cache state. This prevents rejected requests from creating false cache hits for later requests.
 
 `TokenizedPrompt` is produced by a `token-producer`. When none is configured, the framework auto-creates one with the tokenizer-free `estimate` backend, so prefix caching works without extra setup; configure a `token-producer` explicitly to select the vLLM `/render` backend.
 

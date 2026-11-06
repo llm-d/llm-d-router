@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -539,17 +540,20 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		return nil
 	}
 
-	// Update indexer asynchronously to avoid blocking the request path.
-	p.wg.Go(func() {
-		for _, s := range servers {
-			for _, hashes := range state.PerPromptHashes {
-				p.indexerInst.Add(hashes, s)
-				if p.syncerActive() {
-					p.recent.record(s.String(), hashes)
+	// Conditional requests can be rejected by another PreRequest plugin.
+	if !routing.IsConditionalDecode(request.Headers) {
+		// Update indexer asynchronously to avoid blocking the request path.
+		p.wg.Go(func() {
+			for _, s := range servers {
+				for _, hashes := range state.PerPromptHashes {
+					p.indexerInst.Add(hashes, s)
+					if p.syncerActive() {
+						p.recent.record(s.String(), hashes)
+					}
 				}
 			}
-		}
-	})
+		})
+	}
 
 	// Record metrics. Lengths are reported as a byte estimate (fwkrequest.BytesPerToken bytes per token).
 	total := 0

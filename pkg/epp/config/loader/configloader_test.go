@@ -58,6 +58,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
@@ -1126,6 +1127,46 @@ func TestInstantiateAndConfigureDefaultConfig(t *testing.T) {
 	require.NotNil(t, cfg.DataConfig, "a data layer config should be defaulted")
 	require.Len(t, cfg.DataConfig.Sources, 1, "the metrics source should be the only default data source")
 	require.Equal(t, sourcemetrics.MetricsDataSourceType, cfg.DataConfig.Sources[0].Plugin.TypedName().Type)
+}
+
+func TestInstantiateAndConfigure_ValidatesFallbackProfile(t *testing.T) {
+	registerTestPlugins(t)
+	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityStable,
+		disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
+
+	for _, tc := range []struct {
+		name       string
+		parameters string
+		wantError  string
+	}{
+		{name: "omitted"},
+		{name: "configured", parameters: "  parameters: {profiles: {fallback: standby}}\n"},
+		{
+			name:       "unknown profile",
+			parameters: "  parameters: {profiles: {fallback: missing}}\n",
+			wantError:  `profiles.fallback references unknown scheduling profile "missing"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configText := `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- type: disagg-profile-handler
+` + tc.parameters + `schedulingProfiles:
+- name: decode
+- name: standby
+`
+			logger := logging.NewTestLogger()
+			rawConfig, _, err := LoadRawConfig([]byte(configText), logger)
+			require.NoError(t, err)
+			_, err = InstantiateAndConfigure(rawConfig, testutils.NewTestHandle(t.Context()), logger)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestInstantiateAndConfigureRejectsNonSchedulingPlugins(t *testing.T) {

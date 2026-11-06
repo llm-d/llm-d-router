@@ -18,7 +18,9 @@ package disagg_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,11 +28,17 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log" // Import config for thresholds
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -38,6 +46,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
@@ -324,6 +333,218 @@ func TestPDSchedule(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPDSchedule_AggregatedFallback(t *testing.T) {
+	const fallback = "fallback"
+	const encode = "encode"
+	ctx := context.Background()
+
+	fallbackEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "fallback-endpoint"},
+			Address: "1.2.3.4",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+	decodeEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "decode-endpoint"},
+			Address: "5.6.7.8",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+	prefillOnlyEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:      k8stypes.NamespacedName{Name: "prefill-only-endpoint"},
+			Address: "9.10.11.12",
+			Labels:  map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+		},
+		&fwkdl.Metrics{WaitingQueueSize: 0},
+		fwkdl.NewAttributes(),
+	)
+	encodeEndpoint := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			ID:     k8stypes.NamespacedName{Name: "encode-endpoint"},
+			Labels: map[string]string{bylabel.RoleLabel: bylabel.RoleEncode},
+		},
+		&fwkdl.Metrics{},
+		fwkdl.NewAttributes(),
+	)
+
+	prefillFilter, err := bylabel.NewSelector("strict-prefill", &metav1.LabelSelector{
+		MatchLabels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+	})
+	require.NoError(t, err)
+	decodeFilter, err := bylabel.NewSelector("strict-decode", &metav1.LabelSelector{
+		MatchLabels: map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+	})
+	require.NoError(t, err)
+	fallbackFilter, err := bylabel.NewSelector("full-capability", &metav1.LabelSelector{
+		MatchLabels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode},
+	})
+	require.NoError(t, err)
+
+	capacityFilter, err := utilization.Factory("capacity", json.NewDecoder(strings.NewReader(
+		`{"conditions":[{"metric":"running-requests","maxValue":0}]}`)), nil)
+	require.NoError(t, err)
+
+	prefillProfile := scheduling.NewSchedulerProfile().
+		WithFilters(prefillFilter).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	decodeProfile := scheduling.NewSchedulerProfile().
+		WithFilters(decodeFilter, capacityFilter.(fwksched.Filter)).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	fallbackProfile := scheduling.NewSchedulerProfile().
+		WithFilters(fallbackFilter, capacityFilter.(fwksched.Filter)).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	encodeProfile := scheduling.NewSchedulerProfile().
+		WithFilters(bylabel.NewEncodeRole()).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	for _, tc := range []struct {
+		name             string
+		hasDecode        bool
+		hasPrefill       bool
+		hasFallback      bool
+		encodeConfigured bool
+		hasEncode        bool
+		decodeBusy       bool
+		fallbackBusy     bool
+		prefillDeclined  bool
+		cancelled        bool
+		wantPrimary      string
+		wantFallbackRuns int
+	}{
+		{name: "decode unavailable", hasPrefill: true, hasFallback: true, wantPrimary: fallback, wantFallbackRuns: 1},
+		{name: "both stages available", hasDecode: true, hasPrefill: true, hasFallback: true, wantPrimary: decode},
+		{name: "required prefill unavailable", hasDecode: true, hasFallback: true, wantPrimary: fallback, wantFallbackRuns: 1},
+		{name: "prefill declined", hasDecode: true, hasFallback: true, prefillDeclined: true, wantPrimary: decode},
+		{name: "prefill only cannot satisfy fallback", hasPrefill: true, wantFallbackRuns: 1},
+		{name: "fallback unavailable", hasDecode: true, wantFallbackRuns: 1},
+		{name: "decode busy", hasDecode: true, hasFallback: true, decodeBusy: true, wantPrimary: fallback, wantFallbackRuns: 1},
+		{name: "both workers busy", hasDecode: true, hasFallback: true, decodeBusy: true, fallbackBusy: true, wantFallbackRuns: 1},
+		{name: "request cancelled", hasFallback: true, cancelled: true},
+		{name: "encode unavailable retains PD", hasDecode: true, hasPrefill: true, hasFallback: true, encodeConfigured: true, wantPrimary: decode},
+		{name: "all stages available", hasDecode: true, hasPrefill: true, hasFallback: true, encodeConfigured: true, hasEncode: true, wantPrimary: decode},
+		{name: "encode succeeds before prefill fails", hasDecode: true, hasFallback: true, encodeConfigured: true, hasEncode: true, wantPrimary: fallback, wantFallbackRuns: 1},
+		{name: "encode succeeds but fallback unavailable", hasDecode: true, encodeConfigured: true, hasEncode: true, wantFallbackRuns: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decider := &disagg.AlwaysDisaggPDDecider{}
+			handler := disagg.NewDisaggProfileHandler(decode, prefill, "", decider, nil).WithFallbackProfile(fallback)
+			if tc.encodeConfigured {
+				handler = disagg.NewDisaggProfileHandler(decode, prefill, encode, decider, disagg.NewAlwaysDisaggEncodeDecider()).WithFallbackProfile(fallback)
+			}
+			if tc.prefillDeclined {
+				handler = disagg.NewDisaggProfileHandler(decode, prefill, "", nil, nil).WithFallbackProfile(fallback)
+			}
+			var endpoints []fwksched.Endpoint
+			if tc.hasDecode {
+				endpoints = append(endpoints, decodeEndpoint)
+			}
+			if tc.hasPrefill {
+				endpoints = append(endpoints, prefillOnlyEndpoint)
+			}
+			if tc.hasFallback {
+				endpoints = append(endpoints, fallbackEndpoint)
+			}
+			if tc.hasEncode {
+				endpoints = append(endpoints, encodeEndpoint)
+			}
+			decodeEndpoint.GetMetrics().RunningRequestsSize = 0
+			fallbackEndpoint.GetMetrics().RunningRequestsSize = 0
+			if tc.decodeBusy {
+				decodeEndpoint.GetMetrics().RunningRequestsSize = 1
+			}
+			if tc.fallbackBusy {
+				fallbackEndpoint.GetMetrics().RunningRequestsSize = 1
+			}
+
+			fallbackRuns := 0
+			profiles := map[string]fwksched.SchedulerProfile{
+				decode: decodeProfile,
+				prefill: profileFunc(func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+					_, hasPeer := fwksched.ReadRequestAttribute[fwksched.Endpoint](req, disagg.PeerEndpointAttributeKey)
+					assert.True(t, hasPeer)
+					return prefillProfile.Run(ctx, req, endpoints)
+				}),
+				fallback: profileFunc(func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+					fallbackRuns++
+					_, hasPeer := fwksched.ReadRequestAttribute[fwksched.Endpoint](req, disagg.PeerEndpointAttributeKey)
+					assert.False(t, hasPeer)
+					return fallbackProfile.Run(ctx, req, endpoints)
+				}),
+			}
+			encodeRuns := 0
+			if tc.encodeConfigured {
+				profiles[encode] = profileFunc(func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+					encodeRuns++
+					return encodeProfile.Run(ctx, req, endpoints)
+				})
+			}
+			scheduler := scheduling.NewSchedulerWithConfig(scheduling.NewSchedulerConfig(handler, profiles))
+
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			}
+			req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "critical", Body: completionsBody("12345678901"), Headers: map[string]string{reqcommon.RequestIDHeaderKey: "test-request"}}
+			if tc.encodeConfigured {
+				req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "image", Length: 1}}
+			}
+			counter := disagg.LlmdDisaggDecisionCount.WithLabelValues(handler.TypedName().Name, handler.TypedName().Type, req.TargetModel, metricsutil.DisaggPathAggregatedFallback)
+			before := testutil.ToFloat64(counter)
+			got, err := scheduler.Schedule(ctx, req, endpoints)
+			assert.Equal(t, tc.wantFallbackRuns, fallbackRuns)
+			wantDecisions := 0.0
+			if tc.wantPrimary == fallback {
+				wantDecisions = 1
+			}
+			assert.Equal(t, before+wantDecisions, testutil.ToFloat64(counter))
+			if tc.encodeConfigured {
+				assert.Equal(t, 1, encodeRuns)
+			}
+			if tc.wantPrimary == "" {
+				require.Error(t, err)
+				assert.Nil(t, got)
+				var typedErr errcommon.Error
+				require.ErrorAs(t, err, &typedErr)
+				assert.Equal(t, errcommon.ServiceUnavailable, typedErr.Code)
+				assert.Equal(t, string(errcommon.RequestDroppedReasonNoEndpoints), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPrimary, got.PrimaryProfileName)
+			switch {
+			case tc.wantPrimary == fallback:
+				require.Len(t, got.ProfileResults, 1)
+				require.Equal(t, fallbackEndpoint.GetMetadata().ID, got.PrimaryEndpoint().GetMetadata().ID)
+				for _, header := range []string{routing.PrefillEndpointHeader, routing.EncoderEndpointsHeader} {
+					routing.SetRoutingHeader(req.Headers, header, "stale-endpoint")
+				}
+				require.NoError(t, handler.PreRequest(ctx, req, got))
+				require.Equal(t, map[string]string{reqcommon.RequestIDHeaderKey: "test-request"}, req.Headers)
+			case tc.prefillDeclined:
+				assert.NotContains(t, got.ProfileResults, prefill)
+			default:
+				assert.Contains(t, got.ProfileResults, prefill)
+				assert.Equal(t, tc.hasEncode, got.ProfileResults[encode] != nil)
+			}
+		})
+	}
+}
+
+type profileFunc func(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) (*fwksched.ProfileRunResult, error)
+
+func (f profileFunc) Run(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+	return f(ctx, req, endpoints)
 }
 
 func TestPDSchedule_PrefillFirst(t *testing.T) {
