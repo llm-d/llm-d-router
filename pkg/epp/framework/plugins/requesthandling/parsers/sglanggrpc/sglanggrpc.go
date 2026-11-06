@@ -245,11 +245,7 @@ func (p *SGLangGRPCParser) RewritePriority(_ fwkrh.PriorityRewriteContext, paylo
 	if !ok {
 		return payload, false, nil
 	}
-	body, err := grpcframe.ParsePayload(raw)
-	if err != nil {
-		return nil, false, fmt.Errorf("invalid gRPC generate request: %w", err)
-	}
-	framed, err := sglangwire.FramePriority(body, int64(priority))
+	framed, err := sglangwire.RewritePriority(raw, int64(priority))
 	if err != nil {
 		return nil, false, fmt.Errorf("rewriting priority: %w", err)
 	}
