@@ -69,13 +69,15 @@ func TestEndpointMetadataClone(t *testing.T) {
 
 func TestEndpointMetadataEqual(t *testing.T) {
 	base := &EndpointMetadata{
-		ID:          types.NamespacedName{Name: "pod-a-rank-0", Namespace: "default"},
-		Name:        "pod-a",
-		Address:     "10.0.0.1",
-		Port:        "8000",
-		MetricsHost: "10.0.0.1:9000",
-		Labels:      map[string]string{"app": "vllm"},
-		RankIndex:   1,
+		ID:               types.NamespacedName{Name: "pod-a-rank-0", Namespace: "default"},
+		Name:             "pod-a",
+		Address:          "10.0.0.1",
+		Port:             "8000",
+		MetricsHost:      "10.0.0.1:9000",
+		Labels:           map[string]string{"app": "vllm"},
+		RankIndex:        1,
+		RanksPerPort:     2,
+		DataParallelRank: 3,
 	}
 
 	assert.True(t, base.Equal(base.Clone()))
@@ -133,6 +135,18 @@ func TestEndpointMetadataEqual(t *testing.T) {
 			name: "rank index",
 			mutate: func(meta *EndpointMetadata) {
 				meta.RankIndex = 2
+			},
+		},
+		{
+			name: "ranks per port",
+			mutate: func(meta *EndpointMetadata) {
+				meta.RanksPerPort = 4
+			},
+		},
+		{
+			name: "data-parallel rank",
+			mutate: func(meta *EndpointMetadata) {
+				meta.DataParallelRank = 5
 			},
 		},
 	}
