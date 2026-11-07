@@ -121,7 +121,7 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 
 	if logger.V(logutil.DEBUG).Enabled() {
 		logger.V(logutil.DEBUG).Info("Selecting endpoints from candidates by random weighted picker", "max-num-of-endpoints", p.maxNumOfEndpoints,
-			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", fwksched.EndpointScores(scoredEndpoints))
 	}
 
 	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ)

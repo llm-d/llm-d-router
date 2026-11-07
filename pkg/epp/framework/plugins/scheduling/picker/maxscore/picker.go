@@ -91,7 +91,7 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 	logger := log.FromContext(ctx)
 	if logger.V(logutil.DEBUG).Enabled() {
 		logger.V(logutil.DEBUG).Info("Selecting endpoints from candidates sorted by max score", "max-num-of-endpoints", p.maxNumOfEndpoints,
-			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", fwksched.EndpointScores(scoredEndpoints))
 	}
 
 	slices.SortFunc(scoredEndpoints, func(i, j *fwksched.ScoredEndpoint) int { // highest score first, ties by name
