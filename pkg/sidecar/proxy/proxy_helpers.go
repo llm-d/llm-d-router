@@ -184,6 +184,10 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.As(context.Cause(r.Context()), &prefillErr):
 			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
 				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			if isVLLMGRPCRequest(r) {
+				s.relayVLLMPrefillFailure(res, r, prefillErr.response, vllmPrefillOutcome{relayError: true})
+				break
+			}
 			// A key with http.TrailerPrefix is sent as a trailer whether it is
 			// set before or after WriteHeader, so a buffered gRPC status relays
 			// as the HTTP/2 trailer the backend sent.
@@ -371,7 +375,9 @@ func WriteAll(w io.Writer, b []byte) {
 func redirectEncodedInferencePath(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.RawPath != "" {
-			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c {
+			c := path.Clean(r.URL.Path)
+			_, isGRPCMethod := grpcMethodRoutes[c]
+			if reqcommon.DetectAPIType(c).Path() == c || isGRPCMethod {
 				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
 				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
 				return

@@ -362,6 +362,10 @@ func flattenECMetadata(md map[string]any) map[string]any {
 // the consumer over Mooncake, rewrites the request to reference them, and
 // hands off to the configured P/D connector.
 func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, p2p p2pRouting, apiType reqcommon.APIType) {
+	if isVLLMGRPCRequest(r) {
+		s.handleECMooncakeVLLMGRPC(w, r, prefillEndPoint, encodeEndPoints, p2p)
+		return
+	}
 	logger := log.FromContext(r.Context())
 	logger.V(logging.DEBUG).Info("running EC-Mooncake protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
