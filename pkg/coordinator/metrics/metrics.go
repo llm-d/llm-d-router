@@ -80,6 +80,24 @@ const (
 	ProbeResultTransportError = "transport_error"
 )
 
+// Result label values for force_stream_total, one per candidate outcome. The
+// forced outcome is a reassembled reply; the fallback_* outcomes and error_ceiling
+// take the non-forced pass-through; error_upstream and error_transport are also
+// classified by step_errors_total. The metric's Help string is the canonical
+// description of what each value means.
+const (
+	ForceStreamResultForced              = "forced"
+	ForceStreamResultFallbackBudget      = "fallback_budget"
+	ForceStreamResultFallbackUnbounded   = "fallback_unbounded"
+	ForceStreamResultFallbackUnsupported = "fallback_unsupported"
+	ForceStreamResultFallbackLossyFrame  = "fallback_lossy_frame"
+	ForceStreamResultFallbackOversize    = "fallback_oversize"
+	ForceStreamResultFallbackUnreadable  = "fallback_unreadable"
+	ForceStreamResultErrorCeiling        = "error_ceiling"
+	ForceStreamResultErrorUpstream       = "error_upstream"
+	ForceStreamResultErrorTransport      = "error_transport"
+)
+
 // Route label values for orchestration_overhead_seconds. These name the
 // coordinator's registered inference routes, not the raw URL path.
 const (
@@ -167,6 +185,8 @@ func allCollectors() []resettableCollector {
 		upstreamRequestDuration,
 		executionPathTotal,
 		conditionalDecodeProbesTotal,
+		forceStreamBufferedBytes,
+		forceStreamTotal,
 		encodeSubrequests,
 		orchestrationOverhead,
 		mediaItems,

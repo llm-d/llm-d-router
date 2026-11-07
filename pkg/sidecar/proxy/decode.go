@@ -17,10 +17,12 @@ limitations under the License.
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -40,12 +42,18 @@ const (
 	// finishReasonLength is the finish reason when max_tokens was reached.
 	finishReasonLength = "length"
 
-	responseFieldMessage = "message"
-	responseFieldIndex   = "index"
-	responseFieldDelta   = "delta"
-
-	roleAssistant = "assistant"
+	requestFieldStructuredOutputs = "structured_outputs"
+	responseFormatText            = "text"
 )
+
+// vLLMError is the flat error shape older vLLM versions return, which a
+// chunked decode stream re-nests in the OpenAI error envelope.
+type vLLMError struct {
+	Object  string `json:"object"`
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    int    `json:"code"`
+}
 
 // dispatchDecode routes a fully-prepared decode request to either chunked
 // decode or the regular decoder proxy. Chunked decode is only used for
@@ -153,6 +161,14 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// vLLM applies a structured-output constraint to one request's output, so a chunk
+	// that continues earlier text starts the structure over and the joined output is invalid.
+	if requestUsesStructuredOutput(body) {
+		s.logger.V(logging.DEBUG).Info("chunked decode: structured output requested, using regular decode")
+		regularDecode()
+		return
+	}
+
 	// If the token budget fits within a single chunk, skip chunking entirely.
 	if originalMaxTokens > 0 && originalMaxTokens <= s.config.DecodeChunkSize {
 		logger.V(logging.DEBUG).Info("chunked decode: token budget <= chunk size, using regular decode",
@@ -166,14 +182,14 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		regularDecode()
 		return
 	}
-	finalMessage := map[string]json.RawMessage{reqcommon.FieldRole: json.RawMessage(`"` + roleAssistant + `"`)}
+	finalMessage := map[string]json.RawMessage{reqcommon.FieldRole: json.RawMessage(`"` + reqcommon.RoleAssistant + `"`)}
 	prefix := ""
 	if continueFinal, _ := body[reqcommon.FieldContinueFinalMessage].(bool); continueFinal {
 		var role string
 		finalMessage = nil
 		// Only an assistant message can carry the accumulated text; any other final message is sent as is.
 		if len(messages) == 0 || json.Unmarshal(messages[len(messages)-1], &finalMessage) != nil ||
-			json.Unmarshal(finalMessage[reqcommon.FieldRole], &role) != nil || role != roleAssistant {
+			json.Unmarshal(finalMessage[reqcommon.FieldRole], &role) != nil || role != reqcommon.RoleAssistant {
 			regularDecode()
 			return
 		}
@@ -253,7 +269,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			finalMessage[reqcommon.FieldContent] = content
 			message, err := json.Marshal(finalMessage)
 			if err != nil {
-				if writeErr := errorInternalServerError(err, w); writeErr != nil {
+				if writeErr := errorInternalServerError(w, r, err); writeErr != nil {
 					logger.Error(writeErr, "failed to send error response to client")
 				}
 				return
@@ -263,7 +279,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 		chunkBody, err := json.Marshal(chunkReq)
 		if err != nil {
-			if err := errorJSONInvalid(err, w); err != nil {
+			if err := errorJSONInvalid(w, r, err); err != nil {
 				logger.Error(err, "failed to send error response to client")
 			}
 			return
@@ -285,8 +301,10 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			if streamingEnabled && chunkIndex > 0 {
 				// The status went out with the first chunk, so the error is sent the
 				// way vLLM reports a failure in a stream: as a data event before [DONE].
-				errorBody := bw.bodyBytes()
-				var flatError errorResponse
+				// The writer appends a newline to the JSON body, which would break the
+				// SSE event framing, so trim it.
+				errorBody := bytes.TrimSpace(bw.bodyBytes())
+				var flatError vLLMError
 				if json.Unmarshal(errorBody, &flatError) == nil && flatError.Object == "error" {
 					var err error
 					errorBody, err = json.Marshal(reqcommon.OpenAIErrorResponse{Error: reqcommon.OpenAIError{
@@ -309,7 +327,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		var chunkResponse map[string]any
 		if err := json.Unmarshal(bw.bodyBytes(), &chunkResponse); err != nil {
 			logger.Error(jsonErrorForLog(err), "failed to unmarshal chunk response", "chunk", chunkIndex)
-			if err := errorInternalServerError(err, w); err != nil {
+			if err := errorInternalServerError(w, r, err); err != nil {
 				logger.Error(err, "failed to send error response to client")
 			}
 			return
@@ -379,8 +397,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Individual chunk events have usage stripped by emitSSEChunk.
 		if lastResponse != nil {
 			usageEvent := map[string]any{
-				reqcommon.FieldUsage: cumulativeUsage,
-				responseFieldChoices: []any{},
+				reqcommon.FieldUsage:   cumulativeUsage,
+				reqcommon.FieldChoices: []any{},
 			}
 			if data, err := json.Marshal(usageEvent); err == nil {
 				fmt.Fprintf(w, "%s%s\n\n", reqcommon.SSEDataPrefix, data)
@@ -396,7 +414,7 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	// Non-streaming: reassemble the full response.
 	// overwrite choices with the text accumulated across all chunks.
 	if lastResponse == nil {
-		if err := errorInternalServerError(errors.New("no chunks produced"), w); err != nil {
+		if err := errorInternalServerError(w, r, errors.New("no chunks produced")); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -407,17 +425,17 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 	if choice := firstChoice(lastResponse); choice != nil {
 		choice = maps.Clone(choice)
 		fullText := textAccum.String()
-		if msg, ok := choice[responseFieldMessage].(map[string]any); ok {
+		if msg, ok := choice[reqcommon.FieldMessage].(map[string]any); ok {
 			msg = maps.Clone(msg)
 			msg[reqcommon.FieldContent] = fullText
-			choice[responseFieldMessage] = msg
+			choice[reqcommon.FieldMessage] = msg
 		}
-		lastResponse[responseFieldChoices] = []any{choice}
+		lastResponse[reqcommon.FieldChoices] = []any{choice}
 	}
 
 	respBody, err := json.Marshal(lastResponse)
 	if err != nil {
-		if err := errorInternalServerError(err, w); err != nil {
+		if err := errorInternalServerError(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
@@ -476,7 +494,7 @@ func extractPromptTokens(response map[string]any) int {
 
 // extractFinishReason returns finish_reason or "".
 func extractFinishReason(response map[string]any) string {
-	choices, ok := response[responseFieldChoices].([]any)
+	choices, ok := response[reqcommon.FieldChoices].([]any)
 	if !ok || len(choices) == 0 {
 		return ""
 	}
@@ -484,7 +502,7 @@ func extractFinishReason(response map[string]any) string {
 	if !ok {
 		return ""
 	}
-	reason, _ := choice[responseFieldFinishReason].(string)
+	reason, _ := choice[reqcommon.FieldFinishReason].(string)
 	return reason
 }
 
@@ -495,7 +513,7 @@ func extractFinishReason(response map[string]any) string {
 func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool) error {
 	streamChunk := maps.Clone(chunkResponse)
 
-	if choices, _ := chunkResponse[responseFieldChoices].([]any); len(choices) > 0 {
+	if choices, _ := chunkResponse[reqcommon.FieldChoices].([]any); len(choices) > 0 {
 		streamChoices := make([]any, 0, len(choices))
 		for _, c := range choices {
 			choice, ok := c.(map[string]any)
@@ -504,16 +522,16 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool
 			}
 			text := extractChoiceText(choice)
 			streamChoice := map[string]any{
-				responseFieldIndex:        choice[responseFieldIndex],
-				responseFieldFinishReason: nil,
+				reqcommon.FieldIndex:        choice[reqcommon.FieldIndex],
+				reqcommon.FieldFinishReason: nil,
 			}
 			if last {
-				streamChoice[responseFieldFinishReason] = choice[responseFieldFinishReason]
+				streamChoice[reqcommon.FieldFinishReason] = choice[reqcommon.FieldFinishReason]
 			}
-			streamChoice[responseFieldDelta] = map[string]any{reqcommon.FieldContent: text, reqcommon.FieldRole: roleAssistant}
+			streamChoice[reqcommon.FieldDelta] = map[string]any{reqcommon.FieldContent: text, reqcommon.FieldRole: reqcommon.RoleAssistant}
 			streamChoices = append(streamChoices, streamChoice)
 		}
-		streamChunk[responseFieldChoices] = streamChoices
+		streamChunk[reqcommon.FieldChoices] = streamChoices
 	}
 
 	delete(streamChunk, reqcommon.FieldUsage)
@@ -528,7 +546,7 @@ func emitSSEChunk(w http.ResponseWriter, chunkResponse map[string]any, last bool
 
 // firstChoice returns choices[0] from a response map, or nil.
 func firstChoice(response map[string]any) map[string]any {
-	choices, ok := response[responseFieldChoices].([]any)
+	choices, ok := response[reqcommon.FieldChoices].([]any)
 	if !ok || len(choices) == 0 {
 		return nil
 	}
@@ -538,12 +556,21 @@ func firstChoice(response map[string]any) map[string]any {
 
 // extractChoiceText returns the generated text from a choice's message.content.
 func extractChoiceText(choice map[string]any) string {
-	if msg, ok := choice[responseFieldMessage].(map[string]any); ok {
+	if msg, ok := choice[reqcommon.FieldMessage].(map[string]any); ok {
 		if content, ok := msg[reqcommon.FieldContent].(string); ok {
 			return content
 		}
 	}
 	return ""
+}
+
+// toWholeInt is toInt for whole numbers: a float64 with a fraction is
+// rejected instead of truncated.
+func toWholeInt(v any) (int, bool) {
+	if f, ok := v.(float64); ok && f != math.Trunc(f) {
+		return 0, false
+	}
+	return toInt(v)
 }
 
 // toInt converts a JSON number value (float64, int, or json.Number) to int.
@@ -580,4 +607,20 @@ func requestMayCallTools(body map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// requestUsesStructuredOutput reports whether the request sets structured_outputs, or a
+// response_format with a type other than text. Both fields arrive as json.RawMessage.
+func requestUsesStructuredOutput(body map[string]any) bool {
+	if raw, ok := body[requestFieldStructuredOutputs].(json.RawMessage); ok && string(raw) != "null" {
+		return true
+	}
+	raw, ok := body[reqcommon.FieldResponseFormat].(json.RawMessage)
+	if !ok || string(raw) == "null" {
+		return false
+	}
+	var format struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(raw, &format) != nil || format.Type != responseFormatText
 }

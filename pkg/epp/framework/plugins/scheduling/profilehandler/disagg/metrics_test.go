@@ -17,6 +17,7 @@ limitations under the License.
 package disagg
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -67,6 +68,27 @@ func TestRecordDisaggDecisionEmptyModel(t *testing.T) {
 	if err := testutil.CollectAndCompare(LlmdDisaggDecisionCount, strings.NewReader(expected),
 		"llm_d_epp_disagg_decision_total"); err != nil {
 		t.Errorf("RecordDisaggDecision() with empty model failed: %v", err)
+	}
+}
+
+// The target model is the request-body model when no rewrite rule matches, so a
+// flood of made-up names must fold into one overflow series instead of one each.
+func TestRecordDisaggDecisionBoundsModelLabel(t *testing.T) {
+	const testCap = 3
+	old := boundModelName
+	boundModelName = metricsutil.NewBoundedLabel(testCap).Bound
+	LlmdDisaggDecisionCount.Reset()
+	t.Cleanup(func() {
+		boundModelName = old
+		LlmdDisaggDecisionCount.Reset()
+	})
+
+	for i := 0; i < 100; i++ {
+		RecordDisaggDecision("test-plugin", "test-type", fmt.Sprintf("model-%d", i), metricsutil.DisaggPathDecodeOnly)
+	}
+
+	if got := testutil.CollectAndCount(LlmdDisaggDecisionCount); got != testCap+1 {
+		t.Errorf("100 distinct model names must collapse to cap+overflow series, got %d series", got)
 	}
 }
 

@@ -31,7 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
@@ -252,26 +252,26 @@ func (r *rig) header(req *fwksched.InferenceRequest, status string) {
 
 // headerKey delivers response headers with the status under key.
 func (r *rig) headerKey(req *fwksched.InferenceRequest, key, status string) {
-	r.p.ResponseHeader(ctx, req, &fwkrc.Response{RequestID: req.RequestID, Headers: map[string]string{key: status}}, nil)
+	r.p.ResponseHeader(ctx, req, &fwkrh.Response{RequestID: req.RequestID, Headers: map[string]string{key: status}}, nil)
 }
 
 // chunk delivers a streamed chunk that does not end the stream.
 func (r *rig) chunk(req *fwksched.InferenceRequest, start bool) {
-	r.p.ResponseBody(ctx, req, &fwkrc.Response{RequestID: req.RequestID, StartOfStream: start}, nil)
+	r.p.ResponseBody(ctx, req, &fwkrh.Response{RequestID: req.RequestID, StartOfStream: start}, nil)
 }
 
 // end delivers the end-of-stream call. As Director.HandleResponseBody builds
 // it, StartOfStream is true when no body call came before, and cause is
 // natural unless the stream was cut short.
-func (r *rig) end(req *fwksched.InferenceRequest, start bool, cause fwkrc.TerminationCause) {
-	r.p.ResponseBody(ctx, req, &fwkrc.Response{RequestID: req.RequestID, StartOfStream: start, EndOfStream: true, TerminationCause: cause}, nil)
+func (r *rig) end(req *fwksched.InferenceRequest, start bool, cause fwkrh.TerminationCause) {
+	r.p.ResponseBody(ctx, req, &fwkrh.Response{RequestID: req.RequestID, StartOfStream: start, EndOfStream: true, TerminationCause: cause}, nil)
 }
 
 // succeed delivers a successful streamed response for req.
 func (r *rig) succeed(req *fwksched.InferenceRequest) {
 	r.header(req, "200")
 	r.chunk(req, true)
-	r.end(req, false, fwkrc.TerminationCauseNatural)
+	r.end(req, false, fwkrh.TerminationCauseNatural)
 }
 
 // serve runs one successful streamed request to completion.
@@ -281,7 +281,7 @@ func (r *rig) serve(model, pod string) {
 	r.chunk(req, true)
 	r.chunk(req, false)
 	r.now = r.now.Add(time.Second)
-	r.end(req, false, fwkrc.TerminationCauseNatural)
+	r.end(req, false, fwkrh.TerminationCauseNatural)
 }
 
 func TestNewPluginValidates(t *testing.T) {
@@ -344,7 +344,7 @@ func TestBaseModelRequestIsNeutralAndUntracked(t *testing.T) {
 		t.Fatalf("base-model request must score pods equally, got %v", s)
 	}
 	req := r.route("base", "p1")
-	r.end(req, true, fwkrc.TerminationCauseNatural)
+	r.end(req, true, fwkrh.TerminationCauseNatural)
 	if got := r.tier("p1", "base"); got != residency.Absent {
 		t.Fatalf("base model tracked as an adapter: Tier = %v", got)
 	}
@@ -362,7 +362,7 @@ func TestEmptyTargetModelIsNeutralAndUntracked(t *testing.T) {
 	if len(r.p.requests) != 0 {
 		t.Fatalf("empty target model recorded: %v", r.p.requests)
 	}
-	r.end(req, true, fwkrc.TerminationCauseNatural)
+	r.end(req, true, fwkrh.TerminationCauseNatural)
 	if got := r.admit("p1", ""); got.Tier != residency.Absent || got.Pending {
 		t.Fatalf("empty target model tracked as an adapter: %+v", got)
 	}
@@ -447,7 +447,7 @@ func TestErrorStatusIsNotExecution(t *testing.T) {
 	r := newRig(t, nil, 1, "p0")
 	req := r.route("a", "p0")
 	r.header(req, "503")
-	r.end(req, true, fwkrc.TerminationCauseNatural) // an error delivered in full is natural
+	r.end(req, true, fwkrh.TerminationCauseNatural) // an error delivered in full is natural
 	if got := r.tier("p0", "a"); got != residency.Absent {
 		t.Fatalf("Tier = %v, want Absent after an error response", got)
 	}
@@ -462,7 +462,7 @@ func TestPlainStatusKeyErrorIsNotExecution(t *testing.T) {
 	r := newRig(t, nil, 1, "p0")
 	req := r.route("a", "p0")
 	r.headerKey(req, "status", "404")
-	r.end(req, true, fwkrc.TerminationCauseNatural)
+	r.end(req, true, fwkrh.TerminationCauseNatural)
 	if got := r.tier("p0", "a"); got != residency.Absent {
 		t.Fatalf("Tier = %v, want Absent after an error response", got)
 	}
@@ -472,8 +472,8 @@ func TestPlainStatusKeyErrorIsNotExecution(t *testing.T) {
 // cleanup makes the director send one call with StartOfStream AND EndOfStream set and a non-natural
 // cause. That is not evidence of execution.
 func TestSyntheticAbortCleanupLeavesNoTrace(t *testing.T) {
-	for _, cause := range []fwkrc.TerminationCause{
-		fwkrc.TerminationCauseClientDisconnect, fwkrc.TerminationCauseError, fwkrc.TerminationCauseEvicted,
+	for _, cause := range []fwkrh.TerminationCause{
+		fwkrh.TerminationCauseClientDisconnect, fwkrh.TerminationCauseError, fwkrh.TerminationCauseEvicted,
 	} {
 		r := newRig(t, nil, 1, "p0")
 		req := r.route("a", "p0")
@@ -497,7 +497,7 @@ func TestNaturalOneShotResponseIsExecution(t *testing.T) {
 	r := newRig(t, nil, 1, "p0")
 	req := r.route("a", "p0")
 	r.header(req, "200")
-	r.end(req, true, fwkrc.TerminationCauseNatural)
+	r.end(req, true, fwkrh.TerminationCauseNatural)
 	if got := r.tier("p0", "a"); got != residency.GPU {
 		t.Fatalf("Tier = %v, want GPU after a complete one-shot response", got)
 	}
@@ -509,7 +509,7 @@ func TestDisconnectAfterFirstChunkStillExecuted(t *testing.T) {
 	req := r.route("a", "p0")
 	r.header(req, "200")
 	r.chunk(req, true)
-	r.end(req, false, fwkrc.TerminationCauseClientDisconnect)
+	r.end(req, false, fwkrh.TerminationCauseClientDisconnect)
 	if got := r.tier("p0", "a"); got != residency.GPU {
 		t.Fatalf("Tier = %v, want GPU: the adapter ran before the disconnect", got)
 	}
@@ -521,7 +521,7 @@ func TestStreamedErrorStatusIsNotExecution(t *testing.T) {
 	req := r.route("a", "p0")
 	r.header(req, "500")
 	r.chunk(req, true)
-	r.end(req, false, fwkrc.TerminationCauseNatural)
+	r.end(req, false, fwkrh.TerminationCauseNatural)
 	if got := r.tier("p0", "a"); got != residency.Absent {
 		t.Fatalf("Tier = %v, want Absent after a 500 response", got)
 	}
@@ -533,7 +533,7 @@ func TestDuplicatePreRequestCountedOnce(t *testing.T) {
 	if err := r.p.PreRequest(ctx, req, req.SchedulingResult); err != nil {
 		t.Fatal(err)
 	}
-	r.end(req, true, fwkrc.TerminationCauseClientDisconnect) // one abort clears the one pending route
+	r.end(req, true, fwkrh.TerminationCauseClientDisconnect) // one abort clears the one pending route
 	if got := r.admit("p0", "a"); got.Pending {
 		t.Fatalf("Admit = %+v, want the duplicate PreRequest ignored", got)
 	}
@@ -655,8 +655,8 @@ func TestLateCallbacksDoNotResurrectDeletedPod(t *testing.T) {
 	pending := r.route("b", "p0")
 	r.del("p0")
 	r.chunk(pending, true)
-	r.end(pending, false, fwkrc.TerminationCauseNatural)
-	r.end(running, false, fwkrc.TerminationCauseNatural)
+	r.end(pending, false, fwkrh.TerminationCauseNatural)
+	r.end(running, false, fwkrh.TerminationCauseNatural)
 	if r.tracked("p0") {
 		t.Fatal("late callbacks recreated the deleted pod")
 	}
@@ -697,8 +697,8 @@ func TestReplacementAddStartsEmpty(t *testing.T) {
 		}
 	}
 	r.chunk(pending, true)
-	r.end(pending, false, fwkrc.TerminationCauseNatural)
-	r.end(running, false, fwkrc.TerminationCauseNatural)
+	r.end(pending, false, fwkrh.TerminationCauseNatural)
+	r.end(running, false, fwkrh.TerminationCauseNatural)
 	for _, adapter := range []string{"c", "d"} {
 		if got := r.tier("p0", adapter); got != residency.Absent {
 			t.Fatalf("Tier(%s) = %v, want Absent: an old-object callback reached the replacement", adapter, got)
@@ -848,7 +848,7 @@ func TestUpdateMidRequestKeepsRequest(t *testing.T) {
 	r.update("p0")
 	r.chunk(req, true)
 	r.update("p0")
-	r.end(req, false, fwkrc.TerminationCauseNatural)
+	r.end(req, false, fwkrh.TerminationCauseNatural)
 	if got := r.tier("p0", "a"); got != residency.GPU {
 		t.Fatalf("Tier = %v, want GPU: updates mid-request must not drop it", got)
 	}
@@ -917,9 +917,9 @@ func TestConcurrentLifecycleLeavesNoOrphans(t *testing.T) {
 			accepted++
 		}
 		r.p.mu.Unlock()
-		r.p.ResponseHeader(ctx, req, &fwkrc.Response{RequestID: req.RequestID, Headers: map[string]string{":status": "200"}}, nil)
-		r.p.ResponseBody(ctx, req, &fwkrc.Response{RequestID: req.RequestID, StartOfStream: true}, nil)
-		r.p.ResponseBody(ctx, req, &fwkrc.Response{RequestID: req.RequestID, EndOfStream: true, TerminationCause: fwkrc.TerminationCauseNatural}, nil)
+		r.p.ResponseHeader(ctx, req, &fwkrh.Response{RequestID: req.RequestID, Headers: map[string]string{":status": "200"}}, nil)
+		r.p.ResponseBody(ctx, req, &fwkrh.Response{RequestID: req.RequestID, StartOfStream: true}, nil)
+		r.p.ResponseBody(ctx, req, &fwkrh.Response{RequestID: req.RequestID, EndOfStream: true, TerminationCause: fwkrh.TerminationCauseNatural}, nil)
 		r.p.mu.Lock()
 		for id := range r.p.pods {
 			if _, live := r.p.endpoints[id]; !live {

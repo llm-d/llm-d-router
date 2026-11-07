@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
+	"strconv"
 )
 
 // CapSingleToken rewrites body into a synthetic, non-streaming,
@@ -66,6 +68,98 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 	return limits
 }
 
+// samplingLimitsMap returns the map that holds a request's output caps and
+// sampling fields: sampling_params for the vLLM generate API, body itself
+// otherwise. ok is false only for a vLLM generate body with no sampling_params
+// object, so its caps cannot be read.
+func samplingLimitsMap(body map[string]any, apiType APIType) (map[string]any, bool) {
+	if apiType == APITypeVLLMGenerate {
+		sp, ok := body[FieldSamplingParams].(map[string]any)
+		return sp, ok
+	}
+	return body, true
+}
+
+// OutputTokenLimit reports the output token cap the body carries, reading the
+// same fields CapSingleToken writes. ok is false when no field names a usable,
+// non-negative integer cap, which a caller sizing a response buffer treats as
+// an unbounded response. The first field in APIType.tokenLimitFields order that
+// resolves to such a value wins.
+func OutputTokenLimit(body map[string]any, apiType APIType) (int, bool) {
+	limits, ok := samplingLimitsMap(body, apiType)
+	if !ok {
+		return 0, false
+	}
+	for _, field := range apiType.tokenLimitFields() {
+		v, set := FieldValue(limits, field)
+		if !set {
+			continue
+		}
+		if n, err := NonNegativeInt(v); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// OutputChoiceCount reports how many independent completions the request asks
+// for (the n field), read from the same map as OutputTokenLimit. It returns 1
+// when n is absent, unreadable, or below 1, since the server then produces a
+// single completion. A caller sizing a response buffer multiplies the
+// per-completion estimate by this count: the server streams n completions and
+// buffers them together.
+func OutputChoiceCount(body map[string]any, apiType APIType) int {
+	limits, ok := samplingLimitsMap(body, apiType)
+	if !ok {
+		return 1
+	}
+	v, set := FieldValue(limits, FieldN)
+	if !set {
+		return 1
+	}
+	if n, err := NonNegativeInt(v); err == nil && n >= 1 {
+		return n
+	}
+	return 1
+}
+
+// NonNegativeInt coerces a JSON-decoded number into a non-negative int. A client
+// body decodes a number as float64, a body decoded with UseNumber as
+// json.Number, and a body built in-process may hold a Go integer. A value that
+// is negative, non-integral, or outside int range is an error rather than a
+// truncation.
+func NonNegativeInt(v any) (int, error) {
+	switch n := v.(type) {
+	case float64:
+		// float64 cannot represent MaxInt exactly (on 64-bit it rounds up to 2^63),
+		// and converting a value at or past that bound to int is platform-defined,
+		// so the bound is the first float64 past MaxInt.
+		if n < 0 || n != math.Trunc(n) || n >= float64(1<<(strconv.IntSize-1)) {
+			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
+		}
+		return int(n), nil
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0, err
+		}
+		return nonNegativeInt64(i)
+	case int:
+		return nonNegativeInt64(int64(n))
+	case int64:
+		return nonNegativeInt64(n)
+	default:
+		return 0, fmt.Errorf("expected number, got %T", v)
+	}
+}
+
+func nonNegativeInt64(i int64) (int, error) {
+	if i < 0 || i > math.MaxInt {
+		return 0, fmt.Errorf("expected non-negative integer, got %d", i)
+	}
+	return int(i), nil
+}
+
 // RejectStatefulResponsesFields reports an error naming the first field it
 // finds that depends on state the router does not keep: previous_response_id
 // and conversation reference a prior turn, background asks for an async job
@@ -83,7 +177,7 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 // inspected.
 func RejectStatefulResponsesFields(body map[string]any) error {
 	for _, field := range []string{FieldPreviousResponseID, FieldConversation} {
-		if _, set := fieldValue(body, field); set {
+		if _, set := FieldValue(body, field); set {
 			return fmt.Errorf("field %q is not supported by the router", field)
 		}
 	}
@@ -100,12 +194,18 @@ func RejectStatefulResponsesFields(body map[string]any) error {
 	return nil
 }
 
-// fieldValue resolves body[field], reporting whether the client set it. An
+// FieldValue resolves body[field], reporting whether the client set it. An
 // explicit null is not set: SDKs serialize an unset optional that way, and
 // refusing it would name a field the client believes it omitted. Bytes that do
 // not decode report set with a nil value, so a field that cannot be read is
 // refused rather than passed on.
-func fieldValue(body map[string]any, field string) (any, bool) {
+//
+// A body decoded selectively (the coordinator decodes only an allow-list of
+// fields and leaves the rest as json.RawMessage, so they forward byte-for-byte)
+// needs this to read a non-inspected field: the raw bytes are unmarshaled here on
+// demand. A plain type assertion on body[field] would see json.RawMessage and miss
+// the value.
+func FieldValue(body map[string]any, field string) (any, bool) {
 	v, ok := body[field]
 	if !ok {
 		return nil, false
@@ -124,7 +224,7 @@ func fieldValue(body map[string]any, field string) (any, bool) {
 // cannot read as false could arrive there as true, and refusing all of them
 // avoids reimplementing that coercion.
 func backgroundRequested(body map[string]any) bool {
-	v, set := fieldValue(body, FieldBackground)
+	v, set := FieldValue(body, FieldBackground)
 	if !set {
 		return false
 	}

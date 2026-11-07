@@ -3,6 +3,10 @@
 # Extract upstream CRD versions from go.mod so references stay in sync with Go dependencies.
 GIE_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api-inference-extension)
 GATEWAY_API_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api)
+# Pinned vllm-project/vllm ref (tag or commit SHA) for upstream vLLM .proto schemas (rust/proto).
+VLLM_REF ?= 2fb5111bbac7a2e31c0c19c1eb0aa01df5ecb664
+# Pinned sgl-project/sglang ref (tag or commit SHA) for SGLang .proto schemas.
+SGLANG_REF ?= 93a936d007ada66544cb5ac855de540a596c2ca4
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
@@ -10,22 +14,24 @@ $(LOCALBIN):
 	[ -d $@ ] || mkdir -p $@
 
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+BUF ?= $(LOCALBIN)/buf
 PROTOC ?= protoc
 PROTOC_GEN_GO = $(LOCALBIN)/protoc-gen-go
 PROTOC_GEN_GO_GRPC = $(LOCALBIN)/protoc-gen-go-grpc
 
 ## Tool Versions
 CONTROLLER_TOOLS_VERSION ?= v0.19.0
+BUF_VERSION ?= v1.75.0
 PROTOC_GEN_GO_VERSION ?= v1.34.2
 PROTOC_GEN_GO_GRPC_VERSION ?= v1.5.1
 
 .PHONY: sync-upstream-versions
 sync-upstream-versions: ## Update upstream CRD version references to match go.mod once version bumped run this target
 	@echo "Syncing GIE version to $(GIE_VERSION)"
-	@sed -i 's|gateway-api-inference-extension/releases/download/.*/v1-manifests.yaml|gateway-api-inference-extension/releases/download/$(GIE_VERSION)/v1-manifests.yaml|' deploy/components/crds-gie/kustomization.yaml
+	@sed -i 's|gateway-api-inference-extension/releases/download/.*/v1-manifests.yaml|gateway-api-inference-extension/releases/download/$(GIE_VERSION)/v1-manifests.yaml|' test/e2e/artifacts/components/crds-gie/kustomization.yaml
 	@sed -i 's|GIE_VERSION="$${GIE_VERSION:-.*}"|GIE_VERSION="$${GIE_VERSION:-$(GIE_VERSION)}"|' hack/verify-helm.sh hack/verify-manifests.sh
 	@echo "Syncing Gateway API version to $(GATEWAY_API_VERSION)"
-	@sed -i 's|gateway-api/config/crd?ref=.*|gateway-api/config/crd?ref=$(GATEWAY_API_VERSION)|' deploy/components/crds-gateway-api/kustomization.yaml
+	@sed -i 's|gateway-api/config/crd?ref=.*|gateway-api/config/crd?ref=$(GATEWAY_API_VERSION)|' test/e2e/artifacts/components/crds-gateway-api/kustomization.yaml
 	@sed -i 's|GATEWAY_API_VERSION="$${GATEWAY_API_VERSION:-.*}"|GATEWAY_API_VERSION="$${GATEWAY_API_VERSION:-$(GATEWAY_API_VERSION)}"|' hack/verify-helm.sh hack/verify-manifests.sh
 
 .PHONY: generate
@@ -66,14 +72,58 @@ controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessar
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
-.PHONY: generate-proto
-generate-proto: protoc-gen-go protoc-gen-go-grpc ## Generate Golang code from protobuf files.
+VLLM_GRPC_DIR := pkg/common/grpc/vllm
+SGLANG_GRPC_DIR := pkg/common/grpc/sglang
+
+.PHONY: generate-proto generate-proto-vllm generate-proto-vllm-engine generate-proto-vllm-upstream generate-proto-sglang
+generate-proto: generate-proto-vllm generate-proto-sglang ## Generate Golang code from protobuf files.
+
+generate-proto-vllm: generate-proto-vllm-engine generate-proto-vllm-upstream
+
+generate-proto-vllm-engine: protoc-gen-go protoc-gen-go-grpc ## Generate Go bindings for the legacy Python VllmEngine .proto.
 	PATH="$(LOCALBIN):$$PATH" $(PROTOC) \
 		-I pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto \
 		-I . \
 		--go_out=module=github.com/llm-d/llm-d-router:. \
 		--go-grpc_out=module=github.com/llm-d/llm-d-router:. \
 		pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto/*.proto
+
+generate-proto-vllm-upstream: buf protoc-gen-go protoc-gen-go-grpc ## Generate upstream vLLM Go bindings from vllm-project/vllm@$(VLLM_REF).
+	PATH="$(LOCALBIN):$$PATH" $(BUF) generate \
+		--template $(VLLM_GRPC_DIR)/buf.gen.yaml \
+		"https://github.com/vllm-project/vllm.git#ref=$(VLLM_REF),subdir=rust/proto,depth=1"
+
+.PHONY: verify-vllm-proto
+verify-vllm-proto: generate-proto-vllm-upstream ## Check that upstream vLLM Go bindings match vllm-project/vllm@$(VLLM_REF).
+	@status="$$(git status --porcelain -- $(VLLM_GRPC_DIR))"; \
+	if [ -n "$$status" ]; then \
+		echo "ERROR: $(VLLM_GRPC_DIR) differs from vllm-project/vllm@$(VLLM_REF). Run 'make generate-proto-vllm-upstream' and commit the result:"; \
+		echo "$$status"; \
+		git diff -- $(VLLM_GRPC_DIR); \
+		exit 1; \
+	fi
+
+generate-proto-sglang: buf protoc-gen-go protoc-gen-go-grpc ## Generate SGLang Go bindings from sgl-project/sglang@$(SGLANG_REF).
+	PATH="$(LOCALBIN):$$PATH" $(BUF) generate \
+		--template $(SGLANG_GRPC_DIR)/buf.gen.yaml \
+		--path sglang/api/v1 \
+		--path sglang/json/v1 \
+		"https://github.com/sgl-project/sglang.git#ref=$(SGLANG_REF),subdir=proto,depth=1"
+
+.PHONY: verify-sglang-proto
+verify-sglang-proto: generate-proto-sglang ## Check that SGLang Go bindings match sgl-project/sglang@$(SGLANG_REF).
+	@status="$$(git status --porcelain -- $(SGLANG_GRPC_DIR))"; \
+	if [ -n "$$status" ]; then \
+		echo "ERROR: $(SGLANG_GRPC_DIR) differs from sgl-project/sglang@$(SGLANG_REF). Run 'make generate-proto-sglang' and commit the result:"; \
+		echo "$$status"; \
+		git diff -- $(SGLANG_GRPC_DIR); \
+		exit 1; \
+	fi
+
+.PHONY: buf
+buf: $(BUF) ## Download buf locally if necessary.
+$(BUF): $(LOCALBIN)
+	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
 
 .PHONY: protoc-gen-go
 protoc-gen-go: $(PROTOC_GEN_GO) ## Download protoc-gen-go locally if necessary.

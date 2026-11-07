@@ -30,8 +30,11 @@ const (
 	PathModels            = "/v1/models"
 	PathEmbeddings        = "/v1/embeddings"
 	PathAudioSpeech       = "/v1/audio/speech"
+	PathAudioGenerate     = "/v1/audio/generate"
 	PathImagesGenerations = "/v1/images/generations"
 	PathImagesEdits       = "/v1/images/edits"
+	PathVideos            = "/v1/videos"
+	PathVideosSync        = "/v1/videos/sync"
 	PathMessages          = "/v1/messages"
 	PathVLLMGenerate      = "/inference/v1/generate"
 	PathSGLangGenerate    = "/generate"
@@ -145,6 +148,11 @@ func DetectAPIType(path string) APIType {
 func MatchAPIType(path string) (APIType, bool) {
 	path, _, _ = strings.Cut(path, "?")
 	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
+	// vLLM Omni's /v1/audio/generate ends in SGLang's /generate but is not a
+	// generation API this classifier names.
+	if strings.HasSuffix(path, strings.TrimPrefix(PathAudioGenerate, "/v1")) {
+		return 0, false
+	}
 	for apiType := range apiTypeCount {
 		// Keep the slash boundary while allowing provider-specific prefixes.
 		suffix := strings.TrimPrefix(apiType.Path(), "/v1")
@@ -165,15 +173,16 @@ func DetectAPISurface(path string) APISurface {
 	return apiType.Surface()
 }
 
-// JSON request field names that cap output tokens, by API. Chat completions caps
-// both max_tokens and max_completion_tokens: vLLM and SGLang accept the two
-// together and prefer max_completion_tokens, so capping both bounds the request
-// regardless of which field the engine consults. The Completions, Messages, and
-// vLLM generate APIs share a list: none of them defines max_completion_tokens, so
-// capping it would put a field on the wire that a strict server is free to
-// reject.
+// JSON request field names that cap output tokens, by API, ordered by the
+// precedence the engine applies so a reader taking the first field present reads
+// the cap the engine honors. Chat completions lists max_completion_tokens before
+// max_tokens because vLLM and SGLang accept both and prefer max_completion_tokens;
+// CapSingleToken caps every field in the list, so the order does not affect it.
+// The Completions, Messages, and vLLM generate APIs share a list: none of them
+// defines max_completion_tokens, so capping it would put a field on the wire that
+// a strict server is free to reject.
 var (
-	chatCompletionTokenLimitFields = []string{FieldMaxTokens, FieldMaxCompletionTokens}
+	chatCompletionTokenLimitFields = []string{FieldMaxCompletionTokens, FieldMaxTokens}
 	maxTokensOnlyTokenLimitFields  = []string{FieldMaxTokens}
 	responsesTokenLimitFields      = []string{FieldMaxOutputTokens}
 )

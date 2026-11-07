@@ -35,7 +35,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/util"
 )
@@ -179,6 +179,44 @@ func (m *MockSchedulingPlugin) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{Required: m.consumes}
 }
 
+// mockRequestHeaderProducer publishes a request attribute from RequestHeader,
+// before flow control.
+type mockRequestHeaderProducer struct {
+	name     string
+	produces map[fwkplugin.DataKey]any
+	consumes map[fwkplugin.DataKey]any
+}
+
+func (m *mockRequestHeaderProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock-request-header"}
+}
+
+func (m *mockRequestHeaderProducer) Produces() map[fwkplugin.DataKey]any { return m.produces }
+
+func (m *mockRequestHeaderProducer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: m.consumes}
+}
+
+func (m *mockRequestHeaderProducer) RequestHeader(context.Context, *fwksched.InferenceRequest) error {
+	return nil
+}
+
+// mockRequestHeaderRecorder publishes its attribute from RequestHeader and also
+// records later lifecycle events, like a session tracker.
+type mockRequestHeaderRecorder struct {
+	mockRequestHeaderProducer
+}
+
+func (m *mockRequestHeaderRecorder) PreRequest(context.Context, *fwksched.InferenceRequest, *fwksched.SchedulingResult) error {
+	return nil
+}
+
+var (
+	_ fwkrh.RequestHeaderProcessor = &mockRequestHeaderProducer{}
+	_ fwkrh.RequestHeaderProcessor = &mockRequestHeaderRecorder{}
+	_ fwkrh.PreRequest             = &mockRequestHeaderRecorder{}
+)
+
 func TestValidatePluginExecutionOrder(t *testing.T) {
 	dkA := fwkplugin.NewDataKey("keyA", "mock")
 	// Request control plugin that produces data.
@@ -187,9 +225,12 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 	consumerFairnessPolicyPlugin := MockConsumerFairnessPolicy{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
 	// Scheduling plugin.
 	consumerSchedulingPlugin := MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
-	if _, ok := any(pluginA).(fwkrc.DataProducer); !ok {
+	if _, ok := any(pluginA).(fwkrh.DataProducer); !ok {
 		t.Fatalf("pluginA should implement DataProducer")
 	}
+	headerProducer := &mockRequestHeaderProducer{name: "header", produces: map[fwkplugin.DataKey]any{dkA: nil}}
+	headerRecorder := &mockRequestHeaderRecorder{mockRequestHeaderProducer{name: "recorder", produces: map[fwkplugin.DataKey]any{dkA: nil}}}
+	consumerHeaderRecorder := &mockRequestHeaderRecorder{mockRequestHeaderProducer{name: "consumer-recorder", consumes: map[fwkplugin.DataKey]any{dkA: nil}}}
 
 	testCases := []struct {
 		name        string
@@ -210,6 +251,21 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 			name:        "Scheduling plugin depends on a request control plugin",
 			plugins:     []fwkplugin.Plugin{pluginA, &consumerSchedulingPlugin},
 			expectedErr: "",
+		},
+		{
+			name:        "FC depends on a request header plugin",
+			plugins:     []fwkplugin.Plugin{headerProducer, &consumerFairnessPolicyPlugin},
+			expectedErr: "",
+		},
+		{
+			name:        "FC depends on a request header plugin that also implements PreRequest",
+			plugins:     []fwkplugin.Plugin{headerRecorder, &consumerFairnessPolicyPlugin},
+			expectedErr: "",
+		},
+		{
+			name:        "Request header plugin with PreRequest depends on a request control plugin (invalid layer execution order)",
+			plugins:     []fwkplugin.Plugin{pluginA, consumerHeaderRecorder},
+			expectedErr: "invalid plugin layer execution order",
 		},
 	}
 
@@ -254,19 +310,19 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 
 	testCases := []struct {
 		name        string
-		plugins     []fwkrc.DataProducer
+		plugins     []fwkrh.DataProducer
 		expectedDAG map[string][]string
 		expectedErr string
 	}{
 		{
 			name:        "No plugins",
-			plugins:     []fwkrc.DataProducer{},
+			plugins:     []fwkrh.DataProducer{},
 			expectedDAG: map[string][]string{},
 			expectedErr: "",
 		},
 		{
 			name:    "Plugins with no dependencies",
-			plugins: []fwkrc.DataProducer{pluginA, pluginE},
+			plugins: []fwkrh.DataProducer{pluginA, pluginE},
 			expectedDAG: map[string][]string{
 				"A/mock": {},
 				"E/mock": {},
@@ -275,7 +331,7 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 		},
 		{
 			name:    "Simple linear dependency (C -> B -> A)",
-			plugins: []fwkrc.DataProducer{pluginA, pluginB, pluginC},
+			plugins: []fwkrh.DataProducer{pluginA, pluginB, pluginC},
 			expectedDAG: map[string][]string{
 				"A/mock": {},
 				"B/mock": {"A/mock"},
@@ -285,7 +341,7 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 		},
 		{
 			name:    "DAG with multiple dependencies (B -> A, D -> A, E independent)",
-			plugins: []fwkrc.DataProducer{pluginA, pluginB, pluginD, pluginE},
+			plugins: []fwkrh.DataProducer{pluginA, pluginB, pluginD, pluginE},
 			expectedDAG: map[string][]string{
 				"A/mock": {},
 				"B/mock": {"A/mock"},
@@ -296,19 +352,19 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 		},
 		{
 			name:        "Graph with a cycle (X -> Y, Y -> X)",
-			plugins:     []fwkrc.DataProducer{pluginX, pluginY},
+			plugins:     []fwkrh.DataProducer{pluginX, pluginY},
 			expectedDAG: nil,
 			expectedErr: "cycle detected",
 		},
 		{
 			name:        "Data type mismatch between produced and consumed data",
-			plugins:     []fwkrc.DataProducer{pluginZ1, pluginZ2},
+			plugins:     []fwkrh.DataProducer{pluginZ1, pluginZ2},
 			expectedDAG: nil,
 			expectedErr: "data type mismatch between produced and consumed data",
 		},
 		{
 			name:    "Same type different pointers (should succeed)",
-			plugins: []fwkrc.DataProducer{pluginP1, pluginP2},
+			plugins: []fwkrh.DataProducer{pluginP1, pluginP2},
 			expectedDAG: map[string][]string{
 				"P1/mock": {},
 				"P2/mock": {"P1/mock"},

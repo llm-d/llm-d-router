@@ -142,6 +142,12 @@ func New(_ *gateway.Client, params map[string]any) (pipeline.Step, error) {
 func (s *Step) Name() string { return StepName }
 
 func (s *Step) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	// Async serving applies to JSON HTTP requests only. A gRPC Generate
+	// request has no model field and cannot get an OpenAI JSON error, so the
+	// step leaves it untouched even when it carries the mode header.
+	if reqCtx.IsSGLangGRPC() {
+		return nil
+	}
 	headerVal := reqCtx.OriginalHeaders.Get(s.cfg.ModeHeader)
 	if headerVal == "" {
 		// No mode header means the request did not opt into async serving:
@@ -300,11 +306,20 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 		RequestQueueName: queue,
 		ResultQueueName:  resultKey(tenant, reqCtx.RequestID),
 	}
+	// A client gone before the submit has nothing queued under this
+	// submission, and the cancel below could hit a live copy of a retried id.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s: enqueue: %w", StepName, err)
+	}
 	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamAsyncBroker)
 	err = s.sub.SubmitRequest(ctx, msg)
 	call.Done()
 	if err != nil {
 		if ctx.Err() != nil {
+			// go-redis retries the enqueue after a failed reply read, and the
+			// wait before the retry returns the context error, so the submit
+			// can have landed.
+			s.cancelAbandoned(ctx, tenant, reqCtx.RequestID)
 			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
 		}
 		log.FromContext(ctx).WithName(StepName).Error(err, "failed to enqueue request", "id", reqCtx.RequestID)
@@ -314,20 +329,10 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	}
 
 	if mode == asyncModeEnqueue {
-		// The 202 is the only place a client learns an id the coordinator
-		// generated. If the client disconnected while the submit was in
-		// flight, nobody can fetch, delete, or retry the request, so cancel
-		// it pre-dispatch (best effort, per the producer's cancellation
-		// contract) instead of leaving a worker to produce a result no one
-		// reads. A client-chosen id stays queued: the client can still act on
-		// that id even though this connection is gone.
-		if !clientHoldsID(reqCtx) && ctx.Err() != nil {
-			cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancelFn()
-			if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, reqCtx.RequestID)}); err != nil {
-				log.FromContext(ctx).WithName(StepName).Error(err,
-					"failed to cancel request abandoned before the pending response", "id", reqCtx.RequestID)
-			}
+		if ctx.Err() != nil {
+			// The client left before the 202, so it may not hold the id: a
+			// gateway can mint one for a client that sent none.
+			s.cancelAbandoned(ctx, tenant, reqCtx.RequestID)
 			return fmt.Errorf("%s: enqueue: %w", StepName, ctx.Err())
 		}
 		writePending(w, reqCtx.RequestID)
@@ -336,12 +341,18 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	return s.waitForResult(ctx, reqCtx, tenant, timeout)
 }
 
-// clientHoldsID reports whether the client supplied the id this request uses.
-// A missing or malformed x-request-id is replaced with a generated UUID, so the
-// client only knows the id when the value it sent is the one the request
-// carries.
-func clientHoldsID(reqCtx *pipeline.RequestContext) bool {
-	return reqCtx.OriginalHeaders.Get(reqcommon.RequestIDHeaderKey) == reqCtx.RequestID
+// cancelAbandoned cancels, pre-dispatch and best effort, a request whose
+// client disconnected. A later retry with the same id reattaches:
+// reattachRetry revives a still-queued copy, and an already-dropped one
+// leaves a cancelled tombstone that routes the retry to a fresh enqueue.
+// CancelRequests skips an id with no active token, so it is safe when the
+// submit did not land.
+func (s *Step) cancelAbandoned(ctx context.Context, tenant, id string) {
+	cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFn()
+	if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
+		log.FromContext(ctx).WithName(StepName).Error(err, "failed to cancel abandoned request", "id", id)
+	}
 }
 
 // unCancelScript revives a cancelled request that is still queued. The
@@ -370,6 +381,9 @@ func (s *Step) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContex
 	id := reqCtx.RequestID
 	state, res, err := lookupResult(ctx, s.rdb, tenant, id)
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%s: reattach: %w", StepName, ctx.Err())
+		}
 		logger.Error(err, "retry state lookup failed, enqueueing fresh", "id", id)
 		return nil
 	}
@@ -467,17 +481,7 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 		select {
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
-				// Client disconnected: nobody will fetch this result, so
-				// cancel pre-dispatch (best effort, per the producer's
-				// cancellation contract). A later retry with the same id
-				// reattaches: reattachRetry revives a still-queued copy, and
-				// an already-dropped one leaves a cancelled tombstone that
-				// routes the retry to a fresh enqueue.
-				cancelCtx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancelFn()
-				if err := s.sub.CancelRequests(cancelCtx, []string{envelopeID(tenant, id)}); err != nil {
-					logger.Error(err, "failed to cancel abandoned request", "id", id)
-				}
+				s.cancelAbandoned(ctx, tenant, id)
 				return fmt.Errorf("%s: wait: %w", StepName, ctx.Err())
 			}
 			if holdIsDeadline {

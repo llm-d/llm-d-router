@@ -233,8 +233,8 @@ for mode in default leader flag single single-flag-off sidecar disabled priority
     default) mode_args=(--set router.epp.replicas=3) ;;
     leader) mode_args=(--set router.epp.haMode=leader-elected) ;;
     flag) mode_args=(--set router.epp.flags.ha-enable-leader-election=true) ;;
-    single) mode_args=(--set router.epp.replicas=1 --set router.epp.flags.health-checking=false) ;;
-    single-flag-off) mode_args=(--set router.epp.replicas=1 --set-string router.epp.flags.ha-enable-leader-election=False --set router.epp.flags.health-checking=false) ;;
+    single) mode_args=(--set router.epp.replicas=1) ;;
+    single-flag-off) mode_args=(--set router.epp.replicas=1 --set-string router.epp.flags.ha-enable-leader-election=False) ;;
     sidecar) mode_args=("${sync[@]}" --set router.proxy.mode=sidecar) ;;
     disabled) mode_args=("${sync[@]}" --set router.proxy.mode=sidecar --set router.proxy.enabled=false) ;;
     priority) mode_args=(--set router.proxy.priorityRouting.enabled=true) ;;

@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -80,6 +81,12 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		IdleTimeout:       300 * time.Second, // 5 minutes for keep-alive connections
 		ReadHeaderTimeout: 30 * time.Second,  // Reasonable for headers only
 		MaxHeaderBytes:    1 << 20,           // 1 MB for headers is sufficient
+	}
+	if !s.config.SecureServing {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		server.Protocols = protocols
 	}
 
 	var cert *tls.Certificate
@@ -177,6 +184,9 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.As(context.Cause(r.Context()), &prefillErr):
 			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
 				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			// A key with http.TrailerPrefix is sent as a trailer whether it is
+			// set before or after WriteHeader, so a buffered gRPC status relays
+			// as the HTTP/2 trailer the backend sent.
 			maps.Copy(res.Header(), prefillErr.response.headers)
 			res.WriteHeader(prefillErr.response.statusCode)
 			_, writeError = res.Write(prefillErr.response.bodyBytes())
@@ -184,17 +194,16 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.Is(err, syscall.ECONNREFUSED):
 			logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
-			res.Header().Set("Content-Type", "application/json")
-			res.WriteHeader(http.StatusServiceUnavailable)
-			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
+			writeError = sendError(res, r, http.StatusServiceUnavailable,
+				"The decode node is not ready. Please check that the vLLM service is running and the port configuration is correct.")
 
 		default:
 			logger.Error(err, "http: proxy error",
 				"decoderURL", s.config.DecoderURL.String())
-			writeError = errorBadGateway(err, res)
+			writeError = errorBadGateway(res, r)
 		}
 		if writeError != nil {
-			logger.Error(err, "failed to send error response to client")
+			logger.Error(writeError, "failed to send error response to client")
 		}
 	}
 	return decoderProxy
@@ -286,7 +295,7 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
-		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
 			logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
@@ -298,7 +307,7 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
 			logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
-			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
+			if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
 				logger.Error(writeErr, "failed to send error response to client")
 			}
 			return nil, nil, false
@@ -327,13 +336,6 @@ func extractHost(hostWithPort string) string {
 	return host
 }
 
-// isHostPort reports whether s parses as host:port with a non-empty host.
-// net.SplitHostPort accepts ":8000" (empty host), which is not a usable target.
-func isHostPort(s string) bool {
-	host, _, err := net.SplitHostPort(s)
-	return err == nil && host != ""
-}
-
 func newUUID() string {
 	return uuid.New().String()
 }
@@ -357,4 +359,24 @@ func isRetryableStatus(statusCode int) bool {
 // headers and status, so there is no recovery action for a write failure.
 func WriteAll(w io.Writer, b []byte) {
 	_, _ = w.Write(b)
+}
+
+// redirectEncodedInferencePath answers a POST whose percent-encoded path
+// decodes to an inference API path with a 307 to the decoded path. EPP picks its
+// request parser from the encoded path and ServeMux matches it segment by
+// segment, so the two can classify such a request differently. The redirect
+// brings the client back through EPP with the clean path, as ServeMux does for
+// repeated slashes and dot segments. Only POST is served on these paths, so
+// other methods pass through.
+func redirectEncodedInferencePath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.RawPath != "" {
+			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c {
+				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
+				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

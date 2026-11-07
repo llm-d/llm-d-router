@@ -26,7 +26,7 @@ import (
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -181,16 +181,19 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) flowcontrol.FlowQ
 
 func (s *LASStrategy) OnPreRequest(_ *ProgramMetrics, _ *fwksched.InferenceRequest) {}
 
-func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrc.Response) {
+func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrh.Response) {
 	if request == nil || response == nil {
 		return
 	}
 	promptTokens := int64(response.Usage.PromptTokens)
 	completionTokens := int64(response.Usage.CompletionTokens)
+	if completionTokens <= 0 && response.StreamedEvents > 0 {
+		completionTokens = int64(response.StreamedEvents)
+	}
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	id := programIDFor(request)
 	service := s.getOrCreateState(id).AddService(cost, time.Now(), s.halfLifeSeconds)
-	attainedServiceTokens.WithLabelValues(id).Set(service)
+	setProgramGauge(attainedServiceTokens, id, service)
 }
 
 func (s *LASStrategy) EvictProgram(id string) {

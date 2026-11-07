@@ -32,7 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -83,7 +83,7 @@ func band(state *minVirtualService, queues ...flowcontrol.FlowQueueAccessor) *fw
 // complete reports a finished request for flow id, as the model server's usage block would.
 func complete(p *weightedFairShare, id string, priority, promptTokens, completionTokens int) {
 	req := &fwksched.InferenceRequest{FairnessID: id, Objectives: fwksched.RequestObjectives{Priority: priority}}
-	resp := &fwkrc.Response{EndOfStream: true}
+	resp := &fwkrh.Response{EndOfStream: true}
 	resp.Usage.PromptTokens = promptTokens
 	resp.Usage.CompletionTokens = completionTokens
 	p.ResponseBody(context.Background(), req, resp, nil)
@@ -148,6 +148,40 @@ func TestCost(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := newPolicy(t, tc.params)
 			complete(p, "alpha", 0, tc.prompt, tc.completion)
+			assert.InDelta(t, tc.want, virtualService(p, "alpha"), 1e-9)
+		})
+	}
+}
+
+func TestResponseBody_StreamedEventsFallback(t *testing.T) {
+	for name, tc := range map[string]struct {
+		params                     string
+		prompt, completion, events int
+		want                       float64
+	}{
+		"missing usage":                    {"", 0, 0, 35, 70},
+		"preserves prompt usage":           {"", 100, 0, 25, 150},
+		"reported output takes precedence": {"", 100, 40, 45, 180},
+		"no streamed events":               {"", 100, 0, 0, 100},
+		"no usage or events":               {"", 0, 0, 0, 0},
+		"configured costs and weight": {
+			`{"costPerRequest":10,"costPerInputToken":0.5,"costPerOutputToken":3,"flowWeights":{"alpha":2}}`,
+			100, 0, 20, 60,
+		},
+		"output cost disabled": {`{"costPerOutputToken":0}`, 100, 0, 35, 100},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newPolicy(t, tc.params)
+			req := &fwksched.InferenceRequest{FairnessID: "alpha"}
+			resp := &fwkrh.Response{StreamedEvents: tc.events}
+			resp.Usage.PromptTokens = tc.prompt
+			resp.Usage.CompletionTokens = tc.completion
+
+			p.ResponseBody(context.Background(), req, resp, nil)
+			assert.Zero(t, virtualService(p, "alpha"))
+
+			resp.EndOfStream = true
+			p.ResponseBody(context.Background(), req, resp, nil)
 			assert.InDelta(t, tc.want, virtualService(p, "alpha"), 1e-9)
 		})
 	}

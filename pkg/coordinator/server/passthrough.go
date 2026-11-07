@@ -28,8 +28,10 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -133,12 +135,16 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 		Transport:     transport,
 		ErrorLog:      log.New(&passthroughErrorLogWriter{logger: logger}, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			isGRPC := grpcframe.IsContentType(req.Header.Get(reqcommon.HeaderContentType))
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
 				logger.V(logutil.DEFAULT).Info("passthrough proxy: request body exceeds cap", "capBytes", maxBytesErr.Limit)
-				if isOpenAIPassthroughPath(req.URL.Path) {
+				switch {
+				case isGRPC:
+					grpcframe.WriteError(w, codes.ResourceExhausted, "request body too large")
+				case isOpenAIPassthroughPath(req.URL.Path):
 					rejectInference(logger, w, reqcommon.DetectAPIType(req.URL.Path), http.StatusRequestEntityTooLarge, "request body too large")
-				} else {
+				default:
 					w.WriteHeader(http.StatusRequestEntityTooLarge)
 				}
 				return
@@ -155,9 +161,12 @@ func newPassthroughProxy(logger logr.Logger, gatewayURL *url.URL, transport http
 			} else {
 				logger.Error(err, "passthrough proxy error")
 			}
-			if isOpenAIPassthroughPath(req.URL.Path) {
-				rejectInference(logger, w, reqcommon.DetectAPIType(req.URL.Path), http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID))
-			} else {
+			switch {
+			case isGRPC:
+				grpcframe.WriteError(w, codes.Unavailable, reqcommon.InternalErrorMessage(requestID))
+			case isOpenAIPassthroughPath(req.URL.Path):
+				rejectInference(logger, w, reqcommon.DetectAPIType(req.URL.Path), http.StatusBadGateway, reqcommon.InternalErrorMessage(requestID))
+			default:
 				w.WriteHeader(http.StatusBadGateway)
 			}
 		},
@@ -169,7 +178,8 @@ func isOpenAIPassthroughPath(path string) bool {
 	switch path {
 	case reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathResponses,
 		reqcommon.PathConversations, reqcommon.PathModels, reqcommon.PathEmbeddings, reqcommon.PathAudioSpeech,
-		reqcommon.PathImagesGenerations, reqcommon.PathImagesEdits:
+		reqcommon.PathAudioGenerate, reqcommon.PathImagesGenerations, reqcommon.PathImagesEdits,
+		reqcommon.PathVideos, reqcommon.PathVideosSync:
 		return true
 	default:
 		return false

@@ -27,12 +27,12 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
+	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -64,10 +64,23 @@ func createRequest() *scheduling.InferenceRequest {
 func createHundredTokenRequest() *scheduling.InferenceRequest {
 	return &scheduling.InferenceRequest{
 		RequestID: "test-request",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{
-				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, 100)}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{TokenIDs: make([]uint32, 100)}},
 			},
+		},
+	}
+}
+
+func createPromptsRequest(promptLengths ...int) *scheduling.InferenceRequest {
+	arrays := make([][]uint32, len(promptLengths))
+	for i, n := range promptLengths {
+		arrays[i] = make([]uint32, n)
+	}
+	return &scheduling.InferenceRequest{
+		RequestID: "test-request",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: fwkrequest.NewTokenizedRequest(arrays),
 		},
 	}
 }
@@ -108,6 +121,18 @@ func TestFactory(t *testing.T) {
 			pluginName: "ctx-aware",
 			jsonParams: `{"label": "llm-d.ai/prefill-work-range", "reusableTokensProducerName": "p2p-source"}`,
 			expectErr:  false,
+		},
+		{
+			name:       "include max output tokens",
+			pluginName: "ctx-aware",
+			jsonParams: `{"enableFiltering": true, "includeMaxOutputTokens": true}`,
+			expectErr:  false,
+		},
+		{
+			name:       "include max output tokens with reusable tokens producer should error",
+			pluginName: "ctx-aware",
+			jsonParams: `{"label": "llm-d.ai/prefill-work-range", "reusableTokensProducerName": "p2p-source", "includeMaxOutputTokens": true}`,
+			expectErr:  true,
 		},
 		{
 			name:       "malformed JSON should error",
@@ -223,7 +248,7 @@ func TestReusableTokensFilter(t *testing.T) {
 			"10.0.0.2", map[string]string{testPrefillWorkRangeLabel: "51-100"}),
 	}
 
-	t.Run("disabled configuration keeps total length", func(t *testing.T) {
+	t.Run("disabled configuration ignores reusable tokens", func(t *testing.T) {
 		plugin := NewContextLengthAware("default", &contextLengthAwareParameters{
 			Label:           testPrefillWorkRangeLabel,
 			EnableFiltering: true,
@@ -305,6 +330,21 @@ func TestReusableTokensFilter(t *testing.T) {
 		assert.Equal(t, "short", filtered[0].GetMetadata().ID.Name)
 	})
 
+	t.Run("multi-prompt subtracts reusable tokens from the total", func(t *testing.T) {
+		producerName := testReusableTokensProducerName
+		plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
+			Label:                      testPrefillWorkRangeLabel,
+			ReusableTokensProducerName: producerName,
+		})
+		request := createPromptsRequest(50, 50)
+		request.PutAttribute(
+			attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(producerName),
+			attrprefix.ReusablePrefixTokens(10),
+		)
+
+		assert.Equal(t, 90, plugin.getContextLength(request))
+	})
+
 	t.Run("unknown token count remains zero", func(t *testing.T) {
 		producerName := testReusableTokensProducerName
 		plugin := NewContextLengthAware("cache-aware", &contextLengthAwareParameters{
@@ -314,8 +354,8 @@ func TestReusableTokensFilter(t *testing.T) {
 		})
 		request := &scheduling.InferenceRequest{
 			RequestID: "unknown-token-count",
-			Body: &fwkrh.InferenceRequestBody{
-				TokenizedRequest: &fwkrh.TokenizedRequest{},
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{},
 			},
 		}
 		request.PutAttribute(
@@ -356,6 +396,117 @@ func TestReusableTokensScore(t *testing.T) {
 
 	scores := plugin.Score(ctx, request, endpoints)
 	assert.Greater(t, scores[endpoints[0]], scores[endpoints[1]])
+}
+
+func withMaxOutputTokens(request *scheduling.InferenceRequest, n int64) *scheduling.InferenceRequest {
+	request.Body.MaxOutputTokens = &n
+	return request
+}
+
+func TestIncludeMaxOutputTokensFilter(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "short"},
+			"10.0.0.1", map[string]string{DefaultContextLengthLabel: "0-150"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "long"},
+			"10.0.0.2", map[string]string{DefaultContextLengthLabel: "151-1000"}),
+	}
+	newPlugin := func(include bool) *ContextLengthAware {
+		return NewContextLengthAware("ctx-aware", &contextLengthAwareParameters{
+			Label:                  DefaultContextLengthLabel,
+			EnableFiltering:        true,
+			IncludeMaxOutputTokens: include,
+		})
+	}
+	filteredNames := func(filtered []scheduling.Endpoint) []string {
+		names := make([]string, len(filtered))
+		for i, endpoint := range filtered {
+			names[i] = endpoint.GetMetadata().ID.Name
+		}
+		return names
+	}
+
+	tests := []struct {
+		name     string
+		include  bool
+		request  *scheduling.InferenceRequest
+		expected []string
+	}{
+		{
+			name:     "disabled configuration ignores the output cap",
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 100),
+			expected: []string{"short"},
+		},
+		{
+			name:     "output cap is added to the prompt length",
+			include:  true,
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 100),
+			expected: []string{"long"},
+		},
+		{
+			name:     "prompt plus output cap equal to the range max fits",
+			include:  true,
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 50),
+			expected: []string{"short"},
+		},
+		{
+			name:     "multi-prompt request reserves the cap on the longest prompt",
+			include:  true,
+			request:  withMaxOutputTokens(createPromptsRequest(100, 40), 20),
+			expected: []string{"short"},
+		},
+		{
+			name:     "explicit zero output cap reserves nothing",
+			include:  true,
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 0),
+			expected: []string{"short"},
+		},
+		{
+			name:     "missing output cap reserves nothing",
+			include:  true,
+			request:  createHundredTokenRequest(),
+			expected: []string{"short"},
+		},
+		{
+			name:     "request no range can hold is filtered from every endpoint",
+			include:  true,
+			request:  withMaxOutputTokens(createHundredTokenRequest(), 901),
+			expected: []string{},
+		},
+		{
+			name:    "unknown prompt length counts the output cap alone",
+			include: true,
+			request: withMaxOutputTokens(&scheduling.InferenceRequest{
+				RequestID: "unknown-token-count",
+				Body:      &fwkrequest.InferenceRequestBody{},
+			}, 200),
+			expected: []string{"long"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filtered := newPlugin(tt.include).Filter(ctx, tt.request, endpoints)
+			assert.ElementsMatch(t, tt.expected, filteredNames(filtered))
+		})
+	}
+}
+
+func TestIncludeMaxOutputTokensScore(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "short"},
+			"10.0.0.1", map[string]string{DefaultContextLengthLabel: "0-150"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "long"},
+			"10.0.0.2", map[string]string{DefaultContextLengthLabel: "151-1000"}),
+	}
+	plugin := NewContextLengthAware("ctx-aware", &contextLengthAwareParameters{
+		Label:                  DefaultContextLengthLabel,
+		IncludeMaxOutputTokens: true,
+	})
+
+	scores := plugin.Score(ctx, withMaxOutputTokens(createHundredTokenRequest(), 100), endpoints)
+	assert.Greater(t, scores[endpoints[1]], scores[endpoints[0]])
 }
 
 func TestContextLengthAwareFilter(t *testing.T) {
@@ -548,14 +699,81 @@ func TestContextLengthAwareWithTokenizedRequestOnRequest(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body: &fwkrh.InferenceRequestBody{
-			TokenizedRequest: &fwkrh.TokenizedRequest{Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}}},
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokenIDs}}},
 		},
 	}
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)
 	assert.Equal(t, 1, len(filteredEndpoints))
 	assert.Equal(t, "tight-match", filteredEndpoints[0].GetMetadata().ID.Name)
+}
+
+func TestContextLengthAwareMultiPromptUsesLongestPrompt(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "short"},
+			"10.0.0.1", map[string]string{DefaultContextLengthLabel: "0-1024"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "long"},
+			"10.0.0.2", map[string]string{DefaultContextLengthLabel: "1025-8192"}),
+	}
+	plugin := NewContextLengthAware("multi-prompt", &contextLengthAwareParameters{
+		Label:           DefaultContextLengthLabel,
+		EnableFiltering: true,
+	})
+
+	tests := []struct {
+		name          string
+		promptLengths []int
+		want          string
+	}{
+		{name: "prompts that each fit the short range", promptLengths: []int{300, 300, 300, 300}, want: "short"},
+		{name: "one prompt beyond the short range", promptLengths: []int{10, 1100, 10}, want: "long"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := createPromptsRequest(tt.promptLengths...)
+
+			filtered := plugin.Filter(ctx, request, endpoints)
+			require.Len(t, filtered, 1)
+			assert.Equal(t, tt.want, filtered[0].GetMetadata().ID.Name)
+
+			scores := plugin.Score(ctx, request, endpoints)
+			assert.Equal(t, tt.want, highestScored(scores).GetMetadata().ID.Name)
+		})
+	}
+}
+
+func highestScored(scores map[scheduling.Endpoint]float64) scheduling.Endpoint {
+	var best scheduling.Endpoint
+	for endpoint, score := range scores {
+		if best == nil || score > scores[best] {
+			best = endpoint
+		}
+	}
+	return best
+}
+
+func TestCustomLabelMultiPromptUsesTotal(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	endpoints := []scheduling.Endpoint{
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "small"},
+			"10.0.0.1", map[string]string{testPrefillWorkRangeLabel: "0-2048"}),
+		createEndpoint(k8stypes.NamespacedName{Namespace: "default", Name: "large"},
+			"10.0.0.2", map[string]string{testPrefillWorkRangeLabel: "2049-8192"}),
+	}
+	plugin := NewContextLengthAware("custom-label", &contextLengthAwareParameters{
+		Label:           testPrefillWorkRangeLabel,
+		EnableFiltering: true,
+	})
+	request := createPromptsRequest(1500, 1500, 1500, 1500)
+
+	filtered := plugin.Filter(ctx, request, endpoints)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "large", filtered[0].GetMetadata().ID.Name)
+
+	scores := plugin.Score(ctx, request, endpoints)
+	assert.Greater(t, scores[endpoints[1]], scores[endpoints[0]])
 }
 
 func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
@@ -580,7 +798,7 @@ func TestContextLengthAwareNilTokenizedRequestIsZero(t *testing.T) {
 	request := &scheduling.InferenceRequest{
 		RequestID:   "test-request",
 		TargetModel: "test-model",
-		Body:        &fwkrh.InferenceRequestBody{},
+		Body:        &fwkrequest.InferenceRequestBody{},
 	}
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)

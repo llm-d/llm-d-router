@@ -79,14 +79,14 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
-		if err := errorJSONInvalid(err, w); err != nil {
+		if err := errorJSONInvalid(w, r, err); err != nil {
 			logger.Error(err, "failed to send error response to client")
 		}
 		return

@@ -31,6 +31,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -74,17 +75,39 @@ func NewWithTransport(transport *http.Transport, baseURL string) *Client {
 	// to a plain nil interface so both paths pick up http.DefaultTransport.
 	var rt http.RoundTripper
 	if transport != nil {
+		baseRT := http.RoundTripper(transport)
+		if !strings.HasPrefix(baseURL, "https://") && transport.Protocols == nil {
+			h2c := transport.Clone()
+			h2cProtocols := new(http.Protocols)
+			h2cProtocols.SetUnencryptedHTTP2(true)
+			h2c.Protocols = h2cProtocols
+			baseRT = &h2cAwareTransport{http1: transport, h2c: h2c}
+		}
 		// otelhttp injects W3C trace context on every outbound request, so the
 		// gateway, EPP, and sidecar spans join the trace that started here.
 		// Transport() hands this wrapper to the decode and passthrough reverse
 		// proxies, which inject for the same reason. The default span name
 		// stays fixed per method: the passthrough forwards arbitrary paths.
-		rt = otelhttp.NewTransport(transport)
+		rt = otelhttp.NewTransport(baseRT)
 	}
 	return &Client{
 		httpClient: &http.Client{Transport: rt},
 		baseURL:    baseURL,
 	}
+}
+
+// h2cAwareTransport dispatches plaintext gRPC requests over unencrypted HTTP/2
+// while keeping HTTP/1.1 for standard HTTP requests.
+type h2cAwareTransport struct {
+	http1 http.RoundTripper
+	h2c   http.RoundTripper
+}
+
+func (rt *h2cAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if grpcframe.IsContentType(req.Header.Get(reqcommon.HeaderContentType)) {
+		return rt.h2c.RoundTrip(req)
+	}
+	return rt.http1.RoundTrip(req)
 }
 
 // Request sends an HTTP request to the gateway at the given path. The returned
@@ -157,6 +180,35 @@ func (r *readThenFail) Read(p []byte) (int, error) {
 // Post is a convenience method for POST requests.
 func (c *Client) Post(ctx context.Context, path string, body []byte, headers map[string]string) (*http.Response, error) {
 	return c.Request(ctx, http.MethodPost, path, body, headers)
+}
+
+// StreamGRPC sends a gRPC POST request to the gateway and returns the
+// streaming response without buffering the body, regardless of log verbosity.
+// The body is sent as the concatenation of segments, which are not joined, so
+// a large segment can be shared between requests.
+func (c *Client) StreamGRPC(ctx context.Context, path string, headers map[string]string, segments ...[]byte) (*http.Response, error) {
+	url := c.baseURL + path
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating gRPC request: %w", err)
+	}
+	bodyLen := grpcframe.SetSegmentedBody(req, segments)
+	req.Header.Set(ContentTypeHeader, grpcframe.MediaType)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	logger := log.FromContext(ctx).WithName("gateway")
+	if v := logger.V(logutil.DEBUG); v.Enabled() {
+		v.Info("gRPC request", "path", path, "bodyLen", bodyLen, "headers", httplog.RedactedHeaders(req.Header))
+	}
+
+	resp, err := c.httpClient.Do(req) //#nosec -- baseURL is operator-configured (cfg.Address); path is validated upstream
+	if err != nil {
+		return nil, fmt.Errorf("sending gRPC request to gateway: %w", err)
+	}
+	return resp, nil
 }
 
 // BaseURL returns the gateway base URL (e.g. "http://inference-gateway:80").

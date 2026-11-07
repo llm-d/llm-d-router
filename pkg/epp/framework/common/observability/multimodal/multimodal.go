@@ -20,17 +20,24 @@ limitations under the License.
 package multimodal
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // ModalityNone is the mm.modality value when no multimodal content is present.
 const ModalityNone = "none"
+
+// ModalityOther is the metric label value for a modality outside image, audio
+// and video.
+const ModalityOther = metricsutil.OverflowValue
 
 // SpanAttributes derives mm.modality and mm.hash_count from req.
 func SpanAttributes(req *scheduling.InferenceRequest) []attribute.KeyValue {
@@ -66,13 +73,45 @@ func Summary(req *scheduling.InferenceRequest) (modality string, hashCount int) 
 	return strings.Join(modalities, ","), len(features)
 }
 
-func requestMMFeatures(req *scheduling.InferenceRequest) []fwkrh.MultiModalFeature {
+func requestMMFeatures(req *scheduling.InferenceRequest) []fwkrequest.MultiModalFeature {
 	if req == nil || req.Body == nil || req.Body.TokenizedRequest == nil {
 		return nil
 	}
-	var features []fwkrh.MultiModalFeature
+	var features []fwkrequest.MultiModalFeature
 	for _, p := range req.Body.TokenizedRequest.Prompts {
 		features = append(features, p.MultiModalFeatures...)
 	}
 	return features
+}
+
+// MetricLabel bounds a modality value for use as a Prometheus label. Token-in
+// requests (vLLM /inference/v1/generate, SGLang /generate) key mm_hashes by
+// whatever the client sends, and every distinct key would otherwise add series
+// that are never removed. image, audio and video keep their names, ModalityNone
+// and the empty string pass through, and any other modality becomes
+// ModalityOther. A comma-joined value from Summary is folded one modality at a
+// time and stays sorted and deduplicated, so it takes at most 16 values.
+func MetricLabel(modality string) string {
+	if modality == "" || modality == ModalityNone || knownModality(modality) {
+		return modality
+	}
+	var labels []string
+	for _, m := range strings.Split(modality, ",") {
+		if !knownModality(m) {
+			m = ModalityOther
+		}
+		if !slices.Contains(labels, m) {
+			labels = append(labels, m)
+		}
+	}
+	slices.Sort(labels)
+	return strings.Join(labels, ",")
+}
+
+func knownModality(m string) bool {
+	switch reqcommon.Modality(m) {
+	case reqcommon.ModalityImage, reqcommon.ModalityAudio, reqcommon.ModalityVideo:
+		return true
+	}
+	return false
 }

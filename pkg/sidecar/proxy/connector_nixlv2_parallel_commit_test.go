@@ -213,12 +213,13 @@ var _ = Describe("NIXL Connector (v2) parallel WRITE dispatch commit point", fun
 		start := time.Now()
 		// Client timeout is far larger than the backstop, so a 504 means the
 		// backstop fired; a client-side timeout error would mean it hung.
-		status, hdr, _, err := env.send(8 * time.Second)
+		status, hdr, body, err := env.send(8 * time.Second)
 		elapsed := time.Since(start)
 
 		Expect(err).ToNot(HaveOccurred(), "request must return via the backstop, not hang")
 		Expect(status).To(Equal(http.StatusGatewayTimeout))
 		Expect(hdr.Get("Content-Type")).To(Equal("application/json"))
+		Expect(body).To(MatchJSON(`{"error":{"message":"decode aborted: prefill did not complete within the MoRI-IO parallel-dispatch KV-wait timeout","type":"server_error","code":504}}`))
 		Expect(elapsed).To(BeNumerically("<", 5*time.Second), "should return shortly after the 300ms backstop")
 	})
 

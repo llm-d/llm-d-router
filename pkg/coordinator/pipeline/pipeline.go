@@ -200,10 +200,11 @@ func (p *Pipeline) Execute(ctx context.Context, reqCtx *RequestContext) error {
 			coordmetrics.IncExecutionPath(reqCtx.Model, path)
 			span.SetAttributes(semconv.LLMDCoordinatorPipelineExecutionPath(path))
 		}
-		// Render populates TokenIDs on every success path (including a valid
-		// empty prompt array in the completions branch), so gate on the step
-		// having run rather than on len > 0.
-		if executed["render"] {
+		// Render populates TokenIDs on every JSON success path (including a
+		// valid empty prompt array in the completions branch), so gate on the
+		// step having run rather than on len > 0. gRPC Generate skips render
+		// and leaves TokenIDs unset.
+		if executed["render"] && !reqCtx.IsSGLangGRPC() {
 			coordmetrics.RecordRequestInputTokens(reqCtx.Model, len(reqCtx.TokenIDs))
 		}
 		coordmetrics.RecordEncodeSubrequests(reqCtx.Route, reqCtx.EncodeFanout)

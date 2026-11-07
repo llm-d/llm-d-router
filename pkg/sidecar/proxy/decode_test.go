@@ -193,7 +193,7 @@ var _ = Describe("Chunked Decode", func() {
 				}
 				var last map[string]any
 				Expect(json.Unmarshal(gotMessages[len(gotMessages)-1], &last)).To(Succeed())
-				Expect(last).To(HaveKeyWithValue(reqcommon.FieldRole, roleAssistant))
+				Expect(last).To(HaveKeyWithValue(reqcommon.FieldRole, reqcommon.RoleAssistant))
 				Expect(last).To(HaveKeyWithValue(reqcommon.FieldContent, wantText))
 				if continueFinal {
 					Expect(last).To(HaveKeyWithValue("name", "writer"))
@@ -210,7 +210,7 @@ var _ = Describe("Chunked Decode", func() {
 					var event map[string]any
 					Expect(json.Unmarshal([]byte(data), &event)).To(Succeed())
 					if choice := firstChoice(event); choice != nil {
-						emitted = append(emitted, choice[responseFieldDelta].(map[string]any)[reqcommon.FieldContent].(string))
+						emitted = append(emitted, choice[reqcommon.FieldDelta].(map[string]any)[reqcommon.FieldContent].(string))
 					}
 				}
 				Expect(scanner.Err()).ToNot(HaveOccurred())
@@ -454,6 +454,51 @@ var _ = Describe("Chunked Decode", func() {
 		Entry("negative, streaming", -1, true),
 	)
 
+	DescribeTable("forwards structured-output requests unchanged",
+		func(constraint string) {
+			raw := `{"messages":[{"role":"user","content":"City?"}],"max_tokens":20,` + constraint + `}`
+
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			calls := 0
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(string(body)).To(Equal(raw))
+			})
+
+			response := httptest.NewRecorder()
+			server.runChunkedDecode(response, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+			Expect(calls).To(Equal(1))
+		},
+		Entry("response_format json_object", `"response_format":{"type":"json_object"}`),
+		Entry("response_format structural_tag", `"response_format":{"type":"structural_tag","format":{}}`),
+		Entry("structured_outputs", `"structured_outputs":{"regex":"[a-z]+"}`),
+		Entry("response_format that is not an object", `"response_format":"json"`),
+	)
+
+	DescribeTable("still chunks when the output is not constrained",
+		func(constraint string) {
+			ti := newChunkedTestSetup(5, []string{
+				chatResponse("hello ", "length", 8, 5),
+				chatResponse("world", "stop", 9, 5),
+			})
+			defer ti.stop()
+
+			resp := doPost(ti.addr, `{"messages":[{"role":"user","content":"Hi"}],"max_tokens":10,`+constraint+`}`)
+			Expect(resp.StatusCode).To(Equal(http.StatusOK))
+
+			var body map[string]any
+			Expect(json.NewDecoder(resp.Body).Decode(&body)).To(Succeed())
+			content := body["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"]
+			Expect(content).To(Equal("hello world"))
+		},
+		Entry("response_format text", `"response_format":{"type":"text"}`),
+		Entry("response_format null", `"response_format":null`),
+		Entry("structured_outputs null", `"structured_outputs":null`),
+	)
+
 	It("still chunks when tools are declared but tool_choice is none", func() {
 		ti := newChunkedTestSetup(5, []string{
 			chatResponse("hello ", "length", 8, 5),
@@ -542,12 +587,14 @@ var _ = Describe("Chunked Decode", func() {
 
 			w := httptest.NewRecorder()
 			body := fmt.Sprintf(`{"messages":[{"role":"user","content":"Hi"}],"max_tokens":20,"stream":%t}`, streaming)
-			server.runChunkedDecode(w, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body)))
+			r := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body))
+			r.Header.Set(reqcommon.RequestIDHeaderKey, "req-1")
+			server.runChunkedDecode(w, r)
 			Expect(calls).To(Equal(completedChunks + 1))
 
 			resp := w.Result()
 			defer resp.Body.Close()
-			var got errorResponse
+			var got reqcommon.OpenAIError
 			if streaming && completedChunks > 0 {
 				Expect(resp.StatusCode).To(Equal(http.StatusOK))
 				Expect(resp.Header.Get("Content-Type")).To(Equal("text/event-stream"))
@@ -555,24 +602,22 @@ var _ = Describe("Chunked Decode", func() {
 				Expect(events).To(HaveLen(3))
 				Expect(events[0]).To(HavePrefix(reqcommon.SSEDataPrefix))
 				Expect(events[2]).To(Equal(reqcommon.SSEDone))
-				var event struct {
-					Error errorResponse `json:"error"`
-				}
+				var event reqcommon.OpenAIErrorResponse
 				Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[1], reqcommon.SSEDataPrefix)), &event)).To(Succeed())
 				got = event.Error
 			} else {
 				Expect(resp.StatusCode).To(Equal(wantStatus))
 				Expect(resp.Header.Get("Content-Type")).To(Equal("application/json"))
-				Expect(json.Unmarshal(w.Body.Bytes(), &got)).To(Succeed())
-				Expect(got.Object).To(Equal("error"))
+				var envelope reqcommon.OpenAIErrorResponse
+				Expect(json.Unmarshal(w.Body.Bytes(), &envelope)).To(Succeed())
+				got = envelope.Error
 			}
 			Expect(got.Code).To(Equal(wantStatus))
+			Expect(got.Type).To(Equal(reqcommon.OpenAIErrorType(wantStatus)))
 			if wantStatus == http.StatusServiceUnavailable {
-				Expect(got.Type).To(Equal("ServiceUnavailable"))
 				Expect(got.Message).To(ContainSubstring("The decode node is not ready."))
 			} else {
-				Expect(got.Type).To(Equal("BadGateway"))
-				Expect(got.Message).To(Equal(proxyError.Error()))
+				Expect(got.Message).To(Equal("internal error (request_id: req-1)"))
 			}
 		},
 		Entry("wraps a later streaming connection refusal", true, 1, syscall.ECONNREFUSED, http.StatusServiceUnavailable),
@@ -581,6 +626,40 @@ var _ = Describe("Chunked Decode", func() {
 		Entry("preserves a non-streaming connection refusal", false, 1, syscall.ECONNREFUSED, http.StatusServiceUnavailable),
 		Entry("preserves a non-streaming connection failure", false, 1, io.ErrUnexpectedEOF, http.StatusBadGateway),
 	)
+
+	It("re-nests a flat vLLM error from a later chunk in the streaming envelope", func() {
+		decoderURL := &url.URL{Scheme: "http", Host: "decoder:8000"}
+		server := NewProxy(Config{DecoderURL: decoderURL, DecodeChunkSize: 5})
+		server.logger = logr.Discard()
+		calls := 0
+		server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			if calls == 1 {
+				fmt.Fprint(w, chatResponse("hello ", finishReasonLength, 5, 5))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			fmt.Fprint(w, "{\"object\":\"error\",\"message\":\"decoder boom\",\"type\":\"BadGateway\",\"param\":null,\"code\":502}\n")
+		})
+
+		w := httptest.NewRecorder()
+		body := `{"messages":[{"role":"user","content":"Hi"}],"max_tokens":20,"stream":true}`
+		server.runChunkedDecode(w, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body)))
+		Expect(calls).To(Equal(2))
+
+		resp := w.Result()
+		defer resp.Body.Close()
+		Expect(resp.StatusCode).To(Equal(http.StatusOK))
+		events := strings.Split(strings.TrimSuffix(w.Body.String(), "\n\n"), "\n\n")
+		Expect(events).To(HaveLen(3))
+		Expect(events[2]).To(Equal(reqcommon.SSEDone))
+		var event reqcommon.OpenAIErrorResponse
+		Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[1], reqcommon.SSEDataPrefix)), &event)).To(Succeed())
+		Expect(event.Error.Message).To(Equal("decoder boom"))
+		Expect(event.Error.Type).To(Equal("BadGateway"))
+		Expect(event.Error.Code).To(Equal(http.StatusBadGateway))
+	})
 
 	Describe("non-streaming", func() {
 
@@ -731,7 +810,7 @@ var _ = Describe("Chunked Decode", func() {
 
 			var first map[string]any
 			Expect(json.Unmarshal([]byte(strings.TrimPrefix(events[0], reqcommon.SSEDataPrefix)), &first)).To(Succeed())
-			delta := first["choices"].([]any)[0].(map[string]any)[responseFieldDelta].(map[string]any)
+			delta := first["choices"].([]any)[0].(map[string]any)[reqcommon.FieldDelta].(map[string]any)
 			Expect(delta[reqcommon.FieldContent]).To(Equal("hello "))
 
 			// Verify cumulative usage in the final usage event.
@@ -765,8 +844,8 @@ var _ = Describe("Chunked Decode", func() {
 					var event map[string]any
 					Expect(json.Unmarshal([]byte(data), &event)).To(Succeed())
 					if choice := firstChoice(event); choice != nil {
-						Expect(choice).To(HaveKey(responseFieldFinishReason))
-						finishReasons = append(finishReasons, choice[responseFieldFinishReason])
+						Expect(choice).To(HaveKey(reqcommon.FieldFinishReason))
+						finishReasons = append(finishReasons, choice[reqcommon.FieldFinishReason])
 					}
 				}
 				Expect(scanner.Err()).ToNot(HaveOccurred())

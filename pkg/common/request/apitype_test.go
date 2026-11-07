@@ -90,6 +90,9 @@ func TestDetectAPISurface(t *testing.T) {
 		{"prefixed vllm generate", "/provider/model" + PathVLLMGenerate, "vllm_generate"},
 		{"sglang generate", PathSGLangGenerate, "sglang_generate"},
 		{"prefixed sglang generate", "/provider/model" + PathSGLangGenerate, "sglang_generate"},
+		{"audio generate", PathAudioGenerate, "unknown"},
+		{"audio generate trailing slash", PathAudioGenerate + "/", "unknown"},
+		{"audio speech", PathAudioSpeech, "unknown"},
 		{"provider prefix", "/provider/model" + PathMessages, "messages"},
 		{"unversioned provider route", "/provider/messages", "messages"},
 		{"trailing slash and query", PathMessages + "/?beta=true", "messages"},
@@ -144,12 +147,12 @@ func TestAPISurfaceString(t *testing.T) {
 
 func TestAPIType_tokenLimitFields(t *testing.T) {
 	cases := map[APIType][]string{
-		APITypeChatCompletions: {FieldMaxTokens, FieldMaxCompletionTokens},
+		APITypeChatCompletions: {FieldMaxCompletionTokens, FieldMaxTokens},
 		APITypeCompletions:     {FieldMaxTokens},
 		APITypeResponses:       {FieldMaxOutputTokens},
 		APITypeVLLMGenerate:    {FieldMaxTokens},
 		APITypeMessages:        {FieldMaxTokens},
-		APIType(7):             {FieldMaxTokens, FieldMaxCompletionTokens},
+		APIType(7):             {FieldMaxCompletionTokens, FieldMaxTokens},
 	}
 	for apiType, want := range cases {
 		if got := apiType.tokenLimitFields(); !reflect.DeepEqual(got, want) {

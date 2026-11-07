@@ -33,7 +33,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -178,7 +178,7 @@ func (p *parameters) toConfig() (config, error) {
 
 // compile-time type assertions
 var _ fwksched.Filter = &EndpointHealthFilter{}
-var _ fwkrc.ResponseHeaderProcessor = &EndpointHealthFilter{}
+var _ fwkrh.ResponseHeaderProcessor = &EndpointHealthFilter{}
 var _ fwkplugin.ConsumerPlugin = &EndpointHealthFilter{}
 
 // Factory defines the factory function for EndpointHealthFilter.
@@ -278,14 +278,14 @@ func (f *EndpointHealthFilter) Filter(ctx context.Context, _ *fwksched.Inference
 // ResponseHeader counts the response status toward the serving endpoint's
 // response health.
 func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, _ *fwksched.InferenceRequest,
-	response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {
+	response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
 	if f.tracker.cfg.responseFailureThreshold == 0 || response == nil || targetEndpoint == nil {
 		return
 	}
 	address := hostPort(targetEndpoint)
 	// The proxy can serve a request from a later endpoint of those picked, and
 	// that response says nothing about the target.
-	if served, ok := servedEndpoint(response.ReqMetadata); ok && served != address {
+	if served, ok := metadata.ServedEndpoint(response.ReqMetadata); ok && served != address {
 		return
 	}
 	code, ok := responseStatus(response.Headers)
@@ -300,17 +300,6 @@ func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, _ *fwksched.I
 // endpoint that served a request.
 func hostPort(md *fwkdl.EndpointMetadata) string {
 	return net.JoinHostPort(md.GetIPAddress(), md.GetPort())
-}
-
-// servedEndpoint returns the address of the endpoint the proxy reports it sent
-// the request to.
-func servedEndpoint(reqMetadata map[string]any) (string, bool) {
-	lb, ok := reqMetadata[metadata.DestinationEndpointNamespace].(map[string]any)
-	if !ok {
-		return "", false
-	}
-	served, ok := lb[metadata.DestinationEndpointServedKey].(string)
-	return served, ok
 }
 
 func responseStatus(headers map[string]string) (int, bool) {

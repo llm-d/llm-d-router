@@ -34,6 +34,9 @@ const (
 	AttributionSourceHeader = "header"
 	// AttributionSourceAgentIdentity means the fairness identity came from agent identity.
 	AttributionSourceAgentIdentity = "agent_identity"
+	// AttributionSourceDerivedRoot means the fairness identity came from the
+	// derived program root published by an agent-lineage plugin.
+	AttributionSourceDerivedRoot = "derived_root"
 	// AttributionSourceDefault means no fairness identity resolved.
 	AttributionSourceDefault = "default"
 )
@@ -70,7 +73,7 @@ func normalizeAttribution(id, source string) (string, string) {
 	}
 
 	switch source {
-	case AttributionSourceHeader, AttributionSourceAgentIdentity, AttributionSourceDefault:
+	case AttributionSourceHeader, AttributionSourceAgentIdentity, AttributionSourceDerivedRoot, AttributionSourceDefault:
 		return id, source
 	default:
 		return id, AttributionSourceDefault

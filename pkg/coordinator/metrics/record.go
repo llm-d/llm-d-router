@@ -109,6 +109,25 @@ func IncConditionalDecodeProbes(result string) {
 	conditionalDecodeProbesTotal.WithLabelValues(result).Inc()
 }
 
+// AddForceStreamBufferedBytes adds n to the force-stream buffer gauge when a
+// forced request reserves budget.
+func AddForceStreamBufferedBytes(n int64) {
+	forceStreamBufferedBytes.WithLabelValues().Add(float64(n))
+}
+
+// SubForceStreamBufferedBytes subtracts n from the force-stream buffer gauge
+// when a forced request releases its reservation. Balance with
+// AddForceStreamBufferedBytes.
+func SubForceStreamBufferedBytes(n int64) {
+	forceStreamBufferedBytes.WithLabelValues().Sub(float64(n))
+}
+
+// IncForceStreamTotal increments force_stream_total for one model's candidate
+// outcome. The outcome label values are the ForceStreamResult* constants.
+func IncForceStreamTotal(modelName, result string) {
+	forceStreamTotal.WithLabelValues(boundModel(modelName), result).Inc()
+}
+
 // RecordEncodeSubrequests observes the number of Encode subrequests for one
 // client request, including zero when Encode does not run.
 func RecordEncodeSubrequests(route string, n int) {
@@ -151,8 +170,8 @@ func streamLabelValue(stream bool) string {
 }
 
 // IncPromptTokenMismatch increments prompt_token_mismatch_total for one decode
-// response whose usage.prompt_tokens (or input_tokens) did not equal the
-// rendered token count. idsForwarded says whether the decode leg carried the
+// or served conditional-decode response whose usage.prompt_tokens (or
+// input_tokens) did not equal the rendered token count. idsForwarded says whether the decode leg carried the
 // rendered IDs, in which case the worker ignored them, or rendered the prompt
 // itself, in which case the renderers disagree.
 func IncPromptTokenMismatch(modelName, apiType string, idsForwarded bool) {
