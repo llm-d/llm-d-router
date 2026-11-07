@@ -38,13 +38,6 @@ import (
 // subsystem is the Prometheus subsystem for the disaggregation sidecar metrics.
 const subsystem = "llm_d_disagg_sidecar"
 
-// Stage labels for encode/prefill/decode error attribution.
-const (
-	StageEncode  = "encode"
-	StagePrefill = "prefill"
-	StageDecode  = "decode"
-)
-
 var (
 	requestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{

@@ -66,6 +66,14 @@ The sidecar strips every spelling before forwarding, and EPP drops any value a
 client supplies, so these headers are internal to the EPP-to-sidecar hop and are
 never read from or passed to a model server.
 
+The sidecar answers a request whose stage failed with that stage's error
+response, marked on the `x-llm-d-failed-stage` response header (`prefill`,
+`encode`, or `decode`). The EPP reads the header to charge the failure to the
+endpoint that ran the stage: without it, a prefill failure reaches the EPP as
+the decode endpoint's response status. A decode failure is known only after the
+response is on the wire, so it carries no header. The sidecar drops any value
+the model server set, so only the sidecar marks stages.
+
 When both spellings are present the sidecar reads the old one, against the usual
 preference for the current name. Sanitization was deployed under the old name,
 so an EPP that predates the rename strips a client-supplied old name but

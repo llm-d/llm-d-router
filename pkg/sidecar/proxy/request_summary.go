@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
@@ -54,11 +55,11 @@ func requestSummaryFrom(ctx context.Context) *requestSummary {
 // histogram and in the request's summary.
 func observeStageDuration(ctx context.Context, stage string, d time.Duration) {
 	switch stage {
-	case metrics.StageEncode:
+	case routing.StageEncode:
 		metrics.RecordEncodeDuration(d)
-	case metrics.StagePrefill:
+	case routing.StagePrefill:
 		metrics.RecordPrefillDuration(d)
-	case metrics.StageDecode:
+	case routing.StageDecode:
 		metrics.RecordDecodeDuration(d)
 	}
 	if summary := requestSummaryFrom(ctx); summary != nil {
@@ -80,6 +81,13 @@ func observeStageError(ctx context.Context, stage string) {
 		}
 		summary.mu.Unlock()
 	}
+}
+
+// currentFailedStage returns the stage that failed, or empty when none did.
+func (s *requestSummary) currentFailedStage() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failedStage
 }
 
 // requestRoute is where the handler sent a request, for its summary line.
@@ -104,7 +112,7 @@ func (s *requestSummary) log(logger logr.Logger, route requestRoute, status *res
 	if route.encoders > 0 {
 		keysAndValues = append(keysAndValues, "encoders", route.encoders)
 	}
-	for _, stage := range []string{metrics.StageEncode, metrics.StagePrefill, metrics.StageDecode} {
+	for _, stage := range []string{routing.StageEncode, routing.StagePrefill, routing.StageDecode} {
 		if d, ok := s.durations[stage]; ok {
 			keysAndValues = append(keysAndValues, stage+"Duration", d)
 		}

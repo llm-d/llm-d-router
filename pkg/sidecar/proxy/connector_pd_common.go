@@ -31,7 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 const (
@@ -128,11 +128,11 @@ func (s *Server) runConcurrentPD(
 		)
 		// A prefill the sidecar cancelled is not a prefill error.
 		if (isHTTPError(pw.statusCode) || grpcframe.HasErrorStatus(pw.headers)) && prefillCtx.Err() == nil {
-			observeStageError(r.Context(), metrics.StagePrefill)
+			observeStageError(r.Context(), routing.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 			cancelDecode(&prefillFailedError{response: pw})
 		}
-		observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
+		observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
 		log.FromContext(prefillCtx).V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
 	}()
 
@@ -180,9 +180,9 @@ func (s *Server) runConcurrentPD(
 	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
-	observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
+	observeStageDuration(r.Context(), routing.StageDecode, decodeDuration)
 	if decodeFailed() {
-		observeStageError(r.Context(), metrics.StageDecode)
+		observeStageError(r.Context(), routing.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
 	decodeSpan.SetAttributes(
@@ -233,7 +233,7 @@ func (e *prefillFailedError) Error() string {
 // dispatch. Deferred without recover, so the panic still propagates.
 func recordDecodeAbort(ctx context.Context, returned *bool, start time.Time) {
 	if !*returned {
-		observeStageDuration(ctx, metrics.StageDecode, time.Since(start))
-		observeStageError(ctx, metrics.StageDecode)
+		observeStageDuration(ctx, routing.StageDecode, time.Since(start))
+		observeStageError(ctx, routing.StageDecode)
 	}
 }

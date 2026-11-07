@@ -31,6 +31,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -276,8 +277,11 @@ func (f *EndpointHealthFilter) Filter(ctx context.Context, _ *fwksched.Inference
 }
 
 // ResponseHeader counts the response status toward the serving endpoint's
-// response health.
-func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, _ *fwksched.InferenceRequest,
+// response health. A response for a request that ran disaggregated prefill is
+// the decode endpoint's relay of every stage's outcome, so a failure is charged
+// to the endpoint that ran the failed stage, named on the failed-stage header,
+// and to no endpoint when the stage is not marked.
+func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, request *fwksched.InferenceRequest,
 	response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
 	if f.tracker.cfg.responseFailureThreshold == 0 || response == nil || targetEndpoint == nil {
 		return
@@ -293,7 +297,52 @@ func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, _ *fwksched.I
 		return
 	}
 	_, failed := f.tracker.cfg.responseFailureCodes[code]
+
+	if stage := response.Headers[routing.FailedStageHeader]; stage != "" {
+		if stage != routing.StagePrefill {
+			// An encode failure names no single endpoint, and an unknown stage
+			// says nothing about any of them.
+			return
+		}
+		prefill := prefillTarget(request)
+		if prefill == nil {
+			return
+		}
+		f.tracker.observeResponse(log.FromContext(ctx), prefill.ID, hostPort(prefill), failed, f.now())
+		return
+	}
+	if failed && prefillTarget(request) != nil {
+		// The request ran prefill on a sidecar that marks no failed stage, so
+		// the status cannot be attributed to either endpoint.
+		return
+	}
 	f.tracker.observeResponse(log.FromContext(ctx), targetEndpoint.ID, address, failed, f.now())
+}
+
+// prefillTarget returns the endpoint the EPP picked to prefill request, or nil
+// when the request names no prefill target or the scheduling result holds no
+// endpoint at its address. The address the sidecar dials travels on the
+// prefill routing header, which the disagg profile handler sets from the
+// prefill profile's pick.
+func prefillTarget(request *fwksched.InferenceRequest) *fwkdl.EndpointMetadata {
+	if request == nil || request.SchedulingResult == nil {
+		return nil
+	}
+	address := request.Headers[routing.PrefillEndpointHeader]
+	if address == "" {
+		return nil
+	}
+	for _, result := range request.SchedulingResult.ProfileResults {
+		if result == nil {
+			continue
+		}
+		for _, endpoint := range result.TargetEndpoints {
+			if md := endpoint.GetMetadata(); md != nil && hostPort(md) == address {
+				return md
+			}
+		}
+	}
+	return nil
 }
 
 // hostPort returns the endpoint's address in the form the proxy reports the

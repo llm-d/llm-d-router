@@ -75,6 +75,22 @@ const (
 	// EndpointPinHeader carries the worker <ip:port> a request must be scheduled
 	// on. The endpoint-pin-screener keeps only that endpoint.
 	EndpointPinHeader = "x-llm-d-pin-host-port"
+
+	// FailedStageHeader is the response header the sidecar sets on an error
+	// response for a request whose disaggregated stage failed, to the failed
+	// stage's name (StageEncode, StagePrefill, or StageDecode). The EPP reads it
+	// to charge the failure to the endpoint that ran the stage: a prefill
+	// failure reaches the EPP as the decode endpoint's response status, and
+	// without the header it cannot be told apart from a decode failure. Only
+	// stages whose failure is known before the response is written carry the
+	// header; a decode failure is observed after the response is on the wire.
+	FailedStageHeader = "x-llm-d-failed-stage"
+
+	// Names of the disaggregated stages, used as the sidecar's stage labels and
+	// as the values carried on FailedStageHeader.
+	StageEncode  = "encode"
+	StagePrefill = "prefill"
+	StageDecode  = "decode"
 )
 
 // IsTCPPort reports whether port is in 1-65535.

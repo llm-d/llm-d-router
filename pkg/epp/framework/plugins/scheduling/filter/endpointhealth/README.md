@@ -34,6 +34,12 @@ A response ejection starts when the response that completes the failure run arri
 
 Reference the filter first in every scheduling profile that must skip failing endpoints. The fail-open considers only the candidates the filter receives. After a filter that narrows the candidates to the endpoint holding a session or a cached prefix, a failing endpoint can be the only candidate left, and the filter then keeps it.
 
+In a profile whose candidates span roles, reference it after the filter that keeps the profile's role. A healthy candidate of another role keeps the fail-open from firing, so every candidate of the profile's role being unhealthy ends in no endpoints rather than in the fail-open's second choice: keep the role's failing endpoints. After the role filter, and still before any affinity filter, the placement keeps the property above.
+
+## Disaggregated requests
+
+A request that ran disaggregated prefill returns every stage's outcome as the decode endpoint's response, so the response status alone cannot say which endpoint failed. The sidecar marks the stage that failed on the `x-llm-d-failed-stage` response header (see [docs/disaggregation.md](../../../../../../../docs/disaggregation.md)). A prefill failure is charged to the prefill endpoint the EPP picked for the request. An encode failure, and a failed response that marks no stage on a request that ran prefill, are charged to no endpoint, because no single endpoint can be named. A response that marks no stage on a request that ran no prefill, and any successful response, are counted toward the endpoint the EPP picked first, as before.
+
 ## Inputs consumed
 
 When poll health is enabled, the plugin consumes `PollStatusDataKey(pollSource)` (`PollStatus`), which the datalayer collector writes for every polling data source. The EPP fails to start when `pollSource` names no configured polling data source.

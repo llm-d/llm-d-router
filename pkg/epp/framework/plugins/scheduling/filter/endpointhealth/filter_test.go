@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -110,6 +111,150 @@ func respond(f *EndpointHealthFilter, name string, status string) {
 }
 
 func intPtr(v int) *int { return &v }
+
+// pdRequest returns a request whose scheduling picked decode as the primary
+// target and prefill as the prefill target, named on the prefill routing
+// header the way the disagg profile handler sets it.
+func pdRequest(decode, prefill *fwkdl.EndpointMetadata) *fwksched.InferenceRequest {
+	decodeEndpoint := fwksched.NewEndpoint(decode, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	prefillEndpoint := fwksched.NewEndpoint(prefill, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	request := &fwksched.InferenceRequest{Headers: map[string]string{}}
+	routing.SetRoutingHeader(request.Headers, routing.PrefillEndpointHeader, hostPort(prefill))
+	request.SchedulingResult = &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{decodeEndpoint}},
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefillEndpoint}},
+		},
+	}
+	return request
+}
+
+// pdRespond delivers a response for a P/D request: target is the decode
+// endpoint the EPP picked, and stage is the failed stage marked on the
+// response, or empty when the response marks none.
+func pdRespond(f *EndpointHealthFilter, request *fwksched.InferenceRequest,
+	target *fwkdl.EndpointMetadata, status, stage string) {
+	headers := map[string]string{reqcommon.PseudoHeaderStatus: status}
+	if stage != "" {
+		headers[routing.FailedStageHeader] = stage
+	}
+	f.ResponseHeader(context.Background(), request, &fwkrh.Response{Headers: headers}, target)
+}
+
+// TestPrefillFailureChargesPrefillEndpoint covers a failed prefill relayed by
+// the decode endpoint: the marker names the prefill stage, so the failure run
+// is charged to the prefill endpoint and the decode endpoint stays healthy.
+func TestPrefillFailureChargesPrefillEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{ResponseFailureThreshold: intPtr(3)})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 2 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"two failures are below the threshold")
+
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the third failure ejects the prefill endpoint, and the decode endpoint stays healthy")
+}
+
+// TestUnmarkedFailureOnPrefilledRequestChargesNoEndpoint covers a sidecar that
+// marks no failed stage: a failed response for a request that ran prefill is
+// charged to no endpoint, because the status can be either stage's.
+func TestUnmarkedFailureOnPrefilledRequestChargesNoEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 10 {
+		pdRespond(f, request, decode, "503", "")
+	}
+	assert.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// TestEncodeFailureChargesNoEndpoint covers a stage marker the filter cannot
+// attribute to one endpoint.
+func TestEncodeFailureChargesNoEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 10 {
+		pdRespond(f, request, decode, "503", routing.StageEncode)
+	}
+	assert.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// TestDisaggregatedSuccessChargesDecodeEndpoint covers a successful response
+// for a request that ran prefill: it still resets the decode endpoint's
+// failure run, as a decode-only success does, while the prefill endpoint's
+// failures never charge the decode endpoint.
+func TestDisaggregatedSuccessChargesDecodeEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 4 {
+		failFrom(f, "decode", "10.0.0.1", "")
+	}
+	pdRespond(f, request, decode, "200", "")
+	for range 4 {
+		failFrom(f, "decode", "10.0.0.1", "")
+	}
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the success reset the decode endpoint's failure run")
+
+	failFrom(f, "decode", "10.0.0.1", "")
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the run continues from zero after the reset")
+
+	for range 5 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	prefillOnly := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1")}
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, prefillOnly)),
+		"the prefill failures eject the prefill endpoint and leave the decode endpoint healthy")
+}
+
+// TestPrefillMarkerWithoutMatchingEndpoint covers a prefill marker whose
+// address matches no scheduled endpoint, such as a prefill pod that left the
+// pool: no endpoint is charged.
+func TestPrefillMarkerWithoutMatchingEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{ResponseFailureThreshold: intPtr(1)})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	request.Headers[routing.PrefillEndpointHeader] = "10.0.0.9:8000"
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// TestMixedRoleCandidates covers the filter running before a role filter, on
+// candidates of both roles: a healthy candidate of one role keeps fail-open
+// from rescuing an ejected endpoint of the other role. This is why a
+// disaggregated profile narrows the candidates by role before this filter.
+func TestMixedRoleCandidates(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	for range 5 {
+		failFrom(f, "decode", "10.0.0.1", "")
+	}
+	candidates := []fwksched.Endpoint{endpointAt("prefill", "10.0.0.2"), endpointAt("decode", "10.0.0.1")}
+
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
 
 func TestFactory(t *testing.T) {
 	tests := []struct {
