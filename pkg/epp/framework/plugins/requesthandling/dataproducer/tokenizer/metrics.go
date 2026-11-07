@@ -84,15 +84,15 @@ var (
 		[]string{"plugin_type", "plugin_name", "backend", "reason"},
 	)
 
-	// renderCircuitOpen is 1 while the render circuit breaker is open or
-	// half-open, when render calls are skipped, and 0 while it is closed.
+	// renderCircuitOpen is 1 while the render circuit breaker of a render path
+	// is open or half-open, when render calls are skipped, and 0 while it is closed.
 	renderCircuitOpen = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "token_producer_render_circuit_open",
 			Help:      metricsutil.HelpMsgWithStability("Whether the token-producer render circuit breaker is open or half-open (1) or closed (0).", compbasemetrics.ALPHA),
 		},
-		[]string{"plugin_type", "plugin_name"},
+		[]string{"plugin_type", "plugin_name", "path"},
 	)
 
 	// renderCircuitOpensTotal counts transitions to open, including a failed
@@ -103,7 +103,7 @@ var (
 			Name:      "token_producer_render_circuit_opens_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of times the token-producer render circuit breaker opened.", compbasemetrics.ALPHA),
 		},
-		[]string{"plugin_type", "plugin_name"},
+		[]string{"plugin_type", "plugin_name", "path"},
 	)
 
 	// renderSkippedTotal counts render calls skipped by the circuit breaker.
@@ -113,7 +113,7 @@ var (
 			Name:      "token_producer_render_skipped_total",
 			Help:      metricsutil.HelpMsgWithStability("Total number of token-producer render calls skipped because the render circuit breaker was open.", compbasemetrics.ALPHA),
 		},
-		[]string{"plugin_type", "plugin_name"},
+		[]string{"plugin_type", "plugin_name", "path"},
 	)
 
 	registerOnce sync.Once
@@ -189,38 +189,37 @@ func (r *vllmHTTPRenderer) observeRender(ctx context.Context, path string, timeo
 	})
 }
 
-// admitRender asks the circuit breaker whether a render call may proceed. It
-// reports whether the call is the half-open probe, whose outcome recordRender
-// must receive.
-func (r *vllmHTTPRenderer) admitRender(ctx context.Context) (allowed, probe bool) {
-	allowed, probe, transition := r.breaker.admit()
-	r.reportCircuitTransition(ctx, transition)
+// admitRender asks the circuit breaker of path whether a render call may
+// proceed. An admitted call passes the returned generation to recordRender.
+func (r *vllmHTTPRenderer) admitRender(ctx context.Context, path string, b *renderCircuitBreaker) (allowed bool, generation uint64) {
+	allowed, generation, transition := b.admit()
+	r.reportCircuitTransition(ctx, path, b, transition)
 	if !allowed {
-		renderSkippedTotal.WithLabelValues(PluginType, r.pluginName).Inc()
+		renderSkippedTotal.WithLabelValues(PluginType, r.pluginName, path).Inc()
 	}
-	return allowed, probe
+	return allowed, generation
 }
 
-// recordRender passes the outcome of an admitted render call to the circuit breaker.
-func (r *vllmHTTPRenderer) recordRender(ctx context.Context, probe bool, err error) {
+// recordRender passes the outcome of an admitted render call to the circuit breaker of path.
+func (r *vllmHTTPRenderer) recordRender(ctx context.Context, path string, b *renderCircuitBreaker, generation uint64, err error) {
 	result, _ := classifyRenderError(err)
-	r.reportCircuitTransition(ctx, r.breaker.record(probe, result))
+	r.reportCircuitTransition(ctx, path, b, b.record(generation, result))
 }
 
 // reportCircuitTransition logs one line per state change and updates the gauge.
-func (r *vllmHTTPRenderer) reportCircuitTransition(ctx context.Context, transition circuitTransition) {
+func (r *vllmHTTPRenderer) reportCircuitTransition(ctx context.Context, path string, b *renderCircuitBreaker, transition circuitTransition) {
 	logger := log.FromContext(ctx)
 	switch transition {
 	case circuitOpened:
-		renderCircuitOpen.WithLabelValues(PluginType, r.pluginName).Set(1)
-		renderCircuitOpensTotal.WithLabelValues(PluginType, r.pluginName).Inc()
+		renderCircuitOpen.WithLabelValues(PluginType, r.pluginName, path).Set(1)
+		renderCircuitOpensTotal.WithLabelValues(PluginType, r.pluginName, path).Inc()
 		logger.Info("token-producer render circuit opened",
-			"backend", BackendVLLM, "openDuration", r.breaker.openFor().String())
+			"backend", BackendVLLM, "path", path, "openDuration", b.openFor().String())
 	case circuitHalfOpened:
 		logger.V(logutil.DEBUG).Info("token-producer render circuit half-open",
-			"backend", BackendVLLM)
+			"backend", BackendVLLM, "path", path)
 	case circuitClosedAgain:
-		renderCircuitOpen.WithLabelValues(PluginType, r.pluginName).Set(0)
-		logger.Info("token-producer render circuit closed", "backend", BackendVLLM)
+		renderCircuitOpen.WithLabelValues(PluginType, r.pluginName, path).Set(0)
+		logger.Info("token-producer render circuit closed", "backend", BackendVLLM, "path", path)
 	}
 }

@@ -570,9 +570,9 @@ requests. The startup warmup probe is not observed.
 |---|---|---|---|
 | `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. |
 | `llm_d_epp_token_producer_render_failures_total` | Counter | `plugin_type`, `plugin_name`, `backend`, `reason` | Failed render calls. |
-| `llm_d_epp_token_producer_render_circuit_open` | Gauge | `plugin_type`, `plugin_name` | 1 while the render circuit breaker is open or half-open, 0 while it is closed. |
-| `llm_d_epp_token_producer_render_circuit_opens_total` | Counter | `plugin_type`, `plugin_name` | Times the render circuit breaker opened, including after a failed probe. |
-| `llm_d_epp_token_producer_render_skipped_total` | Counter | `plugin_type`, `plugin_name` | Render calls skipped while the circuit breaker was open. |
+| `llm_d_epp_token_producer_render_circuit_open` | Gauge | `plugin_type`, `plugin_name`, `path` | 1 while the render circuit breaker of a render path is open or half-open, 0 while it is closed. |
+| `llm_d_epp_token_producer_render_circuit_opens_total` | Counter | `plugin_type`, `plugin_name`, `path` | Times the render circuit breaker of a render path opened, including after a failed probe. |
+| `llm_d_epp_token_producer_render_skipped_total` | Counter | `plugin_type`, `plugin_name`, `path` | Render calls skipped while the circuit breaker of their render path was open. |
 
 `backend` is `vllm`. `result` is `success`, `timeout`, `canceled` or `error`. A `canceled` call is
 one whose caller went away before the render returned, and it is not counted as a failure. `reason`
@@ -601,7 +601,8 @@ durations. The plugin also logs render failures at error level with the elapsed 
 configured timeout, at most once every 10 seconds per plugin instance. Each line carries
 `suppressed`, the number of failures since the previous line that were not logged.
 
-The circuit breaker metrics exist only when `vllm.circuitBreaker` is configured. A skipped
+The circuit breaker metrics exist only when `vllm.circuitBreaker` is configured, with one series
+per render path such as `/v1/chat/completions/render`. A skipped
 render call is not observed in `llm_d_epp_token_producer_render_duration_seconds`. A rate of
 `llm_d_epp_token_producer_render_circuit_opens_total` that stays above zero while traffic is
 steady means the render endpoint recovers while the circuit is open and is overloaded again

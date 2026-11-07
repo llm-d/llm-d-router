@@ -29,6 +29,11 @@ const (
 	defaultCircuitMaxOpenDuration     = 2 * time.Minute
 )
 
+// renderPaths are the render paths that each get a circuit breaker. The paths
+// have different render budgets, so a fast success on one says nothing about
+// timeouts on another.
+var renderPaths = []string{completionsRenderPath, chatRenderPath, messagesRenderPath, responsesRenderPath}
+
 // errRenderCircuitOpen is returned for a render call that the circuit breaker skipped.
 var errRenderCircuitOpen = errors.New("render circuit breaker is open")
 
@@ -37,11 +42,11 @@ type circuitBreakerConfig struct {
 	// ConsecutiveTimeouts is the number of consecutive timed-out render calls
 	// that opens the circuit. Defaults to 5.
 	ConsecutiveTimeouts int `json:"consecutiveTimeouts,omitempty"`
-	// OpenDuration is how long the circuit stays open after it first opens
-	// (Go duration string). Defaults to 10s.
+	// OpenDuration is how long the circuit stays open each time it opens from
+	// closed (Go duration string). Defaults to 10s.
 	OpenDuration string `json:"openDuration,omitempty"`
-	// MaxOpenDuration caps the open duration, which doubles each time the
-	// circuit opens again soon after closing. Defaults to 2m.
+	// MaxOpenDuration caps the open duration, which doubles on each failed
+	// probe. Defaults to 2m.
 	MaxOpenDuration string `json:"maxOpenDuration,omitempty"`
 }
 
@@ -64,23 +69,25 @@ const (
 	circuitClosedAgain
 )
 
-// renderCircuitBreaker tracks render timeouts for one renderer. While closed,
-// consecutive timeouts open it. While open, render calls are skipped. When the
-// open duration elapses it is half-open: one render call probes the endpoint
-// and the others are skipped until the probe completes.
+// renderCircuitBreaker tracks render timeouts for one render path. While
+// closed, consecutive timeouts open it. While open, render calls are skipped.
+// When the open duration elapses it is half-open: one render call probes the
+// endpoint and the others are skipped until the probe completes.
 type renderCircuitBreaker struct {
 	consecutiveTimeouts int
 	openDuration        time.Duration
 	maxOpenDuration     time.Duration
 	now                 func() time.Time
 
-	mu        sync.Mutex
-	state     circuitState
-	timeouts  int
-	current   time.Duration
-	openUntil time.Time
-	closedAt  time.Time
-	probing   bool
+	mu    sync.Mutex
+	state circuitState
+	// generation changes on every state change. A call is recorded only if
+	// it was admitted in the current state.
+	generation uint64
+	timeouts   int
+	current    time.Duration
+	openUntil  time.Time
+	probing    bool
 }
 
 func newRenderCircuitBreaker(cfg *circuitBreakerConfig) (*renderCircuitBreaker, error) {
@@ -110,6 +117,19 @@ func newRenderCircuitBreaker(cfg *circuitBreakerConfig) (*renderCircuitBreaker, 
 	}, nil
 }
 
+// newRenderCircuitBreakers returns one breaker per render path.
+func newRenderCircuitBreakers(cfg *circuitBreakerConfig) (map[string]*renderCircuitBreaker, error) {
+	breakers := make(map[string]*renderCircuitBreaker, len(renderPaths))
+	for _, path := range renderPaths {
+		b, err := newRenderCircuitBreaker(cfg)
+		if err != nil {
+			return nil, err
+		}
+		breakers[path] = b
+	}
+	return breakers, nil
+}
+
 func parsePositiveDuration(s string, def time.Duration) (time.Duration, error) {
 	d, err := parseHTTPDuration(s, def)
 	if err != nil {
@@ -121,33 +141,40 @@ func parsePositiveDuration(s string, def time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
-// admit reports whether a render call may proceed and whether it is the
-// half-open probe, whose outcome must be passed to record.
-func (b *renderCircuitBreaker) admit() (allowed, probe bool, transition circuitTransition) {
+// admit reports whether a render call may proceed. An admitted call passes
+// the returned generation to record.
+func (b *renderCircuitBreaker) admit() (allowed bool, generation uint64, transition circuitTransition) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	switch b.state {
 	case circuitClosed:
-		return true, false, circuitNoTransition
+		return true, b.generation, circuitNoTransition
 	case circuitOpen:
 		if b.now().Before(b.openUntil) {
-			return false, false, circuitNoTransition
+			return false, 0, circuitNoTransition
 		}
-		b.state = circuitHalfOpen
+		b.setState(circuitHalfOpen)
 		transition = circuitHalfOpened
 	}
 	if b.probing {
-		return false, false, transition
+		return false, 0, transition
 	}
 	b.probing = true
-	return true, true, transition
+	return true, b.generation, transition
 }
 
 // record applies the result label of an admitted render call.
-func (b *renderCircuitBreaker) record(probe bool, result string) circuitTransition {
+func (b *renderCircuitBreaker) record(generation uint64, result string) circuitTransition {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if probe {
+	// A call admitted before the last state change, such as one that was in
+	// flight when the circuit opened, says nothing about the current state.
+	if generation != b.generation {
+		return circuitNoTransition
+	}
+	switch b.state {
+	case circuitHalfOpen:
+		// The only call admitted while half-open is the probe.
 		b.probing = false
 		switch result {
 		case renderResultTimeout:
@@ -158,38 +185,33 @@ func (b *renderCircuitBreaker) record(probe bool, result string) circuitTransiti
 			return circuitNoTransition
 		default:
 			// Any other completion shows the endpoint answers within the budget.
-			b.state = circuitClosed
+			b.setState(circuitClosed)
 			b.timeouts = 0
-			b.closedAt = b.now()
 			return circuitClosedAgain
 		}
-	}
-	// Calls admitted before the circuit opened can complete after it.
-	if b.state != circuitClosed {
-		return circuitNoTransition
-	}
-	switch result {
-	case renderResultTimeout:
-		b.timeouts++
-		if b.timeouts < b.consecutiveTimeouts {
-			return circuitNoTransition
+	case circuitClosed:
+		switch result {
+		case renderResultTimeout:
+			b.timeouts++
+			if b.timeouts < b.consecutiveTimeouts {
+				return circuitNoTransition
+			}
+			b.open(b.openDuration)
+			return circuitOpened
+		case renderResultSuccess:
+			b.timeouts = 0
 		}
-		next := b.openDuration
-		// Opening again soon after closing means the endpoint is still
-		// overloaded, so the open duration keeps growing.
-		if !b.closedAt.IsZero() && b.now().Sub(b.closedAt) < b.maxOpenDuration {
-			next = min(2*b.current, b.maxOpenDuration)
-		}
-		b.open(next)
-		return circuitOpened
-	case renderResultSuccess:
-		b.timeouts = 0
 	}
 	return circuitNoTransition
 }
 
+func (b *renderCircuitBreaker) setState(s circuitState) {
+	b.state = s
+	b.generation++
+}
+
 func (b *renderCircuitBreaker) open(d time.Duration) {
-	b.state = circuitOpen
+	b.setState(circuitOpen)
 	b.timeouts = 0
 	b.current = d
 	b.openUntil = b.now().Add(d)

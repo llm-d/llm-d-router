@@ -205,8 +205,9 @@ type vllmHTTPRenderer struct {
 	// failuresSinceLog counts failures since the last failure log line,
 	// including the one being logged.
 	failuresSinceLog atomic.Int64
-	// breaker is nil unless circuitBreaker is configured.
-	breaker *renderCircuitBreaker
+	// breakers holds one circuit breaker per render path and is nil unless
+	// circuitBreaker is configured.
+	breakers map[string]*renderCircuitBreaker
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
@@ -250,9 +251,9 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 	if err != nil {
 		return nil, err
 	}
-	var breaker *renderCircuitBreaker
+	var breakers map[string]*renderCircuitBreaker
 	if cfg.CircuitBreaker != nil {
-		if breaker, err = newRenderCircuitBreaker(cfg.CircuitBreaker); err != nil {
+		if breakers, err = newRenderCircuitBreakers(cfg.CircuitBreaker); err != nil {
 			return nil, err
 		}
 	}
@@ -271,7 +272,7 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 		prefillOnly:    cfg.PrefillOnly,
 		omitMMKwargs:   cfg.OmitMMKwargs,
 		failureLog:     rate.Sometimes{Interval: renderFailureLogInterval},
-		breaker:        breaker,
+		breakers:       breakers,
 	}, nil
 }
 
@@ -475,12 +476,12 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkre
 	}
 
 	// Probes for warmup and render-mode discovery bypass the circuit breaker.
-	if r.breaker != nil && ctx.Value(unobservedRenderCtxKey{}) == nil {
-		allowed, probe := r.admitRender(ctx)
+	if b := r.breakers[path]; b != nil && ctx.Value(unobservedRenderCtxKey{}) == nil {
+		allowed, generation := r.admitRender(ctx, path, b)
 		if !allowed {
 			return errRenderCircuitOpen
 		}
-		defer func() { r.recordRender(ctx, probe, err) }()
+		defer func() { r.recordRender(ctx, path, b, generation, err) }()
 	}
 
 	start := time.Now()

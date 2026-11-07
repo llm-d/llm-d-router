@@ -61,9 +61,26 @@ func newTestBreaker(t *testing.T, cfg circuitBreakerConfig) (*renderCircuitBreak
 // call admits one render call and records result for it.
 func call(t *testing.T, b *renderCircuitBreaker, result string) circuitTransition {
 	t.Helper()
-	allowed, probe, _ := b.admit()
+	allowed, generation, _ := b.admit()
 	require.True(t, allowed)
-	return b.record(probe, result)
+	return b.record(generation, result)
+}
+
+// probe admits the half-open probe once the open duration has elapsed.
+func probe(t *testing.T, b *renderCircuitBreaker, clock *fakeClock) uint64 {
+	t.Helper()
+	clock.advance(b.openFor())
+	allowed, generation, _ := b.admit()
+	require.True(t, allowed)
+	require.Equal(t, circuitHalfOpen, b.state)
+	return generation
+}
+
+// setBreakerClocks makes every breaker of r read clock.
+func setBreakerClocks(r *vllmHTTPRenderer, clock *fakeClock) {
+	for _, b := range r.breakers {
+		b.now = clock.now
+	}
 }
 
 // tripBreaker opens b with consecutive timeouts.
@@ -104,6 +121,10 @@ func TestRenderCircuitBreaker_Config(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+
+	r, err := newVLLMHTTPRenderer(&vllmConfig{CircuitBreaker: &circuitBreakerConfig{}})
+	require.NoError(t, err)
+	assert.Len(t, r.breakers, len(renderPaths))
 }
 
 func TestRenderCircuitBreaker_OpensOnlyOnConsecutiveTimeouts(t *testing.T) {
@@ -134,19 +155,18 @@ func TestRenderCircuitBreaker_HalfOpenAdmitsOneProbe(t *testing.T) {
 	require.False(t, allowed)
 
 	clock.advance(time.Nanosecond)
-	allowed, probe, transition := b.admit()
+	allowed, generation, transition := b.admit()
 	require.True(t, allowed)
-	require.True(t, probe)
 	assert.Equal(t, circuitHalfOpened, transition)
 
 	allowed, _, transition = b.admit()
 	assert.False(t, allowed, "a second call is skipped while the probe is in flight")
 	assert.Equal(t, circuitNoTransition, transition)
 
-	assert.Equal(t, circuitClosedAgain, b.record(true, renderResultSuccess))
-	allowed, probe, _ = b.admit()
+	assert.Equal(t, circuitClosedAgain, b.record(generation, renderResultSuccess))
+	allowed, _, _ = b.admit()
 	assert.True(t, allowed)
-	assert.False(t, probe)
+	assert.Equal(t, circuitClosed, b.state)
 }
 
 func TestRenderCircuitBreaker_ConcurrentHalfOpenAdmitsOneProbe(t *testing.T) {
@@ -182,15 +202,13 @@ func TestRenderCircuitBreaker_ProbeOutcome(t *testing.T) {
 		t.Run(tc.result, func(t *testing.T) {
 			b, clock := newTestBreaker(t, circuitBreakerConfig{ConsecutiveTimeouts: 1})
 			tripBreaker(t, b)
-			clock.advance(defaultCircuitOpenDuration)
-			allowed, probe, _ := b.admit()
-			require.True(t, allowed && probe)
+			generation := probe(t, b, clock)
 
-			assert.Equal(t, tc.transition, b.record(true, tc.result))
+			assert.Equal(t, tc.transition, b.record(generation, tc.result))
 			assert.Equal(t, tc.state, b.state)
 			if tc.state == circuitHalfOpen {
-				allowed, probe, _ := b.admit()
-				assert.True(t, allowed && probe, "the next call probes after a canceled probe")
+				allowed, _, _ := b.admit()
+				assert.True(t, allowed, "the next call probes after a canceled probe")
 			}
 		})
 	}
@@ -203,38 +221,49 @@ func TestRenderCircuitBreaker_OpenDurationBackoff(t *testing.T) {
 
 	// Each failed probe doubles the open duration up to the cap.
 	for _, want := range []time.Duration{20 * time.Second, 30 * time.Second, 30 * time.Second} {
-		clock.advance(b.openFor())
-		allowed, probe, _ := b.admit()
-		require.True(t, allowed && probe)
-		require.Equal(t, circuitOpened, b.record(true, renderResultTimeout))
+		generation := probe(t, b, clock)
+		require.Equal(t, circuitOpened, b.record(generation, renderResultTimeout))
 		assert.Equal(t, want, b.openFor())
 	}
 
-	// Opening again soon after closing keeps the grown duration.
-	clock.advance(b.openFor())
-	call(t, b, renderResultSuccess)
-	require.Equal(t, circuitClosed, b.state)
-	clock.advance(time.Second)
-	tripBreaker(t, b)
-	assert.Equal(t, 30*time.Second, b.openFor())
-
-	// Opening after maxOpenDuration of closed time starts from openDuration.
-	clock.advance(b.openFor())
-	call(t, b, renderResultSuccess)
-	clock.advance(30 * time.Second)
+	// A trip from closed starts again from openDuration, however soon after closing.
+	require.Equal(t, circuitClosedAgain, b.record(probe(t, b, clock), renderResultSuccess))
 	tripBreaker(t, b)
 	assert.Equal(t, 10*time.Second, b.openFor())
 }
 
-func TestRenderCircuitBreaker_IgnoresCallsAdmittedBeforeOpening(t *testing.T) {
-	b, _ := newTestBreaker(t, circuitBreakerConfig{ConsecutiveTimeouts: 1})
-	allowed, probe, _ := b.admit()
+func TestRenderCircuitBreaker_IgnoresCallsAdmittedBeforeLastStateChange(t *testing.T) {
+	b, clock := newTestBreaker(t, circuitBreakerConfig{ConsecutiveTimeouts: 1})
+	allowed, stale, _ := b.admit()
 	require.True(t, allowed)
-	require.False(t, probe)
 	tripBreaker(t, b)
 
-	assert.Equal(t, circuitNoTransition, b.record(false, renderResultSuccess))
+	// While open, a call admitted before the trip does not close the circuit.
+	assert.Equal(t, circuitNoTransition, b.record(stale, renderResultSuccess))
 	assert.Equal(t, circuitOpen, b.state)
+
+	// While half-open, it is not taken for the probe.
+	generation := probe(t, b, clock)
+	assert.Equal(t, circuitNoTransition, b.record(stale, renderResultTimeout))
+	assert.Equal(t, circuitHalfOpen, b.state)
+
+	// After the probe closes the circuit, its timeout does not reopen it.
+	require.Equal(t, circuitClosedAgain, b.record(generation, renderResultSuccess))
+	assert.Equal(t, circuitNoTransition, b.record(stale, renderResultTimeout))
+	assert.Equal(t, circuitClosed, b.state)
+}
+
+func TestRenderCircuitBreaker_PerRenderPath(t *testing.T) {
+	r, err := newVLLMHTTPRenderer(&vllmConfig{CircuitBreaker: &circuitBreakerConfig{ConsecutiveTimeouts: 2}})
+	require.NoError(t, err)
+	completions, chat := r.breakers[completionsRenderPath], r.breakers[chatRenderPath]
+
+	// Chat successes do not reset the completions count.
+	call(t, completions, renderResultTimeout)
+	call(t, chat, renderResultSuccess)
+	call(t, completions, renderResultTimeout)
+	assert.Equal(t, circuitOpen, completions.state)
+	assert.Equal(t, circuitClosed, chat.state)
 }
 
 // TestProduce_RenderCircuitBreaker drives the circuit through the HTTP render
@@ -260,24 +289,26 @@ func TestProduce_RenderCircuitBreaker(t *testing.T) {
 	// Registered after the server so held requests return before it closes.
 	t.Cleanup(func() { close(release) })
 	clock := &fakeClock{t: time.Unix(1_800_000_000, 0)}
-	r.breaker.now = clock.now
+	setBreakerClocks(r, clock)
 	p := newTestPlugin(r)
 	logs := &logCapture{}
 	ctx := logs.context(context.Background())
-	gauge := func() float64 { return testutil.ToFloat64(renderCircuitOpen.WithLabelValues(PluginType, r.pluginName)) }
+	gauge := func() float64 {
+		return testutil.ToFloat64(renderCircuitOpen.WithLabelValues(PluginType, r.pluginName, chatRenderPath))
+	}
 
 	for range 2 {
 		require.ErrorIs(t, p.Produce(ctx, chatRequest(), nil), context.DeadlineExceeded)
 	}
 	assert.Equal(t, 1.0, gauge())
-	assert.Equal(t, 1.0, testutil.ToFloat64(renderCircuitOpensTotal.WithLabelValues(PluginType, r.pluginName)))
+	assert.Equal(t, 1.0, testutil.ToFloat64(renderCircuitOpensTotal.WithLabelValues(PluginType, r.pluginName, chatRenderPath)))
 	assert.True(t, logged(logs, "token-producer render circuit opened"))
 
 	request := chatRequest()
 	require.NoError(t, p.Produce(ctx, request, nil))
 	assert.Nil(t, request.Body.TokenizedRequest)
 	assert.Equal(t, int32(2), requests.Load(), "the skipped call does not reach the render endpoint")
-	assert.Equal(t, 1.0, testutil.ToFloat64(renderSkippedTotal.WithLabelValues(PluginType, r.pluginName)))
+	assert.Equal(t, 1.0, testutil.ToFloat64(renderSkippedTotal.WithLabelValues(PluginType, r.pluginName, chatRenderPath)))
 
 	saturated.Store(false)
 	clock.advance(10 * time.Second)
@@ -295,13 +326,14 @@ func TestRenderCircuitBreaker_UnobservedCallsBypass(t *testing.T) {
 		requests.Add(1)
 		_, _ = io.WriteString(w, `{"token_ids":[1]}`)
 	})
-	r.breaker.record(false, renderResultTimeout)
-	require.Equal(t, circuitOpen, r.breaker.state)
+	b := r.breakers[chatRenderPath]
+	call(t, b, renderResultTimeout)
+	require.Equal(t, circuitOpen, b.state)
 
 	require.ErrorIs(t, renderPath(context.Background(), r, chatRenderPath), errRenderCircuitOpen)
 	require.NoError(t, renderPath(withUnobservedRender(context.Background()), r, chatRenderPath))
 	assert.Equal(t, int32(1), requests.Load())
-	assert.Equal(t, circuitOpen, r.breaker.state, "an unobserved call does not change the circuit")
+	assert.Equal(t, circuitOpen, b.state, "an unobserved call does not change the circuit")
 }
 
 func logged(logs *logCapture, msg string) bool {

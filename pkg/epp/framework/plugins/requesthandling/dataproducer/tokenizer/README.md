@@ -184,8 +184,8 @@ EPP contract does not establish parity for them.
 | `vllm.insecureSkipVerify`  | `false`                 | Skip server certificate verification when using `https://`; `caCertPath` is ignored when set. |
 | `vllm.circuitBreaker`      | unset                   | Alpha. Skip rendering after consecutive render timeouts; see [Render circuit breaker](#render-circuit-breaker). |
 | `vllm.circuitBreaker.consecutiveTimeouts` | `5`      | Consecutive timed-out render calls that open the circuit.                    |
-| `vllm.circuitBreaker.openDuration` | `10s`           | Open duration after the circuit first opens.                                 |
-| `vllm.circuitBreaker.maxOpenDuration` | `2m`         | Cap on the open duration, which doubles while the render endpoint stays overloaded. |
+| `vllm.circuitBreaker.openDuration` | `10s`           | Open duration each time the circuit opens from closed.                       |
+| `vllm.circuitBreaker.maxOpenDuration` | `2m`         | Cap on the open duration, which doubles on each failed probe.                |
 
 The `estimate` backend tunes multimodal image placeholder estimation (empty uses
 the defaults below):
@@ -275,9 +275,11 @@ completions and the larger of `vllm.timeout` and `vllm.mmTimeout` (30 seconds
 by default) for Chat, Messages, and Responses. Each of those requests then
 routes without token IDs.
 
-Set `vllm.circuitBreaker: {}` to skip rendering instead of waiting. The
-breaker counts render calls per plugin instance, after the retry on an
-alternate discovered endpoint:
+Set `vllm.circuitBreaker: {}` to skip rendering instead of waiting. Each
+render path (completions, Chat, Messages, and Responses) has its own breaker
+per plugin instance, because the paths have different render budgets. A
+breaker counts render calls after the retry on an alternate discovered
+endpoint:
 
 - `consecutiveTimeouts` timed-out render calls in a row open the circuit. A
   successful render call resets the count. Other failures and caller
@@ -288,11 +290,11 @@ alternate discovered endpoint:
   prompt still run and take their no-token path.
 - After the open duration, one request renders with its normal budget while
   the others keep skipping. A timeout opens the circuit again with twice the
-  open duration, up to `maxOpenDuration`. Any other outcome closes it. The
-  probe is a real request because it carries the client's `Authorization`
-  header.
-- When the circuit opens again within `maxOpenDuration` of closing, the open
-  duration keeps doubling instead of starting from `openDuration`.
+  open duration, up to `maxOpenDuration`. Any other outcome closes it, and the
+  next trip opens it for `openDuration` again. The probe is a real request
+  because it carries the client's `Authorization` header.
+- A render call admitted before the last state change, such as one in flight
+  when the circuit opened, does not change the circuit when it completes.
 
 Warmup and render-mode discovery probes bypass the breaker. The breaker bounds
 the latency that an overloaded render endpoint adds; it does not add render

@@ -304,8 +304,8 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 		}
 		renderer.pluginName = name
 		registerRenderMetrics()
-		if renderer.breaker != nil {
-			renderCircuitOpen.WithLabelValues(PluginType, name).Set(0)
+		for path := range renderer.breakers {
+			renderCircuitOpen.WithLabelValues(PluginType, name, path).Set(0)
 		}
 		legacyMessages, err := configureLegacyMessages(ctx, name, cfg.MessagesRenderMode)
 		if err != nil {
