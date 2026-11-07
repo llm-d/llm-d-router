@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -56,7 +57,7 @@ func releaseOnCleanup(t *testing.T, stop chan struct{}) {
 
 func newSGLangPDFixture(t *testing.T, prefill, decode http.HandlerFunc) *sglangPDFixture {
 	t.Helper()
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 		case gateway.PhasePrefill:
 			prefill(w, r)
@@ -66,12 +67,6 @@ func newSGLangPDFixture(t *testing.T, prefill, decode http.HandlerFunc) *sglangP
 			w.WriteHeader(http.StatusBadRequest)
 		}
 	}))
-	protocols := new(http.Protocols)
-	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true)
-	srv.Config.Protocols = protocols
-	srv.Start()
-	t.Cleanup(srv.Close)
 
 	gw := gateway.New(config.GatewayConfig{Address: srv.URL})
 	p, err := NewPrefillStep(gw, map[string]any{ParamKVConnector: kv.SGLang})
@@ -89,13 +84,13 @@ func (f *sglangPDFixture) run(ctx context.Context, t *testing.T) (*httptest.Resp
 	require.NoError(t, err)
 	rec := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
-		RequestID:           "req-pd",
-		OriginalHeaders:     http.Header{},
-		OriginalBody:        payload,
-		GRPCGeneratePayload: payload[grpcframe.HeaderLen:],
-		Stream:              true,
-		KVTransferParams:    map[string]any{},
-		ResponseWriter:      rec,
+		RequestID:        "req-pd",
+		OriginalHeaders:  http.Header{},
+		OriginalBody:     payload,
+		GRPC:             &pipeline.SGLangGRPCRequest{Payload: payload[grpcframe.HeaderLen:]},
+		Stream:           true,
+		KVTransferParams: map[string]any{},
+		ResponseWriter:   rec,
 	}
 	if err := f.prefill.Execute(ctx, reqCtx); err != nil {
 		return rec, err
@@ -112,14 +107,9 @@ func writePrefillHeaders(w http.ResponseWriter) {
 
 func writeDecodeOK(t *testing.T, w http.ResponseWriter) {
 	t.Helper()
-	w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
-	w.WriteHeader(http.StatusOK)
-	frame, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+	grpctest.WriteFrames(t, w, &sglangapiv1.GenerateStreamItem{
 		Item: &sglangapiv1.GenerateStreamItem_Frame{Frame: &sglangapiv1.GenerateResponse{Text: "ok"}},
 	})
-	require.NoError(t, err)
-	_, _ = w.Write(frame)
-	w.Header().Set(http.TrailerPrefix+grpcframe.HeaderStatus, grpcframe.StatusOK)
 }
 
 // After decode succeeds, a prefill stream that keeps running is cancelled by

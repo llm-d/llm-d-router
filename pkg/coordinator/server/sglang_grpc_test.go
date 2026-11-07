@@ -60,10 +60,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps/asyncbroker"
 )
 
-func startCoordinatorH2C(t *testing.T, cfg config.ServerConfig, p *pipeline.Pipeline, gw *gateway.Client) string {
+func startCoordinatorH2C(t *testing.T, cfg config.ServerConfig, p *pipeline.Pipeline, gw *gateway.Client, opts ...server.Option) string {
 	t.Helper()
 	cfg.SecureServing = false
-	srv, err := server.New(cfg, p, gw)
+	srv, err := server.New(cfg, p, gw, opts...)
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -381,17 +381,12 @@ func TestSGLangGRPC_PrefillStreamErrorCancelsDecodeAndSurfacesGRPCStatus(t *test
 }
 
 func TestSGLangGRPC_DecodeOnlyAndControlRPCPassthrough(t *testing.T) {
-	backendSrv := grpc.NewServer()
-	sglangapiv1.RegisterSglangServiceServer(backendSrv, &stubSGLangServiceServer{})
-	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	go func() { _ = backendSrv.Serve(backendLn) }()
-	t.Cleanup(backendSrv.Stop)
+	backendAddr := grpctest.StartGRPCServer(t, func(s *grpc.Server) {
+		sglangapiv1.RegisterSglangServiceServer(s, &stubSGLangServiceServer{})
+	})
 
 	var lastProfile atomic.Value
-	gwClient := gateway.New(config.GatewayConfig{Address: "http://" + backendLn.Addr().String()})
+	gwClient := gateway.New(config.GatewayConfig{Address: "http://" + backendAddr})
 
 	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lastProfile.Store(r.Header.Get(reqcommon.EPPProfileHeaderKey))
@@ -457,9 +452,7 @@ func TestSGLangGRPC_RejectsOversizedAndMalformedBodies(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{Address: gw.URL})
 	addr := startCoordinatorH2C(t, config.ServerConfig{MaxRequestBodySize: 1}, newSGLangPDPipeline(t, gwClient), gwClient)
 
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	h2cClient := &http.Client{Transport: &http.Transport{Protocols: protocols}}
+	h2cClient := grpctest.NewH2CClient()
 
 	sendRaw := func(path string, body []byte) string {
 		t.Helper()
@@ -524,16 +517,11 @@ func TestSGLangGRPC_RejectsOversizedAndMalformedBodies(t *testing.T) {
 }
 
 func TestSGLangGRPC_JSONOnlyStepsNoOp(t *testing.T) {
-	backendSrv := grpc.NewServer()
-	sglangapiv1.RegisterSglangServiceServer(backendSrv, &stubSGLangServiceServer{})
-	backendLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	go func() { _ = backendSrv.Serve(backendLn) }()
-	t.Cleanup(backendSrv.Stop)
+	backendAddr := grpctest.StartGRPCServer(t, func(s *grpc.Server) {
+		sglangapiv1.RegisterSglangServiceServer(s, &stubSGLangServiceServer{})
+	})
 
-	gwClient := gateway.New(config.GatewayConfig{Address: "http://" + backendLn.Addr().String()})
+	gwClient := gateway.New(config.GatewayConfig{Address: "http://" + backendAddr})
 	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Prefer") == "if-available" {
 			t.Error("conditional-decode must not probe on SGLang gRPC Generate")
@@ -1302,16 +1290,11 @@ func TestSGLangGRPC_ClientCancellationAndTLSServing(t *testing.T) {
 	})
 
 	t.Run("TLS HTTP/2 serving", func(t *testing.T) {
-		backendSrv := grpc.NewServer()
-		sglangapiv1.RegisterSglangServiceServer(backendSrv, &stubSGLangServiceServer{})
-		backendLn, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("net.Listen: %v", err)
-		}
-		go func() { _ = backendSrv.Serve(backendLn) }()
-		t.Cleanup(backendSrv.Stop)
+		backendAddr := grpctest.StartGRPCServer(t, func(s *grpc.Server) {
+			sglangapiv1.RegisterSglangServiceServer(s, &stubSGLangServiceServer{})
+		})
 
-		gwClient := gateway.New(config.GatewayConfig{Address: "http://" + backendLn.Addr().String()})
+		gwClient := gateway.New(config.GatewayConfig{Address: "http://" + backendAddr})
 		decodeStep, err := steps.NewDecodeStep(gwClient, map[string]any{"kv_connector": kv.SGLang})
 		if err != nil {
 			t.Fatalf("NewDecodeStep: %v", err)
@@ -1360,6 +1343,125 @@ func TestSGLangGRPC_ClientCancellationAndTLSServing(t *testing.T) {
 			t.Fatalf("expected EOF over TLS, got %v", err)
 		}
 	})
+}
+
+func promptMismatchCount(t *testing.T, reg *prometheus.Registry, apiType string, idsForwarded bool) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantForwarded := strconv.FormatBool(idsForwarded)
+	total := 0.0
+	for _, family := range families {
+		if family.GetName() != "llm_d_coordinator_prompt_token_mismatch_total" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			var gotAPI, gotFwd string
+			for _, l := range m.GetLabel() {
+				switch l.GetName() {
+				case "api_type":
+					gotAPI = l.GetValue()
+				case "ids_forwarded":
+					gotFwd = l.GetValue()
+				}
+			}
+			if gotAPI == apiType && gotFwd == wantForwarded {
+				total += m.GetCounter().GetValue()
+			}
+		}
+	}
+	return total
+}
+
+func TestSGLangGRPC_PromptTokenParityMismatchRecorded(t *testing.T) {
+	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
+		case gateway.PhasePrefill:
+			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+			w.Header().Set(routing.PrefillEndpointHeader, "10.2.3.4:30000")
+			w.WriteHeader(http.StatusOK)
+			frameBytes, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+				Item: &sglangapiv1.GenerateStreamItem_Frame{
+					Frame: &sglangapiv1.GenerateResponse{
+						MetaInfo: &sglangapiv1.GenerateMetaInfo{
+							PromptTokens: 64,
+							CachedTokens: 32,
+							FinishReason: &sglangapiv1.FinishReason{
+								Kind: &sglangapiv1.FinishReason_Length{Length: &sglangapiv1.FinishLength{Length: proto.Uint64(1)}},
+							},
+						},
+					},
+				},
+			})
+			if err != nil {
+				t.Errorf("MarshalProto prefill: %v", err)
+				return
+			}
+			_, _ = w.Write(frameBytes)
+			w.Header().Set(http.TrailerPrefix+grpcframe.HeaderStatus, grpcframe.StatusOK)
+
+		case gateway.PhaseDecode:
+			grpctest.WriteFrames(t, w, &sglangapiv1.GenerateStreamItem{
+				Item: &sglangapiv1.GenerateStreamItem_Frame{
+					Frame: &sglangapiv1.GenerateResponse{
+						Text: "mismatch",
+						MetaInfo: &sglangapiv1.GenerateMetaInfo{
+							PromptTokens:     70, // differs from prefill's 64
+							CompletionTokens: 1,
+							CachedTokens:     0,
+							FinishReason: &sglangapiv1.FinishReason{
+								Kind: &sglangapiv1.FinishReason_Stop{Stop: &sglangapiv1.FinishStop{}},
+							},
+						},
+					},
+				},
+			})
+		}
+	}))
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gw.URL})
+	prefill, err := steps.NewPrefillStep(gwClient, map[string]any{"kv_connector": kv.SGLang})
+	if err != nil {
+		t.Fatalf("NewPrefillStep: %v", err)
+	}
+	decode, err := steps.NewDecodeStep(gwClient, map[string]any{
+		"kv_connector":        kv.SGLang,
+		"prompt_token_parity": "error",
+	})
+	if err != nil {
+		t.Fatalf("NewDecodeStep: %v", err)
+	}
+	addr := startCoordinatorH2C(t, config.ServerConfig{}, pipeline.New([]pipeline.Step{prefill, decode}), gwClient)
+
+	conn := grpctest.Dial(t, addr)
+	stream, err := sglangapiv1.NewSglangServiceClient(conn).Generate(testCtx(t), &sglangapiv1.GenerateRequest{
+		Text: &sglangapiv1.StringOrList{
+			Value: &sglangapiv1.StringOrList_One{One: "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for {
+		_, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			t.Fatalf("Recv: %v", recvErr)
+		}
+	}
+
+	if got := promptMismatchCount(t, reg, reqcommon.APITypeSGLangGenerate.String(), false); got != 1 {
+		t.Fatalf("prompt_token_mismatch_total = %v, want 1", got)
+	}
+	if got := stepErrors(t, reg, steps.DecodeStepName); got != 1 {
+		t.Fatalf("decode step_errors_total = %v, want 1 in error mode", got)
+	}
 }
 
 // testCtx bounds a client call so a regression that leaves the coordinator

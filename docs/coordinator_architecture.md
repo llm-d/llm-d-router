@@ -77,6 +77,7 @@ absorb further processing modes as they are added.
   - [Environment overrides](#environment-overrides)
   - [Connector selection](#connector-selection)
   - [Should the coordinator use the tokens-in format?](#should-the-coordinator-use-the-tokens-in-format)
+  - [Worker protocol for `/inference/v1/generate`](#worker-protocol-for-inferencev1generate)
   - [The built-in steps](#the-built-in-steps)
   - [Adding a step to the pipeline](#adding-a-step-to-the-pipeline)
 - [References](#references)
@@ -222,7 +223,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, and `/sglang.api.v1.SglangService/Generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, `/sglang.api.v1.SglangService/Generate`, `/vllm.Inference/Generate`, and `/vllm.Inference/GenerateStream`. It builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `x-llm-d-epp-profile` header constants. |
@@ -428,6 +429,15 @@ the pipeline continues to the next step. A pipeline that includes the step for H
 requests therefore runs `prefill` and `decode` on every gRPC Generate request. The
 `render`, `replace-media-urls`, `encode`, and `async-broker` steps also do nothing on this path.
 
+On `POST /vllm.Inference/Generate` and `POST /vllm.Inference/GenerateStream`, the
+coordinator runs `conditional-decode`, `encode`, `prefill`, and `decode` in sequence
+over HTTP/2 gRPC. On `conditional-decode`, the coordinator sends `Prefer: if-available`
+to decode and treats HTTP `412` or gRPC `FAILED_PRECONDITION` as a cache miss. On a
+miss, the pipeline continues through `encode`, `prefill`, and `decode`. The `encode`
+step runs only when the request carries `media` items. The `render`,
+`replace-media-urls`, and `async-broker` steps do nothing on native `vllm.Inference`
+gRPC paths.
+
 ### KV and EC transfer protocols
 
 Because the coordinator builds the prefill and decode request bodies itself, it must
@@ -509,6 +519,19 @@ embeddings from encode pods to the prefill pod:
 
 The KV and EC selections are independent. The exact request and response bodies for each
 phase and format are in [communication.md](communication.md).
+
+On `vllm.Inference` gRPC legs, the coordinator supports `kv-nixl`, `kv-shared-storage`,
+`kv-offloading`, `ec-nixl`, and `ec-shared-storage`. Wire helpers in
+[pkg/common/grpc/vllm/vllmwire](../pkg/common/grpc/vllm/vllmwire) drop client
+`kv_transfer_params` and `ec_transfer_params` and preserve `cache_salt` and
+`bypass_prefix_cache`. The coordinator sends full `media` items (`MediaAll`) on `encode`
+and on `prefill` when `encode` does not run. It sends metadata-only `media` items
+(`MediaMetadataOnly`) on `prefill` after `encode` and strips all `media` items
+(`MediaNone`) on `decode` after `prefill` and on `conditional-decode` probes. Both
+`encode` and `prefill` call unary `Generate` with `max_new_tokens=1` and
+`min_new_tokens=0` and read transfer descriptors from `FinishInfo`. When prefill reports
+cached tokens, the coordinator overwrites `FinishInfo.num_cached_tokens` on the terminal
+decode frame.
 
 ### Cross-phase metadata
 
@@ -783,6 +806,7 @@ pipeline:             # connector defaults + ordered steps
   kv_connector: kv-shared-storage
   ec_connector: ec-shared-storage
   use_openai_format: true
+  worker_protocol: http
   steps:
     - type: <step-type>
       params: { ... }
@@ -875,6 +899,19 @@ length (the number of image placeholder tokens) grows with resolution in both fo
 
 The `ec_transfer_params` shape and `size_bytes` are identical between the two formats;
 only the request carrier differs.
+
+### Worker protocol for `/inference/v1/generate`
+
+`pipeline.worker_protocol` selects how the coordinator sends HTTP
+`POST /inference/v1/generate` requests to workers. The default value `http` forwards
+JSON requests to `/inference/v1/generate` on workers. When you set `worker_protocol` to
+`grpc`, the coordinator translates HTTP `/inference/v1/generate` JSON and SSE streams
+to `vllm.Inference` gRPC calls. It maps guided decoding, `logit_bias`, `bad_words`
+token sequences, `logprobs`, `top_logprobs`, `truncate_prompt_tokens`, and
+`allowed_token_ids`, and rejects unknown `sampling_params` keys with HTTP `400`. The
+coordinator still requires a `render` step when `use_openai_format` is `false`, because
+OpenAI text routes continue to call HTTP workers. Native gRPC routes always call
+upstream gRPC methods regardless of `worker_protocol`.
 
 ### The built-in steps
 
