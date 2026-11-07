@@ -35,6 +35,9 @@ layer may serve the request from any of them.
   decode request's `remote_prefiller` from it. The prefill pod's serving address,
   `x-llm-d-prefiller-host-port`, is the `disagg-profile-handler`'s output and is not
   written here.
+- The decision for the request (`P2PSourceDecision`: the `outcome` and `endpoint_role` of
+  `llm_d_epp_p2p_source_decisions_total`) as a request attribute, read by a
+  `prefix-cache-affinity-filter` whose `p2pSourceProducerName` names this instance.
 
 A P2P tier port is `p2pConnectorPort` plus the endpoint's data parallel rank, the
 position of its port in the pool's target ports. See

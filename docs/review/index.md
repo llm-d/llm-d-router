@@ -10,11 +10,11 @@ Two-stage review bundle for `llm-d-router` designed for two-pass additive code r
 
 * [Review a pull request](playbooks/review_a_pull_request.md) - Two-pass additive review procedure and Stage-1 diff-path routing table for agents.
 * [Review Playbook (human guide)](../review_playbook.md) - Stage-2 compiled single-page guide with rationale, exceptions, open questions, and PR examples.
-* [Failure classes and section taxonomy](references/failure_classes.md) - Overview of the 4 Stage-1 rule sections and 17 non-code review rules.
+* [Failure classes and section taxonomy](references/failure_classes.md) - Overview of the 4 Stage-1 rule sections and 20 non-code review rules.
 
 ## Contents
 
-* [Review Rules](rules/index.md) - 4 compact Stage-1 rule files housing 17 `When:`-triggered non-code review invariants.
+* [Review Rules](rules/index.md) - 4 compact Stage-1 rule files housing 20 `When:`-triggered non-code review invariants.
 * [Provenance Sidecar](provenance.json) - Per-section `stale_after` timestamps and per-rule consequences, recurrence counts, and PR thread citations.
 * [Decisions](decisions/index.md) - 28 settled maintainer tradeoffs (`MVM-*`) and human-verified policy decisions.
 * [Open Questions](open_questions/index.md) - 12 unresolved architectural and operational questions (`status: draft`).

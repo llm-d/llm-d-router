@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package sessionstate provides a DataProducer that tracks agentic session
-// history and publishes it for session-aware scheduling plugins.
+// Package sessionstate provides a plugin that tracks agentic session
+// history and publishes it before flow control for session-aware plugins.
 package sessionstate
 
 import (
@@ -56,10 +56,12 @@ func (p Parameters) validate() error {
 }
 
 var (
-	_ fwkrh.DataProducer          = &Producer{}
-	_ fwkrh.PreRequest            = &Producer{}
-	_ fwkrh.ResponseBodyProcessor = &Producer{}
-	_ fwkplugin.ConsumerPlugin    = &Producer{}
+	_ fwkrh.RequestHeaderProcessor = &Producer{}
+	_ fwkrh.DataProducer           = &Producer{}
+	_ fwkrh.PreRequest             = &Producer{}
+	_ fwkrh.ResponseBodyProcessor  = &Producer{}
+	_ fwkrh.RequestAbandoned       = &Producer{}
+	_ fwkplugin.ConsumerPlugin     = &Producer{}
 )
 
 // Producer tracks session history within one EPP instance.
@@ -119,17 +121,32 @@ func (p *Producer) Consumes() fwkplugin.DataDependencies {
 	}
 }
 
-// Produce publishes the history observed before the current request is
-// dispatched, then marks the session as seen at the current time.
-func (p *Producer) Produce(_ context.Context, request *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
+// RequestHeader marks the session as seen and publishes its state before flow
+// control. The attribute resolves on every read, so a request waiting in a
+// queue observes turns and responses recorded for the session in the meantime.
+// The session is not evicted while the request is pending.
+func (p *Producer) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
 	identity, ok := readAgentIdentity(request)
 	if !ok {
 		return nil
 	}
-
-	state := p.registry.GetState(identity)
-	request.PutAttribute(p.dk, state)
+	obs := p.registry.observe(identity, request.RequestID)
+	request.PutAttribute(p.dk, &fwksched.DynamicRequestAttribute{Get: func() any { return obs.state() }})
 	return nil
+}
+
+// Produce is a no-op: RequestHeader already published the session state.
+func (p *Producer) Produce(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) error {
+	return nil
+}
+
+// RequestAbandoned ends the pending state of a request that leaves before
+// PreRequest, for example when flow control rejects it.
+func (p *Producer) RequestAbandoned(_ context.Context, request *fwksched.InferenceRequest) {
+	if request == nil {
+		return
+	}
+	p.registry.ReleasePending(request.RequestID)
 }
 
 // PreRequest records one dispatched turn. A request counts once even when
@@ -140,7 +157,7 @@ func (p *Producer) PreRequest(_ context.Context, request *fwksched.InferenceRequ
 		return nil
 	}
 
-	p.registry.RecordDispatch(identity)
+	p.registry.RecordDispatch(identity, request.RequestID)
 	return nil
 }
 
@@ -160,11 +177,18 @@ func (p *Producer) ResponseBody(
 		return
 	}
 
+	var cachedTokens int64
+	if details := response.Usage.PromptTokenDetails; details != nil {
+		cachedTokens = int64(details.CachedTokens)
+	}
 	p.registry.RecordResponse(
 		identity,
 		response.TerminationCause == fwkrh.TerminationCauseNatural,
-		int64(response.Usage.PromptTokens),
-		int64(response.Usage.CompletionTokens),
+		TurnUsage{
+			InputTokens:  int64(response.Usage.PromptTokens),
+			OutputTokens: int64(response.Usage.CompletionTokens),
+			CachedTokens: cachedTokens,
+		},
 	)
 }
 

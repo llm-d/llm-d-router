@@ -25,12 +25,13 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/prometheus/client_golang/prometheus"
@@ -58,18 +59,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps/asyncbroker"
 )
-
-func startH2CTestGateway(t *testing.T, handler http.Handler) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewUnstartedServer(handler)
-	protocols := new(http.Protocols)
-	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true)
-	srv.Config.Protocols = protocols
-	srv.Start()
-	t.Cleanup(srv.Close)
-	return srv
-}
 
 func startCoordinatorH2C(t *testing.T, cfg config.ServerConfig, p *pipeline.Pipeline, gw *gateway.Client) string {
 	t.Helper()
@@ -126,7 +115,7 @@ func TestSGLangGRPC_ConcurrentPrefillDecodeStreamsAndRewritesCachedTokens(t *tes
 		decodeHeaders http.Header
 	)
 
-	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read gateway request: %v", err)
@@ -339,7 +328,7 @@ func TestSGLangGRPC_PrefillStreamErrorCancelsDecodeAndSurfacesGRPCStatus(t *test
 	decodeStarted := make(chan struct{})
 	var decodeCancelled atomic.Bool
 
-	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 		case gateway.PhasePrefill:
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
@@ -404,7 +393,7 @@ func TestSGLangGRPC_DecodeOnlyAndControlRPCPassthrough(t *testing.T) {
 	var lastProfile atomic.Value
 	gwClient := gateway.New(config.GatewayConfig{Address: "http://" + backendLn.Addr().String()})
 
-	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lastProfile.Store(r.Header.Get(reqcommon.EPPProfileHeaderKey))
 		body, _ := io.ReadAll(r.Body)
 		resp, err := gwClient.StreamGRPC(r.Context(), r.URL.Path, nil, body)
@@ -461,7 +450,7 @@ func TestSGLangGRPC_DecodeOnlyAndControlRPCPassthrough(t *testing.T) {
 }
 
 func TestSGLangGRPC_RejectsOversizedAndMalformedBodies(t *testing.T) {
-	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("gateway must not be called for rejected requests")
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -545,7 +534,7 @@ func TestSGLangGRPC_JSONOnlyStepsNoOp(t *testing.T) {
 	t.Cleanup(backendSrv.Stop)
 
 	gwClient := gateway.New(config.GatewayConfig{Address: "http://" + backendLn.Addr().String()})
-	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Prefer") == "if-available" {
 			t.Error("conditional-decode must not probe on SGLang gRPC Generate")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -680,7 +669,7 @@ func assertErrorBodyDetail(t *testing.T, err error, wantCode uint32, wantMsg str
 func TestSGLangGRPC_MissingPrefillEndpointHeaderReturnsInternal(t *testing.T) {
 	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
 	var decodeCalled atomic.Bool
-	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 		case gateway.PhasePrefill:
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
@@ -752,7 +741,7 @@ func stepErrors(t *testing.T, reg *prometheus.Registry, step string) float64 {
 
 func TestSGLangGRPC_TrailersOnlyOKAndErrorsPreserveDetails(t *testing.T) {
 	t.Run("decode trailers-only OK returns EOF", func(t *testing.T) {
-		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
 			w.Header().Set(grpcframe.HeaderStatus, grpcframe.StatusOK)
 			w.WriteHeader(http.StatusOK)
@@ -786,7 +775,7 @@ func TestSGLangGRPC_TrailersOnlyOKAndErrorsPreserveDetails(t *testing.T) {
 			Code:    http.StatusBadRequest,
 			Message: "unknown lora adapter",
 		})
-		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get(reqcommon.EPPProfileHeaderKey) != gateway.PhasePrefill {
 				t.Errorf("unexpected phase %q", r.Header.Get(reqcommon.EPPProfileHeaderKey))
 			}
@@ -823,7 +812,7 @@ func TestSGLangGRPC_TrailersOnlyOKAndErrorsPreserveDetails(t *testing.T) {
 			Code:    http.StatusTooManyRequests,
 			Message: "decode queue full",
 		})
-		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
 			w.Header().Set(grpcframe.HeaderStatus, strconv.Itoa(int(codes.ResourceExhausted)))
 			w.Header().Set(grpcframe.HeaderMessage, grpcframe.EncodeStatusMessage("decode full"))
@@ -859,7 +848,7 @@ func TestSGLangGRPC_TrailersOnlyOKAndErrorsPreserveDetails(t *testing.T) {
 
 func TestSGLangGRPC_MissingGRPCStatusReturnsInternal(t *testing.T) {
 	t.Run("decode empty 200 without grpc-status", func(t *testing.T) {
-		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
 			w.WriteHeader(http.StatusOK)
 		}))
@@ -892,7 +881,7 @@ func TestSGLangGRPC_MissingGRPCStatusReturnsInternal(t *testing.T) {
 		// declares a second frame, then ends the stream with grpc-status 0.
 		// The truncated frame must surface as an error, not be dropped with
 		// the OK status forwarded.
-		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
 			w.WriteHeader(http.StatusOK)
 			frameBytes, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
@@ -937,7 +926,7 @@ func TestSGLangGRPC_MissingGRPCStatusReturnsInternal(t *testing.T) {
 	})
 
 	t.Run("decode stream after frame without grpc-status trailer", func(t *testing.T) {
-		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
 			w.WriteHeader(http.StatusOK)
 			frameBytes, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
@@ -980,7 +969,7 @@ func TestSGLangGRPC_MissingGRPCStatusReturnsInternal(t *testing.T) {
 	})
 
 	t.Run("prefill stream without grpc-status fails decode", func(t *testing.T) {
-		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 			case gateway.PhasePrefill:
 				w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
@@ -1022,7 +1011,7 @@ func TestSGLangGRPC_PrefillFailureAfterDecodeStartedWritesErrorTrailer(t *testin
 		Message: "kv transfer aborted mid-stream",
 	})
 
-	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 		case gateway.PhasePrefill:
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
@@ -1085,7 +1074,7 @@ func TestSGLangGRPC_PrefillInStreamErrorEncodesMessageAndMapsCode(t *testing.T) 
 	const rawErrMsg = "prompt rejected: 50% over limit\ndetail line"
 	decodeReady := make(chan struct{})
 
-	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 		case gateway.PhasePrefill:
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
@@ -1148,7 +1137,7 @@ func TestSGLangGRPC_PrefillInStreamErrorEncodesMessageAndMapsCode(t *testing.T) 
 func TestSGLangGRPC_PerIndexCachedTokensAndTerminalWait(t *testing.T) {
 	decodeSentTerminal := make(chan struct{})
 
-	gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 		case gateway.PhasePrefill:
 			w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
@@ -1258,7 +1247,7 @@ func TestSGLangGRPC_PerIndexCachedTokensAndTerminalWait(t *testing.T) {
 func TestSGLangGRPC_ClientCancellationAndTLSServing(t *testing.T) {
 	t.Run("client cancellation cancels prefill and decode", func(t *testing.T) {
 		var prefillCancelled, decodeCancelled atomic.Bool
-		gw := startH2CTestGateway(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 			case gateway.PhasePrefill:
 				w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)

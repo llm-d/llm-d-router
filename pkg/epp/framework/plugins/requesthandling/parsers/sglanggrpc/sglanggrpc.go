@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -103,7 +102,7 @@ func (p *SGLangGRPCParser) ParseRequest(ctx context.Context, body []byte, header
 		return nil, fmt.Errorf("unsupported gRPC path: %s", path)
 	}
 
-	payload, err := grpcframe.ParsePayload(body)
+	payload, err := parsers.ParseUnaryFrame(body)
 	if err != nil {
 		return nil, fmt.Errorf("invalid gRPC generate request: %w", err)
 	}
@@ -245,11 +244,7 @@ func (p *SGLangGRPCParser) RewritePriority(_ fwkrh.PriorityRewriteContext, paylo
 	if !ok {
 		return payload, false, nil
 	}
-	body, err := grpcframe.ParsePayload(raw)
-	if err != nil {
-		return nil, false, fmt.Errorf("invalid gRPC generate request: %w", err)
-	}
-	framed, err := sglangwire.FramePriority(body, int64(priority))
+	framed, err := sglangwire.RewritePriority(raw, int64(priority))
 	if err != nil {
 		return nil, false, fmt.Errorf("rewriting priority: %w", err)
 	}
@@ -271,41 +266,29 @@ func (p *SGLangGRPCParser) ParseResponse(_ context.Context, body []byte, _ map[s
 
 	var result *fwkrh.ParsedResponse
 	var errs []error
-	for len(body) > 0 {
-		payload, err := grpcframe.ParsePayload(body)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("parsing gRPC response payload: %w", err))
-			break
-		}
-		body = body[grpcframe.HeaderLen+len(payload):]
-
+	if err := grpcframe.ForEachPayload(body, func(payload []byte) {
 		item, err := sglangwire.ScanStreamItem(payload)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("unmarshaling GenerateStreamItem: %w", err))
-			continue
+			return
 		}
 		if result == nil {
 			result = &fwkrh.ParsedResponse{}
 		}
 		if !item.HasFrame {
-			continue
+			return
 		}
 		result.StreamedEvents++
 		if !item.Finished {
-			continue
+			return
 		}
-		promptTokens := clampUint64ToInt(uint64(item.PromptTokens))
-		completionTokens := clampUint64ToInt(item.CompletionTokens)
+		promptTokens := parsers.ClampToInt(item.PromptTokens)
+		completionTokens := parsers.ClampToInt(item.CompletionTokens)
 		if promptTokens > 0 || completionTokens > 0 {
-			result.Usage = parsers.NewUsage(promptTokens, completionTokens, clampUint64ToInt(uint64(item.CachedTokens)))
+			result.Usage = parsers.NewUsage(promptTokens, completionTokens, parsers.ClampToInt(item.CachedTokens))
 		}
+	}); err != nil {
+		errs = append(errs, fmt.Errorf("parsing gRPC response payload: %w", err))
 	}
 	return result, errors.Join(errs...)
-}
-
-func clampUint64ToInt(v uint64) int {
-	if v > uint64(math.MaxInt) {
-		return math.MaxInt
-	}
-	return int(v) //#nosec G115 -- guarded by MaxInt check above
 }

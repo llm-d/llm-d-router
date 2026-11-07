@@ -19,8 +19,11 @@ package parsers
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"strings"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwkplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins"
@@ -34,14 +37,46 @@ const (
 // NewUsage builds a Usage struct from prompt, completion, and cached prompt
 // token counts.
 func NewUsage(promptTokens, completionTokens, cachedTokens int) *fwkrequest.Usage {
-	return &fwkrequest.Usage{
+	return NewUsageOptionalCached(promptTokens, completionTokens, &cachedTokens)
+}
+
+// NewUsageOptionalCached is NewUsage for an engine that can omit the cached
+// prompt token count. A nil cachedTokens leaves PromptTokenDetails nil.
+func NewUsageOptionalCached(promptTokens, completionTokens int, cachedTokens *int) *fwkrequest.Usage {
+	usage := &fwkrequest.Usage{
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		TotalTokens:      promptTokens + completionTokens,
-		PromptTokenDetails: &fwkrequest.PromptTokenDetails{
-			CachedTokens: cachedTokens,
-		},
 	}
+	if cachedTokens != nil {
+		usage.PromptTokenDetails = &fwkrequest.PromptTokenDetails{
+			CachedTokens: *cachedTokens,
+		}
+	}
+	return usage
+}
+
+// ParseUnaryFrame returns the payload of body, which must hold exactly one
+// gRPC frame. A unary request carries one message, so bytes after the frame
+// are a malformed request that the parser rejects before scheduling runs.
+func ParseUnaryFrame(body []byte) ([]byte, error) {
+	payload, err := grpcframe.ParsePayload(body)
+	if err != nil {
+		return nil, err
+	}
+	if grpcframe.HeaderLen+len(payload) != len(body) {
+		return nil, fmt.Errorf("%w: %d bytes after the frame", grpcframe.ErrMalformed, len(body)-grpcframe.HeaderLen-len(payload))
+	}
+	return payload, nil
+}
+
+// ClampToInt converts an unsigned token count from a protobuf message to int.
+// It saturates at math.MaxInt.
+func ClampToInt[T ~uint32 | ~uint64](v T) int {
+	if uint64(v) > uint64(math.MaxInt) {
+		return math.MaxInt
+	}
+	return int(v) //#nosec G115 -- guarded by MaxInt check above
 }
 
 // ComposeSGLangCacheSalt combines SGLang's extra_key and cache_salt into the
