@@ -102,6 +102,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/priorityholdback"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/softreflectiveceiling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/groupsched"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/admitter/latencyslo"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/admitter/probabilisticadmitter"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix"
@@ -172,6 +173,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/tokenload"
 	topologyaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/topologyaffinity"
 	testfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/test/filter"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/threadidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/thunderagent"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -786,6 +788,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(evictordering.PriorityThenTimeOrderingType, fwkplugin.StabilityAlpha, evictordering.PriorityThenTimeOrderingFactory)
 	fwkplugin.Register(weightedfairshare.WeightedFairShareFairnessPolicyType, fwkplugin.StabilityAlpha, weightedfairshare.WeightedFairShareFairnessPolicyFactory)
 	fwkplugin.Register(softreflectiveceiling.PolicyType, fwkplugin.StabilityAlpha, softreflectiveceiling.Factory)
+	fwkplugin.Register(threadidentity.PluginType, fwkplugin.StabilityAlpha, threadidentity.Factory)
+	fwkplugin.Register(groupsched.PluginType, fwkplugin.StabilityAlpha, groupsched.Factory)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
 	// Beta
