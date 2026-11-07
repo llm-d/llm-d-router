@@ -30,9 +30,10 @@ Verification needs either [`gh`](https://cli.github.com) or
 [`cosign`](https://github.com/sigstore/cosign). Reading the SBOM needs
 `docker buildx` and `jq` for processing the output.
 
-`gh` must be 2.51.0 or later for `--signer-workflow` and 2.64.0 or later for
-`--bundle-from-oci`. It requires authentication (`gh auth login`) because it
-queries the GitHub API for the attestation.
+`gh` must be 2.51.0 or later for `--signer-workflow`, 2.64.0 or later for
+`--bundle-from-oci` and 2.68.0 or later for `--source-ref`. It requires
+authentication (`gh auth login`) because it queries the GitHub API for the
+attestation.
 
 `cosign` must be 2.4.1 or later which reads Sigstore bundles. It needs no
 authentication.
@@ -198,18 +199,25 @@ release workflow signs these files before uploading them, so a downloaded copy
 can be checked without pulling the image.
 
 These attestations are made by `ci-release.yaml` itself, not by the reusable
-build workflow, so that is the signer identity to name:
+build workflow, so that is the signer identity to name. Pin the source ref to
+the release tag as well, otherwise a signed file from an older release also
+passes against a newer one. Download into an empty directory and verify every
+file, including `sbom-digests.txt`:
 
 ```console
 $ TAG=<release tag>
-$ gh release download "$TAG" --repo llm-d/llm-d-router --pattern '*.spdx.json' --pattern 'sbom-digests.txt'
-$ gh attestation verify "llm-d-router-endpoint-picker-$TAG-linux-amd64.spdx.json" \
-    --repo llm-d/llm-d-router \
-    --signer-workflow llm-d/llm-d-router/.github/workflows/ci-release.yaml
+$ gh release download "$TAG" --repo llm-d/llm-d-router --dir "sbom-$TAG" \
+    --pattern '*.spdx.json' --pattern 'sbom-digests.txt'
+$ for f in "sbom-$TAG"/*; do
+    gh attestation verify "$f" \
+      --repo llm-d/llm-d-router \
+      --signer-workflow llm-d/llm-d-router/.github/workflows/ci-release.yaml \
+      --source-ref "refs/tags/$TAG" || echo "not verified: $f"
+  done
 ```
 
-A file that was edited after upload no longer matches the signed digest and
-fails with `no attestations found`.
+A file that was edited after upload no longer matches the signed digest, so no
+attestation exists for it and `gh` fails with `HTTP 404: Not Found`.
 
 ## Troubleshooting
 
@@ -217,10 +225,11 @@ fails with `no attestations found`.
 |---|---|
 | `no attestations found` against a tag which succeeds against a digest | The tag moved to an image whose attestation is not yet published. Resolve the tag to a digest and retry. |
 | `no attestations found` for a release at `v0.10.0` or earlier | Those images carry no attestation. See Coverage. |
-| `Sigstore verification failed` (`gh`) or `failed to verify certificate identity` (`cosign`) | The signer identity names a calling workflow. Use `ci-build-images.yaml`. |
+| `Sigstore verification failed` (`gh`) or `failed to verify certificate identity` (`cosign`) | The signer identity names a calling workflow. Use `ci-build-images.yaml` for images and `ci-release.yaml` for SBOM files attached to a release. |
 | `gh` prints nothing and exits 0 | Output is redirected. The report goes to standard error. Test the exit status. |
 | `.SBOM` returns `{}` | The artifact carries no SBOM. See Coverage. |
-| `no attestations found` for a release SBOM file | The file was changed after download, or the release is `v1.0.0` or earlier. See Coverage. |
+| `HTTP 404: Not Found` for a release SBOM file | The file was changed after download, or the release is `v1.0.0` or earlier. See Coverage. |
+| A release SBOM file fails only with `--source-ref` | The file comes from a different release than `$TAG`. Download it again from the release you are checking. |
 
 ## Related
 
