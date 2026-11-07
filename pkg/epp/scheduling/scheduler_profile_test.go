@@ -18,6 +18,7 @@ limitations under the License.
 package scheduling
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -32,7 +33,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -1068,5 +1071,18 @@ func TestRunPickerPlugin_ScopesThePickerDeclarations(t *testing.T) {
 		score, ok := scores[candidate.Endpoint]
 		assert.True(t, ok, "candidate %d must carry an endpoint the scheduler scored, not a scoped wrapper", i)
 		assert.Equal(t, score, candidate.Score)
+	}
+}
+
+func TestRunPickerPluginLogsCandidateNames(t *testing.T) {
+	var buf bytes.Buffer
+	ctx := log.IntoContext(context.Background(), logutil.NewTestLoggerWithWriter(&buf))
+	picker := &fakePicker{typedName: fwkplugin.TypedName{Type: "fake-picker", Name: "log-candidates"}, selected: 1}
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{picker})
+
+	NewSchedulerProfile().WithPicker(picker).runPickerPlugin(ctx, &fwksched.InferenceRequest{}, newWeightedScores("pod1", "pod2"))
+
+	for _, want := range []string{`"/pod1":0`, `"/pod2":1`} {
+		assert.Contains(t, buf.String(), want, "candidate log must name each endpoint with its weighted score")
 	}
 }

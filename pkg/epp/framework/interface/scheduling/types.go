@@ -187,6 +187,15 @@ type ScoredEndpoint struct {
 	Score float64
 }
 
+// EndpointScores maps each endpoint's namespaced name to its score for logging.
+func EndpointScores(scoredEndpoints []*ScoredEndpoint) map[string]float64 {
+	scores := make(map[string]float64, len(scoredEndpoints))
+	for _, ep := range scoredEndpoints {
+		scores[ep.GetMetadata().GetNamespacedName().String()] = ep.Score
+	}
+	return scores
+}
+
 // ProfileRunResult captures the profile run result.
 type ProfileRunResult struct {
 	TargetEndpoints []Endpoint
