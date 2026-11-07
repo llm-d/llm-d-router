@@ -14,3 +14,11 @@ templates:
   - template: telemetry.md.j2
     application_mode: single
     file_name: docs/telemetry.md
+  - template: scheduler-metrics.go.j2
+    filter: '.groups | map(select(.type == "metric" and (.id | startswith("metric.llm_d.epp.scheduler.")))) | sort_by(.id) | map(.attributes |= ((. // []) | sort_by(.annotations["prometheus.label_position"])))'
+    application_mode: single
+    file_name: pkg/epp/metrics/zz_generated.scheduler_metrics.go
+  - template: scheduler-metrics.md.j2
+    filter: '.groups | map(select(.type == "metric" and (.id | startswith("metric.llm_d.epp.scheduler.")))) | sort_by(.id) | map(.attributes |= ((. // []) | sort_by(.annotations["prometheus.label_position"])))'
+    application_mode: single
+    file_name: scheduler-metrics.md
