@@ -14,6 +14,6 @@
 * The parser accepts single-sequence `GenerateRequest` messages that set `text` or `token_ids`. Requests with `sampling.num_sequences > 1` return `400`.
 * On text prompts, the parser operates in `EPP-Text-Text` mode ([#3993](https://github.com/llm-d/llm-d-router/issues/3993)). The tokenizer tokenizes `text` for prefix-cache scoring only. The parser forwards `text` unchanged, does not rewrite `text` to `token_ids`, and does not inject a render fingerprint.
 * The parser forwards `kv.kv_transfer_params` and `kv.ec_transfer_params` from the client unchanged ([#3979](https://github.com/llm-d/llm-d-router/issues/3979)).
-* The parser extracts `kv.cache_salt`, `stopping.max_new_tokens`, `PreprocessedMediaFeatures` (`identifier`, `mm_hash`, `offset`, `length`, `modality`), and raw `MediaItem.uuid` values for cache scoring.
+* The parser extracts `kv.cache_salt`, `stopping.max_new_tokens`, `PreprocessedMediaFeatures` (`identifier`, `mm_hash`, `offset`, `length`, `modality`), and raw `MediaItem.uuid` values for cache scoring. A modality gets placeholder ranges only when every hashed item of that modality carries `PreprocessedMediaFeatures`.
 * A request with `lora_name` set is routed and scored by the adapter name. A model rewrite targets `lora_name` and leaves `GenerateRequest.model` as the base model. A rewrite to the base model clears `lora_name`.
 * A body with bytes after the single gRPC frame returns `400`.
