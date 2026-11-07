@@ -232,6 +232,10 @@ const (
 	BlockTypeToolResult = "tool_result"
 )
 
+// ThinkingTypeEnabled is the Messages thinking.type that carries a budget_tokens
+// the Anthropic API requires to stay below max_tokens.
+const ThinkingTypeEnabled = "enabled"
+
 // DefaultImageMediaType is vLLM's fallback when an Anthropic base64 image
 // source omits media_type.
 const DefaultImageMediaType = "image/jpeg"
