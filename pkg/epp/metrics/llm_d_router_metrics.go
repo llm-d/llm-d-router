@@ -30,8 +30,6 @@ const (
 )
 
 var (
-	// llmdEndpointLabels replaces the deprecated endpointLabels that used "pod_name".
-	llmdEndpointLabels                   = []string{"endpoint_name", "namespace", "port"}
 	modelLabelsWithFairnessPriority      = append(append([]string{}, modelLabels...), "fairness_id", "priority")
 	requestLabelsWithAPISurface          = append(append([]string{}, modelLabelsWithFairnessPriority...), "api_surface")
 	requestLabelsWithAPISurfaceStreaming = append(append([]string{}, requestLabelsWithAPISurface...), "streaming")
