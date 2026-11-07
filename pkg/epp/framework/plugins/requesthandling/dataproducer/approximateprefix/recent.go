@@ -42,24 +42,50 @@ func newRecentWindow(max int) *recentWindow {
 
 // record appends one prompt's hashes for endpointID and trims oldest prompts
 // until the total hash count is at most max. A single oversized prompt is
-// head-capped to max so matching still anchors at block 0.
-func (w *recentWindow) record(endpointID string, hashes []blockHash) {
+// head-capped to max so matching still anchors at block 0. It returns the
+// stored entry, which replace identifies by its backing array.
+func (w *recentWindow) record(endpointID string, hashes []blockHash) []blockHash {
 	if len(hashes) == 0 {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	cp := w.headCopy(hashes)
+	buf := w.pending[endpointID]
+	buf = append(buf, cp)
+	w.pending[endpointID] = trimPromptHashes(buf, w.max)
+	return cp
+}
+
+// replace swaps the entry that record returned as entry for hashes, keeping its
+// position. It does nothing when the entry has already been trimmed or the
+// endpoint forgotten, so entries recorded since, including an equal prompt of
+// another request, are left as they are.
+func (w *recentWindow) replace(endpointID string, entry, hashes []blockHash) {
+	if len(entry) == 0 || len(hashes) == 0 {
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	prompt := hashes
-	if len(prompt) > w.max {
-		prompt = prompt[:w.max]
-	}
-	cp := make([]blockHash, len(prompt))
-	copy(cp, prompt)
-
 	buf := w.pending[endpointID]
-	buf = append(buf, cp)
-	w.pending[endpointID] = trimPromptHashes(buf, w.max)
+	for i, p := range buf {
+		if &p[0] == &entry[0] {
+			buf[i] = w.headCopy(hashes)
+			w.pending[endpointID] = trimPromptHashes(buf, w.max)
+			return
+		}
+	}
+}
+
+func (w *recentWindow) headCopy(hashes []blockHash) []blockHash {
+	if len(hashes) > w.max {
+		hashes = hashes[:w.max]
+	}
+	cp := make([]blockHash, len(hashes))
+	copy(cp, hashes)
+	return cp
 }
 
 // snapshot returns a deep copy of pending prompts for endpointID without clearing.

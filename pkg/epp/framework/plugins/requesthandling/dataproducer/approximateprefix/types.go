@@ -80,6 +80,8 @@ type SchedulingContextState struct {
 	// endpoints. Taken during Produce, the only stage that sees the candidates
 	// as they were before the scheduler's filters narrowed them.
 	BestAvailableCachedTokens int
+	// BlockSize is the block size in tokens the hashes were derived at.
+	BlockSize int
 }
 
 // Clone creates a deep copy of the SchedulingContextState.
@@ -192,6 +194,10 @@ type config struct {
 	// for hybrid Mamba/GDN models whose decode endpoints cannot reuse KV received over the P/D
 	// transfer. It also removes decode-side prefix affinity for disaggregated requests.
 	ExcludeDecodeWhenDisaggregated bool `json:"excludeDecodeWhenDisaggregated,omitempty"`
+	// IndexCompletions records the prompt followed by the generated text of a
+	// non-streamed /v1/completions request on the decode endpoint that served it.
+	// It applies only with the estimate token-producer backend.
+	IndexCompletions bool `json:"indexCompletions,omitempty"`
 }
 
 // defaultConfig provides sensible defaults for the prefix cache plugins.
