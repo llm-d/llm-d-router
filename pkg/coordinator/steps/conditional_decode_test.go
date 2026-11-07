@@ -303,12 +303,14 @@ func TestConditionalDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
 		path    string
 		tokens  []int
 		entries []pipeline.MultimodalEntry
+		echo    bool
 		want    bool
 	}{
 		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
 		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
 		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
 		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
+		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, echo: true},
 		{name: "not rendered", params: forward, path: reqcommon.PathChatCompletions},
 		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
 		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
@@ -323,6 +325,9 @@ func TestConditionalDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
 				TokenIDs:          tc.tokens,
 				MultimodalEntries: tc.entries,
 				Body:              map[string]any{"model": testModelName},
+			}
+			if tc.echo {
+				reqCtx.Body[reqcommon.FieldEcho] = true
 			}
 			body, err := step.(*ConditionalDecodeStep).prepareBody(reqCtx)
 			require.NoError(t, err)

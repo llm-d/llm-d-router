@@ -56,8 +56,8 @@ const (
 	// send the rendered token IDs in kv_transfer_params.prompt_token_ids on
 	// text-only chat completions, Responses and Messages requests. The decode
 	// worker builds the engine input from them and skips chat templating and
-	// tokenization. Requires vLLM v0.32.0 or later: earlier versions use the IDs
-	// on echo requests and return no echoed prompt. Defaults to false.
+	// tokenization. Requires vLLM v0.27.0 or later; earlier versions ignore the
+	// field. Defaults to false.
 	ParamForwardPromptTokenIDs = "forward_prompt_token_ids"
 )
 

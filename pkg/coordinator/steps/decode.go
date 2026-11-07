@@ -140,7 +140,14 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 					// but correct.
 					if !kvHandoffReplaySafe(s.kv) {
 						logger.Info("force-stream failed and its KV block handoff is spent; decode will recompute the prompt", "error", err.Error())
-						delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
+						// The rendered IDs do not depend on the handoff, so they stay.
+						if kvParams, _ := reqCtx.Body[reqcommon.FieldKVTransferParams].(map[string]any); kvParams != nil {
+							if ids, ok := kvParams[reqcommon.FieldPromptTokenIDs]; ok {
+								reqCtx.Body[reqcommon.FieldKVTransferParams] = map[string]any{reqcommon.FieldPromptTokenIDs: ids}
+							} else {
+								delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
+							}
+						}
 						// The prefill cache-hit count describes the handoff just dropped.
 						reqCtx.PrefillCachedTokens = nil
 					}

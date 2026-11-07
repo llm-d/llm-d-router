@@ -556,12 +556,14 @@ func TestDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
 		path    string
 		tokens  []int
 		entries []pipeline.MultimodalEntry
+		echo    bool
 		want    bool
 	}{
 		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
 		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
 		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
 		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
+		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, echo: true},
 		{name: "not rendered", params: forward, path: reqcommon.PathChatCompletions},
 		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
 		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
@@ -580,6 +582,9 @@ func TestDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
 				MultimodalEntries: tc.entries,
 				KVTransferParams:  map[string]any{"block_id": "xyz"},
 				Body:              map[string]any{"model": "m"},
+			}
+			if tc.echo {
+				reqCtx.Body[reqcommon.FieldEcho] = true
 			}
 			if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err != nil {
 				t.Fatal(err)
