@@ -149,10 +149,8 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, d
 				start := time.Now()
 				err := disp.Dispatch(dispCtx, ep)
 				end := time.Now()
-				// Observed right after Dispatch returns. cancel() leaves an
-				// expired context at DeadlineExceeded, so the order with
-				// cancel() is not what matters; reading early keeps the
-				// window for a later expiry to be charged to this poll small.
+				// Read before any further work so a deadline that expires after
+				// Dispatch returned is not charged to this poll.
 				timedOut := errors.Is(dispCtx.Err(), context.DeadlineExceeded)
 				cancel()
 				// A poll cut short by Stop says nothing about the endpoint.

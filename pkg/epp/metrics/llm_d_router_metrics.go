@@ -609,12 +609,14 @@ var (
 	)
 
 	// LlmdDataLayerPollDuration records data-source poll duration per source type.
+	// The ladder resolves sub-millisecond polls and ends past the 1s per-poll
+	// deadline, so a timed-out poll lands in the last finite bucket.
 	LlmdDataLayerPollDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "datalayer_poll_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Data-source poll duration per source type.", compbasemetrics.ALPHA),
-			Buckets:   prometheus.DefBuckets,
+			Buckets:   []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
 		},
 		[]string{"source_type"},
 	)

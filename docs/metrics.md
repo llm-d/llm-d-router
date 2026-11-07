@@ -443,7 +443,7 @@ type; no endpoint, pod or plugin-instance labels are emitted.
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_datalayer_polls_total` | Counter | `source_type`, `outcome` | Polls the collector ran, by outcome. `outcome` is `success`, `error` or `timeout`. |
-| `llm_d_epp_datalayer_poll_duration_seconds` | Histogram | `source_type` | Wall-clock time of each `Dispatch` call, from the call to its return. Buckets are `prometheus.DefBuckets` (5ms to 10s); polls faster than 5ms all land in the first bucket. |
+| `llm_d_epp_datalayer_poll_duration_seconds` | Histogram | `source_type` | Wall-clock time of each `Dispatch` call, from the call to its return. Buckets run from 0.5ms to 2.5s (0.5ms, 1ms, 2.5ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s); a poll that hits the 1s deadline lands in the 2.5s bucket. |
 | `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Polls whose `Dispatch` returned an error. |
 | `llm_d_epp_datalayer_extract_errors_total` | Counter | `source_type`, `extractor_type` | Extractor failures. |
 
@@ -464,6 +464,8 @@ shutdown (the parent context is cancelled) is dropped from `polls_total` and
 
 `poll_errors_total` and `PollStatus` follow the returned error alone: a `timeout` with a nil
 return increments `polls_total` but not `poll_errors_total`, and does not start a failure run.
+`poll_errors_total` is therefore not `error` plus `timeout` in general. Alert on
+`polls_total{outcome!="success"}`; it covers every poll that did not refresh the endpoint.
 
 ### Endpoint health
 

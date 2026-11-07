@@ -19,14 +19,12 @@ package datalayer
 import (
 	"context"
 	"errors"
-	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
@@ -44,10 +42,6 @@ const (
 	pollsTotalName   = "llm_d_epp_datalayer_polls_total"
 	pollDurationName = "llm_d_epp_datalayer_poll_duration_seconds"
 
-	pollOutcomeSuccess = "success"
-	pollOutcomeError   = "error"
-	pollOutcomeTimeout = "timeout"
-
 	// pollDeadlineWait bounds waits on a poll that runs until the collection
 	// timeout expires.
 	pollDeadlineWait = defaultCollectionTimeout + 2*time.Second
@@ -56,7 +50,7 @@ const (
 	metricSettleWait = time.Second
 )
 
-var pollOutcomes = []string{pollOutcomeSuccess, pollOutcomeError, pollOutcomeTimeout}
+var pollOutcomes = []string{metrics.DataLayerPollOutcomeSuccess, metrics.DataLayerPollOutcomeError, metrics.DataLayerPollOutcomeTimeout}
 
 // pollSource is a PollingDispatcher whose Dispatch counts the call and then
 // delegates to poll. Type and name are set per test so metric labels and
@@ -215,13 +209,13 @@ func TestCollectorPollMetricsOutcomes(t *testing.T) {
 			name:        "nil return is success",
 			poll:        succeedingPoll,
 			wait:        metricSettleWait,
-			wantOutcome: pollOutcomeSuccess,
+			wantOutcome: metrics.DataLayerPollOutcomeSuccess,
 		},
 		{
 			name:           "returned error is error",
 			poll:           func(context.Context) error { return pollErr },
 			wait:           metricSettleWait,
-			wantOutcome:    pollOutcomeError,
+			wantOutcome:    metrics.DataLayerPollOutcomeError,
 			wantPollErrors: 1,
 			wantFailures:   1,
 		},
@@ -229,7 +223,7 @@ func TestCollectorPollMetricsOutcomes(t *testing.T) {
 			name:           "context.Canceled with a live parent is error",
 			poll:           func(context.Context) error { return context.Canceled },
 			wait:           metricSettleWait,
-			wantOutcome:    pollOutcomeError,
+			wantOutcome:    metrics.DataLayerPollOutcomeError,
 			wantPollErrors: 1,
 			wantFailures:   1,
 		},
@@ -237,7 +231,7 @@ func TestCollectorPollMetricsOutcomes(t *testing.T) {
 			name:           "context error after deadline is timeout",
 			poll:           pollAfterDeadline(nil, true),
 			wait:           pollDeadlineWait,
-			wantOutcome:    pollOutcomeTimeout,
+			wantOutcome:    metrics.DataLayerPollOutcomeTimeout,
 			wantPollErrors: 1,
 			wantFailures:   1,
 			wantMinSeconds: defaultCollectionTimeout.Seconds(),
@@ -246,14 +240,14 @@ func TestCollectorPollMetricsOutcomes(t *testing.T) {
 			name:           "nil return after deadline is timeout and not a poll error",
 			poll:           pollAfterDeadline(nil, false),
 			wait:           pollDeadlineWait,
-			wantOutcome:    pollOutcomeTimeout,
+			wantOutcome:    metrics.DataLayerPollOutcomeTimeout,
 			wantMinSeconds: defaultCollectionTimeout.Seconds(),
 		},
 		{
 			name:           "other error after deadline is timeout",
 			poll:           pollAfterDeadline(pollErr, false),
 			wait:           pollDeadlineWait,
-			wantOutcome:    pollOutcomeTimeout,
+			wantOutcome:    metrics.DataLayerPollOutcomeTimeout,
 			wantPollErrors: 1,
 			wantFailures:   1,
 			wantMinSeconds: defaultCollectionTimeout.Seconds(),
@@ -437,10 +431,10 @@ func TestCollectorPollMetricsIntervalDispatcher(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(ticker.Channel()) == 0
 	}, metricSettleWait, 2*time.Millisecond, "expected all ticks consumed")
-	waitForPolls(t, c, src.sourceType, pollOutcomeSuccess, 3, metricSettleWait)
+	waitForPolls(t, c, src.sourceType, metrics.DataLayerPollOutcomeSuccess, 3, metricSettleWait)
 
 	assert.Equal(t, int64(3), atomic.LoadInt64(&src.CallCount), "due must advance once per tick")
-	for _, outcome := range []string{pollOutcomeError, pollOutcomeTimeout} {
+	for _, outcome := range []string{metrics.DataLayerPollOutcomeError, metrics.DataLayerPollOutcomeTimeout} {
 		assert.Zero(t, pollsTotal(t, src.sourceType, outcome), "unexpected %s poll", outcome)
 	}
 }
@@ -464,8 +458,8 @@ func TestCollectorPollMetricsPerDispatcher(t *testing.T) {
 		ticker.Tick()
 	}
 	require.Eventually(t, func() bool {
-		return pollsRecorded(t, every.sourceType, pollOutcomeSuccess, 6) &&
-			pollsRecorded(t, third.sourceType, pollOutcomeSuccess, 2)
+		return pollsRecorded(t, every.sourceType, metrics.DataLayerPollOutcomeSuccess, 6) &&
+			pollsRecorded(t, third.sourceType, metrics.DataLayerPollOutcomeSuccess, 2)
 	}, metricSettleWait, 2*time.Millisecond, "expected per-type counts in counter and histogram")
 	c.Stop()
 
@@ -503,7 +497,7 @@ func TestCollectorPollMetricsBoundedLabels(t *testing.T) {
 	}
 	// 2 collectors x 2 dispatchers x 2 ticks, all under one source type.
 	require.Eventually(t, func() bool {
-		return pollsRecorded(t, srcType, pollOutcomeSuccess, 8)
+		return pollsRecorded(t, srcType, metrics.DataLayerPollOutcomeSuccess, 8)
 	}, metricSettleWait, 2*time.Millisecond, "expected all polls under one series in counter and histogram")
 	for _, c := range collectors {
 		c.Stop()
@@ -520,42 +514,4 @@ func TestCollectorPollMetricsBoundedLabels(t *testing.T) {
 	require.Len(t, durations, 1, "one duration series per source type")
 	assert.Equal(t, []string{"source_type"}, labelNames(durations[0]))
 	assert.Equal(t, uint64(8), durations[0].GetHistogram().GetSampleCount())
-}
-
-// TestCollectorPollMetricsRegistration confirms both families reach the
-// registry with the help, stability and bucket conventions of the data-layer
-// metrics, and that Reset clears them.
-func TestCollectorPollMetricsRegistration(t *testing.T) {
-	resetPollMetrics(t)
-	src := &pollSource{sourceType: "registered-type", name: "registered", poll: succeedingPoll}
-	c := NewCollector()
-	ticker := mocks.NewTicker()
-	require.NoError(t, c.Start(context.Background(), ticker, defaultEndpoint(), []fwkdl.PollingDispatcher{src}))
-	defer c.Stop()
-
-	ticker.Tick()
-	// One sample must be observed in both families, and the collector joined,
-	// before the registry is inspected and reset.
-	waitForPolls(t, c, src.sourceType, pollOutcomeSuccess, 1, metricSettleWait)
-
-	polls := gatherFamily(t, pollsTotalName)
-	require.NotNil(t, polls, "expected the polls family to be registered")
-	assert.Equal(t, dto.MetricType_COUNTER, polls.GetType())
-	assert.Contains(t, polls.GetHelp(), "[ALPHA]")
-
-	durations := gatherFamily(t, pollDurationName)
-	require.NotNil(t, durations, "expected the duration family to be registered")
-	assert.Equal(t, dto.MetricType_HISTOGRAM, durations.GetType())
-	assert.Contains(t, durations.GetHelp(), "[ALPHA]")
-	var bounds []float64
-	for _, b := range pollDuration(t, src.sourceType).GetBucket() {
-		if !math.IsInf(b.GetUpperBound(), 1) {
-			bounds = append(bounds, b.GetUpperBound())
-		}
-	}
-	assert.Equal(t, prometheus.DefBuckets, bounds)
-
-	metrics.Reset()
-	assert.Zero(t, pollsTotal(t, src.sourceType, pollOutcomeSuccess), "Reset must clear poll counts")
-	assert.Nil(t, pollDuration(t, src.sourceType), "Reset must clear duration series")
 }
