@@ -193,7 +193,7 @@ func (c *Client) StreamGRPC(ctx context.Context, path string, headers map[string
 	if err != nil {
 		return nil, fmt.Errorf("creating gRPC request: %w", err)
 	}
-	bodyLen := setSegmentedBody(req, segments)
+	bodyLen := grpcframe.SetSegmentedBody(req, segments)
 	req.Header.Set(ContentTypeHeader, grpcframe.MediaType)
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -209,40 +209,6 @@ func (c *Client) StreamGRPC(ctx context.Context, path string, headers map[string
 		return nil, fmt.Errorf("sending gRPC request to gateway: %w", err)
 	}
 	return resp, nil
-}
-
-// setSegmentedBody installs segments as the request body and returns the
-// total length. It sets ContentLength, and GetBody so the HTTP/2 transport
-// can replay the body after a GOAWAY, which http.NewRequest does only for a
-// bytes.Reader body. Empty segments are skipped.
-func setSegmentedBody(req *http.Request, segments [][]byte) int64 {
-	var total int64
-	parts := make([][]byte, 0, len(segments))
-	for _, seg := range segments {
-		if len(seg) > 0 {
-			total += int64(len(seg))
-			parts = append(parts, seg)
-		}
-	}
-	if total == 0 {
-		req.Body = http.NoBody
-		req.ContentLength = 0
-		return 0
-	}
-	open := func() io.ReadCloser {
-		if len(parts) == 1 {
-			return io.NopCloser(bytes.NewReader(parts[0]))
-		}
-		readers := make([]io.Reader, len(parts))
-		for i, part := range parts {
-			readers[i] = bytes.NewReader(part)
-		}
-		return io.NopCloser(io.MultiReader(readers...))
-	}
-	req.Body = open()
-	req.GetBody = func() (io.ReadCloser, error) { return open(), nil }
-	req.ContentLength = total
-	return total
 }
 
 // BaseURL returns the gateway base URL (e.g. "http://inference-gateway:80").

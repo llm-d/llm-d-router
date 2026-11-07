@@ -1,5 +1,10 @@
 # Update Log
 
+## 2026-11-05
+
+* **Update**: Mined maintainer review threads and issues for pull requests `#3512` to `#3744` with comments through `2026-10-30T14:00:00Z` (59 pull requests, 85 review threads, 35 issues). Added 3 Stage-1 rules (router-built P/D `kv_transfer_params`, bounded metric labels and series cleanup, no locks held across network calls), refined the SSE chunk-boundary usage rule, the client header passthrough rule (`Accept-Encoding`), and the ingress stripping rule (every client entry point), dropped the constant-location sentence already covered by [AGENTS.md](../../AGENTS.md), routed `pkg/*/metrics/**` and observability packages to [unencoded_runtime_hazards.md](rules/unencoded_runtime_hazards.md), and recorded `corpus.mined_through_pr` `3534` (below the lowest pull request still open on `2026-10-30`, `#3535`) in [`provenance.json`](provenance.json).
+* **Update**: Matched routing globs and rule paths to the current tree: `pkg/epp/framework/plugins/requesthandling/**` replaces the merged `requestcontrol` plugin and interface packages (`#3830`), `pkg/common/grpc/**` routes with the engine wire contracts, and `test/e2e/artifacts/` replaces the removed `deploy/` Kustomize tree (`#3034`). Raised the documented Stage-1 budget in [maintain_review_bundle.md](playbooks/maintain_review_bundle.md) to `9,500` bytes and linked the `refresh-review-playbook` skill under `.agents/skills/`.
+
 ## 2026-11-03
 
 * **Update**: Pruned Stage-1 `rules/*.md` from 12 files (53 rules) to 4 files (17 `When:`-triggered non-code rules) by removing contracts inferable from repository code search and `AGENTS.md`, removed broad `- Accept:` nit-suppression waivers, updated `AGENTS.md` and [review_a_pull_request.md](playbooks/review_a_pull_request.md) to the two-pass additive review protocol (`0` to `2` rule files per diff with explicit `None (AGENTS.md and repo search only)` routing rows), updated `hack/render_playbook.py` and [`provenance.json`](provenance.json), and regenerated [`docs/review_playbook.md`](../review_playbook.md).

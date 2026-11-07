@@ -25,111 +25,82 @@ limitations under the License.
 // versus zero allocations in ScanStreamItem.
 //
 // Field numbers come from the generated protobuf descriptors at init, so a
-// renumbered field fails tests instead of reading the wrong field. The vllmgrpc
-// parser counterpart is tracked in llm-d/llm-d-router#3961.
+// renumbered field fails tests instead of reading the wrong field.
 package sglangwire
 
 import (
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 
 	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/protoscan"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 )
 
 // ErrMalformed reports bytes that are not valid protobuf wire data.
-var ErrMalformed = errors.New("malformed protobuf wire data")
+var ErrMalformed = protoscan.ErrMalformed
 
 // Field numbers come from the generated descriptors, so a renumbered field
 // fails the tests instead of silently corrupting messages.
 var (
-	reqRid            = fieldNum(&sglangapiv1.GenerateRequest{}, "rid")
-	reqText           = fieldNum(&sglangapiv1.GenerateRequest{}, "text")
-	reqInputIDs       = fieldNum(&sglangapiv1.GenerateRequest{}, "input_ids")
-	reqStream         = fieldNum(&sglangapiv1.GenerateRequest{}, "stream")
-	reqSamplingParams = fieldNum(&sglangapiv1.GenerateRequest{}, "sampling_params")
-	reqImageData      = fieldNum(&sglangapiv1.GenerateRequest{}, "image_data")
-	reqMMHashes       = fieldNum(&sglangapiv1.GenerateRequest{}, "mm_hashes")
-	reqVideoData      = fieldNum(&sglangapiv1.GenerateRequest{}, "video_data")
-	reqAudioData      = fieldNum(&sglangapiv1.GenerateRequest{}, "audio_data")
-	reqExtraKey       = fieldNum(&sglangapiv1.GenerateRequest{}, "extra_key")
-	reqBootstrapHost  = fieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_host")
-	reqBootstrapPort  = fieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_port")
-	reqBootstrapRoom  = fieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_room")
-	reqPriority       = fieldNum(&sglangapiv1.GenerateRequest{}, "priority")
-	reqCacheSalt      = fieldNum(&sglangapiv1.GenerateRequest{}, "cache_salt")
+	reqRid            = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "rid")
+	reqText           = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "text")
+	reqInputIDs       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "input_ids")
+	reqStream         = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "stream")
+	reqSamplingParams = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "sampling_params")
+	reqImageData      = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "image_data")
+	reqMMHashes       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "mm_hashes")
+	reqVideoData      = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "video_data")
+	reqAudioData      = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "audio_data")
+	reqExtraKey       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "extra_key")
+	reqBootstrapHost  = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_host")
+	reqBootstrapPort  = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_port")
+	reqBootstrapRoom  = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "bootstrap_room")
+	reqPriority       = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "priority")
+	reqCacheSalt      = protoscan.FieldNum(&sglangapiv1.GenerateRequest{}, "cache_salt")
 
-	optStringOrOne = fieldNum(&sglangapiv1.OptionalStringOrList{}, "one")
-	optStringValue = fieldNum(&sglangapiv1.OptionalString{}, "value")
-	optInt64OrOne  = fieldNum(&sglangapiv1.OptionalInt64OrList{}, "one")
-	optInt64Value  = fieldNum(&sglangapiv1.OptionalInt64{}, "value")
+	optStringOrOne = protoscan.FieldNum(&sglangapiv1.OptionalStringOrList{}, "one")
+	optStringValue = protoscan.FieldNum(&sglangapiv1.OptionalString{}, "value")
+	optInt64OrOne  = protoscan.FieldNum(&sglangapiv1.OptionalInt64OrList{}, "one")
+	optInt64Value  = protoscan.FieldNum(&sglangapiv1.OptionalInt64{}, "value")
 
 	// Every *OrList wrapper encodes its single value as field "one" and its
 	// batch as field "many".
-	orListOne  = fieldNum(&sglangapiv1.StringOrList{}, "one")
-	orListMany = fieldNum(&sglangapiv1.StringOrList{}, "many")
+	orListOne  = protoscan.FieldNum(&sglangapiv1.StringOrList{}, "one")
+	orListMany = protoscan.FieldNum(&sglangapiv1.StringOrList{}, "many")
 
-	mediaItem      = fieldNum(&sglangapiv1.MediaInput{}, "item")
-	mediaMany      = fieldNum(&sglangapiv1.MediaInput{}, "many")
-	mediaNested    = fieldNum(&sglangapiv1.MediaInput{}, "nested")
-	mediaItemsItem = fieldNum(&sglangapiv1.MediaItems{}, "items")
+	mediaItem      = protoscan.FieldNum(&sglangapiv1.MediaInput{}, "item")
+	mediaMany      = protoscan.FieldNum(&sglangapiv1.MediaInput{}, "many")
+	mediaNested    = protoscan.FieldNum(&sglangapiv1.MediaInput{}, "nested")
+	mediaItemsItem = protoscan.FieldNum(&sglangapiv1.MediaItems{}, "items")
 
-	tokenIDsIDs         = fieldNum(&sglangapiv1.TokenIds{}, "ids")
-	stringListItems     = fieldNum(&sglangapiv1.StringList{}, "items")
-	samplingMaxNewToken = fieldNum(&sglangapiv1.SamplingParams{}, "max_new_tokens")
+	tokenIDsIDs         = protoscan.FieldNum(&sglangapiv1.TokenIds{}, "ids")
+	stringListItems     = protoscan.FieldNum(&sglangapiv1.StringList{}, "items")
+	samplingMaxNewToken = protoscan.FieldNum(&sglangapiv1.SamplingParams{}, "max_new_tokens")
 
-	itemFrame        = fieldNum(&sglangapiv1.GenerateStreamItem{}, "frame")
-	itemError        = fieldNum(&sglangapiv1.GenerateStreamItem{}, "error")
-	respMetaInfo     = fieldNum(&sglangapiv1.GenerateResponse{}, "meta_info")
-	respIndex        = fieldNum(&sglangapiv1.GenerateResponse{}, "index")
-	metaPromptTokens = fieldNum(&sglangapiv1.GenerateMetaInfo{}, "prompt_tokens")
-	metaComplTokens  = fieldNum(&sglangapiv1.GenerateMetaInfo{}, "completion_tokens")
-	metaFinishReason = fieldNum(&sglangapiv1.GenerateMetaInfo{}, "finish_reason")
-	metaCachedTokens = fieldNum(&sglangapiv1.GenerateMetaInfo{}, "cached_tokens")
+	itemFrame        = protoscan.FieldNum(&sglangapiv1.GenerateStreamItem{}, "frame")
+	itemError        = protoscan.FieldNum(&sglangapiv1.GenerateStreamItem{}, "error")
+	respMetaInfo     = protoscan.FieldNum(&sglangapiv1.GenerateResponse{}, "meta_info")
+	respIndex        = protoscan.FieldNum(&sglangapiv1.GenerateResponse{}, "index")
+	metaPromptTokens = protoscan.FieldNum(&sglangapiv1.GenerateMetaInfo{}, "prompt_tokens")
+	metaComplTokens  = protoscan.FieldNum(&sglangapiv1.GenerateMetaInfo{}, "completion_tokens")
+	metaFinishReason = protoscan.FieldNum(&sglangapiv1.GenerateMetaInfo{}, "finish_reason")
+	metaCachedTokens = protoscan.FieldNum(&sglangapiv1.GenerateMetaInfo{}, "cached_tokens")
 )
-
-func fieldNum(m interface {
-	ProtoReflect() protoreflect.Message
-}, name protoreflect.Name) protowire.Number {
-	fd := m.ProtoReflect().Descriptor().Fields().ByName(name)
-	if fd == nil {
-		panic("sglangwire: unknown field " + string(name))
-	}
-	return fd.Number()
-}
 
 func init() {
 	// The scan assumes every *OrList wrapper uses the same two field numbers.
-	for _, m := range []interface{ ProtoReflect() protoreflect.Message }{
+	for _, m := range []proto.Message{
 		&sglangapiv1.TokenIdsOrList{}, &sglangapiv1.StringListOrList{}, &sglangapiv1.SamplingParamsOrList{},
 	} {
-		if fieldNum(m, "one") != orListOne || fieldNum(m, "many") != orListMany {
+		if protoscan.FieldNum(m, "one") != orListOne || protoscan.FieldNum(m, "many") != orListMany {
 			panic("sglangwire: OrList wrappers disagree on field numbers")
 		}
 	}
-}
-
-// forEachField calls fn for every top-level field of b with the field's
-// number, wire type, value bytes, and full encoding (tag and value).
-func forEachField(b []byte, fn func(num protowire.Number, wireType protowire.Type, value, field []byte)) error {
-	for len(b) > 0 {
-		num, wireType, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			return ErrMalformed
-		}
-		m := protowire.ConsumeFieldValue(num, wireType, b[n:])
-		if m < 0 {
-			return ErrMalformed
-		}
-		fn(num, wireType, b[n:n+m], b[:n+m])
-		b = b[n+m:]
-	}
-	return nil
 }
 
 // Request holds what the coordinator reads from a GenerateRequest payload.
@@ -244,9 +215,9 @@ func appendBootstrap(out []byte, b *Bootstrap) []byte {
 	if b.Host != "" {
 		outer, inner := optionalStringSize(b.Host)
 		out = protowire.AppendTag(out, reqBootstrapHost, protowire.BytesType)
-		out = appendLen(out, outer)
+		out = protoscan.AppendLen(out, outer)
 		out = protowire.AppendTag(out, optStringOrOne, protowire.BytesType)
-		out = appendLen(out, inner)
+		out = protoscan.AppendLen(out, inner)
 		out = protowire.AppendTag(out, optStringValue, protowire.BytesType)
 		out = protowire.AppendString(out, b.Host)
 	}
@@ -257,16 +228,11 @@ func appendBootstrap(out []byte, b *Bootstrap) []byte {
 func appendOptionalInt64(out []byte, num protowire.Number, v int64) []byte {
 	outer, inner := optionalInt64Size(v)
 	out = protowire.AppendTag(out, num, protowire.BytesType)
-	out = appendLen(out, outer)
+	out = protoscan.AppendLen(out, outer)
 	out = protowire.AppendTag(out, optInt64OrOne, protowire.BytesType)
-	out = appendLen(out, inner)
+	out = protoscan.AppendLen(out, inner)
 	out = protowire.AppendTag(out, optInt64Value, protowire.VarintType)
 	return protowire.AppendVarint(out, int64Varint(v))
-}
-
-// appendLen appends a length prefix. n is a non-negative encoded size.
-func appendLen(out []byte, n int) []byte {
-	return protowire.AppendVarint(out, uint64(n)) //#nosec G115 -- n is a non-negative size
 }
 
 // int64Varint returns the varint value of a protobuf int64 field, which
@@ -308,96 +274,83 @@ type RequestFields struct {
 func ScanRequestFields(payload []byte) (RequestFields, error) {
 	var f RequestFields
 	var imageMany, videoMany, audioMany bool
-	var scanErr error
-	recordErr := func(err error) {
-		if err != nil && scanErr == nil {
-			scanErr = err
-		}
-	}
-	err := forEachField(payload, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
-		if scanErr != nil {
-			return
-		}
+	err := protoscan.ForEachField(payload, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		if wireType == protowire.VarintType {
 			if num == reqStream {
 				v, _ := protowire.ConsumeVarint(value)
 				f.Stream = v != 0
 			}
-			return
+			return nil
 		}
 		if wireType != protowire.BytesType {
-			return
+			return nil
 		}
-		body, _ := protowire.ConsumeBytes(value)
 		switch num {
 		case reqRid:
-			recordErr(mergeScalarOrList(&f.Rid, body))
+			return mergeScalarOrList(&f.Rid, value)
 		case reqText:
-			recordErr(mergeScalarOrList(&f.Text, body))
+			return mergeScalarOrList(&f.Text, value)
 		case reqExtraKey:
-			recordErr(mergeScalarOrList(&f.ExtraKey, body))
+			return mergeScalarOrList(&f.ExtraKey, value)
 		case reqCacheSalt:
-			recordErr(mergeScalarOrList(&f.CacheSalt, body))
+			return mergeScalarOrList(&f.CacheSalt, value)
 		case reqInputIDs:
-			recordErr(mergeMessageOrList(&f.InputIDs, body))
+			return mergeMessageOrList(&f.InputIDs, value)
 		case reqSamplingParams:
-			recordErr(mergeMessageOrList(&f.SamplingParams, body))
+			return mergeMessageOrList(&f.SamplingParams, value)
 		case reqMMHashes:
-			recordErr(mergeMessageOrList(&f.MMHashes, body))
+			return mergeMessageOrList(&f.MMHashes, value)
 		case reqImageData:
-			recordErr(mergeMedia(&f.ImageData, &imageMany, body))
+			return mergeMedia(&f.ImageData, &imageMany, value)
 		case reqVideoData:
-			recordErr(mergeMedia(&f.VideoData, &videoMany, body))
+			return mergeMedia(&f.VideoData, &videoMany, value)
 		case reqAudioData:
-			recordErr(mergeMedia(&f.AudioData, &audioMany, body))
+			return mergeMedia(&f.AudioData, &audioMany, value)
 		}
+		return nil
 	})
-	if err == nil {
-		err = scanErr
-	}
 	return f, err
 }
 
 func mergeScalarOrList(dst *OrList, b []byte) error {
-	return forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+	return protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		if wireType != protowire.BytesType {
-			return
+			return nil
 		}
 		switch num {
 		case orListOne:
-			v, _ := protowire.ConsumeBytes(value)
-			*dst = OrList{Present: true, One: v}
+			*dst = OrList{Present: true, One: value}
 		case orListMany:
 			*dst = OrList{Present: true, Many: true}
 		}
+		return nil
 	})
 }
 
 func mergeMessageOrList(dst *OrList, b []byte) error {
-	return forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+	return protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		if wireType != protowire.BytesType {
-			return
+			return nil
 		}
 		switch num {
 		case orListOne:
-			v, _ := protowire.ConsumeBytes(value)
 			switch {
 			case !dst.Present || dst.Many || len(dst.One) == 0:
-				*dst = OrList{Present: true, One: v}
-			case len(v) > 0:
-				dst.One = slices.Concat(dst.One, v)
+				*dst = OrList{Present: true, One: value}
+			case len(value) > 0:
+				dst.One = slices.Concat(dst.One, value)
 			}
 		case orListMany:
 			*dst = OrList{Present: true, Many: true}
 		}
+		return nil
 	})
 }
 
 func mergeMedia(dst *MediaScan, inMany *bool, b []byte) error {
-	var scanErr error
-	err := forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
-		if scanErr != nil || wireType != protowire.BytesType {
-			return
+	return protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
+		if wireType != protowire.BytesType {
+			return nil
 		}
 		switch num {
 		case mediaItem:
@@ -411,29 +364,25 @@ func mergeMedia(dst *MediaScan, inMany *bool, b []byte) error {
 				*dst = MediaScan{}
 				*inMany = true
 			}
-			body, _ := protowire.ConsumeBytes(value)
-			hasItems, err := scanMediaItems(body)
+			hasItems, err := scanMediaItems(value)
 			if err != nil {
-				scanErr = err
-				return
+				return err
 			}
 			if hasItems {
 				dst.Present = true
 			}
 		}
+		return nil
 	})
-	if err == nil {
-		err = scanErr
-	}
-	return err
 }
 
 func scanMediaItems(b []byte) (bool, error) {
 	var hasItems bool
-	err := forEachField(b, func(num protowire.Number, wireType protowire.Type, _, _ []byte) {
+	err := protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, _, _ []byte) error {
 		if num == mediaItemsItem && wireType == protowire.BytesType {
 			hasItems = true
 		}
+		return nil
 	})
 	return hasItems, err
 }
@@ -443,82 +392,43 @@ func scanMediaItems(b []byte) (bool, error) {
 // with its position.
 func ScanTokenIDs(b []byte) ([]uint32, error) {
 	count := 0
-	if err := forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+	if err := protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		if num != tokenIDsIDs {
-			return
+			return nil
 		}
 		switch wireType {
 		case protowire.BytesType:
-			packed, _ := protowire.ConsumeBytes(value)
-			count += countVarints(packed)
+			count += protoscan.CountVarints(value)
 		case protowire.VarintType:
 			count++
 		}
+		return nil
 	}); err != nil {
 		return nil, err
 	}
 	ids := make([]uint32, 0, count)
-	var rangeErr error
-	add := func(v uint64) {
-		if rangeErr != nil {
-			return
+	err := protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
+		if num != tokenIDsIDs || (wireType != protowire.BytesType && wireType != protowire.VarintType) {
+			return nil
 		}
-		if v > math.MaxUint32 {
-			rangeErr = fmt.Errorf("input_ids[%d] out of uint32 range: %d", len(ids), int64(v)) //#nosec G115 -- reports the int64 the client sent
-			return
+		var err error
+		ids, err = protoscan.AppendPackedUint32(ids, wireType, value)
+		if err != nil {
+			return fmt.Errorf("input_ids: %w", err)
 		}
-		ids = append(ids, uint32(v))
-	}
-	err := forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
-		if rangeErr != nil || num != tokenIDsIDs {
-			return
-		}
-		switch wireType {
-		case protowire.BytesType:
-			packed, _ := protowire.ConsumeBytes(value)
-			for len(packed) > 0 {
-				v, n := protowire.ConsumeVarint(packed)
-				if n < 0 {
-					rangeErr = ErrMalformed
-					return
-				}
-				add(v)
-				if rangeErr != nil {
-					return
-				}
-				packed = packed[n:]
-			}
-		case protowire.VarintType:
-			v, _ := protowire.ConsumeVarint(value)
-			add(v)
-		}
+		return nil
 	})
-	if err == nil {
-		err = rangeErr
-	}
 	return ids, err
-}
-
-// countVarints counts the varints in a packed field: one per byte with the
-// continuation bit clear.
-func countVarints(b []byte) int {
-	n := 0
-	for _, c := range b {
-		if c&0x80 == 0 {
-			n++
-		}
-	}
-	return n
 }
 
 // ScanStringList decodes the items of a StringList message.
 func ScanStringList(b []byte) ([]string, error) {
 	var items []string
-	err := forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+	err := protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		if num == stringListItems && wireType == protowire.BytesType {
-			s, _ := protowire.ConsumeBytes(value)
-			items = append(items, string(s))
+			items = append(items, string(value))
 		}
+		return nil
 	})
 	return items, err
 }
@@ -526,44 +436,22 @@ func ScanStringList(b []byte) ([]string, error) {
 // ScanMaxNewTokens reads SamplingParams.max_new_tokens. ok is false when the
 // field is absent.
 func ScanMaxNewTokens(b []byte) (v int64, ok bool, err error) {
-	err = forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+	err = protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		if num == samplingMaxNewToken && wireType == protowire.VarintType {
 			u, _ := protowire.ConsumeVarint(value)
 			v, ok = int64(u), true //#nosec G115 -- two's complement is the protobuf int64 encoding
 		}
+		return nil
 	})
 	return v, ok, err
 }
 
-// FramePriority returns an uncompressed gRPC frame of payload with every
-// client priority field removed and priority appended, in one allocation.
-func FramePriority(payload []byte, priority int64) ([]byte, error) {
-	value := int64Varint(priority)
-	suffixLen := protowire.SizeTag(reqPriority) + protowire.SizeVarint(value)
-	if len(payload) > grpcframe.MaxPayloadLen-suffixLen {
-		return nil, errors.New("sglangwire: GenerateRequest too large for a gRPC frame")
-	}
-	out := make([]byte, grpcframe.HeaderLen, grpcframe.HeaderLen+len(payload)+suffixLen)
-	for b := payload; len(b) > 0; {
-		num, wireType, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			return nil, ErrMalformed
-		}
-		m := protowire.ConsumeFieldValue(num, wireType, b[n:])
-		if m < 0 {
-			return nil, ErrMalformed
-		}
-		if num != reqPriority {
-			out = append(out, b[:n+m]...)
-		}
-		b = b[n+m:]
-	}
-	out = protowire.AppendTag(out, reqPriority, protowire.VarintType)
-	out = protowire.AppendVarint(out, value)
-	if err := grpcframe.PutHeader(out, len(out)-grpcframe.HeaderLen); err != nil {
-		return nil, err
-	}
-	return out, nil
+// RewritePriority returns frame with every client priority field removed
+// and priority set, in one allocation. frame is a full gRPC frame, as is the
+// result. GenerateRequest.priority is an optional field, so a zero priority
+// is still written.
+func RewritePriority(frame []byte, priority int64) ([]byte, error) {
+	return protoscan.ReplaceVarintField(frame, reqPriority, int64Varint(priority), false)
 }
 
 // StreamItem holds the GenerateStreamItem fields that the coordinator and EPP read.
@@ -593,10 +481,9 @@ type StreamItem struct {
 // between frame and error.
 func ScanStreamItem(payload []byte) (StreamItem, error) {
 	var item StreamItem
-	var scanErr error
-	err := forEachField(payload, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+	err := protoscan.ForEachField(payload, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		if wireType != protowire.BytesType {
-			return
+			return nil
 		}
 		// frame and error share the item oneof. Like proto.Unmarshal, a
 		// switch to the other member discards the fields read so far.
@@ -608,41 +495,29 @@ func ScanStreamItem(payload []byte) (StreamItem, error) {
 				item = StreamItem{}
 			}
 			item.HasFrame = true
-			body, _ := protowire.ConsumeBytes(value)
-			if err := scanResponse(body, &item); err != nil {
-				scanErr = err
-			}
+			return scanResponse(value, &item)
 		}
+		return nil
 	})
-	if err == nil {
-		err = scanErr
-	}
 	return item, err
 }
 
 func scanResponse(b []byte, item *StreamItem) error {
-	var scanErr error
-	err := forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+	return protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		switch {
 		case num == respIndex && wireType == protowire.VarintType:
 			v, _ := protowire.ConsumeVarint(value)
 			item.Index = uint32(v) //#nosec G115 -- uint32 field, protobuf truncates the same way
 		case num == respMetaInfo && wireType == protowire.BytesType:
 			item.HasMetaInfo = true
-			body, _ := protowire.ConsumeBytes(value)
-			if err := scanMetaInfo(body, item); err != nil {
-				scanErr = err
-			}
+			return scanMetaInfo(value, item)
 		}
+		return nil
 	})
-	if err == nil {
-		err = scanErr
-	}
-	return err
 }
 
 func scanMetaInfo(b []byte, item *StreamItem) error {
-	return forEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) {
+	return protoscan.ForEachField(b, func(num protowire.Number, wireType protowire.Type, value, _ []byte) error {
 		switch {
 		case num == metaFinishReason && wireType == protowire.BytesType:
 			item.Finished = true
@@ -655,5 +530,6 @@ func scanMetaInfo(b []byte, item *StreamItem) error {
 			v, _ := protowire.ConsumeVarint(value)
 			item.CachedTokens = uint32(v) //#nosec G115 -- uint32 field, protobuf truncates the same way
 		}
+		return nil
 	})
 }

@@ -18,10 +18,14 @@ package preciseprefixcache
 
 import (
 	"context"
+	"fmt"
+	"maps"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -68,6 +72,7 @@ func newNamedProducerForPreRequest(ctx context.Context, name string, speculative
 		kvCacheIndexer:     &fakeKVCacheIndexer{index: idx},
 		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
 		speculativeCache:   cache,
+		speculativeLeases:  newSpeculativeLeases(idx, logr.Discard()),
 		speculativeTTL:     time.Minute,
 		speculativeEnabled: speculativeEnabled,
 		pluginState:        plugin.NewPluginState(ctx),
@@ -81,6 +86,79 @@ func primaryOnly(name string, endpoint scheduling.Endpoint) *scheduling.Scheduli
 			name: {TargetEndpoints: []scheduling.Endpoint{endpoint}},
 		},
 	}
+}
+
+// newSpeculativeTTLProducer returns a Producer that seeds speculative entries
+// into idx, with the TTL cache and its eviction callback built as in New.
+func newSpeculativeTTLProducer(ctx context.Context, t *testing.T, ttl string, idx kvblock.Index) *Producer {
+	t.Helper()
+	cache, leases, parsed, err := buildSpeculativeCache(ctx, PluginConfig{
+		SpeculativeIndexing: true,
+		SpeculativeTTL:      ttl,
+	}, idx)
+	require.NoError(t, err)
+	return &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: "speculative-ttl"},
+		kvCacheIndexer:     &fakeKVCacheIndexer{index: idx},
+		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("speculative-ttl"),
+		speculativeCache:   cache,
+		speculativeLeases:  leases,
+		speculativeTTL:     parsed,
+		speculativeEnabled: true,
+		pluginState:        plugin.NewPluginState(ctx),
+	}
+}
+
+// seedSpeculative runs PreRequest for request id with keys routed to endpoint.
+// It reports failures with assert, so it is safe to call from any goroutine.
+func seedSpeculative(ctx context.Context, t *testing.T, p *Producer, id string,
+	keys []kvblock.BlockHash, endpoint scheduling.Endpoint,
+) {
+	t.Helper()
+	p.pluginState.Write(id, blockKeysStateKey, &blockKeysState{perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{
+		{BlockSize: testBlockSize}: {keys},
+	}})
+	assert.NoError(t, p.PreRequest(ctx, &scheduling.InferenceRequest{RequestID: id},
+		primaryOnly("default", endpoint)))
+}
+
+// speculativeChainLen waits for the synctest bubble to settle, then returns how
+// many of keys the index holds for endpoint.
+func speculativeChainLen(ctx context.Context, t *testing.T, idx kvblock.Index,
+	keys []kvblock.BlockHash, endpoint scheduling.Endpoint,
+) int {
+	t.Helper()
+	synctest.Wait()
+	got, err := idx.Lookup(ctx, keys, sets.New(endpointPodID(endpoint)))
+	require.NoError(t, err)
+	return len(got)
+}
+
+// leaseCounts returns a copy of the lease counts, read under the lease lock.
+func leaseCounts(p *Producer) map[speculativeRow]int {
+	p.speculativeLeases.mu.Lock()
+	defer p.speculativeLeases.mu.Unlock()
+	return maps.Clone(p.speculativeLeases.counts)
+}
+
+// endpointPodID returns the speculative pod identifier PreRequest uses for endpoint.
+func endpointPodID(endpoint scheduling.Endpoint) string {
+	md := endpoint.GetMetadata()
+	return md.Address + ":" + md.Port
+}
+
+// slowEvictIndex delays every Evict, so requests that seed while an expiry's
+// Evict is in flight land in the window between its release and its Evict.
+type slowEvictIndex struct {
+	kvblock.Index
+	delay time.Duration
+}
+
+func (s *slowEvictIndex) Evict(ctx context.Context, keyType kvblock.KeyType, keys []kvblock.BlockHash,
+	entries []kvblock.PodEntry,
+) error {
+	time.Sleep(s.delay)
+	return s.Index.Evict(ctx, keyType, keys, entries)
 }
 
 // speculativeEnabled=true with populated block keys: index.Add called once
@@ -1020,7 +1098,7 @@ func TestSpeculativeTTLExpiry_EvictsAllPromptKeys(t *testing.T) {
 		},
 	}
 
-	cache, ttl, err := buildSpeculativeCache(ctx, PluginConfig{
+	cache, _, ttl, err := buildSpeculativeCache(ctx, PluginConfig{
 		SpeculativeIndexing: true,
 		SpeculativeTTL:      "20ms",
 	}, idx)
@@ -1070,4 +1148,136 @@ func TestBlockKeysStateClone(t *testing.T) {
 	delete(state.perFormatKeys, bigram)
 	require.Equal(t, [][]kvblock.BlockHash{{1, 2}}, cloned.perFormatKeys[plain])
 	require.Equal(t, [][]kvblock.BlockHash{{3}}, cloned.perFormatKeys[bigram])
+}
+
+// Requests that route the same prefix to the same pod share one speculative
+// index entry. An older request's TTL expiry must not remove that entry while
+// a newer request that seeded it is still live.
+func TestSpeculativeTTLExpiry_KeepsEntryOfLiveRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+		defer func() {
+			cancel()
+			synctest.Wait()
+		}()
+
+		idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+		require.NoError(t, err)
+		p := newSpeculativeTTLProducer(ctx, t, "200ms", idx)
+
+		keys := []kvblock.BlockHash{0x1, 0x2, 0x3, 0x4}
+		pod := testEndpoints[0]
+
+		seedSpeculative(ctx, t, p, "A", keys, pod) // expires at 200ms
+		time.Sleep(120 * time.Millisecond)
+		seedSpeculative(ctx, t, p, "B", keys, pod) // expires at 320ms
+		time.Sleep(90 * time.Millisecond)
+		assert.Equal(t, len(keys), speculativeChainLen(ctx, t, idx, keys, pod), "A expired while B is live")
+
+		seedSpeculative(ctx, t, p, "C", keys, pod) // expires at 410ms
+		time.Sleep(120 * time.Millisecond)
+		require.True(t, p.speculativeCache.Has("C"))
+		assert.Equal(t, len(keys), speculativeChainLen(ctx, t, idx, keys, pod), "B expired while C is live")
+
+		time.Sleep(100 * time.Millisecond)
+		require.False(t, p.speculativeCache.Has("C"))
+		assert.Zero(t, speculativeChainLen(ctx, t, idx, keys, pod), "the last live request expired")
+	})
+}
+
+// Leases are kept per (block, pod): the same blocks routed to two pods must
+// leave each pod's rows until that pod's own last request expires.
+func TestSpeculativeTTLExpiry_SameBlocksOnTwoPods(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+		defer func() {
+			cancel()
+			synctest.Wait()
+		}()
+
+		idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+		require.NoError(t, err)
+		p := newSpeculativeTTLProducer(ctx, t, "200ms", idx)
+
+		keys := []kvblock.BlockHash{0x1, 0x2, 0x3, 0x4}
+		podA, podB := testEndpoints[0], testEndpoints[1]
+		chain := func(pod scheduling.Endpoint) int { return speculativeChainLen(ctx, t, idx, keys, pod) }
+
+		seedSpeculative(ctx, t, p, "A1", keys, podA) // expires at 200ms
+		time.Sleep(120 * time.Millisecond)
+		seedSpeculative(ctx, t, p, "B", keys, podB) // expires at 320ms
+		time.Sleep(30 * time.Millisecond)
+		seedSpeculative(ctx, t, p, "A2", keys, podA) // expires at 350ms
+
+		time.Sleep(60 * time.Millisecond) // 210ms
+		assert.Equal(t, len(keys), chain(podA), "A1 expired while A2 is live")
+		assert.Equal(t, len(keys), chain(podB), "A1 expired, B is live")
+
+		time.Sleep(120 * time.Millisecond) // 330ms
+		assert.Equal(t, len(keys), chain(podA), "B expired while A2 is live")
+		assert.Zero(t, chain(podB), "B, the last request on pod B, expired")
+
+		time.Sleep(30 * time.Millisecond) // 360ms
+		assert.Zero(t, chain(podA), "A2, the last request on pod A, expired")
+		assert.Empty(t, leaseCounts(p))
+	})
+}
+
+// Each round, a batch of concurrent requests seeds the same rows on one pod
+// while the previous batch's expiry, having dropped the rows' last leases, is
+// still evicting them. The expiry runs concurrently with the batch's leasing
+// and Add, so it must add the rows back once its Evict returns. Once the
+// goroutines settle, the rows must be present with one lease per live request,
+// and gone once every request has expired. Run with -race.
+func TestSpeculativeTTLExpiry_ConcurrentSeedingAndExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+		defer func() {
+			cancel()
+			synctest.Wait()
+		}()
+
+		inMemory, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+		require.NoError(t, err)
+		idx := &slowEvictIndex{Index: inMemory, delay: 5 * time.Millisecond}
+		const ttl = 100 * time.Millisecond
+		p := newSpeculativeTTLProducer(ctx, t, ttl.String(), idx)
+
+		keys := []kvblock.BlockHash{0x1, 0x2, 0x3, 0x4}
+		pod := testEndpoints[0]
+		row := func(key kvblock.BlockHash) speculativeRow {
+			return speculativeRow{key: key, pod: endpointPodID(pod)}
+		}
+		seedBatch := func(round, size int) {
+			var wg sync.WaitGroup
+			for i := range size {
+				wg.Go(func() {
+					seedSpeculative(ctx, t, p, fmt.Sprintf("req-%d-%d", round, i), keys, pod)
+				})
+			}
+			wg.Wait()
+		}
+
+		const rounds, batch = 5, 8
+		seedBatch(0, batch)
+		seededAt := time.Now()
+		for round := 1; round < rounds; round++ {
+			// The previous batch expires ttl after it seeded, and its Evict
+			// returns 5ms later; this batch seeds in between.
+			time.Sleep(time.Until(seededAt.Add(ttl + 2*time.Millisecond)))
+			seedBatch(round, batch)
+			seededAt = time.Now()
+			time.Sleep(8 * time.Millisecond)
+			assert.Equal(t, len(keys), speculativeChainLen(ctx, t, idx, keys, pod),
+				"round %d: rows are leased by live requests", round)
+			counts := leaseCounts(p)
+			for _, key := range keys {
+				assert.Equal(t, batch, counts[row(key)], "round %d: one lease per live request", round)
+			}
+		}
+
+		time.Sleep(ttl + 10*time.Millisecond)
+		assert.Zero(t, speculativeChainLen(ctx, t, idx, keys, pod), "every request expired")
+		assert.Empty(t, leaseCounts(p))
+	})
 }

@@ -17,7 +17,7 @@ Whether session affinity should be carried by a standard `Set-Cookie` response[^
 
 Session-affinity plugins route multi-turn requests back to warm KV-cache pods, requiring a wire mechanism that works across SDK clients while letting stateless callers opt out. (Conflict audit ID: `UNR-01`.)
 
-Attached review rule: [Ingress-only header stripping and shared constant pointers](../rules/settled_architectural_boundaries.md#ingress-only-header-stripping-and-shared-constant-pointers).
+Attached review rule: [Ingress-only header stripping](../rules/settled_architectural_boundaries.md#ingress-only-header-stripping).
 
 # Positions
 

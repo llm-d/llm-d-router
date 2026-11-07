@@ -15,6 +15,6 @@ When adding multi-turn session handling or stateful routing plugins: never store
 When placing disaggregated multi-stage logic across `pkg/coordinator` and `pkg/sidecar`: keep cluster multi-stage orchestration in `pkg/coordinator` and keep `pkg/sidecar` scoped to the pod-local worker proxy.
 - Open: Whether decode-pod sidecars should watch `InferencePool` and `Pod` objects for SSRF allowlists or avoid workload-pod API watches.
 
-## Ingress-only header stripping and shared constant pointers
-When stripping headers, forwarding `kv_transfer_params`, or adding wire constants: strip spoofing headers and client `kv_transfer_params` at external client ingress while treating internal EPP, Coordinator, and Sidecar `kv_transfer_params` and routing metadata hops as trusted. Grep `pkg/epp/framework/plugins/scheduling/profilehandler/disagg`, `pkg/common/request`, and `pkg/common/routing` before declaring shared constants.
+## Ingress-only header stripping
+When stripping headers or forwarding `kv_transfer_params`: strip spoofing headers and client `kv_transfer_params` at every external client entry point, passthrough routes included, while treating internal EPP, Coordinator, and Sidecar `kv_transfer_params` and routing metadata hops as trusted.
 - Open: Whether session affinity uses standard HTTP `Set-Cookie` headers or an explicit header such as `x-session-token`.

@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -48,7 +49,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
@@ -60,6 +63,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanggrpc"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllminference"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -2049,4 +2053,67 @@ func TestHandleResponseBody_GRPCFrameCarryAndOversizedSkip(t *testing.T) {
 		assert.Equal(t, 6, reqCtx.Usage.CompletionTokens)
 		assert.Equal(t, 15, reqCtx.Usage.PromptTokens)
 	})
+}
+
+// The vllm.Inference stream splits usage across frames: prompt_info on the
+// start frame and finish_info on the final one. The handler keeps the start
+// frame's prompt count when later chunks report none, and leaves the cached
+// token details unset until finish_info arrives. The oversized-frame path is
+// engine-agnostic and TestHandleResponseBody_GRPCFrameCarryAndOversizedSkip
+// covers it.
+func TestHandleResponseBody_VllmInferenceSplitFrames(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	cached9 := uint32(9)
+	startFrame := grpctest.Frame(t, &vllmpb.GenerateResponse{
+		PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 15},
+	})
+	deltaFrame := grpctest.Frame(t, &vllmpb.GenerateResponse{
+		Outputs: &vllmpb.SequenceOutput{Text: "hey", NumTokens: 1},
+	})
+	endFrame := grpctest.Frame(t, &vllmpb.GenerateResponse{
+		Outputs: &vllmpb.SequenceOutput{
+			Text:      "lo",
+			NumTokens: 1,
+			FinishInfo: &vllmpb.FinishInfo{
+				NumOutputTokens: 6,
+				FinishReason:    vllmpb.FinishInfo_STOP,
+				NumCachedTokens: &cached9,
+			},
+		},
+	})
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{vllminference.NewVllmInferenceParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	combined := slices.Concat(startFrame, deltaFrame, endFrame)
+	reqCtx := &RequestContext{
+		Request:              &Request{Headers: map[string]string{":path": vllmpb.Inference_GenerateStream_FullMethodName}},
+		Response:             &Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}},
+		SchedulingRequest:    &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+		modelServerStreaming: true,
+	}
+
+	// Cut inside deltaFrame's header, then inside endFrame's header.
+	cut1 := len(startFrame) + 2
+	cut2 := len(startFrame) + len(deltaFrame) + 3
+	server.HandleResponseBody(ctx, reqCtx, combined[:cut1], false)
+	assert.Equal(t, 0, reqCtx.StreamedEvents)
+	assert.Equal(t, 15, reqCtx.Usage.PromptTokens)
+	assert.Nil(t, reqCtx.Usage.PromptTokenDetails)
+
+	server.HandleResponseBody(ctx, reqCtx, combined[cut1:cut2], false)
+	assert.Equal(t, 1, reqCtx.StreamedEvents)
+
+	server.HandleResponseBody(ctx, reqCtx, combined[cut2:], false)
+	server.HandleResponseBody(ctx, reqCtx, nil, true)
+	assert.Equal(t, 2, reqCtx.StreamedEvents)
+	assert.Equal(t, fwkrequest.Usage{
+		PromptTokens:     15,
+		CompletionTokens: 6,
+		TotalTokens:      21,
+		PromptTokenDetails: &fwkrequest.PromptTokenDetails{
+			CachedTokens: 9,
+		},
+	}, reqCtx.Usage)
 }

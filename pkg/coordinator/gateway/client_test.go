@@ -336,7 +336,7 @@ func TestClient_PlaintextGRPCUsesH2CAndJSONStaysHTTP1(t *testing.T) {
 }
 
 // StreamGRPC sends its segments in order as one body, with the total length,
-// and the body can be replayed through GetBody for an HTTP/2 retry.
+// as grpcframe.SetSegmentedBody installs it.
 func TestClient_StreamGRPCSegmentedBody(t *testing.T) {
 	type got struct {
 		body          []byte
@@ -369,24 +369,5 @@ func TestClient_StreamGRPCSegmentedBody(t *testing.T) {
 		t.Fatalf("Content-Length = %d, want %d", g.contentLength, len(head)+len(payload))
 	}
 
-	req, _ := http.NewRequest(http.MethodPost, "http://x/", nil)
-	if n := setSegmentedBody(req, [][]byte{head, payload}); n != int64(len(head)+len(payload)) {
-		t.Fatalf("setSegmentedBody = %d", n)
-	}
-	if req.GetBody == nil {
-		t.Fatal("GetBody not set: the HTTP/2 transport cannot replay the body")
-	}
-	for i := range 2 {
-		rc, err := req.GetBody()
-		if err != nil {
-			t.Fatalf("GetBody: %v", err)
-		}
-		replay, _ := io.ReadAll(rc)
-		if !bytes.Equal(replay, g.body) {
-			t.Fatalf("GetBody replay %d = %q, want %q", i, replay, g.body)
-		}
-	}
-	if n := setSegmentedBody(req, nil); n != 0 || req.Body != http.NoBody || req.ContentLength != 0 {
-		t.Fatalf("empty body: n=%d body=%v len=%d", n, req.Body, req.ContentLength)
-	}
+	// grpcframe.TestSetSegmentedBody covers GetBody replay and the empty body.
 }
