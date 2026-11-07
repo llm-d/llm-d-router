@@ -236,14 +236,14 @@ presubmit: LINT_NEW_ONLY=true
 presubmit: git-branch-check signed-commits-check go-mod-check format lint lint-security vulncheck check-latest-tags-strict verify-boilerplate verify-telemetry verify-review-playbook
 
 .PHONY: update-telemetry verify-telemetry test-telemetry
-update-telemetry: image-build-builder ## Generate trace attributes, span names, and the catalog.
+update-telemetry: image-build-builder ## Generate trace attributes, spans, scheduler metrics, and catalogs.
 	$(BUILDER_RUN) 'bash hack/telemetry.sh update'
 
 verify-telemetry: image-build-builder ## Check the telemetry registry and generated files.
 	$(BUILDER_RUN) 'bash hack/telemetry.sh verify'
 
 test-telemetry: image-build-builder ## Test telemetry generation and drift detection.
-	$(BUILDER_RUN) 'bash hack/test-telemetry.sh && go test ./pkg/common/observability/semconv ./pkg/epp/scheduling'
+	$(BUILDER_RUN) 'bash hack/test-telemetry.sh && go test ./pkg/common/observability/semconv ./pkg/epp/scheduling ./pkg/epp/metrics'
 
 .PHONY: git-branch-check
 git-branch-check:
