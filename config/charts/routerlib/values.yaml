@@ -287,6 +287,9 @@ modelServers:
   protocol: http # http, grpc
   targetPorts:
     - number: 8000
+  # Service name for GKE gRPC HealthCheckPolicy when type=vllm and protocol=grpc.
+  # Empty defaults to "vllm.Inference".
+  grpcServiceName: ""
   # matchLabels: # REQUIRED in parent charts if creating inference pool
   #   app: vllm-qwen3-32b
 

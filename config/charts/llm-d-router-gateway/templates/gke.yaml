@@ -33,7 +33,7 @@ spec:
       grpcHealthCheck:
         portSpecification: "USE_FIXED_PORT"
         port: {{ $port }}
-        grpcServiceName: "/vllm.grpc.engine.VllmEngine/HealthCheck"
+        grpcServiceName: {{ (.Values.router.modelServers.grpcServiceName | default "vllm.Inference") | quote }}
     {{- end }}
 {{- $eppHealthPort := int (.Values.router.epp.grpcHealthPort | default 9003) }}
 {{- /* The GKE gateway controller health-checks the EPP backend on gRPC port
