@@ -435,14 +435,43 @@ decisions.
 | `llm_d_epp_info` | Gauge | `commit`, `build_ref` | Build info. |
 | `llm_d_epp_model_rewrite_decisions_total` | Counter | `model_rewrite_name`, `model_name`, `target_model` | Model-rewrite decisions. |
 
-### Data layer errors
+### Data layer
 
-These metrics are owned by the EPP data-layer runtime.
+These metrics are owned by the EPP data-layer runtime. `source_type` is the data-source plugin
+type; no endpoint, pod or plugin-instance labels are emitted.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Data-source poll failures. |
+| `llm_d_epp_datalayer_polls_total` | Counter | `source_type`, `outcome` | Polls the collector ran, by outcome. `outcome` is `success`, `error` or `timeout`. |
+| `llm_d_epp_datalayer_poll_duration_seconds` | Histogram | `source_type` | Wall-clock time of each `Dispatch` call, from the call to its return. Buckets run from 0.5ms to 2.5s (0.5ms, 1ms, 2.5ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s); a poll that hits the 1s deadline lands in the 2.5s bucket. |
+| `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Polls whose `Dispatch` returned an error. |
 | `llm_d_epp_datalayer_extract_errors_total` | Counter | `source_type`, `extractor_type` | Extractor failures. |
+
+A poll is one `Dispatch` call on a polling source for one endpoint. Ticks a source skips because
+of its configured interval are not polls and are not counted. A poll interrupted by collector
+shutdown (the parent context is cancelled) is dropped from `polls_total` and
+`poll_duration_seconds` and leaves `poll_errors_total` and the endpoint's `PollStatus` untouched.
+
+`outcome` is decided after `Dispatch` returns:
+
+- `timeout`: the per-poll deadline expired, whatever `Dispatch` returned. A source that returns
+  nil after its context expired (for example, a source that stops running extractors once the
+  context is done) counts here.
+- `error`: the deadline did not expire and `Dispatch` returned a non-nil error, including a
+  `context.Canceled` the source produced itself.
+- `success`: the deadline did not expire and `Dispatch` returned nil. Extractors run inside
+  `Dispatch` may still have failed; those failures are in `extract_errors_total`.
+
+`poll_errors_total` and `PollStatus` follow the returned error alone: a `timeout` with a nil
+return increments `polls_total` but not `poll_errors_total`, and does not start a failure run.
+`poll_errors_total` is therefore not `error` plus `timeout` in general. For poll-level failures
+(the source could not produce data, or ran past its deadline) alert on
+`polls_total{outcome!="success"}`. A poll whose extractors failed still counts as `success`,
+because `Dispatch` returned nil; those refresh failures are visible only in `extract_errors_total`.
+
+All three `outcome` series and the duration histogram are created at zero when a collector
+starts for a source type, so a first `error` or `timeout` after a healthy run is a `0 → 1`
+increment that `rate()` and `increase()` can see, not a series that first appears at `1`.
 
 ### Endpoint health
 
