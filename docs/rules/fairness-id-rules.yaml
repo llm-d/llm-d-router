@@ -1,5 +1,6 @@
-# Recording rules that count distinct fairness IDs per inference pool from
-# llm_d_epp_fairness_id_resolved_total. See docs/metrics.md#fairness-id-resolution.
+# Recording rules for fairness IDs per inference pool: distinct IDs from
+# llm_d_epp_fairness_id_resolved_total and each ID's share of llm_d_epp_request_running.
+# See docs/metrics.md#fairness-id-resolution.
 # Test: promtool test rules hack/testdata/fairness-id-rules-test.yaml
 groups:
   - name: fairness-identities
@@ -31,4 +32,25 @@ groups:
                 (present_over_time(llm_d_epp_fairness_id_resolved_total{source=~"agent_identity|derived_root",fairness_id!="other"}[5m])
                   unless present_over_time(llm_d_epp_fairness_id_resolved_total[1h] offset 5m))
             )
+          )
+  - name: fairness-id-share
+    rules:
+      # Each fairness ID's share of in-flight requests per pool, summed across EPP replicas before
+      # dividing. Request metrics carry no pool label, so each scrape target takes inference_pool
+      # from overflow_total, which EPP pre-creates on startup. Zero series stay in as 0 while the
+      # pool is busy; an idle pool has no sample.
+      - record: llm_d:epp_request_running:ratio
+        expr: |
+          sum by (namespace, inference_pool, fairness_id) (
+            llm_d_epp_request_running
+            * on (namespace, instance) group_left (inference_pool)
+            group by (namespace, instance, inference_pool) (llm_d_epp_fairness_id_overflow_total)
+          )
+          / on (namespace, inference_pool) group_left ()
+          (
+            sum by (namespace, inference_pool) (
+              llm_d_epp_request_running
+              * on (namespace, instance) group_left (inference_pool)
+              group by (namespace, instance, inference_pool) (llm_d_epp_fairness_id_overflow_total)
+            ) > 0
           )
