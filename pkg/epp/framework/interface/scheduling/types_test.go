@@ -201,7 +201,7 @@ func TestEndpointScores(t *testing.T) {
 		{Endpoint: NewEndpoint(newTestMetadata("pod2"), newTestMetrics(), nil), Score: 0.5},
 	}
 
-	assert.Equal(t, map[string]float64{"ns/pod1": 2, "ns/pod2": 0.5}, EndpointScores(scored))
+	assert.Equal(t, map[string]float64{"ns/pod1": 2, "ns/pod2": 0.5}, EndpointScores(scored).MarshalLog())
 }
 
 func TestProfileRunResult_FirstEndpoint(t *testing.T) {

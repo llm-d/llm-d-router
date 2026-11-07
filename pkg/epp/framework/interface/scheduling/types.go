@@ -187,10 +187,14 @@ type ScoredEndpoint struct {
 	Score float64
 }
 
-// EndpointScores maps each endpoint's namespaced name to its score for logging.
-func EndpointScores(scoredEndpoints []*ScoredEndpoint) map[string]float64 {
-	scores := make(map[string]float64, len(scoredEndpoints))
-	for _, ep := range scoredEndpoints {
+// EndpointScores implements logr.Marshaler to render scored endpoints as a map
+// of namespaced name to score. The map is built only when the log line is
+// actually written.
+type EndpointScores []*ScoredEndpoint
+
+func (s EndpointScores) MarshalLog() interface{} {
+	scores := make(map[string]float64, len(s))
+	for _, ep := range s {
 		scores[ep.GetMetadata().GetNamespacedName().String()] = ep.Score
 	}
 	return scores

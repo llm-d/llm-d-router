@@ -1082,7 +1082,7 @@ func TestRunPickerPluginLogsCandidateNames(t *testing.T) {
 
 	NewSchedulerProfile().WithPicker(picker).runPickerPlugin(ctx, &fwksched.InferenceRequest{}, newWeightedScores("pod1", "pod2"))
 
-	for _, want := range []string{`"/pod1":0`, `"/pod2":1`} {
-		assert.Contains(t, buf.String(), want, "candidate log must name each endpoint with its weighted score")
-	}
+	// Map keys are rendered sorted, so the whole map is deterministic.
+	assert.Contains(t, buf.String(), `{"/pod1":0,"/pod2":1}`,
+		"candidate log must name each endpoint with its weighted score")
 }

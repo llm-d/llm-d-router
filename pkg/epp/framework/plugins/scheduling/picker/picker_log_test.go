@@ -57,10 +57,10 @@ func TestPickLogsScoredEndpointNames(t *testing.T) {
 
 			test.picker.Pick(ctx, scoredEndpoints)
 
-			for _, want := range []string{`"ns/pod1":2`, `"ns/pod2":0.5`} {
-				if !strings.Contains(buf.String(), want) {
-					t.Errorf("log output does not contain %s:\n%s", want, buf.String())
-				}
+			// Map keys are rendered sorted, so the whole map is deterministic.
+			want := `{"ns/pod1":2,"ns/pod2":0.5}`
+			if !strings.Contains(buf.String(), want) {
+				t.Errorf("log output does not contain %s:\n%s", want, buf.String())
 			}
 		})
 	}
