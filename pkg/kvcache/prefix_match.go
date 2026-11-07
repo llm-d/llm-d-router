@@ -63,7 +63,8 @@ type PodMatch struct {
 	// block to block. Speculative entries end the chain.
 	ConfirmedBlocks int
 	// BlocksByTier is the per-tier chain length: a tier counts a block only
-	// while the pod holds every previous block in that same tier.
+	// while the pod holds every previous block in that same tier, and only in
+	// complete engine-retrieval units (see PodEntry.RetrievalSpan).
 	// Speculative entries count under SpeculativeTier. Never nil.
 	BlocksByTier map[string]int
 }
@@ -186,13 +187,21 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 		j := 0
 		for ; j < len(entries) && j < len(refs); j++ {
 			e, r := &entries[j], &refs[j].PodEntry
-			if e.PodIdentifier != r.PodIdentifier || e.DeviceTier != r.DeviceTier || e.Speculative != r.Speculative {
+			if e.PodIdentifier != r.PodIdentifier || e.DeviceTier != r.DeviceTier || e.Speculative != r.Speculative || e.RetrievalSpan != r.RetrievalSpan {
 				same = false
 				break
 			}
 		}
-		if same {
+		// Identical span-1 keys can share one increment. A multi-span unit has
+		// to visit creditKey on every key, including repeats of the same entries.
+		if same && !acc.sawMulti && !podEntriesHaveMultiSpan(entries) {
 			acc.pendingRun++
+			continue
+		}
+		if same {
+			if !acc.key(refs) {
+				break
+			}
 			continue
 		}
 		refs = refs[:j]
@@ -304,6 +313,8 @@ func (t *slotTable) insert(ordinal uint32, slot int32) {
 }
 
 // tierChain tracks one tier's contiguous prefix for a candidate pod.
+// Retrieval-unit progress lives on unitTrack: BlocksByTier stays broken
+// when this tier misses a key, even if a later unit of the same tier completes.
 type tierChain struct {
 	ordinal uint32
 	name    string
@@ -311,6 +322,27 @@ type tierChain struct {
 	// seen is the key stamp of the last key where the pod held this tier.
 	seen  uint32
 	alive bool
+	// seenSpan is the retrieval span observed at the current key.
+	seenSpan int
+}
+
+// unitTrack follows one tier's retrieval units for the whole prefix.
+// A tier that first appears after the opening key, or that starts again
+// after a gap, still completes here. That does not extend BlocksByTier.
+type unitTrack struct {
+	ordinal  uint32
+	seen     uint32
+	seenSpan int
+	pending  int
+	unitSpan int
+}
+
+// deferredKey is one multi-span-only key whose weight is waiting for a
+// retrieval unit to complete. covers lists the in-progress units that still
+// include the key; the weight is dropped once every cover aborts.
+type deferredKey struct {
+	weight float64
+	covers []uint32
 }
 
 // tierWeight is one tier's resolved weight, keyed by tier ordinal.
@@ -346,6 +378,19 @@ type matchSlot struct {
 	confirmedAlive bool
 	tiers          []tierChain
 	tiersBuf       [2]tierChain
+	// units tracks retrieval-unit progress for every multi-span tier, including
+	// tiers that are absent from tiers because they were not on the first key.
+	units    []unitTrack
+	unitsBuf [2]unitTrack
+	// uncredited holds per-key weights for keys the pod holds that have not
+	// yet been credited because every entry at those keys belonged to an
+	// incomplete multi-key retrieval unit.
+	uncredited []deferredKey
+	// keyHoldSpan1 / keyHoldMulti record how the pod holds the current key.
+	// MatchedBlocks credits span-1 holds immediately; multi-span-only holds
+	// defer credit until a retrieval unit completes.
+	keyHoldSpan1 bool
+	keyHoldMulti bool
 }
 
 // prefixAccumulator folds an ordered walk over request keys into per-pod
@@ -368,6 +413,9 @@ type prefixAccumulator struct {
 	active   []int32
 	keyStamp uint32
 	first    bool
+	// sawMulti is set once any entry in this accumulation belongs to a
+	// multi-key retrieval unit. Until then endKey keeps the span-1 path.
+	sawMulti bool
 
 	// prev holds the entry signatures of the last fully folded key; pendingRun
 	// counts consecutive matching keys whose slot increments are deferred.
@@ -394,6 +442,7 @@ func acquireAccumulator(ts tierScoring, filter sets.Set[string]) *prefixAccumula
 	a.active = a.active[:0]
 	a.keyStamp = 0
 	a.first = true
+	a.sawMulti = false
 	a.weightCache = a.weightCache[:0]
 	a.prev = a.prev[:0]
 	a.pendingRun = 0
@@ -409,6 +458,11 @@ func releaseAccumulator(a *prefixAccumulator) {
 	for i := range a.slots {
 		a.slots[i].pod = ""
 		clear(a.slots[i].tiers)
+		clear(a.slots[i].units)
+		for j := range a.slots[i].uncredited {
+			a.slots[i].uncredited[j].covers = nil
+		}
+		a.slots[i].uncredited = a.slots[i].uncredited[:0]
 	}
 	if a.pods != nil {
 		clear(a.pods)
@@ -437,6 +491,7 @@ func (a *prefixAccumulator) tierOrdinal(name string) uint32 {
 }
 
 // flushRun applies deferred increments from consecutive identical keys.
+// Only used on the span-1 path; multi-span keys never enter pendingRun.
 func (a *prefixAccumulator) flushRun() {
 	if a.pendingRun == 0 {
 		return
@@ -463,8 +518,10 @@ func (a *prefixAccumulator) flushRun() {
 // is still alive. entries is borrowed for the duration of the call.
 func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 	// When entries match the previous key, every live slot holds this key in
-	// the same tiers; batch the increments until the run ends.
-	if !a.first && a.samePrev(entries) {
+	// the same tiers; batch the increments until the run ends. Skip once any
+	// multi-canonical retrieval unit is in play: those keys must go through
+	// creditKey so incomplete spans are not scored.
+	if !a.first && !a.sawMulti && !entriesHaveMultiSpan(entries) && a.samePrev(entries) {
 		a.pendingRun++
 		return len(a.active) > 0
 	}
@@ -516,6 +573,8 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 		if slot.seen != a.keyStamp {
 			slot.seen = a.keyStamp
 			slot.primaryWeight, slot.otherWeight = 0, 0
+			slot.keyHoldSpan1 = false
+			slot.keyHoldMulti = false
 		}
 		switch {
 		case !primary:
@@ -527,8 +586,25 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 			slot.primaryWeight = max(slot.primaryWeight, w)
 		}
 
-		if !a.stampTier(slot, tierOrdinal) && a.first {
-			slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, name: tier, seen: a.keyStamp, alive: true})
+		span := ref.RetrievalSpan
+		if span < 1 {
+			span = 1
+		}
+		if span == 1 {
+			slot.keyHoldSpan1 = true
+		} else {
+			a.sawMulti = true
+			slot.keyHoldMulti = true
+			a.noteUnit(slot, tierOrdinal, span)
+		}
+		if !a.stampTier(slot, tierOrdinal, span) && a.first {
+			slot.tiers = append(slot.tiers, tierChain{
+				ordinal:  tierOrdinal,
+				name:     tier,
+				seen:     a.keyStamp,
+				alive:    true,
+				seenSpan: span,
+			})
 		}
 	}
 	return a.endKey()
@@ -560,12 +636,44 @@ func (a *prefixAccumulator) samePrev(entries []kvblock.EntryRef) bool {
 	return true
 }
 
-// stampTier marks tier as held at the current key and reports whether the
-// slot tracks that tier.
-func (a *prefixAccumulator) stampTier(slot *matchSlot, tierOrdinal uint32) bool {
+func entriesHaveMultiSpan(entries []kvblock.EntryRef) bool {
+	for i := range entries {
+		if entries[i].RetrievalSpan > 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func podEntriesHaveMultiSpan(entries []kvblock.PodEntry) bool {
+	for i := range entries {
+		if entries[i].RetrievalSpan > 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// noteUnit records that a multi-span tier is held at the current key.
+// The tier is tracked even when it is not part of the first-key prefix.
+func (a *prefixAccumulator) noteUnit(slot *matchSlot, ordinal uint32, span int) {
+	for i := range slot.units {
+		if slot.units[i].ordinal == ordinal {
+			slot.units[i].seen = a.keyStamp
+			slot.units[i].seenSpan = span
+			return
+		}
+	}
+	slot.units = append(slot.units, unitTrack{ordinal: ordinal, seen: a.keyStamp, seenSpan: span})
+}
+
+// stampTier marks tier as held at the current key with the given retrieval
+// span and reports whether the slot tracks that tier.
+func (a *prefixAccumulator) stampTier(slot *matchSlot, tierOrdinal uint32, span int) bool {
 	for i := range slot.tiers {
 		if slot.tiers[i].ordinal == tierOrdinal {
 			slot.tiers[i].seen = a.keyStamp
+			slot.tiers[i].seenSpan = span
 			return true
 		}
 	}
@@ -573,8 +681,59 @@ func (a *prefixAccumulator) stampTier(slot *matchSlot, tierOrdinal uint32) bool 
 }
 
 // endKey closes the current key and reports whether any chain is still
-// alive.
+// alive. Requests whose blocks are all independently retrievable stay on
+// endKeyIndependent; the first multi-key retrieval unit switches the rest of
+// the accumulation onto creditKey.
 func (a *prefixAccumulator) endKey() bool {
+	if !a.sawMulti {
+		return a.endKeyIndependent()
+	}
+	if a.first {
+		a.first = false
+		othersScore := true
+		if len(a.tailOnly) > 0 {
+			for i := range a.slots {
+				s := &a.slots[i]
+				s.primaryAlive = s.primarySeen == a.keyStamp
+				othersScore = othersScore && !s.primaryAlive
+			}
+		}
+		for i := range a.slots {
+			s := &a.slots[i]
+			s.alive = true
+			s.weight = s.keyWeight(a.keyStamp, othersScore)
+			a.creditKey(s, true)
+			a.active = append(a.active, int32(i))
+		}
+		return len(a.active) > 0
+	}
+
+	othersScore := true
+	if len(a.tailOnly) > 0 {
+		for _, i := range a.active {
+			s := &a.slots[i]
+			s.primaryAlive = s.primaryAlive && s.seen == a.keyStamp && s.primarySeen == a.keyStamp
+			othersScore = othersScore && !s.primaryAlive
+		}
+	}
+
+	keep := a.active[:0]
+	for _, i := range a.active {
+		s := &a.slots[i]
+		if s.seen != a.keyStamp {
+			s.alive = false
+			continue // the chain ends at the first key the pod does not hold
+		}
+		s.weight = s.keyWeight(a.keyStamp, othersScore)
+		a.creditKey(s, false)
+		keep = append(keep, i)
+	}
+	a.active = keep
+	return len(a.active) > 0
+}
+
+// endKeyIndependent is the span-1 scoring path: every held key counts.
+func (a *prefixAccumulator) endKeyIndependent() bool {
 	if a.first {
 		a.first = false
 		othersScore := true
@@ -643,6 +802,219 @@ func (a *prefixAccumulator) endKey() bool {
 	return len(a.active) > 0
 }
 
+// creditKey applies retrieval-span rules for the current key.
+//
+// MatchedBlocks / WeightedScore credit a key when the pod holds it through at
+// least one span-1 entry, or when a multi-key retrieval unit completes.
+// Holding a key only through an incomplete multi-key unit defers that credit.
+// A unit completes even when its tier was missing from the first key or broke
+// on an earlier key. An aborted unit drops the deferred keys that no other
+// in-progress unit still covers.
+//
+// BlocksByTier still requires a contiguous per-tier chain among tiers present
+// on the first key: a tier that missed an earlier key stays broken.
+func (a *prefixAccumulator) creditKey(s *matchSlot, first bool) {
+	a.creditBlocksByTier(s, first)
+
+	var openBuf [4]uint32
+	var doneBuf [4]finishedUnit
+	var abortBuf [4]uint32
+	open := openBuf[:0]
+	done := doneBuf[:0]
+	aborted := abortBuf[:0]
+
+	for u := range s.units {
+		ut := &s.units[u]
+		if ut.seen != a.keyStamp {
+			if ut.pending > 0 {
+				aborted = append(aborted, ut.ordinal)
+				ut.pending = 0
+				ut.unitSpan = 0
+			}
+			continue
+		}
+		span := ut.seenSpan
+		if span < 1 {
+			span = 1
+		}
+		if ut.pending == 0 {
+			ut.unitSpan = span
+		}
+		ut.pending++
+		if ut.pending == ut.unitSpan {
+			done = append(done, finishedUnit{ordinal: ut.ordinal, blocks: ut.unitSpan})
+			ut.pending = 0
+			ut.unitSpan = 0
+			continue
+		}
+		open = append(open, ut.ordinal)
+	}
+	// Forget aborted covers before crediting a unit that finished on this
+	// key, so a finished unit can still claim a key the aborted one shared.
+	for _, ordinal := range aborted {
+		discardUnit(s, ordinal)
+	}
+	for _, fin := range done {
+		noteTierBlocks(s, fin.ordinal, fin.blocks)
+		creditUnit(s, fin.ordinal)
+	}
+
+	// ConfirmedBlocks must stay a continuous non-speculative prefix. Update
+	// confirmedAlive for this key before any credit path so a completed
+	// multi-span unit cannot resurrect a chain that already broke.
+	keyConfirmed := s.confirmedSeen == a.keyStamp
+	if first {
+		s.confirmedAlive = keyConfirmed
+	} else if !keyConfirmed {
+		s.confirmedAlive = false
+	}
+
+	switch {
+	case s.keyHoldSpan1:
+		s.matched++
+		s.score += s.weight
+		if keyConfirmed && s.confirmedAlive {
+			s.confirmed++
+		}
+		if len(done) > 0 {
+			if s.confirmedAlive {
+				s.confirmed = s.matched
+			}
+		} else if !unitPending(s) {
+			// No retrieval unit is in progress. Leftover weights belong to
+			// units that already aborted; len(uncredited) is not itself a
+			// reason to keep them.
+			s.uncredited = s.uncredited[:0]
+		}
+	case len(done) > 0:
+		s.matched++
+		s.score += s.weight
+		if s.confirmedAlive {
+			s.confirmed = s.matched
+		}
+	default:
+		if s.keyHoldMulti && len(open) > 0 {
+			covers := make([]uint32, len(open))
+			copy(covers, open)
+			s.uncredited = append(s.uncredited, deferredKey{weight: s.weight, covers: covers})
+		}
+	}
+}
+
+// creditBlocksByTier updates contiguous per-tier counts. Multi-span counts are
+// added later, and only for a unit that completes while the chain is still alive.
+func (a *prefixAccumulator) creditBlocksByTier(s *matchSlot, first bool) {
+	for t := range s.tiers {
+		tc := &s.tiers[t]
+		heldThisKey := tc.seen == a.keyStamp
+		if !heldThisKey {
+			if !first && tc.alive {
+				tc.alive = false
+			}
+			continue
+		}
+		span := tc.seenSpan
+		if span < 1 {
+			span = 1
+		}
+		if span != 1 {
+			if first {
+				tc.alive = true
+			}
+			continue
+		}
+		if first {
+			tc.count = 1
+			tc.alive = true
+		} else if tc.alive {
+			tc.count++
+		}
+	}
+}
+
+// finishedUnit is one retrieval unit that reached its span on this key.
+type finishedUnit struct {
+	ordinal uint32
+	blocks  int
+}
+
+// noteTierBlocks adds a completed unit to BlocksByTier when that tier's
+// contiguous prefix is still alive. Tiers that started late, or that already
+// broke, are left unchanged.
+func noteTierBlocks(s *matchSlot, ordinal uint32, blocks int) {
+	if blocks <= 0 {
+		return
+	}
+	for i := range s.tiers {
+		if s.tiers[i].ordinal == ordinal && s.tiers[i].alive {
+			s.tiers[i].count += blocks
+			return
+		}
+	}
+}
+
+// unitPending reports whether any retrieval unit is still accumulating.
+// Deferred weights are not a signal: an aborted unit leaves weights behind
+// until they are discarded.
+func unitPending(s *matchSlot) bool {
+	for i := range s.units {
+		if s.units[i].pending > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// discardUnit drops one aborted unit. A deferred key is removed only when no
+// other in-progress unit still covers it.
+func discardUnit(s *matchSlot, ordinal uint32) {
+	kept := s.uncredited[:0]
+	for i := range s.uncredited {
+		covers := removeOrdinal(s.uncredited[i].covers, ordinal)
+		if len(covers) == 0 {
+			continue
+		}
+		s.uncredited[i].covers = covers
+		kept = append(kept, s.uncredited[i])
+	}
+	s.uncredited = kept
+}
+
+// creditUnit scores every deferred key still covered by a unit that just
+// finished, then removes those keys so a later unit cannot score them again.
+func creditUnit(s *matchSlot, ordinal uint32) {
+	kept := s.uncredited[:0]
+	for i := range s.uncredited {
+		if !containsOrdinal(s.uncredited[i].covers, ordinal) {
+			kept = append(kept, s.uncredited[i])
+			continue
+		}
+		s.score += s.uncredited[i].weight
+		s.matched++
+	}
+	s.uncredited = kept
+}
+
+func containsOrdinal(ids []uint32, ordinal uint32) bool {
+	for _, id := range ids {
+		if id == ordinal {
+			return true
+		}
+	}
+	return false
+}
+
+func removeOrdinal(ids []uint32, ordinal uint32) []uint32 {
+	n := 0
+	for _, id := range ids {
+		if id != ordinal {
+			ids[n] = id
+			n++
+		}
+	}
+	return ids[:n]
+}
+
 // keyWeight is the weight the current key adds to the slot's score: its
 // best primary weight when it holds a primary tier there, and its best other
 // weight when othersScore. Other tiers score at every key without tail-only
@@ -688,11 +1060,21 @@ func (a *prefixAccumulator) newSlot(pod string) int32 {
 	if cap(s.tiers) > len(s.tiersBuf) {
 		tiers = s.tiers[:0]
 	}
-	*s = matchSlot{pod: pod}
+	var units []unitTrack
+	if cap(s.units) > len(s.unitsBuf) {
+		units = s.units[:0]
+	}
+	uncredited := s.uncredited[:0]
+	*s = matchSlot{pod: pod, uncredited: uncredited}
 	if tiers != nil {
 		s.tiers = tiers
 	} else {
 		s.tiers = s.tiersBuf[:0]
+	}
+	if units != nil {
+		s.units = units
+	} else {
+		s.units = s.unitsBuf[:0]
 	}
 	// Candidate pods per request stay far below the int32 range; clamp
 	// defensively so a pathological request cannot wrap the index negative.

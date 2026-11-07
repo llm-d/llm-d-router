@@ -161,6 +161,10 @@ func (t *tracedIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (B
 	return t.next.GetRequestKey(ctx, engineKey)
 }
 
+func (t *tracedIndex) GetRequestKeys(ctx context.Context, engineKey BlockHash) ([]BlockHash, error) {
+	return t.next.GetRequestKeys(ctx, engineKey)
+}
+
 func (t *tracedIndex) Clear(ctx context.Context, podIdentifier string) error {
 	return t.next.Clear(ctx, podIdentifier)
 }
