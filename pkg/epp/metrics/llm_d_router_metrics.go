@@ -348,7 +348,7 @@ var llmdInferenceExtensionInfo = prometheus.NewGaugeVec(
 		Name:      "info",
 		Help:      metricsutil.HelpMsgWithStability("General information of the current build of Inference Extension.", compbasemetrics.ALPHA),
 	},
-	[]string{"commit", "build_ref"},
+	[]string{metricsutil.BuildInfoLabelCommit, metricsutil.BuildInfoLabelBuildRef},
 )
 
 // --- llm-d Flow Control Metrics ---
