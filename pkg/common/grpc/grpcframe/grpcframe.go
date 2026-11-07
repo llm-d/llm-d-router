@@ -65,23 +65,31 @@ var (
 	// ErrMalformed reports a truncated gRPC frame or data after the frame.
 	ErrMalformed = errors.New("invalid gRPC frame")
 
-	canonicalStatus = http.CanonicalHeaderKey(HeaderStatus)
-	// statusKeys are the map keys under which grpc-status can appear, computed
-	// once so Status does not allocate per call. http.CanonicalHeaderKey
-	// leaves keys containing ':' unchanged, so httputil.ReverseProxy
-	// (TrailerPrefix + "Grpc-Status") and direct callers (TrailerPrefix +
-	// HeaderStatus) store distinct map keys.
-	statusKeys = [...]string{
-		canonicalStatus,
-		http.TrailerPrefix + canonicalStatus,
-		http.TrailerPrefix + HeaderStatus,
-	}
-	trailerHeaders = [...]string{
-		HeaderStatus,
-		HeaderMessage,
-		HeaderStatusDetailsBin,
+	// statusKeys, messageKeys, and detailsBinKeys are the map keys under
+	// which each gRPC status header can appear, computed once so lookups do
+	// not allocate per call. http.CanonicalHeaderKey leaves keys containing
+	// ':' unchanged, so httputil.ReverseProxy (TrailerPrefix + "Grpc-Status")
+	// and direct callers (TrailerPrefix + HeaderStatus) store distinct map
+	// keys.
+	statusKeys     = headerKeys(HeaderStatus)
+	messageKeys    = headerKeys(HeaderMessage)
+	detailsBinKeys = headerKeys(HeaderStatusDetailsBin)
+
+	statusHeaders = [...]struct {
+		name    string
+		trailer string
+		keys    *[3]string
+	}{
+		{HeaderStatus, http.TrailerPrefix + HeaderStatus, &statusKeys},
+		{HeaderMessage, http.TrailerPrefix + HeaderMessage, &messageKeys},
+		{HeaderStatusDetailsBin, http.TrailerPrefix + HeaderStatusDetailsBin, &detailsBinKeys},
 	}
 )
+
+func headerKeys(name string) [3]string {
+	canonical := http.CanonicalHeaderKey(name)
+	return [3]string{canonical, http.TrailerPrefix + canonical, http.TrailerPrefix + name}
+}
 
 // IsContentType reports whether contentType is a gRPC media type
 // ("application/grpc" or "application/grpc+<subtype>").
@@ -94,12 +102,29 @@ func IsContentType(contentType string) bool {
 // Status extracts the gRPC status code string from an HTTP header or trailer
 // map, including unannounced HTTP/2 trailers prefixed with http.TrailerPrefix.
 func Status(h http.Header) (string, bool) {
-	for _, key := range statusKeys {
+	v := firstValue(h, &statusKeys)
+	return v, v != ""
+}
+
+// Message returns the grpc-message value from h, or "" when it is absent. It
+// reads the same key forms as Status.
+func Message(h http.Header) string {
+	return firstValue(h, &messageKeys)
+}
+
+// StatusDetailsBin returns the grpc-status-details-bin value from h, or ""
+// when it is absent. It reads the same key forms as Status.
+func StatusDetailsBin(h http.Header) string {
+	return firstValue(h, &detailsBinKeys)
+}
+
+func firstValue(h http.Header, keys *[3]string) string {
+	for _, key := range keys {
 		if v := firstNonEmpty(h[key]); v != "" {
-			return v, true
+			return v
 		}
 	}
-	return "", false
+	return ""
 }
 
 // HasErrorStatus reports whether h carries a non-OK gRPC status code.
@@ -111,11 +136,22 @@ func HasErrorStatus(h http.Header) bool {
 // CopyTrailers copies gRPC status trailers from src onto dst using
 // http.TrailerPrefix so net/http emits them as HTTP/2 trailers after body writes.
 func CopyTrailers(dst, src http.Header) {
-	for _, key := range trailerHeaders {
-		canonical := http.CanonicalHeaderKey(key)
-		for _, srcKey := range [...]string{canonical, http.TrailerPrefix + canonical, http.TrailerPrefix + key} {
-			for _, val := range src[srcKey] {
-				dst.Add(http.TrailerPrefix+key, val)
+	for _, sh := range statusHeaders {
+		for _, key := range sh.keys {
+			for _, val := range src[key] {
+				dst.Add(sh.trailer, val)
+			}
+		}
+	}
+}
+
+// CopyStatusHeaders copies gRPC status headers and trailers from src onto dst
+// as plain response headers, for a trailers-only gRPC response.
+func CopyStatusHeaders(dst, src http.Header) {
+	for _, sh := range statusHeaders {
+		for _, key := range sh.keys {
+			for _, val := range src[key] {
+				dst.Add(sh.name, val)
 			}
 		}
 	}
@@ -367,15 +403,25 @@ func ParsePayload(data []byte) ([]byte, error) {
 // returned together with the error so callers can still inspect earlier frames.
 func ParsePayloads(data []byte) ([][]byte, error) {
 	var payloads [][]byte
+	err := ForEachPayload(data, func(payload []byte) {
+		payloads = append(payloads, payload)
+	})
+	return payloads, err
+}
+
+// ForEachPayload calls fn with the message payload of each gRPC frame in
+// data, in order, without copying. It stops at the first frame it cannot
+// parse and returns that error, so fn sees only the frames before it.
+func ForEachPayload(data []byte, fn func(payload []byte)) error {
 	for len(data) > 0 {
 		payload, err := ParsePayload(data)
 		if err != nil {
-			return payloads, err
+			return err
 		}
-		payloads = append(payloads, payload)
 		data = data[HeaderLen+len(payload):]
+		fn(payload)
 	}
-	return payloads, nil
+	return nil
 }
 
 // PutHeader writes an uncompressed 5-byte gRPC frame header for a payload of
@@ -390,6 +436,19 @@ func PutHeader(dst []byte, payloadLen int) error {
 	dst[0] = 0
 	binary.BigEndian.PutUint32(dst[1:HeaderLen], uint32(payloadLen)) //#nosec G115 -- guarded by [0, MaxPayloadLen] check above
 	return nil
+}
+
+// FinishFrame writes the 5-byte header into buf[:HeaderLen] for the payload
+// buf[HeaderLen:] and returns buf. A caller that builds a payload in place
+// after a reserved header uses it to close the frame in one step.
+func FinishFrame(buf []byte) ([]byte, error) {
+	if len(buf) < HeaderLen {
+		return nil, fmt.Errorf("gRPC frame buffer length %d is less than %d", len(buf), HeaderLen)
+	}
+	if err := PutHeader(buf, len(buf)-HeaderLen); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // FramePayload wraps payload in an uncompressed 5-byte gRPC frame.
@@ -420,8 +479,5 @@ func MarshalProto(msg proto.Message) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := PutHeader(framed, len(framed)-HeaderLen); err != nil {
-		return nil, err
-	}
-	return framed, nil
+	return FinishFrame(framed)
 }

@@ -205,7 +205,10 @@ func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHas
 		return fmt.Errorf("no keys or entries provided for adding to index")
 	}
 
-	pipe := r.RedisClient.Pipeline()
+	// MULTI/EXEC applies the mappings and the pod entries together, so
+	// pruneEngineKeyScript cannot run between them and delete a mapping whose
+	// pod entries this call has not written yet.
+	pipe := r.RedisClient.TxPipeline()
 
 	// Build engine->request mappings when engine keys are provided.
 	// The ratio of array lengths determines the mapping type:

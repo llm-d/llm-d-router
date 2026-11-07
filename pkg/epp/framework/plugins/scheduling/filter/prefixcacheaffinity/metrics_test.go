@@ -39,7 +39,8 @@ func TestRegisterMetrics(t *testing.T) {
 }
 
 // Each Filter branch records exactly one decision outcome, so the counter labels
-// distinguish an affinity-driven route from one where load reopened the set.
+// distinguish an affinity-driven route from one where load reopened the set,
+// and with pairing on stores that outcome on the request for PreRequest.
 func TestFilterRecordsDecisionOutcome(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -99,8 +100,11 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 			resetMetrics()
 			t.Cleanup(resetMetrics)
 
-			p := newTestPlugin(test.config)
-			p.Filter(context.Background(), nil, test.input)
+			config := test.config
+			config.P2PSourceProducerName = "p2p"
+			p := newTestPlugin(config)
+			request := &fwksched.InferenceRequest{RequestID: "req", Headers: map[string]string{}}
+			p.Filter(context.Background(), request, test.input)
 
 			for _, outcome := range allOutcomes {
 				want := float64(0)
@@ -110,6 +114,9 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 				got := testutil.ToFloat64(filterDecisions.WithLabelValues("test", outcome))
 				assert.Equalf(t, want, got, "outcome %q", outcome)
 			}
+			stored, ok := fwksched.ReadRequestAttribute[affinityOutcome](request, p.outcomeDataKey)
+			require.True(t, ok, "outcome stored on the request")
+			assert.Equal(t, affinityOutcome(test.outcome), stored)
 		})
 	}
 }

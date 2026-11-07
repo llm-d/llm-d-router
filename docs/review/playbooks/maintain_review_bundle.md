@@ -24,7 +24,11 @@ Add or update a rule only when maintainers establish a recurring external contra
 
 1. Add `## <Rule Title>` starting with `When <specific diff condition>:` in 1-3 crisp ASCII sentences (plus optional `- Accept:` settled architectural exceptions and `- Open:` unsettled debates) to `rules/<section>.md`, with zero YAML frontmatter or `[^id]` footnotes. Do not add broad `- Accept:` nit-suppression waivers or rules inferable from sibling `.go` files.
 2. Add the matching `<section_stem>#<rule_anchor>` entry to `provenance.json` with `applies_to` globs, a unique one-sentence `consequence`, `observed_prs`, and 1-3 representative `examples` (plus optional `accept_decisions`, `accept_examples`, `decisions`, or `open_question`).
-3. Keep the combined Stage-1 `rules/*.md` corpus under `8,000` bytes and `2,000` tokens across the 4 files, update counts in [failure_classes.md](../references/failure_classes.md) and [index.md](../index.md) if the rule count changed, append a dated entry to `log.md`, and run `python3 hack/render_playbook.py` and `python3 hack/render_playbook.py --check`.
+3. Keep the combined Stage-1 `rules/*.md` corpus under `9,500` bytes (about `2,375` tokens) across the 4 files, update counts in [failure_classes.md](../references/failure_classes.md) and [index.md](../index.md) if the rule count changed, append a dated entry to `log.md`, and run `python3 hack/render_playbook.py` and `python3 hack/render_playbook.py --check`.
+
+# Refreshing from new maintainer reviews
+
+The [refresh-review-playbook skill](../../../.agents/skills/refresh-review-playbook/SKILL.md) mines maintainer review threads and issues since `corpus.mined_through_pr` in `provenance.json`, triages them against the rule categories above, and validates the result (`.agents/skills/refresh-review-playbook/scripts/validate_refresh.py --render`) before a refresh pull request.
 
 # Settling an open question
 

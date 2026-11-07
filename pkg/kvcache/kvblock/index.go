@@ -157,8 +157,8 @@ type Index interface {
 type KeyType int
 
 const (
-	// EngineKey means the key is an engine-assigned key that must be resolved
-	// to a request key via the engineToRequestKeys mapping.
+	// EngineKey means the key is an engine key, as the event pool stores it,
+	// that must be resolved to a request key via the engineToRequestKeys mapping.
 	EngineKey KeyType = iota
 	// RequestKey means the key is a request key and can be used directly.
 	// This is used for speculative entries that were added without engineKey mapping.

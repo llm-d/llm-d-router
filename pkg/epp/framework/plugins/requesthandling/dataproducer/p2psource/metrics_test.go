@@ -32,6 +32,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -251,7 +252,8 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 			t.Cleanup(resetMetrics)
 
 			p := New("test", test.config)
-			err := p.PreRequest(utils.NewTestContext(t), test.request(p), test.result(p))
+			request := test.request(p)
+			err := p.PreRequest(utils.NewTestContext(t), request, test.result(p))
 			if test.wantPreReqErr {
 				require.Error(t, err)
 			} else {
@@ -260,6 +262,9 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 
 			require.Equal(t, 1, testutil.CollectAndCount(sourceDecisions), "one decision series")
 			assert.Equal(t, float64(1), testutil.ToFloat64(sourceDecisions.WithLabelValues("test", test.role, test.outcome)))
+			published, ok := scheduling.ReadRequestAttribute[attrprefix.P2PSourceDecision](request, p.decisionDataKey)
+			require.True(t, ok, "the decision is published on the request")
+			assert.Equal(t, attrprefix.P2PSourceDecision{Outcome: test.outcome, EndpointRole: test.role}, published)
 
 			observed := pulledTokensObserved(t)
 			if test.pulledTokens == 0 {

@@ -205,6 +205,7 @@ type Producer struct {
 	typedName                   plugin.TypedName
 	prefixMatchDataKey          plugin.DataKey
 	reusablePrefixTokensDataKey plugin.DataKey
+	decisionDataKey             plugin.DataKey
 	minCachedTokenDelta         int
 	prefillProfile              string
 	p2pConnectorPort            int
@@ -265,6 +266,7 @@ func New(name string, cfg Config) *Producer {
 		typedName:                   plugin.TypedName{Type: PluginType, Name: name},
 		prefixMatchDataKey:          attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(name),
+		decisionDataKey:             attrprefix.P2PSourceDecisionDataKey.WithNonEmptyProducerName(name),
 		minCachedTokenDelta:         minCachedTokenDelta,
 		prefillProfile:              prefillProfile,
 		p2pConnectorPort:            p2pConnectorPort,
@@ -276,14 +278,15 @@ func New(name string, cfg Config) *Producer {
 // TypedName returns the plugin's registered type and name.
 func (p *Producer) TypedName() plugin.TypedName { return p.typedName }
 
-// Produces declares the request-wide reusable prefix token floor, and the
+// Produces declares the request-wide reusable prefix token floor, the
 // best-match peer this plugin stashes on the request for its own PreRequest to
-// read back. Both keys are name-bound to this instance, so two configured
-// p2p-source producers do not share them.
+// read back, and the decision PreRequest publishes. All keys are name-bound to
+// this instance, so two configured p2p-source producers do not share them.
 func (p *Producer) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{
 		p.reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokens(0),
 		p.attrKeyValue:                (*bestMatchPeer)(nil),
+		p.decisionDataKey:             attrprefix.P2PSourceDecision{},
 	}
 }
 
@@ -497,8 +500,9 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		request.Headers = map[string]string{}
 	}
 
-	// One decision count per request, and one line with the decision and its
-	// inputs, so pull behavior can be joined to request latency without
+	// One decision count per request, the decision published on the request
+	// for a paired prefix-cache-affinity-filter, and one line with the decision
+	// and its inputs, so pull behavior can be joined to request latency without
 	// TRACE-level log volume. The inputs are collected only when the line is
 	// enabled.
 	dlog := log.FromContext(ctx).WithName(p.typedName.String()).V(logging.DEFAULT)
@@ -511,6 +515,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	_, role := prefixmetrics.PredictionTarget(schedulingResult, prefixMetricsPrefillProfile)
 	defer func() {
 		recordDecision(p.typedName.Name, role, outcome)
+		request.PutAttribute(p.decisionDataKey, attrprefix.P2PSourceDecision{Outcome: outcome, EndpointRole: role})
 		if logDecision {
 			dlog.Info("p2p decision", append(kv, "outcome", outcome)...)
 		}

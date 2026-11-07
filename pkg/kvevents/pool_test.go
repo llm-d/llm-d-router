@@ -19,9 +19,11 @@ package kvevents //nolint:testpackage // tests use unexported processEventBatch
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
@@ -362,7 +364,7 @@ func TestCanonicalWritePath_FallbackLegacy(t *testing.T) {
 
 	// Verify engine->request mapping exists in the Index (legacy 1:1 path)
 	for _, ek := range engineKeys {
-		reqKey, err := idx.GetRequestKey(ctx, kvblock.BlockHash(ek))
+		reqKey, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", ek))
 		require.NoError(t, err, "engine key %d should be resolvable via index", ek)
 		assert.NotEqual(t, kvblock.EmptyBlockHash, reqKey)
 	}
@@ -408,7 +410,7 @@ func TestCanonicalWritePath_ManyToOne(t *testing.T) {
 	// Verify engine keys are resolvable via the Index
 	// Engine keys 0-3 should resolve to canonical[0], 4-7 to canonical[1]
 	for i, ek := range engineKeys {
-		reqKey, err := idx.GetRequestKey(ctx, kvblock.BlockHash(ek))
+		reqKey, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", ek))
 		require.NoError(t, err, "engine key %d should be in index", ek)
 		expectedCanonical := canonicalKeys[i/4]
 		assert.Equal(t, expectedCanonical, reqKey,
@@ -442,11 +444,11 @@ func TestCanonicalWritePath_ManyToOneTrailingBlock(t *testing.T) {
 		ctx := context.Background()
 		_, idx, canonicalKeys := store(t)
 		for i, ek := range engineKeys[:8] {
-			reqKey, err := idx.GetRequestKey(ctx, kvblock.BlockHash(ek))
+			reqKey, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", ek))
 			require.NoError(t, err, "engine key %d", ek)
 			assert.Equal(t, canonicalKeys[i/4], reqKey, "engine key %d should resolve to canonical key %d", ek, i/4)
 		}
-		_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(trailing))
+		_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", trailing))
 		assert.Error(t, err, "the trailing engine key holds no full canonical block")
 	})
 
@@ -477,7 +479,7 @@ func TestCanonicalWritePath_ManyToOneTrailingBlock(t *testing.T) {
 		}}, "pod-a", "test-model")
 
 		assert.Equal(t, 1.0, counterValue(t, skipped)-before)
-		_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(childKeys[0]))
+		_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[0]))
 		assert.Error(t, err, "a child chained on the wrong canonical key is not indexed")
 	})
 }
@@ -520,12 +522,12 @@ func TestCanonicalWritePath_OneToMany(t *testing.T) {
 	}
 
 	// Verify engine key 0 resolves to canonical[1] (last of its mapped keys)
-	reqKey0, err := idx.GetRequestKey(ctx, kvblock.BlockHash(engineKeys[0]))
+	reqKey0, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", engineKeys[0]))
 	require.NoError(t, err)
 	assert.Equal(t, canonicalKeys[1], reqKey0, "engine key 0 should resolve to its last mapped canonical key")
 
 	// Verify engine key 1 resolves to canonical[3]
-	reqKey1, err := idx.GetRequestKey(ctx, kvblock.BlockHash(engineKeys[1]))
+	reqKey1, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", engineKeys[1]))
 	require.NoError(t, err)
 	assert.Equal(t, canonicalKeys[3], reqKey1, "engine key 1 should resolve to its last mapped canonical key")
 
@@ -602,7 +604,7 @@ func TestCanonicalEviction_Eager(t *testing.T) {
 	assert.Len(t, result1[canonicalKeys[1]], 1, "canonical key 1 should still have pod-a")
 
 	// Verify engine key 0 is no longer resolvable
-	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(engineKeys[0]))
+	_, err = idx.GetRequestKey(ctx, ModelEngineKey("test-model", engineKeys[0]))
 	assert.Error(t, err, "evicted engine key should not be resolvable")
 }
 
@@ -1110,7 +1112,7 @@ func TestBlockStoredEvent_EvictionOrderGPUThenCPU(t *testing.T) {
 		assert.Equal(t, "cpu", result[ck][0].DeviceTier)
 	}
 	// Engine→request mapping must still resolve.
-	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(engineKeys[0]))
+	_, err = idx.GetRequestKey(ctx, ModelEngineKey("test-model", engineKeys[0]))
 	require.NoError(t, err, "engine→request mapping should survive gpu eviction")
 
 	// Step 4: Evict from CPU.
@@ -1131,7 +1133,7 @@ func TestBlockStoredEvent_EvictionOrderGPUThenCPU(t *testing.T) {
 		assert.Empty(t, result[ck], "all entries should be gone after full eviction")
 	}
 	// Engine→request mapping should be gone.
-	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(engineKeys[0]))
+	_, err = idx.GetRequestKey(ctx, ModelEngineKey("test-model", engineKeys[0]))
 	assert.Error(t, err, "engine→request mapping should be removed after full eviction")
 }
 
@@ -1198,7 +1200,7 @@ func TestHMAGroupMetadataLearnedForSubCanonicalRejectedKinds(t *testing.T) {
 			assert.Equal(t, 4, meta.BlockSize)
 			assert.Equal(t, 1.0, counterValue(t, metric)-before)
 			assert.Zero(t, recording.getRequestKeyCalls)
-			_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(1900))
+			_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 1900))
 			assert.Error(t, err)
 		})
 	}
@@ -1299,7 +1301,7 @@ func TestHMAGroupFilterRejectsSparseFullAttentionBeforeParentLookup(t *testing.T
 	}}, "pod-hma", "test-model")
 
 	assert.Zero(t, recording.getRequestKeyCalls)
-	_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(950))
+	_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 950))
 	assert.Error(t, err)
 }
 
@@ -1400,12 +1402,12 @@ func TestHMAGroupFilterRecoversCanonicalBlockSizeAfterAuxiliaryEvent(t *testing.
 		require.Len(t, result[key], 1)
 		assert.Equal(t, "pod-hma", result[key][0].PodIdentifier)
 		assert.Equal(t, kvblock.GroupID(groupIdx), result[key][0].GroupIdx)
-		requestKey, err := idx.GetRequestKey(ctx, kvblock.BlockHash(971+i*2))
+		requestKey, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", uint64(971+i*2))) //#nosec G115 -- test data, i is small
 		require.NoError(t, err)
 		assert.Equal(t, key, requestKey)
 	}
-	for _, hash := range []kvblock.BlockHash{970, 972} {
-		_, err := idx.GetRequestKey(ctx, hash)
+	for _, hash := range []uint64{970, 972} {
+		_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", hash))
 		assert.Error(t, err, "auxiliary blocks must not be indexed")
 	}
 }
@@ -1450,8 +1452,8 @@ func TestHMAGroupFilterAcceptsDenseEngineGeometryAfterIncompleteEvents(t *testin
 				require.Len(t, result[key], 1)
 				assert.Equal(t, kvblock.GroupID(groupIdx), result[key][0].GroupIdx)
 			}
-			for _, hash := range []kvblock.BlockHash{1200, 1201} {
-				_, err := idx.GetRequestKey(ctx, hash)
+			for _, hash := range []uint64{1200, 1201} {
+				_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", hash))
 				assert.Error(t, err)
 			}
 		})
@@ -1848,7 +1850,7 @@ func TestPool_DuplicateStoreSurvivesFirstRemove(t *testing.T) {
 	}
 
 	// Engine->request mapping should also be gone after full eviction.
-	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(engineKeys[0]))
+	_, err = idx.GetRequestKey(ctx, ModelEngineKey("test-model", engineKeys[0]))
 	assert.Error(t, err, "engine->request mapping should be removed after the second remove")
 }
 
@@ -2287,7 +2289,7 @@ func TestProcessEventBatch_UnresolvedSubCanonicalParent(t *testing.T) {
 			pool.processEventBatch(ctx, &EventBatch{Events: tt.events}, "pod-a", "test-model")
 
 			assert.Equal(t, tt.wantSkipped, counterValue(t, skipped)-before)
-			_, err := idx.GetRequestKey(ctx, kvblock.BlockHash(tt.childHash))
+			_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", tt.childHash))
 			assert.Error(t, err, "a store with an unresolved parent is not indexed")
 		})
 	}
@@ -2346,9 +2348,9 @@ func TestProcessEventBatch_LoRA(t *testing.T) {
 	assert.Equal(t, 2.0, counterValue(t, skippedMetric)-beforeSkipped,
 		"unresolved LoRA events must increment skipped metric")
 
-	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(2001))
+	_, err = idx.GetRequestKey(ctx, ModelEngineKey("test-model", 2001))
 	assert.Error(t, err, "unresolved LoRA engine key must not be mapped")
-	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(2002))
+	_, err = idx.GetRequestKey(ctx, ModelEngineKey("test-model", 2002))
 	assert.Error(t, err, "unresolved LoRA engine key with empty name must not be mapped")
 
 	// Base-model request for tokensB must not hit unresolved LoRA entries
@@ -2395,6 +2397,87 @@ func TestProcessEventBatch_LoRA(t *testing.T) {
 		BlockHashes: []uint64{2001, 2002},
 	}
 	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{removeEvent}}, "pod-a", "test-model")
+
+	// 5. Removal events carry no adapter; removing the LoRA block must still
+	// evict the adapter's entry.
+	pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+		&BlockRemovedEvent{BlockHashes: []uint64{3001}},
+	}}, "pod-a", "test-model")
+	lookupLoraC, err = idx.Lookup(ctx, loraKeysC, nil)
+	require.NoError(t, err)
+	assert.Empty(t, lookupLoraC[loraKeysC[0]], "removal must evict the resolved LoRA entry")
+}
+
+// Pods of two models that share a tokenizer report the same engine hashes for
+// the same prompt; each model's blocks must chain, match and evict on their own.
+func TestProcessEventBatch_SameEngineHashesAcrossModels(t *testing.T) {
+	server := miniredis.RunT(t)
+	for name, newIndex := range map[string]func() (kvblock.Index, error){
+		"in-memory": func() (kvblock.Index, error) { return kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig()) },
+		"cost-aware": func() (kvblock.Index, error) {
+			return kvblock.NewCostAwareMemoryIndex(kvblock.DefaultCostAwareMemoryIndexConfig())
+		},
+		"redis": func() (kvblock.Index, error) {
+			return kvblock.NewRedisIndex(&kvblock.RedisIndexConfig{Address: server.Addr()})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			server.FlushAll()
+			idx, err := newIndex()
+			require.NoError(t, err)
+			tp, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 16, HashSeed: "test"})
+			require.NoError(t, err)
+			pool, err := NewPool(DefaultConfig(), idx, tp, nil)
+			require.NoError(t, err)
+
+			type modelPod struct{ model, pod string }
+			bf16 := modelPod{"llama-bf16", "10.0.0.1:8000"}
+			fp8 := modelPod{"llama-fp8", "10.0.1.1:8000"}
+			tokens := makeTokens(80)
+			prefixHashes := makeEngineKeys(4, 100)
+			const childHash uint64 = 104
+			for _, mp := range []modelPod{bf16, fp8} {
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+					&BlockStoredEvent{BlockHashes: prefixHashes, Tokens: tokens[:64]},
+				}}, mp.pod, mp.model)
+			}
+			for _, mp := range []modelPod{bf16, fp8} {
+				pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+					&BlockStoredEvent{BlockHashes: []uint64{childHash}, Tokens: tokens[64:], ParentHash: prefixHashes[3]},
+				}}, mp.pod, mp.model)
+			}
+			holders := func(model string) [][]kvblock.PodEntry {
+				keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model, nil)
+				require.NoError(t, err)
+				require.Len(t, keys, 5)
+				found, err := idx.Lookup(ctx, keys, nil)
+				require.NoError(t, err)
+				out := make([][]kvblock.PodEntry, len(keys))
+				for i, key := range keys {
+					out[i] = found[key]
+				}
+				return out
+			}
+			for _, mp := range []modelPod{bf16, fp8} {
+				for i, entries := range holders(mp.model) {
+					require.Equal(t, []kvblock.PodEntry{{PodIdentifier: mp.pod, DeviceTier: "gpu"}}, entries, "%s block %d", mp.model, i)
+				}
+			}
+
+			pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+				&BlockRemovedEvent{BlockHashes: append(slices.Clone(prefixHashes), childHash)},
+			}}, bf16.pod, bf16.model)
+			for i, entries := range holders(bf16.model) {
+				require.Empty(t, entries, "%s block %d must be evicted", bf16.model, i)
+			}
+			for i, entries := range holders(fp8.model) {
+				require.Equal(t, []kvblock.PodEntry{{PodIdentifier: fp8.pod, DeviceTier: "gpu"}}, entries, "%s block %d", fp8.model, i)
+			}
+			_, err = idx.GetRequestKey(ctx, ModelEngineKey(fp8.model, childHash))
+			require.NoError(t, err, "%s mapping must survive the %s eviction", fp8.model, bf16.model)
+		})
+	}
 }
 
 // TestCPUChunkSingleHashRetrievalBoundary covers issue #2889 write path: one

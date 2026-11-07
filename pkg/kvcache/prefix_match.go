@@ -95,9 +95,9 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 	var matches map[string]PodMatch
 	var err error
 	if k.keyWalker != nil {
-		matches, err = matchWalk(ctx, k.keyWalker, keys, k.tierWeights, podFilter)
+		matches, err = matchWalk(ctx, k.keyWalker, keys, k.tierScoring, podFilter)
 	} else {
-		matches, err = matchLookup(ctx, k.kvBlockIndex, keys, k.tierWeights, podFilter)
+		matches, err = matchLookup(ctx, k.kvBlockIndex, keys, k.tierScoring, podFilter)
 	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -130,9 +130,9 @@ func maxMatchedBlocks(matches map[string]PodMatch) int {
 // matchWalk feeds the accumulator from an ordered index walk. The walk ends
 // at the first key without entries or once no chain is alive.
 func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.BlockHash,
-	weights map[string]float64, filter sets.Set[string],
+	ts tierScoring, filter sets.Set[string],
 ) (map[string]PodMatch, error) {
-	acc := acquireAccumulator(weights, filter)
+	acc := acquireAccumulator(ts, filter)
 	defer releaseAccumulator(acc)
 
 	err := walker.WalkKeys(ctx, keys, func(_ int, found bool, entries []kvblock.EntryRef) bool {
@@ -147,13 +147,13 @@ func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.Blo
 // matchLookup feeds the accumulator from a materialized Lookup result, for
 // backends without the walk capability.
 func matchLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockHash,
-	weights map[string]float64, filter sets.Set[string],
+	ts tierScoring, filter sets.Set[string],
 ) (map[string]PodMatch, error) {
 	keyToPods, err := index.Lookup(ctx, keys, filter)
 	if err != nil {
 		return nil, err
 	}
-	return matchMaterialized(ctx, keys, keyToPods, weights, filter)
+	return matchMaterialized(ctx, keys, keyToPods, ts, filter)
 }
 
 // matchMaterialized feeds the accumulator from a Lookup result, walking keys
@@ -161,9 +161,9 @@ func matchLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockH
 // ordinals are assigned per call, since materialized entries carry none.
 func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
-	weights map[string]float64, filter sets.Set[string],
+	ts tierScoring, filter sets.Set[string],
 ) (map[string]PodMatch, error) {
-	acc := acquireAccumulator(weights, filter)
+	acc := acquireAccumulator(ts, filter)
 	defer releaseAccumulator(acc)
 
 	refs := acc.refs[:0]
@@ -349,6 +349,9 @@ type deferredKey struct {
 type tierWeight struct {
 	ordinal uint32
 	weight  float64
+	// primary marks configured tiers without tailOnly and the speculative
+	// tier: the tiers whose chains bound where tail-only tiers start to score.
+	primary bool
 }
 
 // matchSlot is one candidate pod's accumulated state.
@@ -357,10 +360,17 @@ type matchSlot struct {
 	matched int
 	score   float64
 	// seen is the key stamp of the last key holding this pod; weight is the
-	// highest tier weight among its entries at that key.
-	seen   uint32
-	weight float64
-	alive  bool
+	// weight that key adds to score. primaryWeight and otherWeight are the
+	// highest weights among its primary and other entries at that key.
+	seen          uint32
+	weight        float64
+	primaryWeight float64
+	otherWeight   float64
+	alive         bool
+	// primaryAlive tracks the chain of keys held in a primary tier;
+	// primarySeen is the key stamp of the last key holding one.
+	primarySeen  uint32
+	primaryAlive bool
 	// confirmed tracks the chain of keys held in a non-speculative tier;
 	// confirmedSeen is the key stamp of the last key holding one.
 	confirmed      int
@@ -394,8 +404,9 @@ type matchSlot struct {
 // only need to be stable within one accumulation; they key request-local
 // tables and never size state, so sparse or large values cost nothing.
 type prefixAccumulator struct {
-	weights map[string]float64
-	filter  sets.Set[string]
+	weights  map[string]float64
+	tailOnly map[string]bool
+	filter   sets.Set[string]
 
 	table    slotTable
 	slots    []matchSlot
@@ -424,9 +435,9 @@ type prefixAccumulator struct {
 
 var accumulatorPool = sync.Pool{New: func() any { return &prefixAccumulator{} }}
 
-func acquireAccumulator(weights map[string]float64, filter sets.Set[string]) *prefixAccumulator {
+func acquireAccumulator(ts tierScoring, filter sets.Set[string]) *prefixAccumulator {
 	a, _ := accumulatorPool.Get().(*prefixAccumulator)
-	a.weights, a.filter = weights, filter
+	a.weights, a.tailOnly, a.filter = ts.weights, ts.tailOnly, filter
 	a.slots = a.slots[:0]
 	a.active = a.active[:0]
 	a.keyStamp = 0
@@ -443,7 +454,7 @@ func acquireAccumulator(weights map[string]float64, filter sets.Set[string]) *pr
 }
 
 func releaseAccumulator(a *prefixAccumulator) {
-	a.weights, a.filter = nil, nil
+	a.weights, a.tailOnly, a.filter = nil, nil, nil
 	for i := range a.slots {
 		a.slots[i].pod = ""
 		clear(a.slots[i].tiers)
@@ -558,15 +569,21 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 			slot.confirmedSeen = a.keyStamp
 		}
 
-		w := a.weightOf(tier, tierOrdinal)
-		switch {
-		case slot.seen != a.keyStamp:
+		w, primary := a.weightOf(tier, tierOrdinal)
+		if slot.seen != a.keyStamp {
 			slot.seen = a.keyStamp
-			slot.weight = w
+			slot.primaryWeight, slot.otherWeight = 0, 0
 			slot.keyHoldSpan1 = false
 			slot.keyHoldMulti = false
-		case w > slot.weight:
-			slot.weight = w
+		}
+		switch {
+		case !primary:
+			slot.otherWeight = max(slot.otherWeight, w)
+		case slot.primarySeen != a.keyStamp:
+			slot.primarySeen = a.keyStamp
+			slot.primaryWeight = w
+		default:
+			slot.primaryWeight = max(slot.primaryWeight, w)
 		}
 
 		span := ref.RetrievalSpan
@@ -673,13 +690,31 @@ func (a *prefixAccumulator) endKey() bool {
 	}
 	if a.first {
 		a.first = false
+		othersScore := true
+		if len(a.tailOnly) > 0 {
+			for i := range a.slots {
+				s := &a.slots[i]
+				s.primaryAlive = s.primarySeen == a.keyStamp
+				othersScore = othersScore && !s.primaryAlive
+			}
+		}
 		for i := range a.slots {
 			s := &a.slots[i]
 			s.alive = true
+			s.weight = s.keyWeight(a.keyStamp, othersScore)
 			a.creditKey(s, true)
 			a.active = append(a.active, int32(i))
 		}
 		return len(a.active) > 0
+	}
+
+	othersScore := true
+	if len(a.tailOnly) > 0 {
+		for _, i := range a.active {
+			s := &a.slots[i]
+			s.primaryAlive = s.primaryAlive && s.seen == a.keyStamp && s.primarySeen == a.keyStamp
+			othersScore = othersScore && !s.primaryAlive
+		}
 	}
 
 	keep := a.active[:0]
@@ -689,6 +724,7 @@ func (a *prefixAccumulator) endKey() bool {
 			s.alive = false
 			continue // the chain ends at the first key the pod does not hold
 		}
+		s.weight = s.keyWeight(a.keyStamp, othersScore)
 		a.creditKey(s, false)
 		keep = append(keep, i)
 	}
@@ -700,9 +736,18 @@ func (a *prefixAccumulator) endKey() bool {
 func (a *prefixAccumulator) endKeyIndependent() bool {
 	if a.first {
 		a.first = false
+		othersScore := true
+		if len(a.tailOnly) > 0 {
+			for i := range a.slots {
+				s := &a.slots[i]
+				s.primaryAlive = s.primarySeen == a.keyStamp
+				othersScore = othersScore && !s.primaryAlive
+			}
+		}
 		for i := range a.slots {
 			s := &a.slots[i]
 			s.alive = true
+			s.weight = s.keyWeight(a.keyStamp, othersScore)
 			s.matched, s.score = 1, s.weight
 			if s.confirmedSeen == a.keyStamp {
 				s.confirmed, s.confirmedAlive = 1, true
@@ -715,6 +760,15 @@ func (a *prefixAccumulator) endKeyIndependent() bool {
 		return len(a.active) > 0
 	}
 
+	othersScore := true
+	if len(a.tailOnly) > 0 {
+		for _, i := range a.active {
+			s := &a.slots[i]
+			s.primaryAlive = s.primaryAlive && s.seen == a.keyStamp && s.primarySeen == a.keyStamp
+			othersScore = othersScore && !s.primaryAlive
+		}
+	}
+
 	keep := a.active[:0]
 	for _, i := range a.active {
 		s := &a.slots[i]
@@ -722,6 +776,7 @@ func (a *prefixAccumulator) endKeyIndependent() bool {
 			s.alive = false
 			continue // the chain ends at the first key the pod does not hold
 		}
+		s.weight = s.keyWeight(a.keyStamp, othersScore)
 		s.matched++
 		s.score += s.weight
 		switch {
@@ -960,6 +1015,22 @@ func removeOrdinal(ids []uint32, ordinal uint32) []uint32 {
 	return ids[:n]
 }
 
+// keyWeight is the weight the current key adds to the slot's score: its
+// best primary weight when it holds a primary tier there, and its best other
+// weight when othersScore. Other tiers score at every key without tail-only
+// tiers, and otherwise only once no candidate's primary chain reaches the
+// key.
+func (s *matchSlot) keyWeight(keyStamp uint32, othersScore bool) float64 {
+	w := 0.0
+	if othersScore {
+		w = s.otherWeight
+	}
+	if s.primarySeen == keyStamp {
+		w = max(w, s.primaryWeight)
+	}
+	return w
+}
+
 // result materializes the accumulated matches.
 func (a *prefixAccumulator) result() map[string]PodMatch {
 	a.flushRun()
@@ -1014,21 +1085,22 @@ func (a *prefixAccumulator) newSlot(pod string) int32 {
 	return int32(slot)
 }
 
-// weightOf resolves a tier's weight, caching by ordinal so the configured
-// map is consulted once per tier per accumulation.
-func (a *prefixAccumulator) weightOf(tier string, ordinal uint32) float64 {
+// weightOf resolves a tier's weight and whether it is primary, caching by
+// ordinal so the configured maps are consulted once per tier per
+// accumulation.
+func (a *prefixAccumulator) weightOf(tier string, ordinal uint32) (float64, bool) {
 	for i := range a.weightCache {
 		if a.weightCache[i].ordinal == ordinal {
-			return a.weightCache[i].weight
+			return a.weightCache[i].weight, a.weightCache[i].primary
 		}
 	}
-	w := unknownTierWeight
+	w, primary := unknownTierWeight, false
 	if tier == SpeculativeTier {
-		w = speculativeTierWeight
+		w, primary = speculativeTierWeight, true
 	}
 	if configured, ok := a.weights[tier]; ok {
-		w = configured
+		w, primary = configured, !a.tailOnly[tier]
 	}
-	a.weightCache = append(a.weightCache, tierWeight{ordinal: ordinal, weight: w})
-	return w
+	a.weightCache = append(a.weightCache, tierWeight{ordinal: ordinal, weight: w, primary: primary})
+	return w, primary
 }
