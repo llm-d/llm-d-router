@@ -172,6 +172,7 @@ type resettableCollector interface {
 // Register and Reset both iterate it so the two stay in sync.
 func allCollectors() []resettableCollector {
 	return []resettableCollector{
+		buildInfo,
 		requestTotal,
 		requestErrorTotal,
 		requestDuration,
