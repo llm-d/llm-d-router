@@ -754,6 +754,21 @@ schedulingProfiles:
   - pluginRef: referencer
 `
 
+// successPluginOmitsProfileText has a profile-referencing plugin with no profile name set.
+const successPluginOmitsProfileText = `
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: referencer
+  type: test-profile-referencer
+- name: profileHandler
+  type: test-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: referencer
+`
+
 // errorDuplicatePluginText defines the same plugin name twice.
 const errorDuplicatePluginText = `
 apiVersion: llm-d.ai/v1

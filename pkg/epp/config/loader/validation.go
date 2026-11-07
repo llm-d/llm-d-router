@@ -206,6 +206,9 @@ func validateProfileReferences(cfg *configapiv1.EndpointPickerConfig, handle fwk
 			continue
 		}
 		for _, name := range referencer.ReferencedProfiles() {
+			if name == "" {
+				continue
+			}
 			if !profileNames.Has(name) {
 				return fmt.Errorf("plugin '%s' references undefined scheduling profile '%s'", spec.Name, name)
 			}

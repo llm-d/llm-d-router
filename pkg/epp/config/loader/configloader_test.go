@@ -57,11 +57,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/systemone"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
+	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
+	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/scheduling"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -880,6 +882,11 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			configText: successPluginReferencesDefinedProfileText,
 			wantErr:    false,
 		},
+		{
+			name:       "Success (Deep Validation) - Plugin Omits Optional Profile",
+			configText: successPluginOmitsProfileText,
+			wantErr:    false,
+		},
 
 		// --- Feature Validation: Scheduling ---
 		{
@@ -1180,6 +1187,59 @@ schedulingProfiles:
 				})
 			}
 		})
+	}
+}
+
+func TestSessionAffinityProfileNameValidation(t *testing.T) {
+	registerTestPlugins(t)
+	fwkplugin.Register(sessionaffinityfilter.SessionAffinityType, fwkplugin.StabilityStable, sessionaffinityfilter.Factory)
+	fwkplugin.Register(sessionaffinityfilter.MultiClusterFilterType, fwkplugin.StabilityStable, sessionaffinityfilter.MultiClusterFactory)
+	fwkplugin.Register(sessionaffinityscorer.SessionAffinityType, fwkplugin.StabilityStable, sessionaffinityscorer.Factory)
+
+	const text = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: affinity
+  type: %s
+  parameters:
+    strategy: %s
+    profileName: %s
+- name: profileHandler
+  type: test-profile-handler
+schedulingProfiles:
+- name: prefill
+  plugins:
+  - pluginRef: affinity
+- name: decode
+  plugins:
+  - pluginRef: affinity
+`
+	for _, pluginType := range []string{
+		sessionaffinityfilter.SessionAffinityType,
+		sessionaffinityfilter.MultiClusterFilterType,
+		sessionaffinityscorer.SessionAffinityType,
+	} {
+		for _, strategy := range []string{"encoded_endpoint_header", "session_id"} {
+			t.Run(pluginType+"/"+strategy, func(t *testing.T) {
+				logger := logging.NewTestLogger()
+				for _, tc := range []struct {
+					profileName string
+					wantErr     string
+				}{
+					{profileName: "prefill"},
+					{profileName: "prefil", wantErr: "plugin 'affinity' references undefined scheduling profile 'prefil'"},
+				} {
+					rawConfig, _, err := LoadRawConfig([]byte(fmt.Sprintf(text, pluginType, strategy, tc.profileName)), logger)
+					require.NoError(t, err)
+					_, err = InstantiateAndConfigure(rawConfig, testutils.NewTestHandle(t.Context()), logger)
+					if tc.wantErr == "" {
+						require.NoError(t, err, "profileName %q", tc.profileName)
+					} else {
+						require.ErrorContains(t, err, tc.wantErr)
+					}
+				}
+			})
+		}
 	}
 }
 
