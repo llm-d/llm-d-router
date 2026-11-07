@@ -232,6 +232,14 @@ const (
 	BlockTypeToolResult = "tool_result"
 )
 
+// Anthropic Messages stream event types, the values a data line's FieldType
+// takes, for the events that carry usage. message_start nests its usage under
+// FieldMessage; message_delta carries FieldUsage at the top level.
+const (
+	MessageEventStart = "message_start"
+	MessageEventDelta = "message_delta"
+)
+
 // ThinkingTypeEnabled is the Messages thinking.type that carries a budget_tokens
 // the Anthropic API requires to stay below max_tokens.
 const ThinkingTypeEnabled = "enabled"

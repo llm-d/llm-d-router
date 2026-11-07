@@ -191,6 +191,10 @@ type RequestContext struct {
 	// bodyReceived is set once the full request body is buffered; only such requests get an outcome.
 	bodyReceived bool
 
+	// disjointInput holds the input token buckets folded from the response chunks
+	// whose parser reports them separately; Usage.PromptTokens is their sum.
+	disjointInput fwkrh.DisjointInputTokens
+
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
 	sseLineDiscarding bool

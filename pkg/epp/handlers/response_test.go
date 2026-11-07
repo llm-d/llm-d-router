@@ -981,6 +981,32 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 			},
 			wantUsage: fwkrequest.Usage{}, // Zero values
 		},
+		{
+			name: "Inclusive prompt_tokens with cached_tokens only on second usage chunk",
+			chunks: []chunkStream{
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101,"prompt_tokens_details":null}}` + "\n"), endOfStream: false},
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":64}}}` + "\n" + `data: [DONE]`), endOfStream: true},
+			},
+			wantUsage: fwkrequest.Usage{
+				PromptTokens:       100,
+				CompletionTokens:   10,
+				TotalTokens:        110,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 64},
+			},
+		},
+		{
+			name: "Inclusive prompt_tokens with cached_tokens only on first usage chunk",
+			chunks: []chunkStream{
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101,"prompt_tokens_details":{"cached_tokens":64}}}` + "\n"), endOfStream: false},
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":0}}}` + "\n" + `data: [DONE]`), endOfStream: true},
+			},
+			wantUsage: fwkrequest.Usage{
+				PromptTokens:       100,
+				CompletionTokens:   10,
+				TotalTokens:        110,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 64},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1007,37 +1033,146 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	}
 }
 
-// A cache read reported by message_start must survive a later message_delta
-// that serializes a placeholder zero. Each chunk is parsed into a fresh Usage,
-// so this depends on mergeUsage applying the same "a zero never replaces a
-// known count" rule as the parser does within one Usage.
+// Cache read and cache creation counts reported by message_start must survive
+// a later message_delta delivered in a separate HTTP body chunk, including when
+// Envoy sends end of stream as a separate final frame.
 func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
 	t.Parallel()
 
-	server := &StreamingServer{
-		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
-		director:       &mockDirector{},
-	}
-	reqCtx := &RequestContext{
-		Response: &Response{
-			Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream},
+	tests := []struct {
+		name         string
+		messageStart string
+		messageDelta string
+		want         fwkrequest.Usage
+	}{
+		{
+			name:         "delta placeholder zero keeps cache read in prompt and total tokens",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2030,
+				CompletionTokens:   15,
+				TotalTokens:        2045,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
 		},
-		Request:           &Request{Headers: map[string]string{":path": reqcommon.APITypeMessages.Path()}},
-		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+		{
+			name:         "delta omitting cache fields keeps cache read and creation in prompt and total tokens",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2130,
+				CompletionTokens:   15,
+				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "delta increasing input tokens below start plus cache creation",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":80,"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2180,
+				CompletionTokens:   15,
+				TotalTokens:        2195,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "delta superseding input tokens keeps earlier cache read",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":2679,"cache_read_input_tokens":800}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":10682,"output_tokens":510,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       11482,
+				CompletionTokens:   510,
+				TotalTokens:        11992,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 800},
+			},
+		},
+		{
+			name:         "delta superseding input tokens with cache creation",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":2679,"cache_read_input_tokens":800,"cache_creation_input_tokens":500}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":10682,"output_tokens":510,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       11982,
+				CompletionTokens:   510,
+				TotalTokens:        12492,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 800},
+			},
+		},
+		{
+			name:         "delta with output tokens only",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2130,
+				CompletionTokens:   15,
+				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "delta updating input tokens keeps earlier cache buckets in the total",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":25,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2130,
+				CompletionTokens:   15,
+				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "explicit cache miss on start with output tokens only on delta",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":25,"cache_read_input_tokens":0}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       25,
+				CompletionTokens:   15,
+				TotalTokens:        40,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 0},
+			},
+		},
 	}
 
-	chunks := [][]byte{
-		[]byte("event: message_start\ndata: " + `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}` + "\n\n"),
-		[]byte("event: message_delta\ndata: " + `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}` + "\n\n"),
-		[]byte("event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"),
-	}
-	for i, chunk := range chunks {
-		server.HandleResponseBody(context.Background(), reqCtx, chunk, i == len(chunks)-1)
+	stop := "event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"
+	blockDelta := "event: content_block_delta\ndata: " + `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}` + "\n\n"
+	layouts := []struct {
+		name   string
+		chunks func(start, delta string) []string
+	}{
+		{"message_delta in final frame", func(start, delta string) []string { return []string{start, blockDelta, delta + stop} }},
+		{"message_stop final frame", func(start, delta string) []string { return []string{start, delta, stop} }},
+		{"empty final frame", func(start, delta string) []string { return []string{start, delta, ""} }},
 	}
 
-	require.NotNil(t, reqCtx.Usage.PromptTokenDetails)
-	assert.Equal(t, 2000, reqCtx.Usage.PromptTokenDetails.CachedTokens,
-		"a delta placeholder zero must not replace the cache read from message_start")
+	for _, tc := range tests {
+		for _, layout := range layouts {
+			t.Run(tc.name+"/"+layout.name, func(t *testing.T) {
+				server := &StreamingServer{
+					parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+					director:       &mockDirector{},
+				}
+				reqCtx := &RequestContext{
+					Response: &Response{
+						Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream},
+					},
+					Request:           &Request{Headers: map[string]string{":path": reqcommon.APITypeMessages.Path()}},
+					SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+				}
+
+				chunks := layout.chunks(
+					"event: message_start\ndata: "+tc.messageStart+"\n\n",
+					"event: message_delta\ndata: "+tc.messageDelta+"\n\n",
+				)
+				for i, chunk := range chunks {
+					server.HandleResponseBody(t.Context(), reqCtx, []byte(chunk), i == len(chunks)-1)
+				}
+
+				assert.Equal(t, tc.want, reqCtx.Usage)
+			})
+		}
+	}
 }
 
 // A large response.completed event split across chunks must still yield usage.
