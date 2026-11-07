@@ -450,6 +450,8 @@ var unsetRoutingHeaders = routing.AllHeaderNames(
 	routing.KVCacheSourceHeader,
 	routing.EncoderEndpointsHeader,
 	routing.DataParallelEndpointHeader,
+	routing.PrefillDataParallelRankHeader,
+	routing.DecodeDataParallelRankHeader,
 	routing.EndpointPinHeader,
 	tracing.FairnessIDHandoffHeader,
 	tracing.FairnessSourceHandoffHeader,
