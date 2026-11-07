@@ -29,10 +29,28 @@ trap 'rm -rf "$tmp"' EXIT
 weaver registry check --registry "$registry"
 weaver registry generate router "$tmp" \
     --registry "$registry" --templates hack/telemetry/templates
-gofmt -w "$tmp/pkg/common/observability/semconv/"*.go
+gofmt -w "$tmp/pkg/common/observability/semconv/"*.go "$tmp/pkg/epp/metrics/"*.go
+
+# Preserve the manually maintained metric catalog outside the generated table.
+python3 - "$tmp" <<'PYDOC'
+from pathlib import Path
+import sys
+
+tmp = Path(sys.argv[1])
+doc = Path("docs/metrics.md").read_text()
+start = "<!-- BEGIN GENERATED SCHEDULER METRICS -->"
+end = "<!-- END GENERATED SCHEDULER METRICS -->"
+if doc.count(start) != 1 or doc.count(end) != 1 or doc.index(start) > doc.index(end):
+    sys.exit("docs/metrics.md must contain one ordered pair of scheduler metrics markers")
+before, rest = doc.split(start)
+_, after = rest.split(end)
+table = (tmp / "scheduler-metrics.md").read_text()
+(tmp / "docs/metrics.md").write_text(before + start + "\n\n" + table + "\n" + end + after)
+PYDOC
 
 status=0
-for file in pkg/common/observability/semconv/llm_d.go pkg/common/observability/semconv/spans.go docs/telemetry.md; do
+for file in pkg/common/observability/semconv/llm_d.go pkg/common/observability/semconv/spans.go \
+    pkg/epp/metrics/zz_generated.scheduler_metrics.go docs/telemetry.md docs/metrics.md; do
     if [[ "$mode" == update ]]; then
         cp "$tmp/$file" "$file"
     elif ! diff -u "$file" "$tmp/$file"; then
