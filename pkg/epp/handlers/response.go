@@ -102,6 +102,9 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
+		if parsedResp.DisjointInputTokens != nil {
+			mergeDisjointInput(&reqCtx.Usage, &reqCtx.disjointInput, *parsedResp.DisjointInputTokens)
+		}
 	}
 	if endOfStream {
 		// Recorded once here rather than per chunk: a server reporting cumulative
@@ -342,6 +345,26 @@ func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 	if src.PromptTokens != 0 && src.CompletionTokens != 0 && src.TotalTokens != 0 {
 		dst.TotalTokens = src.TotalTokens
 		return
+	}
+	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
+}
+
+// mergeDisjointInput folds the input buckets of one chunk into acc and derives the
+// prompt and total from them. A chunk's PromptTokens and TotalTokens cover only the
+// buckets that chunk reported, so mergeUsage alone undercounts when message_delta
+// omits the cache buckets message_start reported in an earlier chunk.
+func mergeDisjointInput(dst *fwkrequest.Usage, acc *fwkrh.DisjointInputTokens, src fwkrh.DisjointInputTokens) {
+	if src.Uncached > 0 {
+		acc.Uncached = src.Uncached
+	}
+	if src.CacheRead > 0 {
+		acc.CacheRead = src.CacheRead
+	}
+	if src.CacheCreation > 0 {
+		acc.CacheCreation = src.CacheCreation
+	}
+	if prompt := acc.Uncached + acc.CacheRead + acc.CacheCreation; prompt > 0 {
+		dst.PromptTokens = prompt
 	}
 	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
 }

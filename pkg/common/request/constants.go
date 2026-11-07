@@ -226,6 +226,14 @@ const (
 	BlockTypeToolResult = "tool_result"
 )
 
+// Anthropic Messages stream event types, the values a data line's FieldType
+// takes, for the events that carry usage. message_start nests its usage under
+// FieldMessage; message_delta carries FieldUsage at the top level.
+const (
+	MessageEventStart = "message_start"
+	MessageEventDelta = "message_delta"
+)
+
 // DefaultImageMediaType is vLLM's fallback when an Anthropic base64 image
 // source omits media_type.
 const DefaultImageMediaType = "image/jpeg"

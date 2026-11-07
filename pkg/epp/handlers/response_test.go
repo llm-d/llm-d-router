@@ -1107,6 +1107,28 @@ func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
 				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
 			},
 		},
+		{
+			name:         "delta updating input tokens keeps earlier cache buckets in the total",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":25,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2130,
+				CompletionTokens:   15,
+				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "explicit cache miss on start with output tokens only on delta",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":25,"cache_read_input_tokens":0}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       25,
+				CompletionTokens:   15,
+				TotalTokens:        40,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 0},
+			},
+		},
 	}
 
 	stop := "event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"
