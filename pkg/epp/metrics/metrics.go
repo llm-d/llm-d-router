@@ -739,6 +739,17 @@ const (
 	DataLayerPollOutcomeTimeout = "timeout"
 )
 
+// InitDataLayerPollMetrics creates the three outcome series and the duration
+// histogram for a source type at zero, so the first non-success poll is an
+// increment on an existing series instead of the birth of a new one, which
+// rate() and increase() would not see. Safe to call repeatedly.
+func InitDataLayerPollMetrics(sourceType string) {
+	for _, outcome := range []string{DataLayerPollOutcomeSuccess, DataLayerPollOutcomeError, DataLayerPollOutcomeTimeout} {
+		LlmdDataLayerPollsTotal.WithLabelValues(sourceType, outcome)
+	}
+	LlmdDataLayerPollDuration.WithLabelValues(sourceType)
+}
+
 // RecordDataLayerPoll counts one poll under its outcome and observes its
 // duration for a source type.
 func RecordDataLayerPoll(sourceType, outcome string, duration time.Duration) {

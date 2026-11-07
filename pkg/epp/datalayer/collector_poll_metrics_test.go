@@ -316,7 +316,8 @@ func assertNoPollRecorded(t *testing.T, ep fwkdl.Endpoint, srcType, srcName stri
 	for _, outcome := range pollOutcomes {
 		assert.Zero(t, pollsTotal(t, srcType, outcome), "unexpected %s poll", outcome)
 	}
-	assert.Nil(t, pollDuration(t, srcType), "unexpected duration observation")
+	// Start pre-creates the histogram series; what must not exist is an observation.
+	assert.Zero(t, pollDuration(t, srcType).GetSampleCount(), "unexpected duration observation")
 	assert.Zero(t, testutil.ToFloat64(metrics.LlmdDataLayerPollErrorsTotal.WithLabelValues(srcType)))
 	_, ok := readPollStatusFor(ep, srcName)
 	assert.False(t, ok, "unexpected PollStatus")
@@ -469,6 +470,54 @@ func TestCollectorPollMetricsPerDispatcher(t *testing.T) {
 	assert.Equal(t, uint64(2), pollDurationCount(t, third.sourceType))
 }
 
+// TestCollectorPollMetricsFirstFailureVisible confirms Start exposes all three
+// outcome series at zero before any poll, so a first failure after a healthy
+// run is a 0 -> 1 increment on an existing series rather than a new series.
+func TestCollectorPollMetricsFirstFailureVisible(t *testing.T) {
+	resetPollMetrics(t)
+	const srcType = "first-failure-type"
+	var fail atomic.Bool
+	pollErr := errors.New("poll boom")
+	src := &pollSource{sourceType: srcType, name: "flaky", poll: func(context.Context) error {
+		if fail.Load() {
+			return pollErr
+		}
+		return nil
+	}}
+	c := NewCollector()
+	ticker := mocks.NewTicker()
+	require.NoError(t, c.Start(context.Background(), ticker, defaultEndpoint(), []fwkdl.PollingDispatcher{src}))
+	defer c.Stop()
+
+	// Scrape 1: nothing polled yet, every series present at zero.
+	series := familySeries(t, pollsTotalName, srcType)
+	require.Len(t, series, len(pollOutcomes), "all outcome series exist before the first poll")
+	for _, outcome := range pollOutcomes {
+		assert.Zero(t, pollsTotal(t, srcType, outcome))
+	}
+	assert.Zero(t, pollDuration(t, srcType).GetSampleCount())
+
+	// Scrape 2: healthy polls move only the success series.
+	for range 3 {
+		ticker.Tick()
+	}
+	require.Eventually(t, func() bool {
+		return pollsRecorded(t, srcType, metrics.DataLayerPollOutcomeSuccess, 3)
+	}, metricSettleWait, 2*time.Millisecond)
+	assert.Zero(t, pollsTotal(t, srcType, metrics.DataLayerPollOutcomeError))
+	assert.Zero(t, pollsTotal(t, srcType, metrics.DataLayerPollOutcomeTimeout))
+
+	// Scrape 3: the first failure is an increment of the existing error series.
+	fail.Store(true)
+	ticker.Tick()
+	require.Eventually(t, func() bool {
+		return pollsTotal(t, srcType, metrics.DataLayerPollOutcomeError) == 1
+	}, metricSettleWait, 2*time.Millisecond)
+	c.Stop()
+	assert.Len(t, familySeries(t, pollsTotalName, srcType), len(pollOutcomes), "no series created by the failure")
+	assert.Equal(t, uint64(4), pollDurationCount(t, srcType))
+}
+
 // TestCollectorPollMetricsBoundedLabels confirms dispatchers with different
 // names on different endpoints share one series per source type, and that the
 // series carry only the source_type and outcome labels.
@@ -506,9 +555,14 @@ func TestCollectorPollMetricsBoundedLabels(t *testing.T) {
 		assert.Equal(t, int64(2), atomic.LoadInt64(&src.CallCount), "dispatcher %s", src.name)
 	}
 
+	// One series per outcome for the shared type (all pre-created by Start), no
+	// matter how many endpoints or dispatcher names feed it.
 	counters := familySeries(t, pollsTotalName, srcType)
-	require.Len(t, counters, 1, "one counter series per source type and outcome")
-	assert.Equal(t, []string{"outcome", "source_type"}, labelNames(counters[0]))
+	require.Len(t, counters, len(pollOutcomes), "one counter series per source type and outcome")
+	for _, counter := range counters {
+		assert.Equal(t, []string{"outcome", "source_type"}, labelNames(counter))
+	}
+	assert.Equal(t, float64(8), pollsTotal(t, srcType, metrics.DataLayerPollOutcomeSuccess))
 
 	durations := familySeries(t, pollDurationName, srcType)
 	require.Len(t, durations, 1, "one duration series per source type")

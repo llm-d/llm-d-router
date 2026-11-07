@@ -464,8 +464,14 @@ shutdown (the parent context is cancelled) is dropped from `polls_total` and
 
 `poll_errors_total` and `PollStatus` follow the returned error alone: a `timeout` with a nil
 return increments `polls_total` but not `poll_errors_total`, and does not start a failure run.
-`poll_errors_total` is therefore not `error` plus `timeout` in general. Alert on
-`polls_total{outcome!="success"}`; it covers every poll that did not refresh the endpoint.
+`poll_errors_total` is therefore not `error` plus `timeout` in general. For poll-level failures
+(the source could not produce data, or ran past its deadline) alert on
+`polls_total{outcome!="success"}`. A poll whose extractors failed still counts as `success`,
+because `Dispatch` returned nil; those refresh failures are visible only in `extract_errors_total`.
+
+All three `outcome` series and the duration histogram are created at zero when a collector
+starts for a source type, so a first `error` or `timeout` after a healthy run is a `0 → 1`
+increment that `rate()` and `increase()` can see, not a series that first appears at `1`.
 
 ### Endpoint health
 

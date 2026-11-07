@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1511,4 +1512,38 @@ func TestRecordDataLayerPoll(t *testing.T) {
 	Reset()
 	require.Zero(t, promtestutil.CollectAndCount(LlmdDataLayerPollsTotal))
 	require.Zero(t, promtestutil.CollectAndCount(LlmdDataLayerPollDuration))
+}
+
+// TestInitDataLayerPollMetrics confirms every outcome series and the histogram
+// exist at zero after init, that init is idempotent, and that a later poll
+// increments the pre-existing series rather than creating one.
+func TestInitDataLayerPollMetrics(t *testing.T) {
+	Register()
+	t.Cleanup(Reset)
+	Reset()
+
+	InitDataLayerPollMetrics("http-type")
+	InitDataLayerPollMetrics("http-type")
+
+	want := `
+# HELP llm_d_epp_datalayer_polls_total [ALPHA] Data-source polls per source type and outcome.
+# TYPE llm_d_epp_datalayer_polls_total counter
+llm_d_epp_datalayer_polls_total{outcome="error",source_type="http-type"} 0
+llm_d_epp_datalayer_polls_total{outcome="success",source_type="http-type"} 0
+llm_d_epp_datalayer_polls_total{outcome="timeout",source_type="http-type"} 0
+`
+	require.NoError(t, promtestutil.GatherAndCompare(metrics.Registry, strings.NewReader(want), "llm_d_epp_datalayer_polls_total"))
+	require.Equal(t, 1, promtestutil.CollectAndCount(LlmdDataLayerPollDuration), "one histogram series per source type")
+	families, err := metrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() == "llm_d_epp_datalayer_poll_duration_seconds" {
+			require.Len(t, f.GetMetric(), 1)
+			require.Zero(t, f.GetMetric()[0].GetHistogram().GetSampleCount(), "histogram exists with no observations")
+		}
+	}
+
+	RecordDataLayerPoll("http-type", DataLayerPollOutcomeTimeout, time.Second)
+	require.Equal(t, 3, promtestutil.CollectAndCount(LlmdDataLayerPollsTotal), "no new series after a poll")
+	require.Equal(t, float64(1), promtestutil.ToFloat64(LlmdDataLayerPollsTotal.WithLabelValues("http-type", DataLayerPollOutcomeTimeout)))
 }

@@ -99,6 +99,12 @@ func (c *Collector) Start(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
+	// Expose every outcome series at zero before the first poll, so a first
+	// error or timeout after a healthy run is a 0 -> 1 step that rate() and
+	// increase() can see, rather than a series born at 1.
+	for _, d := range dispatchers {
+		metrics.InitDataLayerPollMetrics(d.TypedName().Type)
+	}
 	go c.run(ctx, ticker, ep, dispatchers)
 	return nil
 }
@@ -146,13 +152,15 @@ func (c *Collector) run(ctx context.Context, ticker Ticker, ep fwkdl.Endpoint, d
 					disp = interval.PollingDispatcher
 				}
 				dispCtx, cancel := context.WithTimeout(ctx, defaultCollectionTimeout)
+				deadline, _ := dispCtx.Deadline()
 				start := time.Now()
 				err := disp.Dispatch(dispCtx, ep)
 				end := time.Now()
-				// Read before any further work so a deadline that expires after
-				// Dispatch returned is not charged to this poll.
-				timedOut := errors.Is(dispCtx.Err(), context.DeadlineExceeded)
 				cancel()
+				// Classified against the same instant the duration uses, so a
+				// deadline that passes after Dispatch returned is not charged
+				// to this poll.
+				timedOut := !end.Before(deadline)
 				// A poll cut short by Stop says nothing about the endpoint.
 				if ctx.Err() != nil {
 					return
