@@ -91,8 +91,12 @@ func continuationPrompt(request *fwksched.InferenceRequest) (string, bool) {
 // PreRequest sends the prompt's recent-window entry on after inserting the
 // prompt keys.
 func (p *dataProducer) trackContinuation(ctx context.Context, request *fwksched.InferenceRequest, target *server, blockSize int) chan []blockHash {
+	if !p.config.IndexCompletions || target == nil || !p.estimateTokens.Load() {
+		p.pluginState.Delete(request.RequestID)
+		return nil
+	}
 	prompt, ok := continuationPrompt(request)
-	if !p.config.IndexCompletions || target == nil || !ok || !p.estimateTokens.Load() {
+	if !ok {
 		p.pluginState.Delete(request.RequestID)
 		return nil
 	}
@@ -115,19 +119,19 @@ func (p *dataProducer) ResponseBody(_ context.Context, request *fwksched.Inferen
 	if err != nil || response.Completion == nil || response.TerminationCause != fwkrh.TerminationCauseNatural {
 		return
 	}
-	tokens := tokenproducer.PackBytes([]byte(state.prompt + response.Completion.Text))
-	keyed := &fwksched.InferenceRequest{
-		TargetModel: request.TargetModel,
-		Body: &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{
-			Prompts:   []fwkrequest.PromptTokens{{TokenIDs: tokens}},
-			CacheSalt: request.Body.TokenizedRequest.CacheSalt,
-		}},
-	}
-	hashes := prefixhash.GetBlockHashes(context.Background(), keyed, state.blockSize, p.resolveMaxBlocks(state.blockSize))
-	if len(hashes) == 0 {
-		return
-	}
+	model, salt, text := request.TargetModel, request.Body.TokenizedRequest.CacheSalt, response.Completion.Text
 	p.wg.Go(func() {
+		keyed := &fwksched.InferenceRequest{
+			TargetModel: model,
+			Body: &fwkrequest.InferenceRequestBody{TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts:   []fwkrequest.PromptTokens{{TokenIDs: tokenproducer.PackBytes([]byte(state.prompt + text))}},
+				CacheSalt: salt,
+			}},
+		}
+		hashes := prefixhash.GetBlockHashes(context.Background(), keyed, state.blockSize, p.resolveMaxBlocks(state.blockSize))
+		if len(hashes) == 0 {
+			return
+		}
 		promptEntry := <-state.promptIndexed
 		p.indexerInst.Add(hashes[0], state.server)
 		if !p.syncerActive() {

@@ -23,7 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -246,38 +246,40 @@ func (g *gatedIndexer) appliedLens() []int {
 func TestContinuationIndexedAfterLatePromptInsert(t *testing.T) {
 	const capacity = 3
 	f := newContinuationFixtureWithCapacity(t, estimateTokenProducer, capacity)
-	gate := &gatedIndexer{indexerInterface: f.p.indexerInst, waiting: make(chan struct{}), release: make(chan struct{})}
-	f.p.indexerInst = gate
-	req := completionsRequest(contPrompt)
+	synctest.Test(t, func(t *testing.T) {
+		gate := &gatedIndexer{indexerInterface: f.p.indexerInst, waiting: make(chan struct{}), release: make(chan struct{})}
+		f.p.indexerInst = gate
+		req := completionsRequest(contPrompt)
 
-	ctx := context.Background()
-	require.NoError(t, f.p.Produce(ctx, req, []fwksched.Endpoint{f.decode, f.prefill}))
-	require.NoError(t, f.p.PreRequest(ctx, req, &fwksched.SchedulingResult{
-		PrimaryProfileName: "decode",
-		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			"decode":                          {TargetEndpoints: []fwksched.Endpoint{f.decode}},
-			experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{f.prefill}},
-		},
-	}))
-	<-gate.waiting
-	f.p.ResponseBody(ctx, req, &fwkrh.Response{
-		RequestID:        req.RequestID,
-		StartOfStream:    true,
-		EndOfStream:      true,
-		TerminationCause: fwkrh.TerminationCauseNatural,
-		Completion:       &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"},
-	}, f.decode.GetMetadata())
-	// Give a continuation insert that does not wait for the prompt time to land.
-	time.Sleep(50 * time.Millisecond)
-	close(gate.release)
-	f.p.wg.Wait()
+		ctx := context.Background()
+		require.NoError(t, f.p.Produce(ctx, req, []fwksched.Endpoint{f.decode, f.prefill}))
+		require.NoError(t, f.p.PreRequest(ctx, req, &fwksched.SchedulingResult{
+			PrimaryProfileName: "decode",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"decode":                          {TargetEndpoints: []fwksched.Endpoint{f.decode}},
+				experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{f.prefill}},
+			},
+		}))
+		<-gate.waiting
+		f.p.ResponseBody(ctx, req, &fwkrh.Response{
+			RequestID:        req.RequestID,
+			StartOfStream:    true,
+			EndOfStream:      true,
+			TerminationCause: fwkrh.TerminationCauseNatural,
+			Completion:       &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"},
+		}, f.decode.GetMetadata())
+		// Let a continuation insert that does not wait for the prompt land first.
+		synctest.Wait()
+		close(gate.release)
+		f.p.wg.Wait()
 
-	full := nextTurnBlocks()
-	applied := gate.appliedLens()
-	require.NotEmpty(t, applied)
-	assert.Equal(t, full, applied[len(applied)-1], "continuation inserted after the prompt, applied %v", applied)
-	decode, _ := f.nextTurn(t)
-	assert.Equal(t, capacity, decode, "decode endpoint keeps the leading continuation blocks")
+		full := nextTurnBlocks()
+		applied := gate.appliedLens()
+		require.NotEmpty(t, applied)
+		assert.Equal(t, full, applied[len(applied)-1], "continuation inserted after the prompt, applied %v", applied)
+		decode, _ := f.nextTurn(t)
+		assert.Equal(t, capacity, decode, "decode endpoint keeps the leading continuation blocks")
+	})
 }
 
 // TestContinuationBackendRecordedAtStartup runs the startup sequence: missing
@@ -400,6 +402,18 @@ func TestContinuationOffByDefault(t *testing.T) {
 	assert.Equal(t, fullPromptBlocks, prefill)
 }
 
+// TestContinuationOffSkipsPromptExtraction checks that with completion
+// indexing off, the request path does not pack the prompt.
+func TestContinuationOffSkipsPromptExtraction(t *testing.T) {
+	f := newContinuationFixtureWithParams(t, estimateTokenProducer, defaultLRUCapacityPerServer, `{}`, testHandle())
+	req := completionsRequest(contPrompt)
+	target := f.p.makeserver(f.decode)
+	allocs := testing.AllocsPerRun(10, func() {
+		f.p.trackContinuation(context.Background(), req, &target, contBlockSize)
+	})
+	assert.Zero(t, allocs)
+}
+
 // TestContinuationNotCreditedToPrefillWhenDecodeExcluded covers a disaggregated
 // request recorded on the prefill endpoint only. The prefill endpoint does not
 // hold the generated text's KV.
@@ -509,23 +523,25 @@ func TestContinuationLeavesRecentWindowWhenNotIndexed(t *testing.T) {
 // until the response has ended, with a CrossReplicaSyncer configured.
 func TestContinuationReplacesLatePromptEntry(t *testing.T) {
 	f := newSyncedContinuationFixture(t, 100)
-	gate := &gatedIndexer{indexerInterface: f.p.indexerInst, waiting: make(chan struct{}), release: make(chan struct{})}
-	f.p.indexerInst = gate
-	req := completionsRequest(contPrompt)
+	synctest.Test(t, func(t *testing.T) {
+		gate := &gatedIndexer{indexerInterface: f.p.indexerInst, waiting: make(chan struct{}), release: make(chan struct{})}
+		f.p.indexerInst = gate
+		req := completionsRequest(contPrompt)
 
-	f.schedule(t, req)
-	<-gate.waiting
-	f.p.ResponseBody(context.Background(), req, &fwkrh.Response{
-		RequestID:        req.RequestID,
-		StartOfStream:    true,
-		EndOfStream:      true,
-		TerminationCause: fwkrh.TerminationCauseNatural,
-		Completion:       &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"},
-	}, f.decode.GetMetadata())
-	time.Sleep(50 * time.Millisecond)
-	close(gate.release)
-	f.p.wg.Wait()
+		f.schedule(t, req)
+		<-gate.waiting
+		f.p.ResponseBody(context.Background(), req, &fwkrh.Response{
+			RequestID:        req.RequestID,
+			StartOfStream:    true,
+			EndOfStream:      true,
+			TerminationCause: fwkrh.TerminationCauseNatural,
+			Completion:       &fwkrh.Completion{Text: contCompletion, FinishReason: "stop"},
+		}, f.decode.GetMetadata())
+		synctest.Wait()
+		close(gate.release)
+		f.p.wg.Wait()
 
-	assert.Equal(t, [][]blockHash{contKeys(contPrompt + contCompletion)}, f.window(f.decode))
-	assert.Equal(t, [][]blockHash{contKeys(contPrompt)}, f.window(f.prefill))
+		assert.Equal(t, [][]blockHash{contKeys(contPrompt + contCompletion)}, f.window(f.decode))
+		assert.Equal(t, [][]blockHash{contKeys(contPrompt)}, f.window(f.prefill))
+	})
 }
