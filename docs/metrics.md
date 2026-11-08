@@ -395,10 +395,12 @@ These metrics are owned by EPP scheduler instrumentation. Their declarations in
 and the table below are generated from
 [`scheduler-metrics.yaml`](../pkg/common/observability/semconv/registry/scheduler-metrics.yaml).
 Edit the registry and run `make update-telemetry`; `make verify-telemetry` checks for drift.
-The registry preserves Prometheus names, units, histogram boundaries, and positional label
-order. Metric descriptions supply the Prometheus help text and the documentation; the
-collectors retain their `ALPHA` stability prefix. Other sections of this catalog are maintained
-manually.
+The registry supplies Prometheus names, histogram boundaries, and positional label order.
+Generation requires the `llm_d_epp_` name prefix and unique label positions covering `0..n-1`.
+Metric descriptions supply the Prometheus help text and the documentation. The registry's
+`unit` and `stability` fields are metadata and are not consumed by these templates. Collectors
+retain their `ALPHA` help prefix; unit suffixes come from `metric_name`.
+Other sections of this catalog are maintained manually.
 
 <!-- BEGIN GENERATED SCHEDULER METRICS -->
 
