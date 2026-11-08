@@ -465,16 +465,6 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 			pipelineResult, writeErr := writeResult(w, res)
 			if writeErr != nil {
 				logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
-			} else {
-				// Delivery confirmed on the held connection, the result's only
-				// consumer: reclaim the mailbox now instead of letting it sit
-				// out the full result TTL. On write failure the key stays, as
-				// the client may still fetch by id.
-				delCtx, delCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer delCancel()
-				if err := s.rdb.Del(delCtx, resultKey(tenant, id)).Err(); err != nil {
-					logger.Error(err, "failed to delete delivered result", "id", id)
-				}
 			}
 			return pipelineResult
 		}
@@ -498,8 +488,6 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 					pipelineResult, writeErr := writeResult(w, res)
 					if writeErr != nil {
 						logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
-					} else if err := s.rdb.Del(finalCtx, resultKey(tenant, id)).Err(); err != nil {
-						logger.Error(err, "failed to delete delivered result", "id", id)
 					}
 					return pipelineResult
 				}

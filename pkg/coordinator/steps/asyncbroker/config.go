@@ -132,8 +132,7 @@ type asyncBrokerConfig struct {
 	WaitCapSeconds int64 `json:"wait_cap_seconds,omitempty"`
 	// FetchGraceSeconds is the mailbox TTL applied after a delivered fetch,
 	// covering lost-response retries. Unset falls back to
-	// resultFetchGraceTTL. Zero deletes the result on delivery, matching
-	// wait mode's eager delete.
+	// resultFetchGraceTTL. Zero deletes the result on delivery.
 	FetchGraceSeconds *int64 `json:"fetch_grace_seconds,omitempty"`
 
 	// Routes select the broker queue and tier per request. The queues must

@@ -148,8 +148,7 @@ func (s *Step) handleDelete(w http.ResponseWriter, r *http.Request) {
 // delivers there. Fetch reads are non-destructive: a delivered fetch shrinks
 // the TTL to resultFetchGraceTTL (covering lost-response retries), DELETE
 // reclaims immediately, and the full TTL bounds the unfetched case. Wait
-// mode deletes the key once the result is delivered on the held connection,
-// its only consumer.
+// delivery preserves the TTL for other attached waiters and retries.
 func resultKey(tenant, id string) string {
 	return resultKeyPrefix + tenant + ":" + id
 }

@@ -28,7 +28,7 @@ x-llm-d-request-timeout-seconds: 30      # optional deadline
 {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Summarize this."}]}
 ```
 
-An id names one logical request. Re-submitting an id reattaches to the live request or its stored result instead of running a second copy (reviving it if it was cancelled in-queue), so a retry with a different body gets the original body's response (don't do this). A retry runs fresh only once the previous attempt is fully dead: delivered, expired, or cancelled and dropped.
+An id names one logical request. Re-submitting an id reattaches to the live request or its stored result instead of running a second copy (reviving it if it was cancelled in-queue), so a retry with a different body gets the original body's response (don't do this). A retry runs fresh once neither a live request nor its result remains, or after a cancelled request has been dropped.
 
 **Enqueue** returns immediately and the completion is collected later by id:
 
@@ -51,7 +51,7 @@ If the client disconnects before the 202, the step cancels the request pre-dispa
 
 After a successful fetch delivery the result's TTL is shrunk to a grace window (`fetch_grace_seconds`), so a client that lost the response can re-fetch while unfetched results do not linger past the grace period.
 
-**Wait** returns the model's response on the original connection with the upstream status mirrored, exactly as if the model server had answered directly, and the delivered result is deleted eagerly. Wake-up is a Redis keyspace notification on the result key, with a polling fallback when notifications are unavailable. The hold runs to the request deadline and answers 504 there, or ends early at `wait_cap_seconds` with the 202 response, leaving the request fetchable. If the client disconnects, the step cancels the request pre-dispatch.
+**Wait** returns the model's response on the original connection with the upstream status mirrored, exactly as if the model server had answered directly. Delivery preserves the AP's result TTL so concurrent waiters and retries can read the same result. Wake-up is a Redis keyspace notification on the result key, with a polling fallback when notifications are unavailable. The hold runs to the request deadline and answers 504 there, or ends early at `wait_cap_seconds` with the 202 response, leaving the request fetchable. If the client disconnects, the step cancels the request pre-dispatch.
 
 **Passthrough** classifies and stamps, then lets the pipeline continue, so streaming and upstream errors behave exactly as they do without the step.
 
@@ -132,13 +132,13 @@ All params and their defaults are documented in `pkg/coordinator/steps/asyncbrok
 | Result TTL | result written to Redis → first fetch, expiry, or DELETE | none | AP queue config `result_ttl_seconds` | result deleted + fetch returns 410 Gone |
 | Post-fetch grace | first delivered fetch → grace expiry or DELETE | 60s | step param `fetch_grace_seconds` | result deleted + fetch returns 410 Gone |
 
-The three lifecycle clocks hand off without overlap: the deadline ends where the result TTL begins (result written), and the result TTL ends where the grace begins (first delivered fetch). Wait mode deletes the result on delivery, so the TTL and grace rows apply to enqueue results and to wait requests that fell back at the cap. Raw producers supply a deadline per message, and their results go to the shared belt, which is drained destructively, so the TTL and grace rows do not apply there.
+The three lifecycle clocks hand off without overlap: the deadline ends where the result TTL begins (result written), and the result TTL ends where the grace begins (first delivered fetch). The result TTL applies to both enqueue and wait results. Wait delivery does not shorten or extend it; a subsequent GET applies the fetch grace, and DELETE reclaims the result immediately. Raw producers supply a deadline per message, and their results go to the shared belt, which is drained destructively, so the TTL and grace rows do not apply there.
 
 ## Deployment notes
 
 - The gateway must route `GET/DELETE /v1/requests/*` to the coordinator. Stock llm-d routing forwards only the inference paths, so these need adding to the coordinator's HTTPRoute.
 - The tenant header is trusted as asserted, the same as everywhere else on the llm-d serving path. Request id is the only secret protecting a stored result, so clients that need an unguessable handle should omit `X-Request-Id` and use the minted UUID.
-- Set `result_ttl_seconds` on every AP queue the step feeds, or unfetched results never expire.
+- Set a positive `result_ttl_seconds` on every AP queue the step feeds, or retained results never expire, including results delivered in wait mode.
 - Redis needs keyspace notifications enabled for the wait wake-up (`notify-keyspace-events Kl`). The step detects their absence and falls back to polling.
 - `redis_url` must point at a standalone Redis endpoint, or a proxy presenting one. The step's client does not follow Cluster redirects or Sentinel failovers.
 - Set `maxmemory` together with `maxmemory-policy noeviction` on that Redis, with headroom below the container's memory limit. An evicted marker, counter, or mailbox silently corrupts request state, while `noeviction` turns overflow into write errors the step reports.
