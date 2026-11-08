@@ -48,13 +48,16 @@ func referenceSeed(model, salt string) uint64 {
 // referenceBlockHashes is an independent statement of the block hash chain:
 // the seed is xxhash over the length-prefixed model and salt; block i hashes
 // its token bytes, and its chain hash is xxhash(LE(block hash) || LE(chain hash
-// of block i-1)). Every prompt starts from the seed, the final block may be
-// partial, and empty prompts produce no entry.
-func referenceBlockHashes(model, salt string, prompts [][]uint32, blockSize, maxBlocks int) ([][]BlockHash, []int) {
+// of block i-1)). A block overlapping multimodal items replaces its token hash
+// with xxhash(LE(token hash) || the length-prefixed hash of each overlapping
+// item, in feature order). Every prompt starts from the seed, the final block
+// may be partial, and empty prompts produce no entry.
+func referenceBlockHashes(model, salt string, prompts []fwkrequest.PromptTokens, blockSize, maxBlocks int) ([][]BlockHash, []int) {
 	var hashes [][]BlockHash
 	var tokens []int
 	seed := referenceSeed(model, salt)
-	for _, prompt := range prompts {
+	for _, p := range prompts {
+		prompt := p.TokenIDs
 		if len(prompt) == 0 || blockSize <= 0 {
 			continue
 		}
@@ -63,6 +66,16 @@ func referenceBlockHashes(model, salt string, prompts [][]uint32, blockSize, max
 		for start := 0; start < len(prompt) && len(chain) < maxBlocks; start += blockSize {
 			block := prompt[start:min(start+blockSize, len(prompt))]
 			content := xxhash.Sum64(unsafe.Slice((*byte)(unsafe.Pointer(&block[0])), len(block)*4)) //#nosec G103 -- test reference over a non-empty slice
+			var mm []byte
+			for _, f := range p.MultiModalFeatures {
+				if f.Offset < start+len(block) && start < f.Offset+f.Length {
+					mm = binary.LittleEndian.AppendUint64(mm, uint64(len(f.Hash)))
+					mm = append(mm, f.Hash...)
+				}
+			}
+			if mm != nil {
+				content = xxhash.Sum64(append(binary.LittleEndian.AppendUint64(nil, content), mm...))
+			}
 			var buf [16]byte
 			binary.LittleEndian.PutUint64(buf[:8], content)
 			binary.LittleEndian.PutUint64(buf[8:], prev)
@@ -83,11 +96,25 @@ func referenceBlockHashes(model, salt string, prompts [][]uint32, blockSize, max
 func TestGetBlockHashesMatchesReference(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 1))
 	for iter := range 2000 {
-		prompts := make([][]uint32, rng.IntN(4))
+		prompts := make([]fwkrequest.PromptTokens, rng.IntN(4))
 		for i := range prompts {
-			prompts[i] = make([]uint32, rng.IntN(70))
-			for j := range prompts[i] {
-				prompts[i][j] = rng.Uint32()
+			tokens := make([]uint32, rng.IntN(70))
+			for j := range tokens {
+				tokens[j] = rng.Uint32()
+			}
+			prompts[i].TokenIDs = tokens
+			// Up to three items, in offset order as token producers emit them.
+			offset := 0
+			for range rng.IntN(4) {
+				if offset >= len(tokens) {
+					break
+				}
+				offset += rng.IntN(len(tokens) - offset)
+				length := 1 + rng.IntN(len(tokens)-offset)
+				prompts[i].MultiModalFeatures = append(prompts[i].MultiModalFeatures, fwkrequest.MultiModalFeature{
+					Hash: fmt.Sprintf("item-%d", rng.IntN(1000)), Offset: offset, Length: length,
+				})
+				offset += length
 			}
 		}
 		blockSize := rng.IntN(18) - 1
@@ -100,9 +127,7 @@ func TestGetBlockHashesMatchesReference(t *testing.T) {
 
 		req := &fwksched.InferenceRequest{TargetModel: model, Body: &fwkrequest.InferenceRequestBody{
 			TokenizedRequest: &fwkrequest.TokenizedRequest{CacheSalt: salt}}}
-		for _, p := range prompts {
-			req.Body.TokenizedRequest.Prompts = append(req.Body.TokenizedRequest.Prompts, fwkrequest.PromptTokens{TokenIDs: p})
-		}
+		req.Body.TokenizedRequest.Prompts = prompts
 
 		gotHashes, gotTokens := GetBlockHashesWithPromptTokens(context.Background(), req, blockSize, maxBlocks)
 		wantHashes, wantTokens := referenceBlockHashes(model, salt, prompts, blockSize, maxBlocks)

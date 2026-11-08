@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -307,4 +308,92 @@ func TestKVCacheBlock_Hash(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mmPromptTokens is three 4-token blocks: text in tokens 0-3, one multimodal
+// item rendered as a run of mmPlaceholder in tokens 4-9, and text in tokens
+// 10-11. Placeholder IDs depend on the item's size, not its content, so only
+// the feature hash tells two same-size items apart.
+const mmPlaceholder = 9
+
+var mmPromptTokens = []uint32{1, 2, 3, 4, mmPlaceholder, mmPlaceholder, mmPlaceholder, mmPlaceholder, mmPlaceholder, mmPlaceholder, 5, 6}
+
+func mmHashes(t *testing.T, tokens []uint32, features ...fwkrequest.MultiModalFeature) []BlockHash {
+	t.Helper()
+	hashes := GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+		TargetModel: "m",
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{
+				Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens, MultiModalFeatures: features}},
+			},
+		},
+	}, 4, testMaxPrefixBlocks)
+	require.Len(t, hashes, 1)
+	return hashes[0]
+}
+
+func image(hash string, offset, length int) fwkrequest.MultiModalFeature {
+	return fwkrequest.MultiModalFeature{Modality: reqcommon.ModalityImage, Hash: hash, Offset: offset, Length: length}
+}
+
+func TestGetBlockHashes_MultiModal(t *testing.T) {
+	a := mmHashes(t, mmPromptTokens, image("a", 4, 6))
+	require.Len(t, a, 3)
+
+	t.Run("same item matches", func(t *testing.T) {
+		assert.Equal(t, a, mmHashes(t, mmPromptTokens, image("a", 4, 6)))
+	})
+
+	t.Run("different item diverges from the first overlapping block", func(t *testing.T) {
+		b := mmHashes(t, mmPromptTokens, image("b", 4, 6))
+		assert.Equal(t, a[0], b[0], "block before the item must still match")
+		assert.NotEqual(t, a[1], b[1])
+		assert.NotEqual(t, a[2], b[2])
+	})
+
+	t.Run("blocks before any item hash as text", func(t *testing.T) {
+		assert.Equal(t, mmHashes(t, mmPromptTokens)[0], a[0])
+	})
+
+	t.Run("item inside the final partial block", func(t *testing.T) {
+		tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, mmPlaceholder, mmPlaceholder}
+		x := mmHashes(t, tokens, image("x", 8, 2))
+		y := mmHashes(t, tokens, image("y", 8, 2))
+		require.Len(t, x, 3)
+		assert.Equal(t, x[:2], y[:2])
+		assert.NotEqual(t, x[2], y[2])
+	})
+
+	t.Run("each item in a block shared by two items counts", func(t *testing.T) {
+		tokens := []uint32{1, 2, mmPlaceholder, mmPlaceholder, mmPlaceholder, mmPlaceholder, mmPlaceholder, mmPlaceholder, 5, 6, 7, 8}
+		base := mmHashes(t, tokens, image("a", 2, 3), image("b", 5, 3))
+		otherFirst := mmHashes(t, tokens, image("z", 2, 3), image("b", 5, 3))
+		otherSecond := mmHashes(t, tokens, image("a", 2, 3), image("z", 5, 3))
+		assert.NotEqual(t, base[0], otherFirst[0])
+		assert.Equal(t, base[0], otherSecond[0], "block 0 does not overlap the second item")
+		assert.NotEqual(t, base[1], otherSecond[1], "block 1 overlaps both items")
+	})
+}
+
+func TestWithMMHashes(t *testing.T) {
+	const tokenHash = uint64(42)
+
+	t.Run("item ending at the block start does not overlap", func(t *testing.T) {
+		assert.Equal(t, tokenHash, withMMHashes(tokenHash, []fwkrequest.MultiModalFeature{image("a", 0, 4)}, 4, 8))
+	})
+
+	t.Run("item starting at the block end does not overlap", func(t *testing.T) {
+		assert.Equal(t, tokenHash, withMMHashes(tokenHash, []fwkrequest.MultiModalFeature{image("a", 8, 4)}, 4, 8))
+	})
+
+	t.Run("item covering one boundary token overlaps", func(t *testing.T) {
+		assert.NotEqual(t, tokenHash, withMMHashes(tokenHash, []fwkrequest.MultiModalFeature{image("a", 0, 5)}, 4, 8))
+		assert.NotEqual(t, tokenHash, withMMHashes(tokenHash, []fwkrequest.MultiModalFeature{image("a", 7, 4)}, 4, 8))
+	})
+
+	t.Run("item hashes are length-prefixed", func(t *testing.T) {
+		abC := withMMHashes(tokenHash, []fwkrequest.MultiModalFeature{image("ab", 4, 1), image("c", 5, 1)}, 4, 8)
+		aBC := withMMHashes(tokenHash, []fwkrequest.MultiModalFeature{image("a", 4, 1), image("bc", 5, 1)}, 4, 8)
+		assert.NotEqual(t, abC, aBC)
+	})
 }
