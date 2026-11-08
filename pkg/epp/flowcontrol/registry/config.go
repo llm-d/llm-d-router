@@ -163,6 +163,10 @@ type PriorityBandConfig struct {
 	// MaxRequestsPerFlow bounds queued requests in each flow. Zero disables the limit.
 	MaxRequestsPerFlow uint64
 
+	// FairAdmission relieves this band's request-count limit by evicting from its longest flow; the fairAdmission
+	// field of the v1 PriorityBandConfig API states the rule.
+	FairAdmission bool
+
 	// DefaultRequestTTL bounds queue wait for requests in this band. A pointer to zero makes queue wait
 	// unbounded. Nil inherits the global default at request time.
 	DefaultRequestTTL *time.Duration
@@ -317,6 +321,14 @@ func WithBandMaxBytesPerFlow(maxBytes uint64) PriorityBandConfigOption {
 func WithBandMaxRequestsPerFlow(maxRequests uint64) PriorityBandConfigOption {
 	return func(p *PriorityBandConfig) error {
 		p.MaxRequestsPerFlow = maxRequests
+		return nil
+	}
+}
+
+// WithBandFairAdmission sets whether fair admission is on for this priority band.
+func WithBandFairAdmission(enabled bool) PriorityBandConfigOption {
+	return func(p *PriorityBandConfig) error {
+		p.FairAdmission = enabled
 		return nil
 	}
 }

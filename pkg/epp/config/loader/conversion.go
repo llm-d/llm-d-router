@@ -188,6 +188,7 @@ func convertPriorityBand(in configapiv1alpha1.PriorityBandConfig) configapiv1.Pr
 		MaxRequests:        copyQuantity(in.MaxRequests),
 		MaxBytesPerFlow:    copyQuantity(in.MaxBytesPerFlow),
 		MaxRequestsPerFlow: copyQuantity(in.MaxRequestsPerFlow),
+		FairAdmission:      in.FairAdmission,
 		DefaultRequestTTL:  copyDuration(in.DefaultRequestTTL),
 		FairnessPolicyRef:  in.FairnessPolicyRef,
 		OrderingPolicyRef:  in.OrderingPolicyRef,

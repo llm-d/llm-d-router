@@ -322,6 +322,16 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonFlowLimit)},
 		},
 		{
+			name:            "fc_evict_fair_admission",
+			priority:        0,
+			fcOutcome:       fctypes.QueueOutcomeEvictedFairAdmission,
+			fcErr:           fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrFairAdmissionEvicted),
+			expectErr:       true,
+			expectErrCode:   errcommon.ResourceExhausted,
+			expectErrSubstr: "evicted by fair admission",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonFairAdmission)},
+		},
+		{
 			name:            "fc_reject_no_endpoints",
 			priority:        0,
 			fcOutcome:       fctypes.QueueOutcomeRejectedNoEndpoints,

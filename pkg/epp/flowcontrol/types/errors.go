@@ -68,6 +68,10 @@ var (
 	// `FlowControlRequest.Context()`) was cancelled. This error typically wraps the underlying `context.Canceled` or
 	// `context.DeadlineExceeded` error.
 	ErrContextCancelled = errors.New("request context cancelled")
+
+	// ErrFairAdmissionEvicted indicates a request was evicted by its priority band's FairAdmission to admit a request
+	// from a shorter flow.
+	ErrFairAdmissionEvicted = errors.New("evicted by fair admission for a request from a shorter flow")
 )
 
 // --- General `controller.FlowController` Errors ---

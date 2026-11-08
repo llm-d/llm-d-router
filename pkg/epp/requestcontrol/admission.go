@@ -294,6 +294,8 @@ func translateFlowControlError(err error, poolEmpty func() bool) error {
 		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonFlowLimit)}}
 	case errors.Is(err, types.ErrQueueAtCapacity):
 		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
+	case errors.Is(err, types.ErrFairAdmissionEvicted):
+		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonFairAdmission)}}
 	case errors.Is(err, types.ErrTTLExpired):
 		if poolEmpty() {
 			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}

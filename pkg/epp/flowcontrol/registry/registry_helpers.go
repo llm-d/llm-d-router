@@ -51,6 +51,9 @@ type priorityBand struct {
 	// stats aggregates the occupancy of this band's queues (see occupancyStats).
 	stats occupancyStats
 
+	// lenIndex finds the band's longest queue for fair admission. Nil unless config.FairAdmission is set.
+	lenIndex *queueLenIndex
+
 	// --- State Protected by the registry's mu ---
 
 	// queues holds all managedQueue instances within this band, keyed by their logical ID string.
@@ -104,6 +107,9 @@ func (fr *FlowRegistry) initPriorityBand(bandConfig *PriorityBandConfig) {
 		policyState:    policyState,
 	}
 	band.priorityBandAccessor = &priorityBandAccessor{registry: fr, band: band}
+	if bandConfig.FairAdmission {
+		band.lenIndex = newQueueLenIndex()
+	}
 	fr.priorityBands.Store(bandConfig.Priority, band)
 
 	// Copy-on-write: the published slice is shared with lock-free readers and must not be mutated.
@@ -210,7 +216,7 @@ func (fr *FlowRegistry) synchronizeFlow(
 
 	fr.logger.V(logging.TRACE).Info("Creating new queue for flow instance.", "flowKey", key)
 
-	mq := newManagedQueue(q, policy, key, fr.logger, &band.stats, &fr.totals, band.setQueueActivity)
+	mq := newManagedQueue(q, policy, key, fr.logger, &band.stats, &fr.totals, band.setQueueActivity, band.lenIndex)
 	band.queues[key.ID] = mq
 }
 

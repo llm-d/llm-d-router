@@ -432,7 +432,26 @@ func (fr *FlowRegistry) CapacitySnapshot(priority int) (contracts.CapacitySnapsh
 		Global:             fr.globalCapacityDimension(),
 		MaxBytesPerFlow:    band.config.MaxBytesPerFlow,
 		MaxRequestsPerFlow: band.config.MaxRequestsPerFlow,
+		FairAdmission:      band.config.FairAdmission,
 	}, nil
+}
+
+// LongestQueue implements the contract's fair-admission victim lookup from the band's length index.
+func (fr *FlowRegistry) LongestQueue(priority int) contracts.ManagedQueue {
+	val, ok := fr.priorityBands.Load(priority)
+	if !ok {
+		return nil
+	}
+	return val.(*priorityBand).lenIndex.longest()
+}
+
+// LastAdded implements the contract's read of a fair-admission flow's last-added queued item.
+func (fr *FlowRegistry) LastAdded(key flowcontrol.FlowKey) flowcontrol.QueueItemAccessor {
+	mq, err := fr.ManagedQueue(key)
+	if err != nil {
+		return nil
+	}
+	return mq.(*managedQueue).lastAdded()
 }
 
 // globalCapacityDimension returns the registry-wide occupancy against the configured global limits.
