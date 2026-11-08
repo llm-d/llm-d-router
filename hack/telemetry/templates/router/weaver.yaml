@@ -15,10 +15,21 @@ templates:
     application_mode: single
     file_name: docs/telemetry.md
   - template: scheduler-metrics.go.j2
-    filter: '.groups | map(select(.type == "metric" and (.id | startswith("metric.llm_d.epp.scheduler.")))) | sort_by(.id) | map(.attributes |= ((. // []) | sort_by(.annotations["prometheus.label_position"])))'
+    filter: &scheduler_metrics >-
+      .groups
+      | map(select(.type == "metric" and (.id | startswith("metric.llm_d.epp.scheduler."))))
+      | sort_by(.id)
+      | map(
+          if (.metric_name | startswith("llm_d_epp_")) then .
+          else error(.id + ": metric_name must start with llm_d_epp_") end
+          | (.attributes // []) as $attrs
+          | if ($attrs | map(.annotations["prometheus.label_position"]) | sort) == [range(0; $attrs | length)]
+            then .attributes = ($attrs | sort_by(.annotations["prometheus.label_position"]))
+            else error(.id + ": prometheus.label_position must be present, unique integers from 0 to n-1") end
+        )
     application_mode: single
     file_name: pkg/epp/metrics/zz_generated.scheduler_metrics.go
   - template: scheduler-metrics.md.j2
-    filter: '.groups | map(select(.type == "metric" and (.id | startswith("metric.llm_d.epp.scheduler.")))) | sort_by(.id) | map(.attributes |= ((. // []) | sort_by(.annotations["prometheus.label_position"])))'
+    filter: *scheduler_metrics
     application_mode: single
     file_name: scheduler-metrics.md

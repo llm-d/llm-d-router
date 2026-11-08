@@ -97,6 +97,61 @@ mv "$tmp/original" "$tmp/docs/metrics.md"
 
 scheduler_registry="$tmp/pkg/common/observability/semconv/registry/scheduler-metrics.yaml"
 cp "$scheduler_registry" "$tmp/original"
+# Invalid registry annotations must fail before any generated file is replaced.
+mkdir "$tmp/generated-before"
+cp -R "$tmp/pkg" "$tmp/docs" "$tmp/generated-before/"
+for invalid in missing duplicate gap negative fractional string null prefix; do
+    python3 - "$tmp/original" "$scheduler_registry" "$invalid" <<'PYREGISTRY'
+from pathlib import Path
+import sys
+
+registry = Path(sys.argv[1]).read_text()
+invalid = sys.argv[3]
+if invalid == "prefix":
+    registry = registry.replace("metric_name: llm_d_epp_", "metric_name: other_", 1)
+else:
+    position = "prometheus.label_position: 0"
+    replacements = {
+        "missing": "unrelated.annotation: 0",
+        "duplicate": "prometheus.label_position: 1",
+        "gap": "prometheus.label_position: 5",
+        "negative": "prometheus.label_position: -1",
+        "fractional": "prometheus.label_position: 0.5",
+        "string": 'prometheus.label_position: "0"',
+        "null": "prometheus.label_position: null",
+    }
+    registry = registry.replace(position, replacements[invalid], 1)
+Path(sys.argv[2]).write_text(registry)
+PYREGISTRY
+    if [[ "$invalid" == prefix ]]; then
+        diagnostic='metric.llm_d.epp.scheduler.e2e_duration: metric_name must start with llm_d_epp_'
+    else
+        diagnostic='metric.llm_d.epp.scheduler.attempts: prometheus.label_position must be present, unique integers from 0 to n-1'
+    fi
+    if weaver registry generate router "$tmp/invalid-output" \
+        --registry "$(dirname "$scheduler_registry")" --templates "$tmp/hack/telemetry/templates" \
+        --diagnostic-format json >"$tmp/failure.log" 2>&1; then
+        echo "ERROR: generation accepted $invalid scheduler metadata" >&2
+        exit 1
+    fi
+    if ! grep -Fq "$diagnostic" "$tmp/failure.log"; then
+        cat "$tmp/failure.log" >&2
+        echo "ERROR: generation failed for an unexpected reason ($invalid scheduler metadata)" >&2
+        exit 1
+    fi
+    for mode in update verify; do
+        if bash "$tmp/hack/telemetry.sh" "$mode" >"$tmp/failure.log" 2>&1; then
+            echo "ERROR: $mode accepted $invalid scheduler metadata" >&2
+            exit 1
+        fi
+        for file in pkg/common/observability/semconv/llm_d.go pkg/common/observability/semconv/spans.go \
+            pkg/epp/metrics/zz_generated.scheduler_metrics.go docs/telemetry.md docs/metrics.md; do
+            cmp "$tmp/generated-before/$file" "$tmp/$file"
+        done
+    done
+done
+cp "$tmp/original" "$scheduler_registry"
+
 sed 's/Total number of scheduling attempts./Updated scheduling description./' "$tmp/original" >"$scheduler_registry"
 expect_failure 'scheduler registry changed without regeneration'
 grep -q 'Generated telemetry is stale' "$tmp/failure.log"
