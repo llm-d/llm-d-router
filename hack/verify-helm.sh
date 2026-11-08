@@ -880,6 +880,28 @@ for proxy_type in envoy agentgateway; do
   done
 done
 
+echo "Verifying the agentgateway sidecar mounts the release-scoped proxy ConfigMap..."
+agentgateway_sidecar_render_output="${TEMP_DIR}/agentgateway-sidecar-proxy-config.yaml"
+if ! "${HELM}" template agentgateway-scoped "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+  --set router.proxy.mode=sidecar \
+  --set router.proxy.proxyType=agentgateway \
+  --set router.modelServers.matchLabels.app=llm-instance-gateway \
+  --set router.inferencePool.create=false \
+  --set 'router.modelServers.targetPorts[0].number=8000' > "${agentgateway_sidecar_render_output}"; then
+  echo "Agentgateway sidecar rendering failed"
+  exit 1
+fi
+rendered_agentgateway_config_map=$("${YQ}" -N 'select(.kind == "ConfigMap" and .metadata.name == "agentgateway-scoped-agentgateway") | .metadata.name' "${agentgateway_sidecar_render_output}")
+if [ "${rendered_agentgateway_config_map}" != "agentgateway-scoped-agentgateway" ]; then
+  echo "Agentgateway sidecar did not render the release-scoped proxy ConfigMap"
+  exit 1
+fi
+mounted_agentgateway_config_map=$("${YQ}" -N 'select(.kind == "Deployment" and (.metadata.name | test("-epp$"))) | .spec.template.spec.volumes[] | select(.name == "agentgateway-config-template") | .configMap.name' "${agentgateway_sidecar_render_output}")
+if [ "${mounted_agentgateway_config_map}" != "agentgateway-scoped-agentgateway" ]; then
+  echo "Agentgateway sidecar mounts ConfigMap ${mounted_agentgateway_config_map}, want agentgateway-scoped-agentgateway"
+  exit 1
+fi
+
 echo "Verifying llm-d-router-standalone agentgateway renders plaintext EPP and custom listener ports..."
 agentgateway_render_output="${TEMP_DIR}/llm-d-router-standalone-agentgateway-render.yaml"
 agentgateway_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000' --set 'router.extraServicePorts[0].name=http' --set 'router.extraServicePorts[0].port=9000' --set 'router.extraServicePorts[0].protocol=TCP' --set 'router.extraServicePorts[0].targetPort=http' > ${agentgateway_render_output}"
