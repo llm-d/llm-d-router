@@ -87,14 +87,15 @@ func (c *hashLRU) Contains(key blockHash) bool {
 }
 
 // Add inserts key as most recent, or refreshes it if it is already present.
+// It reports whether the key was newly inserted rather than refreshed.
 // At capacity the least recently added or refreshed key is evicted first.
-func (c *hashLRU) Add(key blockHash) {
+func (c *hashLRU) Add(key blockHash) bool {
 	if c.capacity <= 0 {
-		return
+		return false
 	}
 	if i, ok := c.index[key]; ok {
 		c.moveFront(i)
-		return
+		return false
 	}
 	var i uint32
 	if len(c.nodes) < c.capacity {
@@ -108,6 +109,7 @@ func (c *hashLRU) Add(key blockHash) {
 	c.nodes[i] = hashNode{key: key, prev: nodeNil, next: nodeNil}
 	c.index[key] = i
 	c.pushFront(i)
+	return true
 }
 
 // Remove deletes key if present. The freed node slot is reclaimed by moving

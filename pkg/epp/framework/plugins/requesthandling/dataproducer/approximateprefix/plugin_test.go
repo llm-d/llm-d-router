@@ -261,19 +261,56 @@ func TestPreRequestFailedResponseRollback(t *testing.T) {
 		assert.Error(t, err, "the index-update record is released at end of stream")
 	})
 
-	t.Run("aborted stream removes the entries", func(t *testing.T) {
+	t.Run("stream terminated before its first chunk removes the entries", func(t *testing.T) {
 		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
 		req, hashes := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
 		p.wg.Wait()
 
 		p.ResponseBody(context.Background(), req, &fwkrh.Response{
 			RequestID:        req.RequestID,
+			StartOfStream:    true,
 			EndOfStream:      true,
 			TerminationCause: fwkrh.TerminationCauseClientDisconnect,
 		}, nil)
 
 		assert.Equal(t, []int{0, 0}, p.indexerInst.MatchLongestPrefix(hashes[0], candidates),
-			"a stream torn down before completing leaves no cached prefix")
+			"a stream torn down before its first chunk leaves no cached prefix")
+	})
+
+	t.Run("stream terminated after its first chunk keeps the entries", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+		req, hashes := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
+		p.wg.Wait()
+
+		// StartOfStream is false on the final call of a stream that already
+		// delivered a chunk; the model server ran prefill and keeps the blocks.
+		p.ResponseBody(context.Background(), req, &fwkrh.Response{
+			RequestID:        req.RequestID,
+			EndOfStream:      true,
+			TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+		}, nil)
+
+		assert.Equal(t, []int{3, 3}, p.indexerInst.MatchLongestPrefix(hashes[0], candidates),
+			"a client disconnect after the first chunk leaves the prefilled prefix indexed")
+	})
+
+	t.Run("rollback keeps blocks an earlier request contributed", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+		_, hashesA := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
+		p.wg.Wait()
+		reqB, hashesB := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 9})
+		p.wg.Wait()
+		// The prompts share their first two blocks, so request B's Add inserts
+		// only its third block on each endpoint.
+		assert.Equal(t, hashesA[0][0], hashesB[0][0])
+		assert.Equal(t, hashesA[0][1], hashesB[0][1])
+
+		p.ResponseBody(context.Background(), reqB, failedResponse(reqB.RequestID), nil)
+
+		assert.Equal(t, []int{3, 3}, p.indexerInst.MatchLongestPrefix(hashesA[0], candidates),
+			"the earlier request's full prefix stays indexed")
+		assert.Equal(t, []int{2, 2}, p.indexerInst.MatchLongestPrefix(hashesB[0], candidates),
+			"only the failed request's own block is removed")
 	})
 
 	t.Run("successful response keeps the entries", func(t *testing.T) {

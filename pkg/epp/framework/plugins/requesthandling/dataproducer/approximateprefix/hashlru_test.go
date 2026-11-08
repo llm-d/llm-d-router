@@ -63,6 +63,34 @@ func TestHashLRUZeroCapacity(t *testing.T) {
 	}
 }
 
+func TestHashLRUAddReportsInsertion(t *testing.T) {
+	c := newHashLRU(2)
+	if !c.Add(1) {
+		t.Fatal("adding a new key reports insertion")
+	}
+	if c.Add(1) {
+		t.Fatal("refreshing a present key does not report insertion")
+	}
+	if !c.Add(2) {
+		t.Fatal("adding a second new key reports insertion")
+	}
+	// At capacity both keys are present, so re-adding refreshes without
+	// evicting.
+	if c.Add(1) {
+		t.Fatal("re-adding a present key at capacity does not report insertion")
+	}
+	// A third distinct key evicts the least recently added or refreshed key.
+	if !c.Add(3) {
+		t.Fatal("adding a key that evicts the oldest reports insertion")
+	}
+	if c.Contains(2) {
+		t.Fatal("the least recently added key should have been evicted")
+	}
+	if newHashLRU(0).Add(1) {
+		t.Fatal("a zero-capacity LRU inserts nothing")
+	}
+}
+
 // TestHashLRUMatchesSimpleLRU checks membership and eviction order against
 // simplelru for the same sequence of adds and lookups, including a block hash
 // of zero.
@@ -274,7 +302,7 @@ func BenchmarkHashLRUReplaceAfterFull(b *testing.B) {
 				for i := range benchmarkHashLRUCapacity {
 					lru.Add(benchmarkHashKey(i))
 				}
-				return lru.Add
+				return func(key blockHash) { lru.Add(key) }
 			},
 		},
 	} {

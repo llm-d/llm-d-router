@@ -123,23 +123,33 @@ func (i *indexer) resizeIfNeeded(pc *podCache, pod server) {
 // prompt that remain cached form a contiguous run from block 0, which is what
 // the galloping search in MatchLongestPrefix requires.
 //
+// It returns the hashes this call newly inserted. Hashes already present are
+// refreshed and not returned, so a rollback that removes only the returned
+// hashes keeps entries an earlier Add contributed.
+//
 // If RemovePod runs between looking up the pod's cache and inserting, the
 // insert lands in the removed cache and is discarded with it, as if Add had
 // completed before RemovePod.
-func (i *indexer) Add(hashes []blockHash, pod server) {
+func (i *indexer) Add(hashes []blockHash, pod server) []blockHash {
 	pc := i.podCacheFor(pod)
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	i.resizeIfNeeded(pc, pod)
+	var inserted []blockHash
 	for idx := len(hashes) - 1; idx >= 0; idx-- {
-		pc.lru.Add(hashes[idx])
+		if pc.lru.Add(hashes[idx]) {
+			inserted = append(inserted, hashes[idx])
+		}
 	}
+	return inserted
 }
 
 // Remove deletes hashes from pod's LRU. A hash another prompt also added is
 // deleted with it: the LRU holds no reference counts, so removal errs toward
 // dropping an entry a pod still holds. The cost of that error is a lost
 // affinity match, which re-prefills, never a match for a prefix no pod holds.
+// A caller undoing an Add passes the hashes Add returned, which limits the
+// loss to blocks no earlier Add contributed.
 func (i *indexer) Remove(hashes []blockHash, pod ServerID) {
 	i.mu.RLock()
 	pc := i.pods[pod]

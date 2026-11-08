@@ -298,3 +298,153 @@ dataLayer:
 	require.Zero(t, recorder.callsContaining("first request"))
 	require.Zero(t, recorder.callsContaining("different text, same token ids"))
 }
+
+// TestClientPromptTokenIDsKeyPrefixCacheStreamAbort checks what a response
+// stream torn down under the EPP does to the prefix entries its request
+// indexed. A teardown after a body chunk keeps the entries: the model server
+// produced output, so it ran prefill and holds the blocks. A teardown before
+// any body chunk removes them: the request never ran, and a retry must not be
+// routed as cached.
+func TestClientPromptTokenIDsKeyPrefixCacheStreamAbort(t *testing.T) {
+	recorder := &renderRecorder{}
+	renderSrv := httptest.NewServer(http.HandlerFunc(recorder.handle))
+	t.Cleanup(renderSrv.Close)
+
+	configText := fmt.Sprintf(`
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: token-producer
+    parameters:
+      modelName: %s
+      vllm:
+        url: %s
+  - type: approx-prefix-cache-producer
+    parameters:
+      autoTune: false
+      blockSizeTokens: 4
+  - type: prefix-cache-scorer
+  - type: queue-scorer
+  - type: kv-cache-utilization-scorer
+  - type: openai-parser
+  - type: mock-metrics-source
+  - type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: prefix-cache-scorer
+        weight: 10
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer
+requestHandler:
+  parsers:
+  - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+  - pluginRef: mock-metrics-source
+`, modelMyModelTarget, renderSrv.URL)
+
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
+	// Pod 1 scores better on queue depth and KV utilization, so only a prefix
+	// cache hit can send a request to pod 0.
+	pods := []eppharness.PodState{
+		eppharness.P(0, 0, 0.1, modelMyModelTarget),
+		eppharness.P(1, 0, 0.0, modelMyModelTarget),
+	}
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
+
+	// route sends a complete transaction for tokenIDs and returns the
+	// scheduled endpoint.
+	route := func(tokenIDs, content string) string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
+		require.NoError(t, err)
+		body := `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"` + content + `"}],` +
+			`"max_tokens":10,"kv_transfer_params":{"prompt_token_ids":` + tokenIDs + `}}`
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      "/v1/chat/completions",
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+		}, body)
+		requests = append(requests, ReqResponseOnly(
+			map[string]string{"content-type": "application/json", "status": "200"},
+			`{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"ok","role":"assistant"}}],"usage":{"completion_tokens":1,"prompt_tokens":16,"total_tokens":17}}`,
+		)...)
+		for _, req := range requests {
+			require.NoError(t, client.Send(req))
+		}
+		headersResp, err := client.Recv()
+		require.NoError(t, err)
+		endpoint := headerValue(headersResp.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
+		require.NotEmpty(t, endpoint)
+		// Two request-phase and two response-phase messages were sent, so
+		// three responses remain after the header mutation.
+		for range 3 {
+			_, err = client.Recv()
+			require.NoError(t, err)
+		}
+		require.NoError(t, client.CloseSend())
+		return endpoint
+	}
+
+	// abortStream routes a request with tokenIDs pinned to pod 0 and tears the
+	// stream down under the EPP. midStream delivers the response headers and
+	// one body chunk before the teardown; otherwise the teardown precedes any
+	// response body.
+	abortStream := func(tokenIDs string, midStream bool) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(ctx)
+		require.NoError(t, err)
+		body := `{"model":"` + modelMyModel + `","messages":[{"role":"user","content":"aborted stream"}],` +
+			`"max_tokens":10,"kv_transfer_params":{"prompt_token_ids":` + tokenIDs + `}}`
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      "/v1/chat/completions",
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+		}, body)
+		requests[len(requests)-1].MetadataContext = &envoyCorev3.Metadata{FilterMetadata: fwkepp.GenerateRequestMetadata([]string{"192.168.1.1:8000"})}
+		for _, req := range requests {
+			require.NoError(t, client.Send(req))
+		}
+		for range 2 {
+			_, err = client.Recv()
+			require.NoError(t, err)
+		}
+		if midStream {
+			chunk := `data: {"choices":[{"delta":{"content":"tok"},"index":0,"finish_reason":null}],"id":"123","created":1,"model":"` + modelMyModel + `","object":"chat.completion.chunk"}` + "\n"
+			respPhase := ReqResponseOnly(map[string]string{"content-type": "text/event-stream", "status": "200"}, chunk)
+			// The teardown must land mid-stream, so the chunk is not marked
+			// end-of-stream.
+			respPhase[len(respPhase)-1].GetResponseBody().EndOfStream = false
+			for _, req := range respPhase {
+				require.NoError(t, client.Send(req))
+			}
+			for range 2 {
+				_, err = client.Recv()
+				require.NoError(t, err)
+			}
+		}
+		cancel()
+	}
+
+	// A teardown before any body chunk removes the entries, so the retry
+	// follows the scorers to pod 1. The rollback runs in the stream's deferred
+	// completion; wait it out before probing, since a probe that races it
+	// would index pod 0 and mask the rollback.
+	abortStream(`[201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216]`, false)
+	time.Sleep(500 * time.Millisecond)
+	require.Equal(t, "192.168.1.2:8000", route(`[201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216]`, "retry after early teardown"),
+		"a stream torn down before any body chunk leaves no cached prefix")
+
+	// A teardown after a body chunk keeps the entries, so the retry follows
+	// the prefix to pod 0.
+	abortStream(`[101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116]`, true)
+	require.Eventually(t, func() bool {
+		return route(`[101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116]`, "retry after mid-stream teardown") == "192.168.1.1:8000"
+	}, 5*time.Second, 100*time.Millisecond, "a stream torn down after a body chunk keeps its cached prefix")
+}

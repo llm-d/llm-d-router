@@ -554,6 +554,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	record := &indexUpdateRecord{
 		servers:         servers,
 		perPromptHashes: state.PerPromptHashes,
+		inserted:        make(map[ServerID][][]blockHash, len(servers)),
 		cell:            &updateCell{},
 	}
 	p.pluginState.Write(request.RequestID, indexUpdateStateKey, record)
@@ -568,7 +569,7 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		}
 		for _, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
-				p.indexerInst.Add(hashes, s)
+				record.inserted[s.ServerID] = append(record.inserted[s.ServerID], p.indexerInst.Add(hashes, s))
 				if p.syncerActive() {
 					p.recent.record(s.String(), hashes)
 				}
@@ -633,9 +634,15 @@ func (p *dataProducer) ResponseBody(ctx context.Context, request *fwksched.Infer
 	}
 	record.cell.rolledBack = true
 	for _, s := range record.servers {
-		for _, hashes := range record.perPromptHashes {
+		// The indexer keeps only what this request's Add newly inserted; a
+		// shared block an earlier request contributed stays indexed.
+		for _, hashes := range record.inserted[s.ServerID] {
 			p.indexerInst.Remove(hashes, s.ServerID)
-			if p.syncerActive() {
+		}
+		// The recent window publishes whole prompts, so the withdrawal is the
+		// request's full prompts, not the inserted subset.
+		if p.syncerActive() {
+			for _, hashes := range record.perPromptHashes {
 				p.recent.removePrompt(s.String(), hashes)
 			}
 		}
@@ -645,13 +652,16 @@ func (p *dataProducer) ResponseBody(ctx context.Context, request *fwksched.Infer
 }
 
 // responseFailed reports whether the response says the request did not run to
-// completion on the model server. A stream torn down before completing carries
-// a non-natural TerminationCause. A response delivered in full can still carry
-// an error status, which TerminationCauseNatural does not distinguish, so the
-// status header is read as well.
+// completion on the model server. A non-natural termination counts only when
+// the stream ended before the model server produced a chunk: the director sets
+// StartOfStream on the final call only when no body chunk preceded it, and
+// once output exists the pod keeps the prefilled blocks, so the entries stay.
+// A response delivered in full can still carry an error status, which
+// TerminationCauseNatural does not distinguish, so the status header is read
+// as well.
 func responseFailed(response *fwkrh.Response) bool {
 	if response.TerminationCause != "" && response.TerminationCause != fwkrh.TerminationCauseNatural {
-		return true
+		return response.StartOfStream
 	}
 	status := response.Headers[reqcommon.PseudoHeaderStatus]
 	if status == "" {

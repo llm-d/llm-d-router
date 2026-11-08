@@ -72,6 +72,27 @@ func TestIndexer_AddAndGet(t *testing.T) {
 	assert.Empty(t, i.Get(blockHash(5)), "tail hash should be evicted before the head")
 }
 
+func TestIndexer_AddReturnsInsertedHashes(t *testing.T) {
+	pod := server{
+		ServerID:       ServerID{Namespace: "default", Name: "server1"},
+		NumOfGPUBlocks: 8,
+	}
+	i := newIndexer(context.Background(), 8, "test-name", "test-type").(*indexer)
+
+	inserted := i.Add([]blockHash{1, 2, 3}, pod)
+	assert.ElementsMatch(t, []blockHash{1, 2, 3}, inserted, "a fresh Add reports every hash as inserted")
+
+	inserted = i.Add([]blockHash{1, 2, 9}, pod)
+	assert.ElementsMatch(t, []blockHash{9}, inserted, "hashes an earlier Add contributed are refreshed, not reported")
+
+	// Removing only the second Add's inserted hashes keeps the first Add's
+	// shared leading blocks, which anchor matching.
+	i.Remove(inserted, pod.ServerID)
+	assert.NotEmpty(t, i.Get(blockHash(1)), "a shared leading block survives the rollback")
+	assert.NotEmpty(t, i.Get(blockHash(2)))
+	assert.Empty(t, i.Get(blockHash(9)))
+}
+
 func TestIndexer_Remove(t *testing.T) {
 	pod := server{
 		ServerID:       ServerID{Namespace: "default", Name: "server1"},

@@ -35,8 +35,10 @@ type indexerInterface interface {
 	// blocks of hashes the candidate holds.
 	MatchLongestPrefix(hashes []blockHash, candidates []ServerID) []int
 	// Add records that server holds hashes. hashes must be a prompt's block
-	// hashes starting at block 0; MatchLongestPrefix relies on this.
-	Add(hashes []blockHash, server server)
+	// hashes starting at block 0; MatchLongestPrefix relies on this. It
+	// returns the hashes this call newly inserted; hashes already present
+	// are refreshed and not returned.
+	Add(hashes []blockHash, server server) []blockHash
 	// Remove deletes hashes from server, undoing an Add whose request never
 	// ran on the server.
 	Remove(hashes []blockHash, server ServerID)
@@ -124,12 +126,17 @@ type updateCell struct {
 type indexUpdateRecord struct {
 	servers         []server
 	perPromptHashes [][]blockHash
+	// inserted holds, per server, the block hashes this request's Add newly
+	// inserted. The rollback removes only those, so blocks an earlier request
+	// contributed stay indexed. Written by the queued Add under cell.mu.
+	inserted map[ServerID][][]blockHash
 	// cell is shared, not copied, so every holder of the record observes one
 	// rollback flag.
 	cell *updateCell
 }
 
-// Clone shares cell deliberately: the rollback flag is coordination state.
+// Clone shares cell and inserted deliberately: they are coordination state
+// between the queued Add and the rollback.
 func (r *indexUpdateRecord) Clone() plugin.StateData {
 	cp := *r
 	return &cp
