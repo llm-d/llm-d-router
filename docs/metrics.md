@@ -228,7 +228,7 @@ whose body reached the EPP and whose ending the EPP observes.
 | `outcome` | Meaning | `reason` |
 |---|---|---|
 | `completed` | The model server answered with status 200 and the response finished. | empty |
-| `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated` or `rejected-flow-limit`. |
+| `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated`, `rejected-flow-limit` or `rejected-fair-admission`. |
 | `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
 | `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
 | `failed` | Any other error, before or after dispatch, including a response status other than 200 or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
@@ -897,8 +897,8 @@ These metrics are owned by the EPP Flow Control layer.
 
 *   **Type:** Histogram
 *   **Labels:** `fairness_id`, `priority`, `outcome` (`Dispatched`, `RejectedCapacity`,
-    `RejectedOther`, `EvictedTTL`, `EvictedNoEndpoints`, `EvictedContextCancelled`, `EvictedOther`),
-    `inference_pool`, `model_name`, `target_model_name`
+    `RejectedOther`, `EvictedTTL`, `EvictedNoEndpoints`, `EvictedContextCancelled`,
+    `EvictedFairAdmission`, `EvictedOther`), `inference_pool`, `model_name`, `target_model_name`
 *   **Description:** Total time a request spends in the Flow Control layer, from enqueue to final
     outcome.
 *   **Usage:** Primary latency signal for flow control. Rising p99 indicates backends are saturated
@@ -1020,7 +1020,8 @@ These metrics are owned by the EPP Flow Control layer.
         (candidate pool had no endpoints at the capacity boundary; surfaces as HTTP 503 rather than
         429), `RejectedOther`, `EvictedTTL`, `EvictedNoEndpoints` (queue-wait budget expired while the
         candidate pool had no endpoints; surfaces as HTTP 503 rather than 429), `EvictedContextCancelled`,
-        `EvictedOther`
+        `EvictedFairAdmission` (evicted by the band's `fairAdmission`; surfaces as HTTP 429 with reason
+        `rejected-fair-admission`), `EvictedOther`
     *   `priority`, `inference_pool`
 *   **Description:** Total requests processed by the Flow Control layer, incremented once per request
     after its terminal outcome is determined.
@@ -1038,6 +1039,8 @@ These metrics are owned by the EPP Flow Control layer.
         throughput or tighten admission.
     *   Rising `outcome="EvictedNoEndpoints"`: requests waited out `noEndpointRequestTTL` without an
         endpoint appearing - investigate scaling latency, or raise the budget above pod startup.
+    *   Rising `outcome="EvictedFairAdmission"`: a `fairAdmission` band is full - raise `maxRequests`,
+        scale backends, or bound the dominant flow with `maxRequestsPerFlow`.
     *   `outcome="Dispatched"` is the healthy baseline; compare against total request rate for the
         acceptance ratio.
 

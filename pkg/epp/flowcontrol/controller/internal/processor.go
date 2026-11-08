@@ -109,6 +109,11 @@ type Processor struct {
 	// Only accessed from the Run goroutine, so it needs no synchronization.
 	order []int
 
+	// staleDropped holds the flows whose stale requests fair admission has dropped since sweep number staleDropSweep
+	// completed. Only accessed from the Run goroutine, so it needs no synchronization.
+	staleDropped   map[flowcontrol.FlowKey]struct{}
+	staleDropSweep uint64
+
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
 	isShuttingDown atomic.Bool
@@ -118,6 +123,9 @@ type Processor struct {
 	// Written by both the main Run goroutine (enqueue, shutdown) and the runCleanupSweep goroutine (sweep),
 	// so each slot is an atomic to avoid a data race.
 	dropCounts [types.NumQueueOutcomes]atomic.Uint64
+
+	// sweeps counts completed cleanup sweeps. Written by the runCleanupSweep goroutine, read by Run.
+	sweeps atomic.Uint64
 }
 
 // regimeSample is one observation of the unavailability regime: whether the candidate pool was empty, and when that
@@ -161,6 +169,7 @@ func NewProcessor(
 		lifecycleCtx:         ctx,
 		enqueueChan:          make(chan *FlowItem, enqueueChannelBufferSize),
 		reclamation:          reclamation,
+		staleDropped:         make(map[flowcontrol.FlowKey]struct{}),
 	}
 	// Seeded so readers never handle a nil sample. The pool reads as non-empty until the first dispatch cycle observes
 	// otherwise, which keeps a request that arrives before that cycle on the saturation budget.
@@ -337,14 +346,17 @@ func (p *Processor) enqueue(item *FlowItem) {
 	// --- Capacity Check ---
 	// This check is safe because it is performed by the single-writer Run goroutine.
 	flowQueue := managedQ.FlowQueueAccessor()
-	ok, flowLimit, stats, err := p.hasCapacity(flowQueue, req.ByteSize())
+	limit, stats, err := p.checkCapacity(flowQueue, req.ByteSize())
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %v", key.Priority, err)
 		p.logger.Error(finalErr, "Rejecting request, capacity lookup failed", "flowKey", key, "requestID", req.ID())
 		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
 		return
 	}
-	if !ok {
+	if limit == limitBandRequests && stats.FairAdmission && !regime.empty {
+		limit, stats = p.admitFairly(item, flowQueue, req.ByteSize(), regime, stats)
+	}
+	if limit != limitNone {
 		// When the pool has no endpoints, the queue is acting as a scale-from-zero waiting room. A capacity rejection in
 		// that state reflects genuine unavailability (surfaced as 503), not backpressure against a contended pool (429).
 		if p.regime.Load().empty {
@@ -358,14 +370,14 @@ func (p *Processor) enqueue(item *FlowItem) {
 			return
 		}
 		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
-			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(), "flowAtLimit", flowLimit,
+			"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(), "flowAtLimit", limit == limitFlow,
 			"maxRequestsPerFlow", stats.MaxRequestsPerFlow, "maxBytesPerFlow", stats.MaxBytesPerFlow,
 			"bandLen", stats.Band.Len, "bandCapacityRequests", stats.Band.CapacityRequests,
 			"bandByteSize", stats.Band.ByteSize, "bandCapacityBytes", stats.Band.CapacityBytes,
 			"totalLen", stats.Global.Len, "totalCapacityRequests", stats.Global.CapacityRequests,
 			"totalByteSize", stats.Global.ByteSize, "totalCapacityBytes", stats.Global.CapacityBytes)
 		rejectErr := types.ErrQueueAtCapacity
-		if flowLimit {
+		if limit == limitFlow {
 			rejectErr = fmt.Errorf("%w: %w", types.ErrQueueAtCapacity, types.ErrFlowAtCapacity)
 		}
 		p.finalizeAndRecordDrop(item, fmt.Errorf("%w: %w", types.ErrRejected, rejectErr))
@@ -385,34 +397,57 @@ func (p *Processor) enqueue(item *FlowItem) {
 		"flowKey", key, "requestID", req.ID())
 }
 
-// hasCapacity checks the global, priority-band, and per-flow queue limits.
+// capacityLimit names the queue limit that refuses an item.
+type capacityLimit int
+
+const (
+	limitNone capacityLimit = iota
+	// limitShared is a global limit, the band byte limit, or the band request limit while the flow is also at its own
+	// limit.
+	limitShared
+	// limitBandRequests is the band request limit with every other limit having room, the one limit that fair
+	// admission relieves.
+	limitBandRequests
+	// limitFlow is the flow's own per-flow limit with every global and band limit having room.
+	limitFlow
+)
+
+// checkCapacity checks the global, priority-band, and per-flow queue limits and names the one refusing the item.
 // This check reflects actual resource utilization, including "zombie" items (finalized but unswept), to prevent
 // physical resource overcommitment.
-// flowLimit reports that the flow's own per-flow limit is the only limit refusing the item.
 // A non-nil error means the capacity could not be read (the priority band is not configured), not that capacity is
 // exhausted.
-func (p *Processor) hasCapacity(flowQueue flowcontrol.FlowQueueAccessor, itemByteSize uint64) (ok, flowLimit bool, snapshot contracts.CapacitySnapshot, err error) {
-	snapshot, err = p.registry.CapacitySnapshot(flowQueue.FlowKey().Priority)
+func (p *Processor) checkCapacity(
+	flowQueue flowcontrol.FlowQueueAccessor,
+	itemByteSize uint64,
+) (capacityLimit, contracts.CapacitySnapshot, error) {
+	snapshot, err := p.registry.CapacitySnapshot(flowQueue.FlowKey().Priority)
 	if err != nil {
-		return false, false, snapshot, err
+		return limitShared, snapshot, err
 	}
 	global, band := snapshot.Global, snapshot.Band
 	if global.CapacityBytes > 0 && global.ByteSize+itemByteSize > global.CapacityBytes {
-		return false, false, snapshot, nil
+		return limitShared, snapshot, nil
 	}
 	if global.CapacityRequests > 0 && global.Len+1 > global.CapacityRequests {
-		return false, false, snapshot, nil
+		return limitShared, snapshot, nil
 	}
 	if band.CapacityBytes > 0 && band.ByteSize+itemByteSize > band.CapacityBytes {
-		return false, false, snapshot, nil
-	}
-	if band.CapacityRequests > 0 && band.Len+1 > band.CapacityRequests {
-		return false, false, snapshot, nil
+		return limitShared, snapshot, nil
 	}
 	// Read the flow's occupancy once: only Run adds items, but the cleanup sweep can remove finalized ones concurrently,
 	// and the reported reason must match this decision.
-	flowLimit = flowAtLimit(snapshot, flowQueue, itemByteSize)
-	return !flowLimit, flowLimit, snapshot, nil
+	flowLimit := flowAtLimit(snapshot, flowQueue, itemByteSize)
+	if band.CapacityRequests > 0 && band.Len+1 > band.CapacityRequests {
+		if flowLimit {
+			return limitShared, snapshot, nil
+		}
+		return limitBandRequests, snapshot, nil
+	}
+	if flowLimit {
+		return limitFlow, snapshot, nil
+	}
+	return limitNone, snapshot, nil
 }
 
 // flowAtLimit reports whether admitting an item of itemByteSize would exceed the flow's own per-flow request or byte
@@ -427,6 +462,62 @@ func flowAtLimit(snapshot contracts.CapacitySnapshot, flowQueue flowcontrol.Flow
 		return used > limit || itemByteSize > limit-used
 	}
 	return false
+}
+
+// admitFairly applies the band's fair admission to an item that only the band request limit refuses in snapshot. It
+// returns limitNone when the item may be added, otherwise the limit that still refuses it and the snapshot behind that
+// decision. Only Run adds items, so one freed band slot admits the item.
+func (p *Processor) admitFairly(
+	item *FlowItem,
+	flowQueue flowcontrol.FlowQueueAccessor,
+	itemByteSize uint64,
+	regime *regimeSample,
+	snapshot contracts.CapacitySnapshot,
+) (capacityLimit, contracts.CapacitySnapshot) {
+	key := flowQueue.FlowKey()
+	victim := p.registry.LongestQueue(key.Priority)
+	if victim == nil {
+		return limitBandRequests, snapshot
+	}
+	// Queues shrink concurrently with Run, so reading the arriving flow first keeps its own queue from passing the
+	// margin. The margin keeps two flows from trading places on alternate arrivals.
+	flowLen := flowQueue.Len()
+	victimQueue := victim.FlowQueueAccessor()
+	if victimQueue.Len() < flowLen+2 {
+		return limitBandRequests, snapshot
+	}
+	// Cancelled and expired requests keep their slots until the cleanup sweep removes them. Dropping the victim's first
+	// frees a slot without evicting a live request. That scans the victim's queue, so it runs at most once per flow per
+	// sweep, which bounds its work by the sweep's own and keeps the sweep interval as the staleness bound.
+	if sweep := p.sweeps.Load(); sweep != p.staleDropSweep {
+		clear(p.staleDropped)
+		p.staleDropSweep = sweep
+	}
+	victimKey := victimQueue.FlowKey()
+	if _, done := p.staleDropped[victimKey]; !done {
+		p.staleDropped[victimKey] = struct{}{}
+		p.dropStale(victim, p.clock.Now(), regime, expiryError(regime.empty), p.logger)
+	}
+	victimItem, ok := p.registry.LastAdded(victimKey).(*FlowItem)
+	// Dropping stale requests or the sweep can free a slot, and the item can be finalized, until the eviction itself.
+	limit, snapshot, _ := p.checkCapacity(flowQueue, itemByteSize)
+	if !ok || limit != limitBandRequests || item.FinalState() != nil {
+		return limit, snapshot
+	}
+	if _, err := victim.Remove(victimItem.Handle()); err != nil {
+		// The sweep removed it first.
+		limit, snapshot, _ = p.checkCapacity(flowQueue, itemByteSize)
+		return limit, snapshot
+	}
+	p.finalizeAndRecordDrop(victimItem, fmt.Errorf("%w: %w", types.ErrEvicted, types.ErrFairAdmissionEvicted))
+	// This check only keeps the debug log accurate: an item finalized between the stale drop and the removal keeps its
+	// own outcome, which finalizeAndRecordDrop leaves in place and counts.
+	if victimItem.FinalState().Outcome == types.QueueOutcomeEvictedFairAdmission {
+		p.logger.V(logutil.DEBUG).Info("Evicted queued request for fair admission",
+			"victimFlowKey", victimKey, "victimRequestID", victimItem.OriginalRequest().ID(),
+			"victimFlowLenAfter", victimQueue.Len(), "flowKey", key, "flowLen", flowLen)
+	}
+	return limitNone, snapshot
 }
 
 // recordCapacityUtilization emits occupancy/effective-capacity ratio gauges per priority band (aggregated over every
@@ -760,39 +851,51 @@ func (p *Processor) sweepFinalizedItems() {
 	expiryErr := expiryError(regime.empty)
 
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
-		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
-			item, ok := itemAcc.(*FlowItem)
-			if !ok {
-				// Nothing to finalize on an unknown type; leave it for the queue that owns it.
-				return false
-			}
-			if item.FinalState() != nil {
-				return true
-			}
-			if !isExpired(item, now, regime, p.noEndpointRequestTTL) {
-				return false
-			}
-			// Finalizing here rather than in a separate pass keeps expiry to a single scan. Finalization is
-			// idempotent, and an item finalized but not removed is the same zombie state the sweep already
-			// tolerates, so a queue that declines the removal costs nothing beyond a later sweep.
-			item.FinalizeWithError(expiryErr)
-			logger.V(logutil.TRACE).Info("Evicted item, queue-wait budget exhausted.",
-				"requestID", item.OriginalRequest().ID(), "outcome", item.FinalState().Outcome,
-				"poolEmpty", regime.empty)
-			return true
-		}
-		removedItems := managedQ.Cleanup(predicate)
-		if len(removedItems) > 0 {
-			for _, itemAcc := range removedItems {
-				if fi, ok := itemAcc.(*FlowItem); ok && fi != nil && fi.FinalState() != nil {
-					p.recordDrop(fi.FinalState().Outcome)
-				}
-			}
-			logger.V(logutil.TRACE).Info("Swept finalized items and released capacity.",
-				"count", len(removedItems))
+		if n := p.dropStale(managedQ, now, regime, expiryErr, logger); n > 0 {
+			logger.V(logutil.TRACE).Info("Swept finalized items and released capacity.", "count", n)
 		}
 	}
 	p.processAllQueuesConcurrently("sweepFinalizedItems", processFn)
+	p.sweeps.Add(1)
+}
+
+// dropStale removes the queue's stale items: items finalized while queued, and items whose queue-wait budget in regime
+// has run out at now, which it finalizes with expiryErr. It records each removed item's outcome and returns how many it
+// removed. Both the cleanup sweep and fair admission use it, so they agree on which items hold slots they should not.
+func (p *Processor) dropStale(
+	managedQ contracts.ManagedQueue,
+	now time.Time,
+	regime *regimeSample,
+	expiryErr error,
+	logger logr.Logger,
+) int {
+	removedItems := managedQ.Cleanup(func(itemAcc flowcontrol.QueueItemAccessor) bool {
+		item, ok := itemAcc.(*FlowItem)
+		if !ok {
+			// Nothing to finalize on an unknown type; leave it for the queue that owns it.
+			return false
+		}
+		if item.FinalState() != nil {
+			return true
+		}
+		if !isExpired(item, now, regime, p.noEndpointRequestTTL) {
+			return false
+		}
+		// Finalizing here rather than in a separate pass keeps expiry to a single scan. Finalization is
+		// idempotent, and an item finalized but not removed is the same zombie state the sweep already
+		// tolerates, so a queue that declines the removal costs nothing beyond a later sweep.
+		item.FinalizeWithError(expiryErr)
+		logger.V(logutil.TRACE).Info("Evicted item, queue-wait budget exhausted.",
+			"requestID", item.OriginalRequest().ID(), "outcome", item.FinalState().Outcome,
+			"poolEmpty", regime.empty)
+		return true
+	})
+	for _, itemAcc := range removedItems {
+		if fi, ok := itemAcc.(*FlowItem); ok && fi != nil && fi.FinalState() != nil {
+			p.recordDrop(fi.FinalState().Outcome)
+		}
+	}
+	return len(removedItems)
 }
 
 // isExpired reports whether item has exhausted the queue-wait budget in force. A zero budget disables eviction in

@@ -122,6 +122,12 @@ func TestOutcomeFromError(t *testing.T) {
 			expectOK:      true,
 		},
 		{
+			name:          "evicted by fair admission",
+			err:           fmt.Errorf("%w: %w", ErrEvicted, ErrFairAdmissionEvicted),
+			expectOutcome: QueueOutcomeEvictedFairAdmission,
+			expectOK:      true,
+		},
+		{
 			name:          "evicted on shutdown",
 			err:           fmt.Errorf("%w: %w", ErrEvicted, ErrFlowControllerNotRunning),
 			expectOutcome: QueueOutcomeEvictedOther,
@@ -157,4 +163,20 @@ func TestOutcomeFromError(t *testing.T) {
 	for o := QueueOutcomeNotYetFinalized + 1; o < NumQueueOutcomes; o++ {
 		assert.True(t, covered[o], "no test row covers outcome %s", o)
 	}
+}
+
+// TestQueueOutcomeString checks that every outcome has its own metric label, so two outcomes never share an `outcome`
+// label value in the flow-control metrics.
+func TestQueueOutcomeString(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]QueueOutcome)
+	for o := QueueOutcomeNotYetFinalized; o < NumQueueOutcomes; o++ {
+		label := o.String()
+		assert.NotContains(t, label, "UnknownOutcome", "outcome %d has no label", int(o))
+		if prev, dup := seen[label]; dup {
+			t.Errorf("outcomes %d and %d share the label %q", int(prev), int(o), label)
+		}
+		seen[label] = o
+	}
+	assert.Equal(t, "EvictedFairAdmission", QueueOutcomeEvictedFairAdmission.String())
 }

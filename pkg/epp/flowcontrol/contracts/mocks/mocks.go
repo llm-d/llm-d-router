@@ -100,6 +100,12 @@ func (m *MockRegistryDataPlane) WithConnection(key flowcontrol.FlowKey, fn func(
 	return nil
 }
 
+func (m *MockRegistryDataPlane) LongestQueue(int) contracts.ManagedQueue { return nil }
+
+func (m *MockRegistryDataPlane) LastAdded(flowcontrol.FlowKey) flowcontrol.QueueItemAccessor {
+	return nil
+}
+
 func (m *MockRegistryDataPlane) SubmitDesiredPriorities(_ map[int]struct{}) {}
 
 func (m *MockRegistryDataPlane) PriorityBandUpdateChannel() <-chan map[int]struct{} {

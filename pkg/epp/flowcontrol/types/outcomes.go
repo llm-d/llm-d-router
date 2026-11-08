@@ -84,6 +84,10 @@ const (
 	// `context.DeadlineExceeded` error) (and `ErrEvicted`).
 	QueueOutcomeEvictedContextCancelled
 
+	// QueueOutcomeEvictedFairAdmission indicates eviction from a queue by the band's FairAdmission. The associated error
+	// will wrap `ErrFairAdmissionEvicted` (and `ErrEvicted`).
+	QueueOutcomeEvictedFairAdmission
+
 	// QueueOutcomeEvictedOther indicates eviction from a queue for reasons not covered by more specific eviction
 	// outcomes.
 	// The specific underlying cause can be determined from the associated error (e.g., controller shutdown while the item
@@ -115,6 +119,8 @@ func (o QueueOutcome) String() string {
 		return "EvictedNoEndpoints"
 	case QueueOutcomeEvictedContextCancelled:
 		return "EvictedContextCancelled"
+	case QueueOutcomeEvictedFairAdmission:
+		return "EvictedFairAdmission"
 	case QueueOutcomeEvictedOther:
 		return "EvictedOther"
 	default:
@@ -143,6 +149,8 @@ func OutcomeFromError(err error) (QueueOutcome, bool) {
 			return QueueOutcomeEvictedTTL, true
 		case errors.Is(err, ErrContextCancelled):
 			return QueueOutcomeEvictedContextCancelled, true
+		case errors.Is(err, ErrFairAdmissionEvicted):
+			return QueueOutcomeEvictedFairAdmission, true
 		default:
 			return QueueOutcomeEvictedOther, true
 		}
