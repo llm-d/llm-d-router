@@ -82,8 +82,10 @@ const (
 	// to charge the failure to the endpoint that ran the stage: a prefill
 	// failure reaches the EPP as the decode endpoint's response status, and
 	// without the header it cannot be told apart from a decode failure. Only
-	// stages whose failure is known before the response is written carry the
-	// header; a decode failure is observed after the response is on the wire.
+	// failures known before the response is written carry the header: prefill
+	// and encode failures, and the concurrent-dispatch decode abort, which
+	// writes the response itself. A decode failure observed after the response
+	// is on the wire carries none.
 	FailedStageHeader = "x-llm-d-failed-stage"
 
 	// Names of the disaggregated stages, used as the sidecar's stage labels and

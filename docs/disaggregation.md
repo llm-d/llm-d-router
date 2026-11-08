@@ -70,9 +70,10 @@ The sidecar answers a request whose stage failed with that stage's error
 response, marked on the `x-llm-d-failed-stage` response header (`prefill`,
 `encode`, or `decode`). The EPP reads the header to charge the failure to the
 endpoint that ran the stage: without it, a prefill failure reaches the EPP as
-the decode endpoint's response status. A decode failure is known only after the
-response is on the wire, so it carries no header. The sidecar drops any value
-the model server set, so only the sidecar marks stages.
+the decode endpoint's response status. Only failures known before the response
+is written carry the header: prefill and encode failures, and the
+concurrent-dispatch decode abort, which writes the response itself. The sidecar
+drops any value the model server set, so only the sidecar marks stages.
 
 When both spellings are present the sidecar reads the old one, against the usual
 preference for the current name. Sanitization was deployed under the old name,

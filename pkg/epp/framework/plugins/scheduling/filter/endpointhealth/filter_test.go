@@ -195,11 +195,11 @@ func TestEncodeFailureChargesNoEndpoint(t *testing.T) {
 }
 
 // TestDisaggregatedSuccessChargesDecodeEndpoint covers a successful response
-// for a request that ran prefill: it still resets the decode endpoint's
-// failure run, as a decode-only success does, while the prefill endpoint's
-// failures never charge the decode endpoint.
+// for a request that ran prefill: it resets both endpoints' failure runs, as a
+// decode-only success resets the decode endpoint's, while the prefill
+// endpoint's failures never charge the decode endpoint.
 func TestDisaggregatedSuccessChargesDecodeEndpoint(t *testing.T) {
-	f, _ := newTestFilter(t, parameters{})
+	f, clock := newTestFilter(t, parameters{})
 	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
 	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
 	request := pdRequest(decode, prefill)
@@ -219,12 +219,98 @@ func TestDisaggregatedSuccessChargesDecodeEndpoint(t *testing.T) {
 	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)),
 		"the run continues from zero after the reset")
 
-	for range 5 {
+	// Let the decode endpoint's ejection expire before the prefill sequence.
+	clock.advance(31 * time.Second)
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the decode endpoint's ejection expired")
+
+	for range 4 {
 		pdRespond(f, request, decode, "503", routing.StagePrefill)
 	}
-	prefillOnly := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1")}
-	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, prefillOnly)),
+	pdRespond(f, request, decode, "200", "")
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the success reset the prefill endpoint's failure run")
+
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	decodeOnly := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1")}
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, decodeOnly)),
 		"the prefill failures eject the prefill endpoint and leave the decode endpoint healthy")
+}
+
+// TestDecodeStageMarkerChargesDecodeEndpoint covers a decode failure the sidecar
+// marked, which only the concurrent-dispatch decode abort produces: it is
+// charged to the picked endpoint like an unmarked decode failure.
+func TestDecodeStageMarkerChargesDecodeEndpoint(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 5 {
+		pdRespond(f, request, decode, "502", routing.StageDecode)
+	}
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)))
+}
+
+// TestMarkedResponseOutsideFailureCodesResetsNothing covers a marked response
+// whose status is outside responseFailureCodes, such as the 504 of a prefill
+// KV-wait timeout: it is neither a failure nor a reset for any endpoint.
+func TestMarkedResponseOutsideFailureCodesResetsNothing(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 10 {
+		pdRespond(f, request, decode, "504", routing.StagePrefill)
+	}
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"a status outside the failure codes ejects no endpoint")
+
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	for range 10 {
+		pdRespond(f, request, decode, "504", routing.StagePrefill)
+	}
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)),
+		"a status outside the failure codes does not reset the failure run")
+}
+
+// TestMarkerIgnoredWithoutDisaggregatedStage covers a pool without the sidecar,
+// where a model-server-set marker reaches the EPP untouched: the marker is
+// ignored and the failure charges the picked endpoint.
+func TestMarkerIgnoredWithoutDisaggregatedStage(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	// A request with a scheduling result but no prefill or encoder target.
+	request := &fwksched.InferenceRequest{Headers: map[string]string{}}
+	request.SchedulingResult = &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {TargetEndpoints: []fwksched.Endpoint{
+				fwksched.NewEndpoint(decode, fwkdl.NewMetrics(), fwkdl.NewAttributes()),
+			}},
+		},
+	}
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1")}
+
+	for _, stage := range []string{routing.StagePrefill, routing.StageEncode, routing.StageDecode} {
+		for range 5 {
+			pdRespond(f, request, decode, "503", stage)
+		}
+	}
+	// The only candidate is ejected, so fail-open keeps it; the ejection
+	// counter is the observable.
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)))
+	assert.InDelta(t, 1, counterValue(t, ejections, "health", reasonResponse), 0,
+		"markers on a request that ran no disaggregated stage are ignored")
 }
 
 // TestPrefillMarkerWithoutMatchingEndpoint covers a prefill marker whose

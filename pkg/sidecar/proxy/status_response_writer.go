@@ -121,8 +121,10 @@ func (s *responseStatus) implicitOK() {
 // failed carries that stage on routing.FailedStageHeader, for the EPP to charge
 // the failure to the endpoint that ran the stage. A value the model server set
 // is dropped, so only the sidecar marks stages. Connectors mark the failed
-// stage before they write the error response; a decode failure is known only
-// after the response is on the wire, so it carries no header.
+// stage before they write the error response. The decode stage is the
+// exception: its failure is usually known only after the response is on the
+// wire, and only the concurrent-dispatch decode abort, which writes the
+// response itself, marks one.
 func stampFailedStage(w http.ResponseWriter, summary *requestSummary) http.ResponseWriter {
 	return httpsnoop.Wrap(w, httpsnoop.Hooks{
 		WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {

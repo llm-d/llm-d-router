@@ -297,26 +297,46 @@ func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, request *fwks
 		return
 	}
 	_, failed := f.tracker.cfg.responseFailureCodes[code]
+	prefill := prefillTarget(request)
 
-	if stage := response.Headers[routing.FailedStageHeader]; stage != "" {
-		if stage != routing.StagePrefill {
-			// An encode failure names no single endpoint, and an unknown stage
-			// says nothing about any of them.
-			return
-		}
-		prefill := prefillTarget(request)
-		if prefill == nil {
+	stage := response.Headers[routing.FailedStageHeader]
+	if stage != "" && request != nil &&
+		request.Headers[routing.PrefillEndpointHeader] == "" && request.Headers[routing.EncoderEndpointsHeader] == "" {
+		// The sidecar drops a marker the model server set, but a pool without
+		// the sidecar forwards one through, and its failures must still count.
+		// The request headers, not the resolved prefill target, decide: an
+		// address that matches no scheduled endpoint still ran the sidecar.
+		stage = ""
+	}
+
+	switch stage {
+	case routing.StageDecode:
+		// The decode stage ran on the picked endpoint; only its concurrent-
+		// dispatch abort marks the stage, by writing the response itself.
+	case routing.StagePrefill:
+		if prefill == nil || !failed {
+			// No prefill endpoint to charge, or a status outside
+			// responseFailureCodes, which is neither a failure nor a reset.
 			return
 		}
 		f.tracker.observeResponse(log.FromContext(ctx), prefill.ID, hostPort(prefill), failed, f.now())
 		return
-	}
-	if failed && prefillTarget(request) != nil {
-		// The request ran prefill on a sidecar that marks no failed stage, so
-		// the status cannot be attributed to either endpoint.
+	case "":
+		if failed && prefill != nil {
+			// The request ran prefill on a sidecar that marks no failed stage,
+			// so the status cannot be attributed to either endpoint.
+			return
+		}
+	default:
+		// An encode failure names no single endpoint, and an unknown stage
+		// says nothing about any of them.
 		return
 	}
 	f.tracker.observeResponse(log.FromContext(ctx), targetEndpoint.ID, address, failed, f.now())
+	if !failed && prefill != nil {
+		// A successful response proves the prefill stage ran too.
+		f.tracker.observeResponse(log.FromContext(ctx), prefill.ID, hostPort(prefill), false, f.now())
+	}
 }
 
 // prefillTarget returns the endpoint the EPP picked to prefill request, or nil
