@@ -1137,6 +1137,7 @@ enablement and TLS.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
+| `llm_d_disagg_sidecar_info` | Gauge | `commit`, `build_ref` | Build info. Always `1`. |
 | `llm_d_disagg_sidecar_requests_total` | Counter | `api_type` | Requests on the intercepted inference API paths. `api_type` is `chat_completions`, `completions`, `messages`, `responses`, `vllm_generate`, or `sglang_generate`. |
 | `llm_d_disagg_sidecar_disagg_requests_total` | Counter | `disagg_type` | Requests routed through disaggregation. `disagg_type` is `prefill-decode`, `encode-decode`, or `encode-prefill-decode`. |
 | `llm_d_disagg_sidecar_encode_duration_seconds` | Histogram | - | Encode stage latency. |
