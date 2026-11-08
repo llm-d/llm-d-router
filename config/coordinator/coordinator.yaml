@@ -537,7 +537,12 @@ pipeline:
       #   produced in kv_transfer_params.prompt_token_ids on text-only chat
       #   completions, Responses and Messages requests. The decode worker
       #   builds its input from them and skips chat templating and
-      #   tokenization. Requires vLLM v0.27.0 or later; earlier versions
-      #   ignore the field. Requests with multimodal content or echo set are
-      #   rendered from messages.
+      #   tokenization. Requires vLLM v0.27.0 or later and a render step;
+      #   earlier versions ignore the field. Requests with multimodal content,
+      #   echo, or (chat completions) return_prompt_text set are sent without
+      #   the IDs and rendered from messages. The worker also renders the
+      #   prompt itself, and prompt_token_parity can report
+      #   ids_forwarded="true" mismatches, on Harmony models (such as gpt-oss)
+      #   behind /v1/responses and on the vLLM Rust frontend, neither of which
+      #   reads the field.
       #   forward_prompt_token_ids: false

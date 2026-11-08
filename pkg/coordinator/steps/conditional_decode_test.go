@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -303,14 +304,16 @@ func TestConditionalDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
 		path    string
 		tokens  []int
 		entries []pipeline.MultimodalEntry
-		echo    bool
+		extra   map[string]any
 		want    bool
 	}{
 		{name: "chat", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, want: true},
 		{name: "responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, want: true},
 		{name: "messages", params: forward, path: reqcommon.PathMessages, tokens: []int{1, 2, 3}, want: true},
 		{name: "multimodal", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, entries: image},
-		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, echo: true},
+		{name: "echo", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldEcho: json.RawMessage("true")}},
+		{name: "return_prompt_text", params: forward, path: reqcommon.PathChatCompletions, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}},
+		{name: "return_prompt_text on responses", params: forward, path: reqcommon.PathResponses, tokens: []int{1, 2, 3}, extra: map[string]any{reqcommon.FieldReturnPromptText: json.RawMessage("true")}, want: true},
 		{name: "not rendered", params: forward, path: reqcommon.PathChatCompletions},
 		{name: "generate", params: forward, path: reqcommon.PathVLLMGenerate, tokens: []int{1, 2, 3}},
 		{name: "completions", params: forward, path: reqcommon.PathCompletions, tokens: []int{1, 2, 3}},
@@ -326,9 +329,7 @@ func TestConditionalDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
 				MultimodalEntries: tc.entries,
 				Body:              map[string]any{"model": testModelName},
 			}
-			if tc.echo {
-				reqCtx.Body[reqcommon.FieldEcho] = true
-			}
+			maps.Copy(reqCtx.Body, tc.extra)
 			body, err := step.(*ConditionalDecodeStep).prepareBody(reqCtx)
 			require.NoError(t, err)
 			kvParams, _ := body[reqcommon.FieldKVTransferParams].(map[string]any)

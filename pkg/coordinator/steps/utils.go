@@ -790,11 +790,14 @@ func validatePlaceholderBounds(entries []pipeline.MultimodalEntry, tokenCount in
 // sendsPromptTokenIDs reports whether a decode-leg body for apiType carries the
 // rendered IDs in kv_transfer_params.prompt_token_ids. Multimodal and echo
 // requests are excluded: vLLM renders messages for them and ignores the IDs.
+// Chat requests with return_prompt_text are excluded because vLLM reuses the
+// IDs without the prompt text and returns prompt_text as null.
 func sendsPromptTokenIDs(enabled bool, reqCtx *pipeline.RequestContext, apiType reqcommon.APIType) bool {
 	switch apiType {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
 		return enabled && len(reqCtx.TokenIDs) > 0 && len(reqCtx.MultimodalEntries) == 0 &&
-			!boolField(reqCtx.Body, reqcommon.FieldEcho)
+			!boolField(reqCtx.Body, reqcommon.FieldEcho) &&
+			(apiType != reqcommon.APITypeChatCompletions || !boolField(reqCtx.Body, reqcommon.FieldReturnPromptText))
 	default:
 		return false
 	}
