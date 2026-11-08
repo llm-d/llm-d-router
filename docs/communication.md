@@ -599,7 +599,7 @@ Like chat completions, the body is sent unchanged:
 | Any other error | Generic error response is propagated to the client. Pipeline processing stops. |
 
 > [!NOTE]
-> The 412 response may include additional hints in the response body or response headers (e.g., scheduling suggestions or cache locality information). These hints are not yet consumed by the coordinator and will be defined/integrated later.
+> The coordinator captures the 412 response headers listed in `forward_response_headers` and sends them on the later phases. Hints in the 412 body are not consumed.
 
 ---
 
