@@ -629,7 +629,7 @@ requests. The startup warmup probe is not observed.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. |
+| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_token_producer_render_failures_total` | Counter | `plugin_type`, `plugin_name`, `backend`, `reason` | Failed render calls. |
 
 `backend` is `vllm`. `result` is `success`, `timeout`, `canceled` or `error`. A `canceled` call is

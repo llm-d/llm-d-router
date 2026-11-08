@@ -139,7 +139,8 @@ func (r *vllmHTTPRenderer) observeRender(ctx context.Context, path string, timeo
 	if span := trace.SpanFromContext(ctx); span.IsRecording() && ctx.Value(renderToolAttributesCtxKey{}) != nil {
 		span.SetAttributes(semconv.LLMDEPPTokenProducerResult(result))
 	}
-	renderDurationSeconds.WithLabelValues(PluginType, r.pluginName, BackendVLLM, result).Observe(elapsed.Seconds())
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		renderDurationSeconds.WithLabelValues(PluginType, r.pluginName, BackendVLLM, result), elapsed.Seconds())
 	if reason == "" {
 		return
 	}
