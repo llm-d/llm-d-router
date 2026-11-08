@@ -45,6 +45,10 @@ type Metrics struct {
 	// UpdateTime records the last time when the metrics were updated.
 	// The zero value means no scrape has written this snapshot.
 	UpdateTime time.Time
+
+	// ScalarSamples records when each scalar metric was last observed. Read it
+	// through ScalarSample and CustomScalarSample. Nil means no sample.
+	ScalarSamples *ScalarSamples
 }
 
 // Updated reports whether a scrape has written this snapshot.
@@ -90,5 +94,6 @@ func (m *Metrics) Clone() *Metrics {
 		CachePrefixMatchUnit:    m.CachePrefixMatchUnit,
 		CacheNumBlocks:          m.CacheNumBlocks,
 		UpdateTime:              m.UpdateTime,
+		ScalarSamples:           m.ScalarSamples,
 	}
 }

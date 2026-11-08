@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -36,7 +37,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	preciseproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache"
 	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
@@ -52,6 +52,10 @@ const (
 
 	waitingQueueEWMAHalfLife = 2 * time.Second
 	waitingQueueReopenRatio  = 0.5
+
+	// defaultWaitingQueueStalenessThreshold matches the default of
+	// --metrics-staleness-threshold.
+	defaultWaitingQueueStalenessThreshold = 2 * time.Second
 )
 
 // Policy controls whether the router preserves backend defaults or disables
@@ -71,6 +75,9 @@ type Config struct {
 	MinExternalReusableTokens   int    `json:"minExternalReusableTokens,omitempty"`
 	MaxWaitingRequests          int    `json:"maxWaitingRequests,omitempty"`
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
+	// WaitingQueueStalenessThreshold is the maximum age of the waiting-queue
+	// sample the queue gate acts on. Defaults to 2s if unset.
+	WaitingQueueStalenessThreshold *metav1.Duration `json:"waitingQueueStalenessThreshold,omitempty"`
 }
 
 // DefaultConfig preserves both transfer directions. Threshold mode uses the
@@ -103,6 +110,7 @@ type Plugin struct {
 	offloadPolicy             Policy
 	minExternalReusableTokens int
 	maxWaitingRequests        int
+	waitingQueueStaleness     time.Duration
 	prefixMatchInfoDataKey    plugin.DataKey
 	waitingQueueMu            sync.Mutex
 	waitingQueueByEndpoint    map[string]waitingQueueState
@@ -153,6 +161,14 @@ func New(name string, cfg Config) (*Plugin, error) {
 		return nil, fmt.Errorf(
 			"%s: maxWaitingRequests requires threshold loadPolicy", PluginType)
 	}
+	waitingQueueStalenessThreshold := defaultWaitingQueueStalenessThreshold
+	if cfg.WaitingQueueStalenessThreshold != nil {
+		if cfg.WaitingQueueStalenessThreshold.Duration <= 0 {
+			return nil, fmt.Errorf(
+				"%s: waitingQueueStalenessThreshold must be positive", PluginType)
+		}
+		waitingQueueStalenessThreshold = cfg.WaitingQueueStalenessThreshold.Duration
+	}
 
 	return &Plugin{
 		typedName:                 plugin.TypedName{Type: PluginType, Name: name},
@@ -160,6 +176,7 @@ func New(name string, cfg Config) (*Plugin, error) {
 		offloadPolicy:             cfg.OffloadPolicy,
 		minExternalReusableTokens: cfg.MinExternalReusableTokens,
 		maxWaitingRequests:        cfg.MaxWaitingRequests,
+		waitingQueueStaleness:     waitingQueueStalenessThreshold,
 		prefixMatchInfoDataKey: attrprefix.PrefixCacheMatchInfoDataKey.
 			WithNonEmptyProducerName(cfg.PrefixMatchInfoProducerName),
 		waitingQueueByEndpoint: make(map[string]waitingQueueState),
@@ -180,7 +197,7 @@ func (p *Plugin) Consumes() plugin.DataDependencies {
 		p.prefixMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{},
 	}
 	if p.maxWaitingRequests > 0 {
-		required[attrmetrics.ScalarMetricDataKey(extractormetrics.WaitingQueueSizeKey)] = attrmetrics.ScalarMetricValue(0)
+		required[attrmetrics.ScalarSampleDataKey(fwkdl.ScalarFieldWaitingQueueSize)] = fwkdl.ScalarSample{}
 	}
 	return plugin.DataDependencies{Required: required}
 }
@@ -339,15 +356,19 @@ func (p *Plugin) waitingQueueVeto(endpoint scheduling.Endpoint) bool {
 		return false
 	}
 	metadata := endpoint.GetMetadata()
-	metrics := endpoint.GetMetrics()
-	if metadata == nil || metadata.ID.Name == "" || metrics == nil ||
-		metrics.UpdateTime.IsZero() {
+	if metadata == nil || metadata.ID.Name == "" {
+		return false
+	}
+	// A stale sample fails open: a queue value retained after the metric
+	// disappeared, or after polls stopped, must not keep loading closed.
+	queue, ok := endpoint.GetMetrics().ScalarSample(fwkdl.ScalarFieldWaitingQueueSize)
+	if !ok || !queue.FreshWithin(p.waitingQueueStaleness) {
 		return false
 	}
 
 	endpointID := metadata.ID.String()
-	sampleTime := metrics.UpdateTime
-	sample := float64(metrics.WaitingQueueSize)
+	sampleTime := queue.ScrapeTime
+	sample := queue.Value
 
 	p.waitingQueueMu.Lock()
 	defer p.waitingQueueMu.Unlock()
