@@ -119,15 +119,19 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanggrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanghttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/systemone"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllminference"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentlineage"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/outlenbucket"
 	respondermodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responder/models"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responsereceived/headercopy"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responsereceived/latencyreporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responsereceived/topologystamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/screener/disaggregatedsetrollout"
@@ -683,6 +687,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(topologystamp.PluginType, fwkplugin.StabilityAlpha, topologystamp.Factory)
 	fwkplugin.Register(latencyreporter.PluginType, fwkplugin.StabilityAlpha, latencyreporter.PluginFactory)
+	fwkplugin.Register(headercopy.PluginType, fwkplugin.StabilityAlpha, headercopy.Factory)
 
 	// bylabel role filters
 	// Stable
@@ -831,10 +836,12 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(requestattributereporter.RequestAttributeReporterType, fwkplugin.StabilityBeta, requestattributereporter.RequestAttributeReporterPluginFactory)
 	fwkplugin.Register(openai.OpenAIParserType, fwkplugin.StabilityBeta, openai.OpenAIParserPluginFactory)
 	fwkplugin.Register(vllmgrpc.VllmGRPCParserType, fwkplugin.StabilityBeta, vllmgrpc.VllmGRPCParserPluginFactory)
+	fwkplugin.Register(vllminference.VllmInferenceParserType, fwkplugin.StabilityBeta, vllminference.VllmInferenceParserPluginFactory)
 	fwkplugin.Register(passthrough.PassthroughParserType, fwkplugin.StabilityBeta, passthrough.PassthroughParserPluginFactory)
 	fwkplugin.Register(anthropic.AnthropicParserType, fwkplugin.StabilityBeta, anthropic.AnthropicParserPluginFactory)
 	fwkplugin.Register(vllmhttp.VllmHTTPParserType, fwkplugin.StabilityBeta, vllmhttp.VllmHTTPParserPluginFactory)
 	fwkplugin.Register(systemone.SystemOneParserType, fwkplugin.StabilityBeta, systemone.SystemOneParserPluginFactory)
+	fwkplugin.Register(sglanggrpc.SGLangGRPCParserType, fwkplugin.StabilityBeta, sglanggrpc.SGLangGRPCParserPluginFactory)
 	fwkplugin.Register(sglanghttp.SGLangHTTPParserType, fwkplugin.StabilityBeta, sglanghttp.SGLangHTTPParserPluginFactory)
 	fwkplugin.Register(vertexai.VertexAIParserType, fwkplugin.StabilityBeta, vertexai.VertexAIParserPluginFactory)
 
@@ -856,6 +863,7 @@ func (r *Runner) registerInTreePlugins() {
 	// register request header processor plugins
 	// Alpha
 	fwkplugin.Register(agentidentity.PluginType, fwkplugin.StabilityAlpha, agentidentity.PluginFactory)
+	fwkplugin.Register(agentlineage.PluginType, fwkplugin.StabilityAlpha, agentlineage.PluginFactory)
 	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
 }
 
@@ -1402,9 +1410,15 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
 	})
 	g.Add("metrics", func(ctx context.Context) error {
-		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof)
+		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.PluginHandle)
 	})
-	return g.Run(ctx)
+	// A canceled context is the normal shutdown. Any other error ends the
+	// process with exit status 1, and no other line names it.
+	err = g.Run(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		setupLog.Error(err, "EPP stopped")
+	}
+	return err
 }
 
 // metricsShutdownTimeout bounds graceful shutdown of the metrics server so a
@@ -1417,7 +1431,7 @@ const metricsShutdownTimeout = 5 * time.Second
 // pkg/epp/metrics.Register), not the prometheus default registry. The handler
 // must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
 // Go runtime/process metrics and silently omit every EPP metric.
-func serveMetrics(ctx context.Context, port uint16, enablePprof bool) error {
+func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fwkplugin.HandlePlugins) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {
@@ -1425,6 +1439,7 @@ func serveMetrics(ctx context.Context, port uint16, enablePprof bool) error {
 			mux.Handle(path, h)
 		}
 	}
+	mux.Handle(runserver.PluginStateDebugPath, runserver.NewPluginStateDebugHandler(plugins))
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

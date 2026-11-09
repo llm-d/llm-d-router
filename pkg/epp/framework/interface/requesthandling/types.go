@@ -28,8 +28,8 @@ import (
 // TerminationCause labels how a dispatched request's response stream ended. Observers that learn
 // from response records need it to tell a complete observation from a truncated one: a stream cut
 // short by a disconnect or an eviction reports only the tokens emitted before the cut. Requests
-// whose response processing is skipped never observe completion, so their records always carry a
-// non-natural cause.
+// whose response processing is skipped never observe completion, so their records always carry
+// TerminationCauseNotObserved.
 type TerminationCause string
 
 const (
@@ -48,6 +48,9 @@ const (
 	// classified: a half-close that reaches the EPP before its cancellation propagates, or an
 	// EPP-side failure.
 	TerminationCauseError TerminationCause = "error"
+	// TerminationCauseNotObserved is a request whose route skips response processing: the EPP
+	// stops processing the stream after routing and never sees the response.
+	TerminationCauseNotObserved TerminationCause = "not-observed"
 )
 
 // Response contains information from the response received to be passed to the Response requesthandling plugins

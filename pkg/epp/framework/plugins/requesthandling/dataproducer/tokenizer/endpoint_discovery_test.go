@@ -80,6 +80,17 @@ func TestDiscoveredEndpointPicker_RoundRobinUsesInferencePortsByDefault(t *testi
 	}
 }
 
+func TestDiscoveredEndpointPicker_RejectsInvalidInferencePort(t *testing.T) {
+	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
+	require.NoError(t, err)
+
+	for _, port := range []string{"", "abc", "0", "65536"} {
+		require.ErrorContains(t, picker.Upsert(discoveredEndpoint("bad-"+port, "10.0.0.1", port).GetMetadata()), "invalid port")
+	}
+	require.NoError(t, picker.Upsert(discoveredEndpoint("min", "10.0.0.1", "1").GetMetadata()))
+	require.NoError(t, picker.Upsert(discoveredEndpoint("max", "10.0.0.1", "65535").GetMetadata()))
+}
+
 func TestDiscoveredEndpointPicker_TracksUpdatesAndDeletes(t *testing.T) {
 	picker, err := newDiscoveredEndpointPicker(&endpointDiscoveryConfig{})
 	require.NoError(t, err)
@@ -243,12 +254,18 @@ func TestDiscoveredEndpointPicker_PortRulesRejectUnmatchedAndInvalidRank(t *test
 	require.ErrorContains(t, picker.Upsert(discoveredEndpointWithRank(
 		"prefill", "10.0.0.1", "8000", 0, map[string]string{"llm-d.ai/role": "prefill"},
 	).GetMetadata()), "does not match any port rule")
-	require.ErrorContains(t, picker.Upsert(discoveredEndpointWithRank(
+	// Each fault names its own cause only: a negative rank resolves to a port
+	// inside the range, so the range message would contradict it.
+	err = picker.Upsert(discoveredEndpointWithRank(
 		"negative", "10.0.0.1", "8000", -1, map[string]string{"llm-d.ai/role": "decode"},
-	).GetMetadata()), "invalid rank index")
-	require.ErrorContains(t, picker.Upsert(discoveredEndpointWithRank(
+	).GetMetadata())
+	require.ErrorContains(t, err, "invalid rank index")
+	require.NotContains(t, err.Error(), "resolved render port")
+	err = picker.Upsert(discoveredEndpointWithRank(
 		"overflow", "10.0.0.1", "8000", 1, map[string]string{"llm-d.ai/role": "decode"},
-	).GetMetadata()), "resolved render port")
+	).GetMetadata())
+	require.ErrorContains(t, err, "resolved render port outside 1-65535")
+	require.NotContains(t, err.Error(), "invalid rank index")
 }
 
 func TestDiscoveredEndpointPicker_ReleasesLockBeforeLoadBalancing(t *testing.T) {

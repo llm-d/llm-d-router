@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
@@ -337,6 +338,7 @@ func TestInitFairnessIDResolutionMetricsCreatesOverflowSeries(t *testing.T) {
 
 	InitFairnessIDResolutionMetrics("pool-a")
 
-	require.Equal(t, 3, promtestutil.CollectAndCount(llmdFairnessIDOverflowCounter))
+	require.Equal(t, 4, promtestutil.CollectAndCount(llmdFairnessIDOverflowCounter))
 	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues("header", "pool-a")))
+	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues(tracing.AttributionSourceDerivedRoot, "pool-a")))
 }

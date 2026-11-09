@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
@@ -297,7 +298,7 @@ func compileEndpointPortRules(config *endpointDiscoveryConfig) ([]compiledEndpoi
 func (p *discoveredEndpointPicker) resolveRenderPort(meta *fwkdl.EndpointMetadata) (string, error) {
 	if len(p.portRules) == 0 {
 		port, err := strconv.Atoi(meta.Port)
-		if err != nil || port < 1 || port > 65535 {
+		if err != nil || !routing.IsTCPPort(port) {
 			return "", fmt.Errorf("discovered endpoint %s has invalid port %q", meta.ID, meta.Port)
 		}
 		return meta.Port, nil
@@ -310,10 +311,11 @@ func (p *discoveredEndpointPicker) resolveRenderPort(meta *fwkdl.EndpointMetadat
 		if meta.RankIndex < 0 {
 			return "", fmt.Errorf("discovered endpoint %s has invalid rank index %d", meta.ID, meta.RankIndex)
 		}
-		if meta.RankIndex > 65535-rule.basePort {
+		port, ok := routing.RankPort(rule.basePort, meta.RankIndex)
+		if !ok {
 			return "", fmt.Errorf("discovered endpoint %s resolved render port outside 1-65535", meta.ID)
 		}
-		return strconv.Itoa(rule.basePort + meta.RankIndex), nil
+		return strconv.Itoa(port), nil
 	}
 	return "", fmt.Errorf("discovered endpoint %s does not match any port rule", meta.ID)
 }

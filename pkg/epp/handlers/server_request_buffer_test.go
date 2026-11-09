@@ -19,23 +19,29 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"runtime"
 	"runtime/debug"
 	"strings"
 	"testing"
+	"time"
 	"weak"
 
+	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // inFlightProcessServer replays reqs and then blocks in Recv until finish is
@@ -148,6 +154,234 @@ func TestProcessReleasesRequestBufferAfterRequestPhase(t *testing.T) {
 			require.NoError(t, srv.finish())
 		})
 	}
+}
+
+// streamingResponse returns the response headers and a first response body chunk
+// of a streamed response that has not ended.
+func streamingResponse() []*extProcPb.ProcessingRequest {
+	return []*extProcPb.ProcessingRequest{
+		{Request: &extProcPb.ProcessingRequest_ResponseHeaders{
+			ResponseHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
+				{Key: ":status", RawValue: []byte("200")},
+				{Key: "content-type", RawValue: []byte("text/event-stream")},
+			}}},
+		}},
+		{Request: &extProcPb.ProcessingRequest_ResponseBody{
+			ResponseBody: &extProcPb.HttpBody{Body: []byte("data: {}\n\n")},
+		}},
+	}
+}
+
+// responsePhaseDirector keeps the parsed body on the request, as the Director
+// does for scheduling. It records weak pointers to the request content and the
+// request body that response-phase plugins would receive.
+type responsePhaseDirector struct {
+	mockDirector
+	tokenized      *fwkrequest.TokenizedRequest
+	rawBody        weak.Pointer[byte]
+	completions    weak.Pointer[fwkrequest.CompletionsRequest]
+	prompt         weak.Pointer[byte]
+	headerBody     fwkrequest.InferenceRequestBody
+	bodyChunkBody  fwkrequest.InferenceRequestBody
+	responseBodies int
+}
+
+func (d *responsePhaseDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, body *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
+	// A DataProducer sets TokenizedRequest before scheduling.
+	body.TokenizedRequest = d.tokenized
+	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: body}
+	d.rawBody = weak.Make(&reqCtx.Request.RawBody[0])
+	d.completions = weak.Make(body.Completions)
+	prompt := body.Payload.(fwkrequest.PayloadMap)["prompt"].(json.RawMessage)
+	d.prompt = weak.Make(&prompt[0])
+	return reqCtx, nil
+}
+
+func (d *responsePhaseDirector) HandleResponseHeader(_ context.Context, reqCtx *RequestContext) *RequestContext {
+	d.headerBody = *reqCtx.SchedulingRequest.Body
+	return reqCtx
+}
+
+func (d *responsePhaseDirector) HandleResponseBody(_ context.Context, reqCtx *RequestContext, _ bool) *RequestContext {
+	if d.responseBodies == 0 {
+		d.bodyChunkBody = *reqCtx.SchedulingRequest.Body
+	}
+	d.responseBodies++
+	return reqCtx
+}
+
+func TestProcessReleasesRequestContentAfterForwarding(t *testing.T) {
+	const prefix, suffix = `{"model":"m","stream":true,"max_tokens":16,"prompt":"`, `"}`
+	body := []byte(prefix + strings.Repeat("a", 64<<10) + suffix)
+	registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+	director := &responsePhaseDirector{
+		tokenized: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: []uint32{1, 2, 3}}}},
+	}
+	server := NewStreamingServer(nil, director, registry, 0)
+
+	reqs := append(requestMessages(reqcommon.PathCompletions, body, 16<<10), streamingResponse()...)
+	srv := newInFlightProcessServer(reqs)
+	srv.start(t, server)
+	require.Eventually(t, func() bool {
+		runtime.GC()
+		return director.rawBody.Value() == nil && director.completions.Value() == nil && director.prompt.Value() == nil
+	}, 5*time.Second, 10*time.Millisecond, "request content reachable while the stream waits for the response")
+	require.NoError(t, srv.finish())
+
+	maxTokens := int64(16)
+	want := fwkrequest.InferenceRequestBody{
+		TokenizedRequest: director.tokenized,
+		Stream:           true,
+		MaxOutputTokens:  &maxTokens,
+		Model:            "m",
+	}
+	require.Equal(t, want, director.headerBody, "request body in ResponseHeader")
+	require.Same(t, director.tokenized, director.headerBody.TokenizedRequest)
+	require.Equal(t, want, director.bodyChunkBody, "request body in ResponseBody")
+	require.Same(t, director.tokenized, director.bodyChunkBody.TokenizedRequest)
+}
+
+// stragglerDirector starts a goroutine that holds a copy of the request and reads
+// its body, as a DataProducer does when it outlives its timeout:
+// dataProducerPluginsWithTimeout passes each producer a copy of the request and
+// returns without waiting for it.
+type stragglerDirector struct {
+	mockDirector
+	responseStarted chan struct{}
+	stop            chan struct{}
+	done            chan struct{}
+	contentKept     bool
+}
+
+func (d *stragglerDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, body *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
+	reqCtx.SchedulingRequest = &fwksched.InferenceRequest{Body: body}
+	producerRequest := *reqCtx.SchedulingRequest
+	go func() {
+		defer close(d.done)
+		for {
+			select {
+			case <-d.stop:
+				d.contentKept = producerRequest.Body.Completions != nil && producerRequest.Body.Payload != nil
+				return
+			default:
+				// Reads that overlap the release, for the race detector.
+				_ = producerRequest.Body.Completions
+				runtime.Gosched()
+			}
+		}
+	}()
+	return reqCtx, nil
+}
+
+func (d *stragglerDirector) HandleResponseHeader(_ context.Context, reqCtx *RequestContext) *RequestContext {
+	close(d.responseStarted)
+	return reqCtx
+}
+
+func TestProcessReleaseKeepsBodyForStragglingProducer(t *testing.T) {
+	body := []byte(`{"model":"m","stream":true,"prompt":"hello"}`)
+	registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+	director := &stragglerDirector{
+		responseStarted: make(chan struct{}),
+		stop:            make(chan struct{}),
+		done:            make(chan struct{}),
+	}
+	server := NewStreamingServer(nil, director, registry, 0)
+
+	reqs := append(requestMessages(reqcommon.PathCompletions, body, len(body)), streamingResponse()...)
+	srv := newInFlightProcessServer(reqs)
+	srv.start(t, server)
+	<-director.responseStarted
+	close(director.stop)
+	<-director.done
+	require.NoError(t, srv.finish())
+	require.True(t, director.contentKept, "request content cleared under a producer that still reads it")
+}
+
+// rawBodyDirector records the RawBody that the Director receives.
+type rawBodyDirector struct {
+	mockDirector
+	rawBody []byte
+}
+
+func (d *rawBodyDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
+	d.rawBody = reqCtx.Request.RawBody
+	return reqCtx, nil
+}
+
+func TestProcessRawBodyUsesBufferAbovePoolCap(t *testing.T) {
+	const bufferCap = 64 << 10
+	body := []byte(`{"model":"m","prompt":"` + strings.Repeat("a", 40<<10) + `"}`)
+	tests := []struct {
+		name          string
+		poolCap       int
+		wantSharesBuf bool
+	}{
+		{name: "buffer within the pool cap is copied", poolCap: 2 * bufferCap},
+		{name: "pool without a cap copies", poolCap: 0},
+		{name: "buffer above the pool cap is taken over", poolCap: bufferCap / 2, wantSharesBuf: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+			director := &rawBodyDirector{}
+			server := NewStreamingServer(nil, director, registry, tt.poolCap)
+			var backing []byte
+			server.bufferPool.New = func() any {
+				backing = make([]byte, 0, bufferCap)
+				return bytes.NewBuffer(backing)
+			}
+
+			srv := newInFlightProcessServer(requestMessages(reqcommon.PathCompletions, body, 16<<10))
+			srv.start(t, server)
+			require.Equal(t, body, director.rawBody)
+			require.Equal(t, tt.wantSharesBuf, &director.rawBody[0] == &backing[:1][0],
+				"RawBody shares the request buffer's memory")
+			require.NoError(t, srv.finish())
+		})
+	}
+}
+
+func TestProcessToolCallingSnapshotWithBufferAbovePoolCap(t *testing.T) {
+	const bufferCap = 64 << 10
+	eppmetrics.Register()
+	eppmetrics.Reset()
+	const prefix, suffix = `{"model":"m","tools":[],"messages":[{"role":"user","content":"`, `"}]}`
+	body := []byte(prefix + strings.Repeat("a", 40<<10) + suffix)
+	registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+	director := &rawBodyDirector{}
+	server := NewStreamingServer(nil, director, registry, bufferCap/2)
+	server.SetToolCallingTelemetryEnabled(true)
+	var backing []byte
+	server.bufferPool.New = func() any {
+		backing = make([]byte, 0, bufferCap)
+		return bytes.NewBuffer(backing)
+	}
+
+	srv := newInFlightProcessServer(requestMessages(reqcommon.PathChatCompletions, body, 16<<10))
+	srv.start(t, server)
+	require.Equal(t, body, director.rawBody)
+	require.Same(t, &backing[:1][0], &director.rawBody[0], "RawBody shares the request buffer's memory")
+	require.NoError(t, srv.finish())
+
+	// The snapshot comparison ran with RawBody and the snapshot on the same memory.
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var preserved float64
+	for _, family := range families {
+		if family.GetName() != "llm_d_epp_tool_calling_field_status_total" {
+			continue
+		}
+		for _, sample := range family.GetMetric() {
+			if metricHasLabels(sample, map[string]string{
+				toolcalling.MetricLabelField:  string(toolcalling.FieldTools),
+				toolcalling.MetricLabelStatus: string(toolcalling.FieldStatusPreserved),
+			}) {
+				preserved += sample.GetCounter().GetValue()
+			}
+		}
+	}
+	require.Equal(t, float64(1), preserved, "tools field reported as preserved")
 }
 
 // retainingDirector keeps the parsed body on the request, as the Director does

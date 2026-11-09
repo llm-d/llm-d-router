@@ -71,7 +71,7 @@ func startObjectiveEnv(t *testing.T, crdDir string) *rest.Config {
 	env := &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join(gaieModulePath, "config", "crd", "bases"),
-			filepath.Join(repoRootPath, "test", "integration", "epp", "testdata", crdDir),
+			filepath.Join(RepoRoot(), "test", "integration", "epp", "testdata", crdDir),
 		},
 		ErrorIfCRDPathMissing: true,
 	}

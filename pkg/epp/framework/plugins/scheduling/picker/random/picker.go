@@ -88,7 +88,7 @@ func (p *RandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.Sco
 	logger := log.FromContext(ctx)
 	if logger.V(logutil.DEBUG).Enabled() {
 		logger.V(logutil.DEBUG).Info("Selecting endpoints from candidates randomly", "max-num-of-endpoints", p.maxNumOfEndpoints,
-			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", scoredEndpoints)
+			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", fwksched.EndpointScores(scoredEndpoints))
 	}
 
 	// Shuffle to ensure uniform random selection.

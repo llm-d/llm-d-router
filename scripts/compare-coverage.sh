@@ -40,6 +40,10 @@ THRESHOLD="${3:-0}"
 LABEL="${4:-main}"
 MAX_REGRESSION="${5:-2.0}"
 
+# Exclude generated protobuf and controller-gen files so adding or regenerating
+# schemas does not dilute statement coverage against a cached baseline.
+GENERATED_COVERAGE_RE='(\.pb\.go|/zz_generated[^/]*\.go):'
+
 # extract_total <profile.out> → percentage as a bare number, e.g. "72.4"
 extract_total() {
     local profile="$1"
@@ -47,8 +51,12 @@ extract_total() {
         echo ""
         return
     fi
-    go tool cover -func="$profile" 2>/dev/null \
+    local filtered
+    filtered=$(mktemp)
+    grep -Ev "$GENERATED_COVERAGE_RE" "$profile" > "$filtered" || true
+    go tool cover -func="$filtered" 2>/dev/null \
         | awk '/^total:/{gsub(/%/,"",$NF); print $NF}' || true
+    rm -f "$filtered"
 }
 
 # delta_str <base> <cur> → e.g. "+1.2" or "-0.5" or "0.0"

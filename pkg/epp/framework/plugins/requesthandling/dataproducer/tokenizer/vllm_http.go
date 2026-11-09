@@ -409,6 +409,8 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkre
 	switch body := body.(type) {
 	case fwkrequest.RawPayload:
 		payload = body
+	case fwkrequest.PayloadProto:
+		return errors.New("native vLLM rendering requires an HTTP JSON payload")
 	case fwkrequest.Marshaler:
 		payload, err = body.Marshal()
 		if err != nil {
@@ -527,7 +529,7 @@ func renderOnlyBudget(path string, payload []byte) ([]byte, error) {
 		return nil, err
 	}
 	// Automatic prompt truncation depends on the original output budget.
-	if truncate, ok := envelope["truncate_prompt_tokens"]; ok && !bytes.Equal(bytes.TrimSpace(truncate), []byte("null")) {
+	if truncate, ok := envelope[reqcommon.FieldTruncatePromptTokens]; ok && !bytes.Equal(bytes.TrimSpace(truncate), []byte("null")) {
 		return payload, nil
 	}
 	envelope["max_tokens"] = json.RawMessage("1")
@@ -549,7 +551,7 @@ func renderOnlyBudget(path string, payload []byte) ([]byte, error) {
 		var thinking struct {
 			Type string `json:"type"`
 		}
-		if json.Unmarshal(envelope["thinking"], &thinking) == nil && thinking.Type == "enabled" {
+		if json.Unmarshal(envelope["thinking"], &thinking) == nil && thinking.Type == reqcommon.ThinkingTypeEnabled {
 			delete(envelope, "thinking")
 		}
 	}

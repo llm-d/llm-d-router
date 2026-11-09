@@ -133,7 +133,7 @@ schedulingProfiles:
   - pluginRef: decode-filter
   - pluginRef: prefix-cache-scorer
   - pluginRef: max-score-picker
-`, modelMyModelTarget, renderer.URL, server.Addr(), endpoint, server.Addr(), rolloutName, testPoolName, bylabel.RoleLabel)
+`, modelMyModelTarget, renderer.URL, server.Addr(), endpoint, server.Addr(), rolloutName, TestPoolName, bylabel.RoleLabel)
 	h := NewTestHarness(ctx, t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
 	h.WithPods([]PodState{P(0, 0, 0.1), P(1, 0, 0.1), P(2, 0, 0.1), P(3, 0, 0.1)})
 
@@ -142,7 +142,7 @@ schedulingProfiles:
 	for i := range 4 {
 		pod := &corev1.Pod{}
 		key := types.NamespacedName{Namespace: h.Namespace, Name: fmt.Sprintf("pod-%d", i)}
-		require.NoError(t, k8sClient.Get(ctx, key, pod))
+		require.NoError(t, K8sClient().Get(ctx, key, pod))
 		pod.Labels[disaggregatedsetrollout.DefaultRevisionLabel] = "v1"
 		pod.Labels[bylabel.RoleLabel] = "decode"
 		if i == 2 {
@@ -151,7 +151,7 @@ schedulingProfiles:
 		if i == 3 {
 			pod.Labels[disaggregatedsetrollout.DefaultRevisionLabel] = "v2"
 		}
-		require.NoError(t, k8sClient.Update(ctx, pod))
+		require.NoError(t, K8sClient().Update(ctx, pod))
 	}
 	h.WaitForSync(4, modelMyModel)
 	require.Eventually(t, func() bool {

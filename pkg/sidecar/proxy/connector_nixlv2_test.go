@@ -1405,7 +1405,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		response, err := io.ReadAll(rp.Body)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(rp.StatusCode).To(Equal(http.StatusBadGateway), string(response))
-		Expect(string(response)).To(ContainSubstring("prefill pod"))
+		Expect(string(response)).To(ContainSubstring("internal error"))
 		Expect(env.decodeHandler.RequestCount.Load()).To(BeNumerically("==", 0))
 	})
 

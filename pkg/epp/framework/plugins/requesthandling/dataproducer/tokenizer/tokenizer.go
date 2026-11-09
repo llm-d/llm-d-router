@@ -33,7 +33,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -62,7 +64,8 @@ const (
 	tokenizedPromptKeyID = "TokenizedPrompt"
 )
 
-// Backend identifiers reported on the tokenize span and returned by Plugin.Backend.
+// Backend identifiers, used by the 'backend' config field and reported on the
+// tokenize span and by Plugin.Backend.
 const (
 	BackendVLLM     = "vllm"
 	BackendEstimate = "estimate"
@@ -76,10 +79,14 @@ var TokenizedPromptDataKey = plugin.NewDataKey(tokenizedPromptKeyID, PluginType)
 
 // tokenizerPluginConfig holds the configuration for the tokenizer plugin.
 //
-// Backend selection: `vllm` or `modelName` selects the vLLM HTTP /render
-// backend; `estimate` selects the tokenizer-free byte-packing backend, which is
-// also the zero-config default when no backend is set.
+// Backend selection: 'backend' names the backend explicitly. Without it, the
+// backend is inferred: `vllm` or `modelName` selects the vLLM HTTP /render
+// backend, `estimate` selects the tokenizer-free byte-packing backend, which is
+// also the zero-config default when neither is set.
 type tokenizerPluginConfig struct {
+	// Backend selects the backend ("vllm" or "estimate"); when set, all
+	// backend-specific fields must match it.
+	Backend string `json:"backend,omitempty"`
 	// VLLM configures the vLLM /render backend.
 	VLLM *vllmConfig `json:"vllm,omitempty"`
 	// Estimate selects the tokenizer-free byte-packing backend; mutually
@@ -235,6 +242,43 @@ type framesStridedMode struct {
 	FrameStride int `json:"frameStride,omitempty"`
 }
 
+// resolveBackend returns the configured backend and validates that all
+// backend-specific fields match it. When 'backend' is unset, the backend is
+// inferred from 'vllm', 'modelName', and 'estimate'.
+func (c *tokenizerPluginConfig) resolveBackend() (string, error) {
+	if c.Backend != "" {
+		switch c.Backend {
+		case BackendVLLM:
+			if c.Estimate != nil {
+				return "", fmt.Errorf("'backend' is %q but 'estimate' is set", BackendVLLM)
+			}
+			if c.ModelName == "" {
+				return "", fmt.Errorf("'modelName' must be specified when 'backend' is %q", BackendVLLM)
+			}
+			return BackendVLLM, nil
+		case BackendEstimate:
+			if c.VLLM != nil || c.ModelName != "" {
+				return "", fmt.Errorf("'backend' is %q but 'vllm' or 'modelName' is set", BackendEstimate)
+			}
+			return BackendEstimate, nil
+		default:
+			return "", fmt.Errorf("'backend' must be %q or %q, got %q", BackendEstimate, BackendVLLM, c.Backend)
+		}
+	}
+	if c.Estimate != nil && (c.VLLM != nil || c.ModelName != "") {
+		return "", errors.New("only one of 'estimate' or 'vllm' may be set")
+	}
+	// modelName is required only by the real-tokenizer backend; the zero-config
+	// path selects the estimate backend, which needs none.
+	if c.VLLM != nil || c.ModelName != "" {
+		if c.ModelName == "" {
+			return "", errors.New("'modelName' must be specified")
+		}
+		return BackendVLLM, nil
+	}
+	return BackendEstimate, nil
+}
+
 // PluginFactory is the factory function for the tokenizer plugin.
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	config := tokenizerPluginConfig{}
@@ -245,15 +289,8 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		}
 	}
 
-	estimate := config.Estimate != nil
-	vllm := config.VLLM != nil || config.ModelName != ""
-	if estimate && vllm {
-		return nil, fmt.Errorf("invalid configuration for '%s' plugin: only one of 'estimate' or 'vllm' may be set", PluginType)
-	}
-	// modelName is required only by the real-tokenizer backend; the zero-config
-	// path selects the estimate backend, which needs none.
-	if vllm && config.ModelName == "" {
-		return nil, fmt.Errorf("invalid configuration for '%s' plugin: 'modelName' must be specified", PluginType)
+	if _, err := config.resolveBackend(); err != nil {
+		return nil, fmt.Errorf("invalid configuration for '%s' plugin: %w", PluginType, err)
 	}
 	if config.Estimate != nil && config.Estimate.Image != nil {
 		if m := config.Estimate.Image.Mode; m != "" && m != imageModeDynamic && m != imageModeStatic {
@@ -282,15 +319,18 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	return p, nil
 }
 
-// NewPlugin constructs the configured backend: vllm /render (selected by
-// 'vllm' or 'modelName'), or estimate byte-packing (the default when no
-// backend is set).
+// NewPlugin constructs the backend named by 'backend', or the one the
+// configuration implies without it: vllm /render (selected by 'vllm' or
+// 'modelName'), or estimate byte-packing (the default when neither is set).
 func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) (*Plugin, error) {
+	backendName, err := config.resolveBackend()
+	if err != nil {
+		return nil, fmt.Errorf("invalid configuration for '%s' plugin: %w", PluginType, err)
+	}
 	var backend tokenInputProducer
-	var backendName string
 	var endpointPicker *discoveredEndpointPicker
-	switch {
-	case config.VLLM != nil || config.ModelName != "":
+	switch backendName {
+	case BackendVLLM:
 		cfg := config.VLLM
 		if cfg == nil {
 			cfg = &vllmConfig{}
@@ -314,14 +354,12 @@ func NewPlugin(ctx context.Context, name string, config *tokenizerPluginConfig) 
 			legacyMessages: legacyMessages, legacyResponses: legacyResponses,
 			warmupAuth: vllmWarmupAuthHeader(),
 		}
-		backendName = BackendVLLM
 		endpointPicker, _ = renderer.endpointPicker.(*discoveredEndpointPicker)
 		if endpointPicker != nil && endpointPicker.config.DiscoverModelLimits {
 			go endpointPicker.watchModelLimits(ctx, renderer.client, config.ModelName)
 		}
 	default:
 		backend = estimateBackend{img: newImageEstimator(config.Estimate), vid: newVideoEstimator(config.Estimate), aud: newAudioEstimator(config.Estimate)}
-		backendName = BackendEstimate
 	}
 
 	typedName := plugin.TypedName{Type: PluginType, Name: name}
@@ -404,11 +442,12 @@ func (p *Plugin) ProduceTimeout() time.Duration {
 }
 
 // Produce derives the request's TokenizedRequest via the configured backend and
-// stores it on the body. Skips when one is already present; errors propagate to
-// the Director, which logs and continues.
+// stores it on the body. Skips when one is already present or the request
+// carries prompt token IDs of its own (see clientPromptTokenIDs); errors
+// propagate to the Director, which logs and continues.
 //
-// The tokenize span opens below the already-tokenized skip path, so it is
-// emitted only when the backend is actually invoked.
+// The tokenize span opens below the skip paths, so it is emitted only when the
+// backend is invoked.
 func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceRequest, _ []scheduling.Endpoint) error {
 	if request.Body == nil {
 		return errors.New("request body is nil")
@@ -423,6 +462,17 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 			request.Body.TokenizedRequest.CacheSalt = CacheSaltFromBody(request.Body)
 		}
 		return nil
+	}
+	arrays, ignored := clientPromptTokenIDs(request.Body)
+	if arrays != nil {
+		tp := fwkrequest.NewTokenizedRequest(arrays)
+		tp.CacheSalt = CacheSaltFromBody(request.Body)
+		request.Body.TokenizedRequest = tp
+		log.FromContext(ctx).V(logging.DEBUG).Info("using client-supplied prompt token IDs", "tokenCount", tp.TokenCount())
+		return nil
+	}
+	if ignored != "" {
+		log.FromContext(ctx).V(logging.DEBUG).Info("ignoring client-supplied prompt token IDs, rendering", "reason", ignored)
 	}
 
 	ctx = withMMMetadata(ctx, parseMMMetadataHeaders(request.Headers))

@@ -32,6 +32,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -294,6 +295,9 @@ func TestPassthrough_ProxyErrorResponses(t *testing.T) {
 		{path: reqcommon.PathAudioSpeech, openAI: true},
 		{path: reqcommon.PathImagesGenerations, openAI: true},
 		{path: reqcommon.PathImagesEdits, openAI: true},
+		{path: reqcommon.PathAudioGenerate, openAI: true},
+		{path: reqcommon.PathVideos, openAI: true},
+		{path: reqcommon.PathVideosSync, openAI: true},
 		{path: reqcommon.PathMessages},
 		{path: reqcommon.PathVLLMGenerate},
 		{path: reqcommon.PathSGLangGenerate},
@@ -350,6 +354,40 @@ func TestPassthrough_ProxyErrorResponses(t *testing.T) {
 					require.JSONEq(t, failure.wantBody, rec.Body.String())
 				})
 			}
+		})
+	}
+}
+
+func TestPassthrough_GRPCProxyErrorResponses(t *testing.T) {
+	gwURL, err := url.Parse("http://gw:80")
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name           string
+		err            error
+		wantGRPCStatus string
+	}{
+		{
+			name:           "connection failure",
+			err:            errors.New("connection refused"),
+			wantGRPCStatus: "14",
+		},
+		{
+			name:           "body too large",
+			err:            &http.MaxBytesError{Limit: config.BytesPerMB},
+			wantGRPCStatus: "8",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := newPassthroughProxy(logr.Discard(), gwURL, http.DefaultTransport, "req-1")
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sglang.api.v1.SglangService/HealthCheck", nil)
+			req.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+
+			proxy.ErrorHandler(rec, req, tc.err)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, grpcframe.MediaType, rec.Header().Get(reqcommon.HeaderContentType))
+			require.Equal(t, tc.wantGRPCStatus, rec.Header().Get(grpcframe.HeaderStatus))
 		})
 	}
 }

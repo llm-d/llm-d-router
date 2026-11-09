@@ -54,7 +54,7 @@ type Indexer struct {
 	tokenProcessor kvblock.TokenProcessor // turns tokens to kv block keys
 	kvBlockIndex   kvblock.Index          // looks up pods for block keys
 	keyWalker      kvblock.KeyWalker      // kvBlockIndex's walk capability; nil without one
-	tierWeights    map[string]float64     // device tier -> weight for the prefix matcher
+	tierScoring    tierScoring            // device tier weights for the prefix matcher
 	cacheFormats   *kvblock.CacheFormatCatalog
 	// recordHits enables the contiguous-chain hit metrics, under the same
 	// option that instruments the index.
@@ -97,7 +97,7 @@ func newIndexer(tokenProcessor kvblock.TokenProcessor, kvBlockIndex kvblock.Inde
 		tokenProcessor: tokenProcessor,
 		kvBlockIndex:   kvBlockIndex,
 		keyWalker:      keyWalker,
-		tierWeights:    tierWeightsFromBackends(backends),
+		tierScoring:    tierScoringFromBackends(backends),
 		recordHits:     recordHits,
 	}
 }

@@ -16,6 +16,7 @@ package kvevents
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"hash/fnv"
 	"slices"
@@ -23,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/cespare/xxhash/v2"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -53,6 +55,15 @@ func normalizeDeviceTier(deviceTier string) string {
 	return strings.ToLower(deviceTier)
 }
 
+// namespacedEngineKey scopes an engine hash to the pod's model; vLLM's hash omits it.
+// Uses the topic model, not the LoRA name, because removal events carry no adapter.
+func namespacedEngineKey(modelSeed, hash uint64) kvblock.BlockHash {
+	var b [16]byte
+	binary.LittleEndian.PutUint64(b[:8], modelSeed)
+	binary.LittleEndian.PutUint64(b[8:], hash)
+	return kvblock.BlockHash(xxhash.Sum64(b[:]))
+}
+
 func isPrefixIndexableSpecKind(kind KVCacheSpecKind) bool {
 	switch kind {
 	case KVCacheSpecKindFullAttention, KVCacheSpecKindMlaAttention, KVCacheSpecKindSinkFull:
@@ -69,15 +80,35 @@ func cacheKindLabel(kind KVCacheSpecKind) string {
 	return string(kind)
 }
 
-// subCanonicalStore reports whether ev's engine blocks are smaller than the
-// canonical block size. Events without a declared block size fall back to
-// tokens per block hash.
-func subCanonicalStore(ev *BlockStoredEvent, canonicalBlockSize int) bool {
-	engineBlockSize := ev.BlockSize
-	if engineBlockSize <= 0 && len(ev.BlockHashes) > 0 {
-		engineBlockSize = len(ev.Tokens) / len(ev.BlockHashes)
+// engineBlockSize returns ev's declared block size. Events without one fall
+// back to tokens per block hash.
+func engineBlockSize(ev *BlockStoredEvent) int {
+	if ev.BlockSize <= 0 && len(ev.BlockHashes) > 0 {
+		return len(ev.Tokens) / len(ev.BlockHashes)
 	}
-	return engineBlockSize > 0 && engineBlockSize < canonicalBlockSize
+	return ev.BlockSize
+}
+
+// subCanonicalStore reports whether ev's engine blocks are smaller than the
+// canonical block size.
+func subCanonicalStore(ev *BlockStoredEvent, canonicalBlockSize int) bool {
+	size := engineBlockSize(ev)
+	return size > 0 && size < canonicalBlockSize
+}
+
+// coveredEngineKeys drops the engine keys of a sub-canonical store that start
+// past its last full canonical block. Index.Add maps engine keys to request
+// keys by their count ratio, which matches token positions only once those
+// trailing keys are gone.
+func coveredEngineKeys(ev *BlockStoredEvent, engineKeys []kvblock.BlockHash,
+	numRequestKeys, canonicalBlockSize int,
+) []kvblock.BlockHash {
+	if !subCanonicalStore(ev, canonicalBlockSize) {
+		return engineKeys
+	}
+	size := engineBlockSize(ev)
+	covered := (numRequestKeys*canonicalBlockSize + size - 1) / size
+	return engineKeys[:min(covered, len(engineKeys))]
 }
 
 func blockStoredEventDigestible(ev *BlockStoredEvent, canonicalBlockSize int) (bool, string) {
@@ -676,6 +707,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 		"podID", podIdentifier,
 		"modelName", modelName,
 		"eventCount", len(batch.Events))
+	modelSeed := xxhash.Sum64String(modelName)
 
 	var windowStores []windowStore
 	// Process each event in the batch
@@ -783,12 +815,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			engineKeys := make([]kvblock.BlockHash, len(ev.BlockHashes))
 			for i, hash := range ev.BlockHashes {
-				engineKeys[i] = kvblock.BlockHash(hash)
+				engineKeys[i] = namespacedEngineKey(modelSeed, hash)
 			}
 
 			parentRequestKey := kvblock.EmptyBlockHash
 			if ev.ParentHash != 0 {
-				parentEngineKey := kvblock.BlockHash(ev.ParentHash)
+				parentEngineKey := namespacedEngineKey(modelSeed, ev.ParentHash)
 				key, err := p.index.GetRequestKey(ctx, parentEngineKey)
 				if err != nil {
 					// Engine blocks smaller than the canonical block that end mid
@@ -802,6 +834,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 							"groupIdx", ev.GroupIdx,
 							"cacheKind", ev.KVCacheSpecKind,
 							"reason", reason,
+							"parentHash", ev.ParentHash,
 							"parentEngineKey", parentEngineKey,
 							"numTokens", len(ev.Tokens),
 							"numBlockHashes", len(ev.BlockHashes),
@@ -809,6 +842,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						continue
 					}
 					debugLogger.Error(err, "Failed to get request key for parent block",
+						"parentHash", ev.ParentHash,
 						"parentEngineKey", parentEngineKey,
 						"effectiveModelName", effectiveModelName,
 						"groupIdx", ev.GroupIdx,
@@ -905,6 +939,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			// Index.Add infers the engine->request mapping from the ratio of
 			// len(engineKeys) to len(requestKeys) (1:1, many:1, or 1:many).
+			engineKeys = coveredEngineKeys(ev, engineKeys, len(requestKeys), format.BlockSize)
 			if err := p.index.Add(ctx, engineKeys, requestKeys, podEntries); err != nil {
 				debugLogger.Error(err, "Failed to add event to index",
 					"podIdentifier", podIdentifier, "event", ev)
@@ -980,7 +1015,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			// both 1:1 (legacy) and 1:many (canonical) mappings.
 			engineKeys := make([]kvblock.BlockHash, len(hashesToEvict))
 			for i, hash := range hashesToEvict {
-				engineKeys[i] = kvblock.BlockHash(hash)
+				engineKeys[i] = namespacedEngineKey(modelSeed, hash)
 			}
 			if err := index.Evict(ctx, kvblock.EngineKey, engineKeys, podEntries); err != nil {
 				debugLogger.Error(err, "Failed to evict engine keys from index",

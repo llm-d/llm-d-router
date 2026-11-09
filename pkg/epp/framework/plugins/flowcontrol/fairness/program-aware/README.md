@@ -97,7 +97,7 @@ Under `las`, **attained service**, measured as a weighted sum of input and outpu
 
 * **Program identity**: From the request's `FairnessID` field, which the Director populates from the fairness ID header, the agent-identity attribute, or their `<tenant>/<session>` composition.
 * **Queue state**: Reads queue length and the head item's enqueue time from the `FlowQueueAccessor`.
-* **Token usage** (`las`): From the `Response.Usage` field on stream completion.
+* **Token usage** (`las`): From `Response.Usage` on stream completion, falling back to `Response.StreamedEvents` for output tokens when `Response.Usage.CompletionTokens` is zero and `Response.StreamedEvents` is positive.
 * **Dispatched count, in-flight count, last completion time** (`turn-priority`): From the per-program metrics maintained across the request lifecycle.
 
 ## Configuration

@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -37,7 +38,7 @@ const (
 	RoleDecode  = "decode"
 )
 
-const modalityLabelHelp = "The modality label holds the request's carried modalities as a comma-joined sorted list (none for text-only), matching the mm.modality span attribute; each request is observed once."
+const modalityLabelHelp = "The modality label holds the request's carried modalities as a comma-joined sorted list (none for text-only, other for anything but image, audio and video); each request is observed once."
 
 var predictedCachedTokens = prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
@@ -144,13 +145,14 @@ type Prediction struct {
 }
 
 // RecordPrediction records a request's prefix-cache prediction under role and
-// modality. Every field is observed in one call so each histogram covers the
-// same requests, which is what lets their sums be divided by one another once
-// modality is summed over.
+// modality, with modality bounded by mmobs.MetricLabel. Every field is observed
+// in one call so each histogram covers the same requests, which is what lets
+// their sums be divided by one another once modality is summed over.
 // llm_d_epp_request_input_tokens is not a usable denominator here: it is
 // recorded from the model server's response, so it omits requests that fail or
 // return no usage, which these metrics still count.
 func RecordPrediction(pluginName, pluginType, role, modality string, p Prediction) {
+	modality = mmobs.MetricLabel(modality)
 	predictedCachedTokens.WithLabelValues(pluginName, pluginType, role, modality).Observe(float64(p.Selected))
 	bestPredictedCachedTokens.WithLabelValues(pluginName, pluginType, role, modality).Observe(float64(p.BestPredicted))
 	bestAvailableCachedTokens.WithLabelValues(pluginName, pluginType, role, modality).Observe(float64(p.BestAvailable))

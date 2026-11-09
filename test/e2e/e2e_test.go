@@ -18,6 +18,7 @@ package e2e
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -103,6 +104,29 @@ var _ = ginkgo.Describe("Run end to end tests", func() {
 			standalone.Create(standaloneConfig(), simpleConfig, 1, 8000)
 
 			generateAndCheckLoad(5)
+		})
+
+		ginkgo.It("should keep routing through healthy EPP with fail-open enabled", func() {
+			createModelServersDecode(1)
+
+			cfg := standaloneConfig()
+			cfg.FailOpen = ptr.To(true)
+			cfg.HealthCheckInterval = "1s"
+			standalone.Create(cfg, simpleConfig, 1, 8000)
+
+			metricsURL := fmt.Sprintf("http://localhost:%d/metrics", getMetricsPort())
+			labelFilter := fmt.Sprintf(`model_name=%q`, simModelName)
+			routedRequest := func() int {
+				before := metrics.GetCounterMetric(metricsURL, "llm_d_epp_request_total", labelFilter)
+				runCompletion(simplePrompt, simModelName)
+				return metrics.GetCounterMetric(metricsURL, "llm_d_epp_request_total", labelFilter) - before
+			}
+
+			gomega.Eventually(routedRequest, readyTimeout, time.Second).Should(gomega.Equal(1))
+			ginkgo.By("Checking successful requests continue to reach EPP across the health-check window")
+			// Cover three consecutive failures at the configured 1s health-check interval.
+			gomega.Consistently(routedRequest, 5*time.Second, time.Second).Should(gomega.Equal(1),
+				"successful requests must be scheduled by EPP instead of taking the fail-open fallback")
 		})
 
 		ginkgo.It("should report metrics", func() {

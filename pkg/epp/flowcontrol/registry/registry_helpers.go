@@ -45,6 +45,9 @@ type priorityBand struct {
 	// registry; hot-path readers (CapacitySnapshot) rely on this to read capacities lock-free.
 	config PriorityBandConfig
 
+	// priorityBandAccessor is a preallocated flowcontrol.PriorityBandAccessor for this priorityBand.
+	priorityBandAccessor *priorityBandAccessor
+
 	// stats aggregates the occupancy of this band's queues (see occupancyStats).
 	stats occupancyStats
 
@@ -53,9 +56,6 @@ type priorityBand struct {
 	// queues holds all managedQueue instances within this band, keyed by their logical ID string.
 	// The priority is implicit from the parent priorityBand.
 	queues map[string]*managedQueue
-
-	// priorityBandAccessor is a preallocated flowcontrol.PriorityBandAccessor for this priorityBand
-	priorityBandAccessor *priorityBandAccessor
 
 	// activeQueues indexes the subset of `queues` that currently hold items, keyed by logical ID
 	// (values are *managedQueue). It is maintained by each queue's empty<->non-empty transitions
@@ -130,9 +130,6 @@ func (fr *FlowRegistry) addPriorityBand(priority int) {
 }
 
 func (fr *FlowRegistry) priorityBandDefaultRequestTTL(priority int) (time.Duration, bool) {
-	fr.mu.RLock()
-	defer fr.mu.RUnlock()
-
 	bandValue, ok := fr.priorityBands.Load(priority)
 	if !ok {
 		return 0, false
@@ -175,9 +172,6 @@ func (fr *FlowRegistry) FairnessPolicy(priority int) (flowcontrol.FairnessPolicy
 
 // PriorityBandAccessor retrieves a read-only view for a given priority level.
 func (fr *FlowRegistry) PriorityBandAccessor(priority int) (flowcontrol.PriorityBandAccessor, error) {
-	fr.mu.RLock()
-	defer fr.mu.RUnlock()
-
 	val, ok := fr.priorityBands.Load(priority)
 	if !ok {
 		return nil, fmt.Errorf("failed to get priority band accessor for priority %d: %w",
@@ -258,8 +252,6 @@ var _ flowcontrol.PriorityBandAccessor = &priorityBandAccessor{}
 
 // Priority returns the numerical priority level of this band.
 func (a *priorityBandAccessor) Priority() int {
-	a.registry.mu.RLock()
-	defer a.registry.mu.RUnlock()
 	return a.band.config.Priority
 }
 

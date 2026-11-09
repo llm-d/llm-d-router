@@ -325,15 +325,31 @@ func (p *Observer) stateFor(endpointID string) *endpointState {
 	return state
 }
 
-// record stores one TTFT observation for an endpoint. at is the observation's
-// timestamp; see slidingWindowTracker.window for the ordering it assumes.
-func (p *Observer) record(endpointID string, ttftSeconds float64, inflightAtDispatch int64, at time.Time) {
-	state := p.stateFor(endpointID)
+// lookup returns the endpoint's state, or false once the endpoint has been
+// deleted. Only the add event creates state: a deleted endpoint's requests
+// still in flight deliver their first chunk after the delete, and recreating
+// the state for them would leave an entry no later event removes.
+func (p *Observer) lookup(endpointID string) (*endpointState, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	state, ok := p.state[endpointID]
+	return state, ok
+}
+
+// record stores one TTFT observation for an endpoint and reports whether the
+// endpoint is still tracked. at is the observation's timestamp; see
+// slidingWindowTracker.window for the ordering it assumes.
+func (p *Observer) record(endpointID string, ttftSeconds float64, inflightAtDispatch int64, at time.Time) bool {
+	state, ok := p.lookup(endpointID)
+	if !ok {
+		return false
+	}
 	state.mu.Lock()
 	state.tracker.add(ttftSeconds, inflightAtDispatch, at)
 	state.lastTTFT, state.lastInflightAtDispatch = ttftSeconds, inflightAtDispatch
 	state.observations++
 	state.mu.Unlock()
+	return true
 }
 
 type observerDebugState struct {

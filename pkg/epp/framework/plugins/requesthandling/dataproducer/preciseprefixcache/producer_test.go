@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -358,6 +359,7 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 	p.blockSizeTokens = 2
 	p.speculativeEnabled = true
 	p.speculativeCache = ttlcache.New[string, *speculativeEntries]()
+	p.speculativeLeases = newSpeculativeLeases(indexer.KVBlockIndex(), logr.Discard())
 	p.speculativeTTL = time.Minute
 	request := &scheduling.InferenceRequest{
 		RequestID: "mixed-formats", TargetModel: "test-model",

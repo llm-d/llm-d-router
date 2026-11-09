@@ -179,6 +179,44 @@ func (m *MockSchedulingPlugin) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{Required: m.consumes}
 }
 
+// mockRequestHeaderProducer publishes a request attribute from RequestHeader,
+// before flow control.
+type mockRequestHeaderProducer struct {
+	name     string
+	produces map[fwkplugin.DataKey]any
+	consumes map[fwkplugin.DataKey]any
+}
+
+func (m *mockRequestHeaderProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock-request-header"}
+}
+
+func (m *mockRequestHeaderProducer) Produces() map[fwkplugin.DataKey]any { return m.produces }
+
+func (m *mockRequestHeaderProducer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: m.consumes}
+}
+
+func (m *mockRequestHeaderProducer) RequestHeader(context.Context, *fwksched.InferenceRequest) error {
+	return nil
+}
+
+// mockRequestHeaderRecorder publishes its attribute from RequestHeader and also
+// records later lifecycle events, like a session tracker.
+type mockRequestHeaderRecorder struct {
+	mockRequestHeaderProducer
+}
+
+func (m *mockRequestHeaderRecorder) PreRequest(context.Context, *fwksched.InferenceRequest, *fwksched.SchedulingResult) error {
+	return nil
+}
+
+var (
+	_ fwkrh.RequestHeaderProcessor = &mockRequestHeaderProducer{}
+	_ fwkrh.RequestHeaderProcessor = &mockRequestHeaderRecorder{}
+	_ fwkrh.PreRequest             = &mockRequestHeaderRecorder{}
+)
+
 func TestValidatePluginExecutionOrder(t *testing.T) {
 	dkA := fwkplugin.NewDataKey("keyA", "mock")
 	// Request control plugin that produces data.
@@ -190,6 +228,9 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 	if _, ok := any(pluginA).(fwkrh.DataProducer); !ok {
 		t.Fatalf("pluginA should implement DataProducer")
 	}
+	headerProducer := &mockRequestHeaderProducer{name: "header", produces: map[fwkplugin.DataKey]any{dkA: nil}}
+	headerRecorder := &mockRequestHeaderRecorder{mockRequestHeaderProducer{name: "recorder", produces: map[fwkplugin.DataKey]any{dkA: nil}}}
+	consumerHeaderRecorder := &mockRequestHeaderRecorder{mockRequestHeaderProducer{name: "consumer-recorder", consumes: map[fwkplugin.DataKey]any{dkA: nil}}}
 
 	testCases := []struct {
 		name        string
@@ -210,6 +251,21 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 			name:        "Scheduling plugin depends on a request control plugin",
 			plugins:     []fwkplugin.Plugin{pluginA, &consumerSchedulingPlugin},
 			expectedErr: "",
+		},
+		{
+			name:        "FC depends on a request header plugin",
+			plugins:     []fwkplugin.Plugin{headerProducer, &consumerFairnessPolicyPlugin},
+			expectedErr: "",
+		},
+		{
+			name:        "FC depends on a request header plugin that also implements PreRequest",
+			plugins:     []fwkplugin.Plugin{headerRecorder, &consumerFairnessPolicyPlugin},
+			expectedErr: "",
+		},
+		{
+			name:        "Request header plugin with PreRequest depends on a request control plugin (invalid layer execution order)",
+			plugins:     []fwkplugin.Plugin{pluginA, consumerHeaderRecorder},
+			expectedErr: "invalid plugin layer execution order",
 		},
 	}
 

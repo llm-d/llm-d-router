@@ -1,5 +1,4 @@
 {{- define "llm-d-epp.deployment-pod-spec" -}}
-      {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
       {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict }}
       {{- $proxyType := include "llm-d-router.proxyType" . | trim }}
       {{- $proxyMode := include "llm-d-router.proxyMode" . | trim }}
@@ -132,7 +131,7 @@
           {{- $grpcHealthPort := .Values.router.epp.grpcHealthPort | default 9003 }}
               - --grpc-health-port
               - "{{ $grpcHealthPort }}"
-          {{- if or $isPriorityRouting (include "llm-d-router.proxy.discoveryServiceName" .) }}
+          {{- if include "llm-d-router.epp.healthCheckingRequired" . }}
               - --health-checking=true
           {{- end }}
               # Pass additional flags via the router.epp.flags field in values.yaml.
