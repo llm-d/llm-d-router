@@ -95,3 +95,21 @@ correlate.
 
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
+
+### CPU offloading with vLLM
+
+vLLM's `OffloadingConnector` publishes a `BlockStored` event on the `CPU` tier
+for each offloaded chunk. By default the event carries the chunk's block hashes
+but no tokens, so the EPP indexes it under the request keys that the chunk's GPU
+store mapped to those hashes. When vLLM evicts a GPU block before its offload
+completes, it publishes the GPU removal before the CPU store. If no other
+endpoint holds the block, the removal also drops the mapping, and the CPU store
+is not indexed.
+
+Set `"self_describing_kv_events": true` in the connector's
+`kv_connector_extra_config`
+([vllm-project/vllm#43468](https://github.com/vllm-project/vllm/pull/43468)).
+The CPU store then carries its tokens and parent hash, and the EPP indexes it
+like a GPU store in either order. The self-describing event carries no
+`extra_keys`, so CPU entries for prompts with multimodal inputs or a
+`cache_salt` do not match lookups.

@@ -18,11 +18,16 @@ package engineadapter //nolint:testpackage // Tests access unexported functions
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1426,4 +1431,104 @@ func TestTypedBatchRequiresExplicitSchema(t *testing.T) {
 	require.NoError(t, msgpack.Unmarshal(payload, &batch))
 	batch.schema = &sglangWireSchema
 	require.ErrorContains(t, msgpack.Unmarshal(payload, &batch), "SGLang event batch: need at least 3 fields")
+}
+
+// TestVLLMSelfDescribingCPUStoreAfterGPURemoval sends a GPU store, then one batch
+// in the order vLLM publishes when a GPU block is evicted before its offload
+// completes: the GPU removal, then the self-describing CPU store of each chunk.
+// Each chunk after the first names the previous chunk's last hash as parent.
+// Every offloaded block must be indexed on the CPU tier.
+func TestVLLMSelfDescribingCPUStoreAfterGPURemoval(t *testing.T) {
+	tokens := make([]uint32, 128)
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) //#nosec G115 -- test data is small
+	}
+	stored := func(hashes []uint64, parent any, tokens []uint32, blockSize int, medium string) []any {
+		return []any{eventTagBlockStored, hashes, parent, tokens, blockSize, nil, medium, nil, nil, 0, "full_attention"}
+	}
+	removed := func(hashes []uint64, medium string) []any {
+		return []any{eventTagBlockRemoved, hashes, medium, 0}
+	}
+	cases := map[string]struct {
+		gpuStore []any
+		batch    [][]any
+	}{
+		"engine block equal to canonical block": {
+			gpuStore: stored([]uint64{1, 2, 3, 4, 5, 6, 7, 8}, nil, tokens, 16, "GPU"),
+			batch: [][]any{
+				removed([]uint64{1, 2, 3, 4, 5, 6, 7, 8}, "GPU"),
+				stored([]uint64{1, 2, 3, 4}, nil, tokens[:64], 16, "CPU"),
+				stored([]uint64{5, 6, 7, 8}, uint64(4), tokens[64:], 16, "CPU"),
+			},
+		},
+		"engine block larger than canonical block": {
+			gpuStore: stored([]uint64{1, 2}, nil, tokens, 64, "GPU"),
+			batch: [][]any{
+				removed([]uint64{1, 2}, "GPU"),
+				stored([]uint64{1}, nil, tokens[:64], 64, "CPU"),
+				stored([]uint64{2}, uint64(1), tokens[64:], 64, "CPU"),
+			},
+		},
+	}
+	server := miniredis.RunT(t)
+	indexConfigs := map[string]func() *kvblock.IndexConfig{
+		"memory": kvblock.DefaultIndexConfig,
+		"cost-aware": func() *kvblock.IndexConfig {
+			return &kvblock.IndexConfig{CostAwareMemoryConfig: &kvblock.CostAwareMemoryIndexConfig{Size: "16MiB", NumCounters: 1000}}
+		},
+		"redis": func() *kvblock.IndexConfig {
+			return &kvblock.IndexConfig{RedisConfig: &kvblock.RedisIndexConfig{Address: server.Addr()}}
+		},
+	}
+	for indexName, indexConfig := range indexConfigs {
+		for caseName, tc := range cases {
+			t.Run(indexName+"/"+caseName, func(t *testing.T) {
+				server.FlushAll()
+				ctx := context.Background()
+				processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 16})
+				require.NoError(t, err)
+				config, err := kvcache.NewDefaultConfig()
+				require.NoError(t, err)
+				config.KVBlockIndexConfig = indexConfig()
+				indexer, err := kvcache.NewKVCacheIndexer(ctx, config, processor)
+				require.NoError(t, err)
+				index := indexer.KVBlockIndex()
+				poolConfig := kvevents.DefaultConfig()
+				poolConfig.Concurrency = 1
+				pool, err := kvevents.NewPool(poolConfig, index, processor, NewVLLMAdapter())
+				require.NoError(t, err)
+				pool.Start(ctx)
+				defer pool.Shutdown(ctx)
+
+				send := func(events ...[]any) {
+					payload, err := msgpack.Marshal([]any{0.0, events, nil})
+					require.NoError(t, err)
+					pool.AddTask(&kvevents.RawMessage{Topic: "kv@pod-a@test-model", Payload: payload})
+				}
+				requestKeys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+				require.NoError(t, err)
+				require.Len(t, requestKeys, 8)
+				blocksOnTier := func(tier string) int {
+					matches, err := index.Lookup(ctx, requestKeys, nil)
+					require.NoError(t, err)
+					n := 0
+					for _, key := range requestKeys {
+						for _, entry := range matches[key] {
+							if entry.PodIdentifier == "pod-a" && entry.DeviceTier == tier {
+								n++
+							}
+						}
+					}
+					return n
+				}
+
+				send(tc.gpuStore)
+				require.Eventually(t, func() bool { return blocksOnTier("gpu") == 8 }, time.Second, time.Millisecond)
+				send(tc.batch...)
+				require.Eventually(t, func() bool {
+					return blocksOnTier("gpu") == 0 && blocksOnTier("cpu") == 8
+				}, time.Second, time.Millisecond)
+			})
+		}
+	}
 }
