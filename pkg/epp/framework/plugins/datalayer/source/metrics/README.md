@@ -22,7 +22,7 @@ The Metrics Data Source is a data layer plugin that polls a Prometheus-compatibl
 The plugin config supports:
 
 -   `scheme` (default "http"): The protocol scheme to use for metrics retrieval.
--   `path` (default "/metrics"): The URL path to use for metrics retrieval.
+-   `path` (default "/metrics"): The URL path to use for metrics retrieval. It may carry a query string, such as `/v1/loads?format=prometheus&include=core` for SGLang's per-rank load, which SGLang's HTTP server reports for every data-parallel rank, including ranks on other nodes.
 -   `insecureSkipVerify` (default true): Whether to skip TLS certificate verification when using the "https" scheme.
 -   `caCertPath`: PEM CA bundle to verify the target's server cert.
 -   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together.
