@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -386,4 +387,92 @@ func TestShadowModeNeverActs(t *testing.T) {
 	}
 	inflight, _ := usage(p, "team-b")
 	assert.Equal(t, 0, inflight)
+}
+
+// decisions returns the decision counter for one label combination in enforce mode.
+func decisions(team, class, servedClass, decision, reason string) float64 {
+	return promtestutil.ToFloat64(admissionDecisions.WithLabelValues(team, class, servedClass, decision, reason, ModeEnforce))
+}
+
+// TestDecisionReason verifies that a downgraded or rejected request records the limit it
+// exceeded, and that an admitted request records none.
+func TestDecisionReason(t *testing.T) {
+	cases := []struct {
+		name        string
+		mutate      func(*Parameters)
+		team        string
+		setup       []*fwksched.InferenceRequest // admitted first, to fill a commit
+		req         *fwksched.InferenceRequest
+		servedClass string
+		decision    string
+		reason      string
+	}{
+		{
+			name: "admitted", team: "team-a", req: newRequest("team-a", 10, 10),
+			servedClass: "critical", decision: decisionAdmitted, reason: "",
+		},
+		{
+			name: "downgraded over prompt size", team: "team-a", req: newRequest("team-a", 2000, 10),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonSize,
+		},
+		{
+			name: "downgraded over output size", team: "team-a", req: newRequest("team-a", 10, 500),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonSize,
+		},
+		{
+			name: "downgraded over concurrency", team: "team-a",
+			setup:       []*fwksched.InferenceRequest{newRequest("team-a", 10, 10), newRequest("team-a", 10, 10)},
+			req:         newRequest("team-a", 10, 10),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonConcurrency,
+		},
+		{
+			name:   "downgraded over daily budget",
+			mutate: func(p *Parameters) { p.Teams[0].MaxConcurrency = 0; p.Teams[0].DailyTokens = 500 },
+			team:   "team-a", setup: []*fwksched.InferenceRequest{newRequest("team-a", 100, 100)},
+			req:         newRequest("team-a", 100, 100),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonDaily,
+		},
+		{
+			name:   "size is reported before daily budget and concurrency",
+			mutate: func(p *Parameters) { p.Teams[0].MaxConcurrency = 1; p.Teams[0].DailyTokens = 500 },
+			team:   "team-a", setup: []*fwksched.InferenceRequest{newRequest("team-a", 100, 100)},
+			req:         newRequest("team-a", 2000, 10),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonSize,
+		},
+		{
+			name:   "daily budget is reported before concurrency",
+			mutate: func(p *Parameters) { p.Teams[0].MaxConcurrency = 1; p.Teams[0].DailyTokens = 500 },
+			team:   "team-a", setup: []*fwksched.InferenceRequest{newRequest("team-a", 100, 100)},
+			req:         newRequest("team-a", 100, 100),
+			servedClass: "standard", decision: decisionDowngraded, reason: reasonDaily,
+		},
+		{
+			name: "rejected over size", team: "team-b", req: newRequest("team-b", 2000, 10),
+			servedClass: "", decision: decisionRejectedSize, reason: reasonSize,
+		},
+		{
+			name: "rejected over concurrency", team: "team-b",
+			setup:       []*fwksched.InferenceRequest{newRequest("team-b", 10, 10)},
+			req:         newRequest("team-b", 10, 10),
+			servedClass: "", decision: decisionRejectedConcurrency, reason: reasonConcurrency,
+		},
+		{
+			name: "rejected over daily budget", team: "team-d",
+			setup:       []*fwksched.InferenceRequest{newRequest("team-d", 100, 100)},
+			req:         newRequest("team-d", 100, 100),
+			servedClass: "", decision: decisionRejectedDaily, reason: reasonDaily,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := newTestPlugin(t, tc.mutate)
+			for _, req := range tc.setup {
+				require.NoError(t, p.RequestHeader(t.Context(), req))
+			}
+			class := p.classes[p.teams[tc.team].classIndex].Name
+			before := decisions(tc.team, class, tc.servedClass, tc.decision, tc.reason)
+			_ = p.RequestHeader(t.Context(), tc.req)
+			assert.InDelta(t, 1, decisions(tc.team, class, tc.servedClass, tc.decision, tc.reason)-before, 1e-9)
+		})
+	}
 }

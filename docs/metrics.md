@@ -849,7 +849,7 @@ it is configured. The `team` label shares the fairness ID cardinality bound. The
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_qos_admission_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `mode` | `decision` is `admitted`, `downgraded`, `rejected_concurrency`, `rejected_size` or `rejected_daily`. `served_class` is empty for rejections. |
+| `llm_d_epp_qos_admission_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | `decision` is `admitted`, `downgraded`, `rejected_concurrency`, `rejected_size` or `rejected_daily`. `reason` is the limit a downgraded or rejected request exceeded (`size`, `daily` or `concurrency`) and is empty when admitted. `served_class` is empty for rejections. |
 | `llm_d_epp_qos_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens charged after refunds. |
 | `llm_d_epp_qos_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
 
