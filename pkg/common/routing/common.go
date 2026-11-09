@@ -78,29 +78,34 @@ const (
 
 	// FailedStageHeader is the response header the sidecar's disaggregated
 	// handler sets on every response it writes, to the name of the stage that
-	// failed (StageEncode, StagePrefill, or StageDecode), or StageNone when no
-	// stage failed. The EPP reads it to charge a failure to the endpoint that
-	// ran the failed stage: a prefill failure reaches the EPP as the decode
-	// endpoint's response status, and without the header it cannot be told
-	// apart from a decode failure. Only failures known before the response is
-	// written name their stage: prefill and encode failures, and the
-	// concurrent-dispatch decode abort, which writes the response itself. A
-	// decode failure observed after the response is on the wire, and every
-	// successful response, carry StageNone. A sidecar that predates the header
-	// writes no header at all, which tells the EPP it cannot attribute the
-	// status. The sidecar drops any value the model server set, so only the
-	// sidecar marks stages. The EPP strips the header before the response
-	// reaches the client. This comment and docs/disaggregation.md are the
-	// contract; other mentions point here.
+	// failed (StageEncode, StagePrefill, or StageDecode). When no stage failed
+	// it carries StageNonePrefilled if the prefill stage completed before the
+	// response was written, and StageNone otherwise. The EPP reads it to charge
+	// a failure to the endpoint that ran the failed stage: a prefill failure
+	// reaches the EPP as the decode endpoint's response status, and without the
+	// header it cannot be told apart from a decode failure. StageNonePrefilled
+	// tells the EPP the prefill endpoint succeeded, which a successful response
+	// alone does not: decode can answer before prefill runs or completes. Only
+	// failures known before the response is written name their stage: prefill
+	// and encode failures, and the concurrent-dispatch decode abort, which
+	// writes the response itself. A decode failure observed after the response
+	// is on the wire carries StageNone or StageNonePrefilled. A sidecar that
+	// predates the header writes no header at all, which tells the EPP it
+	// cannot attribute the status. The sidecar drops any value the model server
+	// set, so only the sidecar marks stages. The EPP strips the header before
+	// the response reaches the client. This comment and docs/disaggregation.md
+	// are the contract; other mentions point here.
 	FailedStageHeader = "x-llm-d-failed-stage"
 
 	// Names of the disaggregated stages, used as the sidecar's stage labels and
-	// as the values carried on FailedStageHeader. StageNone is the value a
-	// response carries when no stage failed.
-	StageEncode  = "encode"
-	StagePrefill = "prefill"
-	StageDecode  = "decode"
-	StageNone    = "none"
+	// as the values carried on FailedStageHeader. StageNone and
+	// StageNonePrefilled are the values a response carries when no stage
+	// failed.
+	StageEncode        = "encode"
+	StagePrefill       = "prefill"
+	StageDecode        = "decode"
+	StageNone          = "none"
+	StageNonePrefilled = "none-prefilled"
 )
 
 // IsTCPPort reports whether port is in 1-65535.

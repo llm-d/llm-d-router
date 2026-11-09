@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,42 +35,78 @@ import (
 )
 
 // TestStampFailedStage covers the response header that names the stage whose
-// failure produced the error response.
+// failure produced the response, or whether prefill completed when none did.
 func TestStampFailedStage(t *testing.T) {
-	respond := func(markStage bool, preset string, writeStatus bool) *httptest.ResponseRecorder {
-		ctx, summary := withRequestSummary(context.Background())
-		recorder := httptest.NewRecorder()
-		if preset != "" {
-			recorder.Header().Set(routing.FailedStageHeader, preset)
-		}
-		w := stampFailedStage(recorder, summary)
-		if markStage {
-			observeStageError(ctx, routing.StagePrefill)
-		}
-		if writeStatus {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			_, err := w.Write([]byte("body"))
-			assert.NoError(t, err)
-		}
-		return recorder
+	tests := []struct {
+		name        string
+		stages      func(ctx context.Context)
+		preset      string
+		writeStatus bool
+		want        string
+	}{
+		{
+			name: "a response written after prefill failed carries the stage",
+			stages: func(ctx context.Context) {
+				observeStageDuration(ctx, routing.StagePrefill, time.Millisecond)
+				observeStageError(ctx, routing.StagePrefill)
+			},
+			writeStatus: true,
+			want:        routing.StagePrefill,
+		},
+		{
+			name:   "a response written without a status carries the stage too",
+			stages: func(ctx context.Context) { observeStageError(ctx, routing.StagePrefill) },
+			want:   routing.StagePrefill,
+		},
+		{
+			name:        "a response written before any stage ran carries none",
+			stages:      func(context.Context) {},
+			writeStatus: true,
+			want:        routing.StageNone,
+		},
+		{
+			name: "a response written after prefill completed carries none-prefilled",
+			stages: func(ctx context.Context) {
+				observeStageDuration(ctx, routing.StagePrefill, time.Millisecond)
+			},
+			writeStatus: true,
+			want:        routing.StageNonePrefilled,
+		},
+		{
+			name: "a failed stage wins over a completed prefill",
+			stages: func(ctx context.Context) {
+				observeStageDuration(ctx, routing.StagePrefill, time.Millisecond)
+				observeStageError(ctx, routing.StageDecode)
+			},
+			writeStatus: true,
+			want:        routing.StageDecode,
+		},
+		{
+			name:        "a value set before the sidecar wrote the response is dropped",
+			stages:      func(context.Context) {},
+			preset:      routing.StageDecode,
+			writeStatus: true,
+			want:        routing.StageNone,
+		},
 	}
-
-	assert.Equal(t, routing.StagePrefill,
-		respond(true, "", true).Header().Get(routing.FailedStageHeader),
-		"a response written after a stage failed carries the stage")
-
-	assert.Equal(t, routing.StagePrefill,
-		respond(true, "", false).Header().Get(routing.FailedStageHeader),
-		"a response written without a status carries the stage too")
-
-	assert.Equal(t, routing.StageNone,
-		respond(false, "", true).Header().Get(routing.FailedStageHeader),
-		"a response written before any stage failed carries none")
-
-	assert.Equal(t, routing.StageNone,
-		respond(false, routing.StageDecode, true).Header().Get(routing.FailedStageHeader),
-		"a value set before the sidecar wrote the response is dropped")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, summary := withRequestSummary(context.Background())
+			recorder := httptest.NewRecorder()
+			if tt.preset != "" {
+				recorder.Header().Set(routing.FailedStageHeader, tt.preset)
+			}
+			w := stampFailedStage(recorder, summary)
+			tt.stages(ctx)
+			if tt.writeStatus {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			} else {
+				_, err := w.Write([]byte("body"))
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.want, recorder.Header().Get(routing.FailedStageHeader))
+		})
+	}
 }
 
 // TestStampFailedStageThroughHandler drives the shared-storage connector
@@ -97,6 +134,31 @@ func TestStampFailedStageThroughHandler(t *testing.T) {
 
 		require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 		assert.Equal(t, routing.StagePrefill, recorder.Header().Get(routing.FailedStageHeader))
+	})
+
+	t.Run("prefill success", func(t *testing.T) {
+		prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		defer prefill.Close()
+
+		srv := NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorSharedStorage})
+		srv.logger = log.Log
+		srv.allowlistValidator = &AllowlistValidator{}
+		srv.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"finish_reason":"stop"}]}`))
+		})
+
+		req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions,
+			strings.NewReader(`{"model":"m","messages":[]}`))
+		req.Header.Set(routing.PrefillEndpointHeader, strings.TrimPrefix(prefill.URL, "http://"))
+		recorder := httptest.NewRecorder()
+		srv.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(recorder, req)
+
+		require.Equal(t, http.StatusOK, recorder.Code)
+		assert.Equal(t, routing.StageNonePrefilled, recorder.Header().Get(routing.FailedStageHeader))
 	})
 
 	t.Run("decode-first success drops a model-server value", func(t *testing.T) {

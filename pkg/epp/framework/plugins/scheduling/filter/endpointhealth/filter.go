@@ -314,6 +314,12 @@ func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, request *fwks
 		// The decode stage ran on the picked endpoint. StageNone covers a
 		// decode failure the sidecar learned of only after the response was
 		// written, and every successful response.
+	case routing.StageNonePrefilled:
+		// As StageNone, and the prefill stage completed, which resets the
+		// prefill endpoint's failure run whatever the decode stage returned.
+		if prefill != nil {
+			f.tracker.observeResponse(log.FromContext(ctx), prefill.ID, hostPort(prefill), false, f.now())
+		}
 	case routing.StagePrefill:
 		if prefill == nil || !failed {
 			// No prefill endpoint to charge, or a status outside

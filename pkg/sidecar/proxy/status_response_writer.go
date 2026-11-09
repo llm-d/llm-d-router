@@ -117,11 +117,9 @@ func (s *responseStatus) implicitOK() {
 	}
 }
 
-// stampFailedStage wraps w so every response carries routing.FailedStageHeader:
-// the stage that failed, or routing.StageNone when none did, for the EPP to
-// charge a failure to the endpoint that ran the stage. The header contract,
-// including why a response written before a stage failed still carries
-// StageNone, is documented on routing.FailedStageHeader. A value the model
+// stampFailedStage wraps w so every response carries routing.FailedStageHeader,
+// for the EPP to charge a failure to the endpoint that ran the failed stage.
+// The values are documented on routing.FailedStageHeader. A value the model
 // server set is dropped, so only the sidecar marks stages. The stamp goes on
 // the first write, header or body: a response can be written without a status,
 // which leaves the headers unset.
@@ -133,11 +131,7 @@ func stampFailedStage(w http.ResponseWriter, summary *requestSummary) http.Respo
 		}
 		header := w.Header()
 		header.Del(routing.FailedStageHeader)
-		stage := summary.currentFailedStage()
-		if stage == "" {
-			stage = routing.StageNone
-		}
-		header.Set(routing.FailedStageHeader, stage)
+		header.Set(routing.FailedStageHeader, summary.failedStageMarker())
 	}
 	return httpsnoop.Wrap(w, httpsnoop.Hooks{
 		WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {

@@ -83,11 +83,21 @@ func observeStageError(ctx context.Context, stage string) {
 	}
 }
 
-// currentFailedStage returns the stage that failed, or empty when none did.
-func (s *requestSummary) currentFailedStage() string {
+// failedStageMarker returns the routing.FailedStageHeader value for a response
+// written now: the stage that failed, else whether prefill completed. Every
+// connector records the prefill stage's duration once the prefill response is
+// in, and records a prefill failure before it writes a response, so a recorded
+// prefill with no failed stage is a prefill that completed.
+func (s *requestSummary) failedStageMarker() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.failedStage
+	if s.failedStage != "" {
+		return s.failedStage
+	}
+	if _, ok := s.durations[routing.StagePrefill]; ok {
+		return routing.StageNonePrefilled
+	}
+	return routing.StageNone
 }
 
 // requestRoute is where the handler sent a request, for its summary line.

@@ -197,9 +197,10 @@ func TestEncodeFailureChargesNoEndpoint(t *testing.T) {
 
 // TestDisaggregatedSuccessChargesDecodeEndpoint covers a successful response
 // for a request that ran prefill: it resets the decode endpoint's failure run,
-// as a decode-only success does, and does not reset the prefill endpoint's,
-// because a success does not prove the prefill stage ran: shared-storage
-// decode-first and concurrent dispatch can answer before prefill.
+// as a decode-only success does. Marked StageNone, it does not reset the
+// prefill endpoint's, because the prefill stage did not complete before the
+// response: shared-storage decode-first and concurrent dispatch can answer
+// before prefill.
 func TestDisaggregatedSuccessChargesDecodeEndpoint(t *testing.T) {
 	f, clock := newTestFilter(t, parameters{})
 	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
@@ -233,9 +234,92 @@ func TestDisaggregatedSuccessChargesDecodeEndpoint(t *testing.T) {
 		pdRespond(f, request, decode, "200", routing.StageNone)
 	}
 	pdRespond(f, request, decode, "503", routing.StagePrefill)
-	decodeOnly := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1")}
-	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, decodeOnly)),
-		"successes do not reset the prefill endpoint's failure run")
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)),
+		"StageNone successes do not reset the prefill endpoint's failure run")
+}
+
+// TestPrefilledSuccessResetsPrefillRun covers a response marked
+// StageNonePrefilled: the prefill stage completed, so the prefill endpoint's
+// failure run resets, as a success resets the decode endpoint's.
+func TestPrefilledSuccessResetsPrefillRun(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	pdRespond(f, request, decode, "200", routing.StageNonePrefilled)
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	require.Equal(t, []string{"decode", "prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the completed prefill reset the prefill endpoint's failure run")
+
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"decode"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the run continues from zero after the reset")
+}
+
+// TestPrefilledSuccessResetsPrefillBackoff covers the ejection backoff of a
+// prefill endpoint: each ejection without a completed prefill in between lasts
+// longer, and a completed prefill resets it.
+func TestPrefilledSuccessResetsPrefillBackoff(t *testing.T) {
+	f, clock := newTestFilter(t, parameters{
+		EjectionDuration:    durationPtr(time.Minute),
+		MaxEjectionDuration: durationPtr(5 * time.Minute),
+	})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+	excludedFor := func() time.Duration {
+		t.Helper()
+		for range 5 {
+			pdRespond(f, request, decode, "503", routing.StagePrefill)
+		}
+		start := clock.now()
+		for len(f.Filter(context.Background(), nil, candidates)) < len(candidates) {
+			clock.advance(time.Second)
+		}
+		return clock.now().Sub(start)
+	}
+
+	assert.Equal(t, time.Minute, excludedFor())
+	assert.Equal(t, 2*time.Minute, excludedFor(), "StageNone successes in between keep the backoff")
+
+	pdRespond(f, request, decode, "200", routing.StageNone)
+	assert.Equal(t, 3*time.Minute, excludedFor(), "a StageNone success does not reset the backoff")
+
+	pdRespond(f, request, decode, "200", routing.StageNonePrefilled)
+	assert.Equal(t, time.Minute, excludedFor(), "a completed prefill resets the backoff")
+}
+
+// TestPrefilledDecodeFailureChargesBothEndpoints covers a decode failure the
+// sidecar learned of after writing the response, on a request whose prefill
+// completed: the failure is charged to the decode endpoint, and the prefill
+// endpoint's failure run still resets.
+func TestPrefilledDecodeFailureChargesBothEndpoints(t *testing.T) {
+	f, _ := newTestFilter(t, parameters{})
+	decode := &fwkdl.EndpointMetadata{ID: id("decode"), Address: "10.0.0.1", Port: "8000"}
+	prefill := &fwkdl.EndpointMetadata{ID: id("prefill"), Address: "10.0.0.2", Port: "8000"}
+	request := pdRequest(decode, prefill)
+	candidates := []fwksched.Endpoint{endpointAt("decode", "10.0.0.1"), endpointAt("prefill", "10.0.0.2")}
+
+	for range 4 {
+		pdRespond(f, request, decode, "503", routing.StagePrefill)
+	}
+	for range 5 {
+		pdRespond(f, request, decode, "503", routing.StageNonePrefilled)
+	}
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the decode endpoint is ejected")
+
+	pdRespond(f, request, decode, "503", routing.StagePrefill)
+	assert.Equal(t, []string{"prefill"}, names(f.Filter(context.Background(), nil, candidates)),
+		"the completed prefills reset the prefill endpoint's run, so one more failure does not eject it")
 }
 
 // TestNoneMarkerChargesDecodeEndpoint covers a failed response that carries the

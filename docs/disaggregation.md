@@ -68,10 +68,14 @@ never read from or passed to a model server.
 
 The sidecar's disaggregated handler marks every response it writes with the
 `x-llm-d-failed-stage` response header: the name of the stage that failed
-(`prefill`, `encode`, or `decode`), or `none` when no stage failed. The EPP
-reads the header to charge a failure to the endpoint that ran the stage:
-without it, a prefill failure reaches the EPP as the decode endpoint's response
-status. Only failures known before the response is written name their stage:
+(`prefill`, `encode`, or `decode`). When no stage failed it carries
+`none-prefilled` if the prefill stage completed before the response was
+written, and `none` otherwise. The EPP reads the header to charge a failure to
+the endpoint that ran the stage: without it, a prefill failure reaches the EPP
+as the decode endpoint's response status. `none-prefilled` tells the EPP the
+prefill endpoint succeeded, which a successful response alone does not, since
+decode can answer before prefill runs or completes. Only failures known before
+the response is written name their stage:
 prefill and encode failures, and the concurrent-dispatch decode abort, which
 writes the response itself. The sidecar drops any value the model server set,
 so only the sidecar marks stages, and the EPP strips the header before the
