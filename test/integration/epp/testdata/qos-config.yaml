@@ -5,6 +5,7 @@ plugins:
   - type: mock-metrics-source
   - type: qos-admission
     parameters:
+      mode: enforce
       classes:
         - {name: critical, priority: 100}
         - {name: batch, priority: -10}
