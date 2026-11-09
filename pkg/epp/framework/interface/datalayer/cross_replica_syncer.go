@@ -90,6 +90,23 @@ type CrossReplicaBatchSyncer interface {
 	SetBatch(ctx context.Context, spec CrossReplicaSpec, endpointIDs []string, timeout time.Duration) map[string]error
 }
 
+// CrossReplicaPeerReader is optionally implemented by a CrossReplicaSyncer.
+// PeerSnapshot returns the peer-only aggregate the syncer holds for endpointID
+// and a version of the peer state the syncer saw when it built that aggregate.
+// The version changes whenever the peer values or the set of peers behind the
+// aggregate change, and can also change while the aggregate stays the same.
+// How far a snapshot can lag the peers is up to the syncer. A snapshot with
+// no peers is spec.Aggregate(nil) and has a version too. Versions are only
+// compared for equality; one can repeat an earlier value when the peer state
+// returns to it. ok is false when the syncer holds no snapshot for
+// endpointID, which is not the same as a snapshot with no peers. The returned
+// value is shared and must not be modified. PeerSnapshot does not call the
+// store or peers itself and can run concurrently with Set, SetBatch and
+// Delete.
+type CrossReplicaPeerReader interface {
+	PeerSnapshot(spec CrossReplicaSpec, endpointID string) (peer any, version uint64, ok bool)
+}
+
 // CrossReplicaContributor is an opt-in interface for endpoint extractors that
 // want their installed attributes to reflect cross-replica aggregate state.
 // The plugin's Extract method is unchanged; the runtime detects this interface
@@ -113,7 +130,8 @@ type CrossReplicaSpec struct {
 
 	// Aggregate combines per-replica values into a single aggregate. Its output
 	// must have the same type and may be passed back as an input when Get combines
-	// the cached peer aggregate with the live local value.
+	// the cached peer aggregate with the live local value. It must accept no
+	// values and return an empty aggregate of the same type.
 	Aggregate func(values []any) any
 
 	// SyncDisabled opts this contributor out of cross-replica synchronization
