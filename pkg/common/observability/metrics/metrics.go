@@ -37,9 +37,7 @@ const (
 	BuildInfoLabelBuildRef = "build_ref"
 )
 
-// Disaggregation path label values, naming the stages a request is split into
-// across pods. The EPP, coordinator, and P/D sidecar label their metrics with
-// these values so dashboards can join the components on them.
+// Disaggregation path label values shared by the EPP, coordinator, and P/D sidecar.
 const (
 	// DisaggPathDecodeOnly is a request served without disaggregation.
 	DisaggPathDecodeOnly = "decode-only"
@@ -49,8 +47,8 @@ const (
 	DisaggPathEncodeDecode = "encode-decode"
 	// DisaggPathEncodePrefillDecode is a request split into encode, prefill, and decode (E/P/D).
 	DisaggPathEncodePrefillDecode = "encode-prefill-decode"
-	// DisaggPathAggregatedFallback is a request served locally by the fallback profile.
-	DisaggPathAggregatedFallback = "aggregated-fallback"
+	// DisaggPathFallback labels a routing decision that selects the fallback profile.
+	DisaggPathFallback = "fallback"
 )
 
 // HelpMsgWithStability is a helper function to create a help message with stability level.

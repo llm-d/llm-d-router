@@ -19,6 +19,7 @@ package loader
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/config"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -160,7 +162,7 @@ func TestScheduleDefaultProfileFilterWithPrefixAffinity(t *testing.T) {
 	}
 }
 
-func TestScheduleFallbackWithInjectedSaturationDetector(t *testing.T) {
+func TestFallbackScheduling(t *testing.T) {
 	registerTestPlugins(t)
 	fwkplugin.Register(concurrency.ConcurrencyDetectorType, fwkplugin.StabilityStable, concurrency.ConcurrencyDetectorFactory)
 	fwkplugin.Register(bylabel.LabelSelectorFilterType, fwkplugin.StabilityStable, bylabel.SelectorFactory)
@@ -188,27 +190,77 @@ schedulingProfiles:
 - name: fallback
   plugins: [{pluginRef: aggregated-worker}]
 `
-	logger := logging.NewTestLogger()
-	raw, _, err := LoadRawConfig([]byte(configText), logger)
-	require.NoError(t, err)
-	cfg, err := InstantiateAndConfigure(raw, testutils.NewTestHandle(t.Context()), logger)
-	require.NoError(t, err)
-	scheduler := scheduling.NewSchedulerWithConfig(cfg.SchedulerConfig)
-	endpoint := func(name, role string, requests int64) fwksched.Endpoint {
-		pod := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
-			ID: k8stypes.NamespacedName{Name: name}, Labels: map[string]string{bylabel.RoleLabel: role},
-		}, &fwkdl.Metrics{UpdateTime: time.Now()}, fwkdl.NewAttributes())
-		pod.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: requests})
-		return pod
+	configure := func(t *testing.T, text string) (*config.Config, error) {
+		t.Helper()
+		logger := logging.NewTestLogger()
+		raw, _, err := LoadRawConfig([]byte(text), logger)
+		require.NoError(t, err)
+		return InstantiateAndConfigure(raw, testutils.NewTestHandle(t.Context()), logger)
 	}
-	decode := endpoint("decode", bylabel.RoleDecode, 1)
-	backup := endpoint("fallback", bylabel.RolePrefillDecode, 0)
-	req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "test-model"}
-	_, err = scheduler.Schedule(t.Context(), req, []fwksched.Endpoint{decode, backup})
-	var rejection errcommon.Error
-	require.ErrorAs(t, err, &rejection)
-	assert.Equal(t, errcommon.ServiceUnavailable, rejection.Code)
-	result, err := scheduler.Schedule(t.Context(), req, []fwksched.Endpoint{backup})
-	require.NoError(t, err)
-	assert.Equal(t, "fallback", result.PrimaryProfileName)
+
+	for _, tc := range []struct {
+		name, before, after, wantError string
+	}{
+		{name: "omitted", before: "  parameters: {profiles: {fallback: fallback}}\n"},
+		{name: "blank fallback name", before: "fallback: fallback", after: "fallback: ' '", wantError: "profiles.fallback must name a non-empty scheduling profile"},
+		{name: "unknown profile", before: "fallback: fallback", after: "fallback: missing", wantError: `profiles.fallback references unknown scheduling profile "missing"`},
+		{name: "missing selector", before: "  plugins: [{pluginRef: aggregated-worker}]\n", wantError: `profiles.fallback profile "fallback" requires a pool selector`},
+		{name: "empty selector", before: "{matchLabels: {llm-d.ai/role: prefill-decode}}", after: "{}", wantError: `profiles.fallback profile "fallback" requires a pool selector`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Contains(t, configText, tc.before)
+			_, err := configure(t, strings.Replace(configText, tc.before, tc.after, 1))
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+
+	t.Run("injected saturation detector", func(t *testing.T) {
+		cfg, err := configure(t, configText)
+		require.NoError(t, err)
+		scheduler := scheduling.NewSchedulerWithConfig(cfg.SchedulerConfig)
+		endpoint := func(name, role string, requests int64) fwksched.Endpoint {
+			pod := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+				ID: k8stypes.NamespacedName{Name: name}, Labels: map[string]string{bylabel.RoleLabel: role},
+			}, &fwkdl.Metrics{UpdateTime: time.Now()}, fwkdl.NewAttributes())
+			pod.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: requests})
+			return pod
+		}
+		for _, tc := range []struct {
+			name        string
+			endpoints   []fwksched.Endpoint
+			wantCode    string
+			wantProfile string
+		}{
+			{
+				name: "saturated Decode pool rejects the request",
+				endpoints: []fwksched.Endpoint{
+					endpoint("decode", bylabel.RoleDecode, 1),
+					endpoint("fallback", bylabel.RolePrefillDecode, 0),
+				},
+				wantCode: errcommon.ServiceUnavailable,
+			},
+			{
+				name:        "empty Decode pool selects fallback",
+				endpoints:   []fwksched.Endpoint{endpoint("fallback", bylabel.RolePrefillDecode, 0)},
+				wantProfile: "fallback",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "test-model"}
+				result, err := scheduler.Schedule(t.Context(), req, tc.endpoints)
+				if tc.wantCode != "" {
+					var rejection errcommon.Error
+					require.ErrorAs(t, err, &rejection)
+					assert.Equal(t, tc.wantCode, rejection.Code)
+					return
+				}
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantProfile, result.PrimaryProfileName)
+			})
+		}
+	})
 }

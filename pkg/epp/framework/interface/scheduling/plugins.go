@@ -62,11 +62,8 @@ type SchedulingProfileValidator interface {
 	ValidateSchedulingProfiles(profiles map[string]SchedulerProfile) error
 }
 
-// CandidateAwareProfileHandler optionally supplies a handler with the candidates
-// passed to Schedule, before profile filtering. The callback scopes candidates
-// on demand and is valid only during PickWithCandidates. Treat its result as read-only.
-// Handlers implementing this interface use PickWithCandidates instead of Pick.
-// Decorators embedding such a handler must override PickWithCandidates to intercept it.
+// CandidateAwareProfileHandler is called through PickWithCandidates instead of Pick.
+// The callback returns the read-only candidates before profile filtering and is valid only during the call.
 type CandidateAwareProfileHandler interface {
 	ProfileHandler
 	PickWithCandidates(ctx context.Context, request *InferenceRequest,
