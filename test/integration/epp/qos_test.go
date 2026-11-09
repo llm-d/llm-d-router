@@ -24,6 +24,7 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/stretchr/testify/require"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/qosadmission"
@@ -60,6 +61,30 @@ func immediateHeader(resp *extProcPb.ProcessingResponse, key string) (string, bo
 	return "", false
 }
 
+// requestTotalPriorities returns the priority label of every llm_d_epp_request_total series for
+// the given fairness ID.
+func requestTotalPriorities(t *testing.T, fairnessID string) []string {
+	t.Helper()
+	families, err := crmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var priorities []string
+	for _, family := range families {
+		if family.GetName() != "llm_d_epp_request_total" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["fairness_id"] == fairnessID {
+				priorities = append(priorities, labels["priority"])
+			}
+		}
+	}
+	return priorities
+}
+
 func TestQoSAdmission(t *testing.T) {
 	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(qosTestConfig)).WithBaseResources()
 	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget)}
@@ -81,6 +106,8 @@ func TestQoSAdmission(t *testing.T) {
 		require.Equal(t, "batch", class)
 		_, ok = responseHeader(responses[2], qosadmission.ConcurrencyRemainingHeader)
 		require.True(t, ok)
+		// The director, not the plugin, records the request at the priority it was served at.
+		require.Equal(t, []string{"-10"}, requestTotalPriorities(t, "team-a"))
 	})
 
 	t.Run("over-commit traffic in the lowest class is rejected with 429", func(t *testing.T) {
