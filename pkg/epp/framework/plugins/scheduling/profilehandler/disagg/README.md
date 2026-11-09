@@ -89,19 +89,19 @@ plugins:
 
 Before forwarding a request, the router tries the configured fallback profile once when the Decode pool has no Ready candidates, or when the request requires Prefill and the Prefill pool has no Ready candidates. A successful fallback selects one backup worker for the whole request.
 
-The pool check uses the Ready candidates remaining after request screening and the profile's label and role selectors. A normal pool with candidates does not use fallback when capacity or other profile filters reject them. These rejections and a fallback profile with no target return `503 rejected-no-endpoints`.
+The normal Decode and Prefill profiles use their label or role selectors to identify pool members among the Ready candidates that pass request screening. A normal profile without a pool selector counts all of those candidates as members. If a normal pool has members but health, capacity, or other profile filters reject them all, the request returns `503 rejected-no-endpoints` without trying fallback.
+
+When fallback runs, the backup profile uses its own filters. If no pod matches, the request returns `503 rejected-no-endpoints`.
 
 Skipping Prefill or finding no Encode target does not trigger fallback on its own. Admission and flow control keep their configured waiting and rejection behavior.
 
 ##### Configuration
 
-1. **Prepare the backup pods.** Label pods in the same endpoint pool after checking that their engine can run Prefill and Decode locally, plus Encode for multimodal requests. Use `llm-d.ai/role: prefill-decode` or a custom label such as `inference-pool: fallback`.
-2. **Select pods for each pool.** Use `label-selector-filter` to keep backup pods out of the normal Decode and Prefill profiles. The built-in `decode-filter` and `prefill-filter` also select aggregated workers.
-3. **Enable fallback.** Set `profiles.fallback` on `disagg-profile-handler` to the backup profile name. Fallback requires `stageOrder: decode-first`, the default.
+1. Label the backup pods in the same endpoint pool. Use `llm-d.ai/role: prefill-decode` or a custom label such as `inference-pool: fallback`. Check that these pods can run Prefill and Decode locally, plus Encode for multimodal requests.
+2. Use `label-selector-filter` to select only the intended workers in each profile. The backup profile must have a pool selector that restricts worker labels. A missing or empty selector is rejected at startup. Use dedicated selectors for the normal profiles because the built-in `decode-filter` and `prefill-filter` also select aggregated workers.
+3. Set `profiles.fallback` on `disagg-profile-handler` to the backup profile name. Omit the field to disable fallback. An empty name is rejected. Fallback requires `stageOrder: decode-first`, the default.
 
-The backup profile uses the same plugins as other scheduling profiles. For example, add `utilization-filter` to exclude busy backup pods or `queue-scorer` to prefer shorter queues. EPP runs filters, then scorers, then the picker. The example uses the default `max-score-picker`.
-
-This example requires Prefill for every request.
+The backup profile can use the same filters and scorers as the normal profiles. This example requires Prefill for every request and uses the default picker.
 
 ```yaml
 apiVersion: llm-d.ai/v1
@@ -109,39 +109,25 @@ kind: EndpointPickerConfig
 plugins:
   - name: dedicated-decode
     type: label-selector-filter
-    parameters:
-      matchLabels:
-        llm-d.ai/role: decode
+    parameters: {matchLabels: {llm-d.ai/role: decode}}
   - name: dedicated-prefill
     type: label-selector-filter
-    parameters:
-      matchLabels:
-        llm-d.ai/role: prefill
+    parameters: {matchLabels: {llm-d.ai/role: prefill}}
   - name: aggregated-workers
     type: label-selector-filter
-    parameters:
-      matchLabels:
-        llm-d.ai/role: prefill-decode
+    parameters: {matchLabels: {llm-d.ai/role: prefill-decode}}
   - type: always-disagg-pd-decider
   - type: disagg-profile-handler
     parameters:
-      profiles:
-        decode: decode
-        prefill: prefill
-        # Enable fallback by referencing the backup profile below.
-        fallback: aggregated-fallback
-      deciders:
-        prefill: always-disagg-pd-decider
+      profiles: {fallback: aggregated-fallback}
+      deciders: {prefill: always-disagg-pd-decider}
 schedulingProfiles:
   - name: decode
-    plugins:
-      - pluginRef: dedicated-decode
+    plugins: [{pluginRef: dedicated-decode}]
   - name: prefill
-    plugins:
-      - pluginRef: dedicated-prefill
+    plugins: [{pluginRef: dedicated-prefill}]
   - name: aggregated-fallback
-    plugins:
-      - pluginRef: aggregated-workers
+    plugins: [{pluginRef: aggregated-workers}]
 ```
 
 ---

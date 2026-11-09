@@ -268,55 +268,34 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 				createModelServersPDAggregatedFallback()
 				standalone.Create(standaloneConfig(), aggregatedFallbackConfig, 1, 8000)
 
-				decodePods := k8s.GetPodNames(testConfig, decodeSelector, nsName)
-				fallbackPods := k8s.GetPodNames(testConfig, prefillDecodeSelector, nsName)
-				gomega.Expect(decodePods).Should(gomega.HaveLen(1))
-				gomega.Expect(fallbackPods).Should(gomega.HaveLen(1))
-				gomega.Expect(k8s.GetPodNames(testConfig, prefillSelector, nsName)).Should(gomega.HaveLen(1))
-
-				ginkgo.By("Verifying P/D is preferred while both stages are available")
-				nsHdr, podHdr, _ := runCompletion(simplePrompt, simModelName)
-				gomega.Expect(nsHdr).Should(gomega.Equal(nsName))
-				gomega.Expect(podHdr).Should(gomega.BeElementOf(decodePods))
-
+				expectCompletionOn := func(selector map[string]string) {
+					gomega.Eventually(func(g gomega.Gomega) {
+						ns, pod, err := tryCompletion()
+						g.Expect(err).NotTo(gomega.HaveOccurred())
+						g.Expect(ns).To(gomega.Equal(nsName))
+						g.Expect(pod).To(gomega.BeElementOf(k8s.GetPodNames(testConfig, selector, nsName)))
+					}, eppRecoveryTimeout, time.Second).Should(gomega.Succeed())
+				}
+				expectCompletionOn(decodeSelector)
 				for _, stage := range []struct {
-					name       string
 					deployment string
 					selector   map[string]string
 				}{
-					{name: "Prefill", deployment: "Deployment/vllm-p", selector: prefillSelector},
-					{name: "Decode", deployment: "Deployment/vllm-d", selector: decodeSelector},
+					{"Deployment/vllm-p", prefillSelector},
+					{"Deployment/vllm-d", decodeSelector},
 				} {
-					ginkgo.By(fmt.Sprintf("Scaling %s to zero", stage.name))
 					deployment := []string{stage.deployment}
+					ginkgo.By("Scaling " + stage.deployment + " to zero")
 					k8s.ScaleDeployment(testConfig, nsName, deployment, -1)
-					gomega.Eventually(func() int {
-						return len(k8s.GetPodNames(testConfig, stage.selector, nsName))
-					}, podRemovalTimeout, time.Second).Should(gomega.Equal(0))
+					gomega.Eventually(func() []string {
+						return k8s.GetPodNames(testConfig, stage.selector, nsName)
+					}, podRemovalTimeout, time.Second).Should(gomega.BeEmpty())
+					expectCompletionOn(prefillDecodeSelector)
 
-					ginkgo.By("Verifying requests route to the aggregated fallback")
-					gomega.Eventually(func() string {
-						_, pod, err := tryCompletion()
-						if err != nil {
-							return ""
-						}
-						return pod
-					}, eppRecoveryTimeout, time.Second).Should(gomega.BeElementOf(fallbackPods))
-
-					ginkgo.By(fmt.Sprintf("Scaling %s back up", stage.name))
+					ginkgo.By("Restoring " + stage.deployment)
 					k8s.ScaleDeployment(testConfig, nsName, deployment, 1)
 					k8s.PodsInDeploymentsReady(testConfig, nsName, deployment)
-					decodePods = k8s.GetPodNames(testConfig, decodeSelector, nsName)
-					gomega.Expect(decodePods).Should(gomega.HaveLen(1))
-
-					ginkgo.By("Verifying requests return to P/D")
-					gomega.Eventually(func() string {
-						_, pod, err := tryCompletion()
-						if err != nil {
-							return ""
-						}
-						return pod
-					}, eppRecoveryTimeout, time.Second).Should(gomega.BeElementOf(decodePods))
+					expectCompletionOn(decodeSelector)
 				}
 			})
 		}))

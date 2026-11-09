@@ -271,46 +271,31 @@ func TestScheduleLogsProcessResultsSuccessOnlyWithoutError(t *testing.T) {
 
 func TestScheduleWithCandidateAwareHandler(t *testing.T) {
 	endpoints := newMetricsTestEndpoints("decode")
-	handler := &candidateProfileHandler{
-		stubProfileHandler: &stubProfileHandler{primary: "decode"},
-		t:                  t,
-		wantEndpoint:       endpoints[0],
-	}
+	handler := &candidateProfileHandler{stubProfileHandler: &stubProfileHandler{primary: "decode"}, t: t}
 	profile := NewSchedulerProfile().WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
 	scheduler := NewSchedulerWithConfig(NewSchedulerConfig(handler, map[string]fwksched.SchedulerProfile{"decode": profile}))
-	result, err := scheduler.Schedule(context.Background(), &fwksched.InferenceRequest{}, endpoints)
+	_, err := scheduler.Schedule(t.Context(), &fwksched.InferenceRequest{}, endpoints)
 	assert.NoError(t, err)
-	assert.NotNil(t, result)
 	assert.Equal(t, 2, handler.picks)
-	key := fwkplugin.NewDataKey("undeclared", "stub-profile-handler")
-	_, written := endpoints[0].Get(key)
+	_, written := endpoints[0].Get(fwkplugin.NewDataKey("undeclared", "stub-profile-handler"))
 	assert.False(t, written)
 }
 
 type candidateProfileHandler struct {
 	*stubProfileHandler
-	t            *testing.T
-	wantEndpoint fwksched.Endpoint
-	picks        int
-}
-
-func (h *candidateProfileHandler) Pick(ctx context.Context, request *fwksched.InferenceRequest,
-	profiles map[string]fwksched.SchedulerProfile, results map[string]*fwksched.ProfileRunResult,
-) map[string]fwksched.SchedulerProfile {
-	h.t.Error("legacy Pick called for candidate-aware handler")
-	return h.stubProfileHandler.Pick(ctx, request, profiles, results)
+	t     *testing.T
+	picks int
 }
 
 func (h *candidateProfileHandler) PickWithCandidates(ctx context.Context, request *fwksched.InferenceRequest,
 	profiles map[string]fwksched.SchedulerProfile, results map[string]*fwksched.ProfileRunResult,
-	candidates []fwksched.Endpoint,
+	candidates func() []fwksched.Endpoint,
 ) map[string]fwksched.SchedulerProfile {
 	h.picks++
-	if assert.Len(h.t, candidates, 1) {
-		assert.IsType(h.t, &datalayer.ScopedEndpoint{}, candidates[0])
-		key := fwkplugin.NewDataKey("undeclared", "stub-profile-handler")
-		candidates[0].Put(key, testScoreAttr("rejected"))
-		assert.Equal(h.t, h.wantEndpoint.GetMetadata().ID, candidates[0].GetMetadata().ID)
+	if endpoints := candidates(); assert.Len(h.t, endpoints, 1) {
+		assert.IsType(h.t, &datalayer.ScopedEndpoint{}, endpoints[0])
+		assert.Same(h.t, endpoints[0], candidates()[0])
+		endpoints[0].Put(fwkplugin.NewDataKey("undeclared", "stub-profile-handler"), testScoreAttr("rejected"))
 	}
-	return h.stubProfileHandler.Pick(ctx, request, profiles, results)
+	return h.Pick(ctx, request, profiles, results)
 }

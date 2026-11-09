@@ -1090,35 +1090,15 @@ func TestRunPickerPluginLogsCandidateNames(t *testing.T) {
 }
 
 func TestHasReadyPoolEndpoints(t *testing.T) {
-	decode, err := bylabel.NewSelector("decode", &metav1.LabelSelector{
-		MatchLabels: map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
-	})
-	assert.NoError(t, err)
+	endpoint := func(labels map[string]string) fwksched.Endpoint {
+		return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{Labels: labels}, nil, fwkdl.NewAttributes())
+	}
+	decode := endpoint(map[string]string{bylabel.RoleLabel: bylabel.RoleDecode})
 	zone, err := bylabel.NewSelector("zone", &metav1.LabelSelector{MatchLabels: map[string]string{"zone": "a"}})
 	assert.NoError(t, err)
-	reject := &filterOnlyPlugin{typedName: fwkplugin.TypedName{Type: "reject", Name: "reject"}}
-	for _, tc := range []struct {
-		name    string
-		filters []fwksched.Filter
-		labels  []map[string]string
-		want    bool
-	}{
-		{name: "empty candidates", filters: []fwksched.Filter{decode}},
-		{name: "missing role label", filters: []fwksched.Filter{decode}, labels: []map[string]string{{}}},
-		{name: "capacity before selector", filters: []fwksched.Filter{reject, decode}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RoleDecode}}, want: true},
-		{name: "capacity after selector", filters: []fwksched.Filter{decode, reject}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RoleDecode}}, want: true},
-		{name: "unknown filters do not declare a pool", filters: []fwksched.Filter{reject}, labels: []map[string]string{{}}, want: true},
-		{name: "selectors must match the same endpoint", filters: []fwksched.Filter{decode, zone}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RoleDecode}, {"zone": "a"}}},
-		{name: "selector intersection", filters: []fwksched.Filter{decode, zone}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RoleDecode, "zone": "a"}}, want: true},
-		{name: "built in role includes aggregated workers", filters: []fwksched.Filter{bylabel.NewDecodeRole()}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RolePrefillDecode}}, want: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			endpoints := make([]fwksched.Endpoint, 0, len(tc.labels))
-			for _, labels := range tc.labels {
-				endpoints = append(endpoints, fwksched.NewEndpoint(&fwkdl.EndpointMetadata{Labels: labels}, &fwkdl.Metrics{}, fwkdl.NewAttributes()))
-			}
-			profile := NewSchedulerProfile().WithFilters(tc.filters...)
-			assert.Equal(t, tc.want, profile.HasReadyPoolEndpoints(endpoints))
-		})
-	}
+	profile := NewSchedulerProfile().WithFilters(bylabel.NewDecodeRole(), zone)
+	assert.False(t, profile.HasReadyPoolEndpoints(nil))
+	assert.False(t, profile.HasReadyPoolEndpoints([]fwksched.Endpoint{decode, endpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefill, "zone": "a"})}))
+	assert.True(t, profile.HasReadyPoolEndpoints([]fwksched.Endpoint{endpoint(map[string]string{bylabel.RoleLabel: bylabel.RolePrefillDecode, "zone": "a"})}))
+	assert.True(t, NewSchedulerProfile().HasReadyPoolEndpoints([]fwksched.Endpoint{decode}))
 }

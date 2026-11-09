@@ -97,13 +97,16 @@ var PeerEndpointAttributeKey = plugin.NewDataKey("peer-endpoint", DisaggProfileH
 // only the former is safe to complete decode-only. The value is a bool.
 var prefillDeclinedAttributeKey = plugin.NewDataKey("prefill-declined", DisaggProfileHandlerType)
 
+var errEmptyFallbackProfile = errors.New("profiles.fallback must name a non-empty scheduling profile")
+
 // ── Factory & constructor ────────────────────────────────────────────────────
 
 type disaggProfilesParameters struct {
-	Decode   string `json:"decode,omitempty"`
-	Prefill  string `json:"prefill,omitempty"`
-	Encode   string `json:"encode,omitempty"`
-	Fallback string `json:"fallback,omitempty"`
+	Decode  string `json:"decode,omitempty"`
+	Prefill string `json:"prefill,omitempty"`
+	Encode  string `json:"encode,omitempty"`
+
+	Fallback *string `json:"fallback,omitempty"`
 }
 
 type disaggDecidersParameters struct {
@@ -172,8 +175,8 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 		parameters.Profiles.Decode, parameters.Profiles.Prefill, parameters.Profiles.Encode,
 		pdDecider, encodeDecider,
 	).WithStageOrder(parameters.StageOrder).WithName(name)
-	if parameters.Profiles.Fallback != "" {
-		return handler.WithFallbackProfile(parameters.Profiles.Fallback), nil
+	if parameters.Profiles.Fallback != nil {
+		return handler.WithFallbackProfile(*parameters.Profiles.Fallback), nil
 	}
 	return handler, nil
 }
@@ -208,7 +211,11 @@ func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, _ plugin.Hand
 		parameters.Profiles.Encode = defaultEncodeProfile
 	}
 
-	if fallback := parameters.Profiles.Fallback; fallback != "" {
+	if configured := parameters.Profiles.Fallback; configured != nil {
+		fallback := *configured
+		if strings.TrimSpace(fallback) == "" {
+			return nil, errEmptyFallbackProfile
+		}
 		if parameters.StageOrder != StageOrderDecodeFirst {
 			return nil, fmt.Errorf("aggregated fallback is only supported in %s stage order", StageOrderDecodeFirst)
 		}
@@ -244,11 +251,13 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 
 // compile-time assertions
 var (
-	_ scheduling.ProfileHandler               = &Handler{}
+	_ scheduling.ProfileHandler = &Handler{}
+	_ fwkrh.PreRequest          = &Handler{}
+	_ plugin.ProducerPlugin     = &Handler{}
+	_ plugin.ConsumerPlugin     = &Handler{}
+
 	_ scheduling.CandidateAwareProfileHandler = &FallbackHandler{}
-	_ fwkrh.PreRequest                        = &Handler{}
-	_ plugin.ProducerPlugin                   = &Handler{}
-	_ plugin.ConsumerPlugin                   = &Handler{}
+	_ scheduling.SchedulingProfileValidator   = &FallbackHandler{}
 )
 
 // Handler is the unified disaggregation profile handler.
@@ -264,14 +273,15 @@ var (
 // All four handler types (D, P/D, E/PD, E/P/D) share this single implementation;
 // active stages are selected by setting encodeProfile / prefillProfile.
 type Handler struct {
-	typedName       plugin.TypedName
-	stageOrder      StageOrder
-	decodeProfile   string
-	prefillProfile  string
-	encodeProfile   string
+	typedName      plugin.TypedName
+	stageOrder     StageOrder
+	decodeProfile  string
+	prefillProfile string
+	encodeProfile  string
+	pdDecider      deciderPlugin
+	encodeDecider  deciderPlugin
+
 	fallbackProfile string
-	pdDecider       deciderPlugin
-	encodeDecider   deciderPlugin
 }
 
 // TypedName returns the typed name of the plugin.
@@ -299,32 +309,29 @@ func (h *Handler) WithFallbackProfile(name string) *FallbackHandler {
 // FallbackHandler enables candidate-aware scheduling for aggregated fallback.
 type FallbackHandler struct{ *Handler }
 
-// WithName sets the instance name of the fallback handler.
-func (h *FallbackHandler) WithName(name string) *FallbackHandler {
-	h.Handler.WithName(name)
-	return h
-}
-
-// WithStageOrder sets the stage execution order for the fallback handler.
-func (h *FallbackHandler) WithStageOrder(order StageOrder) *FallbackHandler {
-	h.Handler.WithStageOrder(order)
-	return h
-}
-
 // PickWithCandidates distinguishes an empty stage pool from a filtered pool.
 func (h *FallbackHandler) PickWithCandidates(ctx context.Context, request *scheduling.InferenceRequest,
 	profiles map[string]scheduling.SchedulerProfile, results map[string]*scheduling.ProfileRunResult,
-	candidates []scheduling.Endpoint,
+	candidates func() []scheduling.Endpoint,
 ) map[string]scheduling.SchedulerProfile {
 	return h.pick(ctx, request, profiles, results, candidates)
 }
 
 // ValidateSchedulingProfiles checks the fallback reference against the configured profiles.
-func (h *Handler) ValidateSchedulingProfiles(profiles map[string]scheduling.SchedulerProfile) error {
-	if h.fallbackProfile != "" {
-		if _, exists := profiles[h.fallbackProfile]; !exists {
-			return fmt.Errorf("profiles.fallback references unknown scheduling profile %q", h.fallbackProfile)
-		}
+func (h *FallbackHandler) ValidateSchedulingProfiles(profiles map[string]scheduling.SchedulerProfile) error {
+	if strings.TrimSpace(h.fallbackProfile) == "" {
+		return errEmptyFallbackProfile
+	}
+	profile, exists := profiles[h.fallbackProfile]
+	if !exists {
+		return fmt.Errorf("profiles.fallback references unknown scheduling profile %q", h.fallbackProfile)
+	}
+	pool, ok := profile.(scheduling.PoolAwareSchedulerProfile)
+	if !ok {
+		return fmt.Errorf("profiles.fallback profile %q must implement PoolAwareSchedulerProfile", h.fallbackProfile)
+	}
+	if !pool.HasPoolSelector() {
+		return fmt.Errorf("profiles.fallback profile %q requires a pool selector that restricts worker labels", h.fallbackProfile)
 	}
 	return nil
 }
@@ -418,7 +425,7 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 
 func (h *Handler) pick(ctx context.Context, request *scheduling.InferenceRequest,
 	profiles map[string]scheduling.SchedulerProfile, profileResults map[string]*scheduling.ProfileRunResult,
-	candidates []scheduling.Endpoint,
+	candidates func() []scheduling.Endpoint,
 ) map[string]scheduling.SchedulerProfile {
 	tracer := tracing.Tracer(schedplugins.TracerScope)
 	ctx, span := tracer.Start(ctx, "pick_disagg_profile",
@@ -446,18 +453,16 @@ func (h *Handler) pick(ctx context.Context, request *scheduling.InferenceRequest
 }
 
 // poolEmpty fails closed for profiles that cannot identify their pool members.
-func poolEmpty(profile scheduling.SchedulerProfile, candidates []scheduling.Endpoint) bool {
+func poolEmpty(profile scheduling.SchedulerProfile, candidates func() []scheduling.Endpoint) bool {
 	if candidates == nil {
 		return false
 	}
-	pool, ok := profile.(interface {
-		HasReadyPoolEndpoints([]scheduling.Endpoint) bool
-	})
-	return ok && !pool.HasReadyPoolEndpoints(candidates)
+	pool, ok := profile.(scheduling.PoolAwareSchedulerProfile)
+	return ok && !pool.HasReadyPoolEndpoints(candidates())
 }
 
 func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request *scheduling.InferenceRequest,
-	profiles map[string]scheduling.SchedulerProfile, profileResults map[string]*scheduling.ProfileRunResult, candidates []scheduling.Endpoint,
+	profiles map[string]scheduling.SchedulerProfile, profileResults map[string]*scheduling.ProfileRunResult, candidates func() []scheduling.Endpoint,
 ) map[string]scheduling.SchedulerProfile {
 	// ── Stage 1: Decode ────────────────────────────────────────────────────
 	if _, executed := profileResults[h.decodeProfile]; !executed {
@@ -477,8 +482,8 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 		}
 		decodePoolEmpty := decodeRes.FirstEndpoint() == nil && poolEmpty(profiles[h.decodeProfile], candidates)
 		prefillPoolEmpty := h.prefillRequiredButFailed(request, profileResults) && poolEmpty(profiles[h.prefillProfile], candidates)
-		if decodePoolEmpty || prefillPoolEmpty {
-			if fallback, exists := profiles[h.fallbackProfile]; exists && ctx.Err() == nil {
+		if (decodePoolEmpty || prefillPoolEmpty) && ctx.Err() == nil {
+			if fallback, ok := profiles[h.fallbackProfile].(scheduling.PoolAwareSchedulerProfile); ok && fallback.HasPoolSelector() {
 				// The aggregated target must not inherit affinity to an abandoned stage.
 				request.PutAttribute(PeerEndpointAttributeKey, nil)
 				span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_aggregated_fallback"))
@@ -509,14 +514,14 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	}
 
 	// ── Stage 3: Prefill (optional) ────────────────────────────────────────
-	if prefillProfile, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
+	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
 			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
 				// Publish the decode pick so plugins in the prefill profile (e.g.
 				// topology affinity) can compare candidates against it.
 				request.PutAttribute(PeerEndpointAttributeKey, decodeRes.TargetEndpoints[0])
 				span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_prefill"))
-				return map[string]scheduling.SchedulerProfile{h.prefillProfile: prefillProfile}
+				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 			}
 			// Decider rejected prefill - mark as evaluated so we don't re-run the decider,
 			// and record that this is an intentional skip, not a failed run.

@@ -77,6 +77,9 @@ func (blf *Selector) TypedName() plugin.TypedName {
 	return blf.typedName
 }
 
+// RestrictsPool reports whether the selector excludes any label sets.
+func (blf *Selector) RestrictsPool() bool { return !blf.selector.Empty() }
+
 // MatchesPoolLabels reports whether the labels match the configured selector.
 func (blf *Selector) MatchesPoolLabels(endpointLabels map[string]string) bool {
 	return blf.selector.Matches(labels.Set(endpointLabels))

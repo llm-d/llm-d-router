@@ -238,3 +238,13 @@ func (r *ProfileRunResult) FirstEndpoint() Endpoint {
 type SchedulerProfile interface {
 	Run(ctx context.Context, request *InferenceRequest, candidateEndpoints []Endpoint) (*ProfileRunResult, error)
 }
+
+// PoolAwareSchedulerProfile describes pool membership before profile filtering.
+// Wrappers used with fallback must preserve this interface.
+type PoolAwareSchedulerProfile interface {
+	SchedulerProfile
+	// HasPoolSelector reports whether the profile restricts pool membership by label.
+	HasPoolSelector() bool
+	// HasReadyPoolEndpoints reports whether any of the screened candidates belong to the pool.
+	HasReadyPoolEndpoints(candidates []Endpoint) bool
+}

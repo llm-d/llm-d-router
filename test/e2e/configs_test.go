@@ -199,35 +199,23 @@ schedulingProfiles:
     weight: 2
 `
 
-// aggregatedFallbackConfig uses strict pool selectors to test stage loss.
 const aggregatedFallbackConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
 - name: decode-only
   type: label-selector-filter
-  parameters:
-    matchLabels:
-      llm-d.ai/role: decode
+  parameters: {matchLabels: {llm-d.ai/role: decode}}
 - name: full-capability-fallback
   type: label-selector-filter
-  parameters:
-    matchExpressions:
-    - key: llm-d.ai/role
-      operator: In
-      values: [prefill-decode, encode-prefill-decode]
+  parameters: {matchLabels: {llm-d.ai/role: prefill-decode}}
 - name: prefill-only
   type: label-selector-filter
-  parameters:
-    matchLabels:
-      llm-d.ai/role: prefill
+  parameters: {matchLabels: {llm-d.ai/role: prefill}}
 - type: max-score-picker
 - type: always-disagg-pd-decider
 - type: disagg-profile-handler
   parameters:
-    profiles:
-      decode: decode
-      prefill: prefill
-      fallback: aggregated-fallback
+    profiles: {fallback: aggregated-fallback}
     deciders:
       prefill: always-disagg-pd-decider
 schedulingProfiles:

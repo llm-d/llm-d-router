@@ -136,6 +136,16 @@ func (p *SchedulerProfile) String() string {
 	)
 }
 
+// HasPoolSelector reports whether the profile restricts pool membership by label.
+func (p *SchedulerProfile) HasPoolSelector() bool {
+	for _, filter := range p.filters {
+		if matcher, ok := filter.(fwksched.EndpointPoolMatcher); ok && matcher.RestrictsPool() {
+			return true
+		}
+	}
+	return false
+}
+
 // HasReadyPoolEndpoints checks the screened candidates against pool selectors.
 // Only EndpointPoolMatcher filters define membership; other filters are not run.
 func (p *SchedulerProfile) HasReadyPoolEndpoints(endpoints []fwksched.Endpoint) bool {

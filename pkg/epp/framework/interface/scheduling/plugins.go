@@ -56,16 +56,22 @@ type ProfileHandler interface {
 		profileResults map[string]*ProfileRunResult) (*SchedulingResult, error)
 }
 
+// SchedulingProfileValidator validates a handler's configured profile references at load time.
+type SchedulingProfileValidator interface {
+	ProfileHandler
+	ValidateSchedulingProfiles(profiles map[string]SchedulerProfile) error
+}
+
 // CandidateAwareProfileHandler optionally supplies a handler with the candidates
-// passed to Schedule, before profile filtering. Candidates are scoped to the
-// handler's data declarations and must not be modified.
+// passed to Schedule, before profile filtering. The callback scopes candidates
+// on demand and is valid only during PickWithCandidates. Treat its result as read-only.
 // Handlers implementing this interface use PickWithCandidates instead of Pick.
 // Decorators embedding such a handler must override PickWithCandidates to intercept it.
 type CandidateAwareProfileHandler interface {
 	ProfileHandler
 	PickWithCandidates(ctx context.Context, request *InferenceRequest,
 		profiles map[string]SchedulerProfile, profileResults map[string]*ProfileRunResult,
-		candidates []Endpoint) map[string]SchedulerProfile
+		candidates func() []Endpoint) map[string]SchedulerProfile
 }
 
 // Filter defines the interface for filtering a list of pods based on context.
@@ -77,6 +83,8 @@ type Filter interface {
 // EndpointPoolMatcher identifies a filter that selects pool members by label.
 // The supplied labels are read-only.
 type EndpointPoolMatcher interface {
+	// RestrictsPool reports whether the selector excludes any label sets.
+	RestrictsPool() bool
 	MatchesPoolLabels(labels map[string]string) bool
 }
 

@@ -385,10 +385,8 @@ func buildSchedulerConfig(
 		return nil, errors.New("SingleProfileHandler cannot support multiple scheduling profiles")
 	}
 
-	if handler, ok := profileHandler.(interface {
-		ValidateSchedulingProfiles(map[string]fwksched.SchedulerProfile) error
-	}); ok {
-		if err := handler.ValidateSchedulingProfiles(profiles); err != nil {
+	if validator, ok := profileHandler.(fwksched.SchedulingProfileValidator); ok {
+		if err := validator.ValidateSchedulingProfiles(profiles); err != nil {
 			return nil, err
 		}
 	}

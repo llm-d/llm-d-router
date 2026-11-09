@@ -581,10 +581,6 @@ Custom profile names (if your scheduling profiles are not named `decode`/`prefil
       prefill: prefix-based-pd-decider
 ```
 
-#### P/D with Experimental Aggregated Fallback
-
-See [experimental aggregated P/D fallback](../pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md#experimental-aggregated-pd-fallback) for configuration, scheduling triggers, and engine capability requirements.
-
 #### P/D (Prefill/Decode, Prefill-First)
 
 In `prefill-first` mode, prefill runs first without requiring a PD decider, and publishes the selected prefill endpoint so subsequent decode scheduling can match against it (e.g., via topology affinity).

@@ -90,7 +90,7 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 		before := time.Now()
 		var profiles map[string]fwksched.SchedulerProfile
 		if handler, ok := s.profileHandler.(fwksched.CandidateAwareProfileHandler); ok {
-			scopedRequest, scopedEndpoints, _ := datalayer.ScopeInvocation(logger, profilePickerExtensionPoint, handler, request, candidateEndpoints)
+			scopedRequest, scopedEndpoints := datalayer.ScopeInvocationWithLazyEndpoints(logger, profilePickerExtensionPoint, handler, request, candidateEndpoints)
 			profiles = handler.PickWithCandidates(ctx, scopedRequest, s.profiles, profileRunResults, scopedEndpoints)
 		} else {
 			scopedRequest, _ := datalayer.ScopeRequest(logger, profilePickerExtensionPoint, s.profileHandler, request)
