@@ -55,6 +55,16 @@ func TestPackBytes_KeyPreserving(t *testing.T) {
 	assert.Equal(t, xxhash.Sum64(raw), hashTokens(tokens), "packed-token hash != raw-byte hash; estimate path is not key-preserving")
 }
 
+// TestEstimateBackend_UnsupportedBody asserts a body the backend cannot read
+// is reported as unsupported rather than estimated as an empty prompt.
+func TestEstimateBackend_UnsupportedBody(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Payload: fwkrequest.RawPayload(`{"prompt":"hi"}`),
+	})
+	require.ErrorIs(t, err, errUnsupportedBody)
+	assert.Nil(t, tp)
+}
+
 // TestEstimateBackend_GeneratePassthrough asserts pre-tokenized input is kept
 // as real tokens, not re-estimated.
 func TestEstimateBackend_GeneratePassthrough(t *testing.T) {
