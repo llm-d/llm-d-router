@@ -1096,22 +1096,20 @@ func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.End
 }
 
 // connectPeerStore hands the peer set to the configured cross-replica syncer
-// when it consumes peers, and reports whether it did. A syncer backed by its
-// own store does not implement PeerConsumer, so discovery runs and the set
-// stays unread; the log line says so, because the peer set is then maintained
-// for nothing.
-func (r *Runner) connectPeerStore(source fwkdl.PeerSource) bool {
+// when it consumes peers. A syncer backed by its own store does not implement
+// PeerConsumer, so discovery runs and the set stays unread; the log line says
+// so, because the peer set is then maintained for nothing.
+func (r *Runner) connectPeerStore(source fwkdl.PeerSource) {
 	syncer := r.PluginHandle.CrossReplicaSyncer()
 	consumer, ok := syncer.(fwkdl.PeerConsumer)
 	if !ok {
 		setupLog.Info("Peer discovery is configured but no cross-replica syncer consumes the peer set",
 			"syncerConfigured", syncer != nil)
-		return false
+		return
 	}
 	consumer.SetPeerSource(source)
 	setupLog.Info("Connected the peer set to the cross-replica syncer",
 		"syncer", syncer.TypedName().String())
-	return true
 }
 
 // initAdmissionControl builds the request admission controller, gated by the

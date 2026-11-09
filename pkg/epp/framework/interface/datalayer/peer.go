@@ -51,10 +51,10 @@ type PeerStore interface {
 // discovery writes through PeerUpsert and PeerDelete, a consumer reads through
 // Peers. MemoryPeerStore implements both.
 type PeerSource interface {
-	// Peers returns a snapshot of the current peer set, ordered by ID. The set
-	// may be incomplete while discovery converges and changes as replicas come
-	// and go, so callers must tolerate a partial set. A missing peer degrades
-	// sync accuracy; it does not block serving.
+	// Peers returns a snapshot of the current peer set, ordered by ID. Each
+	// call allocates and sorts a fresh snapshot, so a consumer should read it
+	// once per sync cycle, not on every Get. See PeerDiscovery.Ready for how
+	// complete the set is.
 	Peers() []PeerMetadata
 }
 
@@ -64,8 +64,8 @@ type PeerSource interface {
 type PeerConsumer interface {
 	// SetPeerSource supplies the source of the live peer set. The runtime calls
 	// it once during startup, before serving begins, and only when peer
-	// discovery is configured. A syncer that is never given a source has no
-	// peers and must still serve.
+	// discovery is configured. See PeerDiscovery.Ready for how complete the set
+	// is.
 	SetPeerSource(source PeerSource)
 }
 

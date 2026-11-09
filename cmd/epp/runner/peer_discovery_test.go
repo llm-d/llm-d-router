@@ -161,7 +161,6 @@ func TestSetupPeerDiscoveryLeavesNonConsumingSyncer(t *testing.T) {
 
 	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("my-peers")))
 	assert.Len(t, mgr.added, 1)
-	assert.False(t, r.connectPeerStore(nil), "a syncer that keeps its own store takes no peer source")
 }
 
 // Peer discovery without any configured syncer starts and stays unconsumed.
@@ -171,7 +170,6 @@ func TestSetupPeerDiscoveryWithoutSyncer(t *testing.T) {
 
 	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("my-peers")))
 	assert.Len(t, mgr.added, 1)
-	assert.False(t, r.connectPeerStore(nil))
 }
 
 // Without dataLayer.discovery.peers nothing is registered.

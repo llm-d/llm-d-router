@@ -134,9 +134,7 @@ A syncer backed by its own store, such as `redis-syncer`, does not implement
 `PeerConsumer`. Peer discovery then still runs and the set is left unread; the
 runner logs that nothing consumes it.
 
-The peer set may be incomplete while discovery converges and changes as replicas
-come and go, so a consumer must tolerate a partial set. A missing peer degrades
-sync accuracy; it does not block serving.
+See the `PeerDiscovery.Ready` godoc for how complete the peer set is.
 
 ---
 
