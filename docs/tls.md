@@ -21,6 +21,7 @@ them. Which sources supply its value differs: see
 | `--tls-min-version` | `VersionTLS12`, `VersionTLS13` | `VersionTLS12` | yes | yes | yes | Minimum TLS version for secure serving. A value below `VersionTLS12` is rejected at startup. |
 | `--tls-cipher-suites` | Go `crypto/tls` cipher suite names (comma-separated or repeated) | `crypto/tls` default | yes | yes | yes | Cipher suites for secure serving. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. |
 | `--enable-cert-reload` | `true` / `false` | `false` | yes | — | — | Reload the `--cert-path` key pair when it changes. |
+| `--client-ca-file` | file path | empty | yes | — | — | PEM CA that requires a verified client certificate on the serving listener. Requires `--secure-serving`. A gateway that presents no certificate, or one from another CA, fails the TLS handshake. |
 | `--secure-proxy` | `true` / `false` | `true` | — | deprecated | — | Deprecated alias for `--secure-serving`. |
 
 ## Differences between components
@@ -61,5 +62,6 @@ logged as `creating self-signed TLS certificate`.
 
 Each component logs the message `server TLS` at startup, whether or not TLS is enabled.
 The entry carries two keys: `tls` is `false` when secure serving is disabled, and
-`cert_path` is empty when no certificate directory is configured. The rendering of the
-keys depends on the log format.
+`cert_path` is empty when no certificate directory is configured. The EPP adds
+`client_ca`, which is `true` when `--client-ca-file` is set. The rendering of the keys
+depends on the log format.
