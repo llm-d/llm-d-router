@@ -674,17 +674,18 @@ type windowStore struct {
 // vLLM publishes that store later in the batch, so processEventBatch holds the
 // sliding-window stores until the batch ends or a sliding-window removal comes.
 // Hashes the prefix index does not map are left out.
-func (p *Pool) addWindowStores(ctx context.Context, stores []windowStore, podIdentifier string) {
+func (p *Pool) addWindowStores(ctx context.Context, stores []windowStore, podIdentifier string, modelSeed uint64) {
 	for _, s := range stores {
 		var hashes []uint64
 		var engineKeys, requestKeys []kvblock.BlockHash
 		for _, hash := range s.hashes {
-			rk, err := p.index.GetRequestKey(ctx, kvblock.BlockHash(hash))
+			engineKey := namespacedEngineKey(modelSeed, hash)
+			rk, err := p.index.GetRequestKey(ctx, engineKey)
 			if err != nil {
 				continue
 			}
 			hashes = append(hashes, hash)
-			engineKeys = append(engineKeys, kvblock.BlockHash(hash))
+			engineKeys = append(engineKeys, engineKey)
 			requestKeys = append(requestKeys, rk)
 		}
 		if len(requestKeys) == 0 {
@@ -958,7 +959,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					// By kind, not by a known window size: Evict of blocks the
 					// window index never stored is a no-op. The batch's earlier
 					// sliding-window stores go in first.
-					p.addWindowStores(ctx, windowStores, podIdentifier)
+					p.addWindowStores(ctx, windowStores, podIdentifier, modelSeed)
 					windowStores = nil
 					index = p.windowIndex
 				} else if !found || !isPrefixIndexableSpecKind(KVCacheSpecKind(meta.Kind)) {
@@ -1046,5 +1047,5 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			debugLogger.Info("Unknown event", "podIdentifier", podIdentifier, "event", genericEvent)
 		}
 	}
-	p.addWindowStores(ctx, windowStores, podIdentifier)
+	p.addWindowStores(ctx, windowStores, podIdentifier, modelSeed)
 }
