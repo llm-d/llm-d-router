@@ -285,7 +285,7 @@ func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, _ *fwksched.I
 	address := hostPort(targetEndpoint)
 	// The proxy can serve a request from a later endpoint of those picked, and
 	// that response says nothing about the target.
-	if served, ok := servedEndpoint(response.ReqMetadata); ok && served != address {
+	if served, ok := metadata.ServedEndpoint(response.ReqMetadata); ok && served != address {
 		return
 	}
 	code, ok := responseStatus(response.Headers)
@@ -300,17 +300,6 @@ func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, _ *fwksched.I
 // endpoint that served a request.
 func hostPort(md *fwkdl.EndpointMetadata) string {
 	return net.JoinHostPort(md.GetIPAddress(), md.GetPort())
-}
-
-// servedEndpoint returns the address of the endpoint the proxy reports it sent
-// the request to.
-func servedEndpoint(reqMetadata map[string]any) (string, bool) {
-	lb, ok := reqMetadata[metadata.DestinationEndpointNamespace].(map[string]any)
-	if !ok {
-		return "", false
-	}
-	served, ok := lb[metadata.DestinationEndpointServedKey].(string)
-	return served, ok
 }
 
 func responseStatus(headers map[string]string) (int, bool) {

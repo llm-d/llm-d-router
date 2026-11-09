@@ -521,10 +521,14 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	}
 
 	targetEndpoint := primaryProfileResult.TargetEndpoints[0]
-	servers := []server{p.makeserver(targetEndpoint)}
-
+	pr, disaggregated := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]
+	disaggregated = disaggregated && pr != nil && len(pr.TargetEndpoints) > 0
+	servers := make([]server, 0, 2)
+	if !disaggregated || !p.config.ExcludeDecodeWhenDisaggregated {
+		servers = append(servers, p.makeserver(targetEndpoint))
+	}
 	// Also record for prefill node if present in P/D disaggregated mode.
-	if pr, exists := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {
+	if disaggregated {
 		servers = append(servers, p.makeserver(pr.TargetEndpoints[0]))
 	}
 
@@ -682,6 +686,7 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 	gpuBlocks := defaultLRUCapacityPerServer
+	fromMetrics := false
 	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
 		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
 		// CacheNumBlocks counts engine blocks, but each LRU entry is one router
@@ -690,12 +695,14 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 		if engineBlockSize := targetEndpoint.GetMetrics().CacheBlockSize; engineBlockSize > 0 {
 			gpuBlocks = max(1, gpuBlocks*engineBlockSize/p.GetBlockSize([]fwksched.Endpoint{targetEndpoint}))
 		}
+		fromMetrics = true
 	} else if p.config.LRUCapacityPerServer > 0 {
 		gpuBlocks = p.config.LRUCapacityPerServer
 	}
 	return server{
-		ServerID:       ServerID(targetEndpoint.GetMetadata().ID),
-		NumOfGPUBlocks: gpuBlocks,
+		ServerID:            ServerID(targetEndpoint.GetMetadata().ID),
+		NumOfGPUBlocks:      gpuBlocks,
+		CapacityFromMetrics: fromMetrics,
 	}
 }
 

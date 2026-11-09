@@ -489,6 +489,10 @@ func (ts *testDirector) HandleResponseBody(ctx context.Context, reqCtx *handlers
 	}
 	return reqCtx
 }
+func (ts *testDirector) GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata {
+	return ts.GetRandomEndpoint()
+}
+
 func (ts *testDirector) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	return &fwkdl.EndpointMetadata{
 		Address: podAddress,

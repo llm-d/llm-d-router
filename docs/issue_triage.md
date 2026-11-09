@@ -7,6 +7,7 @@ Every open issue carries either `needs-triage` or exactly one `triage/*` label. 
 | Label | Meaning |
 |---|---|
 | `triage/accepted` | Ready to be worked on |
+| `triage/needs-design` | Blocked on design consensus, an RFC, or cross-SIG input |
 | `triage/needs-information` | The reporter must add details before work can start |
 | `triage/not-reproducible` | Could not be reproduced as described |
 | `triage/duplicate` | Covered by another open issue |
@@ -52,3 +53,16 @@ The workflow reads the last 100 comments, the last 100 cross-references and the 
 
 This check is independent of `stale.yaml`, which marks issues stale after 90 days of inactivity from anyone.
 
+## Triage process
+
+Maintainers (`@llm-d/router-maintainers`) add `area/*` and `kind/*` labels to [unrouted `needs-triage` issues](https://github.com/llm-d/llm-d-router/issues?q=is%3Aopen+is%3Aissue+label%3Aneeds-triage+-label%3Aarea%2Fepp+-label%3Aarea%2Fscheduling+-label%3Aarea%2Fflowcontrol+-label%3Aarea%2Fkvcache+-label%3Aarea%2Fcoordinator+-label%3Aarea%2Fsidecar+-label%3Aarea%2Fdatalayer+-label%3Aarea%2Ftelemetry+-label%3Aarea%2Fdev+-label%3Aarea%2Fdocs). Component code owners ([CODEOWNERS](../CODEOWNERS)) review their per-area triage queues (linked in [area_taxonomy.md](area_taxonomy.md#area-contacts-and-code-owners)) and `triage/needs-information` issues weekly, and set `triage/accepted`, `triage/needs-design`, `good first issue`, or `help wanted`. When an issue carries both `area/epp` and a more specific subsystem `area/*` label, the subsystem's code owners triage it.
+
+### `good first issue` and `help wanted`
+
+Apply `good first issue` and `help wanted` only to `triage/accepted` issues. Do not apply either label to `triage/needs-design` issues, `needs-triage` issues, or unassigned issues that already have an open pull request.
+
+Before applying `good first issue`, verify that the issue has no open design questions, needs no multi-node GPU cluster to test, and has a comment naming:
+
+1. Target package or file path.
+2. Verification command.
+3. Reviewer `@handle`.

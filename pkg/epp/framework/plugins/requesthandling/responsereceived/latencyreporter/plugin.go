@@ -27,14 +27,15 @@ import (
 	"slices"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 )
 
@@ -54,6 +55,7 @@ const (
 )
 
 var (
+	_ plugin.ConsumerPlugin                   = &Plugin{}
 	_ requesthandling.ResponseHeaderProcessor = &Plugin{}
 	_ requesthandling.ResponseBodyProcessor   = &Plugin{}
 )
@@ -139,6 +141,19 @@ func newPlugin(name string, params Parameters) (*Plugin, error) {
 // TypedName returns the type and name tuple of this plugin instance.
 func (p *Plugin) TypedName() plugin.TypedName { return p.typedName }
 
+// Consumes declares TokenizedPromptDataKey when promptBuckets is configured so the
+// framework instantiates the default tokenizer for the promptTokens fallback.
+func (p *Plugin) Consumes() plugin.DataDependencies {
+	if len(p.buckets) == 0 {
+		return plugin.DataDependencies{}
+	}
+	return plugin.DataDependencies{
+		Required: map[plugin.DataKey]any{
+			tokenizer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
+		},
+	}
+}
+
 // ResponseHeader records the response status for use at end of stream.
 func (p *Plugin) ResponseHeader(_ context.Context, request *scheduling.InferenceRequest, response *requesthandling.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil {
@@ -158,6 +173,10 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 	}
 	v, _ := p.statuses.LoadAndDelete(request.RequestID)
 	status, _ := v.(string)
+	// llm_d_epp_request_outcome_total leaves out a request whose ending the EPP did not see.
+	if response.TerminationCause == requesthandling.TerminationCauseNotObserved {
+		return
+	}
 
 	priority := request.Objectives.Priority
 	if p.priorities != nil {
@@ -177,11 +196,11 @@ func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRe
 	if result != outcomeCompleted {
 		return
 	}
-	if !response.FirstTokenTimestamp.IsZero() && !response.ReceivedTimestamp.IsZero() {
+	if !response.FirstTokenTimestamp.IsZero() && !response.ReceivedTimestamp.IsZero() && response.FirstTokenTimestamp.After(response.ReceivedTimestamp) {
 		latencyTTFT.WithLabelValues(prio, bucket, path, streaming).Observe(response.FirstTokenTimestamp.Sub(response.ReceivedTimestamp).Seconds())
 	}
 	if tpot, ok := meanTPOT(response); ok {
-		latencyTPOT.WithLabelValues(prio, path).Observe(tpot.Seconds())
+		latencyTPOT.WithLabelValues(prio, path).Observe(tpot)
 	}
 }
 
@@ -203,14 +222,14 @@ func outcome(status string, cause requesthandling.TerminationCause) string {
 	}
 }
 
-// meanTPOT is the per-request mean gap between output tokens. It needs a streamed response with
-// at least two output tokens.
-func meanTPOT(response *requesthandling.Response) (time.Duration, bool) {
+// meanTPOT is the per-request mean gap between output tokens, in seconds. It needs a streamed
+// response with at least two output tokens and strictly increasing timestamps.
+func meanTPOT(response *requesthandling.Response) (float64, bool) {
 	n := response.Usage.CompletionTokens
-	if !response.Streaming || n < 2 || response.FirstTokenTimestamp.IsZero() || response.CompleteTimestamp.IsZero() {
+	if !response.Streaming || n < 2 || response.ReceivedTimestamp.IsZero() || response.FirstTokenTimestamp.IsZero() || response.CompleteTimestamp.IsZero() || !response.FirstTokenTimestamp.After(response.ReceivedTimestamp) || !response.CompleteTimestamp.After(response.FirstTokenTimestamp) {
 		return 0, false
 	}
-	return response.CompleteTimestamp.Sub(response.FirstTokenTimestamp) / time.Duration(n-1), true
+	return response.CompleteTimestamp.Sub(response.FirstTokenTimestamp).Seconds() / float64(n-1), true
 }
 
 func promptTokens(request *scheduling.InferenceRequest, response *requesthandling.Response) int {

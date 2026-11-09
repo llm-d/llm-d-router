@@ -140,6 +140,9 @@ func (p *ProbabilisticAdmitter) Admit(_ context.Context, request *fwksched.Infer
 		return errcommon.Error{
 			Code: errcommon.ResourceExhausted,
 			Msg:  fmt.Sprintf("probabilistic-admitter: rejected, saturation=%.3f prob=%.2f", saturation, prob),
+			// The request is dropped before dispatch, so the reason header is what
+			// lets requestOutcome count it as rejected rather than failed.
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
 		}
 	}
 	return nil

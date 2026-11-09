@@ -249,9 +249,7 @@ func TestBulkPredictWithMetrics_WithPredictedLatencyCtx(t *testing.T) {
 	prefixCacheScores := []float64{0.0}
 
 	plCtx := &predictedLatencyCtx{
-		schedulingRequest: fwksched.InferenceRequest{
-			TargetModel: "test-model",
-		},
+		targetModel:       "test-model",
 		incomingModelName: "incoming-model",
 	}
 
@@ -460,7 +458,7 @@ func TestResponseBody_TPOTTrainingIncludesSelectedPredictedTPOT(t *testing.T) {
 	plCtx := newPredictedLatencyContext(request)
 	plCtx.targetMetadata = endpoint.GetMetadata()
 	plCtx.schedulingResult = schedulingResult
-	plCtx.schedulingRequest = *request
+	plCtx.targetModel = request.TargetModel
 	plCtx.incomingModelName = testModelName
 	plCtx.requestReceivedTimestamp = time.Now().Add(-200 * time.Millisecond)
 	plCtx.ttft = 80
@@ -526,7 +524,7 @@ func TestResponseBody_PDDecodeTPOTUsesSelectedDecodePrediction(t *testing.T) {
 	plCtx.targetMetadata = decodeSelected.GetMetadata()
 	plCtx.prefillTargetMetadata = prefill.GetMetadata()
 	plCtx.schedulingResult = schedulingResult
-	plCtx.schedulingRequest = *request
+	plCtx.targetModel = request.TargetModel
 	plCtx.incomingModelName = testModelName
 	plCtx.requestReceivedTimestamp = time.Now().Add(-200 * time.Millisecond)
 	plCtx.ttft = 80
@@ -580,7 +578,7 @@ func TestResponseBody_TPOTTrainingOmitsPredictedWhenMissing(t *testing.T) {
 	plCtx := newPredictedLatencyContext(request)
 	plCtx.targetMetadata = endpoint.GetMetadata()
 	plCtx.schedulingResult = schedulingResult
-	plCtx.schedulingRequest = *request
+	plCtx.targetModel = request.TargetModel
 	plCtx.incomingModelName = testModelName
 	plCtx.requestReceivedTimestamp = time.Now().Add(-200 * time.Millisecond)
 	plCtx.ttft = 80
@@ -626,7 +624,7 @@ func TestBulkPredictWithMetrics_PredictionDurationModelLabels(t *testing.T) {
 		},
 	}
 	plCtx := &predictedLatencyCtx{
-		schedulingRequest: fwksched.InferenceRequest{TargetModel: "target-model"},
+		targetModel:       "target-model",
 		incomingModelName: "incoming-model",
 	}
 

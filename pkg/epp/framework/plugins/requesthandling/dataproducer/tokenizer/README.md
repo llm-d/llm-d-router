@@ -16,8 +16,17 @@ example an `approx-prefix-cache-producer` that feeds
 [Request Control](../../../../../../../docs/architecture.md#request-control).
 The plugin is idempotent: if
 `InferenceRequestBody.TokenizedRequest` is already populated by an earlier
-producer, tokenization is skipped. Multi-modal features are flattened into the
-upstream list shape, sorted by placeholder offset.
+producer, tokenization is skipped. A request that already carries prompt token
+IDs is not rendered either. This covers a token-array Completions `prompt`
+without a non-null `truncate_prompt_tokens`, and
+`kv_transfer_params.prompt_token_ids` on a text-only Chat Completions,
+Messages, or Responses request, which vLLM's chat path consumes in place of
+templating and tokenizing the messages. A request with media content or `echo`
+set is rendered, since vLLM then ignores the field; for media, the render also
+supplies the multimodal features. The supplied IDs are stored in
+`TokenizedRequest` as sent, so other engine-side preprocessing such as
+`add_special_tokens` is not reflected. Multi-modal features are flattened into the upstream
+list shape, sorted by placeholder offset.
 
 ## Backend
 
@@ -132,9 +141,7 @@ tool schemas or other nested content. Plugins use the typed protocol
 projections to read content. Prompt-affecting mutations must finish before
 token production; metadata added afterward must not affect tokenization.
 
-Completions requests with token arrays go through vLLM, which owns truncation
-and other input preprocessing. These requests require a render round trip and
-an available renderer. Native Generate requests carry final tokens and bypass
+Native Generate requests carry final tokens and bypass
 rendering. Direct requests to the three `/render` endpoints retain model
 routing and pass through without local token
 production or response parsing.

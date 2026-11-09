@@ -371,7 +371,9 @@ func (pl *PredictedLatency) getOrMakePredictedLatencyContextForRequest(request *
 
 // predictedLatencyCtx holds per-request state for latency prediction and training.
 type predictedLatencyCtx struct {
-	schedulingRequest         fwksched.InferenceRequest
+	// targetModel is kept instead of a copy of the request, which would keep the
+	// request body alive after it has been forwarded.
+	targetModel               string
 	targetMetadata            *fwkdl.EndpointMetadata
 	prefillTargetMetadata     *fwkdl.EndpointMetadata
 	schedulingResult          *fwksched.SchedulingResult
@@ -425,7 +427,7 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 		}
 	}
 	return &predictedLatencyCtx{
-		schedulingRequest:              *request,
+		targetModel:                    request.TargetModel,
 		inputTokenCount:                inputTokenCount,
 		lastSeenMetrics:                make(map[string]*fwkdl.Metrics),
 		prefixCacheScoresForEndpoints:  make(map[string]float64),

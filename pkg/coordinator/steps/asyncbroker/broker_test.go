@@ -42,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
@@ -202,6 +203,32 @@ func TestAsyncBrokerNoModeHeaderIsNoOp(t *testing.T) {
 	keys, err := rdb.Keys(t.Context(), "*").Result()
 	require.NoError(t, err)
 	assert.Empty(t, keys)
+}
+
+func TestAsyncBrokerSGLangGRPCGenerateIsNoOp(t *testing.T) {
+	for _, mode := range []string{"passthrough", "enqueue", "wait", "sideways"} {
+		t.Run(mode, func(t *testing.T) {
+			step, rdb := newAsyncTestStep(t, nil)
+			rec := httptest.NewRecorder()
+			reqCtx := &pipeline.RequestContext{
+				RequestID:           "req-grpc-1",
+				OriginalPath:        sglangapiv1.SglangService_Generate_FullMethodName,
+				OriginalHeaders:     http.Header{http.CanonicalHeaderKey(defaultModeHeader): {mode}},
+				GRPCGeneratePayload: []byte{},
+				Stream:              true,
+				ResponseWriter:      rec,
+			}
+
+			require.NoError(t, step.Execute(t.Context(), reqCtx))
+
+			// No JSON error on the gRPC stream and nothing in Redis.
+			assert.Empty(t, rec.Body.String())
+			assert.Empty(t, rec.Header())
+			keys, err := rdb.Keys(t.Context(), "*").Result()
+			require.NoError(t, err)
+			assert.Empty(t, keys)
+		})
+	}
 }
 
 func TestAsyncBrokerRejections(t *testing.T) {

@@ -35,6 +35,9 @@ layer may serve the request from any of them.
   decode request's `remote_prefiller` from it. The prefill pod's serving address,
   `x-llm-d-prefiller-host-port`, is the `disagg-profile-handler`'s output and is not
   written here.
+- The decision for the request (`P2PSourceDecision`: the `outcome` and `endpoint_role` of
+  `llm_d_epp_p2p_source_decisions_total`) as a request attribute, read by a
+  `prefix-cache-affinity-filter` whose `p2pSourceProducerName` names this instance.
 
 A P2P tier port is `p2pConnectorPort` plus the endpoint's data parallel rank, the
 position of its port in the pool's target ports. See
@@ -68,7 +71,7 @@ available.
 
 - `prefixMatchInfoProducerName` (string, optional): Name of the prefix-cache producer instance that supplies `PrefixCacheMatchInfo`. Empty selects the default unnamed producer.
 - `minCachedTokenDelta` (int, optional, default: `1`): Minimum cached-token advantage required to write the source. Must be `>= 1`. Higher values avoid transfers for prefixes that are cheap to recompute.
-- `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. If the profile has no target, the primary profile target is used.
+- `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. If the profile has no target, the primary profile target is used. See [Prefill profile name](#prefill-profile-name).
 - `p2pConnectorPort` (int, optional, default: `7777`): `OffloadingConnector` P2P tier port of data parallel rank 0 on every endpoint; rank `r` listens on `p2pConnectorPort + r`, which must stay within 1-65535: an endpoint beyond that is skipped as a source, and a request to a prefill endpoint beyond it fails. Must match the P2P tier's configured port.
 - `costModel` (object, optional): When set, the source is written only when the pull's gain exceeds its cost, evaluated after the `minCachedTokenDelta` floor. Omitted, the fixed-delta decision applies. See [Cost model](#cost-model).
 
@@ -161,6 +164,50 @@ dataLayer:
         - pluginRef: precise-cache
 ```
 
+### Prefill profile name
+
+`prefillProfileName` must equal the name of the scheduling profile that picks the prefill
+pod. Both names default to `prefill`, so a config that leaves them unset works. When you
+rename the prefill profile, change `prefillProfileName` to the same name. If the names
+differ, the plugin writes no `x-llm-d-kv-cache-prefill-p2p-host-port`, and every
+disaggregated request fails: the sidecar `offloading` connector returns HTTP 500, and the
+coordinator `kv-offloading` connector fails the request before decode is sent.
+
+Behind the routing sidecar, the name comes from the `disagg-profile-handler`:
+
+```yaml
+plugins:
+  - type: disagg-profile-handler
+    parameters:
+      profiles:
+        prefill: prefill-h200       # the profile that picks the prefill pod
+        decode: decode
+  - type: p2p-source-producer
+    parameters:
+      prefillProfileName: prefill-h200   # must be the same name
+schedulingProfiles:
+  - name: prefill-h200
+    plugins: [...]
+  - name: decode
+    plugins: [...]
+```
+
+Behind the coordinator, `header-profile-handler` runs the profile named by
+`x-llm-d-epp-profile`, which the coordinator always sets to `prefill` on the prefill
+request; with a single configured profile it runs that one whatever its name. Name the
+prefill profile `prefill` and leave `prefillProfileName` unset:
+
+```yaml
+plugins:
+  - type: header-profile-handler
+  - type: p2p-source-producer       # prefillProfileName unset: prefill
+schedulingProfiles:
+  - name: prefill                   # equals prefillProfileName
+    plugins: [...]
+  - name: decode
+    plugins: [...]
+```
+
 ## Deployment Requirements
 
 The source results in a transfer only when the serving deployment can
@@ -174,6 +221,17 @@ serve and pull the named blocks:
 
 For cache-aware prefill-work routing, follow the
 [`context-length-aware` profile and work-range guidance](../../../scheduling/scorer/contextlengthaware/README.md#p2p-cache-aware-prefill-work).
+
+## Metrics
+
+- `llm_d_epp_p2p_source_decisions_total`: one decision per request, labelled by `endpoint_role` and `outcome`
+  (`pulled`, `self`, `below-floor`, `declined`, and the cases that leave no decision to make).
+- `llm_d_epp_p2p_source_predicted_pulled_tokens`: prompt tokens the selected source holds beyond
+  the computing endpoint, per request sent to pull.
+
+See [P2P KV-cache source](../../../../../../../docs/metrics.md#p2p-kv-cache-source) for every
+outcome, how `endpoint_role` is assigned under a renamed prefill profile, and the vLLM metrics that
+report the pulls served.
 
 ## Related Documentation
 

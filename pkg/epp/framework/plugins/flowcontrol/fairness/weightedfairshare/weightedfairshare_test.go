@@ -153,6 +153,40 @@ func TestCost(t *testing.T) {
 	}
 }
 
+func TestResponseBody_StreamedEventsFallback(t *testing.T) {
+	for name, tc := range map[string]struct {
+		params                     string
+		prompt, completion, events int
+		want                       float64
+	}{
+		"missing usage":                    {"", 0, 0, 35, 70},
+		"preserves prompt usage":           {"", 100, 0, 25, 150},
+		"reported output takes precedence": {"", 100, 40, 45, 180},
+		"no streamed events":               {"", 100, 0, 0, 100},
+		"no usage or events":               {"", 0, 0, 0, 0},
+		"configured costs and weight": {
+			`{"costPerRequest":10,"costPerInputToken":0.5,"costPerOutputToken":3,"flowWeights":{"alpha":2}}`,
+			100, 0, 20, 60,
+		},
+		"output cost disabled": {`{"costPerOutputToken":0}`, 100, 0, 35, 100},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newPolicy(t, tc.params)
+			req := &fwksched.InferenceRequest{FairnessID: "alpha"}
+			resp := &fwkrh.Response{StreamedEvents: tc.events}
+			resp.Usage.PromptTokens = tc.prompt
+			resp.Usage.CompletionTokens = tc.completion
+
+			p.ResponseBody(context.Background(), req, resp, nil)
+			assert.Zero(t, virtualService(p, "alpha"))
+
+			resp.EndOfStream = true
+			p.ResponseBody(context.Background(), req, resp, nil)
+			assert.InDelta(t, tc.want, virtualService(p, "alpha"), 1e-9)
+		})
+	}
+}
+
 // Weights come from flowWeights by fairness ID, unlisted IDs take defaultFlowWeight, and
 // nothing on the request changes them.
 func TestWeight_FromConfigOnly(t *testing.T) {

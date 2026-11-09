@@ -17,7 +17,9 @@ limitations under the License.
 package server
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +27,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -105,9 +109,14 @@ func TestServerRouteDispatch(t *testing.T) {
 		{http.MethodPost, "/v1/messages/.", served, "/v1/messages"},
 		{http.MethodPost, "/v1/chat%2Fcompletions", served, "/v1/chat/completions"},
 		{http.MethodPost, "/v1/messages%2F", served, "/v1/messages"},
+		{http.MethodPost, "/sglang.api.v1.SglangService/Generate", served, "/sglang.api.v1.SglangService/Generate"},
+		{http.MethodPost, "/sglang.api.v1.SglangService/Generate/", served, "/sglang.api.v1.SglangService/Generate"},
+		{http.MethodPost, "/sglang.api.v1.SglangService%2FGenerate", served, "/sglang.api.v1.SglangService/Generate"},
 
-		{http.MethodPost, "/generate", served, "/generate"},
-		{http.MethodPost, "/generate/", served, "/generate"},
+		{http.MethodPost, "/sglang.api.v1.SglangService/HealthCheck", passthrough, "/sglang.api.v1.SglangService/HealthCheck"},
+		{http.MethodPut, "/generate", passthrough, "/generate"},
+		{http.MethodPost, "/generate", passthrough, "/generate"},
+		{http.MethodPost, "/generate/", passthrough, "/generate/"},
 		{http.MethodPost, "/v1/chat/completions/render", passthrough, "/v1/chat/completions/render"},
 		{http.MethodPost, "/v1/completions/render", passthrough, "/v1/completions/render"},
 		{http.MethodPost, "/v1/messages/count_tokens", passthrough, "/v1/messages/count_tokens"},
@@ -154,7 +163,11 @@ func TestServerRouteDispatch(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{"model":"m"}`))
+			var reqBody io.Reader = strings.NewReader(`{"model":"m"}`)
+			if strings.Contains(tt.path, "SglangService") {
+				reqBody = bytes.NewReader(make([]byte, grpcframe.HeaderLen))
+			}
+			req := httptest.NewRequest(tt.method, tt.path, reqBody)
 
 			rec := doPassthrough(t, srv, req)
 
@@ -189,10 +202,10 @@ func TestServerRouteMethodNotAllowed(t *testing.T) {
 		{http.MethodDelete, "/v1/completions", http.MethodPost},
 		{http.MethodHead, "/inference/v1/generate", http.MethodPost},
 		{http.MethodPut, "/inference/v1/generate", http.MethodPost},
-		{http.MethodPut, "/generate", http.MethodPost},
 		{http.MethodOptions, "/v1/chat/completions", http.MethodPost},
 		{http.MethodGet, "/v1/responses", http.MethodPost},
 		{http.MethodHead, "/v1/messages", http.MethodPost},
+		{http.MethodGet, "/sglang.api.v1.SglangService/Generate", http.MethodPost},
 		{http.MethodPost, "/healthz", http.MethodGet},
 		{http.MethodHead, "/readyz", http.MethodGet},
 		{"PROPFIND", "/v1/files", ""},
@@ -227,6 +240,7 @@ func TestServerRouteMethodNotAllowed(t *testing.T) {
 func TestCanonicalizeInferencePath(t *testing.T) {
 	routes := chi.NewRouter()
 	routes.Post("/v1/responses", func(http.ResponseWriter, *http.Request) {})
+	routes.Post(sglangapiv1.SglangService_Generate_FullMethodName, func(http.ResponseWriter, *http.Request) {})
 	routes.Post("/v1/requests/{id}/cancel", func(http.ResponseWriter, *http.Request) {})
 	tests := []struct {
 		name        string
@@ -238,6 +252,8 @@ func TestCanonicalizeInferencePath(t *testing.T) {
 		{name: "trailing slash", method: http.MethodPost, target: "/v1/responses/?x=1", wantPath: "/v1/responses"},
 		{name: "encoded slash", method: http.MethodPost, target: "/v1/responses%2F", wantPath: "/v1/responses"},
 		{name: "exact path", method: http.MethodPost, target: "/v1/responses", wantPath: "/v1/responses"},
+		{name: "sglang grpc generate trailing slash", method: http.MethodPost, target: "/sglang.api.v1.SglangService/Generate/", wantPath: "/sglang.api.v1.SglangService/Generate"},
+		{name: "sglang grpc healthcheck unserved", method: http.MethodPost, target: "/sglang.api.v1.SglangService/HealthCheck/", wantPath: "/sglang.api.v1.SglangService/HealthCheck/"},
 		{name: "other method", method: http.MethodGet, target: "/v1/responses/", wantPath: "/v1/responses/"},
 		{name: "unserved path", method: http.MethodPost, target: "/generate/", wantPath: "/generate/"},
 		{name: "step route", method: http.MethodPost, target: "/v1/requests/abc/cancel/", wantPath: "/v1/requests/abc/cancel/"},

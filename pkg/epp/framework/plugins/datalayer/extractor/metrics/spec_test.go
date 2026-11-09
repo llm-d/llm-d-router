@@ -599,6 +599,13 @@ func TestExtractValue(t *testing.T) {
 			},
 			want: 99.9,
 		},
+		{
+			name: "untyped metric",
+			metric: &dto.Metric{
+				Untyped: &dto.Untyped{Value: ptr.To(7.5)},
+			},
+			want: 7.5,
+		},
 	}
 
 	for _, tt := range tests {

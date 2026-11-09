@@ -76,6 +76,9 @@ func NewPrefillStep(gwClient *gateway.Client, params map[string]any) (pipeline.S
 func (s *PrefillStep) Name() string { return PrefillStepName }
 
 func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	if reqCtx.IsSGLangGRPC() {
+		return s.executeSGLangGRPC(ctx, reqCtx)
+	}
 	logger := log.FromContext(ctx).WithName(PrefillStepName)
 
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
@@ -106,6 +109,11 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	defer resp.Body.Close()
 
 	reqCtx.PeerTopology = resp.Header.Get(reqcommon.PeerTopologyHeaderKey)
+	if reader, ok := s.kv.(kv.PrefillResponseReader); ok {
+		if err := reader.ReadPrefillResponse(reqCtx, resp.Header); err != nil {
+			return fmt.Errorf("prefill: %w", err)
+		}
+	}
 
 	var prefillResp prefillResponse
 	if err := json.NewDecoder(resp.Body).Decode(&prefillResp); err != nil {
@@ -150,13 +158,16 @@ func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.Req
 }
 
 func (s *PrefillStep) buildSGLangPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext) (map[string]any, error) {
-	if s.kv.Name() != kv.SGLang || !reqCtx.Stream {
-		return nil, fmt.Errorf("/generate prefill requires kv-sglang and stream=true: %w", pipeline.ErrBadRequest)
+	if s.kv.Name() != kv.SGLang {
+		return nil, fmt.Errorf("/generate prefill requires %s connector, got %s", kv.SGLang, s.kv.Name())
+	}
+	if !reqCtx.Stream {
+		return nil, fmt.Errorf("/generate prefill requires stream=true: %w", pipeline.ErrBadRequest)
 	}
 	if reqCtx.Body[reqcommon.FieldDisaggPrefillDPRank] != nil {
 		return nil, fmt.Errorf("client-supplied disagg_prefill_dp_rank is unsupported: %w", pipeline.ErrBadRequest)
 	}
-	if sampling, present := reqCtx.Body[reqcommon.FieldSamplingParams]; present {
+	if sampling := reqCtx.Body[reqcommon.FieldSamplingParams]; sampling != nil {
 		params, ok := sampling.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("SGLang prefill requires one sampling_params object: %w", pipeline.ErrBadRequest)
