@@ -342,10 +342,17 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 	resp, err := s.gwClient.Post(ctx, reqCtx.OriginalPath, bodyBytes, headers)
 	call.Done()
 	if err != nil {
-		// No response headers arrived, so nothing is on the wire; a plain error
-		// lets the server answer a clean 502.
+		// A round trip that failed because the client left is the cancellation,
+		// not a transport fault, so it records no outcome.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			logger.V(logutil.VERBOSE).Info("force-stream: client cancelled", "error", err)
+			return fmt.Errorf("%s: %w", DecodeStepName, ctxErr)
+		}
+		// No response headers arrived, so nothing is on the wire; an unwritten
+		// error lets the server answer a clean 502. The status-less UpstreamError
+		// classifies it upstream_transport, as the pass-through's failure is.
 		coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultErrorTransport)
-		return fmt.Errorf("%s: force-stream request: %w", DecodeStepName, err)
+		return fmt.Errorf("force-stream request: %w: %w", &pipeline.UpstreamError{Step: DecodeStepName}, err)
 	}
 	defer resp.Body.Close()
 

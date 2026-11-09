@@ -1340,9 +1340,50 @@ func TestForceStream_TransportError(t *testing.T) {
 	var streamed *pipeline.UpstreamStreamedError
 	require.False(t, errors.As(err, &streamed),
 		"a transport failure writes nothing, so it must return a plain error for a clean 502")
+	require.Equal(t, coordmetrics.ErrorCodeUpstreamTransport, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts),
+		"an unreachable upstream is classified like the pass-through's")
 
 	require.Equal(t, 0, recorder.Body.Len(), "nothing may be written to the client on a transport failure")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorTransport), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
+}
+
+// TestForceStream_ClientCancelBeforeHeaders covers a client that leaves before
+// the upstream answers. The failed round trip is the cancellation, not a
+// transport fault, so no force-stream outcome is recorded.
+func TestForceStream_ClientCancelBeforeHeaders(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	// The upstream never answers; release lets server.Close finish.
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		cancel()
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-cancel-headers",
+		OriginalPath:     reqcommon.PathChatCompletions,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false, "max_tokens": 16,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: recorder,
+	}
+
+	err := step.Execute(ctx, reqCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, pipeline.IsClientCancellation(ctx, err))
+	require.Equal(t, 0, recorder.Body.Len())
+	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorTransport), 1e-9,
+		"a client cancel is not an upstream transport failure")
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
 }
 
