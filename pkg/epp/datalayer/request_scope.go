@@ -91,6 +91,21 @@ func ScopeInvocation(logger logr.Logger, extensionPoint string, plugin fwkplugin
 		violations
 }
 
+// ScopeInvocationWithLazyEndpoints builds scoped endpoint wrappers on demand.
+// Out-of-scope accesses are logged and counted. Rejected writes are dropped
+// without failing the request.
+func ScopeInvocationWithLazyEndpoints(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin,
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.InferenceRequest, func() []fwksched.Endpoint) {
+	violations := &Violations{}
+	var scoped []fwksched.Endpoint
+	return scopeRequest(logger, extensionPoint, plugin, request, violations), func() []fwksched.Endpoint {
+		if scoped == nil {
+			scoped = scopeEndpoints(logger, extensionPoint, plugin, endpoints, violations)
+		}
+		return scoped
+	}
+}
+
 func scopeRequest(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin,
 	request *fwksched.InferenceRequest, violations *Violations) *fwksched.InferenceRequest {
 	if request == nil {

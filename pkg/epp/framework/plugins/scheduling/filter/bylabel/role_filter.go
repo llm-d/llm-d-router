@@ -69,6 +69,9 @@ func (f *RoleFilter) WithName(name string) *RoleFilter {
 	return f
 }
 
+// RestrictsPool reports whether the filter excludes any label sets.
+func (f *RoleFilter) RestrictsPool() bool { return true }
+
 // MatchesPoolLabels reports whether the labels describe an accepted role.
 func (f *RoleFilter) MatchesPoolLabels(labels map[string]string) bool {
 	role, roleDefined := labels[RoleLabel]

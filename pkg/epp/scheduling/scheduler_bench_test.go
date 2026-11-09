@@ -168,24 +168,29 @@ func BenchmarkDisaggSchedule(b *testing.B) {
 		{name: "fallback", prefill: true, fallback: true, decodeAbsent: true},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
+			base := disagg.NewDisaggProfileHandler("decode", "prefill", "", nil, nil)
+			if tc.prefill {
+				base = disagg.NewDisaggProfileHandler("decode", "prefill", "", &disagg.AlwaysDisaggPDDecider{}, nil)
+			}
+			var handler fwksched.ProfileHandler = base
+			if tc.fallback {
+				handler = base.WithFallbackProfile("fallback")
+			}
+			profiles := map[string]fwksched.SchedulerProfile{}
+			for name, role := range map[string]string{"decode": bylabel.RoleDecode, "prefill": bylabel.RolePrefill, "fallback": bylabel.RolePrefillDecode} {
+				selector, err := bylabel.NewSelector(name, &metav1.LabelSelector{MatchLabels: map[string]string{bylabel.RoleLabel: role}})
+				if err != nil {
+					b.Fatal(err)
+				}
+				profiles[name] = NewSchedulerProfile().WithFilters(selector).WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+			}
+			scheduler := NewSchedulerWithConfig(NewSchedulerConfig(handler, profiles))
+			want := "decode"
+			if tc.decodeAbsent {
+				want = "fallback"
+			}
 			for _, n := range []int{5, 25, 100, 1000} {
 				b.Run(fmt.Sprintf("endpoints=%d", n), func(b *testing.B) {
-					base := disagg.NewDisaggProfileHandler("decode", "prefill", "", nil, nil)
-					if tc.prefill {
-						base = disagg.NewDisaggProfileHandler("decode", "prefill", "", &disagg.AlwaysDisaggPDDecider{}, nil)
-					}
-					var handler fwksched.ProfileHandler = base
-					if tc.fallback {
-						handler = base.WithFallbackProfile("fallback")
-					}
-					profiles := map[string]fwksched.SchedulerProfile{}
-					for name, role := range map[string]string{"decode": bylabel.RoleDecode, "prefill": bylabel.RolePrefill, "fallback": bylabel.RolePrefillDecode} {
-						selector, err := bylabel.NewSelector(name, &metav1.LabelSelector{MatchLabels: map[string]string{bylabel.RoleLabel: role}})
-						if err != nil {
-							b.Fatal(err)
-						}
-						profiles[name] = NewSchedulerProfile().WithFilters(selector).WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
-					}
 					endpoints := makeBenchmarkEndpoints(n)
 					roles := []string{bylabel.RoleDecode, bylabel.RolePrefill, bylabel.RolePrefillDecode}
 					for i, endpoint := range endpoints {
@@ -195,18 +200,12 @@ func BenchmarkDisaggSchedule(b *testing.B) {
 						}
 						endpoint.GetMetadata().Labels = map[string]string{bylabel.RoleLabel: role}
 					}
-					scheduler := NewSchedulerWithConfig(NewSchedulerConfig(handler, profiles))
 					request := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "critical", Headers: map[string]string{}}
 					b.ReportAllocs()
-					b.ResetTimer()
-					for i := 0; i < b.N; i++ {
+					for b.Loop() {
 						result, err := scheduler.Schedule(context.Background(), request, endpoints)
 						if err != nil {
 							b.Fatal(err)
-						}
-						want := "decode"
-						if tc.decodeAbsent {
-							want = "fallback"
 						}
 						if result.PrimaryProfileName != want {
 							b.Fatalf("primary = %s, want %s", result.PrimaryProfileName, want)
