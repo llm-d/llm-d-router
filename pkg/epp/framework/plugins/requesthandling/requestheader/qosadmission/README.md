@@ -88,7 +88,7 @@ Configure a flow-control priority band for each class priority, or rely on dynam
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `llm_d_epp_qos_admission_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `mode` | Decisions: `admitted`, `downgraded`, `rejected_concurrency`, `rejected_size`, `rejected_daily`. |
+| `llm_d_epp_qos_admission_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | Decisions: `admitted`, `downgraded`, `rejected_concurrency`, `rejected_size`, `rejected_daily`, and the limit that caused each downgrade or rejection. |
 | `llm_d_epp_qos_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens consumed after refunds, including downgraded traffic. Showback. |
 | `llm_d_epp_qos_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
 
@@ -106,16 +106,19 @@ The metrics are served on the EPP `/metrics` endpoint with the other EPP metrics
 | `class` | The team's committed class |
 | `served_class` | Class the request is served at: `class` when `admitted`, the next lower class when `downgraded`, empty for a rejection |
 | `decision` | `admitted`, `downgraded`, `rejected_size` (`400`), `rejected_concurrency` or `rejected_daily` (`429`) |
+| `reason` | Limit the request exceeded: `size` (`maxPromptTokens` or `maxOutputTokens`), `daily` (`dailyTokens`) or `concurrency` (`maxConcurrency`). Empty when `admitted` |
 | `mode` | `shadow` when the decision was only recorded, `enforce` when it was applied |
+
+A request over several limits reports one reason, the first of `size`, `daily` and `concurrency`; the same order decides its rejection. For a rejection `reason` repeats what the `decision` name already says, so one query can group downgrades and rejections by cause.
 
 In shadow mode the counter is the report of what enforcement would do; every request is still served at its original priority.
 
 ### PromQL
 
-Requests per second that would be moved down or rejected, per team, in shadow mode:
+Requests per second that would be moved down or rejected, per team, decision and limit, in shadow mode:
 
 ```promql
-sum by (team, decision) (rate(llm_d_epp_qos_admission_decisions_total{mode="shadow",decision!="admitted"}[5m]))
+sum by (team, decision, reason) (rate(llm_d_epp_qos_admission_decisions_total{mode="shadow",decision!="admitted"}[5m]))
 ```
 
 Fraction of each team's traffic outside its contract over a day. Sum over EPP replicas, since each replica decides on its own share of the traffic:
@@ -128,5 +131,5 @@ sum by (team) (increase(llm_d_epp_qos_admission_decisions_total{mode="shadow"}[1
 
 To size the commits before setting `mode: enforce`, compare per-replica demand with them, since each replica holds its own commits:
 
-- Concurrency: `llm_d_epp_qos_inflight_requests` counts only admitted requests, so it never exceeds `maxConcurrency`. A gauge that stays at the commit while the team has `downgraded` or `rejected_concurrency` decisions means demand is above it. A `downgraded` decision does not record which limit was exceeded.
-- Daily budget: compare `max by (team) (increase(llm_d_epp_qos_charged_tokens_total[1d]))` with `dailyTokens`. The charged tokens include downgraded traffic, so they measure the team's total demand rather than what fit in the budget. The budget resets at 00:00 UTC, so a rolling `[1d]` window only approximates one budget day.
+- Concurrency: `llm_d_epp_qos_inflight_requests` counts only admitted requests, so it never exceeds `maxConcurrency`. Decisions with `reason="concurrency"` mean demand is above it. A request also over a size limit or the daily budget reports that reason instead, so the count is a lower bound.
+- Daily budget: decisions with `reason="daily"` mean the budget ran out. To see by how much, compare `max by (team) (increase(llm_d_epp_qos_charged_tokens_total[1d]))` with `dailyTokens`. The charged tokens include downgraded traffic, so they measure the team's total demand rather than what fit in the budget. The budget resets at 00:00 UTC, so a rolling `[1d]` window only approximates one budget day.
