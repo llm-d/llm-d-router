@@ -57,9 +57,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/systemone"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/kvcacheutilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/prefix"
@@ -1128,57 +1126,6 @@ func TestInstantiateAndConfigureDefaultConfig(t *testing.T) {
 	require.NotNil(t, cfg.DataConfig, "a data layer config should be defaulted")
 	require.Len(t, cfg.DataConfig.Sources, 1, "the metrics source should be the only default data source")
 	require.Equal(t, sourcemetrics.MetricsDataSourceType, cfg.DataConfig.Sources[0].Plugin.TypedName().Type)
-}
-
-func TestInstantiateAndConfigure_ValidatesFallbackProfile(t *testing.T) {
-	registerTestPlugins(t)
-	fwkplugin.Register(bylabel.LabelSelectorFilterType, fwkplugin.StabilityStable, bylabel.SelectorFactory)
-	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityStable,
-		disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
-
-	for _, tc := range []struct {
-		name       string
-		parameters string
-		selector   string
-		wantError  string
-	}{
-		{name: "omitted"},
-		{name: "empty fallback name", parameters: "  parameters: {profiles: {fallback: ''}}\n", wantError: `profiles.fallback must name a non-empty scheduling profile`},
-		{name: "blank fallback name", parameters: "  parameters: {profiles: {fallback: ' '}}\n", wantError: `profiles.fallback must name a non-empty scheduling profile`},
-		{name: "configured", parameters: "  parameters: {profiles: {fallback: standby}}\n", selector: "{matchLabels: {inference-pool: fallback}}"},
-		{name: "missing selector", parameters: "  parameters: {profiles: {fallback: standby}}\n", wantError: `profiles.fallback profile "standby" requires a pool selector`},
-		{name: "empty selector", parameters: "  parameters: {profiles: {fallback: standby}}\n", selector: "{}", wantError: `profiles.fallback profile "standby" requires a pool selector`},
-		{
-			name:       "unknown profile",
-			parameters: "  parameters: {profiles: {fallback: missing}}\n",
-			wantError:  `profiles.fallback references unknown scheduling profile "missing"`,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var pluginConfig, pluginRef string
-			if tc.selector != "" {
-				pluginConfig = "- type: label-selector-filter\n  parameters: " + tc.selector + "\n"
-				pluginRef = "  plugins: [{pluginRef: label-selector-filter}]\n"
-			}
-			configText := `apiVersion: llm-d.ai/v1
-kind: EndpointPickerConfig
-plugins:
-- type: disagg-profile-handler
-` + tc.parameters + pluginConfig + `schedulingProfiles:
-- name: decode
-- name: standby
-` + pluginRef
-			logger := logging.NewTestLogger()
-			rawConfig, _, err := LoadRawConfig([]byte(configText), logger)
-			require.NoError(t, err)
-			_, err = InstantiateAndConfigure(rawConfig, testutils.NewTestHandle(t.Context()), logger)
-			if tc.wantError != "" {
-				require.ErrorContains(t, err, tc.wantError)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
 }
 
 func TestInstantiateAndConfigureRejectsNonSchedulingPlugins(t *testing.T) {

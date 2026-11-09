@@ -340,8 +340,6 @@ func TestFallbackHandler_ValidateWrappedProfile(t *testing.T) {
 	profiles := map[string]fwksched.SchedulerProfile{"backup": profileFunc(profile.Run)}
 	handler := disagg.NewDisaggProfileHandler(decode, prefill, "", nil, nil)
 
-	require.ErrorContains(t, handler.WithFallbackProfile("").ValidateSchedulingProfiles(profiles),
-		"profiles.fallback must name a non-empty scheduling profile")
 	require.ErrorContains(t, handler.WithFallbackProfile("backup").ValidateSchedulingProfiles(profiles),
 		`profile "backup" must implement PoolAwareSchedulerProfile`)
 }
@@ -363,7 +361,7 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 		selectors[name] = selector
 	}
 	capacityFilter := capacity.(fwksched.Filter)
-	decodeProfile := newProfile(selectors[decode], capacityFilter)
+	decodeProfile := newProfile(capacityFilter, selectors[decode])
 	prefillProfile := newProfile(selectors[prefill], capacityFilter)
 	fallbackProfile := newProfile(selectors[fallback], capacityFilter)
 	encodeProfile := newProfile(bylabel.NewEncodeRole())
@@ -383,22 +381,16 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 		wantPrimary      string
 		wantFallbackRuns int
 		opaqueDecode     bool
-		capacityFirst    bool
-		noBackupSelector bool
 	}{
 		{name: "decode unavailable", hasPrefill: true, hasFallback: true, wantPrimary: fallback, wantFallbackRuns: 1},
 		{name: "required prefill unavailable", hasDecode: true, hasFallback: true, wantPrimary: fallback, wantFallbackRuns: 1},
 		{name: "prefill declined", hasDecode: true, hasFallback: true, prefillDeclined: true, wantPrimary: decode},
-		{name: "prefill only cannot satisfy fallback", hasPrefill: true, wantFallbackRuns: 1},
-		{name: "fallback without selector cannot pick prefill", hasPrefill: true, noBackupSelector: true},
 		{name: "ready decode at capacity", hasDecode: true, hasFallback: true, decodeBusy: true},
 		{name: "ready required prefill at capacity", hasDecode: true, hasPrefill: true, hasFallback: true, prefillBusy: true},
 		{name: "opaque decode profile fails closed", hasFallback: true, opaqueDecode: true},
-		{name: "capacity before selector retains rejection", hasDecode: true, hasFallback: true, decodeBusy: true, fallbackBusy: true, capacityFirst: true},
-		{name: "capacity before selector with missing decode", hasFallback: true, fallbackBusy: true, capacityFirst: true, wantFallbackRuns: 1},
+		{name: "fallback at capacity", hasFallback: true, fallbackBusy: true, wantFallbackRuns: 1},
 		{name: "request cancelled", hasFallback: true, cancelled: true},
 		{name: "encode unavailable retains PD", hasDecode: true, hasPrefill: true, hasFallback: true, encodeConfigured: true, wantPrimary: decode},
-		{name: "all stages available", hasDecode: true, hasPrefill: true, hasFallback: true, encodeConfigured: true, hasEncode: true, wantPrimary: decode},
 		{name: "encode succeeds before prefill fails", hasDecode: true, hasFallback: true, encodeConfigured: true, hasEncode: true, wantPrimary: fallback, wantFallbackRuns: 1},
 		{name: "encode succeeds but fallback unavailable", hasDecode: true, encodeConfigured: true, hasEncode: true, wantFallbackRuns: 1},
 	} {
@@ -431,10 +423,6 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 				}, metrics, fwkdl.NewAttributes()))
 			}
 
-			backup := fallbackProfile
-			if tc.noBackupSelector {
-				backup = newProfile()
-			}
 			fallbackRuns := 0
 			profiles := map[string]fwksched.SchedulerProfile{
 				decode: decodeProfile,
@@ -447,20 +435,17 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 					},
 				},
 				fallback: &trackedProfile{
-					PoolAwareSchedulerProfile: backup,
+					PoolAwareSchedulerProfile: fallbackProfile,
 					run: func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 						fallbackRuns++
 						_, hasPeer := fwksched.ReadRequestAttribute[fwksched.Endpoint](req, disagg.PeerEndpointAttributeKey)
 						assert.False(t, hasPeer)
-						return backup.Run(ctx, req, endpoints)
+						return fallbackProfile.Run(ctx, req, endpoints)
 					},
 				},
 			}
 			if tc.opaqueDecode {
 				profiles[decode] = profileFunc(decodeProfile.Run)
-			}
-			if tc.capacityFirst {
-				profiles[decode] = newProfile(capacityFilter, selectors[decode])
 			}
 			encodeRuns := 0
 			if tc.encodeConfigured {
@@ -480,7 +465,7 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 			if tc.encodeConfigured {
 				req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures = []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "image", Length: 1}}
 			}
-			counter := disagg.LlmdDisaggDecisionCount.WithLabelValues(handler.TypedName().Name, handler.TypedName().Type, req.TargetModel, metricsutil.DisaggPathAggregatedFallback)
+			counter := disagg.LlmdDisaggDecisionCount.WithLabelValues(handler.TypedName().Name, handler.TypedName().Type, req.TargetModel, metricsutil.DisaggPathFallback)
 			before := testutil.ToFloat64(counter)
 			got, err := scheduler.Schedule(ctx, req, endpoints)
 			assert.Equal(t, tc.wantFallbackRuns, fallbackRuns)

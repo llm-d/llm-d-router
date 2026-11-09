@@ -811,11 +811,11 @@ This plugin records the routing decision for each request.
     *   `model_name`: the target model name, or "unknown" if empty
     *   `decision_type`: one of
         *   `decode-only` - decode-only path (no disaggregation)
-        *   `aggregated-fallback` - a backup worker was selected for the complete request by the [experimental aggregated P/D fallback profile](../pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md#experimental-aggregated-pd-fallback)
         *   `prefill-decode` - split into prefill and decode stages (P/D or EP/D)
         *   `encode-decode` - encode disaggregation with local prefill+decode (E/PD)
         *   `encode-prefill-decode` - full three-stage pipeline (E/P/D)
-*   **Description:** Counts disaggregation routing decisions made during scheduling, before requests are forwarded.
+        *   `fallback` - backup worker selected to handle the full request
+*   **Description:** Counts requests processed, broken down by the disaggregation routing decision.
     Requests rejected because a required prefill stage found no endpoint are not counted.
 *   **Actionability:** Monitor the distribution across decision types to understand engagement per
     disaggregation mode. Sudden ratio changes may indicate configuration issues, workload shifts, or

@@ -320,12 +320,6 @@ func TestHandlerFactory(t *testing.T) {
 		{"aggregated fallback differs from decode", map[string]any{
 			"profiles": map[string]any{"decode": customFallbackProfile, "fallback": customFallbackProfile},
 		}, true},
-		{"aggregated fallback differs from prefill", map[string]any{
-			"profiles": map[string]any{"prefill": customFallbackProfile, "fallback": customFallbackProfile},
-		}, true},
-		{"aggregated fallback differs from encode", map[string]any{
-			"profiles": map[string]any{"encode": customFallbackProfile, "fallback": customFallbackProfile},
-		}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

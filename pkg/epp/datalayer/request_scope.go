@@ -91,9 +91,7 @@ func ScopeInvocation(logger logr.Logger, extensionPoint string, plugin fwkplugin
 		violations
 }
 
-// ScopeInvocationWithLazyEndpoints builds scoped endpoint wrappers on demand.
-// Out-of-scope accesses are logged and counted. Rejected writes are dropped
-// without failing the request.
+// ScopeInvocationWithLazyEndpoints wraps the candidate list on the first call to the returned function.
 func ScopeInvocationWithLazyEndpoints(logger logr.Logger, extensionPoint string, plugin fwkplugin.Plugin,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.InferenceRequest, func() []fwksched.Endpoint) {
 	violations := &Violations{}

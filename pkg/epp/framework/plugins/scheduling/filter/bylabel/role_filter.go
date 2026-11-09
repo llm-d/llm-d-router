@@ -69,10 +69,10 @@ func (f *RoleFilter) WithName(name string) *RoleFilter {
 	return f
 }
 
-// RestrictsPool reports whether the filter excludes any label sets.
+// RestrictsPool implements scheduling.EndpointPoolMatcher.
 func (f *RoleFilter) RestrictsPool() bool { return true }
 
-// MatchesPoolLabels reports whether the labels describe an accepted role.
+// MatchesPoolLabels implements scheduling.EndpointPoolMatcher.
 func (f *RoleFilter) MatchesPoolLabels(labels map[string]string) bool {
 	role, roleDefined := labels[RoleLabel]
 	_, roleValid := f.validRoles[role]
