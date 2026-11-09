@@ -26,7 +26,8 @@ import (
 const (
 	// ModeEnforce applies admission decisions.
 	ModeEnforce = "enforce"
-	// ModeShadow computes and records decisions without acting on them.
+	// ModeShadow computes and records decisions without acting on them. It is the default, so a
+	// contract is observed against real traffic before it is enforced.
 	ModeShadow = "shadow"
 
 	defaultOutputTokenWeight = 2
@@ -61,7 +62,7 @@ type TeamConfig struct {
 
 // Parameters is the plugin configuration.
 type Parameters struct {
-	// Mode is "enforce" (default) or "shadow".
+	// Mode is "shadow" (default) or "enforce".
 	Mode string `json:"mode,omitempty"`
 	// TeamHeader names the request header carrying the team ID. Defaults to the fairness ID
 	// header, so the team is also the fairness flow.
@@ -82,7 +83,7 @@ type Parameters struct {
 
 func defaultParameters() Parameters {
 	return Parameters{
-		Mode:                     ModeEnforce,
+		Mode:                     ModeShadow,
 		TeamHeader:               metadata.FlowFairnessIDKey,
 		OutputTokenWeight:        defaultOutputTokenWeight,
 		DefaultOutputReservation: 1000,

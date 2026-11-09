@@ -42,6 +42,7 @@ func (c *fakeClock) now() time.Time { return c.t }
 
 func testParams() Parameters {
 	p := defaultParameters()
+	p.Mode = ModeEnforce
 	p.Classes = []ClassConfig{
 		{Name: "critical", Priority: 100},
 		{Name: "standard", Priority: 10},
@@ -117,6 +118,7 @@ func TestFactory(t *testing.T) {
 	assert.Equal(t, "qos", p.TypedName().Name)
 	assert.Equal(t, 3, p.teams["a"].cfg.MaxConcurrency)
 	assert.InDelta(t, 1000, p.teams["a"].cfg.DailyTokens, 1e-9)
+	assert.True(t, p.shadow, "decisions are recorded, not applied, unless mode is enforce")
 }
 
 func TestFactory_InvalidConfig(t *testing.T) {
