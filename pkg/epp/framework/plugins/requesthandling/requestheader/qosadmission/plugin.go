@@ -57,6 +57,13 @@ const (
 	decisionRejectedConcurrency = "rejected_concurrency"
 	decisionRejectedSize        = "rejected_size"
 	decisionRejectedDaily       = "rejected_daily"
+
+	// The reason label names the limit a downgraded or rejected request exceeded. When it exceeds
+	// several, the first of size, daily budget and concurrency is reported, the same order that
+	// picks the rejection.
+	reasonSize        = "size"
+	reasonDaily       = "daily"
+	reasonConcurrency = "concurrency"
 )
 
 var (
@@ -202,6 +209,15 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	overDaily := team.cfg.DailyTokens > 0 && team.dailyUsed+cost > team.cfg.DailyTokens
 	overConcurrency := team.cfg.MaxConcurrency > 0 && team.inflight >= team.cfg.MaxConcurrency
 	served, decision, withinContract := committed, decisionAdmitted, !overSize && !overDaily && !overConcurrency
+	reason := ""
+	switch {
+	case overSize:
+		reason = reasonSize
+	case overDaily:
+		reason = reasonDaily
+	case overConcurrency:
+		reason = reasonConcurrency
+	}
 	switch {
 	case withinContract:
 		team.inflight++
@@ -211,17 +227,17 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 		served, decision = p.classes[team.classIndex+1], decisionDowngraded
 	case overSize:
 		team.mu.Unlock()
-		return p.reject(team, committed.Name, decisionRejectedSize, p.sizeError(team, committed.Name))
+		return p.reject(team, committed.Name, decisionRejectedSize, reason, p.sizeError(team, committed.Name))
 	case overDaily:
 		team.mu.Unlock()
-		return p.reject(team, committed.Name, decisionRejectedDaily, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
+		return p.reject(team, committed.Name, decisionRejectedDaily, reason, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
 	default:
 		team.mu.Unlock()
-		return p.reject(team, committed.Name, decisionRejectedConcurrency, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
+		return p.reject(team, committed.Name, decisionRejectedConcurrency, reason, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
 	}
 	team.mu.Unlock()
 
-	admissionDecisions.WithLabelValues(team.label, committed.Name, served.Name, decision, p.mode()).Inc()
+	admissionDecisions.WithLabelValues(team.label, committed.Name, served.Name, decision, reason, p.mode()).Inc()
 	rec := &admission{team: team, servedClass: served.Name, reserved: cost, committed: withinContract}
 	p.admissions.Store(request.RequestID, rec)
 	// A request that never reaches end of stream (flow-control rejection, scheduling failure)
@@ -304,8 +320,8 @@ func (p *Plugin) mode() string {
 }
 
 // reject records a rejection and returns err, or nil in shadow mode.
-func (p *Plugin) reject(team *teamState, class, decision string, err errcommon.Error) error {
-	admissionDecisions.WithLabelValues(team.label, class, "", decision, p.mode()).Inc()
+func (p *Plugin) reject(team *teamState, class, decision, reason string, err errcommon.Error) error {
+	admissionDecisions.WithLabelValues(team.label, class, "", decision, reason, p.mode()).Inc()
 	if p.shadow {
 		return nil
 	}

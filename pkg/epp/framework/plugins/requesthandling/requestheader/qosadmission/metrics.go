@@ -32,9 +32,9 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "qos_admission_decisions_total",
-			Help:      metricsutil.HelpMsgWithStability("QoS admission decisions per team, committed class and served class.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("QoS admission decisions per team, committed class, served class and the limit that moved the request out of its class.", compbasemetrics.ALPHA),
 		},
-		[]string{"team", "class", "served_class", "decision", "mode"},
+		[]string{"team", "class", "served_class", "decision", "reason", "mode"},
 	)
 
 	chargedTokens = prometheus.NewCounterVec(
