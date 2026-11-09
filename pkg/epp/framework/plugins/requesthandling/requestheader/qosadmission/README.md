@@ -93,3 +93,40 @@ Configure a flow-control priority band for each class priority, or rely on dynam
 | `llm_d_epp_qos_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
 
 The `team` label shares the fairness ID cardinality bound.
+
+The metrics are served on the EPP `/metrics` endpoint with the other EPP metrics; see [Router pod / EPP](../../../../../../../docs/metrics.md#router-pod--epp) for the port and scrape authentication.
+
+### Decisions
+
+`llm_d_epp_qos_admission_decisions_total` counts one decision per request:
+
+| Label | Value |
+|---|---|
+| `team` | Team resolved from `teamHeader`, or the `defaultTeam` ID |
+| `class` | The team's committed class |
+| `served_class` | Class the request is served at: `class` when `admitted`, the next lower class when `downgraded`, empty for a rejection |
+| `decision` | `admitted`, `downgraded`, `rejected_size` (`400`), `rejected_concurrency` or `rejected_daily` (`429`) |
+| `mode` | `shadow` when the decision was only recorded, `enforce` when it was applied |
+
+In shadow mode the counter is the report of what enforcement would do; every request is still served at its original priority.
+
+### PromQL
+
+Requests per second that would be moved down or rejected, per team, in shadow mode:
+
+```promql
+sum by (team, decision) (rate(llm_d_epp_qos_admission_decisions_total{mode="shadow",decision!="admitted"}[5m]))
+```
+
+Fraction of each team's traffic outside its contract over a day. Sum over EPP replicas, since each replica decides on its own share of the traffic:
+
+```promql
+sum by (team) (increase(llm_d_epp_qos_admission_decisions_total{mode="shadow",decision!="admitted"}[1d]))
+/
+sum by (team) (increase(llm_d_epp_qos_admission_decisions_total{mode="shadow"}[1d]))
+```
+
+To size the commits before setting `mode: enforce`, compare per-replica demand with them, since each replica holds its own commits:
+
+- Concurrency: `llm_d_epp_qos_inflight_requests` counts only admitted requests, so it never exceeds `maxConcurrency`. A gauge that stays at the commit while the team has `downgraded` or `rejected_concurrency` decisions means demand is above it. A `downgraded` decision does not record which limit was exceeded.
+- Daily budget: compare `max by (team) (increase(llm_d_epp_qos_charged_tokens_total[1d]))` with `dailyTokens`. The charged tokens include downgraded traffic, so they measure the team's total demand rather than what fit in the budget. The budget resets at 00:00 UTC, so a rolling `[1d]` window only approximates one budget day.
