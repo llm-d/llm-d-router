@@ -197,7 +197,8 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	subscribersManager := kvevents.NewSubscriberManager(pool)
 	if config.KVEventsConfig.ZMQEndpoint != "" {
 		log.FromContext(ctx).Info("kvEventsConfig.zmqEndpoint is deprecated: the bound socket takes the pod identity from the topic; "+
-			"use per-pod subscriptions (discoverPods)", "zmqEndpoint", config.KVEventsConfig.ZMQEndpoint,
+			"drop zmqEndpoint and have each engine bind its own PUB socket, which the EPP subscribes to by default",
+			"zmqEndpoint", config.KVEventsConfig.ZMQEndpoint,
 			"allowUntrustedPublishers", config.KVEventsConfig.AllowUntrustedPublishers)
 		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
 			config.KVEventsConfig.ZMQEndpoint, "", "", config.KVEventsConfig.TopicFilter, false); err != nil {

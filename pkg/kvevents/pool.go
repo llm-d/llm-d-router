@@ -294,8 +294,8 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 	}
 	if cfg.ZMQEndpoint != "" && !cfg.AllowUntrustedPublishers && !isLocalZMQEndpoint(cfg.ZMQEndpoint) {
 		return nil, fmt.Errorf("kvEventsConfig.zmqEndpoint %q binds a non-loopback address, so any network peer can publish "+
-			"KV events under any pod's identity; use per-pod subscriptions (discoverPods) or set "+
-			"kvEventsConfig.allowUntrustedPublishers", cfg.ZMQEndpoint)
+			"KV events under any pod's identity; drop zmqEndpoint and have each engine bind its own PUB socket, "+
+			"which the EPP subscribes to by default, or set kvEventsConfig.allowUntrustedPublishers", cfg.ZMQEndpoint)
 	}
 
 	p := &Pool{

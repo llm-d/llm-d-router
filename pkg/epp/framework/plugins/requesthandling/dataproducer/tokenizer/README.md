@@ -540,7 +540,7 @@ client sent for either field are overridden. vLLM versions without these fields
 ignore them and return the tensors. The option is false by default and works
 with `vllm.url` and `vllm.endpointDiscovery`.
 
-A complete sample config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml).
+A deployment-shaped config that pairs this with `precise-prefix-cache-producer` and `prefix-cache-scorer` is at [`test/perf/config/router-configs/precise-prefix.yaml`](../../../../../../../test/perf/config/router-configs/precise-prefix.yaml); the producer subscribes to each discovered endpoint's KV-event socket. The e2e variant at [`test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml`](../../../../../../../test/e2e/artifacts/config/sim-epp-tokenizer-vllm-http-config.yaml) instead binds one socket the simulator publishes to (`kvEventsConfig.zmqEndpoint` with `allowUntrustedPublishers`), which is not a deployment setting.
 
 ## Live verification
 

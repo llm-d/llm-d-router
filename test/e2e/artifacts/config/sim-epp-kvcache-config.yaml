@@ -1,5 +1,9 @@
 # Sample EPP configuration for running without P/D
 # with small hash block size for simulation purposes.
+# e2e only: the simulator pods publish KV events to a socket the EPP binds
+# (kvEventsConfig.zmqEndpoint with allowUntrustedPublishers). Deployments omit
+# zmqEndpoint; each engine binds its own PUB socket and the producer subscribes
+# to every discovered endpoint by default.
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
