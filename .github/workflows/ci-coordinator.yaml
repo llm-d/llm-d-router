@@ -184,10 +184,15 @@ jobs:
       matrix:
         include:
           - topology: single-EPP
+            gateway: envoy
             target: test-e2e-coordinator-run
           - topology: 3-EPP
+            gateway: envoy
             target: test-e2e-coordinator-3epp-run
-    name: e2e-tests (${{ matrix.topology }})
+          - topology: single-EPP
+            gateway: agentgateway
+            target: test-e2e-coordinator-run
+    name: e2e-tests (${{ matrix.topology }}, ${{ matrix.gateway }})
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -232,6 +237,7 @@ jobs:
         env:
           GO_MOD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-mod-cache }}
           GO_BUILD_CACHE_VOL: ${{ steps.e2e-setup.outputs.go-build-cache }}
+          E2E_GATEWAY: ${{ matrix.gateway }}
         run: make -f Makefile.coord.mk ${{ matrix.target }}
 
   e2e-tests-status:
