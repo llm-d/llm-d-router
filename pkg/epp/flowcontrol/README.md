@@ -181,6 +181,7 @@ per-team service classes onto that hierarchy:
 * `qos-admission` (RequestHeader) maps each team to a class, and each class to a band priority. It
   moves traffic outside the team's contract (size limits, a concurrency cap and a daily
   weighted-token budget) one class down before the request is queued. The fairness ID is the team.
+  It only records its decisions until `mode: enforce` is set.
 * `program-aware-fairness` with `strategy: las` shares a band between teams by least attained
   service.
 * `latency-reporter` records TTFT and TPOT per class, prompt-length bucket and prefill/decode

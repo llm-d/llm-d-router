@@ -844,7 +844,8 @@ Control alone does not emit them. `program_id` is the request's fairness ID and 
 ### QoS admission
 
 These metrics are owned by the `qos-admission` RequestHeader plugin and are registered only when
-it is configured. The `team` label shares the fairness ID cardinality bound.
+it is configured. The `team` label shares the fairness ID cardinality bound. The plugin defaults to
+`mode="shadow"`, where decisions are recorded but not applied.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
