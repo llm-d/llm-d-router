@@ -1,0 +1,33 @@
+# hostNetwork model-server pods bound to the control node, as Exos creates for
+# Borneo runners. They carry no traffic; they show that Pod-based discovery
+# sees the control node IP for every runner.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prediction
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-runner-0
+  namespace: prediction
+  labels: {app: glm52, exos/runner-id: runner-0}
+spec:
+  nodeSelector: {exos-poc/control-node: "true"}
+  hostNetwork: true
+  containers:
+  - name: pause
+    image: registry.k8s.io/pause:3.10
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-runner-1
+  namespace: prediction
+  labels: {app: glm52, exos/runner-id: runner-1}
+spec:
+  nodeSelector: {exos-poc/control-node: "true"}
+  hostNetwork: true
+  containers:
+  - name: pause
+    image: registry.k8s.io/pause:3.10

@@ -73,9 +73,11 @@ type EndpointSliceDiscovery struct {
 	selector  labels.Selector
 	client    kubernetes.Interface
 
-	// mu guards current, which DumpState reads concurrently with reconcile.
-	mu      sync.RWMutex
-	current map[types.NamespacedName]*fwkdl.EndpointMetadata
+	// endpoints holds the endpoints last applied to the datastore, keyed by
+	// endpoint ID. reconcile diffs the newly computed set against it. mu
+	// guards it because DumpState reads it concurrently with reconcile.
+	mu        sync.RWMutex
+	endpoints map[types.NamespacedName]*fwkdl.EndpointMetadata
 
 	ready     chan struct{}
 	readyOnce sync.Once
@@ -124,7 +126,7 @@ func newEndpointSliceDiscovery(name string, p params, client kubernetes.Interfac
 		params:    p,
 		selector:  sel,
 		client:    client,
-		current:   make(map[types.NamespacedName]*fwkdl.EndpointMetadata),
+		endpoints: make(map[types.NamespacedName]*fwkdl.EndpointMetadata),
 		ready:     make(chan struct{}),
 	}, nil
 }
@@ -214,8 +216,8 @@ func (d *EndpointSliceDiscovery) reconcile(ctx context.Context, lister discovery
 	desired := d.endpointsFrom(ctx, slices)
 
 	d.mu.Lock()
-	previous := d.current
-	d.current = desired
+	previous := d.endpoints
+	d.endpoints = desired
 	d.mu.Unlock()
 
 	ids := make([]types.NamespacedName, 0, len(desired))
@@ -318,7 +320,7 @@ func sameEndpoint(a, b *fwkdl.EndpointMetadata) bool {
 func (d *EndpointSliceDiscovery) count() int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return len(d.current)
+	return len(d.endpoints)
 }
 
 // maxDebugDumpEndpoints caps DumpState so the debug payload stays bounded.
@@ -335,8 +337,8 @@ type discoveryState struct {
 // DumpState reports the endpoint identities from the last reconcile.
 func (d *EndpointSliceDiscovery) DumpState() (json.RawMessage, error) {
 	d.mu.RLock()
-	names := make([]string, 0, len(d.current))
-	for id := range d.current {
+	names := make([]string, 0, len(d.endpoints))
+	for id := range d.endpoints {
 		names = append(names, id.String())
 	}
 	d.mu.RUnlock()

@@ -1,0 +1,113 @@
+# Standalone Envoy in its own Deployment: ext_proc to the EPP Service, then
+# ORIGINAL_DST to the endpoint the EPP picked (x-gateway-destination-endpoint).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config
+  namespace: default
+data:
+  envoy.yaml: |
+    admin:
+      address: {socket_address: {address: 127.0.0.1, port_value: 19000}}
+    static_resources:
+      listeners:
+      - name: inference
+        address: {socket_address: {address: "::", port_value: 8080, ipv4_compat: true}}
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: inference
+              access_log:
+              - name: envoy.access_loggers.stdout
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                  log_format:
+                    text_format_source:
+                      inline_string: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(:PATH)%\" %RESPONSE_CODE% upstream=%UPSTREAM_HOST% dur=%DURATION%ms\n"
+              route_config:
+                name: inference
+                virtual_hosts:
+                - name: inference
+                  domains: ["*"]
+                  routes:
+                  - match: {prefix: "/"}
+                    route: {cluster: original_destination_cluster, timeout: 600s, idle_timeout: 600s}
+              http_filters:
+              - name: envoy.filters.http.ext_proc
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                  grpc_service:
+                    envoy_grpc: {cluster_name: epp, authority: epp.default.svc:9002}
+                    timeout: 10s
+                  failure_mode_allow: false
+                  message_timeout: 600s
+                  processing_mode:
+                    request_header_mode: SEND
+                    response_header_mode: SEND
+                    request_body_mode: FULL_DUPLEX_STREAMED
+                    response_body_mode: FULL_DUPLEX_STREAMED
+                    request_trailer_mode: SEND
+                    response_trailer_mode: SEND
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+      - name: epp
+        type: STRICT_DNS
+        connect_timeout: 5s
+        lb_policy: LEAST_REQUEST
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            explicit_http_config: {http2_protocol_options: {}}
+        load_assignment:
+          cluster_name: epp
+          endpoints:
+          - lb_endpoints:
+            - endpoint: {address: {socket_address: {address: epp.default.svc.cluster.local, port_value: 9002}}}
+      - name: original_destination_cluster
+        type: ORIGINAL_DST
+        connect_timeout: 10s
+        lb_policy: CLUSTER_PROVIDED
+        original_dst_lb_config:
+          use_http_header: true
+          http_header_name: x-gateway-destination-endpoint
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: envoy}
+  template:
+    metadata:
+      labels: {app: envoy}
+    spec:
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.36.2
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+        ports:
+        - {name: http, containerPort: 8080}
+        volumeMounts:
+        - {name: config, mountPath: /etc/envoy}
+        resources:
+          requests: {cpu: 200m, memory: 128Mi}
+      volumes:
+      - name: config
+        configMap: {name: envoy-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy
+  namespace: default
+spec:
+  selector: {app: envoy}
+  ports:
+  - {name: http, port: 8080, targetPort: 8080}

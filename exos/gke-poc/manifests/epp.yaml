@@ -1,0 +1,109 @@
+# Standalone EPP with the endpointslice-discovery plugin.
+# Rendered with envsubst (EPP_IMAGE).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: epp
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: epp-endpointslices
+  namespace: default
+rules:
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: epp-endpointslices
+  namespace: default
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: epp-endpointslices}
+subjects:
+- {kind: ServiceAccount, name: epp, namespace: default}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: epp-config
+  namespace: default
+data:
+  config.yaml: |
+    apiVersion: llm-d.ai/v1
+    kind: EndpointPickerConfig
+    plugins:
+    - name: slice-discovery
+      type: endpointslice-discovery
+      parameters:
+        namespace: default
+        selector: kubernetes.io/service-name=glm52-server
+        portName: http
+    - type: queue-scorer
+    - type: kv-cache-utilization-scorer
+    - type: max-score-picker
+    schedulingProfiles:
+    - name: default
+      plugins:
+      - pluginRef: queue-scorer
+      - pluginRef: kv-cache-utilization-scorer
+      - pluginRef: max-score-picker
+    dataLayer:
+      discovery:
+        endpoints:
+          pluginRef: slice-discovery
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epp
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: epp}
+  template:
+    metadata:
+      labels: {app: epp}
+    spec:
+      serviceAccountName: epp
+      containers:
+      - name: epp
+        image: ${EPP_IMAGE}
+        args:
+        - --pool-name=glm52
+        - --pool-namespace=default
+        - --config-file=/etc/epp/config.yaml
+        - --grpc-port=9002
+        - --grpc-health-port=9003
+        - --metrics-port=9090
+        - --secure-serving=false
+        - --allow-experimental-plugins
+        - --v=3
+        ports:
+        - {name: grpc, containerPort: 9002}
+        - {name: grpc-health, containerPort: 9003}
+        - {name: metrics, containerPort: 9090}
+        readinessProbe:
+          grpc: {port: 9003, service: readiness}
+          periodSeconds: 5
+        volumeMounts:
+        - {name: config, mountPath: /etc/epp}
+        resources:
+          requests: {cpu: 500m, memory: 512Mi}
+      volumes:
+      - name: config
+        configMap: {name: epp-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epp
+  namespace: default
+spec:
+  selector: {app: epp}
+  ports:
+  - {name: grpc, port: 9002, targetPort: 9002, appProtocol: http2}
+  - {name: metrics, port: 9090, targetPort: 9090}
