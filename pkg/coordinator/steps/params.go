@@ -30,9 +30,11 @@ import (
 const (
 	ParamKVConnector = "kv_connector"
 	ParamECConnector = "ec_connector"
-	// ParamForceStream opts the decode step into force-streaming: a
-	// non-streaming client request is sent upstream with stream enabled, and
-	// the streamed response is reassembled into one non-streaming reply.
+	// ParamForceStream opts the decode and conditional-decode steps into
+	// force-streaming: a non-streaming client request is sent upstream with
+	// stream enabled, and the streamed response is reassembled into one
+	// non-streaming reply. It and the two sizes below are pipeline settings
+	// (see EnableForceStream); a step that sets them is rejected.
 	ParamForceStream = "force_stream"
 	// ParamForceStreamBufferSize is the total byte budget, as a human-readable
 	// string ("1GiB"), shared across concurrent forced requests. A request that

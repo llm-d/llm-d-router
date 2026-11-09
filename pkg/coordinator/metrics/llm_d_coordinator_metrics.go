@@ -170,20 +170,20 @@ var (
 	)
 )
 
-// Force-stream family. Recorded by the decode step when force-streaming is
-// enabled: it streams the upstream response and reassembles it into one
-// non-streaming reply. The gauge tracks bytes reserved against the shared
-// buffer budget by in-flight forced requests, so an operator can see how close
-// they run to the limit; the counter records each candidate's outcome, as the
-// Help string defines.
+// Force-stream family. Recorded by the decode and conditional-decode steps when
+// force-streaming is enabled: they stream the upstream response and reassemble
+// it into one non-streaming reply. The gauge tracks bytes reserved against the
+// shared buffer budget by in-flight forced requests, so an operator can see how
+// close they run to the limit; the counter records each candidate's outcome, as
+// the Help string defines.
 var (
 	forceStreamBufferedBytes = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "force_stream_buffered_bytes",
-			Help:      metricsutil.HelpMsgWithStability("Bytes currently reserved against the force-stream buffer budget by in-flight forced requests.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Bytes currently reserved against the force-stream buffer budget by in-flight forced requests, by step; the steps share one budget.", compbasemetrics.ALPHA),
 		},
-		[]string{},
+		stepLabel,
 	)
 
 	forceStreamTotal = prometheus.NewCounterVec(
@@ -191,12 +191,12 @@ var (
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "force_stream_total",
 			Help: metricsutil.HelpMsgWithStability(
-				"Total number of force-stream candidate requests by model and outcome: "+
+				"Total number of force-stream candidate requests by model, step and outcome: "+
 					"forced (reassembled from a streamed upstream into one reply and written to the client), "+
 					"fallback_budget (budget full), "+
 					"fallback_unbounded (the reply estimate exceeds the per-request cap: a declared token limit too large for it, or an n whose per-choice overhead alone exceeds it), "+
 					"fallback_unsupported (declined before any upstream call: the request declares a field the reassembler drops, the engine would not serve it as a stream, "+
-					"or the kv-sglang connector, whose decode server cannot recompute a prompt on fallback), "+
+					"or, on the decode step, the kv-sglang connector, whose decode server cannot recompute a prompt on fallback), "+
 					"fallback_lossy_frame (a streamed frame carried a field the reassembler drops, such as reasoning from a server-side parser, so the request is re-sent after one upstream attempt; "+
 					"with a one-shot KV handoff the decode pod recomputes the prompt), "+
 					"fallback_oversize (Responses completed frame larger than the reservation plus the request body), "+
@@ -206,10 +206,11 @@ var (
 					"or error_transport (no upstream response). "+
 					"The fallback outcomes and error_ceiling take the non-forced pass-through; when the forced attempt already "+
 					"consumed a one-shot KV block handoff, the pass-through drops it and decode recomputes the prompt; "+
-					"error_upstream and error_transport are also classified generically by step_errors_total.",
+					"error_upstream and error_transport are also classified generically by step_errors_total. "+
+					"A conditional-decode probe the worker defers (HTTP 412) records no outcome; decode records the request's.",
 				compbasemetrics.ALPHA),
 		},
-		withLabel(modelLabel, "result"),
+		forceStreamLabels,
 	)
 )
 

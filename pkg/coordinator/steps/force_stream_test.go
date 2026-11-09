@@ -80,18 +80,30 @@ func newForceStreamStep(t *testing.T, serverURL, bufferSize string) (*DecodeStep
 	// and ceiling behavior with a single request free to reserve all of it; the
 	// default cap (a fixed 256KiB, clamped to the budget only when smaller) is
 	// covered separately.
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:               true,
-		ParamForceStreamBufferSize:     bufferSize,
-		ParamForceStreamMaxRequestSize: bufferSize,
-	})
+	step, err := newForcedDecodeStep(t, gwClient, bufferSize, bufferSize, map[string]any{})
 	require.NoError(t, err)
 	return step.(*DecodeStep), reg
 }
 
+// newForcedDecodeStep builds a decode step from params and enables
+// force-streaming on it with the given pipeline-level sizes.
+func newForcedDecodeStep(t *testing.T, gwClient *gateway.Client, bufferSize, maxRequestSize string, params map[string]any) (pipeline.Step, error) {
+	t.Helper()
+	step, err := NewDecodeStep(gwClient, params)
+	if err != nil {
+		return nil, err
+	}
+	return step, EnableForceStream([]pipeline.Step{step}, bufferSize, maxRequestSize)
+}
+
+const (
+	forceStreamTotalMetric         = "llm_d_coordinator_force_stream_total"
+	forceStreamBufferedBytesMetric = "llm_d_coordinator_force_stream_buffered_bytes"
+)
+
 func forceStreamCount(t *testing.T, reg *prometheus.Registry, result string) float64 {
 	t.Helper()
-	return gatherLabeled(t, reg, "llm_d_coordinator_force_stream_total", "result", result)
+	return gatherLabeled(t, reg, forceStreamTotalMetric, "result", result)
 }
 
 // forceStreamCountModel reads force_stream_total for one (model_name, result)
@@ -101,7 +113,7 @@ func forceStreamCountModel(t *testing.T, reg *prometheus.Registry, model, result
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
 	for _, mf := range mfs {
-		if mf.GetName() != "llm_d_coordinator_force_stream_total" {
+		if mf.GetName() != forceStreamTotalMetric {
 			continue
 		}
 		for _, m := range mf.GetMetric() {
@@ -117,17 +129,21 @@ func forceStreamCountModel(t *testing.T, reg *prometheus.Registry, model, result
 	return 0
 }
 
+// forceStreamGauge sums the buffered-bytes gauge over every step.
 func forceStreamGauge(t *testing.T, reg *prometheus.Registry) float64 {
 	t.Helper()
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
+	total := 0.0
 	for _, mf := range mfs {
-		if mf.GetName() != "llm_d_coordinator_force_stream_buffered_bytes" {
+		if mf.GetName() != forceStreamBufferedBytesMetric {
 			continue
 		}
-		return mf.GetMetric()[0].GetGauge().GetValue()
+		for _, m := range mf.GetMetric() {
+			total += m.GetGauge().GetValue()
+		}
 	}
-	return 0
+	return total
 }
 
 func gatherLabeled(t *testing.T, reg *prometheus.Registry, name, label, value string) float64 {
@@ -354,19 +370,17 @@ func TestForceStreamBody_StreamOptions(t *testing.T) {
 func TestForceStream_ParamsOptional(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{})
 
-	// Both params absent: the step builds and force-streaming stays off, so an
-	// operator who configures no force_stream keys keeps the pass-through.
+	// Until the pipeline enables it, force-streaming stays off, so an operator
+	// who configures no force_stream keys keeps the pass-through.
 	off, err := NewDecodeStep(gwClient, map[string]any{})
 	require.NoError(t, err)
-	require.False(t, off.(*DecodeStep).forceStream, "force_stream defaults to off when the param is absent")
 	require.Nil(t, off.(*DecodeStep).budget, "no budget is allocated while force_stream is off")
 
 	// force_stream on with no buffer size: the default budget applies, so the
-	// size param is optional even when the feature is enabled.
-	on, err := NewDecodeStep(gwClient, map[string]any{ParamForceStream: true})
+	// size settings are optional even when the feature is enabled.
+	on, err := newForcedDecodeStep(t, gwClient, "", "", map[string]any{})
 	require.NoError(t, err)
 	ds := on.(*DecodeStep)
-	require.True(t, ds.forceStream)
 	require.NotNil(t, ds.budget, "force_stream on without a buffer size uses the default budget")
 	require.Equal(t, int64(1<<30), ds.budget.max, "the default buffer budget is 1GiB")
 	require.Equal(t, int64(256<<10), ds.budget.perRequestMax, "the default per-request cap is 256KiB")
@@ -423,21 +437,21 @@ func TestForceStream_ClientRequestedStreaming_Skipped(t *testing.T) {
 func TestForceStream_BudgetConfigErrors(t *testing.T) {
 	gwClient := gateway.New(config.GatewayConfig{})
 	cases := []struct {
-		name   string
-		params map[string]any
+		name                   string
+		bufferSize, perRequest string
 	}{
-		{"zero buffer", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "0"}},
-		{"negative buffer", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "-1GiB"}},
-		{"non-numeric buffer", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "abc"}},
-		{"zero per-request", map[string]any{ParamForceStream: true, ParamForceStreamMaxRequestSize: "0"}},
-		{"non-numeric per-request", map[string]any{ParamForceStream: true, ParamForceStreamMaxRequestSize: "nope"}},
-		{"per-request exceeds buffer", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "1GiB", ParamForceStreamMaxRequestSize: "2GiB"}},
-		{"buffer below envelope overhead", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "1KiB"}},
-		{"per-request below envelope overhead", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "1GiB", ParamForceStreamMaxRequestSize: "1KiB"}},
+		{"zero buffer", "0", ""},
+		{"negative buffer", "-1GiB", ""},
+		{"non-numeric buffer", "abc", ""},
+		{"zero per-request", "", "0"},
+		{"non-numeric per-request", "", "nope"},
+		{"per-request exceeds buffer", "1GiB", "2GiB"},
+		{"buffer below envelope overhead", "1KiB", ""},
+		{"per-request below envelope overhead", "1GiB", "1KiB"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewDecodeStep(gwClient, tc.params)
+			_, err := newForcedDecodeStep(t, gwClient, tc.bufferSize, tc.perRequest, map[string]any{})
 			require.Error(t, err)
 		})
 	}
@@ -459,11 +473,7 @@ func TestForceStream_PerRequestCap_FallsBack(t *testing.T) {
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:               true,
-		ParamForceStreamBufferSize:     "1GiB",
-		ParamForceStreamMaxRequestSize: "4KiB",
-	})
+	step, err := newForcedDecodeStep(t, gwClient, "1GiB", "4KiB", map[string]any{})
 	require.NoError(t, err)
 
 	// A generate request whose max_tokens would reserve far more than the 4KiB
@@ -1072,12 +1082,12 @@ func TestForceStream_FallbackBudget(t *testing.T) {
 	}
 
 	sizing, _ := newForceStreamStep(t, server.URL, "1GiB")
-	reserved, ok := sizing.estimateReservation(reqCtx)
+	reserved, ok := sizing.budget.estimateReservation(reqCtx)
 	require.True(t, ok)
 	// Build the real step with the budget pinned to one reservation, then claim
 	// all of it so the request under test cannot fit.
 	step, reg := newForceStreamStep(t, server.URL, strconv.FormatInt(reserved, 10))
-	require.True(t, step.budget.tryReserve(reserved), "pre-reserve the whole budget")
+	require.True(t, step.budget.tryReserve(DecodeStepName, reserved), "pre-reserve the whole budget")
 	require.InDelta(t, float64(reserved), forceStreamGauge(t, reg), 1e-9, "the gauge reports the live reservation")
 
 	require.NoError(t, step.Execute(context.Background(), reqCtx))
@@ -1086,7 +1096,7 @@ func TestForceStream_FallbackBudget(t *testing.T) {
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackBudget), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 
-	step.budget.release(reserved)
+	step.budget.release(DecodeStepName, reserved)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "the gauge drops by the released reservation")
 }
 
@@ -1134,7 +1144,7 @@ func TestForceStream_NoTokenLimit_Forced(t *testing.T) {
 // costs that overhead, so a huge n with no max_tokens must take the pass-through
 // rather than reserve the flat cap.
 func TestEstimateReservation_NoTokenLimitGuardsN(t *testing.T) {
-	s := &DecodeStep{budget: newForceStreamBudget(1<<30, 256<<10)}
+	b := newForceStreamBudget(1<<30, 256<<10)
 	limit := (int64(256<<10) - forceStreamBaseOverheadBytes) / forceStreamPerChoiceOverheadBytes
 	for _, tc := range []struct {
 		name   string
@@ -1151,7 +1161,7 @@ func TestEstimateReservation_NoTokenLimitGuardsN(t *testing.T) {
 			if tc.n != nil {
 				body["n"] = tc.n
 			}
-			reserved, ok := s.estimateReservation(&pipeline.RequestContext{OriginalPath: reqcommon.PathCompletions, Body: body})
+			reserved, ok := b.estimateReservation(&pipeline.RequestContext{OriginalPath: reqcommon.PathCompletions, Body: body})
 			require.Equal(t, tc.wantOK, ok)
 			if ok {
 				require.EqualValues(t, 256<<10, reserved, "a request with no token limit reserves the whole cap")
@@ -1533,12 +1543,7 @@ func TestForceStream_CeilingSpentHandoff_Recomputes(t *testing.T) {
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:               true,
-		ParamForceStreamBufferSize:     "4KiB",
-		ParamForceStreamMaxRequestSize: "4KiB",
-		ParamKVConnector:               kv.NIXL,
-	})
+	step, err := newForcedDecodeStep(t, gwClient, "4KiB", "4KiB", map[string]any{ParamKVConnector: kv.NIXL})
 	require.NoError(t, err)
 
 	recorder := httptest.NewRecorder()
@@ -1680,12 +1685,7 @@ func TestForceStream_SpentHandoff_Recomputes(t *testing.T) {
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:               true,
-		ParamForceStreamBufferSize:     "1GiB",
-		ParamForceStreamMaxRequestSize: "1GiB",
-		ParamKVConnector:               kv.NIXL,
-	})
+	step, err := newForcedDecodeStep(t, gwClient, "1GiB", "1GiB", map[string]any{ParamKVConnector: kv.NIXL})
 	require.NoError(t, err)
 
 	recorder := httptest.NewRecorder()
@@ -1733,12 +1733,7 @@ func TestForceStream_SharedStorage_FallbackKeepsKVParams(t *testing.T) {
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:               true,
-		ParamForceStreamBufferSize:     "1GiB",
-		ParamForceStreamMaxRequestSize: "1GiB",
-		ParamKVConnector:               kv.SharedStorage,
-	})
+	step, err := newForcedDecodeStep(t, gwClient, "1GiB", "1GiB", map[string]any{ParamKVConnector: kv.SharedStorage})
 	require.NoError(t, err)
 
 	cached := 32
@@ -1781,12 +1776,7 @@ func TestForceStream_LossyFrameSpentHandoff_Recomputes(t *testing.T) {
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:               true,
-		ParamForceStreamBufferSize:     "1GiB",
-		ParamForceStreamMaxRequestSize: "1GiB",
-		ParamKVConnector:               kv.NIXL,
-	})
+	step, err := newForcedDecodeStep(t, gwClient, "1GiB", "1GiB", map[string]any{ParamKVConnector: kv.NIXL})
 	require.NoError(t, err)
 
 	prefillCached := 32
@@ -1835,12 +1825,7 @@ func TestForceStream_SGLang_SkippedBeforeAttempt(t *testing.T) {
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:               true,
-		ParamForceStreamBufferSize:     "1GiB",
-		ParamForceStreamMaxRequestSize: "1GiB",
-		ParamKVConnector:               kv.SGLang,
-	})
+	step, err := newForcedDecodeStep(t, gwClient, "1GiB", "1GiB", map[string]any{ParamKVConnector: kv.SGLang})
 	require.NoError(t, err)
 
 	recorder := httptest.NewRecorder()
@@ -1894,12 +1879,7 @@ func TestForceStream_MessagesThinkingSpentHandoff_PassesThrough(t *testing.T) {
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:               true,
-		ParamForceStreamBufferSize:     "1GiB",
-		ParamForceStreamMaxRequestSize: "1GiB",
-		ParamKVConnector:               kv.NIXL,
-	})
+	step, err := newForcedDecodeStep(t, gwClient, "1GiB", "1GiB", map[string]any{ParamKVConnector: kv.NIXL})
 	require.NoError(t, err)
 
 	recorder := httptest.NewRecorder()
@@ -2382,10 +2362,7 @@ func TestForceStream_Responses_ReservesRequestEcho(t *testing.T) {
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:           true,
-		ParamForceStreamBufferSize: "1GiB",
-	})
+	step, err := newForcedDecodeStep(t, gwClient, "1GiB", "", map[string]any{})
 	require.NoError(t, err)
 
 	recorder := httptest.NewRecorder()
@@ -2462,10 +2439,10 @@ func TestResponsesEchoBytes(t *testing.T) {
 func TestForceStreamBudget_TryReserveRejectsNonPositive(t *testing.T) {
 	b := newForceStreamBudget(1<<30, 256<<10)
 	for _, n := range []int64{0, -1, math.MinInt64} {
-		require.False(t, b.tryReserve(n), "n=%d", n)
+		require.False(t, b.tryReserve(DecodeStepName, n), "n=%d", n)
 		require.Zero(t, b.current.Load(), "n=%d must not change the total", n)
 	}
-	require.True(t, b.tryReserve(1))
+	require.True(t, b.tryReserve(DecodeStepName, 1))
 }
 
 // TestForceStream_Responses_EchoOutsidePerRequestCap pins how the two parts of a
@@ -2480,11 +2457,7 @@ func TestForceStream_Responses_EchoOutsidePerRequestCap(t *testing.T) {
 		reg := prometheus.NewRegistry()
 		require.NoError(t, coordmetrics.Register(reg))
 		coordmetrics.Reset()
-		step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: serverURL}), map[string]any{
-			ParamForceStream:               true,
-			ParamForceStreamBufferSize:     "1GiB",
-			ParamForceStreamMaxRequestSize: "8KiB",
-		})
+		step, err := newForcedDecodeStep(t, gateway.New(config.GatewayConfig{Address: serverURL}), "1GiB", "8KiB", map[string]any{})
 		require.NoError(t, err)
 		return step.(*DecodeStep), reg
 	}
@@ -3010,12 +2983,7 @@ func TestForceStream_MidStreamErrorSpentHandoff_ForwardsEnvelope(t *testing.T) {
 	require.NoError(t, coordmetrics.Register(reg))
 	coordmetrics.Reset()
 	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:               true,
-		ParamForceStreamBufferSize:     "1GiB",
-		ParamForceStreamMaxRequestSize: "1GiB",
-		ParamKVConnector:               kv.NIXL,
-	})
+	step, err := newForcedDecodeStep(t, gwClient, "1GiB", "1GiB", map[string]any{ParamKVConnector: kv.NIXL})
 	require.NoError(t, err)
 
 	recorder := httptest.NewRecorder()
