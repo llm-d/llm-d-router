@@ -18,13 +18,16 @@ package tokenizer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/google/uuid"
 	tokenizerTypes "github.com/llm-d/llm-d-router/pkg/kvcache/tokenization/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -98,9 +101,10 @@ func anthropicImageToURL(src *fwkrequest.AnthropicImageSource) string {
 // The IDs suit content-locality hashing only; they never match engine KV blocks,
 // so pairing this backend with the engine-correlated scorer yields misses, not bad routes.
 type estimateBackend struct {
-	img imageEstimator
-	vid videoEstimator
-	aud audioEstimator
+	img   imageEstimator
+	vid   videoEstimator
+	aud   audioEstimator
+	arTTS bool
 }
 
 // parseMMMetadataHeaders reads the x-llm-d-* request headers into an mmMetadata.
@@ -244,7 +248,45 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: packBytes(raw)}}}, nil
+	tp := &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: packBytes(raw)}}}
+	if b.arTTS && body.TextToSpeech != nil {
+		tp.CacheSalt, err = ttsConditioningCacheSalt(body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return tp, nil
+}
+
+// ttsConditioningCacheSalt hashes request-visible AR TTS conditioning independently
+// of the token-count projection. The identity is local to the router.
+func ttsConditioningCacheSalt(body *fwkrequest.InferenceRequestBody) (string, error) {
+	payload, ok := body.Payload.(fwkrequest.PayloadMap)
+	if !ok {
+		return "", errors.New("AR TTS cache estimation requires a parsed JSON payload")
+	}
+	extraParams, _ := payload["extra_params"].(map[string]any)
+	if useRandom, _ := extraParams["use_random"].(bool); useRandom {
+		// IndexTTS2 gives randomized conditioning a request-local engine salt.
+		return "ar-tts:" + uuid.NewString(), nil
+	}
+	conditioning := make(map[string]any)
+	for _, field := range []string{
+		reqcommon.FieldInput, reqcommon.FieldInstructions, "cache_salt",
+		"task_type", "language", "voice", "speaker", "ref_text", "ref_audio",
+		"ref_audio_2", "references", "x_vector_only_mode", "speaker_embedding",
+		"ref_audio_codes", "extra_params", "non_streaming_mode",
+		"ambient_sound", "duration_seconds", "token_count", "max_new_tokens",
+	} {
+		if value, present := payload[field]; present {
+			conditioning[field] = value
+		}
+	}
+	raw, err := json.Marshal(conditioning)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode AR TTS cache conditioning: %w", err)
+	}
+	return fmt.Sprintf("ar-tts:%x", sha256.Sum256(raw)), nil
 }
 
 func estimateMultiStringCompletions(req *fwkrequest.CompletionsRequest) (*fwkrequest.TokenizedRequest, error) {
