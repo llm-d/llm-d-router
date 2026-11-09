@@ -17,14 +17,14 @@ External API token semantics, engine streaming and render wire contracts, HTTP h
 
 ### Anthropic split prompt tokens and vLLM streaming usage flags
 
-When parsing or forwarding token usage and `stream_options`: sum Anthropic `/v1/messages` prompt tokens as `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` (OpenAI nests `cached_tokens` instead), and treat vLLM `stream_options.continuous_usage_stats` (cumulative usage on every chunk) as separate from one-shot `include_usage` without injecting `include_usage` beside it.
+When parsing or forwarding token usage and `stream_options`: sum Anthropic prompt tokens as `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` (OpenAI nests `cached_tokens`), and treat vLLM `stream_options.continuous_usage_stats` (cumulative usage per chunk) as separate from one-shot `include_usage` without injecting `include_usage` beside it.
 
 - **Why it matters:** Ignoring Anthropic cache token fields undercounts prompt tokens, and injecting include_usage alongside continuous_usage_stats duplicates or corrupts streaming usage.
-- **Examples:** Observed in 63 PRs: [#848](https://github.com/llm-d/llm-d-router/issues/848), [#932](https://github.com/llm-d/llm-d-router/pull/932#discussion_r3178050269), [#2391](https://github.com/llm-d/llm-d-router/pull/2391#discussion_r3798712574)
+- **Examples:** Observed in 16 PRs: [#848](https://github.com/llm-d/llm-d-router/issues/848), [#3803](https://github.com/llm-d/llm-d-router/pull/3803#pullrequestreview-5722725807), [#4030](https://github.com/llm-d/llm-d-router/pull/4030#pullrequestreview-5814088976)
 
 ### Client JSON passthrough, Content-Length, and Connection upgrade
 
-When decoding JSON bodies, rewriting payloads, or copying client headers upstream: unmarshal only router-inspected keys so other fields pass through, delete or recompute `Content-Length` on rewrite, and scan every `Connection` line and token case-insensitively (RFC 9110) for `upgrade`. Do not forward client `Accept-Encoding` to legs whose responses the router decodes; Go `http.Transport` only decompresses gzip it requested itself.
+When decoding JSON bodies, rewriting payloads, or copying client headers: unmarshal only router-inspected keys so other fields pass through, recompute or drop `Content-Length` on rewrite, and scan `Connection` headers case-insensitively (RFC 9110) for `upgrade`. Do not forward client `Accept-Encoding` when the router decodes responses; Go `http.Transport` only decompresses gzip it requested itself.
 
 - **Why it matters:** Full-struct JSON re-serialization drops unknown client fields, stale Content-Length headers truncate or hang streams after body rewrites, single-line Connection checks miss RFC 9110 upgrades, and a forwarded client Accept-Encoding lets upstreams return gzip the router then fails to decode.
 - **Settled decision:** [Opt-in backend request priority rewrite via PriorityRewriter interface](review/decisions/opt_in_backend_priority_rewrite.md).
@@ -32,7 +32,7 @@ When decoding JSON bodies, rewriting payloads, or copying client headers upstrea
 
 ### Native engine render passthrough and stateful Responses rejection
 
-When integrating inference APIs, prompt rendering, or `/v1/responses`: forward raw client payloads to native engine `/render` routes (`/v1/responses/render`, `/v1/messages/render`) instead of translating schemas in the router, and reject `/v1/responses` `previous_response_id` and `conversation` fields with an explicit error.
+When integrating inference APIs, prompt rendering, or `/v1/responses`: forward raw client payloads to native engine `/render` routes (`/v1/responses/render`, `/v1/messages/render`) instead of translating schemas in the router, and reject `previous_response_id` and `conversation` fields with an explicit error.
 
 - **Why it matters:** Router-side prompt translation drifts from backend tokenizer templates, and silently ignoring previous_response_id or conversation fields drops prior multi-turn context.
 - **Reviewers accept:** Interim translation while the engine lacks a native `/render` endpoint ([#1896](https://github.com/llm-d/llm-d-router/pull/1896#issuecomment-4924616643), [#1896](https://github.com/llm-d/llm-d-router/pull/1896#pullrequestreview-4657668118)).
@@ -40,10 +40,10 @@ When integrating inference APIs, prompt rendering, or `/v1/responses`: forward r
 
 ### Router-built P/D transfer params
 
-When a sidecar connector builds decode-leg `kv_transfer_params` itself instead of forwarding prefill's response: set every key that engine's connector reads unconditionally (vLLM NIXL: `remote_request_id`), never carry one engine's keys into another engine's connector (SGLang uses `bootstrap_host`/`port`/`room` and has no `remote_request_id`), and drop encoder `ec_transfer_params` from decode bodies.
+When building or forwarding decode-leg `kv_transfer_params`: set keys the engine connector reads unconditionally (vLLM NIXL: `remote_request_id`), never mix cross-engine keys, and drop encoder `ec_transfer_params`. When forwarding `prompt_token_ids`, omit IDs from legacy translations lacking token parity, and exclude `echo`, `return_prompt_text`, or multimodal requests.
 
-- **Why it matters:** Router-built decode params that omit a key the engine connector reads unconditionally, or carry another engine's keys, crash the decode engine or break its KV transfer, and forwarded encoder ec_transfer_params trigger connector errors on decode workers.
-- **Examples:** Observed in 2 PRs: [#3607](https://github.com/llm-d/llm-d-router/issues/3607), [#3608](https://github.com/llm-d/llm-d-router/pull/3608#pullrequestreview-5627567379), [#3732](https://github.com/llm-d/llm-d-router/pull/3732#pullrequestreview-5701261477)
+- **Why it matters:** Engines crash or reject decode legs when required transfer keys are missing, cross-engine parameters collide, encoder transfer params reach decoders, or approximate token IDs from legacy translations are forwarded without parity.
+- **Examples:** Observed in 7 PRs: [#3608](https://github.com/llm-d/llm-d-router/pull/3608#pullrequestreview-5627567379), [#3706](https://github.com/llm-d/llm-d-router/pull/3706#discussion_r4436608664), [#3741](https://github.com/llm-d/llm-d-router/pull/3741#discussion_r4503756290)
 
 ### ZMQ KV-events sequence gaps and worker epoch resets
 
@@ -58,7 +58,7 @@ Non-local concurrency, Envoy ext_proc skip-path, SSE chunk-boundary accumulation
 
 ### Unjoined timed-out DataProducer goroutines and buffer lifetimes
 
-When writing `DataProducer` plugins or body handling around `dataProducerPluginsWithTimeout`: timeout returns without joining the producer goroutine, so check `ctx.Err()` before writes, and never mutate shared `*InferenceRequestBody` fields in place after timeout or recycle `sync.Pool` buffers while an unjoined producer or snapshot reader aliases their bytes.
+When writing `DataProducer` plugins or handling `dataProducerPluginsWithTimeout`: timeout returns without joining the producer goroutine, so check `ctx.Err()` before writes, and never mutate shared `*InferenceRequestBody` fields after timeout or recycle `sync.Pool` buffers while an unjoined producer aliases their bytes.
 
 - **Why it matters:** Unjoined producer goroutines that outlive timeout mutate request bodies or recycled sync.Pool buffers concurrently with downstream scheduling.
 - **Open question:** Whether the plugin framework recovers plugin panics at the invocation boundary and reports them per request ([#2105](https://github.com/llm-d/llm-d-router/issues/2105)) or lets a panicking plugin stop the process ([#2098](https://github.com/llm-d/llm-d-router/issues/2098#issuecomment-5032265086)) ([details](review/open_questions/plugin_panic_isolation.md)).
@@ -87,10 +87,10 @@ When keying per-endpoint maps, prefix-cache indexes, ZMQ sockets, or SSRF allowl
 
 ### Bounded metric labels and series cleanup
 
-When adding Prometheus `*Vec` labels or configurable buckets: wrap caller-controlled values (`model_name`, `fairness_id`) in `BoundedLabel` at every record site, plugin metrics included, delete series when their endpoint or flow is removed, and cap configurable bucket counts.
+When adding Prometheus `*Vec` labels or configurable buckets: avoid unbounded per-pod or per-request series across autoscaling, wrap caller-controlled values (`model_name`, `fairness_id`) in `BoundedLabel`, delete series when endpoints or flows are removed, and cap configurable bucket counts.
 
 - **Why it matters:** Caller-controlled label values, series never deleted after endpoint or flow removal, and unbounded configurable buckets grow Prometheus series without limit and freeze stale values in aggregates.
-- **Examples:** Observed in 4 PRs: [#2106](https://github.com/llm-d/llm-d-router/issues/2106), [#2529](https://github.com/llm-d/llm-d-router/issues/2529), [#3539](https://github.com/llm-d/llm-d-router/pull/3539#discussion_r4347141065)
+- **Examples:** Observed in 8 PRs: [#1188](https://github.com/llm-d/llm-d-router/issues/1188), [#3269](https://github.com/llm-d/llm-d-router/pull/3269#discussion_r4358607142), [#3694](https://github.com/llm-d/llm-d-router/pull/3694#discussion_r4395951470)
 
 ### No locks held across network calls
 
