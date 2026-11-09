@@ -69,16 +69,20 @@ func (f *RoleFilter) WithName(name string) *RoleFilter {
 	return f
 }
 
+// MatchesPoolLabels reports whether the labels describe an accepted role.
+func (f *RoleFilter) MatchesPoolLabels(labels map[string]string) bool {
+	role, roleDefined := labels[RoleLabel]
+	_, roleValid := f.validRoles[role]
+	return (!roleDefined && f.allowsNoRole) || roleValid
+}
+
 // Filter retains the endpoints carrying one of the filter's valid roles, plus those
 // carrying no role at all when allowsNoRole is set.
 func (f *RoleFilter) Filter(_ context.Context, _ *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) []scheduling.Endpoint {
 	filteredEndpoints := []scheduling.Endpoint{}
 
 	for _, endpoint := range endpoints {
-		role, roleDefined := endpoint.GetMetadata().Labels[RoleLabel]
-		_, roleValid := f.validRoles[role]
-
-		if (!roleDefined && f.allowsNoRole) || roleValid {
+		if f.MatchesPoolLabels(endpoint.GetMetadata().Labels) {
 			filteredEndpoints = append(filteredEndpoints, endpoint)
 		}
 	}
