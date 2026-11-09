@@ -77,6 +77,7 @@ type Processor struct {
 	endpointCandidates   contracts.EndpointCandidates
 	usageLimitPolicy     flowcontrol.UsageLimitPolicy
 	bandSelectionPolicy  flowcontrol.BandSelectionPolicy
+	dispatchGate         flowcontrol.DispatchGate
 	clock                clock.WithTicker
 	noEndpointRequestTTL time.Duration
 	cleanupSweepInterval time.Duration
@@ -166,6 +167,11 @@ func NewProcessor(
 	// otherwise, which keeps a request that arrives before that cycle on the saturation budget.
 	p.regime.Store(&regimeSample{})
 	return p
+}
+
+// SetDispatchGate installs an optional per-item dispatch filter. Nil admits every selected item.
+func (p *Processor) SetDispatchGate(gate flowcontrol.DispatchGate) {
+	p.dispatchGate = gate
 }
 
 // Submit attempts a non-blocking handoff of an item to the processor's internal enqueue channel.
@@ -575,6 +581,9 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 				"priority", priority)
 			continue // Continue to the next band to maximize work conservation.
 		}
+		item = chooseDispatchItem(item, originalBand, func(candidate flowcontrol.QueueItemAccessor) bool {
+			return p.itemAllowed(ctx, candidate, saturation)
+		})
 		if item == nil {
 			continue
 		}
@@ -662,6 +671,43 @@ func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleave
 		}
 	}
 	return
+}
+
+// itemAllowed reports whether the dispatch gate lets this item leave the queue.
+// A nil gate admits every non-nil item.
+func (p *Processor) itemAllowed(ctx context.Context, item flowcontrol.QueueItemAccessor, saturation float64) bool {
+	if item == nil {
+		return false
+	}
+	if p.dispatchGate == nil {
+		return true
+	}
+	return p.dispatchGate.Allow(ctx, item, saturation)
+}
+
+// chooseDispatchItem returns picked when the gate allows it. Otherwise it returns the first
+// sibling-flow head in the band that the gate allows, so a held head does not block that band.
+func chooseDispatchItem(
+	picked flowcontrol.QueueItemAccessor,
+	band flowcontrol.PriorityBandAccessor,
+	allow func(flowcontrol.QueueItemAccessor) bool,
+) flowcontrol.QueueItemAccessor {
+	if picked != nil && allow(picked) {
+		return picked
+	}
+	if band == nil {
+		return nil
+	}
+	var found flowcontrol.QueueItemAccessor
+	band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
+		head := queue.Peek()
+		if head != nil && allow(head) {
+			found = head
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.

@@ -82,7 +82,7 @@ func (m *mockFlowController) ReleaseDispatchReservation(requestID string) {
 func TestFlowControlAdmissionController_ReleaseDispatchReservation(t *testing.T) {
 	t.Parallel()
 	fc := &mockFlowController{}
-	ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+	ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{}, nil)
 
 	ac.ReleaseDispatchReservation("request-1")
 
@@ -256,7 +256,7 @@ func TestFlowControlAdmissionController_RequestTTL(t *testing.T) {
 				Request:           &handlers.Request{Headers: headers, Metadata: map[string]any{}},
 			}
 			fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched}
-			controller := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+			controller := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{}, nil)
 
 			err := controller.Admit(ctx, reqCtx, 0)
 
@@ -427,7 +427,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 				},
 			}
 			fc := &mockFlowController{outcome: tc.fcOutcome, err: tc.fcErr}
-			ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{Candidates: tc.locatorPods})
+			ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{Candidates: tc.locatorPods}, nil)
 
 			err := ac.Admit(ctx, reqCtx, tc.priority)
 
@@ -463,7 +463,7 @@ func TestFlowControlAdmissionController_StampsQueueDuration(t *testing.T) {
 		t.Parallel()
 		reqCtx := newReqCtx()
 		fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched, delay: 5 * time.Millisecond}
-		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{}, nil)
 
 		require.NoError(t, ac.Admit(ctx, reqCtx, 0))
 		assert.True(t, reqCtx.FlowControlAdmitted)
@@ -478,7 +478,7 @@ func TestFlowControlAdmissionController_StampsQueueDuration(t *testing.T) {
 			err:     fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrQueueAtCapacity),
 			delay:   5 * time.Millisecond,
 		}
-		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{}, nil)
 
 		require.Error(t, ac.Admit(ctx, reqCtx, 0))
 		assert.False(t, reqCtx.FlowControlAdmitted)

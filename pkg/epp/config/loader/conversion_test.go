@@ -233,6 +233,7 @@ func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 			PriorityBands:                []configapiv1alpha1.PriorityBandConfig{band},
 			UsageLimitPolicyPluginRef:    "usage-limit",
 			BandSelectionPolicyPluginRef: "band-selection",
+			DispatchGatePluginRef:        "dispatch-gate",
 			SaturationDetector:           &configapiv1alpha1.SaturationDetectorConfig{PluginRef: "detector"},
 			EnableEviction:               true,
 		},

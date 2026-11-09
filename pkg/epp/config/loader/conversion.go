@@ -156,6 +156,7 @@ func convertFlowControl(in *configapiv1alpha1.FlowControlConfig) *configapiv1.Fl
 		DefaultNegativePriorityBand:  convertPriorityBandPtr(in.DefaultNegativePriorityBand),
 		UsageLimitPolicyPluginRef:    in.UsageLimitPolicyPluginRef,
 		BandSelectionPolicyPluginRef: in.BandSelectionPolicyPluginRef,
+		DispatchGatePluginRef:        in.DispatchGatePluginRef,
 		EnableEviction:               in.EnableEviction,
 	}
 
