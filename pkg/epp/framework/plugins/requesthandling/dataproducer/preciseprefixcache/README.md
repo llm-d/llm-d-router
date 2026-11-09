@@ -39,6 +39,16 @@ upstream. No-op otherwise.
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
 to `vllm` when omitted.
 
+The producer subscribes to each discovered endpoint's event socket and
+attributes events to the endpoint it dialed. `kvEventsConfig.zmqEndpoint` is a
+deprecated alternative that binds one socket every engine publishes to. A
+bound socket cannot tell publishers apart, so it takes the pod identity from
+the topic, and any peer that reaches the socket can publish events under any
+pod's identity. The EPP refuses to bind a `zmqEndpoint` on a non-loopback
+address unless `kvEventsConfig.allowUntrustedPublishers` is `true`. Set it only
+when a network policy limits who can reach the port, and prefer per-pod
+subscriptions.
+
 SGLang EAGLE/MTP events describe cached positions as overlapping token pairs.
 The index preserves their trailing lookahead and learns each pod's page size.
 Request matching hashes complete bigram pages using the same format.
