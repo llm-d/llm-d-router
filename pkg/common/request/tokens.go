@@ -19,6 +19,7 @@ package request
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -181,6 +182,21 @@ func nonNegativeInt64(i int64) (int, error) {
 		return 0, fmt.Errorf("expected non-negative integer, got %d", i)
 	}
 	return int(i), nil
+}
+
+// StreamRequested reports the client's stream flag. A null stream is unset.
+// Non-null, non-boolean values are rejected because a model server may coerce
+// them to true while the router treats them as non-streaming.
+func StreamRequested(body map[string]any) (bool, error) {
+	v, set := FieldValue(body, FieldStream)
+	if !set {
+		return false, nil
+	}
+	stream, isBool := v.(bool)
+	if !isBool {
+		return false, errors.New("stream must be a boolean")
+	}
+	return stream, nil
 }
 
 // RejectStatefulResponsesFields reports an error naming the first field it
