@@ -135,6 +135,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	// rebuilds the body, so a client copy is dropped once here.
 	_, clientKVTransferParams := parsed[reqcommon.FieldKVTransferParams]
 	delete(parsed, reqcommon.FieldKVTransferParams)
+	if apiType == reqcommon.APITypeSGLangGenerate {
+		delete(parsed, reqcommon.FieldDisaggPrefillDPRank)
+	}
 	parseDuration = time.Since(parseStart)
 	parseDone = true
 
@@ -273,13 +276,12 @@ func inferenceRoute(path string) string {
 // chat templates render into the prompt verbatim. The steps that read messages
 // or input decode them on use (promptItems).
 var inspectedRequestFields = map[string]struct{}{
-	reqcommon.FieldModel:               {},
-	reqcommon.FieldStream:              {},
-	"prompt":                           {},
-	"token_ids":                        {},
-	reqcommon.FieldSamplingParams:      {},
-	"features":                         {},
-	reqcommon.FieldDisaggPrefillDPRank: {},
+	reqcommon.FieldModel:          {},
+	reqcommon.FieldStream:         {},
+	"prompt":                      {},
+	"token_ids":                   {},
+	reqcommon.FieldSamplingParams: {},
+	"features":                    {},
 }
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.

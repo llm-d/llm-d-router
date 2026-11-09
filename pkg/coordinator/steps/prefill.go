@@ -164,9 +164,6 @@ func (s *PrefillStep) buildSGLangPrefillBody(ctx context.Context, reqCtx *pipeli
 	if !reqCtx.Stream {
 		return nil, fmt.Errorf("/generate prefill requires stream=true: %w", pipeline.ErrBadRequest)
 	}
-	if reqCtx.Body[reqcommon.FieldDisaggPrefillDPRank] != nil {
-		return nil, fmt.Errorf("client-supplied disagg_prefill_dp_rank is unsupported: %w", pipeline.ErrBadRequest)
-	}
 	if sampling := reqCtx.Body[reqcommon.FieldSamplingParams]; sampling != nil {
 		params, ok := sampling.(map[string]any)
 		if !ok {

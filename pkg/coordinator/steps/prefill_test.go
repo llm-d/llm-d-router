@@ -1292,10 +1292,8 @@ func TestPrefillStep_SGLangRequestScope(t *testing.T) {
 		body  string
 		valid bool
 	}{
-		{name: "null rank", body: `{"stream":true,"disagg_prefill_dp_rank":null}`, valid: true},
 		{name: "null sampling params", body: `{"stream":true,"sampling_params":null}`, valid: true},
 		{name: "multiple samples", body: `{"stream":true,"sampling_params":{"n":2}}`},
-		{name: "rank override", body: `{"stream":true,"disagg_prefill_dp_rank":0}`},
 		{name: "non-streaming", body: `{"stream":false}`},
 		{name: "sampling array", body: `{"stream":true,"sampling_params":[{}]}`},
 		{name: "fractional sample count", body: `{"stream":true,"sampling_params":{"n":1.5}}`},

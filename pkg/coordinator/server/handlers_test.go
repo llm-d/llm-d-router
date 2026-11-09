@@ -505,17 +505,16 @@ func TestHandleInference_BodyKeepsNestedKeyOrder(t *testing.T) {
 func TestDecodeRequestBody(t *testing.T) {
 	tools := `[{"type":"function","function":{"parameters":{"properties":{"b":{},"a":{}}}}}]`
 	parsed, err := decodeRequestBody([]byte(`{"model":"m","stream":true,"prompt":"hi","token_ids":[1],` +
-		`"sampling_params":{"max_tokens":5},"disagg_prefill_dp_rank":null,"features":{},"tools":` + tools + `}`))
+		`"sampling_params":{"max_tokens":5},"features":{},"tools":` + tools + `}`))
 	require.NoError(t, err)
 	require.Equal(t, map[string]any{
-		"model":                            "m",
-		"stream":                           true,
-		"prompt":                           "hi",
-		"token_ids":                        []any{1.0},
-		"sampling_params":                  map[string]any{"max_tokens": 5.0},
-		reqcommon.FieldDisaggPrefillDPRank: nil,
-		"features":                         map[string]any{},
-		"tools":                            json.RawMessage(tools),
+		"model":           "m",
+		"stream":          true,
+		"prompt":          "hi",
+		"token_ids":       []any{1.0},
+		"sampling_params": map[string]any{"max_tokens": 5.0},
+		"features":        map[string]any{},
+		"tools":           json.RawMessage(tools),
 	}, parsed)
 
 	for _, body := range []string{`[1,2]`, `null`, `"text"`} {
@@ -771,6 +770,32 @@ func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
 				t.Fatalf("%d drop lines, want %d: %v", drops, want, lines)
 			}
 		})
+	}
+}
+
+func TestHandleInference_DropsSGLangPrefillRank(t *testing.T) {
+	for _, path := range []string{reqcommon.PathSGLangGenerate, reqcommon.PathVLLMGenerate, reqcommon.PathChatCompletions} {
+		for _, rank := range []string{"0", "2", "null"} {
+			t.Run(path+"/"+rank, func(t *testing.T) {
+				step := &capturingStep{}
+				srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+				require.NoError(t, err)
+				body := `{"model":"m","stream":true,"disagg_prefill_dp_rank":` + rank + `}`
+				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+				rec := httptest.NewRecorder()
+				// /generate uses passthrough, so exercise the handler directly.
+				srv.handleInference(rec, req)
+				require.Equal(t, http.StatusOK, rec.Code)
+				require.NotNil(t, step.captured)
+				forwarded, err := json.Marshal(step.captured.Body)
+				require.NoError(t, err)
+				want := body
+				if path == reqcommon.PathSGLangGenerate {
+					want = `{"model":"m","stream":true}`
+				}
+				require.JSONEq(t, want, string(forwarded))
+			})
+		}
 	}
 }
 
