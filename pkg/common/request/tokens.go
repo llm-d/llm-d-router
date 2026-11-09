@@ -211,7 +211,7 @@ func RejectStatefulResponsesFields(body map[string]any) error {
 	if !readable {
 		return fmt.Errorf("field %q could not be read as a JSON array or string", FieldInput)
 	}
-	if referencesFile(items) {
+	if ReferencesFile(items) {
 		return fmt.Errorf("field %q is not supported by the router", FieldFileID)
 	}
 	return nil
@@ -290,7 +290,7 @@ var fileHydrationPartTypes = map[string]bool{
 	PartTypeComputerScreenshot: true,
 }
 
-// referencesFile reports whether v nests a content part naming a Files API
+// ReferencesFile reports whether v nests a content part naming a Files API
 // upload. The depth varies: a message content part, a computer_call_output's
 // output object, and a function_call_output's output array all carry one.
 //
@@ -299,7 +299,7 @@ var fileHydrationPartTypes = map[string]bool{
 // replayed from a prior response carries one, so refusing it would name a field
 // the client believes it omitted. Values reach this walk fully decoded, so a
 // JSON null arrives as a nil.
-func referencesFile(v any) bool {
+func ReferencesFile(v any) bool {
 	switch t := v.(type) {
 	case map[string]any:
 		if partType, _ := t[FieldType].(string); fileHydrationPartTypes[partType] {
@@ -308,13 +308,13 @@ func referencesFile(v any) bool {
 			}
 		}
 		for _, nested := range t {
-			if referencesFile(nested) {
+			if ReferencesFile(nested) {
 				return true
 			}
 		}
 	case []any:
 		for _, nested := range t {
-			if referencesFile(nested) {
+			if ReferencesFile(nested) {
 				return true
 			}
 		}
