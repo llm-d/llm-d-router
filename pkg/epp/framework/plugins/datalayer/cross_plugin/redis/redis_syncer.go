@@ -19,6 +19,7 @@ package redis
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
 	"errors"
@@ -31,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/google/uuid"
 	goredis "github.com/redis/go-redis/v9"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -52,6 +54,7 @@ const (
 
 var _ fwkdl.CrossReplicaSyncer = (*RedisSyncer)(nil)
 var _ fwkdl.CrossReplicaBatchSyncer = (*RedisSyncer)(nil)
+var _ fwkdl.CrossReplicaPeerReader = (*RedisSyncer)(nil)
 
 type redisConfig struct {
 	Address         string `json:"address"`
@@ -77,7 +80,9 @@ type RedisSyncer struct {
 }
 
 type aggregateCacheEntry struct {
-	value any
+	value   any // nil when peers == 0
+	peers   int
+	version uint64
 }
 
 func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, error) {
@@ -239,10 +244,19 @@ func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID st
 	return nil
 }
 
+// cachePeerAggregate replaces the cached peer aggregate for hashKey. When no
+// peer raw value changed since the last call, it keeps the cached entry and
+// decodes nothing.
 func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, value any, raw map[string]string, aggregate func([]any) any) int {
 	logger := ctrl.LoggerFrom(ctx)
+	fields := slices.Sorted(maps.Keys(raw))
+	version := s.peerVersion(fields, raw)
+	if cached, ok := s.cache.Load(hashKey); ok && cached.(*aggregateCacheEntry).version == version {
+		return cached.(*aggregateCacheEntry).peers
+	}
+
 	remoteValues := make([]any, 0, len(raw))
-	for _, field := range slices.Sorted(maps.Keys(raw)) {
+	for _, field := range fields {
 		if field == s.replicaID {
 			continue
 		}
@@ -257,13 +271,32 @@ func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, va
 		remoteValues = append(remoteValues, remoteValue)
 	}
 
-	if len(remoteValues) == 0 {
-		s.cache.Delete(hashKey)
-	} else {
-		s.cache.Store(hashKey, &aggregateCacheEntry{value: aggregate(remoteValues)})
+	entry := &aggregateCacheEntry{peers: len(remoteValues), version: version}
+	if len(remoteValues) > 0 {
+		entry.value = aggregate(remoteValues)
 	}
-
+	s.cache.Store(hashKey, entry)
 	return len(remoteValues)
+}
+
+// peerVersion hashes the sorted (field, raw) pairs of every peer field. Each
+// part is length-prefixed so that different pairs cannot hash the same bytes.
+func (s *RedisSyncer) peerVersion(sortedFields []string, raw map[string]string) uint64 {
+	d := xxhash.New()
+	var length [8]byte
+	write := func(part string) {
+		binary.LittleEndian.PutUint64(length[:], uint64(len(part)))
+		_, _ = d.Write(length[:])
+		_, _ = d.WriteString(part)
+	}
+	for _, field := range sortedFields {
+		if field == s.replicaID {
+			continue
+		}
+		write(field)
+		write(raw[field])
+	}
+	return d.Sum64()
 }
 
 func (s *RedisSyncer) Set(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) error {
@@ -397,10 +430,23 @@ func execFailedWholeChunk(execErr error, cmds []goredis.Cmder) bool {
 func (s *RedisSyncer) get(_ context.Context, key fwkdl.StateKey, endpointID string, local any, aggregate func([]any) any) any {
 	hashKey := s.hashKey(key, endpointID)
 	cached, ok := s.cache.Load(hashKey)
-	if !ok {
+	if !ok || cached.(*aggregateCacheEntry).peers == 0 {
 		return local
 	}
 	return aggregate([]any{local, cached.(*aggregateCacheEntry).value})
+}
+
+// PeerSnapshot implements fwkdl.CrossReplicaPeerReader.
+func (s *RedisSyncer) PeerSnapshot(spec fwkdl.CrossReplicaSpec, endpointID string) (any, uint64, bool) {
+	cached, ok := s.cache.Load(s.hashKey(spec.StateKey, endpointID))
+	if !ok {
+		return nil, 0, false
+	}
+	entry := cached.(*aggregateCacheEntry)
+	if entry.peers == 0 {
+		return spec.Aggregate(nil), entry.version, true
+	}
+	return entry.value, entry.version, true
 }
 
 func (s *RedisSyncer) Get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {

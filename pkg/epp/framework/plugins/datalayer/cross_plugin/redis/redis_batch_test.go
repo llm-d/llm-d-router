@@ -112,7 +112,8 @@ func TestSetBatchMatchesSetAcrossChunks(t *testing.T) {
 		got, gotOK := batch.cache.Load(key)
 		require.Equal(t, wantOK, gotOK, id)
 		if i%3 == 0 {
-			require.False(t, gotOK, id)
+			require.Zero(t, got.(*aggregateCacheEntry).peers, id)
+			require.Nil(t, got.(*aggregateCacheEntry).value, id)
 			continue
 		}
 		require.Equal(t, []any{cloneableInt(7), cloneableInt(9)}, got.(*aggregateCacheEntry).value)
@@ -149,8 +150,9 @@ func TestSetBatchEndpointFailures(t *testing.T) {
 		require.True(t, ok)
 		require.Same(t, old, entry)
 	}
-	_, ok := syncer.cache.Load(syncer.hashKey(spec.StateKey, ids[2]))
-	require.False(t, ok)
+	entry, ok := syncer.cache.Load(syncer.hashKey(spec.StateKey, ids[2]))
+	require.True(t, ok)
+	require.Zero(t, entry.(*aggregateCacheEntry).peers)
 }
 
 func TestSetBatchChunkFailuresKeepCaches(t *testing.T) {
