@@ -69,8 +69,9 @@ type PluginConfig struct {
 }
 
 var (
-	_ fwkrh.DataProducer = &Producer{}
-	_ plugin.StateDumper = &Producer{}
+	_ fwkrh.DataProducer          = &Producer{}
+	_ fwkrh.AdmissionDataProducer = &Producer{}
+	_ plugin.StateDumper          = &Producer{}
 )
 
 // subscriberManager is the subset of kvevents.SubscriberManager the producer
@@ -298,7 +299,7 @@ func sortedCapped(in []string, limit int) []string {
 // Produces declares the PrefixCacheMatchInfoDataKey published per endpoint,
 // name-bound to this producer instance.
 func (p *Producer) Produces() map[plugin.DataKey]any {
-	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
+	return map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}, p.admissionKey(): admissionPrefix{}}
 }
 
 // Consumes declares the TokenizedRequest dependency from token-producer so
@@ -339,45 +340,21 @@ func (p *Producer) Produce(ctx context.Context,
 		}
 	}
 
-	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil ||
-		len(request.Body.TokenizedRequest.Prompts) == 0 {
-		span.SetAttributes(semconv.LLMDEPPProducerResult("skipped_no_tokens"))
-		return nil
-	}
-
-	groups := make(map[kvblock.CacheFormat][]endpointWithPodID)
-	for _, endpoint := range endpoints {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if md := endpoint.GetMetadata(); md != nil {
-			podID := fmt.Sprintf("%s:%s", md.Address, md.Port)
-			format := p.kvCacheIndexer.CacheFormat(podID)
-			groups[format] = append(groups[format], endpointWithPodID{endpoint: endpoint, podID: podID})
-		}
-	}
-	if len(groups) == 0 {
-		// Compute default-format keys even when no endpoint has metadata.
-		groups[kvblock.CacheFormat{BlockSize: p.blockSizeTokens}] = nil
-	}
-	keysByFormat := make(map[kvblock.CacheFormat][][]kvblock.BlockHash, len(groups))
+	var keysByFormat map[kvblock.CacheFormat][][]kvblock.BlockHash
 	var results []endpointResult
-	for format, group := range groups {
-		perPromptKeys, perPromptMMContent, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, format)
-		if err != nil {
-			span.SetStatus(codes.Error, err.Error())
-			return fmt.Errorf("failed to compute block keys: %w", err)
-		}
-		if len(perPromptKeys) == 0 {
-			continue
-		}
-		keysByFormat[format] = perPromptKeys
-		groupResults, err := p.matchEndpointBlockKeys(ctx, span, request, group,
-			perPromptKeys, perPromptMMContent, format)
+	var prepared *admissionPrefix
+	if request != nil {
+		prepared, _ = scheduling.ReadRequestAttribute[*admissionPrefix](request, p.admissionKey())
+	}
+	if prepared != nil {
+		keysByFormat = prepared.keysByFormat
+		results = prepared.forEndpoints(endpoints)
+	} else {
+		var err error
+		keysByFormat, results, err = p.matchPrefix(ctx, span, request, endpoints)
 		if err != nil {
 			return err
 		}
-		results = append(results, groupResults...)
 	}
 	if len(keysByFormat) == 0 {
 		span.SetAttributes(semconv.LLMDEPPProducerResult("skipped_no_tokens"))
@@ -418,6 +395,55 @@ func (p *Producer) Produce(ctx context.Context,
 		)
 	}
 	return nil
+}
+
+// matchPrefix computes and matches keys in each candidate's own cache format.
+func (p *Producer) matchPrefix(ctx context.Context, span trace.Span,
+	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
+) (map[kvblock.CacheFormat][][]kvblock.BlockHash, []endpointResult, error) {
+	if request == nil || request.Body == nil || request.Body.TokenizedRequest == nil ||
+		len(request.Body.TokenizedRequest.Prompts) == 0 {
+		return nil, nil, nil
+	}
+
+	groups := make(map[kvblock.CacheFormat][]endpointWithPodID)
+	for _, endpoint := range endpoints {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if endpoint == nil {
+			continue
+		}
+		if md := endpoint.GetMetadata(); md != nil {
+			podID := fmt.Sprintf("%s:%s", md.Address, md.Port)
+			format := p.kvCacheIndexer.CacheFormat(podID)
+			groups[format] = append(groups[format], endpointWithPodID{endpoint: endpoint, podID: podID})
+		}
+	}
+	if len(groups) == 0 {
+		// Compute default-format keys even when no endpoint has metadata.
+		groups[kvblock.CacheFormat{BlockSize: p.blockSizeTokens}] = nil
+	}
+	keysByFormat := make(map[kvblock.CacheFormat][][]kvblock.BlockHash, len(groups))
+	var results []endpointResult
+	for format, group := range groups {
+		perPromptKeys, perPromptMMContent, err := computeBlockKeys(ctx, p.kvCacheIndexer, request, format)
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return nil, nil, fmt.Errorf("failed to compute block keys: %w", err)
+		}
+		if len(perPromptKeys) == 0 {
+			continue
+		}
+		keysByFormat[format] = perPromptKeys
+		groupResults, err := p.matchEndpointBlockKeys(ctx, span, request, group,
+			perPromptKeys, perPromptMMContent, format)
+		if err != nil {
+			return nil, nil, err
+		}
+		results = append(results, groupResults...)
+	}
+	return keysByFormat, results, nil
 }
 
 // matchEndpointBlockKeys matches one format's prompts against its endpoints.

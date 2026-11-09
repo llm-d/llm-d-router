@@ -58,6 +58,7 @@ const (
 var minBlockSizeTokens = 64
 
 var (
+	_ fwkrh.AdmissionDataProducer       = &dataProducer{}
 	_ fwkrh.DataProducer                = &dataProducer{}
 	_ fwkrh.PreRequest                  = &dataProducer{}
 	_ plugin.StateDumper                = &dataProducer{}
@@ -156,7 +157,7 @@ func (p *dataProducer) snapshotState() prefixIndexState {
 
 // Produces returns the data produced by the plugin.
 func (p *dataProducer) Produces() map[plugin.DataKey]any {
-	out := map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}}
+	out := map[plugin.DataKey]any{p.dk: attrprefix.PrefixCacheMatchInfo{}, p.admissionKey(): admissionPrefix{}}
 	if p.syncCrossReplicaState {
 		out[p.syncHashDK] = attrprefix.PrefixHashSet{}
 	}
@@ -310,13 +311,36 @@ func (p *dataProducer) PluginState() *plugin.PluginState {
 // Produce is called by the director before scheduling requests.
 func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
 	p.mergeRemoteHashes(pods)
+	prepared, ok := fwksched.ReadRequestAttribute[*admissionPrefix](request, p.admissionKey())
+	if !ok || prepared == nil {
+		prepared = p.matchPrefix(ctx, request, pods)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.publishPrefix(prepared, pods)
+	state := *prepared.state
+	state.BestAvailableCachedTokens = 0
+	for _, pod := range pods {
+		if pod == nil || pod.GetMetadata() == nil {
+			continue
+		}
+		state.BestAvailableCachedTokens = max(state.BestAvailableCachedTokens,
+			state.PredictedCachedTokens[ServerID(pod.GetMetadata().ID)])
+	}
+	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), &state)
+	return nil
+}
 
+func (p *dataProducer) matchPrefix(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) *admissionPrefix {
 	blockSize := p.GetBlockSize(pods)
 	perPromptHashes, perPromptTokens := prefixhash.GetBlockHashesWithPromptTokens(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
-	candidates := make([]ServerID, len(pods))
-	for i, pod := range pods {
-		candidates[i] = ServerID(pod.GetMetadata().ID)
+	candidates := make([]ServerID, 0, len(pods))
+	for _, pod := range pods {
+		if pod != nil && pod.GetMetadata() != nil {
+			candidates = append(candidates, ServerID(pod.GetMetadata().ID))
+		}
 	}
 	prefixCacheServers := make(map[ServerID]int)
 	predictedCachedTokens := make(map[ServerID]int)
@@ -339,23 +363,13 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		v.Info("Prefix cache match", "matchedBlocks", matched, "totalBlocks", totalBlocks)
 	}
 
-	bestAvailable := 0
-	for _, pod := range pods {
-		id := ServerID(pod.GetMetadata().ID)
-		pod.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(prefixCacheServers[id], totalBlocks, blockSize))
-		bestAvailable = max(bestAvailable, predictedCachedTokens[id])
-	}
-
 	state := &SchedulingContextState{
-		PerPromptHashes:           perPromptHashes,
-		PrefixCacheServers:        prefixCacheServers,
-		PredictedCachedTokens:     predictedCachedTokens,
-		BestAvailableCachedTokens: bestAvailable,
+		PerPromptHashes:       perPromptHashes,
+		PrefixCacheServers:    prefixCacheServers,
+		PredictedCachedTokens: predictedCachedTokens,
 	}
 
-	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
-
-	return nil
+	return &admissionPrefix{state: state, totalBlocks: totalBlocks, blockSize: blockSize}
 }
 
 // mergeRemoteHashes folds peer recent-window prompts into the local indexer.
@@ -372,6 +386,9 @@ func (p *dataProducer) mergeRemoteHashes(pods []fwksched.Endpoint) {
 		return
 	}
 	for _, pod := range pods {
+		if pod == nil || pod.GetMetadata() == nil {
+			continue
+		}
 		set, ok := peekPrefixHashSet(pod, p.syncHashDK)
 		if !ok || set == nil {
 			continue
@@ -719,7 +736,7 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 func (p *dataProducer) GetBlockSize(endpoints []fwksched.Endpoint) int {
 	blockSize := p.config.BlockSizeTokens
 	if p.config.AutoTune && len(endpoints) > 0 {
-		if endpoint := endpoints[0]; endpoint.GetMetrics() != nil {
+		if endpoint := endpoints[0]; endpoint != nil && endpoint.GetMetrics() != nil {
 			m := endpoint.GetMetrics()
 			if pmu := m.CachePrefixMatchUnit; pmu > 0 {
 				blockSize = pmu
