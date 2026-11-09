@@ -310,9 +310,10 @@ func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, request *fwks
 	}
 
 	switch stage {
-	case routing.StageDecode:
-		// The decode stage ran on the picked endpoint; only its concurrent-
-		// dispatch abort marks the stage, by writing the response itself.
+	case routing.StageDecode, routing.StageNone:
+		// The decode stage ran on the picked endpoint. StageNone covers a
+		// decode failure the sidecar learned of only after the response was
+		// written, and every successful response.
 	case routing.StagePrefill:
 		if prefill == nil || !failed {
 			// No prefill endpoint to charge, or a status outside
@@ -323,8 +324,8 @@ func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, request *fwks
 		return
 	case "":
 		if failed && prefill != nil {
-			// The request ran prefill on a sidecar that marks no failed stage,
-			// so the status cannot be attributed to either endpoint.
+			// The request ran prefill on a sidecar that predates the
+			// failed-stage header, so the status cannot be attributed.
 			return
 		}
 	default:
@@ -333,10 +334,6 @@ func (f *EndpointHealthFilter) ResponseHeader(ctx context.Context, request *fwks
 		return
 	}
 	f.tracker.observeResponse(log.FromContext(ctx), targetEndpoint.ID, address, failed, f.now())
-	if !failed && prefill != nil {
-		// A successful response proves the prefill stage ran too.
-		f.tracker.observeResponse(log.FromContext(ctx), prefill.ID, hostPort(prefill), false, f.now())
-	}
 }
 
 // prefillTarget returns the endpoint the EPP picked to prefill request, or nil
