@@ -121,7 +121,7 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 
 	return &realFlowControlHarness{
 		cancel: cancel,
-		ac:     NewFlowControlAdmissionController(fc, "test-pool", candidates),
+		ac:     NewFlowControlAdmissionController(fc, "test-pool", candidates, nil),
 		reg:    reg,
 	}
 }

@@ -130,6 +130,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentlineage"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/cacheclass"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/outlenbucket"
 	respondermodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responder/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responsereceived/headercopy"
@@ -806,6 +807,8 @@ func (r *Runner) registerInTreePlugins() {
 	// Beta
 	fwkplugin.Register(latencyslo.LatencyAdmissionPluginType, fwkplugin.StabilityBeta, latencyslo.LatencyAdmissionFactory)
 	fwkplugin.Register(probabilisticadmitter.Type, fwkplugin.StabilityBeta, probabilisticadmitter.Factory)
+	// Alpha
+	fwkplugin.Register(cacheclass.Type, fwkplugin.StabilityAlpha, cacheclass.Factory)
 
 	// Latency scoring and filtering plugins
 	// Beta
@@ -1193,6 +1196,7 @@ func (r *Runner) initAdmissionControl(
 		EndpointCandidates:  endpointCandidates,
 		UsageLimitPolicy:    eppConfig.FlowControlConfig.UsageLimitPolicy,
 		BandSelectionPolicy: eppConfig.FlowControlConfig.BandSelectionPolicy,
+		DispatchGate:        eppConfig.FlowControlConfig.DispatchGate,
 	}
 
 	var requestEvictor *fceviction.RequestEvictor
@@ -1213,8 +1217,12 @@ func (r *Runner) initAdmissionControl(
 	}
 
 	fc := fccontroller.NewFlowController(ctx, opts.PoolName, eppConfig.FlowControlConfig.Controller, deps)
+	var flowIDRewriter requestcontrol.FlowIDRewriter
+	if rewriter, ok := eppConfig.FlowControlConfig.DispatchGate.(requestcontrol.FlowIDRewriter); ok {
+		flowIDRewriter = rewriter
+	}
 	return endpointCandidates,
-		requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName, endpointCandidates),
+		requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName, endpointCandidates, flowIDRewriter),
 		registry,
 		requestEvictor
 }

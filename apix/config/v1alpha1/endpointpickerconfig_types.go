@@ -493,6 +493,12 @@ type FlowControlConfig struct {
 	BandSelectionPolicyPluginRef string `json:"bandSelectionPolicyPluginRef,omitempty"`
 
 	// +optional
+	// DispatchGatePluginRef names a DispatchGate plugin. The gate can hold a queued item without
+	// changing its priority. Other flows in the same band are still offered a dispatch turn.
+	// If omitted, every item the fairness policy selects may dispatch.
+	DispatchGatePluginRef string `json:"dispatchGatePluginRef,omitempty"`
+
+	// +optional
 	// SaturationDetector specifies which saturation detector plugin to use for both Admission and
 	// Flow Control. If omitted, "utilization-detector" is used by default.
 	SaturationDetector *SaturationDetectorConfig `json:"saturationDetector,omitempty"`
@@ -550,6 +556,10 @@ func (fcc *FlowControlConfig) String() string {
 
 	if fcc.BandSelectionPolicyPluginRef != "" {
 		parts = append(parts, "BandSelectionPolicyRef: "+fcc.BandSelectionPolicyPluginRef)
+	}
+
+	if fcc.DispatchGatePluginRef != "" {
+		parts = append(parts, "DispatchGateRef: "+fcc.DispatchGatePluginRef)
 	}
 
 	if fcc.SaturationDetector != nil {

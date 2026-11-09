@@ -165,6 +165,17 @@ type DispatchReservationTracker interface {
 	ReleaseDispatch(requestID string) bool
 }
 
+// DispatchGate decides whether a queue item selected for dispatch may leave the queue at the
+// current saturation. False leaves the item queued. A nil gate admits every item.
+//
+// The processor still offers other flows in the same priority band a turn, so a held item does
+// not block a sibling flow whose head the gate allows.
+type DispatchGate interface {
+	plugin.Plugin
+
+	Allow(ctx context.Context, item QueueItemAccessor, saturation float64) bool
+}
+
 // UsageLimitPolicy computes the usage limit of a priority band dynamically.
 //
 // The goal of this policy is to enable adaptive capacity management by gating lower-priority traffic
