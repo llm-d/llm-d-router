@@ -312,6 +312,16 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
 		},
 		{
+			name:            "fc_reject_flow_limit",
+			priority:        0,
+			fcOutcome:       fctypes.QueueOutcomeRejectedCapacity,
+			fcErr:           fmt.Errorf("%w: %w: %w", fctypes.ErrRejected, fctypes.ErrQueueAtCapacity, fctypes.ErrFlowAtCapacity),
+			expectErr:       true,
+			expectErrCode:   errcommon.ResourceExhausted,
+			expectErrSubstr: "per-flow limit reached",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonFlowLimit)},
+		},
+		{
 			name:            "fc_reject_no_endpoints",
 			priority:        0,
 			fcOutcome:       fctypes.QueueOutcomeRejectedNoEndpoints,
@@ -506,6 +516,12 @@ func TestTranslateFlowControlError(t *testing.T) {
 			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrQueueAtCapacity),
 			wantCode:   errcommon.ResourceExhausted,
 			wantReason: string(errcommon.RequestDroppedReasonSaturated),
+		},
+		{
+			name:       "per-flow limit rejection returns 429 with its own reason",
+			err:        fmt.Errorf("%w: %w: %w", fctypes.ErrRejected, fctypes.ErrQueueAtCapacity, fctypes.ErrFlowAtCapacity),
+			wantCode:   errcommon.ResourceExhausted,
+			wantReason: string(errcommon.RequestDroppedReasonFlowLimit),
 		},
 		{
 			name:       "no-endpoints rejection returns 503",

@@ -94,6 +94,11 @@ Required or Optional, directly or through other producers. This includes produce
 automatically. Every other producer runs in step 5. Producers in step 3 see every located candidate,
 so their per-endpoint work grows with the candidates the screeners remove.
 
+For example, `disaggregatedset-rollout-screener` with `revisionGating.affinity.prefixCache` consumes
+`PrefixCacheMatchInfo`, so `approx-prefix-cache-producer` and the `token-producer` it consumes run in
+step 3 with no `dataProducers` entry; see its
+[producer setup](../pkg/epp/framework/plugins/requesthandling/screener/disaggregatedsetrollout/README.md#producer-setup).
+
 #### Scheduling
 
 Each scheduling profile runs the following stages. Multiple profiles may run for one request, such as separate prefill and decode profiles.
@@ -225,6 +230,11 @@ The fields in a schedulingProfile entry are:
 - **plugins**: references plugins that implement `Filter`, `Scorer`, or `Picker` to run when this scheduling profile is chosen for a request.
 - **pluginRef**: reference to the name of the plugin instance to be used
 - **weight**: weight to be used if the referenced plugin is a scorer.
+
+Exactly one profile handler chooses which scheduling profiles run for each request. The EPP fails
+to start when the configuration lists more than one profile handler, or defines more than one
+scheduling profile without one. `single-profile-handler` supports exactly one profile; for more
+profiles, configure `disagg-profile-handler` or `header-profile-handler`.
 
 A complete configuration might look like this:
 
@@ -408,6 +418,8 @@ Enable chunked decode via the pd-sidecar flag:
 >   choice for every choice.
 > - the request declares a non-empty `tools` array and does not set `tool_choice: none`, because a
 >   tool call cannot be reassembled across chunk boundaries.
+> - the request sets `structured_outputs`, or a `response_format` whose `type` is not `text`, because
+>   vLLM applies the constraint to each chunk's output separately.
 
 ---
 
@@ -431,6 +443,7 @@ Enable chunked decode via the pd-sidecar flag:
 - [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
 - [Envoy External Processing](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/ext_proc_filter)
 - [EPP Container Sizing Guide](./operations.md)
+- [Inference API Routing](./api-routing.md)
 
 ### Canonical llm-d architecture (upstream)
 

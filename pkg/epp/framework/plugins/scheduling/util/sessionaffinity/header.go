@@ -27,7 +27,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -79,7 +79,7 @@ func DecodePodName(ctx context.Context, token string) string {
 // TODO: this should be using a cookie and ensure not overriding any other
 // cookie values if present.
 // Tracked in https://github.com/llm-d/llm-d-router/issues/28
-func WriteResponseHeader(ctx context.Context, pluginType, sessionHeader string, response *requestcontrol.Response, targetPod *datalayer.EndpointMetadata) {
+func WriteResponseHeader(ctx context.Context, pluginType, sessionHeader string, response *fwkrh.Response, targetPod *datalayer.EndpointMetadata) {
 	if response == nil || targetPod == nil {
 		reqID := "undefined"
 		if response != nil {

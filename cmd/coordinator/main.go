@@ -140,6 +140,7 @@ func main() {
 		log.Error(err, "failed to register coordinator metrics")
 		os.Exit(1)
 	}
+	coordmetrics.RecordBuildInfo(version.CommitSHA, version.BuildRef)
 
 	gwClient := gateway.New(cfg.Gateway)
 

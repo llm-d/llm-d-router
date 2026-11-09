@@ -43,6 +43,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
@@ -51,7 +52,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -105,15 +105,16 @@ func (s *StreamingServer) SetMaxRequestBodySize(n int) {
 
 // SetResponders sets the plugins that may answer a request instead of routing it. They are
 // asked in the given order.
-func (s *StreamingServer) SetResponders(responders []fwkrc.Responder) {
+func (s *StreamingServer) SetResponders(responders []fwkrh.Responder) {
 	s.responders = responders
 }
 
 type Director interface {
-	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (*RequestContext, error)
+	HandleRequest(ctx context.Context, reqCtx *RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (*RequestContext, error)
 	HandleResponseHeader(ctx context.Context, reqCtx *RequestContext) *RequestContext
 	HandleResponseBody(ctx context.Context, reqCtx *RequestContext, endOfStream bool) *RequestContext
 	GetRandomEndpoint() *fwkdl.EndpointMetadata
+	GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata
 }
 
 type Datastore interface {
@@ -137,7 +138,7 @@ type StreamingServer struct {
 	// maxRequestBodySize caps the buffered request body in bytes; 0 disables the cap.
 	maxRequestBodySize int
 	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
-	responders []fwkrc.Responder
+	responders []fwkrh.Responder
 }
 
 // RequestContext stores context information during the life time of an HTTP request.
@@ -157,7 +158,7 @@ type RequestContext struct {
 	Priority                 int
 	RequestReceivedTimestamp time.Time
 	RequestSize              int
-	Usage                    fwkrh.Usage
+	Usage                    fwkrequest.Usage
 	StreamedEvents           int
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool
@@ -168,7 +169,7 @@ type RequestContext struct {
 
 	// TerminationCause is set only when the stream ends without completing; the end-of-stream
 	// response record defaults an unset cause to a natural completion.
-	TerminationCause fwkrc.TerminationCause
+	TerminationCause fwkrh.TerminationCause
 
 	// FlowControlAdmitted reports whether flow control processed this request. It gates emission of the
 	// FlowQueueDuration response header, distinguishing a genuine zero-wait dispatch from flow control
@@ -190,9 +191,18 @@ type RequestContext struct {
 	// bodyReceived is set once the full request body is buffered; only such requests get an outcome.
 	bodyReceived bool
 
+	// disjointInput holds the input token buckets folded from the response chunks
+	// whose parser reports them separately; Usage.PromptTokens is their sum.
+	disjointInput fwkrh.DisjointInputTokens
+
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
 	sseLineDiscarding bool
+
+	// grpcFrameCarry holds trailing bytes of an incomplete gRPC frame across response chunks.
+	grpcFrameCarry         []byte
+	grpcFrameSkipRemaining uint64
+	grpcStreamCorrupted    bool
 
 	toolCallingSurface             reqcommon.APIType
 	toolCallingRequest             bool
@@ -254,8 +264,8 @@ const (
 	// The state machine sends an ImmediateResponse(429) to the proxy.
 	requestEvicted
 	// requestResponseProcessingSkipped indicates that EPP response-phase stream interception was skipped for this request.
-	// The state machine sends a RequestHeadersResponse and RequestBodyResponse with the routing decision
-	// from the scheduling director to the proxy, and then gracefully closes the stream to stop further external processing.
+	// The state machine sends the RequestHeadersResponse, and a RequestBodyResponse when the request has a body,
+	// with the routing decision to the proxy, and then gracefully closes the stream to stop further external processing.
 	requestResponseProcessingSkipped
 	// requestAnsweredLocal indicates a Responder answered the request itself with an
 	// ImmediateResponse rather than routing it to a model server. The state machine sends the
@@ -288,6 +298,15 @@ func (s *StreamingServer) getOrResolveParser(reqCtx *RequestContext) (fwkrh.Pars
 	return parser, nil
 }
 
+// FirstTokenTimestamp returns when the first response body bytes were received; zero if none were.
+func (r *RequestContext) FirstTokenTimestamp() time.Time { return r.firstTokenTimestamp }
+
+// ResponseCompleteTimestamp returns when the response completed; zero until it does.
+func (r *RequestContext) ResponseCompleteTimestamp() time.Time { return r.responseCompleteTimestamp }
+
+// ModelServerStreaming reports whether the model server answered with an event stream.
+func (r *RequestContext) ModelServerStreaming() bool { return r.modelServerStreaming }
+
 // apiType classifies the request by its path. A request rejected before its
 // headers are copied has no path and classifies as chat completions.
 func (r *RequestContext) apiType() reqcommon.APIType {
@@ -296,6 +315,17 @@ func (r *RequestContext) apiType() reqcommon.APIType {
 		headers = r.Request.Headers
 	}
 	return reqcommon.DetectAPIType(fwkrequest.GetRequestPath(headers))
+}
+
+// releaseRequestBody drops the request body once it has been forwarded, because
+// a streamed response can last for the whole generation. Body is replaced rather
+// than cleared: a DataProducer that outlived its timeout can still hold a copy of
+// the request and read the original body.
+func (r *RequestContext) releaseRequestBody() {
+	r.Request.RawBody = nil
+	if r.SchedulingRequest != nil && r.SchedulingRequest.Body != nil {
+		r.SchedulingRequest.Body = r.SchedulingRequest.Body.ResponsePhaseView()
+	}
 }
 
 func toolCallingAPIForPath(path string) (reqcommon.APIType, bool) {
@@ -352,26 +382,28 @@ func extractTraceContext(ctx context.Context, req *extProcPb.ProcessingRequest_R
 
 // terminationCause classifies a stream that ended without completing. ctxErr is the request
 // context's error, which is non-nil once Envoy has torn the stream down under the EPP.
-func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrc.TerminationCause {
+func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCause {
 	switch {
 	case reqCtx.requestState == requestEvicted:
-		return fwkrc.TerminationCauseEvicted
+		return fwkrh.TerminationCauseEvicted
+	case reqCtx.requestState == requestResponseProcessingSkipped:
+		return fwkrh.TerminationCauseNotObserved
 	case ctxErr != nil:
-		return fwkrc.TerminationCauseClientDisconnect
+		return fwkrh.TerminationCauseClientDisconnect
 	default:
-		return fwkrc.TerminationCauseError
+		return fwkrh.TerminationCauseError
 	}
 }
 
-func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrc.TerminationCause {
+func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrh.TerminationCause {
 	if trailers == nil || trailers.GetTrailers() == nil {
 		return ""
 	}
 
 	for _, header := range trailers.GetTrailers().GetHeaders() {
-		if header.Key == "grpc-status" {
-			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != "0" {
-				return fwkrc.TerminationCauseError
+		if header.Key == grpcframe.HeaderStatus {
+			if grpcStatus := envoy.GetHeaderValue(header); grpcStatus != "" && grpcStatus != grpcframe.StatusOK {
+				return fwkrh.TerminationCauseError
 			}
 			return ""
 		}
@@ -412,7 +444,7 @@ func requestOutcome(reqCtx *RequestContext, err, ctxErr error) (outcome, reason 
 	case reqCtx.responseStatusCode != "":
 		return outcomeFailed, reqCtx.responseStatusCode, true
 	case reqCtx.responseComplete:
-		if reqCtx.TerminationCause == fwkrc.TerminationCauseError {
+		if reqCtx.TerminationCause == fwkrh.TerminationCauseError {
 			return outcomeFailed, errcommon.ModelServerError, true
 		}
 		return outcomeCompleted, "", true
@@ -437,9 +469,16 @@ func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 
 func (s *StreamingServer) putBuffer(buf *bytes.Buffer) {
 	buf.Reset()
-	if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+	if s.poolKeeps(buf) {
 		s.bufferPool.Put(buf)
 	}
+}
+
+// poolKeeps reports whether putBuffer returns buf to the pool. The request body
+// handler relies on this rule: RawBody takes the memory of a buffer the pool
+// does not keep, so such a buffer must never be reused.
+func (s *StreamingServer) poolKeeps(buf *bytes.Buffer) bool {
+	return s.maxPoolBufferSize == 0 || buf.Cap() <= s.maxPoolBufferSize
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
@@ -668,14 +707,21 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if v.RequestBody.EndOfStream {
 				loggerTrace.Info("decoding")
 				reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
-				// Keep the buffer intact through comparison. RawBody is a copy
-				// so parser and Director edits cannot change the baseline.
 				inboundBody := buf.Bytes()
-				reqCtx.Request.RawBody = make([]byte, buf.Len())
-				copy(reqCtx.Request.RawBody, inboundBody)
+				if !s.poolKeeps(buf) {
+					// putBuffer drops this buffer, so RawBody takes its memory.
+					// Parsers and the Director replace RawBody on a rewrite and never
+					// write into it, so inboundBody stays the comparison baseline.
+					reqCtx.Request.RawBody = inboundBody
+					buf = nil
+				} else {
+					// RawBody is a copy so the pooled buffer can be reused.
+					reqCtx.Request.RawBody = make([]byte, len(inboundBody))
+					copy(reqCtx.Request.RawBody, inboundBody)
+				}
 
 				// Body stream complete. Capture raw size for flow control.
-				reqCtx.RequestSize = buf.Len()
+				reqCtx.RequestSize = len(inboundBody)
 				reqCtx.bodyReceived = true
 
 				parser, resolveErr := s.getOrResolveParser(reqCtx)
@@ -755,12 +801,14 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				// The response phase can last for the whole generation, so return
 				// the buffer here unless the tool-calling snapshot in ctx still
-				// references its bytes.
-				if hasInboundToolSnapshot {
-					buf.Reset()
-				} else {
-					s.putBuffer(buf)
-					buf = nil
+				// references its bytes. A buffer above the pool cap is already nil.
+				if buf != nil {
+					if hasInboundToolSnapshot {
+						buf.Reset()
+					} else {
+						s.putBuffer(buf)
+						buf = nil
+					}
 				}
 
 				// After scheduling, look up the eviction channel for eviction support.
@@ -887,6 +935,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			return err
 		}
 		if reqCtx.requestState == requestResponseProcessingSkipped {
+			// A header-time skip (e.g. a WebSocket upgrade) never reaches the body
+			// phase, so the request-processing latency is recorded here. OnceFunc
+			// keeps the body-phase skip from recording twice.
+			recordRequestProcessing()
 			logger.V(logutil.DEFAULT).Info("EPP skipped response interception, routed request",
 				"targetEndpoint", reqCtx.TargetEndpoint,
 				"targetModel", reqCtx.TargetModelName)
@@ -1078,6 +1130,7 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		r.requestRunning = true
 		// Dump the response so a new stream message can begin
 		r.reqBodyResp = nil
+		r.releaseRequestBody()
 	}
 	if r.requestState == responseReceived && r.respHeaderResp != nil {
 		loggerTrace.Info("Sending response header response", "obj", r.respHeaderResp)

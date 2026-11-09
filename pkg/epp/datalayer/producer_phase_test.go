@@ -25,7 +25,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -55,7 +55,7 @@ type mockResponseHeaderScreener struct {
 	mockScreener
 }
 
-func (m *mockResponseHeaderScreener) ResponseHeader(context.Context, *fwksched.InferenceRequest, *fwkrc.Response, *fwkdl.EndpointMetadata) {
+func (m *mockResponseHeaderScreener) ResponseHeader(context.Context, *fwksched.InferenceRequest, *fwkrh.Response, *fwkdl.EndpointMetadata) {
 }
 
 func TestResolveDataProducerPhases(t *testing.T) {
@@ -74,71 +74,71 @@ func TestResolveDataProducerPhases(t *testing.T) {
 	tests := []struct {
 		name     string
 		plugins  []fwkplugin.Plugin
-		explicit map[string]fwkrc.DataProducerPhase
-		want     map[string]fwkrc.DataProducerPhase
+		explicit map[string]fwkrh.DataProducerPhase
+		want     map[string]fwkrh.DataProducerPhase
 	}{
 		{
 			name:    "no screener consumes producer data",
 			plugins: []fwkplugin.Plugin{tokenizer, prefixCache, inflight, &mockScreener{name: "s"}},
-			want: map[string]fwkrc.DataProducerPhase{
-				"tokenizer": fwkrc.DataProducerPhaseScheduling,
-				"prefix":    fwkrc.DataProducerPhaseScheduling,
-				"inflight":  fwkrc.DataProducerPhaseScheduling,
+			want: map[string]fwkrh.DataProducerPhase{
+				"tokenizer": fwkrh.DataProducerPhaseScheduling,
+				"prefix":    fwkrh.DataProducerPhaseScheduling,
+				"inflight":  fwkrh.DataProducerPhaseScheduling,
 			},
 		},
 		{
 			name: "screener requirement promotes the producer and its inputs",
 			plugins: []fwkplugin.Plugin{tokenizer, prefixCache, inflight, predictor,
 				&mockScreener{name: "s", consumes: map[fwkplugin.DataKey]any{prefix: nil}}},
-			want: map[string]fwkrc.DataProducerPhase{
-				"tokenizer": fwkrc.DataProducerPhaseRequestHandling,
-				"prefix":    fwkrc.DataProducerPhaseRequestHandling,
-				"inflight":  fwkrc.DataProducerPhaseScheduling,
-				"predictor": fwkrc.DataProducerPhaseScheduling,
+			want: map[string]fwkrh.DataProducerPhase{
+				"tokenizer": fwkrh.DataProducerPhaseRequestHandling,
+				"prefix":    fwkrh.DataProducerPhaseRequestHandling,
+				"inflight":  fwkrh.DataProducerPhaseScheduling,
+				"predictor": fwkrh.DataProducerPhaseScheduling,
 			},
 		},
 		{
 			name: "optional screener dependency promotes",
 			plugins: []fwkplugin.Plugin{inflight,
 				&mockScreener{name: "s", optional: map[fwkplugin.DataKey]any{load: nil}}},
-			want: map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseRequestHandling},
+			want: map[string]fwkrh.DataProducerPhase{"inflight": fwkrh.DataProducerPhaseRequestHandling},
 		},
 		{
 			name: "screener implementing ResponseHeaderProcessor promotes",
 			plugins: []fwkplugin.Plugin{inflight,
 				&mockResponseHeaderScreener{mockScreener{name: "s", consumes: map[fwkplugin.DataKey]any{load: nil}}}},
-			want: map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseRequestHandling},
+			want: map[string]fwkrh.DataProducerPhase{"inflight": fwkrh.DataProducerPhaseRequestHandling},
 		},
 		{
 			name:     "explicit RequestHandling producer promotes its inputs",
 			plugins:  []fwkplugin.Plugin{tokenizer, prefixCache},
-			explicit: map[string]fwkrc.DataProducerPhase{"prefix": fwkrc.DataProducerPhaseRequestHandling},
-			want: map[string]fwkrc.DataProducerPhase{
-				"tokenizer": fwkrc.DataProducerPhaseRequestHandling,
-				"prefix":    fwkrc.DataProducerPhaseRequestHandling,
+			explicit: map[string]fwkrh.DataProducerPhase{"prefix": fwkrh.DataProducerPhaseRequestHandling},
+			want: map[string]fwkrh.DataProducerPhase{
+				"tokenizer": fwkrh.DataProducerPhaseRequestHandling,
+				"prefix":    fwkrh.DataProducerPhaseRequestHandling,
 			},
 		},
 		{
 			name:     "explicit RequestHandling without consumers",
 			plugins:  []fwkplugin.Plugin{inflight},
-			explicit: map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseRequestHandling},
-			want:     map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseRequestHandling},
+			explicit: map[string]fwkrh.DataProducerPhase{"inflight": fwkrh.DataProducerPhaseRequestHandling},
+			want:     map[string]fwkrh.DataProducerPhase{"inflight": fwkrh.DataProducerPhaseRequestHandling},
 		},
 		{
 			name: "explicit Scheduling is not overridden",
 			plugins: []fwkplugin.Plugin{tokenizer, prefixCache,
 				&mockScreener{name: "s", consumes: map[fwkplugin.DataKey]any{prefix: nil}}},
-			explicit: map[string]fwkrc.DataProducerPhase{"prefix": fwkrc.DataProducerPhaseScheduling},
-			want: map[string]fwkrc.DataProducerPhase{
-				"tokenizer": fwkrc.DataProducerPhaseScheduling,
-				"prefix":    fwkrc.DataProducerPhaseScheduling,
+			explicit: map[string]fwkrh.DataProducerPhase{"prefix": fwkrh.DataProducerPhaseScheduling},
+			want: map[string]fwkrh.DataProducerPhase{
+				"tokenizer": fwkrh.DataProducerPhaseScheduling,
+				"prefix":    fwkrh.DataProducerPhaseScheduling,
 			},
 		},
 		{
 			name:     "explicit entry for a non-producer is ignored",
 			plugins:  []fwkplugin.Plugin{inflight, &mockScreener{name: "s"}},
-			explicit: map[string]fwkrc.DataProducerPhase{"s": fwkrc.DataProducerPhaseRequestHandling},
-			want:     map[string]fwkrc.DataProducerPhase{"inflight": fwkrc.DataProducerPhaseScheduling},
+			explicit: map[string]fwkrh.DataProducerPhase{"s": fwkrh.DataProducerPhaseRequestHandling},
+			want:     map[string]fwkrh.DataProducerPhase{"inflight": fwkrh.DataProducerPhaseScheduling},
 		},
 	}
 	for _, tt := range tests {
@@ -156,9 +156,9 @@ func TestValidateAndOrderDataDependenciesProducerPhases(t *testing.T) {
 		consumes: map[fwkplugin.DataKey]any{tokens: nil}}
 	screener := &mockScreener{name: "s", consumes: map[fwkplugin.DataKey]any{prefix: nil}}
 	responseHeaderScreener := &mockResponseHeaderScreener{mockScreener{name: "rh", consumes: map[fwkplugin.DataKey]any{prefix: nil}}}
-	requestHandling := map[string]fwkrc.DataProducerPhase{
-		"tokenizer": fwkrc.DataProducerPhaseRequestHandling,
-		"prefix":    fwkrc.DataProducerPhaseRequestHandling,
+	requestHandling := map[string]fwkrh.DataProducerPhase{
+		"tokenizer": fwkrh.DataProducerPhaseRequestHandling,
+		"prefix":    fwkrh.DataProducerPhaseRequestHandling,
 	}
 
 	t.Run("screener consumes RequestHandling producers", func(t *testing.T) {
@@ -185,7 +185,7 @@ func TestValidateAndOrderDataDependenciesProducerPhases(t *testing.T) {
 
 	t.Run("RequestHandling producer consuming a Scheduling producer fails", func(t *testing.T) {
 		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{prefixCache, tokenizer},
-			WithDataProducerPhases(map[string]fwkrc.DataProducerPhase{"prefix": fwkrc.DataProducerPhaseRequestHandling}))
+			WithDataProducerPhases(map[string]fwkrh.DataProducerPhase{"prefix": fwkrh.DataProducerPhaseRequestHandling}))
 		assert.ErrorContains(t, err, "producer tokenizer/mock needs to be executed before consumer prefix/mock")
 		assert.ErrorContains(t, err, "run the producer in the RequestHandling phase")
 	})

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -982,6 +983,54 @@ func TestEncodeStep_BuildsCorrectTokenIDs(t *testing.T) {
 		if receivedTokenIDs[i] != float64(32000) {
 			t.Fatalf("expected placeholder=32000 at index %d, got %v", i, receivedTokenIDs[i])
 		}
+	}
+}
+
+// TestEncodeStep_BuildsTokenIDsFromSpan verifies the encode sub-request prompt
+// carries the entry's placeholder span as it sits in the full prompt, so a
+// model that interleaves other tokens inside the span preprocesses the same
+// sequence the prefiller expands.
+func TestEncodeStep_BuildsTokenIDsFromSpan(t *testing.T) {
+	var receivedTokenIDs []any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		receivedTokenIDs, _ = parsed["token_ids"].([]any)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ec_transfer_params": map[string]any{"h1": map[string]any{"peer_port": 5501}},
+		})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, _ := NewEncodeStep(gwClient, map[string]any{"use_openai_format": false})
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-span",
+		Model:     "test",
+		TokenIDs:  []int{1, 32000, 32001, 32000, 2345},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "h1", KwargsData: "dGVzdA==", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
+		},
+	}
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	require.Equal(t, []any{float64(1), float64(32000), float64(32001), float64(32000)}, receivedTokenIDs)
+
+	// A span past the end of token_ids fails the request.
+	reqCtx.TokenIDs = []int{1, 32000}
+	require.Error(t, step.Execute(context.Background(), reqCtx))
+
+	// A negative length or an offset+length that overflows int fails the
+	// request instead of panicking.
+	reqCtx.TokenIDs = []int{1, 32000, 32001, 32000, 2345}
+	for _, span := range []pipeline.PlaceholderRange{
+		{Offset: 4, Length: -2},
+		{Offset: 2, Length: math.MaxInt},
+	} {
+		reqCtx.MultimodalEntries[0].Placeholder = span
+		require.Error(t, step.Execute(context.Background(), reqCtx), "span %+v", span)
 	}
 }
 
@@ -2027,4 +2076,36 @@ func TestEncodeStep_ClientCancelLogsNoError(t *testing.T) {
 	err = step.Execute(log.IntoContext(ctx, logr.New(sink)), reqCtx)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, sink.errors, "a cancelled fan-out must not log at error level")
+}
+
+// The encode step skips SGLang gRPC Generate requests even when multimodal
+// entries are present, so it never posts a JSON encode request for them.
+func TestEncodeStep_SkipsSGLangGRPCGenerate(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		RequestID:           "req-grpc",
+		GRPCGeneratePayload: []byte{},
+		TokenIDs:            []int{1, 32000, 2},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := requestCount.Load(); got != 0 {
+		t.Fatalf("encode sent %d gateway requests for a gRPC Generate request, want 0", got)
+	}
 }

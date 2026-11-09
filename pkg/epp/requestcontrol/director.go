@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -51,10 +50,11 @@ import (
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentlineage"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -62,7 +62,7 @@ import (
 
 const (
 	// dataProducerTimeout is the default per-producer execution timeout. A
-	// producer overrides it by implementing requestcontrol.TimeoutAwareProducer.
+	// producer overrides it by implementing requesthandling.TimeoutAwareProducer.
 	dataProducerTimeout       = 400 * time.Millisecond
 	responseBodyQueueCapacity = 100
 )
@@ -106,8 +106,7 @@ func NewDirectorWithConfig(
 // responseBodyWork represents a unit of work to be processed by the async response body queue.
 type responseBodyWork struct {
 	ctx            context.Context
-	request        *fwksched.InferenceRequest
-	response       *fwkrc.Response
+	response       *fwkrh.Response
 	targetEndpoint *fwkdl.EndpointMetadata
 }
 
@@ -119,6 +118,9 @@ type responseBodyQueue struct {
 	done   chan struct{} // closed when the processing goroutine exits
 	mu     sync.Mutex
 	closed bool
+	// requests holds the request scoped to each ResponseStreaming plugin, in
+	// plugin order, for every chunk of the response.
+	requests []*fwksched.InferenceRequest
 }
 
 func newResponseBodyQueue() *responseBodyQueue {
@@ -205,7 +207,7 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 
 // HandleRequest orchestrates the request lifecycle.
 // It always returns the requestContext even in the error case, as the request context is used in error handling.
-func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
+func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
 	// An error while admitting (admission controller, candidate lookup, screeners, Admitter plugins)
@@ -267,19 +269,70 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
+	// Producers may hold per-request state between RequestHeader or Produce and
+	// PreRequest, where they normally release it. Release it here for every path
+	// that leaves HandleRequest without reaching PreRequest: a RequestHeader
+	// error, a flow-control rejection, no endpoint candidates, screeners
+	// eliminating every candidate, an Admitter denial, a scheduler error, or a
+	// prepareRequest failure.
+	reachedPreRequest := false
+	defer func() {
+		if !reachedPreRequest {
+			d.releaseProducerState(ctx, reqCtx.SchedulingRequest)
+		}
+	}()
+
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
-	// Derive FairnessID from agent identity when no explicit header supplied it.
+	// Derive the FairnessID from the fairness-ID header (tenant identity) and
+	// the derived-root or agent-identity attribute (program/session identity).
+	// The derived root, published by the agent-lineage plugin, is the session
+	// ID of the root request of the request's tree and takes precedence over
+	// the raw agent identity. Composition is opt-in through
+	// requestHandler.composeFairnessIDs. When enabled, the tenant is
+	// percent-encoded and joined with the root or session as
+	// "<tenant>/<root>", so flow control keys one queue per program while the
+	// tenant stays visible for isolation and metric labels. Encoding "%" and
+	// "/" keeps the first segment exactly the tenant, so a tenant carrying
+	// either character cannot collide with another tenant's composed key, and
+	// root or session IDs stay free to contain the separator. A request with
+	// a root but no fairness header composes onto the default tenant
+	// ("<default-tenant>/<root>"). When disabled, the fairness-ID header keys
+	// the flow as sent, a headerless request keys on its root or session
+	// alone, and a request carrying neither identity falls back to the
+	// default flow.
 	source := tracing.AttributionSourceHeader
-	if reqCtx.SchedulingRequest.FairnessID == "" {
-		if agentID, ok := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey); ok && agentID != "" {
-			reqCtx.SchedulingRequest.FairnessID = agentID
-			source = tracing.AttributionSourceAgentIdentity
+	tenantID := reqCtx.SchedulingRequest.FairnessID
+	root, _ := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentlineage.DerivedRootKey)
+	agentID, _ := fwksched.ReadRequestAttribute[string](reqCtx.SchedulingRequest, agentidentity.AgentIdentityKey)
+	programID := root
+	if programID == "" {
+		programID = agentID
+	}
+	switch {
+	case tenantID != "" && d.requestControlPlugins.ComposeFairnessIDs():
+		tenantID = escapeFairnessTenant(tenantID)
+		if programID != "" {
+			reqCtx.SchedulingRequest.FairnessID = tenantID + metadata.FairnessIDTenantSeparator + programID
 		} else {
-			reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultFairnessID
-			source = tracing.AttributionSourceDefault
+			reqCtx.SchedulingRequest.FairnessID = tenantID
 		}
+	case tenantID != "":
+		// Header-only traffic keys the flow on the tenant fairness ID as sent.
+	case root != "":
+		if d.requestControlPlugins.ComposeFairnessIDs() {
+			reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultTenantID + metadata.FairnessIDTenantSeparator + root
+		} else {
+			reqCtx.SchedulingRequest.FairnessID = root
+		}
+		source = tracing.AttributionSourceDerivedRoot
+	case agentID != "":
+		reqCtx.SchedulingRequest.FairnessID = agentID
+		source = tracing.AttributionSourceAgentIdentity
+	default:
+		reqCtx.SchedulingRequest.FairnessID = reqcommon.DefaultFairnessID
+		source = tracing.AttributionSourceDefault
 	}
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)
@@ -315,23 +368,11 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 	}
 
-	// Producers may hold per-request state between Produce and PreRequest, where
-	// they normally release it. Release it here for every path that leaves
-	// HandleRequest without reaching PreRequest: screeners eliminating every
-	// candidate after RequestHandling producers ran, an Admitter denial, a scheduler
-	// error, or a prepareRequest failure.
-	reachedPreRequest := false
-	defer func() {
-		if !reachedPreRequest {
-			d.releaseProducerState(ctx, reqCtx.SchedulingRequest)
-		}
-	}()
-
 	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
 	// A producer whose RequestHandling run fails leaves its keys missing for the
 	// Scheduling phase too, so producers requiring them are skipped there.
 	missingKeys := map[string]struct{}{}
-	if err := d.runDataProducers(ctx, fwkrc.RequestHandlingDataProducerExtensionPoint, d.requestControlPlugins.requestHandlingDataProducers,
+	if err := d.runDataProducers(ctx, fwkrh.RequestHandlingDataProducerExtensionPoint, d.requestControlPlugins.requestHandlingDataProducers,
 		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
 		// Don't fail the request if DataProducer plugins fail.
 		logger.Error(err, "failed to prepare request handling data")
@@ -345,7 +386,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 	}
 	// Prepare per request data by running DataProducer plugins.
-	if err := d.runDataProducers(ctx, fwkrc.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
+	if err := d.runDataProducers(ctx, fwkrh.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
 		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
 		// Don't fail the request if DataProducer plugins fail.
 		logger.Error(err, "failed to prepare per request data")
@@ -407,10 +448,21 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	return reqCtx, nil
 }
 
+// escapeFairnessTenant percent-encodes the characters that would otherwise make
+// the tenant/session split ambiguous: "%" and the separator. A tenant with
+// neither is returned unchanged without allocating.
+func escapeFairnessTenant(id string) string {
+	if !strings.ContainsAny(id, "%"+metadata.FairnessIDTenantSeparator) {
+		return id
+	}
+	id = strings.ReplaceAll(id, "%", "%25")
+	return strings.ReplaceAll(id, metadata.FairnessIDTenantSeparator, "%2F")
+}
+
 // modelRewriteIfNeeded rewrites the model name in the payload when the resolved target
 // differs from the model the parser read out of the body, marking the body Mutated so
 // repackage can skip re-marshaling when nothing changed.
-func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) error {
 	if reqCtx.TargetModelName == "" {
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
@@ -420,7 +472,7 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 		logger.Info("Warning: parser does not implement ModelNameRewriter, skipping model rewrite")
 		return nil
 	}
-	payload, ok := inferenceRequestBody.Payload.(fwkrh.MarshalablePayload)
+	payload, ok := inferenceRequestBody.Payload.(fwkrequest.MarshalablePayload)
 	if !ok {
 		logger.Info("Warning: payload does not implement MarshalablePayload, skipping model rewrite")
 		return nil
@@ -442,7 +494,7 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 	return nil
 }
 
-func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) error {
 	logger := log.FromContext(ctx)
 	// Priority propagation is an explicit opt-in policy; when disabled the request
 	// body is forwarded unchanged.
@@ -454,7 +506,7 @@ func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers
 		logger.V(logutil.DEBUG).Info("parser does not implement PriorityRewriter, skipping priority rewrite")
 		return nil
 	}
-	payload, ok := inferenceRequestBody.Payload.(fwkrh.MarshalablePayload)
+	payload, ok := inferenceRequestBody.Payload.(fwkrequest.MarshalablePayload)
 	if !ok {
 		logger.V(logutil.DEBUG).Info("payload does not implement MarshalablePayload, skipping priority rewrite")
 		return nil
@@ -477,14 +529,14 @@ func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers
 // repackage re-serializes the request body when inferenceRequestBody was mutated since
 // parsing (see InferenceRequestBody.Mutated), skipping the marshal otherwise so the
 // originally received bytes are forwarded unchanged.
-func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) error {
 	if !inferenceRequestBody.Mutated {
 		reqCtx.RequestSize = len(reqCtx.Request.RawBody)
 		return nil
 	}
-	marshaler, ok := inferenceRequestBody.WirePayload().(fwkrh.Marshaler)
+	marshaler, ok := inferenceRequestBody.WirePayload().(fwkrequest.Marshaler)
 	if !ok {
-		// Payload forwarded unchanged (raw or proto).
+		// Payload forwarded unchanged.
 		reqCtx.RequestSize = len(reqCtx.Request.RawBody)
 		return nil
 	}
@@ -603,7 +655,7 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	// claimed the header. Ensures a missing gate plugin surfaces as a 412 so
 	// the coordinator's cache-miss fallback runs, instead of a silent forward.
 	if routing.IsConditionalDecode(reqCtx.SchedulingRequest.Headers) {
-		if _, handled := reqCtx.SchedulingRequest.GetAttribute(fwkrc.ConditionalDecodeHandledAttributeKey); !handled {
+		if _, handled := reqCtx.SchedulingRequest.GetAttribute(fwkrh.ConditionalDecodeHandledAttributeKey); !handled {
 			return reqCtx, errcommon.Error{
 				Code: errcommon.PreconditionFailed,
 				Msg:  "conditional-decode request received but no gate plugin is configured",
@@ -641,7 +693,7 @@ func (d *Director) HandleResponseHeader(ctx context.Context, reqCtx *handlers.Re
 	if len(d.requestControlPlugins.responseReceivedPlugins) == 0 {
 		return reqCtx
 	}
-	response := &fwkrc.Response{
+	response := &fwkrh.Response{
 		RequestID:   reqCtx.Request.ID,
 		Headers:     reqCtx.Response.Headers,
 		ReqMetadata: reqCtx.Request.Metadata,
@@ -662,18 +714,18 @@ func (d *Director) HandleResponseHeader(ctx context.Context, reqCtx *handlers.Re
 // to the ext_proc response sent back to Envoy.
 func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.RequestContext, endOfStream bool) *handlers.RequestContext {
 	// Resolved once so every end-of-stream Response carries the same cause.
-	var cause fwkrc.TerminationCause
+	var cause fwkrh.TerminationCause
 	if endOfStream {
 		cause = reqCtx.TerminationCause
 		if cause == "" {
-			cause = fwkrc.TerminationCauseNatural
+			cause = fwkrh.TerminationCauseNatural
 		}
 	}
 
 	// The eviction tracker must observe stream termination even when no streaming plugins are
 	// registered, so this runs before the early return below.
 	if endOfStream && d.requestEvictor != nil {
-		d.requestEvictor.ResponseBody(ctx, reqCtx.SchedulingRequest, &fwkrc.Response{
+		d.requestEvictor.ResponseBody(ctx, reqCtx.SchedulingRequest, &fwkrh.Response{
 			RequestID:        reqCtx.Request.ID,
 			EndOfStream:      true,
 			TerminationCause: cause,
@@ -686,7 +738,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 
 	startOfStream := !reqCtx.ResponseBodyStarted
 	reqCtx.ResponseBodyStarted = true
-	response := &fwkrc.Response{
+	response := &fwkrh.Response{
 		RequestID:      reqCtx.Request.ID,
 		Headers:        reqCtx.Response.Headers,
 		StartOfStream:  startOfStream,
@@ -697,24 +749,31 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 
 	if endOfStream {
 		response.TerminationCause = cause
+		response.ReceivedTimestamp = reqCtx.RequestReceivedTimestamp
+		response.FirstTokenTimestamp = reqCtx.FirstTokenTimestamp()
+		response.CompleteTimestamp = reqCtx.ResponseCompleteTimestamp()
+		response.Streaming = reqCtx.ModelServerStreaming()
 		// Drain the async queue: close the channel and wait for the goroutine to finish
 		// processing all previously queued chunks before running the final chunk synchronously.
+		var requests []*fwksched.InferenceRequest
 		if val, ok := d.responseBodyQueues.LoadAndDelete(reqCtx); ok {
 			q := val.(*responseBodyQueue)
 			q.closeAndWait()
+			requests = q.requests
+		} else {
+			requests = d.scopeResponseStreamingPlugins(ctx, reqCtx.SchedulingRequest)
 		}
 		// Run the final chunk synchronously so DynamicMetadata is available for the response.
-		d.runResponseBodyPlugins(ctx, reqCtx.SchedulingRequest, response, reqCtx.TargetPod)
+		d.runResponseBodyPlugins(ctx, requests, response, reqCtx.TargetPod)
 		reqCtx.Response.DynamicMetadata = response.DynamicMetadata
 	} else {
 		// Get or create the async queue for this request.
 		work := responseBodyWork{
 			ctx:            ctx,
-			request:        reqCtx.SchedulingRequest,
 			response:       response,
 			targetEndpoint: reqCtx.TargetPod,
 		}
-		q := d.loadOrCreateResponseBodyQueue(reqCtx)
+		q := d.loadOrCreateResponseBodyQueue(ctx, reqCtx)
 		if !q.enqueue(work) {
 			// Built here rather than at function entry: this path is per-chunk, and
 			// deriving a logger allocates whether or not anything is emitted.
@@ -725,11 +784,12 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	return reqCtx
 }
 
-func (d *Director) loadOrCreateResponseBodyQueue(reqCtx *handlers.RequestContext) *responseBodyQueue {
+func (d *Director) loadOrCreateResponseBodyQueue(ctx context.Context, reqCtx *handlers.RequestContext) *responseBodyQueue {
 	if val, ok := d.responseBodyQueues.Load(reqCtx); ok {
 		return val.(*responseBodyQueue)
 	}
 	q := newResponseBodyQueue()
+	q.requests = d.scopeResponseStreamingPlugins(ctx, reqCtx.SchedulingRequest)
 	val, loaded := d.responseBodyQueues.LoadOrStore(reqCtx, q)
 	if loaded {
 		return val.(*responseBodyQueue)
@@ -748,6 +808,34 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 	return pod.GetMetadata()
 }
 
+// GetRandomDecodeEndpoint returns a random endpoint that can serve a decode
+// session, for requests routed without a scheduling profile. A nil metadata
+// with a non-empty pool means no endpoint is decode-capable.
+func (d *Director) GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata {
+	pods := d.datastore.PodList(decodeCapableEndpoint)
+	if len(pods) == 0 {
+		return nil
+	}
+	number := rand.Intn(len(pods)) //#nosec G404 -- load spreading across pods, not security-sensitive
+	return pods[number].GetMetadata()
+}
+
+// decodeCapableEndpoint follows the bylabel role filters: an endpoint without
+// the role label counts as decode-capable, prefill-only, encode-only, and
+// unrecognized roles do not.
+func decodeCapableEndpoint(ep fwkdl.Endpoint) bool {
+	meta := ep.GetMetadata()
+	if meta == nil || meta.Labels == nil {
+		return true
+	}
+	switch meta.Labels[bylabel.RoleLabel] {
+	case "", bylabel.RoleDecode, bylabel.RolePrefillDecode, bylabel.RoleEncodePrefillDecode:
+		return true
+	default:
+		return false
+	}
+}
+
 // runPreRequestPlugins invokes every registered PreRequest plugin, wraps each non-nil
 // error with the plugin's typed name, and returns the joined result. Plugins are not
 // short-circuited: a failure in one does not skip the rest, so every plugin still runs
@@ -763,10 +851,10 @@ func (d *Director) runPreRequestPlugins(ctx context.Context, request *fwksched.I
 		if debugEnabled {
 			loggerDebug.Info("Running PreRequest plugin", "plugin", name)
 		}
-		scopedRequest, violations := datalayer.ScopeRequest(logger, fwkrc.PreRequestExtensionPoint, plugin, request)
+		scopedRequest, violations := datalayer.ScopeRequest(logger, fwkrh.PreRequestExtensionPoint, plugin, request)
 		before := time.Now()
 		err := plugin.PreRequest(ctx, scopedRequest, schedulingResult)
-		metrics.RecordPluginProcessingLatency(fwkrc.PreRequestExtensionPoint, name.Type, name.Name, time.Since(before))
+		metrics.RecordPluginProcessingLatency(fwkrh.PreRequestExtensionPoint, name.Type, name.Name, time.Since(before))
 		if err == nil {
 			err = violations.Write()
 		}
@@ -788,18 +876,23 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 	if len(d.requestControlPlugins.requestHeaderPlugins) == 0 {
 		return nil
 	}
-	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	logger := log.FromContext(ctx)
+	loggerDebug := logger.V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	for _, plugin := range d.requestControlPlugins.requestHeaderPlugins {
 		name := plugin.TypedName()
 		if debugEnabled {
 			loggerDebug.Info("Running RequestHeaderProcessor plugin", "plugin", name)
 		}
+		scopedRequest, violations := datalayer.ScopeRequest(logger, fwkrh.RequestHeaderExtensionPoint, plugin, request)
 		before := time.Now()
-		if err := plugin.RequestHeader(ctx, request); err != nil {
+		if err := plugin.RequestHeader(ctx, scopedRequest); err != nil {
 			return err
 		}
-		metrics.RecordPluginProcessingLatency(fwkrc.RequestHeaderExtensionPoint, name.Type, name.Name, time.Since(before))
+		metrics.RecordPluginProcessingLatency(fwkrh.RequestHeaderExtensionPoint, name.Type, name.Name, time.Since(before))
+		if err := violations.Write(); err != nil {
+			return errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("RequestHeader %q failed: %w", name.String(), err).Error()}
+		}
 		if debugEnabled {
 			loggerDebug.Info("Completed running RequestHeaderProcessor plugin successfully", "plugin", name)
 		}
@@ -809,7 +902,7 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 
 // runDataProducers runs one phase's producers. missing holds the keys of
 // producers that failed or were skipped, across phases.
-func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, plugins []fwkrc.DataProducer,
+func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, plugins []fwkrh.DataProducer,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint, missing map[string]struct{}) error {
 	if len(plugins) == 0 {
 		return nil
@@ -820,7 +913,7 @@ func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, 
 	// their own keys count as missing in turn. The errors are returned joined.
 	// Once the request's context is done, no further producer is started.
 	var errs []error
-	markMissing := func(p fwkrc.DataProducer) {
+	markMissing := func(p fwkrh.DataProducer) {
 		for key := range p.Produces() {
 			missing[key.String()] = struct{}{}
 		}
@@ -835,7 +928,7 @@ func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, 
 			markMissing(p)
 			continue
 		}
-		if err := dataProducerPluginsWithTimeout(ctx, extensionPoint, producerTimeout(p), []fwkrc.DataProducer{p}, request, endpoints); err != nil {
+		if err := dataProducerPluginsWithTimeout(ctx, extensionPoint, producerTimeout(p), []fwkrh.DataProducer{p}, request, endpoints); err != nil {
 			errs = append(errs, err)
 			if ctx.Err() != nil {
 				break
@@ -847,7 +940,7 @@ func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, 
 }
 
 // missingRequiredInput returns a key that p requires and that is in missing.
-func missingRequiredInput(p fwkrc.DataProducer, missing map[string]struct{}) (string, bool) {
+func missingRequiredInput(p fwkrh.DataProducer, missing map[string]struct{}) (string, bool) {
 	if len(missing) == 0 {
 		return "", false
 	}
@@ -865,7 +958,8 @@ func missingRequiredInput(p fwkrc.DataProducer, missing map[string]struct{}) (st
 
 func (d *Director) runScreeners(ctx context.Context,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
-	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	logger := log.FromContext(ctx)
+	loggerDebug := logger.V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	filteredEndpoints := endpoints
 	for _, plugin := range d.requestControlPlugins.screeners {
@@ -873,9 +967,13 @@ func (d *Director) runScreeners(ctx context.Context,
 		if debugEnabled {
 			loggerDebug.Info("Running Screener plugin", "plugin", name)
 		}
+		// Violations dropped: Screen has no error return, so the scope's counter
+		// is the only signal. Scoping builds a fresh slice per screener, so no
+		// screener sees another's edits to its input.
+		scopedRequest, scopedEndpoints, _ := datalayer.ScopeInvocation(logger, fwkrh.ScreenerExtensionPoint, plugin, request, endpoints)
 		before := time.Now()
-		pluginEndpoints := plugin.Screen(ctx, request, slices.Clone(endpoints))
-		metrics.RecordPluginProcessingLatency(fwkrc.ScreenerExtensionPoint,
+		pluginEndpoints := datalayer.Unscope(plugin.Screen(ctx, scopedRequest, scopedEndpoints))
+		metrics.RecordPluginProcessingLatency(fwkrh.ScreenerExtensionPoint,
 			name.Type, name.Name, time.Since(before))
 		allowed := make(map[fwksched.Endpoint]struct{}, len(pluginEndpoints))
 		for _, endpoint := range pluginEndpoints {
@@ -898,16 +996,20 @@ func (d *Director) runScreeners(ctx context.Context,
 
 func (d *Director) runAdmissionPlugins(ctx context.Context,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (fwkplugin.TypedName, error) {
-	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+	logger := log.FromContext(ctx)
+	loggerDebug := logger.V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	for _, plugin := range d.requestControlPlugins.admissionPlugins {
 		name := plugin.TypedName()
 		if debugEnabled {
 			loggerDebug.Info("Running Admit plugin", "plugin", name)
 		}
+		// Violations dropped: Admit returns a denial reason rather than a plugin
+		// error, so a rejected write is not grounds to deny the request.
+		scopedRequest, scopedEndpoints, _ := datalayer.ScopeInvocation(logger, fwkrh.AdmissionExtensionPoint, plugin, request, endpoints)
 		before := time.Now()
-		denyReason := plugin.Admit(ctx, request, endpoints)
-		metrics.RecordPluginProcessingLatency(fwkrc.AdmissionExtensionPoint, name.Type, name.Name, time.Since(before))
+		denyReason := plugin.Admit(ctx, scopedRequest, scopedEndpoints)
+		metrics.RecordPluginProcessingLatency(fwkrh.AdmissionExtensionPoint, name.Type, name.Name, time.Since(before))
 		if denyReason != nil {
 			if debugEnabled {
 				loggerDebug.Info("Admit plugin denied the request", "plugin", name, "reason", denyReason.Error())
@@ -934,17 +1036,20 @@ func admissionReason(err error) string {
 	return e.Code
 }
 
-func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {
-	loggerDebug := log.FromContext(ctx).V(logutil.DEBUG)
+func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
+	logger := log.FromContext(ctx)
+	loggerDebug := logger.V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
 	for _, plugin := range d.requestControlPlugins.responseReceivedPlugins {
 		name := plugin.TypedName()
 		if debugEnabled {
 			loggerDebug.Info("Running ResponseReceived plugin", "plugin", name)
 		}
+		// Violations dropped: ResponseHeader has no error return.
+		scopedRequest, _ := datalayer.ScopeRequest(logger, fwkrh.ResponseReceivedExtensionPoint, plugin, request)
 		before := time.Now()
-		plugin.ResponseHeader(ctx, request, response, targetEndpoint)
-		metrics.RecordPluginProcessingLatency(fwkrc.ResponseReceivedExtensionPoint, name.Type, name.Name, time.Since(before))
+		plugin.ResponseHeader(ctx, scopedRequest, response, targetEndpoint)
+		metrics.RecordPluginProcessingLatency(fwkrh.ResponseReceivedExtensionPoint, name.Type, name.Name, time.Since(before))
 		if debugEnabled {
 			loggerDebug.Info("Completed running ResponseReceived plugin successfully", "plugin", name)
 		}
@@ -952,18 +1057,35 @@ func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksch
 }
 
 func (d *Director) releaseProducerState(ctx context.Context, request *fwksched.InferenceRequest) {
-	for _, plugins := range [][]fwkrc.DataProducer{d.requestControlPlugins.requestHandlingDataProducers, d.requestControlPlugins.dataProducerPlugins} {
+	for _, plugins := range [][]fwkrh.DataProducer{d.requestControlPlugins.requestHandlingDataProducers, d.requestControlPlugins.dataProducerPlugins} {
 		for _, p := range plugins {
-			if abandoner, ok := p.(fwkrc.RequestAbandoned); ok {
+			if abandoner, ok := p.(fwkrh.RequestAbandoned); ok {
 				abandoner.RequestAbandoned(ctx, request)
 			}
 		}
 	}
 }
 
-func (d *Director) runResponseBodyPlugins(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, targetEndpoint *fwkdl.EndpointMetadata) {
+// scopeResponseStreamingPlugins confines each ResponseStreaming plugin to its
+// declarations. It runs once per response rather than per chunk: no request
+// field is written after scheduling, so one scoped copy per plugin serves every
+// chunk without the per-chunk allocation. Violations are dropped: ResponseBody
+// has no error return.
+func (d *Director) scopeResponseStreamingPlugins(ctx context.Context, request *fwksched.InferenceRequest) []*fwksched.InferenceRequest {
+	logger := log.FromContext(ctx)
+	plugins := d.requestControlPlugins.responseStreamingPlugins
+	requests := make([]*fwksched.InferenceRequest, len(plugins))
+	for i, plugin := range plugins {
+		requests[i], _ = datalayer.ScopeRequest(logger, fwkrh.ResponseStreamingExtensionPoint, plugin, request)
+	}
+	return requests
+}
+
+// runResponseBodyPlugins runs each ResponseStreaming plugin with its request
+// from scopeResponseStreamingPlugins.
+func (d *Director) runResponseBodyPlugins(ctx context.Context, requests []*fwksched.InferenceRequest, response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
 	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
-	for _, plugin := range d.requestControlPlugins.responseStreamingPlugins {
+	for i, plugin := range d.requestControlPlugins.responseStreamingPlugins {
 		// This loop runs per response chunk, so it caches TypedName and guards
 		// the log calls: passing arguments to a disabled logger still boxes them
 		// into a heap-allocated slice.
@@ -972,8 +1094,8 @@ func (d *Director) runResponseBodyPlugins(ctx context.Context, request *fwksched
 			loggerTrace.Info("Running ResponseStreaming plugin", "plugin", name)
 		}
 		before := time.Now()
-		plugin.ResponseBody(ctx, request, response, targetEndpoint)
-		metrics.RecordPluginProcessingLatency(fwkrc.ResponseStreamingExtensionPoint, name.Type, name.Name, time.Since(before))
+		plugin.ResponseBody(ctx, requests[i], response, targetEndpoint)
+		metrics.RecordPluginProcessingLatency(fwkrh.ResponseStreamingExtensionPoint, name.Type, name.Name, time.Since(before))
 		if loggerTrace.Enabled() {
 			loggerTrace.Info("Completed running ResponseStreaming plugin successfully", "plugin", name)
 		}
@@ -986,6 +1108,6 @@ func (d *Director) runResponseBodyPlugins(ctx context.Context, request *fwksched
 func (d *Director) processResponseBodyQueue(q *responseBodyQueue) {
 	defer close(q.done)
 	for work := range q.ch {
-		d.runResponseBodyPlugins(work.ctx, work.request, work.response, work.targetEndpoint)
+		d.runResponseBodyPlugins(work.ctx, q.requests, work.response, work.targetEndpoint)
 	}
 }

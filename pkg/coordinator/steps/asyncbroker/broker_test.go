@@ -42,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
@@ -204,6 +205,32 @@ func TestAsyncBrokerNoModeHeaderIsNoOp(t *testing.T) {
 	assert.Empty(t, keys)
 }
 
+func TestAsyncBrokerSGLangGRPCGenerateIsNoOp(t *testing.T) {
+	for _, mode := range []string{"passthrough", "enqueue", "wait", "sideways"} {
+		t.Run(mode, func(t *testing.T) {
+			step, rdb := newAsyncTestStep(t, nil)
+			rec := httptest.NewRecorder()
+			reqCtx := &pipeline.RequestContext{
+				RequestID:           "req-grpc-1",
+				OriginalPath:        sglangapiv1.SglangService_Generate_FullMethodName,
+				OriginalHeaders:     http.Header{http.CanonicalHeaderKey(defaultModeHeader): {mode}},
+				GRPCGeneratePayload: []byte{},
+				Stream:              true,
+				ResponseWriter:      rec,
+			}
+
+			require.NoError(t, step.Execute(t.Context(), reqCtx))
+
+			// No JSON error on the gRPC stream and nothing in Redis.
+			assert.Empty(t, rec.Body.String())
+			assert.Empty(t, rec.Header())
+			keys, err := rdb.Keys(t.Context(), "*").Result()
+			require.NoError(t, err)
+			assert.Empty(t, keys)
+		})
+	}
+}
+
 func TestAsyncBrokerRejections(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -339,6 +366,7 @@ func TestAsyncBrokerClientGone(t *testing.T) {
 		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
 		for _, line := range logged {
 			assert.NotContains(t, line, "failed to enqueue request")
+			assert.NotContains(t, line, "failed to cancel abandoned request")
 		}
 	})
 	t.Run("wait", func(t *testing.T) {
@@ -372,11 +400,12 @@ func TestAsyncBrokerClientGone(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), exists, "the abandoned request should be marked cancelled before dispatch")
 	})
-	t.Run("enqueue with a client-chosen id stays queued", func(t *testing.T) {
-		// The client already knows this id, so it can still fetch, delete, or
-		// retry the request after this connection is gone.
+	t.Run("enqueue with a client-chosen id cancels the queued request", func(t *testing.T) {
+		// A gateway can mint the id for a client that sent none, so the step
+		// cannot know the client holds it. A client that chose it re-POSTs
+		// the id to revive the still-queued request.
 		step, rdb := newAsyncTestStep(t, nil)
-		reqCtx, _ := asyncReqCtx(t, `{"model":"test-model"}`,
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`,
 			map[string]string{
 				defaultModeHeader:            "enqueue",
 				defaultTenantHeader:          "team-a",
@@ -388,29 +417,71 @@ func TestAsyncBrokerClientGone(t *testing.T) {
 		step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel}
 
 		err := step.Execute(ctx, reqCtx)
-		require.ErrorIs(t, err, pipeline.ErrPipelineDone)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
 
 		eid := envelopeID("team-a", "client-job")
 		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(eid)).Result()
 		require.NoError(t, err)
-		assert.Zero(t, exists, "a request the client can still address should not be cancelled")
-		members, err := rdb.ZRange(t.Context(), "team-default-queue", 0, -1).Result()
-		require.NoError(t, err)
-		assert.Len(t, members, 1, "a request the client can still address should stay queued")
+		assert.Equal(t, int64(1), exists, "the abandoned request should be marked cancelled before dispatch")
 	})
 }
 
 // cancelAfterSubmit ends the request context once the enqueue has succeeded,
-// so the client is gone when the hold begins.
+// so the client is gone when the hold begins. A non-nil err replaces the
+// submit's success, as for a reply lost after Redis ran the enqueue.
 type cancelAfterSubmit struct {
 	asyncSubmitter
 	cancel context.CancelFunc
+	err    error
 }
 
 func (s cancelAfterSubmit) SubmitRequest(ctx context.Context, req api.Request) error {
 	err := s.asyncSubmitter.SubmitRequest(ctx, req)
 	s.cancel()
+	if err == nil {
+		err = s.err
+	}
 	return err
+}
+
+// A client gone during the submit is cancelled pre-dispatch in both queued
+// modes, whatever the id's origin, including a failed submit that reached Redis.
+func TestAsyncBrokerCancelsAbandonedSubmit(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      string
+		clientID  string
+		submitErr error
+	}{
+		{name: "enqueue, generated id", mode: "enqueue"},
+		{name: "enqueue, client-chosen id", mode: "enqueue", clientID: "req-test-1"},
+		{name: "enqueue, failed submit", mode: "enqueue", submitErr: context.Canceled},
+		{name: "enqueue, client-chosen id, failed submit", mode: "enqueue", clientID: "req-test-1", submitErr: context.Canceled},
+		{name: "wait, client-chosen id", mode: "wait", clientID: "req-test-1"},
+		{name: "wait, failed submit", mode: "wait", submitErr: context.Canceled},
+		{name: "wait, client-chosen id, failed submit", mode: "wait", clientID: "req-test-1", submitErr: context.Canceled},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			step, rdb := newAsyncTestStep(t, nil)
+			headers := map[string]string{defaultModeHeader: tc.mode, defaultTenantHeader: "team-a"}
+			if tc.clientID != "" {
+				headers["X-Request-Id"] = tc.clientID
+			}
+			reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, headers)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			step.sub = cancelAfterSubmit{asyncSubmitter: step.sub, cancel: cancel, err: tc.submitErr}
+
+			err := step.Execute(ctx, reqCtx)
+			require.ErrorIs(t, err, context.Canceled)
+			assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+			cancelled, err := rdb.Exists(t.Context(), api.RequestCancellationKey(envelopeID("team-a", "req-test-1"))).Result()
+			require.NoError(t, err)
+			assert.Equal(t, int64(1), cancelled)
+		})
+	}
 }
 
 func upstreamRequestCount(t *testing.T, reg *prometheus.Registry, upstream string) float64 {
@@ -979,6 +1050,30 @@ func TestAsyncBrokerRetryReattaches(t *testing.T) {
 		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(eid)).Result()
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), exists, "retry should clear the cancel marker")
+		assert.Equal(t, int64(1), queueLen(t, rdb))
+	})
+
+	t.Run("aborted retry leaves the live request queued", func(t *testing.T) {
+		step, rdb := newAsyncTestStep(t, nil)
+		post(t, step, "enqueue", "job-r6")
+		reqCtx, rec := asyncReqCtx(t, `{"model":"test-model"}`, map[string]string{
+			defaultModeHeader: "enqueue", defaultTenantHeader: "team-a", "X-Request-Id": "job-r6",
+		})
+		reqCtx.RequestID = "job-r6"
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		var logged []string
+		logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
+
+		err := step.Execute(log.IntoContext(ctx, logger), reqCtx)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, rec.Body.String(), "nothing is written to a departed client")
+		for _, line := range logged {
+			assert.NotContains(t, line, "retry state lookup failed")
+		}
+		exists, err := rdb.Exists(t.Context(), api.RequestCancellationKey(envelopeID("team-a", "job-r6"))).Result()
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), exists, "the live request must not be cancelled")
 		assert.Equal(t, int64(1), queueLen(t, rdb))
 	})
 

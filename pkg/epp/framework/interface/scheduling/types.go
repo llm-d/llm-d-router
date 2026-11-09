@@ -23,16 +23,12 @@ import (
 	"reflect"
 	"sync"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 const nilString = "<nil>"
-
-type TokenizedRequest = fwkrh.TokenizedRequest
-
-type MultiModalFeature = fwkrh.MultiModalFeature
 
 // RequestObjectives represents the scheduling objectives parsed from the InferenceObjectiveSpec, to be used in scheduling decisions.
 type RequestObjectives struct {
@@ -46,7 +42,7 @@ type InferenceRequest struct {
 	// TargetModel is the final target model after traffic split.
 	TargetModel string
 	// Data contains the request-body fields that we parse out as user input.
-	Body *fwkrh.InferenceRequestBody
+	Body *fwkrequest.InferenceRequestBody
 	// Headers is a map of the request headers.
 	Headers map[string]string
 	// Request Objective
@@ -189,6 +185,19 @@ func ScoredEndpointComparer(a, b ScoredEndpoint) bool {
 type ScoredEndpoint struct {
 	Endpoint
 	Score float64
+}
+
+// EndpointScores implements logr.Marshaler to render scored endpoints as a map
+// of namespaced name to score. The map is built only when the log line is
+// actually written.
+type EndpointScores []*ScoredEndpoint
+
+func (s EndpointScores) MarshalLog() interface{} {
+	scores := make(map[string]float64, len(s))
+	for _, ep := range s {
+		scores[ep.GetMetadata().GetNamespacedName().String()] = ep.Score
+	}
+	return scores
 }
 
 // ProfileRunResult captures the profile run result.

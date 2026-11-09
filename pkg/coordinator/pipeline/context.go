@@ -36,17 +36,23 @@ var hopByHopHeaders = map[string]bool{
 	"upgrade":             true,
 }
 
-// internalForwardingHeaders are set only by the coordinator; a client copy is
-// dropped, and so is a value of forward_response_headers under these names.
-// EPP routes on epp-profile and x-llm-d-pin-host-port, and answers
-// Prefer: if-available, the conditional-decode probe's signal, with 412 on
-// any other leg.
+// internalForwardingHeaders are set by the coordinator on outbound phase calls
+// or stamped by EPP or the gateway and read by the coordinator from a phase
+// response; a client copy is dropped, and so is a value of
+// forward_response_headers under these names. EPP routes on epp-profile and
+// x-llm-d-pin-host-port, and answers Prefer: if-available, the
+// conditional-decode probe's signal, with 412 on any other leg. The prefill
+// P2P address and prefill endpoint headers name the prefill pod a decode
+// request pulls from, so a client cannot choose them.
 var internalForwardingHeaders = map[string]bool{
 	reqcommon.EPPProfileHeaderKey:         true,
 	reqcommon.RevisionDecisionIDHeaderKey: true,
 	reqcommon.PeerTopologyHeaderKey:       true,
 	routing.EndpointPinHeader:             true,
 	routing.PreferHeader:                  true,
+	routing.KVCachePrefillHeader:          true,
+	routing.PrefillEndpointHeader:         true,
+	routing.LegacyPrefillEndpointHeader:   true,
 }
 
 func isForwardableHeader(name string) bool {
@@ -61,6 +67,14 @@ func isForwardableHeader(name string) bool {
 // plugin is not exposed.
 func StripInternalHeaders(headers http.Header) {
 	for key := range internalForwardingHeaders {
+		headers.Del(key)
+	}
+}
+
+// StripHopByHopHeaders removes the hop-by-hop headers, which describe one
+// connection and must not be relayed to the next.
+func StripHopByHopHeaders(headers http.Header) {
+	for key := range hopByHopHeaders {
 		headers.Del(key)
 	}
 }
@@ -136,6 +150,13 @@ func (rc *RequestContext) CaptureResponseHeaders(responses ...http.Header) {
 	}
 }
 
+// P2PPeer is a pod's OffloadingConnector P2P tier address, the one a KV pull
+// dials. The pod's serving address is a different port.
+type P2PPeer struct {
+	Host string
+	Port int
+}
+
 // RequestContext carries all state for a single request through the pipeline.
 //
 // OriginalBody is never re-marshalled from Body, so a step reading it after
@@ -171,6 +192,10 @@ type RequestContext struct {
 
 	TokenIDs          []int
 	MultimodalEntries []MultimodalEntry
+	// MMPayload is the render step's mm_payload when render returned no
+	// kwargs_data for the entries: "none". Empty when the entries
+	// carry kwargs_data or render did not populate them.
+	MMPayload string
 	// ECTransferParams is an ordered list (one entry per encode response).
 	// Each entry is a single-key map: mm_hash -> opaque per-encoding transfer
 	// descriptor (see the ec.Connector interface doc for the descriptor shape).
@@ -207,12 +232,43 @@ type RequestContext struct {
 	// forwarded onto the decode request by newDecodeProxyRequest. Empty when
 	// the prefill EPP's config has no topology-stamp-handler.
 	PeerTopology string
+	// KVRequestID is the kv-offloading transfer id. Set by the connector's
+	// PreparePrefillKVParams; empty with any other connector.
+	KVRequestID string
+	// PrefillPeer is the prefill pod's P2P tier address. Set by the
+	// kv-offloading connector's ReadPrefillResponse; nil before the prefill
+	// response and with any other connector.
+	PrefillPeer *P2PPeer
 
 	forwardResponseHeaders map[string]struct{}
 	downstreamHeaders      map[string]string
 
 	// ResponseWriter is used by decode steps to stream the final response to the client.
 	ResponseWriter http.ResponseWriter
+
+	// GRPCGeneratePayload holds the unframed protobuf payload of an SGLang
+	// native gRPC Generate request with client bootstrap fields removed. It
+	// aliases OriginalBody unless a field was removed. The prefill and decode
+	// steps send it as is, between a frame header and their bootstrap
+	// fields, so neither copies it. Nil for JSON HTTP requests. Use
+	// IsSGLangGRPC to test for a gRPC Generate request.
+	GRPCGeneratePayload []byte
+	// PrefillStream holds the active concurrent SGLang gRPC prefill stream
+	// started by PrefillStep and coordinated with DecodeStep.
+	PrefillStream *SGLangPrefillStream
+}
+
+// IsSGLangGRPC reports whether the request is an SGLang native gRPC Generate
+// request. An empty GenerateRequest has an empty but non-nil payload.
+func (rc *RequestContext) IsSGLangGRPC() bool {
+	return rc.GRPCGeneratePayload != nil
+}
+
+// ClosePrefillStream cancels and releases any active concurrent prefill stream.
+func (rc *RequestContext) ClosePrefillStream() {
+	if rc != nil && rc.PrefillStream != nil {
+		rc.PrefillStream.Close()
+	}
 }
 
 // MultimodalEntry describes one multimodal item in the request and where it

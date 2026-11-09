@@ -53,7 +53,7 @@ const (
 	// kvModelName is the model name used in KV tests.
 	kvModelName = "Qwen/Qwen2.5-1.5B-Instruct"
 	// renderManifest is the manifest for the standalone vLLM render deployment and service.
-	renderManifest = "../../deploy/environments/dev/e2e-infra/vllm-render.yaml"
+	renderManifest = "artifacts/environments/dev/e2e-infra/vllm-render.yaml"
 
 	// defaultPort is the envoy gateway's NodePort.
 	defaultPort        = 30080
@@ -72,7 +72,7 @@ var (
 
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
-	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v1.0.0", ginkgo.GinkgoLogr)
+	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v1.1.0", ginkgo.GinkgoLogr)
 	sideCarImage     = env.GetEnvString("SIDECAR_IMAGE", "ghcr.io/llm-d/llm-d-router-disagg-sidecar:dev", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", vllmSimImage, ginkgo.GinkgoLogr)
 	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)

@@ -20,6 +20,7 @@ GKE_GATEWAY_API_VERSION="${GKE_GATEWAY_API_VERSION:-v1.4.0}"
 GIE_VERSION="${GIE_VERSION:-v1.6.2}"
 HELM="${HELM:-${SCRIPT_ROOT}/bin/helm}"
 KUBECTL_VALIDATE="${KUBECTL_VALIDATE:-${SCRIPT_ROOT}/bin/kubectl-validate}"
+YQ="${YQ:-${SCRIPT_ROOT}/bin/yq}"
 TEMP_DIR=$(mktemp -d)
 
 make kubectl-validate
@@ -200,6 +201,25 @@ if grep -Eq -- '^kind: ClusterRole(Binding)?$' "${gke_monitoring_render_output}"
   exit 1
 fi
 
+echo "Verifying the EPP ServiceMonitor scrapes every metrics Service of a release under one job..."
+servicemonitor_job_render_output="${TEMP_DIR}/llm-d-router-gateway-servicemonitor-job-render.yaml"
+servicemonitor_job_render_command="${HELM} template sm-job ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set provider.name=gke --set provider.gke.preferredBackends.enabled=true --set provider.gke.preferredBackends.preferredReplicas=2 --set provider.gke.preferredBackends.defaultReplicas=2 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false > ${servicemonitor_job_render_output}"
+echo "Executing: ${servicemonitor_job_render_command}"
+eval "${servicemonitor_job_render_command}"
+metrics_services='select(.kind == "Service" and (.spec.ports | any_c(.name == "http-metrics")))'
+job_label=$("${YQ}" -N 'select(.kind == "ServiceMonitor") | .spec.jobLabel' "${servicemonitor_job_render_output}")
+metrics_service_count=$("${YQ}" -N "${metrics_services} | .metadata.name" "${servicemonitor_job_render_output}" | wc -l | tr -d ' ')
+if [ "${metrics_service_count}" -ne 4 ]; then
+  echo "GKE preferred backends with 2 preferred and 2 default replicas rendered ${metrics_service_count} EPP metrics Services, expected 4"
+  exit 1
+fi
+expected_job="sm-job-epp"
+job_values=$(JOB_LABEL="${job_label}" "${YQ}" -N "${metrics_services} | .metadata.labels[strenv(JOB_LABEL)]" "${servicemonitor_job_render_output}" | sort -u | tr '\n' ' ')
+if [ "${job_values}" != "${expected_job} " ]; then
+  echo "ServiceMonitor jobLabel '${job_label}' must give all EPP metrics Services of the release the job ${expected_job}, got: ${job_values}"
+  exit 1
+fi
+
 echo "Verifying Prometheus authentication renders cluster RBAC..."
 prometheus_auth_render_output="${TEMP_DIR}/llm-d-router-gateway-prometheus-auth-render.yaml"
 prometheus_auth_render_command="${HELM} template prometheus-auth ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=true > ${prometheus_auth_render_output}"
@@ -244,6 +264,8 @@ test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["proxy-service-scheduling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.nodeSelector.pool=router --set router.proxy.nodeSelector.pool=router --set-json router.proxy.tolerations=[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}] --set-json router.proxy.affinity={\"podAntiAffinity\":{\"preferredDuringSchedulingIgnoredDuringExecution\":[{\"weight\":100,\"podAffinityTerm\":{\"topologyKey\":\"kubernetes.io/hostname\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}}]}}"
 test_cases_llm_d_router_standalone["proxy-service-pod-settings"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.podAnnotations.team=router --set router.proxy.podSecurityContext.runAsUser=65532"
+test_cases_llm_d_router_standalone["pod-placement"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.priorityClassName=router-critical --set router.proxy.priorityClassName=router-critical --set router.epp.podLabels.team=router --set router.proxy.podLabels.team=router --set-json router.epp.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-standalone\":\"release-name-epp\"}}}] --set-json router.proxy.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}]"
+test_cases_llm_d_router_standalone["pod-placement-statefulset"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.podLabels.team=router"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
 test_cases_llm_d_router_standalone["lifecycle-override"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.epp.lifecycle.preStop.exec.command[0]=/epp-drain --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
 test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.lifecycle.preStop.exec.command[0]=/proxy-drain"
@@ -344,6 +366,20 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
     if ! grep -q "team: router" "${epp_yaml}" || ! grep -q "runAsUser: 65532" "${epp_yaml}"; then
       echo "Validation failed: proxy podAnnotations or podSecurityContext not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "pod-placement" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if [ "$(grep -c 'priorityClassName: "router-critical"' "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "team: router" "${epp_yaml}")" -ne 2 ] || [ "$(grep -c "topologySpreadConstraints:" "${epp_yaml}")" -ne 2 ]; then
+      echo "Validation failed: EPP and proxy priorityClassName, podLabels or topologySpreadConstraints not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "pod-placement-statefulset" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "kind: StatefulSet" "${epp_yaml}" || ! grep -q "team: router" "${epp_yaml}"; then
+      echo "Validation failed: router.epp.podLabels not rendered on the EPP StatefulSet for test: ${key}"
       exit 1
     fi
   fi
@@ -578,6 +614,51 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   echo "Metrics authentication RBAC checks passed for ${chart}."
 done
 
+echo "Verifying cluster RBAC names..."
+render_cluster_rbac_name() {
+  local chart="$1" release="$2" namespace="$3"
+  local output="${TEMP_DIR}/${chart}-cluster-rbac-name.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template "${release}" "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace "${namespace}" --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    --set router.monitoring.prometheus.auth.enabled=true "${args[@]}" > "${output}"; then
+    echo "Cluster RBAC rendering failed for ${chart}: ${release}/${namespace}"
+    exit 1
+  fi
+  cluster_rbac_name=$("${YQ}" 'select(.kind == "ClusterRole" and .metadata.name == "*-epp") | .metadata.name' "${output}")
+  local binding_name role_ref
+  binding_name=$("${YQ}" 'select(.kind == "ClusterRoleBinding" and .metadata.name == "*-epp") | .metadata.name' "${output}")
+  role_ref=$("${YQ}" 'select(.kind == "ClusterRoleBinding" and .metadata.name == "*-epp") | .roleRef.name' "${output}")
+  if [ -z "${cluster_rbac_name}" ] || [ "${binding_name}" != "${cluster_rbac_name}" ] || [ "${role_ref}" != "${cluster_rbac_name}" ]; then
+    echo "${chart}: ClusterRole '${cluster_rbac_name}', binding '${binding_name}' and roleRef '${role_ref}' must match for ${release}/${namespace}"
+    exit 1
+  fi
+}
+
+long_release=$(printf 'r%.0s' {1..40})
+long_namespace=$(printf 'n%.0s' {1..40})
+shared_prefix=llm-d-nightly-tiered-prefix-cache-gke-gpu
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  render_cluster_rbac_name "${chart}" short default
+  if [ "${cluster_rbac_name}" != "short-default-epp" ]; then
+    echo "${chart}: expected short-default-epp, got ${cluster_rbac_name}"
+    exit 1
+  fi
+
+  render_cluster_rbac_name "${chart}" "${long_release}" "${long_namespace}"
+
+  render_cluster_rbac_name "${chart}" tiered-prefix-cache "${shared_prefix}"
+  first_name="${cluster_rbac_name}"
+  render_cluster_rbac_name "${chart}" tiered-prefix-cache "${shared_prefix}-sglang"
+  if [ "${cluster_rbac_name}" == "${first_name}" ]; then
+    echo "${chart}: namespaces sharing their first 40 characters got the same ClusterRole name ${first_name}"
+    exit 1
+  fi
+done
+
 echo "Running llm-d-router-standalone negative validation tests..."
 missing_endpoint_selector_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.inferencePool.create=false --set router.modelServers.type=vllm --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
 echo "Executing: ${missing_endpoint_selector_command}"
@@ -656,6 +737,15 @@ if eval "${invalid_tokenizer_flavor_command}"; then
   exit 1
 fi
 
+for label_path in router.epp.podLabels.llm-d-router-standalone router.proxy.podLabels.llm-d-router-proxy; do
+  invalid_pod_labels_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set ${label_path}=override"
+  echo "Executing: ${invalid_pod_labels_command}"
+  if eval "${invalid_pod_labels_command}"; then
+    echo "Helm template unexpectedly succeeded for chart-owned label ${label_path}"
+    exit 1
+  fi
+done
+
 echo "Verifying llm-d-router-standalone extra flags render as --flag=value..."
 flag_render_output="${TEMP_DIR}/llm-d-router-standalone-flag-render.yaml"
 flag_render_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set-string router.epp.flags.secure-serving=false > ${flag_render_output}"
@@ -704,6 +794,36 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
     gomemlimit_ref=$(grep -c -- 'resource: limits.memory$' "${gomemlimit_render_output}" || true)
     if [ "${gomemlimit_env}" != "${gomemlimit_want_env}" ] || [ "${gomemlimit_ref}" != "${gomemlimit_want_ref}" ]; then
       echo "${chart} (${gomemlimit_set}): expected ${gomemlimit_want_env} GOMEMLIMIT and ${gomemlimit_want_ref} limits.memory reference, got ${gomemlimit_env} and ${gomemlimit_ref}"
+      exit 1
+    fi
+  done
+done
+
+echo "Verifying namespace-only install renders no cluster RBAC..."
+declare -A ns_only
+ns_only[llm-d-router-gateway:no-auth]="--set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-gateway:prometheus-no-auth]="--set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-standalone:default-pool-no-auth]="--set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-standalone:no-auth]="--set router.inferencePool.create=false --set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-standalone:prometheus-no-auth]="--set router.inferencePool.create=false --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-standalone:gmp-no-auth]="--set router.inferencePool.create=false --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false --set router.monitoring.provider.name=gmp"
+ns_only[llm-d-router-gateway:gmp-no-auth]="--set provider.name=gke --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false --set router.monitoring.provider.name=gmp"
+for key in "${!ns_only[@]}"; do
+  out="${TEMP_DIR}/ns-only-${key//:/-}.yaml"
+  read -ra extra <<< "${ns_only[$key]}"
+  ${HELM} template ns-only "${SCRIPT_ROOT}/config/charts/${key%%:*}" --set router.modelServers.matchLabels.app=llm-instance-gateway "${extra[@]}" > "${out}" || exit 1
+  if grep -Eq -- '^kind: ClusterRole(Binding)?$' "${out}"; then
+    echo "Namespace-only case ${key} rendered cluster RBAC"
+    exit 1
+  fi
+done
+# Chart defaults keep metrics auth on, so they must render the cluster RBAC the README documents.
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  out="${TEMP_DIR}/default-rbac-${chart}.yaml"
+  ${HELM} template default-rbac ${SCRIPT_ROOT}/config/charts/${chart} --set router.modelServers.matchLabels.app=llm-instance-gateway > "${out}" || exit 1
+  for k in ClusterRole ClusterRoleBinding; do
+    if ! grep -Eq -- "^kind: ${k}\$" "${out}"; then
+      echo "Default render of ${chart} is missing ${k}; update the RBAC table in config/charts/README.md"
       exit 1
     fi
   done
@@ -880,6 +1000,52 @@ if ! grep -A1 -- 'healthy_panic_threshold:' <<<"${ext_proc_cluster}" | grep -q -
   echo "Proxy service mode with fail-open did not disable panic mode on the ext_proc cluster"
   exit 1
 fi
+
+echo "Verifying Envoy active health checks require EPP's gRPC health service..."
+for proxy_mode in sidecar service; do
+  for fail_open in true false; do
+    health_checking_render_output="${TEMP_DIR}/envoy-health-checking-${proxy_mode}-${fail_open}.yaml"
+    if ! "${HELM}" template health-checking "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+      --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+      --set router.proxy.mode="${proxy_mode}" --set router.proxy.failOpen="${fail_open}" > "${health_checking_render_output}"; then
+      echo "Envoy Helm render failed in ${proxy_mode} mode with failOpen=${fail_open}"
+      exit 1
+    fi
+    if ! grep -q -- '--health-checking=true' "${health_checking_render_output}"; then
+      echo "Envoy did not enable EPP's gRPC health service in ${proxy_mode} mode with failOpen=${fail_open}"
+      exit 1
+    fi
+
+    for flag_type in --set --set-string; do
+      if health_checking_error=$("${HELM}" template health-checking "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+        --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+        --set router.proxy.mode="${proxy_mode}" --set router.proxy.failOpen="${fail_open}" \
+        "${flag_type}" router.epp.flags.health-checking=false 2>&1); then
+        echo "Envoy accepted ${flag_type} router.epp.flags.health-checking=false in ${proxy_mode} mode with failOpen=${fail_open}"
+        exit 1
+      fi
+      if ! grep -q -- 'router.epp.flags.health-checking' <<<"${health_checking_error}"; then
+        echo "Unexpected Helm validation error: ${health_checking_error}"
+        exit 1
+      fi
+    done
+  done
+done
+
+for proxy_setting in router.proxy.enabled=false router.proxy.proxyType=agentgateway; do
+  health_checking_render_output="${TEMP_DIR}/no-envoy-health-checking.yaml"
+  if ! "${HELM}" template health-checking "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+    --set "${proxy_setting}" \
+    --set router.epp.flags.health-checking=false > "${health_checking_render_output}"; then
+    echo "Helm render rejected disabled health checking with ${proxy_setting}"
+    exit 1
+  fi
+  if grep -q -- '--health-checking=true' "${health_checking_render_output}"; then
+    echo "Unexpectedly enabled EPP health checking with ${proxy_setting}"
+    exit 1
+  fi
+done
 
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."
 fail_closed_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fail-closed-render.yaml"

@@ -45,5 +45,5 @@ schedulingProfiles:
 ---
 
 ## Related Documentation
-- [Precise Prefix Cache Producer](../../../requestcontrol/dataproducer/preciseprefixcache/)
+- [Precise Prefix Cache Producer](../../../requesthandling/dataproducer/preciseprefixcache/)
 - [Prefix Cache Scorer](../prefix/)

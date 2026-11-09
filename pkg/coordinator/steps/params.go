@@ -30,6 +30,28 @@ import (
 const (
 	ParamKVConnector = "kv_connector"
 	ParamECConnector = "ec_connector"
+	// ParamForceStream opts the decode step into force-streaming: a
+	// non-streaming client request is sent upstream with stream enabled, and
+	// the streamed response is reassembled into one non-streaming reply.
+	ParamForceStream = "force_stream"
+	// ParamForceStreamBufferSize is the total byte budget, as a human-readable
+	// string ("1GiB"), shared across concurrent forced requests. A request that
+	// cannot reserve its estimate from it takes the non-buffering pass-through.
+	ParamForceStreamBufferSize = "force_stream_buffer_size"
+	// ParamForceStreamMaxRequestSize caps the bytes one forced request may
+	// reserve for its generated reply, as a human-readable string ("256KiB"). It
+	// keeps a single large request from claiming a large share of the shared
+	// budget and starving concurrent candidates. Unset defaults to 256KiB (room
+	// for roughly 16k output tokens), capped to force_stream_buffer_size when that
+	// is smaller. A Responses request also reserves its own body size from the
+	// shared budget, outside this cap, for the request fields its reply echoes.
+	ParamForceStreamMaxRequestSize = "force_stream_max_request_size"
+	// ParamPromptTokenParity selects what the decode and conditional-decode
+	// steps do when the worker's usage reports a prompt token count different
+	// from the rendered one: "off" skips the check, "warn" (default) counts and
+	// logs it, "error" also records a step error. The response to the client
+	// is never changed.
+	ParamPromptTokenParity = "prompt_token_parity"
 )
 
 func buildKVConnector(params map[string]any) (kv.Connector, error) {

@@ -381,7 +381,7 @@ var _ = Describe("SSRF protection startup warning", func() {
 			ContainSubstring("--"+enableSSRFProtection),
 			ContainSubstring(routing.PrefillEndpointHeader),
 			ContainSubstring(routing.EncoderEndpointsHeader),
-			ContainSubstring(routing.KVCacheSourceHeader),
+			ContainSubstring(reqcommon.FieldRemoteKVSource),
 		))
 	})
 })

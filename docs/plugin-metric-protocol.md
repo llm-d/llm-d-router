@@ -119,6 +119,6 @@ The model server MUST expose the following LoRA adapter metrics via the same Pro
 **Required by:** `precise-prefix-cache-producer`, `prefix-cache-scorer`, `prefix-cache-affinity-filter`
 
 The EPP supports prefix cache optimized request scheduling via the
-[precise prefix cache producer](../pkg/epp/framework/plugins/requestcontrol/dataproducer/preciseprefixcache/README.md).
+[precise prefix cache producer](../pkg/epp/framework/plugins/requesthandling/dataproducer/preciseprefixcache/README.md).
 To benefit from optimal prefix-aware request scheduling, model servers SHOULD support prefix
 cache reuse, such as the [vllm automatic prefix caching](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching.html) feature.

@@ -78,9 +78,9 @@ func TestIntegrationPeerPlugin(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testContextTimeout)
 	defer cancel()
 
-	require.NoError(t, k8sClient.Create(ctx, ns))
+	require.NoError(t, K8sClient().Create(ctx, ns))
 	t.Cleanup(func() {
-		_ = k8sClient.Delete(context.Background(), ns)
+		_ = K8sClient().Delete(context.Background(), ns)
 	})
 
 	// The plugin reads its own address from the environment to exclude itself.
@@ -93,7 +93,7 @@ func TestIntegrationPeerPlugin(t *testing.T) {
 	peerDisc, ok := plugin.(*k8speer.Plugin)
 	require.True(t, ok, "factory returned %T, want *k8speer.Plugin", plugin)
 
-	mgr, mgrClient := setupTestManager(t, testEnv.Config, nsName)
+	mgr, mgrClient := setupTestManager(t, Config(), nsName)
 	runtime := datalayer.NewRuntime(0)
 	require.NoError(t, peerDisc.RegisterDependencies(runtime))
 	require.NoError(t, runtime.Configure(nil, logr.Discard()))

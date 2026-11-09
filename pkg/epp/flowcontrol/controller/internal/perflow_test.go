@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -62,13 +63,20 @@ func enqueuePerFlow(t *testing.T, h *testHarness, reg *registry.FlowRegistry, id
 	return item
 }
 
-func requireCapacityRejection(t *testing.T, item *FlowItem) {
+// requireCapacityRejection asserts a capacity rejection; flowLimit says whether the error must also wrap
+// ErrFlowAtCapacity.
+func requireCapacityRejection(t *testing.T, item *FlowItem, flowLimit bool) {
 	t.Helper()
 	state := item.FinalState()
 	require.NotNil(t, state, "a flow must not consume the rest of the band's capacity")
 	require.Equal(t, types.QueueOutcomeRejectedCapacity, state.Outcome)
 	require.ErrorIs(t, state.Err, types.ErrRejected)
 	require.ErrorIs(t, state.Err, types.ErrQueueAtCapacity)
+	if flowLimit {
+		require.ErrorIs(t, state.Err, types.ErrFlowAtCapacity)
+	} else {
+		require.NotErrorIs(t, state.Err, types.ErrFlowAtCapacity)
+	}
 	require.Nil(t, item.Handle())
 	item.Finalize(context.Canceled)
 	require.Same(t, state, item.FinalState())
@@ -103,7 +111,7 @@ func TestPerFlowCapacityBoundaries(t *testing.T) {
 			if tc.sizes == nil {
 				size = 11
 			}
-			requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "overflow", testFlow, size))
+			requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "overflow", testFlow, size), true)
 			other := flowcontrol.FlowKey{ID: "flow-b", Priority: testFlow.Priority}
 			require.Nil(t, enqueuePerFlow(t, h, reg, "other", other, 1).FinalState())
 			stats, err := reg.CapacitySnapshot(testFlow.Priority)
@@ -127,7 +135,7 @@ func TestPerFlowCapacityTemplates(t *testing.T) {
 		for i := 0; i < tc.count; i++ {
 			require.Nil(t, enqueuePerFlow(t, h, reg, fmt.Sprintf("%d-%d", tc.priority, i), key, 5).FinalState())
 		}
-		requireCapacityRejection(t, enqueuePerFlow(t, h, reg, fmt.Sprintf("overflow-%d", tc.priority), key, 1))
+		requireCapacityRejection(t, enqueuePerFlow(t, h, reg, fmt.Sprintf("overflow-%d", tc.priority), key, 1), true)
 	}
 }
 
@@ -157,9 +165,25 @@ func TestPerFlowCapacityDisabledAndAggregateLimits(t *testing.T) {
 			if tc.name == "global count" || tc.name == "global bytes" {
 				key.Priority = 11
 			}
-			requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "overflow", key, 1))
+			requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "overflow", key, 1), false)
 		})
 	}
+}
+
+func TestPerFlowCapacityReasonWhenBandAlsoFull(t *testing.T) {
+	h, reg := perFlowProcessor(t, registry.WithPriorityBand(&registry.PriorityBandConfig{
+		Priority: testFlow.Priority, MaxRequests: 3, MaxRequestsPerFlow: 2,
+	}))
+	other := flowcontrol.FlowKey{ID: "flow-b", Priority: testFlow.Priority}
+	for i := 0; i < 2; i++ {
+		require.Nil(t, enqueuePerFlow(t, h, reg, strconv.Itoa(i), testFlow, 1).FinalState())
+	}
+	// The band has room, so only the flow's own limit refuses this request.
+	requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "flow-only", testFlow, 1), true)
+	require.Nil(t, enqueuePerFlow(t, h, reg, "fill-band", other, 1).FinalState())
+	// The band and the flow are both full: raising the per-flow limit would admit nothing, so the band is reported.
+	requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "band-and-flow", testFlow, 1), false)
+	requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "band-only", other, 1), false)
 }
 
 func TestPerFlowCapacityReleased(t *testing.T) {
@@ -170,7 +194,7 @@ func TestPerFlowCapacityReleased(t *testing.T) {
 			h.saturationDetector.ReserveDispatchFunc = func(string) bool { reservations++; return true }
 			first := enqueuePerFlow(t, h, reg, "first", testFlow, 10)
 			require.Nil(t, first.FinalState())
-			requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "overflow", testFlow, 1))
+			requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "overflow", testFlow, 1), true)
 			switch action {
 			case "dispatch":
 				require.Zero(t, reservations)
@@ -179,7 +203,7 @@ func TestPerFlowCapacityReleased(t *testing.T) {
 				require.Equal(t, 1, reservations)
 			case "cancel":
 				first.Finalize(context.Canceled)
-				requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "unswept", testFlow, 1))
+				requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "unswept", testFlow, 1), true)
 				h.processor.sweepFinalizedItems()
 				require.Equal(t, types.QueueOutcomeEvictedContextCancelled, first.FinalState().Outcome)
 			case "expire":
@@ -212,6 +236,7 @@ func TestPerFlowCapacityNoEndpoints(t *testing.T) {
 	require.ErrorIs(t, state.Err, types.ErrRejected)
 	require.ErrorIs(t, state.Err, types.ErrNoEndpoints)
 	require.NotErrorIs(t, state.Err, types.ErrQueueAtCapacity)
+	require.NotErrorIs(t, state.Err, types.ErrFlowAtCapacity)
 	require.Zero(t, h.processor.dropCounts[types.QueueOutcomeRejectedCapacity].Load())
 	require.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeRejectedNoEndpoints].Load())
 }
@@ -220,5 +245,36 @@ func TestPerFlowCapacityByteOverflow(t *testing.T) {
 	h, reg := perFlowProcessor(t, registry.WithDefaultPriorityBand(&registry.PriorityBandConfig{MaxBytesPerFlow: 10}))
 	key := flowcontrol.FlowKey{ID: testFlow.ID, Priority: 0}
 	require.Nil(t, enqueuePerFlow(t, h, reg, "first", key, 1).FinalState())
-	requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "overflow", key, math.MaxUint64))
+	requireCapacityRejection(t, enqueuePerFlow(t, h, reg, "overflow", key, math.MaxUint64), true)
+}
+
+// shrinkingManagedQueue reports a flow length that drops after the first read, as when the cleanup sweep removes
+// finalized items between two reads of the flow's occupancy.
+type shrinkingManagedQueue struct {
+	*mocks.MockManagedQueue
+	lens []int
+}
+
+func (q *shrinkingManagedQueue) FlowQueueAccessor() flowcontrol.FlowQueueAccessor { return q }
+
+func (q *shrinkingManagedQueue) Len() int {
+	n := q.lens[0]
+	if len(q.lens) > 1 {
+		q.lens = q.lens[1:]
+	}
+	return n
+}
+
+func TestPerFlowCapacityReasonMatchesDecision(t *testing.T) {
+	h := newTestHarness(t, testCleanupTick)
+	t.Cleanup(h.processor.shutdown)
+	q := &shrinkingManagedQueue{MockManagedQueue: &mocks.MockManagedQueue{FlowKeyV: testFlow}, lens: []int{3, 0}}
+	h.ManagedQueueFunc = func(flowcontrol.FlowKey) (contracts.ManagedQueue, error) { return q, nil }
+	h.CapacitySnapshotFunc = func(int) (contracts.CapacitySnapshot, error) {
+		return contracts.CapacitySnapshot{MaxRequestsPerFlow: 3}, nil
+	}
+	item := NewItem(t.Context(), fwkfcmocks.NewMockFlowControlRequest(1, "overflow", testFlow), testTTL, h.clock.Now(), logr.Discard())
+	h.processor.enqueue(item)
+	// The per-flow limit refused the request, so the reason must say so even though the flow shrank afterwards.
+	requireCapacityRejection(t, item, true)
 }

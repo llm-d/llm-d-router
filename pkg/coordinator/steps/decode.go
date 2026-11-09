@@ -21,14 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/common/usage"
 
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
@@ -38,18 +36,6 @@ import (
 
 const DecodeStepName = "decode"
 
-// ParamPromptTokenParity selects what the decode step does when the worker's
-// usage reports a prompt token count different from the rendered one:
-// "off" skips the check, "warn" (default) counts and logs it, "error" also
-// records a step error. The response to the client is never changed.
-const ParamPromptTokenParity = "prompt_token_parity"
-
-const (
-	promptTokenParityOff   = "off"
-	promptTokenParityWarn  = "warn"
-	promptTokenParityError = "error"
-)
-
 func init() {
 	pipeline.Register(DecodeStepName, NewDecodeStep)
 }
@@ -58,6 +44,8 @@ type DecodeStep struct {
 	gwClient          *gateway.Client
 	kv                kv.Connector
 	promptTokenParity string
+	forceStream       bool
+	budget            *forceStreamBudget
 }
 
 func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -75,35 +63,90 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity}, nil
-}
-
-func parsePromptTokenParity(params map[string]any) (string, error) {
-	mode, err := paramString(params, ParamPromptTokenParity)
+	forceStream, _, err := paramBool(params, ParamForceStream)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("decode: %w", err)
 	}
-	switch mode {
-	case "":
-		return promptTokenParityWarn, nil
-	case promptTokenParityOff, promptTokenParityWarn, promptTokenParityError:
-		return mode, nil
-	default:
-		return "", fmt.Errorf("%s must be %q, %q or %q, got %q",
-			ParamPromptTokenParity, promptTokenParityOff, promptTokenParityWarn, promptTokenParityError, mode)
+	step := &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity, forceStream: forceStream}
+	if forceStream {
+		budget, err := parseForceStreamBudget(params)
+		if err != nil {
+			return nil, fmt.Errorf("decode: %w", err)
+		}
+		step.budget = budget
 	}
+	return step, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
+	if reqCtx.IsSGLangGRPC() {
+		return s.executeSGLangGRPC(ctx, reqCtx)
+	}
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 
 	if err := s.prepareDecodeBody(ctx, reqCtx); err != nil {
 		return err
 	}
-	parity := s.newParityCheck(logger, reqCtx)
-	injectedUsage := parity != nil && injectIncludeUsage(reqCtx)
+	parity, injectedUsage := setupParity(DecodeStepName, s.promptTokenParity, logger, reqCtx, reqCtx.Body)
+
+	// Force-streaming applies only to a non-streaming request. A request whose
+	// reply may carry fields the reassembler drops (tool calls, logprobs,
+	// reasoning), or that the engine would not serve as a stream, takes the
+	// pass-through; forceStreamLossy catches what the request declares up front,
+	// and a server-side default is caught on the frame mid-stream (both fall back
+	// here). Every other candidate
+	// reserves budget and reassembles the whole reply; one whose estimate exceeds
+	// the per-request cap, or that finds the budget full, falls through to the
+	// pass-through below, which buffers nothing.
+	if s.forceStream && !reqCtx.Stream {
+		if shape, shapeOK := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); shapeOK {
+			switch {
+			case s.kv.Name() == kv.SGLang, forceStreamLossy(shape, reqCtx.Body):
+				// An SGLang decode server has no local-prefill path, so a fallback
+				// could not recompute a prompt whose handoff the forced attempt used.
+				coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnsupported)
+			default:
+				generated, ok := s.estimateReservation(reqCtx)
+				if !ok {
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnbounded)
+					break
+				}
+				// The forced body is built before the reservation because the
+				// Responses reservation includes its size (see responsesEchoBytes).
+				bodyBytes, err := json.Marshal(forceStreamBody(reqCtx.Body, shape))
+				if err != nil {
+					return fmt.Errorf("%s: force-stream marshal: %w", DecodeStepName, err)
+				}
+				reserved := generated + responsesEchoBytes(shape, bodyBytes)
+				switch {
+				case s.budget.tryReserve(reserved):
+					err := s.executeForceStream(ctx, logger, reqCtx, shape, bodyBytes, generated, reserved, parity)
+					fallbackResult, isFallback := forceStreamFallbackResult(err)
+					if !isFallback {
+						return err
+					}
+					// The attempt failed with nothing written to the client. Falling back
+					// re-sends reqCtx.Body through the pass-through, so the pod may run the
+					// request twice. Unless the connector is replay-safe, the forced attempt
+					// already used the one-shot handoff the body names, so the fallback
+					// drops it and the decode pod recomputes the prompt; the reply is slower
+					// but correct.
+					if !kvHandoffReplaySafe(s.kv) {
+						logger.Info("force-stream failed and its KV block handoff is spent; decode will recompute the prompt", "error", err.Error())
+						delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
+						// The prefill cache-hit count describes the handoff just dropped.
+						reqCtx.PrefillCachedTokens = nil
+					}
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, fallbackResult)
+					// Fell back with nothing written; continue to the pass-through below.
+				default:
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackBudget)
+				}
+			}
+		}
+	}
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath, "stream", reqCtx.Stream)
 
@@ -112,7 +155,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	writer, finalize := s.responseWriter(reqCtx, parity, injectedUsage)
+	writer, finalize := parityResponseWriter(reqCtx, parity, injectedUsage)
 	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamDecode, nil)
 	if err := finalize(); err != nil {
 		// The buffered tail could not be forwarded, so the client holds a
@@ -123,154 +166,40 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	return out.streamedError(DecodeStepName)
 }
 
-// responseWriter returns the writer the decode response is streamed through,
-// and the function that flushes whatever it buffered. Without a prefill count
-// and without a parity check the client gets the decode worker's bytes
-// untouched.
-func (s *DecodeStep) responseWriter(reqCtx *pipeline.RequestContext, parity *parityCheck, injectedUsage bool) (http.ResponseWriter, func() error) {
-	if reqCtx.PrefillCachedTokens == nil && parity == nil {
-		return reqCtx.ResponseWriter, func() error { return nil }
-	}
-	opts := usage.Options{
-		CachedTokens:       reqCtx.PrefillCachedTokens,
-		DropUsageOnlyFrame: injectedUsage,
-	}
-	if parity != nil {
-		opts.OnUsage = parity.onUsage
-	}
-	return usage.NewResponseWriter(reqCtx.ResponseWriter, opts, reqCtx.Stream)
+// kvHandoffReplaySafe reports whether a decode body's kv_transfer_params may be
+// sent a second time. Only kv-shared-storage qualifies: its decode pod re-reads
+// the shared store, so a replay finds the KV again. The other connectors name a
+// one-shot handoff: the NIXL blocks the prefiller frees once pulled, the
+// kv-offloading P2P batch the prefiller releases once fetched, or the SGLang
+// bootstrap room. A connector not listed here is treated as one-shot too.
+func kvHandoffReplaySafe(conn kv.Connector) bool {
+	return conn.Name() == kv.SharedStorage
 }
 
-// parityCheck compares the prompt token count the decode worker reports with
-// the number of token IDs the render step produced, which is what prefill ran
-// on. A difference means decode rendered a different prompt than prefill did:
-// the worker ignored forwarded IDs (vLLM does for messages with non-text
-// content or with echo set) or the two renderers disagree (tokenizer, chat
-// template, processor version, chat_template_kwargs). Either way prefill's KV
-// cache does not match and decode silently recomputes the prompt, so the only
-// visible symptom without this check is a slower request.
-type parityCheck struct {
-	logger       logr.Logger
-	mode         string
-	requestID    string
-	model        string
-	apiType      reqcommon.APIType
-	idsForwarded bool
-	expected     int
-	reported     bool
-}
-
-// newParityCheck returns nil when the check is off or no tokens were rendered.
-func (s *DecodeStep) newParityCheck(logger logr.Logger, reqCtx *pipeline.RequestContext) *parityCheck {
-	if s.promptTokenParity == promptTokenParityOff || len(reqCtx.TokenIDs) == 0 {
-		return nil
-	}
-	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
-	return &parityCheck{
-		logger:    logger,
-		mode:      s.promptTokenParity,
-		requestID: reqCtx.RequestID,
-		model:     reqCtx.Model,
-		apiType:   apiType,
-		// Completions sends the rendered IDs as the prompt (prepareDecodeBody);
-		// the generate route carries them by definition. The other routes
-		// forward the client's text today.
-		idsForwarded: apiType == reqcommon.APITypeCompletions || apiType == reqcommon.APITypeVLLMGenerate,
-		expected:     len(reqCtx.TokenIDs),
-	}
-}
-
-// onUsage is called for each usage block in the decode response. Only the
-// first block that carries a prompt count is judged: a streamed Messages
-// response reports input_tokens on message_start and again on the final
-// usage, and both describe the same prompt. usage.PromptTokens folds the
-// Messages cache split back in, so a P/D request whose prompt was served
-// from prefill's KV compares as a match, not a short count.
-func (p *parityCheck) onUsage(block map[string]any) {
-	if p.reported {
-		return
-	}
-	got, ok := usage.PromptTokens(block)
-	if !ok {
-		return
-	}
-	p.reported = true
-	if got == p.expected {
-		return
-	}
-	coordmetrics.IncPromptTokenMismatch(p.model, p.apiType.String(), p.idsForwarded)
-	keysAndValues := []any{
-		"request_id", p.requestID,
-		"rendered_tokens", p.expected,
-		"decode_prompt_tokens", got,
-		"api_type", p.apiType,
-		"ids_forwarded", p.idsForwarded,
-	}
-	if p.mode == promptTokenParityError {
-		coordmetrics.IncStepErrorTotal(DecodeStepName, coordmetrics.ErrorCodePromptTokenMismatch)
-		p.logger.Error(nil, "prompt token mismatch between prefill and decode", keysAndValues...)
-		return
-	}
-	p.logger.Info("prompt token mismatch between prefill and decode", keysAndValues...)
-}
-
-// injectIncludeUsage asks a streamed chat or completions leg for the trailing
-// usage frame when the client did not, so the parity check can read it. It
-// reports whether it added the option; the response writer then drops that
-// frame so the client's stream stays as requested. Responses and Messages
-// streams carry usage on their own terminal events.
-func injectIncludeUsage(reqCtx *pipeline.RequestContext) bool {
-	if !reqCtx.Stream {
-		return false
-	}
-	switch reqcommon.DetectAPIType(reqCtx.OriginalPath) {
-	case reqcommon.APITypeChatCompletions, reqcommon.APITypeCompletions:
+// forceStreamFallbackResult classifies a force-stream error as fallback-eligible,
+// returning the outcome label to record when the request takes the pass-through. It
+// leaves the client uncommitted, so the caller may fall back; nil (a forced
+// success) and every other error are not fallbacks, so ok is false and the caller
+// returns them directly.
+func forceStreamFallbackResult(err error) (result string, ok bool) {
+	switch {
+	case errors.Is(err, errForceStreamOversize):
+		return coordmetrics.ForceStreamResultFallbackOversize, true
+	case errors.Is(err, errForceStreamUnreadable):
+		return coordmetrics.ForceStreamResultFallbackUnreadable, true
+	case errors.Is(err, errForceStreamLossyFrame):
+		// Its own label: unlike fallback_unsupported, which declines before any
+		// upstream call, the pod already ran one attempt, and a non-replay-safe
+		// handoff makes the fallback recompute the prompt.
+		return coordmetrics.ForceStreamResultFallbackLossyFrame, true
+	case errors.Is(err, errForceStreamCeiling):
+		// A ceiling abort falls back like the others; it keeps the error_ceiling
+		// label so the byte-estimate shortfall stays visible for alerting.
+		return coordmetrics.ForceStreamResultErrorCeiling, true
 	default:
-		return false
-	}
-	options := streamOptions(reqCtx.Body)
-	if include, ok := options[fieldIncludeUsage].(bool); ok && include {
-		return false
-	}
-	// vLLM reports usage on every chunk when include_usage and
-	// continuous_usage_stats are both set. A client that sent only the latter
-	// gets no usage today; adding include_usage would put a usage block in
-	// each of its content chunks, which the writer cannot drop, so the check
-	// is skipped rather than reshaping the stream.
-	if continuous, ok := options[fieldContinuousUsageStats].(bool); ok && continuous {
-		return false
-	}
-	merged := make(map[string]any, len(options)+1)
-	for k, v := range options {
-		merged[k] = v
-	}
-	merged[fieldIncludeUsage] = true
-	reqCtx.Body[reqcommon.FieldStreamOptions] = merged
-	return true
-}
-
-// streamOptions returns the request's stream_options object. The server
-// decodes only the fields the pipeline inspects and keeps the rest as raw
-// JSON (decodeRequestBody), so the value is usually json.RawMessage here.
-func streamOptions(body map[string]any) map[string]any {
-	switch v := body[reqcommon.FieldStreamOptions].(type) {
-	case map[string]any:
-		return v
-	case json.RawMessage:
-		var options map[string]any
-		if err := json.Unmarshal(v, &options); err != nil {
-			return nil
-		}
-		return options
-	default:
-		return nil
+		return "", false
 	}
 }
-
-const (
-	fieldIncludeUsage         = "include_usage"
-	fieldContinuousUsageStats = "continuous_usage_stats"
-)
 
 // prepareDecodeBody mutates reqCtx.Body in place rather than on a clone (unlike
 // prefill and conditional-decode). decode is the terminal pipeline step: its body
@@ -291,7 +220,7 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(reqCtx.TokenIDs) > 0 {
-			reqCtx.Body["prompt"] = reqCtx.TokenIDs
+			reqCtx.Body[reqcommon.FieldPrompt] = reqCtx.TokenIDs
 		}
 	default:
 		// kvParams and injectUUIDs above already ran; both are harmless here
@@ -345,7 +274,7 @@ func injectMediaPartUUIDs(items []any, apiType reqcommon.APIType, entries []pipe
 		modCounter[media.modality]++
 		hashes := hashesByMod[media.modality]
 		if localIdx < len(hashes) {
-			media.part["uuid"] = hashes[localIdx]
+			media.part[reqcommon.FieldUUID] = hashes[localIdx]
 			continue
 		}
 		// A miss means entries and parts got out of line upstream (see

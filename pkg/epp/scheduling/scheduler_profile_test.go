@@ -18,6 +18,7 @@ limitations under the License.
 package scheduling
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -32,7 +33,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
@@ -997,3 +1000,89 @@ func TestRunScorer_ScopesTheWrappedPluginDeclarations(t *testing.T) {
 type testScoreAttr string
 
 func (a testScoreAttr) Clone() fwkdl.Cloneable { return a }
+
+// declaringPicker reads a declared and an undeclared attribute on every
+// candidate, then returns three candidates in the three shapes a picker can
+// hand back: the ScoredEndpoint it was given, a copy of one, and the bare
+// endpoint inside one.
+type declaringPicker struct {
+	declared, undeclared fwkplugin.DataKey
+	declaredReads        []bool
+	undeclaredReads      []bool
+}
+
+func (p *declaringPicker) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "declaring-picker", Name: "declaring-picker"}
+}
+
+func (p *declaringPicker) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: map[fwkplugin.DataKey]any{p.declared: nil}}
+}
+
+func (p *declaringPicker) Pick(_ context.Context, scored []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
+	for _, candidate := range scored {
+		_, ok := candidate.Get(p.declared)
+		p.declaredReads = append(p.declaredReads, ok)
+		_, ok = candidate.Get(p.undeclared)
+		p.undeclaredReads = append(p.undeclaredReads, ok)
+	}
+	copied := *scored[1]
+	return &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{scored[0], &copied, scored[2].Endpoint}}
+}
+
+// A picker is confined to its declarations while it picks, and what it returns
+// carries the underlying endpoints, so PreRequest plugins reading the targets
+// are not confined to the picker's declarations.
+func TestRunPickerPlugin_ScopesThePickerDeclarations(t *testing.T) {
+	declared := fwkplugin.NewDataKey("declared", "some-producer")
+	undeclared := fwkplugin.NewDataKey("undeclared", "other-producer")
+
+	scores := map[fwksched.Endpoint]float64{}
+	for i, name := range []string{"ep-1", "ep-2", "ep-3"} {
+		attrs := fwkdl.NewAttributes()
+		attrs.Put(declared, testScoreAttr("declared"))
+		attrs.Put(undeclared, testScoreAttr("secret"))
+		endpoint := fwksched.NewEndpoint(
+			&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: name}}, &fwkdl.Metrics{}, attrs)
+		scores[endpoint] = float64(i)
+	}
+
+	picker := &declaringPicker{declared: declared, undeclared: undeclared}
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{picker})
+	result := NewSchedulerProfile().WithPicker(picker).runPickerPlugin(context.Background(), &fwksched.InferenceRequest{}, scores)
+
+	assert.Equal(t, []bool{true, true, true}, picker.declaredReads, "a picker must reach the key it declares")
+	assert.Equal(t, []bool{false, false, false}, picker.undeclaredReads, "an undeclared key must read as absent")
+
+	if !assert.NotNil(t, result) {
+		return
+	}
+	assert.Len(t, result.TargetEndpoints, 3)
+	for i, target := range result.TargetEndpoints {
+		underlying := target
+		if scored, ok := target.(*fwksched.ScoredEndpoint); ok {
+			underlying = scored.Endpoint
+		}
+		_, ok := scores[underlying]
+		assert.True(t, ok, "target %d must carry an endpoint the scheduler scored, not a scoped wrapper", i)
+	}
+	assert.Len(t, result.ScoredCandidates, 3)
+	for i, candidate := range result.ScoredCandidates {
+		score, ok := scores[candidate.Endpoint]
+		assert.True(t, ok, "candidate %d must carry an endpoint the scheduler scored, not a scoped wrapper", i)
+		assert.Equal(t, score, candidate.Score)
+	}
+}
+
+func TestRunPickerPluginLogsCandidateNames(t *testing.T) {
+	var buf bytes.Buffer
+	ctx := log.IntoContext(context.Background(), logutil.NewTestLoggerWithWriter(&buf))
+	picker := &fakePicker{typedName: fwkplugin.TypedName{Type: "fake-picker", Name: "log-candidates"}, selected: 1}
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{picker})
+
+	NewSchedulerProfile().WithPicker(picker).runPickerPlugin(ctx, &fwksched.InferenceRequest{}, newWeightedScores("pod1", "pod2"))
+
+	// Map keys are rendered sorted, so the whole map is deterministic.
+	assert.Contains(t, buf.String(), `{"/pod1":0,"/pod2":1}`,
+		"candidate log must name each endpoint with its weighted score")
+}
