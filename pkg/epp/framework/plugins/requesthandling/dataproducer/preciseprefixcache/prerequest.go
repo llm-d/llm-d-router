@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/jellydator/ttlcache/v3"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -165,17 +166,21 @@ func (s *blockKeysState) Clone() plugin.StateData {
 	return &blockKeysState{perFormatKeys: cp}
 }
 
-// bestAvailableState carries candidate predictions and their maximum from
+// bestAvailableState carries candidate predictions and their maxima from
 // Produce to PreRequest, before the scheduler's filters narrow the candidates.
 type bestAvailableState struct {
 	cachedTokens          int
 	predictedCachedTokens map[datalayer.ID]int
+	gpuCachedTokens       map[datalayer.ID]int
+	maxGPUCachedTokens    int
+	maxConfirmedTokens    int
 }
 
 // Clone implements plugin.StateData.
 func (s *bestAvailableState) Clone() plugin.StateData {
 	cp := *s
 	cp.predictedCachedTokens = maps.Clone(s.predictedCachedTokens)
+	cp.gpuCachedTokens = maps.Clone(s.gpuCachedTokens)
 	return &cp
 }
 
@@ -188,6 +193,18 @@ func (s *bestAvailableState) Clone() plugin.StateData {
 // length.
 func predictedCachedTokens(info *attrprefix.PrefixCacheMatchInfo) int {
 	return info.CachedBlockCount() * info.BlockSizeTokens()
+}
+
+// gpuCachedTokens converts a match into the contiguous prompt tokens the index
+// holds in the endpoint's GPU memory.
+func gpuCachedTokens(info *attrprefix.PrefixCacheMatchInfo) int {
+	return info.CachedBlocksByTier()[kvcache.GPUTier] * info.BlockSizeTokens()
+}
+
+// confirmedCachedTokens converts a match into the contiguous prompt tokens the
+// engine confirmed in any device tier.
+func confirmedCachedTokens(info *attrprefix.PrefixCacheMatchInfo) int {
+	return info.ConfirmedCachedBlockCount() * info.BlockSizeTokens()
 }
 
 // matchInfo reads the match the producer attached to an endpoint.
@@ -248,7 +265,37 @@ func (p *Producer) recordPrediction(ctx context.Context, request *scheduling.Inf
 		BestAvailable: bestAvailable,
 		PromptTokens:  request.Body.TokenizedRequest.TokenCount(),
 	})
+	p.recordGPUMiss(request, profile, role, info)
 	p.recordMMPrediction(ctx, request, role, info)
+}
+
+// recordGPUMiss attributes the prompt tokens the chosen endpoint lacks in GPU
+// memory to where the index holds them. Without scored candidates or Produce
+// state the chosen endpoint stands in for the maxima, as in recordPrediction.
+func (p *Producer) recordGPUMiss(request *scheduling.InferenceRequest, profile *scheduling.ProfileRunResult,
+	role string, info *attrprefix.PrefixCacheMatchInfo,
+) {
+	selected, confirmed := gpuCachedTokens(info), confirmedCachedTokens(info)
+	miss := prefixmetrics.GPUMiss{
+		Selected:               selected,
+		BestPredicted:          selected,
+		BestAvailable:          selected,
+		SelectedConfirmed:      confirmed,
+		BestAvailableConfirmed: confirmed,
+		PromptTokens:           request.Body.TokenizedRequest.TokenCount(),
+	}
+	state, err := plugin.ReadPluginStateKey[*bestAvailableState](
+		p.pluginState, request.RequestID, bestAvailableStateKey)
+	if err == nil && len(profile.ScoredCandidates) > 0 {
+		for _, candidate := range profile.ScoredCandidates {
+			if md := candidate.GetMetadata(); md != nil {
+				miss.BestPredicted = max(miss.BestPredicted, state.gpuCachedTokens[md.ID])
+			}
+		}
+		miss.BestAvailable = max(miss.BestPredicted, state.maxGPUCachedTokens)
+		miss.BestAvailableConfirmed = max(confirmed, state.maxConfirmedTokens)
+	}
+	prefixmetrics.RecordGPUMiss(p.typedName.Name, p.typedName.Type, role, miss)
 }
 
 // recordMMPrediction reports the multimodal prompt tokens the index expects
