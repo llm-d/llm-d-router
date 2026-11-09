@@ -394,7 +394,7 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 	require.NoError(t, err)
 
 	prefillProfile := scheduling.NewSchedulerProfile().
-		WithFilters(prefillFilter).
+		WithFilters(prefillFilter, capacityFilter.(fwksched.Filter)).
 		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
 	decodeProfile := scheduling.NewSchedulerProfile().
 		WithFilters(decodeFilter, capacityFilter.(fwksched.Filter)).
@@ -414,11 +414,14 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 		encodeConfigured bool
 		hasEncode        bool
 		decodeBusy       bool
+		prefillBusy      bool
 		fallbackBusy     bool
 		prefillDeclined  bool
 		cancelled        bool
 		wantPrimary      string
 		wantFallbackRuns int
+		opaqueDecode     bool
+		capacityFirst    bool
 	}{
 		{name: "decode unavailable", hasPrefill: true, hasFallback: true, wantPrimary: fallback, wantFallbackRuns: 1},
 		{name: "both stages available", hasDecode: true, hasPrefill: true, hasFallback: true, wantPrimary: decode},
@@ -426,8 +429,12 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 		{name: "prefill declined", hasDecode: true, hasFallback: true, prefillDeclined: true, wantPrimary: decode},
 		{name: "prefill only cannot satisfy fallback", hasPrefill: true, wantFallbackRuns: 1},
 		{name: "fallback unavailable", hasDecode: true, wantFallbackRuns: 1},
-		{name: "decode busy", hasDecode: true, hasFallback: true, decodeBusy: true, wantPrimary: fallback, wantFallbackRuns: 1},
-		{name: "both workers busy", hasDecode: true, hasFallback: true, decodeBusy: true, fallbackBusy: true, wantFallbackRuns: 1},
+		{name: "ready decode at capacity", hasDecode: true, hasFallback: true, decodeBusy: true},
+		{name: "ready required prefill at capacity", hasDecode: true, hasPrefill: true, hasFallback: true, prefillBusy: true},
+		{name: "fallback at capacity after decode loss", hasFallback: true, fallbackBusy: true, wantFallbackRuns: 1},
+		{name: "opaque decode profile fails closed", hasFallback: true, opaqueDecode: true},
+		{name: "capacity before selector retains rejection", hasDecode: true, hasFallback: true, decodeBusy: true, fallbackBusy: true, capacityFirst: true},
+		{name: "capacity before selector with missing decode", hasFallback: true, fallbackBusy: true, capacityFirst: true, wantFallbackRuns: 1},
 		{name: "request cancelled", hasFallback: true, cancelled: true},
 		{name: "encode unavailable retains PD", hasDecode: true, hasPrefill: true, hasFallback: true, encodeConfigured: true, wantPrimary: decode},
 		{name: "all stages available", hasDecode: true, hasPrefill: true, hasFallback: true, encodeConfigured: true, hasEncode: true, wantPrimary: decode},
@@ -457,9 +464,13 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 				endpoints = append(endpoints, encodeEndpoint)
 			}
 			decodeEndpoint.GetMetrics().RunningRequestsSize = 0
+			prefillOnlyEndpoint.GetMetrics().RunningRequestsSize = 0
 			fallbackEndpoint.GetMetrics().RunningRequestsSize = 0
 			if tc.decodeBusy {
 				decodeEndpoint.GetMetrics().RunningRequestsSize = 1
+			}
+			if tc.prefillBusy {
+				prefillOnlyEndpoint.GetMetrics().RunningRequestsSize = 1
 			}
 			if tc.fallbackBusy {
 				fallbackEndpoint.GetMetrics().RunningRequestsSize = 1
@@ -468,17 +479,28 @@ func TestPDSchedule_AggregatedFallback(t *testing.T) {
 			fallbackRuns := 0
 			profiles := map[string]fwksched.SchedulerProfile{
 				decode: decodeProfile,
-				prefill: profileFunc(func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
-					_, hasPeer := fwksched.ReadRequestAttribute[fwksched.Endpoint](req, disagg.PeerEndpointAttributeKey)
-					assert.True(t, hasPeer)
-					return prefillProfile.Run(ctx, req, endpoints)
-				}),
+				prefill: &trackedProfile{
+					SchedulerProfile: prefillProfile,
+					run: func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+						_, hasPeer := fwksched.ReadRequestAttribute[fwksched.Endpoint](req, disagg.PeerEndpointAttributeKey)
+						assert.True(t, hasPeer)
+						return prefillProfile.Run(ctx, req, endpoints)
+					},
+				},
 				fallback: profileFunc(func(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 					fallbackRuns++
 					_, hasPeer := fwksched.ReadRequestAttribute[fwksched.Endpoint](req, disagg.PeerEndpointAttributeKey)
 					assert.False(t, hasPeer)
 					return fallbackProfile.Run(ctx, req, endpoints)
 				}),
+			}
+			if tc.opaqueDecode {
+				profiles[decode] = profileFunc(decodeProfile.Run)
+			}
+			if tc.capacityFirst {
+				profiles[decode] = scheduling.NewSchedulerProfile().
+					WithFilters(capacityFilter.(fwksched.Filter), decodeFilter).
+					WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
 			}
 			encodeRuns := 0
 			if tc.encodeConfigured {
@@ -545,6 +567,15 @@ type profileFunc func(context.Context, *fwksched.InferenceRequest, []fwksched.En
 
 func (f profileFunc) Run(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
 	return f(ctx, req, endpoints)
+}
+
+type trackedProfile struct {
+	*scheduling.SchedulerProfile
+	run profileFunc
+}
+
+func (p *trackedProfile) Run(ctx context.Context, req *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
+	return p.run(ctx, req, endpoints)
 }
 
 func TestPDSchedule_PrefillFirst(t *testing.T) {

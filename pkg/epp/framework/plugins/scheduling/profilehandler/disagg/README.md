@@ -78,19 +78,35 @@ plugins:
         encode: always-disagg-multimodal-decider
 ```
 
+#### Limitations
+
+- In `decode-first` mode, Prefill and Encode each require a decider. In `prefill-first` mode, Prefill runs when its profile is configured.
+- `deciders.prefill` and `deciders.encode` must reference plugins declared in the same configuration.
+
 #### Experimental Aggregated P/D Fallback
 
 ##### What it does
 
-Requests fail when Decode or a required Prefill stage has no available target. A fallback profile lets the router send the complete request to a backup worker that can run Prefill and Decode locally. This can be a spare worker or a capable worker reassigned from the Prefill pool.
+Before forwarding a request, the router tries the configured fallback profile once when the Decode pool has no Ready candidates, or when the request requires Prefill and the Prefill pool has no Ready candidates. A successful fallback selects one backup worker for the whole request.
+
+The pool check uses the Ready candidates remaining after request screening and the profile's label and role selectors. A normal pool with candidates does not use fallback when capacity or other profile filters reject them. These rejections and a fallback profile with no target return `503 rejected-no-endpoints`.
+
+Skipping Prefill or finding no Encode target does not trigger fallback on its own. Admission and flow control keep their configured waiting and rejection behavior.
 
 ##### Configuration
 
-Set `profiles.fallback` to the backup profile defined in `schedulingProfiles`. Keep normal and backup worker selections separate. This example always requires Prefill; cache-aware routing is optional.
+1. **Prepare the backup pods.** Label pods in the same endpoint pool after checking that their engine can run Prefill and Decode locally, plus Encode for multimodal requests. Use `llm-d.ai/role: prefill-decode` or a custom label such as `inference-pool: fallback`.
+2. **Select pods for each pool.** Use `label-selector-filter` to keep backup pods out of the normal Decode and Prefill profiles. The built-in `decode-filter` and `prefill-filter` also select aggregated workers.
+3. **Enable fallback.** Set `profiles.fallback` on `disagg-profile-handler` to the backup profile name. Fallback requires `stageOrder: decode-first`, the default.
+
+The backup profile uses the same plugins as other scheduling profiles. For example, add `utilization-filter` to exclude busy backup pods or `queue-scorer` to prefer shorter queues. EPP runs filters, then scorers, then the picker. The example uses the default `max-score-picker`.
+
+This example requires Prefill for every request.
 
 ```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
 plugins:
-  # Exclude backup workers from normal Decode/Prefill routing.
   - name: dedicated-decode
     type: label-selector-filter
     parameters:
@@ -104,12 +120,9 @@ plugins:
   - name: aggregated-workers
     type: label-selector-filter
     parameters:
-      matchExpressions:
-        - key: llm-d.ai/role
-          operator: In
-          values: [prefill-decode, encode-prefill-decode]
+      matchLabels:
+        llm-d.ai/role: prefill-decode
   - type: always-disagg-pd-decider
-  - type: max-score-picker
   - type: disagg-profile-handler
     parameters:
       profiles:
@@ -123,30 +136,13 @@ schedulingProfiles:
   - name: decode
     plugins:
       - pluginRef: dedicated-decode
-      - pluginRef: max-score-picker
   - name: prefill
     plugins:
       - pluginRef: dedicated-prefill
-      - pluginRef: max-score-picker
   - name: aggregated-fallback
     plugins:
       - pluginRef: aggregated-workers
-      - pluginRef: max-score-picker
 ```
-
-##### Limitations
-
-- Supported only with `stageOrder: decode-first`. Each request tries normal routing first and attempts fallback at most once. Skipping Prefill by a decider does not trigger fallback.
-- Normal Decode and Prefill profiles must exclude fallback workers. The built-in role filters also match `prefill-decode` and `encode-prefill-decode`; using them can route normal traffic to backup workers and prevent fallback from triggering when dedicated workers disappear.
-- A fallback worker must run the complete request locally. A role label does not enable missing engine capabilities. For multimodal requests, the worker must also handle the required encoding.
-- Encode unavailability alone does not trigger fallback. Normal P/D continues without a remote Encode result; completion depends on the selected workers' capabilities.
-- Capacity filters, including automatically injected saturation detector filters, can trigger fallback when they remove all candidates. Admission rejections before scheduling do not. If fallback also has no target, the request returns `503 rejected-no-endpoints`.
-
-#### Limitations
-
-- Without a configured decider, the corresponding stage is disabled for all requests — this is a static decision at startup, not per-request.
-- The names in `deciders.prefill` and `deciders.encode` must match plugin names declared earlier in the same configuration.
-- When using P/D disaggregation, a `PrefixCachePlugin` must be configured in the prefill and decode scheduling profiles.
 
 ---
 

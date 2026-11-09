@@ -159,7 +159,8 @@ func createModelServersPDSharedStorage(decodeReplicas int) {
 	createModelServersPDWithConnector(1, decodeReplicas, constants.KVConnectorSharedStorage)
 }
 
-// The simulator validates routing; it does not validate inference-engine capabilities.
+// The EPD fixture omits the routing sidecar so the fallback simulator runs locally.
+// This validates routing, not inference-engine capabilities.
 func createModelServersPDAggregatedFallback() {
 	createModelServersPDSharedStorage(1)
 	createModelServersFromKustomize(epdDeploymentDir, map[string]string{

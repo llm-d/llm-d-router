@@ -26,12 +26,14 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -1085,4 +1087,38 @@ func TestRunPickerPluginLogsCandidateNames(t *testing.T) {
 	// Map keys are rendered sorted, so the whole map is deterministic.
 	assert.Contains(t, buf.String(), `{"/pod1":0,"/pod2":1}`,
 		"candidate log must name each endpoint with its weighted score")
+}
+
+func TestHasReadyPoolEndpoints(t *testing.T) {
+	decode, err := bylabel.NewSelector("decode", &metav1.LabelSelector{
+		MatchLabels: map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+	})
+	assert.NoError(t, err)
+	zone, err := bylabel.NewSelector("zone", &metav1.LabelSelector{MatchLabels: map[string]string{"zone": "a"}})
+	assert.NoError(t, err)
+	reject := &filterOnlyPlugin{typedName: fwkplugin.TypedName{Type: "reject", Name: "reject"}}
+	for _, tc := range []struct {
+		name    string
+		filters []fwksched.Filter
+		labels  []map[string]string
+		want    bool
+	}{
+		{name: "empty candidates", filters: []fwksched.Filter{decode}},
+		{name: "missing role label", filters: []fwksched.Filter{decode}, labels: []map[string]string{{}}},
+		{name: "capacity before selector", filters: []fwksched.Filter{reject, decode}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RoleDecode}}, want: true},
+		{name: "capacity after selector", filters: []fwksched.Filter{decode, reject}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RoleDecode}}, want: true},
+		{name: "unknown filters do not declare a pool", filters: []fwksched.Filter{reject}, labels: []map[string]string{{}}, want: true},
+		{name: "selectors must match the same endpoint", filters: []fwksched.Filter{decode, zone}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RoleDecode}, {"zone": "a"}}},
+		{name: "selector intersection", filters: []fwksched.Filter{decode, zone}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RoleDecode, "zone": "a"}}, want: true},
+		{name: "built in role includes aggregated workers", filters: []fwksched.Filter{bylabel.NewDecodeRole()}, labels: []map[string]string{{bylabel.RoleLabel: bylabel.RolePrefillDecode}}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoints := make([]fwksched.Endpoint, 0, len(tc.labels))
+			for _, labels := range tc.labels {
+				endpoints = append(endpoints, fwksched.NewEndpoint(&fwkdl.EndpointMetadata{Labels: labels}, &fwkdl.Metrics{}, fwkdl.NewAttributes()))
+			}
+			profile := NewSchedulerProfile().WithFilters(tc.filters...)
+			assert.Equal(t, tc.want, profile.HasReadyPoolEndpoints(endpoints))
+		})
+	}
 }

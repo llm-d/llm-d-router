@@ -183,10 +183,9 @@ func TestScheduleFallbackWithInjectedSaturationDetector(t *testing.T) {
 			wantBothBusy:   "decode",
 		},
 		{
-			name:           "concurrency fails closed",
-			detectorType:   concurrency.ConcurrencyDetectorType,
-			parameters:     []byte(`{"maxConcurrency":1,"failOpen":false}`),
-			wantDecodeBusy: "fallback",
+			name:         "concurrency fails closed",
+			detectorType: concurrency.ConcurrencyDetectorType,
+			parameters:   []byte(`{"maxConcurrency":1,"failOpen":false}`),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,6 +228,7 @@ schedulingProfiles:
 
 			for _, phase := range []struct {
 				name         string
+				decodeAbsent bool
 				decodeBusy   bool
 				fallbackBusy bool
 				wantPrimary  string
@@ -236,6 +236,7 @@ schedulingProfiles:
 				{name: "healthy", wantPrimary: "decode"},
 				{name: "decode saturated", decodeBusy: true, wantPrimary: tc.wantDecodeBusy},
 				{name: "both saturated", decodeBusy: true, fallbackBusy: true, wantPrimary: tc.wantBothBusy},
+				{name: "decode unavailable", decodeAbsent: true, wantPrimary: "fallback"},
 				{name: "recovered", wantPrimary: "decode"},
 			} {
 				t.Run(phase.name, func(t *testing.T) {
@@ -248,6 +249,9 @@ schedulingProfiles:
 						{name: "decode", role: bylabel.RoleDecode, busy: phase.decodeBusy},
 						{name: "fallback", role: bylabel.RolePrefillDecode, busy: phase.fallbackBusy},
 					} {
+						if spec.role == bylabel.RoleDecode && phase.decodeAbsent {
+							continue
+						}
 						metrics := &fwkdl.Metrics{UpdateTime: time.Now()}
 						load := &attrconcurrency.InFlightLoad{}
 						if spec.busy {

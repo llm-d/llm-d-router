@@ -241,10 +241,10 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 
 // compile-time assertions
 var (
-	_ scheduling.ProfileHandler = &Handler{}
-	_ fwkrh.PreRequest          = &Handler{}
-	_ plugin.ProducerPlugin     = &Handler{}
-	_ plugin.ConsumerPlugin     = &Handler{}
+	_ scheduling.CandidateAwareProfileHandler = &Handler{}
+	_ fwkrh.PreRequest                        = &Handler{}
+	_ plugin.ProducerPlugin                   = &Handler{}
+	_ plugin.ConsumerPlugin                   = &Handler{}
 )
 
 // Handler is the unified disaggregation profile handler.
@@ -379,12 +379,22 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 	}
 }
 
-// Pick implements scheduling.ProfileHandler.
+// Pick implements scheduling.ProfileHandler without pool availability information.
+// Fallback requires PickWithCandidates.
 // In decode-first mode (default), stages run: decode → encode (optional) → prefill (optional).
 // In prefill-first mode, stages run: prefill (optional) → encode (optional) → decode.
 // Returns the next profile to execute, or an empty map when all stages are done.
 func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
+	return h.PickWithCandidates(ctx, request, profiles, profileResults, nil)
+}
+
+// PickWithCandidates uses the pre-filter candidates to distinguish an empty pool
+// from a profile rejected by capacity or other request filters.
+func (h *Handler) PickWithCandidates(ctx context.Context, request *scheduling.InferenceRequest,
+	profiles map[string]scheduling.SchedulerProfile, profileResults map[string]*scheduling.ProfileRunResult,
+	candidates []scheduling.Endpoint,
+) map[string]scheduling.SchedulerProfile {
 	tracer := tracing.Tracer(schedplugins.TracerScope)
 	ctx, span := tracer.Start(ctx, "pick_disagg_profile",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -407,11 +417,22 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if h.stageOrder == StageOrderPrefillFirst {
 		return h.pickPrefillFirst(ctx, span, request, profiles, profileResults)
 	}
-	return h.pickDecodeFirst(ctx, span, request, profiles, profileResults)
+	return h.pickDecodeFirst(ctx, span, request, profiles, profileResults, candidates)
+}
+
+// poolEmpty fails closed for profiles that cannot identify their pool members.
+func poolEmpty(profile scheduling.SchedulerProfile, candidates []scheduling.Endpoint) bool {
+	if candidates == nil {
+		return false
+	}
+	pool, ok := profile.(interface {
+		HasReadyPoolEndpoints([]scheduling.Endpoint) bool
+	})
+	return ok && !pool.HasReadyPoolEndpoints(candidates)
 }
 
 func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request *scheduling.InferenceRequest,
-	profiles map[string]scheduling.SchedulerProfile, profileResults map[string]*scheduling.ProfileRunResult,
+	profiles map[string]scheduling.SchedulerProfile, profileResults map[string]*scheduling.ProfileRunResult, candidates []scheduling.Endpoint,
 ) map[string]scheduling.SchedulerProfile {
 	// ── Stage 1: Decode ────────────────────────────────────────────────────
 	if _, executed := profileResults[h.decodeProfile]; !executed {
@@ -429,7 +450,9 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 		if _, ran := profileResults[h.fallbackProfile]; ran {
 			return map[string]scheduling.SchedulerProfile{}
 		}
-		if decodeRes.FirstEndpoint() == nil || h.prefillRequiredButFailed(request, profileResults) {
+		decodePoolEmpty := decodeRes.FirstEndpoint() == nil && poolEmpty(profiles[h.decodeProfile], candidates)
+		prefillPoolEmpty := h.prefillRequiredButFailed(request, profileResults) && poolEmpty(profiles[h.prefillProfile], candidates)
+		if decodePoolEmpty || prefillPoolEmpty {
 			if fallback, exists := profiles[h.fallbackProfile]; exists && ctx.Err() == nil {
 				// The aggregated target must not inherit affinity to an abandoned stage.
 				request.PutAttribute(PeerEndpointAttributeKey, nil)
@@ -461,14 +484,14 @@ func (h *Handler) pickDecodeFirst(ctx context.Context, span trace.Span, request 
 	}
 
 	// ── Stage 3: Prefill (optional) ────────────────────────────────────────
-	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
+	if prefillProfile, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
 			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
 				// Publish the decode pick so plugins in the prefill profile (e.g.
 				// topology affinity) can compare candidates against it.
 				request.PutAttribute(PeerEndpointAttributeKey, decodeRes.TargetEndpoints[0])
 				span.SetAttributes(semconv.LLMDEPPProfileHandlerDecision("run_prefill"))
-				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
+				return map[string]scheduling.SchedulerProfile{h.prefillProfile: prefillProfile}
 			}
 			// Decider rejected prefill - mark as evaluated so we don't re-run the decider,
 			// and record that this is an intentional skip, not a failed run.

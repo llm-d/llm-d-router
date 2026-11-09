@@ -199,7 +199,7 @@ schedulingProfiles:
     weight: 2
 `
 
-// aggregatedFallbackConfig routes to an aggregated worker when Decode or required Prefill has no endpoints.
+// aggregatedFallbackConfig uses strict pool selectors to test stage loss.
 const aggregatedFallbackConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
