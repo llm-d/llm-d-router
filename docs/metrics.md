@@ -270,6 +270,9 @@ sum by (fairness_id) (rate(llm_d_epp_request_output_tokens_sum[5m]))
 sum by (fairness_id, outcome) (rate(llm_d_epp_request_outcome_total[5m]))
 ```
 
+The recording rule `llm_d:epp_request_running:ratio` (see
+[Fairness ID resolution](#fairness-id-resolution)) records the share per pool.
+
 #### Exemplars
 
 Metrics whose notes say they carry a trace exemplar attach the request's trace context
@@ -710,8 +713,9 @@ When `requestHandler.composeFairnessIDs` is enabled, a request carrying both the
 agent identity is recorded under the composed `<tenant>/<session>` ID with `source="header"`. The
 tenant part is percent-encoded (`%` to `%25`, `/` to `%2F`), so the first segment is always the
 whole tenant. On such a pool, `llm_d:epp_named_fairness_ids:count5m` counts distinct composed IDs,
-which are sessions rather than tenants, and `llm_d:epp_agent_sessions:count5m` does not count
-tenant-stamped sessions because those requests resolve with `source="header"`.
+which are sessions rather than tenants, `llm_d:epp_request_running:ratio` splits a tenant's share
+across its sessions, and `llm_d:epp_agent_sessions:count5m` does not count tenant-stamped sessions
+because those requests resolve with `source="header"`.
 
 The `fairness_id` label uses the shared cap described in [Metrics catalog](#metrics-catalog).
 Scheduling and Flow Control always use the original ID; only the label is folded. Per replica:
@@ -734,17 +738,25 @@ sum by (inference_pool, source) (rate(llm_d_epp_fairness_id_overflow_total[5m]))
 ```
 
 [`rules/fairness-id-rules.yaml`](rules/fairness-id-rules.yaml) has recording rules that count
-distinct fairness IDs per pool, deduplicated across EPP replicas:
+distinct fairness IDs per pool, deduplicated across EPP replicas, and record each ID's share of
+in-flight requests:
 
 | Rule | Value |
 |---|---|
 | `llm_d:epp_named_fairness_ids:count5m` | Header IDs, including composed `<tenant>/<session>` IDs, that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
 | `llm_d:epp_named_fairness_ids:incomplete5m` | 1 when header IDs were folded in the same window, so the count is a lower bound; otherwise 0. |
 | `llm_d:epp_agent_sessions:count5m` | Agent identity or derived-root IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source=~"agent_identity\|derived_root"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
+| `llm_d:epp_request_running:ratio` | Each fairness ID's share of `llm_d_epp_request_running` (dispatched, unfinished requests) per pool, summed across EPP replicas before dividing. `other` and `default-flow` count in the total, so the values in a pool sum to 1, and an ID's share is a lower bound while `other` is above 0. Queued requests are not included. While the pool is busy, an ID a replica has served reports 0 when nothing is in flight; an idle pool has no sample. |
 
 The rules group by `namespace` and `inference_pool`, so the scrape must attach a `namespace`
-label. Change `5m` for a different window. An ID is missed when all of its requests went to a
-replica that was removed before Prometheus scraped it. To check the rules after editing them, run
+label. Request metrics carry no pool label, so the ratio rule takes `inference_pool` from
+`llm_d_epp_fairness_id_overflow_total` on the same `namespace`, `job`, `pod`, and `instance`, using
+the newest pool when one target reports two within the lookback window. The ratio rule omits any
+replica that does not export that counter. Duplicate scrapes of one EPP pod count its running
+requests twice in the pool sum. All four rules aggregate by `namespace` and
+`inference_pool` without a cluster label, so each Prometheus must evaluate one cluster. Change `5m`
+for a different window. An ID is missed when all of its requests went to a replica that was removed
+before Prometheus scraped it. To check the rules after editing them, run
 `promtool test rules hack/testdata/fairness-id-rules-test.yaml`.
 
 ### Program-aware fairness

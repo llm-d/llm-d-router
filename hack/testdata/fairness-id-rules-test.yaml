@@ -108,3 +108,133 @@ tests:
         exp_samples:
           - labels: 'llm_d:epp_named_fairness_ids:incomplete5m{namespace="ns",inference_pool="pool-a"}'
             value: 0
+  # Ratio: pool-a in ns has two replicas under different scrape jobs. A replica in ns without the
+  # overflow counter is left out. pool-a in ns2 reuses the pool name, a job name and an instance
+  # address. pool-c in ns and pool-d in ns2 are idle; pool-d shares a job name and an instance
+  # address with an ns replica and has the newer counter sample. other and default-flow count in
+  # the denominator; team-b is split across two models; team-c has a zero series. Averaging
+  # per-replica ratios would give team-a 0.25; summing first gives 0.1.
+  - interval: 1m
+    input_series:
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns",job="r1-epp",instance="10.0.0.1:9090",inference_pool="pool-a",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns",job="r1-epp",instance="10.0.0.1:9090",inference_pool="pool-a",source="default"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns",job="r1-epp-backup",instance="10.0.0.2:9090",inference_pool="pool-a",source="header"}'
+        values: '0x4'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns2",job="r1-epp",instance="10.0.0.1:9090",inference_pool="pool-a",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns",job="r3-epp",instance="10.0.2.1:9090",inference_pool="pool-c",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns2",job="r1-epp-backup",instance="10.0.0.2:9090",inference_pool="pool-d",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r1-epp",instance="10.0.0.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '1x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r1-epp",instance="10.0.0.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="default-flow"}'
+        values: '1x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r1-epp",instance="10.0.0.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-b"}'
+        values: '0x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r1-epp",instance="10.0.0.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-c"}'
+        values: '0x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r1-epp-backup",instance="10.0.0.2:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '0x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r1-epp-backup",instance="10.0.0.2:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-b"}'
+        values: '4x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r1-epp-backup",instance="10.0.0.2:9090",model_name="m2",target_model_name="m2",api_surface="completions",priority="0",fairness_id="team-b"}'
+        values: '2x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r1-epp-backup",instance="10.0.0.2:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="other"}'
+        values: '2x5'
+      - series: 'llm_d_epp_request_running{namespace="ns2",job="r1-epp",instance="10.0.0.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '5x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r3-epp",instance="10.0.2.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '0x5'
+      - series: 'llm_d_epp_request_running{namespace="ns2",job="r1-epp-backup",instance="10.0.0.2:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '0x5'
+      - series: 'llm_d_epp_request_running{namespace="ns",job="r0-epp",instance="10.0.0.9:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '3x5'
+    promql_expr_test:
+      - expr: 'llm_d:epp_request_running:ratio'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns",inference_pool="pool-a",fairness_id="team-a"}'
+            value: 0.1
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns",inference_pool="pool-a",fairness_id="team-b"}'
+            value: 0.6
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns",inference_pool="pool-a",fairness_id="other"}'
+            value: 0.2
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns",inference_pool="pool-a",fairness_id="default-flow"}'
+            value: 0.1
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns",inference_pool="pool-a",fairness_id="team-c"}'
+            value: 0
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns2",inference_pool="pool-a",fairness_id="team-a"}'
+            value: 1
+  # Pod IP reuse: a terminated pod's series can still be in the lookback window when its IP goes to
+  # a new pod of another pool in the same namespace. In ns3 the two pods share a job and differ by
+  # pod; in ns4 the targets have no pod label and differ by job. In ns6 two targets share a job, have
+  # no pod label and differ by instance. In ns7 one target moves from pool-g to pool-h while the old
+  # series is still in the lookback window, and the newest pool wins. Each pool keeps its own ratio,
+  # and pool-z in ns5 still records.
+  - interval: 1m
+    input_series:
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns3",job="kubernetes-pods",pod="epp-e-0",instance="10.0.3.1:9090",inference_pool="pool-e",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns3",job="kubernetes-pods",pod="epp-f-0",instance="10.0.3.1:9090",inference_pool="pool-f",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns4",job="re-epp",instance="10.0.4.1:9090",inference_pool="pool-e",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns4",job="rf-epp",instance="10.0.4.1:9090",inference_pool="pool-f",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns5",job="rz-epp",pod="rz-epp-0",instance="10.0.5.1:9090",inference_pool="pool-z",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns6",job="kubernetes-pods",instance="10.0.6.1:9090",inference_pool="pool-g",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns6",job="kubernetes-pods",instance="10.0.6.2:9090",inference_pool="pool-h",source="header"}'
+        values: '0x5'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns7",job="kubernetes-pods",instance="10.0.7.1:9090",inference_pool="pool-g",source="header"}'
+        values: '0 0 _ _ _ _'
+      - series: 'llm_d_epp_fairness_id_overflow_total{namespace="ns7",job="kubernetes-pods",instance="10.0.7.1:9090",inference_pool="pool-h",source="header"}'
+        values: '_ _ 0 0 0 0'
+      - series: 'llm_d_epp_request_running{namespace="ns3",job="kubernetes-pods",pod="epp-e-0",instance="10.0.3.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '1x5'
+      - series: 'llm_d_epp_request_running{namespace="ns3",job="kubernetes-pods",pod="epp-e-0",instance="10.0.3.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-b"}'
+        values: '1x5'
+      - series: 'llm_d_epp_request_running{namespace="ns3",job="kubernetes-pods",pod="epp-f-0",instance="10.0.3.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '3x5'
+      - series: 'llm_d_epp_request_running{namespace="ns4",job="re-epp",instance="10.0.4.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '2x5'
+      - series: 'llm_d_epp_request_running{namespace="ns4",job="rf-epp",instance="10.0.4.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '2x5'
+      - series: 'llm_d_epp_request_running{namespace="ns4",job="rf-epp",instance="10.0.4.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-b"}'
+        values: '2x5'
+      - series: 'llm_d_epp_request_running{namespace="ns5",job="rz-epp",pod="rz-epp-0",instance="10.0.5.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '1x5'
+      - series: 'llm_d_epp_request_running{namespace="ns6",job="kubernetes-pods",instance="10.0.6.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '1x5'
+      - series: 'llm_d_epp_request_running{namespace="ns6",job="kubernetes-pods",instance="10.0.6.2:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-b"}'
+        values: '1x5'
+      - series: 'llm_d_epp_request_running{namespace="ns7",job="kubernetes-pods",instance="10.0.7.1:9090",model_name="m1",target_model_name="m1",api_surface="unknown",priority="0",fairness_id="team-a"}'
+        values: '1x5'
+    promql_expr_test:
+      - expr: 'llm_d:epp_request_running:ratio'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns3",inference_pool="pool-e",fairness_id="team-a"}'
+            value: 0.5
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns3",inference_pool="pool-e",fairness_id="team-b"}'
+            value: 0.5
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns3",inference_pool="pool-f",fairness_id="team-a"}'
+            value: 1
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns4",inference_pool="pool-e",fairness_id="team-a"}'
+            value: 1
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns4",inference_pool="pool-f",fairness_id="team-a"}'
+            value: 0.5
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns4",inference_pool="pool-f",fairness_id="team-b"}'
+            value: 0.5
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns5",inference_pool="pool-z",fairness_id="team-a"}'
+            value: 1
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns6",inference_pool="pool-g",fairness_id="team-a"}'
+            value: 1
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns6",inference_pool="pool-h",fairness_id="team-b"}'
+            value: 1
+          - labels: 'llm_d:epp_request_running:ratio{namespace="ns7",inference_pool="pool-h",fairness_id="team-a"}'
+            value: 1
