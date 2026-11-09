@@ -431,6 +431,7 @@ pipeline:
     #   params:
     #     prompt_token_parity: warn   # off | warn | error; a served cache hit is
     #                                 # checked like a decode response (see decode)
+    #     forward_prompt_token_ids: false   # same as on the decode step
 
     # -------------------------------------------------------------------
     # encode: fans out one POST per multimodal entry to the encoder pods,
@@ -531,3 +532,17 @@ pipeline:
       #     warn  - count (prompt_token_mismatch_total) and log   (default)
       #     error - also record a decode step error
       #   prompt_token_parity: warn
+      #
+      #   forward_prompt_token_ids sends the token IDs the render step
+      #   produced in kv_transfer_params.prompt_token_ids on text-only chat
+      #   completions, Responses and Messages requests. The decode worker
+      #   builds its input from them and skips chat templating and
+      #   tokenization. Requires vLLM v0.27.0 or later and a render step;
+      #   earlier versions ignore the field. Requests with multimodal content,
+      #   echo, or (chat completions) return_prompt_text set are sent without
+      #   the IDs and rendered from messages. The worker also renders the
+      #   prompt itself, and prompt_token_parity can report
+      #   ids_forwarded="true" mismatches, on Harmony models (such as gpt-oss)
+      #   behind /v1/responses and on the vLLM Rust frontend, neither of which
+      #   reads the field.
+      #   forward_prompt_token_ids: false
