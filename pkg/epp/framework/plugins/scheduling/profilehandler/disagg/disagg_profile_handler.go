@@ -171,8 +171,11 @@ func HandlerFactory(name string, rawParameters *json.Decoder, handle plugin.Hand
 	handler := NewDisaggProfileHandler(
 		parameters.Profiles.Decode, parameters.Profiles.Prefill, parameters.Profiles.Encode,
 		pdDecider, encodeDecider,
-	).WithStageOrder(parameters.StageOrder).WithFallbackProfile(parameters.Profiles.Fallback)
-	return handler.WithName(name), nil
+	).WithStageOrder(parameters.StageOrder).WithName(name)
+	if parameters.Profiles.Fallback != "" {
+		return handler.WithFallbackProfile(parameters.Profiles.Fallback), nil
+	}
+	return handler, nil
 }
 
 func DisaggProfileHandlerConfigParser(rawParameters *json.Decoder, _ plugin.Handle) (any, error) {
@@ -241,7 +244,8 @@ func NewDisaggProfileHandler(decodeProfile, prefillProfile, encodeProfile string
 
 // compile-time assertions
 var (
-	_ scheduling.CandidateAwareProfileHandler = &Handler{}
+	_ scheduling.ProfileHandler               = &Handler{}
+	_ scheduling.CandidateAwareProfileHandler = &FallbackHandler{}
 	_ fwkrh.PreRequest                        = &Handler{}
 	_ plugin.ProducerPlugin                   = &Handler{}
 	_ plugin.ConsumerPlugin                   = &Handler{}
@@ -285,10 +289,34 @@ func (h *Handler) WithStageOrder(stageOrder StageOrder) *Handler {
 	return h
 }
 
-// WithFallbackProfile sets the optional aggregated profile for decode-first scheduling.
-func (h *Handler) WithFallbackProfile(name string) *Handler {
-	h.fallbackProfile = name
+// WithFallbackProfile returns a copy configured for aggregated fallback.
+func (h *Handler) WithFallbackProfile(name string) *FallbackHandler {
+	handler := *h
+	handler.fallbackProfile = name
+	return &FallbackHandler{Handler: &handler}
+}
+
+// FallbackHandler enables candidate-aware scheduling for aggregated fallback.
+type FallbackHandler struct{ *Handler }
+
+// WithName sets the instance name of the fallback handler.
+func (h *FallbackHandler) WithName(name string) *FallbackHandler {
+	h.Handler.WithName(name)
 	return h
+}
+
+// WithStageOrder sets the stage execution order for the fallback handler.
+func (h *FallbackHandler) WithStageOrder(order StageOrder) *FallbackHandler {
+	h.Handler.WithStageOrder(order)
+	return h
+}
+
+// PickWithCandidates distinguishes an empty stage pool from a filtered pool.
+func (h *FallbackHandler) PickWithCandidates(ctx context.Context, request *scheduling.InferenceRequest,
+	profiles map[string]scheduling.SchedulerProfile, results map[string]*scheduling.ProfileRunResult,
+	candidates []scheduling.Endpoint,
+) map[string]scheduling.SchedulerProfile {
+	return h.pick(ctx, request, profiles, results, candidates)
 }
 
 // ValidateSchedulingProfiles checks the fallback reference against the configured profiles.
@@ -379,19 +407,16 @@ func newDisaggProfileHandler(handlerType, decodeProfile, prefillProfile, encodeP
 	}
 }
 
-// Pick implements scheduling.ProfileHandler without pool availability information.
-// Fallback requires PickWithCandidates.
+// Pick implements scheduling.ProfileHandler.
 // In decode-first mode (default), stages run: decode → encode (optional) → prefill (optional).
 // In prefill-first mode, stages run: prefill (optional) → encode (optional) → decode.
 // Returns the next profile to execute, or an empty map when all stages are done.
 func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest, profiles map[string]scheduling.SchedulerProfile,
 	profileResults map[string]*scheduling.ProfileRunResult) map[string]scheduling.SchedulerProfile {
-	return h.PickWithCandidates(ctx, request, profiles, profileResults, nil)
+	return h.pick(ctx, request, profiles, profileResults, nil)
 }
 
-// PickWithCandidates uses the pre-filter candidates to distinguish an empty pool
-// from a profile rejected by capacity or other request filters.
-func (h *Handler) PickWithCandidates(ctx context.Context, request *scheduling.InferenceRequest,
+func (h *Handler) pick(ctx context.Context, request *scheduling.InferenceRequest,
 	profiles map[string]scheduling.SchedulerProfile, profileResults map[string]*scheduling.ProfileRunResult,
 	candidates []scheduling.Endpoint,
 ) map[string]scheduling.SchedulerProfile {

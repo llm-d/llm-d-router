@@ -1957,3 +1957,23 @@ func TestHandler_ProcessResults_PrefillFirst(t *testing.T) {
 	assert.Contains(t, res.ProfileResults, defaultDecodeProfile)
 	assert.Contains(t, res.ProfileResults, DefaultPrefillProfile)
 }
+
+func TestHandlerFactory_CandidateAwareFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		config         string
+		wantCandidates bool
+	}{
+		{name: "default", config: `{}`},
+		{name: "pd", config: `{"deciders":{"prefill":"always-disagg-pd-decider"}}`},
+		{name: "fallback", config: `{"profiles":{"fallback":"backup"}}`, wantCandidates: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := HandlerFactory("handler", plugin.StrictDecoder([]byte(tc.config)), handleWithDeciders(utils.NewTestContext(t)))
+			require.NoError(t, err)
+			_, aware := p.(scheduling.CandidateAwareProfileHandler)
+			assert.Equal(t, tc.wantCandidates, aware)
+			assert.Equal(t, "handler", p.TypedName().Name)
+		})
+	}
+}

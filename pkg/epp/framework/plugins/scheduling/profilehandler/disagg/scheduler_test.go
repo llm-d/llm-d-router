@@ -653,3 +653,26 @@ func TestPDSchedule_PrefillFirst(t *testing.T) {
 		t.Errorf("Unexpected output (-want +got): %v", diff)
 	}
 }
+
+func TestPDSchedule_DecoratedHandler(t *testing.T) {
+	handler := &decoratedHandler{Handler: disagg.NewDisaggProfileHandler(decode, prefill, "", nil, nil)}
+	profile := scheduling.NewSchedulerProfile().WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+	scheduler := scheduling.NewSchedulerWithConfig(scheduling.NewSchedulerConfig(handler, map[string]fwksched.SchedulerProfile{decode: profile}))
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "decode"}}, &fwkdl.Metrics{}, fwkdl.NewAttributes())
+	result, err := scheduler.Schedule(context.Background(), &fwksched.InferenceRequest{RequestID: uuid.NewString()}, []fwksched.Endpoint{endpoint})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 2, handler.picks)
+}
+
+type decoratedHandler struct {
+	*disagg.Handler
+	picks int
+}
+
+func (h *decoratedHandler) Pick(ctx context.Context, request *fwksched.InferenceRequest,
+	profiles map[string]fwksched.SchedulerProfile, results map[string]*fwksched.ProfileRunResult,
+) map[string]fwksched.SchedulerProfile {
+	h.picks++
+	return h.Handler.Pick(ctx, request, profiles, results)
+}
