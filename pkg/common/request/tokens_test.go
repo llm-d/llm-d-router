@@ -564,6 +564,45 @@ func TestNonNegativeInt(t *testing.T) {
 	}
 }
 
+func TestStreamRequested(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      map[string]any
+		stream    bool
+		wantError bool
+	}{
+		{name: "absent", body: map[string]any{}},
+		{name: "null", body: map[string]any{FieldStream: nil}},
+		{name: "true", body: map[string]any{FieldStream: true}, stream: true},
+		{name: "false", body: map[string]any{FieldStream: false}},
+		{name: "raw null", body: map[string]any{FieldStream: json.RawMessage(`null`)}},
+		{name: "raw true", body: map[string]any{FieldStream: json.RawMessage(`true`)}, stream: true},
+		{name: "raw false", body: map[string]any{FieldStream: json.RawMessage(`false`)}},
+		{name: "string true", body: map[string]any{FieldStream: "true"}, wantError: true},
+		{name: "string false", body: map[string]any{FieldStream: "false"}, wantError: true},
+		{name: "number", body: map[string]any{FieldStream: json.Number("1")}, wantError: true},
+		{name: "object", body: map[string]any{FieldStream: map[string]any{}}, wantError: true},
+		{name: "array", body: map[string]any{FieldStream: []any{}}, wantError: true},
+		{name: "undecodable raw", body: map[string]any{FieldStream: json.RawMessage(`{`)}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream, err := StreamRequested(tc.body)
+			if tc.wantError {
+				if err == nil || err.Error() != "stream must be a boolean" {
+					t.Fatalf("StreamRequested() error = %v, want stream must be a boolean", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("StreamRequested() error = %v", err)
+			}
+			if stream != tc.stream {
+				t.Errorf("StreamRequested() = %v, want %v", stream, tc.stream)
+			}
+		})
+	}
+}
+
 func TestRejectStatefulResponsesFields(t *testing.T) {
 	tests := []struct {
 		name      string

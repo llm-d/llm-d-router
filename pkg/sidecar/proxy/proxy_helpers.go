@@ -303,6 +303,13 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 		}
 		return nil, nil, false
 	}
+	if _, err := reqcommon.StreamRequested(parsed); err != nil {
+		logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+			logger.Error(writeErr, "failed to send error response to client")
+		}
+		return nil, nil, false
+	}
 	// createRoutes registers exact POST routes with and without a trailing slash
 	// for each inference path and derives apiType from DetectAPIType. The decoder
 	// catch-all handles extra segments and unrelated paths without reading their
