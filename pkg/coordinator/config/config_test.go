@@ -75,6 +75,35 @@ func TestLoadDefaults(t *testing.T) {
 	if len(cfg.Server.TLSCipherSuites) != 0 {
 		t.Errorf("server.tls_cipher_suites = %v, want empty", cfg.Server.TLSCipherSuites)
 	}
+
+	if len(cfg.DeprecatedKeys) != 0 {
+		t.Errorf("DeprecatedKeys = %v, want empty", cfg.DeprecatedKeys)
+	}
+}
+
+func TestLoadDeprecatedWriteTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		env  bool
+	}{
+		{name: "file", body: "server:\n  write_timeout: 600s\n"},
+		{name: "env", body: "", env: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env {
+				t.Setenv("COORDINATOR_SERVER_WRITE_TIMEOUT", "600s")
+			}
+			cfg, err := Load(writeConfig(t, tt.body))
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if want := []string{"server.write_timeout"}; !slices.Equal(cfg.DeprecatedKeys, want) {
+				t.Errorf("DeprecatedKeys = %v, want %v", cfg.DeprecatedKeys, want)
+			}
+		})
+	}
 }
 
 func TestLoadEnvOverride(t *testing.T) {

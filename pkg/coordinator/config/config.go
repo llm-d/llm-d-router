@@ -32,6 +32,10 @@ type Config struct {
 	Server   ServerConfig   `mapstructure:"server"`
 	Gateway  GatewayConfig  `mapstructure:"gateway"`
 	Pipeline PipelineConfig `mapstructure:"pipeline"`
+
+	// DeprecatedKeys are keys set in the file or environment that have no
+	// effect; main reports them at startup since this package has no logger.
+	DeprecatedKeys []string `mapstructure:"-"`
 }
 
 // BytesPerMB is the number of bytes in one megabyte.
@@ -109,6 +113,9 @@ func Load(path string) (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshalling config: %w", err)
+	}
+	if v.IsSet("server.write_timeout") {
+		cfg.DeprecatedKeys = append(cfg.DeprecatedKeys, "server.write_timeout")
 	}
 	return &cfg, nil
 }
