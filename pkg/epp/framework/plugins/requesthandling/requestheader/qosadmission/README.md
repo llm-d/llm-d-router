@@ -4,7 +4,7 @@
 **Interfaces:** `requesthandling.RequestHeaderProcessor`, `requesthandling.ResponseHeaderProcessor`, `requesthandling.ResponseBodyProcessor`
 **Stability:** Alpha
 
-Enforces per-team QoS contracts ahead of flow control. Until `mode: enforce` is set it serves each team at its committed class and only records downgrades and rejections; see [Shadow Mode](#shadow-mode). Each team is committed to a service class, and each class is a flow-control priority band. A team's contract is its size limits (`maxPromptTokens`, `maxOutputTokens`) and its commits: its concurrency (`maxConcurrency`) and its daily weighted-token budget (`dailyTokens`). Traffic within the contract is served at the team's class. Traffic outside it moves one class down, and is rejected when no lower class exists: `400` above a size limit, `429` above a commit.
+Enforces per-team QoS contracts ahead of flow control. Until `mode: enforce-limits` is set it serves each team at its committed class and only records downgrades and rejections; see [Report-Only Mode](#report-only-mode). Each team is committed to a service class, and each class is a flow-control priority band. A team's contract is its size limits (`maxPromptTokens`, `maxOutputTokens`) and its commits: its concurrency (`maxConcurrency`) and its daily weighted-token budget (`dailyTokens`). Traffic within the contract is served at the team's class. Traffic outside it moves one class down, and is rejected when no lower class exists: `400` above a size limit, `429` above a commit.
 
 ## What It Does
 
@@ -32,9 +32,9 @@ The concurrency header is present only for a team with a `maxConcurrency` commit
 
 A `429` adds `retry-after` (seconds: `1` for concurrency, until the next UTC day for the daily budget) and `x-llm-d-request-dropped-reason: rejected-over-quota`, and reports the team's committed class in `x-llm-d-qos-class`. A `400` reports `rejected-size-limit` and the team's committed class.
 
-## Shadow Mode
+## Report-Only Mode
 
-The plugin starts in `mode: shadow` (the default). It serves every request at its team's committed class: it sets the class priority and, when the request has none, the fairness ID, as enforce mode does. Every decision is computed and recorded in `llm_d_epp_qos_admission_decisions_total{mode="shadow"}`, but a request outside the contract is neither moved down a class nor rejected, and the plugin adds no response headers. Commits are counted as they would be when enforced: a request recorded as `admitted` holds a concurrency slot and a daily charge until it completes, and one recorded as `downgraded` or `rejected_*` holds neither. Use it to compare commits against real traffic, then set `mode: enforce` to apply the decisions.
+The plugin starts in `mode: report-only` (the default). It serves every request at its team's committed class: it sets the class priority and, when the request has none, the fairness ID, as `enforce-limits` mode does. Every decision is computed and recorded in `llm_d_epp_qos_admission_decisions_total{mode="report-only"}`, but a request outside the contract is neither moved down a class nor rejected, and the plugin adds no response headers. Commits are counted as they would be when enforced: a request recorded as `admitted` holds a concurrency slot and a daily charge until it completes, and one recorded as `downgraded` or `rejected_*` holds neither. Use it to compare commits against real traffic, then set `mode: enforce-limits` to apply the decisions.
 
 ## Configuration
 
@@ -42,7 +42,7 @@ The plugin starts in `mode: shadow` (the default). It serves every request at it
 plugins:
 - type: qos-admission
   parameters:
-    mode: enforce
+    mode: enforce-limits
     outputTokenWeight: 2
     defaultOutputReservation: 1000
     classes:              # highest first; priorities must strictly decrease
@@ -64,7 +64,7 @@ plugins:
 
 | Field | Default | Description |
 |---|---|---|
-| `mode` | `shadow` | `shadow` serves each team at its committed class and records downgrades and rejections without applying them; `enforce` applies them. |
+| `mode` | `report-only` | `report-only` serves each team at its committed class and records downgrades and rejections without applying them; `enforce-limits` applies them. |
 | `teamHeader` | `x-llm-d-inference-fairness-id` | Request header carrying the team ID. |
 | `outputTokenWeight` | `2` | Cost of one output token relative to one input token. Must be `> 0`. |
 | `defaultOutputReservation` | `1000` | Output tokens reserved when neither the request nor the team sets a cap. |
@@ -107,29 +107,29 @@ The metrics are served on the EPP `/metrics` endpoint with the other EPP metrics
 | `served_class` | Class the request is served at: `class` when `admitted`, the next lower class when `downgraded`, empty for a rejection |
 | `decision` | `admitted`, `downgraded`, `rejected_size` (`400`), `rejected_concurrency` or `rejected_daily` (`429`) |
 | `reason` | Limit the request exceeded: `size` (`maxPromptTokens` or `maxOutputTokens`), `daily` (`dailyTokens`) or `concurrency` (`maxConcurrency`). Empty when `admitted` |
-| `mode` | `shadow` when the decision was only recorded, `enforce` when it was applied |
+| `mode` | `report-only` when the decision was only recorded, `enforce-limits` when it was applied |
 
 A request over several limits reports one reason, the first of `size`, `daily` and `concurrency`; the same order decides its rejection. For a rejection `reason` repeats what the `decision` name already says, so one query can group downgrades and rejections by cause.
 
-In shadow mode the counter is the report of what enforcement would do; every request is served at its team's committed class.
+In report-only mode the counter is the report of what enforcement would do; every request is served at its team's committed class.
 
 ### PromQL
 
-Requests per second that would be moved down or rejected, per team, decision and limit, in shadow mode:
+Requests per second that would be moved down or rejected, per team, decision and limit, in report-only mode:
 
 ```promql
-sum by (team, decision, reason) (rate(llm_d_epp_qos_admission_decisions_total{mode="shadow",decision!="admitted"}[5m]))
+sum by (team, decision, reason) (rate(llm_d_epp_qos_admission_decisions_total{mode="report-only",decision!="admitted"}[5m]))
 ```
 
 Fraction of each team's traffic outside its contract over a day. Sum over EPP replicas, since each replica decides on its own share of the traffic:
 
 ```promql
-sum by (team) (increase(llm_d_epp_qos_admission_decisions_total{mode="shadow",decision!="admitted"}[1d]))
+sum by (team) (increase(llm_d_epp_qos_admission_decisions_total{mode="report-only",decision!="admitted"}[1d]))
 /
-sum by (team) (increase(llm_d_epp_qos_admission_decisions_total{mode="shadow"}[1d]))
+sum by (team) (increase(llm_d_epp_qos_admission_decisions_total{mode="report-only"}[1d]))
 ```
 
-To size the commits before setting `mode: enforce`, compare per-replica demand with them, since each replica holds its own commits:
+To size the commits before setting `mode: enforce-limits`, compare per-replica demand with them, since each replica holds its own commits:
 
 - Concurrency: `llm_d_epp_qos_inflight_requests` counts only admitted requests, so it never exceeds `maxConcurrency`. Decisions with `reason="concurrency"` mean demand is above it. A request also over a size limit or the daily budget reports that reason instead, so the count is a lower bound.
 - Daily budget: decisions with `reason="daily"` mean the budget ran out. To see by how much, compare `max by (team) (increase(llm_d_epp_qos_charged_tokens_total[1d]))` with `dailyTokens`. The charged tokens include downgraded traffic, so they measure the team's total demand rather than what fit in the budget. The budget resets at 00:00 UTC, so a rolling `[1d]` window only approximates one budget day.

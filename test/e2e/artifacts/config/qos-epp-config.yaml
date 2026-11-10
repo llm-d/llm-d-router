@@ -12,7 +12,7 @@ featureGates:
 plugins:
 - type: qos-admission
   parameters:
-    mode: enforce
+    mode: enforce-limits
     outputTokenWeight: 2
     classes:
     - {name: critical, priority: 100}
