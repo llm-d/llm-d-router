@@ -118,15 +118,15 @@ func TestServeMetrics_BindsMetricsPort(t *testing.T) {
 }
 
 func TestServeMetrics_ListenError(t *testing.T) {
-	held, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = held.Close() })
-
+	// An out-of-range port fails to listen on every OS. Holding a loopback port
+	// does not: macOS still lets serveMetrics bind the wildcard address.
 	s := &Server{
 		logger: logr.Discard(),
-		config: Config{MetricsPort: held.Addr().(*net.TCPAddr).Port},
+		config: Config{MetricsPort: 65536},
 	}
-	require.Error(t, s.serveMetrics(context.Background()))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.Error(t, s.serveMetrics(ctx))
 }
 
 func TestServeMetrics_TLS(t *testing.T) {
