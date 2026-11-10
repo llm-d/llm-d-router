@@ -49,8 +49,11 @@ func TestSGLangKV_Params(t *testing.T) {
 	}
 
 	prefill := c.PreparePrefillKVParams(context.Background(), reqCtx)
-	if len(prefill) != 2 {
-		t.Errorf("prefill params = %v, want only bootstrap port and room", prefill)
+	if len(prefill) != 3 {
+		t.Errorf("prefill params = %v, want only bootstrap host, port and room", prefill)
+	}
+	if prefill[reqcommon.FieldBootstrapHost] != "127.0.0.1" {
+		t.Errorf("prefill bootstrap host = %v, want 127.0.0.1", prefill[reqcommon.FieldBootstrapHost])
 	}
 	if prefill[reqcommon.FieldBootstrapPort] != sglangBootstrapPort {
 		t.Errorf("prefill: %s = %v, want %d", reqcommon.FieldBootstrapPort, prefill[reqcommon.FieldBootstrapPort], sglangBootstrapPort)

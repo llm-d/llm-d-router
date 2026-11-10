@@ -134,15 +134,12 @@ func unreachableFormatError(format reqcommon.APIType) error {
 	return fmt.Errorf("unsupported request format %v: no coordinator route serves it", format)
 }
 
-// resolveFormat maps a request path to the wire format a step emits. The steps
-// build only Completions, Chat Completions, Responses, Messages, and generate
-// bodies, so any other API collapses to APITypeVLLMGenerate; Chat Completions,
-// Responses, and Messages additionally require useOpenAIFormat. Generate is the
-// fallback because its body carries the prompt as reqCtx.TokenIDs and does not
-// depend on the client's request shape.
+// resolveFormat preserves Completions and SGLang generate regardless of
+// useOpenAIFormat. Chat Completions, Responses, and Messages retain their format
+// when enabled; other requests use vLLM's tokens-in generate format.
 func resolveFormat(useOpenAIFormat bool, path string) reqcommon.APIType {
 	switch detected := reqcommon.DetectAPIType(path); detected {
-	case reqcommon.APITypeCompletions:
+	case reqcommon.APITypeCompletions, reqcommon.APITypeSGLangGenerate:
 		return detected
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
 		if useOpenAIFormat {

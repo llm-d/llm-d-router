@@ -810,6 +810,32 @@ func TestHandleInference_DropsClientKVTransferParams(t *testing.T) {
 	}
 }
 
+func TestHandleInference_DropsSGLangPrefillRank(t *testing.T) {
+	for _, path := range []string{reqcommon.PathSGLangGenerate, reqcommon.PathVLLMGenerate, reqcommon.PathChatCompletions} {
+		for _, rank := range []string{"0", "2", "null"} {
+			t.Run(path+"/"+rank, func(t *testing.T) {
+				step := &capturingStep{}
+				srv, err := New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+				require.NoError(t, err)
+				body := `{"model":"m","stream":true,"disagg_prefill_dp_rank":` + rank + `}`
+				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+				rec := httptest.NewRecorder()
+				// /generate uses passthrough, so exercise the handler directly.
+				srv.handleInference(rec, req)
+				require.Equal(t, http.StatusOK, rec.Code)
+				require.NotNil(t, step.captured)
+				forwarded, err := json.Marshal(step.captured.Body)
+				require.NoError(t, err)
+				want := body
+				if path == reqcommon.PathSGLangGenerate {
+					want = `{"model":"m","stream":true}`
+				}
+				require.JSONEq(t, want, string(forwarded))
+			})
+		}
+	}
+}
+
 func TestRoutesRegistered(t *testing.T) {
 	// With the NotFound passthrough in place, an unregistered path no longer
 	// returns 404 — it reverse-proxies to the stub gateway and returns 502.

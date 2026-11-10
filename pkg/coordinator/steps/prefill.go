@@ -146,62 +146,80 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 }
 
 func (s *PrefillStep) buildPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format reqcommon.APIType) (map[string]any, error) {
+	switch format {
+	case reqcommon.APITypeSGLangGenerate:
+		return s.buildSGLangPrefillBody(ctx, reqCtx)
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages,
+		reqcommon.APITypeCompletions, reqcommon.APITypeVLLMGenerate:
+		return s.buildVLLMPrefillBody(ctx, reqCtx, format)
+	default:
+		return nil, unreachableFormatError(format)
+	}
+}
+
+func (s *PrefillStep) buildSGLangPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext) (map[string]any, error) {
+	if s.kv.Name() != kv.SGLang {
+		return nil, fmt.Errorf("/generate prefill requires %s connector, got %s", kv.SGLang, s.kv.Name())
+	}
+	if !reqCtx.Stream {
+		return nil, fmt.Errorf("/generate prefill requires stream=true: %w", pipeline.ErrBadRequest)
+	}
+	if sampling := reqCtx.Body[reqcommon.FieldSamplingParams]; sampling != nil {
+		params, ok := sampling.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("SGLang prefill requires one sampling_params object: %w", pipeline.ErrBadRequest)
+		}
+		n, present, err := paramInt(params, reqcommon.FieldN)
+		if err != nil || (present && n != 1) {
+			return nil, fmt.Errorf("SGLang prefill requires sampling_params.n=1: %w", pipeline.ErrBadRequest)
+		}
+	}
+	body := maps.Clone(reqCtx.Body)
+	reqCtx.KVTransferParams = s.kv.PreparePrefillKVParams(ctx, reqCtx)
+	maps.Copy(body, reqCtx.KVTransferParams)
+	return body, nil
+}
+
+func (s *PrefillStep) buildVLLMPrefillBody(ctx context.Context, reqCtx *pipeline.RequestContext, format reqcommon.APIType) (map[string]any, error) {
 	ecParams, err := s.ec.PreparePrefillECParams(ctx, reqCtx)
 	if err != nil {
 		return nil, err
 	}
 	kvParams := s.kv.PreparePrefillKVParams(ctx, reqCtx)
 
+	var body map[string]any
 	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
-		body := maps.Clone(reqCtx.Body)
-		reqcommon.CapSingleToken(body, format)
-		body[reqcommon.FieldKVTransferParams] = kvParams
-		if len(ecParams) > 0 {
-			body[reqcommon.FieldECTransferParams] = ecParams
-		}
-		return body, nil
+		body = maps.Clone(reqCtx.Body)
 
 	case reqcommon.APITypeCompletions:
 		prompt := reqCtx.Body["prompt"]
 		if len(reqCtx.TokenIDs) > 0 {
 			prompt = reqCtx.TokenIDs
 		}
-		body := map[string]any{
-			"request_id":                    reqCtx.RequestID,
-			"model":                         reqCtx.Model,
-			"prompt":                        prompt,
-			reqcommon.FieldKVTransferParams: kvParams,
+		body = map[string]any{
+			"request_id": reqCtx.RequestID,
+			"model":      reqCtx.Model,
+			"prompt":     prompt,
 		}
-		reqcommon.CapSingleToken(body, format)
-		// Completions never carries multimodal entries (see render.executeCompletions).
-		if len(ecParams) > 0 {
-			body[reqcommon.FieldECTransferParams] = ecParams
-		}
-		return body, nil
 
 	case reqcommon.APITypeVLLMGenerate:
-		body := map[string]any{
-			"request_id":                    reqCtx.RequestID,
-			"token_ids":                     reqCtx.TokenIDs,
-			"model":                         reqCtx.Model,
-			reqcommon.FieldKVTransferParams: kvParams,
+		body = map[string]any{
+			"request_id": reqCtx.RequestID,
+			"token_ids":  reqCtx.TokenIDs,
+			"model":      reqCtx.Model,
 		}
-		reqcommon.CapSingleToken(body, format)
 		if err := s.applyGenerateMMInputs(ctx, reqCtx, ecParams, body); err != nil {
 			return nil, err
 		}
-		if len(ecParams) > 0 {
-			body[reqcommon.FieldECTransferParams] = ecParams
-		}
-		return body, nil
-
-	default:
-		// resolveFormat above never returns anything but the formats handled
-		// here, so this case is unreachable unless resolveFormat's contract
-		// changes.
-		return nil, unreachableFormatError(format)
 	}
+
+	reqcommon.CapSingleToken(body, format)
+	body[reqcommon.FieldKVTransferParams] = kvParams
+	if len(ecParams) > 0 {
+		body[reqcommon.FieldECTransferParams] = ecParams
+	}
+	return body, nil
 }
 
 // applyGenerateMMInputs sets the multimodal input on a generate prefill body:

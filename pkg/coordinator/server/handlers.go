@@ -135,6 +135,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	// rebuilds the body, so a client copy is dropped once here.
 	_, clientKVTransferParams := parsed[reqcommon.FieldKVTransferParams]
 	delete(parsed, reqcommon.FieldKVTransferParams)
+	if apiType == reqcommon.APITypeSGLangGenerate {
+		delete(parsed, reqcommon.FieldDisaggPrefillDPRank)
+	}
 	parseDuration = time.Since(parseStart)
 	parseDone = true
 

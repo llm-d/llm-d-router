@@ -134,12 +134,11 @@ const (
 	FieldEnableThinking        = "enable_thinking"
 	FieldThinking              = "thinking" // Anthropic Messages thinking config
 
-	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
-	// The prefill pod echoes them back so the decode pod can open the bootstrap
-	// channel to it.
-	FieldBootstrapHost = "bootstrap_host"
-	FieldBootstrapPort = "bootstrap_port"
-	FieldBootstrapRoom = "bootstrap_room"
+	// SGLang bootstrap coordination fields, carried at the top level on /generate.
+	FieldBootstrapHost       = "bootstrap_host"
+	FieldBootstrapPort       = "bootstrap_port"
+	FieldBootstrapRoom       = "bootstrap_room"
+	FieldDisaggPrefillDPRank = "disagg_prefill_dp_rank"
 )
 
 // Role values, the strings a message's FieldRole takes.
