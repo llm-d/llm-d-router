@@ -28,7 +28,7 @@ DataProducer, PreRequest, ResponseHeader, ResponseBody, ProducerPlugin, Consumer
 | `samplingMean` | `1000` | Mean interval for decode token sampling |
 | `maxDecodeTokenSamplesForPrediction` | `0` | Max tokens to sample for TPOT prediction (0 = disabled) |
 | `sloBufferFactor` | `1.0` | Multiplier for SLO headroom calculation |
-| `contextTTL` | `5m` | TTL for per-request context in the cache |
+| `contextTTL` | `5m` | TTL for per-request context in the cache, as a duration string such as `5m` |
 | `streamingMode` | `false` | Record TTFT on first chunk (true) vs EOS (false) |
 | `endpointRoleLabel` | `""` | Label key for disaggregated serving roles |
 | `predictInProduce` | `true` | Enable/disable bulk predictions. Set false for training-only mode |
