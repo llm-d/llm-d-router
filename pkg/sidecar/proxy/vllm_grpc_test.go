@@ -41,6 +41,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/utils/set"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
@@ -2020,6 +2021,64 @@ func TestVLLMGRPCClientCancellationPropagatesToWorkers(t *testing.T) {
 			t.Fatal("timed out waiting for decode stream cancellation")
 		}
 	})
+}
+
+// A gRPC client that disconnects during prefill makes the prefill proxy answer
+// gRPC Unavailable itself; that status is not a prefill failure and is not
+// retried.
+func TestVLLMGRPCClientCancelDuringPrefillIsNotAPrefillFailure(t *testing.T) {
+	var attempts atomic.Int32
+	received := make(chan struct{}, 1)
+	prefillH2C := grpctest.NewH2CServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case received <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	prefillURL, err := url.Parse(prefillH2C.URL)
+	require.NoError(t, err)
+
+	s := NewProxy(Config{Port: "0", KVConnector: constants.KVConnectorNIXLV2, PrefillMaxRetries: 2, PrefillRetryBackoff: time.Millisecond})
+	s.logger = log.Log
+	s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("decode must not run after the client disconnected")
+	})
+	handled := make(chan struct{})
+	sidecar := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handled)
+		s.handleNIXLV2VLLMGRPC(w, withContextLogger(s, r), prefillURL.Host, p2pRouting{})
+	}))
+	client := newVLLMGRPCClient(t, strings.TrimPrefix(sidecar.URL, "http://"))
+
+	before := snapshotStageMetrics(t)
+	callCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		_, rpcErr := client.Generate(callCtx, &vllmpb.GenerateRequest{
+			Model:  "m",
+			Prompt: &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2}}},
+		})
+		errCh <- rpcErr
+	}()
+
+	select {
+	case <-received:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prefill did not receive the request")
+	}
+	cancel()
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sidecar handler did not return after the client disconnected")
+	}
+	require.Error(t, <-errCh)
+	assert.Equal(t, int32(1), attempts.Load())
+	assert.Equal(t, stageMetrics{prefillCount: 1}, snapshotStageMetrics(t).delta(before))
 }
 
 func TestVLLMGRPCEncodedPathRedirectOverH2C(t *testing.T) {

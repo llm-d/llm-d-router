@@ -360,14 +360,15 @@ func (s *Server) runNIXLV2Serial(
 	// because prefill already ran.
 	var pw *bufferedResponseWriter
 	var prefillErr error
-	var prefillTimedOut bool
+	var prefillTimedOut, clientGone bool
 retryLoop:
 	for attempt := 0; ; attempt++ {
 		pw = &bufferedResponseWriter{}
 		// A timed-out attempt that got no response carries the prefill proxy's
 		// 502, or gRPC Unavailable, so it is retried like one.
 		prefillTimedOut, prefillErr = s.servePrefillAttempt(prefillHandler, pw, preq, setPrefillReq)
-		if !leg.shouldRetryPrefill(pw) || attempt >= s.config.PrefillMaxRetries {
+		clientGone = preq.Context().Err() != nil
+		if clientGone || !leg.shouldRetryPrefill(pw) || attempt >= s.config.PrefillMaxRetries {
 			break
 		}
 		logger.Info("retrying prefill request",
@@ -390,9 +391,10 @@ retryLoop:
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 
-	// The reverse proxy also aborts the prefill body copy when the client
-	// disconnects, which is not a prefill failure.
-	if prefillErr != nil && preq.Context().Err() != nil {
+	// A client that disconnects during an attempt fails it without a prefill
+	// failure: the prefill proxy answers 502, or gRPC Unavailable, itself before
+	// the response headers and aborts the body copy after them.
+	if clientGone && (prefillErr != nil || prefillAttemptFailed(pw)) {
 		logger.Info("client disconnected during prefill", "request_id", uuidStr)
 		prefillSpan.End()
 		return
