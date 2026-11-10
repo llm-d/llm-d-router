@@ -110,6 +110,7 @@ identity, or their composition `<tenant>/<session>` when `requestHandler.compose
 enabled and a request carries both, has a cap that defaults to 1000 distinct values. Configure it with
 `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id` to `other`. Caps
 apply over the lifetime of the process. Once a cap is reached, new values are reported as `other`.
+A value longer than 256 bytes, or one that is not valid UTF-8, is always reported as `other`.
 `default-flow`, the ID given to requests that have none, keeps its own label unless the limit is 0.
 These bounds apply whether or not the `flowControl` feature gate is enabled. When Flow Control is
 enabled, its series for a `fairness_id` are removed when the corresponding flow is garbage collected.
