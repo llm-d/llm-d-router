@@ -115,6 +115,7 @@ func TestPDSchedule(t *testing.T) {
 		},
 
 		PrimaryProfileName: decode,
+		PrefillProfileName: prefill,
 	}
 
 	decodeResult := &fwksched.SchedulingResult{
@@ -128,6 +129,7 @@ func TestPDSchedule(t *testing.T) {
 			},
 		},
 		PrimaryProfileName: decode,
+		PrefillProfileName: prefill,
 	}
 
 	tests := []struct {
@@ -247,6 +249,7 @@ func TestPDSchedule(t *testing.T) {
 					},
 				},
 				PrimaryProfileName: decode,
+				PrefillProfileName: prefill,
 			},
 		},
 		{
@@ -392,6 +395,7 @@ func TestPDSchedule_PrefillFirst(t *testing.T) {
 			},
 		},
 		PrimaryProfileName: decode,
+		PrefillProfileName: prefill,
 	}
 
 	prefillSchedulerProfile := scheduling.NewSchedulerProfile().

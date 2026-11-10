@@ -558,6 +558,7 @@ func (h *Handler) ProcessResults(
 
 	return &scheduling.SchedulingResult{
 		PrimaryProfileName: h.decodeProfile,
+		PrefillProfileName: h.prefillProfile,
 		ProfileResults:     updatedResults,
 	}, nil
 }

@@ -232,6 +232,7 @@ func TestPredictionTarget(t *testing.T) {
 			name: "disaggregated",
 			result: &fwksched.SchedulingResult{
 				PrimaryProfileName: "decode",
+				PrefillProfileName: "prefill",
 				ProfileResults: map[string]*fwksched.ProfileRunResult{
 					"decode":  decodeProfile,
 					"prefill": prefillProfile,
@@ -244,6 +245,7 @@ func TestPredictionTarget(t *testing.T) {
 			name: "prefill profile ran without a target",
 			result: &fwksched.SchedulingResult{
 				PrimaryProfileName: "decode",
+				PrefillProfileName: "prefill",
 				ProfileResults: map[string]*fwksched.ProfileRunResult{
 					"decode":  decodeProfile,
 					"prefill": nil,
@@ -263,7 +265,7 @@ func TestPredictionTarget(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			profile, role := PredictionTarget(tt.result, "prefill")
+			profile, role := PredictionTarget(tt.result)
 			assert.Same(t, tt.wantProfile, profile)
 			assert.Equal(t, tt.wantRole, role)
 		})

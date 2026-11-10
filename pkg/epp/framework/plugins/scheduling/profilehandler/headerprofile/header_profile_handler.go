@@ -226,6 +226,7 @@ func (h *HeaderProfileHandler) ProcessResults(_ context.Context, request *fwksch
 	return &fwksched.SchedulingResult{
 		ProfileResults:     profileResults,
 		PrimaryProfileName: profileName,
+		PrefillProfileName: h.prefillProfile,
 	}, nil
 }
 
