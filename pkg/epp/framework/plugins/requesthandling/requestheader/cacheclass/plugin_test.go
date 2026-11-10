@@ -358,6 +358,12 @@ func TestAllowHoldsReadyMissAboveThreshold(t *testing.T) {
 	if got, want := FlowID("tenant", cold), "tenant"; got != want {
 		t.Fatalf("not-ready class flow id = %q, want %q", got, want)
 	}
+	if got, want := ParentFlowID(FlowID("tenant", miss)), "tenant"; got != want {
+		t.Fatalf("ParentFlowID(miss) = %q, want %q", got, want)
+	}
+	if got, want := ParentFlowID(FlowID("tenant", hit)), "tenant"; got != want {
+		t.Fatalf("ParentFlowID(hit) = %q, want %q", got, want)
+	}
 
 	req := &fwksched.InferenceRequest{RequestID: "rewrite"}
 	req.PutAttribute(CacheClassKey, miss)
@@ -366,6 +372,10 @@ func TestAllowHoldsReadyMissAboveThreshold(t *testing.T) {
 	}
 	if got := p.RewriteFlowID("tenant", &fwksched.InferenceRequest{RequestID: "bare"}); got != "tenant" {
 		t.Fatalf("RewriteFlowID without class = %q, want tenant", got)
+	}
+
+	if _, ok := p.Produces()[CacheClassKey]; !ok {
+		t.Fatal("Produces() must declare CacheClassKey")
 	}
 }
 

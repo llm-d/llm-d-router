@@ -74,3 +74,9 @@ The index is an LRU of prefix block hashes with capacity `indexCapacity`. There
 is no time-based TTL on index entries. Pending classifications that never reach
 `PreRequest` (shed or cancelled) are swept after 2 minutes for turned-away
 metrics.
+
+## Queue IDs
+
+Ready hit/miss classes use sibling queue IDs (`parent + cacheclass suffix`) at
+the same priority so a held miss does not block a hit. `ParentFlowID` strips the
+suffix to recover the parent fairness ID for accounting.

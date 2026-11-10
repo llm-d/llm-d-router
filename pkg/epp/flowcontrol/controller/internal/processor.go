@@ -581,9 +581,12 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 				"priority", priority)
 			continue // Continue to the next band to maximize work conservation.
 		}
-		item = chooseDispatchItem(item, originalBand, func(candidate flowcontrol.QueueItemAccessor) bool {
-			return p.itemAllowed(ctx, candidate, saturation)
-		})
+		item, err = p.applyDispatchGate(ctx, item, originalBand, saturation)
+		if err != nil {
+			p.logger.Error(err, "Failed to apply dispatch gate, skipping priority band for this cycle",
+				"priority", priority)
+			continue
+		}
 		if item == nil {
 			continue
 		}
@@ -685,29 +688,78 @@ func (p *Processor) itemAllowed(ctx context.Context, item flowcontrol.QueueItemA
 	return p.dispatchGate.Allow(ctx, item, saturation)
 }
 
-// chooseDispatchItem returns picked when the gate allows it. Otherwise it returns the first
-// sibling-flow head in the band that the gate allows, so a held head does not block that band.
-func chooseDispatchItem(
+// applyDispatchGate returns the fairness pick when the gate allows it. When the pick is held,
+// it re-runs fairness over only gate-eligible queues in the band. A nil fairness pick stays
+// nil: the gate must not invent work the fairness policy declined to select.
+func (p *Processor) applyDispatchGate(
+	ctx context.Context,
 	picked flowcontrol.QueueItemAccessor,
 	band flowcontrol.PriorityBandAccessor,
-	allow func(flowcontrol.QueueItemAccessor) bool,
-) flowcontrol.QueueItemAccessor {
-	if picked != nil && allow(picked) {
-		return picked
+	saturation float64,
+) (flowcontrol.QueueItemAccessor, error) {
+	if p.dispatchGate == nil || picked == nil {
+		return picked, nil
+	}
+	if p.itemAllowed(ctx, picked, saturation) {
+		return picked, nil
 	}
 	if band == nil {
+		return nil, nil
+	}
+	filtered := &gateEligibleBand{
+		base: band,
+		allow: func(item flowcontrol.QueueItemAccessor) bool {
+			return p.itemAllowed(ctx, item, saturation)
+		},
+	}
+	return p.selectItem(ctx, filtered)
+}
+
+// gateEligibleBand exposes only queues whose current head the gate allows, so fairness can
+// pick among dispatchable sibling flows without scanning in registry order.
+type gateEligibleBand struct {
+	base  flowcontrol.PriorityBandAccessor
+	allow func(flowcontrol.QueueItemAccessor) bool
+}
+
+func (g *gateEligibleBand) Priority() int { return g.base.Priority() }
+func (g *gateEligibleBand) PolicyState() any {
+	return g.base.PolicyState()
+}
+
+func (g *gateEligibleBand) eligible(q flowcontrol.FlowQueueAccessor) bool {
+	if q == nil {
+		return false
+	}
+	head := q.Peek()
+	return head != nil && g.allow(head)
+}
+
+func (g *gateEligibleBand) FlowKeys() []flowcontrol.FlowKey {
+	var keys []flowcontrol.FlowKey
+	for _, key := range g.base.FlowKeys() {
+		if g.eligible(g.base.Queue(key.ID)) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func (g *gateEligibleBand) Queue(id string) flowcontrol.FlowQueueAccessor {
+	q := g.base.Queue(id)
+	if !g.eligible(q) {
 		return nil
 	}
-	var found flowcontrol.QueueItemAccessor
-	band.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
-		head := queue.Peek()
-		if head != nil && allow(head) {
-			found = head
-			return false
+	return q
+}
+
+func (g *gateEligibleBand) IterateQueues(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
+	g.base.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
+		if !g.eligible(queue) {
+			return true
 		}
-		return true
+		return callback(queue)
 	})
-	return found
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.
