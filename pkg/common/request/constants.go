@@ -85,6 +85,8 @@ const (
 	FieldResponseFormat       = "response_format"
 	FieldSamplingParams       = "sampling_params"
 	FieldN                    = "n"
+	FieldCacheSalt            = "cache_salt"
+	FieldPriority             = "priority"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"
