@@ -40,6 +40,10 @@ const (
 	// outcomeAdmittedSmallRequest: the pool is at or above T but the request adds fewer
 	// uncached tokens than minUncachedTokens; the request is admitted.
 	outcomeAdmittedSmallRequest = "admitted_small_request"
+	// outcomeAdmittedSubBlock: the pool is at or above T and the prefix attribute
+	// is present with TotalBlocks == 0; the prompt is shorter than one KV block
+	// and the request is admitted.
+	outcomeAdmittedSubBlock = "admitted_sub_block"
 	// outcomeNotApplicable: the admitter received no endpoints.
 	outcomeNotApplicable = "not_applicable"
 )

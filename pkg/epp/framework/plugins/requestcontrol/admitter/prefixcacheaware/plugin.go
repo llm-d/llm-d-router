@@ -15,12 +15,15 @@ limitations under the License.
 */
 
 // Package prefixcacheaware provides an Admitter for cache-aware load shedding:
-// it denies cache-cold requests while the pool is near saturation. Below the
-// shed threshold every request is admitted. At or above it, a request is admitted only if some endpoint has a
-// prefix cache hit ratio of at least minHitRatio; otherwise it is denied with
-// the same typed error flow control uses for a saturated pool (429 by default,
-// 503 optional, reason "rejected-saturated"), so clients see ordinary
-// backpressure and nothing about the cache state behind the decision.
+// it denies cache-cold sheddable requests while the pool is near saturation.
+// Requests with priority >= 0 are admitted. Below the shed threshold every
+// sheddable request is admitted. At or above it, a sheddable request is
+// admitted when some endpoint has a prefix cache hit ratio of at least
+// minHitRatio, when the prompt is shorter than one KV block, or when it is
+// under minUncachedTokens. Otherwise it is denied with the typed error flow
+// control uses for a saturated pool (429 by default, 503 optional, reason
+// "rejected-saturated"). The status and reason header match that backpressure.
+// The body is the fixed string "pool saturated, request rejected".
 //
 // The Admitter runs after the data producers and before scheduling, so it sees
 // the full candidate pool and the request's prefix match on every endpoint. It
@@ -151,10 +154,14 @@ const shedMessage = "pool saturated, request rejected"
 // errcommon.Error carrying the configured status code and the
 // rejected-saturated reason header to deny. See the package documentation.
 //
-// The request is intentionally unused: everything the rule needs, the prefix
-// match and the uncached token count, has already been projected onto the
-// endpoints by the data producers. A nil request is therefore fine.
-func (p *Plugin) Admit(ctx context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+// A nil request and any request with priority >= 0 are admitted. That is the
+// same sheddable split the other admitters use: only priority < 0 can be shed.
+// The prefix match and the uncached token count are read from the endpoints.
+func (p *Plugin) Admit(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	if request == nil || request.Objectives.Priority >= 0 {
+		return nil
+	}
+
 	logger := log.FromContext(ctx).V(logutil.DEBUG)
 	if len(endpoints) == 0 {
 		recordDecision(p.typedName.Name, outcomeNotApplicable)
@@ -168,23 +175,22 @@ func (p *Plugin) Admit(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 		return nil
 	}
 
-	hot := 0
-	bestHit := 0.0
-	for _, ep := range endpoints {
-		if ep == nil {
-			continue
-		}
-		ratio := p.hitRatio(ep)
-		bestHit = max(bestHit, ratio)
-		if ratio >= p.config.MinHitRatio {
-			hot++
-		}
-	}
+	hot, bestHit, subBlock := p.classify(endpoints)
 
 	if hot > 0 {
 		logger.Info("PrefixCacheAwareAdmitter: shedding, hot request admitted",
 			"saturation", saturation, "hotEndpoints", hot, "endpoints", len(endpoints))
 		recordDecision(p.typedName.Name, outcomeAdmittedHot)
+		return nil
+	}
+
+	// A prompt shorter than one KV block has no prefix to protect and almost no
+	// prefill. Missing prefix data stays cold: only a present attribute with
+	// TotalBlocks == 0 takes this branch.
+	if subBlock {
+		logger.Info("PrefixCacheAwareAdmitter: shedding, sub-block prompt admitted",
+			"saturation", saturation, "endpoints", len(endpoints))
+		recordDecision(p.typedName.Name, outcomeAdmittedSubBlock)
 		return nil
 	}
 
@@ -207,16 +213,44 @@ func (p *Plugin) Admit(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 	}
 }
 
-func (p *Plugin) hitRatio(ep fwksched.Endpoint) float64 {
+// classify reports how many endpoints meet H, the best hit ratio among endpoints
+// whose prompt spans at least one block, and whether every present prefix
+// attribute describes a sub-block prompt.
+func (p *Plugin) classify(endpoints []fwksched.Endpoint) (hot int, bestHit float64, subBlock bool) {
+	sawBlocks := false
+	sawEmpty := false
+	for _, ep := range endpoints {
+		info, ok := p.prefixMatch(ep)
+		if !ok {
+			continue
+		}
+		if info.TotalBlocks() <= 0 {
+			sawEmpty = true
+			continue
+		}
+		sawBlocks = true
+		ratio := float64(info.MatchBlocks()) / float64(info.TotalBlocks())
+		bestHit = max(bestHit, ratio)
+		if ratio >= p.config.MinHitRatio {
+			hot++
+		}
+	}
+	return hot, bestHit, sawEmpty && !sawBlocks
+}
+
+func (p *Plugin) prefixMatch(ep fwksched.Endpoint) (*attrprefix.PrefixCacheMatchInfo, bool) {
+	if ep == nil {
+		return nil, false
+	}
 	raw, ok := ep.Get(p.prefixMatchDataKey)
 	if !ok {
-		return 0
+		return nil, false
 	}
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
-	if !ok || info == nil || info.TotalBlocks() <= 0 {
-		return 0
+	if !ok || info == nil {
+		return nil, false
 	}
-	return float64(info.MatchBlocks()) / float64(info.TotalBlocks())
+	return info, true
 }
 
 // uncachedTokens reads the request's uncached token projection on one endpoint.

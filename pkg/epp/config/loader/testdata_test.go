@@ -137,6 +137,7 @@ plugins:
   parameters:
     saturationDetectorRef: pool-concurrency
     shedThreshold: 0.8
+    minHitRatio: 0.6
 - name: pool-concurrency
   type: concurrency-detector
   parameters:

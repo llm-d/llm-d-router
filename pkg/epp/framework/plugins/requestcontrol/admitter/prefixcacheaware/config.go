@@ -33,11 +33,11 @@ type Config struct {
 	// uses. Any plugin that implements flowcontrol.SaturationDetector works. Required.
 	SaturationDetectorRef string `json:"saturationDetectorRef" pluginRef:""`
 
-	// ShedThreshold is T. Shedding starts when S >= T. Range (0, 1]. Default 0.85.
+	// ShedThreshold is T. Shedding starts when S >= T. Range (0, 1]. Required.
 	ShedThreshold float64 `json:"shedThreshold,omitempty"`
 
 	// MinHitRatio is H. While shedding, a request is admitted only if some
-	// endpoint reports a prefix cache hit ratio >= H for it. Range [0, 1]. Default 0.6.
+	// endpoint reports a prefix cache hit ratio >= H for it. Range [0, 1]. Required.
 	MinHitRatio float64 `json:"minHitRatio,omitempty"`
 
 	// MinUncachedTokens exempts small requests. A request whose smallest uncached
@@ -60,11 +60,16 @@ type Config struct {
 	InFlightLoadProducerName string `json:"inFlightLoadProducerName,omitempty"`
 }
 
-// DefaultConfig holds the defaults applied before decoding parameters.
-var DefaultConfig = Config{
-	ShedThreshold:  0.85,
-	MinHitRatio:    0.6,
-	ShedStatusCode: http.StatusTooManyRequests,
+// wireConfig is the JSON shape. ShedThreshold and MinHitRatio are pointers so an
+// omitted field is distinct from an explicit zero.
+type wireConfig struct {
+	SaturationDetectorRef       string   `json:"saturationDetectorRef"`
+	ShedThreshold               *float64 `json:"shedThreshold"`
+	MinHitRatio                 *float64 `json:"minHitRatio"`
+	MinUncachedTokens           int64    `json:"minUncachedTokens,omitempty"`
+	ShedStatusCode              *int     `json:"shedStatusCode"`
+	PrefixMatchInfoProducerName string   `json:"prefixMatchInfoProducerName,omitempty"`
+	InFlightLoadProducerName    string   `json:"inFlightLoadProducerName,omitempty"`
 }
 
 func (c *Config) validate() error {
@@ -103,11 +108,27 @@ func (c *Config) errorCode() (string, error) {
 // plugin registry so the config loader instantiates the referenced detector
 // before this admitter.
 func ConfigParser(rawParameters *json.Decoder, _ fwkplugin.Handle) (any, error) {
-	config := DefaultConfig
+	config := Config{ShedStatusCode: http.StatusTooManyRequests}
 	if rawParameters != nil {
-		if err := rawParameters.Decode(&config); err != nil {
+		var wire wireConfig
+		if err := rawParameters.Decode(&wire); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 		}
+		if wire.ShedThreshold == nil {
+			return nil, errors.New("shedThreshold is required")
+		}
+		if wire.MinHitRatio == nil {
+			return nil, errors.New("minHitRatio is required")
+		}
+		config.SaturationDetectorRef = wire.SaturationDetectorRef
+		config.ShedThreshold = *wire.ShedThreshold
+		config.MinHitRatio = *wire.MinHitRatio
+		config.MinUncachedTokens = wire.MinUncachedTokens
+		if wire.ShedStatusCode != nil {
+			config.ShedStatusCode = *wire.ShedStatusCode
+		}
+		config.PrefixMatchInfoProducerName = wire.PrefixMatchInfoProducerName
+		config.InFlightLoadProducerName = wire.InFlightLoadProducerName
 	}
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)

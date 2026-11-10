@@ -33,8 +33,8 @@ func TestConfigParser(t *testing.T) {
 		check   func(t *testing.T, c *Config)
 	}{
 		{
-			name: "defaults",
-			json: `{"saturationDetectorRef":"det"}`,
+			name: "required thresholds and status default",
+			json: `{"saturationDetectorRef":"det","shedThreshold":0.85,"minHitRatio":0.6}`,
 			check: func(t *testing.T, c *Config) {
 				assert.Equal(t, 0.85, c.ShedThreshold)
 				assert.Equal(t, 0.6, c.MinHitRatio)
@@ -42,13 +42,22 @@ func TestConfigParser(t *testing.T) {
 				assert.Equal(t, 429, c.ShedStatusCode)
 			},
 		},
-		{name: "missing ref", json: `{}`, wantErr: "saturationDetectorRef is required"},
-		{name: "threshold zero", json: `{"saturationDetectorRef":"det","shedThreshold":0}`, wantErr: "shedThreshold"},
-		{name: "threshold above one", json: `{"saturationDetectorRef":"det","shedThreshold":1.5}`, wantErr: "shedThreshold"},
-		{name: "hit ratio above one", json: `{"saturationDetectorRef":"det","minHitRatio":1.5}`, wantErr: "minHitRatio"},
-		{name: "negative min uncached", json: `{"saturationDetectorRef":"det","minUncachedTokens":-1}`, wantErr: "minUncachedTokens"},
-		{name: "bad status code", json: `{"saturationDetectorRef":"det","shedStatusCode":500}`, wantErr: "shedStatusCode"},
-		{name: "unknown field", json: `{"saturationDetectorRef":"det","nope":1}`, wantErr: "unknown field"},
+		{
+			name: "explicit zero hit ratio",
+			json: `{"saturationDetectorRef":"det","shedThreshold":0.5,"minHitRatio":0}`,
+			check: func(t *testing.T, c *Config) {
+				assert.Equal(t, 0.0, c.MinHitRatio)
+			},
+		},
+		{name: "missing ref", json: `{"shedThreshold":0.85,"minHitRatio":0.6}`, wantErr: "saturationDetectorRef is required"},
+		{name: "missing shed threshold", json: `{"saturationDetectorRef":"det","minHitRatio":0.6}`, wantErr: "shedThreshold is required"},
+		{name: "missing hit ratio", json: `{"saturationDetectorRef":"det","shedThreshold":0.85}`, wantErr: "minHitRatio is required"},
+		{name: "threshold zero", json: `{"saturationDetectorRef":"det","shedThreshold":0,"minHitRatio":0.6}`, wantErr: "shedThreshold"},
+		{name: "threshold above one", json: `{"saturationDetectorRef":"det","shedThreshold":1.5,"minHitRatio":0.6}`, wantErr: "shedThreshold"},
+		{name: "hit ratio above one", json: `{"saturationDetectorRef":"det","shedThreshold":0.85,"minHitRatio":1.5}`, wantErr: "minHitRatio"},
+		{name: "negative min uncached", json: `{"saturationDetectorRef":"det","shedThreshold":0.85,"minHitRatio":0.6,"minUncachedTokens":-1}`, wantErr: "minUncachedTokens"},
+		{name: "bad status code", json: `{"saturationDetectorRef":"det","shedThreshold":0.85,"minHitRatio":0.6,"shedStatusCode":500}`, wantErr: "shedStatusCode"},
+		{name: "unknown field", json: `{"saturationDetectorRef":"det","shedThreshold":0.85,"minHitRatio":0.6,"nope":1}`, wantErr: "unknown field"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
