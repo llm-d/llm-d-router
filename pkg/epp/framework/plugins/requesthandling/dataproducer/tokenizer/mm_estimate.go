@@ -105,18 +105,11 @@ func (e imageEstimator) placeholderCount(url string) int {
 }
 
 // placeholderCountFromHead estimates placeholder tokens for an uploaded image
-// file part whose leading bytes are head. WebP is peeked by hand, since no Go
-// decoder is registered for it; other formats decode their dimension header,
-// and anything else falls back to the default resolution.
+// file part whose leading bytes are head. Decodable image headers give the
+// dimensions; anything else falls back to the default resolution.
 func (e imageEstimator) placeholderCountFromHead(head []byte) int {
-	if w, h, is := webpDimensions(head); is {
-		return e.countFromDims(w, h, true)
-	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(head))
-	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
-		return e.countFromDims(0, 0, false)
-	}
-	return e.countFromDims(cfg.Width, cfg.Height, true)
+	w, h, ok := imageDimensions(bytes.NewReader(head))
+	return e.countFromDims(w, h, ok)
 }
 
 // placeholderForAnthropicImage returns the content (URL or raw base64) and
@@ -176,15 +169,14 @@ func imageDimensionsFromBase64(url string) (width, height int, ok bool) {
 
 // imageDimensionsFromBase64Payload decodes a bare base64 image payload and
 // returns its pixel dimensions.
-func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool) {
-	// Image decoding is streamed to reduce memory overhead, since
-	// only headers are necessary.
-	r := base64.NewDecoder(base64.StdEncoding, strings.NewReader(rawB64))
+// imageDimensions reads an image's pixel dimensions from r. WebP has no
+// registered decoder, so its size fields are read from a peeked header; Peek
+// does not consume, so registered decoders still receive the full stream. Peek
+// may also return fewer bytes than asked for, so the guard mirrors
+// webpDimensions' minimal chunk-header size. Only the dimension headers are
+// read, never the pixels.
+func imageDimensions(r io.Reader) (width, height int, ok bool) {
 	br := bufio.NewReader(r)
-	// webp has no registered decoder, so its size fields are read from the
-	// peeked header. Peek does not consume, so registered decoders still
-	// receive the full stream. Peek may also return fewer bytes than asked
-	// for, so the guard mirrors webpDimensions' minimal chunk-header size.
 	if hdr, _ := br.Peek(webpHeaderBytes); len(hdr) >= 20 {
 		if w, h, is := webpDimensions(hdr); is {
 			return w, h, true
@@ -195,6 +187,13 @@ func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool
 		return 0, 0, false
 	}
 	return cfg.Width, cfg.Height, true
+}
+
+// imageDimensionsFromBase64Payload decodes a bare base64 image payload and
+// returns its pixel dimensions. ok is false when the URL is not a decodable
+// base64 image.
+func imageDimensionsFromBase64Payload(rawB64 string) (width, height int, ok bool) {
+	return imageDimensions(base64.NewDecoder(base64.StdEncoding, strings.NewReader(rawB64)))
 }
 
 // mmMetadata carries per-request multimodal properties parsed from the
