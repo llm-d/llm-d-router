@@ -19,6 +19,7 @@ package p2psource
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -348,9 +349,7 @@ func TestCostModelTieDeclines(t *testing.T) {
 	// gain 4000*(1.5-1)/1000 = 2 ms, cost 2 ms; both exact in float64.
 	cfg := `{"ttftByDecision": true, "costModel": {"prefillMicrosecondsPerToken": 1.5, "transferMicrosecondsPerToken": 1,
 		"transferFixedMs": 2}}`
-	built, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(cfg)), nil)
-	require.NoError(t, err)
-	recorder := built.(*ttftRecorder)
+	recorder := newTTFTRecorder(t, cfg)
 	request := costRequest(recorder.Producer, "req-tie", 4000, 0)
 	require.NoError(t, recorder.PreRequest(utils.NewTestContext(t), request,
 		decodeOnly(queuedEndpoint(recorder.Producer, "pod-a", "10.0.0.1", 0, 0))))
@@ -375,8 +374,7 @@ func TestFactoryAddsResponseBodyOnlyWithTTFTByDecision(t *testing.T) {
 	_, hooks := plain.(fwkrh.ResponseBodyProcessor)
 	assert.False(t, hooks, "a producer without ttftByDecision registers no response-body hook")
 
-	recorder, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(`{"ttftByDecision": true}`)), nil)
-	require.NoError(t, err)
+	var recorder plugin.Plugin = newTTFTRecorder(t, `{"ttftByDecision": true}`)
 	_, hooks = recorder.(fwkrh.ResponseBodyProcessor)
 	assert.True(t, hooks, "ttftByDecision registers the response-body hook")
 	_, preRequest := recorder.(fwkrh.PreRequest)
@@ -396,6 +394,10 @@ func TestTTFTByDecision(t *testing.T) {
 	}
 	disconnected := streamEnd(true)
 	disconnected.TerminationCause = fwkrh.TerminationCauseClientDisconnect
+	errored := streamEnd(true)
+	errored.TerminationCause = fwkrh.TerminationCauseError
+	evicted := streamEnd(true)
+	evicted.TerminationCause = fwkrh.TerminationCauseEvicted
 	firstByteAtReceipt := streamEnd(true)
 	firstByteAtReceipt.FirstTokenTimestamp = received
 	tests := []struct {
@@ -404,6 +406,7 @@ func TestTTFTByDecision(t *testing.T) {
 		chunks   []*fwkrh.Response
 		labels   []string // outcome, cost_margin; nil when nothing is recorded
 		skipPreq bool
+		rawBody  bool
 	}{
 		{
 			// gain 8192*(19-3.9)/1000 = 123.7 ms, cost 15 + 500 ms requeue.
@@ -419,6 +422,13 @@ func TestTTFTByDecision(t *testing.T) {
 			labels: []string{"pulled", "0..250ms"},
 		},
 		{
+			// The margin is set before the body rejects the source.
+			name:    "unparsed body",
+			rawBody: true,
+			chunks:  []*fwkrh.Response{{StartOfStream: true}, streamEnd(true)},
+			labels:  []string{"unparsed-body", "0..250ms"},
+		},
+		{
 			name:   "non-streaming response",
 			chunks: []*fwkrh.Response{streamEnd(false)},
 		},
@@ -426,6 +436,14 @@ func TestTTFTByDecision(t *testing.T) {
 			// The EPP's request TTFT skips a stream it tears down.
 			name:   "disconnect after the first byte",
 			chunks: []*fwkrh.Response{{StartOfStream: true}, disconnected},
+		},
+		{
+			name:   "stream error",
+			chunks: []*fwkrh.Response{{StartOfStream: true}, errored},
+		},
+		{
+			name:   "stream evicted",
+			chunks: []*fwkrh.Response{{StartOfStream: true}, evicted},
 		},
 		{
 			name:   "first byte not after receipt",
@@ -448,10 +466,11 @@ func TestTTFTByDecision(t *testing.T) {
 
 			cfg := `{"ttftByDecision": true, "costModel": {"prefillMicrosecondsPerToken": 19, "transferMicrosecondsPerToken": 3.9,
 				"transferFixedMs": 15, "requeueMs": 500}}`
-			built, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(cfg)), nil)
-			require.NoError(t, err)
-			recorder := built.(*ttftRecorder)
+			recorder := newTTFTRecorder(t, cfg)
 			request := costRequest(recorder.Producer, "req-1", 8192, 0)
+			if test.rawBody {
+				request.Body = &fwkrequest.InferenceRequestBody{Payload: fwkrequest.RawPayload([]byte(`{}`))}
+			}
 			if !test.skipPreq {
 				require.NoError(t, recorder.PreRequest(utils.NewTestContext(t), request,
 					decodeOnly(queuedEndpoint(recorder.Producer, "pod-a", "10.0.0.1", 0, test.waiting))))
@@ -468,7 +487,7 @@ func TestTTFTByDecision(t *testing.T) {
 					"TTFT count and sum by outcome and cost_margin")
 			}
 
-			_, err = plugin.ReadPluginStateKey[*decisionState](recorder.pluginState, "req-1", decisionStateKey)
+			_, err := plugin.ReadPluginStateKey[*decisionState](recorder.pluginState, "req-1", decisionStateKey)
 			if test.name == "stream still open" {
 				assert.NoError(t, err, "the decision stays until the stream ends")
 			} else {
@@ -485,9 +504,7 @@ func TestTTFTByDecisionSurvivesStateExpiry(t *testing.T) {
 	resetMetrics()
 	t.Cleanup(resetMetrics)
 
-	built, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(`{"ttftByDecision": true}`)), nil)
-	require.NoError(t, err)
-	recorder := built.(*ttftRecorder)
+	recorder := newTTFTRecorder(t, `{"ttftByDecision": true}`)
 	janitorCtx, stopJanitor := context.WithCancel(context.Background())
 	t.Cleanup(stopJanitor)
 	recorder.pluginState = plugin.NewPluginState(janitorCtx,
@@ -509,7 +526,7 @@ func TestTTFTByDecisionSurvivesStateExpiry(t *testing.T) {
 		EndOfStream: true, Streaming: true, TerminationCause: fwkrh.TerminationCauseNatural,
 		ReceivedTimestamp: received, FirstTokenTimestamp: received.Add(time.Second),
 	}, nil)
-	assert.Equal(t, map[string][2]float64{"pulled": {1, 1}}, histogramObserved(t, requestTTFT, "outcome"),
+	assert.Equal(t, map[string][2]float64{"pulled,none": {1, 1}}, histogramObserved(t, requestTTFT, "outcome", "cost_margin"),
 		"the long stream records its TTFT")
 
 	leakedCtx, endLeaked := context.WithCancel(utils.NewTestContext(t))
@@ -520,6 +537,15 @@ func TestTTFTByDecisionSurvivesStateExpiry(t *testing.T) {
 		_, ok := recorder.pluginState.LastAccessTime("req-leaked")
 		return !ok
 	}, time.Second, 10*time.Millisecond, "the janitor reclaims the decision of an ended stream")
+}
+
+// newTTFTRecorder builds a ttftByDecision producer through PluginFactory on a
+// handle whose context ends with the test, so the plugin-state janitor stops.
+func newTTFTRecorder(t *testing.T, cfg string) *ttftRecorder {
+	t.Helper()
+	built, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(cfg)), plugin.NewEppHandle(t.Context(), nil))
+	require.NoError(t, err)
+	return built.(*ttftRecorder)
 }
 
 // histogramObserved returns the observation count and sum of a histogram
@@ -545,20 +571,31 @@ func histogramObserved(t *testing.T, histogram *prometheus.HistogramVec, keyLabe
 	return observed
 }
 
-// PluginFactory registers both collectors on the handle's registry, so a
+// PluginFactory registers every collector on the handle's registry, so a
 // deployment exports them.
 func TestPluginFactoryExportsMetrics(t *testing.T) {
 	resetMetrics()
 	t.Cleanup(resetMetrics)
 
 	registry := prometheus.NewRegistry()
-	handle := plugin.NewEppHandle(context.Background(),
+	handle := plugin.NewEppHandle(t.Context(),
 		func() []k8stypes.NamespacedName { return nil }, plugin.WithMetricsRecorder(registry))
-	built, err := PluginFactory("p2p", nil, handle)
+	cfg := `{"ttftByDecision": true, "minCachedTokenDelta": 32}`
+	built, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(cfg)), handle)
 	require.NoError(t, err)
-	p := built.(*Producer)
-	require.NoError(t, p.PreRequest(utils.NewTestContext(t), preRequest(p, "req-pull", peer("10.0.0.2", 48)),
+	recorder := built.(*ttftRecorder)
+	p := recorder.Producer
+	// Against one 16-token block on the computing pod, 64 source tokens clear
+	// the floor and 32 leave a 16-token gap below it.
+	pull := preRequest(p, "req-pull", peer("10.0.0.2", 64))
+	require.NoError(t, recorder.PreRequest(utils.NewTestContext(t), pull, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
+	require.NoError(t, recorder.PreRequest(utils.NewTestContext(t), preRequest(p, "req-low", peer("10.0.0.2", 32)),
 		decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 1))))
+	received := time.Unix(1000, 0)
+	recorder.ResponseBody(utils.NewTestContext(t), pull, &fwkrh.Response{
+		EndOfStream: true, Streaming: true, TerminationCause: fwkrh.TerminationCauseNatural,
+		ReceivedTimestamp: received, FirstTokenTimestamp: received.Add(time.Second),
+	}, nil)
 
 	families, err := registry.Gather()
 	require.NoError(t, err)
@@ -566,20 +603,28 @@ func TestPluginFactoryExportsMetrics(t *testing.T) {
 	for _, family := range families {
 		byName[family.GetName()] = family
 	}
-	labels := map[string]string{"plugin_name": "p2p", "endpoint_role": "decode", "outcome": "pulled"}
 	decisions := byName["llm_d_epp_p2p_source_decisions_total"]
 	require.NotNil(t, decisions, "decision counter exported")
-	require.Len(t, decisions.GetMetric(), 1)
-	assert.Equal(t, labels, labelMap(decisions.GetMetric()[0]))
-	assert.Equal(t, float64(1), decisions.GetMetric()[0].GetCounter().GetValue())
+	assert.Len(t, decisions.GetMetric(), 2, "one series per outcome")
 
-	delete(labels, "outcome")
-	pulled := byName["llm_d_epp_p2p_source_predicted_pulled_tokens"]
-	require.NotNil(t, pulled, "predicted pulled tokens exported")
-	require.Len(t, pulled.GetMetric(), 1)
-	assert.Equal(t, labels, labelMap(pulled.GetMetric()[0]))
-	assert.Equal(t, uint64(1), pulled.GetMetric()[0].GetHistogram().GetSampleCount())
-	assert.Equal(t, float64(32), pulled.GetMetric()[0].GetHistogram().GetSampleSum())
+	for _, want := range []struct {
+		name   string
+		labels map[string]string
+		sum    float64
+	}{
+		{"llm_d_epp_p2p_source_predicted_pulled_tokens", map[string]string{}, 48},
+		{"llm_d_epp_p2p_source_unpulled_tokens", map[string]string{"outcome": "below-floor"}, 16},
+		{"llm_d_epp_p2p_source_request_ttft_seconds", map[string]string{"outcome": "pulled", "cost_margin": "none"}, 1},
+	} {
+		family := byName[want.name]
+		require.NotNil(t, family, "%s exported", want.name)
+		require.Len(t, family.GetMetric(), 1, want.name)
+		labels := map[string]string{"plugin_name": "p2p", "endpoint_role": "decode"}
+		maps.Copy(labels, want.labels)
+		assert.Equal(t, labels, labelMap(family.GetMetric()[0]), want.name)
+		assert.Equal(t, uint64(1), family.GetMetric()[0].GetHistogram().GetSampleCount(), want.name)
+		assert.Equal(t, want.sum, family.GetMetric()[0].GetHistogram().GetSampleSum(), want.name)
+	}
 }
 
 func labelMap(metric *dto.Metric) map[string]string {
