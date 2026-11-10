@@ -79,18 +79,16 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 		})
 	}))
 
-	ginkgo.When("the renderer ignores mm_payload and OpenAI passthrough is disabled", ginkgo.Ordered, testWrapper(func() {
-		// The render step asks for no tensors (mm_payload: none). The
-		// simulator returns kwargs_data anyway, as a vLLM without the field
-		// does, so encode and prefill keep the features path and send no
-		// content_parts.
-		// TODO simulator's behavior changed - it does not ignore mm_payload: none, update the test to reflect that
-		ginkgo.XIt("keeps the features path on encode and prefill", func() {
+	ginkgo.When("the render step omits the tensors and OpenAI passthrough is disabled", ginkgo.Ordered, testWrapper(func() {
+		// The render step asks for no tensors (mm_payload: none). Encode sends the
+		// media as content_parts, and prefill sends features with mm_metadata
+		// rebuilt from the encode response's EC descriptor.
+		ginkgo.It("sends content_parts on encode and mm_metadata features on prefill", func() {
 			logs := runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
 				modelName, inlineImageDataURI,
 			)), allSteps, 1, tokenLimits{}, coordinatorConfigNIXLGenerateMMPayload)
-			verifyFeaturesPath(logs)
+			verifyMMPayloadNonePath(logs)
 		})
 	}))
 
@@ -561,21 +559,25 @@ func verifyEncodeSkipped(logs string) {
 		"coordinator logs missing 'skipping encode for generate request'")
 }
 
-// verifyFeaturesPath asserts that generate-format encode and prefill requests
-// carried the render tensors as features and no content_parts.
-func verifyFeaturesPath(logs string) {
-	ginkgo.By("Verifying encode requests carry features and no content_parts")
-	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"encode"`, `"kwargs_data"`)).To(gomega.BeTrue(),
-		"coordinator logs have no encode request body carrying kwargs_data")
-	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"encode"`, `"content_parts"`)).To(gomega.BeFalse(),
-		"encode request body must not carry content_parts when render returned kwargs_data")
+// verifyMMPayloadNonePath asserts that, with the render tensors omitted,
+// generate-format encode requests carry the media as content_parts and the
+// prefill request carries features with mm_metadata in place of kwargs_data.
+func verifyMMPayloadNonePath(logs string) {
+	ginkgo.By("Verifying encode requests carry content_parts and no kwargs_data")
+	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"encode"`, `"content_parts"`)).To(gomega.BeTrue(),
+		"coordinator logs have no encode request body carrying content_parts")
+	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"encode"`, `"kwargs_data"`)).To(gomega.BeFalse(),
+		"encode request body must not carry kwargs_data when render omitted the tensors")
 
-	ginkgo.By("Verifying the prefill request carries features and no content_parts")
+	ginkgo.By("Verifying the prefill request carries mm_metadata features and no content_parts")
 	body := parsePrefillGenerateBody(logs)
+	gomega.Expect(body).NotTo(gomega.HaveKey("content_parts"), "generate prefill body must not carry content_parts: %v", body)
 	features, ok := body["features"].(map[string]any)
 	gomega.Expect(ok).To(gomega.BeTrue(), "generate prefill body has no features object: %v", body)
-	gomega.Expect(features).To(gomega.HaveKey("kwargs_data"), "generate prefill features has no kwargs_data: %v", features)
-	gomega.Expect(body).NotTo(gomega.HaveKey("content_parts"), "generate prefill body must not carry content_parts: %v", body)
+	gomega.Expect(features).To(gomega.HaveKeyWithValue("kwargs_data", gomega.HaveKeyWithValue("image", gomega.Equal([]any{nil}))),
+		"generate prefill features must carry null kwargs_data: %v", features)
+	gomega.Expect(features).To(gomega.HaveKeyWithValue("mm_metadata", gomega.HaveKeyWithValue("image", gomega.ConsistOf(gomega.Not(gomega.BeNil())))),
+		"generate prefill features must carry mm_metadata: %v", features)
 }
 
 // logHasLine reports whether any single line in logs contains all of substrs.
