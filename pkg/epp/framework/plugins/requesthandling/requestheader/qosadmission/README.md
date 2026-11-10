@@ -4,7 +4,7 @@
 **Interfaces:** `requesthandling.RequestHeaderProcessor`, `requesthandling.ResponseHeaderProcessor`, `requesthandling.ResponseBodyProcessor`
 **Stability:** Alpha
 
-Enforces per-team QoS contracts ahead of flow control. It records decisions without acting on them until `mode: enforce` is set; see [Shadow Mode](#shadow-mode). Each team is committed to a service class, and each class is a flow-control priority band. A team's contract is its size limits (`maxPromptTokens`, `maxOutputTokens`) and its commits: its concurrency (`maxConcurrency`) and its daily weighted-token budget (`dailyTokens`). Traffic within the contract is served at the team's class. Traffic outside it moves one class down, and is rejected when no lower class exists: `400` above a size limit, `429` above a commit.
+Enforces per-team QoS contracts ahead of flow control. Until `mode: enforce` is set it serves each team at its committed class and only records downgrades and rejections; see [Shadow Mode](#shadow-mode). Each team is committed to a service class, and each class is a flow-control priority band. A team's contract is its size limits (`maxPromptTokens`, `maxOutputTokens`) and its commits: its concurrency (`maxConcurrency`) and its daily weighted-token budget (`dailyTokens`). Traffic within the contract is served at the team's class. Traffic outside it moves one class down, and is rejected when no lower class exists: `400` above a size limit, `429` above a commit.
 
 ## What It Does
 
@@ -34,7 +34,7 @@ A `429` adds `retry-after` (seconds: `1` for concurrency, until the next UTC day
 
 ## Shadow Mode
 
-The plugin starts in `mode: shadow` (the default). Every decision is computed and recorded in `llm_d_epp_qos_admission_decisions_total{mode="shadow"}`, but the plugin never rejects, never changes the priority or fairness ID, and adds no response headers. Commits are counted as they would be when enforced: a request recorded as `admitted` holds a concurrency slot and a daily charge until it completes, and one recorded as `downgraded` or `rejected_*` holds neither. Use it to compare commits against real traffic, then set `mode: enforce` to apply the decisions.
+The plugin starts in `mode: shadow` (the default). It serves every request at its team's committed class: it sets the class priority and, when the request has none, the fairness ID, as enforce mode does. Every decision is computed and recorded in `llm_d_epp_qos_admission_decisions_total{mode="shadow"}`, but a request outside the contract is neither moved down a class nor rejected, and the plugin adds no response headers. Commits are counted as they would be when enforced: a request recorded as `admitted` holds a concurrency slot and a daily charge until it completes, and one recorded as `downgraded` or `rejected_*` holds neither. Use it to compare commits against real traffic, then set `mode: enforce` to apply the decisions.
 
 ## Configuration
 
@@ -64,7 +64,7 @@ plugins:
 
 | Field | Default | Description |
 |---|---|---|
-| `mode` | `shadow` | `shadow` records decisions without acting on them; `enforce` applies them. |
+| `mode` | `shadow` | `shadow` serves each team at its committed class and records downgrades and rejections without applying them; `enforce` applies them. |
 | `teamHeader` | `x-llm-d-inference-fairness-id` | Request header carrying the team ID. |
 | `outputTokenWeight` | `2` | Cost of one output token relative to one input token. Must be `> 0`. |
 | `defaultOutputReservation` | `1000` | Output tokens reserved when neither the request nor the team sets a cap. |
@@ -111,7 +111,7 @@ The metrics are served on the EPP `/metrics` endpoint with the other EPP metrics
 
 A request over several limits reports one reason, the first of `size`, `daily` and `concurrency`; the same order decides its rejection. For a rejection `reason` repeats what the `decision` name already says, so one query can group downgrades and rejections by cause.
 
-In shadow mode the counter is the report of what enforcement would do; every request is still served at its original priority.
+In shadow mode the counter is the report of what enforcement would do; every request is served at its team's committed class.
 
 ### PromQL
 

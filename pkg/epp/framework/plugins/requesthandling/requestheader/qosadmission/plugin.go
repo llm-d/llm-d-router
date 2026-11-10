@@ -227,13 +227,13 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 		served, decision = p.classes[team.classIndex+1], decisionDowngraded
 	case overSize:
 		team.mu.Unlock()
-		return p.reject(team, committed.Name, decisionRejectedSize, reason, p.sizeError(team, committed.Name))
+		return p.reject(request, teamID, team, committed, decisionRejectedSize, reason, p.sizeError(team, committed.Name))
 	case overDaily:
 		team.mu.Unlock()
-		return p.reject(team, committed.Name, decisionRejectedDaily, reason, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
+		return p.reject(request, teamID, team, committed, decisionRejectedDaily, reason, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
 	default:
 		team.mu.Unlock()
-		return p.reject(team, committed.Name, decisionRejectedConcurrency, reason, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
+		return p.reject(request, teamID, team, committed, decisionRejectedConcurrency, reason, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
 	}
 	team.mu.Unlock()
 
@@ -245,14 +245,21 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	requestID := request.RequestID
 	rec.stop = context.AfterFunc(ctx, func() { p.finish(requestID, nil) })
 
+	// Shadow mode serves the team's committed class: a downgrade is recorded, not applied.
 	if p.shadow {
-		return nil
+		served = committed
 	}
-	request.Objectives.Priority = served.Priority
+	setClass(request, teamID, served)
+	return nil
+}
+
+// setClass serves the request at class and makes the team the fairness flow when the request
+// has no fairness ID.
+func setClass(request *scheduling.InferenceRequest, teamID string, class ClassConfig) {
+	request.Objectives.Priority = class.Priority
 	if request.FairnessID == "" && teamID != "" {
 		request.FairnessID = teamID
 	}
-	return nil
 }
 
 // ResponseHeader reports the served class and the team's remaining quota.
@@ -319,13 +326,17 @@ func (p *Plugin) mode() string {
 	return ModeEnforce
 }
 
-// reject records a rejection and returns err, or nil in shadow mode.
-func (p *Plugin) reject(team *teamState, class, decision, reason string, err errcommon.Error) error {
-	admissionDecisions.WithLabelValues(team.label, class, "", decision, reason, p.mode()).Inc()
-	if p.shadow {
-		return nil
+// reject records a rejection and returns err. In shadow mode it returns nil instead.
+func (p *Plugin) reject(request *scheduling.InferenceRequest, teamID string, team *teamState, committed ClassConfig,
+	decision, reason string, err errcommon.Error) error {
+	admissionDecisions.WithLabelValues(team.label, committed.Name, "", decision, reason, p.mode()).Inc()
+	if !p.shadow {
+		return err
 	}
-	return err
+	// Shadow mode serves a would-be rejection at the team's committed class. Like a rejection, it
+	// holds no concurrency slot and no budget charge, so later decisions match enforce mode.
+	setClass(request, teamID, committed)
+	return nil
 }
 
 func (p *Plugin) sizeError(team *teamState, class string) errcommon.Error {
