@@ -113,13 +113,19 @@ func TestMessagesRenderMode(t *testing.T) {
 				require.NoError(t, err)
 				req := &scheduling.InferenceRequest{Body: parsed.Body, Headers: map[string]string{"authorization": "Bearer secret"}}
 				require.NoError(t, p.Produce(context.Background(), req, nil))
-				require.Equal(t, &fwkrequest.TokenizedRequest{
+				expected := &fwkrequest.TokenizedRequest{
 					CacheSalt: "tenant-a",
 					Prompts: []fwkrequest.PromptTokens{{
 						TokenIDs:           []uint32{1, 2, 3},
 						MultiModalFeatures: []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "hash", Offset: 1, Length: 2}},
 					}},
-				}, req.Body.TokenizedRequest)
+				}
+				if tc.legacy {
+					// The Go-side legacy translation renders the translated body, not the
+					// client's original request, so its IDs are marked LegacyTranslated.
+					expected.LegacyTranslated = true
+				}
+				require.Equal(t, expected, req.Body.TokenizedRequest)
 				require.Equal(t, fwkrequest.RawPayload(raw), req.Body.WirePayload())
 				require.False(t, req.Body.Mutated)
 				unchanged, err := json.Marshal(req.Body.Messages)
@@ -273,7 +279,8 @@ func TestMessagesRenderModeLeavesOtherProtocolsUnchanged(t *testing.T) {
 			direct                      bool
 		}{
 			{"chat", "/v1/chat/completions", ` {"model":"adapter","messages":[{"role":"user","content":"hi"}],"unknown":{"z":1,"a":2}} `, chatRenderPath, openai.NewOpenAIParser(), false},
-			{"completions", "/v1/completions", ` {"model":"adapter","prompt":[1,2,3],"truncate_prompt_tokens":3} `, completionsRenderPath, openai.NewOpenAIParser(), false},
+			{"completions text", "/v1/completions", ` {"model":"adapter","prompt":"hi","truncate_prompt_tokens":3} `, completionsRenderPath, openai.NewOpenAIParser(), false},
+			{"completions tokens", "/v1/completions", ` {"model":"adapter","prompt":[1,2,3]} `, "", openai.NewOpenAIParser(), false},
 			{"vllm generate", "/inference/v1/generate", `{"model":"adapter","token_ids":[1,2,3],"sampling_params":{"max_tokens":1}}`, "", vllmhttp.NewVllmHTTPParser(), false},
 			{"sglang generate", "/generate", `{"input_ids":[1,2,3],"sampling_params":{"max_new_tokens":1}}`, "", sglanghttp.NewSGLangHTTPParser(), false},
 			{"direct messages", messagesRenderPath, `{"model":"adapter","unknown":{"z":1,"a":2}}`, "", anthropic.NewAnthropicParser(), true},

@@ -315,7 +315,8 @@ func (fr *FlowRegistry) WithConnection(key flowcontrol.FlowKey, fn func(conn con
 			fr.clock,
 		)
 	}
-	defer state.unpin(fr.clock.Now())
+	// Read the clock when the lease is released, not when the defer is set up.
+	defer func() { state.unpin(fr.clock.Now()) }()
 
 	// 2. Flow provisioning: Ensure physical resources exist.
 	// We use sync.Once to ensure we only pay the initialization cost exactly once per flowState object.

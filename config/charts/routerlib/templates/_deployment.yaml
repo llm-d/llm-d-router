@@ -3,8 +3,7 @@
       {{- $proxyType := include "llm-d-router.proxyType" . | trim }}
       {{- $proxyMode := include "llm-d-router.proxyMode" . | trim }}
       {{- $proxySidecar := and $proxy.enabled (eq $proxyMode "sidecar") }}
-      {{- $proxyConfigMap := index $proxy "configMap" | default dict }}
-      {{- $proxyConfigMapName := index $proxyConfigMap "name" | default "" }}
+      {{- $proxyConfigMapName := include "llm-d-router.proxyConfigMapName" . }}
       {{- $eppFlags := include "llm-d-router.epp.flags" . | fromYaml }}
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $eppFlags "secure-serving")) }}
         {{- $_ := set $eppFlags "secure-serving" false }}

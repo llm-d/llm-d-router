@@ -201,6 +201,25 @@ if grep -Eq -- '^kind: ClusterRole(Binding)?$' "${gke_monitoring_render_output}"
   exit 1
 fi
 
+echo "Verifying the EPP ServiceMonitor scrapes every metrics Service of a release under one job..."
+servicemonitor_job_render_output="${TEMP_DIR}/llm-d-router-gateway-servicemonitor-job-render.yaml"
+servicemonitor_job_render_command="${HELM} template sm-job ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set provider.name=gke --set provider.gke.preferredBackends.enabled=true --set provider.gke.preferredBackends.preferredReplicas=2 --set provider.gke.preferredBackends.defaultReplicas=2 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false > ${servicemonitor_job_render_output}"
+echo "Executing: ${servicemonitor_job_render_command}"
+eval "${servicemonitor_job_render_command}"
+metrics_services='select(.kind == "Service" and (.spec.ports | any_c(.name == "http-metrics")))'
+job_label=$("${YQ}" -N 'select(.kind == "ServiceMonitor") | .spec.jobLabel' "${servicemonitor_job_render_output}")
+metrics_service_count=$("${YQ}" -N "${metrics_services} | .metadata.name" "${servicemonitor_job_render_output}" | wc -l | tr -d ' ')
+if [ "${metrics_service_count}" -ne 4 ]; then
+  echo "GKE preferred backends with 2 preferred and 2 default replicas rendered ${metrics_service_count} EPP metrics Services, expected 4"
+  exit 1
+fi
+expected_job="sm-job-epp"
+job_values=$(JOB_LABEL="${job_label}" "${YQ}" -N "${metrics_services} | .metadata.labels[strenv(JOB_LABEL)]" "${servicemonitor_job_render_output}" | sort -u | tr '\n' ' ')
+if [ "${job_values}" != "${expected_job} " ]; then
+  echo "ServiceMonitor jobLabel '${job_label}' must give all EPP metrics Services of the release the job ${expected_job}, got: ${job_values}"
+  exit 1
+fi
+
 echo "Verifying Prometheus authentication renders cluster RBAC..."
 prometheus_auth_render_output="${TEMP_DIR}/llm-d-router-gateway-prometheus-auth-render.yaml"
 prometheus_auth_render_command="${HELM} template prometheus-auth ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=true > ${prometheus_auth_render_output}"
@@ -780,6 +799,36 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   done
 done
 
+echo "Verifying namespace-only install renders no cluster RBAC..."
+declare -A ns_only
+ns_only[llm-d-router-gateway:no-auth]="--set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-gateway:prometheus-no-auth]="--set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-standalone:default-pool-no-auth]="--set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-standalone:no-auth]="--set router.inferencePool.create=false --set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-standalone:prometheus-no-auth]="--set router.inferencePool.create=false --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false"
+ns_only[llm-d-router-standalone:gmp-no-auth]="--set router.inferencePool.create=false --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false --set router.monitoring.provider.name=gmp"
+ns_only[llm-d-router-gateway:gmp-no-auth]="--set provider.name=gke --set router.monitoring.prometheus.enabled=true --set router.monitoring.prometheus.auth.enabled=false --set router.monitoring.provider.name=gmp"
+for key in "${!ns_only[@]}"; do
+  out="${TEMP_DIR}/ns-only-${key//:/-}.yaml"
+  read -ra extra <<< "${ns_only[$key]}"
+  ${HELM} template ns-only "${SCRIPT_ROOT}/config/charts/${key%%:*}" --set router.modelServers.matchLabels.app=llm-instance-gateway "${extra[@]}" > "${out}" || exit 1
+  if grep -Eq -- '^kind: ClusterRole(Binding)?$' "${out}"; then
+    echo "Namespace-only case ${key} rendered cluster RBAC"
+    exit 1
+  fi
+done
+# Chart defaults keep metrics auth on, so they must render the cluster RBAC the README documents.
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  out="${TEMP_DIR}/default-rbac-${chart}.yaml"
+  ${HELM} template default-rbac ${SCRIPT_ROOT}/config/charts/${chart} --set router.modelServers.matchLabels.app=llm-instance-gateway > "${out}" || exit 1
+  for k in ClusterRole ClusterRoleBinding; do
+    if ! grep -Eq -- "^kind: ${k}\$" "${out}"; then
+      echo "Default render of ${chart} is missing ${k}; update the RBAC table in config/charts/README.md"
+      exit 1
+    fi
+  done
+done
+
 if ! HELM="${HELM}" bash "${SCRIPT_ROOT}/hack/verify-plugins-config.sh"; then
   echo "Structured plugins configuration validation failed"
   exit 1
@@ -830,6 +879,28 @@ for proxy_type in envoy agentgateway; do
     done
   done
 done
+
+echo "Verifying the agentgateway sidecar mounts the release-scoped proxy ConfigMap..."
+agentgateway_sidecar_render_output="${TEMP_DIR}/agentgateway-sidecar-proxy-config.yaml"
+if ! "${HELM}" template agentgateway-scoped "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+  --set router.proxy.mode=sidecar \
+  --set router.proxy.proxyType=agentgateway \
+  --set router.modelServers.matchLabels.app=llm-instance-gateway \
+  --set router.inferencePool.create=false \
+  --set 'router.modelServers.targetPorts[0].number=8000' > "${agentgateway_sidecar_render_output}"; then
+  echo "Agentgateway sidecar rendering failed"
+  exit 1
+fi
+rendered_agentgateway_config_map=$("${YQ}" -N 'select(.kind == "ConfigMap" and .metadata.name == "agentgateway-scoped-agentgateway") | .metadata.name' "${agentgateway_sidecar_render_output}")
+if [ "${rendered_agentgateway_config_map}" != "agentgateway-scoped-agentgateway" ]; then
+  echo "Agentgateway sidecar did not render the release-scoped proxy ConfigMap"
+  exit 1
+fi
+mounted_agentgateway_config_map=$("${YQ}" -N 'select(.kind == "Deployment" and (.metadata.name | test("-epp$"))) | .spec.template.spec.volumes[] | select(.name == "agentgateway-config-template") | .configMap.name' "${agentgateway_sidecar_render_output}")
+if [ "${mounted_agentgateway_config_map}" != "agentgateway-scoped-agentgateway" ]; then
+  echo "Agentgateway sidecar mounts ConfigMap ${mounted_agentgateway_config_map}, want agentgateway-scoped-agentgateway"
+  exit 1
+fi
 
 echo "Verifying llm-d-router-standalone agentgateway renders plaintext EPP and custom listener ports..."
 agentgateway_render_output="${TEMP_DIR}/llm-d-router-standalone-agentgateway-render.yaml"

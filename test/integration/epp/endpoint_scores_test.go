@@ -17,12 +17,19 @@ limitations under the License.
 package epp
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 )
@@ -74,6 +81,123 @@ func TestEndpointScoresMetadataOffByDefault(t *testing.T) {
 	require.True(t, ok, "expected destination endpoint in envoy.lb namespace")
 	_, ok = envoyLb.Fields[metadata.DestinationEndpointScoresKey]
 	require.False(t, ok, "expected destination endpoint scores to be absent from envoy.lb namespace by default")
+}
+
+func TestTextToSpeechCacheSaltEndpointScores(t *testing.T) {
+	configText := `
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: openai-parser
+  - type: token-producer
+    parameters:
+      backend: estimate
+  - type: approx-prefix-cache-producer
+    parameters:
+      autoTune: false
+      blockSizeTokens: 64
+  - type: prefix-cache-scorer
+  - type: max-score-picker
+  - type: mock-metrics-source
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: prefix-cache-scorer
+      - pluginRef: max-score-picker
+requestHandler:
+  parsers:
+    - pluginRef: openai-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+    - pluginRef: mock-metrics-source
+`
+	h := NewTestHarness(t.Context(), t, WithStandardMode(), WithConfigText(configText), WithEmitEndpointScores()).WithBaseResources()
+	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget), P(1, 0, 0.1, modelMyModelTarget)}
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+
+	sendSpeech := func(t *testing.T, requestID, salt string) (string, map[string]*structpb.Value) {
+		t.Helper()
+		body := map[string]any{
+			"model": modelMyModel,
+			"input": strings.Repeat("Welcome to customer support. ", 16),
+		}
+		if salt != "" {
+			body["cache_salt"] = salt
+		}
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      "/v1/audio/speech",
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+			reqcommon.RequestIDHeaderKey: requestID,
+		}, string(raw))
+		requests = append(requests, ReqResponseOnly(
+			map[string]string{"content-type": "audio/wav", ":status": "200"}, "RIFF",
+		)...)
+
+		client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = client.CloseSend() }()
+		responses, err := fwkepp.StreamedRequest(t, client, requests, 4)
+		require.NoError(t, err)
+		require.Len(t, responses, 4)
+
+		envoyLb := responses[0].DynamicMetadata.GetFields()[metadata.DestinationEndpointNamespace].GetStructValue()
+		require.NotNil(t, envoyLb)
+		endpoint := envoyLb.Fields[metadata.DestinationEndpointKey].GetStringValue()
+		require.NotEmpty(t, endpoint)
+		scores := envoyLb.Fields[metadata.DestinationEndpointScoresKey].GetStructValue()
+		require.NotNil(t, scores)
+		require.Len(t, scores.Fields, len(pods))
+		return endpoint, scores.Fields
+	}
+
+	cachedEndpoint, coldScores := sendSpeech(t, "warmup", "tenant-a")
+	for _, score := range coldScores {
+		require.Zero(t, score.GetNumberValue())
+	}
+
+	// PreRequest updates the prefix index asynchronously.
+	dumper, ok := h.Runner.PluginHandle.Plugin(approximateprefix.ApproxPrefixCachePluginType).(plugin.StateDumper)
+	require.True(t, ok)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		raw, err := dumper.DumpState()
+		require.NoError(c, err)
+		var state struct {
+			TotalPods int `json:"totalPods"`
+			Pods      []struct {
+				Blocks int `json:"blocks"`
+			} `json:"pods"`
+		}
+		require.NoError(c, json.Unmarshal(raw, &state))
+		require.Equal(c, 1, state.TotalPods)
+		require.Len(c, state.Pods, 1)
+		require.Greater(c, state.Pods[0].Blocks, 0)
+	}, 5*time.Second, 10*time.Millisecond)
+
+	for _, tc := range []struct {
+		name      string
+		salt      string
+		wantMatch bool
+	}{
+		{name: "same-salt", salt: "tenant-a", wantMatch: true},
+		{name: "different-salt", salt: "tenant-b"},
+		{name: "missing-salt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, scores := sendSpeech(t, tc.name, tc.salt)
+			require.Contains(t, scores, cachedEndpoint)
+			if tc.wantMatch {
+				require.Greater(t, scores[cachedEndpoint].GetNumberValue(), 0.0)
+			} else {
+				for _, score := range scores {
+					require.Zero(t, score.GetNumberValue(), "isolated requests must not receive a cache-hit bonus")
+				}
+			}
+		})
+	}
 }
 
 // requestHeaderEnvoyLbMetadata drives one LLM request through the EPP and returns the envoy.lb

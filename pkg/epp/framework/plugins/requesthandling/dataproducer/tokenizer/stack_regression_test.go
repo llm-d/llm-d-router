@@ -25,16 +25,21 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanggrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanghttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllminference"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 )
@@ -51,6 +56,29 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 	framed := make([]byte, 5+len(msg))
 	binary.BigEndian.PutUint32(framed[1:5], uint32(len(msg))) //#nosec G115 -- test fixture, small proto messages
 	copy(framed[5:], msg)
+	sglangFramed, err := grpcframe.MarshalProto(&sglangapiv1.GenerateRequest{
+		InputIds:  &sglangapiv1.TokenIdsOrList{Value: &sglangapiv1.TokenIdsOrList_One{One: &sglangapiv1.TokenIds{Ids: []int64{1, 2, 3}}}},
+		CacheSalt: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "tenant-a"}},
+	})
+	require.NoError(t, err)
+	vllmInferenceFramed, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+		Model:  "m",
+		Prompt: &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2, 3}}},
+		Kv:     &vllmpb.KVCacheParameters{CacheSalt: "tenant-a"},
+		Media: []*vllmpb.MediaItem{
+			{
+				Modality: vllmpb.Modality_MODALITY_IMAGE,
+				Source: &vllmpb.MediaItem_Features{
+					Features: &vllmpb.PreprocessedMediaFeatures{
+						Identifier: "image-hash",
+						Offset:     1,
+						Length:     2,
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
 	features := []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "image-hash", Offset: 1, Length: 2}}
 	for _, tc := range []struct {
 		name, path, salt string
@@ -63,6 +91,10 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 			body: []byte(`{"input_ids":[1,2,3],"cache_salt":"tenant-a","sampling_params":{"max_new_tokens":1}}`),
 		},
 		{
+			name: "sglang gRPC", path: sglangapiv1.SglangService_Generate_FullMethodName, salt: "tenant-a", parser: sglanggrpc.NewSGLangGRPCParser(),
+			body: sglangFramed,
+		},
+		{
 			name: "vllm HTTP", path: "/inference/v1/generate", salt: "tenant-a", parser: vllmhttp.NewVllmHTTPParser(),
 			body:     []byte(`{"model":"m","token_ids":[1,2,3],"cache_salt":"tenant-a","features":{"mm_hashes":{"image":["image-hash"]},"mm_placeholders":{"image":[{"offset":1,"length":2}]}},"sampling_params":{"max_tokens":1}}`),
 			features: features,
@@ -70,6 +102,10 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 		{
 			name: "vllm gRPC", path: "/vllm.grpc.engine.VllmEngine/Generate", parser: vllmgrpc.NewVllmGRPCParser(),
 			body: framed, features: features,
+		},
+		{
+			name: "vllm.Inference gRPC", path: vllmpb.Inference_GenerateStream_FullMethodName, salt: "tenant-a", parser: vllminference.NewVllmInferenceParser(),
+			body: vllmInferenceFramed, features: features,
 		},
 	} {
 		for _, backend := range []string{BackendVLLM, BackendEstimate} {
@@ -148,6 +184,19 @@ func TestGRPCTextProducesTokens(t *testing.T) {
 	require.NotNil(t, req.Body.TokenizedRequest)
 	require.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
 	require.Equal(t, "Hello world", req.Body.Payload.(fwkrequest.PayloadProto).Message.(*pb.GenerateRequest).GetText())
+
+	vllmInfFramed, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+		Model:  "grpc-model",
+		Prompt: &vllmpb.GenerateRequest_Text{Text: "Hello world"},
+	})
+	require.NoError(t, err)
+	parsedInf, err := vllminference.NewVllmInferenceParser().ParseRequest(context.Background(), vllmInfFramed, map[string]string{":path": vllmpb.Inference_Generate_FullMethodName})
+	require.NoError(t, err)
+	reqInf := &scheduling.InferenceRequest{Body: parsedInf.Body}
+	require.NoError(t, p.Produce(context.Background(), reqInf, nil))
+	require.NotNil(t, reqInf.Body.TokenizedRequest)
+	require.Equal(t, []uint32{1, 2, 3}, reqInf.Body.TokenizedRequest.Prompts[0].TokenIDs)
+	require.Equal(t, fwkrequest.PayloadBytes(vllmInfFramed), reqInf.Body.Payload)
 }
 
 func TestDirectRenderKeepsModel(t *testing.T) {

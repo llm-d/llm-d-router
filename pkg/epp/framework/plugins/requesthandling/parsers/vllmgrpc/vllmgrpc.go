@@ -28,13 +28,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
-	grpcutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 )
 
@@ -91,7 +91,7 @@ func (p *VllmGRPCParser) Claims() fwkrh.Claims {
 func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	logger := log.FromContext(ctx)
 
-	parsedPayload, err := grpcutil.ParseGrpcPayload(body)
+	parsedPayload, err := grpcframe.ParsePayload(body)
 	if err != nil {
 		return nil, errors.New("invalid or unsupported gRPC payload")
 	}
@@ -174,7 +174,7 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 		// Streaming chunks often leave this empty until the final chunk.
 		promptToken, completionToken, cachedToken := int(v.Chunk.PromptTokens), int(v.Chunk.CompletionTokens), int(v.Chunk.CachedTokens)
 		if promptToken > 0 || completionToken > 0 {
-			result.Usage = requestControlUsage(promptToken, completionToken, cachedToken)
+			result.Usage = parsers.NewUsage(promptToken, completionToken, cachedToken)
 		}
 
 	case *pb.GenerateResponse_Complete:
@@ -182,7 +182,7 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 		// Populate Usage for complete, non-streaming responses.
 		promptToken, completionToken, cachedToken := int(v.Complete.PromptTokens), int(v.Complete.CompletionTokens), int(v.Complete.CachedTokens)
 		if promptToken > 0 || completionToken > 0 {
-			result.Usage = requestControlUsage(promptToken, completionToken, cachedToken)
+			result.Usage = parsers.NewUsage(promptToken, completionToken, cachedToken)
 		}
 
 	default:
@@ -192,19 +192,8 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 	return result, nil
 }
 
-func requestControlUsage(promptToken, completionToken, cachedToken int) *fwkrequest.Usage {
-	return &fwkrequest.Usage{
-		PromptTokens:     promptToken,
-		CompletionTokens: completionToken,
-		TotalTokens:      promptToken + completionToken,
-		PromptTokenDetails: &fwkrequest.PromptTokenDetails{
-			CachedTokens: cachedToken,
-		},
-	}
-}
-
 func toGenerateResponse(payload []byte, resp *pb.GenerateResponse) error {
-	parsedPayload, err := grpcutil.ParseGrpcPayload(payload)
+	parsedPayload, err := grpcframe.ParsePayload(payload)
 	if err != nil {
 		return err
 	}
@@ -307,7 +296,7 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrequest.Inf
 }
 
 func toEmbedResponse(payload []byte, resp *pb.EmbedResponse) error {
-	parsedPayload, err := grpcutil.ParseGrpcPayload(payload)
+	parsedPayload, err := grpcframe.ParsePayload(payload)
 	if err != nil {
 		return err
 	}

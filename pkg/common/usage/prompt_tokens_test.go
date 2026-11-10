@@ -18,6 +18,7 @@ package usage
 
 import (
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -185,5 +186,107 @@ func TestResponseWriter_ObserverAndCachedTokensTogether(t *testing.T) {
 	}
 	if got := cachedTokensOf(t, recorder.Body.Bytes()); got != 3 {
 		t.Fatalf("cached_tokens = %d, want 3", got)
+	}
+}
+
+// recordingWriter records writes as they happen, so a test can tell whether a
+// body was forwarded before or after finalize.
+type recordingWriter struct {
+	*httptest.ResponseRecorder
+	writes int
+}
+
+func (w *recordingWriter) Write(b []byte) (int, error) {
+	w.writes++
+	return w.ResponseRecorder.Write(b)
+}
+
+func TestResponseWriter_PassthroughKeepsContentLengthAndForwardsEagerly(t *testing.T) {
+	for name, streaming := range map[string]bool{"json": false, "sse": true} {
+		t.Run(name, func(t *testing.T) {
+			rec := &recordingWriter{ResponseRecorder: httptest.NewRecorder()}
+			var seen int
+			writer, finalize := NewResponseWriter(rec, Options{OnUsage: func(block map[string]any) {
+				seen, _ = PromptTokens(block)
+			}}, streaming)
+			writer.Header().Set("Content-Length", "123")
+			writer.WriteHeader(200)
+			if rec.Header().Get("Content-Length") != "123" {
+				t.Fatalf("passthrough must keep Content-Length, got %q", rec.Header().Get("Content-Length"))
+			}
+			first, second := `{"choices":[],`, `"usage":{"prompt_tokens":4}}`
+			if streaming {
+				first, second = "data: {\"choices\":[{\"delta\":{}}]}\n\n", "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4}}\n\ndata: [DONE]\n\n"
+			}
+			if _, err := writer.Write([]byte(first)); err != nil {
+				t.Fatal(err)
+			}
+			if rec.writes != 1 || rec.Body.String() != first {
+				t.Fatalf("first write must be forwarded immediately, got %d writes, body %q", rec.writes, rec.Body.String())
+			}
+			if _, err := writer.Write([]byte(second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := finalize(); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Body.String() != first+second {
+				t.Fatalf("body changed in passthrough: %q", rec.Body.String())
+			}
+			if seen != 4 {
+				t.Fatalf("observer saw %d, want 4", seen)
+			}
+		})
+	}
+}
+
+func TestResponseWriter_RewriteModeStillDropsContentLength(t *testing.T) {
+	rec := httptest.NewRecorder()
+	cached := 1
+	writer, _ := NewResponseWriter(rec, Options{CachedTokens: &cached}, false)
+	writer.Header().Set("Content-Length", "123")
+	writer.WriteHeader(200)
+	if rec.Header().Get("Content-Length") != "" {
+		t.Fatalf("a rewriting writer must drop Content-Length, got %q", rec.Header().Get("Content-Length"))
+	}
+}
+
+func TestResponseWriter_PassthroughSkipsObservationPastCap(t *testing.T) {
+	old := maxObserveBytes
+	maxObserveBytes = 16
+	t.Cleanup(func() { maxObserveBytes = old })
+	rec := httptest.NewRecorder()
+	called := false
+	writer, finalize := NewResponseWriter(rec, Options{OnUsage: func(map[string]any) { called = true }}, false)
+	body := `{"padding":"xxxxxxxxxxxxxxxxxxxx","usage":{"prompt_tokens":4}}`
+	if _, err := writer.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Body.String() != body {
+		t.Fatalf("body must be forwarded even past the cap: %q", rec.Body.String())
+	}
+	if called {
+		t.Fatal("observer must not run on a truncated copy")
+	}
+}
+
+func TestResponseWriter_PassthroughReadFrom(t *testing.T) {
+	rec := &readerFromResponseWriter{}
+	var seen int
+	writer, finalize := NewResponseWriter(rec, Options{OnUsage: func(block map[string]any) {
+		seen, _ = PromptTokens(block)
+	}}, false)
+	body := `{"choices":[],"usage":{"prompt_tokens":6}}`
+	if _, err := writer.(io.ReaderFrom).ReadFrom(strings.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if rec.body.String() != body || seen != 6 {
+		t.Fatalf("ReadFrom passthrough: body %q seen %d", rec.body.String(), seen)
 	}
 }

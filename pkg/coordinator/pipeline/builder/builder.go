@@ -33,23 +33,31 @@ import (
 // The async-broker step must intercept requests before any processing step
 // touches them (queued bodies are stored verbatim, and passthrough stamping
 // must precede routing), so it is only valid in first position. The tokens-in
-// format (use_openai_format=false) sends token IDs that only the render step
-// produces, so it requires a render step in the pipeline.
+// format (use_openai_format=false) and forward_prompt_token_ids send token IDs
+// that only the render step produces, so both require a render step in the
+// pipeline.
 func validatePipeline(p config.PipelineConfig) error {
+	hasRender := false
 	for i, s := range p.Steps {
 		if s.Type == asyncbroker.StepName && i > 0 {
 			return fmt.Errorf("the %q step must be the first pipeline step, found it at position %d", asyncbroker.StepName, i+1)
 		}
-	}
-	if p.UseOpenAIFormat {
-		return nil
-	}
-	for _, s := range p.Steps {
 		if s.Type == steps.RenderStepName {
-			return nil
+			hasRender = true
 		}
 	}
-	return fmt.Errorf("pipeline.use_openai_format=false requires a %q step (the tokens-in format sends token IDs that render produces)", steps.RenderStepName)
+	if hasRender {
+		return nil
+	}
+	if !p.UseOpenAIFormat {
+		return fmt.Errorf("pipeline.use_openai_format=false requires a %q step (the tokens-in format sends token IDs that render produces)", steps.RenderStepName)
+	}
+	for _, s := range p.Steps {
+		if forward, _ := s.Params[steps.ParamForwardPromptTokenIDs].(bool); forward {
+			return fmt.Errorf("%s on the %q step requires a %q step (it sends token IDs that render produces)", steps.ParamForwardPromptTokenIDs, s.Type, steps.RenderStepName)
+		}
+	}
+	return nil
 }
 
 // usesOpenAIFormatParam reports whether stepType reads the use_openai_format

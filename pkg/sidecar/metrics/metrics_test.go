@@ -39,6 +39,15 @@ func sampleCount(t *testing.T, h prometheus.Histogram) uint64 {
 	return m.GetHistogram().GetSampleCount()
 }
 
+func TestRecordBuildInfo(t *testing.T) {
+	buildInfo.Reset()
+
+	RecordBuildInfo("abc123", "v1.2.3")
+
+	require.Equal(t, 1.0, promtestutil.ToFloat64(buildInfo.WithLabelValues("abc123", "v1.2.3")))
+	require.Equal(t, 1, promtestutil.CollectAndCount(buildInfo, "llm_d_disagg_sidecar_info"))
+}
+
 func TestRecordRequest(t *testing.T) {
 	requestsTotal.Reset()
 

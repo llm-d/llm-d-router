@@ -20,12 +20,12 @@ package latencyslo
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -159,7 +159,11 @@ func (p *LatencyAdmission) Admit(ctx context.Context, request *fwksched.Inferenc
 	if !hasValid && !hasIdle && !hasCold {
 		logger.V(logutil.DEBUG).Info("LatencyAdmission: rejecting sheddable request, no valid endpoint available",
 			"endpoints", len(endpoints))
-		return errors.New("no valid endpoint available to serve the request")
+		return errcommon.Error{
+			Code:    errcommon.ResourceExhausted,
+			Msg:     "no valid endpoint available to serve the request",
+			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)},
+		}
 	}
 
 	return nil

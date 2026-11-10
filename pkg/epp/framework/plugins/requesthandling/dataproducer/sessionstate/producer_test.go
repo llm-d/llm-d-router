@@ -28,6 +28,7 @@ import (
 	eppdatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -200,15 +201,15 @@ func TestFactoryParameters(t *testing.T) {
 	}
 }
 
-func TestProduceWithoutAgentIdentityIsNoOp(t *testing.T) {
+func TestRequestHeaderWithoutAgentIdentityIsNoOp(t *testing.T) {
 	t.Parallel()
 
 	producer := newTestProducer(t)
 	request := &fwksched.InferenceRequest{}
 
-	require.NoError(t, producer.Produce(context.Background(), nil, nil))
-	require.NoError(t, producer.Produce(context.Background(), request, nil))
-	require.NoError(t, producer.Produce(context.Background(), requestWithAgentIdentity(""), nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), request))
+	require.NoError(t, producer.RequestHeader(context.Background(), requestWithAgentIdentity("")))
 
 	assert.Empty(t, request.AttributeKeys())
 }
@@ -220,21 +221,21 @@ func TestSessionIDAttributeAloneIsNoOp(t *testing.T) {
 	request := &fwksched.InferenceRequest{}
 	request.PutAttribute(attrsession.SessionIDDataKey, attrsession.SessionID("session-a"))
 
-	require.NoError(t, producer.Produce(context.Background(), request, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), request))
 	require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
 
 	_, published := ReadSessionState(request)
 	assert.False(t, published)
 }
 
-func TestProduceAndPreRequestTrackSessionHistory(t *testing.T) {
+func TestRequestHeaderAndPreRequestTrackSessionHistory(t *testing.T) {
 	t.Parallel()
 
 	producer := newTestProducer(t)
 	first := requestWithAgentIdentity("session-a")
 
 	beforeFirst := time.Now()
-	require.NoError(t, producer.Produce(context.Background(), first, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), first))
 	afterFirst := time.Now()
 	state, ok := ReadSessionState(first)
 	require.True(t, ok)
@@ -251,7 +252,7 @@ func TestProduceAndPreRequestTrackSessionHistory(t *testing.T) {
 	require.NoError(t, producer.PreRequest(context.Background(), first, resultWithProfiles(1)))
 
 	second := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), second, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), second))
 	state, ok = ReadSessionState(second)
 	require.True(t, ok)
 	assert.Equal(t, int64(1), state.TurnsTaken)
@@ -265,12 +266,12 @@ func TestResponseBodyTracksCompletedRequestsAndTokens(t *testing.T) {
 
 	producer := newTestProducer(t)
 	request := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), request, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), request))
 	require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
 
 	producer.ResponseBody(context.Background(), request, &fwkrh.Response{EndOfStream: false}, nil)
 	inFlight := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), inFlight, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), inFlight))
 	state, ok := ReadSessionState(inFlight)
 	require.True(t, ok)
 	assert.Equal(t, int64(1), state.InFlightRequests)
@@ -278,7 +279,7 @@ func TestResponseBodyTracksCompletedRequestsAndTokens(t *testing.T) {
 
 	producer.ResponseBody(context.Background(), request, finalResponse(fwkrh.TerminationCauseNatural, 12, 34), nil)
 	completed := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), completed, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), completed))
 	state, ok = ReadSessionState(completed)
 	require.True(t, ok)
 	assert.Zero(t, state.InFlightRequests)
@@ -300,12 +301,12 @@ func TestAbnormalTerminationDoesNotCompleteRequest(t *testing.T) {
 			t.Parallel()
 			producer := newTestProducer(t)
 			request := requestWithAgentIdentity("session-a")
-			require.NoError(t, producer.Produce(context.Background(), request, nil))
+			require.NoError(t, producer.RequestHeader(context.Background(), request))
 			require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
 
 			producer.ResponseBody(context.Background(), request, finalResponse(cause, 12, 34), nil)
 			next := requestWithAgentIdentity("session-a")
-			require.NoError(t, producer.Produce(context.Background(), next, nil))
+			require.NoError(t, producer.RequestHeader(context.Background(), next))
 			state, ok := ReadSessionState(next)
 			require.True(t, ok)
 			assert.Zero(t, state.InFlightRequests)
@@ -321,12 +322,12 @@ func TestNaturalCompletionWithoutUsage(t *testing.T) {
 
 	producer := newTestProducer(t)
 	request := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), request, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), request))
 	require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(1)))
 	producer.ResponseBody(context.Background(), request, finalResponse(fwkrh.TerminationCauseNatural, 0, 0), nil)
 
 	next := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), next, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), next))
 	state, ok := ReadSessionState(next)
 	require.True(t, ok)
 	assert.Equal(t, int64(1), state.CompletedRequests)
@@ -339,7 +340,7 @@ func TestResponseBodyWithoutTrackedDispatchIsNoOp(t *testing.T) {
 
 	producer := newTestProducer(t)
 	request := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), request, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), request))
 
 	producer.ResponseBody(context.Background(), nil, finalResponse(fwkrh.TerminationCauseNatural, 1, 2), nil)
 	producer.ResponseBody(context.Background(), &fwksched.InferenceRequest{}, finalResponse(fwkrh.TerminationCauseNatural, 1, 2), nil)
@@ -347,7 +348,7 @@ func TestResponseBodyWithoutTrackedDispatchIsNoOp(t *testing.T) {
 	producer.ResponseBody(context.Background(), request, finalResponse(fwkrh.TerminationCauseNatural, 1, 2), nil)
 
 	next := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), next, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), next))
 	state, ok := ReadSessionState(next)
 	require.True(t, ok)
 	assert.Zero(t, state.InFlightRequests)
@@ -361,12 +362,136 @@ func TestPreRequestCountsMultipleProfilesOnce(t *testing.T) {
 
 	producer := newTestProducer(t)
 	request := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), request, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), request))
 	require.NoError(t, producer.PreRequest(context.Background(), request, resultWithProfiles(2)))
 
 	next := requestWithAgentIdentity("session-a")
-	require.NoError(t, producer.Produce(context.Background(), next, nil))
+	require.NoError(t, producer.RequestHeader(context.Background(), next))
 	state, ok := ReadSessionState(next)
 	require.True(t, ok)
 	assert.Equal(t, int64(1), state.TurnsTaken)
+}
+
+func TestRequestHeaderPublishesLiveState(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	queued := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.RequestHeader(context.Background(), queued))
+
+	state, ok := ReadSessionState(queued)
+	require.True(t, ok)
+	assert.Zero(t, state.TurnsTaken)
+	assert.Zero(t, state.InFlightRequests)
+
+	// Another turn of the same session is dispatched and completes while the
+	// first request is still queued.
+	other := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.RequestHeader(context.Background(), other))
+	require.NoError(t, producer.PreRequest(context.Background(), other, resultWithProfiles(1)))
+
+	state, ok = ReadSessionState(queued)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), state.TurnsTaken)
+	assert.Equal(t, int64(1), state.InFlightRequests)
+
+	response := finalResponse(fwkrh.TerminationCauseNatural, 100, 7)
+	response.Usage.PromptTokenDetails = &fwkrequest.PromptTokenDetails{CachedTokens: 64}
+	before := time.Now()
+	producer.ResponseBody(context.Background(), other, response, nil)
+
+	state, ok = ReadSessionState(queued)
+	require.True(t, ok)
+	assert.Zero(t, state.InFlightRequests)
+	assert.Equal(t, int64(1), state.CompletedRequests)
+	assert.Equal(t, int64(100), state.TotalInputTokens)
+	assert.Equal(t, int64(7), state.TotalOutputTokens)
+	assert.Equal(t, int64(64), state.TotalCachedTokens)
+	assert.False(t, state.LastResponseAt.Before(before))
+}
+
+func TestProduceIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	request := requestWithAgentIdentity("session-a")
+	require.NoError(t, producer.Produce(context.Background(), request, nil))
+
+	_, published := ReadSessionState(request)
+	assert.False(t, published)
+	assert.Zero(t, registrySessionCount(&producer.registry))
+}
+
+func TestPendingRequestKeepsSessionFromEviction(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		finish func(p *Producer, request *fwksched.InferenceRequest)
+	}{
+		{
+			name: "dispatched",
+			finish: func(p *Producer, request *fwksched.InferenceRequest) {
+				require.NoError(t, p.PreRequest(context.Background(), request, resultWithProfiles(1)))
+				p.ResponseBody(context.Background(), request, finalResponse(fwkrh.TerminationCauseNatural, 1, 1), nil)
+			},
+		},
+		{
+			name: "abandoned",
+			finish: func(p *Producer, request *fwksched.InferenceRequest) {
+				p.RequestAbandoned(context.Background(), request)
+				// A second release of the same request must not affect other requests.
+				p.RequestAbandoned(context.Background(), request)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			producer := newTestProducer(t)
+			request := requestWithAgentIdentity("session-a")
+			request.RequestID = "queued"
+			require.NoError(t, producer.RequestHeader(context.Background(), request))
+
+			// The request waits in a flow-control queue for longer than the TTL.
+			ttl := time.Hour
+			start := time.Now().Add(-2 * ttl)
+			setRegistrySessionTimes(t, &producer.registry, "session-a", start, start)
+			producer.registry.EvictIdle(time.Now(), ttl)
+			require.Equal(t, 1, registrySessionCount(&producer.registry), "a session with a pending request must remain")
+
+			test.finish(producer, request)
+			setRegistrySessionTimes(t, &producer.registry, "session-a", start, start)
+			setRegistryLastResponseAt(t, &producer.registry, "session-a", start)
+			producer.registry.EvictIdle(time.Now(), ttl)
+			assert.Zero(t, registrySessionCount(&producer.registry), "the session is evictable once the request leaves")
+		})
+	}
+}
+
+type sessionStateFairnessConsumer struct {
+	fwkfcmocks.MockFairnessPolicy
+}
+
+func (c *sessionStateFairnessConsumer) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Required: map[fwkplugin.DataKey]any{SessionStateDataKey: SessionState{}}}
+}
+
+func TestFairnessPolicyCanConsumeSessionState(t *testing.T) {
+	t.Parallel()
+
+	identityProvider, err := agentidentity.PluginFactory(agentidentity.PluginType, nil, nil)
+	require.NoError(t, err)
+	producer := newTestProducer(t)
+	consumer := &sessionStateFairnessConsumer{fwkfcmocks.MockFairnessPolicy{TypedNameV: fwkplugin.TypedName{Type: "mock-fairness", Name: "fairness"}}}
+
+	ordered, err := eppdatalayer.ValidateAndOrderDataDependencies([]fwkplugin.Plugin{consumer, producer, identityProvider})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		identityProvider.TypedName().String(),
+		producer.TypedName().String(),
+		consumer.TypedName().String(),
+	}, ordered)
 }

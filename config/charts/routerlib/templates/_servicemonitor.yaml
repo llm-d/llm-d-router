@@ -23,7 +23,8 @@ spec:
         key: token
         name: {{ .Values.router.monitoring.prometheus.auth.secretName }}
     {{- end }}
-  jobLabel: {{ include "llm-d-router.name" . }}
+  {{- /* jobLabel names a Service label whose value becomes the scrape job; the selector requires it on every Service. */}}
+  jobLabel: app.kubernetes.io/name
   namespaceSelector:
     matchNames:
     - {{ .Release.Namespace }}

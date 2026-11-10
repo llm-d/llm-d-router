@@ -295,6 +295,56 @@ func TestPrefixPluginPartialPrefixMatch(t *testing.T) {
 	assert.Equal(t, 0, prefixInfo2.MatchBlocks())
 }
 
+func TestPrefixPluginExcludeDecodeWhenDisaggregated(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	for _, exclude := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exclude=%v", exclude), func(t *testing.T) {
+			p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config{
+				BlockSizeTokens:                1,
+				MaxPrefixBlocksToMatch:         defaultMaxPrefixBlocks,
+				LRUCapacityPerServer:           defaultLRUCapacityPerServer,
+				ExcludeDecodeWhenDisaggregated: exclude,
+			}, testHandle())
+			decode := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "decode"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+			prefill := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "prefill"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+			endpoints := []fwksched.Endpoint{decode, prefill}
+			key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType)
+			matches := func(tokens []uint32) (int, int) {
+				req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "m", Body: tokenizedBody(tokens)}
+				_ = p.Produce(context.Background(), req, endpoints)
+				d, _ := decode.Get(key)
+				f, _ := prefill.Get(key)
+				return d.(*attrprefix.PrefixCacheMatchInfo).MatchBlocks(), f.(*attrprefix.PrefixCacheMatchInfo).MatchBlocks()
+			}
+			send := func(tokens []uint32, withPrefill bool) {
+				req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "m", Body: tokenizedBody(tokens)}
+				_ = p.Produce(context.Background(), req, endpoints)
+				results := map[string]*fwksched.ProfileRunResult{"decode": {TargetEndpoints: []fwksched.Endpoint{decode}}}
+				if withPrefill {
+					results[experimentalDefaultPrefillProfile] = &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{prefill}}
+				}
+				_ = p.PreRequest(context.Background(), req, &fwksched.SchedulingResult{PrimaryProfileName: "decode", ProfileResults: results})
+				p.wg.Wait()
+			}
+
+			// A disaggregated request: the prefill endpoint is always credited.
+			send([]uint32{1, 2, 3}, true)
+			dm, pm := matches([]uint32{1, 2, 3})
+			assert.Equal(t, 3, pm)
+			if exclude {
+				assert.Equal(t, 0, dm, "decode must not be credited with a prefix it received over the handoff")
+			} else {
+				assert.Equal(t, 3, dm)
+			}
+
+			// A decode-only request computes the prompt on decode, so decode is credited either way.
+			send([]uint32{4, 5}, false)
+			dm, _ = matches([]uint32{4, 5})
+			assert.Equal(t, 2, dm)
+		})
+	}
+}
+
 func TestPrefixPluginPrefixGrowth(t *testing.T) {
 	disableMinBlockSizeClamp(t)
 	config := config{
@@ -428,6 +478,68 @@ func TestMakeserver_AutotuneCapacityInRouterBlocks(t *testing.T) {
 			assert.Equal(t, tc.want, p.makeserver(endpoint).NumOfGPUBlocks)
 		})
 	}
+}
+
+// TestMakeserver_CapacityFromMetrics checks that only a capacity derived from
+// endpoint metrics is marked as such, so the indexer never lets a fallback
+// capacity replace it.
+func TestMakeserver_CapacityFromMetrics(t *testing.T) {
+	tests := []struct {
+		name     string
+		autoTune bool
+		metrics  *fwkdl.Metrics
+		want     server
+	}{
+		{name: "autotune with blocks", autoTune: true, metrics: &fwkdl.Metrics{CacheBlockSize: 64, CacheNumBlocks: 1000},
+			want: server{NumOfGPUBlocks: 1000, CapacityFromMetrics: true}},
+		{name: "autotune before first scrape", autoTune: true, metrics: &fwkdl.Metrics{},
+			want: server{NumOfGPUBlocks: 500}},
+		{name: "autotune off ignores metrics", autoTune: false, metrics: &fwkdl.Metrics{CacheBlockSize: 64, CacheNumBlocks: 1000},
+			want: server{NumOfGPUBlocks: 500}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config{AutoTune: tc.autoTune, BlockSizeTokens: defaultBlockSizeTokens, LRUCapacityPerServer: 500}
+			p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+			assert.NoError(t, err)
+
+			id := k8stypes.NamespacedName{Name: "pod1"}
+			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: id}, tc.metrics, fwkdl.NewAttributes())
+			tc.want.ServerID = ServerID(id)
+			assert.Equal(t, tc.want, p.makeserver(endpoint))
+		})
+	}
+}
+
+// TestPreRequest_ResizesLRUWhenMetricsArriveLate checks that a pod first
+// indexed before its metrics were scraped is resized to the metrics-derived
+// capacity on a later request, and keeps it when the metrics then disappear.
+func TestPreRequest_ResizesLRUWhenMetricsArriveLate(t *testing.T) {
+	cfg := config{AutoTune: true, BlockSizeTokens: defaultBlockSizeTokens, LRUCapacityPerServer: 500}
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+	assert.NoError(t, err)
+
+	id := k8stypes.NamespacedName{Name: "pod1"}
+	add := func(m *fwkdl.Metrics) {
+		endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: id}, m, fwkdl.NewAttributes())
+		p.indexerInst.Add([]blockHash{1}, p.makeserver(endpoint))
+	}
+	capacity := func() int {
+		idx := p.indexerInst.(*indexer)
+		pc := idx.pods[ServerID(id)]
+		pc.mu.RLock()
+		defer pc.mu.RUnlock()
+		return pc.lru.Cap()
+	}
+
+	add(&fwkdl.Metrics{})
+	assert.Equal(t, 500, capacity(), "before the first scrape the configured capacity applies")
+
+	add(&fwkdl.Metrics{CacheBlockSize: 64, CacheNumBlocks: 1000})
+	assert.Equal(t, 1000, capacity(), "metrics-derived capacity replaces the fallback")
+
+	add(&fwkdl.Metrics{})
+	assert.Equal(t, 1000, capacity(), "a scrape missing the metric must not shrink the LRU")
 }
 
 func TestMaxPrefixTokensToMatch(t *testing.T) {

@@ -41,6 +41,15 @@ func setRegistrySessionTimes(t *testing.T, registry *SessionStateRegistry, ident
 	record.state.LastSeenAt = lastSeenAt
 }
 
+func setRegistryLastResponseAt(t *testing.T, registry *SessionStateRegistry, identity string, lastResponseAt time.Time) {
+	t.Helper()
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	record, ok := registry.sessions[identity]
+	require.True(t, ok)
+	record.state.LastResponseAt = lastResponseAt
+}
+
 func TestRegistryGetState(t *testing.T) {
 	t.Parallel()
 
@@ -71,13 +80,13 @@ func TestRegistryRecordsDispatchAndResponse(t *testing.T) {
 	t.Parallel()
 
 	registry := &SessionStateRegistry{}
-	registry.RecordDispatch("session-a")
+	registry.RecordDispatch("session-a", "")
 	state := registry.GetState("session-a")
 	assert.Equal(t, int64(1), state.TurnsTaken)
 	assert.Equal(t, int64(1), state.InFlightRequests)
 	assert.Zero(t, state.CompletedRequests)
 
-	registry.RecordResponse("session-a", true, 12, 34)
+	registry.RecordResponse("session-a", true, TurnUsage{InputTokens: 12, OutputTokens: 34})
 	state = registry.GetState("session-a")
 	assert.Equal(t, int64(1), state.TurnsTaken)
 	assert.Zero(t, state.InFlightRequests)
@@ -90,15 +99,15 @@ func TestRegistryRecordsAbnormalResponse(t *testing.T) {
 	t.Parallel()
 
 	registry := &SessionStateRegistry{}
-	registry.RecordDispatch("session-a")
-	registry.RecordResponse("session-a", false, 12, 34)
+	registry.RecordDispatch("session-a", "")
+	registry.RecordResponse("session-a", false, TurnUsage{InputTokens: 12, OutputTokens: 34})
 	state := registry.GetState("session-a")
 	assert.Zero(t, state.InFlightRequests)
 	assert.Zero(t, state.CompletedRequests)
 	assert.Zero(t, state.TotalInputTokens)
 	assert.Zero(t, state.TotalOutputTokens)
 
-	registry.RecordResponse("session-a", true, 1, 2)
+	registry.RecordResponse("session-a", true, TurnUsage{InputTokens: 1, OutputTokens: 2})
 	state = registry.GetState("session-a")
 	assert.Zero(t, state.InFlightRequests)
 	assert.Zero(t, state.CompletedRequests)
@@ -110,7 +119,7 @@ func TestRegistrySessionsAreIsolated(t *testing.T) {
 	t.Parallel()
 
 	registry := &SessionStateRegistry{}
-	registry.RecordDispatch("session-a")
+	registry.RecordDispatch("session-a", "")
 	other := registry.GetState("session-b")
 	assert.Zero(t, other.TurnsTaken)
 	assert.Zero(t, other.InFlightRequests)
@@ -125,7 +134,7 @@ func TestRegistryEvictsIdleSessions(t *testing.T) {
 	t.Parallel()
 
 	registry := &SessionStateRegistry{}
-	registry.RecordDispatch("session-a")
+	registry.RecordDispatch("session-a", "")
 	ttl := time.Hour
 	start := time.Now().Add(-2 * ttl)
 	setRegistrySessionTimes(t, registry, "session-a", start, start)
@@ -133,7 +142,8 @@ func TestRegistryEvictsIdleSessions(t *testing.T) {
 	registry.EvictIdle(start.Add(ttl+time.Nanosecond), ttl)
 	assert.Equal(t, 1, registrySessionCount(registry), "a session with an in-flight request must remain")
 
-	registry.RecordResponse("session-a", false, 0, 0)
+	registry.RecordResponse("session-a", false, TurnUsage{InputTokens: 0, OutputTokens: 0})
+	setRegistryLastResponseAt(t, registry, "session-a", start)
 	registry.EvictIdle(start.Add(ttl), ttl)
 	assert.Equal(t, 1, registrySessionCount(registry), "a session at the TTL boundary must remain")
 
@@ -142,6 +152,64 @@ func TestRegistryEvictsIdleSessions(t *testing.T) {
 	state := registry.GetState("session-a")
 	assert.Zero(t, state.TurnsTaken)
 	assert.Zero(t, state.Duration)
+}
+
+func TestRegistryPendingRequestIDMovesToNewerObservation(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{}
+	registry.observe("session-a", "request-1")
+	// The same request ID observed for another session moves its pending entry.
+	registry.observe("session-b", "request-1")
+
+	ttl := time.Hour
+	start := time.Now().Add(-2 * ttl)
+	setRegistrySessionTimes(t, registry, "session-a", start, start)
+	setRegistrySessionTimes(t, registry, "session-b", start, start)
+	registry.EvictIdle(time.Now(), ttl)
+	assert.Equal(t, 1, registrySessionCount(registry), "only the session holding the pending entry must remain")
+
+	registry.ReleasePending("request-1")
+	registry.EvictIdle(time.Now(), ttl)
+	assert.Zero(t, registrySessionCount(registry))
+}
+
+func TestRegistryEvictionCountsResponseActivity(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{}
+	registry.RecordDispatch("session-a", "")
+	ttl := time.Hour
+	start := time.Now().Add(-2 * ttl)
+	setRegistrySessionTimes(t, registry, "session-a", start, start)
+	registry.RecordResponse("session-a", true, TurnUsage{})
+	responseAt := start.Add(ttl)
+	setRegistryLastResponseAt(t, registry, "session-a", responseAt)
+
+	registry.EvictIdle(start.Add(ttl+time.Nanosecond), ttl)
+	assert.Equal(t, 1, registrySessionCount(registry), "a response newer than the TTL must keep the session")
+
+	registry.EvictIdle(responseAt.Add(ttl+time.Nanosecond), ttl)
+	assert.Zero(t, registrySessionCount(registry))
+}
+
+func TestRegistryRecordsResponseTimeAndCachedTokens(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{}
+	registry.RecordDispatch("session-a", "")
+	registry.RecordDispatch("session-a", "")
+
+	before := time.Now()
+	registry.RecordResponse("session-a", false, TurnUsage{InputTokens: 9, CachedTokens: 9})
+	state := registry.GetState("session-a")
+	assert.False(t, state.LastResponseAt.Before(before), "an abnormal end still records the response time")
+	assert.Zero(t, state.TotalCachedTokens)
+
+	registry.RecordResponse("session-a", true, TurnUsage{InputTokens: 10, OutputTokens: 2, CachedTokens: 8})
+	state = registry.GetState("session-a")
+	assert.Equal(t, int64(8), state.TotalCachedTokens)
+	assert.Equal(t, int64(10), state.TotalInputTokens)
 }
 
 func TestRegistryZeroTTLDisablesEviction(t *testing.T) {
@@ -164,8 +232,8 @@ func TestRegistryConcurrentUpdates(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			registry.RecordDispatch("session-a")
-			registry.RecordResponse("session-a", true, 2, 3)
+			registry.RecordDispatch("session-a", "")
+			registry.RecordResponse("session-a", true, TurnUsage{InputTokens: 2, OutputTokens: 3})
 		}()
 	}
 	wg.Wait()

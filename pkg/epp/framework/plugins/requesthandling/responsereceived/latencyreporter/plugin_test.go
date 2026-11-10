@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,10 +30,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 )
 
@@ -334,6 +338,34 @@ func TestLatencyObservations(t *testing.T) {
 		n1, _ := histogram(t, latencyTTFT, "74", "le1024", pathLocal, "false")
 		assert.Equal(t, n0, n1)
 	})
+
+	t.Run("non-positive decode duration records TTFT only", func(t *testing.T) {
+		n0, s0 := histogram(t, latencyTTFT, "76", "le1024", pathLocal, "true")
+		m0, _ := histogram(t, latencyTPOT, "76", pathLocal)
+		c0 := count("76", "le1024", pathLocal, true, outcomeCompleted)
+		run(p, "obs-decode-neg", reqSpec{priority: 76, prompt: 100, completion: 10, ttft: 100 * time.Millisecond, decode: -50 * time.Millisecond, streaming: true})
+		run(p, "obs-decode-zero", reqSpec{priority: 76, prompt: 100, completion: 10, ttft: 100 * time.Millisecond, decode: 0, streaming: true})
+		n1, s1 := histogram(t, latencyTTFT, "76", "le1024", pathLocal, "true")
+		m1, _ := histogram(t, latencyTPOT, "76", pathLocal)
+		assert.Equal(t, n0+2, n1)
+		assert.InDelta(t, 0.2, s1-s0, 1e-9)
+		assert.Equal(t, m0, m1)
+		assert.Equal(t, c0+2, count("76", "le1024", pathLocal, true, outcomeCompleted))
+	})
+
+	t.Run("non-positive TTFT duration records neither TTFT nor TPOT", func(t *testing.T) {
+		n0, _ := histogram(t, latencyTTFT, "77", "le1024", pathLocal, "true")
+		m0, _ := histogram(t, latencyTPOT, "77", pathLocal)
+		c0 := count("77", "le1024", pathLocal, true, outcomeCompleted)
+		run(p, "obs-ttft-neg", reqSpec{priority: 77, prompt: 100, completion: 10, ttft: -100 * time.Millisecond, decode: 200 * time.Millisecond, streaming: true})
+		run(p, "obs-ttft-zero", reqSpec{priority: 77, prompt: 100, completion: 10, ttft: 0, decode: 200 * time.Millisecond, streaming: true})
+		run(p, "obs-both-zero", reqSpec{priority: 77, prompt: 100, completion: 10, ttft: 0, decode: 0, streaming: true})
+		n1, _ := histogram(t, latencyTTFT, "77", "le1024", pathLocal, "true")
+		m1, _ := histogram(t, latencyTPOT, "77", pathLocal)
+		assert.Equal(t, n0, n1)
+		assert.Equal(t, m0, m1)
+		assert.Equal(t, c0+3, count("77", "le1024", pathLocal, true, outcomeCompleted))
+	})
 }
 
 func TestPriorityFilter(t *testing.T) {
@@ -355,4 +387,74 @@ func TestNoPriorityFilterRecordsEveryPriority(t *testing.T) {
 	before := count("-5", "le1024", pathLocal, false, outcomeCompleted)
 	run(p, "req-anyprio", reqSpec{priority: -5, prompt: 100, ttft: time.Millisecond})
 	assert.Equal(t, before+1, count("-5", "le1024", pathLocal, false, outcomeCompleted))
+}
+
+func TestConsumes(t *testing.T) {
+	defaults := map[string]string{
+		tokenizer.TokenizedPromptDataKey.String(): tokenizer.PluginType,
+	}
+	factories := map[string]fwkplugin.FactoryFunc{
+		tokenizer.PluginType: tokenizer.PluginFactory,
+	}
+
+	t.Run("no_prompt_buckets", func(t *testing.T) {
+		got, err := PluginFactory("latency", nil, nil)
+		require.NoError(t, err)
+		consumer, ok := got.(fwkplugin.ConsumerPlugin)
+		require.True(t, ok, "Plugin must implement ConsumerPlugin")
+		assert.Equal(t, fwkplugin.DataDependencies{}, consumer.Consumes())
+
+		handle := fwkplugin.NewEppHandle(t.Context(), nil)
+		handle.AddPlugin(got.TypedName().Name, got)
+		require.NoError(t, datalayer.CreateMissingDataProducers(t.Context(), defaults, factories, handle))
+		assert.Nil(t, handle.Plugin(tokenizer.PluginType))
+		_, err = datalayer.ValidateAndOrderDataDependencies(handle.GetAllPlugins())
+		require.NoError(t, err)
+	})
+
+	t.Run("with_prompt_buckets", func(t *testing.T) {
+		p := newTestPlugin(t, testConfig)
+		var plg fwkplugin.Plugin = p
+		consumer, ok := plg.(fwkplugin.ConsumerPlugin)
+		require.True(t, ok, "Plugin must implement ConsumerPlugin")
+		assert.Equal(t, fwkplugin.DataDependencies{
+			Required: map[fwkplugin.DataKey]any{
+				tokenizer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
+			},
+		}, consumer.Consumes())
+
+		handle := fwkplugin.NewEppHandle(t.Context(), nil)
+		handle.AddPlugin(p.TypedName().Name, p)
+		require.NoError(t, datalayer.CreateMissingDataProducers(t.Context(), defaults, factories, handle))
+		tokPlugin := handle.Plugin(tokenizer.PluginType)
+		require.NotNil(t, tokPlugin, "default token-producer should be auto-created")
+		_, err := datalayer.ValidateAndOrderDataDependencies(handle.GetAllPlugins())
+		require.NoError(t, err)
+
+		producer := tokPlugin.(fwkrh.DataProducer)
+		req := &fwksched.InferenceRequest{
+			RequestID:   "req-tokenized-fallback",
+			TargetModel: "m",
+			Headers:     map[string]string{},
+			Objectives:  fwksched.RequestObjectives{Priority: 401},
+			Body: &fwkrequest.InferenceRequestBody{
+				ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+					Messages: []fwkrequest.Message{{Role: "user", Content: fwkrequest.Content{Raw: strings.Repeat("abcd", 2000)}}},
+				},
+				Payload: fwkrequest.PayloadMap{},
+			},
+		}
+		require.NoError(t, producer.Produce(t.Context(), req, nil))
+		require.NotNil(t, req.Body.TokenizedRequest)
+		require.Greater(t, req.Body.TokenizedRequest.TokenCount(), 1024)
+
+		before := count("401", "le8192", pathLocal, true, outcomeCancelled)
+		p.ResponseHeader(t.Context(), req, &fwkrh.Response{Headers: map[string]string{":status": "200"}}, nil)
+		p.ResponseBody(t.Context(), req, &fwkrh.Response{
+			EndOfStream:      true,
+			TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+			Streaming:        true,
+		}, nil)
+		assert.Equal(t, before+1, count("401", "le8192", pathLocal, true, outcomeCancelled))
+	})
 }

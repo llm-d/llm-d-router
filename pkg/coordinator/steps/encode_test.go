@@ -2077,3 +2077,35 @@ func TestEncodeStep_ClientCancelLogsNoError(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, sink.errors, "a cancelled fan-out must not log at error level")
 }
+
+// The encode step skips SGLang gRPC Generate requests even when multimodal
+// entries are present, so it never posts a JSON encode request for them.
+func TestEncodeStep_SkipsSGLangGRPCGenerate(t *testing.T) {
+	var requestCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	step, err := NewEncodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		ParamECConnector: ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := &pipeline.RequestContext{
+		RequestID:           "req-grpc",
+		GRPCGeneratePayload: []byte{},
+		TokenIDs:            []int{1, 32000, 2},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+		},
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := requestCount.Load(); got != 0 {
+		t.Fatalf("encode sent %d gateway requests for a gRPC Generate request, want 0", got)
+	}
+}

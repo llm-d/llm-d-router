@@ -35,6 +35,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -47,9 +48,6 @@ const (
 
 	// tracerScope is the OTel instrumentation scope for the sidecar proxy.
 	tracerScope = "llm-d-router/pkg/sidecar/proxy"
-
-	responseFieldChoices      = "choices"
-	responseFieldFinishReason = "finish_reason"
 )
 
 // Config represents the complete runtime configuration for the proxy server.
@@ -138,6 +136,16 @@ type Config struct {
 
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
+
+	// ForwardPromptTokenIDs carries a client-supplied
+	// kv_transfer_params.prompt_token_ids onto the prefill and decode
+	// requests. It must only be enabled when the gateway in front runs the
+	// forward-prompt-token-ids EPP plugin (or a trusted coordinator): vLLM
+	// serves those IDs instead of rendering messages, so a caller that
+	// supplies its own list bypasses every messages-level gateway policy
+	// (injected system prompts, guardrails, prompt-token limits). Defaults
+	// to false, which drops the field exactly as the connectors did before.
+	ForwardPromptTokenIDs bool
 	// InferencePoolNamespace is the Kubernetes namespace of the InferencePool to watch.
 	InferencePoolNamespace string
 	// InferencePoolName is the name of the InferencePool to watch.
@@ -494,8 +502,27 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 			},
 		}
+		return otelhttp.NewTransport(t)
 	}
-	return otelhttp.NewTransport(t)
+	h2c := t.Clone()
+	h2cProtocols := new(http.Protocols)
+	h2cProtocols.SetUnencryptedHTTP2(true)
+	h2c.Protocols = h2cProtocols
+	return otelhttp.NewTransport(&h2cAwareTransport{http1: t, h2c: h2c})
+}
+
+// h2cAwareTransport dispatches plaintext gRPC requests over unencrypted HTTP/2
+// while keeping HTTP/1.1 for standard HTTP backends.
+type h2cAwareTransport struct {
+	http1 http.RoundTripper
+	h2c   http.RoundTripper
+}
+
+func (rt *h2cAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if grpcframe.IsContentType(req.Header.Get(reqcommon.HeaderContentType)) {
+		return rt.h2c.RoundTrip(req)
+	}
+	return rt.http1.RoundTrip(req)
 }
 
 func (s *Server) setKVConnector() {
