@@ -222,7 +222,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	toolFields.compareValidatedDispatchedForSpan(pbody, prefillSpan)
 	var pw *bufferedResponseWriter
 	var prefillErr error
-	var prefillTimedOut bool
+	var prefillTimedOut, clientGone bool
 retryLoop:
 	for attempt := 0; ; attempt++ {
 		pw = &bufferedResponseWriter{}
@@ -231,8 +231,9 @@ retryLoop:
 		// A timed-out attempt with no response carries the proxy's 502, so it is
 		// retried like one.
 		prefillTimedOut, prefillErr = s.servePrefillAttempt(prefillHandler, pw, preq, pbody)
+		clientGone = preq.Context().Err() != nil
 
-		if !isHTTPError(pw.statusCode) {
+		if !isHTTPError(pw.statusCode) || clientGone {
 			break
 		}
 		if !isRetryableStatus(pw.statusCode) {
@@ -263,9 +264,10 @@ retryLoop:
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 
-	// The reverse proxy also aborts the prefill body copy when the client
-	// disconnects, which is not a prefill failure.
-	if prefillErr != nil && preq.Context().Err() != nil {
+	// A client that disconnects during an attempt fails it without a prefill
+	// failure: the reverse proxy answers 502 itself before the response headers
+	// and aborts the body copy after them.
+	if clientGone && (prefillErr != nil || isHTTPError(pw.statusCode)) {
 		logger.Info("client disconnected during prefill", "request_id", uuidStr)
 		prefillSpan.End()
 		return

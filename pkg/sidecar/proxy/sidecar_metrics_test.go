@@ -1884,6 +1884,83 @@ func TestHandleNIXLV2SerialClientCancelDuringPrefillBody(t *testing.T) {
 	assert.Equal(t, codes.Unset, prefillSpan.Status().Code)
 }
 
+// A client that disconnects before the prefill response arrives makes the
+// reverse proxy answer 502 itself, which is not a prefill failure either.
+func TestHandleNIXLV2SerialClientCancelBeforePrefillResponse(t *testing.T) {
+	spans := tracetest.NewSpanRecorder()
+	useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+
+	var posts atomic.Int32
+	received := make(chan struct{}, 1)
+	prefill := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case received <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	defer prefill.Close()
+	prefillURL, err := url.Parse(prefill.URL)
+	require.NoError(t, err)
+
+	s := NewProxy(Config{Port: "0", DecoderURL: prefillURL, PrefillMaxRetries: 2, PrefillRetryBackoff: time.Millisecond})
+	var logged []string
+	s.logger = funcr.New(func(prefix, args string) {
+		logged = append(logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: logging.TRACE})
+	s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("decode must not run after the client disconnected")
+	})
+	handled := make(chan struct{})
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handled)
+		s.handleNIXLV2(w, withContextLogger(s, r), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
+	}))
+	defer sidecar.Close()
+
+	before := snapshotStageMetrics(t)
+	raw, err := json.Marshal(textChatBody())
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sidecar.URL+reqcommon.PathChatCompletions, bytes.NewReader(raw))
+	require.NoError(t, err)
+	go func() {
+		if resp, err := sidecar.Client().Do(req); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-received:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prefill did not receive the request")
+	}
+	cancel()
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sidecar handler did not return after the client disconnected")
+	}
+
+	assert.Equal(t, stageMetrics{prefillCount: 1}, snapshotStageMetrics(t).delta(before))
+	assert.Equal(t, int32(1), posts.Load(), "a disconnected client's prefill must not be retried")
+	for _, entry := range logged {
+		assert.NotContains(t, entry, "prefill request failed")
+		assert.NotContains(t, entry, "retrying prefill request")
+	}
+	var prefillSpan sdktrace.ReadOnlySpan
+	for _, span := range spans.Ended() {
+		if span.Name() == "prefill" {
+			prefillSpan = span
+		}
+	}
+	require.NotNil(t, prefillSpan, "the prefill span must end")
+	assert.Equal(t, codes.Unset, prefillSpan.Status().Code)
+}
+
 // writeHeaderSignal closes written once the final status is written through it.
 type writeHeaderSignal struct {
 	http.ResponseWriter
