@@ -51,7 +51,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/admitter/prefixcacheaware"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/admitter/prefixcacheaware"
 	reqdataprodprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"

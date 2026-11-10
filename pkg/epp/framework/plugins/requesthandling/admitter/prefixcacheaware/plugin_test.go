@@ -30,7 +30,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -447,7 +447,7 @@ func TestFactory(t *testing.T) {
 		idleDecode := withRole(makeEndpoint("decode", 0, 10), bylabel.RoleDecode)
 		strict, err := Factory("strict", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector","shedThreshold":0.9,"minHitRatio":0.6}`)), newHandle(t, true))
 		require.NoError(t, err)
-		require.Error(t, strict.(fwkrc.Admitter).Admit(context.Background(), sheddableRequest(), []fwksched.Endpoint{fullPrefill, idleDecode}))
+		require.Error(t, strict.(fwkrh.Admitter).Admit(context.Background(), sheddableRequest(), []fwksched.Endpoint{fullPrefill, idleDecode}))
 		assert.Equal(t, 1.0, testutil.ToFloat64(observedSaturation.WithLabelValues("strict")))
 	})
 
