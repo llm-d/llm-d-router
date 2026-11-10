@@ -133,6 +133,8 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
+		metrics.Registry.MustRegister(LlmdDataLayerPollsTotal)
+		metrics.Registry.MustRegister(LlmdDataLayerPollDuration)
 		metrics.Registry.MustRegister(llmdToolCallingFieldStatusTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -196,6 +198,8 @@ func Reset() {
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	LlmdDataLayerPollErrorsTotal.Reset()
 	LlmdDataLayerExtractErrorsTotal.Reset()
+	LlmdDataLayerPollsTotal.Reset()
+	LlmdDataLayerPollDuration.Reset()
 	llmdToolCallingFieldStatusTotal.Reset()
 }
 
@@ -221,9 +225,15 @@ func RecordRequestErrCounter(ctx context.Context, modelName, targetModelName str
 }
 
 // InitFairnessIDResolutionMetrics creates the overflow series at 0 for every source, so a
-// rate or increase over the first overflow is not lost.
+// rate or increase over the first overflow is not lost. The ratio rule in
+// docs/rules/fairness-id-rules.yaml also reads each replica's inference_pool from these series.
 func InitFairnessIDResolutionMetrics(inferencePool string) {
-	for _, source := range []string{tracing.AttributionSourceHeader, tracing.AttributionSourceAgentIdentity, tracing.AttributionSourceDefault} {
+	for _, source := range []string{
+		tracing.AttributionSourceHeader,
+		tracing.AttributionSourceAgentIdentity,
+		tracing.AttributionSourceDerivedRoot,
+		tracing.AttributionSourceDefault,
+	} {
 		llmdFairnessIDOverflowCounter.WithLabelValues(source, inferencePool)
 	}
 }
@@ -718,6 +728,34 @@ func RecordDataLayerPollError(sourceType string) {
 // RecordDataLayerExtractError increments the extract error counter for a source/extractor type.
 func RecordDataLayerExtractError(sourceType, extractorType string) {
 	LlmdDataLayerExtractErrorsTotal.WithLabelValues(sourceType, extractorType).Inc()
+}
+
+// Outcome label values of LlmdDataLayerPollsTotal.
+const (
+	// DataLayerPollOutcomeSuccess: Dispatch returned nil before its deadline.
+	DataLayerPollOutcomeSuccess = "success"
+	// DataLayerPollOutcomeError: Dispatch returned an error before its deadline.
+	DataLayerPollOutcomeError = "error"
+	// DataLayerPollOutcomeTimeout: the poll deadline expired, whatever Dispatch returned.
+	DataLayerPollOutcomeTimeout = "timeout"
+)
+
+// InitDataLayerPollMetrics creates the three outcome series and the duration
+// histogram for a source type at zero, so the first non-success poll is an
+// increment on an existing series instead of the birth of a new one, which
+// rate() and increase() would not see. Safe to call repeatedly.
+func InitDataLayerPollMetrics(sourceType string) {
+	for _, outcome := range []string{DataLayerPollOutcomeSuccess, DataLayerPollOutcomeError, DataLayerPollOutcomeTimeout} {
+		LlmdDataLayerPollsTotal.WithLabelValues(sourceType, outcome)
+	}
+	LlmdDataLayerPollDuration.WithLabelValues(sourceType)
+}
+
+// RecordDataLayerPoll counts one poll under its outcome and observes its
+// duration for a source type.
+func RecordDataLayerPoll(sourceType, outcome string, duration time.Duration) {
+	LlmdDataLayerPollsTotal.WithLabelValues(sourceType, outcome).Inc()
+	LlmdDataLayerPollDuration.WithLabelValues(sourceType).Observe(duration.Seconds())
 }
 
 // RecordToolCallingFieldStatuses records outcomes only for fields present on at

@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -130,6 +131,25 @@ func TestDecodeStep_PromptTokenParity_MismatchCountsAndKeepsResponse(t *testing.
 	body := recorder.Body.String()
 	if !strings.Contains(body, `"content":"ok"`) || !strings.Contains(body, `"prompt_tokens":7`) {
 		t.Fatalf("response must reach the client unchanged, got %s", body)
+	}
+}
+
+// A chat leg that forwards prompt_token_ids is labeled ids_forwarded=true, so a
+// mismatch there means the worker ignored the IDs.
+func TestDecodeStep_PromptTokenParity_ForwardedChatIDsLabel(t *testing.T) {
+	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	server := parityServer(t, 7)
+	defer server.Close()
+
+	step, reqCtx, _, err := parityRequest(server, map[string]any{ParamForwardPromptTokenIDs: true}, []int{1, 2, 3, 4, 5}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := counterValue(t, reg, parityMetric, map[string]string{"model_name": "llama-3", "api_type": "chat_completions", "ids_forwarded": "true"}); got != 1 {
+		t.Fatalf("mismatch counter = %v, want 1", got)
 	}
 }
 
@@ -342,5 +362,122 @@ func TestDecodeStep_PromptTokenParity_SkipsInjectionForContinuousUsageStats(t *t
 	}
 	if got := counterValue(t, reg, parityMetric, nil); got != 0 {
 		t.Fatalf("mismatch counter = %v, want 0 (no usage to compare)", got)
+	}
+}
+
+// A worker that reports no usage (an older server) is a no-op: nothing is
+// counted and the body is untouched.
+func TestDecodeStep_PromptTokenParity_MissingUsageIsNoop(t *testing.T) {
+	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	body := `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}` + "\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := counterValue(t, reg, parityMetric, nil); got != 0 {
+		t.Fatalf("mismatch counter = %v, want 0", got)
+	}
+	if recorder.Body.String() != body {
+		t.Fatalf("body changed: %q", recorder.Body.String())
+	}
+}
+
+// On the completions route the step sends the rendered IDs as the prompt, so
+// a mismatch carries ids_forwarded=true and api_type=completions.
+func TestDecodeStep_PromptTokenParity_CompletionsLabels(t *testing.T) {
+	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	var received map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &received)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"text": "ok"}},
+			"usage":   map[string]any{"prompt_tokens": 7, "completion_tokens": 1},
+		})
+	}))
+	defer server.Close()
+
+	step, reqCtx, _, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx.OriginalPath = "/v1/completions"
+	reqCtx.Body = map[string]any{"model": "llama-3", "stream": false, "prompt": "hi"}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prompt, ok := received["prompt"].([]any); !ok || len(prompt) != 3 {
+		t.Fatalf("decode body must carry the rendered IDs as the prompt, got %v", received["prompt"])
+	}
+	if got := counterValue(t, reg, parityMetric, map[string]string{"api_type": "completions", "ids_forwarded": "true"}); got != 1 {
+		t.Fatalf("mismatch counter{completions, ids_forwarded=true} = %v, want 1", got)
+	}
+}
+
+// A client whose stream_options is not an object gets its body forwarded as
+// sent and no check: nothing injected, the worker's frames pass through.
+func TestDecodeStep_PromptTokenParity_MalformedStreamOptionsSkips(t *testing.T) {
+	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	var receivedRaw []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedRaw, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx.Body["stream_options"] = json.RawMessage(`"x"`)
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(string(receivedRaw), `"stream_options":"x"`) {
+		t.Fatalf("malformed stream_options must be forwarded as sent, got %s", receivedRaw)
+	}
+	if !strings.Contains(recorder.Body.String(), `"usage"`) {
+		t.Fatalf("with the check skipped nothing may be dropped, got %s", recorder.Body.String())
+	}
+	if got := counterValue(t, reg, parityMetric, nil); got != 0 {
+		t.Fatalf("mismatch counter = %v, want 0 (check skipped)", got)
+	}
+}
+
+// With nothing to rewrite the decode writer is a passthrough: the worker's
+// Content-Length survives and the body is forwarded as it arrived.
+func TestDecodeStep_PromptTokenParity_ObserveOnlyKeepsContentLength(t *testing.T) {
+	metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	body := `{"choices":[],"usage":{"prompt_tokens":3}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	step, reqCtx, recorder, err := parityRequest(server, map[string]any{}, []int{1, 2, 3}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := recorder.Header().Get("Content-Length"); got != strconv.Itoa(len(body)) {
+		t.Fatalf("Content-Length = %q, want %d (observe-only must not drop it)", got, len(body))
+	}
+	if recorder.Body.String() != body {
+		t.Fatalf("body changed: %q", recorder.Body.String())
 	}
 }

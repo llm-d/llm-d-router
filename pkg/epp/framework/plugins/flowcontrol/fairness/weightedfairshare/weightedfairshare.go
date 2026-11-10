@@ -216,7 +216,7 @@ func (p *weightedFairShare) Pick(
 	return best, nil
 }
 
-// ResponseBody charges the flow for a completed request, using the final chunk's usage.
+// ResponseBody charges the flow for a completed request.
 func (p *weightedFairShare) ResponseBody(
 	_ context.Context,
 	request *fwksched.InferenceRequest,
@@ -226,9 +226,13 @@ func (p *weightedFairShare) ResponseBody(
 	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}
+	completionTokens := response.Usage.CompletionTokens
+	if completionTokens <= 0 && response.StreamedEvents > 0 {
+		completionTokens = response.StreamedEvents
+	}
 	cost := p.cfg.CostPerRequest +
 		p.cfg.CostPerInputToken*float64(response.Usage.PromptTokens) +
-		p.cfg.CostPerOutputToken*float64(response.Usage.CompletionTokens)
+		p.cfg.CostPerOutputToken*float64(completionTokens)
 	if cost == 0 {
 		return
 	}

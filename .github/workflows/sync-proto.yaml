@@ -1,0 +1,101 @@
+# Keeps the generated upstream Go bindings under pkg/common/grpc/<engine>/gen
+# in sync with the engine repositories (sgl-project/sglang, vllm-project/vllm).
+# When upstream changes its schemas, opens a pull request (or updates the open
+# one) that moves the pinned ref in Makefile.gen.mk and regenerates the
+# bindings. One job runs per engine. The sync logic lives in hack/sync-proto.sh.
+name: Sync upstream protos
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: 'Engine to sync'
+        required: true
+        type: choice
+        options: [all, sglang, vllm]
+        default: all
+      ref:
+        description: 'Upstream ref to sync to (default: newest main commit that changed the tracked schemas). Needs one engine.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.repository == 'llm-d/llm-d-router'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: ${{ fromJSON(inputs.engine == 'sglang' && '["sglang"]' || inputs.engine == 'vllm' && '["vllm"]' || '["sglang", "vllm"]') }}
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.engine }}
+      cancel-in-progress: false
+    steps:
+      - name: Reject a ref without one engine
+        if: inputs.ref != '' && inputs.engine == 'all'
+        run: |
+          echo "::error::Select one engine when you pass a ref."
+          exit 1
+
+      # Pull requests opened with GITHUB_TOKEN do not trigger CI, so the
+      # branch is pushed and the PR opened with a GitHub App token.
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.PROTO_SYNC_APP_ID || secrets.RELEASE_NOTES_APP_ID }}
+          private-key: ${{ secrets.PROTO_SYNC_APP_PRIVATE_KEY || secrets.RELEASE_NOTES_APP_PRIVATE_KEY }}
+
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Sync to the newest upstream schemas
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REF: ${{ inputs.ref }}
+          PR_BODY_FILE: ${{ runner.temp }}/pr-body.md
+        run: hack/sync-proto.sh "${{ matrix.engine }}"
+
+      - name: Open or update the pull request
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          BRANCH: ${{ steps.sync.outputs.branch }}
+          GRPC_DIR: ${{ steps.sync.outputs.grpc_dir }}
+          TITLE: ${{ steps.sync.outputs.title }}
+          PR_BODY_FILE: ${{ runner.temp }}/pr-body.md
+        run: |
+          set -euo pipefail
+          user_id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+
+          git checkout -B "${BRANCH}"
+          git add Makefile.gen.mk "${GRPC_DIR}"
+          git commit -s -m "${TITLE}"
+          # One standing branch per engine: each run replaces the previous proposal.
+          git push --force origin "HEAD:refs/heads/${BRANCH}"
+
+          pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${BRANCH}&state=open" --jq '.[0].number // empty')
+          if [[ -n "${pr}" ]]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/pulls/${pr}" -f title="${TITLE}" -F "body=@${PR_BODY_FILE}" --silent
+            echo "Updated #${pr}"
+          else
+            gh pr create --base main --head "${BRANCH}" --title "${TITLE}" --body-file "${PR_BODY_FILE}"
+          fi

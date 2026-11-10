@@ -1434,3 +1434,32 @@ func TestFlowRegistry_GarbageCollection_PrunesMetricSeries(t *testing.T) {
 	assert.Zero(t, countSeriesWithFairnessID(t, flowID),
 		"GC must prune every metric series labeled with the collected flow's fairness ID")
 }
+
+// TestFlowRegistry_FlowIdleTimeStartsWhenConnectionCloses checks that a flow is
+// aged from the moment its last connection closes. WithConnection reads the clock
+// in a defer, and reading it at acquisition time made a long request look idle for
+// its whole duration, so the flow could be collected right after it ended.
+func TestFlowRegistry_FlowIdleTimeStartsWhenConnectionCloses(t *testing.T) {
+	t.Parallel()
+	h := newRegistryTestHarness(t, harnessOptions{manualGC: true})
+	key := flowcontrol.FlowKey{ID: "idle-timestamp-flow", Priority: highPriority}
+
+	err := h.fr.WithConnection(key, func(conn contracts.ActiveFlowConnection) error {
+		// The connection stays open for most of the GC timeout.
+		h.fakeClock.Step(h.config.FlowGCTimeout - time.Minute)
+		return nil
+	})
+	require.NoError(t, err)
+	h.assertFlowExists(key, "Flow should exist while its connection is open")
+
+	// Two minutes of real idle time are not enough to collect the flow, even though
+	// six minutes have passed since the connection was acquired.
+	h.fakeClock.Step(2 * time.Minute)
+	h.fr.ExecuteGCCycle()
+	h.assertFlowExists(key, "Flow should survive until it has been idle for the GC timeout")
+
+	// Once the idle time passes the timeout the flow is collected.
+	h.fakeClock.Step(h.config.FlowGCTimeout)
+	h.fr.ExecuteGCCycle()
+	h.assertFlowDoesNotExist(key, "Flow should be collected after the idle timeout")
+}

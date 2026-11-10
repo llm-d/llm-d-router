@@ -28,6 +28,8 @@ jobs:
     outputs:
       src: ${{ steps.filter.outputs.src }}
       helm: ${{ steps.filter.outputs.helm }}
+      sglang-proto: ${{ steps.filter.outputs.sglang-proto }}
+      vllm-proto: ${{ steps.filter.outputs.vllm-proto }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -56,6 +58,48 @@ jobs:
               - 'config/charts/**'
               - 'hack/verify-helm.sh'
               - '.github/workflows/ci-pr-checks.yaml'
+            sglang-proto:
+              - 'pkg/common/grpc/sglang/**'
+              - 'Makefile.gen.mk'
+              - '.github/workflows/ci-pr-checks.yaml'
+            vllm-proto:
+              - 'pkg/common/grpc/vllm/**'
+              - 'Makefile.gen.mk'
+              - '.github/workflows/ci-pr-checks.yaml'
+
+  verify-sglang-proto:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.sglang-proto == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Verify vendored SGLang protos match SGLANG_REF
+        run: make verify-sglang-proto
+
+  verify-vllm-proto:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.vllm-proto == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Verify generated vLLM protos match VLLM_REF
+        run: make verify-vllm-proto
 
   verify-helm-charts:
     needs: check-changes
@@ -247,7 +291,7 @@ jobs:
             archive: llm-d-router-endpoint-picker
           - name: simulator
             source: pull
-            image: ghcr.io/llm-d/llm-d-inference-sim:v1.1.0
+            image: ghcr.io/llm-d/llm-d-inference-sim:v1.2.0
             archive: llm-d-inference-sim
     name: e2e-image-common (${{ matrix.image.name }})
     steps:

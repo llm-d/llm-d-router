@@ -696,7 +696,8 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					PromptTokens: 25,
 					TotalTokens:  25,
 				},
-				StreamedEvents: 1,
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 25},
+				StreamedEvents:      1,
 			},
 		},
 		{
@@ -707,7 +708,8 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 15,
 					TotalTokens:      15,
 				},
-				StreamedEvents: 1,
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{},
+				StreamedEvents:      1,
 			},
 		},
 		{
@@ -721,7 +723,8 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 15,
 					TotalTokens:      40,
 				},
-				StreamedEvents: 3,
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 25},
+				StreamedEvents:      3,
 			},
 		},
 		{
@@ -737,7 +740,8 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 						CachedTokens: 80,
 					},
 				},
-				StreamedEvents: 2,
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 100, CacheRead: 80},
+				StreamedEvents:      2,
 			},
 		},
 		{
@@ -750,7 +754,8 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					CompletionTokens: 510,
 					TotalTokens:      11192,
 				},
-				StreamedEvents: 2,
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 10682},
+				StreamedEvents:      2,
 			},
 		},
 		{
@@ -759,14 +764,65 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":30,\"output_tokens\":15,\"cache_read_input_tokens\":0}}"),
 			want: &fwkrh.ParsedResponse{
 				Usage: &request.Usage{
-					PromptTokens:     30,
+					PromptTokens:     2030,
 					CompletionTokens: 15,
-					TotalTokens:      45,
+					TotalTokens:      2045,
 					PromptTokenDetails: &request.PromptTokenDetails{
 						CachedTokens: 2000,
 					},
 				},
-				StreamedEvents: 2,
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 30, CacheRead: 2000},
+				StreamedEvents:      2,
+			},
+		},
+		{
+			name: "message_delta omitting cache fields keeps the earlier cache read and creation",
+			chunk: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"cache_read_input_tokens\":2000,\"cache_creation_input_tokens\":100}}}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":30,\"output_tokens\":15}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
+					PromptTokens:     2130,
+					CompletionTokens: 15,
+					TotalTokens:      2145,
+					PromptTokenDetails: &request.PromptTokenDetails{
+						CachedTokens: 2000,
+					},
+				},
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 30, CacheRead: 2000, CacheCreation: 100},
+				StreamedEvents:      2,
+			},
+		},
+		{
+			name: "message_delta explicit zero cache read with no earlier read",
+			chunk: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"cache_read_input_tokens\":0}}}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":30,\"output_tokens\":15,\"cache_read_input_tokens\":0}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
+					PromptTokens:     30,
+					CompletionTokens: 15,
+					TotalTokens:      45,
+					PromptTokenDetails: &request.PromptTokenDetails{
+						CachedTokens: 0,
+					},
+				},
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 30},
+				StreamedEvents:      2,
+			},
+		},
+		{
+			name:  "message_delta explicit zero cache read with output tokens only",
+			chunk: []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":15,\"cache_read_input_tokens\":0}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
+					PromptTokens:     0,
+					CompletionTokens: 15,
+					TotalTokens:      15,
+					PromptTokenDetails: &request.PromptTokenDetails{
+						CachedTokens: 0,
+					},
+				},
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{},
+				StreamedEvents:      1,
 			},
 		},
 		{
@@ -781,7 +837,8 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 						CachedTokens: 100000,
 					},
 				},
-				StreamedEvents: 1,
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 50, CacheRead: 100000, CacheCreation: 248},
+				StreamedEvents:      1,
 			},
 		},
 		{
@@ -824,7 +881,6 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 }
 
 func BenchmarkAnthropicParser_ParseResponse_Streaming(b *testing.B) {
-	parser := NewAnthropicParser()
 	tests := []struct {
 		name  string
 		chunk []byte
@@ -841,14 +897,108 @@ func BenchmarkAnthropicParser_ParseResponse_Streaming(b *testing.B) {
 
 	for _, tt := range tests {
 		b.Run(tt.name, func(b *testing.B) {
+			parser := NewAnthropicParser()
+			ctx := b.Context()
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := parser.parseStreamResponse(tt.chunk); err != nil {
+				if _, err := parser.ParseResponse(ctx, tt.chunk, sseHeaders, false); err != nil {
 					b.Fatal(err)
 				}
 			}
 		})
 	}
+}
+
+var sseHeaders = map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream}
+
+func sseEvent(event, data string) string {
+	return "event: " + event + "\ndata: " + data + "\n\n"
+}
+
+// Each chunk reports only the usage of its own events, so a message_delta in a
+// later chunk carries none of the cache buckets message_start reported.
+func TestAnthropicParser_ParseResponse_StreamChunksAreIndependent(t *testing.T) {
+	start := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100,"output_tokens":1}}}`)
+	blockDelta := sseEvent("content_block_delta", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`)
+	delta := sseEvent("message_delta", `{"type":"message_delta","usage":{"output_tokens":15,"cache_read_input_tokens":0}}`)
+	stop := sseEvent("message_stop", `{"type":"message_stop"}`)
+
+	tests := []struct {
+		name  string
+		chunk string
+		want  *fwkrh.ParsedResponse
+	}{
+		{
+			name:  "message_start",
+			chunk: start,
+			want: &fwkrh.ParsedResponse{
+				Usage:               &request.Usage{PromptTokens: 2130, TotalTokens: 2130, PromptTokenDetails: &request.PromptTokenDetails{CachedTokens: 2000}},
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 30, CacheRead: 2000, CacheCreation: 100},
+				StreamedEvents:      1,
+			},
+		},
+		{
+			name:  "content_block_delta",
+			chunk: blockDelta,
+			want:  &fwkrh.ParsedResponse{StreamedEvents: 1},
+		},
+		{
+			name:  "message_delta and message_stop",
+			chunk: delta + stop,
+			want: &fwkrh.ParsedResponse{
+				Usage:               &request.Usage{CompletionTokens: 15, TotalTokens: 15, PromptTokenDetails: &request.PromptTokenDetails{}},
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{},
+				StreamedEvents:      2,
+			},
+		},
+		{
+			name:  "message_stop",
+			chunk: stop,
+			want:  &fwkrh.ParsedResponse{StreamedEvents: 1},
+		},
+		{
+			name:  "message_start without usage",
+			chunk: sseEvent("message_start", `{"type":"message_start","message":{"id":"msg_2"}}`),
+			want:  &fwkrh.ParsedResponse{StreamedEvents: 1},
+		},
+	}
+	parser := NewAnthropicParser()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseResponse(t.Context(), []byte(tt.chunk), sseHeaders, false)
+			require.NoError(t, err)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("ParseResponse() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	got, err := parser.ParseResponse(t.Context(), nil, sseHeaders, true)
+	require.NoError(t, err)
+	assert.Nil(t, got, "an empty final frame reports nothing")
+}
+
+func TestAnthropicParser_ParseResponse_ContentTypeBoundaries(t *testing.T) {
+	start := sseEvent("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":30}}}`)
+
+	t.Run("event stream parameter in a JSON media type", func(t *testing.T) {
+		got, err := NewAnthropicParser().ParseResponse(t.Context(),
+			[]byte(`{"usage":{"input_tokens":3,"output_tokens":2}}`),
+			map[string]string{reqcommon.HeaderContentType: "application/json; note=text/event-stream"}, true)
+		require.NoError(t, err)
+		assert.Equal(t, &fwkrh.ParsedResponse{Usage: &request.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}}, got)
+	})
+
+	t.Run("mixed case header and media type with parameters", func(t *testing.T) {
+		got, err := NewAnthropicParser().ParseResponse(t.Context(), []byte(start),
+			map[string]string{"Content-Type": "Text/Event-Stream; charset=utf-8"}, true)
+		require.NoError(t, err)
+		assert.Equal(t, &fwkrh.ParsedResponse{
+			Usage:               &request.Usage{PromptTokens: 30, TotalTokens: 30},
+			DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 30},
+			StreamedEvents:      1,
+		}, got)
+	})
 }
 
 func TestAnthropicParser_Claims(t *testing.T) {

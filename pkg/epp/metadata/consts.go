@@ -104,16 +104,21 @@ func HeaderNames(key string) []string {
 	return []string{key}
 }
 
-// GetLowerCaseHeaderValue returns a header value from a lower-case header map using the current name first, then deprecated aliases.
+// GetLowerCaseHeaderValue returns the first non-empty value, trying the current name before deprecated aliases.
+// A header sent only with empty values is reported as present with an empty value, the same as a header without aliases.
 func GetLowerCaseHeaderValue(headers map[string]string, key string) (string, bool) {
 	key = strings.ToLower(key)
 	if aliases, ok := headerAliases[key]; ok {
+		present := false
 		for _, alias := range aliases {
 			if value, ok := headers[alias]; ok {
-				return value, true
+				if value != "" {
+					return value, true
+				}
+				present = true
 			}
 		}
-		return "", false
+		return "", present
 	}
 	value, ok := headers[key]
 	return value, ok
@@ -122,4 +127,16 @@ func GetLowerCaseHeaderValue(headers map[string]string, key string) (string, boo
 // IsFiniteFloat reports whether a value is neither NaN nor infinite.
 func IsFiniteFloat(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+// ServedEndpoint returns the host:port of the endpoint the proxy reports it sent
+// the request to, read from the response-phase dynamic metadata. ok is false when
+// the proxy reports none.
+func ServedEndpoint(reqMetadata map[string]any) (served string, ok bool) {
+	lb, ok := reqMetadata[DestinationEndpointNamespace].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	served, ok = lb[DestinationEndpointServedKey].(string)
+	return served, ok
 }

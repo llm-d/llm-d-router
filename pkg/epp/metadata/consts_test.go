@@ -83,23 +83,72 @@ func TestIsFiniteFloat(t *testing.T) {
 	}
 }
 
-// The fairness ID is read from the current header name when present, even if empty, and from
-// the deprecated name otherwise.
-func TestGetLowerCaseHeaderValueFairnessID(t *testing.T) {
+func TestGetLowerCaseHeaderValueAliases(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name    string
-		headers map[string]string
-		want    string
-	}{
-		{name: "deprecated name only", headers: map[string]string{OldFlowFairnessIDKey: "team-a"}, want: "team-a"},
-		{name: "both names", headers: map[string]string{FlowFairnessIDKey: "team-b", OldFlowFairnessIDKey: "team-a"}, want: "team-b"},
-		{name: "current name empty", headers: map[string]string{FlowFairnessIDKey: "", OldFlowFairnessIDKey: "team-a"}, want: ""},
+	for key, names := range headerAliases {
+		if len(names) < 2 {
+			continue
+		}
+		current, deprecated := names[0], names[1]
+		tests := []struct {
+			name    string
+			headers map[string]string
+			want    string
+			wantOK  bool
+		}{
+			{name: "deprecated name only", headers: map[string]string{deprecated: "old"}, want: "old", wantOK: true},
+			{name: "both names", headers: map[string]string{current: "new", deprecated: "old"}, want: "new", wantOK: true},
+			{name: "current name empty", headers: map[string]string{current: "", deprecated: "old"}, want: "old", wantOK: true},
+			{name: "current name empty and deprecated absent", headers: map[string]string{current: ""}, want: "", wantOK: true},
+			{name: "both names empty", headers: map[string]string{current: "", deprecated: ""}, want: "", wantOK: true},
+			{name: "neither name", headers: map[string]string{}, want: "", wantOK: false},
+		}
+		for _, test := range tests {
+			t.Run(key+"/"+test.name, func(t *testing.T) {
+				got, ok := GetLowerCaseHeaderValue(test.headers, key)
+				assert.Equal(t, test.wantOK, ok)
+				assert.Equal(t, test.want, got)
+			})
+		}
 	}
-	for _, test := range tests {
-		got, ok := GetLowerCaseHeaderValue(test.headers, FlowFairnessIDKey)
-		assert.True(t, ok, test.name)
-		assert.Equal(t, test.want, got, test.name)
+}
+
+func TestServedEndpoint(t *testing.T) {
+	tests := []struct {
+		name        string
+		reqMetadata map[string]any
+		want        string
+		wantOK      bool
+	}{
+		{
+			name:        "served endpoint present",
+			reqMetadata: map[string]any{DestinationEndpointNamespace: map[string]any{DestinationEndpointServedKey: "10.0.0.7:8000"}},
+			want:        "10.0.0.7:8000",
+			wantOK:      true,
+		},
+		{
+			name:        "namespace without the served key",
+			reqMetadata: map[string]any{DestinationEndpointNamespace: map[string]any{DestinationEndpointKey: "10.0.0.7:8000"}},
+		},
+		{
+			name:        "served key with a non-string value",
+			reqMetadata: map[string]any{DestinationEndpointNamespace: map[string]any{DestinationEndpointServedKey: 1}},
+		},
+		{
+			name:        "no namespace",
+			reqMetadata: map[string]any{},
+		},
+		{
+			name: "nil metadata",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ServedEndpoint(tt.reqMetadata)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("ServedEndpoint() = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
 	}
 }

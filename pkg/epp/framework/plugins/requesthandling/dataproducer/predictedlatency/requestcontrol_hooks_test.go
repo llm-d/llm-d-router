@@ -80,7 +80,7 @@ func TestNewPredictedLatencyContext(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Equal(t, *request, ctx.schedulingRequest)
+	assert.Equal(t, request.TargetModel, ctx.targetModel)
 	assert.Equal(t, 2, ctx.inputTokenCount)
 	assert.NotNil(t, ctx.lastSeenMetrics)
 	assert.NotNil(t, ctx.prefixCacheScoresForEndpoints)
@@ -371,7 +371,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FirstToken(t *testing.T) {
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-100 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
-	predictedLatencyCtx.schedulingRequest = *request
+	predictedLatencyCtx.targetModel = request.TargetModel
 	predictedLatencyCtx.ttftSLO = 100
 	predictedLatencyCtx.avgTPOTSLO = 50
 	predictedLatencyCtx.incomingModelName = testModelName
@@ -428,7 +428,7 @@ func TestPredictedLatency_NonStreamingMode_ResponseBody_FirstToken(t *testing.T)
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-100 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
-	predictedLatencyCtx.schedulingRequest = *request
+	predictedLatencyCtx.targetModel = request.TargetModel
 
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
@@ -457,7 +457,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_SubsequentTokens(t *testing
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now()
 	predictedLatencyCtx.schedulingResult = schedulingResult
-	predictedLatencyCtx.schedulingRequest = *request
+	predictedLatencyCtx.targetModel = request.TargetModel
 	predictedLatencyCtx.ttftSLO = 100
 	predictedLatencyCtx.avgTPOTSLO = 50
 	predictedLatencyCtx.incomingModelName = testModelName
@@ -701,7 +701,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_FinalToken(t *testing.T) {
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-200 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
-	predictedLatencyCtx.schedulingRequest = *request
+	predictedLatencyCtx.targetModel = request.TargetModel
 	predictedLatencyCtx.ttft = 100 // TTFT > 0: means first token already arrived (False for FirstChunk)
 
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
@@ -734,7 +734,7 @@ func TestPredictedLatency_StreamingMode_ResponseBody_SingleChunk(t *testing.T) {
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-150 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
-	predictedLatencyCtx.schedulingRequest = *request
+	predictedLatencyCtx.targetModel = request.TargetModel
 	// ttft == 0: First chunk and Final chunk at the same time
 
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
@@ -767,7 +767,7 @@ func TestPredictedLatency_NonStreamingMode_ResponseBody_FinalToken(t *testing.T)
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-300 * time.Millisecond)
 	predictedLatencyCtx.schedulingResult = schedulingResult
-	predictedLatencyCtx.schedulingRequest = *request
+	predictedLatencyCtx.targetModel = request.TargetModel
 	// ttft == 0: For non-streaming, TTFT happens when EndOfStream is true
 
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
@@ -807,7 +807,7 @@ func TestPredictedLatency_ResponseBody_CleansUpContext_WhenPreRequestSkipped(t *
 	predictedLatencyCtx := newPredictedLatencyContext(request)
 	predictedLatencyCtx.targetMetadata = endpoint.GetMetadata()
 	predictedLatencyCtx.schedulingResult = schedulingResult
-	predictedLatencyCtx.schedulingRequest = *request
+	predictedLatencyCtx.targetModel = request.TargetModel
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-50 * time.Millisecond)
 	predictedLatencyCtx.inputTokenCount = 4096
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)

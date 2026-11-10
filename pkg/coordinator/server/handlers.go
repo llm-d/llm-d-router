@@ -31,6 +31,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -137,9 +138,14 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	parseDuration = time.Since(parseStart)
 	parseDone = true
 
-	stream, _ = parsed[reqcommon.FieldStream].(bool)
 	if m, ok := parsed["model"].(string); ok && m != "" {
 		model = m
+	}
+	stream, err = reqcommon.StreamRequested(parsed)
+	if err != nil {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, err.Error())
+		return
 	}
 	if model != inflightModel {
 		coordmetrics.DecRequestRunning(inflightModel)
@@ -244,7 +250,7 @@ func inferenceRoute(path string) string {
 		return coordmetrics.RouteResponses
 	case reqcommon.PathMessages:
 		return coordmetrics.RouteMessages
-	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate:
+	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate, sglangapiv1.SglangService_Generate_FullMethodName:
 		return coordmetrics.RouteGenerate
 	default:
 		return coordmetrics.RouteUnknown
@@ -310,6 +316,15 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if s.draining.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("draining"))
+		return
+	}
+	s.handleHealth(w, r)
 }
 
 // rejectInference answers a rejected inference request with the error envelope

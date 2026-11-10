@@ -176,9 +176,14 @@ func (p *Observer) observeFirstChunk(ctx context.Context, requestID string, endO
 
 	now := time.Now()
 	ttft := now.Sub(dispatch.dispatchedAt).Seconds()
-	p.record(dispatch.endpointID, ttft, dispatch.inflight, now)
+	recorded := p.record(dispatch.endpointID, ttft, dispatch.inflight, now)
 
 	if debugLogger := log.FromContext(ctx).V(logutil.DEBUG); debugLogger.Enabled() {
+		if !recorded {
+			debugLogger.Info("Dropped TTFT observation for a deleted endpoint", "requestID", requestID,
+				"endpoint", dispatch.endpointID)
+			return
+		}
 		debugLogger.Info("ttft-observation", "requestID", requestID, "endpoint", dispatch.endpointID,
 			"ttftSeconds", ttft, "inflightAtDispatch", dispatch.inflight)
 	}

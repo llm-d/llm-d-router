@@ -21,10 +21,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -176,6 +178,17 @@ func TestHandleRequestHeaders(t *testing.T) {
 			},
 			wantObjective: "new-objective",
 			wantTarget:    "new-model",
+		},
+		{
+			name: "Falls back to old aliases when the new control headers are empty",
+			headers: []*configPb.HeaderValue{
+				{Key: metadata.ObjectiveKey, Value: ""},
+				{Key: metadata.OldObjectiveKey, Value: "old-objective"},
+				{Key: metadata.ModelNameRewriteKey, Value: ""},
+				{Key: metadata.OldModelNameRewriteKey, Value: "old-model"},
+			},
+			wantObjective: "old-objective",
+			wantTarget:    "old-model",
 		},
 		{
 			name: "Drops client-supplied routing headers",
@@ -720,19 +733,255 @@ func (*emptyPoolDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
 	return nil
 }
 
+func (*emptyPoolDirector) GetRandomDecodeEndpoint() *datalayer.EndpointMetadata {
+	return nil
+}
+
+func headersFrame(headers map[string]string) *extProcPb.ProcessingRequest_RequestHeaders {
+	hv := make([]*configPb.HeaderValue, 0, len(headers))
+	for k, v := range headers {
+		hv = append(hv, &configPb.HeaderValue{Key: k, Value: v})
+	}
+	return &extProcPb.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: hv}},
+	}
+}
+
+func TestIsWebSocketUpgrade(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    bool
+	}{
+		{
+			name:    "canonical upgrade",
+			headers: map[string]string{"connection": "Upgrade", "upgrade": "websocket"},
+			want:    true,
+		},
+		{
+			name:    "case-insensitive values and token list",
+			headers: map[string]string{"Connection": "keep-alive, UPGRADE", "Upgrade": "WebSocket"},
+			want:    true,
+		},
+		{
+			name:    "missing connection header",
+			headers: map[string]string{"upgrade": "websocket"},
+			want:    false,
+		},
+		{
+			name:    "missing upgrade header",
+			headers: map[string]string{"connection": "Upgrade"},
+			want:    false,
+		},
+		{
+			name:    "non-websocket upgrade",
+			headers: map[string]string{"connection": "Upgrade", "upgrade": "h2c"},
+			want:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isWebSocketUpgrade(headersFrame(tc.headers)))
+		})
+	}
+}
+
+func TestHandleRequestHeadersRejectsNonGetWebSocketUpgrade(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &mockDirectorRequest{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.HandleRequestHeaders(context.Background(), reqCtx, headersFrame(map[string]string{
+		":method":    http.MethodPost,
+		"connection": "Upgrade",
+		"upgrade":    "websocket",
+	}))
+
+	assert.Equal(t, errcommon.BadRequest, errcommon.CanonicalCode(err))
+	assert.Empty(t, reqCtx.TargetEndpoint)
+}
+
+func headersFrameLines(lines ...[2]string) *extProcPb.ProcessingRequest_RequestHeaders {
+	hv := make([]*configPb.HeaderValue, 0, len(lines))
+	for _, l := range lines {
+		hv = append(hv, &configPb.HeaderValue{Key: l[0], Value: l[1]})
+	}
+	return &extProcPb.ProcessingRequest_RequestHeaders{
+		RequestHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: hv}},
+	}
+}
+
+func TestIsWebSocketUpgradeMultiLineHeaders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		lines [][2]string
+		want  bool
+	}{
+		{
+			name: "upgrade token on the second Connection line",
+			lines: [][2]string{
+				{"Connection", "keep-alive"},
+				{"Connection", "Upgrade"},
+				{"Upgrade", "websocket"},
+			},
+			want: true,
+		},
+		{
+			name: "websocket on the second Upgrade line",
+			lines: [][2]string{
+				{"Upgrade", "h2c"},
+				{"Upgrade", "websocket"},
+				{"Connection", "Upgrade"},
+			},
+			want: true,
+		},
+		{
+			name: "no upgrade token on any Connection line",
+			lines: [][2]string{
+				{"Connection", "keep-alive"},
+				{"Connection", "close"},
+				{"Upgrade", "websocket"},
+			},
+			want: false,
+		},
+		{
+			name: "upgrade token without a websocket Upgrade line",
+			lines: [][2]string{
+				{"Connection", "Upgrade"},
+				{"Upgrade", "h2c"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isWebSocketUpgrade(headersFrameLines(tc.lines...)))
+		})
+	}
+}
+
+func TestHandleRequestHeaders_WebSocketUpgradePicksDecodeEndpoint(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &decodePickingDirector{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.HandleRequestHeaders(context.Background(), reqCtx, headersFrame(map[string]string{
+		":method":    http.MethodGet,
+		"connection": "Upgrade",
+		"upgrade":    "websocket",
+	}))
+
+	require.NoError(t, err)
+	assert.Equal(t, "1.2.3.4:80", reqCtx.TargetEndpoint,
+		"an upgrade must route through the decode picker, not the plain random pick")
+}
+
+func TestHandleRequestHeaders_WebSocketUpgradeWithoutDecodeEndpoints(t *testing.T) {
+	t.Parallel()
+
+	server := &StreamingServer{director: &emptyPoolDirector{}}
+	reqCtx := &RequestContext{
+		Request:  &Request{Headers: make(map[string]string)},
+		Response: &Response{Headers: make(map[string]string)},
+	}
+
+	err := server.HandleRequestHeaders(context.Background(), reqCtx, headersFrame(map[string]string{
+		":method":    http.MethodGet,
+		"connection": "Upgrade",
+		"upgrade":    "websocket",
+	}))
+
+	assert.Equal(t, errcommon.ServiceUnavailable, errcommon.CanonicalCode(err))
+	assert.Empty(t, reqCtx.TargetEndpoint)
+}
+
+func TestProcessClosesStreamAfterWebSocketUpgrade(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := &blockingReplayProcessServer{replayProcessServer{ctx: ctx, reqs: []*extProcPb.ProcessingRequest{
+		{Request: headersFrame(map[string]string{
+			":method":    http.MethodGet,
+			":path":      "/v1/realtime",
+			"connection": "Upgrade",
+			"upgrade":    "websocket",
+		})},
+		// A WebSocket frame the EPP must never receive.
+		{Request: &extProcPb.ProcessingRequest_RequestBody{
+			RequestBody: &extProcPb.HttpBody{Body: []byte{0x81, 0x82, 0, 0, 0, 0, 'h', 'i'}},
+		}},
+	}}}
+	server := NewStreamingServer(nil, &mockDirectorRequest{}, nil, 0)
+
+	done := make(chan error, 1)
+	go func() { done <- server.Process(stream) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Process kept the ext_proc stream open after a WebSocket upgrade")
+	}
+
+	require.Len(t, stream.sentResponses, 1)
+	setHeaders := map[string]string{}
+	for _, h := range stream.sentResponses[0].GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders() {
+		setHeaders[h.GetHeader().GetKey()] = string(h.GetHeader().GetRawValue())
+	}
+	assert.Equal(t, "1.2.3.4:80", setHeaders[metadata.DestinationEndpointKey])
+	assert.NotContains(t, setHeaders, "connection")
+	assert.NotContains(t, setHeaders, "upgrade")
+}
+
 type mockDirectorRequest struct {
 	Director
-	endpoint *datalayer.EndpointMetadata
+	endpoint       *datalayer.EndpointMetadata
+	decodeEndpoint *datalayer.EndpointMetadata
 }
 
 func (m *mockDirectorRequest) GetRandomEndpoint() *datalayer.EndpointMetadata {
 	if m.endpoint != nil {
 		return m.endpoint
 	}
+	return defaultTestEndpoint()
+}
+
+func (m *mockDirectorRequest) GetRandomDecodeEndpoint() *datalayer.EndpointMetadata {
+	if m.decodeEndpoint != nil {
+		return m.decodeEndpoint
+	}
+	return defaultTestEndpoint()
+}
+
+func defaultTestEndpoint() *datalayer.EndpointMetadata {
 	return &datalayer.EndpointMetadata{
 		Address: "1.2.3.4",
 		Port:    "80",
 	}
+}
+
+// decodePickingDirector answers every plain random pick with no endpoint, so a
+// test can tell whether the request path used the decode picker.
+type decodePickingDirector struct {
+	mockDirectorRequest
+}
+
+func (*decodePickingDirector) GetRandomEndpoint() *datalayer.EndpointMetadata {
+	return nil
 }
 
 // Attribution must be established from the incoming headers before the Director
@@ -755,7 +1004,7 @@ func TestRequestAttributionAtIngress(t *testing.T) {
 	}{
 		{"canonical header", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: "team-a"}}, "team-a", tracing.AttributionSourceHeader},
 		{"deprecated alias", []*configPb.HeaderValue{{Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
-		{"empty canonical shadows alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, reqcommon.DefaultFairnessID, tracing.AttributionSourceDefault},
+		{"empty canonical falls back to alias", []*configPb.HeaderValue{{Key: metadata.FlowFairnessIDKey, Value: ""}, {Key: metadata.OldFlowFairnessIDKey, Value: "team-b"}}, "team-b", tracing.AttributionSourceHeader},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := extractTraceContext(context.Background(), &extProcPb.ProcessingRequest_RequestHeaders{

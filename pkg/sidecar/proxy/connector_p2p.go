@@ -36,7 +36,6 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // p2pPeer is a pod's OffloadingConnector P2P tier address.
@@ -143,7 +142,9 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	// single output token so the prefiller returns as soon as KV is stored.
 	prefillData := maps.Clone(requestData)
 	prefillKVParams := reqcommon.RemoteDecoderParams(kvRequestID)
+	promptTokenIDs := s.clientPromptTokenIDs(requestData)
 	addP2PPullToPrefill(prefillKVParams, source)
+	setPromptTokenIDs(prefillKVParams, promptTokenIDs)
 	prefillData[reqcommon.FieldKVTransferParams] = prefillKVParams
 	reqcommon.CapSingleToken(prefillData, apiType)
 
@@ -162,6 +163,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	// (streaming, token limits) is preserved.
 	decodeData := maps.Clone(requestData)
 	decodeData[reqcommon.FieldKVTransferParams] = reqcommon.RemotePrefillerParams(kvRequestID, p2p.prefill.host, p2p.prefill.port)
+	setPromptTokenIDs(decodeData[reqcommon.FieldKVTransferParams].(map[string]any), promptTokenIDs)
 
 	decodeBody, err := json.Marshal(decodeData)
 	if err != nil {
@@ -217,7 +219,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
 	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
 	prefillDuration := time.Since(prefillStart)
-	observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
+	observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
 
 	prefillFailed := isHTTPError(pw.statusCode)
 	prefillSpan.SetAttributes(
@@ -225,7 +227,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 	if prefillFailed {
-		observeStageError(r.Context(), metrics.StagePrefill)
+		observeStageError(r.Context(), routing.StagePrefill)
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 	}
 	prefillSpan.End()
@@ -271,9 +273,9 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
-	observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
+	observeStageDuration(r.Context(), routing.StageDecode, decodeDuration)
 	if decodeStatus.failed() {
-		observeStageError(r.Context(), metrics.StageDecode)
+		observeStageError(r.Context(), routing.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
 	decodeSpan.SetAttributes(
@@ -330,8 +332,40 @@ func addP2PPullToPrefill(prefillKVParams map[string]any, source *kvSource) {
 // block is dropped. A rejected block is logged and dropped, so the request
 // proceeds without a pull.
 func (s *Server) kvSourceFromBody(logger logr.Logger, clientIP string, requestData map[string]any) (source *kvSource, present bool) {
-	kvParams, _ := requestData[reqcommon.FieldKVTransferParams].(map[string]any)
-	raw, ok := kvParams[reqcommon.FieldRemoteKVSource]
+	// kv_transfer_params stays as json.RawMessage in the decoded body (it is
+	// deliberately not in inspectedRequestFields), so parse the raw form.
+	rawValue, exists := requestData[reqcommon.FieldKVTransferParams]
+	if !exists || rawValue == nil {
+		logger.Info("warning: KV cache source header without a remote_kv_source block in the body; proceeding without a pull",
+			"clientIP", clientIP)
+		return nil, false
+	}
+	// Decode only the remote_kv_source key, leaving prompt_token_ids and any
+	// other fields as raw bytes: materializing a 1M-token ID array costs
+	// ~286 ms and 128 MB (Go 1.27 benchmark) versus ~125 ms and 15 MB when
+	// kept raw, and the sidecar re-encodes the array on each hop.
+	var rawParams map[string]json.RawMessage
+	switch v := rawValue.(type) {
+	case map[string]any:
+		// Already decoded (unit tests build maps directly).
+		rawParams = make(map[string]json.RawMessage, len(v))
+		for k, val := range v {
+			if encoded, err := json.Marshal(val); err == nil {
+				rawParams[k] = encoded
+			}
+		}
+	case json.RawMessage:
+		if err := json.Unmarshal(v, &rawParams); err != nil || rawParams == nil {
+			logger.Info("warning: KV cache source header without a remote_kv_source block in the body; proceeding without a pull",
+				"clientIP", clientIP)
+			return nil, false
+		}
+	default:
+		logger.Info("warning: KV cache source header without a remote_kv_source block in the body; proceeding without a pull",
+			"clientIP", clientIP)
+		return nil, false
+	}
+	sourceRaw, ok := rawParams[reqcommon.FieldRemoteKVSource]
 	if !ok {
 		// EPP writes the header and the block in one step, so a header alone
 		// is a client or an EPP that does not match this sidecar.
@@ -339,18 +373,26 @@ func (s *Server) kvSourceFromBody(logger logr.Logger, clientIP string, requestDa
 			"clientIP", clientIP)
 		return nil, false
 	}
-	delete(kvParams, reqcommon.FieldRemoteKVSource)
-	if len(kvParams) == 0 {
+	// Remove the source key, leaving other keys (including prompt_token_ids)
+	// as untouched raw bytes.
+	delete(rawParams, reqcommon.FieldRemoteKVSource)
+	if len(rawParams) == 0 {
 		delete(requestData, reqcommon.FieldKVTransferParams)
+	} else if cleaned, err := json.Marshal(rawParams); err == nil {
+		requestData[reqcommon.FieldKVTransferParams] = json.RawMessage(cleaned)
 	}
 
-	block, _ := raw.(map[string]any)
+	var block map[string]any
+	if err := json.Unmarshal(sourceRaw, &block); err != nil {
+		logger.Info("ignoring malformed remote_kv_source in request body", "value", string(sourceRaw))
+		return nil, true
+	}
 	kvRequestID, _ := block[reqcommon.FieldKVRequestID].(string)
 	host, _ := block[reqcommon.FieldRemoteHost].(string)
 	port, portOK := toWholeInt(block[reqcommon.FieldRemotePort])
 	switch {
 	case kvRequestID == "" || host == "" || !portOK || !routing.IsTCPPort(port):
-		logger.Info("ignoring malformed remote_kv_source in request body", "value", raw)
+		logger.Info("ignoring malformed remote_kv_source in request body", "value", string(sourceRaw))
 		return nil, true
 	case !s.allowlistValidator.IsAllowedHost(host):
 		logger.Info("SSRF protection: KV cache source not in allowlist, ignoring",
@@ -391,7 +433,12 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, p2p
 	defer toolFields.report(r.Context())
 
 	source := p2p.source
-	requestData[reqcommon.FieldKVTransferParams] = map[string]any{reqcommon.FieldRemoteKVSource: source.params()}
+	// Rebuild kv_transfer_params from scratch: the sidecar owns this field, so
+	// client-supplied keys are dropped rather than forwarded to vLLM, except
+	// prompt_token_ids, which only lets the engine skip re-tokenizing.
+	sourceKVParams := map[string]any{reqcommon.FieldRemoteKVSource: source.params()}
+	setPromptTokenIDs(sourceKVParams, s.clientPromptTokenIDs(requestData))
+	requestData[reqcommon.FieldKVTransferParams] = sourceKVParams
 
 	logger.Info("running P2P source protocol",
 		"kv_request_id", source.kvRequestID,

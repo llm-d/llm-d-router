@@ -18,6 +18,7 @@ package preciseprefixcache
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -83,6 +84,7 @@ func TestMultimodalBlockIndices(t *testing.T) {
 		name            string
 		features        []fwkrequest.MultiModalFeature
 		blockSizeTokens int
+		numTokens       int
 		want            []int
 	}{
 		{
@@ -132,11 +134,36 @@ func TestMultimodalBlockIndices(t *testing.T) {
 			blockSizeTokens: 16,
 			want:            []int{1},
 		},
+		{
+			name:            "span clamped to prompt length",
+			features:        []fwkrequest.MultiModalFeature{{Offset: 8, Length: math.MaxUint32}},
+			blockSizeTokens: 16,
+			numTokens:       40,
+			want:            []int{0, 1, 2},
+		},
+		{
+			name:            "feature starting at or past prompt end skipped",
+			features:        []fwkrequest.MultiModalFeature{{Offset: 40, Length: 16}, {Offset: math.MaxUint32, Length: math.MaxUint32}},
+			blockSizeTokens: 16,
+			numTokens:       40,
+			want:            nil,
+		},
+		{
+			name:            "negative offset skipped",
+			features:        []fwkrequest.MultiModalFeature{{Offset: -16, Length: 32}},
+			blockSizeTokens: 16,
+			numTokens:       40,
+			want:            nil,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := multimodalBlockIndices(tt.features, tt.blockSizeTokens)
+			numTokens := tt.numTokens
+			if numTokens == 0 {
+				numTokens = 1 << 20
+			}
+			got := multimodalBlockIndices(tt.features, tt.blockSizeTokens, numTokens)
 			assert.Equal(t, tt.want, got)
 		})
 	}

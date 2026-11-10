@@ -496,12 +496,18 @@ Configures metrics scraping via Prometheus (compatible with Google Managed Prome
 | `router.tracing.sampling.sampler` | Trace sampler type. | `parentbased_traceidratio` |
 | `router.tracing.sampling.samplerArg` | Sampler argument (e.g., sampling ratio `"0.1"`). | `"0.1"` |
 
+With `prometheusoperator`, the ServiceMonitor takes the scrape `job` from the EPP Services'
+`app.kubernetes.io/name` label, `<release>-epp`. All EPP replicas of a release share that job,
+including the per-replica Services of GKE preferred backends; the `service` and `instance`
+labels tell the replicas apart.
+
 When tracing is enabled, EPP request-associated spans carry `llm_d.epp.fairness.id` and
 `llm_d.epp.fairness.source` together. The value is the fairness identity the EPP resolved
 for the request, and the source records which branch resolved it: `header` for the
 `x-llm-d-inference-fairness-id` header or its deprecated alias
-`x-gateway-inference-fairness-id`, `agent_identity` when the agent-identity plugin supplies
-the client's session identifier, or `default` for the `default-flow` sentinel. Source
+`x-gateway-inference-fairness-id`, `derived_root` when the agent-lineage plugin derives a
+program root, `agent_identity` when the agent-identity plugin supplies the client's session
+identifier, or `default` for the `default-flow` sentinel. Source
 `header` identifies the resolution branch, not producer authentication. Requests that fail
 before the identity resolves keep the value set at ingress: the fairness header value, or
 `default-flow` with source `default` when the header is absent, even if the agent-identity
@@ -516,8 +522,7 @@ and the Admitter plugins. `llm_d.epp.admission.decision` is `admitted` or `rejec
 the request failed before admission, and not changed by a later scheduling failure or eviction.
 A rejection adds `llm_d.epp.admission.reason`: the `x-llm-d-request-dropped-reason` value, such
 as `rejected-ttl-expired`, or the EPP error code when none is set. An Admitter plugin that denies
-without an error code is recorded as `admitter:` plus its plugin type, such as
-`admitter:latency-slo-admitter`. When Flow Control dispatched
+without an error code is recorded as `admitter:` plus its plugin type. When Flow Control dispatched
 the request, `llm_d.epp.admission.queue_duration_ms` holds the time behind the
 `x-llm-d-flow-queue-duration-ms` response header, in fractional milliseconds.
 
@@ -680,6 +685,25 @@ helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway \
   --set router.latencyPredictor.mode=service \
   --set router.latencyPredictor.predictionServers.count=3
 ```
+
+---
+
+### 7. RBAC
+
+The EPP caches pods, InferencePools, InferenceObjectives and InferenceModelRewrites, and holds its leader-election lease, in the release namespace only, so those permissions are namespaced `Role`s. Objects rendered by the charts, with names in Kind order (one name applies to both objects). `<name>` is `<release[:40]>-epp`, the release name truncated to 40 characters plus `-epp`; `<release>` is the full release name; `<ns>` is the release namespace.
+
+| Name | Kind | Rendered when | Grants |
+|---|---|---|---|
+| `<name>-sa` | Role, RoleBinding | always | `pods` get/list/watch |
+| `<name>-non-sa` | Role, RoleBinding | gateway chart always; standalone chart unless `router.inferencePool.create=false` | `inferencepools`, `inferenceobjectives`, `inferencemodelrewrites` get/list/watch |
+| `<name>-leader-election`, `<name>-leader-election-binding` | Role, RoleBinding | `router.epp.haMode=leader-elected`; or `haMode` is empty and either `router.epp.flags.ha-enable-leader-election` is a boolean true value (`1`, `t`, `T`, `true`, `TRUE`, `True`) or that flag is unset, `router.epp.replicas` > 1, `router.epp.autoscaling.enabled` is false, and no GKE preferred backends or priority routing. Never for `haMode=all-active` or `router.epp.crossReplica.enabled`; a conflicting `ha-enable-leader-election` flag fails the render | `leases` (all verbs), `events` create/patch |
+| `<release>-<ns>-epp` (if either is over 40 characters: `<release[:40]>-<ns[:40]>-<8-char hash>-epp`) | ClusterRole, ClusterRoleBinding | `router.monitoring.prometheus.auth.enabled` is true (the default) | `tokenreviews` and `subjectaccessreviews` create; `/metrics` get only when `router.monitoring.prometheus.enabled=true` and `router.monitoring.provider.name=prometheusoperator` |
+| `<ns>-<release>-metrics-reader`, `<ns>-<release>-metrics-reader-role-binding` | ClusterRole, ClusterRoleBinding | `router.monitoring.prometheus.enabled`, `router.monitoring.prometheus.auth.enabled` and `router.monitoring.provider.name=gmp` (gateway chart also needs `provider.name=gke`) | `/metrics` get (GMP) |
+| `<release>-metrics-reader-secret-read`, `gmp-system:collector:<ns>-<release>-metrics-reader-secret-read` (`gke-gmp-system:` prefix when `router.monitoring.provider.gmp.autopilot=true`) | Role, RoleBinding | `router.monitoring.prometheus.enabled`, `router.monitoring.prometheus.auth.enabled` and `router.monitoring.provider.name=gmp` (gateway chart also needs `provider.name=gke`) | one named Secret get/list/watch, bound to the GMP `collector` ServiceAccount |
+
+Chart defaults render the ClusterRole above (`prometheus.auth.enabled` defaults to true), so a default install needs cluster-scoped permissions. Metrics authentication needs a ClusterRole: `TokenReview` and `SubjectAccessReview` are cluster-scoped, as is the `/metrics` non-resource URL, and a `Role` cannot grant them (see [Kubernetes RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/)).
+
+**Namespace-only install:** set `router.monitoring.prometheus.auth.enabled=false`. The chart then renders no ClusterRole or ClusterRoleBinding and passes `--metrics-endpoint-auth=false`. Metrics are served unauthenticated, so restrict access with a NetworkPolicy. Prometheus Operator can still scrape through the ServiceMonitor; GMP PodMonitoring needs the authenticated path.
 
 ---
 

@@ -19,6 +19,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
@@ -132,6 +134,30 @@ func TestRecordRequestCounterBoundsModelCardinality(t *testing.T) {
 	count := promtestutil.CollectAndCount(llmdRequestCounter)
 	require.LessOrEqualf(t, count, testCap+1,
 		"model_name cardinality must stay bounded by the cap, got %d series", count)
+}
+
+// The model_name and fairness_id labels come from request headers that Envoy
+// forwards as raw bytes. Prometheus panics on a label value that is not valid
+// UTF-8, and the gRPC server does not recover handler panics, so such a
+// request must fold to the overflow label instead of exiting the process.
+func TestRecordRequestCounterSurvivesNonUTF8AndOversizedLabels(t *testing.T) {
+	Reset()
+	resetFairnessLabelLimit(t)
+	t.Cleanup(Reset)
+
+	invalid := "model\xff"
+	oversized := strings.Repeat("m", metricsutil.MaxLabelValueLength+1)
+
+	require.NotPanics(t, func() {
+		RecordRequestCounter(invalid, invalid, reqcommon.APISurfaceUnknown, invalid, 0)
+		RecordRequestCounter(oversized, oversized, reqcommon.APISurfaceUnknown, oversized, 0)
+		RecordRequestErrCounter(context.Background(), invalid, invalid, reqcommon.APISurfaceUnknown, invalid, "0", "400")
+	})
+
+	require.Equal(t, 1, promtestutil.CollectAndCount(llmdRequestCounter),
+		"both requests must land on the single overflow series")
+	require.Equal(t, float64(2), promtestutil.ToFloat64(llmdRequestCounter.WithLabelValues(
+		metricsutil.OverflowValue, metricsutil.OverflowValue, metricsutil.OverflowValue, "0", reqcommon.APISurfaceUnknown.String())))
 }
 
 // The fairness_id label is populated from a client request header, so the shared limiter must
@@ -337,6 +363,7 @@ func TestInitFairnessIDResolutionMetricsCreatesOverflowSeries(t *testing.T) {
 
 	InitFairnessIDResolutionMetrics("pool-a")
 
-	require.Equal(t, 3, promtestutil.CollectAndCount(llmdFairnessIDOverflowCounter))
+	require.Equal(t, 4, promtestutil.CollectAndCount(llmdFairnessIDOverflowCounter))
 	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues("header", "pool-a")))
+	require.Equal(t, 0.0, promtestutil.ToFloat64(llmdFairnessIDOverflowCounter.WithLabelValues(tracing.AttributionSourceDerivedRoot, "pool-a")))
 }

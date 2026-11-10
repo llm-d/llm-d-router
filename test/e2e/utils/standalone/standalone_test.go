@@ -34,8 +34,9 @@ import (
 )
 
 const (
-	poolName = "food-review-inference-pool"
-	eppName  = poolName + "-epp"
+	poolName           = "food-review-inference-pool"
+	eppName            = poolName + "-epp"
+	proxyConfigMapName = poolName + "-envoy"
 
 	simpleConfig = `apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
@@ -98,7 +99,7 @@ func TestStandaloneChart(t *testing.T) {
 			for _, name := range []string{
 				"Deployment/" + eppName, "Service/" + eppName,
 				"ServiceAccount/" + eppName, "ConfigMap/" + eppName,
-				"ConfigMap/envoy", "InferencePool/" + poolName,
+				"ConfigMap/" + proxyConfigMapName, "InferencePool/" + poolName,
 				"Role/" + eppName + "-sa", "RoleBinding/" + eppName + "-sa",
 				"Role/" + eppName + "-non-sa", "RoleBinding/" + eppName + "-non-sa",
 			} {
@@ -151,7 +152,7 @@ func TestStandaloneChart(t *testing.T) {
 			if strings.TrimSpace(config) != strings.TrimSpace(simpleConfig) {
 				t.Fatal("plugin configuration changed during rendering")
 			}
-			envoy, _, _ := unstructured.NestedString(objects["ConfigMap/envoy"].Object, "data", "envoy.yaml")
+			envoy, _, _ := unstructured.NestedString(objects["ConfigMap/"+proxyConfigMapName].Object, "data", "envoy.yaml")
 			failOpen := tc.failOpen != nil && *tc.failOpen
 			if !strings.Contains(envoy, fmt.Sprintf("failure_mode_allow: %t", failOpen)) || !strings.Contains(envoy, "address: 127.0.0.1") {
 				t.Fatal("unexpected sidecar proxy configuration")
@@ -162,6 +163,22 @@ func TestStandaloneChart(t *testing.T) {
 			}
 			if !strings.Contains(envoy, "interval: "+healthCheckInterval) {
 				t.Fatalf("Envoy health-check interval must be %s", healthCheckInterval)
+			}
+			volumes, _, _ := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "volumes")
+			var mountedConfigMap string
+			for _, volume := range volumes {
+				v := volume.(map[string]any)
+				if v["name"] != "config" {
+					continue
+				}
+				configMap, ok := v["configMap"].(map[string]any)
+				if !ok {
+					t.Fatal("config volume is not backed by a ConfigMap")
+				}
+				mountedConfigMap, _ = configMap["name"].(string)
+			}
+			if mountedConfigMap != proxyConfigMapName {
+				t.Fatalf("proxy mounts ConfigMap %q, want %q", mountedConfigMap, proxyConfigMapName)
 			}
 			pool := objects["InferencePool/"+poolName]
 			ports, _, _ := unstructured.NestedSlice(pool.Object, "spec", "targetPorts")
@@ -177,7 +194,14 @@ func TestStandaloneChart(t *testing.T) {
 			if picker != eppName || router.PoolName != poolName {
 				t.Fatalf("pool or EPP service identity changed: %s, %s", router.PoolName, picker)
 			}
-			service := router.accessService(tc.namespace, 30080, 32090)
+			if router.ProxySelector != nil {
+				t.Fatalf("sidecar mode rendered a proxy selector: %v", router.ProxySelector)
+			}
+			services := router.accessServices(tc.namespace, 30080, 32090)
+			if len(services) != 1 {
+				t.Fatalf("sidecar mode access services = %d, want 1", len(services))
+			}
+			service := services[0]
 			if !reflect.DeepEqual(service.Spec.Selector, router.Selector) || service.Spec.Ports[0].NodePort != 30080 || service.Spec.Ports[1].NodePort != 32090 {
 				t.Fatalf("invalid test access service: %+v", service.Spec)
 			}
@@ -210,7 +234,7 @@ func TestStandaloneChartDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, obj := range router.objects {
-		if obj.GetKind() == "ConfigMap" && obj.GetName() == "envoy" {
+		if obj.GetKind() == "ConfigMap" && obj.GetName() == cfg.ReleaseName+"-envoy" {
 			envoy, _, _ := unstructured.NestedString(obj.Object, "data", "envoy.yaml")
 			if !strings.Contains(envoy, "failure_mode_allow: true") {
 				t.Fatal("unset fail-open must preserve the chart default")
@@ -219,6 +243,50 @@ func TestStandaloneChartDefaults(t *testing.T) {
 		}
 	}
 	t.Fatal("chart did not render the Envoy configuration")
+}
+
+func TestStandaloneChartServiceModeFailOpen(t *testing.T) {
+	cfg := testConfig("e2e-1", "registry.example:5000/team/router:dev")
+	cfg.ProxyMode, cfg.FailOpen = ProxyModeService, ptr.To(true)
+	router, err := renderRouter(context.Background(), cfg, simpleConfig, 1, []int32{8000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if router.eppDeployment != eppName || router.Selector[proxySelectorKey] != "" {
+		t.Fatalf("EPP Deployment = %q, selector = %v", router.eppDeployment, router.Selector)
+	}
+	if router.ProxySelector == nil || router.proxyReplicas < 1 {
+		t.Fatalf("service mode proxy selector = %v, replicas = %d", router.ProxySelector, router.proxyReplicas)
+	}
+	objects := make(map[string]*unstructured.Unstructured)
+	for _, obj := range router.objects {
+		objects[obj.GetKind()+"/"+obj.GetName()] = obj
+	}
+	containers, _, _ := unstructured.NestedSlice(objects["Deployment/"+eppName].Object, "spec", "template", "spec", "containers")
+	if len(containers) != 1 {
+		t.Fatalf("service mode EPP Pod containers = %d, want 1", len(containers))
+	}
+	if objects["Service/"+eppName+"-model-servers"] == nil {
+		t.Fatal("fail-open did not render the model-server fallback Service")
+	}
+	envoy, _, _ := unstructured.NestedString(objects["ConfigMap/"+cfg.ReleaseName+"-envoy"].Object, "data", "envoy.yaml")
+	if !strings.Contains(envoy, "failure_mode_allow: true") || !strings.Contains(envoy, "inference_pool_fallback") {
+		t.Fatal("expected a fail-open proxy configuration with the fallback cluster")
+	}
+	services := router.accessServices(cfg.Namespace, 30080, 32090)
+	if len(services) != 2 {
+		t.Fatalf("service mode access services = %d, want 2", len(services))
+	}
+	httpService, metricsService := services[0], services[1]
+	if !reflect.DeepEqual(httpService.Spec.Selector, router.ProxySelector) || len(httpService.Spec.Ports) != 1 || httpService.Spec.Ports[0].NodePort != 30080 {
+		t.Fatalf("HTTP access must select the proxy Pods: %+v", httpService.Spec)
+	}
+	if !reflect.DeepEqual(metricsService.Spec.Selector, router.Selector) || len(metricsService.Spec.Ports) != 1 || metricsService.Spec.Ports[0].NodePort != 32090 {
+		t.Fatalf("metrics access must select the EPP Pods: %+v", metricsService.Spec)
+	}
+	if httpService.Name == metricsService.Name {
+		t.Fatalf("access Services share the name %q", httpService.Name)
+	}
 }
 
 func TestStandaloneImageValues(t *testing.T) {
@@ -250,6 +318,7 @@ func readyTestRouterPod(name string, ready bool) corev1.Pod {
 	}
 	return corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(name)},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "envoy-proxy"}, {Name: "epp"}}},
 		Status: corev1.PodStatus{
 			Phase:      corev1.PodRunning,
 			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: condition}},
@@ -259,6 +328,16 @@ func readyTestRouterPod(name string, ready bool) corev1.Pod {
 			},
 		},
 	}
+}
+
+// readySingleContainerPod is a service-mode EPP or proxy Pod.
+func readySingleContainerPod(name, container string, ready bool) corev1.Pod {
+	pod := readyTestRouterPod(name, ready)
+	pod.Spec.Containers = []corev1.Container{{Name: container}}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{Name: container, Ready: ready, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+	}
+	return pod
 }
 
 func TestStandaloneReadyLeader(t *testing.T) {
@@ -291,6 +370,19 @@ func TestStandaloneReadyLeader(t *testing.T) {
 	leader.Status.ContainerStatuses[0].Ready = false
 	if _, err := readyLeader([]corev1.Pod{leader}, 1); err == nil {
 		t.Fatal("unready Envoy must not be Ready")
+	}
+	leader = readyTestRouterPod("leader", true)
+	leader.Status.ContainerStatuses = leader.Status.ContainerStatuses[1:]
+	if _, err := readyLeader([]corev1.Pod{leader}, 1); err == nil {
+		t.Fatal("a sidecar-mode Pod with one started container must not be Ready")
+	}
+	eppLeader := readySingleContainerPod("epp-leader", "epp", true)
+	eppStandby := readySingleContainerPod("epp-standby", "epp", false)
+	if _, err := readyLeader([]corev1.Pod{eppLeader, eppStandby}, 2); err != nil {
+		t.Fatalf("service-mode EPP leader: %v", err)
+	}
+	if !ReadyRouterPod(&eppLeader) || ReadyRouterPod(&eppStandby) {
+		t.Fatal("service-mode EPP readiness must follow its single container")
 	}
 }
 
@@ -345,6 +437,33 @@ func TestStandalonePortForwardRecovery(t *testing.T) {
 	}
 	if err := forward.reconcile(ctx, []corev1.Pod{newLeader}); err == nil {
 		t.Fatal("expected start failure")
+	}
+}
+
+func TestStandalonePortForwardAnyReady(t *testing.T) {
+	ctx := context.Background()
+	var started []string
+	forward := &routerPortForward{anyReady: true, start: func(_ context.Context, pod *corev1.Pod) (*forwardProcess, error) {
+		started = append(started, pod.Name)
+		done := make(chan struct{})
+		return &forwardProcess{done: done, stop: func() { close(done) }}, nil
+	}}
+	first := readySingleContainerPod("proxy-a", "envoy-proxy", true)
+	second := readySingleContainerPod("proxy-b", "envoy-proxy", true)
+	for _, pods := range [][]corev1.Pod{{first, second}, {second, first}} {
+		if err := forward.reconcile(ctx, pods); err != nil {
+			t.Fatalf("several Ready proxy Pods must not be an error: %v", err)
+		}
+	}
+	if !reflect.DeepEqual(started, []string{"proxy-a"}) {
+		t.Fatalf("forward must stay on the first Ready proxy Pod: %v", started)
+	}
+	first.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+	if err := forward.reconcile(ctx, []corev1.Pod{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(started, []string{"proxy-a", "proxy-b"}) {
+		t.Fatalf("forward must move to another Ready proxy Pod: %v", started)
 	}
 }
 

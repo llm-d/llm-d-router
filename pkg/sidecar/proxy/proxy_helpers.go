@@ -82,6 +82,12 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		ReadHeaderTimeout: 30 * time.Second,  // Reasonable for headers only
 		MaxHeaderBytes:    1 << 20,           // 1 MB for headers is sufficient
 	}
+	if !s.config.SecureServing {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		server.Protocols = protocols
+	}
 
 	var cert *tls.Certificate
 	if s.config.SecureServing {
@@ -178,6 +184,9 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.As(context.Cause(r.Context()), &prefillErr):
 			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
 				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			// A key with http.TrailerPrefix is sent as a trailer whether it is
+			// set before or after WriteHeader, so a buffered gRPC status relays
+			// as the HTTP/2 trailer the backend sent.
 			maps.Copy(res.Header(), prefillErr.response.headers)
 			res.WriteHeader(prefillErr.response.statusCode)
 			_, writeError = res.Write(prefillErr.response.bodyBytes())
@@ -220,7 +229,10 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 // such as tools[].function.parameters that chat templates render into the
 // prompt verbatim.
 var inspectedRequestFields = map[string]struct{}{
-	reqcommon.FieldKVTransferParams:     {},
+	// kv_transfer_params is deliberately NOT decoded as Go values: the only
+	// reader, clientPromptTokenIDs, handles the raw json.RawMessage form, and
+	// decoding it would materialize a long prompt_token_ids array (one boxed
+	// value per token) only to serialize it right back.
 	reqcommon.FieldECTransferParams:     {},
 	reqcommon.FieldMaxTokens:            {},
 	reqcommon.FieldMaxCompletionTokens:  {},
@@ -286,6 +298,13 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+			logger.Error(writeErr, "failed to send error response to client")
+		}
+		return nil, nil, false
+	}
+	if _, err := reqcommon.StreamRequested(parsed); err != nil {
+		logger.V(logging.DEBUG).Info("invalid request body", "error", err)
 		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
 			logger.Error(writeErr, "failed to send error response to client")
 		}

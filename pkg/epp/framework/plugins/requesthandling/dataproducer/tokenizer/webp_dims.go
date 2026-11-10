@@ -16,7 +16,10 @@ limitations under the License.
 
 package tokenizer
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"math"
+)
 
 // webpHeaderBytes covers the RIFF container plus the complete size fields of
 // every webp format: the VP8X canvas size, the VP8 keyframe size, and the
@@ -39,13 +42,17 @@ func webpDimensions(hdr []byte) (width, height int, ok bool) {
 	switch string(hdr[12:16]) {
 	case "VP8X":
 		// Extended format: 1-byte flags and 3 reserved bytes, then the
-		// canvas size minus one in each direction.
+		// canvas size minus one in each direction. RFC 9649 Section 2.2
+		// requires the canvas pixel count to fit in 32 bits.
 		if len(payload) < 10 {
 			return 0, 0, false
 		}
-		w := int(payload[4]) | int(payload[5])<<8 | int(payload[6])<<16
-		h := int(payload[7]) | int(payload[8])<<8 | int(payload[9])<<16
-		return w + 1, h + 1, true
+		w := (int(payload[4]) | int(payload[5])<<8 | int(payload[6])<<16) + 1
+		h := (int(payload[7]) | int(payload[8])<<8 | int(payload[9])<<16) + 1
+		if int64(w)*int64(h) > math.MaxUint32 {
+			return 0, 0, false
+		}
+		return w, h, true
 	case "VP8 ":
 		// Lossy: 3-byte frame tag, 3-byte start code, then 14-bit sizes.
 		if len(payload) < 10 ||

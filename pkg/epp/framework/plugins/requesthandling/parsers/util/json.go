@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"unicode/utf8"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -44,12 +45,16 @@ func ParseRenderRequest(data []byte) (*fwkrh.ParseResult, error) {
 }
 
 // UnmarshalEnvelope keeps objects, arrays, and rawFields opaque so routing
-// metadata edits cannot round-trip content through Go values.
+// metadata edits cannot round-trip content through Go values. The json.RawMessage
+// values can share memory with data, so callers must not modify them in place; to
+// change a value, replace it.
 func UnmarshalEnvelope(data []byte, rawFields ...string) (map[string]any, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		if fallbackErr := Unmarshal(data, &fields); fallbackErr != nil {
-			return nil, fallbackErr
+	fields, ok := splitObject(data)
+	if !ok {
+		if err := json.Unmarshal(data, &fields); err != nil {
+			if fallbackErr := Unmarshal(data, &fields); fallbackErr != nil {
+				return nil, fallbackErr
+			}
 		}
 	}
 	result := make(map[string]any, len(fields))
@@ -85,6 +90,116 @@ func ObjectField(payload map[string]any, key string) (map[string]any, bool) {
 		}
 	}
 	return nil, false
+}
+
+// splitObject returns the members of a valid JSON object as slices of data, so the
+// envelope does not copy message content. Each slice has its capacity capped at its
+// length, so an append cannot write into data. It reports false for invalid JSON and
+// for any top-level value that is not an object; json.Unmarshal handles those.
+func splitObject(data []byte) (map[string]json.RawMessage, bool) {
+	if !json.Valid(data) {
+		return nil, false
+	}
+	i := skipSpace(data, 0)
+	if data[i] != '{' {
+		return nil, false
+	}
+	fields := make(map[string]json.RawMessage)
+	i = skipSpace(data, i+1)
+	if data[i] == '}' {
+		return fields, true
+	}
+	for {
+		keyEnd := stringEnd(data, i)
+		key := objectKey(data[i:keyEnd])
+		i = skipSpace(data, skipSpace(data, keyEnd)+1) // past ':'
+		valueEnd := jsonValueEnd(data, i)
+		fields[key] = json.RawMessage(data[i:valueEnd:valueEnd])
+		i = skipSpace(data, valueEnd)
+		if data[i] == '}' {
+			return fields, true
+		}
+		i = skipSpace(data, i+1) // past ','
+	}
+}
+
+// objectKey decodes a quoted key. A key that is plain ASCII without escapes is
+// used as is; any other key goes through json.Unmarshal, which unescapes it and
+// replaces invalid UTF-8. The caller has validated data, so json.Unmarshal of a
+// key cannot fail.
+func objectKey(quoted []byte) string {
+	plain := true
+	for _, c := range quoted {
+		if c == '\\' || c >= utf8.RuneSelf {
+			plain = false
+			break
+		}
+	}
+	if plain {
+		return string(quoted[1 : len(quoted)-1])
+	}
+	var key string
+	_ = json.Unmarshal(quoted, &key)
+	return key
+}
+
+// The scanners below assume data is valid JSON and i is at the start of a token.
+
+func skipSpace(data []byte, i int) int {
+	for i < len(data) {
+		switch data[i] {
+		case ' ', '\t', '\n', '\r':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// stringEnd returns the index after the closing quote of the string at i.
+func stringEnd(data []byte, i int) int {
+	for j := i + 1; ; j++ {
+		switch data[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1
+		}
+	}
+}
+
+// jsonValueEnd returns the index after the value at i.
+func jsonValueEnd(data []byte, i int) int {
+	switch data[i] {
+	case '"':
+		return stringEnd(data, i)
+	case '{', '[':
+		depth := 0
+		for j := i; ; j++ {
+			switch data[j] {
+			case '"':
+				j = stringEnd(data, j) - 1
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return j + 1
+				}
+			}
+		}
+	default:
+		j := i
+		for j < len(data) {
+			switch data[j] {
+			case ',', '}', ']', ' ', '\t', '\n', '\r':
+				return j
+			}
+			j++
+		}
+		return j
+	}
 }
 
 // Unmarshal decodes one JSON value, preserves numbers as json.Number, and rejects trailing data.

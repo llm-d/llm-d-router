@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 
 	"github.com/felixge/httpsnoop"
+
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 const sseEventDelimiter = "\n\n"
@@ -113,6 +115,44 @@ func (s *responseStatus) implicitOK() {
 	if s.statusCode == 0 {
 		s.statusCode = http.StatusOK
 	}
+}
+
+// stampFailedStage wraps w so every response carries routing.FailedStageHeader,
+// for the EPP to charge a failure to the endpoint that ran the failed stage.
+// The values are documented on routing.FailedStageHeader. A value the model
+// server set is dropped, so only the sidecar marks stages. The stamp goes on
+// the first write, header or body: a response can be written without a status,
+// which leaves the headers unset.
+func stampFailedStage(w http.ResponseWriter, summary *requestSummary) http.ResponseWriter {
+	var stamped atomic.Bool
+	stamp := func() {
+		if !stamped.CompareAndSwap(false, true) {
+			return
+		}
+		header := w.Header()
+		header.Del(routing.FailedStageHeader)
+		header.Set(routing.FailedStageHeader, summary.failedStageMarker())
+	}
+	return httpsnoop.Wrap(w, httpsnoop.Hooks{
+		WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {
+			return func(statusCode int) {
+				stamp()
+				next(statusCode)
+			}
+		},
+		Write: func(next httpsnoop.WriteFunc) httpsnoop.WriteFunc {
+			return func(b []byte) (int, error) {
+				stamp()
+				return next(b)
+			}
+		},
+		ReadFrom: func(next httpsnoop.ReadFromFunc) httpsnoop.ReadFromFunc {
+			return func(src io.Reader) (int64, error) {
+				stamp()
+				return next(src)
+			}
+		},
+	})
 }
 
 // failed reports whether the response carried an error status or could not be

@@ -276,8 +276,8 @@ func bulkPredictWithMetrics(
 	}
 
 	if predictedLatencyContext != nil {
-		recordRequestTTFTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.incomingModelName, predictedLatencyContext.schedulingRequest.TargetModel, duration.Seconds())
-		recordRequestTPOTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.incomingModelName, predictedLatencyContext.schedulingRequest.TargetModel, duration.Seconds())
+		recordRequestTTFTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.incomingModelName, predictedLatencyContext.targetModel, duration.Seconds())
+		recordRequestTPOTPredictionDuration(ctx, pluginName, pluginType, predictedLatencyContext.incomingModelName, predictedLatencyContext.targetModel, duration.Seconds())
 	}
 
 	results := make([]*latencypredictor.PredictionResponse, len(bulkResponse.Predictions))

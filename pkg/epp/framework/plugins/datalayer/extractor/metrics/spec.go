@@ -230,7 +230,8 @@ func (spec *Spec) labelsMatch(metricLabels []*dto.LabelPair) bool {
 }
 
 // extractValue gets the numeric value from different metric types.
-// Currently only Gauge and Counter are supported.
+// Gauge, Counter and Untyped samples carry one; the text parser files a
+// sample whose family has no TYPE line as Untyped.
 func extractValue(metric *dto.Metric) float64 {
 	if metric == nil {
 		return 0
@@ -240,6 +241,9 @@ func extractValue(metric *dto.Metric) float64 {
 	}
 	if counter := metric.GetCounter(); counter != nil {
 		return counter.GetValue()
+	}
+	if untyped := metric.GetUntyped(); untyped != nil {
+		return untyped.GetValue()
 	}
 	return 0
 }

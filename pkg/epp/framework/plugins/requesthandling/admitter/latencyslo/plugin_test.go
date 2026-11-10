@@ -19,10 +19,12 @@ package latencyslo
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
@@ -213,6 +215,12 @@ func TestAdmit(t *testing.T) {
 			err := plugin.Admit(context.Background(), tt.request, tt.endpoints)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Admit() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			// A rejection is a shed under load: 429 with the saturated dropped reason, not a 500.
+			var e errcommon.Error
+			if err != nil && (!errors.As(err, &e) || e.Code != errcommon.ResourceExhausted ||
+				e.Headers[errcommon.RequestDroppedReasonHeaderKey] != string(errcommon.RequestDroppedReasonSaturated)) {
+				t.Errorf("Admit() rejection = %#v, want ResourceExhausted with dropped reason %q", err, errcommon.RequestDroppedReasonSaturated)
 			}
 		})
 	}

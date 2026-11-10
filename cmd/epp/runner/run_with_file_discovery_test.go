@@ -21,14 +21,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	pb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -36,6 +40,7 @@ import (
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
 
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
+	testutils "github.com/llm-d/llm-d-router/test/utils"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -403,6 +408,104 @@ dataLayer:
 	}
 }
 
+// TestRunWithFileDiscovery_LogsRunnableError is a regression test for
+// https://github.com/llm-d/llm-d-router/issues/4045: a server that failed to
+// start made the EPP exit with status 1 and no log line naming the error,
+// because the run group's error was returned without being logged.
+func TestRunWithFileDiscovery_LogsRunnableError(t *testing.T) {
+	dir := t.TempDir()
+	endpointsPath := filepath.Join(dir, "endpoints.yaml")
+	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
+
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - name: file-discovery
+    type: file-discovery
+    parameters:
+      path: %q
+      watchFile: false
+  - name: random-picker
+    type: random-picker
+  - name: single-profile-handler
+    type: single-profile-handler
+  - name: metrics-source
+    type: metrics-data-source
+  - name: metrics-extractor
+    type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: random-picker
+dataLayer:
+  injectDefaults: false
+  discovery:
+    pluginRef: file-discovery
+  sources:
+    - pluginRef: metrics-source
+      extractors:
+        - pluginRef: metrics-extractor
+`, endpointsPath)
+
+	grpcListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	defer grpcListener.Close()
+	healthListener, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	defer healthListener.Close()
+
+	// The metrics server binds its port by number on the wildcard address, so
+	// a listener already holding that address makes it fail to start.
+	heldListener, err := net.Listen("tcp", ":0") //#nosec -- wildcard address, the one serveMetrics binds
+	require.NoError(t, err)
+	defer heldListener.Close()
+	heldPort := uint16(heldListener.Addr().(*net.TCPAddr).Port) //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+
+	var mu sync.Mutex
+	var logged strings.Builder
+	previous := setupLog
+	setupLog = funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged.WriteString(prefix + " " + args + "\n")
+	}, funcr.Options{})
+	t.Cleanup(func() { setupLog = previous })
+
+	opts := runserver.NewOptions()
+	opts.GRPCPort = uint16(grpcListener.Addr().(*net.TCPAddr).Port)         //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+	opts.GRPCHealthPort = uint16(healthListener.Addr().(*net.TCPAddr).Port) //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+	opts.MetricsPort = heldPort
+	opts.SecureServing = false
+	opts.HealthChecking = true
+	opts.PoolName = testPoolName
+	opts.PoolNamespace = "test-ns"
+	opts.ConfigText = configText
+
+	r := NewRunner()
+	r.grpcListener = grpcListener
+	r.healthListener = healthListener
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- r.runWithFileDiscovery(ctx, opts, rawConfig) }()
+
+	select {
+	case err := <-runErr:
+		require.ErrorContains(t, err, "metrics server")
+	case <-time.After(10 * time.Second):
+		t.Fatal("runWithFileDiscovery did not return after the metrics server failed to bind")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, logged.String(), "EPP stopped")
+	assert.Contains(t, logged.String(), "address already in use")
+}
+
 func checkHealthServing(addr string) bool {
 	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -422,6 +525,44 @@ type dummyAlphaPlugin struct {
 
 func (p *dummyAlphaPlugin) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: p.pluginType, Name: p.name}
+}
+
+func TestServeMetrics_ServesPluginState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handle := testutils.NewTestHandle(ctx)
+	handle.AddPlugin("dummy", &dummyAlphaPlugin{name: "dummy", pluginType: "dummy-type"})
+
+	port, err := fwknet.GetFreePort()
+	require.NoError(t, err)
+	errCh := make(chan error, 1)
+	go func() { errCh <- serveMetrics(ctx, uint16(port), false, handle) }() //#nosec -- port is an OS-assigned ephemeral TCP port, always <= 65535
+
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, runserver.PluginStateDebugPath)
+	client := &http.Client{Timeout: 2 * time.Second}
+	var body []byte
+	require.Eventually(t, func() bool {
+		resp, err := client.Get(url)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		body, err = io.ReadAll(resp.Body)
+		return err == nil
+	}, 2*time.Second, 20*time.Millisecond, "plugin state endpoint should return 200")
+
+	var state struct {
+		Plugins map[string]json.RawMessage `json:"plugins"`
+	}
+	require.NoError(t, json.Unmarshal(body, &state))
+	assert.Contains(t, state.Plugins, "dummy")
+
+	cancel()
+	require.NoError(t, <-errCh)
 }
 
 // TestRunWithFileDiscovery_InvalidObjectivesFile checks that --objectives-file is
