@@ -10,7 +10,7 @@
 
 ## 1. Summary
 
-Today, `llm-d` renders and tokenizes every text prompt twice. On ingress, EPP's `token-producer` plugin or Coordinator's `render` step tokenizes the prompt to score prefix-cache affinity. Before inference, the GPU worker renders and tokenizes the same prompt again. Duplicate tokenization wastes CPU, adds time-to-first-token (TTFT) latency on long multi-turn contexts, and lets router and worker token IDs drift.
+By default today, `llm-d` renders and tokenizes every text prompt twice. On ingress, EPP's `token-producer` plugin or Coordinator's `render` step tokenizes the prompt to score prefix-cache affinity. Before inference, the GPU worker renders and tokenizes the same prompt again. Duplicate tokenization wastes CPU, adds time-to-first-token (TTFT) latency on long multi-turn contexts, and lets router and worker token IDs drift.
 
 This proposal tokenizes every prompt **at most once, at ingress**, across **vLLM** and **SGLang** over **`Tokens -> Tokens` model servers**:
 
@@ -127,7 +127,7 @@ sequenceDiagram
     end
 ```
 
-- **Disaggregated P/D:** Coordinator reuses the rendered `token_ids` slice across stages. When `conditional-decode` misses the prefix cache, the worker returns gRPC `FAILED_PRECONDITION`, and Coordinator runs `encode -> prefill -> decode`. vLLM runs prefill (`max_new_tokens=1`) before decode via `GenerateRequest.kv`, whereas SGLang runs prefill and decode concurrently with `bootstrap_*` fields.
+- **Disaggregated P/D:** Coordinator reuses the rendered `token_ids` slice across stages. When `conditional-decode` misses the prefix cache, the worker returns gRPC `FAILED_PRECONDITION`, and Coordinator runs the disaggregated stages. vLLM runs `encode -> prefill -> decode` via `GenerateRequest.kv`, whereas SGLang runs prefill and decode concurrently with `bootstrap_*` fields (prefill calls `--encoder-urls` in EPD).
 - **Client disconnect:** Coordinator cancels active worker gRPC streams and closes any open local UDS sidecar stream.
 - **Token passthrough (`Coord-Tok-Tok`):** Coordinator skips `Render` and `Derender` and streams `Generate(token_ids)` directly.
 - **Parameter lowering:** `Render` returns the generation parameters that token-space workers need. Those include a `structural_tag` or JSON schema for `response_format` and `tool_choice`, and `engine_reasoning_gate` with `chat_template_kwargs`. They also include `bad_words_token_ids` and `stop_token_ids` for single-token stop strings. Coordinator copies them into `GenerateRequest` or `SamplingParams`. Multi-token stop strings match in the sidecar `Derender` stream, and Coordinator cancels the worker stream on a match.
@@ -156,11 +156,11 @@ The critical path per mode, in delivery order:
 
 | # | Gap | Frontend | Stage | Modes | Issue / PR |
 | ---: | :--- | :--- | :--- | :--- | :--- |
-| 1 | Merge `vllm.Render/Tokenize` and add raw JSON input, Completions, Messages, Harmony Responses, [`render_fingerprint`](#74-skew-detection-parity-and-pool-topology), and `--uds`. | Rust | `Render` | `Coord-Text-Tok` | [vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
-| 2 | Merge `vllm.Render/DetokenizeStream` and add Completions, Messages, Responses, and client JSON/SSE envelopes. | Rust | `Derender` | `Coord-Text-Tok` | [vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
-| 3 | Decode `logprobs` candidate tokens in `vllm.Render/Detokenize` and `DetokenizeStream`. | Rust | `Derender` | `Coord-Text-Tok` | [vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
-| 4 | Expose [`grpc.health.v1`](#75-sidecar-health-and-failure-modes) on `vllm-rs render`. | Rust | `Render`, `Derender` | `Coord-Text-Tok` | [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
-| 5 | When render omits media tensors, retain [`mm_metadata`](#71-multimodal-requests) in the response (and accept metadata-only `MediaItem` on `vllm.Inference`). | Both | `Render`, `Generate` | `Coord-Text-Tok` | [vllm#64997](https://github.com/vllm-project/vllm/issues/64997) |
+| 1 | Merge `vllm.Render/RenderChat` and add raw JSON input, Completions, Messages, Harmony Responses, [`render_fingerprint`](#74-skew-detection-parity-and-pool-topology), and `--uds`. | Rust | `Render` | `Coord-Text-Tok` | [vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
+| 2 | Merge `vllm.Render/DerenderChatStream` and add Completions, Messages, Responses, and client JSON/SSE envelopes. | Rust | `Derender` | `Coord-Text-Tok` | [vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
+| 3 | Decode `logprobs` candidate tokens in `vllm.Render` (`DerenderChat`, `DerenderChatStream`, and non-Chat APIs). | Rust | `Derender` | `Coord-Text-Tok` | [vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
+| 4 | Expose [`grpc.health.v1`](#75-sidecar-health-and-failure-modes) on `vllm-rs render`. | Rust | `Render`, `Derender` | `Coord-Text-Tok` | [vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
+| 5 | Retain [`mm_metadata`](#71-multimodal-requests) when render omits media tensors (`mm_payload = METADATA`), and accept metadata-only `MediaItem` on `vllm.Inference`. | Both | `Render`, `Generate` | `Coord-Text-Tok` | [vllm#64997](https://github.com/vllm-project/vllm/issues/64997), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
 | 6 | Support [`mm_processor_kwargs`](#71-multimodal-requests) and [`media_io_kwargs`](#71-multimodal-requests) on `vllm.Inference.GenerateRequest`. | Rust | `Generate` | `All` | [vllm#66426](https://github.com/vllm-project/vllm/issues/66426) |
 | 7 | Support `n>1` in `vllm.Inference`. | Rust | `Generate` | `All` | [vllm#65841](https://github.com/vllm-project/vllm/issues/65841) |
 | 8 | Accept [`prompt_render_fingerprint`](#74-skew-detection-parity-and-pool-topology) on `vllm.Inference.GenerateRequest` and enforce `--on-fingerprint-mismatch` on gRPC. | Rust | `Generate` | `Coord-Text-Tok` | [vllm#65503](https://github.com/vllm-project/vllm/issues/65503) |
@@ -170,7 +170,7 @@ The critical path per mode, in delivery order:
 | # | Gap | Frontend | Stage | Modes | Issue / PR |
 | ---: | :--- | :--- | :--- | :--- | :--- |
 | 1 | Expose SGLang `Lower` and `Respond` over gRPC and UDS (standalone `sglang-render` or decoupled from `sgl-router`) with [`render_fingerprint`](#74-skew-detection-parity-and-pool-topology) and [`grpc.health.v1`](#75-sidecar-health-and-failure-modes). | Rust | `Render`, `Derender` | `Coord-Text-Tok` | [sglang#48232](https://github.com/sgl-project/sglang/issues/48232) |
-| 2 | Add Messages, Responses, and [multimodal support](#71-multimodal-requests) in `sglang-processor`. | Rust | `Render`, `Derender` | `Coord-Text-Tok` | [sglang#48232](https://github.com/sgl-project/sglang/issues/48232), [sglang#46291](https://github.com/sgl-project/sglang/pull/46291) |
+| 2 | Add Messages, Responses, and [multimodal support](#71-multimodal-requests) in `sglang-processor`, plus pixel-free decode M-RoPE metadata on `sglang.api.v1`. | Rust | `Render`, `Generate`, `Derender` | `Coord-Text-Tok` | [sglang#48232](https://github.com/sgl-project/sglang/issues/48232), [sglang#46291](https://github.com/sgl-project/sglang/pull/46291) |
 | 3 | Support `DecodeStream` and stop strings on `output_ids` in the SGLang render service. | Rust | `Derender` | `Coord-Text-Tok` | [sglang#40920](https://github.com/sgl-project/sglang/issues/40920), [sglang#40956](https://github.com/sgl-project/sglang/issues/40956) |
 | 4 | Decode `logprobs` candidate text in `DecodeStream` on `--skip-tokenizer-init` pools. | Rust | `Derender` | `Coord-Text-Tok` | [sglang#40920](https://github.com/sgl-project/sglang/issues/40920), [sglang#48232](https://github.com/sgl-project/sglang/issues/48232) |
 | 5 | Expose [`grpc.health.v1`](#75-sidecar-health-and-failure-modes) on `sglang-server`. | Rust | `Generate` | `All` | [sglang#38075](https://github.com/sgl-project/sglang/issues/38075) |
@@ -190,7 +190,7 @@ The critical path per mode, in delivery order:
 | 7 | **Coordinator (low priority):** Map HTTP `/inference/v1/generate` and `/generate` to `vllm.Inference` and `sglang.api.v1` gRPC. | Both | `Generate` | `Coord-Tok-Tok` | [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3901](https://github.com/llm-d/llm-d-router/issues/3901) |
 | 8 | **Coordinator (low priority):** Forward Python `VllmEngine` and `SglangScheduler` gRPC streams across P/D stages. | Both | `Generate` | `Coord-Tok-Tok` | [#3981](https://github.com/llm-d/llm-d-router/issues/3981) |
 | 9 | **Coordinator:** [Strip client](#72-security-and-trust-boundaries) `prompt_token_ids`, `prompt_render_fingerprint`, `render_fingerprint`, and `input_ids` on text routes. | Both | `Render` | `Coord-Text-Tok` | [#3979](https://github.com/llm-d/llm-d-router/issues/3979) |
-| 10 | **Coordinator:** [Forward media bytes](#71-multimodal-requests) from `replace-media-urls` to `Render` and `encode`, with `mm_hashes` in `encode` gRPC metadata. | Both | `Render`, `Generate` | `Coord-Text-Tok` | [#3988](https://github.com/llm-d/llm-d-router/issues/3988) |
+| 10 | **Coordinator:** [Forward media bytes](#71-multimodal-requests) from `replace-media-urls` to `Render` and vLLM `encode` (or SGLang `prefill`), with `mm_hashes` in gRPC metadata. | Both | `Render`, `Generate` | `Coord-Text-Tok` | [#3988](https://github.com/llm-d/llm-d-router/issues/3988) |
 | 11 | **Coordinator (low priority):** Support `/v1/completions` batch `prompt` arrays (`[]string` and `[][]int`) via sub-request fan-out. | Both | `Render`, `Generate`, `Derender` | `Coord-Text-Tok`, `Coord-Tok-Tok` | [#4088](https://github.com/llm-d/llm-d-router/issues/4088) |
 | 12 | **Coordinator (low priority):** Serve `/tokenize`, `/detokenize`, and `/v1/messages/count_tokens` from the local render sidecar instead of decode passthrough. | Both | `Render`, `Derender` | `Coord-Text-Tok` | [#4111](https://github.com/llm-d/llm-d-router/issues/4111), [#4124](https://github.com/llm-d/llm-d-router/issues/4124) |
 | 13 | **EPP:** Add gRPC parsers for `vllm.Inference` and `sglang.api.v1`. | Both | `Generate` | `All` | [#3993](https://github.com/llm-d/llm-d-router/issues/3993), [#3901](https://github.com/llm-d/llm-d-router/issues/3901) |
@@ -226,12 +226,12 @@ On both engines, `Coord-Text-Tok` keeps GPU workers in token space and runs `Ren
 - **Stages**
   - **Render:** Partial. Coordinator targets `vllm-rs render` over UDS gRPC (never Python HTTP `/v1/*/render`). Draft `vllm.Render` supports typed Chat only and lacks `--uds`.
   - **Generate:** Partial. `vllm.Inference/GenerateStream` supports `token_ids` with `output_text=false`, KV/EC parameters, and media for `n=1`. Coordinator lacks a gRPC client.
-  - **Derender:** Partial. Draft `vllm.Render` streams Chat deltas only. It lacks Completions, Messages, Responses, client JSON/SSE envelopes, and `logprobs` candidate decoding.
+  - **Derender:** Partial. Draft `vllm.Render` streams Chat deltas and `logprobs` (`DerenderChatStream`). It lacks Completions, Messages, Responses, and client JSON/SSE envelopes.
 - **Engine gaps**
-  - Merge Chat render and streaming derender in `vllm.Render` ([vllm#64685](https://github.com/vllm-project/vllm/pull/64685)).
+  - Merge `RenderChat`, `DerenderChat`, and `DerenderChatStream` in `vllm.Render` ([vllm#64685](https://github.com/vllm-project/vllm/pull/64685)).
   - Add raw JSON input, Completions, Messages, Responses (with Harmony), client JSON/SSE envelopes, `render_fingerprint`, and `--uds` ([vllm#65503](https://github.com/vllm-project/vllm/issues/65503)).
-  - Decode `logprobs` candidate tokens in `vllm.Render/DetokenizeStream` ([vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503)).
-  - When render omits media tensors, retain `mm_metadata` in the response ([vllm#64997](https://github.com/vllm-project/vllm/issues/64997)).
+  - Decode `logprobs` candidate tokens across `vllm.Render` RPCs ([vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503)).
+  - Retain `mm_metadata` when render omits media tensors, and accept metadata-only `MediaItem` on `vllm.Inference` ([vllm#64997](https://github.com/vllm-project/vllm/issues/64997), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503)).
   - Support `mm_processor_kwargs` and `media_io_kwargs` on `vllm.Inference.GenerateRequest` ([vllm#66426](https://github.com/vllm-project/vllm/issues/66426)).
   - Support `n>1` in `vllm.Inference` ([vllm#65841](https://github.com/vllm-project/vllm/issues/65841)).
   - Accept `prompt_render_fingerprint` on `vllm.Inference.GenerateRequest` and enforce `--on-fingerprint-mismatch` on gRPC ([vllm#65503](https://github.com/vllm-project/vllm/issues/65503)).
@@ -260,7 +260,7 @@ On both engines, `Coord-Text-Tok` keeps GPU workers in token space and runs `Ren
   - **Derender:** Unsupported. Responders in `sglang-processor` require server `text` rather than `output_ids` (except on DeepSeek-V4/V4.1). Logprob text decodes on the server detok shard only.
 - **Engine gaps**
   - Expose `Lower`, `Respond`, `render_fingerprint`, and `grpc.health.v1` over UDS, via standalone `sglang-render` or decoupled `sgl-router` ([sglang#48232](https://github.com/sgl-project/sglang/issues/48232)).
-  - Add Messages, Responses, and multimodal support in `sglang-processor` ([sglang#48232](https://github.com/sgl-project/sglang/issues/48232), [sglang#46291](https://github.com/sgl-project/sglang/pull/46291)).
+  - Add Messages, Responses, and multimodal support in `sglang-processor`, plus pixel-free decode M-RoPE metadata on `sglang.api.v1` ([sglang#48232](https://github.com/sgl-project/sglang/issues/48232), [sglang#46291](https://github.com/sgl-project/sglang/pull/46291)).
   - Support `DecodeStream` and stop strings on `output_ids` in the SGLang render service ([sglang#40920](https://github.com/sgl-project/sglang/issues/40920) items 3-4, [sglang#40956](https://github.com/sgl-project/sglang/issues/40956)).
   - Decode `logprobs` candidate text in `DecodeStream` ([sglang#40920](https://github.com/sgl-project/sglang/issues/40920) items 3-4, [sglang#48232](https://github.com/sgl-project/sglang/issues/48232)).
   - Expose `grpc.health.v1` on `sglang-server` ([sglang#38075](https://github.com/sgl-project/sglang/issues/38075)).
@@ -274,7 +274,7 @@ On both engines, `Coord-Text-Tok` keeps GPU workers in token space and runs `Ren
     - When `Render` rejects prompts past `max_model_len`, return `400`. Forward pre-truncated `input_ids` without truncation flags ([llm-d-router#4124](https://github.com/llm-d/llm-d-router/issues/4124)).
     - When a buffered multi-token stop string matches, cancel `Generate` ([llm-d-router#4124](https://github.com/llm-d/llm-d-router/issues/4124)).
     - Strip client `input_ids` and `render_fingerprint` on text routes ([llm-d-router#3979](https://github.com/llm-d/llm-d-router/issues/3979)).
-    - Forward media bytes from `replace-media-urls` to `Render` and `encode`, with `mm_hashes` in `encode` gRPC metadata ([llm-d-router#3988](https://github.com/llm-d/llm-d-router/issues/3988)).
+    - Forward media bytes from `replace-media-urls` to `Render` and `prefill`, with `mm_hashes` in `prefill` gRPC metadata ([llm-d-router#3988](https://github.com/llm-d/llm-d-router/issues/3988)).
     - Support `/v1/completions` batch `prompt` arrays via sub-request fan-out as a low-priority follow-up ([llm-d-router#4088](https://github.com/llm-d/llm-d-router/issues/4088)).
     - Serve `/tokenize`, `/detokenize`, and `/v1/messages/count_tokens` from the render sidecar as a low-priority follow-up ([llm-d-router#4124](https://github.com/llm-d/llm-d-router/issues/4124)).
   - **EPP**
@@ -363,9 +363,11 @@ Sections 7.1-7.3 cover request, security, and state rules whose gaps appear per 
 
 Multimodal requests preserve single tokenization without 2-38 MB pixel tensors (`kwargs_data`) on gateway links:
 
-- **Coordinator + EPP (`gRPC`):** Coordinator calls the render sidecar with tensor omission (`omit_media_kwargs = true` on `vllm.Render/Tokenize` and hash-and-placeholder mode on `SglangRender/Lower`). The sidecar computes `mm_hashes`, retains per-item `mm_metadata` (`image_grid_thw` / `video_grid_thw`), and expands multimodal placeholders in `token_ids` to match the worker layout. Coordinator sends compressed media (`MediaItem` bytes/URLs on `vllm.Inference`, or `MediaInput` and `mm_hashes` on `sglang.api.v1`) only to `encode` (or `prefill` without `encode`). Prefill with `ECConnector` and decode workers receive `mm_metadata` and KV blocks without decoding pixels.
-  - *Processor overrides:* When a vLLM request sets `mm_processor_kwargs` or `media_io_kwargs`, placeholder lengths depend on those fields, which `vllm.Inference.GenerateRequest` lacks today. For those requests, Coordinator requests inline `PreprocessedMediaFeatures` from `Tokenize` until `GenerateRequest` adds those fields ([vllm#66426](https://github.com/vllm-project/vllm/issues/66426)).
-- **Media fetch policy:** Coordinator's `replace-media-urls` step fetches each media URL once under domain allowlists, private-network guards, size caps, and timeouts. Coordinator passes the fetched bytes to `Render` over UDS and to `encode` (`MediaItem.raw_bytes` on `vllm.Inference`, `MediaInput` on `sglang.api.v1`), without worker refetches. Coordinator also sends `mm_hashes` in gRPC metadata, so EPP routes `encode` requests without buffered media bodies.
+- **Coordinator + EPP (`gRPC`):** Coordinator calls the render sidecar in metadata mode (`mm_payload = METADATA` on `vllm.Render` and hash-and-placeholder mode on `SglangRender/Lower`). The sidecar computes `mm_hashes`, retains per-item grid metadata (`image_grid_thw` / `video_grid_thw`), and expands multimodal placeholders in token IDs for EPP cache affinity.
+  - *Encode and prefill inputs:* On vLLM, Coordinator sends `MediaItem.raw_bytes` per item to `encode`. When every item has an EC descriptor, `prefill` receives expanded `token_ids`, metadata-only `MediaItem` entries, and `ec_transfer_params` ([vllm#64997](https://github.com/vllm-project/vllm/issues/64997), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503)). Without `encode` or on a partial EC miss, `vllm.Inference` cannot mix `features` and `raw_bytes` in one request. Coordinator collapses uniform placeholder spans and sends `MediaItem.raw_bytes` (`uuid = mm_hash`) plus any `ec_transfer_params` until [vllm#53169](https://github.com/vllm-project/vllm/pull/53169) lands. On SGLang, `prefill` receives `MediaInput` (`image_data` / `video_data` / `audio_data`), `mm_hashes`, and collapsed `input_ids`, and calls `--encoder-urls` internally in EPD mode.
+  - *Decode, KV, and EC failures:* Decode workers receive KV blocks without pixel bytes. vLLM sends metadata-only `MediaItem` entries ([vllm#65503](https://github.com/vllm-project/vllm/issues/65503)), and SGLang uses metadata-only `MediaRef` or P/D bootstrap M-RoPE transfer ([sglang#48232](https://github.com/sgl-project/sglang/issues/48232)). SGLang `decode` aborts on KV-transfer errors. vLLM multimodal decode pools set `kv_load_failure_policy: fail`, and Coordinator re-runs from `encode` on retryable EC or KV load failures ([llm-d-router#3993](https://github.com/llm-d/llm-d-router/issues/3993)).
+  - *Processor overrides:* `sglang.api.v1` carries per-item resize and frame hints on `MediaRef`, whereas `vllm.Inference.GenerateRequest` lacks `mm_processor_kwargs` and `media_io_kwargs`. When a vLLM request sets either field, Coordinator requests inline `PreprocessedMediaFeatures` from `vllm.Render` until `GenerateRequest` adds both fields ([vllm#66426](https://github.com/vllm-project/vllm/issues/66426)).
+- **Media fetch policy:** Coordinator's `replace-media-urls` step fetches each media URL once under domain allowlists, private-network guards, size caps, and timeouts. Coordinator passes the fetched bytes to `Render` over UDS and to vLLM `encode` (`MediaItem.raw_bytes`) or SGLang `prefill` (`MediaInput`), without worker refetches. Coordinator also sends `mm_hashes` in gRPC metadata, so EPP routes `encode` and `prefill` requests without buffered media bodies.
 
 ### 7.2 Security and Trust Boundaries
 
@@ -379,9 +381,9 @@ Untrusted token IDs on Chat, Messages, or Responses let callers bypass system pr
 Coordinator and engine render sidecars hold no cross-request or persisted state:
 
 - When [vllm-project/agentic-api](https://github.com/vllm-project/agentic-api) sits in front of `llm-d`, it terminates `/v1/conversations` and stateful `/v1/responses` (`previous_response_id`, `store: true`, `background: true`). It expands prior turns into a stateless `/v1/responses` input, forwards that request to `llm-d`, and stores the output ([`docs/api-routing.md`](api-routing.md)).
-- Without `agentic-api`, Coordinator and `pd-sidecar` reject unsupported stateful `/v1/responses` fields with `400 Bad Request` (`RejectStatefulResponsesFields`) and avoid router database state.
+- Without `agentic-api`, Coordinator and `pd-sidecar` reject `previous_response_id`, `conversation`, `background`, and `file_id` with `400 Bad Request` (`RejectStatefulResponsesFields`). They allow `store: true` without persistence (as vLLM does when response storage is disabled) and avoid router database state.
 
-Within one streamed response in `Coord-Text-Tok`, the sidecar holds detokenizer and output-parser state in memory for its open `DetokenizeStream` or `Respond` call. Coordinator holds only the client connection, and GPU workers hold no output-parser state.
+Within one streamed response in `Coord-Text-Tok`, the sidecar holds detokenizer and output-parser state in memory for its open `vllm.Render` or `SglangRender` stream. Coordinator holds only the client connection, and GPU workers hold no output-parser state.
 
 ### 7.4 Skew Detection, Parity, and Pool Topology
 
@@ -413,7 +415,7 @@ In `Coord-Text-Tok`, worker calls use token-only gRPC, so the local sidecar hand
 - **Current support**
   - Coordinator has no UDS render sidecar, sidecar health gate on `/readyz`, or render admission control.
 - **Engine gaps**
-  - Expose `grpc.health.v1` on `vllm-rs render` and `sglang-render` ([vllm#65503](https://github.com/vllm-project/vllm/issues/65503), [sglang#48232](https://github.com/sgl-project/sglang/issues/48232)).
+  - Expose `grpc.health.v1` on `vllm-rs render` and `sglang-render` ([vllm#64685](https://github.com/vllm-project/vllm/pull/64685), [vllm#65503](https://github.com/vllm-project/vllm/issues/65503), [sglang#48232](https://github.com/sgl-project/sglang/issues/48232)).
 - **llm-d gaps**
   - Run the render sidecar as a Kubernetes native sidecar (`restartPolicy: Always`) on a memory-backed `emptyDir` UDS ([llm-d-router#3985](https://github.com/llm-d/llm-d-router/issues/3985)).
   - Gate Coordinator `/readyz` on `grpc.health.v1` status from the local sidecar ([llm-d-router#3985](https://github.com/llm-d/llm-d-router/issues/3985)).
