@@ -211,6 +211,7 @@ func TestInflightGauges_DisaggEarlyPrefillRelease(t *testing.T) {
 	req := makeTokenRequest("req-disagg", 4) // 4 input + 6 output = 10 tokens
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
 			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(podA)}},
 			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint(podB)}},

@@ -71,6 +71,7 @@ func decodeOnly(ep scheduling.Endpoint) *scheduling.SchedulingResult {
 func prefillOnly(ep scheduling.Endpoint) *scheduling.SchedulingResult {
 	return &scheduling.SchedulingResult{
 		PrimaryProfileName: "prefill",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*scheduling.ProfileRunResult{
 			"prefill": {TargetEndpoints: []scheduling.Endpoint{ep}},
 		},

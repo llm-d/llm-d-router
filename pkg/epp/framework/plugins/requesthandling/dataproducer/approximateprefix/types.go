@@ -107,15 +107,6 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 }
 
 const (
-	// experimentalDefaultPrefillProfile is a hardcoded profile name for prefill nodes.
-	// In P/D disaggregation mode, the prefill and decode are usually represented as two different
-	// scheduling profiles to pick the prefill and decode endpoints. This constant defines the
-	// prefill profile name to ensure that the index is updated for the prefill endpoint and not
-	// only for the primary endpoint that will initially handle the request.
-	// This is hardcoded for now until we land on a canonical approach for plugins to identify
-	// prefill and decode endpoints (See https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2080)
-	experimentalDefaultPrefillProfile = "prefill"
-
 	// podActiveCheckInterval is the interval at which we check if pods are still active.
 	podActiveCheckInterval = 2 * time.Minute
 

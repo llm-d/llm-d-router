@@ -48,7 +48,6 @@ import (
 
 const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
-	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
 )
 
@@ -594,7 +593,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 			if endpoint == nil || endpoint.GetMetadata() == nil {
 				continue
 			}
-			if profileName == profilePrefill {
+			if profileName == result.PrefillProfileName {
 				p.release(endpoint, request, profileName)
 			} else {
 				p.releaseTokensEarly(endpoint, request, profileName)
@@ -606,10 +605,10 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// prefill contribution as soon as prefill completes, while other profiles'
 	// entries remain until EndOfStream.
 	if p.addEstimatedOutputTokens && resp.StartOfStream {
-		if prefillResult, ok := result.ProfileResults[profilePrefill]; ok && len(prefillResult.TargetEndpoints) > 0 {
+		if prefillResult := result.PrefillProfile(); prefillResult != nil && len(prefillResult.TargetEndpoints) > 0 {
 			endpoint := prefillResult.TargetEndpoints[0]
 			if endpoint != nil && endpoint.GetMetadata() != nil {
-				p.release(endpoint, request, profilePrefill)
+				p.release(endpoint, request, result.PrefillProfileName)
 			}
 		}
 	}
