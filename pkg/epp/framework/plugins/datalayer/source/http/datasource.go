@@ -183,6 +183,11 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 		Client: http.Client{
 			Timeout:   timeout,
 			Transport: baseTransport,
+			// A scraped endpoint picks the redirect target, so following one would let
+			// a pod point the scrape at any address the EPP can reach.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 	if scheme == "https" {
