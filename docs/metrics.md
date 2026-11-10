@@ -574,6 +574,8 @@ reaches its `PreRequest` records one decision.
 |---|---|---|---|
 | `llm_d_epp_p2p_source_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `outcome` | One per request, with the outcome the producer's `p2p decision` log line names. |
 | `llm_d_epp_p2p_source_predicted_pulled_tokens` | Histogram | `plugin_name`, `endpoint_role` | Prompt tokens the selected source holds beyond the endpoint computing the prefix, per request sent to pull. |
+| `llm_d_epp_p2p_source_unpulled_tokens` | Histogram | `plugin_name`, `endpoint_role`, `outcome` | The same gap, per `declined` or `below-floor` request whose source holds more than the computing endpoint. |
+| `llm_d_epp_p2p_source_request_ttft_seconds` | Histogram | `plugin_name`, `endpoint_role`, `outcome`, `cost_margin` | Time from request receipt to the first response byte, per streaming request whose stream ends naturally (an HTTP error status delivered in full included), with `ttftByDecision`. |
 
 A request records the first outcome in this table that applies to it.
 
@@ -604,6 +606,14 @@ endpoints that compute the prefix, the prefill pods under P/D disaggregation. vL
 promotion job from its P2P tier (`tier=~".*:p2p"`) in `vllm:kv_offload_tiering_promotion_latency_seconds`,
 labelled `result="success"` or `result="failure"`. As with the prefix prediction, the cohorts differ:
 a pull that fails or falls back to local prefill is counted on the router side only.
+
+`cost_margin` buckets the cost model's gain minus cost: `-inf..-1s`, `-1s..-250ms`, `-250ms..0`,
+`0..250ms`, `250ms..1s`, `1s..+inf`, and `none` for a decision the cost model did not price. A
+positive margin is the cost model approving a pull; `outcome` records whether the pull was requested,
+and an `unparsed-body` decision keeps its margin. The margin also depends on the load of the source
+and computing endpoints, so requests in one bucket can differ in cached-token gap, load and prompt
+length. TTFT by margin is diagnostic and does not measure the benefit of a pull.
+`outcome="pulled"` is the router's request, which the engine may still compute locally.
 
 ### Prefix-cache affinity filter and P2P
 
