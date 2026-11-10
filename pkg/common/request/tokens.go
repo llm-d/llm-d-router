@@ -38,6 +38,10 @@ import (
 // min_tokens <= max_tokens=1 without raising the floor above the cap (vLLM's
 // SamplingParams rejects min_tokens > max_tokens).
 //
+// n is stripped so the leg runs one sequence: vLLM splits n > 1 into child
+// requests but returns kv_transfer_params for only one of them, and the other
+// children hold their KV blocks until the lease expires.
+//
 // A Messages body with thinking enabled loses its thinking object: the API
 // requires budget_tokens below max_tokens, so the budget cannot stand next to a
 // cap of 1, and the leg has no thinking to budget. vLLM applies an enabled
@@ -67,6 +71,7 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 		limits[field] = 1
 	}
 	delete(limits, FieldMinTokens)
+	delete(limits, FieldN)
 	if apiType == APITypeMessages {
 		if thinking, _ := FieldValue(body, FieldThinking); thinkingType(thinking) == ThinkingTypeEnabled {
 			delete(body, FieldThinking)
