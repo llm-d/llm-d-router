@@ -369,7 +369,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MaxIdleConnsPerHost, "max-idle-conns-per-host", opts.MaxIdleConnsPerHost, "max idle keep-alive connections per host for reverse proxy transports; set to at least the expected concurrency")
 	fs.IntVar(&opts.PrefillMaxRetries, prefillMaxRetries, opts.PrefillMaxRetries, "max retry attempts when a prefill request fails with a 5xx error; 0 means no retries (default)")
 	fs.DurationVar(&opts.PrefillRetryBackoff, prefillRetryBackoff, opts.PrefillRetryBackoff, "delay between prefill retry attempts")
-	fs.DurationVar(&opts.PrefillTimeout, prefillTimeout, opts.PrefillTimeout, "timeout for each prefill attempt; a timed-out attempt is retried like a 5xx, and the client receives 504 once attempts are exhausted; 0 means no timeout (default)")
+	fs.DurationVar(&opts.PrefillTimeout, prefillTimeout, opts.PrefillTimeout, "timeout for the first prefill attempt and each retry separately; an attempt that times out before the response arrives is retried under --prefill-max-retries, and a timed-out last attempt answers 504; 0 means no timeout (default)")
 	fs.StringVar(&opts.inlineConfiguration, inlineConfiguration, "", "Sidecar configuration in YAML provided as inline specification. Example `--configuration={port: 8085, model-server-port: 8203}. Inline configuration and file configuration are mutually exclusive.`")
 	fs.StringVar(&opts.fileConfiguration, configurationFile, "", "Path to file which contains sidecar configuration in YAML. Example `--configuration-file=/etc/config/sidecar-config.yaml`. Inline configuration and file configuration are mutually exclusive.")
 }
