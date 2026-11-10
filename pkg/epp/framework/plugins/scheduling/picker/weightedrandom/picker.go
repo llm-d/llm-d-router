@@ -121,9 +121,11 @@ func (p *WeightedRandomPicker) WithName(name string) *WeightedRandomPicker {
 }
 
 // WithTemperature sets the temperature that tunes how sharply selection favors higher scores.
-// WeightedRandomPickerFactory validates that the value is > 0 before construction.
+// A non-positive value is ignored and the current temperature is kept.
 func (p *WeightedRandomPicker) WithTemperature(temperature float64) *WeightedRandomPicker {
-	p.temperature = temperature
+	if temperature > 0 {
+		p.temperature = temperature
+	}
 	return p
 }
 

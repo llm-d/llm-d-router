@@ -136,6 +136,23 @@ func TestWeightedRandomPickerFactoryTemperature(t *testing.T) {
 	}
 }
 
+func TestWithTemperatureIgnoresNonPositiveValues(t *testing.T) {
+	tests := []struct {
+		value    float64
+		expected float64
+	}{
+		{value: 0.5, expected: 0.5},
+		{value: 0, expected: DefaultTemperature},
+		{value: -1, expected: DefaultTemperature},
+	}
+
+	for _, test := range tests {
+		if got := NewWeightedRandomPicker(1).WithTemperature(test.value).temperature; got != test.expected {
+			t.Errorf("WithTemperature(%g): expected temperature %g, got %g", test.value, test.expected, got)
+		}
+	}
+}
+
 func TestPickWeightedRandomPicker(t *testing.T) {
 	const (
 		testIterations = 10000
