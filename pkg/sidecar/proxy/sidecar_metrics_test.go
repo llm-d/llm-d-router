@@ -1885,7 +1885,7 @@ func TestHandleNIXLV2SerialClientCancelDuringPrefillBody(t *testing.T) {
 }
 
 // A client that disconnects before the prefill response arrives makes the
-// reverse proxy answer 502 itself, which is not a prefill failure either.
+// reverse proxy answer 502 itself; that 502 is not a prefill failure.
 func TestHandleNIXLV2SerialClientCancelBeforePrefillResponse(t *testing.T) {
 	spans := tracetest.NewSpanRecorder()
 	useTracerProviderForTest(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
@@ -1959,6 +1959,73 @@ func TestHandleNIXLV2SerialClientCancelBeforePrefillResponse(t *testing.T) {
 	}
 	require.NotNil(t, prefillSpan, "the prefill span must end")
 	assert.Equal(t, codes.Unset, prefillSpan.Status().Code)
+}
+
+// A prefill error that arrived before the client disconnected during the retry
+// backoff is still a prefill failure, whether its body was complete or cut off.
+func TestHandleNIXLV2SerialClientCancelDuringRetryBackoff(t *testing.T) {
+	for _, cutOff := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cut-off body %t", cutOff), func(t *testing.T) {
+			var posts atomic.Int32
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				posts.Add(1)
+				if cutOff {
+					w.Header().Set("Content-Length", "100")
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":`)
+			}))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{Port: "0", DecoderURL: prefillURL, PrefillMaxRetries: 2, PrefillRetryBackoff: time.Minute})
+			var once sync.Once
+			backoff := make(chan struct{})
+			s.logger = funcr.New(func(_, args string) {
+				if strings.Contains(args, "retrying prefill request") {
+					once.Do(func() { close(backoff) })
+				}
+			}, funcr.Options{Verbosity: logging.TRACE})
+			s.decoderProxy = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("decode must not run after the client disconnected")
+			})
+			handled := make(chan struct{})
+			sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(handled)
+				s.handleNIXLV2(w, withContextLogger(s, r), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
+			}))
+			defer sidecar.Close()
+
+			before := snapshotStageMetrics(t)
+			raw, err := json.Marshal(textChatBody())
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, sidecar.URL+reqcommon.PathChatCompletions, bytes.NewReader(raw))
+			require.NoError(t, err)
+			go func() {
+				if resp, err := sidecar.Client().Do(req); err == nil {
+					_ = resp.Body.Close()
+				}
+			}()
+
+			select {
+			case <-backoff:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the sidecar did not start the retry backoff")
+			}
+			cancel()
+			select {
+			case <-handled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("sidecar handler did not return after the client disconnected")
+			}
+
+			assert.Equal(t, int32(1), posts.Load())
+			assert.Equal(t, stageMetrics{prefillCount: 1, prefillErrors: 1}, snapshotStageMetrics(t).delta(before))
+		})
+	}
 }
 
 // writeHeaderSignal closes written once the final status is written through it.

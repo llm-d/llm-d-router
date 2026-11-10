@@ -194,9 +194,6 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 		}
 		return
 	}
-	preq.Body = io.NopCloser(bytes.NewReader(pbody))
-	preq.ContentLength = int64(len(pbody))
-
 	prefillHandler, err := s.prefillerProxyHandler(prefillPodHostPort)
 	if err != nil {
 		logger.Error(err, "failed to create prefill handler")
@@ -568,19 +565,17 @@ func servePrefill(h http.Handler, pw *bufferedResponseWriter, r *http.Request) (
 }
 
 // servePrefillAttempt sends body as one prefill attempt, bounded by
-// Config.PrefillTimeout when it is set. timedOut reports an attempt the timeout
-// ended before a complete response arrived.
+// Config.PrefillTimeout when it is set. timedOut reports whether the timeout
+// ended the attempt before a complete response arrived.
 func (s *Server) servePrefillAttempt(h http.Handler, pw *bufferedResponseWriter, preq *http.Request, body []byte) (timedOut bool, err error) {
-	attempt := preq
+	ctx := preq.Context()
 	if s.config.PrefillTimeout > 0 {
-		ctx, cancel := context.WithTimeout(preq.Context(), s.config.PrefillTimeout)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.config.PrefillTimeout)
 		defer cancel()
-		attempt = preq.WithContext(ctx)
 	}
-	attempt.Body = io.NopCloser(bytes.NewReader(body))
-	attempt.ContentLength = int64(len(body))
-	err = servePrefill(h, pw, attempt)
-	timedOut = errors.Is(attempt.Context().Err(), context.DeadlineExceeded) &&
+	err = servePrefill(h, pw, cloneRequestWithBody(ctx, preq, body))
+	timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded) &&
 		preq.Context().Err() == nil &&
 		(err != nil || isHTTPError(pw.statusCode))
 	return timedOut, err

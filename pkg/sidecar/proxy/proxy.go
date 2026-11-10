@@ -80,8 +80,8 @@ type Config struct {
 	PrefillMaxRetries int
 	// PrefillRetryBackoff is the delay between prefill retry attempts.
 	PrefillRetryBackoff time.Duration
-	// PrefillTimeout bounds each prefill attempt, retries included. 0 means
-	// no timeout.
+	// PrefillTimeout bounds the first prefill attempt and each retry
+	// separately. 0 means no timeout.
 	PrefillTimeout time.Duration
 
 	// UseTLSForPrefiller indicates whether to use TLS when sending requests to prefillers.
