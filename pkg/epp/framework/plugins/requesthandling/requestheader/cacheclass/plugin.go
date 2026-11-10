@@ -66,6 +66,8 @@ const (
 	// How long a classified request may stay unclaimed before it is treated as rejected.
 	// Requests that reach PreRequest claim their entry immediately; anything still pending
 	// after this was shed at admission.
+	// Age after which an unclaimed entry is treated as shed: attributed as turned-away and
+	// removed. Admitted requests claim their entry in PreRequest before this elapses.
 	defaultPendingTTL = 2 * time.Minute
 	// How often unclaimed entries are swept.
 	defaultSweepInterval = 30 * time.Second
@@ -74,8 +76,9 @@ const (
 	// shed traffic only because the router just started.
 	defaultWarmupBlocks = 5000
 
-	// flowIDSuffixHit and flowIDSuffixMiss split one fairness ID into two queues at the
-	// same priority. The unit separator keeps the suffix out of ordinary fairness IDs.
+	// flowIDSuffixHit and flowIDSuffixMiss split one parent fairness ID into two sibling
+	// queues at the same priority. The unit separator keeps the suffix out of ordinary
+	// fairness IDs. ParentFlowID strips these to recover the parent ID for accounting.
 	flowIDSuffixHit  = "\x1fcacheclass:hit"
 	flowIDSuffixMiss = "\x1fcacheclass:miss"
 )
@@ -244,6 +247,11 @@ func Factory(name string, raw *json.Decoder, handle fwkplugin.Handle) (fwkplugin
 // TypedName returns the plugin type and instance name.
 func (p *Plugin) TypedName() fwkplugin.TypedName { return p.typedName }
 
+// Produces declares the CacheClass request attribute written by RequestHeader.
+func (p *Plugin) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{CacheClassKey: &CacheClass{}}
+}
+
 // RequestHeader classifies the request and attaches CacheClass. It does not change priority.
 //
 // It fails open on any problem deriving hashes and leaves the request without a class, so the
@@ -251,8 +259,8 @@ func (p *Plugin) TypedName() fwkplugin.TypedName { return p.typedName }
 func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error {
 	logger := log.FromContext(ctx)
 
-	hashes := p.blockHashes(ctx, request)
-	matched, total := p.lookup(hashes)
+	perPrompt := p.blockHashes(ctx, request)
+	matched, total := p.lookupPrompts(perPrompt)
 	if total == 0 {
 		// Nothing hashable (empty prompt, pre-tokenized body we cannot byte-pack, parse
 		// failure). Leave the request exactly as it arrived.
@@ -277,8 +285,12 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceR
 		OriginalPriority: original,
 	})
 
+	var flat []prefixhash.BlockHash
+	for _, hs := range perPrompt {
+		flat = append(flat, hs...)
+	}
 	p.pending.Store(request.RequestID, &pendingEntry{
-		hashes:        hashes,
+		hashes:        flat,
 		matchedTokens: matchedTokens,
 		hit:           hit,
 		at:            time.Now(),
@@ -311,8 +323,11 @@ func (p *Plugin) Allow(_ context.Context, item fwkfc.QueueItemAccessor, saturati
 	return false
 }
 
-// FlowID returns the fairness ID flow control should queue under. A Ready class splits hits
-// and misses into sibling queues at the same priority so a held miss does not block a hit.
+// FlowID returns the queue ID flow control should use. A Ready class splits hits and misses
+// into sibling queues at the same priority so a held miss does not block a hit.
+//
+// The returned ID is a queue key, not the parent fairness ID. Use ParentFlowID to recover the
+// tenant/model key used for service accounting.
 func FlowID(base string, class *CacheClass) string {
 	if class == nil || !class.Ready {
 		return base
@@ -323,9 +338,20 @@ func FlowID(base string, class *CacheClass) string {
 	return base + flowIDSuffixMiss
 }
 
+// ParentFlowID strips a cache-class sibling suffix from a queue ID, returning the parent
+// fairness ID. IDs without a known suffix are returned unchanged.
+func ParentFlowID(id string) string {
+	for _, suffix := range []string{flowIDSuffixHit, flowIDSuffixMiss} {
+		if len(id) > len(suffix) && id[len(id)-len(suffix):] == suffix {
+			return id[:len(id)-len(suffix)]
+		}
+	}
+	return id
+}
+
 // RewriteFlowID implements requestcontrol.FlowIDRewriter when this plugin is also the
 // configured DispatchGate. Admission uses it so hit and miss requests share a priority band
-// as sibling flows.
+// as sibling queues.
 func (p *Plugin) RewriteFlowID(base string, req *fwksched.InferenceRequest) string {
 	if req == nil {
 		return base
@@ -368,7 +394,7 @@ func (p *Plugin) PreRequest(ctx context.Context, request *fwksched.InferenceRequ
 // The request is shallow-copied rather than mutated: request.Body.TokenizedRequest belongs to
 // the token-producer, and overwriting it here would corrupt the routing-grade prefix match
 // computed later.
-func (p *Plugin) blockHashes(ctx context.Context, request *fwksched.InferenceRequest) []prefixhash.BlockHash {
+func (p *Plugin) blockHashes(ctx context.Context, request *fwksched.InferenceRequest) [][]prefixhash.BlockHash {
 	if request == nil || request.Body == nil {
 		return nil
 	}
@@ -386,11 +412,19 @@ func (p *Plugin) blockHashes(ctx context.Context, request *fwksched.InferenceReq
 	shadow := *request
 	shadow.Body = &shadowBody
 
-	var all []prefixhash.BlockHash
-	for _, hs := range prefixhash.GetBlockHashes(ctx, &shadow, p.blockSizeTokens, p.maxPrefixBlocks) {
-		all = append(all, hs...)
+	return prefixhash.GetBlockHashes(ctx, &shadow, p.blockSizeTokens, p.maxPrefixBlocks)
+}
+
+// lookupPrompts matches each prompt's prefix independently and sums matched/total blocks.
+// Concatenating prompts would stop at the first gap of the first prompt and ignore later
+// prompts that may be fully cached.
+func (p *Plugin) lookupPrompts(perPrompt [][]prefixhash.BlockHash) (matched, total int) {
+	for _, hashes := range perPrompt {
+		m, t := p.lookup(hashes)
+		matched += m
+		total += t
 	}
-	return all
+	return matched, total
 }
 
 // lookup returns the length of the longest indexed prefix, in blocks, and the total block
@@ -431,14 +465,9 @@ func (p *Plugin) runJanitor(ctx context.Context) {
 // sweep reclaims entries for requests that never reached PreRequest and attributes what they
 // were carrying.
 //
-// An entry older than pendingTTL belongs to a request that was shed at admission: admitted
-// requests claim their entry within one scheduling pass. Recording the cached tokens those
-// requests would have reused turns the cost of blind shedding into a direct observation --
-// prefill already paid for, declined at the door, and stranded in KV with no further turn to
-// amortize it.
-//
-// This is also what bounds the map. Under the overload this plugin exists to measure, the
-// large majority of classified requests are rejected, so sweeping is not an optimization.
+// An entry older than pendingTTL is treated as shed at admission: admitted requests claim
+// their entry in PreRequest before this deadline. Recording the cached tokens those requests
+// would have reused turns the cost of blind shedding into a direct observation.
 func (p *Plugin) sweep(now time.Time) (swept int) {
 	p.pending.Range(func(k, v any) bool {
 		entry, ok := v.(*pendingEntry)

@@ -39,5 +39,11 @@ func EstimatePromptTokens(ctx context.Context, body *fwkrequest.InferenceRequest
 		return nil, nil
 	}
 	b := estimateBackend{img: newImageEstimator(nil), vid: newVideoEstimator(nil)}
-	return b.produce(ctx, body)
+	tp, err := b.produce(ctx, body)
+	if err != nil || tp == nil {
+		return tp, err
+	}
+	// Match the token-producer: prefix hashing reads TokenizedRequest.CacheSalt.
+	tp.CacheSalt = CacheSaltFromBody(body)
+	return tp, nil
 }
