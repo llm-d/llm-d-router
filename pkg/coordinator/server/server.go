@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -186,6 +187,7 @@ type Server struct {
 	secureServing      bool
 	certPath           string
 	tls                tlsProfile
+	draining           atomic.Bool
 }
 
 func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client) (*Server, error) {
@@ -240,7 +242,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	// r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
 	r.Post(sglangapiv1.SglangService_Generate_FullMethodName, s.handleSGLangGRPC)
 	r.Get(pathHealthz, s.handleHealth)
-	r.Get(pathReadyz, s.handleHealth)
+	r.Get(pathReadyz, s.handleReady)
 	r.NotFound(s.passthrough.ServeHTTP)
 
 	for _, step := range p.Steps() {
@@ -251,7 +253,7 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 
 	s.httpServer = &http.Server{
 		Addr:         cfg.ListenAddr,
-		Handler:      otelHandler(r),
+		Handler:      s.closeWhenDraining(otelHandler(r)),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 	}
@@ -296,6 +298,25 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	}
 	s.httpServer.TLSConfig = tlsConfig
 	return s.httpServer.ServeTLS(l, "", "")
+}
+
+// StartDrain makes /readyz return 503 and closes each connection after its
+// next response while the listener keeps accepting. Idle connections stay
+// open so a request already written by a pooled client is served instead of
+// reset; Shutdown closes the ones that stay idle.
+func (s *Server) StartDrain() {
+	s.draining.Store(true)
+}
+
+// closeWhenDraining sets Connection: close on every response during a drain.
+// net/http's HTTP/2 server turns that header into a GOAWAY.
+func (s *Server) closeWhenDraining(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.draining.Load() {
+			w.Header().Set("Connection", "close")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

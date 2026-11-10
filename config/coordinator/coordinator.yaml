@@ -88,8 +88,17 @@ server:
   # bounds the total in-flight time of a single chat — set generously.
   write_timeout: 120s
   
-  # Kubernetes terminationGracePeriodSeconds must exceed shutdown_timeout; SSE
-  # streams held open for up to write_timeout are force-closed once the grace period expires.
+  # drain_timeout is how long the coordinator keeps serving after SIGTERM before
+  # shutdown_timeout starts. During the window /readyz returns 503 and each
+  # connection is closed after its next response, so clients holding pooled
+  # keep-alive connections reconnect to another replica. 0 disables the window.
+  # Set it to cover the time endpoint removal takes to reach clients and proxies.
+  # env: COORDINATOR_SERVER_DRAIN_TIMEOUT
+  # drain_timeout: 0s
+
+  # Kubernetes terminationGracePeriodSeconds must exceed any preStop hook plus
+  # drain_timeout plus shutdown_timeout; SSE streams held open for up to
+  # write_timeout are force-closed once the grace period expires.
   shutdown_timeout: 25s
 
   # max_request_body_size caps the request body in megabytes. The default is

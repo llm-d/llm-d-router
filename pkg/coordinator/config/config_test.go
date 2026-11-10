@@ -56,6 +56,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30 * time.Second},
 		{"server.write_timeout", cfg.Server.WriteTimeout, 120 * time.Second},
 		{"server.shutdown_timeout", cfg.Server.ShutdownTimeout, 25 * time.Second},
+		{"server.drain_timeout", cfg.Server.DrainTimeout, time.Duration(0)},
 		{"server.max_request_body_size", cfg.Server.MaxRequestBodySize, int64(DefaultMaxRequestBodySize)},
 		{"gateway.max_idle_conns_per_host", cfg.Gateway.MaxIdleConnsPerHost, 100},
 		{"gateway.idle_conn_timeout", cfg.Gateway.IdleConnTimeout, 90 * time.Second},
