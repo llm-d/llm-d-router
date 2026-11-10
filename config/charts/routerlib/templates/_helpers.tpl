@@ -9,10 +9,30 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 
 {{/*
+Base of the standalone resource names. router.fullnameOverride lets one release
+hold several aliased instances of the standalone chart.
+*/}}
+{{- define "llm-d-router.baseName" -}}
+{{- .Values.router.fullnameOverride | default .Release.Name | default "default-pool" | lower | trim -}}
+{{- end -}}
+
+{{/*
+Whether the current chart is llm-d-router-standalone. Helm replaces .Chart.Name
+with the dependency alias, so the chart declares its kind in its values.
+*/}}
+{{- define "llm-d-router.isStandaloneChart" -}}
+{{- if eq (.Values.router.chartKind | default "") "standalone" -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/*
 Router deployment name
 */}}
 {{- define "llm-d-router.name" -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{- $base := include "llm-d-router.baseName" . | trunc 40 -}}
 {{ $base }}-epp
 {{- end -}}
 
@@ -20,7 +40,7 @@ Router deployment name
 Cluster RBAC unique name
 */}}
 {{- define "llm-d-router.cluster-rbac-name" -}}
-{{- $release := .Release.Name | default "default-pool" | lower | trim }}
+{{- $release := include "llm-d-router.baseName" . }}
 {{- $ns := .Release.Namespace | default "default" | lower | trim }}
 {{- if and (le (len $release) 40) (le (len $ns) 40) }}
 {{- printf "%s-%s-epp" $release $ns | quote }}
@@ -113,7 +133,7 @@ pod) or "service" (proxy runs as its own horizontally scalable Deployment).
 Name of the standalone proxy Deployment and Service used in service mode.
 */}}
 {{- define "llm-d-router.proxyName" -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{- $base := include "llm-d-router.baseName" . | trunc 40 -}}
 {{ $base }}-proxy
 {{- end -}}
 
@@ -136,7 +156,7 @@ it must use this helper.
 {{- $configMap := index $proxy "configMap" | default dict -}}
 {{- $name := index $configMap "name" | default "" -}}
 {{- if empty $name -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{- $base := include "llm-d-router.baseName" . | trunc 40 -}}
 {{- $name = printf "%s-%s" $base (include "llm-d-router.proxyType" .) -}}
 {{- end -}}
 {{- $name -}}
@@ -205,7 +225,7 @@ Service instead.
 */}}
 {{- define "llm-d-router.proxy.failOpenFallback.enabled" -}}
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
-{{- if and (hasPrefix "llm-d-router-standalone" .Chart.Name) $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy") (eq (include "llm-d-router.proxy.failOpen" .) "true") -}}
+{{- if and (eq (include "llm-d-router.isStandaloneChart" .) "true") $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy") (eq (include "llm-d-router.proxy.failOpen" .) "true") -}}
 true
 {{- else -}}
 false
@@ -388,7 +408,7 @@ Return the standalone EPP model-server target ports.
 {{/*
 Return the agentgateway standalone logical backend service name.
 Derives the name from .Values.router.modelServers.matchLabels.app,
-falling back to .Release.Name if not set.
+falling back to llm-d-router.baseName if not set.
 */}}
 {{- define "llm-d-router.agentgateway.logicalBackendName" -}}
 {{- $appLabel := "" -}}
@@ -398,7 +418,7 @@ falling back to .Release.Name if not set.
 {{- if not (empty $appLabel) -}}
   {{- $appLabel -}}
 {{- else -}}
-  {{- .Release.Name -}}
+  {{- include "llm-d-router.baseName" . -}}
 {{- end -}}
 {{- end -}}
 
@@ -409,7 +429,7 @@ Standalone uses proxy presets merged with explicit proxy overrides.
 {{- define "llm-d-router.proxy" -}}
 {{- $proxy := deepCopy (.Values.router.proxy | default dict) -}}
 {{- $resolved := $proxy -}}
-{{- if hasPrefix "llm-d-router-standalone" .Chart.Name -}}
+{{- if eq (include "llm-d-router.isStandaloneChart" .) "true" -}}
   {{- $proxyType := include "llm-d-router.proxyType" . -}}
   {{- $presets := index $proxy "presets" | default dict -}}
   {{- $preset := deepCopy ((index $presets $proxyType) | default dict) -}}
@@ -442,7 +462,7 @@ Return the rendered proxy ConfigMap data.
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
 {{- $configMap := index $proxy "configMap" | default dict -}}
 {{- $data := deepCopy ((index $configMap "data") | default dict) -}}
-{{- if hasPrefix "llm-d-router-standalone" .Chart.Name -}}
+{{- if eq (include "llm-d-router.isStandaloneChart" .) "true" -}}
   {{- $proxyType := include "llm-d-router.proxyType" . -}}
   {{- if eq $proxyType "agentgateway" -}}
     {{- $generated := dict "config.yaml" (include "llm-d-router.proxy.agentgatewayConfig" .) -}}
@@ -597,7 +617,7 @@ Helper to check if priorityRouting is enabled across chart contexts.
 
 {{- define "llm-d-router.epp.healthCheckingRequired" -}}
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
-{{- if or (eq (include "llm-d-router.priorityRouting.enabled" .) "true") (include "llm-d-router.proxy.discoveryServiceName" .) (and (hasPrefix "llm-d-router-standalone" .Chart.Name) $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy")) -}}
+{{- if or (eq (include "llm-d-router.priorityRouting.enabled" .) "true") (include "llm-d-router.proxy.discoveryServiceName" .) (and (eq (include "llm-d-router.isStandaloneChart" .) "true") $proxy.enabled (eq (include "llm-d-router.proxyType" .) "envoy")) -}}
 true
 {{- end -}}
 {{- end -}}

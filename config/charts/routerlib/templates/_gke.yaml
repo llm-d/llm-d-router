@@ -2,11 +2,12 @@
 {{- $monitoringProvider := include "llm-d-router.monitoring.provider" . | fromYaml | default dict -}}
 {{- if and $monitoringProvider (eq (lower (index $monitoringProvider "name" | default "")) "gmp") }}
 {{- if and .Values.router.monitoring.prometheus.enabled .Values.router.monitoring.prometheus.auth.enabled }}
-{{- $metricsReadSA := printf "%s-metrics-reader-sa" .Release.Name -}}
-{{- $metricsReadSecretName := printf "%s-metrics-reader-secret" .Release.Name -}}
-{{- $metricsReadRoleName := printf "%s-%s-metrics-reader" .Release.Namespace .Release.Name -}}
-{{- $metricsReadRoleBindingName := printf "%s-%s-metrics-reader-role-binding" .Release.Namespace .Release.Name -}}
-{{- $secretReadRoleName := printf "%s-metrics-reader-secret-read" .Release.Name -}}
+{{- $baseName := include "llm-d-router.baseName" . -}}
+{{- $metricsReadSA := printf "%s-metrics-reader-sa" $baseName -}}
+{{- $metricsReadSecretName := printf "%s-metrics-reader-secret" $baseName -}}
+{{- $metricsReadRoleName := printf "%s-%s-metrics-reader" .Release.Namespace $baseName -}}
+{{- $metricsReadRoleBindingName := printf "%s-%s-metrics-reader-role-binding" .Release.Namespace $baseName -}}
+{{- $secretReadRoleName := printf "%s-metrics-reader-secret-read" $baseName -}}
 {{- $gmpNamespace := "gmp-system" -}}
 {{- $isAutopilot := false -}}
 {{- with (index $monitoringProvider "gmp") }}
@@ -15,7 +16,7 @@
 {{- if $isAutopilot -}}
 {{-   $gmpNamespace = "gke-gmp-system" -}}
 {{- end -}}
-{{- $gmpCollectorRoleBindingName := printf "%s:collector:%s-%s-metrics-reader-secret-read" $gmpNamespace .Release.Namespace .Release.Name -}}
+{{- $gmpCollectorRoleBindingName := printf "%s:collector:%s-%s-metrics-reader-secret-read" $gmpNamespace .Release.Namespace $baseName -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -36,7 +37,7 @@ type: kubernetes.io/service-account-token
 apiVersion: monitoring.googleapis.com/v1
 kind: PodMonitoring
 metadata:
-  name: {{ .Release.Name }}
+  name: {{ $baseName }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "llm-d-router.labels" . | nindent 4 }}

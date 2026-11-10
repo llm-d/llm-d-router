@@ -1,4 +1,30 @@
 router:
+  # Internal marker read by the templates this chart shares with
+  # llm-d-router-gateway. They cannot rely on the chart name, which Helm
+  # replaces with the alias when the chart is a dependency. Do not modify.
+  chartKind: standalone
+
+  # Base of the names of the resources this chart creates, used in place of the
+  # release name. With fullnameOverride: qwen, the chart creates qwen-epp,
+  # qwen-envoy, qwen-proxy and so on. Where the chart documentation writes
+  # <release> in a resource name, it stands for this value when it is set.
+  # The value is lowercased, and truncated to 40 characters before suffixes
+  # such as -epp.
+  #
+  # Leave it empty for a single installation. Set it when an umbrella chart
+  # declares this chart several times under different aliases: the instances
+  # share the release name, so each one needs a distinct value, for example
+  # router-qwen.router.fullnameOverride=qwen. See "Several Standalone Routers
+  # in One Umbrella Chart" in config/charts/README.md.
+  #
+  # Changing it on an installed release renames its resources: Helm deletes the
+  # old objects and creates new ones, which interrupts traffic.
+  #
+  # The InferencePool created with router.inferencePool.create=true, and the
+  # pool name EPP watches, keep the release name. Aliased instances in one
+  # release therefore need router.inferencePool.create=false.
+  fullnameOverride: ""
+
   modelServers:
     # matchLabels: # REQUIRED
     #   app: vllm-qwen3-32b

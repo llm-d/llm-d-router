@@ -12,12 +12,12 @@ prediction servers run as their own Deployments, each behind a Service).
 Names of the service-mode training and prediction Deployments and Services.
 */}}
 {{- define "llm-d-router.latencyPredictor.trainingName" -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{- $base := include "llm-d-router.baseName" . | trunc 40 -}}
 {{ $base }}-latency-training
 {{- end -}}
 
 {{- define "llm-d-router.latencyPredictor.predictionName" -}}
-{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{- $base := include "llm-d-router.baseName" . | trunc 40 -}}
 {{ $base }}-latency-prediction
 {{- end -}}
 
