@@ -520,10 +520,11 @@ func TestAsyncBrokerWaitDeliversResult(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "chat.completion")
 
-	// Attached waiters and retries share the AP's result retention window.
+	// Delivery shrinks the mailbox to the grace window, which other attached
+	// waiters and retries read within.
 	ttl, err := rdb.TTL(t.Context(), key).Result()
 	require.NoError(t, err)
-	assert.Equal(t, time.Hour, ttl)
+	assert.Equal(t, resultFetchGraceTTL, ttl)
 }
 
 func TestAsyncBrokerWaitDeliversStoredError(t *testing.T) {

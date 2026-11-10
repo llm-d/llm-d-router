@@ -164,7 +164,7 @@ func TestAsyncBrokerWaitDeadlineResultIsRetained(t *testing.T) {
 	require.JSONEq(t, `{"answer":"boundary"}`, rec.Body.String())
 	ttl, err := rdb.TTL(t.Context(), key).Result()
 	require.NoError(t, err)
-	require.Equal(t, 5*time.Minute, ttl, "final-deadline delivery must retain the result for other waiters")
+	require.Equal(t, resultFetchGraceTTL, ttl, "final-deadline delivery must keep the result for the grace window")
 }
 
 func TestAsyncBrokerWaitResultLifecycle(t *testing.T) {
@@ -182,15 +182,16 @@ func TestAsyncBrokerWaitResultLifecycle(t *testing.T) {
 			key := resultKey("team-a", "req-test-1")
 			result, err := json.Marshal(api.ResultMessage{StatusCode: http.StatusOK, Payload: `{"answer":"retained"}`})
 			require.NoError(t, err)
+			// No expiry on the stored result: the AP's result_ttl_seconds
+			// defaults to 0.
 			require.NoError(t, rdb.LPush(t.Context(), key, result).Err())
-			require.NoError(t, rdb.Expire(t.Context(), key, 5*time.Minute).Err())
 			headers := map[string]string{
 				defaultModeHeader: "wait", defaultTenantHeader: "team-a",
 				reqcommon.RequestIDHeaderKey: "req-test-1",
 			}
-			for i, wantTTL := range []time.Duration{5 * time.Minute, 4 * time.Minute} {
+			for i := range 2 {
 				if i > 0 {
-					mr.FastForward(time.Minute)
+					mr.FastForward(resultFetchGraceTTL / 2)
 				}
 				req, rec := asyncReqCtx(t, `{"model":"test-model"}`, headers)
 				require.ErrorIs(t, step.Execute(t.Context(), req), pipeline.ErrPipelineDone)
@@ -198,14 +199,14 @@ func TestAsyncBrokerWaitResultLifecycle(t *testing.T) {
 				require.JSONEq(t, `{"answer":"retained"}`, rec.Body.String())
 				ttl, err := rdb.TTL(t.Context(), key).Result()
 				require.NoError(t, err)
-				require.Equal(t, wantTTL, ttl, "wait delivery must preserve the existing expiry")
+				require.Equal(t, resultFetchGraceTTL, ttl, "wait delivery must bound the result to the grace window")
 			}
 			n, err := rdb.ZCard(t.Context(), "team-default-queue").Result()
 			require.NoError(t, err)
-			require.Zero(t, n, "retrying a retained result must not submit work")
+			require.Zero(t, n, "retrying within the grace window must not submit work")
 
 			if reclaim == "expiry" {
-				mr.FastForward(4 * time.Minute)
+				mr.FastForward(resultFetchGraceTTL)
 			} else {
 				router := chi.NewRouter()
 				step.RegisterRoutes(router)
@@ -224,4 +225,20 @@ func TestAsyncBrokerWaitResultLifecycle(t *testing.T) {
 			require.Equal(t, int64(1), n, "a reclaimed result must allow a fresh submission with the same id")
 		})
 	}
+}
+
+func TestAsyncBrokerWaitZeroFetchGraceKeepsResultForAttachedWaiters(t *testing.T) {
+	step, rdb := newAsyncTestStep(t, map[string]any{"fetch_grace_seconds": 0})
+	t.Cleanup(func() { _ = step.rdb.Close() })
+	req, rec := asyncReqCtx(t, `{"model":"test-model"}`, nil)
+	key := resultKey("team-a", req.RequestID)
+	result, err := json.Marshal(api.ResultMessage{StatusCode: http.StatusOK, Payload: `{"answer":"floor"}`})
+	require.NoError(t, err)
+	require.NoError(t, rdb.LPush(t.Context(), key, result).Err())
+
+	require.ErrorIs(t, step.waitForResult(t.Context(), req, "team-a", time.Second), pipeline.ErrPipelineDone)
+	require.Equal(t, http.StatusOK, rec.Code)
+	ttl, err := rdb.TTL(t.Context(), key).Result()
+	require.NoError(t, err)
+	require.Equal(t, 5*time.Second, ttl, "a zero fetch grace must not delete the result under other attached waiters")
 }

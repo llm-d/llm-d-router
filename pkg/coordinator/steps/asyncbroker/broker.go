@@ -69,6 +69,11 @@ const waitPollInterval = 200 * time.Millisecond
 // recovered on the next backup tick rather than never.
 const waitBackupPollInterval = 2 * time.Second
 
+// waitGraceFloor is the shortest mailbox TTL left after a wait delivery. It
+// exceeds waitBackupPollInterval, so a waiter attached to the same id that
+// missed the wake-up still reads the result on its next poll.
+const waitGraceFloor = 5 * time.Second
+
 // Step bridges the coordinator to the llm-d-async broker. A
 // request that carries the mode header opts into async serving: passthrough
 // labels it (quota classification, objective and fairness headers) and lets
@@ -465,6 +470,17 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 			pipelineResult, writeErr := writeResult(w, res)
 			if writeErr != nil {
 				logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
+			} else {
+				// Delivery confirmed: shrink the mailbox to the grace window
+				// instead of letting it sit out the full result TTL. Deleting
+				// outright would take the result from other waiters attached
+				// to the same id. On write failure the key stays, as the
+				// client may still fetch by id.
+				graceCtx, graceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer graceCancel()
+				if err := s.rdb.Expire(graceCtx, resultKey(tenant, id), s.cfg.waitGrace()).Err(); err != nil {
+					logger.Error(err, "failed to shrink result ttl after wait delivery", "id", id)
+				}
 			}
 			return pipelineResult
 		}
@@ -488,6 +504,8 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 					pipelineResult, writeErr := writeResult(w, res)
 					if writeErr != nil {
 						logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
+					} else if err := s.rdb.Expire(finalCtx, resultKey(tenant, id), s.cfg.waitGrace()).Err(); err != nil {
+						logger.Error(err, "failed to shrink result ttl after wait delivery", "id", id)
 					}
 					return pipelineResult
 				}
