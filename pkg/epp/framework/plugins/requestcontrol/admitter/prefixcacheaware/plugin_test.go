@@ -97,9 +97,28 @@ func decisionCount(outcome string) float64 {
 }
 
 func validConfig() Config {
-	c := DefaultConfig
-	c.SaturationDetectorRef = "det"
-	return c
+	return Config{
+		SaturationDetectorRef: "det",
+		ShedThreshold:         0.85,
+		MinHitRatio:           0.6,
+		ShedStatusCode:        http.StatusTooManyRequests,
+	}
+}
+
+// sheddableRequest is a priority < 0 request, the only kind this admitter can shed.
+func sheddableRequest() *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{
+		RequestID:  "r1",
+		Objectives: fwksched.RequestObjectives{Priority: -1},
+	}
+}
+
+// makeSubBlockEndpoint carries a present prefix attribute for a prompt shorter
+// than one KV block.
+func makeSubBlockEndpoint(name string) fwksched.Endpoint {
+	ep := makeEndpoint(name, -1, 0)
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(0, 0, 16))
+	return ep
 }
 
 // denial unwraps the typed error an Admit call returned, or nil when admitted.
@@ -157,6 +176,19 @@ func TestAdmitDecisions(t *testing.T) {
 			name:        "missing prefix attribute counts as cold",
 			saturation:  0.9,
 			endpoints:   []fwksched.Endpoint{makeEndpoint("unknown", -1, 9000)},
+			wantCode:    errcommon.ResourceExhausted,
+			wantOutcome: outcomeShedCold,
+		},
+		{
+			name:        "sub-block prompt is admitted",
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{makeSubBlockEndpoint("short")},
+			wantOutcome: outcomeAdmittedSubBlock,
+		},
+		{
+			name:        "a real block count overrides a sub-block attribute",
+			saturation:  0.9,
+			endpoints:   []fwksched.Endpoint{makeSubBlockEndpoint("short"), cold},
 			wantCode:    errcommon.ResourceExhausted,
 			wantOutcome: outcomeShedCold,
 		},
@@ -230,9 +262,7 @@ func TestAdmitDecisions(t *testing.T) {
 			require.NoError(t, config.validate())
 			det := &fakeDetector{saturation: tc.saturation}
 			p := mustNew(t, config, det)
-			request := &fwksched.InferenceRequest{RequestID: "r1"}
-
-			d := denial(t, p.Admit(context.Background(), request, tc.endpoints))
+			d := denial(t, p.Admit(context.Background(), sheddableRequest(), tc.endpoints))
 
 			if tc.wantCode == "" {
 				assert.Nil(t, d, "request should be admitted")
@@ -264,7 +294,7 @@ func TestAdmitThresholdIsStateless(t *testing.T) {
 
 	admitted := func(saturation float64) bool {
 		det.saturation = saturation
-		return p.Admit(context.Background(), &fwksched.InferenceRequest{}, cold) == nil
+		return p.Admit(context.Background(), sheddableRequest(), cold) == nil
 	}
 
 	assert.True(t, admitted(0.849), "below T: admit")
@@ -274,17 +304,24 @@ func TestAdmitThresholdIsStateless(t *testing.T) {
 	assert.True(t, admitted(0.10), "idle: admit")
 }
 
-// TestAdmitIgnoresRequest pins down that the decision reads only the endpoint
-// attributes: a nil request gets the same answer as a populated one.
-func TestAdmitIgnoresRequest(t *testing.T) {
+// TestAdmitSkipsNonSheddableRequests checks the priority gate shared with the
+// other admitters: a nil request and priority >= 0 are admitted, and only
+// priority < 0 reaches the shed rule.
+func TestAdmitSkipsNonSheddableRequests(t *testing.T) {
 	resetMetrics()
 	p := mustNew(t, validConfig(), &fakeDetector{saturation: 1.0})
-	cold := []fwksched.Endpoint{makeEndpoint("cold", 0, 1)}
-	hot := []fwksched.Endpoint{makeEndpoint("hot", 90, 1)}
+	cold := []fwksched.Endpoint{makeEndpoint("cold", 0, 9000)}
 
-	assert.Error(t, p.Admit(context.Background(), nil, cold))
-	assert.Error(t, p.Admit(context.Background(), &fwksched.InferenceRequest{RequestID: "r1"}, cold))
-	assert.NoError(t, p.Admit(context.Background(), nil, hot))
+	assert.NoError(t, p.Admit(context.Background(), nil, cold))
+	assert.NoError(t, p.Admit(context.Background(), &fwksched.InferenceRequest{
+		Objectives: fwksched.RequestObjectives{Priority: 0},
+	}, cold))
+	assert.NoError(t, p.Admit(context.Background(), &fwksched.InferenceRequest{
+		Objectives: fwksched.RequestObjectives{Priority: 5},
+	}, cold))
+	assert.Error(t, p.Admit(context.Background(), sheddableRequest(), cold))
+	assert.Equal(t, 1.0, decisionCount(outcomeShedCold), "only the sheddable request is a shed decision")
+	assert.Equal(t, 1, testutil.CollectAndCount(decisions))
 }
 
 // TestPoolSaturationByStage checks that S is evaluated per pipeline stage and
@@ -304,7 +341,7 @@ func TestPoolSaturationByStage(t *testing.T) {
 		}}
 		p := mustNew(t, validConfig(), det)
 
-		require.Error(t, p.Admit(context.Background(), nil, []fwksched.Endpoint{prefill, decode}))
+		require.Error(t, p.Admit(context.Background(), sheddableRequest(), []fwksched.Endpoint{prefill, decode}))
 		assert.Equal(t, []string{flowcontrol.SaturationStagePrefill, flowcontrol.SaturationStageDecode}, det.stages)
 		assert.Equal(t, []int{1, 1}, det.poolSizes)
 		assert.Equal(t, 0.9, testutil.ToFloat64(observedSaturation.WithLabelValues("test")), "the gauge reports the maximum")
@@ -313,14 +350,14 @@ func TestPoolSaturationByStage(t *testing.T) {
 	t.Run("interleaved endpoints count in both stages", func(t *testing.T) {
 		det := &fakeDetector{}
 		p := mustNew(t, validConfig(), det)
-		require.NoError(t, p.Admit(context.Background(), nil, []fwksched.Endpoint{prefill, decode, both}))
+		require.NoError(t, p.Admit(context.Background(), sheddableRequest(), []fwksched.Endpoint{prefill, decode, both}))
 		assert.Equal(t, []int{2, 2}, det.poolSizes)
 	})
 
 	t.Run("a stage with no endpoints is skipped", func(t *testing.T) {
 		det := &fakeDetector{}
 		p := mustNew(t, validConfig(), det)
-		require.NoError(t, p.Admit(context.Background(), nil, []fwksched.Endpoint{prefill, encode}))
+		require.NoError(t, p.Admit(context.Background(), sheddableRequest(), []fwksched.Endpoint{prefill, encode}))
 		assert.Equal(t, []string{flowcontrol.SaturationStagePrefill}, det.stages, "encode-only endpoints are not a stage")
 		assert.Equal(t, []int{1}, det.poolSizes)
 	})
@@ -328,7 +365,7 @@ func TestPoolSaturationByStage(t *testing.T) {
 	t.Run("no stage at all falls back to the whole pool", func(t *testing.T) {
 		det := &fakeDetector{saturation: 1.0}
 		p := mustNew(t, validConfig(), det)
-		require.Error(t, p.Admit(context.Background(), nil, []fwksched.Endpoint{encode}), "S = 1.0 over the whole pool and no prefix hit: shed")
+		require.Error(t, p.Admit(context.Background(), sheddableRequest(), []fwksched.Endpoint{encode}), "S = 1.0 over the whole pool and no prefix hit: shed")
 		assert.Equal(t, []string{""}, det.stages, "unpartitioned evaluation carries no stage")
 		assert.Equal(t, []int{1}, det.poolSizes)
 	})
@@ -376,7 +413,7 @@ func TestFactory(t *testing.T) {
 	}
 
 	t.Run("resolves the concurrency detector", func(t *testing.T) {
-		plugin, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector","shedThreshold":0.5}`)), newHandle(t, true))
+		plugin, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector","shedThreshold":0.5,"minHitRatio":0.6}`)), newHandle(t, true))
 		require.NoError(t, err)
 		p := plugin.(*Plugin)
 		assert.Equal(t, PluginType, p.TypedName().Type)
@@ -390,13 +427,13 @@ func TestFactory(t *testing.T) {
 		idle := makeEndpoint("idle", 0, 10)
 		pool := []fwksched.Endpoint{busy, idle}
 
-		assert.NoError(t, p.Admit(context.Background(), &fwksched.InferenceRequest{}, pool),
+		assert.NoError(t, p.Admit(context.Background(), sheddableRequest(), pool),
 			"the prompt is cached on busy; where it is placed is the scheduler's call")
 
 		coldIdle := makeEndpoint("idle", 0, 10)
 		coldBusy := makeEndpoint("busy", 0, 10)
 		coldBusy.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: 2})
-		d := denial(t, p.Admit(context.Background(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{coldBusy, coldIdle}))
+		d := denial(t, p.Admit(context.Background(), sheddableRequest(), []fwksched.Endpoint{coldBusy, coldIdle}))
 		require.NotNil(t, d, "no endpoint has the prefix")
 		assert.Equal(t, errcommon.ResourceExhausted, d.Code)
 		assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), d.Headers[errcommon.RequestDroppedReasonHeaderKey])
@@ -408,19 +445,19 @@ func TestFactory(t *testing.T) {
 		fullPrefill := withRole(makeEndpoint("prefill", 0, 10), bylabel.RolePrefill)
 		fullPrefill.Put(attrconcurrency.InFlightLoadDataKey, &attrconcurrency.InFlightLoad{Requests: 2})
 		idleDecode := withRole(makeEndpoint("decode", 0, 10), bylabel.RoleDecode)
-		strict, err := Factory("strict", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector","shedThreshold":0.9}`)), newHandle(t, true))
+		strict, err := Factory("strict", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector","shedThreshold":0.9,"minHitRatio":0.6}`)), newHandle(t, true))
 		require.NoError(t, err)
-		require.Error(t, strict.(fwkrc.Admitter).Admit(context.Background(), &fwksched.InferenceRequest{}, []fwksched.Endpoint{fullPrefill, idleDecode}))
+		require.Error(t, strict.(fwkrc.Admitter).Admit(context.Background(), sheddableRequest(), []fwksched.Endpoint{fullPrefill, idleDecode}))
 		assert.Equal(t, 1.0, testutil.ToFloat64(observedSaturation.WithLabelValues("strict")))
 	})
 
 	t.Run("missing ref", func(t *testing.T) {
-		_, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"nope"}`)), newHandle(t, true))
+		_, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"nope","shedThreshold":0.5,"minHitRatio":0.6}`)), newHandle(t, true))
 		require.ErrorContains(t, err, "not found")
 	})
 
 	t.Run("ref is not a detector", func(t *testing.T) {
-		_, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"not-a-detector"}`)), newHandle(t, true))
+		_, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"not-a-detector","shedThreshold":0.5,"minHitRatio":0.6}`)), newHandle(t, true))
 		require.ErrorContains(t, err, "must implement")
 	})
 
@@ -430,12 +467,12 @@ func TestFactory(t *testing.T) {
 	})
 
 	t.Run("unknown field", func(t *testing.T) {
-		_, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector","bogus":1}`)), newHandle(t, true))
+		_, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector","shedThreshold":0.5,"minHitRatio":0.6,"bogus":1}`)), newHandle(t, true))
 		require.Error(t, err)
 	})
 
 	t.Run("nil handle", func(t *testing.T) {
-		_, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector"}`)), nil)
+		_, err := Factory("shed", fwkplugin.StrictDecoder([]byte(`{"saturationDetectorRef":"concurrency-detector","shedThreshold":0.5,"minHitRatio":0.6}`)), nil)
 		require.Error(t, err)
 	})
 }
