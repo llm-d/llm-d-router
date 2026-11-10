@@ -289,7 +289,8 @@ monitoring:
       # When true, the chart creates cluster-scoped RBAC for the EPP. See docs/metrics.md.
       enabled: true
       # Service account token Secret the ServiceMonitor authenticates with.
-      # Empty means <release>-metrics-reader-secret. Set a name to override it.
+      # Empty means <base>-metrics-reader-secret, where <base> is router.fullnameOverride
+      # in the standalone chart when set, else the release name. Set a name to override it.
       secretName: ""
     # additional labels for the ServiceMonitor
     extraLabels: {}
