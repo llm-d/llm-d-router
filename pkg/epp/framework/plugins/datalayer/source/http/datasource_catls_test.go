@@ -89,9 +89,11 @@ func TestNewHTTPDataSource_CACertPath(t *testing.T) {
 	tests := []struct {
 		name       string
 		caCertPath string
+		skipVerify bool
 		wantErr    error
 		wantRootCA bool
 	}{
+		{name: "CA overrides skip-verify", caCertPath: writeCACert(t), skipVerify: true, wantRootCA: true},
 		{name: "valid CA sets RootCAs", caCertPath: writeCACert(t), wantRootCA: true},
 		{name: "empty CA uses system pool", caCertPath: "", wantRootCA: false},
 		{name: "bad CA path errors", caCertPath: "/nonexistent/ca.pem", wantErr: ErrReadCACert},
@@ -99,7 +101,7 @@ func TestNewHTTPDataSource_CACertPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ds, err := NewHTTPDataSource[any]("https", "/metrics", TLSOptions{CACertPath: tt.caCertPath}, "test-type", "ds", parser)
+			ds, err := NewHTTPDataSource[any]("https", "/metrics", TLSOptions{SkipVerify: tt.skipVerify, CACertPath: tt.caCertPath}, "test-type", "ds", parser)
 			if tt.wantErr != nil {
 				assert.ErrorIs(t, err, tt.wantErr)
 				return
