@@ -104,6 +104,59 @@ flowControl:
     maxBytesPerFlow: "1Mi"
 ```
 
+### Multiple active replicas
+
+Each active EPP replica runs its own flow controller. Queues, fairness accounting, and the queue
+capacity limits (`maxRequests` and `maxBytes`, global and per band) are per replica, so N active
+replicas can together queue up to N times each limit.
+
+A replica dispatches queued requests while pool saturation, as reported by the saturation detector,
+is below the band's usage limit. `utilization-detector` reads model-server metrics, which include
+requests from every replica. `concurrency-detector` reads the in-flight load tracked by the producer
+named in its `inFlightLoadProducerName`:
+
+* Without a cross-replica syncer, the load counts only this replica's requests. Each replica
+  dispatches up to the full pool capacity, so N replicas dispatch up to N times the pool capacity.
+* With a syncer (`dataLayer.crossReplica.syncerPluginRef`) and `syncCrossReplicaState` left at its
+  default on the producer, the load adds the other replicas' published values to this replica's
+  live count. The other replicas' values lag by up to about two `syncInterval` periods (400ms at the
+  default). Requests that reach several replicas within that lag can be dispatched against the same
+  free capacity, and a burst that reaches every replica at once can be dispatched up to N times the
+  pool capacity. The [Redis syncer](../framework/plugins/datalayer/cross_plugin/redis/README.md)
+  describes which peer values count while Redis is unreachable and when a stopped replica drops out.
+
+To keep total dispatch within the pool capacity independent of sync lag and syncer health, give each
+replica a fixed share. Point `concurrency-detector` at an in-flight load producer with
+`syncCrossReplicaState: false`, and set `maxConcurrency` (and `maxTokenConcurrency` in `tokens` and
+`hybrid` modes) to the intended per-endpoint limit divided by the number of active replicas.
+Scheduling plugins can keep the shared view through a second, synced producer. For a per-endpoint
+limit of 10 on two replicas:
+
+```yaml
+plugins:
+- type: inflight-load-producer # synced, read by consumers that leave inFlightLoadProducerName unset
+- type: inflight-load-producer
+  name: admission-load
+  parameters:
+    syncCrossReplicaState: false
+- type: concurrency-detector
+  parameters:
+    maxConcurrency: 5
+    inFlightLoadProducerName: admission-load
+flowControl:
+  saturationDetector:
+    pluginRef: concurrency-detector
+```
+
+Fixed shares have these costs:
+
+* A change in replica count, including one made by EPP autoscaling, needs a configuration change.
+* A replica does not use capacity that another replica leaves idle. When traffic reaches the
+  replicas unevenly, or a replica is down, requests wait in one replica's queue while the pool runs
+  below capacity.
+* Replicas that share one configuration, as in a Deployment, get equal shares, and `maxConcurrency`
+  is an integer, so a per-endpoint limit that the replica count does not divide is rounded down.
+
 ### High Level Architecture
 
 The following diagram illustrates the high-level dependency model and request flow for the system. It shows how
