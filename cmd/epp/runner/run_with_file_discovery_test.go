@@ -605,6 +605,42 @@ dataLayer:
 	require.ErrorContains(t, err, "objective 0: name is required")
 }
 
+// TestRunWithFileDiscovery_RejectsSchedulingDecisionsHistory checks that
+// --scheduling-decisions-history stops startup on the file-discovery path
+// instead of being accepted with no endpoint served.
+func TestRunWithFileDiscovery_RejectsSchedulingDecisionsHistory(t *testing.T) {
+	dir := t.TempDir()
+	endpointsPath := filepath.Join(dir, "endpoints.yaml")
+	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
+
+	opts := runserver.NewOptions()
+	opts.SchedulingDecisionsHistory = 10
+	opts.ConfigText = fmt.Sprintf(`apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - name: file-discovery
+    type: file-discovery
+    parameters:
+      path: %q
+      watchFile: false
+dataLayer:
+  injectDefaults: false
+  discovery:
+    endpoints:
+      pluginRef: file-discovery
+`, endpointsPath)
+
+	r := NewRunner()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	err = r.runWithFileDiscovery(ctx, opts, rawConfig)
+	require.ErrorContains(t, err, `flag "scheduling-decisions-history" is not supported in file-discovery mode`)
+}
+
 func TestRunWithFileDiscovery_AlphaPluginBlockedByDefault(t *testing.T) {
 	const alphaType = "alpha-test-plugin"
 	fwkplugin.Register(alphaType, fwkplugin.StabilityAlpha, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
