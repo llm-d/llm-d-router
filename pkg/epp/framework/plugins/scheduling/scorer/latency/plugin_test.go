@@ -395,3 +395,42 @@ func TestFactoryValidatesConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestScoreEndpointWithoutPredictionDoesNotOutscorePredicted(t *testing.T) {
+	scorer := NewPlugin(noExploreConfig()) // default strategy: "least"
+
+	epTight := makeLatencyScorerEndpoint("tight", 0.3, 0, 5)
+	epLoose := makeLatencyScorerEndpoint("loose", 0.3, 0, 5)
+	epNoPred := makeLatencyScorerEndpoint("no-prediction", 0.3, 0, 5)
+
+	setLatencyPrediction(epTight, true, true, 10, 2, 90, 18)
+	setLatencyPrediction(epLoose, true, true, 100, 20, 50, 10)
+	// epNoPred has no LatencyPredictionInfo attribute.
+
+	scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{epTight, epLoose, epNoPred})
+
+	if scores[epNoPred] != 0 {
+		t.Errorf("endpoint without a prediction should score 0 when others have positive headroom: tight=%f loose=%f no-prediction=%f",
+			scores[epTight], scores[epLoose], scores[epNoPred])
+	}
+	if scores[epTight] <= scores[epLoose] {
+		t.Errorf("least strategy should prefer the tighter headroom: tight=%f loose=%f", scores[epTight], scores[epLoose])
+	}
+}
+
+func TestScoreEndpointWithoutPredictionDoesNotOutscoreNegative(t *testing.T) {
+	scorer := NewPlugin(noExploreConfig())
+
+	epTPOTNeg := makeLatencyScorerEndpoint("tpot-neg", 0.3, 0, 5)
+	epNoPred := makeLatencyScorerEndpoint("no-prediction", 0.3, 0, 5)
+
+	setLatencyPrediction(epTPOTNeg, true, false, 10, -8, 90, 38) // only TPOT negative
+	// epNoPred has no LatencyPredictionInfo attribute.
+
+	scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{epTPOTNeg, epNoPred})
+
+	if scores[epNoPred] != 0 || scores[epTPOTNeg] == 0 {
+		t.Errorf("endpoint without a prediction should score below an endpoint with a known deficit: tpot-neg=%f no-prediction=%f",
+			scores[epTPOTNeg], scores[epNoPred])
+	}
+}

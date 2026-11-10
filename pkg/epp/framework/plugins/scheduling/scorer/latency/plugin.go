@@ -209,9 +209,11 @@ func (s *Plugin) Score(ctx context.Context, _ *fwksched.InferenceRequest, endpoi
 	// Separate positive and negative headroom endpoints.
 	// The scorer assumes homogeneous input from upstream filters, but if a mix
 	// is present, only positive endpoints are scored (negative get score 0).
+	// An endpoint without a prediction has no known headroom, so it goes with
+	// the negative endpoints and ranks with the worst deficit bucket.
 	var positive, negative []epData
 	for _, d := range data {
-		if d.info != nil && (d.ttftHeadroom < 0 || d.tpotHeadroom < 0) {
+		if d.info == nil || d.ttftHeadroom < 0 || d.tpotHeadroom < 0 {
 			negative = append(negative, d)
 		} else {
 			positive = append(positive, d)
