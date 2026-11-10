@@ -158,6 +158,10 @@ const (
 	FieldFinishReason = "finish_reason"
 	FieldMessage      = "message"
 	FieldDelta        = "delta"
+	// vLLM returns a reasoning model's thinking text under FieldReasoning, and
+	// under FieldReasoningContent in releases before v0.31.0.
+	FieldReasoning        = "reasoning"
+	FieldReasoningContent = "reasoning_content"
 )
 
 // Usage fields in a response body. Chat Completions and Completions report

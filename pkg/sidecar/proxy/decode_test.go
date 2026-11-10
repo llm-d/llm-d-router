@@ -661,6 +661,60 @@ var _ = Describe("Chunked Decode", func() {
 		Expect(event.Error.Code).To(Equal(http.StatusBadGateway))
 	})
 
+	DescribeTable("serves a reasoning model in one decode after the first chunk",
+		func(streaming bool, reasoningField string) {
+			reasoningChunk := fmt.Sprintf(`{"choices":[{"index":0,"finish_reason":"length",`+
+				`"message":{"role":"assistant","content":null,%q:"Let me think"}}],`+
+				`"usage":{"prompt_tokens":8,"completion_tokens":5,"total_tokens":13}}`, reasoningField)
+			final := `{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Paris."}}]}`
+			server := NewProxy(Config{DecodeChunkSize: 5})
+			server.logger = logr.Discard()
+			var requests []map[string]any
+			server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request map[string]any
+				Expect(json.NewDecoder(r.Body).Decode(&request)).To(Succeed())
+				requests = append(requests, request)
+				if len(requests) == 1 {
+					fmt.Fprint(w, reasoningChunk)
+					return
+				}
+				// httputil.ReverseProxy adds the decoder's headers to those already set.
+				w.Header().Add("Content-Type", "application/json")
+				fmt.Fprint(w, final)
+			})
+			raw := fmt.Sprintf(`{"messages":[{"role":"user","content":"Hi"}],"stream":%t,"kv_transfer_params":{"test":true}}`, streaming)
+			w := httptest.NewRecorder()
+			server.runChunkedDecode(w, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(raw)))
+
+			Expect(requests).To(HaveLen(2))
+			Expect(requests[1]).To(Equal(map[string]any{
+				"messages": []any{map[string]any{"role": "user", "content": "Hi"}},
+				"stream":   streaming,
+			}))
+			Expect(w.Code).To(Equal(http.StatusOK))
+			Expect(w.Header().Values("Content-Type")).To(Equal([]string{"application/json"}))
+			Expect(w.Body.String()).To(Equal(final))
+		},
+		Entry("non-streaming", false, "reasoning"),
+		Entry("streaming", true, "reasoning"),
+		Entry("reasoning_content", false, "reasoning_content"),
+	)
+
+	It("stops after maxDecodeChunks when chunks consume tokens without producing text", func() {
+		server := NewProxy(Config{DecodeChunkSize: 5})
+		server.logger = logr.Discard()
+		calls := 0
+		server.decoderProxy = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			fmt.Fprint(w, chatResponse("", finishReasonLength, 8, 5))
+		})
+		w := httptest.NewRecorder()
+		body := `{"messages":[{"role":"user","content":"Hi"}]}`
+		server.runChunkedDecode(w, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(body)))
+		Expect(calls).To(Equal(maxDecodeChunks))
+		Expect(w.Code).To(Equal(http.StatusOK))
+	})
+
 	Describe("non-streaming", func() {
 
 		It("falls back to regular decode when budget fits in one chunk", func() {
