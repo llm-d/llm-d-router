@@ -318,6 +318,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if s.draining.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("draining"))
+		return
+	}
+	s.handleHealth(w, r)
+}
+
 // rejectInference answers a rejected inference request with the error envelope
 // of its API and logs a failure to write it.
 func rejectInference(logger logr.Logger, w http.ResponseWriter, apiType reqcommon.APIType, status int, msg string) {

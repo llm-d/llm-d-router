@@ -164,7 +164,7 @@ func main() {
 	if cfg.Server.MetricsPort <= 0 {
 		log.Info("metrics endpoint disabled", "reason", "server.metrics_port <= 0")
 	}
-	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout)
+	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout, "drain_timeout", cfg.Server.DrainTimeout)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
@@ -197,12 +197,14 @@ func main() {
 
 // run starts the coordinator server and, when cfg.MetricsPort > 0, the
 // Prometheus /metrics server alongside it. It blocks until ctx is cancelled
-// or either server exits. On any exit condition both servers are drained
-// before run returns: the coordinator server bounded by cfg.ShutdownTimeout,
-// the metrics server by metricsShutdownTimeout. A non-positive MetricsPort
-// disables the metrics endpoint entirely. lis, when non-nil, is an already
-// bound listener the coordinator server serves on instead of binding
-// cfg.ListenAddr itself; production passes nil.
+// or either server exits. When ctx is cancelled and cfg.DrainTimeout > 0, the
+// coordinator server first serves for cfg.DrainTimeout with /readyz failing
+// and every response closing its connection. On any exit condition both
+// servers are drained before run returns: the coordinator server bounded by
+// cfg.ShutdownTimeout, the metrics server by metricsShutdownTimeout. A
+// non-positive MetricsPort disables the metrics endpoint entirely. lis, when
+// non-nil, is an already bound listener the coordinator server serves on
+// instead of binding cfg.ListenAddr itself; production passes nil.
 func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig, lis net.Listener) error {
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -220,6 +222,14 @@ func run(ctx context.Context, srv *server.Server, cfg config.ServerConfig, lis n
 			// ListenAndServe returned before shutdown was requested; always a failure.
 			return fmt.Errorf("coordinator server: %w", err)
 		case <-gctx.Done():
+			if ctx.Err() != nil && cfg.DrainTimeout > 0 {
+				srv.StartDrain()
+				select {
+				case <-time.After(cfg.DrainTimeout):
+				case err := <-errCh:
+					return fmt.Errorf("coordinator server: %w", err)
+				}
+			}
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 			defer cancel()
 			if err := srv.Shutdown(shutdownCtx); err != nil {
