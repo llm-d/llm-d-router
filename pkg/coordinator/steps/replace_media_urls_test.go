@@ -1774,6 +1774,14 @@ func TestReplaceMediaURLsStep_BlocksMetadataIPThroughProxy(t *testing.T) {
 	}
 }
 
+// A nil Proxy means direct connections; the wrapper must keep it nil so the
+// transport dials directly and dialControl checks the target.
+func TestAddressGuard_CheckedProxyKeepsDirectTransport(t *testing.T) {
+	if (&addressGuard{}).checkedProxy(nil) != nil {
+		t.Fatal("checkedProxy(nil) must return nil")
+	}
+}
+
 func TestReplaceMediaURLsStep_CapsRedirects(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

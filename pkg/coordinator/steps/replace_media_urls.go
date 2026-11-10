@@ -897,6 +897,9 @@ func (g *addressGuard) newClient(timeout time.Duration) *http.Client {
 // The proxy resolves the host again, so a DNS-rebinding target can
 // still differ from the checked IP; allowed_domains closes that if needed.
 func (g *addressGuard) checkedProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request) (*url.URL, error) {
+	if proxy == nil {
+		return nil
+	}
 	return func(r *http.Request) (*url.URL, error) {
 		proxyURL, err := proxy(r)
 		if err != nil || proxyURL == nil {
