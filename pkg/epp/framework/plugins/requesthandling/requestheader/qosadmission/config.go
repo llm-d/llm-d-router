@@ -26,8 +26,9 @@ import (
 const (
 	// ModeEnforce applies admission decisions.
 	ModeEnforce = "enforce"
-	// ModeShadow computes and records decisions without acting on them. It is the default, so a
-	// contract is observed against real traffic before it is enforced.
+	// ModeShadow serves each team at its committed class and records downgrades and rejections
+	// without applying them. It is the default, so a contract is observed against real traffic
+	// before it is enforced.
 	ModeShadow = "shadow"
 
 	defaultOutputTokenWeight = 2
