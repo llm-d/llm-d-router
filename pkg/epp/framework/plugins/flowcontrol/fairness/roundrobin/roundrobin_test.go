@@ -43,11 +43,47 @@ var (
 	flow3Key = flowcontrol.FlowKey{ID: flow3ID, Priority: 0}
 )
 
+func newMockBand(state any, queues ...flowcontrol.FlowQueueAccessor) *fwkfcmocks.MockPriorityBandAccessor {
+	return &fwkfcmocks.MockPriorityBandAccessor{
+		PolicyStateV: state,
+		IterateQueuesFunc: func(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
+			for _, q := range queues {
+				if !callback(q) {
+					return
+				}
+			}
+		},
+	}
+}
+
 func TestRoundRobin_Name(t *testing.T) {
 	t.Parallel()
 	policy := newRoundRobin("test-rr")
 	assert.Equal(t, "test-rr", policy.TypedName().Name)
 	assert.Equal(t, RoundRobinFairnessPolicyType, policy.TypedName().Type)
+}
+
+func TestRoundRobin_Pick_InvalidPolicyState(t *testing.T) {
+	t.Parallel()
+	policy := newRoundRobin("")
+	ctx := context.Background()
+
+	var typedNilCursor *roundRobinCursor
+	for _, tc := range []struct {
+		name  string
+		state any
+	}{
+		{name: "nil state", state: nil},
+		{name: "wrong state type", state: "not-a-cursor"},
+		{name: "typed-nil cursor", state: typedNilCursor},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			selected, err := policy.Pick(ctx, newMockBand(tc.state))
+			require.Error(t, err)
+			assert.Nil(t, selected)
+		})
+	}
 }
 
 func TestRoundRobin_Pick_Logic(t *testing.T) {
@@ -56,26 +92,11 @@ func TestRoundRobin_Pick_Logic(t *testing.T) {
 	ctx := context.Background()
 	state := policy.NewState(ctx)
 
-	// Setup: Three non-empty queues
+	// Unsorted input to verify FlowKey ordering.
 	queue1 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow1Key}
 	queue2 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 2, FlowKeyV: flow2Key}
 	queue3 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 3, FlowKeyV: flow3Key}
-
-	mockBand := &fwkfcmocks.MockPriorityBandAccessor{
-		PolicyStateV: state,
-		FlowKeysFunc: func() []flowcontrol.FlowKey { return []flowcontrol.FlowKey{flow3Key, flow1Key, flow2Key} }, // Unsorted to test sorting
-		QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
-			switch id {
-			case flow1ID:
-				return queue1
-			case flow2ID:
-				return queue2
-			case flow3ID:
-				return queue3
-			}
-			return nil
-		},
-	}
+	mockBand := newMockBand(state, queue3, queue1, queue2)
 
 	// Expected order is based on sorted FlowKeys: flow1, flow2, flow3
 	expectedOrder := []string{flow1ID, flow2ID, flow3ID}
@@ -105,27 +126,11 @@ func TestRoundRobin_Pick_SkipsEmptyQueues(t *testing.T) {
 	ctx := context.Background()
 	state := policy.NewState(ctx)
 
-	// Setup: Two non-empty queues and one empty queue
 	flowEmptyKey := flowcontrol.FlowKey{ID: "flowEmpty", Priority: 0}
 	queue1 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow1Key}
 	queueEmpty := &fwkfcmocks.MockFlowQueueAccessor{LenV: 0, FlowKeyV: flowEmptyKey}
 	queue3 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 3, FlowKeyV: flow3Key}
-
-	mockBand := &fwkfcmocks.MockPriorityBandAccessor{
-		PolicyStateV: state,
-		FlowKeysFunc: func() []flowcontrol.FlowKey { return []flowcontrol.FlowKey{flow1Key, flowEmptyKey, flow3Key} },
-		QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
-			switch id {
-			case flow1ID:
-				return queue1
-			case "flowEmpty":
-				return queueEmpty
-			case flow3ID:
-				return queue3
-			}
-			return nil
-		},
-	}
+	mockBand := newMockBand(state, queue1, queueEmpty, nil, queue3)
 
 	// Expected order: flow1, flow3, flow1, flow3, ...
 	selected, err := policy.Pick(ctx, mockBand)
@@ -200,21 +205,6 @@ func TestRoundRobin_Pick_DrainedQueuePreservesCursorOrder(t *testing.T) {
 	activeQueues := []flowcontrol.FlowQueueAccessor{queue1, queue2, queue3}
 	mockBand := &fwkfcmocks.MockPriorityBandAccessor{
 		PolicyStateV: state,
-		FlowKeysFunc: func() []flowcontrol.FlowKey {
-			keys := make([]flowcontrol.FlowKey, len(activeQueues))
-			for i, q := range activeQueues {
-				keys[i] = q.FlowKey()
-			}
-			return keys
-		},
-		QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
-			for _, q := range activeQueues {
-				if q.FlowKey().ID == id {
-					return q
-				}
-			}
-			return nil
-		},
 		IterateQueuesFunc: func(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
 			for _, q := range activeQueues {
 				if !callback(q) {
@@ -252,23 +242,73 @@ func TestRoundRobin_Pick_DrainedQueuePreservesCursorOrder(t *testing.T) {
 	assert.Equal(t, flow1ID, selected.FlowKey().ID, "When the last flow in sorted order drains, Pick must wrap around to the first active flow")
 }
 
+func TestRoundRobin_Pick_EmptyBandPreservesCursor(t *testing.T) {
+	t.Parallel()
+	policy := newRoundRobin("")
+	ctx := context.Background()
+	state := policy.NewState(ctx)
+
+	queue1 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow1Key}
+	queue2 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow2Key}
+	queue3 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow3Key}
+
+	var activeQueues []flowcontrol.FlowQueueAccessor
+	mockBand := &fwkfcmocks.MockPriorityBandAccessor{
+		PolicyStateV: state,
+		IterateQueuesFunc: func(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
+			for _, q := range activeQueues {
+				if !callback(q) {
+					return
+				}
+			}
+		},
+	}
+
+	// Empty tick before any flow has been selected.
+	selected, err := policy.Pick(ctx, mockBand)
+	require.NoError(t, err)
+	assert.Nil(t, selected)
+
+	// First burst selects flow1.
+	activeQueues = []flowcontrol.FlowQueueAccessor{queue1, queue2, queue3}
+	selected, err = policy.Pick(ctx, mockBand)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, flow1ID, selected.FlowKey().ID)
+
+	// Idle tick with no active queues must not reset lastSelected.
+	activeQueues = nil
+	selected, err = policy.Pick(ctx, mockBand)
+	require.NoError(t, err)
+	assert.Nil(t, selected)
+
+	// Next burst resumes at flow2 rather than restarting at flow1.
+	activeQueues = []flowcontrol.FlowQueueAccessor{queue1, queue2, queue3}
+	selected, err = policy.Pick(ctx, mockBand)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, flow2ID, selected.FlowKey().ID)
+}
+
 func TestRoundRobin_Pick_HandlesDynamicFlows(t *testing.T) {
 	t.Parallel()
 	policy := newRoundRobin("")
 	ctx := context.Background()
 	state := policy.NewState(ctx)
 
-	// Initial setup
 	queue1 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow1Key}
 	queue2 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow2Key}
+	queue3 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow3Key}
+
+	activeQueues := []flowcontrol.FlowQueueAccessor{queue1, queue2}
 	mockBand := &fwkfcmocks.MockPriorityBandAccessor{
 		PolicyStateV: state,
-		FlowKeysFunc: func() []flowcontrol.FlowKey { return []flowcontrol.FlowKey{flow1Key, flow2Key} },
-		QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
-			if id == flow1ID {
-				return queue1
+		IterateQueuesFunc: func(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
+			for _, q := range activeQueues {
+				if !callback(q) {
+					return
+				}
 			}
-			return queue2
 		},
 	}
 
@@ -278,22 +318,10 @@ func TestRoundRobin_Pick_HandlesDynamicFlows(t *testing.T) {
 	require.NotNil(t, selected, "Pick should select a queue initially")
 	assert.Equal(t, flow1ID, selected.FlowKey().ID, "First selection should be flow1")
 
-	// --- Simulate adding a flow ---
-	queue3 := &fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow3Key}
-	mockBand.FlowKeysFunc = func() []flowcontrol.FlowKey { return []flowcontrol.FlowKey{flow1Key, flow2Key, flow3Key} }
-	mockBand.QueueFunc = func(id string) flowcontrol.FlowQueueAccessor {
-		switch id {
-		case flow1ID:
-			return queue1
-		case flow2ID:
-			return queue2
-		case flow3ID:
-			return queue3
-		}
-		return nil
-	}
+	// Add flow3
+	activeQueues = []flowcontrol.FlowQueueAccessor{queue1, queue2, queue3}
 
-	// Next selection should be flow2 (continues from last index)
+	// Next selection should be flow2
 	selected, err = policy.Pick(ctx, mockBand)
 	require.NoError(t, err, "Pick should not error after adding a flow")
 	require.NotNil(t, selected, "Pick should select a queue after adding a flow")
@@ -305,8 +333,8 @@ func TestRoundRobin_Pick_HandlesDynamicFlows(t *testing.T) {
 	require.NotNil(t, selected, "Pick should select the new flow")
 	assert.Equal(t, flow3ID, selected.FlowKey().ID, "Next selection should be the new flow3")
 
-	// --- Simulate removing a flow ---
-	mockBand.FlowKeysFunc = func() []flowcontrol.FlowKey { return []flowcontrol.FlowKey{flow1Key, flow3Key} } // flow2 is removed
+	// Remove flow2
+	activeQueues = []flowcontrol.FlowQueueAccessor{queue1, queue3}
 
 	// Next selection should wrap around and pick flow1
 	selected, err = policy.Pick(ctx, mockBand)
@@ -326,25 +354,13 @@ func TestRoundRobin_Pick_Concurrency(t *testing.T) {
 			state := policy.NewState(ctx) // Shared state for all goroutines
 
 			// Setup: Three non-empty queues
-			queues := []*fwkfcmocks.MockFlowQueueAccessor{
-				{LenV: 1, FlowKeyV: flow1Key},
-				{LenV: 2, FlowKeyV: flow2Key},
-				{LenV: 3, FlowKeyV: flow3Key},
+			queues := []flowcontrol.FlowQueueAccessor{
+				&fwkfcmocks.MockFlowQueueAccessor{LenV: 1, FlowKeyV: flow1Key},
+				&fwkfcmocks.MockFlowQueueAccessor{LenV: 2, FlowKeyV: flow2Key},
+				&fwkfcmocks.MockFlowQueueAccessor{LenV: 3, FlowKeyV: flow3Key},
 			}
 			numQueues := int64(len(queues))
-
-			mockBand := &fwkfcmocks.MockPriorityBandAccessor{
-				PolicyStateV: state,
-				FlowKeysFunc: func() []flowcontrol.FlowKey { return []flowcontrol.FlowKey{flow1Key, flow2Key, flow3Key} },
-				QueueFunc: func(id string) flowcontrol.FlowQueueAccessor {
-					for _, q := range queues {
-						if q.FlowKey().ID == id {
-							return q
-						}
-					}
-					return nil
-				},
-			}
+			mockBand := newMockBand(state, queues...)
 
 			var wg sync.WaitGroup
 			numGoroutines := 10

@@ -26,7 +26,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"sync"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -66,7 +65,8 @@ func (p *roundRobin) TypedName() fwkplugin.TypedName {
 // It is initialized via NewState and stored on the PriorityBandAccessor.
 type roundRobinCursor struct {
 	mu           sync.Mutex
-	lastSelected *flowcontrol.FlowKey
+	hasLast      bool
+	lastSelected flowcontrol.FlowKey
 }
 
 // NewState initializes the policy state for a specific priority band.
@@ -81,7 +81,6 @@ func (p *roundRobin) Pick(
 	flowGroup flowcontrol.PriorityBandAccessor,
 ) (flowcontrol.FlowQueueAccessor, error) {
 	if flowGroup == nil {
-		// Nothing to pick
 		return nil, nil //nolint:nilnil
 	}
 
@@ -91,45 +90,33 @@ func (p *roundRobin) Pick(
 		return nil, fmt.Errorf("invalid state type for RoundRobin policy: expected *roundRobinCursor, got %T", v)
 	}
 
-	var activeQueues []flowcontrol.FlowQueueAccessor
-	flowGroup.IterateQueues(func(q flowcontrol.FlowQueueAccessor) bool {
-		if q != nil && q.Len() > 0 {
-			activeQueues = append(activeQueues, q)
-		}
-		return true
-	})
-	if len(activeQueues) == 0 {
-		c.mu.Lock()
-		c.lastSelected = nil
-		c.mu.Unlock()
-		return nil, nil //nolint:nilnil
-	}
-
-	slices.SortFunc(activeQueues, func(a, b flowcontrol.FlowQueueAccessor) int {
-		return a.FlowKey().Compare(b.FlowKey())
-	})
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	startIdx := 0
-	if c.lastSelected != nil {
-		idx, found := slices.BinarySearchFunc(
-			activeQueues,
-			*c.lastSelected,
-			func(q flowcontrol.FlowQueueAccessor, target flowcontrol.FlowKey) int {
-				return q.FlowKey().Compare(target)
-			},
-		)
-		if found {
-			startIdx = (idx + 1) % len(activeQueues)
-		} else {
-			startIdx = idx % len(activeQueues)
+	var minQueue, nextQueue flowcontrol.FlowQueueAccessor
+	var minKey, nextKey flowcontrol.FlowKey
+	flowGroup.IterateQueues(func(q flowcontrol.FlowQueueAccessor) bool {
+		if q == nil || q.Len() == 0 {
+			return true
 		}
+		key := q.FlowKey()
+		if minQueue == nil || key.Compare(minKey) < 0 {
+			minQueue, minKey = q, key
+		}
+		if c.hasLast && key.Compare(c.lastSelected) > 0 &&
+			(nextQueue == nil || key.Compare(nextKey) < 0) {
+			nextQueue, nextKey = q, key
+		}
+		return true
+	})
+	if nextQueue == nil {
+		nextQueue, nextKey = minQueue, minKey
 	}
-
-	selectedQueue := activeQueues[startIdx]
-	selectedKey := selectedQueue.FlowKey()
-	c.lastSelected = &selectedKey
-	return selectedQueue, nil
+	if nextQueue == nil {
+		// Keep lastSelected across empty ticks so bursts resume where the band left off.
+		return nil, nil //nolint:nilnil
+	}
+	c.hasLast = true
+	c.lastSelected = nextKey
+	return nextQueue, nil
 }
