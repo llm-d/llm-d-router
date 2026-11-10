@@ -34,6 +34,12 @@ A response ejection starts when the response that completes the failure run arri
 
 Reference the filter first in every scheduling profile that must skip failing endpoints. The fail-open considers only the candidates the filter receives. After a filter that narrows the candidates to the endpoint holding a session or a cached prefix, a failing endpoint can be the only candidate left, and the filter then keeps it.
 
+In a profile whose candidates span roles, reference the filter after the role filter and before any affinity filter. A healthy candidate of another role prevents the fail-open, so when every endpoint of the profile's role is unhealthy the profile gets no endpoints.
+
+## Disaggregated requests
+
+A request that ran disaggregated prefill returns every stage's outcome as the decode endpoint's response, so the response status alone cannot say which endpoint failed. The sidecar marks every response it writes with the `x-llm-d-failed-stage` header; see [docs/disaggregation.md](../../../../../../../docs/disaggregation.md) for the header contract. A prefill failure is charged to the prefill endpoint the EPP picked for the request, and a decode failure to the endpoint the EPP picked first. An encode failure, a marked response whose status is outside `responseFailureCodes`, and a failed response from a sidecar that predates the header on a request that ran prefill, are charged to no endpoint. A response that reports the prefill stage completed resets the prefill endpoint's failure run and backoff, whatever the decode stage returned. Any other success resets only the decode endpoint's: shared-storage decode-first and concurrent dispatch can answer before prefill runs or completes, so a success alone says nothing about the prefill endpoint. The marker is read only on a request that carries a prefill or encoder target: the sidecar drops a marker the model server set, but a pool without the sidecar forwards one through, and its failures must still count.
+
 ## Inputs consumed
 
 When poll health is enabled, the plugin consumes `PollStatusDataKey(pollSource)` (`PollStatus`), which the datalayer collector writes for every polling data source. The EPP fails to start when `pollSource` names no configured polling data source.

@@ -36,7 +36,6 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // p2pPeer is a pod's OffloadingConnector P2P tier address.
@@ -220,7 +219,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
 	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
 	prefillDuration := time.Since(prefillStart)
-	observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
+	observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
 
 	prefillFailed := isHTTPError(pw.statusCode)
 	prefillSpan.SetAttributes(
@@ -228,7 +227,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 	if prefillFailed {
-		observeStageError(r.Context(), metrics.StagePrefill)
+		observeStageError(r.Context(), routing.StagePrefill)
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
 	}
 	prefillSpan.End()
@@ -274,9 +273,9 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
-	observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
+	observeStageDuration(r.Context(), routing.StageDecode, decodeDuration)
 	if decodeStatus.failed() {
-		observeStageError(r.Context(), metrics.StageDecode)
+		observeStageError(r.Context(), routing.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
 	decodeSpan.SetAttributes(

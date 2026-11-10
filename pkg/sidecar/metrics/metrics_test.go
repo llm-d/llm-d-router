@@ -28,6 +28,7 @@ import (
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // sampleCount returns the histogram's observation count. Plain histograms have
@@ -89,14 +90,14 @@ func TestRecordDurations(t *testing.T) {
 func TestRecordError(t *testing.T) {
 	errorsTotal.Reset()
 
-	RecordError(StagePrefill)
-	RecordError(StagePrefill)
-	RecordError(StageDecode)
-	RecordError(StageEncode)
+	RecordError(routing.StagePrefill)
+	RecordError(routing.StagePrefill)
+	RecordError(routing.StageDecode)
+	RecordError(routing.StageEncode)
 
-	require.Equal(t, 2.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(StagePrefill)))
-	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(StageDecode)))
-	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(StageEncode)))
+	require.Equal(t, 2.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(routing.StagePrefill)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(routing.StageDecode)))
+	require.Equal(t, 1.0, promtestutil.ToFloat64(errorsTotal.WithLabelValues(routing.StageEncode)))
 }
 
 func TestRecordToolCallingFieldStatuses(t *testing.T) {
