@@ -75,7 +75,7 @@ The default `0 / 1 / 2` weights an output token at twice an input token. The coe
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `flowWeights` | `{}` | Weight per fairness ID. Values must be `> 0`; there is no upper bound. |
+| `flowWeights` | `{}` | Weight per fairness ID. Values must be `> 0`; there is no upper bound. Each entry adds one metric label value (see [Observability](#observability)). |
 | `defaultFlowWeight` | `1` | Weight for any fairness ID absent from `flowWeights`, including the default tenant unstamped callers fall into. Must be `> 0`. |
 | `idleTtlSeconds` | `3600` | Idle flows are pruned after this. `0` disables pruning. |
 | `sweepSeconds` | `300` | Minimum interval between idle sweeps. |
@@ -112,7 +112,7 @@ Under contention the virtual-service gauges of backlogged flows in one band stay
 
 The weight gauge shows the weight resolved for each flow. A fairness ID that does not match a `flowWeights` key silently takes `defaultFlowWeight`, and this gauge is how to detect that. Collectors are per-instance and registered through `handle.Metrics()`, so two instances can share one registry.
 
-Both gauges label `flow_id` with the fairness ID, so they share the `--fairness-id-metric-label-limit` cap. Flows past the cap are still scheduled and charged; they just get no series.
+Both gauges label `flow_id` with the fairness ID, so they share the `--fairness-id-metric-label-limit` cap. Flows past the cap are still scheduled and charged; they just get no series. A fairness ID named in `flowWeights` keeps its own label on these gauges and on every `fairness_id` metric after the cap fills, unless the limit is 0 or the ID is `other`, the overflow label. The match is on the whole fairness ID, as for the weight. The IDs are pinned when the policy is built, so this applies to every configured instance, whether or not a priority band references it.
 
 ## Trade-offs
 
