@@ -687,13 +687,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			logger.V(logutil.DEFAULT).Info("EPP received request") // Request ID and trace fields are logged as logger context values.
 
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
-		case *extProcPb.ProcessingRequest_RequestBody:
-			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
+		case *extProcPb.ProcessingRequest_RequestBody, *extProcPb.ProcessingRequest_RequestTrailers:
+			// Request trailers end the body: Envoy then sends the last body chunk without EndOfStream.
+			trailers := req.GetRequestTrailers() != nil
+			chunk := req.GetRequestBody().GetBody()
+			loggerTrace.Info("Incoming body chunk", "EoS", req.GetRequestBody().GetEndOfStream(), "trailers", trailers)
 			if buf == nil {
 				buf = s.bufferPool.Get().(*bytes.Buffer)
 				buf.Reset()
 			}
-			if s.maxRequestBodySize > 0 && buf.Len()+len(v.RequestBody.Body) > s.maxRequestBodySize {
+			if s.maxRequestBodySize > 0 && buf.Len()+len(chunk) > s.maxRequestBodySize {
 				err = errcommon.Error{
 					Code: errcommon.PayloadTooLarge,
 					Msg:  fmt.Sprintf("request body exceeds the %d-byte limit", s.maxRequestBodySize),
@@ -701,10 +704,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				break
 			}
 			// In the stream case, we can receive multiple request bodies.
-			buf.Write(v.RequestBody.Body)
+			buf.Write(chunk)
 
 			// Message is buffered, we can read and decode.
-			if v.RequestBody.EndOfStream {
+			if req.GetRequestBody().GetEndOfStream() || trailers {
 				loggerTrace.Info("decoding")
 				reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 				inboundBody := buf.Bytes()
@@ -824,7 +827,12 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 
 				reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
-				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
+				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody, !trailers)
+				if trailers {
+					reqCtx.reqBodyResp = append(reqCtx.reqBodyResp, &extProcPb.ProcessingResponse{
+						Response: &extProcPb.ProcessingResponse_RequestTrailers{RequestTrailers: &extProcPb.TrailersResponse{}},
+					})
+				}
 				fairnessID, priority := extractFairnessAndPriority(reqCtx)
 				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, reqCtx.Priority)
 				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.RequestSize)
@@ -835,8 +843,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 				recordRequestProcessing()
 			}
-		case *extProcPb.ProcessingRequest_RequestTrailers:
-			// This is currently unused.
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
 			// Overwrites the request-phase value on purpose. Response-received plugins
 			// read this through Response.ReqMetadata to learn which endpoint actually
