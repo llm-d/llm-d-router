@@ -30,17 +30,20 @@ import (
 
 	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	otelsemconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -510,5 +513,77 @@ func TestRenderMetrics_WarmupIsNotObserved(t *testing.T) {
 	assert.Zero(t, renderSeriesCount(t, renderFailuresTotal, r.pluginName))
 	for _, line := range logs.snapshot() {
 		assert.NotContains(t, line, "token-producer render call failed")
+	}
+}
+
+func TestRenderDurationTraceExemplars(t *testing.T) {
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { require.NoError(t, tp.Shutdown(context.Background())) })
+	recordingCtx, span := tp.Tracer("tokenizer-test").Start(context.Background(), "render")
+	defer span.End()
+
+	sampledRemote := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    span.SpanContext().TraceID(),
+		SpanID:     span.SpanContext().SpanID(),
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	}))
+	unsampled := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: span.SpanContext().TraceID(),
+		SpanID:  span.SpanContext().SpanID(),
+	}))
+
+	for _, tc := range []struct {
+		name                string
+		ctx                 context.Context
+		wantTrace, wantSpan bool
+	}{
+		{"recording", recordingCtx, true, true},
+		{"propagated", sampledRemote, true, false},
+		{"unsampled", unsampled, false, false},
+		{"no span", context.Background(), false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			renderDurationSeconds.Reset()
+			renderer := &vllmHTTPRenderer{pluginName: "exemplar-test"}
+			renderer.observeRender(tc.ctx, chatRenderPath, time.Second, 25*time.Millisecond, nil)
+			metric := &dto.Metric{}
+			observer := renderDurationSeconds.WithLabelValues(PluginType, renderer.pluginName, BackendVLLM, renderResultSuccess)
+			require.NoError(t, observer.(prometheus.Metric).Write(metric))
+			require.Equal(t, uint64(1), metric.GetHistogram().GetSampleCount())
+			require.InDelta(t, 0.025, metric.GetHistogram().GetSampleSum(), 1e-9)
+			var exemplar *dto.Exemplar
+			for _, bucket := range metric.GetHistogram().GetBucket() {
+				if bucket.GetExemplar() != nil {
+					exemplar = bucket.GetExemplar()
+					break
+				}
+			}
+			if !tc.wantTrace {
+				require.Nil(t, exemplar)
+				return
+			}
+			require.NotNil(t, exemplar)
+			labels := map[string]string{}
+			for _, label := range exemplar.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			require.Equal(t, span.SpanContext().TraceID().String(), labels[metricsutil.ExemplarTraceIDLabel])
+			if tc.wantSpan {
+				require.Equal(t, span.SpanContext().SpanID().String(), labels[metricsutil.ExemplarSpanIDLabel])
+			} else {
+				require.NotContains(t, labels, metricsutil.ExemplarSpanIDLabel)
+			}
+
+			registry := prometheus.NewRegistry()
+			require.NoError(t, registry.Register(renderDurationSeconds))
+			req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			req.Header.Set("Accept", "application/openmetrics-text;version=1.0.0")
+			rec := httptest.NewRecorder()
+			promhttp.HandlerFor(registry, promhttp.HandlerOpts{EnableOpenMetrics: true}).ServeHTTP(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Contains(t, rec.Header().Get("Content-Type"), "application/openmetrics-text")
+			require.Contains(t, rec.Body.String(), `trace_id="`+span.SpanContext().TraceID().String()+`"`)
+		})
 	}
 }

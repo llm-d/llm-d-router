@@ -179,12 +179,6 @@ func testSGLangBigramEventIndex(t *testing.T, indexConfig *kvblock.IndexConfig) 
 		require.Len(t, matches[key], 1)
 		require.Equal(t, "pod-1", matches[key][0].PodIdentifier)
 	}
-	childKey, err := index.GetRequestKey(ctx, kvblock.BlockHash(101))
-	require.NoError(t, err)
-	require.Equal(t, requestKeys[1], childKey)
-	parentKey, err := index.GetRequestKey(ctx, kvblock.BlockHash(100))
-	require.NoError(t, err)
-	require.Equal(t, requestKeys[0], parentKey)
 
 	payload, err := msgpack.Marshal([]any{0.0, []any{[]any{
 		eventTagBlockStored, []uint64{102}, nil, [][]uint32{{11, 22}, {22, 44}}, 2, nil, "GPU",

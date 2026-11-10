@@ -199,6 +199,18 @@ func TestSGLangGRPCParser_ParseRequest(t *testing.T) {
 			wantErrContains: "invalid gRPC generate request",
 		},
 		{
+			name: "rejects bytes after the gRPC frame",
+			path: sglangapiv1.SglangService_Generate_FullMethodName,
+			rawBody: func() []byte {
+				framed, err := grpcframe.MarshalProto(&sglangapiv1.GenerateRequest{
+					Text: &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "hi"}},
+				})
+				require.NoError(t, err)
+				return append(framed, 0xde, 0xad)
+			}(),
+			wantErrContains: "invalid gRPC generate request",
+		},
+		{
 			name:            "rejects missing prompt",
 			path:            sglangapiv1.SglangService_Generate_FullMethodName,
 			req:             &sglangapiv1.GenerateRequest{},

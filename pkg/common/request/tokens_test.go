@@ -160,6 +160,56 @@ func TestCapSingleToken(t *testing.T) {
 			want:    map[string]any{"model": "m", "max_tokens": 1, "stream": false},
 		},
 		{
+			name:    "messages drops an enabled thinking whose budget cannot sit below the cap",
+			apiType: APITypeMessages,
+			body: map[string]any{
+				"model":      "m",
+				"max_tokens": 16000,
+				"thinking":   map[string]any{"type": "enabled", "budget_tokens": 10000},
+			},
+			want: map[string]any{"model": "m", "max_tokens": 1, "stream": false},
+		},
+		{
+			name:    "messages drops an enabled thinking held as raw JSON",
+			apiType: APITypeMessages,
+			body: map[string]any{
+				"model":      "m",
+				"max_tokens": 16000,
+				"thinking":   json.RawMessage(`{"type":"enabled","budget_tokens":10000}`),
+			},
+			want: map[string]any{"model": "m", "max_tokens": 1, "stream": false},
+		},
+		{
+			name:    "messages keeps a disabled thinking",
+			apiType: APITypeMessages,
+			body: map[string]any{
+				"model":      "m",
+				"max_tokens": 16000,
+				"thinking":   map[string]any{"type": "disabled"},
+			},
+			want: map[string]any{
+				"model":      "m",
+				"max_tokens": 1,
+				"stream":     false,
+				"thinking":   map[string]any{"type": "disabled"},
+			},
+		},
+		{
+			name:    "chat completions leaves a thinking field alone",
+			apiType: APITypeChatCompletions,
+			body: map[string]any{
+				"model":    "m",
+				"thinking": map[string]any{"type": "enabled", "budget_tokens": 10000},
+			},
+			want: map[string]any{
+				"model":                 "m",
+				"max_tokens":            1,
+				"max_completion_tokens": 1,
+				"stream":                false,
+				"thinking":              map[string]any{"type": "enabled", "budget_tokens": 10000},
+			},
+		},
+		{
 			name:    "streaming is forced false and stream_options stripped",
 			apiType: APITypeCompletions,
 			body:    map[string]any{"stream": true, "stream_options": map[string]any{"include_usage": true}},
@@ -509,6 +559,45 @@ func TestNonNegativeInt(t *testing.T) {
 			got, err := NonNegativeInt(tc.v)
 			if got != tc.want || (err == nil) != tc.wantOK {
 				t.Errorf("NonNegativeInt(%#v) = (%d, %v), want (%d, ok=%v)", tc.v, got, err, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestStreamRequested(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      map[string]any
+		stream    bool
+		wantError bool
+	}{
+		{name: "absent", body: map[string]any{}},
+		{name: "null", body: map[string]any{FieldStream: nil}},
+		{name: "true", body: map[string]any{FieldStream: true}, stream: true},
+		{name: "false", body: map[string]any{FieldStream: false}},
+		{name: "raw null", body: map[string]any{FieldStream: json.RawMessage(`null`)}},
+		{name: "raw true", body: map[string]any{FieldStream: json.RawMessage(`true`)}, stream: true},
+		{name: "raw false", body: map[string]any{FieldStream: json.RawMessage(`false`)}},
+		{name: "string true", body: map[string]any{FieldStream: "true"}, wantError: true},
+		{name: "string false", body: map[string]any{FieldStream: "false"}, wantError: true},
+		{name: "number", body: map[string]any{FieldStream: json.Number("1")}, wantError: true},
+		{name: "object", body: map[string]any{FieldStream: map[string]any{}}, wantError: true},
+		{name: "array", body: map[string]any{FieldStream: []any{}}, wantError: true},
+		{name: "undecodable raw", body: map[string]any{FieldStream: json.RawMessage(`{`)}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream, err := StreamRequested(tc.body)
+			if tc.wantError {
+				if err == nil || err.Error() != "stream must be a boolean" {
+					t.Fatalf("StreamRequested() error = %v, want stream must be a boolean", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("StreamRequested() error = %v", err)
+			}
+			if stream != tc.stream {
+				t.Errorf("StreamRequested() = %v, want %v", stream, tc.stream)
 			}
 		})
 	}

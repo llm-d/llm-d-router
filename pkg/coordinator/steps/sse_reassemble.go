@@ -76,10 +76,8 @@ const (
 // message_stop ends the stream (there is no [DONE] marker). A non-text content
 // block (tool_use, thinking) makes the reply lossy, so force-streaming falls back.
 const (
-	messageEventStart        = "message_start"
 	messageEventContentStart = "content_block_start"
 	messageEventContentDelta = "content_block_delta"
-	messageEventDelta        = "message_delta"
 	messageEventStop         = "message_stop"
 
 	deltaTypeText = "text_delta"
@@ -309,7 +307,7 @@ func (r *sseReassembler) addResponses(frame map[string]any) {
 // would get them concatenated into one.
 func (r *sseReassembler) addMessages(frame map[string]any) {
 	switch frame[reqcommon.FieldType] {
-	case messageEventStart:
+	case reqcommon.MessageEventStart:
 		msg, ok := frame[fieldMessage].(map[string]any)
 		if !ok {
 			return
@@ -348,7 +346,7 @@ func (r *sseReassembler) addMessages(frame map[string]any) {
 			r.messageText.WriteString(text)
 			r.contentBytes += int64(len(text))
 		}
-	case messageEventDelta:
+	case reqcommon.MessageEventDelta:
 		if delta, ok := frame[fieldDelta].(map[string]any); ok {
 			if sr, ok := delta[fieldStopReason]; ok {
 				r.stopReason = sr

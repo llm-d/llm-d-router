@@ -24,15 +24,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/util/sessionaffinity"
 )
 
 // testOverflowLimit is the request limit of testGuardParams: 8 * (1 + 0.5).
@@ -155,6 +159,81 @@ func TestOverflowMovesRequestsOffAFullRevision(t *testing.T) {
 	}
 	// Nothing is stored: once v1 has room, requests draw v1 again.
 	assertNoOverflow(t, screener, overflowPool(testOverflowLimit-1, 0))
+}
+
+// TestOverflowReadsLoadThroughTheScreenerScope screens the way the director
+// does: the pool is scoped to the Screener's declarations before Screen, and
+// the guard reads the in-flight load through that scope.
+func TestOverflowReadsLoadThroughTheScreenerScope(t *testing.T) {
+	screener := seededOverflowScreener(t, overflowConfig())
+	datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{screener})
+	pool := overflowPool(testOverflowLimit, 0)
+	counts := map[string]int{}
+	for range testDraws {
+		request := &fwksched.InferenceRequest{Headers: map[string]string{}}
+		scopedRequest, scopedPool, _ := datalayer.ScopeInvocation(logr.Discard(), fwkrh.ScreenerExtensionPoint, screener, request, pool)
+		got := datalayer.Unscope(screener.Screen(context.Background(), scopedRequest, scopedPool))
+		if len(got) == 0 {
+			t.Fatal("empty survivor set")
+		}
+		counts[got[0].GetMetadata().Labels[testRevLabel]]++
+	}
+	if counts["v2"] != testDraws {
+		t.Fatalf("v1 prefill full: served %v, want every request on v2", counts)
+	}
+}
+
+// fakeGuard is an overflow guard that declares both Required and Optional keys.
+type fakeGuard struct{ deps fwkplugin.DataDependencies }
+
+func (g *fakeGuard) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "fake-guard", Name: testGuardName}
+}
+
+func (g *fakeGuard) Filter(_ context.Context, _ *fwksched.InferenceRequest, pods []fwksched.Endpoint) []fwksched.Endpoint {
+	return pods
+}
+
+func (g *fakeGuard) Consumes() fwkplugin.DataDependencies { return g.deps }
+
+// TestConsumesMergesTheGuardDependencies folds a guard that requires one of
+// the affinity sources' optional keys and declares an optional key it also
+// requires: a required key leaves Optional, and a guard witness replaces the
+// nil the sources declare.
+func TestConsumesMergesTheGuardDependencies(t *testing.T) {
+	config := overflowConfig()
+	config.RevisionGating.Affinity = &RevisionAffinity{
+		Mode:    AffinityModePrefix,
+		Sources: []sessionaffinity.SessionIDSource{{Attribute: "agent-identity"}, {Attribute: "tenant"}},
+	}
+	screener := newTestScreener(config)
+	agentKey := fwkplugin.NewDataKey("agent-identity", "")
+	tenantKey := fwkplugin.NewDataKey("tenant", "")
+	loadKey := attrconcurrency.InFlightLoadDataKey
+	screener.overflowGuard = &fakeGuard{deps: fwkplugin.DataDependencies{
+		Required: map[fwkplugin.DataKey]any{agentKey: "guard-required", loadKey: attrconcurrency.InFlightLoad{}},
+		Optional: map[fwkplugin.DataKey]any{tenantKey: "guard-optional", loadKey: "shadowed"},
+	}}
+
+	deps := screener.Consumes()
+	if got := deps.Required[agentKey]; got != "guard-required" {
+		t.Fatalf("Required[agent-identity] = %v, want the guard's witness", got)
+	}
+	if got := deps.Required[loadKey]; got != (attrconcurrency.InFlightLoad{}) {
+		t.Fatalf("Required[in-flight load] = %v, want the guard's witness", got)
+	}
+	if _, optional := deps.Optional[agentKey]; optional {
+		t.Fatal("agent-identity is required by the guard and must leave Optional")
+	}
+	if _, optional := deps.Optional[loadKey]; optional {
+		t.Fatal("a key the guard requires must not also be optional")
+	}
+	if got := deps.Optional[tenantKey]; got != "guard-optional" {
+		t.Fatalf("Optional[tenant] = %v, want the guard's witness", got)
+	}
+	if len(deps.Required) != 2 || len(deps.Optional) != 1 {
+		t.Fatalf("Required %v, Optional %v: want 2 required and 1 optional key", deps.Required, deps.Optional)
+	}
 }
 
 func TestOverflowKeepsTheRevisionWhenAnyEndpointHasRoom(t *testing.T) {

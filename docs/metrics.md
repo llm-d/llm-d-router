@@ -110,6 +110,7 @@ identity, or their composition `<tenant>/<session>` when `requestHandler.compose
 enabled and a request carries both, has a cap that defaults to 1000 distinct values. Configure it with
 `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id` to `other`. Caps
 apply over the lifetime of the process. Once a cap is reached, new values are reported as `other`.
+A value longer than 256 bytes, or one that is not valid UTF-8, is always reported as `other`.
 `default-flow`, the ID given to requests that have none, keeps its own label unless the limit is 0.
 These bounds apply whether or not the `flowControl` feature gate is enabled. When Flow Control is
 enabled, its series for a `fairness_id` are removed when the corresponding flow is garbage collected.
@@ -269,6 +270,9 @@ sum by (fairness_id) (rate(llm_d_epp_request_output_tokens_sum[5m]))
 # How each tenant's requests ended.
 sum by (fairness_id, outcome) (rate(llm_d_epp_request_outcome_total[5m]))
 ```
+
+The recording rule `llm_d:epp_request_running:ratio` (see
+[Fairness ID resolution](#fairness-id-resolution)) records the share per pool.
 
 #### Exemplars
 
@@ -571,6 +575,8 @@ reaches its `PreRequest` records one decision.
 |---|---|---|---|
 | `llm_d_epp_p2p_source_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `outcome` | One per request, with the outcome the producer's `p2p decision` log line names. |
 | `llm_d_epp_p2p_source_predicted_pulled_tokens` | Histogram | `plugin_name`, `endpoint_role` | Prompt tokens the selected source holds beyond the endpoint computing the prefix, per request sent to pull. |
+| `llm_d_epp_p2p_source_unpulled_tokens` | Histogram | `plugin_name`, `endpoint_role`, `outcome` | The same gap, per `declined` or `below-floor` request whose source holds more than the computing endpoint. |
+| `llm_d_epp_p2p_source_request_ttft_seconds` | Histogram | `plugin_name`, `endpoint_role`, `outcome`, `cost_margin` | Time from request receipt to the first response byte, per streaming request whose stream ends naturally (an HTTP error status delivered in full included), with `ttftByDecision`. |
 
 A request records the first outcome in this table that applies to it.
 
@@ -602,6 +608,33 @@ promotion job from its P2P tier (`tier=~".*:p2p"`) in `vllm:kv_offload_tiering_p
 labelled `result="success"` or `result="failure"`. As with the prefix prediction, the cohorts differ:
 a pull that fails or falls back to local prefill is counted on the router side only.
 
+`cost_margin` buckets the cost model's gain minus cost: `-inf..-1s`, `-1s..-250ms`, `-250ms..0`,
+`0..250ms`, `250ms..1s`, `1s..+inf`, and `none` for a decision the cost model did not price. A
+positive margin is the cost model approving a pull; `outcome` records whether the pull was requested,
+and an `unparsed-body` decision keeps its margin. The margin also depends on the load of the source
+and computing endpoints, so requests in one bucket can differ in cached-token gap, load and prompt
+length. TTFT by margin is diagnostic and does not measure the benefit of a pull.
+`outcome="pulled"` is the router's request, which the engine may still compute locally.
+
+### Prefix-cache affinity filter and P2P
+
+A `prefix-cache-affinity-filter` with `p2pSourceProducerName` set emits this counter, labelled by the
+filter instance. Each request the instance filtered that reaches `PreRequest` records one count.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `affinity_outcome`, `p2p_outcome` | The filter's outcome for the request, with the decision of the `p2p-source-producer` that `p2pSourceProducerName` names. |
+
+`affinity_outcome` is the filter's outcome, or `multiple` for a request the instance decided more
+than once because it runs in more than one scheduling profile. `p2p_outcome` and `endpoint_role` are
+the producer's `outcome` and `endpoint_role` (see [P2P KV-cache source](#p2p-kv-cache-source)).
+`p2p_outcome="unreported"` marks a request with no published P2P decision, and its `endpoint_role`
+is empty. A likely cause is a `p2pSourceProducerName` that names no configured `p2p-source-producer`,
+which startup accepts because the dependency is optional.
+
+`self` and `below-floor` occur whether or not the selected endpoint is in the filter's sticky set,
+so `p2p_outcome` does not show whether a `load_override` moved the request off it.
+
 ### Token producer render
 
 These metrics belong to the `token-producer` when it uses the vLLM render backend. The metric
@@ -610,7 +643,7 @@ requests. The startup warmup probe is not observed.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. |
+| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_token_producer_render_failures_total` | Counter | `plugin_type`, `plugin_name`, `backend`, `reason` | Failed render calls. |
 
 `backend` is `vllm`. `result` is `success`, `timeout`, `canceled` or `error`. A `canceled` call is
@@ -672,8 +705,9 @@ included. Requests that fail earlier, such as a body that cannot be parsed, are 
 
 - `header`: the `x-llm-d-inference-fairness-id` header, its deprecated name
   `x-gateway-inference-fairness-id`, or the ID derived from it (percent-encoded, and
-  composed with the agent identity when present) when `requestHandler.composeFairnessIDs`
-  is enabled.
+  composed with the derived program root or the agent identity when present) when
+  `requestHandler.composeFairnessIDs` is enabled.
+- `derived_root`: no header, and the agent-lineage plugin derived a program root.
 - `agent_identity`: no header, and the agent identity plugin supplied an ID.
 - `default`: neither, so the request uses `default-flow`.
 
@@ -690,8 +724,9 @@ When `requestHandler.composeFairnessIDs` is enabled, a request carrying both the
 agent identity is recorded under the composed `<tenant>/<session>` ID with `source="header"`. The
 tenant part is percent-encoded (`%` to `%25`, `/` to `%2F`), so the first segment is always the
 whole tenant. On such a pool, `llm_d:epp_named_fairness_ids:count5m` counts distinct composed IDs,
-which are sessions rather than tenants, and `llm_d:epp_agent_sessions:count5m` does not count
-tenant-stamped sessions because those requests resolve with `source="header"`.
+which are sessions rather than tenants, `llm_d:epp_request_running:ratio` splits a tenant's share
+across its sessions, and `llm_d:epp_agent_sessions:count5m` does not count tenant-stamped sessions
+because those requests resolve with `source="header"`.
 
 The `fairness_id` label uses the shared cap described in [Metrics catalog](#metrics-catalog).
 Scheduling and Flow Control always use the original ID; only the label is folded. Per replica:
@@ -714,17 +749,25 @@ sum by (inference_pool, source) (rate(llm_d_epp_fairness_id_overflow_total[5m]))
 ```
 
 [`rules/fairness-id-rules.yaml`](rules/fairness-id-rules.yaml) has recording rules that count
-distinct fairness IDs per pool, deduplicated across EPP replicas:
+distinct fairness IDs per pool, deduplicated across EPP replicas, and record each ID's share of
+in-flight requests:
 
 | Rule | Value |
 |---|---|
 | `llm_d:epp_named_fairness_ids:count5m` | Header IDs, including composed `<tenant>/<session>` IDs, that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
 | `llm_d:epp_named_fairness_ids:incomplete5m` | 1 when header IDs were folded in the same window, so the count is a lower bound; otherwise 0. |
-| `llm_d:epp_agent_sessions:count5m` | Agent identity IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source="agent_identity"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
+| `llm_d:epp_agent_sessions:count5m` | Agent identity or derived-root IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source=~"agent_identity\|derived_root"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
+| `llm_d:epp_request_running:ratio` | Each fairness ID's share of `llm_d_epp_request_running` (dispatched, unfinished requests) per pool, summed across EPP replicas before dividing. `other` and `default-flow` count in the total, so the values in a pool sum to 1, and an ID's share is a lower bound while `other` is above 0. Queued requests are not included. While the pool is busy, an ID a replica has served reports 0 when nothing is in flight; an idle pool has no sample. |
 
 The rules group by `namespace` and `inference_pool`, so the scrape must attach a `namespace`
-label. Change `5m` for a different window. An ID is missed when all of its requests went to a
-replica that was removed before Prometheus scraped it. To check the rules after editing them, run
+label. Request metrics carry no pool label, so the ratio rule takes `inference_pool` from
+`llm_d_epp_fairness_id_overflow_total` on the same `namespace`, `job`, `pod`, and `instance`, using
+the newest pool when one target reports two within the lookback window. The ratio rule omits any
+replica that does not export that counter. Duplicate scrapes of one EPP pod count its running
+requests twice in the pool sum. All four rules aggregate by `namespace` and
+`inference_pool` without a cluster label, so each Prometheus must evaluate one cluster. Change `5m`
+for a different window. An ID is missed when all of its requests went to a replica that was removed
+before Prometheus scraped it. To check the rules after editing them, run
 `promtool test rules hack/testdata/fairness-id-rules-test.yaml`.
 
 ### Program-aware fairness
@@ -1117,6 +1160,7 @@ enablement and TLS.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
+| `llm_d_disagg_sidecar_info` | Gauge | `commit`, `build_ref` | Build info. Always `1`. |
 | `llm_d_disagg_sidecar_requests_total` | Counter | `api_type` | Requests on the intercepted inference API paths. `api_type` is `chat_completions`, `completions`, `messages`, `responses`, `vllm_generate`, or `sglang_generate`. |
 | `llm_d_disagg_sidecar_disagg_requests_total` | Counter | `disagg_type` | Requests routed through disaggregation. `disagg_type` is `prefill-decode`, `encode-decode`, or `encode-prefill-decode`. |
 | `llm_d_disagg_sidecar_encode_duration_seconds` | Histogram | - | Encode stage latency. |

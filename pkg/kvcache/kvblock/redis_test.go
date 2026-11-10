@@ -17,6 +17,8 @@ limitations under the License.
 package kvblock_test
 
 import (
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -157,6 +159,56 @@ func TestRedisBatchEvictPreservesMappingAndPrunesNext(t *testing.T) {
 	require.NoError(t, err)
 	_, err = index.GetRequestKey(ctx, 12)
 	require.Error(t, err)
+}
+
+// TestRedisIndexEngineEvictKeepsMappingAddedConcurrently holds pod B's HSET,
+// which Add sends after its ZADD, until pod A's engine-key eviction of the same
+// block has finished. Pod B's entry must stay reachable through its engine key,
+// or later removals and child stores for that engine key cannot resolve it.
+func TestRedisIndexEngineEvictKeepsMappingAddedConcurrently(t *testing.T) {
+	ctx := t.Context()
+	server, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(server.Close)
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(t, err)
+
+	const (
+		engineKey  BlockHash = 9001
+		requestKey BlockHash = 1
+	)
+	podA := PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
+	podB := PodEntry{PodIdentifier: "10.0.0.2:8000", DeviceTier: "gpu"}
+	require.NoError(t, index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podA}))
+
+	reached, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	server.Server().SetPreHook(func(_ *miniredisserver.Peer, command string, args ...string) bool {
+		if command == "HSET" && len(args) > 1 && args[0] == requestKey.String() &&
+			strings.Contains(args[1], podB.PodIdentifier) {
+			once.Do(func() {
+				close(reached)
+				<-release
+			})
+		}
+		return false
+	})
+
+	added := make(chan error, 1)
+	go func() {
+		added <- index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podB})
+	}()
+	<-reached
+	require.NoError(t, index.Evict(ctx, EngineKey, []BlockHash{engineKey}, []PodEntry{podA}))
+	close(release)
+	require.NoError(t, <-added)
+
+	result, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+	require.NoError(t, err)
+	require.Equal(t, []PodEntry{podB}, result[requestKey])
+	got, err := index.GetRequestKey(ctx, engineKey)
+	require.NoError(t, err, "engine key mapping removed while pod B's entry remains")
+	require.Equal(t, requestKey, got)
 }
 
 // TestRedisLookup_OneBadKeyDoesNotDiscardOtherMatches verifies that a single

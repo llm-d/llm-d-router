@@ -64,6 +64,7 @@ const (
 	ecMooncakePortFlag        = "ec-mooncake-port"
 	ecMooncakePodIPFlag       = "ec-mooncake-pod-ip"
 	enableP2PPull             = "enable-p2p-pull"
+	forwardPromptTokenIDs     = "forward-prompt-token-ids"
 	enableSSRFProtection      = "enable-ssrf-protection"
 	enablePrefillerSampling   = "enable-prefiller-sampling"
 	enableTLS                 = "enable-tls"
@@ -126,6 +127,7 @@ type yamlConfiguration struct {
 	EnableSSRFProtection       *bool    `json:"enable-ssrf-protection,omitempty"`
 	EnablePrefillerSampling    *bool    `json:"enable-prefiller-sampling,omitempty"`
 	EnableP2PPull              *bool    `json:"enable-p2p-pull,omitempty"`
+	ForwardPromptTokenIDs      *bool    `json:"forward-prompt-token-ids,omitempty"`
 	SecureServing              *bool    `json:"secure-serving,omitempty"`
 	SecureProxy                *bool    `json:"secure-proxy,omitempty"`
 	CertPath                   string   `json:"cert-path,omitempty"`
@@ -286,6 +288,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the ec_port the EC consumer (prefiller, or the local decoder without a prefiller) listens on for Mooncake EC control (only used with --ec-connector=ec-mooncake)")
 	fs.StringVar(&opts.ECMooncakePodIP, ecMooncakePodIPFlag, opts.ECMooncakePodIP,
 		"the local decoder's address reachable from encoder pods, named to encoders as the EC consumer when a request has no prefiller. Defaults to the POD_IP env var (only used with --ec-connector=ec-mooncake)")
+	fs.BoolVar(&opts.ForwardPromptTokenIDs, forwardPromptTokenIDs, opts.ForwardPromptTokenIDs,
+		"Carry kv_transfer_params.prompt_token_ids onto prefill and decode requests. Only enable behind a gateway running the forward-prompt-token-ids EPP plugin.")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Serve the listener over TLS.")
@@ -843,6 +847,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.EnableP2PPull != nil && !opts.isFlagSet(enableP2PPull) {
 		opts.EnableP2PPull = *cfg.EnableP2PPull
+	}
+	if cfg.ForwardPromptTokenIDs != nil && !opts.isFlagSet(forwardPromptTokenIDs) {
+		opts.ForwardPromptTokenIDs = *cfg.ForwardPromptTokenIDs
 	}
 
 	if !opts.isSecureServingFlagSet() {

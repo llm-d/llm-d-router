@@ -1,5 +1,6 @@
-# Recording rules that count distinct fairness IDs per inference pool from
-# llm_d_epp_fairness_id_resolved_total. See docs/metrics.md#fairness-id-resolution.
+# Recording rules for fairness IDs per inference pool: distinct IDs from
+# llm_d_epp_fairness_id_resolved_total and each ID's share of llm_d_epp_request_running.
+# See docs/metrics.md#fairness-id-resolution.
 # Test: promtool test rules hack/testdata/fairness-id-rules-test.yaml
 groups:
   - name: fairness-identities
@@ -20,14 +21,39 @@ groups:
       - record: llm_d:epp_named_fairness_ids:incomplete5m
         expr: |
           max by (namespace, inference_pool) (increase(llm_d_epp_fairness_id_overflow_total{source="header"}[5m]) > bool 0)
-      # Distinct agent sessions seen in the last 5m, per pool. Folded IDs are excluded.
+      # Distinct agent sessions seen in the last 5m, per pool: agent-identity
+      # sessions and agent-lineage derived roots. Folded IDs are excluded.
       - record: llm_d:epp_agent_sessions:count5m
         expr: |
           count by (namespace, inference_pool) (
             count by (namespace, inference_pool, fairness_id) (
-                (increase(llm_d_epp_fairness_id_resolved_total{source="agent_identity",fairness_id!="other"}[5m]) > 0)
+                (increase(llm_d_epp_fairness_id_resolved_total{source=~"agent_identity|derived_root",fairness_id!="other"}[5m]) > 0)
               or
-                (present_over_time(llm_d_epp_fairness_id_resolved_total{source="agent_identity",fairness_id!="other"}[5m])
+                (present_over_time(llm_d_epp_fairness_id_resolved_total{source=~"agent_identity|derived_root",fairness_id!="other"}[5m])
                   unless present_over_time(llm_d_epp_fairness_id_resolved_total[1h] offset 5m))
             )
+          )
+  - name: fairness-id-share
+    rules:
+      # Request metrics carry no pool label, so each scrape target takes inference_pool from
+      # overflow_total, which EPP pre-creates on startup. A target that reports two pools within the
+      # lookback window, such as a reused address after lost staleness markers, uses the newest one.
+      - record: llm_d:epp_request_running:ratio
+        expr: |
+          sum by (namespace, inference_pool, fairness_id) (
+            llm_d_epp_request_running
+            * on (namespace, job, pod, instance) group_left (inference_pool)
+            group by (namespace, job, pod, instance, inference_pool) (
+              topk by (namespace, job, pod, instance) (1, timestamp(llm_d_epp_fairness_id_overflow_total))
+            )
+          )
+          / on (namespace, inference_pool) group_left ()
+          (
+            sum by (namespace, inference_pool) (
+              llm_d_epp_request_running
+              * on (namespace, job, pod, instance) group_left (inference_pool)
+              group by (namespace, job, pod, instance, inference_pool) (
+                topk by (namespace, job, pod, instance) (1, timestamp(llm_d_epp_fairness_id_overflow_total))
+              )
+            ) > 0
           )

@@ -18,7 +18,10 @@ package p2psource
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -31,7 +34,9 @@ import (
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -46,18 +51,20 @@ func TestRegisterMetrics(t *testing.T) {
 }
 
 // Each PreRequest records exactly one decision outcome, the same one its
-// decision log line names, under the endpoint_role the prefix-cache metrics use,
-// and only a pull records predicted pulled tokens.
+// decision log line names, under the endpoint_role the prefix-cache metrics use.
+// Only a pull records predicted pulled tokens, and only a declined or
+// below-floor decision with a positive gap records unpulled tokens.
 func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 	tests := []struct {
-		name          string
-		config        Config
-		request       func(p *Producer) *scheduling.InferenceRequest
-		result        func(p *Producer) *scheduling.SchedulingResult
-		outcome       string
-		role          string
-		pulledTokens  int // 0 when no pull is recorded
-		wantPreReqErr bool
+		name           string
+		config         Config
+		request        func(p *Producer) *scheduling.InferenceRequest
+		result         func(p *Producer) *scheduling.SchedulingResult
+		outcome        string
+		role           string
+		pulledTokens   int // 0 when no pull is recorded
+		unpulledTokens int // 0 when no unpulled gap is recorded
+		wantPreReqErr  bool
 	}{
 		{
 			name:    "pulled",
@@ -148,6 +155,35 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 			},
 			outcome: "below-floor",
 			role:    "decode",
+			// 32 tokens on the source, one 16-token block on the computing pod.
+			unpulledTokens: 16,
+		},
+		{
+			// The computing pod holds more than the source: nothing is left
+			// behind.
+			name:   "below floor without a cached advantage",
+			config: Config{MinCachedTokenDelta: 1},
+			request: func(p *Producer) *scheduling.InferenceRequest {
+				return preRequest(p, "req-ahead", peer("10.0.0.2", 16))
+			},
+			result: func(p *Producer) *scheduling.SchedulingResult {
+				return decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 2))
+			},
+			outcome: "below-floor",
+			role:    "decode",
+		},
+		{
+			// The source and the computing pod hold the same prefix.
+			name:   "below floor with an equal cache",
+			config: Config{MinCachedTokenDelta: 1},
+			request: func(p *Producer) *scheduling.InferenceRequest {
+				return preRequest(p, "req-equal", peer("10.0.0.2", 32))
+			},
+			result: func(p *Producer) *scheduling.SchedulingResult {
+				return decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 2))
+			},
+			outcome: "below-floor",
+			role:    "decode",
 		},
 		{
 			name:    "no best match",
@@ -225,8 +261,9 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 			result: func(p *Producer) *scheduling.SchedulingResult {
 				return decodeOnly(queuedEndpoint(p, "pod-a", "10.0.0.1", 0, 1))
 			},
-			outcome: "declined",
-			role:    "decode",
+			outcome:        "declined",
+			role:           "decode",
+			unpulledTokens: 8192,
 		},
 		{
 			name:   "prefill port out of range",
@@ -251,7 +288,8 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 			t.Cleanup(resetMetrics)
 
 			p := New("test", test.config)
-			err := p.PreRequest(utils.NewTestContext(t), test.request(p), test.result(p))
+			request := test.request(p)
+			err := p.PreRequest(utils.NewTestContext(t), request, test.result(p))
 			if test.wantPreReqErr {
 				require.Error(t, err)
 			} else {
@@ -260,6 +298,17 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 
 			require.Equal(t, 1, testutil.CollectAndCount(sourceDecisions), "one decision series")
 			assert.Equal(t, float64(1), testutil.ToFloat64(sourceDecisions.WithLabelValues("test", test.role, test.outcome)))
+			published, ok := scheduling.ReadRequestAttribute[attrprefix.P2PSourceDecision](request, p.decisionDataKey)
+			require.True(t, ok, "the decision is published on the request")
+			assert.Equal(t, attrprefix.P2PSourceDecision{Outcome: test.outcome, EndpointRole: test.role}, published)
+
+			unpulled := histogramObserved(t, unpulledTokens, "outcome")
+			if test.unpulledTokens == 0 {
+				assert.Empty(t, unpulled, "unpulled tokens observations")
+			} else {
+				assert.Equal(t, map[string][2]float64{test.outcome: {1, float64(test.unpulledTokens)}}, unpulled,
+					"unpulled tokens count and sum by outcome")
+			}
 
 			observed := pulledTokensObserved(t)
 			if test.pulledTokens == 0 {
@@ -270,6 +319,230 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 				"predicted pulled tokens count and sum by endpoint_role")
 		})
 	}
+}
+
+func TestCostMarginBucket(t *testing.T) {
+	for _, test := range []struct {
+		marginMs float64
+		want     string
+	}{
+		{-1500, "-inf..-1s"},
+		{-1000, "-1s..-250ms"},
+		{-250, "-250ms..0"},
+		{0, "-250ms..0"}, // gain == cost declines
+		{0.1, "0..250ms"},
+		{250, "250ms..1s"},
+		{1000, "1s..+inf"},
+	} {
+		assert.Equal(t, test.want, costMarginBucket(test.marginMs), "margin %v ms", test.marginMs)
+	}
+}
+
+// A pull whose gain equals its cost is declined: the producer leaves the body
+// and headers untouched, records the gap as unpulled, and labels the margin
+// -250ms..0.
+func TestCostModelTieDeclines(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+
+	// gain 4000*(1.5-1)/1000 = 2 ms, cost 2 ms; both exact in float64.
+	cfg := `{"ttftByDecision": true, "costModel": {"prefillMicrosecondsPerToken": 1.5, "transferMicrosecondsPerToken": 1,
+		"transferFixedMs": 2}}`
+	built, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(cfg)), nil)
+	require.NoError(t, err)
+	recorder := built.(*ttftRecorder)
+	request := costRequest(recorder.Producer, "req-tie", 4000, 0)
+	require.NoError(t, recorder.PreRequest(utils.NewTestContext(t), request,
+		decodeOnly(queuedEndpoint(recorder.Producer, "pod-a", "10.0.0.1", 0, 0))))
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(sourceDecisions.WithLabelValues("p2p", "decode", "declined")))
+	assertNoSource(t, request)
+	assert.Equal(t, map[string][2]float64{"declined": {1, 4000}}, histogramObserved(t, unpulledTokens, "outcome"))
+
+	received := time.Unix(1000, 0)
+	recorder.ResponseBody(utils.NewTestContext(t), request, &fwkrh.Response{
+		EndOfStream: true, Streaming: true, TerminationCause: fwkrh.TerminationCauseNatural,
+		ReceivedTimestamp: received, FirstTokenTimestamp: received.Add(time.Second),
+	}, nil)
+	assert.Equal(t, map[string][2]float64{"declined,-250ms..0": {1, 1}},
+		histogramObserved(t, requestTTFT, "outcome", "cost_margin"))
+}
+
+// Only ttftByDecision adds the response-body hook.
+func TestFactoryAddsResponseBodyOnlyWithTTFTByDecision(t *testing.T) {
+	plain, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(`{}`)), nil)
+	require.NoError(t, err)
+	_, hooks := plain.(fwkrh.ResponseBodyProcessor)
+	assert.False(t, hooks, "a producer without ttftByDecision registers no response-body hook")
+
+	recorder, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(`{"ttftByDecision": true}`)), nil)
+	require.NoError(t, err)
+	_, hooks = recorder.(fwkrh.ResponseBodyProcessor)
+	assert.True(t, hooks, "ttftByDecision registers the response-body hook")
+	_, preRequest := recorder.(fwkrh.PreRequest)
+	assert.True(t, preRequest, "the wrapped producer keeps its PreRequest")
+}
+
+// With ttftByDecision, the end of a streaming response records its TTFT under
+// the decision and cost margin its PreRequest made, once, and releases the
+// stored decision.
+func TestTTFTByDecision(t *testing.T) {
+	received := time.Unix(1000, 0)
+	streamEnd := func(streaming bool) *fwkrh.Response {
+		return &fwkrh.Response{
+			EndOfStream: true, Streaming: streaming, TerminationCause: fwkrh.TerminationCauseNatural,
+			ReceivedTimestamp: received, FirstTokenTimestamp: received.Add(1500 * time.Millisecond),
+		}
+	}
+	disconnected := streamEnd(true)
+	disconnected.TerminationCause = fwkrh.TerminationCauseClientDisconnect
+	firstByteAtReceipt := streamEnd(true)
+	firstByteAtReceipt.FirstTokenTimestamp = received
+	tests := []struct {
+		name     string
+		waiting  int // computing pod's waiting queue: 1 adds requeueMs and declines
+		chunks   []*fwkrh.Response
+		labels   []string // outcome, cost_margin; nil when nothing is recorded
+		skipPreq bool
+	}{
+		{
+			// gain 8192*(19-3.9)/1000 = 123.7 ms, cost 15 + 500 ms requeue.
+			name:    "declined",
+			waiting: 1,
+			chunks:  []*fwkrh.Response{{StartOfStream: true}, streamEnd(true)},
+			labels:  []string{"declined", "-1s..-250ms"},
+		},
+		{
+			// gain 123.7 ms, cost 15 ms.
+			name:   "pulled",
+			chunks: []*fwkrh.Response{{StartOfStream: true}, streamEnd(true)},
+			labels: []string{"pulled", "0..250ms"},
+		},
+		{
+			name:   "non-streaming response",
+			chunks: []*fwkrh.Response{streamEnd(false)},
+		},
+		{
+			// The EPP's request TTFT skips a stream it tears down.
+			name:   "disconnect after the first byte",
+			chunks: []*fwkrh.Response{{StartOfStream: true}, disconnected},
+		},
+		{
+			name:   "first byte not after receipt",
+			chunks: []*fwkrh.Response{{StartOfStream: true}, firstByteAtReceipt},
+		},
+		{
+			name:   "stream still open",
+			chunks: []*fwkrh.Response{{StartOfStream: true}},
+		},
+		{
+			name:     "no stored decision",
+			chunks:   []*fwkrh.Response{streamEnd(true)},
+			skipPreq: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resetMetrics()
+			t.Cleanup(resetMetrics)
+
+			cfg := `{"ttftByDecision": true, "costModel": {"prefillMicrosecondsPerToken": 19, "transferMicrosecondsPerToken": 3.9,
+				"transferFixedMs": 15, "requeueMs": 500}}`
+			built, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(cfg)), nil)
+			require.NoError(t, err)
+			recorder := built.(*ttftRecorder)
+			request := costRequest(recorder.Producer, "req-1", 8192, 0)
+			if !test.skipPreq {
+				require.NoError(t, recorder.PreRequest(utils.NewTestContext(t), request,
+					decodeOnly(queuedEndpoint(recorder.Producer, "pod-a", "10.0.0.1", 0, test.waiting))))
+			}
+			for _, chunk := range test.chunks {
+				recorder.ResponseBody(utils.NewTestContext(t), request, chunk, nil)
+			}
+
+			observed := histogramObserved(t, requestTTFT, "outcome", "cost_margin")
+			if test.labels == nil {
+				assert.Empty(t, observed, "TTFT observations")
+			} else {
+				assert.Equal(t, map[string][2]float64{strings.Join(test.labels, ","): {1, 1.5}}, observed,
+					"TTFT count and sum by outcome and cost_margin")
+			}
+
+			_, err = plugin.ReadPluginStateKey[*decisionState](recorder.pluginState, "req-1", decisionStateKey)
+			if test.name == "stream still open" {
+				assert.NoError(t, err, "the decision stays until the stream ends")
+			} else {
+				assert.Error(t, err, "the decision is released at the end of the stream")
+			}
+		})
+	}
+}
+
+// A stream that outlasts the staleness threshold keeps its decision while its
+// stream ctx is alive, so its end still records TTFT. A decision whose stream
+// ctx ends without an end-of-stream call is reclaimed by the janitor.
+func TestTTFTByDecisionSurvivesStateExpiry(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+
+	built, err := PluginFactory("p2p", json.NewDecoder(strings.NewReader(`{"ttftByDecision": true}`)), nil)
+	require.NoError(t, err)
+	recorder := built.(*ttftRecorder)
+	janitorCtx, stopJanitor := context.WithCancel(context.Background())
+	t.Cleanup(stopJanitor)
+	recorder.pluginState = plugin.NewPluginState(janitorCtx,
+		plugin.WithStalenessThreshold(50*time.Millisecond), plugin.WithCleanupInterval(10*time.Millisecond))
+	preRequestOn := func(ctx context.Context, id string) *scheduling.InferenceRequest {
+		request := preRequest(recorder.Producer, id, peer("10.0.0.2", 48))
+		require.NoError(t, recorder.PreRequest(ctx, request, decodeOnly(endpoint(recorder.Producer, "pod-a", "10.0.0.1", 1))))
+		return request
+	}
+
+	streamCtx, endStream := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(endStream)
+	long := preRequestOn(streamCtx, "req-long")
+	recorder.ResponseBody(streamCtx, long, &fwkrh.Response{StartOfStream: true}, nil)
+	// Several janitor sweeps past the threshold, no chunks.
+	time.Sleep(150 * time.Millisecond)
+	received := time.Unix(1000, 0)
+	recorder.ResponseBody(streamCtx, long, &fwkrh.Response{
+		EndOfStream: true, Streaming: true, TerminationCause: fwkrh.TerminationCauseNatural,
+		ReceivedTimestamp: received, FirstTokenTimestamp: received.Add(time.Second),
+	}, nil)
+	assert.Equal(t, map[string][2]float64{"pulled": {1, 1}}, histogramObserved(t, requestTTFT, "outcome"),
+		"the long stream records its TTFT")
+
+	leakedCtx, endLeaked := context.WithCancel(utils.NewTestContext(t))
+	preRequestOn(leakedCtx, "req-leaked")
+	endLeaked()
+	// LastAccessTime does not refresh the entry, so polling cannot keep it alive.
+	require.Eventually(t, func() bool {
+		_, ok := recorder.pluginState.LastAccessTime("req-leaked")
+		return !ok
+	}, time.Second, 10*time.Millisecond, "the janitor reclaims the decision of an ended stream")
+}
+
+// histogramObserved returns the observation count and sum of a histogram
+// vector, keyed by the comma-joined values of the given labels.
+func histogramObserved(t *testing.T, histogram *prometheus.HistogramVec, keyLabels ...string) map[string][2]float64 {
+	t.Helper()
+	registry := prometheus.NewRegistry()
+	require.NoError(t, registry.Register(histogram))
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	observed := map[string][2]float64{}
+	for _, family := range families {
+		for _, metric := range family.GetMetric() {
+			labels := labelMap(metric)
+			key := make([]string, 0, len(keyLabels))
+			for _, name := range keyLabels {
+				key = append(key, labels[name])
+			}
+			h := metric.GetHistogram()
+			observed[strings.Join(key, ",")] = [2]float64{float64(h.GetSampleCount()), h.GetSampleSum()}
+		}
+	}
+	return observed
 }
 
 // PluginFactory registers both collectors on the handle's registry, so a

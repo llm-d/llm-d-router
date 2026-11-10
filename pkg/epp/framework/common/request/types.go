@@ -250,6 +250,13 @@ type TokenizedRequest struct {
 	Prompts []PromptTokens
 	// CacheSalt isolates prefix caches across requests. Populated by the token-producer.
 	CacheSalt string
+	// LegacyTranslated marks prompts produced by the token-producer's Go-side
+	// legacy /v1/messages or /v1/responses translation rather than by the
+	// backend renderer. Those translations do not guarantee token parity with
+	// what vLLM renders from the client's request (they drop fields like
+	// thinking, reasoning and tool_choice), so consumers must not forward the
+	// IDs as authoritative.
+	LegacyTranslated bool
 }
 
 // PromptTokens bundles the token IDs and multimodal features for a single
@@ -532,6 +539,8 @@ type TextToSpeechRequest struct {
 	// RefText is the transcript of a reference audio clip for voice cloning
 	// and is tokenized alongside Input.
 	RefText string `json:"ref_text,omitempty"`
+	// CacheSalt isolates prefix caches for security.
+	CacheSalt string `json:"cache_salt,omitempty"`
 }
 
 func (r *TextToSpeechRequest) String() string {

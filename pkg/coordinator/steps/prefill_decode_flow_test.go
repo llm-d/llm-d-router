@@ -648,3 +648,89 @@ func clientCachedTokens(t *testing.T, body string) int {
 	t.Fatalf("no cached_tokens in the response the client received: %s", body)
 	return 0
 }
+
+func TestResponseHeaders_FlowFromConditionalDecodeMiss(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		probeRevision string
+	}{
+		{name: "412 carries the revision", probeRevision: "revision-b"},
+		{name: "412 without the revision", probeRevision: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runConditionalDecodeMissHeaderFlow(t, tc.probeRevision)
+		})
+	}
+}
+
+func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string) {
+	t.Helper()
+	var prefillHeaders, decodeHeaders http.Header
+
+	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Header.Get(routing.PreferHeader) == routing.PreferIfAvailable:
+			if probeRevision != "" {
+				w.Header().Set("X-LLM-D-Disagg-Revision", probeRevision)
+			}
+			w.WriteHeader(http.StatusPreconditionFailed)
+
+		case r.Header.Get(reqcommon.EPPProfileHeaderKey) == gateway.PhasePrefill:
+			prefillHeaders = r.Header.Clone()
+			_ = json.NewEncoder(w).Encode(map[string]any{"kv_transfer_params": map[string]any{}})
+
+		case r.Header.Get(reqcommon.EPPProfileHeaderKey) == gateway.PhaseDecode:
+			decodeHeaders = r.Header.Clone()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]any{"role": "assistant", "content": "done"}},
+				},
+			})
+
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+	conditionalDecodeStep, err := NewConditionalDecodeStep(gwClient, nil)
+	if err != nil {
+		t.Fatalf("build conditional-decode step: %v", err)
+	}
+	prefillStep, err := NewPrefillStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatalf("build prefill step: %v", err)
+	}
+	decodeStep, err := NewDecodeStep(gwClient, map[string]any{})
+	if err != nil {
+		t.Fatalf("build decode step: %v", err)
+	}
+
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "test-conditional-decode-header-flow",
+		OriginalPath: reqcommon.PathChatCompletions,
+		Body: map[string]any{
+			"model":    "llama-3",
+			"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+	p, err := pipeline.NewWithForwardResponseHeaders(
+		[]pipeline.Step{conditionalDecodeStep, prefillStep, decodeStep},
+		[]string{"X-LLM-D-Disagg-Revision"},
+	)
+	if err != nil {
+		t.Fatalf("build pipeline: %v", err)
+	}
+	if err := p.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("pipeline failed: %v", err)
+	}
+
+	if got := prefillHeaders.Get("X-LLM-D-Disagg-Revision"); got != probeRevision {
+		t.Errorf("prefill revision header = %q, want %q", got, probeRevision)
+	}
+	if got := decodeHeaders.Get("X-LLM-D-Disagg-Revision"); got != probeRevision {
+		t.Errorf("decode revision header = %q, want %q", got, probeRevision)
+	}
+}

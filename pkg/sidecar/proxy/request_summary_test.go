@@ -38,28 +38,27 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 func TestObserveStageRecordsMetricAndSummary(t *testing.T) {
 	before := snapshotStageMetrics(t)
 	ctx, summary := withRequestSummary(context.Background())
 
-	observeStageDuration(ctx, metrics.StagePrefill, 10*time.Millisecond)
-	observeStageDuration(ctx, metrics.StagePrefill, 5*time.Millisecond)
-	observeStageError(ctx, metrics.StageDecode)
-	observeStageError(ctx, metrics.StagePrefill)
+	observeStageDuration(ctx, routing.StagePrefill, 10*time.Millisecond)
+	observeStageDuration(ctx, routing.StagePrefill, 5*time.Millisecond)
+	observeStageError(ctx, routing.StageDecode)
+	observeStageError(ctx, routing.StagePrefill)
 
 	assert.Equal(t, stageMetrics{prefillCount: 2, prefillErrors: 1, decodeErrors: 1}, snapshotStageMetrics(t).delta(before))
-	assert.Equal(t, 15*time.Millisecond, summary.durations[metrics.StagePrefill], "time in a stage adds up across attempts")
-	assert.Equal(t, metrics.StageDecode, summary.failedStage, "the first failed stage is kept")
+	assert.Equal(t, 15*time.Millisecond, summary.durations[routing.StagePrefill], "time in a stage adds up across attempts")
+	assert.Equal(t, routing.StageDecode, summary.failedStage, "the first failed stage is kept")
 }
 
 func TestObserveStageWithoutSummaryStillRecordsMetrics(t *testing.T) {
 	before := snapshotStageMetrics(t)
 
-	observeStageDuration(context.Background(), metrics.StageEncode, time.Millisecond)
-	observeStageError(context.Background(), metrics.StageEncode)
+	observeStageDuration(context.Background(), routing.StageEncode, time.Millisecond)
+	observeStageError(context.Background(), routing.StageEncode)
 
 	assert.Equal(t, stageMetrics{encodeCount: 1, encodeErrors: 1}, snapshotStageMetrics(t).delta(before))
 }

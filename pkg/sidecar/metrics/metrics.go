@@ -32,17 +32,11 @@ import (
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
+	"github.com/llm-d/llm-d-router/pkg/sidecar/version"
 )
 
 // subsystem is the Prometheus subsystem for the disaggregation sidecar metrics.
 const subsystem = "llm_d_disagg_sidecar"
-
-// Stage labels for encode/prefill/decode error attribution.
-const (
-	StageEncode  = "encode"
-	StagePrefill = "prefill"
-	StageDecode  = "decode"
-)
 
 var (
 	requestsTotal = prometheus.NewCounterVec(
@@ -99,6 +93,15 @@ var (
 		[]string{"stage"},
 	)
 
+	buildInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: subsystem,
+			Name:      "info",
+			Help:      metricsutil.HelpMsgWithStability("General information of the current build of the disaggregation sidecar.", compbasemetrics.ALPHA),
+		},
+		[]string{metricsutil.BuildInfoLabelCommit, metricsutil.BuildInfoLabelBuildRef},
+	)
+
 	toolCallingFieldStatusTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: subsystem,
@@ -117,10 +120,12 @@ var (
 var registerOnce sync.Once
 
 // Register registers the sidecar metrics with controller-runtime's registry,
-// which the /metrics endpoint serves. Safe to call more than once.
+// which the /metrics endpoint serves, and records the build info. Safe to call
+// more than once.
 func Register() {
 	registerOnce.Do(func() {
 		ctrlmetrics.Registry.MustRegister(
+			buildInfo,
 			requestsTotal,
 			disaggRequestsTotal,
 			encodeDuration,
@@ -129,7 +134,13 @@ func Register() {
 			errorsTotal,
 			toolCallingFieldStatusTotal,
 		)
+		RecordBuildInfo(version.CommitSHA, version.BuildRef)
 	})
+}
+
+// RecordBuildInfo sets the build info gauge for the given commit and build ref.
+func RecordBuildInfo(commit, buildRef string) {
+	buildInfo.WithLabelValues(commit, buildRef).Set(1)
 }
 
 // RecordRequest counts a request on an intercepted inference API path for the

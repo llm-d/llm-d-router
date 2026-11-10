@@ -167,16 +167,38 @@ func newScreener(name string, config Config, scope labels.Selector, handle fwkpl
 func (c *Screener) TypedName() fwkplugin.TypedName { return c.typedName }
 
 // Consumes declares the request attributes named by affinity sources when
-// prefix affinity is enabled, and requires PrefixCacheMatchInfo when
+// prefix affinity is enabled, requires PrefixCacheMatchInfo when
 // affinity.prefixCache is set, so the prefix cache producer and the tokenizer
-// it needs run during request handling, before this Screener.
+// it needs run during request handling, before this Screener, and declares
+// what the overflow guard consumes.
 func (c *Screener) Consumes() fwkplugin.DataDependencies {
-	if c.config.RevisionGating.affinityMode() != AffinityModePrefix {
-		return fwkplugin.DataDependencies{}
+	deps := fwkplugin.DataDependencies{}
+	if c.config.RevisionGating.affinityMode() == AffinityModePrefix {
+		deps = sessionaffinity.SourcesConsumes(c.config.RevisionGating.Affinity.Sources)
+		if c.prefixCache != nil {
+			deps.Required = map[fwkplugin.DataKey]any{c.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}}
+		}
 	}
-	deps := sessionaffinity.SourcesConsumes(c.config.RevisionGating.Affinity.Sources)
-	if c.prefixCache != nil {
-		deps.Required = map[fwkplugin.DataKey]any{c.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}}
+	// The overflow guard runs inside Screen, on the endpoints scoped to this
+	// declaration, so it reads through what the Screener declares.
+	if guard, ok := c.overflowGuard.(fwkplugin.ConsumerPlugin); ok {
+		guardDeps := guard.Consumes()
+		for key, witness := range guardDeps.Required {
+			if deps.Required == nil {
+				deps.Required = map[fwkplugin.DataKey]any{}
+			}
+			deps.Required[key] = witness
+			delete(deps.Optional, key)
+		}
+		for key, witness := range guardDeps.Optional {
+			if _, required := deps.Required[key]; required {
+				continue
+			}
+			if deps.Optional == nil {
+				deps.Optional = map[fwkplugin.DataKey]any{}
+			}
+			deps.Optional[key] = witness
+		}
 	}
 	return deps
 }
