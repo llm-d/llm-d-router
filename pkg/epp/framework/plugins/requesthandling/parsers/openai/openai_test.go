@@ -2078,6 +2078,47 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 				Usage: nil,
 			},
 		},
+		{
+			// response_format text: plain text carries no usage, and parsing
+			// it as JSON would only log an error per response.
+			name: "Plain-text transcription response",
+			body: []byte(" Hello there.\n"),
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "text/plain",
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "SRT transcription response",
+			body: []byte("1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"),
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "application/x-subrip",
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "VTT transcription response",
+			body: []byte("WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n"),
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "text/vtt",
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "JSON transcription response with duration usage",
+			body: []byte(`{"text":" you","usage":{"type":"duration","seconds":1}}`),
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "application/json",
+			},
+			// The duration usage shape carries no token fields, so usage
+			// parses to zero values rather than nil.
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2982,38 +3023,20 @@ func TestOpenAIParser_ParseRequestTranscriptionsHeadBound(t *testing.T) {
 	}
 }
 
-// response_format selects the reply's shape; only the JSON formats carry a
-// body whose usage response processing can read, so the plain-text formats
-// skip it instead of logging a parse error per response.
-func TestOpenAIParser_ParseRequestTranscriptionsResponseFormat(t *testing.T) {
-	for _, tc := range []struct {
-		format string
-		skip   bool
-	}{
-		{format: "", skip: false},
-		{format: "json", skip: false},
-		{format: "verbose_json", skip: false},
-		{format: "diarized_json", skip: false},
-		{format: "text", skip: true},
-		{format: "srt", skip: true},
-		{format: "vtt", skip: true},
-	} {
-		parts := []videoFormPart{
-			{name: "file", value: "audio", filename: "a.wav", mediaType: "audio/wav"},
-			{name: "model", value: "whisper-large-v3"},
-		}
-		if tc.format != "" {
-			parts = append(parts, videoFormPart{name: "response_format", value: tc.format})
-		}
-		body, ct := buildVideoForm(t, parts...)
-		result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
-			map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if result.SkipResponseProcessing != tc.skip {
-			t.Errorf("response_format %q: SkipResponseProcessing = %v, want %v", tc.format, result.SkipResponseProcessing, tc.skip)
-		}
+// A form truncated inside the file part -- not just inside the trailing
+// boundary -- must fail in the file reader rather than pass with a short
+// capture.
+func TestOpenAIParser_ParseRequestTranscriptionsTruncatedFilePart(t *testing.T) {
+	content := strings.Repeat("a", 8192)
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "file", value: content, filename: "a.wav", mediaType: "audio/wav"},
+		videoFormPart{name: "model", value: "whisper-large-v3"})
+	// Cut inside the file part, past the part header and well before the
+	// closing boundary.
+	cut := len(body) - 200
+	if _, err := NewOpenAIParser().ParseRequest(context.Background(), body[:cut],
+		map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct}); err == nil {
+		t.Error("ParseRequest accepted a form truncated inside the file part")
 	}
 }
 

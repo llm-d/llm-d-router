@@ -472,30 +472,35 @@ func (e audioEstimator) tokensForDuration(seconds float64) int {
 	return tokens
 }
 
-// durationSeconds resolves a clip's length in seconds. A header value wins, then
-// the payload, which is exact for PCM WAV and payloadBytes/bytesPerSecond for
-// everything else, then configuration, then the built-in default. A clip carried
-// by reference has no payload and so falls through to configuration.
+// durationSeconds resolves a clip's length in seconds: a header value wins,
+// then the payload (exact for PCM WAV, decoded bytes over a byte rate for
+// everything else), then configuration, then the built-in default. A clip
+// carried by reference has no payload and so falls through to configuration.
+// It is the base64 twin of durationSecondsUploaded: it decodes the payload's
+// bounded head and full decoded length and shares the one resolution order.
 func (e audioEstimator) durationSeconds(data string, meta audioMetadata) float64 {
-	if meta.duration > 0 {
-		return meta.duration
-	}
-	if data != "" {
-		if seconds, ok := wavDurationFromBase64(data); ok {
-			return seconds
-		}
-		rate := e.bytesPerSecond(meta)
-		if n := reqcommon.Base64DecodedLen(audioBase64Payload(data)); n > 0 {
-			return float64(n) / float64(rate)
-		}
-	}
-	if e.defDuration > 0 {
-		return e.defDuration
-	}
-	return defaultAudioDuration
+	head, size := decodeAudioHead(data)
+	return e.durationSecondsUploaded(head, size, meta)
 }
 
-// durationSecondsUploaded resolves an uploaded file part's length in seconds,
+// decodeAudioHead returns the first UploadedMediaHeadBytes decoded bytes of a
+// base64 audio payload and the payload's full decoded length. An empty payload
+// returns nil and zero, so duration resolution falls through to configuration.
+func decodeAudioHead(data string) ([]byte, int64) {
+	payload := audioBase64Payload(data)
+	if payload == "" {
+		return nil, 0
+	}
+	// Only the headers are needed, so decoding is streamed and bounded.
+	head := make([]byte, fwkrequest.UploadedMediaHeadBytes)
+	n, err := io.ReadFull(base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload)), head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, 0
+	}
+	return head[:n], int64(reqcommon.Base64DecodedLen(payload))
+}
+
+// durationSecondsUploaded resolves an uploaded clip's length in seconds,
 // with the same precedence as durationSeconds: a header value wins, then the
 // payload, which is exact for PCM WAV and size/bytesPerSecond for everything
 // else, then configuration, then the built-in default.
@@ -527,20 +532,6 @@ func (e audioEstimator) bytesPerSecond(meta audioMetadata) int {
 		return e.defBytesPerSec
 	}
 	return defaultAudioBytesPerSecond
-}
-
-// wavDurationFromBase64 returns the length of a base64 PCM WAV payload, its data
-// chunk divided by the byte rate its own header declares. ok is false when the
-// payload is not a readable WAV, leaving the caller on the byte-rate estimate.
-func wavDurationFromBase64(data string) (seconds float64, ok bool) {
-	payload := audioBase64Payload(data)
-	// Only the headers are needed, so decoding is streamed and bounded.
-	head := make([]byte, fwkrequest.UploadedMediaHeadBytes)
-	n, err := io.ReadFull(base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload)), head)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		return 0, false
-	}
-	return wavDurationFromHead(head[:n], int64(reqcommon.Base64DecodedLen(payload)))
 }
 
 // wavDurationFromHead walks the RIFF chunk list of a PCM WAV whose leading

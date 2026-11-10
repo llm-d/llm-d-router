@@ -283,6 +283,14 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 		return p.parseStreamResponse(body)
 	}
 
+	// Usage lives in JSON bodies. The transcription response formats text,
+	// srt and vtt arrive as text/plain, application/x-subrip and text/vtt,
+	// which carry none, so parsing them would only log an error per
+	// response; an absent media type keeps the historical JSON assumption.
+	if mediaType != "" && mediaType != reqcommon.ContentTypeJSON {
+		return nil, nil //nolint:nilnil
+	}
+
 	usage, err := extractUsage(body)
 	if err != nil {
 		return nil, err
@@ -762,15 +770,12 @@ func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]
 		Transcriptions: transcriptions,
 		Payload:        request.RawPayload(body),
 	}
-	var responseFormat string
 	err := parseMultipartForm(body, headers, apiType, func(name string, value []byte) error {
 		switch name {
 		case reqcommon.FieldModel:
 			extractedBody.Model = string(value)
 		case "prompt":
 			transcriptions.Prompt = string(value)
-		case "response_format":
-			responseFormat = string(value)
 		case "stream":
 			stream, err := strconv.ParseBool(string(value))
 			if err != nil {
@@ -788,16 +793,7 @@ func parseTranscriptionsRequest(apiType string, body []byte, headers map[string]
 	if err != nil {
 		return nil, err
 	}
-	// response_format selects the reply's shape. json, verbose_json and
-	// diarized_json carry a JSON body whose usage ParseResponse can read;
-	// text, srt and vtt are plain text, where usage extraction would only
-	// log a parse error per response.
-	skipResponseProcessing := true
-	switch responseFormat {
-	case "", "json", "verbose_json", "diarized_json":
-		skipResponseProcessing = false
-	}
-	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: skipResponseProcessing}, nil
+	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
 }
 
 func requestBodyDecodeError(err, validationErr error) error {
