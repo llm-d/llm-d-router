@@ -332,7 +332,8 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 
 		// Thinking text is outside message.content, so a later chunk would
 		// continue an empty assistant message and restart the thinking. The
-		// first chunk consumed the prefilled KV, so the decoder recomputes the prompt.
+		// prefilled KV was consumed by the first chunk, so the decoder serves the
+		// prompt from its prefix cache or recomputes it.
 		if chunkIndex == 0 && choiceHasReasoning(firstChoice(chunkResponse)) {
 			logger.V(logging.DEBUG).Info("chunked decode: reasoning in first chunk, using regular decode")
 			decodeReq := maps.Clone(body)
