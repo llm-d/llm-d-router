@@ -881,7 +881,7 @@ func (g *addressGuard) newClient(timeout time.Duration) *http.Client {
 			if len(via) >= maxRedirects {
 				return fmt.Errorf("stopped after %d redirects: %w", maxRedirects, pipeline.ErrBadRequest)
 			}
-			if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+			if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
 				return fmt.Errorf("redirect from https to %q not allowed: %w", req.URL.Scheme, pipeline.ErrBadRequest)
 			}
 			if !g.hostAllowed(req.URL.Hostname()) {
@@ -894,7 +894,7 @@ func (g *addressGuard) newClient(timeout time.Duration) *http.Client {
 
 // checkedProxy wraps proxy so that a request sent through a proxy has its
 // target resolved and checked first: dialControl only sees the proxy's address.
-// ponytail: the proxy resolves the host again, so a DNS-rebinding target can
+// The proxy resolves the host again, so a DNS-rebinding target can
 // still differ from the checked IP; allowed_domains closes that if needed.
 func (g *addressGuard) checkedProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request) (*url.URL, error) {
 	return func(r *http.Request) (*url.URL, error) {

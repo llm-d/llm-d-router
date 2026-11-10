@@ -1793,11 +1793,19 @@ func TestReplaceMediaURLsStep_RejectsHTTPSDowngradeRedirect(t *testing.T) {
 	}))
 	defer secure.Close()
 
+	// An http start that hops to https must not be able to drop back to http.
+	start := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, secure.URL, http.StatusFound)
+	}))
+	defer start.Close()
+
 	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "2s"})
 	rmu.client.Transport.(*http.Transport).TLSClientConfig = secure.Client().Transport.(*http.Transport).TLSClientConfig
-	_, _, err := rmu.download(context.Background(), secure.URL, reqcommon.ModalityImage)
-	if !errors.Is(err, pipeline.ErrBadRequest) {
-		t.Fatalf("https to http redirect must classify as bad request, got %v", err)
+	for _, rawURL := range []string{secure.URL, start.URL} {
+		_, _, err := rmu.download(context.Background(), rawURL, reqcommon.ModalityImage)
+		if !errors.Is(err, pipeline.ErrBadRequest) {
+			t.Fatalf("https to http redirect from %s must classify as bad request, got %v", rawURL, err)
+		}
 	}
 }
 
