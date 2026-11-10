@@ -1755,9 +1755,15 @@ func TestReplaceMediaURLsStep_BlocksMetadataIPThroughProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// newClient clones http.DefaultTransport, so a proxy set there before the
+	// step is built reaches the step through the production wiring. t.Setenv
+	// would not: http.ProxyFromEnvironment reads the environment once.
+	orig := http.DefaultTransport
+	withProxy := orig.(*http.Transport).Clone()
+	withProxy.Proxy = http.ProxyURL(proxyURL)
+	http.DefaultTransport = withProxy
+	t.Cleanup(func() { http.DefaultTransport = orig })
 	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "2s"})
-	base := rmu.client.Transport.(*http.Transport)
-	base.Proxy = rmu.guard.checkedProxy(http.ProxyURL(proxyURL))
 
 	_, _, err = rmu.download(context.Background(), "http://169.254.169.254/latest/meta-data/", reqcommon.ModalityImage)
 	if !errors.Is(err, pipeline.ErrBadRequest) {
