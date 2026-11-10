@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"slices"
 	"strings"
@@ -1635,6 +1636,10 @@ func TestAddressGuard_BlockedIP(t *testing.T) {
 		{"unique-local v6", "fc00::1", true},
 		{"ipv4-mapped metadata", "::ffff:169.254.169.254", true},
 		{"ipv4-mapped private", "::ffff:10.0.0.1", true},
+		{"nat64 metadata", "64:ff9b::a9fe:a9fe", true},
+		{"nat64 private", "64:ff9b::a00:1", true},
+		{"nat64 public", "64:ff9b::808:808", false},
+		{"ipv4-compatible metadata", "::a9fe:a9fe", true},
 		{"public v4", "8.8.8.8", false},
 		{"public v6", "2001:4860:4860::8888", false},
 	}
@@ -1732,6 +1737,67 @@ func TestReplaceMediaURLsStep_BlocksRedirectToPrivate(t *testing.T) {
 	}
 	if !errors.Is(err, pipeline.ErrBadRequest) {
 		t.Fatalf("blocked redirect must classify as bad request, got %v", err)
+	}
+}
+
+// With HTTP(S)_PROXY set, the dialer only sees the proxy's address, so the
+// target must be checked before the request is handed to the proxy.
+func TestReplaceMediaURLsStep_BlocksMetadataIPThroughProxy(t *testing.T) {
+	var proxied atomic.Bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxied.Store(true)
+		w.Header().Set("Content-Type", testImagePNGMIME)
+		_, _ = w.Write([]byte("metadata"))
+	}))
+	defer proxy.Close()
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "2s"})
+	base := rmu.client.Transport.(*http.Transport)
+	base.Proxy = rmu.guard.checkedProxy(http.ProxyURL(proxyURL))
+
+	_, _, err = rmu.download(context.Background(), "http://169.254.169.254/latest/meta-data/", reqcommon.ModalityImage)
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("blocked target behind a proxy must classify as bad request, got %v", err)
+	}
+	if proxied.Load() {
+		t.Fatal("request to a blocked target must not reach the proxy")
+	}
+}
+
+func TestReplaceMediaURLsStep_CapsRedirects(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, server.URL+"/next", http.StatusFound)
+	}))
+	defer server.Close()
+
+	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "5s"})
+	_, _, err := rmu.download(context.Background(), server.URL, reqcommon.ModalityImage)
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("redirect loop must classify as bad request, got %v", err)
+	}
+}
+
+func TestReplaceMediaURLsStep_RejectsHTTPSDowngradeRedirect(t *testing.T) {
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", testImagePNGMIME)
+		_, _ = w.Write([]byte("data"))
+	}))
+	defer plain.Close()
+	secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL, http.StatusFound)
+	}))
+	defer secure.Close()
+
+	rmu := newLoopbackStep(t, map[string]any{"download_timeout": "2s"})
+	rmu.client.Transport.(*http.Transport).TLSClientConfig = secure.Client().Transport.(*http.Transport).TLSClientConfig
+	_, _, err := rmu.download(context.Background(), secure.URL, reqcommon.ModalityImage)
+	if !errors.Is(err, pipeline.ErrBadRequest) {
+		t.Fatalf("https to http redirect must classify as bad request, got %v", err)
 	}
 }
 
