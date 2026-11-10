@@ -46,7 +46,7 @@ func (c *fakeClock) now() time.Time { return c.t }
 
 func testParams() Parameters {
 	p := defaultParameters()
-	p.Mode = ModeEnforce
+	p.Mode = ModeEnforceLimits
 	p.Classes = []ClassConfig{
 		{Name: "critical", Priority: 100},
 		{Name: "standard", Priority: 10},
@@ -122,7 +122,7 @@ func TestFactory(t *testing.T) {
 	assert.Equal(t, "qos", p.TypedName().Name)
 	assert.Equal(t, 3, p.teams["a"].cfg.MaxConcurrency)
 	assert.InDelta(t, 1000, p.teams["a"].cfg.DailyTokens, 1e-9)
-	assert.True(t, p.shadow, "decisions are recorded, not applied, unless mode is enforce")
+	assert.True(t, p.reportOnly, "decisions are recorded, not applied, unless mode is enforce-limits")
 }
 
 func TestFactory_InvalidConfig(t *testing.T) {
@@ -371,10 +371,10 @@ func TestCompletedRequestIsNotReleasedAgainOnStreamEnd(t *testing.T) {
 	assert.InDelta(t, 300, daily, 1e-9)
 }
 
-// TestShadowModeServesCommittedClass verifies that shadow mode serves every request at its team's
+// TestReportOnlyServesCommittedClass verifies that report-only mode serves every request at its team's
 // committed class: downgrades and rejections are recorded, not applied.
-func TestShadowModeServesCommittedClass(t *testing.T) {
-	p, _ := newTestPlugin(t, func(params *Parameters) { params.Mode = ModeShadow })
+func TestReportOnlyServesCommittedClass(t *testing.T) {
+	p, _ := newTestPlugin(t, func(params *Parameters) { params.Mode = ModeReportOnly })
 
 	oversized := newRequest("team-a", 5000, 10)
 	require.NoError(t, p.RequestHeader(t.Context(), oversized), "a would-be downgrade is recorded, not applied")
@@ -388,11 +388,11 @@ func TestShadowModeServesCommittedClass(t *testing.T) {
 		assert.Equal(t, -10, req.Objectives.Priority, "team-b stays at its committed batch class")
 		resp := &fwkrh.Response{Headers: map[string]string{}}
 		p.ResponseHeader(t.Context(), req, resp, nil)
-		assert.Empty(t, resp.Headers, "shadow mode adds no response headers")
+		assert.Empty(t, resp.Headers, "report-only mode adds no response headers")
 		reqs = append(reqs, req)
 	}
 	inflight, _ := usage(p, "team-b")
-	assert.Equal(t, 1, inflight, "a would-be rejection holds no slot, as in enforce mode")
+	assert.Equal(t, 1, inflight, "a would-be rejection holds no slot, as in enforce-limits mode")
 	for _, req := range reqs {
 		complete(p, req, 10, 10)
 	}
@@ -433,42 +433,42 @@ func diffDecisions(before, after map[string]float64) string {
 	return ""
 }
 
-// TestShadowAndEnforceSetTheSamePriority verifies that both modes serve a request within its
-// contract at the team's class, and that the only difference is that shadow mode does not move
+// TestReportOnlyAndEnforceLimitsSetTheSamePriority verifies that both modes serve a request within its
+// contract at the team's class, and that the only difference is that report-only mode does not move
 // a request outside its contract to a lower class.
-func TestShadowAndEnforceSetTheSamePriority(t *testing.T) {
+func TestReportOnlyAndEnforceLimitsSetTheSamePriority(t *testing.T) {
 	cases := []struct {
-		name          string
-		req           func() *fwksched.InferenceRequest
-		setup         int // team-a requests admitted first, to fill its concurrency commit of 2
-		enforcePrio   int
-		shadowPrio    int
-		enforceErrors bool
+		name                string
+		req                 func() *fwksched.InferenceRequest
+		setup               int // team-a requests admitted first, to fill its concurrency commit of 2
+		enforceLimitsPrio   int
+		reportOnlyPrio      int
+		enforceLimitsErrors bool
 	}{
-		{name: "critical within contract", req: func() *fwksched.InferenceRequest { return newRequest("team-a", 10, 10) }, enforcePrio: 100, shadowPrio: 100},
-		{name: "standard within contract", req: func() *fwksched.InferenceRequest { return newRequest("stranger", 10, 10) }, enforcePrio: 10, shadowPrio: 10},
-		{name: "batch within contract", req: func() *fwksched.InferenceRequest { return newRequest("team-b", 10, 10) }, enforcePrio: -10, shadowPrio: -10},
-		{name: "critical over size", req: func() *fwksched.InferenceRequest { return newRequest("team-a", 5000, 10) }, enforcePrio: 10, shadowPrio: 100},
-		{name: "critical over concurrency", req: func() *fwksched.InferenceRequest { return newRequest("team-a", 10, 10) }, setup: 2, enforcePrio: 10, shadowPrio: 100},
-		{name: "batch over size", req: func() *fwksched.InferenceRequest { return newRequest("team-b", 5000, 10) }, enforceErrors: true, shadowPrio: -10},
+		{name: "critical within contract", req: func() *fwksched.InferenceRequest { return newRequest("team-a", 10, 10) }, enforceLimitsPrio: 100, reportOnlyPrio: 100},
+		{name: "standard within contract", req: func() *fwksched.InferenceRequest { return newRequest("stranger", 10, 10) }, enforceLimitsPrio: 10, reportOnlyPrio: 10},
+		{name: "batch within contract", req: func() *fwksched.InferenceRequest { return newRequest("team-b", 10, 10) }, enforceLimitsPrio: -10, reportOnlyPrio: -10},
+		{name: "critical over size", req: func() *fwksched.InferenceRequest { return newRequest("team-a", 5000, 10) }, enforceLimitsPrio: 10, reportOnlyPrio: 100},
+		{name: "critical over concurrency", req: func() *fwksched.InferenceRequest { return newRequest("team-a", 10, 10) }, setup: 2, enforceLimitsPrio: 10, reportOnlyPrio: 100},
+		{name: "batch over size", req: func() *fwksched.InferenceRequest { return newRequest("team-b", 5000, 10) }, enforceLimitsErrors: true, reportOnlyPrio: -10},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, mode := range []string{ModeEnforce, ModeShadow} {
+			for _, mode := range []string{ModeEnforceLimits, ModeReportOnly} {
 				p, _ := newTestPlugin(t, func(params *Parameters) { params.Mode = mode })
 				for range tc.setup {
 					require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-a", 10, 10)))
 				}
 				req := tc.req()
 				err := p.RequestHeader(t.Context(), req)
-				if mode == ModeEnforce && tc.enforceErrors {
+				if mode == ModeEnforceLimits && tc.enforceLimitsErrors {
 					require.Error(t, err)
 					continue
 				}
 				require.NoError(t, err)
-				want := tc.enforcePrio
-				if mode == ModeShadow {
-					want = tc.shadowPrio
+				want := tc.enforceLimitsPrio
+				if mode == ModeReportOnly {
+					want = tc.reportOnlyPrio
 				}
 				assert.Equal(t, want, req.Objectives.Priority, mode)
 			}
@@ -476,9 +476,9 @@ func TestShadowAndEnforceSetTheSamePriority(t *testing.T) {
 	}
 }
 
-// TestShadowModeDecisionsMatchEnforce verifies that shadow mode records the same decisions that
-// enforce mode applies, for the same requests.
-func TestShadowModeDecisionsMatchEnforce(t *testing.T) {
+// TestReportOnlyDecisionsMatchEnforceLimits verifies that report-only mode records the same
+// decisions that enforce-limits mode applies, for the same requests.
+func TestReportOnlyDecisionsMatchEnforceLimits(t *testing.T) {
 	run := func(mode string) []string {
 		p, _ := newTestPlugin(t, func(params *Parameters) { params.Mode = mode })
 		var got []string
@@ -504,12 +504,13 @@ func TestShadowModeDecisionsMatchEnforce(t *testing.T) {
 		decide(newRequest("team-d", 100, 100)) // over the daily budget, lowest class
 		return got
 	}
-	assert.Equal(t, run(ModeEnforce), run(ModeShadow))
+	assert.Equal(t, run(ModeEnforceLimits), run(ModeReportOnly))
 }
 
-// decisions returns the decision counter for one label combination in enforce mode.
+// decisions returns the decision counter for one label combination in enforce-limits mode.
 func decisions(team, class, servedClass, decision, reason string) float64 {
-	return promtestutil.ToFloat64(admissionDecisions.WithLabelValues(team, class, servedClass, decision, reason, ModeEnforce))
+	return promtestutil.ToFloat64(admissionDecisions.WithLabelValues(
+		team, class, servedClass, decision, reason, ModeEnforceLimits))
 }
 
 // TestDecisionReason verifies that a downgraded or rejected request records the limit it

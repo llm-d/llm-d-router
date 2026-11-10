@@ -24,12 +24,13 @@ import (
 )
 
 const (
-	// ModeEnforce applies admission decisions.
-	ModeEnforce = "enforce"
-	// ModeShadow serves each team at its committed class and records downgrades and rejections
+	// ModeEnforceLimits applies admission decisions: it moves traffic outside a contract one class
+	// down, and rejects it in the lowest class.
+	ModeEnforceLimits = "enforce-limits"
+	// ModeReportOnly serves each team at its committed class and records downgrades and rejections
 	// without applying them. It is the default, so a contract is observed against real traffic
 	// before it is enforced.
-	ModeShadow = "shadow"
+	ModeReportOnly = "report-only"
 
 	defaultOutputTokenWeight = 2
 )
@@ -63,7 +64,7 @@ type TeamConfig struct {
 
 // Parameters is the plugin configuration.
 type Parameters struct {
-	// Mode is "shadow" (default) or "enforce".
+	// Mode is "report-only" (default) or "enforce-limits".
 	Mode string `json:"mode,omitempty"`
 	// TeamHeader names the request header carrying the team ID. Defaults to the fairness ID
 	// header, so the team is also the fairness flow.
@@ -84,7 +85,7 @@ type Parameters struct {
 
 func defaultParameters() Parameters {
 	return Parameters{
-		Mode:                     ModeShadow,
+		Mode:                     ModeReportOnly,
 		TeamHeader:               metadata.FlowFairnessIDKey,
 		OutputTokenWeight:        defaultOutputTokenWeight,
 		DefaultOutputReservation: 1000,
@@ -92,8 +93,8 @@ func defaultParameters() Parameters {
 }
 
 func (p *Parameters) validate() error {
-	if p.Mode != ModeEnforce && p.Mode != ModeShadow {
-		return fmt.Errorf("mode must be %q or %q, got %q", ModeEnforce, ModeShadow, p.Mode)
+	if p.Mode != ModeEnforceLimits && p.Mode != ModeReportOnly {
+		return fmt.Errorf("mode must be %q or %q, got %q", ModeEnforceLimits, ModeReportOnly, p.Mode)
 	}
 	if p.TeamHeader == "" {
 		return errors.New("teamHeader must not be empty")

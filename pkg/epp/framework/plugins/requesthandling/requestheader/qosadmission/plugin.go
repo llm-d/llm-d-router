@@ -98,7 +98,7 @@ type admission struct {
 // Plugin enforces per-team QoS contracts. See the package README.
 type Plugin struct {
 	typedName    plugin.TypedName
-	shadow       bool
+	reportOnly   bool
 	teamHeader   string
 	outputWeight float64
 	defaultOut   int64
@@ -150,7 +150,7 @@ func newPlugin(name string, params Parameters, now func() time.Time) (*Plugin, e
 	}
 	return &Plugin{
 		typedName:    plugin.TypedName{Type: PluginType, Name: name},
-		shadow:       params.Mode == ModeShadow,
+		reportOnly:   params.Mode == ModeReportOnly,
 		teamHeader:   params.TeamHeader,
 		outputWeight: params.OutputTokenWeight,
 		defaultOut:   params.DefaultOutputReservation,
@@ -245,8 +245,8 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	requestID := request.RequestID
 	rec.stop = context.AfterFunc(ctx, func() { p.finish(requestID, nil) })
 
-	// Shadow mode serves the team's committed class: a downgrade is recorded, not applied.
-	if p.shadow {
+	// Report-only mode serves the team's committed class: a downgrade is recorded, not applied.
+	if p.reportOnly {
 		served = committed
 	}
 	setClass(request, teamID, served)
@@ -264,7 +264,7 @@ func setClass(request *scheduling.InferenceRequest, teamID string, class ClassCo
 
 // ResponseHeader reports the served class and the team's remaining quota.
 func (p *Plugin) ResponseHeader(_ context.Context, request *scheduling.InferenceRequest, response *requesthandling.Response, _ *datalayer.EndpointMetadata) {
-	if p.shadow || request == nil || response == nil || response.Headers == nil {
+	if p.reportOnly || request == nil || response == nil || response.Headers == nil {
 		return
 	}
 	v, ok := p.admissions.Load(request.RequestID)
@@ -320,21 +320,22 @@ func (p *Plugin) finish(requestID string, usage *fwkrequest.Usage) {
 }
 
 func (p *Plugin) mode() string {
-	if p.shadow {
-		return ModeShadow
+	if p.reportOnly {
+		return ModeReportOnly
 	}
-	return ModeEnforce
+	return ModeEnforceLimits
 }
 
-// reject records a rejection and returns err. In shadow mode it returns nil instead.
+// reject records a rejection and returns err. In report-only mode it returns nil instead.
 func (p *Plugin) reject(request *scheduling.InferenceRequest, teamID string, team *teamState, committed ClassConfig,
 	decision, reason string, err errcommon.Error) error {
 	admissionDecisions.WithLabelValues(team.label, committed.Name, "", decision, reason, p.mode()).Inc()
-	if !p.shadow {
+	if !p.reportOnly {
 		return err
 	}
-	// Shadow mode serves a would-be rejection at the team's committed class. Like a rejection, it
-	// holds no concurrency slot and no budget charge, so later decisions match enforce mode.
+	// Report-only mode serves a would-be rejection at the team's committed class. Like a
+	// rejection, it holds no concurrency slot and no budget charge, so later decisions match
+	// enforce-limits mode.
 	setClass(request, teamID, committed)
 	return nil
 }
