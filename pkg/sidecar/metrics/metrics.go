@@ -23,6 +23,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -156,19 +157,22 @@ func RecordDisagg(disaggType string) {
 	disaggRequestsTotal.WithLabelValues(disaggType).Inc()
 }
 
-// RecordEncodeDuration records encode stage latency.
-func RecordEncodeDuration(d time.Duration) {
-	encodeDuration.Observe(d.Seconds())
+// RecordEncodeDuration records encode stage latency and attaches the request's
+// trace as an exemplar, so a point on the latency graph links to its trace.
+func RecordEncodeDuration(ctx context.Context, d time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, encodeDuration, d.Seconds())
 }
 
-// RecordPrefillDuration records prefill stage latency.
-func RecordPrefillDuration(d time.Duration) {
-	prefillDuration.Observe(d.Seconds())
+// RecordPrefillDuration records prefill stage latency and attaches the
+// request's trace as an exemplar.
+func RecordPrefillDuration(ctx context.Context, d time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, prefillDuration, d.Seconds())
 }
 
-// RecordDecodeDuration records decode stage latency.
-func RecordDecodeDuration(d time.Duration) {
-	decodeDuration.Observe(d.Seconds())
+// RecordDecodeDuration records decode stage latency and attaches the request's
+// trace as an exemplar.
+func RecordDecodeDuration(ctx context.Context, d time.Duration) {
+	metricsutil.ObserveWithTraceExemplar(ctx, decodeDuration, d.Seconds())
 }
 
 // RecordError counts a stage error (StageEncode, StagePrefill, or StageDecode).

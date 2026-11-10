@@ -52,15 +52,15 @@ func requestSummaryFrom(ctx context.Context) *requestSummary {
 }
 
 // observeStageDuration records how long a stage took in that stage's duration
-// histogram and in the request's summary.
+// histogram, with ctx's trace as the exemplar, and in the request's summary.
 func observeStageDuration(ctx context.Context, stage string, d time.Duration) {
 	switch stage {
 	case routing.StageEncode:
-		metrics.RecordEncodeDuration(d)
+		metrics.RecordEncodeDuration(ctx, d)
 	case routing.StagePrefill:
-		metrics.RecordPrefillDuration(d)
+		metrics.RecordPrefillDuration(ctx, d)
 	case routing.StageDecode:
-		metrics.RecordDecodeDuration(d)
+		metrics.RecordDecodeDuration(ctx, d)
 	}
 	if summary := requestSummaryFrom(ctx); summary != nil {
 		summary.mu.Lock()
