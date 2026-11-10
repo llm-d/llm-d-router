@@ -3,13 +3,17 @@
 **Type:** `agent-identity`
 **Interfaces:** `requesthandling.RequestHeaderProcessor`, `plugin.ProducerPlugin`
 
-Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. The Director then uses this attribute when deriving `FairnessID`, so every turn of an agent session lands in the same flow-control fairness queue. When `requestHandler.composeFairnessIDs` is enabled (off by default) and the request also carries a tenant fairness ID, the Director composes the two into `<tenant>/<session>`.
+Resolves a per-session identity from agent-specific HTTP headers and stores it as a request attribute (`"agent-identity"`) for use by other subsystems. It also resolves the thread that sent the request and the thread that spawned it, stored as the `"thread-id"` and `"parent-thread-id"` attributes. The Director then uses the `"agent-identity"` attribute when deriving `FairnessID`, so every turn of an agent session lands in the same flow-control fairness queue. When `requestHandler.composeFairnessIDs` is enabled (off by default) and the request also carries a tenant fairness ID, the Director composes the two into `<tenant>/<session>`.
 
 ## What It Does
 
-The plugin runs after request assembly and before admission control. It inspects a fixed set of agent session headers and stores the first non-empty value as a request attribute via `request.PutAttribute(AgentIdentityKey, value)`, whose serialized name is `agent-identity`.
+The plugin runs after request assembly and before admission control. It inspects a fixed set of agent session headers and stores the first non-empty value as a request attribute via `request.PutAttribute(AgentIdentityKey, value)`, whose serialized name is `agent-identity`. It resolves the thread and parent the same way, from the thread and parent header lists below, and stores them as the `"thread-id"` and `"parent-thread-id"` attributes.
 
 The plugin stores the identity as a request attribute only — it does not set `FairnessID`. The Director reads the `"agent-identity"` attribute when deriving `FairnessID`. This separation means the agent identity is available as a reliable signal to other subsystems (scheduling, KV cache control, etc.) without being conflated with flow-control identity.
+
+### Standard headers
+
+The `x-llm-d-thread-id` and `x-llm-d-parent-thread-id` pair is the standard llm-d way for a client to declare its thread identity: any harness or gateway can send it directly, without harness-specific headers or router configuration. The convention for a program's tree: the root thread either omits `x-llm-d-thread-id` (the thread then falls back to the session id) or sends the root id itself, and a depth-1 child sends the root thread's id as its parent.
 
 ## How It Works
 
@@ -18,7 +22,22 @@ The plugin stores the identity as a request attribute only — it does not set `
    2. `x-session-affinity` (OpenCode)
    3. `session-id` (Codex)
    4. `session_id` (Codex, legacy underscored fallback)
-2. If nothing matches, no attribute is stored — the Director falls through to `metadata.DefaultFairnessID`, so the request is still admitted, just into the shared default queue.
+2. Walk the thread list and store the first non-empty match as the `"thread-id"` attribute. Operator-supplied entries from `additionalThreadHeaders` come first, followed by:
+   1. `x-llm-d-thread-id` (standard, any client)
+   2. `x-claude-code-agent-id` (Claude Code sub-agent)
+   3. `thread-id` (Codex)
+   4. `thread_id` (Codex, legacy underscored fallback)
+   5. `x-opencode-session-id` (OpenCode)
+
+   When no thread header matches, `"thread-id"` falls back to the `"agent-identity"` value, so a client that sends no thread header yields one thread per session.
+3. Walk the parent list and store the first non-empty match as the `"parent-thread-id"` attribute. Operator-supplied entries from `additionalParentThreadHeaders` come first, followed by:
+   1. `x-llm-d-parent-thread-id` (standard, any client)
+   2. `x-claude-code-parent-agent-id` (Claude Code nested sub-agent)
+   3. `x-codex-parent-thread-id` (Codex)
+   4. `x-parent-session-id` (OpenCode, shared wire convention)
+
+   A Claude Code sub-agent that sends its agent id but no parent header is a depth-1 child of the main thread, so its parent is the session id. A parent equal to the thread id is not published, and a root thread publishes no parent: an absent or empty read means root.
+4. If no session header matches, no `"agent-identity"` attribute is stored — the Director falls through to `metadata.DefaultFairnessID`, so the request is still admitted, just into the shared default queue.
 
 After the plugin returns, the Director derives `FairnessID`:
 1. If `requestHandler.composeFairnessIDs` is enabled and the `x-llm-d-inference-fairness-id` header is set, percent-encode `%` (`%25`) and `/` (`%2F`) in the header, then append `/<agent-identity>` when the attribute is non-empty. The first path segment is therefore always the whole tenant, and flow control keys one queue per session while the tenant stays part of the fairness ID and metric labels.
@@ -32,11 +51,13 @@ The plugin is stateless and safe under concurrent use.
 
 ## Inputs Consumed
 
-- `scheduling.InferenceRequest.Headers` — read-only lookup of the session headers above (built-in defaults plus any from `additionalSessionHeaders`). Keys are expected lowercase (Envoy normalizes inbound headers).
+- `scheduling.InferenceRequest.Headers` — read-only lookup of the session headers above (built-in defaults plus any from `additionalSessionHeaders`) and of the thread and parent headers (built-in defaults plus any from `additionalThreadHeaders` / `additionalParentThreadHeaders`). Keys are expected lowercase (Envoy normalizes inbound headers).
 
 ## Outputs Produced
 
 - `scheduling.InferenceRequest` attribute `"agent-identity"` (`string`) — set when a session header matches.
+- `scheduling.InferenceRequest` attribute `"thread-id"` (`string`) — set when a thread header matches or the agent identity is set.
+- `scheduling.InferenceRequest` attribute `"parent-thread-id"` (`string`) — set when the request belongs to a spawned thread; absent on a root.
 
 ## Configuration
 
@@ -48,6 +69,8 @@ The plugin is stateless and safe under concurrent use.
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `additionalSessionHeaders` | `[]string` | No | `[]` | Extra header names to check before the built-in defaults. Order is preserved; the first non-empty match wins. Use this to support a new agent, or to track an upstream rename, without a code change. |
+| `additionalThreadHeaders` | `[]string` | No | `[]` | Extra thread-ID header names, prepended the same way as `additionalSessionHeaders`. |
+| `additionalParentThreadHeaders` | `[]string` | No | `[]` | Extra parent-ID header names, prepended the same way as `additionalSessionHeaders`. |
 
 ### Examples
 
@@ -150,6 +173,9 @@ Codex emits a session header automatically on every outbound request. Current bu
 
 - **Default-queue fall-through is silent.** Requests from agents that don't match any of the configured headers land in the default fairness queue without any indication. This is by design (the plugin is non-fatal), but operators should not assume the absence of errors means every client is being identified.
 - **Codex `previous_response_id` is not used.** It references the prior turn's response, not the chain root, so keying on it would shard one conversation across many queues. Correctly folding it back to the root requires a `ResponseBody` hook recording `response.id → root` mappings, which this plugin does not implement.
+- **Thread and parent values are client-supplied.** Any caller can claim any thread id, so consumers keying state on them should scope by tenant, the way agent-lineage does.
+- **The lists are independent.** A thread and a parent may come from different header families when a client sends more than one.
+- **The standard pair carries no program identity.** A client that sends only the thread pair gets `thread-id` and `parent-thread-id` but no `agent-identity`; send a session header as well to get a per-program fairness key.
 
 ## Related Documentation
 - Claude Code session header (official): <https://code.claude.com/docs/en/llm-gateway> — the `X-Claude-Code-Session-Id` row in "Request headers Claude Code includes."
