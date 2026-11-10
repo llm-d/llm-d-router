@@ -123,6 +123,17 @@ func (s *responseStatus) failed() bool {
 	return s.statusCode == 0 || isHTTPError(s.statusCode) || s.writeFailed
 }
 
+// upstreamFailed reports whether the response is evidence that the server behind
+// the proxy is not the one the caller expects, as opposed to that server
+// rejecting the request: it answered nothing, answered with a 5xx, or its answer
+// could not be delivered. A 4xx is excluded — a malformed request, a rate limit
+// or a load-shedding rejection leaves the server's identity untouched, and a
+// caller that discards per-server state on this predicate would otherwise pay to
+// re-learn it under exactly the load that produced the rejection.
+func (s *responseStatus) upstreamFailed() bool {
+	return s.statusCode == 0 || s.statusCode >= http.StatusInternalServerError || s.writeFailed
+}
+
 // deferredCommitWriter wraps a client http.ResponseWriter and holds all writes
 // until the caller decides the outcome (the "commit point"). It is used by the
 // MoRI-IO parallel WRITE dispatch so decode can run concurrently with prefill

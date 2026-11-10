@@ -120,17 +120,25 @@ func (s *Server) handleMooncake(w http.ResponseWriter, r *http.Request, prefillP
 	// A restarted vLLM mints a new engine_id, so a failed response leaves the
 	// cached map naming a dead engine. Every client-observable prefill failure
 	// is relayed through this writer by the decoder proxy's error handler, so
-	// the status check covers prefill and decode alike.
+	// the status check covers prefill and decode alike. Only an upstream failure
+	// counts: a 4xx leaves the map valid, and evicting on a load-shedding 429
+	// would make every rejected request pay a bootstrap /query during overload.
+	//
+	// Deferred, without recover, because the reverse proxy aborts a broken
+	// stream with http.ErrAbortHandler, which unwinds past a straight-line check
+	// once the response has started.
 	writer, status := captureResponseStatus(w)
+	defer func() {
+		if status.upstreamFailed() {
+			s.mooncakeEngineIDs.Remove(prefillPodHostPort)
+			logger.V(logging.TRACE).Info("dropped cached mooncake engine map after failed response", "prefill", prefillPodHostPort)
+		}
+	}()
 	s.runConcurrentPD(writer, r, prefillBody, decodeBody, prefillPodHostPort, constants.KVConnectorMooncake, func(prefillReq, _ *http.Request) {
 		// Route prefill to the same DP rank whose engine_id was given to decode, so the
 		// KV it produces lands on the engine decode pulls from. No-op for a single rank.
 		prefillReq.Header.Set(requestHeaderDataParallelRank, dpRank)
 	}, toolFields)
-	if status.failed() {
-		s.mooncakeEngineIDs.Remove(prefillPodHostPort)
-		logger.V(logging.TRACE).Info("dropped cached mooncake engine map after failed response", "prefill", prefillPodHostPort)
-	}
 }
 
 // getMooncakeEngineMap returns the dp_rank -> engine_id mapping for the given prefill, querying the bootstrap server on first use and caching it.

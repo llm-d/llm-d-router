@@ -325,11 +325,7 @@ func newMooncakeEngineMapTest(t *testing.T) *mooncakeEngineMapTest {
 
 	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		if code := int(fx.prefillStatusCode.Load()); code != 0 {
-			w.WriteHeader(code)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(fx.statusOrDefault(&fx.prefillStatusCode))
 	}))
 	t.Cleanup(prefill.Close)
 	prefillURL, err := url.Parse(prefill.URL)
@@ -354,11 +350,7 @@ func newMooncakeEngineMapTest(t *testing.T) *mooncakeEngineMapTest {
 			<-r.Context().Done()
 			return
 		}
-		if code := int(fx.decodeStatusCode.Load()); code != 0 {
-			w.WriteHeader(code)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(fx.statusOrDefault(&fx.decodeStatusCode))
 	}))
 	t.Cleanup(decode.Close)
 	decodeURL, err := url.Parse(decode.URL)
@@ -387,6 +379,14 @@ func (fx *mooncakeEngineMapTest) decodeEngineIDs() []string {
 	return append([]string(nil), fx.decodeEngines...)
 }
 
+// statusOrDefault returns the configured status of a stage, or 200 when unset.
+func (fx *mooncakeEngineMapTest) statusOrDefault(stage *atomic.Int32) int {
+	if code := int(stage.Load()); code != 0 {
+		return code
+	}
+	return http.StatusOK
+}
+
 // A failed request must drop the cached engine map: vLLM mints a new engine_id
 // at every start, so the next request has to re-query the bootstrap server and
 // name the current engine.
@@ -402,6 +402,23 @@ func TestMooncakeEngineMapDroppedAfterFailedRequest(t *testing.T) {
 	require.Equal(t, http.StatusOK, fx.send(t))
 	require.Equal(t, []string{"engine-v1", "engine-v1", "engine-v2"}, fx.decodeEngineIDs())
 	require.Equal(t, int32(2), fx.bootstrapQueries.Load(), "the request after the failure must re-query the bootstrap server")
+}
+
+// A 4xx the client observes must keep the cached engine map: the prefill is
+// still the engine it was, and dropping the map on a load-shedding rejection
+// makes every rejected request pay a bootstrap /query on top of the overload.
+func TestMooncakeEngineMapKeptAfterClientError(t *testing.T) {
+	fx := newMooncakeEngineMapTest(t)
+
+	require.Equal(t, http.StatusOK, fx.send(t))
+
+	fx.decodeStatusCode.Store(http.StatusTooManyRequests)
+	require.Equal(t, http.StatusTooManyRequests, fx.send(t))
+	fx.decodeStatusCode.Store(http.StatusOK)
+
+	require.Equal(t, http.StatusOK, fx.send(t))
+	require.Equal(t, []string{"engine-v1", "engine-v1", "engine-v1"}, fx.decodeEngineIDs())
+	require.Equal(t, int32(1), fx.bootstrapQueries.Load(), "a 4xx must not force a bootstrap re-query")
 }
 
 // A prefill failure the client observes also invalidates the cached engine
