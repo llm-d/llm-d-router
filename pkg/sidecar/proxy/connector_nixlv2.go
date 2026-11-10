@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -36,6 +37,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -358,11 +360,13 @@ func (s *Server) runNIXLV2Serial(
 	// because prefill already ran.
 	var pw *bufferedResponseWriter
 	var prefillErr error
+	var prefillTimedOut bool
 retryLoop:
 	for attempt := 0; ; attempt++ {
 		pw = &bufferedResponseWriter{}
-		setPrefillReq(preq)
-		prefillErr = servePrefill(prefillHandler, pw, preq)
+		// A timed-out attempt that got no response carries the prefill proxy's
+		// 502, or gRPC Unavailable, so it is retried like one.
+		prefillTimedOut, prefillErr = s.servePrefillAttempt(prefillHandler, pw, preq, setPrefillReq)
 		if !leg.shouldRetryPrefill(pw) || attempt >= s.config.PrefillMaxRetries {
 			break
 		}
@@ -370,7 +374,8 @@ retryLoop:
 			"attempt", attempt+1,
 			"target", prefillPodHostPort,
 			"request_id", uuidStr,
-			"previous_code", pw.statusCode)
+			"previous_code", pw.statusCode,
+			"timed_out", prefillTimedOut)
 		select {
 		case <-time.After(s.config.PrefillRetryBackoff):
 		case <-preq.Context().Done():
@@ -390,6 +395,20 @@ retryLoop:
 	if prefillErr != nil && preq.Context().Err() != nil {
 		logger.Info("client disconnected during prefill", "request_id", uuidStr)
 		prefillSpan.End()
+		return
+	}
+
+	if prefillTimedOut {
+		observeStageError(r.Context(), routing.StagePrefill)
+		logger.Error(context.DeadlineExceeded, "prefill request timed out",
+			"request_id", uuidStr,
+			"timeout", s.config.PrefillTimeout.String())
+		prefillSpan.SetStatus(codes.Error, "prefill request timed out")
+		prefillSpan.End()
+		if err := sendError(w, r, http.StatusGatewayTimeout,
+			"prefill request timed out after "+s.config.PrefillTimeout.String()); err != nil {
+			logger.Error(err, "failed to send error response to client")
+		}
 		return
 	}
 
@@ -486,6 +505,33 @@ func servePrefill(h http.Handler, pw *bufferedResponseWriter, r *http.Request) (
 	}()
 	h.ServeHTTP(pw, r)
 	return nil
+}
+
+// servePrefillAttempt sends one prefill attempt, its body set by setReq,
+// bounded by Config.PrefillTimeout when it is set. timedOut reports whether the
+// timeout ended the attempt before a complete response arrived.
+func (s *Server) servePrefillAttempt(h http.Handler, pw *bufferedResponseWriter, preq *http.Request, setReq func(*http.Request)) (timedOut bool, err error) {
+	ctx := preq.Context()
+	attempt := preq
+	if s.config.PrefillTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.config.PrefillTimeout)
+		defer cancel()
+		attempt = preq.WithContext(ctx)
+	}
+	setReq(attempt)
+	err = servePrefill(h, pw, attempt)
+	timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded) &&
+		preq.Context().Err() == nil &&
+		(err != nil || prefillAttemptFailed(pw))
+	return timedOut, err
+}
+
+// prefillAttemptFailed reports whether pw holds an error response. The prefill
+// proxy answers a gRPC request it could not complete with a gRPC error status
+// over HTTP 200.
+func prefillAttemptFailed(pw *bufferedResponseWriter) bool {
+	return isHTTPError(pw.statusCode) || grpcframe.HasErrorStatus(pw.headers)
 }
 
 // decodeResponseWriter returns the writer the decode response is streamed
