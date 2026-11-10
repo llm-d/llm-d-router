@@ -32,6 +32,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -594,13 +595,95 @@ func TestBestAvailableState_Clone(t *testing.T) {
 	state := &bestAvailableState{
 		cachedTokens:          7 * testBlockSize,
 		predictedCachedTokens: map[datalayer.ID]int{id: testBlockSize},
+		gpuCachedTokens:       map[datalayer.ID]int{id: testBlockSize},
 	}
 	cloned, ok := state.Clone().(*bestAvailableState)
 	require.True(t, ok)
 	require.Equal(t, state, cloned)
 
 	cloned.predictedCachedTokens[id] = 0
+	cloned.gpuCachedTokens[id] = 0
 	assert.Equal(t, testBlockSize, state.predictedCachedTokens[id])
+	assert.Equal(t, testBlockSize, state.gpuCachedTokens[id])
+}
+
+// Produce captures each candidate's GPU-tier and confirmed chains before the
+// filters run, and PreRequest splits the chosen endpoint's GPU miss across
+// them. The chosen endpoint holds 2 blocks in GPU memory and 6 in any tier, a
+// scored peer holds 3 in GPU memory, a filtered peer holds 4, and another
+// filtered peer holds 7 in its CPU tier only.
+func TestProduceThenPreRequest_AttributesGPUMiss(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-gpu-miss"
+	const promptBlocks = 8
+
+	idx := &fakeKVCacheIndexer{
+		computeFromTokens: func(_ context.Context, _ []uint32, _ string, _ []*kvblock.BlockExtraFeatures) ([]kvblock.BlockHash, error) {
+			keys := make([]kvblock.BlockHash, promptBlocks)
+			for i := range keys {
+				keys[i] = kvblock.BlockHash(i + 1)
+			}
+			return keys, nil
+		},
+		matchBlockKeys: func(_ context.Context, _ []kvblock.BlockHash, _ sets.Set[string]) (map[string]kvcache.PodMatch, error) {
+			podMatch := func(gpu, cpu, chain int) kvcache.PodMatch {
+				return kvcache.PodMatch{
+					WeightedScore: float64(chain), MatchedBlocks: chain, ConfirmedBlocks: chain,
+					BlocksByTier: map[string]int{kvcache.GPUTier: gpu, "cpu": cpu},
+				}
+			}
+			return map[string]kvcache.PodMatch{
+				"10.0.0.1:8080": podMatch(2, 6, 6),
+				"10.0.0.2:8080": podMatch(3, 3, 3),
+				"10.0.0.3:8080": podMatch(4, 4, 4),
+				"10.0.0.4:8080": podMatch(0, 7, 7),
+			}, nil
+		},
+	}
+	p := newProducerForProduceAndPreRequest(ctx, name, idx)
+
+	endpoints := append(freshEndpoints(),
+		scheduling.NewEndpoint(&datalayer.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-c"}, Address: "10.0.0.3", Port: "8080"}, nil, nil),
+		scheduling.NewEndpoint(&datalayer.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-d"}, Address: "10.0.0.4", Port: "8080"}, nil, nil),
+	)
+	req := tokenizedRequest("req-gpu-miss", promptBlocks*testBlockSize)
+	req.TargetModel = "test-model"
+	require.NoError(t, p.Produce(ctx, req, endpoints))
+
+	_ = p.PreRequest(ctx, req, primaryWithScored("default", endpoints[0], endpoints[0], endpoints[1]))
+
+	for reason, blocks := range map[string]int{
+		prefixmetrics.GPUMissFiltered:      1,
+		prefixmetrics.GPUMissNotPicked:     1,
+		prefixmetrics.GPUMissLowerTier:     2,
+		prefixmetrics.GPUMissPeerLowerTier: 1,
+		prefixmetrics.GPUMissUncached:      1,
+	} {
+		assert.Equal(t, float64(blocks*testBlockSize), gpuMissTokens(t, name, reason), reason)
+	}
+}
+
+// With no state from Produce the scored maxima are unknown, so the chosen
+// endpoint stands in for them and the miss reads as a lower-tier and uncached
+// split on that endpoint alone.
+func TestPreRequest_GPUMissWithoutProduceState(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	prefixmetrics.Register()
+
+	const name = "precise-gpu-miss-no-state"
+	p := newNamedProducerForPreRequest(ctx, name, false, &fakeKVBlockIndex{})
+
+	endpoint := freshEndpoints()[0]
+	endpoint.Put(p.dk, attrprefix.NewPrefixCacheMatchInfo(4, 8, testBlockSize).
+		WithCachedBlockCount(4).
+		WithCachedBlocksByTier(map[string]int{kvcache.GPUTier: 1, "cpu": 4}))
+	_ = p.PreRequest(ctx, tokenizedRequest("req-gpu-miss-no-state", 8*testBlockSize), primaryWithScored("default", endpoint, endpoint))
+
+	assert.Equal(t, float64(3*testBlockSize), gpuMissTokens(t, name, prefixmetrics.GPUMissLowerTier))
+	assert.Equal(t, float64(4*testBlockSize), gpuMissTokens(t, name, prefixmetrics.GPUMissUncached))
+	assert.Zero(t, gpuMissTokens(t, name, prefixmetrics.GPUMissFiltered))
 }
 
 func TestProduceThenPreRequest_ReadsOnlySelectedMatchInfo(t *testing.T) {
@@ -1280,4 +1363,27 @@ func TestSpeculativeTTLExpiry_ConcurrentSeedingAndExpiry(t *testing.T) {
 		assert.Zero(t, speculativeChainLen(ctx, t, idx, keys, pod), "every request expired")
 		assert.Empty(t, leaseCounts(p))
 	})
+}
+
+// gpuMissTokens returns the plugin's llm_d_epp_prefix_gpu_miss_tokens_total for
+// reason, or 0 when the series does not exist.
+func gpuMissTokens(t *testing.T, pluginName, reason string) float64 {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "llm_d_epp_prefix_gpu_miss_tokens_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["plugin_name"] == pluginName && labels["reason"] == reason {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
 }
