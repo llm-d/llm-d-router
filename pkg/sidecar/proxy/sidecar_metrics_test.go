@@ -1694,6 +1694,112 @@ func TestHandleNIXLV2SerialInterruptedPrefillErrorRetry(t *testing.T) {
 	}
 }
 
+// A prefill pod that accepts the request and never answers must not hold it
+// until the route timeout.
+func TestHandleNIXLV2SerialPrefillTimeout(t *testing.T) {
+	const (
+		timeout = 100 * time.Millisecond
+		// The fake pod answers 200 after holdFor, so without a timeout the
+		// request succeeds slowly instead of answering 504.
+		holdFor = 5 * time.Second
+	)
+	tests := []struct {
+		name          string
+		maxRetries    int
+		holdAttempts  int32
+		cutOffBody    bool
+		wantCode      int
+		wantAttempts  int32
+		wantDelta     stageMetrics
+		wantFailStage string
+	}{
+		{
+			name:         "a hung attempt with retries disabled answers 504",
+			holdAttempts: 3,
+			wantCode:     http.StatusGatewayTimeout, wantAttempts: 1,
+			wantDelta:     stageMetrics{prefillCount: 1, prefillErrors: 1},
+			wantFailStage: routing.StagePrefill,
+		},
+		{
+			name:       "hung attempts exhaust the retries and answer 504",
+			maxRetries: 2, holdAttempts: 3,
+			wantCode: http.StatusGatewayTimeout, wantAttempts: 3,
+			wantDelta:     stageMetrics{prefillCount: 1, prefillErrors: 1},
+			wantFailStage: routing.StagePrefill,
+		},
+		{
+			name:       "a timed-out attempt is retried and the retry succeeds",
+			maxRetries: 2, holdAttempts: 1,
+			wantCode: http.StatusOK, wantAttempts: 2,
+			wantDelta: stageMetrics{prefillCount: 1, decodeCount: 1},
+		},
+		{
+			name:       "an attempt that answers within the timeout is not retried",
+			maxRetries: 2,
+			wantCode:   http.StatusOK, wantAttempts: 1,
+			wantDelta: stageMetrics{prefillCount: 1, decodeCount: 1},
+		},
+		{
+			// Prefill already ran, the same rule as a cut-off 2xx without a timeout.
+			name:       "a timeout that cuts off a 2xx body is not retried",
+			maxRetries: 2, holdAttempts: 3, cutOffBody: true,
+			wantCode: http.StatusGatewayTimeout, wantAttempts: 1,
+			wantDelta:     stageMetrics{prefillCount: 1, prefillErrors: 1},
+			wantFailStage: routing.StagePrefill,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if attempts.Add(1) > tt.holdAttempts {
+					statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
+					return
+				}
+				_, _ = io.Copy(io.Discard, r.Body)
+				if tt.cutOffBody {
+					w.Header().Set("Content-Length", "100")
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, `{"kv_transfer_params":`)
+					w.(http.Flusher).Flush()
+				}
+				select {
+				case <-r.Context().Done():
+				case <-time.After(holdFor):
+					statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
+				}
+			}))
+			defer prefill.Close()
+			prefillURL, err := url.Parse(prefill.URL)
+			require.NoError(t, err)
+
+			s := NewProxy(Config{Port: "0", DecoderURL: prefillURL,
+				PrefillMaxRetries: tt.maxRetries, PrefillRetryBackoff: time.Millisecond,
+				PrefillTimeout: timeout})
+			s.logger = log.Log
+			s.decoderProxy = statusHandler(http.StatusOK, `{"choices":[]}`)
+
+			before := snapshotStageMetrics(t)
+			req := chatRequest(t, textChatBody())
+			ctx, summary := withRequestSummary(context.WithValue(req.Context(), http.ServerContextKey, &http.Server{}))
+			req = req.WithContext(ctx)
+			rw := httptest.NewRecorder()
+			started := time.Now()
+			s.handleNIXLV2(rw, req, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
+
+			assert.Less(t, time.Since(started), holdFor/2)
+			assert.Equal(t, tt.wantCode, rw.Code, rw.Body.String())
+			assert.Equal(t, tt.wantAttempts, attempts.Load())
+			assert.Equal(t, tt.wantDelta, snapshotStageMetrics(t).delta(before))
+			assert.Equal(t, tt.wantFailStage, summary.failedStage)
+			if tt.wantCode == http.StatusGatewayTimeout {
+				assert.Contains(t, rw.Body.String(), "prefill request timed out after 100ms")
+			}
+		})
+	}
+}
+
 // A client that disconnects while the prefill body is copied makes the reverse
 // proxy abort the same way a dropped prefill connection does.
 func TestHandleNIXLV2SerialClientCancelDuringPrefillBody(t *testing.T) {

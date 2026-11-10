@@ -79,6 +79,7 @@ const (
 	maxIdleConnsPerHost       = "max-idle-conns-per-host"
 	prefillMaxRetries         = "prefill-max-retries"
 	prefillRetryBackoff       = "prefill-retry-backoff"
+	prefillTimeout            = "prefill-timeout"
 	decodeChunkSize           = "decode-chunk-size"
 	inlineConfiguration       = "configuration"
 	configurationFile         = "configuration-file"
@@ -140,6 +141,7 @@ type yamlConfiguration struct {
 	MaxIdleConnsPerHost        int      `json:"max-idle-conns-per-host,omitempty"`
 	PrefillMaxRetries          *int     `json:"prefill-max-retries,omitempty"`
 	PrefillRetryBackoff        string   `json:"prefill-retry-backoff,omitempty"`
+	PrefillTimeout             string   `json:"prefill-timeout,omitempty"`
 	DecodeChunkSize            int      `json:"decode-chunk-size,omitempty"`
 	Tracing                    *bool    `json:"tracing,omitempty"`
 	EnableToolCallingTelemetry *bool    `json:"enable-tool-calling-telemetry,omitempty"`
@@ -367,6 +369,7 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&opts.MaxIdleConnsPerHost, "max-idle-conns-per-host", opts.MaxIdleConnsPerHost, "max idle keep-alive connections per host for reverse proxy transports; set to at least the expected concurrency")
 	fs.IntVar(&opts.PrefillMaxRetries, prefillMaxRetries, opts.PrefillMaxRetries, "max retry attempts when a prefill request fails with a 5xx error; 0 means no retries (default)")
 	fs.DurationVar(&opts.PrefillRetryBackoff, prefillRetryBackoff, opts.PrefillRetryBackoff, "delay between prefill retry attempts")
+	fs.DurationVar(&opts.PrefillTimeout, prefillTimeout, opts.PrefillTimeout, "timeout for each prefill attempt; a timed-out attempt is retried like a 5xx, and the client receives 504 once attempts are exhausted; 0 means no timeout (default)")
 	fs.StringVar(&opts.inlineConfiguration, inlineConfiguration, "", "Sidecar configuration in YAML provided as inline specification. Example `--configuration={port: 8085, model-server-port: 8203}. Inline configuration and file configuration are mutually exclusive.`")
 	fs.StringVar(&opts.fileConfiguration, configurationFile, "", "Path to file which contains sidecar configuration in YAML. Example `--configuration-file=/etc/config/sidecar-config.yaml`. Inline configuration and file configuration are mutually exclusive.")
 }
@@ -705,6 +708,9 @@ func (opts *Options) Validate() error {
 	if opts.PrefillMaxRetries > 0 && opts.PrefillRetryBackoff <= 0 {
 		return fmt.Errorf("--prefill-retry-backoff must be positive when --prefill-max-retries > 0, got %v", opts.PrefillRetryBackoff)
 	}
+	if opts.PrefillTimeout < 0 {
+		return fmt.Errorf("--prefill-timeout must be non-negative (0 means no timeout), got %v", opts.PrefillTimeout)
+	}
 
 	// Validate chunked decode
 	if opts.DecodeChunkSize < 0 {
@@ -893,6 +899,15 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 				prefillRetryBackoff, cfg.PrefillRetryBackoff, err, opts.PrefillRetryBackoff)
 		} else {
 			opts.PrefillRetryBackoff = d
+		}
+	}
+	if cfg.PrefillTimeout != "" && !opts.isFlagSet(prefillTimeout) {
+		d, err := time.ParseDuration(cfg.PrefillTimeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: ignoring invalid %s value %q: %v; using default %v\n",
+				prefillTimeout, cfg.PrefillTimeout, err, opts.PrefillTimeout)
+		} else {
+			opts.PrefillTimeout = d
 		}
 	}
 	if cfg.DecodeChunkSize != 0 && !opts.isFlagSet(decodeChunkSize) {

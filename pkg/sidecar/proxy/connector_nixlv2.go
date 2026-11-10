@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -221,14 +222,15 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	toolFields.compareValidatedDispatchedForSpan(pbody, prefillSpan)
 	var pw *bufferedResponseWriter
 	var prefillErr error
+	var prefillTimedOut bool
 retryLoop:
 	for attempt := 0; ; attempt++ {
 		pw = &bufferedResponseWriter{}
-		preq.Body = io.NopCloser(bytes.NewReader(pbody))
-		preq.ContentLength = int64(len(pbody))
 		// A response cut off mid-body keeps its status, and the status decides
 		// whether it is retried. A cut-off 2xx is not, because prefill already ran.
-		prefillErr = servePrefill(prefillHandler, pw, preq)
+		// A timed-out attempt with no response carries the proxy's 502, so it is
+		// retried like one.
+		prefillTimedOut, prefillErr = s.servePrefillAttempt(prefillHandler, pw, preq, pbody)
 
 		if !isHTTPError(pw.statusCode) {
 			break
@@ -244,7 +246,8 @@ retryLoop:
 			"attempt", attempt+1,
 			"target", prefillPodHostPort,
 			"request_id", uuidStr,
-			"previous_code", pw.statusCode)
+			"previous_code", pw.statusCode,
+			"timed_out", prefillTimedOut)
 
 		select {
 		case <-time.After(s.config.PrefillRetryBackoff):
@@ -265,6 +268,20 @@ retryLoop:
 	if prefillErr != nil && preq.Context().Err() != nil {
 		logger.Info("client disconnected during prefill", "request_id", uuidStr)
 		prefillSpan.End()
+		return
+	}
+
+	if prefillTimedOut {
+		observeStageError(r.Context(), routing.StagePrefill)
+		logger.Error(context.DeadlineExceeded, "prefill request timed out",
+			"request_id", uuidStr,
+			"timeout", s.config.PrefillTimeout.String())
+		prefillSpan.SetStatus(codes.Error, "prefill request timed out")
+		prefillSpan.End()
+		if err := sendError(w, r, http.StatusGatewayTimeout,
+			"prefill request timed out after "+s.config.PrefillTimeout.String()); err != nil {
+			logger.Error(err, "failed to send error response to client")
+		}
 		return
 	}
 
@@ -546,6 +563,25 @@ func servePrefill(h http.Handler, pw *bufferedResponseWriter, r *http.Request) (
 	}()
 	h.ServeHTTP(pw, r)
 	return nil
+}
+
+// servePrefillAttempt sends body as one prefill attempt, bounded by
+// Config.PrefillTimeout when it is set. timedOut reports an attempt the timeout
+// ended before a complete response arrived.
+func (s *Server) servePrefillAttempt(h http.Handler, pw *bufferedResponseWriter, preq *http.Request, body []byte) (timedOut bool, err error) {
+	attempt := preq
+	if s.config.PrefillTimeout > 0 {
+		ctx, cancel := context.WithTimeout(preq.Context(), s.config.PrefillTimeout)
+		defer cancel()
+		attempt = preq.WithContext(ctx)
+	}
+	attempt.Body = io.NopCloser(bytes.NewReader(body))
+	attempt.ContentLength = int64(len(body))
+	err = servePrefill(h, pw, attempt)
+	timedOut = errors.Is(attempt.Context().Err(), context.DeadlineExceeded) &&
+		preq.Context().Err() == nil &&
+		(err != nil || isHTTPError(pw.statusCode))
+	return timedOut, err
 }
 
 // decodeResponseWriter returns the writer the decode response is streamed
