@@ -87,8 +87,9 @@ type HTTPDataSource[T any] struct {
 // independently verified the target identity; do not use SkipVerify to talk to
 // endpoints whose certificate cannot be authenticated out of band.
 type TLSOptions struct {
-	// SkipVerify disables verification of the target's server certificate.
-	// See the TLSOptions doc for the threat model this assumes.
+	// SkipVerify disables verification of the target's server certificate
+	// when CACertPath is empty. See the TLSOptions doc for the threat model
+	// this assumes.
 	SkipVerify bool
 	// CACertPath is a PEM CA bundle used to verify the target instead of the
 	// system pool. Setting it enables verification even when SkipVerify is set.
