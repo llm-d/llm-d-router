@@ -26,6 +26,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
 func createTestEndpointWithLabels(name string, kvCacheUsage float64, runningRequestsSize, waitingQueueSize int, labels map[string]string) fwksched.Endpoint {
@@ -179,7 +180,7 @@ func TestValidatePrediction_PrefillEndpointNeutralizeTPOT(t *testing.T) {
 
 	// Simulate the fix logic from generatePredictions
 	if config.EndpointRoleLabel != "" && prefillEp.GetMetadata().Labels != nil {
-		if prefillEp.GetMetadata().Labels[config.EndpointRoleLabel] == ExperimentalDefaultPrefillProfile {
+		if prefillEp.GetMetadata().Labels[config.EndpointRoleLabel] == bylabel.RolePrefill {
 			predResult.TPOTValid = true
 			predResult.Headroom = 0
 			predResult.IsValid = predResult.TTFTValid
@@ -199,7 +200,7 @@ func TestValidatePrediction_PrefillEndpointNeutralizeTPOT(t *testing.T) {
 		Headroom:  -969,
 	}
 	if config.EndpointRoleLabel != "" && decodeEp.GetMetadata().Labels != nil {
-		if decodeEp.GetMetadata().Labels[config.EndpointRoleLabel] == ExperimentalDefaultPrefillProfile {
+		if decodeEp.GetMetadata().Labels[config.EndpointRoleLabel] == bylabel.RolePrefill {
 			decodeResult.TPOTValid = true
 			decodeResult.Headroom = 0
 			decodeResult.IsValid = decodeResult.TTFTValid
