@@ -3,7 +3,7 @@ kind: EndpointPickerConfig
 plugins:
   - type: openai-parser
   - type: mock-metrics-source
-  - type: qos-admission
+  - type: qos-contract
     parameters:
       mode: enforce-limits
       classes:

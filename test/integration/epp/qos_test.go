@@ -27,7 +27,7 @@ import (
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/qosadmission"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/qoscontract"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
 	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
@@ -85,7 +85,7 @@ func requestTotalPriorities(t *testing.T, fairnessID string) []string {
 	return priorities
 }
 
-func TestQoSAdmission(t *testing.T) {
+func TestQoSContract(t *testing.T) {
 	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(qosTestConfig)).WithBaseResources()
 	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget)}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
@@ -101,10 +101,10 @@ func TestQoSAdmission(t *testing.T) {
 		responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 4)
 		require.NoError(t, err)
 		require.Len(t, responses, 4)
-		class, ok := responseHeader(responses[2], qosadmission.ClassHeader)
+		class, ok := responseHeader(responses[2], qoscontract.ClassHeader)
 		require.True(t, ok, "the served class is reported on the response")
 		require.Equal(t, "batch", class)
-		_, ok = responseHeader(responses[2], qosadmission.ConcurrencyRemainingHeader)
+		_, ok = responseHeader(responses[2], qoscontract.ConcurrencyRemainingHeader)
 		require.True(t, ok)
 		// The director, not the plugin, records the request at the priority it was served at.
 		require.Equal(t, []string{"-10"}, requestTotalPriorities(t, "team-a"))
@@ -121,7 +121,7 @@ func TestQoSAdmission(t *testing.T) {
 		require.Equal(t, envoyTypePb.StatusCode_TooManyRequests, ir.GetStatus().GetCode())
 		reason, _ := immediateHeader(responses[0], errcommon.RequestDroppedReasonHeaderKey)
 		require.Equal(t, string(errcommon.RequestDroppedReasonOverQuota), reason)
-		retry, ok := immediateHeader(responses[0], qosadmission.RetryAfterHeader)
+		retry, ok := immediateHeader(responses[0], qoscontract.RetryAfterHeader)
 		require.True(t, ok)
 		require.NotEmpty(t, retry)
 	})

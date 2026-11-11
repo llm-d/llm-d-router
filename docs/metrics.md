@@ -841,16 +841,16 @@ Control alone does not emit them. `program_id` is the request's fairness ID and 
 | `llm_d_epp_program_aware_avg_wait_time_milliseconds` | Gauge | `program_id` | Mean wait time. |
 | `llm_d_epp_program_aware_attained_service_tokens` | Gauge | `program_id` | Attained service. |
 
-### QoS admission
+### QoS contract
 
-These metrics are owned by the `qos-admission` RequestHeader plugin and are registered only when
+These metrics are owned by the `qos-contract` RequestHeader plugin and are registered only when
 it is configured. The `team` label shares the fairness ID cardinality bound. The plugin defaults to
 `mode="report-only"`, where each team is served at its committed class and downgrades and rejections
 are recorded but not applied.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_qos_admission_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | `decision` is `admitted`, `downgraded`, `rejected_concurrency`, `rejected_size` or `rejected_daily`. `reason` is the limit a downgraded or rejected request exceeded (`size`, `daily` or `concurrency`) and is empty when admitted. `served_class` is empty for rejections. |
+| `llm_d_epp_qos_contract_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | `decision` is `within_contract`, `downgraded`, `rejected_concurrency`, `rejected_size` or `rejected_daily`. `reason` is the limit a downgraded or rejected request exceeded (`size`, `daily` or `concurrency`) and is empty within the contract. `served_class` is empty for rejections. |
 | `llm_d_epp_qos_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens charged after refunds. |
 | `llm_d_epp_qos_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
 

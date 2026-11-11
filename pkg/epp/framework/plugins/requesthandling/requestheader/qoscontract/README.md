@@ -1,6 +1,6 @@
-# QoS Admission
+# QoS Contract
 
-**Type:** `qos-admission`
+**Type:** `qos-contract`
 **Interfaces:** `requesthandling.RequestHeaderProcessor`, `requesthandling.ResponseHeaderProcessor`, `requesthandling.ResponseBodyProcessor`
 **Stability:** Alpha
 
@@ -11,13 +11,21 @@ Enforces per-team QoS contracts ahead of flow control. Until `mode: enforce-limi
 The plugin runs in the RequestHeader phase, before flow control queues the request. For each request it:
 
 1. Resolves the team from `teamHeader` (default: the fairness ID header). A missing or unlisted team uses `defaultTeam`.
-2. Checks the contract. A request is within it when its prompt is at most `maxPromptTokens`, its output cap is at most `maxOutputTokens`, the team has a free `maxConcurrency` slot, and the reservation `input + outputTokenWeight * maxOutput` fits in what is left of `dailyTokens`. Such a request takes a slot, held from admission, queueing included, to completion, and is charged the reservation against the daily budget.
+2. Checks the contract. A request is within it when its prompt is at most `maxPromptTokens`, its output cap is at most `maxOutputTokens`, the team has a free `maxConcurrency` slot, and the reservation `input + outputTokenWeight * maxOutput` fits in what is left of `dailyTokens`. Such a request takes a slot, held from this phase, queueing included, to completion, and is charged the reservation against the daily budget.
 3. Moves a request outside the contract to the next lower class, without taking a slot or a charge. In the lowest class it is rejected: with `400` when it is above a size limit, else with `429`.
 4. Sets the request priority to the served class and sets the fairness ID to the team when no fairness ID was supplied.
 
 At end of stream the reservation of a committed request is settled against the reported usage: unused tokens are refunded to the daily budget, and usage above the reservation is charged to it. A response with no usage block keeps the reservation as the charge. A request that ends without a response body (a flow-control rejection, a scheduling failure, a client disconnect) is refunded in full when its stream ends.
 
 Input tokens are estimated as request bytes / 4, because tokenization runs after flow control. `maxOutput` is the request's output cap, else the team's `maxOutputTokens`, else `defaultOutputReservation`.
+
+### Why a RequestHeader Plugin
+
+The plugin is not an `Admitter` and does not replace flow-control admission. Both run later in the director: flow control queues and dispatches the request in the band its priority selects, and `Admitter` plugins run after flow control has dispatched it. The contract decision has to come first:
+
+- A downgrade changes the priority, and so the band flow control queues the request in. Only a RequestHeader plugin can still change it.
+- A rejection in the lowest class answers at once. Rejected later, the request would first wait in the lowest band, and its `429` would arrive only after the queue wait.
+- The concurrency slot counts queued requests, so it is taken before queueing, in the same check that decides the downgrade or rejection.
 
 ## Responses
 
@@ -34,13 +42,13 @@ A `429` adds `retry-after` (seconds: `1` for concurrency, until the next UTC day
 
 ## Report-Only Mode
 
-The plugin starts in `mode: report-only` (the default). It serves every request at its team's committed class: it sets the class priority and, when the request has none, the fairness ID, as `enforce-limits` mode does. Every decision is computed and recorded in `llm_d_epp_qos_admission_decisions_total{mode="report-only"}`, but a request outside the contract is neither moved down a class nor rejected, and the plugin adds no response headers. Commits are counted as they would be when enforced: a request recorded as `admitted` holds a concurrency slot and a daily charge until it completes, and one recorded as `downgraded` or `rejected_*` holds neither. Use it to compare commits against real traffic, then set `mode: enforce-limits` to apply the decisions.
+The plugin starts in `mode: report-only` (the default). It serves every request at its team's committed class: it sets the class priority and, when the request has none, the fairness ID, as `enforce-limits` mode does. Every decision is computed and recorded in `llm_d_epp_qos_contract_decisions_total{mode="report-only"}`, but a request outside the contract is neither moved down a class nor rejected, and the plugin adds no response headers. Commits are counted as they would be when enforced: a request recorded as `within_contract` holds a concurrency slot and a daily charge until it completes, and one recorded as `downgraded` or `rejected_*` holds neither. Use it to compare commits against real traffic, then set `mode: enforce-limits` to apply the decisions.
 
 ## Configuration
 
 ```yaml
 plugins:
-- type: qos-admission
+- type: qos-contract
   parameters:
     mode: enforce-limits
     outputTokenWeight: 2
@@ -88,7 +96,7 @@ Configure a flow-control priority band for each class priority, or rely on dynam
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `llm_d_epp_qos_admission_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | Decisions: `admitted`, `downgraded`, `rejected_concurrency`, `rejected_size`, `rejected_daily`, and the limit that caused each downgrade or rejection. |
+| `llm_d_epp_qos_contract_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | Decisions: `within_contract`, `downgraded`, `rejected_concurrency`, `rejected_size`, `rejected_daily`, and the limit that caused each downgrade or rejection. |
 | `llm_d_epp_qos_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens consumed after refunds, including downgraded traffic. Showback. |
 | `llm_d_epp_qos_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
 
@@ -98,15 +106,15 @@ The metrics are served on the EPP `/metrics` endpoint with the other EPP metrics
 
 ### Decisions
 
-`llm_d_epp_qos_admission_decisions_total` counts one decision per request:
+`llm_d_epp_qos_contract_decisions_total` counts one decision per request:
 
 | Label | Value |
 |---|---|
 | `team` | Team resolved from `teamHeader`, or the `defaultTeam` ID |
 | `class` | The team's committed class |
-| `served_class` | Class the request is served at: `class` when `admitted`, the next lower class when `downgraded`, empty for a rejection |
-| `decision` | `admitted`, `downgraded`, `rejected_size` (`400`), `rejected_concurrency` or `rejected_daily` (`429`) |
-| `reason` | Limit the request exceeded: `size` (`maxPromptTokens` or `maxOutputTokens`), `daily` (`dailyTokens`) or `concurrency` (`maxConcurrency`). Empty when `admitted` |
+| `served_class` | Class the request is served at: `class` when `within_contract`, the next lower class when `downgraded`, empty for a rejection |
+| `decision` | `within_contract`, `downgraded`, `rejected_size` (`400`), `rejected_concurrency` or `rejected_daily` (`429`) |
+| `reason` | Limit the request exceeded: `size` (`maxPromptTokens` or `maxOutputTokens`), `daily` (`dailyTokens`) or `concurrency` (`maxConcurrency`). Empty when `within_contract` |
 | `mode` | `report-only` when the decision was only recorded, `enforce-limits` when it was applied |
 
 A request over several limits reports one reason, the first of `size`, `daily` and `concurrency`; the same order decides its rejection. For a rejection `reason` repeats what the `decision` name already says, so one query can group downgrades and rejections by cause.
@@ -118,18 +126,18 @@ In report-only mode the counter is the report of what enforcement would do; ever
 Requests per second that would be moved down or rejected, per team, decision and limit, in report-only mode:
 
 ```promql
-sum by (team, decision, reason) (rate(llm_d_epp_qos_admission_decisions_total{mode="report-only",decision!="admitted"}[5m]))
+sum by (team, decision, reason) (rate(llm_d_epp_qos_contract_decisions_total{mode="report-only",decision!="within_contract"}[5m]))
 ```
 
 Fraction of each team's traffic outside its contract over a day. Sum over EPP replicas, since each replica decides on its own share of the traffic:
 
 ```promql
-sum by (team) (increase(llm_d_epp_qos_admission_decisions_total{mode="report-only",decision!="admitted"}[1d]))
+sum by (team) (increase(llm_d_epp_qos_contract_decisions_total{mode="report-only",decision!="within_contract"}[1d]))
 /
-sum by (team) (increase(llm_d_epp_qos_admission_decisions_total{mode="report-only"}[1d]))
+sum by (team) (increase(llm_d_epp_qos_contract_decisions_total{mode="report-only"}[1d]))
 ```
 
 To size the commits before setting `mode: enforce-limits`, compare per-replica demand with them, since each replica holds its own commits:
 
-- Concurrency: `llm_d_epp_qos_inflight_requests` counts only admitted requests, so it never exceeds `maxConcurrency`. Decisions with `reason="concurrency"` mean demand is above it. A request also over a size limit or the daily budget reports that reason instead, so the count is a lower bound.
+- Concurrency: `llm_d_epp_qos_inflight_requests` counts only requests within the contract, so it never exceeds `maxConcurrency`. Decisions with `reason="concurrency"` mean demand is above it. A request also over a size limit or the daily budget reports that reason instead, so the count is a lower bound.
 - Daily budget: decisions with `reason="daily"` mean the budget ran out. To see by how much, compare `max by (team) (increase(llm_d_epp_qos_charged_tokens_total[1d]))` with `dailyTokens`. The charged tokens include downgraded traffic, so they measure the team's total demand rather than what fit in the budget. The budget resets at 00:00 UTC, so a rolling `[1d]` window only approximates one budget day.
