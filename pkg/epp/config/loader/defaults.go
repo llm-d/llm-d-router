@@ -148,9 +148,9 @@ func applySystemDefaults(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin
 // config defines none.
 const defaultProfileName = "default"
 
-// schedulingProfileNames returns the profile names the config ends up with
-// after ensureSchedulingLayer runs.
-func schedulingProfileNames(cfg *configapiv1.EndpointPickerConfig) sets.Set[string] {
+// SchedulingProfileNames returns the profile names the config ends up with
+// after InstantiateAndConfigure applies defaults.
+func SchedulingProfileNames(cfg *configapiv1.EndpointPickerConfig) sets.Set[string] {
 	if len(cfg.SchedulingProfiles) == 0 {
 		return sets.New(defaultProfileName)
 	}

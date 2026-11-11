@@ -304,8 +304,7 @@ func TestSessionAffinity_FactoryProfileName(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			handle := utils.NewTestHandle(utils.NewTestContext(t))
-			handle.SetSchedulingProfileNames(test.profiles)
+			handle := utils.NewTestHandleWithSchedulingProfiles(utils.NewTestContext(t), test.profiles)
 			_, err := sessionaffinity.Factory("test", plugin.StrictDecoder(json.RawMessage(test.params)), handle)
 			if test.expectErr {
 				if err == nil || !strings.Contains(err.Error(), "scheduling profile 'prefil' is not defined") {

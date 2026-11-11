@@ -41,10 +41,9 @@ import (
 var _ plugin.Handle = &fakeHandle{}
 
 type fakeHandle struct {
-	ctx                    context.Context
-	plugins                map[string]plugin.Plugin
-	crossReplicaSyncer     plugin.Plugin
-	schedulingProfileNames sets.Set[string]
+	ctx                context.Context
+	plugins            map[string]plugin.Plugin
+	crossReplicaSyncer plugin.Plugin
 }
 
 func newFakeHandle(ctx context.Context) *fakeHandle {
@@ -709,9 +708,5 @@ func TestDumpStateConcurrentWithPreRequest(t *testing.T) {
 }
 
 func (h *fakeHandle) SchedulingProfileNames() sets.Set[string] {
-	return h.schedulingProfileNames
-}
-
-func (h *fakeHandle) SetSchedulingProfileNames(names sets.Set[string]) {
-	h.schedulingProfileNames = names
+	return nil
 }

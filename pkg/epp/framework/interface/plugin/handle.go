@@ -54,12 +54,9 @@ type Handle interface {
 	RefreshMetricsInterval() time.Duration
 
 	// SchedulingProfileNames returns the names of the configured scheduling
-	// profiles. It is empty when the profiles are not known.
+	// profiles, so plugin factories can validate parameters that name a
+	// profile. It is empty when the profiles are not known.
 	SchedulingProfileNames() sets.Set[string]
-
-	// SetSchedulingProfileNames records the configured scheduling profile
-	// names so plugin factories can validate parameters that name a profile.
-	SetSchedulingProfileNames(sets.Set[string])
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -158,11 +155,6 @@ func (h *eppHandle) SchedulingProfileNames() sets.Set[string] {
 	return h.schedulingProfileNames
 }
 
-// SetSchedulingProfileNames sets the configured scheduling profile names.
-func (h *eppHandle) SetSchedulingProfileNames(names sets.Set[string]) {
-	h.schedulingProfileNames = names
-}
-
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -181,6 +173,14 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 func WithRefreshMetricsInterval(interval time.Duration) HandleOption {
 	return func(h *eppHandle) {
 		h.refreshMetricsInterval = interval
+	}
+}
+
+// WithSchedulingProfileNames sets the scheduling profile names advertised to
+// plugins via Handle.SchedulingProfileNames.
+func WithSchedulingProfileNames(names sets.Set[string]) HandleOption {
+	return func(h *eppHandle) {
+		h.schedulingProfileNames = names
 	}
 }
 

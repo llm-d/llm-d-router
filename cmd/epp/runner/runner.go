@@ -928,7 +928,8 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds),
 		fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry),
-		fwkplugin.WithRefreshMetricsInterval(refreshMetricsInterval))
+		fwkplugin.WithRefreshMetricsInterval(refreshMetricsInterval),
+		fwkplugin.WithSchedulingProfileNames(loader.SchedulingProfileNames(rawConfig)))
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 

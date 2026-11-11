@@ -621,10 +621,9 @@ func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
 }
 
 type testHandle struct {
-	ctx                    context.Context
-	podList                func() []k8stypes.NamespacedName
-	crossReplicaSyncer     plugin.Plugin
-	schedulingProfileNames sets.Set[string]
+	ctx                context.Context
+	podList            func() []k8stypes.NamespacedName
+	crossReplicaSyncer plugin.Plugin
 }
 
 func (h *testHandle) Context() context.Context {
@@ -825,9 +824,5 @@ func TestDumpStateConcurrentWithWrites(t *testing.T) {
 }
 
 func (h *testHandle) SchedulingProfileNames() sets.Set[string] {
-	return h.schedulingProfileNames
-}
-
-func (h *testHandle) SetSchedulingProfileNames(names sets.Set[string]) {
-	h.schedulingProfileNames = names
+	return nil
 }

@@ -86,6 +86,14 @@ func (h *testHandlePlugins) GetAllPluginsWithNames() map[string]plugin.Plugin {
 	return h.plugins
 }
 
+// NewTestHandleWithSchedulingProfiles returns a test handle that reports names
+// from SchedulingProfileNames.
+func NewTestHandleWithSchedulingProfiles(ctx context.Context, names sets.Set[string]) plugin.Handle {
+	h := NewTestHandle(ctx).(*testHandle)
+	h.schedulingProfileNames = names
+	return h
+}
+
 func NewTestHandle(ctx context.Context) plugin.Handle {
 	return &testHandle{
 		ctx: ctx,
@@ -98,8 +106,4 @@ func NewTestHandle(ctx context.Context) plugin.Handle {
 
 func (h *testHandle) SchedulingProfileNames() sets.Set[string] {
 	return h.schedulingProfileNames
-}
-
-func (h *testHandle) SetSchedulingProfileNames(names sets.Set[string]) {
-	h.schedulingProfileNames = names
 }

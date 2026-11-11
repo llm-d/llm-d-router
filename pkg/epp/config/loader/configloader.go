@@ -119,7 +119,6 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
-	handle.SetSchedulingProfileNames(schedulingProfileNames(rawConfig))
 	if err := instantiatePlugins(rawConfig.Plugins, handle, logger); err != nil {
 		return nil, fmt.Errorf("plugin instantiation failed: %w", err)
 	}

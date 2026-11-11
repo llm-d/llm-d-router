@@ -1021,7 +1021,7 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			}
 
 			// 2. Instantiate & Configure
-			handle := testutils.NewTestHandle(context.Background())
+			handle := testutils.NewTestHandleWithSchedulingProfiles(context.Background(), SchedulingProfileNames(rawConfig))
 			cfg, err := InstantiateAndConfigure(rawConfig, handle, logger)
 
 			if tc.wantErr {
@@ -1236,7 +1236,8 @@ schedulingProfiles:
 				} {
 					rawConfig, _, err := LoadRawConfig([]byte(fmt.Sprintf(text, pluginType, strategy, tc.profileName)), logger)
 					require.NoError(t, err)
-					_, err = InstantiateAndConfigure(rawConfig, testutils.NewTestHandle(t.Context()), logger)
+					handle := testutils.NewTestHandleWithSchedulingProfiles(t.Context(), SchedulingProfileNames(rawConfig))
+					_, err = InstantiateAndConfigure(rawConfig, handle, logger)
 					if tc.wantErr == "" {
 						require.NoError(t, err, "profileName %q", tc.profileName)
 					} else {

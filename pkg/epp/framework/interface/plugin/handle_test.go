@@ -170,8 +170,7 @@ func TestValidateProfileName(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			h := NewEppHandle(context.Background(), nil)
-			h.SetSchedulingProfileNames(test.profiles)
+			h := NewEppHandle(context.Background(), nil, WithSchedulingProfileNames(test.profiles))
 			err := ValidateProfileName(h, test.profile)
 			if test.expectErr {
 				assert.EqualError(t, err, "scheduling profile 'prefil' is not defined")
