@@ -1271,10 +1271,11 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 }
 
 // validateConfig runs the configuration checks of a real start against an
-// empty datastore: the discovery flags of Kubernetes mode, plugin
-// instantiation and the config checks of phase two,
-// the discovery plugin, plugin stability, and the data layer configuration.
-// It needs no Kubernetes cluster and starts no server or data source.
+// empty datastore: the discovery flags of Kubernetes mode, the objectives
+// file of file-discovery mode, plugin instantiation and the config checks of
+// phase two, the discovery plugin, plugin stability, and the data layer
+// configuration. It needs no Kubernetes cluster and starts no server or data
+// source.
 func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1289,6 +1290,9 @@ func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, ra
 
 	pool := datalayer.NewEndpointPool(resolvePoolNamespace(opts.PoolNamespace), "epp")
 	ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts)).WithEndpointPool(pool)
+	if _, err := loadObjectivesFile(opts.ObjectivesFile, ds); err != nil {
+		return err
+	}
 	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
 		return err
