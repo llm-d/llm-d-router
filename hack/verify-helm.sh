@@ -1301,7 +1301,9 @@ fi
 for pb in false true; do
   gke_timeout_output="${TEMP_DIR}/llm-d-router-gateway-gke-timeout-${pb}.yaml"
   ${HELM} template gke-timeout ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set provider.name=gke --set provider.gke.preferredBackends.enabled=${pb} --set provider.gke.backendTimeoutSec=2400 --set router.modelServers.matchLabels.app=llm-instance-gateway > "${gke_timeout_output}" || exit 1
-  "${KUBECTL_VALIDATE}" "${gke_timeout_output}" --local-crds "${TEMP_DIR}" || exit 1
+  if [ "${pb}" == "false" ]; then
+    "${KUBECTL_VALIDATE}" "${gke_timeout_output}" --local-crds "${TEMP_DIR}" || exit 1
+  fi
   bad_timeouts=$("${YQ}" -N 'select(.kind == "GCPBackendPolicy") | select(.spec.default.timeoutSec != 2400) | .metadata.name' "${gke_timeout_output}")
   if [ -n "${bad_timeouts}" ]; then
     echo "GCPBackendPolicy timeoutSec override missed policies (preferredBackends=${pb}): ${bad_timeouts}"

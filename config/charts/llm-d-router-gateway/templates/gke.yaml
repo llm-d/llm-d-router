@@ -60,7 +60,7 @@ spec:
         port: {{ $eppHealthPort }}
 {{- end }}
 {{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict }}
-{{- $backendTimeoutSec := int (dig "gke" "backendTimeoutSec" 300 .Values.provider | default 300) }}
+{{- $backendTimeoutSec := int (dig "gke" "backendTimeoutSec" 300 (.Values.provider | default dict) | default 300) }}
 {{- if $gkePB.enabled }}
 {{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
 {{- $defaultReplicas := $gkePB.defaultReplicas | default 1 | int }}
