@@ -57,6 +57,9 @@ func TestValidateConfig(t *testing.T) {
   port: "8000"
 `), 0o600))
 
+	invalidObjectivesFile := filepath.Join(t.TempDir(), "objectives.yaml")
+	require.NoError(t, os.WriteFile(invalidObjectivesFile, []byte("objectives:\n- priority: 10\n"), 0o600))
+
 	fileDiscoveryConfig := replaceOnce(t, validateConfigBase, "plugins:\n- type: approx-prefix-cache-producer",
 		"plugins:\n- name: file-disc\n  type: file-discovery\n  parameters:\n    path: "+endpointsFile+
 			"\n- type: approx-prefix-cache-producer") + `dataLayer:
@@ -66,10 +69,11 @@ func TestValidateConfig(t *testing.T) {
 `
 
 	tests := []struct {
-		name       string
-		configText string
-		poolName   string
-		wantErr    string
+		name           string
+		configText     string
+		poolName       string
+		objectivesFile string
+		wantErr        string
 	}{
 		{
 			name:       "valid config",
@@ -97,6 +101,25 @@ func TestValidateConfig(t *testing.T) {
 			configText: validateConfigBase,
 			wantErr:    "either pool-name or endpoint-selector must be set",
 		},
+		{
+			name:           "objectives file in kubernetes mode",
+			configText:     validateConfigBase,
+			poolName:       "epp",
+			objectivesFile: invalidObjectivesFile,
+			wantErr:        "objectives-file requires file discovery",
+		},
+		{
+			name:           "invalid objectives file with file discovery",
+			configText:     fileDiscoveryConfig,
+			objectivesFile: invalidObjectivesFile,
+			wantErr:        "objective 0: name is required",
+		},
+		{
+			name:           "missing objectives file with file discovery",
+			configText:     fileDiscoveryConfig,
+			objectivesFile: filepath.Join(t.TempDir(), "missing.yaml"),
+			wantErr:        "missing.yaml",
+		},
 	}
 
 	for _, tc := range tests {
@@ -107,6 +130,7 @@ func TestValidateConfig(t *testing.T) {
 			opts := runserver.NewOptions()
 			opts.ConfigText = tc.configText
 			opts.PoolName = tc.poolName
+			opts.ObjectivesFile = tc.objectivesFile
 			opts.ValidateConfig = true
 
 			r := NewRunner()
