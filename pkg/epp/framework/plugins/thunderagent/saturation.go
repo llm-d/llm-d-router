@@ -23,12 +23,30 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
-// Saturation refreshes the pod ledger from the live endpoint list and always
-// returns 0.0.
+// endpointStaleAfter bounds how long an endpoint from another saturation stage
+// remains in the admission view after Saturation stops reporting it.
+const endpointStaleAfter = 5 * time.Second
+
+type trackedEndpoint struct {
+	ep        fwkdl.Endpoint
+	capacity  float64
+	stage     string
+	updatedAt time.Time
+}
+
+func (a *ThunderAgent) endpointCapacity(m *fwkdl.Metrics) float64 {
+	if m != nil && m.CacheBlockSize > 0 && m.CacheNumBlocks > 0 {
+		return float64(m.CacheBlockSize) * float64(m.CacheNumBlocks)
+	}
+	return a.fallbackCapacityTokens
+}
+
+// Saturation refreshes the live endpoint view and always returns 0.0.
 //
 // Returning 0 is deliberate: the flow controller's saturation gate is a
 // band-level head-of-line block, and while it reports saturated nothing
@@ -36,42 +54,49 @@ import (
 // are what complete trajectories and free capacity, so blocking them can
 // only stall the pool. The per-session gate lives in Pick instead, where an
 // admitted session's turn can be told apart from a new one. This hook is
-// used because it is the only flow-control callback that receives the
-// endpoint list each dispatch cycle.
-func (a *ThunderAgent) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
-	now := time.Now()
-	m := a.mgr
-
+// used because it receives the live endpoint list each dispatch cycle.
+func (a *ThunderAgent) Saturation(ctx context.Context, endpoints []fwkdl.Endpoint) float64 {
+	now := a.clock.Now()
+	stage := fwkfc.SaturationStageFromContext(ctx)
+	seen := make(map[string]bool, len(endpoints))
 	var prefillPods []string
-	m.mu.Lock()
+
+	a.mu.Lock()
 	for _, endpoint := range endpoints {
+		if endpoint == nil {
+			continue
+		}
 		md := endpoint.GetMetadata()
 		if md == nil {
 			continue
 		}
 		id := md.ID.String()
-		_, known := m.endpoints[id]
-		m.ensureEndpointLocked(id, a.endpointCapacity(endpoint.GetMetrics()), now)
-		if role := md.Labels[bylabel.RoleLabel]; !known && (role == bylabel.RolePrefill || role == bylabel.RoleEncodePrefill) {
+		seen[id] = true
+		a.endpoints[id] = &trackedEndpoint{
+			ep:        endpoint,
+			capacity:  a.endpointCapacity(endpoint.GetMetrics()),
+			stage:     stage,
+			updatedAt: now,
+		}
+		if role := md.Labels[bylabel.RoleLabel]; !a.prefillSeen[id] && (role == bylabel.RolePrefill || role == bylabel.RoleEncodePrefill) {
+			a.prefillSeen[id] = true
 			prefillPods = append(prefillPods, id)
 		}
 	}
-	// A pod the endpoint list has stopped reporting is gone: unbind its
-	// sessions so their next turn re-enters as new, and drop the entry.
-	for id, p := range m.endpoints {
-		if now.Sub(p.updatedAt) <= endpointStaleAfter {
+	// A pod absent from an unstaged call or from its own stage's call is gone;
+	// entries from other stages time out after endpointStaleAfter.
+	for id, entry := range a.endpoints {
+		if seen[id] {
 			continue
 		}
-		for sid, s := range p.sessions {
-			s.endpoint = nil
-			s.paused = false
-			delete(p.sessions, sid)
+		if stage == "" || entry.stage == stage || now.Sub(entry.updatedAt) > endpointStaleAfter {
+			a.deleteEndpointLocked(id)
 		}
-		delete(m.endpoints, id)
 	}
-	m.mu.Unlock()
+	a.mu.Unlock()
+
 	for _, id := range prefillPods {
-		log.FromContext(ctx).V(logutil.DEFAULT).Info("thunder-agent does not support prefill/decode disaggregation: prefill pods enter its session manager", "pod", id)
+		log.FromContext(ctx).V(logutil.DEFAULT).Info("thunder-agent does not support prefill/decode disaggregation: prefill pods enter its admission pool", "pod", id)
 	}
 	return 0.0
 }

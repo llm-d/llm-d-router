@@ -18,18 +18,20 @@ package thunderagent
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	clocktesting "k8s.io/utils/clock/testing"
 
-	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
-	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 )
 
@@ -42,127 +44,191 @@ func testConfig() Config {
 	return cfg
 }
 
-func newTestAgent(cfg Config) *ThunderAgent {
-	return newThunderAgent("test", cfg)
+// testLedger simulates session-state-producer's published attributes against a
+// controllable clock so unit tests can exercise ThunderAgent deterministically.
+type testLedger struct {
+	clock    *clocktesting.FakeClock
+	agent    *ThunderAgent
+	sessions map[string]*sessionstate.SessionState
+	pods     map[string]fwkdl.Endpoint
 }
 
-// schedEndpoint builds a scheduling endpoint; blockSize and numBlocks of 0
-// leave the endpoint without scraped capacity, selecting the fallback.
-func schedEndpoint(name string, blockSize, numBlocks int) fwksched.Endpoint {
+func newTestLedger(cfg Config) *testLedger {
+	clk := clocktesting.NewFakeClock(time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC))
+	return &testLedger{
+		clock:    clk,
+		agent:    newThunderAgentWithClock("test", cfg, clk),
+		sessions: make(map[string]*sessionstate.SessionState),
+		pods:     make(map[string]fwkdl.Endpoint),
+	}
+}
+
+func (l *testLedger) now() time.Time {
+	return l.clock.Now()
+}
+
+func (l *testLedger) step(d time.Duration) {
+	l.clock.Step(d)
+}
+
+func (l *testLedger) pod(name string, blockSize, numBlocks int) fwkdl.Endpoint {
 	nn := types.NamespacedName{Namespace: "default", Name: name}
-	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: nn},
-		&fwkdl.Metrics{CacheBlockSize: blockSize, CacheNumBlocks: numBlocks}, nil)
-}
-
-func schedulingResultFor(endpoint fwksched.Endpoint) *fwksched.SchedulingResult {
-	return &fwksched.SchedulingResult{
-		PrimaryProfileName: "default",
-		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+	podID := nn.String()
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: nn}, &fwkdl.Metrics{
+		CacheBlockSize: blockSize,
+		CacheNumBlocks: numBlocks,
+	})
+	ep.GetAttributes().Put(
+		sessionstate.EndpointSessionsDataKey.WithNonEmptyProducerName(sessionstate.SessionStateProducerType),
+		&fwkdl.DynamicAttribute{
+			Get: func() fwkdl.Cloneable {
+				var out sessionstate.EndpointSessions
+				for _, s := range l.sessions {
+					if s.Endpoint == podID {
+						out = append(out, *s)
+					}
+				}
+				slices.SortFunc(out, func(a, b sessionstate.SessionState) int {
+					return strings.Compare(a.SessionID, b.SessionID)
+				})
+				return out
+			},
 		},
+	)
+	l.pods[podID] = ep
+	return ep
+}
+
+func (l *testLedger) ensurePod(name string) {
+	if _, ok := l.pods["default/"+name]; !ok {
+		l.pod(name, 0, 0)
 	}
 }
 
-// newRequest builds a request whose session id is published the way the
-// agent-identity plugin does; an empty sessionID leaves the request
-// anonymous.
-func newRequest(sessionID string, sizeBytes int) *fwksched.InferenceRequest {
-	req := &fwksched.InferenceRequest{
-		RequestID:        "req-" + sessionID,
-		RequestSizeBytes: sizeBytes,
-	}
-	if sessionID != "" {
-		req.PutAttribute(agentidentity.AgentIdentityKey, sessionID)
-	}
-	return req
-}
-
-func endOfStream(totalTokens, promptTokens int) *fwkrh.Response {
-	return &fwkrh.Response{
-		EndOfStream: true,
-		Usage:       fwkrequest.Usage{TotalTokens: totalTokens, PromptTokens: promptTokens},
+func (l *testLedger) removePod(name string) {
+	podID := "default/" + name
+	delete(l.pods, podID)
+	for _, s := range l.sessions {
+		if s.Endpoint == podID {
+			s.Endpoint = ""
+		}
 	}
 }
 
-// startTurn dispatches one turn without completing it.
-func startTurn(t *testing.T, a *ThunderAgent, id string, endpoint fwksched.Endpoint, sizeBytes int) *fwksched.InferenceRequest {
-	t.Helper()
-	req := newRequest(id, sizeBytes)
-	require.NoError(t, a.PreRequest(context.Background(), req, schedulingResultFor(endpoint)))
-	return req
+func (l *testLedger) prime(eps ...fwkdl.Endpoint) {
+	l.agent.Saturation(context.Background(), eps)
 }
 
-// runTurn dispatches and completes one turn reporting totalTokens.
-func runTurn(t *testing.T, a *ThunderAgent, id string, endpoint fwksched.Endpoint, sizeBytes, totalTokens int) {
-	t.Helper()
-	req := startTurn(t, a, id, endpoint, sizeBytes)
-	a.ResponseBody(context.Background(), req, endOfStream(totalTokens, totalTokens), nil)
-}
-
-func sessionOf(a *ThunderAgent, id string) (session, bool) {
-	a.mgr.mu.Lock()
-	defer a.mgr.mu.Unlock()
-	s, ok := a.mgr.sessions[id]
+func (l *testLedger) ensureSession(id string) *sessionstate.SessionState {
+	s, ok := l.sessions[id]
 	if !ok {
-		return session{}, false
+		s = &sessionstate.SessionState{SessionID: id}
+		l.sessions[id] = s
 	}
-	return *s, true
+	return s
 }
 
-func endpointTokens(a *ThunderAgent, id string) float64 {
-	a.mgr.mu.Lock()
-	defer a.mgr.mu.Unlock()
-	p, ok := a.mgr.endpoints[id]
+func (l *testLedger) startTurn(id, podName string, sizeBytes int) {
+	l.ensurePod(podName)
+	s := l.ensureSession(id)
+	s.TurnsTaken++
+	s.InFlightRequests++
+	s.InFlightTokens += sessionstate.EstimatePromptTokens(sizeBytes)
+	s.Endpoint = "default/" + podName
+	s.LastSeenAt = l.now()
+}
+
+func (l *testLedger) runTurn(id, podName string, sizeBytes, totalTokens int) {
+	l.ensurePod(podName)
+	s := l.ensureSession(id)
+	s.TurnsTaken++
+	s.CompletedRequests++
+	s.InFlightRequests = 0
+	s.InFlightTokens = 0
+	s.Endpoint = "default/" + podName
+	now := l.now()
+	s.LastSeenAt = now
+	s.LastResponseAt = now
+	if totalTokens > 0 {
+		s.ContextTokens = int64(totalTokens)
+	} else {
+		est := sessionstate.EstimatePromptTokens(sizeBytes)
+		if est > s.ContextTokens {
+			s.ContextTokens = est
+		}
+	}
+}
+
+func (l *testLedger) seed(id, podName string, committed int) {
+	l.runTurn(id, podName, 400, committed)
+}
+
+func (l *testLedger) idleFor(id string, d time.Duration) {
+	s := l.sessions[id]
+	t := l.now().Add(-d)
+	s.LastSeenAt = t
+	s.LastResponseAt = t
+}
+
+func (l *testLedger) evict(id string) {
+	delete(l.sessions, id)
+}
+
+func (l *testLedger) pause(id string) {
+	s := l.sessions[id]
+	l.agent.mu.Lock()
+	local := l.agent.ensureLocalLocked(id)
+	local.paused = true
+	local.pausedAtTurns = s.TurnsTaken
+	l.agent.mu.Unlock()
+}
+
+func (l *testLedger) isPaused(id string) bool {
+	s, ok := l.sessions[id]
+	if !ok {
+		return false
+	}
+	l.agent.mu.Lock()
+	defer l.agent.mu.Unlock()
+	return l.agent.local[id].pausedLive(*s)
+}
+
+func (l *testLedger) endpointTokens(podName string) float64 {
+	snap := l.agent.snapshot()
+	ep, ok := snap.endpoints["default/"+podName]
 	if !ok {
 		return -1
 	}
-	return p.occupancy(time.Now())
+	return ep.workingSet
 }
 
-// idleFor backdates a session's last response, so it looks idle for d.
-func idleFor(a *ThunderAgent, id string, d time.Duration) {
-	a.mgr.mu.Lock()
-	a.mgr.sessions[id].lastResponseAt = time.Now().Add(-d)
-	a.mgr.mu.Unlock()
+func (l *testLedger) request(id string, sizeBytes int) *fwksched.InferenceRequest {
+	req := &fwksched.InferenceRequest{
+		RequestID:        "req-" + id,
+		RequestSizeBytes: sizeBytes,
+	}
+	if id != "" {
+		req.PutAttribute(agentidentity.AgentIdentityKey, id)
+		if s, ok := l.sessions[id]; ok {
+			req.PutAttribute(
+				sessionstate.SessionStateDataKey.WithNonEmptyProducerName(sessionstate.SessionStateProducerType),
+				*s,
+			)
+		}
+	}
+	return req
 }
 
-// pause marks a session paused, as a reclaim would.
-func pause(a *ThunderAgent, id string) {
-	a.mgr.mu.Lock()
-	a.mgr.sessions[id].paused = true
-	a.mgr.mu.Unlock()
-}
-
-// dlEndpoint builds a datalayer endpoint without scraped capacity, selecting
-// the fallback.
-func dlEndpoint(name string) fwkdl.Endpoint {
-	nn := types.NamespacedName{Namespace: "default", Name: name}
-	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: nn}, &fwkdl.Metrics{})
-}
-
-// primeFitView refreshes the pod ledger the way the flow controller does
-// each dispatch cycle.
-func primeFitView(a *ThunderAgent, endpoints ...fwkdl.Endpoint) {
-	a.Saturation(context.Background(), endpoints)
-}
-
-func isPaused(a *ThunderAgent, id string) bool {
-	a.mgr.mu.Lock()
-	defer a.mgr.mu.Unlock()
-	s, ok := a.mgr.sessions[id]
-	return ok && s.paused
-}
-
-func makeQueue(id string, headEnqueue time.Time, headBytes uint64) *fwkfcmocks.MockFlowQueueAccessor {
-	return makeFlowQueue(id, id, headEnqueue, headBytes)
+func (l *testLedger) makeQueue(id string, headEnqueue time.Time, headBytes uint64) *fwkfcmocks.MockFlowQueueAccessor {
+	return l.makeFlowQueue(id, id, headEnqueue, headBytes)
 }
 
 // makeFlowQueue builds a one-item queue named flowID whose head request
 // carries the given agent-identity session; an empty session leaves it
 // anonymous.
-func makeFlowQueue(flowID, session string, headEnqueue time.Time, headBytes uint64) *fwkfcmocks.MockFlowQueueAccessor {
+func (l *testLedger) makeFlowQueue(flowID, session string, headEnqueue time.Time, headBytes uint64) *fwkfcmocks.MockFlowQueueAccessor {
 	req := fwkfcmocks.NewMockFlowControlRequest(headBytes, "req-"+flowID, fwkfc.FlowKey{ID: flowID})
-	req.InferenceRequestV = newRequest(session, int(headBytes))
+	req.InferenceRequestV = l.request(session, int(headBytes))
 	return &fwkfcmocks.MockFlowQueueAccessor{
 		LenV:     1,
 		FlowKeyV: fwkfc.FlowKey{ID: flowID},
@@ -171,6 +237,11 @@ func makeFlowQueue(flowID, session string, headEnqueue time.Time, headBytes uint
 			OriginalRequestV: req,
 		},
 	}
+}
+
+func schedEndpoint(name string) fwksched.Endpoint {
+	nn := types.NamespacedName{Namespace: "default", Name: name}
+	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: nn}, &fwkdl.Metrics{}, nil)
 }
 
 func bandOf(queues ...fwkfc.FlowQueueAccessor) *fwkfcmocks.MockPriorityBandAccessor {
@@ -183,15 +254,6 @@ func bandOf(queues ...fwkfc.FlowQueueAccessor) *fwkfcmocks.MockPriorityBandAcces
 			}
 		},
 	}
-}
-
-// seed runs one 400-byte turn for the session on pod and completes it with
-// the given committed total.
-func seed(t *testing.T, a *ThunderAgent, id string, pod string, committed int) {
-	t.Helper()
-	ep := schedEndpoint(pod, 0, 0)
-	req := startTurn(t, a, id, ep, 400)
-	a.ResponseBody(context.Background(), req, endOfStream(committed, 100), nil)
 }
 
 func pick(t *testing.T, a *ThunderAgent, queues ...fwkfc.FlowQueueAccessor) fwkfc.FlowQueueAccessor {

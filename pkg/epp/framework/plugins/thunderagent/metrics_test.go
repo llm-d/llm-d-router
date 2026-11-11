@@ -20,7 +20,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -28,13 +27,16 @@ import (
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// The ledger gauges are computed at scrape time, so they follow the sweep with
-// no request in between.
+// The ledger gauges are computed at scrape time, so they follow endpoint and
+// session state changes immediately.
 func TestLedgerGaugesWithoutTraffic(t *testing.T) {
-	a := newTestAgent(testConfig())
+	l := newTestLedger(testConfig())
 	reg := prometheus.NewPedanticRegistry()
-	require.NoError(t, a.metrics.register(reg))
-	runTurn(t, a, "s1", schedEndpoint("pod-a", 16, 100), 400, 300)
+	require.NoError(t, l.agent.metrics.register(reg))
+
+	podA := l.pod("pod-a", 16, 100)
+	l.runTurn("s1", "pod-a", 400, 300)
+	l.prime(podA)
 
 	require.Equal(t, map[string]float64{
 		`endpoint_capacity_tokens{endpoint="default/pod-a"}`:    1600,
@@ -44,11 +46,9 @@ func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 		`sessions{state="running"}`:                             0,
 	}, gather(t, reg))
 
-	a.mgr.mu.Lock()
-	a.mgr.sessions["s1"].lastActivity = time.Now().Add(-2 * a.mgr.ttl)
-	a.mgr.endpoints["default/pod-a"].updatedAt = time.Now().Add(-2 * endpointStaleAfter)
-	a.mgr.mu.Unlock()
-	a.mgr.sweep(time.Now())
+	l.evict("s1")
+	l.step(2 * endpointStaleAfter)
+	l.agent.sweep()
 
 	require.Equal(t, map[string]float64{
 		`sessions{state="idle"}`:    0,
@@ -61,12 +61,14 @@ func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 // keeps reporting.
 func TestSecondInstanceRegistrationFails(t *testing.T) {
 	reg := prometheus.NewPedanticRegistry()
-	first := newTestAgent(testConfig())
-	require.NoError(t, first.metrics.register(reg))
-	runTurn(t, first, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
+	first := newTestLedger(testConfig())
+	require.NoError(t, first.agent.metrics.register(reg))
+	podA := first.pod("pod-a", 0, 0)
+	first.runTurn("s1", "pod-a", 400, 300)
+	first.prime(podA)
 
-	second := newTestAgent(testConfig())
-	require.Error(t, second.metrics.register(reg))
+	second := newTestLedger(testConfig())
+	require.Error(t, second.agent.metrics.register(reg))
 	require.Equal(t, float64(1), gather(t, reg)[`sessions{state="idle"}`])
 }
 
