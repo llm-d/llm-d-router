@@ -195,6 +195,9 @@ var envelopeRawFields = map[string][]string{
 	chatCompletionsAPI: {reqcommon.FieldPrompt},
 	completionsAPI:     {reqcommon.FieldPrompt},
 	responsesAPI:       {reqcommon.FieldInput, reqcommon.FieldInstructions},
+	// ref_audio can be a large inline data URI; the object and array
+	// conditioning fields stay raw on their own shape.
+	audioSpeechAPI: {"ref_audio"},
 }
 
 func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
@@ -433,8 +436,8 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 			Instructions     string          `json:"instructions,omitempty"`
 			RefText          string          `json:"ref_text,omitempty"`
 			CacheSalt        string          `json:"cache_salt,omitempty"`
-			Voice            string          `json:"voice,omitempty"`
-			Speaker          string          `json:"speaker,omitempty"`
+			Voice            json.RawMessage `json:"voice,omitempty"`
+			Speaker          json.RawMessage `json:"speaker,omitempty"`
 			Language         string          `json:"language,omitempty"`
 			TaskType         string          `json:"task_type,omitempty"`
 			RefAudio         json.RawMessage `json:"ref_audio,omitempty"`
@@ -444,7 +447,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 			XVectorOnlyMode  *bool           `json:"x_vector_only_mode,omitempty"`
 		}
 		if err := json.Unmarshal(rawBody, &speechRequest); err != nil {
-			return nil, requestBodyDecodeError(err, errors.New("invalid text to speech request: input, instructions, ref_text, and cache_salt must be strings"))
+			return nil, requestBodyDecodeError(err, errors.New("invalid text to speech request: input, instructions, ref_text, and cache_salt must be strings and x_vector_only_mode a boolean"))
 		}
 		if speechRequest.Input == nil {
 			return nil, errors.New("invalid text to speech request: must have string input field")
@@ -455,10 +458,16 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		refAudioCodes := rawFieldOrNull(speechRequest.RefAudioCodes)
 		extraParams := rawFieldOrNull(speechRequest.ExtraParams)
 		speakerEmbedding := rawFieldOrNull(speechRequest.SpeakerEmbedding)
-		// The engine accepts "speaker" as an alias of "voice"; one field.
-		voice := speechRequest.Voice
+		// The engine accepts "speaker" as an alias of "voice", and both as a
+		// string or an object carrying an id; one normalized string.
+		voice, err := voiceField(speechRequest.Voice)
+		if err != nil {
+			return nil, err
+		}
 		if voice == "" {
-			voice = speechRequest.Speaker
+			if voice, err = voiceField(speechRequest.Speaker); err != nil {
+				return nil, err
+			}
 		}
 		return &request.InferenceRequestBody{
 			TextToSpeech: &request.TextToSpeechRequest{
@@ -789,6 +798,29 @@ func rawFieldOrNull(raw json.RawMessage) json.RawMessage {
 		return nil
 	}
 	return raw
+}
+
+// voiceField returns the voice a voice or speaker field carries: the string
+// itself, or the object form's id, the two shapes the engine normalizes to one
+// voice name. Empty input is an absent field.
+func voiceField(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, nil
+	}
+	var obj struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		if obj.ID == "" {
+			return "", errors.New("invalid text to speech request: a voice object must have an id")
+		}
+		return obj.ID, nil
+	}
+	return "", errors.New("invalid text to speech request: voice must be a string or an object with an id")
 }
 
 // toInt coerces a JSON-decoded number-ish value into an int. JSON numbers

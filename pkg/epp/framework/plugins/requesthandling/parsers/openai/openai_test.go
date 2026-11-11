@@ -1568,6 +1568,8 @@ func wantEnvelopeRawFields(want *request.InferenceRequestBody) []string {
 		return envelopeRawFields[responsesAPI]
 	case want.Completions != nil || want.ChatCompletions != nil:
 		return envelopeRawFields[chatCompletionsAPI]
+	case want.TextToSpeech != nil:
+		return envelopeRawFields[audioSpeechAPI]
 	default:
 		return nil
 	}
@@ -3013,18 +3015,49 @@ func TestOpenAIParser_ParseRequestTextToSpeechConditioning(t *testing.T) {
 	}
 }
 
-// The engine accepts "speaker" as an alias of "voice"; either name fills the
-// same field.
+// The engine accepts "speaker" as an alias of "voice", and both as a string
+// or an object carrying an id; every form fills the same normalized field.
 func TestOpenAIParser_ParseRequestTextToSpeechSpeakerAlias(t *testing.T) {
 	for name, field := range map[string]string{"voice": "voice", "speaker": "speaker"} {
-		body := `{"input": "hello", "` + field + `": "ryan"}`
-		result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
-			map[string]string{":path": "/v1/audio/speech"})
-		if err != nil {
-			t.Fatal(err)
+		for form, value := range map[string]string{
+			"string":       `"ryan"`,
+			"object":       `{"id": "ryan"}`,
+			"null":         `null`,
+			"object no id": `{}`,
+		} {
+			t.Run(name+"/"+form, func(t *testing.T) {
+				body := `{"input": "hello", "` + field + `": ` + value + `}`
+				result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+					map[string]string{":path": "/v1/audio/speech"})
+				if form == "object no id" {
+					if err == nil {
+						t.Error("ParseRequest accepted a voice object without an id")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "ryan"
+				if form == "null" {
+					want = ""
+				}
+				if result.Body.TextToSpeech.Voice != want {
+					t.Errorf("Voice = %q, want %q", result.Body.TextToSpeech.Voice, want)
+				}
+			})
 		}
-		if result.Body.TextToSpeech.Voice != "ryan" {
-			t.Errorf("%s: Voice = %q, want ryan", name, result.Body.TextToSpeech.Voice)
+	}
+}
+
+// A number where a voice belongs is neither of the two shapes the engine
+// normalizes; the request is refused rather than forwarded for the engine to
+// reject with its own error.
+func TestOpenAIParser_ParseRequestTextToSpeechInvalidVoice(t *testing.T) {
+	for _, body := range []string{`{"input": "hello", "voice": 5}`, `{"input": "hello", "speaker": [1]}`} {
+		if _, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+			map[string]string{":path": "/v1/audio/speech"}); err == nil {
+			t.Errorf("ParseRequest accepted %s", body)
 		}
 	}
 }
