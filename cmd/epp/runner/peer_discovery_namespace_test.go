@@ -17,52 +17,15 @@ limitations under the License.
 package runner
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
 )
-
-// recordingManager records runnables so tests can run setupPeerDiscovery
-// without a cluster.
-type recordingManager struct {
-	ctrl.Manager
-	added []manager.Runnable
-}
-
-func (m *recordingManager) Add(r manager.Runnable) error {
-	m.added = append(m.added, r)
-	return nil
-}
-
-type fakePeerDiscovery struct {
-	notDiscoveryPlugin
-}
-
-func (p *fakePeerDiscovery) Start(context.Context, fwkdl.PeerNotifier) error { return nil }
-
-func (p *fakePeerDiscovery) Ready() <-chan struct{} { return nil }
-
-var _ fwkdl.PeerDiscovery = (*fakePeerDiscovery)(nil)
-
-func peerConfigRef(ref string) *configapiv1.EndpointPickerConfig {
-	return &configapiv1.EndpointPickerConfig{
-		DataLayer: &configapiv1.DataLayerConfig{
-			Discovery: &configapiv1.DiscoveryConfig{
-				Peers: &configapiv1.PeerDiscoveryConfig{PluginRef: ref},
-			},
-		},
-	}
-}
 
 func newK8sPeerPlugin(t *testing.T, namespace string) fwkplugin.Plugin {
 	t.Helper()
@@ -80,17 +43,17 @@ func newK8sPeerPlugin(t *testing.T, namespace string) fwkplugin.Plugin {
 
 func TestSetupPeerDiscovery_K8sPeerInPoolNamespace(t *testing.T) {
 	r := &Runner{PluginHandle: newHandleWithPlugin(t, "peer-disc", newK8sPeerPlugin(t, "pool-ns"))}
-	mgr := &recordingManager{}
+	mgr := &addOnlyManager{}
 
-	require.NoError(t, r.setupPeerDiscovery(mgr, peerConfigRef("peer-disc"), "pool-ns"))
+	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("peer-disc"), "pool-ns"))
 	assert.Len(t, mgr.added, 1)
 }
 
 func TestSetupPeerDiscovery_K8sPeerOutsidePoolNamespace(t *testing.T) {
 	r := &Runner{PluginHandle: newHandleWithPlugin(t, "peer-disc", newK8sPeerPlugin(t, "epp-ns"))}
-	mgr := &recordingManager{}
+	mgr := &addOnlyManager{}
 
-	err := r.setupPeerDiscovery(mgr, peerConfigRef("peer-disc"), "pool-ns")
+	err := r.setupPeerDiscovery(mgr, peersConfigRef("peer-disc"), "pool-ns")
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "peer-disc")
 	assert.ErrorContains(t, err, "epp-ns")
@@ -99,9 +62,9 @@ func TestSetupPeerDiscovery_K8sPeerOutsidePoolNamespace(t *testing.T) {
 }
 
 func TestSetupPeerDiscovery_OtherPluginIgnoresPoolNamespace(t *testing.T) {
-	r := &Runner{PluginHandle: newHandleWithPlugin(t, "peer-disc", &fakePeerDiscovery{})}
-	mgr := &recordingManager{}
+	r := &Runner{PluginHandle: newHandleWithPlugin(t, "peer-disc", newStubPeerDiscovery())}
+	mgr := &addOnlyManager{}
 
-	require.NoError(t, r.setupPeerDiscovery(mgr, peerConfigRef("peer-disc"), "pool-ns"))
+	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("peer-disc"), "pool-ns"))
 	assert.Len(t, mgr.added, 1)
 }
