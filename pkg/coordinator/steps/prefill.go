@@ -150,13 +150,13 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 // prompt-cache hit count on reqCtx when decode will reuse prefill's KV blocks.
 func recordPrefillOutcome(logger logr.Logger, reqCtx *pipeline.RequestContext, kvName, path string, cachedTokens *int) {
 	// kv-nixl always requests a remote-decode handoff, so missing
-	// kv_transfer_params means decode will recompute the whole prompt. Older
+	// kv_transfer_params.remote_block_ids means decode will recompute the whole prompt. Older
 	// engines (< v0.29.0) silently drop top-level transfer params on this route,
 	// which is the most common cause. Empty params are not a failure for the
 	// other connectors: kv-shared-storage carries no wire fields at all.
-	decodeRecomputesPrompt := len(reqCtx.KVTransferParams) == 0 && kvName == kv.NIXL
+	decodeRecomputesPrompt := kvName == kv.NIXL && !kv.NIXLHasRemoteBlockIDs(reqCtx.KVTransferParams)
 	if decodeRecomputesPrompt {
-		logger.Info("prefill returned no kv_transfer_params; decode will recompute the prompt",
+		logger.Info("prefill returned no kv_transfer_params.remote_block_ids; decode will recompute the prompt",
 			"kvConnector", kvName, "path", path)
 	}
 	// Only a prefill response that measured the prompt cache, for a request

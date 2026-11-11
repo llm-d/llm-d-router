@@ -87,37 +87,54 @@ func TestBuild_EmptyReturnsDefault(t *testing.T) {
 }
 
 func TestConnectors_KVParams(t *testing.T) {
+	nixlPrefill := map[string]any{
+		"do_remote_decode":  true,
+		"do_remote_prefill": false,
+		"remote_engine_id":  nil,
+		"remote_block_ids":  nil,
+		"remote_host":       nil,
+		"remote_port":       nil,
+	}
 	cases := []struct {
 		name           string
+		connector      string
 		decodeIncoming map[string]any
 		wantPrefill    map[string]any
 		wantDecode     map[string]any
 	}{
 		{
-			name: NIXL,
+			name:      NIXL,
+			connector: NIXL,
 			decodeIncoming: map[string]any{
-				"block_id":  "block-999",
-				"peer_host": "10.0.0.42",
-				"peer_port": float64(7777),
+				"remote_block_ids": []any{[]any{float64(7)}},
+				"remote_host":      "10.0.0.42",
+				"remote_port":      float64(7777),
 			},
-			wantPrefill: map[string]any{
-				"do_remote_decode":  true,
-				"do_remote_prefill": false,
-				"remote_engine_id":  nil,
-				"remote_block_ids":  nil,
-				"remote_host":       nil,
-				"remote_port":       nil,
-			},
+			wantPrefill: nixlPrefill,
 			wantDecode: map[string]any{
 				"do_remote_decode":  false,
 				"do_remote_prefill": true,
-				"block_id":          "block-999",
-				"peer_host":         "10.0.0.42",
-				"peer_port":         float64(7777),
+				"remote_block_ids":  []any{[]any{float64(7)}},
+				"remote_host":       "10.0.0.42",
+				"remote_port":       float64(7777),
 			},
 		},
 		{
+			name:        NIXL + " without prefill params",
+			connector:   NIXL,
+			wantPrefill: nixlPrefill,
+			wantDecode:  map[string]any{},
+		},
+		{
+			name:           NIXL + " with empty remote_block_ids",
+			connector:      NIXL,
+			decodeIncoming: map[string]any{"remote_block_ids": []any{}, "remote_host": "10.0.0.42"},
+			wantPrefill:    nixlPrefill,
+			wantDecode:     map[string]any{},
+		},
+		{
 			name:           SharedStorage,
+			connector:      SharedStorage,
 			decodeIncoming: map[string]any{"ignored": "field"},
 			wantPrefill:    map[string]any{"do_remote_decode": true, "do_remote_prefill": false},
 			wantDecode:     map[string]any{"do_remote_decode": false, "do_remote_prefill": true},
@@ -126,12 +143,12 @@ func TestConnectors_KVParams(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := Build(tc.name)
+			c, err := Build(tc.connector)
 			if err != nil {
-				t.Fatalf("Build(%q): %v", tc.name, err)
+				t.Fatalf("Build(%q): %v", tc.connector, err)
 			}
-			if c.Name() != tc.name {
-				t.Fatalf("Name() = %q, want %q", c.Name(), tc.name)
+			if c.Name() != tc.connector {
+				t.Fatalf("Name() = %q, want %q", c.Name(), tc.connector)
 			}
 
 			reqCtx := &pipeline.RequestContext{KVTransferParams: tc.decodeIncoming}
@@ -141,6 +158,29 @@ func TestConnectors_KVParams(t *testing.T) {
 			}
 			if got := c.PrepareDecodeKVParams(context.Background(), reqCtx); !reflect.DeepEqual(got, tc.wantDecode) {
 				t.Errorf("decode params:\n got=%v\nwant=%v", got, tc.wantDecode)
+			}
+		})
+	}
+}
+
+func TestNIXLHasRemoteBlockIDs(t *testing.T) {
+	cases := []struct {
+		name   string
+		params map[string]any
+		want   bool
+	}{
+		{name: "nil params"},
+		{name: "other fields only", params: map[string]any{"remote_host": "h", "remote_port": float64(1)}},
+		{name: "null", params: map[string]any{"remote_block_ids": nil}},
+		{name: "empty array", params: map[string]any{"remote_block_ids": []any{}}},
+		{name: "blocks", params: map[string]any{"remote_block_ids": []any{float64(1)}}, want: true},
+		// vLLM groups blocks per KV cache group and reads the outer list's truthiness.
+		{name: "empty group", params: map[string]any{"remote_block_ids": []any{[]any{}}}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NIXLHasRemoteBlockIDs(tc.params); got != tc.want {
+				t.Fatalf("NIXLHasRemoteBlockIDs(%v) = %v, want %v", tc.params, got, tc.want)
 			}
 		})
 	}
