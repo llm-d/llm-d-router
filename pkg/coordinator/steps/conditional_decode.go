@@ -103,10 +103,10 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 
 	// A non-streaming request the worker serves is force-streamed as decode
-	// would serve it. A decline
-	// or a fallback re-sends body through the probe below; the probe body names
-	// no KV handoff, so the re-send is safe. Its outcome is recorded only when
-	// the probe is not deferred: a deferred request is decode's to record.
+	// would serve it. A decline or a fallback re-sends body through the probe
+	// below; the probe body names no KV handoff, so the re-send is safe. Its
+	// outcome is recorded only when the probe is not deferred: a deferred
+	// request is decode's to record.
 	var forceStreamResult string
 	if s.budget != nil && !reqCtx.Stream {
 		if shape, ok := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); ok {
