@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package qosadmission
+package qoscontract
 
 import (
 	"errors"
@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	// ModeEnforceLimits applies admission decisions: it moves traffic outside a contract one class
+	// ModeEnforceLimits applies contract decisions: it moves traffic outside a contract one class
 	// down, and rejects it in the lowest class.
 	ModeEnforceLimits = "enforce-limits"
 	// ModeReportOnly serves each team at its committed class and records downgrades and rejections
@@ -48,7 +48,7 @@ type TeamConfig struct {
 	ID string `json:"id"`
 	// Class is the name of the class the team's committed traffic is served at.
 	Class string `json:"class"`
-	// MaxConcurrency is the committed number of requests from admission to completion. 0 is
+	// MaxConcurrency is the committed number of requests from the request header to completion. 0 is
 	// unlimited.
 	MaxConcurrency int `json:"maxConcurrency,omitempty"`
 	// MaxPromptTokens is the largest prompt served at the team's class. Larger prompts move one

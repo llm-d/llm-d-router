@@ -1,6 +1,6 @@
 # EPP configuration for per-team QoS classes on flow control.
 #
-# qos-admission maps each team to a class (a priority band), and moves traffic
+# qos-contract maps each team to a class (a priority band), and moves traffic
 # outside its contract (size limits, concurrency and daily token budget) one
 # class down. program-aware-fairness shares each band between teams by least
 # attained service.
@@ -10,7 +10,7 @@ kind: EndpointPickerConfig
 featureGates:
 - flowControl
 plugins:
-- type: qos-admission
+- type: qos-contract
   parameters:
     mode: enforce-limits
     outputTokenWeight: 2
