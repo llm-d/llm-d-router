@@ -3680,7 +3680,7 @@ func TestHandleRequestRejectsWithdrawnCandidateAfterDiscoveryRenewal(t *testing.
 	go func() { done <- freshness.Start(ctx) }()
 	defer func() { cancel(); require.NoError(t, <-done) }()
 	require.Eventually(t, func() bool { return freshness.CheckReady() == nil }, time.Second, time.Millisecond)
-	dir.SetEndpointSelectionCheck(freshness.CheckReady)
+	dir.SetEndpointSelectionCheck(freshness.CheckEndpoints)
 	dir.requestControlPlugins.AddPlugins(freshness)
 	dir.requestControlPlugins.screeners = append(dir.requestControlPlugins.screeners, &mockScreener{name: "pause-after-snapshot", screen: func(candidates []fwksched.Endpoint) []fwksched.Endpoint {
 		require.NoError(t, api.Delete(ctx, pod))

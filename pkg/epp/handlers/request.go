@@ -120,8 +120,10 @@ func (s *StreamingServer) fallbackToRandomEndpoint(ctx context.Context, reqCtx *
 // fallbackToEndpoint routes reqCtx to endpoint, answering with the no-endpoints
 // rejection when endpoint is nil.
 func (s *StreamingServer) fallbackToEndpoint(ctx context.Context, reqCtx *RequestContext, endpoint *fwkdl.EndpointMetadata, requestSize int) error {
-	if checker, ok := s.director.(interface{ CheckEndpointSelection() error }); ok {
-		if err := checker.CheckEndpointSelection(); err != nil {
+	if checker, ok := s.director.(interface {
+		CheckEndpointSelection(...*fwkdl.EndpointMetadata) error
+	}); ok {
+		if err := checker.CheckEndpointSelection(endpoint); err != nil {
 			return err
 		}
 	}

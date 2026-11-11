@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -138,16 +139,27 @@ func (d *DiscoveryFreshness) checkReady(validated *validatedMembership) error {
 	return nil
 }
 
-func (d *DiscoveryFreshness) Admit(_ context.Context, _ *fwksched.InferenceRequest, candidates []fwksched.Endpoint) error {
+// CheckEndpoints validates freshness and any selected endpoints against one snapshot.
+func (d *DiscoveryFreshness) CheckEndpoints(endpoints ...*fwkdl.EndpointMetadata) error {
 	validated := d.validated.Load()
 	if err := d.checkReady(validated); err != nil {
-		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
+		return err
 	}
-	for _, candidate := range candidates {
-		meta := candidate.GetMetadata()
-		if !meta.Equal(validated.endpoints[meta.ID]) {
-			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: fmt.Sprintf("request endpoint %s does not match validated Kubernetes membership", meta.ID)}
+	for _, meta := range endpoints {
+		if meta == nil || !meta.Equal(validated.endpoints[meta.ID]) {
+			return errors.New("selected endpoint does not match validated Kubernetes membership")
 		}
+	}
+	return nil
+}
+
+func (d *DiscoveryFreshness) Admit(_ context.Context, _ *fwksched.InferenceRequest, candidates []fwksched.Endpoint) error {
+	endpoints := make([]*fwkdl.EndpointMetadata, len(candidates))
+	for i, candidate := range candidates {
+		endpoints[i] = candidate.GetMetadata()
+	}
+	if err := d.CheckEndpoints(endpoints...); err != nil {
+		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
 	}
 	return nil
 }
