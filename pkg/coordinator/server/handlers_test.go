@@ -586,21 +586,6 @@ func TestNew_RejectsUnparsableGatewayURL(t *testing.T) {
 	}
 }
 
-// deadlineRecorder wraps httptest.ResponseRecorder with a SetWriteDeadline
-// method so http.NewResponseController can reach it; it records the deadline
-// the handler sets.
-type deadlineRecorder struct {
-	*httptest.ResponseRecorder
-	deadlineSet   bool
-	deadlineValue time.Time
-}
-
-func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
-	d.deadlineSet = true
-	d.deadlineValue = t
-	return nil
-}
-
 func TestHandleInference_StreamRequested(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -620,7 +605,7 @@ func TestHandleInference_StreamRequested(t *testing.T) {
 			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
 			require.NoError(t, err)
 			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(tc.body))
-			rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+			rec := httptest.NewRecorder()
 
 			srv.handleInference(rec, req)
 
@@ -633,36 +618,7 @@ func TestHandleInference_StreamRequested(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code)
 			require.NotNil(t, step.captured)
 			require.Equal(t, tc.stream, step.captured.Stream)
-			require.Equal(t, tc.stream, rec.deadlineSet)
 		})
-	}
-}
-
-func TestHandleInference_StreamingClearsWriteDeadline(t *testing.T) {
-	// A streaming request must clear the connection write deadline (zero value)
-	// before executing the pipeline, so a long stream is not cut by WriteTimeout.
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
-	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
-	newTestServer(nil).handleInference(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for streaming request, got %d", rec.Code)
-	}
-	if !rec.deadlineSet {
-		t.Fatal("streaming request did not clear the write deadline")
-	}
-	if !rec.deadlineValue.IsZero() {
-		t.Fatalf("expected zero deadline to disable the timeout, got %v", rec.deadlineValue)
-	}
-}
-
-func TestHandleInference_NonStreamingDoesNotTouchWriteDeadline(t *testing.T) {
-	// A non-streaming request must leave the write deadline alone, keeping
-	// WriteTimeout as a slow-client guard.
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
-	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
-	newTestServer(nil).handleInference(rec, req)
-	if rec.deadlineSet {
-		t.Fatal("non-streaming request must not change the write deadline")
 	}
 }
 

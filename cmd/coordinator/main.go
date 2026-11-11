@@ -86,6 +86,9 @@ func main() {
 		log.Error(err, "failed to load config")
 		os.Exit(1)
 	}
+	for _, key := range cfg.DeprecatedKeys {
+		log.Info("config key is deprecated and ignored", "key", key)
+	}
 
 	// CLI -v wins over config log_level.
 	if vFlag := pflag.CommandLine.Lookup("v"); vFlag != nil && !vFlag.Changed {

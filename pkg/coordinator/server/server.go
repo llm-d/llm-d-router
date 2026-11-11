@@ -252,10 +252,9 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	}
 
 	s.httpServer = &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      s.closeWhenDraining(otelHandler(r)),
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		Addr:        cfg.ListenAddr,
+		Handler:     s.closeWhenDraining(otelHandler(r)),
+		ReadTimeout: cfg.ReadTimeout,
 	}
 	if !cfg.SecureServing {
 		protocols := new(http.Protocols)
