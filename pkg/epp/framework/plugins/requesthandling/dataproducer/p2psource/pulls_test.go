@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -193,4 +194,46 @@ func TestInFlightPulls_Off(t *testing.T) {
 
 	pull(t, p.(*Producer), "req-off")
 	requirePulls(t, "test", 0)
+}
+
+// With ttftByDecision also set, the one response hook releases the pull at the
+// first chunk and records the TTFT at the end of the stream; an abandoned
+// request still releases its pull.
+func TestInFlightPulls_WithTTFTByDecision(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+	inFlightPulls.Reset()
+	t.Cleanup(inFlightPulls.Reset)
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+	dec := json.NewDecoder(strings.NewReader(`{"trackInFlightPulls": true, "ttftByDecision": true}`))
+	built, err := PluginFactory("p2p", dec, utils.NewTestHandle(ctx))
+	require.NoError(t, err)
+	p, ok := built.(*trackingProducer)
+	require.True(t, ok, "both options keep the pull release hooks")
+
+	received := time.Unix(1000, 0)
+	end := &fwkrh.Response{
+		EndOfStream: true, Streaming: true, TerminationCause: fwkrh.TerminationCauseNatural,
+		ReceivedTimestamp: received, FirstTokenTimestamp: received.Add(1500 * time.Millisecond),
+	}
+
+	req := pull(t, p.Producer, "req-1")
+	requirePulls(t, "p2p", 1)
+
+	p.ResponseBody(ctx, req, chunk(true, false), nil)
+	requirePulls(t, "p2p", 0)
+	assert.Empty(t, histogramObserved(t, requestTTFT, "outcome"), "no TTFT before the stream ends")
+
+	p.ResponseBody(ctx, req, end, nil)
+	assert.Equal(t, map[string][2]float64{"pulled": {1, 1.5}}, histogramObserved(t, requestTTFT, "outcome"),
+		"TTFT count and sum by outcome")
+	_, err = plugin.ReadPluginStateKey[*decisionState](p.pluginState, "req-1", decisionStateKey)
+	require.Error(t, err, "the decision is released at the end of the stream")
+	requirePulls(t, "p2p", 0)
+
+	abandoned := pull(t, p.Producer, "req-2")
+	requirePulls(t, "p2p", 1)
+	p.RequestAbandoned(ctx, abandoned)
+	requirePulls(t, "p2p", 0)
 }
