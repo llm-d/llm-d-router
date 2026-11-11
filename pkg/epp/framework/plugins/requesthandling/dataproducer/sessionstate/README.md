@@ -1,8 +1,9 @@
 # Session State Producer
 
 The `session-state-producer` tracks history for identities published by the
-`agent-identity` request-header plugin and publishes per-request session state
-for flow-control and scheduling plugins through the request attribute store.
+`agent-identity` request-header plugin. It publishes per-request session state
+through the request attribute store and per-endpoint session snapshots through
+each endpoint's attribute map.
 
 The producer uses only the `agent-identity` attribute. `SessionIDDataKey` is a
 separate attribute produced by `session-id-producer` from one configured header
@@ -37,11 +38,18 @@ attribute resolves on every read: a request waiting in a flow-control queue
 observes turns dispatched and responses completed for its session in the
 meantime. Read it with `sessionstate.ReadSessionState`. `Produce` is a no-op.
 
+The producer also subscribes to `endpoint-notification-source` and attaches a
+`DynamicAttribute` for `EndpointSessionsDataKey` (`sessionstate.EndpointSessions`)
+on each endpoint. Calling `sessionstate.ReadEndpointSessions` returns a fresh
+snapshot of all sessions currently bound to that endpoint.
+
 The `sessionstate.SessionState` value contains:
 
+- `SessionID`: session identifier published by `agent-identity`.
 - `TurnsTaken`: requests of the session dispatched so far.
 - `Duration`: elapsed time from the first observation of the session to the
-  observation of the current request.
+  observation of the current request (or the snapshot read time for endpoint
+  snapshots).
 - `LastSeenAt`: time the preceding request was observed; for a new session it
   is the current request time.
 - `LastResponseAt`: time the most recent response lifecycle of the session
@@ -55,17 +63,34 @@ The `sessionstate.SessionState` value contains:
   responses.
 - `TotalCachedTokens`: cached prompt tokens (`prompt_tokens_details.cached_tokens`)
   reported by naturally completed responses.
+- `Endpoint`: `NamespacedName` string of the primary profile's picked endpoint
+  from the latest dispatched turn, or `""` before dispatch or after that endpoint
+  leaves the pool.
+- `ContextTokens`: context token footprint of the latest finished turn.
+- `InFlightTokens`: sum of prompt token estimates for turns currently in flight.
 
-A turn is counted in `PreRequest` only after scheduling selects at least one
-target. Multiple scheduling profiles still count as one turn. The request is
-also added to `InFlightRequests` at that point and removed when its response
-lifecycle ends. Client disconnects, evictions, and internal errors do not
-contribute to `CompletedRequests` or the token totals because their usage may
-be incomplete. A naturally completed response without usage data contributes
-zero tokens.
+`SessionState.ContextSize()` returns `max(ContextTokens, InFlightTokens)`.
+`EstimatePromptTokens(requestSizeBytes)` converts a raw request size in bytes
+to a token estimate using `request.BytesPerToken`, with a minimum of `1`.
 
-State is local to one EPP replica. A session is removed when its latest
-request or response is older than the eviction TTL, at the next sweep.
+A turn is counted in `PreRequest` once per `RequestID` after scheduling selects
+a target, binding or moving `Endpoint` when the primary profile picked one and
+charging `EstimatePromptTokens(request.RequestSizeBytes)` into `InFlightTokens`.
+When a response lifecycle ends (`EndOfStream`), `ResponseBody` removes the turn
+from `InFlightRequests` and deducts its charged estimate from `InFlightTokens`
+for every termination cause. `ContextTokens` updates to `Usage.TotalTokens` (or
+`PromptTokens + CompletionTokens` on natural completion when `TotalTokens` is
+zero), falling back to the turn's prompt estimate when it exceeds the stored
+`ContextTokens`. Client disconnects, evictions, and internal errors do not
+contribute to `CompletedRequests` or the cumulative token totals because their
+usage may be incomplete.
+
+When `endpoint-notification-source` delivers `EventDelete` for the active
+endpoint object (or `EventAddOrUpdate` replaces it with a new endpoint object),
+the producer clears `Endpoint` on affected sessions while keeping their history
+and `ContextTokens`. State is local to one EPP replica.
+A session is removed from both the session map and the endpoint index when its
+latest request or response is older than the eviction TTL, at the next sweep.
 Sessions are retained while a request is pending (observed at `RequestHeader`
 but not yet dispatched, for example waiting in a flow-control queue) or in
 flight. A pending request that is rejected before dispatch is released through
