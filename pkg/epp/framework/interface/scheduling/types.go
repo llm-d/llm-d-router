@@ -55,6 +55,10 @@ type InferenceRequest struct {
 	Objectives RequestObjectives
 	// FairnessID is the identity used by the flow control system to group requests into fairness queues.
 	FairnessID string
+	// PriorityClass is the resolved x-llm-d-inference-priority-class value.
+	// Sheddable replaces Objectives.Priority with the negative admission band.
+	// Critical, missing, and invalid leave Objectives.Priority unchanged.
+	PriorityClass string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.
 	RequestSizeBytes int
 	// SchedulingResult captures the scheduling decisions made during the cycle.

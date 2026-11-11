@@ -44,7 +44,8 @@ type AdmissionController interface {
 	// Args:
 	//   ctx: The request context, carrying deadlines, cancellation signals, and logger.
 	//   reqCtx: The handlers.RequestContext containing details about the incoming request.
-	//   priority: The priority level of the request, as determined by the InferenceObjective.
+	//   priority: The admission priority. A sheddable priority class has already replaced the
+	//     InferenceObjective priority with the negative band. A critical class has not.
 	//
 	// Returns:
 	//   - nil: If the request is admitted and should proceed to scheduling.

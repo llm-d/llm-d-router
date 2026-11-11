@@ -50,6 +50,13 @@ const (
 	TPOTSLOHeaderKey = "x-llm-d-slo-tpot-ms"
 	// OldTPOTSLOHeaderKey is the deprecated alias for TPOTSLOHeaderKey.
 	OldTPOTSLOHeaderKey = "x-slo-tpot-ms"
+	// PriorityClassKey is the header a requesting layer uses to label a request
+	// critical (within quota) or sheddable (over quota). It is a scheduling hint.
+	PriorityClassKey = "x-llm-d-inference-priority-class"
+	// PriorityClassCritical is the within-quota priority class.
+	PriorityClassCritical = "critical"
+	// PriorityClassSheddable is the over-quota priority class.
+	PriorityClassSheddable = "sheddable"
 
 	// DefaultFairnessID is the default fairness ID used when no ID is provided in the request.
 	// This ensures that requests without explicit fairness identifiers are still grouped and managed by the Flow Control
@@ -64,6 +71,7 @@ var headerAliases = map[string][]string{
 	ModelNameRewriteKey: {ModelNameRewriteKey, OldModelNameRewriteKey},
 	TTFTSLOHeaderKey:    {TTFTSLOHeaderKey, OldTTFTSLOHeaderKey},
 	TPOTSLOHeaderKey:    {TPOTSLOHeaderKey, OldTPOTSLOHeaderKey},
+	PriorityClassKey:    {PriorityClassKey},
 }
 
 // HeaderNames returns the current header name followed by deprecated aliases.

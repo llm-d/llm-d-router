@@ -250,7 +250,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 
 	infObjective := d.getInferenceObjective(ctx, reqCtx)
-	priority := int(*infObjective.Spec.Priority)
+	objectivePriority := int(*infObjective.Spec.Priority)
+	priorityClass := parsePriorityClass(reqCtx.Request.Headers)
+	reqCtx.PriorityClass = priorityClass.class
+	priority := admissionPriority(objectivePriority, priorityClass)
 	reqCtx.Priority = priority
 	requestObjectives := fwksched.RequestObjectives{Priority: priority}
 
@@ -268,11 +271,19 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		Body:             inferenceRequestBody,
 		Headers:          reqCtx.Request.Headers,
 		FairnessID:       fairnessID,
+		PriorityClass:    priorityClass.class,
 		Objectives:       requestObjectives,
 		RequestSizeBytes: reqCtx.RequestSize,
 	}
 
-	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
+	logger = logger.WithValues(
+		"objectiveKey", reqCtx.ObjectiveKey,
+		"incomingModelName", reqCtx.IncomingModelName,
+		"targetModelName", reqCtx.TargetModelName,
+		"priority", priority,
+		"objectivePriority", objectivePriority,
+		"priorityClass", priorityClass.class,
+	)
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
@@ -282,8 +293,13 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if reqCtx.SchedulingRequest.FairnessID == "" {
 		reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
 	}
+	if priorityClass.invalid {
+		metrics.RecordPriorityClassUnknown(metrics.PriorityClassUnknownReasonInvalid)
+	}
+	metrics.RecordPriorityClassRequest(reqCtx.SchedulingRequest.FairnessID, priorityClass.class)
 
-	// Admit may block until flow control admits the request.
+	// priority is the band admission and flow control use. Sheddable has already replaced the
+	// InferenceObjective priority with the negative band. Critical has not raised it.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
 	}

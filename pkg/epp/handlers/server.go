@@ -110,12 +110,16 @@ type StreamingServer struct {
 // Refactor this monolithic struct. Fields related to the Envoy ext-proc protocol should be decoupled from the internal
 // request lifecycle state.
 type RequestContext struct {
-	TargetPod                  *fwkdl.EndpointMetadata
-	TargetEndpoint             string
-	IncomingModelName          string
-	TargetModelName            string
-	ObjectiveKey               string
-	Priority                   int
+	TargetPod         *fwkdl.EndpointMetadata
+	TargetEndpoint    string
+	IncomingModelName string
+	TargetModelName   string
+	ObjectiveKey      string
+	Priority          int
+	// PriorityClass is the resolved x-llm-d-inference-priority-class value.
+	// Missing and invalid headers resolve to critical.
+	// Sheddable sets Priority to the negative admission band. Critical does not raise it.
+	PriorityClass              string
 	RequestReceivedTimestamp   time.Time
 	FirstTokenTimestamp        time.Time
 	ResponseCompleteTimestamp  time.Time

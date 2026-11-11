@@ -30,6 +30,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -59,6 +60,7 @@ import (
 	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
 )
@@ -70,10 +72,12 @@ var (
 // --- Mocks ---
 
 type mockAdmissionController struct {
-	admitErr error
+	admitErr    error
+	gotPriority int
 }
 
-func (m *mockAdmissionController) Admit(context.Context, *handlers.RequestContext, int) error {
+func (m *mockAdmissionController) Admit(_ context.Context, _ *handlers.RequestContext, priority int) error {
+	m.gotPriority = priority
 	return m.admitErr
 }
 
@@ -350,23 +354,30 @@ func TestDirector_HandleRequest(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                    string
-		reqBodyMap              map[string]any
-		mockAdmissionController *mockAdmissionController
-		inferenceObjectiveName  string
-		schedulerMockSetup      func(m *mockScheduler)
-		initialTargetModelName  string // Initial target model in the reqCtx.
-		parser                  fwkrh.Parser
-		wantErrCode             string                   // Expected errcommon code string
-		wantReqCtx              *handlers.RequestContext // Fields to check in the returned RequestContext
-		targetModelName         string                   // Expected model name after target model resolution
-		admitRequestDenialError error                    // Expected denial error from admission plugin
-		dataProducerPlugin      *mockDataProducerPlugin
-		preRequestPlugin        *mockPreRequestPlugin
-		wantMutatedBody         map[string]any
-		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
-		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
-		rewrites                []*v1alpha2.InferenceModelRewrite
+		name                     string
+		reqBodyMap               map[string]any
+		mockAdmissionController  *mockAdmissionController
+		inferenceObjectiveName   string
+		schedulerMockSetup       func(m *mockScheduler)
+		initialTargetModelName   string // Initial target model in the reqCtx.
+		parser                   fwkrh.Parser
+		wantErrCode              string                   // Expected errcommon code string
+		wantReqCtx               *handlers.RequestContext // Fields to check in the returned RequestContext
+		targetModelName          string                   // Expected model name after target model resolution
+		admitRequestDenialError  error                    // Expected denial error from admission plugin
+		dataProducerPlugin       *mockDataProducerPlugin
+		preRequestPlugin         *mockPreRequestPlugin
+		wantMutatedBody          map[string]any
+		fairnessIDHeader         string  // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
+		wantFairnessID           string  // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
+		priorityClassHeader      *string // When set, sent as metadata.PriorityClassKey, including an empty value.
+		wantPriorityClass        string
+		wantAdmitPriority        *int
+		wantUnknownPriorityClass bool
+		unknownRawLabel          string   // When set, this label must not be incremented on the unknown counter.
+		saturation               *float64 // When set, admission uses the legacy controller at this saturation.
+		wantErrSubstr            string
+		rewrites                 []*v1alpha2.InferenceModelRewrite
 	}{
 		{
 			name: "successful completions request",
@@ -424,6 +435,149 @@ func TestDirector_HandleRequest(t *testing.T) {
 			initialTargetModelName: model,
 			inferenceObjectiveName: objectiveName,
 			wantFairnessID:         metadata.DefaultFairnessID,
+			wantPriorityClass:      metadata.PriorityClassCritical,
+			wantAdmitPriority:      ptr.To(2),
+		},
+		{
+			name: "critical priority class stays on the objective priority",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "user-123",
+			wantFairnessID:         "user-123",
+			priorityClassHeader:    ptr.To(metadata.PriorityClassCritical),
+			wantPriorityClass:      metadata.PriorityClassCritical,
+			wantAdmitPriority:      ptr.To(2),
+		},
+		{
+			name: "sheddable priority class moves admission onto the negative band",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "user-123",
+			wantFairnessID:         "user-123",
+			priorityClassHeader:    ptr.To(metadata.PriorityClassSheddable),
+			wantPriorityClass:      metadata.PriorityClassSheddable,
+			wantAdmitPriority:      ptr.To(sheddableAdmissionPriority),
+		},
+		{
+			name: "critical priority class does not promote a negative objective",
+			reqBodyMap: map[string]any{
+				"model":  modelSheddable,
+				"prompt": "sheddable prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: modelSheddable,
+			inferenceObjectiveName: objectiveNameSheddable,
+			fairnessIDHeader:       "user-123",
+			wantFairnessID:         "user-123",
+			priorityClassHeader:    ptr.To(metadata.PriorityClassCritical),
+			wantPriorityClass:      metadata.PriorityClassCritical,
+			wantAdmitPriority:      ptr.To(-1),
+		},
+		{
+			name: "full pool drops a sheddable priority class",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "sheddable prompt",
+			},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			priorityClassHeader:    ptr.To(metadata.PriorityClassSheddable),
+			saturation:             ptr.To(1.0),
+			wantErrCode:            errcommon.ResourceExhausted,
+			wantErrSubstr:          "system saturated, sheddable request dropped",
+		},
+		{
+			name: "full pool still admits a critical priority class",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			wantFairnessID:         metadata.DefaultFairnessID,
+			priorityClassHeader:    ptr.To(metadata.PriorityClassCritical),
+			wantPriorityClass:      metadata.PriorityClassCritical,
+			wantAdmitPriority:      ptr.To(2),
+			saturation:             ptr.To(1.0),
+		},
+		{
+			name: "spare capacity admits a sheddable priority class",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "sheddable prompt",
+			},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			wantFairnessID:         metadata.DefaultFairnessID,
+			priorityClassHeader:    ptr.To(metadata.PriorityClassSheddable),
+			wantPriorityClass:      metadata.PriorityClassSheddable,
+			wantAdmitPriority:      ptr.To(sheddableAdmissionPriority),
+			saturation:             ptr.To(0.0),
+		},
+		{
+			name: "empty priority class is critical and invalid",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName:   model,
+			inferenceObjectiveName:   objectiveName,
+			wantFairnessID:           metadata.DefaultFairnessID,
+			priorityClassHeader:      ptr.To(""),
+			wantPriorityClass:        metadata.PriorityClassCritical,
+			wantAdmitPriority:        ptr.To(2),
+			wantUnknownPriorityClass: true,
+		},
+		{
+			name: "unrecognized priority class is critical and does not label the raw value",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName:   model,
+			inferenceObjectiveName:   objectiveName,
+			wantFairnessID:           metadata.DefaultFairnessID,
+			priorityClassHeader:      ptr.To("excess"),
+			wantPriorityClass:        metadata.PriorityClassCritical,
+			wantAdmitPriority:        ptr.To(2),
+			wantUnknownPriorityClass: true,
+			unknownRawLabel:          "excess",
 		},
 		{
 			name: "successful request with preRequest plugin adding key",
@@ -851,7 +1005,14 @@ func TestDirector_HandleRequest(t *testing.T) {
 				config = config.WithAdmissionPlugins(newMockAdmissionPlugin("test-admit-plugin", test.admitRequestDenialError))
 
 				endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
-				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config)
+				var admissionController AdmissionController = test.mockAdmissionController
+				if test.saturation != nil {
+					saturation := *test.saturation
+					admissionController = NewLegacyAdmissionController(&mockSaturationDetector{
+						SaturationFunc: func(context.Context, []fwkdl.Endpoint) float64 { return saturation },
+					}, endpointCandidates)
+				}
+				director := NewDirectorWithConfig(ds, mockSched, admissionController, endpointCandidates, config)
 				if len(test.rewrites) > 0 {
 					mockDs := &mockDatastore{
 						pods:     ds.PodList(datastore.AllPodsPredicate),
@@ -886,6 +1047,17 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if test.fairnessIDHeader != "" {
 					reqCtx.Request.Headers[metadata.FlowFairnessIDKey] = test.fairnessIDHeader
 				}
+				if test.priorityClassHeader != nil {
+					reqCtx.Request.Headers[metadata.PriorityClassKey] = *test.priorityClassHeader
+				}
+				var beforeClass, beforeUnknown, beforeRaw float64
+				if test.wantPriorityClass != "" {
+					beforeClass = promtestutil.ToFloat64(metrics.LlmdPriorityClassRequestsTotal.WithLabelValues(test.wantPriorityClass, test.wantFairnessID))
+					beforeUnknown = promtestutil.ToFloat64(metrics.LlmdPriorityClassUnknownTotal.WithLabelValues(metrics.PriorityClassUnknownReasonInvalid))
+					if test.unknownRawLabel != "" {
+						beforeRaw = promtestutil.ToFloat64(metrics.LlmdPriorityClassUnknownTotal.WithLabelValues(test.unknownRawLabel))
+					}
+				}
 
 				parseResult, parseErr := openai.NewOpenAIParser().ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				var returnedReqCtx *handlers.RequestContext
@@ -900,6 +1072,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					var e errcommon.Error
 					if assert.ErrorAs(t, err, &e, "Error should be of type errcommon.Error") {
 						assert.Equal(t, test.wantErrCode, e.Code, "Error code mismatch")
+						if test.wantErrSubstr != "" {
+							assert.Contains(t, e.Msg, test.wantErrSubstr, "Error message mismatch")
+						}
 					}
 					return
 				}
@@ -919,6 +1094,28 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if test.wantFairnessID != "" {
 					require.NotNil(t, returnedReqCtx.SchedulingRequest, "SchedulingRequest should be populated")
 					assert.Equal(t, test.wantFairnessID, returnedReqCtx.SchedulingRequest.FairnessID, "SchedulingRequest.FairnessID mismatch")
+				}
+				if test.wantPriorityClass != "" {
+					require.NotNil(t, returnedReqCtx.SchedulingRequest, "SchedulingRequest should be populated")
+					assert.Equal(t, test.wantPriorityClass, returnedReqCtx.PriorityClass, "reqCtx.PriorityClass mismatch")
+					assert.Equal(t, test.wantPriorityClass, returnedReqCtx.SchedulingRequest.PriorityClass, "SchedulingRequest.PriorityClass mismatch")
+					if test.wantAdmitPriority != nil {
+						if test.mockAdmissionController != nil {
+							assert.Equal(t, *test.wantAdmitPriority, test.mockAdmissionController.gotPriority, "admission priority mismatch")
+						}
+						assert.Equal(t, *test.wantAdmitPriority, returnedReqCtx.Priority, "request priority mismatch")
+						assert.Equal(t, *test.wantAdmitPriority, returnedReqCtx.SchedulingRequest.Objectives.Priority, "objective priority mismatch")
+					}
+					assert.Equal(t, beforeClass+1, promtestutil.ToFloat64(metrics.LlmdPriorityClassRequestsTotal.WithLabelValues(test.wantPriorityClass, test.wantFairnessID)))
+					unknownAfter := promtestutil.ToFloat64(metrics.LlmdPriorityClassUnknownTotal.WithLabelValues(metrics.PriorityClassUnknownReasonInvalid))
+					if test.wantUnknownPriorityClass {
+						assert.Equal(t, beforeUnknown+1, unknownAfter)
+					} else {
+						assert.Equal(t, beforeUnknown, unknownAfter)
+					}
+					if test.unknownRawLabel != "" {
+						assert.Equal(t, beforeRaw, promtestutil.ToFloat64(metrics.LlmdPriorityClassUnknownTotal.WithLabelValues(test.unknownRawLabel)))
+					}
 				}
 
 				if test.wantMutatedBody != nil {

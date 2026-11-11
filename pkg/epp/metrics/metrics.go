@@ -420,6 +420,8 @@ func Register(customCollectors ...prometheus.Collector) {
 		// Register other metrics
 		metrics.Registry.MustRegister(requestCounter)
 		metrics.Registry.MustRegister(llmdRequestCounter)
+		metrics.Registry.MustRegister(LlmdPriorityClassRequestsTotal)
+		metrics.Registry.MustRegister(LlmdPriorityClassUnknownTotal)
 		metrics.Registry.MustRegister(requestErrCounter)
 		metrics.Registry.MustRegister(llmdRequestErrCounter)
 		metrics.Registry.MustRegister(requestLatencies)
@@ -486,6 +488,8 @@ func Reset() {
 	// Reset other metrics
 	requestCounter.Reset()
 	llmdRequestCounter.Reset()
+	LlmdPriorityClassRequestsTotal.Reset()
+	LlmdPriorityClassUnknownTotal.Reset()
 	requestErrCounter.Reset()
 	llmdRequestErrCounter.Reset()
 	requestLatencies.Reset()
