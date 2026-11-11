@@ -138,9 +138,9 @@ func (p *WeightedRandomPicker) TypedName() fwkplugin.TypedName {
 // from its weighted score.
 func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.ScoredEndpoint) *fwksched.ProfileRunResult {
 	logger := log.FromContext(ctx)
-	// Largest positive score. Normalizing by it keeps effective weights in (0,1] so the A-Res keys
-	// stay numerically computable even at extreme temperatures. Probabilities are weight ratios, so
-	// dividing every score by a constant does not change the resulting distribution.
+	// Largest positive score. Normalizing by it keeps log weights <= 0 so they stay finite at
+	// extreme temperatures. Probabilities are weight ratios, so dividing every score by a constant
+	// does not change the resulting distribution.
 	maxScore := 0.0
 	for _, scoredEndpoint := range scoredEndpoints {
 		if scoredEndpoint.Score > maxScore {
@@ -160,7 +160,9 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 			"num-of-candidates", len(scoredEndpoints), "scored-endpoints", fwksched.EndpointScores(scoredEndpoints))
 	}
 
-	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ)
+	// A-Res algorithm: keyᵢ = Uᵢ^(1/wᵢ), sorted on the order-preserving transform
+	// log(wᵢ) - log(-log(Uᵢ)). Uᵢ^(1/wᵢ) underflows to 0 when wᵢ is small, and tied keys would
+	// fall back to input order.
 	weightedEndpoints := make([]weightedScoredEndpoint, 0, len(scoredEndpoints))
 
 	for _, scoredEndpoint := range scoredEndpoints {
@@ -168,23 +170,18 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 			continue
 		}
 
-		// Sample on the effective weight w = (score/maxScore)^(1/T), normalized so weights stay in
-		// (0,1]; T=1 keeps probability proportional to score. The wrapper's Endpoint is the original
-		// candidate, which is what gets returned.
-		scoredEndpoint := &fwksched.ScoredEndpoint{
-			Endpoint: scoredEndpoint,
-			Score:    math.Pow(scoredEndpoint.Score/maxScore, 1.0/p.temperature),
-		}
+		// Effective weight w = (score/maxScore)^(1/T); T=1 keeps probability proportional to score.
+		logWeight := math.Log(scoredEndpoint.Score/maxScore) / p.temperature
 
 		// Generate a random number U in (0,1)
 		u := picker.PickerRand.Float64()
 		if u == 0 {
-			u = 1e-10 // Avoid 0 to ensure positive key
+			u = 1e-10 // Avoid 0 to ensure a finite key
 		}
 
 		weightedEndpoints = append(weightedEndpoints, weightedScoredEndpoint{
 			ScoredEndpoint: scoredEndpoint,
-			key:            math.Pow(u, 1.0/scoredEndpoint.Score),
+			key:            logWeight - math.Log(-math.Log(u)),
 		})
 	}
 
@@ -198,7 +195,7 @@ func (p *WeightedRandomPicker) Pick(ctx context.Context, scoredEndpoints []*fwks
 
 	targetEndpoints := make([]fwksched.Endpoint, selectedCount)
 	for i := range selectedCount {
-		targetEndpoints[i] = weightedEndpoints[i].Endpoint
+		targetEndpoints[i] = weightedEndpoints[i].ScoredEndpoint
 	}
 
 	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
