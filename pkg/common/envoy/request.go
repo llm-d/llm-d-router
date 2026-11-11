@@ -38,3 +38,17 @@ func GenerateRequestBodyResponses(requestBodyBytes []byte, setEos bool) []*extPr
 	}
 	return responses
 }
+
+// GenerateUnmodifiedRequestBodyResponse returns a single request-body response
+// with no body mutation, so the proxy keeps the body it already holds.
+func GenerateUnmodifiedRequestBodyResponse() []*extProcPb.ProcessingResponse {
+	return []*extProcPb.ProcessingResponse{
+		{
+			Response: &extProcPb.ProcessingResponse_RequestBody{
+				RequestBody: &extProcPb.BodyResponse{
+					Response: &extProcPb.CommonResponse{},
+				},
+			},
+		},
+	}
+}

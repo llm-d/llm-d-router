@@ -103,6 +103,14 @@ func (s *StreamingServer) SetMaxRequestBodySize(n int) {
 	s.maxRequestBodySize = n
 }
 
+// SetSkipUnmodifiedRequestBody controls whether a request-body response omits
+// body_mutation when the body was not rewritten. Off by default. Safe only when
+// the proxy's request_body_mode is BUFFERED or BUFFERED_PARTIAL; in
+// FULL_DUPLEX_STREAMED the proxy does not retain the original body.
+func (s *StreamingServer) SetSkipUnmodifiedRequestBody(enabled bool) {
+	s.skipUnmodifiedRequestBody = enabled
+}
+
 // SetResponders sets the plugins that may answer a request instead of routing it. They are
 // asked in the given order.
 func (s *StreamingServer) SetResponders(responders []fwkrh.Responder) {
@@ -137,6 +145,8 @@ type StreamingServer struct {
 	toolCallingTelemetryEnabled bool
 	// maxRequestBodySize caps the buffered request body in bytes; 0 disables the cap.
 	maxRequestBodySize int
+	// skipUnmodifiedRequestBody omits body_mutation when the scheduled body was not rewritten.
+	skipUnmodifiedRequestBody bool
 	// responders may answer a request instead of routing it. Empty unless set via SetResponders.
 	responders []fwkrh.Responder
 }
@@ -827,7 +837,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 
 				reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
-				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody, !trailers)
+				reqCtx.reqBodyResp = s.generateRequestBodyResponses(reqCtx, !trailers)
 				if trailers {
 					reqCtx.reqBodyResp = append(reqCtx.reqBodyResp, &extProcPb.ProcessingResponse{
 						Response: &extProcPb.ProcessingResponse_RequestTrailers{RequestTrailers: &extProcPb.TrailersResponse{}},
@@ -1174,4 +1184,18 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		logger.V(logutil.DEBUG).Info("EPP sent trailer back to proxy")
 	}
 	return nil
+}
+
+// generateRequestBodyResponses builds the ext_proc request-body replies. When
+// skipUnmodifiedRequestBody is set and the scheduled body was not rewritten, the
+// reply has no body mutation so the proxy keeps the body it already holds.
+func (s *StreamingServer) generateRequestBodyResponses(reqCtx *RequestContext, setEos bool) []*extProcPb.ProcessingResponse {
+	if s.skipUnmodifiedRequestBody && requestBodyUnmodified(reqCtx) {
+		return envoy.GenerateUnmodifiedRequestBodyResponse()
+	}
+	return envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody, setEos)
+}
+
+func requestBodyUnmodified(reqCtx *RequestContext) bool {
+	return reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.Body != nil && !reqCtx.SchedulingRequest.Body.Mutated
 }
