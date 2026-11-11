@@ -168,6 +168,18 @@ Messages streaming events. Input tokens include uncached and cached prompt token
 Interrupted streams contribute no completed-request token observations. The running-request
 gauge releases each request when it completes or its ext_proc stream closes.
 
+`llm_d_epp_request_input_tokens`, `llm_d_epp_request_output_tokens`,
+`llm_d_epp_request_cached_tokens`, `llm_d_epp_request_ntpot_seconds`,
+`llm_d_epp_request_streaming_tpot_seconds` and the `latency-reporter` plugin's
+`llm_d_epp_latency_tpot_seconds` take their token counts from the `usage` block of the response.
+vLLM includes `usage` in a chat completions or completions stream only when the request sets
+`stream_options.include_usage` or the server runs with `--enable-force-include-usage`. A stream
+without it adds no observation to these metrics, but `llm_d_epp_request_total` and
+`llm_d_epp_request_ttft_seconds` still count it. Run vLLM with `--enable-force-include-usage`
+when these metrics must cover every stream. Clients then receive `usage` in every chat
+completions and completions stream, including a final chunk with an empty `choices` list.
+Messages and Responses streams carry `usage` without either setting.
+
 Per-surface p95 latency uses the histogram buckets:
 
 ```promql
