@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -118,15 +119,17 @@ func TestServeMetrics_BindsMetricsPort(t *testing.T) {
 }
 
 func TestServeMetrics_ListenError(t *testing.T) {
-	// An out-of-range port fails to listen on every OS. Holding a loopback port
-	// does not: macOS still lets serveMetrics bind the wildcard address.
-	s := &Server{
-		logger: logr.Discard(),
-		config: Config{MetricsPort: 65536},
-	}
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = held.Close() })
+	// serveMetrics binds the held address itself. macOS allows binding ":port"
+	// while "127.0.0.1:port" is held, so MetricsPort would not collide there.
+	t.Setenv(envMoRIIOMetricsAddr, held.Addr().String())
+
+	s := &Server{logger: logr.Discard()}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	require.Error(t, s.serveMetrics(ctx))
+	require.ErrorIs(t, s.serveMetrics(ctx), syscall.EADDRINUSE)
 }
 
 func TestServeMetrics_TLS(t *testing.T) {
