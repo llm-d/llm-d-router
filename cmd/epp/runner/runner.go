@@ -1271,12 +1271,21 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 }
 
 // validateConfig runs the configuration checks of a real start against an
-// empty datastore: plugin instantiation and the config checks of phase two,
+// empty datastore: the discovery flags of Kubernetes mode, plugin
+// instantiation and the config checks of phase two,
 // the discovery plugin, plugin stability, and the data layer configuration.
 // It needs no Kubernetes cluster and starts no server or data source.
 func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	dl := rawConfig.DataLayer
+	fileDiscovery := dl != nil && dl.Discovery != nil && dl.Discovery.Endpoints != nil
+	if !fileDiscovery {
+		if err := validateKubernetesDiscoveryFlags(opts); err != nil {
+			return err
+		}
+	}
 
 	pool := datalayer.NewEndpointPool(resolvePoolNamespace(opts.PoolNamespace), "epp")
 	ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts)).WithEndpointPool(pool)
@@ -1284,7 +1293,7 @@ func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, ra
 	if err != nil {
 		return err
 	}
-	if dl := rawConfig.DataLayer; dl != nil && dl.Discovery != nil && dl.Discovery.Endpoints != nil {
+	if fileDiscovery {
 		if _, err := r.resolveDiscovery(rawConfig); err != nil {
 			return fmt.Errorf("failed to resolve discovery plugin: %w", err)
 		}

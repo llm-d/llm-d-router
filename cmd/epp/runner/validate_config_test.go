@@ -68,11 +68,13 @@ func TestValidateConfig(t *testing.T) {
 	tests := []struct {
 		name       string
 		configText string
+		poolName   string
 		wantErr    string
 	}{
 		{
 			name:       "valid config",
 			configText: validateConfigBase,
+			poolName:   "epp",
 		},
 		{
 			name:       "valid config with file discovery",
@@ -81,12 +83,19 @@ func TestValidateConfig(t *testing.T) {
 		{
 			name:       "unregistered plugin type",
 			configText: replaceOnce(t, validateConfigBase, "type: max-score-picker", "type: max-score-pickr"),
+			poolName:   "epp",
 			wantErr:    "plugin type 'max-score-pickr' is not registered",
 		},
 		{
 			name:       "profile references an undefined plugin",
 			configText: replaceOnce(t, validateConfigBase, "pluginRef: decode-filter", "pluginRef: no-such-plugin"),
+			poolName:   "epp",
 			wantErr:    "no-such-plugin",
+		},
+		{
+			name:       "kubernetes mode without pool-name or endpoint-selector",
+			configText: validateConfigBase,
+			wantErr:    "either pool-name or endpoint-selector must be set",
 		},
 	}
 
@@ -97,6 +106,7 @@ func TestValidateConfig(t *testing.T) {
 
 			opts := runserver.NewOptions()
 			opts.ConfigText = tc.configText
+			opts.PoolName = tc.poolName
 			opts.ValidateConfig = true
 
 			r := NewRunner()
