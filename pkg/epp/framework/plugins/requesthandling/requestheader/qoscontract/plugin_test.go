@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package qosadmission
+package qoscontract
 
 import (
 	"context"
@@ -147,7 +147,7 @@ func TestFactory_InvalidConfig(t *testing.T) {
 	}
 }
 
-func TestRequestHeader_AdmitsAtCommittedClass(t *testing.T) {
+func TestRequestHeader_ServesAtCommittedClass(t *testing.T) {
 	p, _ := newTestPlugin(t, nil)
 	req := newRequest("team-a", 100, 50)
 
@@ -404,7 +404,7 @@ func TestReportOnlyServesCommittedClass(t *testing.T) {
 // team|class|served_class|decision|reason.
 func testutilDecisions(mode string) map[string]float64 {
 	ch := make(chan prometheus.Metric, 1024)
-	go func() { admissionDecisions.Collect(ch); close(ch) }()
+	go func() { contractDecisions.Collect(ch); close(ch) }()
 	out := map[string]float64{}
 	for m := range ch {
 		var pb dto.Metric
@@ -440,7 +440,7 @@ func TestReportOnlyAndEnforceLimitsSetTheSamePriority(t *testing.T) {
 	cases := []struct {
 		name                string
 		req                 func() *fwksched.InferenceRequest
-		setup               int // team-a requests admitted first, to fill its concurrency commit of 2
+		setup               int // team-a requests served within the contract first, to fill its concurrency commit of 2
 		enforceLimitsPrio   int
 		reportOnlyPrio      int
 		enforceLimitsErrors bool
@@ -493,7 +493,7 @@ func TestReportOnlyDecisionsMatchEnforceLimits(t *testing.T) {
 		decide(newRequest("team-a", 5000, 10)) // over the size limit
 
 		// team-b is in the lowest class with a concurrency commit of 1. A would-be rejection must
-		// hold no slot, so once the admitted request completes the next one is admitted again.
+		// hold no slot, so once the in-contract request completes the next one is within the contract again.
 		first := newRequest("team-b", 10, 10)
 		decide(first)
 		decide(newRequest("team-b", 10, 10)) // over concurrency
@@ -509,26 +509,26 @@ func TestReportOnlyDecisionsMatchEnforceLimits(t *testing.T) {
 
 // decisions returns the decision counter for one label combination in enforce-limits mode.
 func decisions(team, class, servedClass, decision, reason string) float64 {
-	return promtestutil.ToFloat64(admissionDecisions.WithLabelValues(
+	return promtestutil.ToFloat64(contractDecisions.WithLabelValues(
 		team, class, servedClass, decision, reason, ModeEnforceLimits))
 }
 
 // TestDecisionReason verifies that a downgraded or rejected request records the limit it
-// exceeded, and that an admitted request records none.
+// exceeded, and that a request within the contract records none.
 func TestDecisionReason(t *testing.T) {
 	cases := []struct {
 		name        string
 		mutate      func(*Parameters)
 		team        string
-		setup       []*fwksched.InferenceRequest // admitted first, to fill a commit
+		setup       []*fwksched.InferenceRequest // served within the contract first, to fill a commit
 		req         *fwksched.InferenceRequest
 		servedClass string
 		decision    string
 		reason      string
 	}{
 		{
-			name: "admitted", team: "team-a", req: newRequest("team-a", 10, 10),
-			servedClass: "critical", decision: decisionAdmitted, reason: "",
+			name: "within contract", team: "team-a", req: newRequest("team-a", 10, 10),
+			servedClass: "critical", decision: decisionWithinContract, reason: "",
 		},
 		{
 			name: "downgraded over prompt size", team: "team-a", req: newRequest("team-a", 2000, 10),
