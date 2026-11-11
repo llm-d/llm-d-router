@@ -77,8 +77,9 @@ type Config struct {
 	ProxyMode ProxyMode
 	// FailOpen overrides router.proxy.failOpen when non-nil. When true, Envoy
 	// routes to the model servers through the fallback route while EPP is unreachable.
-	FailOpen            *bool
-	HealthCheckInterval string
+	FailOpen                     *bool
+	HealthCheckInterval          string
+	HealthCheckNoTrafficInterval string
 }
 
 // ProxyMode is the chart's router.proxy.mode.
@@ -217,6 +218,9 @@ func renderRouter(ctx context.Context, cfg Config, plugins string, replicas int,
 	}
 	if cfg.HealthCheckInterval != "" {
 		proxyValues["healthCheckInterval"] = cfg.HealthCheckInterval
+	}
+	if cfg.HealthCheckNoTrafficInterval != "" {
+		proxyValues["healthCheckNoTrafficInterval"] = cfg.HealthCheckNoTrafficInterval
 	}
 	if len(proxyValues) > 0 {
 		routerValues["proxy"] = proxyValues
