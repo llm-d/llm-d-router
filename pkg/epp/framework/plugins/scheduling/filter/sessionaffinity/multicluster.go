@@ -27,7 +27,6 @@ import (
 const MultiClusterFilterType = "multicluster-session-affinity-filter"
 
 var _ fwksched.Filter = &MultiClusterFilter{}
-var _ fwksched.ProfileReferencer = &MultiClusterFilter{}
 
 // MultiClusterFactory builds the cross-cluster session-affinity filter.
 func MultiClusterFactory(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {

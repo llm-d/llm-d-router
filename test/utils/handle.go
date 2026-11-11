@@ -23,6 +23,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
@@ -31,8 +32,9 @@ import (
 type testHandle struct {
 	ctx context.Context
 	plugin.HandlePlugins
-	metricsRecorder    plugin.MetricsRecorder
-	crossReplicaSyncer plugin.Plugin
+	metricsRecorder        plugin.MetricsRecorder
+	crossReplicaSyncer     plugin.Plugin
+	schedulingProfileNames sets.Set[string]
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -92,4 +94,12 @@ func NewTestHandle(ctx context.Context) plugin.Handle {
 		},
 		metricsRecorder: prometheus.NewRegistry(),
 	}
+}
+
+func (h *testHandle) SchedulingProfileNames() sets.Set[string] {
+	return h.schedulingProfileNames
+}
+
+func (h *testHandle) SetSchedulingProfileNames(names sets.Set[string]) {
+	h.schedulingProfileNames = names
 }

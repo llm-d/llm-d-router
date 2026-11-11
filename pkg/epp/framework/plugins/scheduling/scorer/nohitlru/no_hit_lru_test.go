@@ -27,6 +27,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -40,9 +41,10 @@ import (
 var _ plugin.Handle = &fakeHandle{}
 
 type fakeHandle struct {
-	ctx                context.Context
-	plugins            map[string]plugin.Plugin
-	crossReplicaSyncer plugin.Plugin
+	ctx                    context.Context
+	plugins                map[string]plugin.Plugin
+	crossReplicaSyncer     plugin.Plugin
+	schedulingProfileNames sets.Set[string]
 }
 
 func newFakeHandle(ctx context.Context) *fakeHandle {
@@ -704,4 +706,12 @@ func TestDumpStateConcurrentWithPreRequest(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func (h *fakeHandle) SchedulingProfileNames() sets.Set[string] {
+	return h.schedulingProfileNames
+}
+
+func (h *fakeHandle) SetSchedulingProfileNames(names sets.Set[string]) {
+	h.schedulingProfileNames = names
 }

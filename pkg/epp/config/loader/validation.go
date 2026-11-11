@@ -27,7 +27,6 @@ import (
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -187,30 +186,6 @@ func validateSchedulingProfiles(cfg *configapiv1.EndpointPickerConfig) error {
 			if !definedPlugins.Has(pluginRef.PluginRef) {
 				return fmt.Errorf("schedulingProfiles[%s] references undefined plugin '%s'",
 					profile.Name, pluginRef.PluginRef)
-			}
-		}
-	}
-	return nil
-}
-
-// validateProfileReferences checks that every scheduling profile a plugin's
-// parameters name is configured.
-func validateProfileReferences(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin.Handle) error {
-	profileNames := sets.New[string]()
-	for _, profile := range cfg.SchedulingProfiles {
-		profileNames.Insert(profile.Name)
-	}
-	for _, spec := range cfg.Plugins {
-		referencer, ok := handle.Plugin(spec.Name).(fwksched.ProfileReferencer)
-		if !ok {
-			continue
-		}
-		for _, name := range referencer.ReferencedProfiles() {
-			if name == "" {
-				continue
-			}
-			if !profileNames.Has(name) {
-				return fmt.Errorf("plugin '%s' references undefined scheduling profile '%s'", spec.Name, name)
 			}
 		}
 	}

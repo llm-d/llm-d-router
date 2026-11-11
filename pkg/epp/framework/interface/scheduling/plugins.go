@@ -56,16 +56,6 @@ type ProfileHandler interface {
 		profileResults map[string]*ProfileRunResult) (*SchedulingResult, error)
 }
 
-// ProfileReferencer is an optional interface for plugins whose parameters
-// name scheduling profiles. The config loader fails when a returned name
-// matches no configured profile.
-type ProfileReferencer interface {
-	plugin.Plugin
-	// ReferencedProfiles returns the profile names set in the plugin's
-	// parameters. Unset names are omitted.
-	ReferencedProfiles() []string
-}
-
 // Filter defines the interface for filtering a list of pods based on context.
 type Filter interface {
 	plugin.Plugin

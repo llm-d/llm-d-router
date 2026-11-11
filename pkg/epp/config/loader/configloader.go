@@ -119,6 +119,7 @@ func InstantiateAndConfigure(
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
+	handle.SetSchedulingProfileNames(schedulingProfileNames(rawConfig))
 	if err := instantiatePlugins(rawConfig.Plugins, handle, logger); err != nil {
 		return nil, fmt.Errorf("plugin instantiation failed: %w", err)
 	}
@@ -129,9 +130,6 @@ func InstantiateAndConfigure(
 	logger.Info("Instantiated all plugins and applied system defaults. Effective raw configuration", "config", rawConfig.String())
 
 	if err := validateConfig(rawConfig); err != nil {
-		return nil, fmt.Errorf("configuration validation failed: %w", err)
-	}
-	if err := validateProfileReferences(rawConfig, handle); err != nil {
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 

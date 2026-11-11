@@ -887,6 +887,11 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			configText: successPluginOmitsProfileText,
 			wantErr:    false,
 		},
+		{
+			name:       "Success (Deep Validation) - Plugin References Implicit Default Profile",
+			configText: successPluginReferencesImplicitDefaultProfileText,
+			wantErr:    false,
+		},
 
 		// --- Feature Validation: Scheduling ---
 		{
@@ -1227,7 +1232,7 @@ schedulingProfiles:
 					wantErr     string
 				}{
 					{profileName: "prefill"},
-					{profileName: "prefil", wantErr: "plugin 'affinity' references undefined scheduling profile 'prefil'"},
+					{profileName: "prefil", wantErr: "scheduling profile 'prefil' is not defined"},
 				} {
 					rawConfig, _, err := LoadRawConfig([]byte(fmt.Sprintf(text, pluginType, strategy, tc.profileName)), logger)
 					require.NoError(t, err)
@@ -1407,20 +1412,10 @@ func (m *mockDrainFilter) Filter(context.Context, *fwksched.InferenceRequest, []
 }
 
 // Mock Filter that names a scheduling profile in its parameters
-type mockProfileReferencer struct {
-	mockPlugin
-	profileName string
-}
-
-// compile-time type assertion
-var _ fwksched.ProfileReferencer = &mockProfileReferencer{}
+type mockProfileReferencer struct{ mockPlugin }
 
 func (m *mockProfileReferencer) Filter(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	return endpoints
-}
-
-func (m *mockProfileReferencer) ReferencedProfiles() []string {
-	return []string{m.profileName}
 }
 
 // Mock Handler
@@ -1614,7 +1609,7 @@ func registerTestPlugins(t *testing.T) {
 		}, mockWithNestedDependenciesConfigParser,
 	)
 
-	fwkplugin.Register(testProfileReferencerType, fwkplugin.StabilityStable, func(name string, params *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testProfileReferencerType, fwkplugin.StabilityStable, func(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		var p struct {
 			ProfileName string `json:"profileName"`
 		}
@@ -1623,7 +1618,10 @@ func registerTestPlugins(t *testing.T) {
 				return nil, err
 			}
 		}
-		return &mockProfileReferencer{mockPlugin: mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileReferencerType}}, profileName: p.ProfileName}, nil
+		if err := fwkplugin.ValidateProfileName(handle, p.ProfileName); err != nil {
+			return nil, err
+		}
+		return &mockProfileReferencer{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileReferencerType}}}, nil
 	})
 
 	fwkplugin.Register(testSourceType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {

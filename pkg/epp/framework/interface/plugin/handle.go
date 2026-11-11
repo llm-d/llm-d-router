@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // Handle provides plugins a set of standard data and tools to work with
@@ -51,6 +52,14 @@ type Handle interface {
 	// --refresh-metrics-interval, after the minimum-interval clamp. Data sources
 	// that set their own interval may poll less often than this. Zero when unset.
 	RefreshMetricsInterval() time.Duration
+
+	// SchedulingProfileNames returns the names of the configured scheduling
+	// profiles. It is empty when the profiles are not known.
+	SchedulingProfileNames() sets.Set[string]
+
+	// SetSchedulingProfileNames records the configured scheduling profile
+	// names so plugin factories can validate parameters that name a profile.
+	SetSchedulingProfileNames(sets.Set[string])
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -79,6 +88,7 @@ type eppHandle struct {
 	metricsRecorder        MetricsRecorder
 	crossReplicaSyncer     Plugin
 	refreshMetricsInterval time.Duration
+	schedulingProfileNames sets.Set[string]
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -143,6 +153,16 @@ func (h *eppHandle) RefreshMetricsInterval() time.Duration {
 	return h.refreshMetricsInterval
 }
 
+// SchedulingProfileNames returns the configured scheduling profile names.
+func (h *eppHandle) SchedulingProfileNames() sets.Set[string] {
+	return h.schedulingProfileNames
+}
+
+// SetSchedulingProfileNames sets the configured scheduling profile names.
+func (h *eppHandle) SetSchedulingProfileNames(names sets.Set[string]) {
+	h.schedulingProfileNames = names
+}
+
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -191,4 +211,14 @@ func PluginByType[P Plugin](handlePlugins HandlePlugins, name string) (P, error)
 		return zero, fmt.Errorf("the plugin with the name '%s' is not an instance of %T", name, zero)
 	}
 	return plugin, nil
+}
+
+// ValidateProfileName returns an error when name is set and the handle knows
+// the configured scheduling profiles but none of them is named name.
+func ValidateProfileName(handle Handle, name string) error {
+	profiles := handle.SchedulingProfileNames()
+	if name == "" || profiles.Len() == 0 || profiles.Has(name) {
+		return nil
+	}
+	return fmt.Errorf("scheduling profile '%s' is not defined", name)
 }

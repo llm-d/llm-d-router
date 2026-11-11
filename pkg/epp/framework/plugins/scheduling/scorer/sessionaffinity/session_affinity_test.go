@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -286,32 +287,36 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 	}
 }
 
-func TestSessionAffinity_ReferencedProfiles(t *testing.T) {
+func TestSessionAffinity_FactoryProfileName(t *testing.T) {
 	tests := []struct {
-		name   string
-		params string
-		want   []string
+		name      string
+		profiles  sets.Set[string]
+		params    string
+		expectErr bool
 	}{
-		{name: "no profileName", params: `{"strategy":"encoded_endpoint_header"}`, want: nil},
-		{name: "encoded_endpoint_header with profileName", params: `{"strategy":"encoded_endpoint_header","profileName":"prefill"}`, want: []string{"prefill"}},
-		{name: "session_id with profileName", params: `{"strategy":"session_id","profileName":"prefill"}`, want: []string{"prefill"}},
+		{name: "defined profile", profiles: sets.New("prefill", "decode"), params: `{"profileName":"prefill"}`},
+		{name: "defined profile with session_id", profiles: sets.New("prefill", "decode"), params: `{"strategy":"session_id","profileName":"prefill"}`},
+		{name: "undefined profile rejected", profiles: sets.New("prefill", "decode"), params: `{"profileName":"prefil"}`, expectErr: true},
+		{name: "undefined profile with session_id rejected", profiles: sets.New("prefill", "decode"), params: `{"strategy":"session_id","profileName":"prefil"}`, expectErr: true},
+		{name: "profileName omitted", profiles: sets.New("prefill", "decode"), params: `{}`},
+		{name: "profiles unknown to the handle", params: `{"profileName":"prefil"}`},
 	}
 
-	handle := utils.NewTestHandle(utils.NewTestContext(t))
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			p, err := sessionaffinity.Factory("test", plugin.StrictDecoder(json.RawMessage(test.params)), handle)
+			handle := utils.NewTestHandle(utils.NewTestContext(t))
+			handle.SetSchedulingProfileNames(test.profiles)
+			_, err := sessionaffinity.Factory("test", plugin.StrictDecoder(json.RawMessage(test.params)), handle)
+			if test.expectErr {
+				if err == nil || !strings.Contains(err.Error(), "scheduling profile 'prefil' is not defined") {
+					t.Fatalf("expected undefined profile error, got %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if diff := cmp.Diff(test.want, p.(*sessionaffinity.SessionAffinity).ReferencedProfiles()); diff != "" {
-				t.Errorf("unexpected referenced profiles (-want +got):\n%s", diff)
-			}
 		})
-	}
-
-	if diff := cmp.Diff([]string{"prefill"}, sessionaffinity.NewSessionAffinity("test", "", "prefill").ReferencedProfiles()); diff != "" {
-		t.Errorf("unexpected referenced profiles from NewSessionAffinity (-want +got):\n%s", diff)
 	}
 }
 

@@ -769,6 +769,18 @@ schedulingProfiles:
   - pluginRef: referencer
 `
 
+// successPluginReferencesImplicitDefaultProfileText names the profile the loader
+// creates when the config defines none.
+const successPluginReferencesImplicitDefaultProfileText = `
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: referencer
+  type: test-profile-referencer
+  parameters:
+    profileName: default
+`
+
 // errorDuplicatePluginText defines the same plugin name twice.
 const errorDuplicatePluginText = `
 apiVersion: llm-d.ai/v1

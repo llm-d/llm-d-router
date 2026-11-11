@@ -80,7 +80,6 @@ func (p *parameters) validate() error {
 }
 
 var _ scheduling.Scorer = &SessionAffinity{}
-var _ scheduling.ProfileReferencer = &SessionAffinity{}
 var _ fwkrh.ResponseHeaderProcessor = &SessionAffinity{}
 var _ fwkrh.PreRequest = &SessionAffinity{}
 
@@ -95,11 +94,13 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 	if err := params.validate(); err != nil {
 		return nil, fmt.Errorf("invalid parameters of the '%s' scorer - %w", SessionAffinityType, err)
 	}
+	if err := plugin.ValidateProfileName(handle, params.ProfileName); err != nil {
+		return nil, fmt.Errorf("invalid profileName of the '%s' scorer - %w", SessionAffinityType, err)
+	}
 
 	return &SessionAffinity{
-		typedName:   plugin.TypedName{Type: SessionAffinityType, Name: name},
-		profileName: params.ProfileName,
-		strategy:    newStrategy(params, handle),
+		typedName: plugin.TypedName{Type: SessionAffinityType, Name: name},
+		strategy:  newStrategy(params, handle),
 	}, nil
 }
 
@@ -107,8 +108,7 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 // When sessionHeader is empty the default x-session-token header is used.
 func NewSessionAffinity(name, sessionHeader, profileName string) *SessionAffinity {
 	return &SessionAffinity{
-		typedName:   plugin.TypedName{Type: SessionAffinityType, Name: name},
-		profileName: profileName,
+		typedName: plugin.TypedName{Type: SessionAffinityType, Name: name},
 		strategy: &encodedEndpointHeaderStrategy{
 			sessionHeader: sessionutil.NormalizeHeader(sessionHeader),
 			profileName:   profileName,
@@ -138,21 +138,12 @@ func newStrategy(params parameters, handle plugin.Handle) strategy {
 // SessionAffinity is a routing scorer that routes a session's requests to the
 // same pod, per whichever algorithm strategy implements.
 type SessionAffinity struct {
-	typedName   plugin.TypedName
-	profileName string
-	strategy    strategy
+	typedName plugin.TypedName
+	strategy  strategy
 }
 
 func (s *SessionAffinity) TypedName() plugin.TypedName {
 	return s.typedName
-}
-
-// ReferencedProfiles returns the configured profileName, if set.
-func (s *SessionAffinity) ReferencedProfiles() []string {
-	if s.profileName == "" {
-		return nil
-	}
-	return []string{s.profileName}
 }
 
 // Consumes reports the request attributes the configured strategy reads.

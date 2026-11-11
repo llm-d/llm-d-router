@@ -18,7 +18,6 @@ package sessionaffinity
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -36,11 +35,4 @@ func TestMultiClusterFactory(t *testing.T) {
 	require.IsType(t, &MultiClusterFilter{}, p)
 	require.Equal(t, MultiClusterFilterType, p.TypedName().Type)
 	require.Equal(t, "mc", p.TypedName().Name)
-}
-
-func TestMultiClusterFilter_ReferencedProfiles(t *testing.T) {
-	h := fwkplugin.NewEppHandle(context.Background(), nil, fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
-	p, err := MultiClusterFactory("mc", fwkplugin.StrictDecoder(json.RawMessage(`{"profileName":"prefill"}`)), h)
-	require.NoError(t, err)
-	require.Equal(t, []string{"prefill"}, p.(*MultiClusterFilter).ReferencedProfiles())
 }
