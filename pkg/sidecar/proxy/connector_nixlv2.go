@@ -39,9 +39,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
 // MoRI-IO WRITE-mode kv_transfer_params fields, populated by the sidecar
@@ -131,6 +131,9 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// Keeps the client's body intact for the decode request below.
 	prefillRequest := maps.Clone(body)
+	// The EPP may forward the rendered prompt as kv_transfer_params.prompt_token_ids;
+	// both hops below replace kv_transfer_params, so carry the IDs or both pods re-tokenize.
+	promptTokenIDs := s.clientPromptTokenIDs(body)
 
 	// WRITE mode populates the destination fields the prefill engine needs for
 	// its RDMA Write; READ mode leaves them nil per the standard NIXLv2 contract.
@@ -179,6 +182,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
 	addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), source)
+	setPromptTokenIDs(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), promptTokenIDs)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
@@ -250,7 +254,7 @@ retryLoop:
 	}
 
 	prefillDuration := time.Since(prefillStart)
-	observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
+	observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
@@ -265,7 +269,7 @@ retryLoop:
 	}
 
 	if prefillErr == nil && isHTTPError(pw.statusCode) {
-		observeStageError(r.Context(), metrics.StagePrefill)
+		observeStageError(r.Context(), routing.StagePrefill)
 		logger.Error(fmt.Errorf("prefill returned %d", pw.statusCode), "prefill request failed",
 			"request_id", uuidStr,
 			logBodyBytesKey, pw.buffer.Len())
@@ -292,7 +296,7 @@ retryLoop:
 		}
 	}
 	if prefillErr != nil {
-		observeStageError(r.Context(), metrics.StagePrefill)
+		observeStageError(r.Context(), routing.StagePrefill)
 		logger.Error(jsonErrorForLog(prefillErr), "prefill request failed",
 			"request_id", uuidStr,
 			"status", pw.statusCode,
@@ -442,6 +446,16 @@ retryLoop:
 	}
 	// Decode behind a prefiller has no ECConnector; the prefill stage consumed the encoder cache.
 	delete(body, reqcommon.FieldECTransferParams)
+	if dKVParams, ok := pKVTransferParams.(map[string]any); ok {
+		setPromptTokenIDs(dKVParams, promptTokenIDs)
+	} else if pKVTransferParams == nil && promptTokenIDs != nil {
+		// The prefill response omitted kv_transfer_params (the decode-recompute
+		// fallback): still carry the client's forwarded prompt_token_ids so the
+		// decode worker can skip re-tokenizing the long prompt. vLLM pops the
+		// key and treats the emptied map as falsy, so no empty KV metadata
+		// reaches the connector.
+		pKVTransferParams = map[string]any{reqcommon.FieldPromptTokenIDs: promptTokenIDs}
+	}
 	body[reqcommon.FieldKVTransferParams] = pKVTransferParams
 
 	dbody, err := json.Marshal(body)
@@ -475,17 +489,17 @@ retryLoop:
 	}
 	decodeReturned = true
 	if err := finalizeDecodeWriter(); err != nil {
-		observeStageDuration(r.Context(), metrics.StageDecode, time.Since(decodeStart))
-		observeStageError(r.Context(), metrics.StageDecode)
+		observeStageDuration(r.Context(), routing.StageDecode, time.Since(decodeStart))
+		observeStageError(r.Context(), routing.StageDecode)
 		logger.Error(err, "failed to flush cached token response writer")
 		decodeSpan.SetStatus(codes.Error, "failed to flush cached token response writer")
 		return
 	}
 
 	decodeDuration := time.Since(decodeStart)
-	observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
+	observeStageDuration(r.Context(), routing.StageDecode, decodeDuration)
 	if decodeStatus.failed() {
-		observeStageError(r.Context(), metrics.StageDecode)
+		observeStageError(r.Context(), routing.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())))
@@ -566,6 +580,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 
 	// Keeps the client's body intact for the decode request built below.
 	prefillRequest := maps.Clone(body)
+	promptTokenIDs := s.clientPromptTokenIDs(body)
 
 	// Pin both requests to the same DP rank (kv_transfer_params + HTTP header).
 	// The header and remote_dp_rank must be in [0, dp_size_local).
@@ -620,6 +635,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	}
 	// Compose the OffloadingConnector p2p pull onto the NIXL prefill request.
 	addP2PPullToPrefill(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), source)
+	setPromptTokenIDs(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), promptTokenIDs)
 
 	reqcommon.CapSingleToken(prefillRequest, apiType)
 
@@ -667,6 +683,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Wide-EP fan-out (decode request): the opposite host list, the PREFILL-side
 	// pod IPs. A multi-pod deployment must set both host flags. Re-resolved per
 	// request so peer restarts (new IP) are picked up within the TTL.
+	setPromptTokenIDs(body[reqcommon.FieldKVTransferParams].(map[string]any), promptTokenIDs)
 	if len(remoteHosts) > 0 {
 		dkv := body[reqcommon.FieldKVTransferParams].(map[string]any)
 		dkv["remote_hosts"] = []any{prefillHost}
@@ -744,7 +761,9 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Decode writes into a deferred writer that buffers everything until we
 	// commit() (prefill succeeded -> flush + stream on) or abort() (prefill
 	// failed -> discard); it never writes to the client directly.
-	dcw := newDeferredCommitWriter(w)
+	dcw := newDeferredCommitWriter()
+	streamingEnabled, _ := body[reqcommon.FieldStream].(bool)
+	var finalizeDecodeWriter func() error
 
 	// Prefill goroutine: body is buffered so it can be returned to the client
 	// verbatim on failure. On ANY non-2xx status (transport errors surface as
@@ -776,7 +795,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		prefillHandler.ServeHTTP(pw, preq)
 		prefillResp = pw
 		prefillDuration := time.Since(prefillStartedAt)
-		observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
+		observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
 		prefillSpan.SetAttributes(
 			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
@@ -854,13 +873,22 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			}
 			cancel()
 			if !decodeAborted.Load() {
-				dcw.commit()
+				dcw.commit(w)
 			}
 			<-prefillDone
 		case <-prefillDone:
 			if prefillResp != nil && !isHTTPError(prefillResp.statusCode) {
-				// Prefill succeeded: commit decode's buffered response and stream on.
-				if !dcw.commit() {
+				// Rewrite decode's usage with the prefill cache count, as in serial dispatch.
+				var prefillerResponse map[string]any
+				if err := json.Unmarshal(prefillResp.bodyBytes(), &prefillerResponse); err != nil {
+					logger.Error(jsonErrorForLog(err), "concurrent-dispatch: failed to parse prefill response", "request_id", uuidStr)
+				}
+				pUsage := prefillerResponse[reqcommon.FieldUsage]
+				pKVParams, _ := prefillerResponse[reqcommon.FieldKVTransferParams].(map[string]any)
+				pCachedTokens, _ := usage.CachedTokens(pUsage)
+				decodeWriter, finalize := decodeResponseWriter(w, pCachedTokens, pUsage != nil && len(pKVParams) > 0, streamingEnabled)
+				finalizeDecodeWriter = finalize
+				if !dcw.commit(decodeWriter) {
 					logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
 						"request_id", uuidStr)
 				}
@@ -869,7 +897,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			// Prefill failed: abort decode and return the prefill error verbatim.
 			cancel()
 			dcw.abort()
-			observeStageError(r.Context(), metrics.StagePrefill)
+			observeStageError(r.Context(), routing.StagePrefill)
 			status := http.StatusBadGateway
 			if prefillResp != nil {
 				status = prefillResp.statusCode
@@ -899,7 +927,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 			dcw.abort()
 			// Counted here rather than from prefill's own outcome: the cancelled
 			// prefill may still come back 2xx if it completed as the timer fired.
-			observeStageError(r.Context(), metrics.StagePrefill)
+			observeStageError(r.Context(), routing.StagePrefill)
 			decodeTimedOut = true
 			logger.Error(nil, "concurrent-dispatch: prefill did not complete within KV-wait timeout; aborting",
 				"request_id", uuidStr, "timeout", waitTimeout.String())
@@ -915,6 +943,13 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Wait for decode to finish (streamed on success, or promptly aborted) so
 	// we never leak the decode goroutine or its response body.
 	<-decodeDone
+	var finalizeErr error
+	if finalizeDecodeWriter != nil && !decodeAborted.Load() {
+		if finalizeErr = finalizeDecodeWriter(); finalizeErr != nil {
+			logger.Error(finalizeErr, "failed to flush cached token response writer (concurrent-dispatch)",
+				"request_id", uuidStr)
+		}
+	}
 
 	// Decode errors are attributed only when the commit point let decode's
 	// response reach the client. When the commit point wrote the response
@@ -922,12 +957,12 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// and the failure is counted as a prefill error. Decode duration is also
 	// sampled on the KV-wait timeout, where decode waited the full timeout.
 	if !clientResponded {
-		observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
-		if decodeAborted.Load() || dcw.failed() {
-			observeStageError(r.Context(), metrics.StageDecode)
+		observeStageDuration(r.Context(), routing.StageDecode, decodeDuration)
+		if decodeAborted.Load() || dcw.failed() || finalizeErr != nil {
+			observeStageError(r.Context(), routing.StageDecode)
 		}
 	} else if decodeTimedOut {
-		observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
+		observeStageDuration(r.Context(), routing.StageDecode, decodeDuration)
 	}
 
 	if currentSpan := trace.SpanFromContext(parentCtx); currentSpan.SpanContext().IsValid() {

@@ -102,7 +102,8 @@ router:
     presets:
       envoy:
         configMap:
-          name: envoy
+          # Empty means <release>-envoy. Set a name to override it.
+          name: ""
           data:
             envoy.yaml: |
               {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
@@ -545,13 +546,14 @@ router:
         volumes:
           - name: config
             configMap:
-              name: '{{ .Values.router.proxy.presets.envoy.configMap.name }}'
+              name: '{{ include "llm-d-router.proxyConfigMapName" . }}'
               items:
                 - key: envoy.yaml
                   path: envoy.yaml
       agentgateway:
         configMap:
-          name: agentgateway
+          # Empty means <release>-agentgateway. Set a name to override it.
+          name: ""
         name: agentgateway-proxy
         # Keep main on latest-dev; release tooling rewrites this to a stable tag.
         image: cr.agentgateway.dev/agentgateway:latest-dev

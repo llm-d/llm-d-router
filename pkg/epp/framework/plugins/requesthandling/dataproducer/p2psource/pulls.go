@@ -142,6 +142,9 @@ func (e *pullEntry) OnEvicted(_ string, _ plugin.StateKey) {
 // producer without tracking is not called for every response chunk.
 type trackingProducer struct {
 	*Producer
+	// ttft records TTFT by decision from the same response hook. Nil unless
+	// ttftByDecision is set.
+	ttft *ttftRecorder
 }
 
 var (
@@ -154,13 +157,19 @@ var (
 // ResponseBody releases the request's pull at its first response chunk, by
 // which time the computing pod has prefilled and the pull is done. The
 // end-of-stream call, which the director also makes for a request that fails
-// after scheduling, releases a pull that no earlier chunk did.
-func (p *trackingProducer) ResponseBody(_ context.Context, request *scheduling.InferenceRequest, response *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
+// after scheduling, releases a pull that no earlier chunk did. With
+// ttftByDecision set, it then passes the chunk to the TTFT recorder. The two
+// keep separate per-request state, so the order changes no result; releasing
+// first keeps the release independent of the recorder's early returns.
+func (p *trackingProducer) ResponseBody(ctx context.Context, request *scheduling.InferenceRequest, response *fwkrh.Response, md *fwkdl.EndpointMetadata) {
 	if request == nil || response == nil {
 		return
 	}
 	if response.StartOfStream || response.EndOfStream {
 		p.pulls.release(request.RequestID)
+	}
+	if p.ttft != nil {
+		p.ttft.ResponseBody(ctx, request, response, md)
 	}
 }
 

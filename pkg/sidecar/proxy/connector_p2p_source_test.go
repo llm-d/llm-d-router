@@ -327,7 +327,11 @@ var _ = Describe("kvSourceFromBody", func() {
 
 		Expect(present).To(BeTrue())
 		Expect(source).To(Equal(&kvSource{kvRequestID: "k2", p2pPeer: p2pPeer{host: sourceHost, port: 7778}}))
-		Expect(body[reqcommon.FieldKVTransferParams]).To(Equal(map[string]any{"other": true}))
+		// The cleaned kv_transfer_params is written back as json.RawMessage
+		// (prompt_token_ids and other keys stay as raw bytes).
+		cleaned, ok := body[reqcommon.FieldKVTransferParams].(json.RawMessage)
+		Expect(ok).To(BeTrue())
+		Expect(cleaned).To(MatchJSON(`{"other":true}`))
 	})
 
 	It("drops a source whose host is not in the allowlist", func() {
@@ -338,7 +342,11 @@ var _ = Describe("kvSourceFromBody", func() {
 
 		Expect(present).To(BeTrue())
 		Expect(source).To(BeNil())
-		Expect(body[reqcommon.FieldKVTransferParams]).To(Equal(map[string]any{"other": true}))
+		// The cleaned kv_transfer_params is written back as json.RawMessage
+		// (prompt_token_ids and other keys stay as raw bytes).
+		cleaned, ok := body[reqcommon.FieldKVTransferParams].(json.RawMessage)
+		Expect(ok).To(BeTrue())
+		Expect(cleaned).To(MatchJSON(`{"other":true}`))
 	})
 
 	It("removes kv_transfer_params when the source was its only key", func() {

@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/weightedfairshare"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 func TestWeightedFairShareStreamingUsage(t *testing.T) {
@@ -76,8 +77,8 @@ flowControl:
 			crmetrics.Registry = prometheus.NewRegistry()
 			t.Cleanup(func() { crmetrics.Registry = registry })
 
-			h := NewTestHarness(t.Context(), t, WithStandardMode(), WithConfigText(configText)).WithBaseResources()
-			pods := []PodState{P(0, 0, 0.1, modelMyModelTarget)}
+			h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText)).WithBaseResources()
+			pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget)}
 			h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
 
 			requests := fwkepp.ReqRaw(map[string]string{

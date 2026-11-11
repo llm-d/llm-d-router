@@ -9,7 +9,7 @@ IMAGE_REGISTRY ?= ghcr.io/llm-d
 
 # Image tags
 COORDINATOR_TAG      ?= dev
-VLLM_SIMULATOR_TAG   ?= v1.1.0
+VLLM_SIMULATOR_TAG   ?= v1.2.0
 EPP_TAG              ?= dev
 
 # Full image references (derived; override only if you need a non-standard repo)
@@ -127,7 +127,7 @@ E2E_NUM_PROCS ?= 5
 # suite fails fast if the two disagree.
 E2E_ENV_VARS = COORDINATOR_IMAGE VLLM_IMAGE EPP_IMAGE VLLM_RENDER_IMAGE VLLM_RENDER_PORT \
                E2E_GATEWAY_PORT E2E_KEEP_CLUSTER_ON_FAILURE E2E_NUM_PROCS EXISTS_TIMEOUT \
-               E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME E2E_EPP_TOPOLOGY
+               E2E_PRINT_LOGS K8S_CONTEXT READY_TIMEOUT MODEL_NAME E2E_EPP_TOPOLOGY E2E_GATEWAY
 BUILDER_E2E_ENV_FLAGS = $(foreach v,$(E2E_ENV_VARS),$(if $($(v)),-e '$(v)=$($(v))'))
 ifneq ($(filter command line environment,$(origin NAMESPACE)),)
 BUILDER_E2E_ENV_FLAGS += -e NAMESPACE=$(NAMESPACE)

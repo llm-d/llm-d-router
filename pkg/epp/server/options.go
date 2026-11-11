@@ -134,8 +134,11 @@ type Options struct {
 	tlsCipherSuiteValues       []uint16 // Parsed TLS cipher suite values.
 	MetricsEndpointAuth        bool     // Enables authentication and authorization of the metrics endpoint.
 	MetricsClientCAFile        string   // PEM CA that requires a verified client cert on the metrics endpoint.
+	ClientCAFile               string   // PEM CA that requires a verified client cert on the serving listener.
 	MetricsCertDir             string   // Directory with the metrics server certificates that enables metrics TLS.
 	EnableGRPCStreamMetrics    bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
+	// clientCAs is the CA pool parsed from ClientCAFile.
+	clientCAs *x509.CertPool
 	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
 	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. default-flow does not count
 	// against the cap. Bounds metric cardinality in deployments with many distinct fairness IDs.
@@ -285,6 +288,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Enables authentication and authorization of the metrics endpoint.")
 	fs.StringVar(&opts.MetricsClientCAFile, "metrics-client-ca-file", opts.MetricsClientCAFile,
 		"PEM CA for metrics mTLS: require verified client certs.")
+	fs.StringVar(&opts.ClientCAFile, "client-ca-file", opts.ClientCAFile,
+		"PEM CA for mTLS on the serving listener: require a verified client certificate from the gateway. Requires --secure-serving.")
 	fs.StringVar(&opts.MetricsCertDir, "metrics-cert-dir", opts.MetricsCertDir,
 		"Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
@@ -379,6 +384,18 @@ func (opts *Options) Complete() error {
 		}
 	}
 
+	if opts.ClientCAFile != "" {
+		caPEM, err := os.ReadFile(opts.ClientCAFile)
+		if err != nil {
+			return fmt.Errorf("%w %s: %v", errReadClientCA, opts.ClientCAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return fmt.Errorf("%w: %s", errNoValidClientCA, opts.ClientCAFile)
+		}
+		opts.clientCAs = pool
+	}
+
 	if opts.TLSMinVersion != "" {
 		v, err := parseTLSVersion(opts.TLSMinVersion)
 		if err != nil {
@@ -407,6 +424,9 @@ var (
 	errMetricsCertUnreadable          = errors.New("metrics TLS: cert file unreadable")
 	errReadMetricsClientCA            = errors.New("reading metrics client CA")
 	errNoValidMetricsCA               = errors.New("no valid CA certs in metrics client CA file")
+	errClientCARequiresSecureServing  = errors.New(`"client-ca-file" requires "secure-serving"`)
+	errReadClientCA                   = errors.New("reading client CA")
+	errNoValidClientCA                = errors.New("no valid CA certs in client CA file")
 )
 
 // ConfigureMetricsTLS enables TLS, and optional client mTLS, on the metrics server.
@@ -462,6 +482,9 @@ func (opts *Options) Validate() error {
 	}
 	if opts.MetricsCertDir != "" && opts.MetricsClientCAFile == "" && !opts.MetricsEndpointAuth {
 		return errMetricsTLSWithoutAuth
+	}
+	if opts.ClientCAFile != "" && !opts.SecureServing {
+		return errClientCARequiresSecureServing
 	}
 
 	if opts.RefreshMetricsInterval < MinRefreshMetricsInterval {
@@ -549,6 +572,12 @@ func (opts *Options) TLSMinVersionValue() uint16 {
 // TLSCipherSuiteValues returns the parsed uint16 TLS cipher suite IDs.
 func (opts *Options) TLSCipherSuiteValues() []uint16 {
 	return opts.tlsCipherSuiteValues
+}
+
+// ClientCAPool returns the CA pool parsed from ClientCAFile, or nil when the
+// serving listener does not require client certificates.
+func (opts *Options) ClientCAPool() *x509.CertPool {
+	return opts.clientCAs
 }
 
 var tlsVersions = map[string]uint16{

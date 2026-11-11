@@ -1281,3 +1281,46 @@ func countLogMsgs(infos []capturedLog, substr string) int {
 	}
 	return n
 }
+
+// TestPrefillStep_FreshBodyForwardsCacheSaltAndPriority covers the formats
+// whose prefill body is built from RequestContext rather than cloned:
+// vLLM salts the first block hash with cache_salt, so a prefill without it
+// shares cache blocks with unsalted requests.
+func TestPrefillStep_FreshBodyForwardsCacheSaltAndPriority(t *testing.T) {
+	step, err := NewPrefillStep(gateway.New(config.GatewayConfig{}), map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		format reqcommon.APIType
+		body   map[string]any
+	}{
+		{"completions with salt and priority", reqcommon.APITypeCompletions, map[string]any{"prompt": "hi", reqcommon.FieldCacheSalt: "s", reqcommon.FieldPriority: -5}},
+		{"generate with salt and priority", reqcommon.APITypeVLLMGenerate, map[string]any{reqcommon.FieldCacheSalt: "s", reqcommon.FieldPriority: -5}},
+		{"completions without salt or priority", reqcommon.APITypeCompletions, map[string]any{"prompt": "hi"}},
+		{"generate without salt or priority", reqcommon.APITypeVLLMGenerate, map[string]any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-salt",
+				Model:            "test",
+				TokenIDs:         []int{1, 2},
+				Body:             tc.body,
+				KVTransferParams: make(map[string]any),
+			}
+			body, err := step.(*PrefillStep).buildPrefillBody(context.Background(), reqCtx, tc.format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{reqcommon.FieldCacheSalt, reqcommon.FieldPriority} {
+				want, inClient := tc.body[field]
+				got, inPrefill := body[field]
+				if inClient != inPrefill || got != want {
+					t.Errorf("%s: prefill has %v (present=%v), client sent %v (present=%v)", field, got, inPrefill, want, inClient)
+				}
+			}
+		})
+	}
+}

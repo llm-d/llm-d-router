@@ -115,6 +115,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionid"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/forwardtokens"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/headerstamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -762,6 +763,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(p2psource.PluginType, fwkplugin.StabilityAlpha, p2psource.PluginFactory)
 	fwkplugin.Register(selectivekv.PluginType, fwkplugin.StabilityAlpha, selectivekv.PluginFactory)
 	fwkplugin.Register(loraresidency.Type, fwkplugin.StabilityAlpha, loraresidency.Factory)
+	fwkplugin.Register(forwardtokens.PluginType, fwkplugin.StabilityAlpha, forwardtokens.PluginFactory)
 	// multicluster variants
 	fwkplugin.Register(sessionaffinityfilter.MultiClusterFilterType, fwkplugin.StabilityAlpha, sessionaffinityfilter.MultiClusterFactory)
 	fwkplugin.Register(queuedepth.MultiClusterScorerType, fwkplugin.StabilityAlpha, queuedepth.MultiClusterScorerFactory)
@@ -1120,8 +1122,9 @@ func (r *Runner) resolveDiscovery(rawConfig *configapiv1.EndpointPickerConfig) (
 
 // setupPeerDiscovery runs the PeerDiscovery plugin referenced by
 // rawConfig.DataLayer.Discovery.Peers, when set, as a manager runnable on
-// every replica. Discovered peers land in store. The plugin is expected to
-// have been instantiated and registered in r.PluginHandle by
+// every replica. Discovered peers land in a store handed to the configured
+// cross-replica syncer when it consumes them. The plugin is expected to have
+// been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo.
 func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.EndpointPickerConfig) error {
 	dl := rawConfig.DataLayer
@@ -1139,12 +1142,29 @@ func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.End
 		return fmt.Errorf("peerDiscovery: plugin %q does not implement PeerDiscovery", ref)
 	}
 
-	// TODO(#1892): Connect peerStore to CrossReplicaSyncer. See TestPeerDiscoveryFullWiring.
 	peerStore := statesync.NewMemoryPeerStore()
+	r.connectPeerStore(peerStore)
 	notifier := fwkdl.NewPeerNotifier(peerStore)
 	return mgr.Add(runnable.NoLeaderElection(manager.RunnableFunc(func(ctx context.Context) error {
 		return disc.Start(ctx, notifier)
 	})))
+}
+
+// connectPeerStore hands the peer set to the configured cross-replica syncer
+// when it consumes peers. A syncer backed by its own store does not implement
+// PeerConsumer, so discovery runs and the set stays unread; the log line says
+// so, because the peer set is then maintained for nothing.
+func (r *Runner) connectPeerStore(source fwkdl.PeerSource) {
+	syncer := r.PluginHandle.CrossReplicaSyncer()
+	consumer, ok := syncer.(fwkdl.PeerConsumer)
+	if !ok {
+		setupLog.Info("Peer discovery is configured but no cross-replica syncer consumes the peer set",
+			"syncerConfigured", syncer != nil)
+		return
+	}
+	consumer.SetPeerSource(source)
+	setupLog.Info("Connected the peer set to the cross-replica syncer",
+		"syncer", syncer.TypedName().String())
 }
 
 // initAdmissionControl builds the request admission controller, gated by the

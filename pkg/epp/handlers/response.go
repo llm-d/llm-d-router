@@ -34,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -376,14 +377,20 @@ func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *Req
 	return s.director.HandleResponseHeader(ctx, reqCtx)
 }
 
+// generateResponseHeaderResponse re-sets the response headers after the
+// response plugins ran. The failed-stage marker the plugins read is left out,
+// and removed from the upstream set when the response carried one, so the
+// client never sees it.
 func (s *StreamingServer) generateResponseHeaderResponse(reqCtx *RequestContext) *extProcPb.ProcessingResponse {
+	mutation := &extProcPb.HeaderMutation{SetHeaders: s.generateResponseHeaders(reqCtx)}
+	if _, ok := reqCtx.Response.Headers[routing.FailedStageHeader]; ok {
+		mutation.RemoveHeaders = []string{routing.FailedStageHeader}
+	}
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &extProcPb.HeadersResponse{
 				Response: &extProcPb.CommonResponse{
-					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: s.generateResponseHeaders(reqCtx),
-					},
+					HeaderMutation: mutation,
 				},
 			},
 		},
@@ -435,9 +442,10 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 		})
 	}
 
-	// Include any non-system-owned headers.
+	// Include any non-system-owned headers. The failed-stage marker is
+	// internal; generateResponseHeaderResponse removes it.
 	for key, value := range reqCtx.Response.Headers {
-		if request.IsSystemOwnedHeader(key) {
+		if request.IsSystemOwnedHeader(key) || key == routing.FailedStageHeader {
 			continue
 		}
 		headers = append(headers, &configPb.HeaderValueOption{

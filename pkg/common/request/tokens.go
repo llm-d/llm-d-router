@@ -19,6 +19,7 @@ package request
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -36,6 +37,10 @@ import (
 // stripped instead of capped: it defaults to 0 in vLLM, so removing it keeps
 // min_tokens <= max_tokens=1 without raising the floor above the cap (vLLM's
 // SamplingParams rejects min_tokens > max_tokens).
+//
+// n is stripped so the leg runs one sequence: vLLM splits n > 1 into child
+// requests but returns kv_transfer_params for only one of them, and the other
+// children hold their KV blocks until the lease expires.
 //
 // A Messages body with thinking enabled loses its thinking object: the API
 // requires budget_tokens below max_tokens, so the budget cannot stand next to a
@@ -66,6 +71,7 @@ func CapSingleToken(body map[string]any, apiType APIType) map[string]any {
 		limits[field] = 1
 	}
 	delete(limits, FieldMinTokens)
+	delete(limits, FieldN)
 	if apiType == APITypeMessages {
 		if thinking, _ := FieldValue(body, FieldThinking); thinkingType(thinking) == ThinkingTypeEnabled {
 			delete(body, FieldThinking)
@@ -183,6 +189,21 @@ func nonNegativeInt64(i int64) (int, error) {
 	return int(i), nil
 }
 
+// StreamRequested reports the client's stream flag. A null stream is unset.
+// Non-null, non-boolean values are rejected because a model server may coerce
+// them to true while the router treats them as non-streaming.
+func StreamRequested(body map[string]any) (bool, error) {
+	v, set := FieldValue(body, FieldStream)
+	if !set {
+		return false, nil
+	}
+	stream, isBool := v.(bool)
+	if !isBool {
+		return false, errors.New("stream must be a boolean")
+	}
+	return stream, nil
+}
+
 // RejectStatefulResponsesFields reports an error naming the first field it
 // finds that depends on state the router does not keep: previous_response_id
 // and conversation reference a prior turn, background asks for an async job
@@ -211,7 +232,7 @@ func RejectStatefulResponsesFields(body map[string]any) error {
 	if !readable {
 		return fmt.Errorf("field %q could not be read as a JSON array or string", FieldInput)
 	}
-	if referencesFile(items) {
+	if ReferencesFile(items) {
 		return fmt.Errorf("field %q is not supported by the router", FieldFileID)
 	}
 	return nil
@@ -290,7 +311,7 @@ var fileHydrationPartTypes = map[string]bool{
 	PartTypeComputerScreenshot: true,
 }
 
-// referencesFile reports whether v nests a content part naming a Files API
+// ReferencesFile reports whether v nests a content part naming a Files API
 // upload. The depth varies: a message content part, a computer_call_output's
 // output object, and a function_call_output's output array all carry one.
 //
@@ -299,7 +320,7 @@ var fileHydrationPartTypes = map[string]bool{
 // replayed from a prior response carries one, so refusing it would name a field
 // the client believes it omitted. Values reach this walk fully decoded, so a
 // JSON null arrives as a nil.
-func referencesFile(v any) bool {
+func ReferencesFile(v any) bool {
 	switch t := v.(type) {
 	case map[string]any:
 		if partType, _ := t[FieldType].(string); fileHydrationPartTypes[partType] {
@@ -308,13 +329,13 @@ func referencesFile(v any) bool {
 			}
 		}
 		for _, nested := range t {
-			if referencesFile(nested) {
+			if ReferencesFile(nested) {
 				return true
 			}
 		}
 	case []any:
 		for _, nested := range t {
-			if referencesFile(nested) {
+			if ReferencesFile(nested) {
 				return true
 			}
 		}

@@ -32,6 +32,10 @@ type Config struct {
 	Server   ServerConfig   `mapstructure:"server"`
 	Gateway  GatewayConfig  `mapstructure:"gateway"`
 	Pipeline PipelineConfig `mapstructure:"pipeline"`
+
+	// DeprecatedKeys are keys set in the file or environment that have no
+	// effect; main reports them at startup since this package has no logger.
+	DeprecatedKeys []string `mapstructure:"-"`
 }
 
 // BytesPerMB is the number of bytes in one megabyte.
@@ -51,8 +55,8 @@ type ServerConfig struct {
 	TLSMinVersion      string        `mapstructure:"tls_min_version"`
 	TLSCipherSuites    []string      `mapstructure:"tls_cipher_suites"`
 	ReadTimeout        time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout       time.Duration `mapstructure:"write_timeout"`
 	ShutdownTimeout    time.Duration `mapstructure:"shutdown_timeout"`
+	DrainTimeout       time.Duration `mapstructure:"drain_timeout"`
 	MaxRequestBodySize int64         `mapstructure:"max_request_body_size"`
 }
 
@@ -93,8 +97,8 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("server.tls_min_version", "")
 	v.SetDefault("server.tls_cipher_suites", []string{})
 	v.SetDefault("server.read_timeout", 30*time.Second)
-	v.SetDefault("server.write_timeout", 120*time.Second)
 	v.SetDefault("server.shutdown_timeout", 25*time.Second)
+	v.SetDefault("server.drain_timeout", 0)
 	v.SetDefault("server.max_request_body_size", DefaultMaxRequestBodySize)
 	v.SetDefault("gateway.max_idle_conns_per_host", 100)
 	v.SetDefault("gateway.idle_conn_timeout", 90*time.Second)
@@ -109,6 +113,9 @@ func Load(path string) (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshalling config: %w", err)
+	}
+	if v.IsSet("server.write_timeout") {
+		cfg.DeprecatedKeys = append(cfg.DeprecatedKeys, "server.write_timeout")
 	}
 	return &cfg, nil
 }

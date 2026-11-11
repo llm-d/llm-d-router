@@ -42,6 +42,7 @@ func init() {
 type ConditionalDecodeStep struct {
 	gwClient          *gateway.Client
 	promptTokenParity string
+	forwardTokenIDs   bool
 }
 
 func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.Step, error) {
@@ -55,7 +56,11 @@ func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (
 	if err != nil {
 		return nil, fmt.Errorf("conditional-decode: %w", err)
 	}
-	return &ConditionalDecodeStep{gwClient: gwClient, promptTokenParity: parity}, nil
+	forwardTokenIDs, _, err := paramBool(params, ParamForwardPromptTokenIDs)
+	if err != nil {
+		return nil, fmt.Errorf("conditional-decode: %w", err)
+	}
+	return &ConditionalDecodeStep{gwClient: gwClient, promptTokenParity: parity, forwardTokenIDs: forwardTokenIDs}, nil
 }
 
 func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName }
@@ -130,7 +135,11 @@ func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext) (ma
 	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
 		// The client's chat-completions, responses, or messages body is
-		// forwarded as-is.
+		// forwarded as-is. The server drops any client kv_transfer_params, so
+		// this map holds only the IDs.
+		if sendsPromptTokenIDs(s.forwardTokenIDs, reqCtx, format) {
+			body[reqcommon.FieldKVTransferParams] = map[string]any{reqcommon.FieldPromptTokenIDs: reqCtx.TokenIDs}
+		}
 	case reqcommon.APITypeCompletions:
 		if len(reqCtx.TokenIDs) > 0 {
 			body[reqcommon.FieldPrompt] = reqCtx.TokenIDs

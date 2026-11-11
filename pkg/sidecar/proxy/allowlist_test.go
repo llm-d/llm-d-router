@@ -35,6 +35,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -42,6 +43,7 @@ import (
 	. "github.com/onsi/gomega"    //nolint:revive
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -161,6 +163,115 @@ var _ = Describe("AllowlistValidator", func() {
 		Entry("when the context is canceled", false),
 		Entry("when the validator is stopped", true),
 	)
+
+	Context("when the InferencePool is redelivered", func() {
+		var (
+			validator *AllowlistValidator
+			client    *dynamicfake.FakeDynamicClient
+			pool      *unstructured.Unstructured
+		)
+		podGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+		podLists := func() int {
+			lists := 0
+			for _, action := range client.Actions() {
+				if action.GetVerb() == "list" && action.GetResource() == podGVR {
+					lists++
+				}
+			}
+			return lists
+		}
+
+		BeforeEach(func() {
+			validator = newTestAllowlistValidator()
+			DeferCleanup(validator.Stop)
+			client = validator.dynamicClient.(*dynamicfake.FakeDynamicClient)
+			ctx := context.Background()
+			pool = &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": routing.InferencePoolAPIGroup + "/v1",
+				"kind":       "InferencePool",
+				"metadata":   map[string]interface{}{"name": "test", "namespace": "test"},
+				"spec": map[string]interface{}{
+					"selector":    map[string]interface{}{"matchLabels": map[string]interface{}{"app": "vllm"}},
+					"targetPorts": []interface{}{map[string]interface{}{"number": int64(8000)}},
+				},
+			}}
+			_, err := client.Resource(validator.gvr).Namespace("test").Create(ctx, pool, metav1.CreateOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			for i, ip := range []string{"10.244.1.1", "10.244.1.2", "10.244.1.3"} {
+				pod := &unstructured.Unstructured{Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name": fmt.Sprintf("pod-%d", i), "namespace": "test",
+						"labels": map[string]interface{}{"app": "vllm"},
+					},
+					"status": map[string]interface{}{"podIP": ip},
+				}}
+				_, err := client.Resource(podGVR).Namespace("test").Create(ctx, pod, metav1.CreateOptions{})
+				Expect(err).ToNot(HaveOccurred())
+			}
+			Expect(validator.Start(newTestContext())).To(Succeed())
+			Eventually(func() bool {
+				return validator.IsAllowed("10.244.1.1:8000") && validator.IsAllowed("10.244.1.2:8000") &&
+					validator.IsAllowed("10.244.1.3:8000")
+			}, 3*time.Second, 10*time.Millisecond).Should(BeTrue())
+		})
+
+		It("should keep the pod informer when a resync redelivers the unchanged pool", func() {
+			listsBefore := podLists()
+			validator.podInformersMu.RLock()
+			informerBefore := validator.podInformers["test"]
+			validator.podInformersMu.RUnlock()
+
+			// A resync calls the update handler with the cached pool as both old and new.
+			cached, exists, err := validator.poolInformer.GetStore().GetByKey("test/test")
+			Expect(err).ToNot(HaveOccurred())
+			Expect(exists).To(BeTrue())
+			validator.onInferencePoolUpdate(cached, cached)
+
+			validator.podInformersMu.RLock()
+			informerAfter := validator.podInformers["test"]
+			validator.podInformersMu.RUnlock()
+			Expect(informerAfter).To(BeIdenticalTo(informerBefore))
+			Consistently(podLists, 200*time.Millisecond, 10*time.Millisecond).Should(Equal(listsBefore))
+			Expect(validator.IsAllowed("10.244.1.2:8000")).To(BeTrue())
+		})
+
+		It("should keep the pod informer when only the pool status changes", func() {
+			listsBefore := podLists()
+			validator.podInformersMu.RLock()
+			informerBefore := validator.podInformers["test"]
+			validator.podInformersMu.RUnlock()
+
+			updated := pool.DeepCopy()
+			updated.SetResourceVersion("2")
+			Expect(unstructured.SetNestedSlice(updated.Object,
+				[]interface{}{map[string]interface{}{"parentRef": map[string]interface{}{"name": "gateway"}}},
+				"status", "parents")).To(Succeed())
+			validator.onInferencePoolUpdate(pool, updated)
+
+			validator.podInformersMu.RLock()
+			informerAfter := validator.podInformers["test"]
+			validator.podInformersMu.RUnlock()
+			Expect(informerAfter).To(BeIdenticalTo(informerBefore))
+			Consistently(podLists, 200*time.Millisecond, 10*time.Millisecond).Should(Equal(listsBefore))
+			Expect(validator.IsAllowed("10.244.1.2:8000")).To(BeTrue())
+		})
+
+		It("should restart the pod informer when the pool spec changes", func() {
+			listsBefore := podLists()
+			updated := pool.DeepCopy()
+			Expect(unstructured.SetNestedSlice(updated.Object,
+				[]interface{}{map[string]interface{}{"number": int64(9000)}}, "spec", "targetPorts")).To(Succeed())
+			validator.onInferencePoolUpdate(pool, updated)
+
+			Eventually(podLists, 3*time.Second, 10*time.Millisecond).Should(BeNumerically(">", listsBefore))
+			Eventually(func() bool { return validator.IsAllowed("10.244.1.2:9000") },
+				3*time.Second, 10*time.Millisecond).Should(BeTrue())
+			Expect(validator.IsAllowed("10.244.1.2:8000")).To(BeFalse())
+		})
+	})
 
 	Context("when SSRF protection is disabled", func() {
 		var validator *AllowlistValidator

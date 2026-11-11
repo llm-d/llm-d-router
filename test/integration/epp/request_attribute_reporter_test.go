@@ -27,6 +27,7 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 var reqLogger = zap.New(zap.UseDevMode(true), zap.Level(-1*zapcore.Level(logutil.DEFAULT)))
@@ -37,11 +38,11 @@ var requestAttributeReporterTestConfig string
 func TestRequestAttributeReporter(t *testing.T) {
 	ctx := t.Context()
 
-	// Use our new WithConfigText harness option to provide the custom config.
-	h := NewTestHarness(ctx, t, WithStandardMode(), WithConfigText(requestAttributeReporterTestConfig)).WithBaseResources()
+	// Use our new eppharness.WithConfigText harness option to provide the custom config.
+	h := eppharness.NewTestHarness(ctx, t, eppharness.WithStandardMode(), eppharness.WithConfigText(requestAttributeReporterTestConfig)).WithBaseResources()
 
 	// Pods must exist in datastore so that there's no early failure
-	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget)}
+	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget)}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 	h.WaitForReadyPodsMetric(len(pods))
 

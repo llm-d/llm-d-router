@@ -66,6 +66,21 @@ The sidecar strips every spelling before forwarding, and EPP drops any value a
 client supplies, so these headers are internal to the EPP-to-sidecar hop and are
 never read from or passed to a model server.
 
+The sidecar's disaggregated handler marks every response it writes with the
+`x-llm-d-failed-stage` response header: the name of the stage that failed
+(`prefill`, `encode`, or `decode`). When no stage failed it carries
+`none-prefilled` if the prefill stage completed before the response was
+written, and `none` otherwise. The EPP reads the header to charge a failure to
+the endpoint that ran the stage: without it, a prefill failure reaches the EPP
+as the decode endpoint's response status. `none-prefilled` tells the EPP the
+prefill endpoint succeeded, which a successful response alone does not, since
+decode can answer before prefill runs or completes. Only failures known before
+the response is written name their stage:
+prefill and encode failures, and the concurrent-dispatch decode abort, which
+writes the response itself. The sidecar drops any value the model server set,
+so only the sidecar marks stages, and the EPP strips the header before the
+response reaches the client.
+
 When both spellings are present the sidecar reads the old one, against the usual
 preference for the current name. Sanitization was deployed under the old name,
 so an EPP that predates the rename strips a client-supplied old name but
@@ -828,6 +843,50 @@ Enabling the flag requires:
   Without the `inferencepools` permissions the sidecar does not start serving.
   Without the `pods` permissions the allowlist stays empty and every request
   with a prefill target is rejected.
+
+#### Restrict access to the sidecar port
+
+The allowlist checks the target of a request. It does not check who sent the
+request. A `NetworkPolicy` on the decode pods closes the sidecar port to every
+peer that has no reason to call it. Apply one whether or not the allowlist is
+on. It is the only control available when the allowlist cannot be enabled, for
+example when the decode pods mount no service account token.
+
+Allow ingress on the sidecar port only from the gateway data plane pods and the
+EPP pods. The EPP scrapes the decode pods' `/metrics` through the sidecar port
+when the InferencePool target port is the sidecar port. Add the coordinator
+when the deployment runs one, and the monitoring namespace when Prometheus
+scrapes the sidecar port directly. Adjust the selectors to the labels of the
+deployment:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pd-sidecar-ingress
+spec:
+  podSelector:
+    matchLabels:
+      llm-d.ai/role: decode
+  policyTypes: ["Ingress"]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: <gateway namespace>
+      podSelector:
+        matchLabels:
+          <gateway data plane pod label>
+    - podSelector:
+        matchLabels:
+          llm-d-router-gateway: <router release name>
+    ports:
+    - port: 8000
+      protocol: TCP
+```
+
+The prefill pods do not call the decode sidecar, so they need no entry. The
+sidecar calls the prefill pods and the local engine, and egress stays open.
 
 ### Connector-Specific Flags
 

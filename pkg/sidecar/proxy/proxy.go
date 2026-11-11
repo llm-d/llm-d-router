@@ -136,6 +136,16 @@ type Config struct {
 
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
+
+	// ForwardPromptTokenIDs carries a client-supplied
+	// kv_transfer_params.prompt_token_ids onto the prefill and decode
+	// requests. It must only be enabled when the gateway in front runs the
+	// forward-prompt-token-ids EPP plugin (or a trusted coordinator): vLLM
+	// serves those IDs instead of rendering messages, so a caller that
+	// supplies its own list bypasses every messages-level gateway policy
+	// (injected system prompts, guardrails, prompt-token limits). Defaults
+	// to false, which drops the field exactly as the connectors did before.
+	ForwardPromptTokenIDs bool
 	// InferencePoolNamespace is the Kubernetes namespace of the InferencePool to watch.
 	InferencePoolNamespace string
 	// InferencePoolName is the name of the InferencePool to watch.
