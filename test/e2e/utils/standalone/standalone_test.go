@@ -67,24 +67,27 @@ func testConfig(namespace, image string) Config {
 
 func TestStandaloneChart(t *testing.T) {
 	for _, tc := range []struct {
-		name                string
-		namespace           string
-		replicas            int
-		ports               []int32
-		failOpen            *bool
-		healthCheckInterval string
+		name                         string
+		namespace                    string
+		replicas                     int
+		ports                        []int32
+		failOpen                     *bool
+		healthCheckInterval          string
+		healthCheckNoTrafficInterval string
 	}{
-		{"single", "e2e-1", 1, []int32{8000}, nil, ""},
-		{"leader-election", "e2e-2", 3, []int32{8000}, nil, ""},
-		{"data-parallel", "e2e-3", 1, []int32{8000, 8001}, nil, ""},
-		{"fail-open", "e2e-4", 1, []int32{8000}, ptr.To(true), "1s"},
-		{"fail-closed", "e2e-5", 1, []int32{8000}, ptr.To(false), ""},
+		{"single", "e2e-1", 1, []int32{8000}, nil, "", ""},
+		{"leader-election", "e2e-2", 3, []int32{8000}, nil, "", ""},
+		{"data-parallel", "e2e-3", 1, []int32{8000, 8001}, nil, "", ""},
+		{"fail-open", "e2e-4", 1, []int32{8000}, ptr.To(true), "1s", ""},
+		{"fail-closed", "e2e-5", 1, []int32{8000}, ptr.To(false), "", ""},
+		{"no-traffic-interval", "e2e-6", 1, []int32{8000}, nil, "", "3s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			image := "registry.example:5000/team/router:dev"
 			cfg := testConfig(tc.namespace, image)
 			cfg.FailOpen = tc.failOpen
 			cfg.HealthCheckInterval = tc.healthCheckInterval
+			cfg.HealthCheckNoTrafficInterval = tc.healthCheckNoTrafficInterval
 			router, err := renderRouter(context.Background(), cfg, simpleConfig, tc.replicas, tc.ports)
 			if err != nil {
 				t.Fatal(err)
@@ -161,8 +164,17 @@ func TestStandaloneChart(t *testing.T) {
 			if healthCheckInterval == "" {
 				healthCheckInterval = "10s"
 			}
-			if !strings.Contains(envoy, "interval: "+healthCheckInterval) {
+			if !strings.Contains(envoy, " interval: "+healthCheckInterval+"\n") {
 				t.Fatalf("Envoy health-check interval must be %s", healthCheckInterval)
+			}
+			// Envoy probes a cluster that has not carried traffic every 60s by default,
+			// so a restarted EPP would stay out of rotation for minutes.
+			noTrafficInterval := tc.healthCheckNoTrafficInterval
+			if noTrafficInterval == "" {
+				noTrafficInterval = healthCheckInterval
+			}
+			if !strings.Contains(envoy, " no_traffic_interval: "+noTrafficInterval+"\n") {
+				t.Fatalf("Envoy health-check no_traffic_interval must be %s", noTrafficInterval)
 			}
 			volumes, _, _ := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "volumes")
 			var mountedConfigMap string
@@ -238,6 +250,9 @@ func TestStandaloneChartDefaults(t *testing.T) {
 			envoy, _, _ := unstructured.NestedString(obj.Object, "data", "envoy.yaml")
 			if !strings.Contains(envoy, "failure_mode_allow: true") {
 				t.Fatal("unset fail-open must preserve the chart default")
+			}
+			if !strings.Contains(envoy, " no_traffic_interval: 10s\n") {
+				t.Fatal("unset no_traffic_interval must follow the health-check interval")
 			}
 			return
 		}

@@ -75,6 +75,10 @@ router:
     healthCheckTimeout: "2s"
     healthCheckUnhealthyThreshold: 3
     healthCheckHealthyThreshold: 2
+    # Probe interval while the ext_proc cluster has not carried traffic, which
+    # includes every EPP pod start. Envoy defaults it to 60s; empty uses
+    # healthCheckInterval.
+    healthCheckNoTrafficInterval: ""
 
     # OpenTelemetry tracing for the Envoy proxy. When enabled, Envoy creates a
     # span per request and propagates the trace context on the ext_proc gRPC
@@ -434,6 +438,7 @@ router:
                       # Active gRPC health checking for the ext_proc cluster.
                       - timeout: {{ .Values.router.proxy.healthCheckTimeout }}
                         interval: {{ .Values.router.proxy.healthCheckInterval }}
+                        no_traffic_interval: {{ .Values.router.proxy.healthCheckNoTrafficInterval | default .Values.router.proxy.healthCheckInterval }}
                         unhealthy_threshold: {{ .Values.router.proxy.healthCheckUnhealthyThreshold }}
                         healthy_threshold: {{ .Values.router.proxy.healthCheckHealthyThreshold }}
                         reuse_connection: true
