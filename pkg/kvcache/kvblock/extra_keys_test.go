@@ -133,6 +133,64 @@ func TestParseRawExtraKeys_FirstContinuation(t *testing.T) {
 	}
 }
 
+func TestParseRawExtraKeys_CacheSalt(t *testing.T) {
+	features := func(salt string, hashes ...string) *kvblock.BlockExtraFeatures {
+		f := &kvblock.BlockExtraFeatures{CacheSalt: salt}
+		for _, h := range hashes {
+			f.MMHashes = append(f.MMHashes, kvblock.MMHash{Hash: h})
+		}
+		return f
+	}
+	for _, tt := range []struct {
+		name     string
+		raw      [][]any
+		loraName string
+		want     []*kvblock.BlockExtraFeatures
+	}{
+		{
+			name: "salt after an item",
+			raw:  [][]any{{[]any{"img", int64(4)}, "salt"}, {[]any{"img", int64(-12)}}},
+			want: []*kvblock.BlockExtraFeatures{features("salt", "img"), features("", "img")},
+		},
+		{
+			name: "salt alone in block 0, item in a later block",
+			raw:  [][]any{{"salt"}, {[]any{"img", int64(4)}}, nil},
+			want: []*kvblock.BlockExtraFeatures{features("salt"), features("", "img"), nil},
+		},
+		{
+			name:     "LoRA name, item and salt in block 0",
+			raw:      [][]any{{"adapter", []any{"img", int64(4)}, "salt"}},
+			loraName: "adapter",
+			want:     []*kvblock.BlockExtraFeatures{features("salt", "img")},
+		},
+		{
+			name: "salt without items stays an MM hash",
+			raw:  [][]any{{"salt"}, nil},
+			want: []*kvblock.BlockExtraFeatures{features("", "salt"), nil},
+		},
+		{
+			name: "bare identifiers stay MM hashes",
+			raw:  [][]any{{"img", "salt"}, {"img"}},
+			want: []*kvblock.BlockExtraFeatures{features("", "img", "salt"), features("", "img")},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := kvblock.ParseRawExtraKeys(tt.raw, tt.loraName)
+			require.NoError(t, err)
+			require.Len(t, result, len(tt.want))
+			for i, want := range tt.want {
+				if want == nil {
+					assert.Nil(t, result[i], "block %d", i)
+					continue
+				}
+				require.NotNil(t, result[i], "block %d", i)
+				assert.Equal(t, want.MMHashes, result[i].MMHashes, "block %d", i)
+				assert.Equal(t, want.CacheSalt, result[i].CacheSalt, "block %d", i)
+			}
+		})
+	}
+}
+
 func TestParseRawExtraKeys_SkipsUnknownEntryTypes(t *testing.T) {
 	// Non-string, non-tuple entries (e.g. numeric LoRA ids) should be skipped.
 	raw := [][]any{
@@ -292,6 +350,33 @@ func TestMMFeatures_DifferentImagesProduceDifferentHashes(t *testing.T) {
 
 	assert.NotEqual(t, keysA[0], keysB[0],
 		"blocks with different image hashes must produce different block keys")
+}
+
+func TestMMFeatures_CacheSaltHashesAfterMMHashes(t *testing.T) {
+	config := &kvblock.TokenProcessorConfig{BlockSizeTokens: 16, HashSeed: "test"}
+	processor, err := kvblock.NewChunkedTokenDatabase(config)
+	require.NoError(t, err)
+
+	tokens := make([]uint32, 32)
+	for i := range tokens {
+		tokens[i] = uint32(i + 1) //#nosec G115 -- test data, i < 64
+	}
+	img := kvblock.MMHash{Hash: "img"}
+	salt := kvblock.MMHash{Hash: "salt"}
+	keys := func(features ...*kvblock.BlockExtraFeatures) []kvblock.BlockHash {
+		t.Helper()
+		k, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "model", features)
+		require.NoError(t, err)
+		return k
+	}
+
+	saltField := keys(&kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img}, CacheSalt: "salt"}, nil)
+	assert.Equal(t, keys(&kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img, salt}}, nil), saltField,
+		"the salt field must hash as an extra key after the MM hashes")
+	assert.NotEqual(t, keys(&kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{salt, img}}, nil)[0], saltField[0])
+	assert.Equal(t,
+		keys(&kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{salt}}, nil),
+		keys(&kvblock.BlockExtraFeatures{CacheSalt: "salt"}, nil))
 }
 
 func TestMMFeatures_NilFeaturesSameAsTextOnly(t *testing.T) {

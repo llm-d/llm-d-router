@@ -1158,10 +1158,10 @@ func TestProduce_PassesMMExtraFeatures(t *testing.T) {
 	require.NotNil(t, captured)
 }
 
-// Cache salt is folded into the first block's extra keys, isolating salted
-// prompts. Mirrors engine-side ingestion, which folds vLLM's block-0 cache_salt
-// into the same per-block hash list.
-func TestProduce_FoldsCacheSalt(t *testing.T) {
+// Cache salt is set on the first block's extra features, isolating salted
+// prompts. Mirrors engine-side ingestion, which keeps vLLM's block-0 cache_salt
+// apart from the MM hashes.
+func TestProduce_SetsCacheSalt(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	tokens := make([]uint32, 16)
@@ -1170,18 +1170,17 @@ func TestProduce_FoldsCacheSalt(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		mm   []fwkrequest.MultiModalFeature
-		want []kvblock.MMHash
+		name   string
+		mm     []fwkrequest.MultiModalFeature
+		wantMM []kvblock.MMHash
 	}{
 		{
 			name: "salt only",
-			want: []kvblock.MMHash{{Hash: "s3cr3t"}},
 		},
 		{
-			name: "salt appended after mm hash",
-			mm:   []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "abc", Offset: 2, Length: 4}},
-			want: []kvblock.MMHash{{Hash: "abc"}, {Hash: "s3cr3t"}},
+			name:   "salt alongside mm hash",
+			mm:     []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "abc", Offset: 2, Length: 4}},
+			wantMM: []kvblock.MMHash{{Hash: "abc"}},
 		},
 	}
 
@@ -1211,7 +1210,8 @@ func TestProduce_FoldsCacheSalt(t *testing.T) {
 			require.NoError(t, p.Produce(ctx, req, testEndpoints))
 			require.Len(t, captured, 1)
 			require.NotNil(t, captured[0])
-			require.Equal(t, tc.want, captured[0].MMHashes)
+			require.Equal(t, tc.wantMM, captured[0].MMHashes)
+			require.Equal(t, "s3cr3t", captured[0].CacheSalt)
 		})
 	}
 }
