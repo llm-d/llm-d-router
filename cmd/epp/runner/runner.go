@@ -303,6 +303,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err
 	}
+	if opts.ValidateConfig {
+		if err := r.validateConfig(ctx, opts, rawConfig); err != nil {
+			setupLog.Error(err, "Configuration is invalid")
+			return err
+		}
+		setupLog.Info("Configuration is valid")
+		return nil
+	}
 	dlCfg := rawConfig.DataLayer
 	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
 		return r.runWithFileDiscovery(ctx, opts, rawConfig)
@@ -1260,6 +1268,37 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 		filterPlugin.(fwkfc.EvictionFilterPolicy),
 		fceviction.NewImmediateResponseEvictor(),
 	), nil
+}
+
+// validateConfig runs the configuration checks of a real start against an
+// empty datastore: plugin instantiation and the config checks of phase two,
+// the discovery plugin, plugin stability, and the data layer configuration.
+// It needs no Kubernetes cluster and starts no server or data source.
+func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	pool := datalayer.NewEndpointPool(resolvePoolNamespace(opts.PoolNamespace), "epp")
+	ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts)).WithEndpointPool(pool)
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
+	if err != nil {
+		return err
+	}
+	if dl := rawConfig.DataLayer; dl != nil && dl.Discovery != nil && dl.Discovery.Endpoints != nil {
+		if _, err := r.resolveDiscovery(rawConfig); err != nil {
+			return fmt.Errorf("failed to resolve discovery plugin: %w", err)
+		}
+	}
+	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
+		return err
+	}
+	if err := r.dlRuntime.Configure(eppConfig.DataConfig, setupLog); err != nil {
+		return fmt.Errorf("failed to configure datalayer: %w", err)
+	}
+	if r.schedulerConfig == nil {
+		return errors.New("scheduler config must be set either by config api or through code")
+	}
+	return nil
 }
 
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.

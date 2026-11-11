@@ -152,6 +152,7 @@ type Options struct {
 	FeatureGates   []string // Feature gates applied on top of the configuration's featureGates.
 
 	AllowExperimentalPlugins bool // Allows loading of experimental Alpha plugins.
+	ValidateConfig           bool // Validates the configuration and exits without starting the EPP.
 
 	// internal
 	fs                  *pflag.FlagSet // FlagSet used in AddFlags() and consulted in Validate()
@@ -302,6 +303,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"configuration's featureGates list, so these override entries set there.")
 	fs.BoolVar(&opts.AllowExperimentalPlugins, "allow-experimental-plugins", opts.AllowExperimentalPlugins,
 		"Allows loading of experimental Alpha plugins.")
+	fs.BoolVar(&opts.ValidateConfig, "validate-config", opts.ValidateConfig,
+		"Validate the configuration and exit, without connecting to Kubernetes or starting any server.")
 }
 
 func (opts *Options) Complete() error {
