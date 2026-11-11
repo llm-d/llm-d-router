@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -282,9 +283,16 @@ func (av *AllowlistValidator) onInferencePoolAdd(obj interface{}) {
 	av.updatePodsForPool(pool)
 }
 
-// onInferencePoolUpdate handles updated InferencePool resources
-func (av *AllowlistValidator) onInferencePoolUpdate(_, newObj interface{}) {
+// onInferencePoolUpdate handles updated InferencePool resources. The informer
+// also calls it on every resync with the pool unchanged, and a status update
+// leaves the spec as it was. Neither changes the selector or target ports, and
+// restarting the pod informer for them would rebuild the allowlist from a
+// partly relisted pod cache, denying pool pods until the relist completes.
+func (av *AllowlistValidator) onInferencePoolUpdate(oldObj, newObj interface{}) {
 	pool := newObj.(*unstructured.Unstructured)
+	if oldPool, ok := oldObj.(*unstructured.Unstructured); ok && reflect.DeepEqual(oldPool.Object["spec"], pool.Object["spec"]) {
+		return
+	}
 	av.logger.Info("InferencePool updated", "name", pool.GetName())
 	av.updatePodsForPool(pool)
 }
