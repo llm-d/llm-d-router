@@ -90,9 +90,10 @@ type Options struct {
 	//
 	// InferencePool.
 	//
-	PoolGroup     string // Kubernetes resource group of the InferencePool this Endpoint Picker is associated with.
-	PoolNamespace string // Namespace of the InferencePool this Endpoint Picker is associated with.
-	PoolName      string // Name of the InferencePool this Endpoint Picker is associated with.
+	PoolGroup                   string        // Kubernetes resource group of the InferencePool this Endpoint Picker is associated with.
+	PoolNamespace               string        // Namespace of the InferencePool this Endpoint Picker is associated with.
+	PoolName                    string        // Name of the InferencePool this Endpoint Picker is associated with.
+	DiscoveryStalenessThreshold time.Duration // Maximum age of verified Kubernetes membership; zero disables verification.
 	//
 	// Endpoints (in lieu of using an InferencePool for service discovery).
 	//
@@ -224,6 +225,9 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.PoolNamespace, "pool-namespace", opts.PoolNamespace,
 		"Namespace of the InferencePool this Endpoint Picker is associated with.")
 	fs.StringVar(&opts.PoolName, "pool-name", opts.PoolName, "Name of the InferencePool this Endpoint Picker is associated with.")
+	fs.DurationVar(&opts.DiscoveryStalenessThreshold, "discovery-staleness-threshold", opts.DiscoveryStalenessThreshold,
+		"Maximum age of verified Kubernetes InferencePool membership. Zero disables verification; a positive value must be at least 2s. "+
+			"Uses background API reads to verify watch-driven routing membership and rejects new requests when verification expires.")
 	fs.StringVar(&opts.endpointSelectorStr, "endpoint-selector", opts.endpointSelectorStr,
 		"Selector to filter model server pods on. "+
 			"Supports Kubernetes label selector syntax: equality-based (e.g., 'app=vllm,env=prod'), "+
@@ -460,6 +464,12 @@ func ConfigureMetricsTLS(opts *Options, mo *metricsserver.Options) error {
 }
 
 func (opts *Options) Validate() error {
+	if opts.DiscoveryStalenessThreshold < 0 || (opts.DiscoveryStalenessThreshold > 0 && opts.DiscoveryStalenessThreshold < 2*time.Second) {
+		return errors.New("discovery-staleness-threshold must be zero or at least 2s")
+	}
+	if opts.DiscoveryStalenessThreshold > 0 && opts.EndpointSelector != nil {
+		return errors.New("discovery-staleness-threshold requires InferencePool discovery")
+	}
 	// pool-name and endpoint-selector are checked on the Kubernetes discovery
 	// path only; file discovery reads neither.
 	if opts.EndpointSelector != nil {

@@ -266,6 +266,37 @@ The router supports multiple High Availability (HA) modes:
    - **GKE Preferred Backends (Gateway Mode, Recommended on GKE)**: Uses GKE `GCPBackendPolicy` (`PREFERRED` and `DEFAULT` tiers) and `HealthCheckPolicy` for warm-standby failover and rate/capacity spillover; see [GKE Preferred Backends (Gateway Mode)](#gke-preferred-backends-gateway-mode).
    - **Leader Election with Fail-Open**: Uses Kubernetes `coordination.k8s.io/Lease` coordination so only the elected leader serves inference extension requests while standby pods remain out of rotation until acquiring the lease; see [Leader Election and Fail-Open](#leader-election-and-fail-open).
 
+### Kubernetes discovery freshness
+
+`--discovery-staleness-threshold=30s` enables bounded verification of Kubernetes
+InferencePool membership. The default, `0`, disables verification. A positive
+threshold must be at least `2s`. This option requires Kubernetes InferencePool
+discovery; file discovery and `--endpoint-selector` do not support it.
+
+Pod and InferencePool watches maintain membership. A background verifier reads
+the InferencePool and lists its matching Pods through an uncached API reader,
+then compares their routing metadata with the datastore. It does not update
+membership. It starts attempts approximately every third of the threshold with
+up to 20 percent jitter, with each attempt limited to a third of the threshold.
+The cadence is measured from the attempt's start, so successful reads complete
+within the previous snapshot's freshness budget. Read and comparison time count
+toward the freshness budget. Each replica performs its own verification; choose the
+threshold with the Pod count and API-server load in mind.
+
+After initial validation, failed API reads retain the last validated membership
+until its age reaches the threshold. A known mismatch or deleted pool invalidates
+it immediately. An expired or invalidated check makes readiness report
+`NOT_SERVING` and rejects new inference requests with HTTP 503. The request is
+checked before flow-control admission and again before scheduling, including
+bodyless requests and WebSocket upgrades that select endpoints directly. Liveness
+and already-dispatched response streams are unaffected. Readiness recovers only when
+the datastore matches a successful API snapshot, including removal of withdrawn
+endpoints. Leader Lease renewal and backend metric scrapes do not renew this
+freshness budget.
+
+Configure the gateway to fail closed on EPP unavailability if inference must stop
+during discovery loss. Gateway fail-open routing can bypass EPP checks.
+
 ### Active-Active Mode
 
 To run multiple EPP replicas concurrently with shared in-flight load, configure
