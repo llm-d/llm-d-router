@@ -540,7 +540,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 
 	// --- Initialize Core EPP Components ---
 	if r.schedulerConfig == nil {
-		err := errors.New("scheduler config must be set either by config api or through code")
+		err := errSchedulerConfigMissing
 		setupLog.Error(err, "failed to create scheduler")
 		return nil, nil, err
 	}
@@ -1048,6 +1048,9 @@ func extractDeploymentName(podName string) (string, error) {
 	return "", fmt.Errorf("failed to parse deployment name from pod name %s", podName)
 }
 
+// errSchedulerConfigMissing reports a configuration that sets no scheduler.
+var errSchedulerConfigMissing = errors.New("scheduler config must be set either by config api or through code")
+
 // validateKubernetesDiscoveryFlags checks the flags the Kubernetes discovery path
 // needs: an InferencePool name or an endpoint selector, but not both.
 func validateKubernetesDiscoveryFlags(opts *runserver.Options) error {
@@ -1309,7 +1312,7 @@ func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, ra
 		return fmt.Errorf("failed to configure datalayer: %w", err)
 	}
 	if r.schedulerConfig == nil {
-		return errors.New("scheduler config must be set either by config api or through code")
+		return errSchedulerConfigMissing
 	}
 	return nil
 }
@@ -1388,7 +1391,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 
 	if r.schedulerConfig == nil {
-		return errors.New("scheduler config must be set either by config api or through code")
+		return errSchedulerConfigMissing
 	}
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
