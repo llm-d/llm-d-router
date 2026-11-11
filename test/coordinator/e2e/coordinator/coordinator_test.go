@@ -578,6 +578,19 @@ func verifyMMPayloadNonePath(logs string) {
 		"generate prefill features must carry null kwargs_data: %v", features)
 	gomega.Expect(features).To(gomega.HaveKeyWithValue("mm_metadata", gomega.HaveKeyWithValue("image", gomega.ConsistOf(gomega.Not(gomega.BeNil())))),
 		"generate prefill features must carry mm_metadata: %v", features)
+
+	ginkgo.By("Verifying the prefill mm_metadata was rebuilt from the encode EC descriptor")
+	// The log redacts the encoded mm_metadata value, so the check pins its
+	// source: render returned none, and the image's descriptor carries the
+	// field the rebuild encodes.
+	gomega.Expect(logHasLine(logs, `"logger":"handler.render"`, `"body":"response"`, `"mm_metadata_len":0`)).To(gomega.BeTrue(),
+		"render response must carry no mm_metadata")
+	hashes, _ := features["mm_hashes"].(map[string]any)
+	imageHashes, _ := hashes["image"].([]any)
+	gomega.Expect(imageHashes).To(gomega.HaveLen(1), "generate prefill features must carry one image mm_hash: %v", features)
+	gomega.Expect(body).To(gomega.HaveKeyWithValue("ec_transfer_params",
+		gomega.HaveKeyWithValue(imageHashes[0], gomega.HaveKeyWithValue("metadata", gomega.HaveKey("image_grid_thw")))),
+		"generate prefill ec_transfer_params must carry image_grid_thw for the image: %v", body)
 }
 
 // logHasLine reports whether any single line in logs contains all of substrs.
