@@ -240,8 +240,10 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	contractDecisions.WithLabelValues(team.label, committed.Name, served.Name, decision, reason, p.mode()).Inc()
 	rec := &hold{team: team, servedClass: served.Name, reserved: cost, committed: withinContract}
 	p.holds.Store(request.RequestID, rec)
-	// A request that never reaches end of stream (flow-control rejection, scheduling failure)
-	// is released in full when its stream ends.
+	// ctx is the ext_proc stream context (srv.Context() in handlers.Process), not one scoped to
+	// this phase. The EPP runs one stream per request, so ctx is done only when the request ends.
+	// A request that never reaches end of stream (flow-control rejection, scheduling failure,
+	// client disconnect) is released in full then.
 	requestID := request.RequestID
 	rec.stop = context.AfterFunc(ctx, func() { p.finish(requestID, nil) })
 
