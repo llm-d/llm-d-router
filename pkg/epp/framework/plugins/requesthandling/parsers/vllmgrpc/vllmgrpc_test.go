@@ -20,6 +20,7 @@ package vllmgrpc
 import (
 	"context"
 	"encoding/binary"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -568,6 +569,71 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				return
 			}
 
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("ParseResponse() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestVllmGRPCParser_ParseResponse_MultipleFrames(t *testing.T) {
+	chunk := func(prompt, completion uint32) proto.Message {
+		return &pb.GenerateResponse{Response: &pb.GenerateResponse_Chunk{Chunk: &pb.GenerateStreamChunk{
+			TokenIds: []uint32{1}, PromptTokens: prompt, CompletionTokens: completion,
+		}}}
+	}
+	complete := &pb.GenerateResponse{Response: &pb.GenerateResponse_Complete{Complete: &pb.GenerateComplete{
+		FinishReason: "stop", PromptTokens: 20, CompletionTokens: 15, CachedTokens: 5,
+	}}}
+	completeUsage := &fwkrequest.Usage{
+		PromptTokens: 20, CompletionTokens: 15, TotalTokens: 35,
+		PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 5},
+	}
+	frames := func(msgs ...proto.Message) []byte {
+		parts := make([][]byte, 0, len(msgs))
+		for _, m := range msgs {
+			parts = append(parts, createGrpcPayload(t, m))
+		}
+		return slices.Concat(parts...)
+	}
+
+	tests := []struct {
+		name    string
+		body    []byte
+		want    *fwkrh.ParsedResponse
+		wantErr bool
+	}{
+		{
+			name: "chunk then complete in one body",
+			body: frames(chunk(0, 0), complete),
+			want: &fwkrh.ParsedResponse{Usage: completeUsage},
+		},
+		{
+			name: "last frame with usage wins",
+			body: frames(chunk(10, 5), complete, chunk(0, 0)),
+			want: &fwkrh.ParsedResponse{Usage: completeUsage},
+		},
+		{
+			name:    "usage before a truncated frame is kept",
+			body:    append(frames(complete), createGrpcPayload(t, chunk(1, 1))[:6]...),
+			want:    &fwkrh.ParsedResponse{Usage: completeUsage},
+			wantErr: true,
+		},
+		{
+			name:    "usage around an unrecognized frame is kept",
+			body:    frames(&pb.GenerateResponse{}, complete),
+			want:    &fwkrh.ParsedResponse{Usage: completeUsage},
+			wantErr: true,
+		},
+	}
+
+	parser := NewVllmGRPCParser()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseResponse(context.Background(), tt.body, nil, false)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseResponse() error = %v, wantErr %v", err, tt.wantErr)
+			}
 			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("ParseResponse() mismatch (-want +got):\n%s", diff)
 			}
