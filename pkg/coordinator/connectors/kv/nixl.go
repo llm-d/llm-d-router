@@ -27,10 +27,18 @@ import (
 )
 
 // nixlKV implements the NIXL P2P KV transfer protocol. The prefill request
-// declares the request will be remote-decoded; the decode request forwards
-// the prefill response's kv_transfer_params verbatim plus do_remote_prefill
-// so the decode pod can pull KV blocks from the prefill pod.
+// declares the request will be remote-decoded; when the prefill response
+// carries remote_block_ids (NIXLHasRemoteBlockIDs), the decode request
+// forwards its kv_transfer_params verbatim plus do_remote_prefill so the
+// decode pod can pull the blocks from the prefill pod.
 type nixlKV struct{}
+
+// NIXLHasRemoteBlockIDs reports whether kv_transfer_params carries a non-empty
+// remote_block_ids, the truthiness vLLM's NIXL scheduler applies to the field.
+func NIXLHasRemoteBlockIDs(params map[string]any) bool {
+	ids, ok := params[reqcommon.FieldRemoteBlockIDs].([]any)
+	return ok && len(ids) > 0
+}
 
 func (nixlKV) Name() string { return NIXL }
 
@@ -48,12 +56,18 @@ func (nixlKV) PreparePrefillKVParams(ctx context.Context, _ *pipeline.RequestCon
 }
 
 func (nixlKV) PrepareDecodeKVParams(ctx context.Context, reqCtx *pipeline.RequestContext) map[string]any {
+	logger := log.FromContext(ctx).WithName(loggerName)
+	// Without kv_transfer_params.remote_block_ids, do_remote_prefill fails a vLLM assertion that exits the engine.
+	if !NIXLHasRemoteBlockIDs(reqCtx.KVTransferParams) {
+		logger.V(logutil.TRACE).Info("no prefill kv_transfer_params.remote_block_ids; decode computes the prompt")
+		return map[string]any{}
+	}
 	out := make(map[string]any, len(reqCtx.KVTransferParams)+2)
 	for k, v := range reqCtx.KVTransferParams {
 		out[k] = v
 	}
 	out[reqcommon.FieldDoRemoteDecode] = false
 	out[reqcommon.FieldDoRemotePrefill] = true
-	log.FromContext(ctx).WithName(loggerName).V(logutil.TRACE).Info("preparing decode kv params", "params", out)
+	logger.V(logutil.TRACE).Info("preparing decode kv params", "params", out)
 	return out
 }

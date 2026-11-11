@@ -1214,7 +1214,7 @@ x-llm-d-epp-profile: decode
 ```
 
 > [!NOTE]
-> The `kv_transfer_params` fields are connector-dependent. The example above shows the NIXL format. The fields `remote_engine_id`, `remote_block_ids`, `remote_request_id`, `remote_host`, `remote_port`, and `tp_size` are returned by the prefill worker and forwarded verbatim to the decode worker. The coordinator adds `do_remote_decode: false` and `do_remote_prefill: true`.
+> The `kv_transfer_params` fields are connector-dependent. The example above shows the NIXL format. The fields `remote_engine_id`, `remote_block_ids`, `remote_request_id`, `remote_host`, `remote_port`, and `tp_size` are returned by the prefill worker and forwarded verbatim to the decode worker. The coordinator adds `do_remote_decode: false` and `do_remote_prefill: true`. When the prefill response carries no `kv_transfer_params.remote_block_ids`, or the pipeline has no `prefill` step, the decode request carries an empty `kv_transfer_params` and the decode worker computes the prompt itself.
 
 ### Request (/v1/responses)
 
