@@ -33,6 +33,7 @@ import (
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -42,12 +43,17 @@ import (
 // DiscoveryFreshness verifies watch-driven routing membership against uncached API reads.
 // It never writes membership; the Kubernetes reconcilers own those updates.
 type DiscoveryFreshness struct {
-	reader      client.Reader
-	datastore   datastore.Datastore
-	pool        types.NamespacedName
-	threshold   time.Duration
-	clock       clock.Clock
-	validatedAt atomic.Pointer[time.Time]
+	reader    client.Reader
+	datastore datastore.Datastore
+	pool      types.NamespacedName
+	threshold time.Duration
+	clock     clock.Clock
+	validated atomic.Pointer[validatedMembership]
+}
+
+type validatedMembership struct {
+	at        time.Time
+	endpoints map[types.NamespacedName]*fwkdl.EndpointMetadata
 }
 
 var _ fwkplugin.ReadinessChecker = (*DiscoveryFreshness)(nil)
@@ -65,7 +71,7 @@ func (*DiscoveryFreshness) TypedName() fwkplugin.TypedName {
 func (*DiscoveryFreshness) NeedLeaderElection() bool { return false }
 
 func (d *DiscoveryFreshness) Start(ctx context.Context) error {
-	defer d.validatedAt.Store(nil)
+	defer d.validated.Store(nil)
 	for ctx.Err() == nil {
 		// At most 0.4 thresholds between starts plus a one-third-threshold read
 		// leaves time to renew the previous snapshot before it expires.
@@ -91,17 +97,17 @@ func (d *DiscoveryFreshness) refresh(ctx context.Context) error {
 	pool := &v1.InferencePool{}
 	if err := d.reader.Get(ctx, d.pool, pool); err != nil {
 		if apierrors.IsNotFound(err) {
-			d.validatedAt.Store(nil)
+			d.validated.Store(nil)
 		}
 		return fmt.Errorf("read InferencePool membership: %w", err)
 	}
 	if !pool.DeletionTimestamp.IsZero() {
-		d.validatedAt.Store(nil)
+		d.validated.Store(nil)
 		return fmt.Errorf("InferencePool %s is being deleted", d.pool)
 	}
 	endpointPool := poolutil.InferencePoolToEndpointPool(pool)
 	if err := datastore.VerifyPool(d.datastore, endpointPool); err != nil {
-		d.validatedAt.Store(nil)
+		d.validated.Store(nil)
 		return err
 	}
 	pods := &corev1.PodList{}
@@ -111,30 +117,37 @@ func (d *DiscoveryFreshness) refresh(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := datastore.VerifyMembership(d.datastore, endpointPool, pods.Items); err != nil {
+	endpoints, err := datastore.VerifyMembership(d.datastore, endpointPool, pods.Items)
+	if err != nil {
 		// A known mismatch cannot use the grace period for unavailable discovery.
-		d.validatedAt.Store(nil)
+		d.validated.Store(nil)
 		return err
 	}
-	d.validatedAt.Store(&started)
+	d.validated.Store(&validatedMembership{at: started, endpoints: endpoints})
 	return nil
 }
 
 func (d *DiscoveryFreshness) CheckReady() error {
-	validated := d.validatedAt.Load()
-	if validated == nil || d.clock.Since(*validated) >= d.threshold {
+	return d.checkReady(d.validated.Load())
+}
+
+func (d *DiscoveryFreshness) checkReady(validated *validatedMembership) error {
+	if validated == nil || d.clock.Since(validated.at) >= d.threshold {
 		return fmt.Errorf("discovery membership has not been validated within %s", d.threshold)
 	}
 	return nil
 }
 
-func (d *DiscoveryFreshness) Admit(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) error {
-	return d.admissionError()
-}
-
-func (d *DiscoveryFreshness) admissionError() error {
-	if err := d.CheckReady(); err != nil {
+func (d *DiscoveryFreshness) Admit(_ context.Context, _ *fwksched.InferenceRequest, candidates []fwksched.Endpoint) error {
+	validated := d.validated.Load()
+	if err := d.checkReady(validated); err != nil {
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
+	}
+	for _, candidate := range candidates {
+		meta := candidate.GetMetadata()
+		if !meta.Equal(validated.endpoints[meta.ID]) {
+			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: fmt.Sprintf("request endpoint %s does not match validated Kubernetes membership", meta.ID)}
+		}
 	}
 	return nil
 }

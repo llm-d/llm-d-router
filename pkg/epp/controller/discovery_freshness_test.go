@@ -36,6 +36,7 @@ import (
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
 	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
@@ -78,7 +79,12 @@ func TestDiscoveryFreshnessExpiresWhenMembershipReadsFail(t *testing.T) {
 			require.Error(t, d.CheckReady())
 			require.NoError(t, d.refresh(ctx))
 			require.NoError(t, d.CheckReady())
-			require.NoError(t, d.Admit(ctx, nil, nil))
+			endpoint := ds.PodList(datastore.AllPodsPredicate)[0]
+			candidates := []fwksched.Endpoint{fwksched.NewEndpoint(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())}
+			require.NoError(t, d.Admit(ctx, nil, candidates))
+			changed := endpoint.GetMetadata().Clone()
+			changed.Port = "9000"
+			require.Error(t, d.Admit(ctx, nil, []fwksched.Endpoint{fwksched.NewEndpoint(changed, endpoint.GetMetrics(), endpoint.GetAttributes())}))
 
 			unavailable = true
 			clock.Step(9 * time.Second)
@@ -100,6 +106,8 @@ func TestDiscoveryFreshnessExpiresWhenMembershipReadsFail(t *testing.T) {
 			require.NoError(t, d.refresh(ctx))
 			require.NoError(t, d.CheckReady())
 			require.NoError(t, d.Admit(ctx, nil, nil))
+			require.ErrorAs(t, d.Admit(ctx, nil, candidates), &rejection)
+			require.Equal(t, errcommon.ServiceUnavailable, rejection.Code)
 			readDelay = 10 * time.Second
 			require.NoError(t, d.refresh(ctx))
 			require.Error(t, d.CheckReady(), "slow API reads must not extend the freshness budget")
@@ -202,8 +210,8 @@ func TestDiscoveryFreshnessLoopKeepsDelayedSuccessfulReadsReady(t *testing.T) {
 		}
 		finish <- struct{}{}
 		require.Eventually(t, func() bool {
-			validated := d.validatedAt.Load()
-			return validated != nil && validated.Equal(snapshotStarted)
+			validated := d.validated.Load()
+			return validated != nil && validated.at.Equal(snapshotStarted)
 		}, time.Second, time.Millisecond)
 		require.NoError(t, d.CheckReady())
 		clock.Step(time.Second)
