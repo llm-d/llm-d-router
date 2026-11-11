@@ -312,12 +312,45 @@ func (s *Server) StartDrain() {
 // net/http's HTTP/2 server turns that header into a GOAWAY.
 func (s *Server) closeWhenDraining(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.draining.Load() {
-			w.Header().Set("Connection", "close")
-		}
-		next.ServeHTTP(w, r)
+		dw := &drainResponseWriter{ResponseWriter: w, draining: &s.draining}
+		next.ServeHTTP(dw, r)
+		dw.WriteHeader(http.StatusOK)
 	})
 }
+
+type drainResponseWriter struct {
+	http.ResponseWriter
+	draining    *atomic.Bool
+	wroteHeader bool
+}
+
+func (w *drainResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	// Non-101 informational responses leave final headers uncommitted and must not carry Connection: close.
+	w.wroteHeader = status >= http.StatusOK || status == http.StatusSwitchingProtocols
+	if w.wroteHeader && status != http.StatusSwitchingProtocols && w.draining.Load() {
+		w.Header().Set("Connection", "close")
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *drainResponseWriter) Write(p []byte) (int, error) {
+	w.WriteHeader(http.StatusOK)
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *drainResponseWriter) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *drainResponseWriter) FlushError() error {
+	w.WriteHeader(http.StatusOK)
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *drainResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
