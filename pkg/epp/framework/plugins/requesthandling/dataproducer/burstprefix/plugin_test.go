@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
@@ -169,5 +170,70 @@ func TestProduce_SecondWindowAfterSeal(t *testing.T) {
 	for i := range second {
 		assert.NotEmpty(t, second[i], "every second-window sample must be assigned")
 		assert.Equal(t, second[0], second[i], "second-window samples must co-locate")
+	}
+}
+
+// mmTokenizedRequest builds a request whose prompt is text, a media placeholder
+// run, and text, carrying the media's feature: the shape vLLM renders for a
+// multimodal prompt, where the placeholder tokens are the same for every media
+// of a size and only the feature hash tells two apart.
+func mmTokenizedRequest(imageHash string) *fwksched.InferenceRequest {
+	const placeholder = 9
+	return &fwksched.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+				TokenIDs: []uint32{1, 2, 3, 4, placeholder, placeholder, placeholder, placeholder, placeholder, placeholder, 5, 6},
+				MultiModalFeatures: []fwkrequest.MultiModalFeature{
+					{Modality: reqcommon.ModalityImage, Hash: imageHash, Offset: 4, Length: 6},
+				},
+			}}},
+		},
+	}
+}
+
+// A burst of requests carrying the same image shares one prefix group and must
+// co-locate; the same placeholder tokens with a different image are a
+// different prefix to the hasher, so each request stands alone and no replica
+// is steered.
+func TestProduce_MediaContentSeparatesBursts(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		firstHash  string
+		secondHash string
+		wantShared bool
+	}{
+		{name: "same image co-locates", firstHash: "image-a", secondHash: "image-a", wantShared: true},
+		{name: "different image stands alone", firstHash: "image-a", secondHash: "image-b", wantShared: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := newDataProducer(context.Background(), "burst", config{WindowDurationMs: 100, MaxPerReplica: unlimitedPerReplica, BlockSizeTokens: 4, MaxBatchSize: unlimitedBatchSize})
+			require.NoError(t, err)
+
+			endpoints := []fwksched.Endpoint{testEndpoint("pod1"), testEndpoint("pod2"), testEndpoint("pod3")}
+			var first, second string
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				err := p.Produce(context.Background(), mmTokenizedRequest(tc.firstHash), endpoints)
+				assert.NoError(t, err)
+				first = p.assignedReplica(t, endpoints)
+			}()
+			go func() {
+				defer wg.Done()
+				err := p.Produce(context.Background(), mmTokenizedRequest(tc.secondHash), endpoints)
+				assert.NoError(t, err)
+				second = p.assignedReplica(t, endpoints)
+			}()
+			wg.Wait()
+
+			if tc.wantShared {
+				assert.NotEmpty(t, first, "a shared image must group the burst")
+				assert.Equal(t, first, second, "requests with the same image must co-locate on one replica")
+			} else {
+				assert.Empty(t, first, "a lone request in its group must not be steered")
+				assert.Empty(t, second, "a lone request in its group must not be steered")
+			}
+		})
 	}
 }
