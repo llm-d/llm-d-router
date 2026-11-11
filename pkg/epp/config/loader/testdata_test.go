@@ -725,8 +725,8 @@ const errorPluginReferencesUndefinedProfileText = `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
-- name: referencer
-  type: test-profile-referencer
+- name: profile-filter
+  type: test-profile-name-filter
   parameters:
     profileName: prefill
 - name: profileHandler
@@ -734,7 +734,7 @@ plugins:
 schedulingProfiles:
 - name: default
   plugins:
-  - pluginRef: referencer
+  - pluginRef: profile-filter
 `
 
 // successPluginReferencesDefinedProfileText has a plugin whose parameters name a defined profile.
@@ -742,8 +742,8 @@ const successPluginReferencesDefinedProfileText = `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
-- name: referencer
-  type: test-profile-referencer
+- name: profile-filter
+  type: test-profile-name-filter
   parameters:
     profileName: default
 - name: profileHandler
@@ -751,22 +751,22 @@ plugins:
 schedulingProfiles:
 - name: default
   plugins:
-  - pluginRef: referencer
+  - pluginRef: profile-filter
 `
 
-// successPluginOmitsProfileText has a profile-referencing plugin with no profile name set.
+// successPluginOmitsProfileText has a plugin that leaves profileName unset.
 const successPluginOmitsProfileText = `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
-- name: referencer
-  type: test-profile-referencer
+- name: profile-filter
+  type: test-profile-name-filter
 - name: profileHandler
   type: test-profile-handler
 schedulingProfiles:
 - name: default
   plugins:
-  - pluginRef: referencer
+  - pluginRef: profile-filter
 `
 
 // successPluginReferencesImplicitDefaultProfileText names the profile the loader
@@ -775,8 +775,8 @@ const successPluginReferencesImplicitDefaultProfileText = `
 apiVersion: llm-d.ai/v1
 kind: EndpointPickerConfig
 plugins:
-- name: referencer
-  type: test-profile-referencer
+- name: profile-filter
+  type: test-profile-name-filter
   parameters:
     profileName: default
 `

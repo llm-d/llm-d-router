@@ -81,7 +81,7 @@ const (
 	testWithDependencies       = "test-with-dependencies"
 	testWithNestedDependencies = "test-with-nested-dependencies"
 	testDrainFilterType        = "test-drain-filter"
-	testProfileReferencerType  = "test-profile-referencer"
+	testProfileNameFilterType  = "test-profile-name-filter"
 
 	testFeatureGate = "test-feature-gate"
 )
@@ -1412,9 +1412,9 @@ func (m *mockDrainFilter) Filter(context.Context, *fwksched.InferenceRequest, []
 }
 
 // Mock Filter that names a scheduling profile in its parameters
-type mockProfileReferencer struct{ mockPlugin }
+type mockProfileNameFilter struct{ mockPlugin }
 
-func (m *mockProfileReferencer) Filter(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
+func (m *mockProfileNameFilter) Filter(_ context.Context, _ *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	return endpoints
 }
 
@@ -1609,7 +1609,7 @@ func registerTestPlugins(t *testing.T) {
 		}, mockWithNestedDependenciesConfigParser,
 	)
 
-	fwkplugin.Register(testProfileReferencerType, fwkplugin.StabilityStable, func(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	fwkplugin.Register(testProfileNameFilterType, fwkplugin.StabilityStable, func(name string, params *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		var p struct {
 			ProfileName string `json:"profileName"`
 		}
@@ -1621,7 +1621,7 @@ func registerTestPlugins(t *testing.T) {
 		if err := fwkplugin.ValidateProfileName(handle, p.ProfileName); err != nil {
 			return nil, err
 		}
-		return &mockProfileReferencer{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileReferencerType}}}, nil
+		return &mockProfileNameFilter{mockPlugin{t: fwkplugin.TypedName{Name: name, Type: testProfileNameFilterType}}}, nil
 	})
 
 	fwkplugin.Register(testSourceType, fwkplugin.StabilityStable, func(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
