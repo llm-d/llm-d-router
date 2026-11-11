@@ -601,6 +601,43 @@ func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
+func TestHandleInference_StreamRequested(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		stream    bool
+		wantError bool
+	}{
+		{name: "absent", body: `{"model":"m"}`},
+		{name: "null", body: `{"model":"m","stream":null}`},
+		{name: "true", body: `{"model":"m","stream":true}`, stream: true},
+		{name: "false", body: `{"model":"m","stream":false}`},
+		{name: "string", body: `{"model":"m","stream":"true"}`, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := &capturingStep{}
+			p := pipeline.New([]pipeline.Step{step})
+			srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(tc.body))
+			rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+
+			srv.handleInference(rec, req)
+
+			if tc.wantError {
+				require.Equal(t, http.StatusBadRequest, rec.Code)
+				require.Nil(t, step.captured, "invalid stream must not reach the pipeline")
+				require.JSONEq(t, `{"error":{"message":"stream must be a boolean","type":"invalid_request_error","code":400}}`, rec.Body.String())
+				return
+			}
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.NotNil(t, step.captured)
+			require.Equal(t, tc.stream, step.captured.Stream)
+			require.Equal(t, tc.stream, rec.deadlineSet)
+		})
+	}
+}
+
 func TestHandleInference_StreamingClearsWriteDeadline(t *testing.T) {
 	// A streaming request must clear the connection write deadline (zero value)
 	// before executing the pipeline, so a long stream is not cut by WriteTimeout.

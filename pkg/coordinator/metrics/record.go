@@ -24,6 +24,11 @@ import (
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
+// RecordBuildInfo sets the build info gauge for the given commit and build ref.
+func RecordBuildInfo(commit, buildRef string) {
+	buildInfo.WithLabelValues(commit, buildRef).Set(1)
+}
+
 // IncRequestTotal increments request_total for the given model.
 func IncRequestTotal(modelName string) {
 	requestTotal.WithLabelValues(boundModel(modelName)).Inc()

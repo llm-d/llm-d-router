@@ -48,7 +48,6 @@ const (
 	responsesAPI       = "responses"
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
-	promptField        = "prompt"
 
 	formFieldNumInferenceSteps = "num_inference_steps"
 	embeddingsAPI              = "embeddings"
@@ -192,8 +191,8 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 // envelope, and the string fields each keeps opaque. Prompt content is decoded
 // once into the typed body; the original bytes are forwarded unless mutated.
 var envelopeRawFields = map[string][]string{
-	chatCompletionsAPI: {promptField},
-	completionsAPI:     {promptField},
+	chatCompletionsAPI: {reqcommon.FieldPrompt},
+	completionsAPI:     {reqcommon.FieldPrompt},
 	responsesAPI:       {reqcommon.FieldInput, reqcommon.FieldInstructions},
 }
 

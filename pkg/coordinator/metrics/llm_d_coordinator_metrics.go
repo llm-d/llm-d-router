@@ -27,6 +27,15 @@ import (
 // client request the coordinator accepts, including bodies that fail
 // pre-parse validation (413, unreadable body, invalid JSON).
 var (
+	buildInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterCoordinatorSubsystem,
+			Name:      "info",
+			Help:      metricsutil.HelpMsgWithStability("General information of the current build of the coordinator.", compbasemetrics.ALPHA),
+		},
+		[]string{metricsutil.BuildInfoLabelCommit, metricsutil.BuildInfoLabelBuildRef},
+	)
+
 	requestTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,

@@ -102,7 +102,7 @@ func computeBlockKeysForTokens(ctx context.Context, idx kvCacheIndexer,
 		mmHashes, mmPlaceholders := tokenizer.ConvertMMFeaturesFromUpstream(mmFeatures)
 		extraFeatures = kvblock.ComputeBlockExtraFeatures(
 			mmHashes, mmPlaceholders, blockSizeTokens, cachedPositions)
-		if blockIndices := multimodalBlockIndices(mmFeatures, blockSizeTokens); len(blockIndices) > 0 {
+		if blockIndices := multimodalBlockIndices(mmFeatures, blockSizeTokens, len(tokens)); len(blockIndices) > 0 {
 			mm = &mmPromptContent{blockIndices: blockIndices, features: mmFeatures}
 		}
 	}
@@ -145,18 +145,19 @@ func countMMMatchedTokens(mmFeatures []fwkrequest.MultiModalFeature, matchLen, b
 }
 
 // multimodalBlockIndices returns the sorted unique block indices spanned by
-// any of the given features.
-func multimodalBlockIndices(features []fwkrequest.MultiModalFeature, blockSizeTokens int) []int {
+// any of the given features, with each span clamped to the prompt's numTokens.
+// Offsets and lengths are client-supplied on the gRPC path.
+func multimodalBlockIndices(features []fwkrequest.MultiModalFeature, blockSizeTokens, numTokens int) []int {
 	if blockSizeTokens <= 0 || len(features) == 0 {
 		return nil
 	}
 	seen := map[int]struct{}{}
 	for _, f := range features {
-		if f.Length <= 0 {
+		if f.Length <= 0 || f.Offset < 0 || f.Offset >= numTokens {
 			continue
 		}
 		start := f.Offset / blockSizeTokens
-		end := (f.Offset + f.Length - 1) / blockSizeTokens
+		end := (min(f.Offset+f.Length, numTokens) - 1) / blockSizeTokens
 		for i := start; i <= end; i++ {
 			seen[i] = struct{}{}
 		}
@@ -180,7 +181,7 @@ func totalMMBlocks(request *scheduling.InferenceRequest, blockSizeTokens int) in
 	}
 	total := 0
 	for _, prompt := range request.Body.TokenizedRequest.Prompts {
-		total += len(multimodalBlockIndices(prompt.MultiModalFeatures, blockSizeTokens))
+		total += len(multimodalBlockIndices(prompt.MultiModalFeatures, blockSizeTokens, len(prompt.TokenIDs)))
 	}
 	return total
 }

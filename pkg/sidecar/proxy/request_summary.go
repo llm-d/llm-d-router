@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
@@ -51,15 +52,15 @@ func requestSummaryFrom(ctx context.Context) *requestSummary {
 }
 
 // observeStageDuration records how long a stage took in that stage's duration
-// histogram and in the request's summary.
+// histogram, with ctx's trace as the exemplar, and in the request's summary.
 func observeStageDuration(ctx context.Context, stage string, d time.Duration) {
 	switch stage {
-	case metrics.StageEncode:
-		metrics.RecordEncodeDuration(d)
-	case metrics.StagePrefill:
-		metrics.RecordPrefillDuration(d)
-	case metrics.StageDecode:
-		metrics.RecordDecodeDuration(d)
+	case routing.StageEncode:
+		metrics.RecordEncodeDuration(ctx, d)
+	case routing.StagePrefill:
+		metrics.RecordPrefillDuration(ctx, d)
+	case routing.StageDecode:
+		metrics.RecordDecodeDuration(ctx, d)
 	}
 	if summary := requestSummaryFrom(ctx); summary != nil {
 		summary.mu.Lock()
@@ -80,6 +81,23 @@ func observeStageError(ctx context.Context, stage string) {
 		}
 		summary.mu.Unlock()
 	}
+}
+
+// failedStageMarker returns the routing.FailedStageHeader value for a response
+// written now: the stage that failed, else whether prefill completed. Every
+// connector records the prefill stage's duration once the prefill response is
+// in, and records a prefill failure before it writes a response, so a recorded
+// prefill with no failed stage is a prefill that completed.
+func (s *requestSummary) failedStageMarker() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failedStage != "" {
+		return s.failedStage
+	}
+	if _, ok := s.durations[routing.StagePrefill]; ok {
+		return routing.StageNonePrefilled
+	}
+	return routing.StageNone
 }
 
 // requestRoute is where the handler sent a request, for its summary line.
@@ -104,7 +122,7 @@ func (s *requestSummary) log(logger logr.Logger, route requestRoute, status *res
 	if route.encoders > 0 {
 		keysAndValues = append(keysAndValues, "encoders", route.encoders)
 	}
-	for _, stage := range []string{metrics.StageEncode, metrics.StagePrefill, metrics.StageDecode} {
+	for _, stage := range []string{routing.StageEncode, routing.StagePrefill, routing.StageDecode} {
 		if d, ok := s.durations[stage]; ok {
 			keysAndValues = append(keysAndValues, stage+"Duration", d)
 		}

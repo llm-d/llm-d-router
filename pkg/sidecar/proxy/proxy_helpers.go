@@ -229,7 +229,10 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 // such as tools[].function.parameters that chat templates render into the
 // prompt verbatim.
 var inspectedRequestFields = map[string]struct{}{
-	reqcommon.FieldKVTransferParams:     {},
+	// kv_transfer_params is deliberately NOT decoded as Go values: the only
+	// reader, clientPromptTokenIDs, handles the raw json.RawMessage form, and
+	// decoding it would materialize a long prompt_token_ids array (one boxed
+	// value per token) only to serialize it right back.
 	reqcommon.FieldECTransferParams:     {},
 	reqcommon.FieldMaxTokens:            {},
 	reqcommon.FieldMaxCompletionTokens:  {},
@@ -295,6 +298,13 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+			logger.Error(writeErr, "failed to send error response to client")
+		}
+		return nil, nil, false
+	}
+	if _, err := reqcommon.StreamRequested(parsed); err != nil {
+		logger.V(logging.DEBUG).Info("invalid request body", "error", err)
 		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
 			logger.Error(writeErr, "failed to send error response to client")
 		}

@@ -535,6 +535,9 @@ func TestResponsesRenderMode(t *testing.T) {
 				assert.Equal(t, []uint32{1, 2, 3}, req.Body.TokenizedRequest.Prompts[0].TokenIDs)
 				assert.Equal(t, []fwkrequest.MultiModalFeature{{Modality: reqcommon.ModalityImage, Hash: "hash", Offset: 1, Length: 2}},
 					req.Body.TokenizedRequest.Prompts[0].MultiModalFeatures)
+				// The legacy translation's IDs describe a translated body, so
+				// they are marked for downstream consumers.
+				assert.Equal(t, tc.legacy, req.Body.TokenizedRequest.LegacyTranslated)
 			}
 			wantCalls := 2
 			if auto {

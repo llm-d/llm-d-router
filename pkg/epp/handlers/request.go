@@ -132,7 +132,7 @@ func (s *StreamingServer) fallbackToEndpoint(ctx context.Context, reqCtx *Reques
 	reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
 
 	if requestSize > 0 {
-		reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
+		reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody, true)
 	}
 	return nil
 }

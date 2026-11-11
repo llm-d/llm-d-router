@@ -53,6 +53,7 @@ ec-connector: %q
 enable-ssrf-protection: true
 enable-prefiller-sampling: true
 enable-p2p-pull: true
+forward-prompt-token-ids: true
 enable-tls:
 - prefiller
 - decoder
@@ -99,6 +100,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		enable-ssrf-protection: true,
 		enable-prefiller-sampling: true,
 		enable-p2p-pull: true,
+		forward-prompt-token-ids: true,
 		enable-tls: ['prefiller', 'decoder'],
 		tls-insecure-skip-verify: ['decoder'],
 		secure-serving: false,
@@ -144,6 +146,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = true
+				o.ForwardPromptTokenIDs = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -192,6 +195,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = true
+				o.ForwardPromptTokenIDs = true
 
 				o.enableTLS = []string{prefillStage, decodeStage}
 				o.UseTLSForPrefiller = true
@@ -254,6 +258,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = false
+				o.ForwardPromptTokenIDs = true // from forward-prompt-token-ids: true in the inline YAML
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -306,6 +311,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				ecConnector:               constants.ECExampleConnector,
 				enableSSRFProtection:      true,
 				enablePrefillerSampling:   true,
+				forwardPromptTokenIDs:     false, // overrides forward-prompt-token-ids: true in the file YAML
 				enableTLS:                 &[]string{prefillStage},
 				tlsInsecureSkipVerify:     &[]string{prefillStage},
 				secureServing:             false,
@@ -329,6 +335,7 @@ func TestSidecarConfiguration(t *testing.T) {
 				o.EnableSSRFProtection = true
 				o.EnablePrefillerSampling = true
 				o.EnableP2PPull = true
+				o.ForwardPromptTokenIDs = false
 
 				o.enableTLS = []string{prefillStage}
 				o.UseTLSForPrefiller = true
@@ -505,6 +512,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 	assertEqual(enableSSRFProtection, expected.EnableSSRFProtection, actual.EnableSSRFProtection)
 	assertEqual(enablePrefillerSampling, expected.EnablePrefillerSampling, actual.EnablePrefillerSampling)
 	assertEqual(enableP2PPull, expected.EnableP2PPull, actual.EnableP2PPull)
+	assertEqual(forwardPromptTokenIDs, expected.ForwardPromptTokenIDs, actual.ForwardPromptTokenIDs)
 
 	assertEqual("UseTLSForPrefiller", expected.UseTLSForPrefiller, actual.UseTLSForPrefiller)
 	assertEqual("UseTLSForDecoder", expected.UseTLSForDecoder, actual.UseTLSForDecoder)

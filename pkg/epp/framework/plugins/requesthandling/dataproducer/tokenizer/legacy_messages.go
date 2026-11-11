@@ -127,7 +127,7 @@ func (b renderBackend) renderLegacyMessages(ctx context.Context, body *fwkreques
 	return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
 		TokenIDs:           tokenIDs,
 		MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
-	}}}, nil
+	}}, LegacyTranslated: true}, nil
 }
 
 // Compare the expected Chat representation of the original Messages fields.

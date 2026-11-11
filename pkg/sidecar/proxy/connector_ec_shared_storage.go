@@ -26,7 +26,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // fanoutEncoderPrimer sends concurrent encoder requests for each multimodal
@@ -72,7 +72,7 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 		encodeStart := time.Now()
 		total, err := s.fanoutEncoderPrimer(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
-			observeStageError(r.Context(), metrics.StageEncode)
+			observeStageError(r.Context(), routing.StageEncode)
 			logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(w, r); err != nil {
 				logger.Error(err, "failed to send error response to client")
@@ -80,7 +80,7 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 		if total > 0 {
-			observeStageDuration(r.Context(), metrics.StageEncode, time.Since(encodeStart))
+			observeStageDuration(r.Context(), routing.StageEncode, time.Since(encodeStart))
 		}
 	}
 

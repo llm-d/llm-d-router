@@ -7,7 +7,7 @@ The Round Robin fairness policy selects a queue from a priority band using a sim
 ## What it does
 
 1.  **State Management**: It maintains a mutable cursor (`roundRobinCursor`) for each Priority Band it governs, storing the last selected flow key.
-2.  **Determinism**: Flow keys are sorted deterministically before selection.
+2.  **Determinism**: Active queues are ordered deterministically by `FlowKey`.
 3.  **Work Conserving**: It skips empty queues and only selects from flows that have pending items.
 
 ## Unit of Fairness
@@ -17,7 +17,7 @@ The Round Robin fairness policy selects a queue from a priority band using a sim
 ## Inputs consumed
 
 This policy consumes structural data from the flow control system:
-*   **Flow Keys**: Reads the set of active flow keys from the `PriorityBandAccessor`.
+*   **Active Queues**: Iterates active queues in the priority band via `PriorityBandAccessor.IterateQueues`.
 *   **Queue State**: Inspects the length of queues to skip empty ones.
 *   **Cursor State**: Reads and updates the cursor stored on the priority band.
 

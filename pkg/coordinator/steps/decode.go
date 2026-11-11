@@ -43,6 +43,7 @@ type DecodeStep struct {
 	gwClient          *gateway.Client
 	kv                kv.Connector
 	promptTokenParity string
+	forwardTokenIDs   bool
 	// budget is set when the pipeline enables force-streaming.
 	budget *forceStreamBudget
 }
@@ -65,7 +66,11 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity}, nil
+	forwardTokenIDs, _, err := paramBool(params, ParamForwardPromptTokenIDs)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity, forwardTokenIDs: forwardTokenIDs}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -110,7 +115,14 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				// reply is slower but correct.
 				if sent && !kvHandoffReplaySafe(s.kv) {
 					logger.Info("force-stream failed and its KV block handoff is spent; decode will recompute the prompt", "result", result)
-					delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
+					// The rendered IDs do not depend on the handoff, so they stay.
+					if kvParams, _ := reqCtx.Body[reqcommon.FieldKVTransferParams].(map[string]any); kvParams != nil {
+						if ids, ok := kvParams[reqcommon.FieldPromptTokenIDs]; ok {
+							reqCtx.Body[reqcommon.FieldKVTransferParams] = map[string]any{reqcommon.FieldPromptTokenIDs: ids}
+						} else {
+							delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
+						}
+					}
 					// The prefill cache-hit count describes the handoff just dropped.
 					reqCtx.PrefillCachedTokens = nil
 				}
@@ -161,7 +173,12 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 	s.injectUUIDs(reqCtx, logger)
 
 	switch format {
-	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages, reqcommon.APITypeVLLMGenerate:
+	case reqcommon.APITypeChatCompletions, reqcommon.APITypeResponses, reqcommon.APITypeMessages:
+		if sendsPromptTokenIDs(s.forwardTokenIDs, reqCtx, format) {
+			kvParams[reqcommon.FieldPromptTokenIDs] = reqCtx.TokenIDs
+		}
+		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+	case reqcommon.APITypeVLLMGenerate:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
 		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams

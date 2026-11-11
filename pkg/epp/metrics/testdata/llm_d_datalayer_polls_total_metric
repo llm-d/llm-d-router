@@ -1,0 +1,6 @@
+# HELP llm_d_epp_datalayer_polls_total [ALPHA] Data-source polls per source type and outcome.
+# TYPE llm_d_epp_datalayer_polls_total counter
+llm_d_epp_datalayer_polls_total{outcome="error",source_type="http-type"} 1
+llm_d_epp_datalayer_polls_total{outcome="success",source_type="dcgm-type"} 1
+llm_d_epp_datalayer_polls_total{outcome="success",source_type="http-type"} 2
+llm_d_epp_datalayer_polls_total{outcome="timeout",source_type="http-type"} 1
