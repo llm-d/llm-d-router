@@ -54,7 +54,17 @@ dataLayer:
 	listener, err := fwknet.ReserveListener()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
-	startFileDiscoveryDrainTest(ctx, t, opts, listener)
+	_, done := startFileDiscoveryDrainTest(ctx, t, opts, listener)
+	defer func() {
+		if !t.Failed() {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Errorf("EPP exited before serving a request: %v", err)
+		default:
+		}
+	}()
 
 	// A served request means startup has finished applying the flags. It carries no
 	// fairness ID, so it resolves to default-flow and takes no cap slot.
