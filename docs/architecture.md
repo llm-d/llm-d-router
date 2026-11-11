@@ -265,6 +265,13 @@ If the configuration is in a file, the EPP command line argument `--config-file`
  to specify the full path of the file in question. If the configuration is passed as in-line
  text the EPP command line argument `--config-text` should be used.
 
+To check a configuration before deploying it, add `--validate-config`. The EPP then runs the same
+ configuration checks as a real start (plugin types and parameters, scheduling profiles, data
+ dependencies, plugin stability and the data layer setup), logs the result and exits with code 0
+ when the configuration is valid or 1 when it is not. It does not connect to Kubernetes or start
+ any server, so it runs anywhere the EPP binary does, such as a laptop or a CI job. It checks the
+ configuration only, not whether the services that plugins connect to are reachable.
+
 Feature gates can also be set with the `--feature-gates` command line argument, which takes a 
  comma-separated list of kubelet-style `name=bool` entries; a bare name enables the gate. These
  entries are applied after the configuration's own `featureGates` list, so they override it.
