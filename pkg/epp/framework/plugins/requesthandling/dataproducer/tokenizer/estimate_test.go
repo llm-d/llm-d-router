@@ -1629,3 +1629,19 @@ func TestEstimateBackend_ChatToolCallsAffectPrefix(t *testing.T) {
 	long := chatEstimate(t, turn("write_file", strings.Repeat("x", 4000)))
 	assert.Greater(t, len(long), len(noCall)+900, "tool call arguments must count toward the estimate")
 }
+
+// A payload that cannot decode as standard base64 -- URL-safe alphabet, for
+// example -- still has a length, so the byte-rate estimate applies. Falling
+// back to the default duration here would weigh such clips at 10 s regardless
+// of size.
+func TestAudioEstimator_UndecodableBase64UsesByteRate(t *testing.T) {
+	// 64,000 URL-safe characters: no standard-base64 decode, but
+	// Base64DecodedLen still yields 48,000 bytes, 3 s at the default rate.
+	payload := strings.Repeat("_-", 32000)
+	tp, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(payload, "wav"))
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, audioTokens(3), tp.Prompts[0].MultiModalFeatures[0].Length)
+	assert.NotEqual(t, audioTokens(defaultAudioDuration), tp.Prompts[0].MultiModalFeatures[0].Length,
+		"an undecodable payload must not fall back to the default duration")
+}

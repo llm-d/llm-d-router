@@ -479,6 +479,9 @@ func (e audioEstimator) tokensForDuration(seconds float64) int {
 // It is the base64 twin of durationSecondsUploaded: it decodes the payload's
 // bounded head and full decoded length and shares the one resolution order.
 func (e audioEstimator) durationSeconds(data string, meta audioMetadata) float64 {
+	if meta.duration > 0 {
+		return meta.duration
+	}
 	head, size := decodeAudioHead(data)
 	return e.durationSecondsUploaded(head, size, meta)
 }
@@ -486,6 +489,8 @@ func (e audioEstimator) durationSeconds(data string, meta audioMetadata) float64
 // decodeAudioHead returns the first UploadedMediaHeadBytes decoded bytes of a
 // base64 audio payload and the payload's full decoded length. An empty payload
 // returns nil and zero, so duration resolution falls through to configuration.
+// A payload that cannot decode still has a length, so the head is nil while
+// the size carries the byte-rate estimate.
 func decodeAudioHead(data string) ([]byte, int64) {
 	payload := audioBase64Payload(data)
 	if payload == "" {
@@ -494,10 +499,11 @@ func decodeAudioHead(data string) ([]byte, int64) {
 	// Only the headers are needed, so decoding is streamed and bounded.
 	head := make([]byte, fwkrequest.UploadedMediaHeadBytes)
 	n, err := io.ReadFull(base64.NewDecoder(base64.StdEncoding, strings.NewReader(payload)), head)
+	size := int64(reqcommon.Base64DecodedLen(payload))
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		return nil, 0
+		return nil, size
 	}
-	return head[:n], int64(reqcommon.Base64DecodedLen(payload))
+	return head[:n], size
 }
 
 // durationSecondsUploaded resolves an uploaded clip's length in seconds,

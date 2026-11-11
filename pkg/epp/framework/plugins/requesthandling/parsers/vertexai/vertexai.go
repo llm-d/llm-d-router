@@ -177,21 +177,11 @@ func (p *VertexAIParser) ParseResponse(ctx context.Context, body []byte, headers
 	return result, errors.Join(errs...)
 }
 
-// bodyHeaders returns headers carrying the content type an HttpBody declares
-// for its data. A frame that declares none has an unknown data type, and the
-// transport's content type describes the gRPC channel rather than the data, so
-// it is dropped rather than forwarded: the OpenAI parser treats an absent type
-// as its historical JSON assumption, which is what an undeclared frame's JSON
-// data needs.
+// bodyHeaders returns headers with the content type an HttpBody declares for its
+// data, or headers unchanged when it declares none.
 func bodyHeaders(headers map[string]string, contentType string) map[string]string {
 	if contentType == "" {
-		if _, ok := headers[reqcommon.HeaderContentType]; !ok {
-			return headers
-		}
-		out := make(map[string]string, len(headers))
-		maps.Copy(out, headers)
-		delete(out, reqcommon.HeaderContentType)
-		return out
+		return headers
 	}
 	out := make(map[string]string, len(headers)+1)
 	maps.Copy(out, headers)

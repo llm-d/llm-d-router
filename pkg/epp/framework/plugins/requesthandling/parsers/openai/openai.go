@@ -283,11 +283,10 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 		return p.parseStreamResponse(body)
 	}
 
-	// Usage lives in JSON bodies. The transcription response formats text,
-	// srt and vtt arrive as text/plain, application/x-subrip and text/vtt,
-	// which carry none, so parsing them would only log an error per
-	// response; an absent media type keeps the historical JSON assumption.
-	if mediaType != "" && mediaType != reqcommon.ContentTypeJSON {
+	// The transcription response formats text, srt and vtt carry no usage,
+	// and parsing them as JSON would only log an error per response. srt
+	// arrives as application/x-subrip and vtt as text/vtt.
+	if mediaType == "text/plain" || mediaType == "text/vtt" || mediaType == "application/x-subrip" {
 		return nil, nil //nolint:nilnil
 	}
 
