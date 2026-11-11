@@ -620,6 +620,43 @@ var (
 		},
 		[]string{"source_type"},
 	)
+
+	// LlmdCrossReplicaPublishesTotal records per-endpoint cross-replica
+	// publishes per state key and outcome.
+	LlmdCrossReplicaPublishesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cross_replica_publishes_total",
+			Help:      metricsutil.HelpMsgWithStability("Per-endpoint cross-replica state publishes per state key and outcome.", compbasemetrics.ALPHA),
+		},
+		[]string{"state_key", "outcome"},
+	)
+
+	// LlmdCrossReplicaLastPublishTimestamp records when a state key last
+	// published at least one endpoint, so time() minus it is how old this
+	// replica's shared state can be for its peers.
+	LlmdCrossReplicaLastPublishTimestamp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cross_replica_last_publish_timestamp_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Unix time of the last successful cross-replica state publish per state key.", compbasemetrics.ALPHA),
+		},
+		[]string{"state_key"},
+	)
+
+	// LlmdCrossReplicaPublishCycleDuration records how long one publish cycle
+	// over every registered endpoint takes. The ladder starts below the 200ms
+	// default sync interval and ends past it, since a cycle slower than the
+	// interval delays the next one.
+	LlmdCrossReplicaPublishCycleDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cross_replica_publish_cycle_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Duration of one cross-replica publish cycle over all registered endpoints.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2.5},
+		},
+		[]string{},
+	)
 )
 
 // --- Tool-calling request field integrity metric ---
