@@ -87,12 +87,14 @@ func TestNewHTTPDataSource_CACertPath(t *testing.T) {
 	parser := func(r io.Reader) (any, error) { return struct{}{}, nil }
 
 	tests := []struct {
-		name       string
-		caCertPath string
-		skipVerify bool
-		wantErr    error
-		wantRootCA bool
+		name           string
+		caCertPath     string
+		skipVerify     bool
+		wantErr        error
+		wantRootCA     bool
+		wantSkipVerify bool
 	}{
+		{name: "skip-verify without CA stays insecure", skipVerify: true, wantSkipVerify: true},
 		{name: "CA overrides skip-verify", caCertPath: writeCACert(t), skipVerify: true, wantRootCA: true},
 		{name: "valid CA sets RootCAs", caCertPath: writeCACert(t), wantRootCA: true},
 		{name: "empty CA uses system pool", caCertPath: "", wantRootCA: false},
@@ -111,7 +113,7 @@ func TestNewHTTPDataSource_CACertPath(t *testing.T) {
 			require.True(t, ok)
 			tr, ok := cl.Transport.(*http.Transport)
 			require.True(t, ok)
-			assert.False(t, tr.TLSClientConfig.InsecureSkipVerify)
+			assert.Equal(t, tt.wantSkipVerify, tr.TLSClientConfig.InsecureSkipVerify)
 			if tt.wantRootCA {
 				assert.NotNil(t, tr.TLSClientConfig.RootCAs)
 			} else {
