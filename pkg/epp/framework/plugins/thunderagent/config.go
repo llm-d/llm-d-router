@@ -44,6 +44,10 @@ type Config struct {
 	// ForceAdmitTimeout is the maximum queue wait before a request is admitted
 	// even when no pod has room. 0s disables forced admission.
 	ForceAdmitTimeout metav1.Duration `json:"forceAdmitTimeout"`
+	// ResumeOnOtherPod lets a paused session whose own pod has no room, even
+	// after reclaiming idle sessions, resume on another pod with room. That
+	// pod does not hold the session's KV and recomputes its history.
+	ResumeOnOtherPod bool `json:"resumeOnOtherPod"`
 }
 
 func defaultConfig() Config {
