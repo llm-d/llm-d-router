@@ -1634,14 +1634,14 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				Size:              "1024x1024",
 				NumInferenceSteps: ptr.To[int64](30),
 				NegativePrompt:    "blurry",
-				Image:             attachedImage,
+				InputImages:       []request.UploadedMedia{attachedImage},
 			},
 		},
 		{
 			name:       "images edits request with prompt only",
 			path:       "/v1/images/edits",
 			fields:     map[string]string{"prompt": "make it night"},
-			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", Image: attachedImage},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", InputImages: []request.UploadedMedia{attachedImage}},
 		},
 		{
 			name: "images edits request with stream",
@@ -1651,13 +1651,13 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				"stream": "true",
 			},
 			wantStream: true,
-			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", Image: attachedImage},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", InputImages: []request.UploadedMedia{attachedImage}},
 		},
 		{
 			name:       "images edits request via prefix-mounted path",
 			path:       "/openai/v1/images/edits",
 			fields:     map[string]string{"prompt": "make it night"},
-			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", Image: attachedImage},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", InputImages: []request.UploadedMedia{attachedImage}},
 		},
 		{
 			name:    "images edits request missing prompt",
@@ -2826,12 +2826,12 @@ func TestOpenAIParser_ImagesEditsSharesMultipartReader(t *testing.T) {
 	want := &request.ImagesGenerationsRequest{
 		Prompt: "add a hat",
 		N:      ptr.To[int64](2),
-		Image: request.UploadedMedia{
+		InputImages: []request.UploadedMedia{{
 			ContentType: "image/png",
 			SizeBytes:   int64(len(media)),
 			Head:        []byte(media),
 			Hash:        xxhash.Sum64([]byte(media)),
-		},
+		}},
 	}
 	if diff := cmp.Diff(want, result.Body.Images); diff != "" {
 		t.Errorf("Images mismatch (-want +got):\n%s", diff)
@@ -2857,7 +2857,10 @@ func TestOpenAIParser_ImagesEditsCapturesImagePart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	image := result.Body.Images.Image
+	if got := len(result.Body.Images.InputImages); got != 1 {
+		t.Fatalf("captured %d image parts, want 1", got)
+	}
+	image := result.Body.Images.InputImages[0]
 	if image.SizeBytes != int64(len(media)) {
 		t.Errorf("SizeBytes = %d, want %d", image.SizeBytes, len(media))
 	}
@@ -2869,6 +2872,32 @@ func TestOpenAIParser_ImagesEditsCapturesImagePart(t *testing.T) {
 	}
 	if image.ContentType != "image/png" {
 		t.Errorf("ContentType = %q, want image/png", image.ContentType)
+	}
+}
+
+// A multi-image edit captures every image part in form order, whether sent as
+// repeated "image" parts or under the "image[]" alias; the mask stays ignored.
+func TestOpenAIParser_ImagesEditsCapturesEveryImagePart(t *testing.T) {
+	first, second, third := "first-image", "second-image-bytes", "third"
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "prompt", value: "merge these"},
+		videoFormPart{name: "image", value: first, filename: "a.png", mediaType: "image/png"},
+		videoFormPart{name: "image", value: second, filename: "b.jpg", mediaType: "image/jpeg"},
+		videoFormPart{name: "mask", value: "maskbytes", filename: "mask.png", mediaType: "image/png"},
+		videoFormPart{name: "image[]", value: third, filename: "c.webp", mediaType: "image/webp"},
+	)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/images/edits", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []request.UploadedMedia{
+		{ContentType: "image/png", SizeBytes: int64(len(first)), Head: []byte(first), Hash: xxhash.Sum64String(first)},
+		{ContentType: "image/jpeg", SizeBytes: int64(len(second)), Head: []byte(second), Hash: xxhash.Sum64String(second)},
+		{ContentType: "image/webp", SizeBytes: int64(len(third)), Head: []byte(third), Hash: xxhash.Sum64String(third)},
+	}
+	if diff := cmp.Diff(want, result.Body.Images.InputImages); diff != "" {
+		t.Errorf("InputImages mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -2884,8 +2913,8 @@ func TestOpenAIParser_ImagesEditsNoImagePart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if image := result.Body.Images.Image; image.SizeBytes != 0 || image.Head != nil || image.Hash != 0 {
-		t.Errorf("Image = %+v, want the zero value", image)
+	if images := result.Body.Images.InputImages; len(images) != 0 {
+		t.Errorf("InputImages = %+v, want none", images)
 	}
 }
 

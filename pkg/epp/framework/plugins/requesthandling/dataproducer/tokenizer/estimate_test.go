@@ -148,7 +148,7 @@ func TestImagesEstimator_CapturedImageDimensionTokens(t *testing.T) {
 	png := pngBytes(t, 128, 64)
 	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: int64(len(png)), Head: png, Hash: xxhash.Sum64(png)}
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
-		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: []fwkrequest.UploadedMedia{media}},
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
@@ -161,13 +161,39 @@ func TestImagesEstimator_CapturedImageDimensionTokens(t *testing.T) {
 	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
 }
 
+// TestImagesEstimator_MultipleImagesSumTokens asserts a multi-image edit
+// reports one image feature per uploaded image, in order and back to back, and
+// its token count is the text plus the placeholders of every image.
+func TestImagesEstimator_MultipleImagesSumTokens(t *testing.T) {
+	first, second := pngBytes(t, 128, 64), pngBytes(t, 256, 128)
+	images := []fwkrequest.UploadedMedia{
+		{ContentType: "image/png", SizeBytes: int64(len(first)), Head: first, Hash: xxhash.Sum64(first)},
+		{ContentType: "image/png", SizeBytes: int64(len(second)), Head: second, Hash: xxhash.Sum64(second)},
+	}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: images},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 2)
+	textTokens := len(packBytes([]byte("add a hat")))
+	assert.Equal(t, textTokens, features[0].Offset)
+	assert.Equal(t, imageTokens(128, 64), features[0].Length)
+	assert.Equal(t, strconv.FormatUint(images[0].Hash, 16), features[0].Hash)
+	assert.Equal(t, features[0].Offset+features[0].Length, features[1].Offset)
+	assert.Equal(t, imageTokens(256, 128), features[1].Length)
+	assert.Equal(t, strconv.FormatUint(images[1].Hash, 16), features[1].Hash)
+	assert.Equal(t, textTokens+imageTokens(128, 64)+imageTokens(256, 128), tp.TokenCount())
+}
+
 // TestImagesEstimator_UndecodableHeadUsesDefaultResolution asserts an image
 // head that carries no readable dimension header falls back to the default
 // resolution, so the request still carries image weight.
 func TestImagesEstimator_UndecodableHeadUsesDefaultResolution(t *testing.T) {
 	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: 4096, Head: []byte("not an image header")}
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
-		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: []fwkrequest.UploadedMedia{media}},
 	})
 	require.NoError(t, err)
 	features := tp.Prompts[0].MultiModalFeatures
@@ -182,7 +208,7 @@ func TestImagesEstimator_WebPHeadDimensions(t *testing.T) {
 	head := webpHeader("VP8L", 512, 256)
 	media := fwkrequest.UploadedMedia{ContentType: "image/webp", SizeBytes: int64(len(head)), Head: head, Hash: xxhash.Sum64(head)}
 	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
-		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: []fwkrequest.UploadedMedia{media}},
 	})
 	require.NoError(t, err)
 	features := tp.Prompts[0].MultiModalFeatures

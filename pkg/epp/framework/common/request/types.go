@@ -676,10 +676,10 @@ type ImagesGenerationsRequest struct {
 	// NegativePrompt describes what to avoid in the generated image(s) and is
 	// encoded alongside Prompt for classifier-free guidance.
 	NegativePrompt string `json:"negative_prompt,omitempty"`
-	// Image is the uploaded file part of an images-edits request, the
-	// image-to-image conditioning input. Its zero value means the request
+	// InputImages are the uploaded image parts of an images-edits request, the
+	// image-to-image conditioning inputs, in form order. Empty means the request
 	// carried no image part (images-generations requests never do).
-	Image UploadedMedia `json:"-"`
+	InputImages []UploadedMedia `json:"-"`
 }
 
 func (i *ImagesGenerationsRequest) String() string {
