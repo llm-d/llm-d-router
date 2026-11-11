@@ -1285,3 +1285,26 @@ for c in "sidecar:${envoy_default_output}:--concurrency:8:1" "sidecar-cpuset:${e
     exit 1
   fi
 done
+
+echo "Verifying Envoy ext_proc message_timeout and GKE GCPBackendPolicy timeoutSec..."
+if ! grep -q -- 'message_timeout: 1000s$' "${envoy_default_output}"; then
+  echo "Standalone Envoy default render did not set message_timeout: 1000s"
+  exit 1
+fi
+envoy_timeout_output="${TEMP_DIR}/llm-d-router-standalone-envoy-timeout-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.extProcMessageTimeout=2400s > "${envoy_timeout_output}" || exit 1
+"${KUBECTL_VALIDATE}" "${envoy_timeout_output}" --local-crds "${TEMP_DIR}" || exit 1
+if ! grep -q -- 'message_timeout: 2400s$' "${envoy_timeout_output}"; then
+  echo "Standalone Envoy override did not render message_timeout: 2400s"
+  exit 1
+fi
+for pb in false true; do
+  gke_timeout_output="${TEMP_DIR}/llm-d-router-gateway-gke-timeout-${pb}.yaml"
+  ${HELM} template gke-timeout ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set provider.name=gke --set provider.gke.preferredBackends.enabled=${pb} --set provider.gke.backendTimeoutSec=2400 --set router.modelServers.matchLabels.app=llm-instance-gateway > "${gke_timeout_output}" || exit 1
+  "${KUBECTL_VALIDATE}" "${gke_timeout_output}" --local-crds "${TEMP_DIR}" || exit 1
+  bad_timeouts=$("${YQ}" -N 'select(.kind == "GCPBackendPolicy") | select(.spec.default.timeoutSec != 2400) | .metadata.name' "${gke_timeout_output}")
+  if [ -n "${bad_timeouts}" ]; then
+    echo "GCPBackendPolicy timeoutSec override missed policies (preferredBackends=${pb}): ${bad_timeouts}"
+    exit 1
+  fi
+done

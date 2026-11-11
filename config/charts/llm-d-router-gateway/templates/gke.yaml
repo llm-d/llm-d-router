@@ -60,6 +60,7 @@ spec:
         port: {{ $eppHealthPort }}
 {{- end }}
 {{- $gkePB := include "llm-d-router.gkePreferredBackends" . | fromYaml | default dict }}
+{{- $backendTimeoutSec := int (dig "gke" "backendTimeoutSec" 300 .Values.provider | default 300) }}
 {{- if $gkePB.enabled }}
 {{- $preferredReplicas := $gkePB.preferredReplicas | default 1 | int }}
 {{- $defaultReplicas := $gkePB.defaultReplicas | default 1 | int }}
@@ -109,7 +110,7 @@ spec:
     kind: InferencePool
     name: {{ .Release.Name }}
   default:
-    timeoutSec: 300    # 5-minute timeout (adjust as needed)
+    timeoutSec: {{ $backendTimeoutSec }}
     logging:
       enabled: true    # log all requests by default
 ---
@@ -146,7 +147,7 @@ spec:
     kind: Service
     name: {{ $serviceName }}
   default:
-    timeoutSec: 300
+    timeoutSec: {{ $backendTimeoutSec }}
     backendPreference: {{ $pref }}
     {{- if $gkePB.balancingMode }}
     balancingMode: {{ $gkePB.balancingMode }}
