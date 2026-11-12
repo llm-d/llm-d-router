@@ -595,3 +595,22 @@ func TestDecisionReason(t *testing.T) {
 		})
 	}
 }
+
+func TestUntilNextDay(t *testing.T) {
+	ist := time.FixedZone("IST", 2*60*60)
+	cases := []struct {
+		name string
+		now  time.Time
+		want time.Duration
+	}{
+		{name: "midday", now: time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC), want: 12 * time.Hour},
+		{name: "at midnight", now: time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC), want: 24 * time.Hour},
+		{name: "end of month", now: time.Date(2026, 11, 30, 23, 59, 30, 0, time.UTC), want: 30 * time.Second},
+		{name: "non-UTC location", now: time.Date(2026, 11, 13, 1, 0, 0, 0, ist), want: time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, untilNextDay(tc.now))
+		})
+	}
+}
