@@ -1481,6 +1481,28 @@ func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
 	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
 }
 
+func TestNewAcceptsRegisteredKVEventEngineType(t *testing.T) {
+	built := 0
+	engineadapter.Register("test-own-format", func() kvevents.EngineAdapter {
+		built++
+		return engineadapter.NewVLLMAdapter()
+	})
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.EngineType = "test-own-format"
+
+	_, err = New(ctx, "own-format-engine", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, built, "New builds the pool's adapter from the registry")
+}
+
 type fakeSubscriberManager struct {
 	ids             []string
 	sourceEndpoints []string
