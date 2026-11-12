@@ -51,7 +51,7 @@ func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 
 // ParseMessage decodes one vLLM event batch.
 func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
-	podID, modelName := parseTopic(msg.Topic)
+	podID, modelName := topicIdentity(msg)
 
 	vllmBatch := msgpackTypedEventBatch{schema: &vllmWireSchema}
 	if err := msgpack.Unmarshal(msg.Payload, &vllmBatch); err != nil {

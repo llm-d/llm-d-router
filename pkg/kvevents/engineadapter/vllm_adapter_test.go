@@ -203,6 +203,25 @@ func TestVLLMParseMessage_Valid(t *testing.T) {
 	assert.Equal(t, uint64(99), blockStored.ParentHash)
 }
 
+// TestVLLMParseMessage_ModelOnlyTopic tests a per-pod subscription whose
+// topic names the model alone.
+func TestVLLMParseMessage_ModelOnlyTopic(t *testing.T) {
+	payload, err := msgpack.Marshal([]any{
+		1234567890.0,
+		[]any{[]any{"BlockStored", []any{uint64(100)}, uint64(99), []uint32{1, 2, 3}, 16, nil, "gpu", nil, nil}},
+	})
+	require.NoError(t, err)
+
+	podID, modelName, _, err := NewVLLMAdapter().ParseMessage(&kvevents.RawMessage{
+		Topic:          "kv@llama-2-7b",
+		SourceEndpoint: "10.0.0.5:5556",
+		Payload:        payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "10.0.0.5:5556", podID)
+	assert.Equal(t, "llama-2-7b", modelName)
+}
+
 // TestVLLMParseMessage_BatchExtraTrailingFields tests a batch from a publisher
 // that serves snapshots, which appends its publisher_id to every batch.
 func TestVLLMParseMessage_BatchExtraTrailingFields(t *testing.T) {

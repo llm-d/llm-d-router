@@ -72,7 +72,7 @@ func (s *SGLangAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 // It extracts pod identity and model name from the topic,
 // and decodes the msgpack payload into an EventBatch.
 func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
-	podID, modelName := parseTopic(msg.Topic)
+	podID, modelName := topicIdentity(msg)
 
 	batch := msgpackTypedEventBatch{schema: &sglangWireSchema}
 	if err := msgpack.Unmarshal(msg.Payload, &batch); err != nil {
