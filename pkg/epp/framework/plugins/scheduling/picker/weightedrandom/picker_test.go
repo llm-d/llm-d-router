@@ -109,6 +109,33 @@ func TestPickWeightedRandomPickerTemperature(t *testing.T) {
 	}
 }
 
+// TestPickWeightedRandomPickerLowTemperatureMultiPick checks that every slot follows score order at
+// low temperature, where the effective weights of non-top endpoints are far below 1e-3.
+func TestPickWeightedRandomPickerLowTemperatureMultiPick(t *testing.T) {
+	low := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "low"}}, nil, nil)
+	mid := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "mid"}}, nil, nil)
+	top := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "top"}}, nil, nil)
+	input := []*fwksched.ScoredEndpoint{
+		{Endpoint: low, Score: 0.25},
+		{Endpoint: mid, Score: 0.5},
+		{Endpoint: top, Score: 1.0},
+	}
+
+	// At T=0.01 the chance of any order other than [top, mid] is about 0.5^100 per call.
+	picker := NewWeightedRandomPicker(2).WithTemperature(0.01)
+	for range 100 {
+		result := picker.Pick(context.Background(), input)
+		if len(result.TargetEndpoints) != 2 {
+			t.Fatalf("expected 2 endpoints, got %d", len(result.TargetEndpoints))
+		}
+		first := result.TargetEndpoints[0].GetMetadata().ID.Name
+		second := result.TargetEndpoints[1].GetMetadata().ID.Name
+		if first != "top" || second != "mid" {
+			t.Fatalf("expected [top mid], got [%s %s]", first, second)
+		}
+	}
+}
+
 // TestWeightedRandomPickerFactoryTemperature verifies that the factory rejects non-positive
 // temperatures and accepts a valid or omitted value.
 func TestWeightedRandomPickerFactoryTemperature(t *testing.T) {

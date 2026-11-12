@@ -676,6 +676,10 @@ type ImagesGenerationsRequest struct {
 	// NegativePrompt describes what to avoid in the generated image(s) and is
 	// encoded alongside Prompt for classifier-free guidance.
 	NegativePrompt string `json:"negative_prompt,omitempty"`
+	// Image is the uploaded file part of an images-edits request, the
+	// image-to-image conditioning input. Its zero value means the request
+	// carried no image part (images-generations requests never do).
+	Image UploadedMedia `json:"-"`
 }
 
 func (i *ImagesGenerationsRequest) String() string {
@@ -744,6 +748,26 @@ func (v *VideoGenerationRequest) String() string {
 		derefInt(v.NumFrames), derefFloat(v.FPS),
 		derefInt(v.NumInferenceSteps), derefInt(v.NumOutputsPerPrompt))
 }
+
+// UploadedMedia describes one uploaded multipart file part without retaining
+// its body: Hash covers the full stream, SizeBytes its length, and Head its
+// leading bytes for container sniffing.
+type UploadedMedia struct {
+	// ContentType is the file part's declared MIME type.
+	ContentType string `json:"-"`
+	// SizeBytes is the file part's length in bytes.
+	SizeBytes int64 `json:"-"`
+	// Head holds the leading bytes of the file part.
+	Head []byte `json:"-"`
+	// Hash is the xxhash of the file part's full byte stream.
+	Hash uint64 `json:"-"`
+}
+
+// UploadedMediaHeadBytes bounds how many leading bytes of a media payload are
+// retained for container sniffing: the parser captures this many bytes of an
+// uploaded file part, and the estimator's dimension and duration walks read
+// within it.
+const UploadedMediaHeadBytes = 1024
 
 // GenerateRequest holds pre-tokenized input for native generate endpoints
 // (vLLM /inference/v1/generate and SGLang /generate). Unlike OpenAI-compatible

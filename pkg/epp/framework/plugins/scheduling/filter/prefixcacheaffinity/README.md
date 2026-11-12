@@ -61,10 +61,13 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
   `maxTTFTPenaltyMs`, break stickiness and keep all endpoints (0 = always stick). The
   per-endpoint TTFT is estimated from in-flight tokens as
   `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
-  `prefillThroughput` (default), or comes from the latency predictor when `ttftSource`
-  is `latencyPredictor`
+  `prefillThroughput` (default); when `ttftEstimate` is `backlog` the numerator
+  is `inFlightTokens`, and when `ttftEstimate` is `full` it becomes
+  `inFlightTokens + uncachedRequestTokens`. The TTFT comes
+  from the latency predictor when `ttftSource` is `latencyPredictor`
 - If either the sticky or non-sticky set has no endpoint with the TTFT source attribute
-  (`LatencyPredictionInfo` or `InFlightLoad`), the TTFT load gate is skipped and all
+  (`LatencyPredictionInfo` or `InFlightLoad`, plus `UncachedRequestTokens` when
+  `ttftEstimate` is `full`), the TTFT load gate is skipped and all
   endpoints are kept; the `missing_signal` outcome is recorded. If no endpoints have
   `PrefixCacheMatchInfo`, all prefix scores default to 0 and no endpoints pass the affinity
   threshold, so all are kept (no-op)
@@ -119,6 +122,7 @@ documents the strategy and its calibration.
 | `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
 | `p2pSourceProducerName` | `string` | No | (empty) | Name of the `p2p-source-producer` whose decision is paired with this filter's outcome per request; empty disables the pairing |
+| `ttftEstimate` | `string` | No | `backlog` | TTFT estimation method with `prefillThroughput` source: `backlog` or `full` |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
 2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
@@ -126,10 +130,19 @@ unloaded chunk of `max_num_batched_tokens` (8192) tokens. It is hardware-, model
 serving-stack-specific; retune it for a different deployment, or set `ttftSource`
 to `latencyPredictor` to source TTFT from the latency predictor instead.
 
+With `ttftEstimate: backlog`, the TTFT estimate omits the request's own prefill, so
+`maxTTFTPenaltyMs` has to account for the extra prefill the request would run on a
+non-sticky endpoint. With `ttftEstimate: full`, each endpoint's estimate adds the
+request's uncached tokens on that endpoint, so the non-sticky endpoint's estimate already
+contains that extra prefill. A `backlog`-tuned `maxTTFTPenaltyMs` under `full` might break
+stickiness later than intended. With `full`, set `maxTTFTPenaltyMs` lower than a
+`backlog`-tuned value.
+
 ## Dependencies
 
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
 - Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer`)
+- Reads `UncachedRequestTokens` for the TTFT load gate when `ttftEstimate` is `full` (from `in-flight-load-producer`)
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 - Reads `P2PSourceDecision` in `PreRequest` when `p2pSourceProducerName` is set (from `p2p-source-producer`; optional)
 
