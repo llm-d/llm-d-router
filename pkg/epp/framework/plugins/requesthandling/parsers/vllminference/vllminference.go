@@ -132,6 +132,17 @@ func (p *VllmInferenceParser) ParseRequest(ctx context.Context, body []byte, hea
 	}
 	extracted.RawBody = body
 	extracted.Payload = fwkrequest.PayloadBytes(body)
+	if req.HasKVHints() {
+		// A kv_hints action names a peer the engine connects to, so only a hint
+		// the EPP writes after scheduling may reach it.
+		stripped, err := vllmwire.RewriteKVHints(body, nil)
+		if err != nil {
+			return nil, fmt.Errorf("invalid gRPC generate request: %w", err)
+		}
+		extracted.Payload = fwkrequest.PayloadBytes(stripped)
+		extracted.Mutated = true
+		log.FromContext(ctx).V(logutil.DEBUG).Info("dropped client-supplied kv_hints")
+	}
 	if logger := log.FromContext(ctx).V(logutil.TRACE); logger.Enabled() {
 		logger.Info("parsed vllm.Inference GenerateRequest", "stream", stream)
 	}

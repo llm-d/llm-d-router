@@ -223,20 +223,22 @@ func ReplaceVarintField(frame []byte, num protowire.Number, value uint64, omitZe
 	return grpcframe.FinishFrame(out)
 }
 
-// ReplaceBytesField is ReplaceVarintField for a string or bytes field. An
-// empty value removes the field.
-func ReplaceBytesField(frame []byte, num protowire.Number, value string) ([]byte, error) {
+// ReplaceBytesField is ReplaceVarintField for a string, bytes, or message
+// field. For a message field, value is the serialized message. An empty value
+// removes the field.
+func ReplaceBytesField[V string | []byte](frame []byte, num protowire.Number, value V) ([]byte, error) {
 	fieldLen := 0
-	if value != "" {
+	if len(value) != 0 {
 		fieldLen = protowire.SizeTag(num) + protowire.SizeBytes(len(value))
 	}
 	out, unchanged, err := startReplace(frame, num, fieldLen)
 	if err != nil || unchanged {
 		return out, err
 	}
-	if value != "" {
+	if len(value) != 0 {
 		out = protowire.AppendTag(out, num, protowire.BytesType)
-		out = protowire.AppendString(out, value)
+		out = AppendLen(out, len(value))
+		out = append(out, value...)
 	}
 	return grpcframe.FinishFrame(out)
 }
