@@ -734,3 +734,133 @@ func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string) {
 		t.Errorf("decode revision header = %q, want %q", got, probeRevision)
 	}
 }
+
+// A decode worker never runs the prefill, so the count of tokens the prefill
+// stage wrote to the KV/prefix cache, which vLLM reports at
+// prompt_tokens_details.created_cache_tokens, arrives at the client as the
+// prefill worker's measurement, not the decode worker's zero.
+func TestCreatedCacheTokens_FlowFromPrefillToDecode(t *testing.T) {
+	const (
+		prefillCachedTokens      = 0
+		prefillCreatedCacheTokens = 4608
+		decodeCachedTokens       = 500
+		decodeCreatedCacheTokens  = 0
+	)
+
+	tests := []struct {
+		name   string
+		path   string
+		stream bool
+	}{
+		{name: "non-streaming", path: reqcommon.PathChatCompletions},
+		{name: "streaming", path: reqcommon.PathChatCompletions, stream: true},
+		{name: "responses", path: reqcommon.PathResponses},
+		{name: "responses streaming", path: reqcommon.PathResponses, stream: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			responses := test.path == reqcommon.PathResponses
+			gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
+				case gateway.PhasePrefill:
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"kv_transfer_params": map[string]any{"block_id": "block-1"},
+						"usage":              usageBlockForCounts(responses, prefillCachedTokens, prefillCreatedCacheTokens),
+					})
+				case gateway.PhaseDecode:
+					if test.stream {
+						writeUsageSSE(t, w, usageBlockForCounts(responses, decodeCachedTokens, decodeCreatedCacheTokens))
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"usage": usageBlockForCounts(responses, decodeCachedTokens, decodeCreatedCacheTokens)})
+				default:
+					http.Error(w, "not found", http.StatusNotFound)
+				}
+			}))
+			defer gwServer.Close()
+
+			gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+			reqCtx := cachedTokensRequestContext(test.stream)
+			reqCtx.OriginalPath = test.path
+
+			prefillStep, _ := NewPrefillStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+			if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("prefill failed: %v", err)
+			}
+			switch got := reqCtx.PrefillCreatedCacheTokens; {
+			case got == nil:
+				t.Fatalf("prefill reported no created-cache-token count, want %d", prefillCreatedCacheTokens)
+			case *got != prefillCreatedCacheTokens:
+				t.Fatalf("prefill created cache tokens = %d, want %d", *got, prefillCreatedCacheTokens)
+			}
+
+			decodeStep, _ := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.NIXL})
+			recorder := httptest.NewRecorder()
+			reqCtx.ResponseWriter = recorder
+			if err := decodeStep.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("decode failed: %v", err)
+			}
+
+			if got := clientCreatedCacheTokens(t, recorder.Body.String()); got != prefillCreatedCacheTokens {
+				t.Errorf("client created_cache_tokens = %d, want the prefill worker's %d", got, prefillCreatedCacheTokens)
+			}
+			if test.stream && !strings.Contains(recorder.Body.String(), reqcommon.SSEDoneMarker) {
+				t.Errorf("rewritten stream dropped the done marker: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
+func usageBlockWithCounts(cachedTokens, createdCacheTokens int) map[string]any {
+	return map[string]any{
+		reqcommon.FieldPromptTokens: 64,
+		reqcommon.FieldPromptTokensDetails: map[string]any{
+			reqcommon.FieldCachedTokens:       cachedTokens,
+			reqcommon.FieldCreatedCacheTokens: createdCacheTokens,
+		},
+	}
+}
+
+// usageBlockForCounts returns the usage block the route reports in: Responses
+// counts input tokens with details under input_tokens_details.
+func usageBlockForCounts(responses bool, cachedTokens, createdCacheTokens int) map[string]any {
+	if !responses {
+		return usageBlockWithCounts(cachedTokens, createdCacheTokens)
+	}
+	return map[string]any{
+		reqcommon.FieldInputTokens: 64,
+		reqcommon.FieldInputTokensDetails: map[string]any{
+			reqcommon.FieldCachedTokens:       cachedTokens,
+			reqcommon.FieldCreatedCacheTokens: createdCacheTokens,
+		},
+	}
+}
+
+// clientCreatedCacheTokens reads usage.prompt_tokens_details.created_cache_tokens
+// out of the response the client received, whether it is one JSON document or
+// an SSE stream.
+func clientCreatedCacheTokens(t *testing.T, body string) int {
+	t.Helper()
+	documents := []string{body}
+	if strings.HasPrefix(body, reqcommon.SSEDataPrefix) {
+		documents = nil
+		for line := range strings.SplitSeq(body, "\n") {
+			data, ok := strings.CutPrefix(line, reqcommon.SSEDataPrefix)
+			if ok && strings.TrimSpace(data) != reqcommon.SSEDoneMarker {
+				documents = append(documents, data)
+			}
+		}
+	}
+	for _, document := range documents {
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(document), &parsed); err != nil {
+			t.Fatalf("unmarshal %s: %v", document, err)
+		}
+		if created, ok := usage.CreatedCacheTokens(parsed[reqcommon.FieldUsage]); ok {
+			return created
+		}
+	}
+	t.Fatalf("no created_cache_tokens in the response the client received: %s", body)
+	return 0
+}

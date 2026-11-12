@@ -124,6 +124,16 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		return cachedTokens
 	}
 
+	createdCacheTokensFromResponse := func(response map[string]any) float64 {
+		usage, ok := response["usage"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		details, ok := usage["prompt_tokens_details"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		createdCacheTokens, ok := details["created_cache_tokens"].(float64)
+		Expect(ok).To(BeTrue())
+		return createdCacheTokens
+	}
+
 	It("should successfully send request to 1. prefill 2. decode with the correct fields", func() {
 		proxyBaseAddr := startProxy()
 
@@ -347,7 +357,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		responseBody := sendStreamingChatCompletionsRequest(proxyBaseAddr)
 
-		Expect(responseBody).To(ContainSubstring(`"prompt_tokens_details":{"cached_tokens":7}`))
+		Expect(responseBody).To(ContainSubstring(`"prompt_tokens_details":{"cached_tokens":7,"created_cache_tokens":0}`))
 		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
 	})
 
@@ -361,6 +371,83 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 		Expect(responseBody).To(ContainSubstring(`"cached_tokens":0`))
 		Expect(responseBody).ToNot(ContainSubstring(`"cached_tokens":49`))
+		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
+	})
+
+	It("should overwrite decoder created cache tokens with the prefiller's", func() {
+		// vLLM PD: the prefill stage writes the KV/prefix cache and reports the
+		// count at created_cache_tokens, while the decoder, which never runs the
+		// prefill, reports zero. The proxy must substitute the prefiller's
+		// measurement the way it does for cached_tokens.
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":6440,"completion_tokens":30,"total_tokens":6470,"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":4608}}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":6440,"completion_tokens":30,"total_tokens":6470,"prompt_tokens_details":{"cached_tokens":6440,"created_cache_tokens":0}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(createdCacheTokensFromResponse(response)).To(BeNumerically("==", 4608))
+		Expect(cachedTokensFromResponse(response)).To(BeNumerically("==", 0))
+	})
+
+	It("should add prefiller created cache tokens when decoder usage details omit them", func() {
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":6440,"completion_tokens":30,"total_tokens":6470,"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":4608}}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":6440,"completion_tokens":30,"total_tokens":6470,"prompt_tokens_details":{"cached_tokens":6440}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(createdCacheTokensFromResponse(response)).To(BeNumerically("==", 4608))
+	})
+
+	It("should return zero created cache tokens when prefiller does not report them", func() {
+		// The default mock prefiller reports cached_tokens only; a decoder
+		// reporting created_cache_tokens must have its zero substituted, the
+		// way a measured zero substitutes for cached_tokens.
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49,"created_cache_tokens":1920}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(createdCacheTokensFromResponse(response)).To(BeNumerically("==", 0))
+	})
+
+	It("should keep the decoder created cache tokens when the handoff produced no transfer params", func() {
+		// No blocks moved, so the decoder recomputes the prompt and writes the
+		// cache itself: its own count is the measurement that reaches the client.
+		testInfo.prefillHandler.RawResponse = `{"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7,"created_cache_tokens":4608}}}`
+		testInfo.decodeHandler.RawResponse = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49,"created_cache_tokens":1920}}}`
+		proxyBaseAddr := startProxy()
+
+		response := sendChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(createdCacheTokensFromResponse(response)).To(BeNumerically("==", 1920))
+	})
+
+	It("should replace created cache tokens in streamed usage chunks", func() {
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":6440,"completion_tokens":30,"total_tokens":6470,"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":4608}}}`
+		testInfo.decodeHandler.RawResponseType = eventStreamContentType
+		testInfo.decodeHandler.RawResponse = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":6440,\"completion_tokens\":30,\"total_tokens\":6470,\"prompt_tokens_details\":{\"cached_tokens\":6440,\"created_cache_tokens\":0}}}\n\ndata: [DONE]\n"
+		proxyBaseAddr := startProxy()
+
+		responseBody := sendStreamingChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(responseBody).To(ContainSubstring(`"content":"hello"`))
+		Expect(responseBody).To(ContainSubstring(`"created_cache_tokens":4608`))
+		Expect(responseBody).ToNot(ContainSubstring(`"created_cache_tokens":0`))
+		Expect(responseBody).To(ContainSubstring(`"cached_tokens":0`))
+		Expect(responseBody).ToNot(ContainSubstring(`"cached_tokens":6440`))
+		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
+	})
+
+	It("should create created cache tokens in streamed usage chunks that omit them", func() {
+		testInfo.prefillHandler.RawResponse = `{"kv_transfer_params":{"remote_block_ids":[1,2,3],"remote_engine_id":"5b5fb28f-3f30-4bdd-9a36-958d52459200","remote_host":"ahost","remote_port":4032},"usage":{"prompt_tokens":6440,"completion_tokens":30,"total_tokens":6470,"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":4608}}}`
+		testInfo.decodeHandler.RawResponseType = eventStreamContentType
+		testInfo.decodeHandler.RawResponse = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":6440,\"completion_tokens\":30,\"total_tokens\":6470}}\n\ndata: [DONE]\n"
+		proxyBaseAddr := startProxy()
+
+		responseBody := sendStreamingChatCompletionsRequest(proxyBaseAddr)
+
+		Expect(responseBody).To(ContainSubstring(`"created_cache_tokens":4608`))
 		Expect(responseBody).To(ContainSubstring("data: [DONE]"))
 	})
 
