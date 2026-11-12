@@ -21,6 +21,10 @@ are met:
 | **hasIdle** | At least one endpoint has zero dispatched requests |
 | **hasCold** | At least one endpoint has <2% KV cache (predictions unreliable) |
 
+Endpoints whose metrics have never been scraped are skipped, including their predictions, which
+were computed from zero-value metrics. When no candidate endpoint has scraped metrics, the request
+is admitted.
+
 If none are met, the request is rejected with HTTP 429 and
 `x-llm-d-request-dropped-reason: rejected-saturated`, the same response Flow Control gives when it
 sheds a request.
