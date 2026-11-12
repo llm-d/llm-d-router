@@ -271,26 +271,7 @@ func requestMessages(req map[string]any) ([]json.RawMessage, error) {
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, err
-	}
-	if fields == nil {
-		return nil, errors.New("request body is not a JSON object")
-	}
-	parsed := make(map[string]any, len(fields))
-	for k, v := range fields {
-		if _, ok := inspectedRequestFields[k]; !ok {
-			parsed[k] = v
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		parsed[k] = decoded
-	}
-	return parsed, nil
+	return reqcommon.DecodeRequestBody(raw, inspectedRequestFields)
 }
 
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
