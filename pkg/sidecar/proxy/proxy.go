@@ -599,8 +599,8 @@ func (s *Server) createRoutes() http.Handler {
 			handler(w, r)
 		})
 	}
-	// DetectAPIType owns the path-to-API mapping; deriving it here keeps the
-	// served routes from drifting away from it.
+	// DetectAPIType owns the HTTP path-to-API mapping; deriving it here keeps
+	// the HTTP routes from drifting away from it.
 	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
 		registerInferenceRoute(path, reqcommon.DetectAPIType(path))
 	}
@@ -609,7 +609,7 @@ func (s *Server) createRoutes() http.Handler {
 	// the call decode-only as before.
 	var grpcPaths []string
 	if s.config.KVConnector == constants.KVConnectorSGLang {
-		grpcPaths = append(grpcPaths, sglangapiv1.SglangService_Generate_FullMethodName)
+		grpcPaths = []string{sglangapiv1.SglangService_Generate_FullMethodName}
 		registerInferenceRoute(sglangapiv1.SglangService_Generate_FullMethodName, reqcommon.APITypeSGLangGenerate)
 	}
 

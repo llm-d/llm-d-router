@@ -23,17 +23,18 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/protobuf/proto"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/sglangwire"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -111,10 +112,8 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefil
 		grpcframe.WriteError(w, code, msg)
 		return
 	}
-	payload := frame[grpcframe.HeaderLen:]
-
-	var genReq sglangapiv1.GenerateRequest
-	if err := proto.Unmarshal(payload, &genReq); err != nil {
+	scanned, err := sglangwire.ScanGenerateRequest(frame[grpcframe.HeaderLen:])
+	if err != nil {
 		logger.V(logging.DEBUG).Info("invalid GenerateRequest protobuf", "error", err)
 		grpcframe.WriteError(w, codes.InvalidArgument, "invalid GenerateRequest")
 		return
@@ -124,34 +123,22 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefil
 	trace.SpanFromContext(r.Context()).SetAttributes(semconv.LLMDPDProxyBootstrapRoom(roomID))
 
 	bootstrapHost := extractHost(prefillPodHostPort)
-	bootstrapPort := int64(sglangBootstrapPort)
-	genReq.BootstrapHost = &sglangapiv1.OptionalStringOrList{
-		Value: &sglangapiv1.OptionalStringOrList_One{
-			One: &sglangapiv1.OptionalString{Value: proto.String(bootstrapHost)},
-		},
-	}
-	genReq.BootstrapPort = &sglangapiv1.OptionalInt64OrList{
-		Value: &sglangapiv1.OptionalInt64OrList_One{
-			One: &sglangapiv1.OptionalInt64{Value: proto.Int64(bootstrapPort)},
-		},
-	}
-	genReq.BootstrapRoom = &sglangapiv1.OptionalInt64OrList{
-		Value: &sglangapiv1.OptionalInt64OrList_One{
-			One: &sglangapiv1.OptionalInt64{Value: proto.Int64(roomID)},
-		},
+	head, tail, err := sglangwire.LegEnvelope(len(scanned.Payload), &sglangwire.Bootstrap{
+		Host: bootstrapHost,
+		Port: int64(sglangBootstrapPort),
+		Room: roomID,
+	})
+	if err != nil {
+		logger.Error(err, "failed to encode GenerateRequest")
+		grpcframe.WriteError(w, codes.ResourceExhausted, err.Error())
+		return
 	}
 	logger.V(logging.TRACE).Info("bootstrap info added",
 		"bootstrap_host", bootstrapHost,
 		"bootstrap_port", sglangBootstrapPort,
 		"bootstrap_room", roomID)
 
-	body, err := grpcframe.MarshalProto(&genReq)
-	if err != nil {
-		logger.Error(err, "failed to marshal GenerateRequest")
-		grpcframe.WriteError(w, codes.Internal, "failed to encode GenerateRequest")
-		return
-	}
-
+	body := slices.Concat(head, scanned.Payload, tail)
 	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, nil)
 }
 

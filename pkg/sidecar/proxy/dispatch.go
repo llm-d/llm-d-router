@@ -213,30 +213,30 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			}
 		}
 
-		// The EC connectors read a JSON body. A gRPC request falls back to P/D
-		// or decode-only, where the prefiller or decoder encodes the media.
-		if len(allowedEncoders) > 0 && s.handleECConnector != nil && grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
-			logger.V(logging.DEBUG).Info("skipping EC connector for a gRPC request", "encoderCount", len(allowedEncoders))
-			allowedEncoders = nil
-		}
 		if len(allowedEncoders) > 0 && s.handleECConnector != nil {
-			logger.V(logging.DEBUG).Info("encoder headers detected, using EC connector",
-				"encoderCount", len(allowedEncoders),
-				"encoderCandidates", len(encoderHostPorts),
-				"hasPrefiller", len(prefillHostPort) > 0)
-			span.SetAttributes(
-				semconv.LLMDECProxyEncodeDisaggregationUsed(true),
-				semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
-				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
-			)
-			route.path = metricsutil.DisaggPathEncodeDecode
-			if len(prefillHostPort) > 0 {
-				route.path = metricsutil.DisaggPathEncodePrefillDecode
+			if grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
+				// The EC connectors read a JSON body. A gRPC request falls back to P/D
+				// or decode-only, where the prefiller or decoder encodes the media.
+				logger.V(logging.DEBUG).Info("skipping EC connector for a gRPC request", "encoderCount", len(allowedEncoders))
+			} else {
+				logger.V(logging.DEBUG).Info("encoder headers detected, using EC connector",
+					"encoderCount", len(allowedEncoders),
+					"encoderCandidates", len(encoderHostPorts),
+					"hasPrefiller", len(prefillHostPort) > 0)
+				span.SetAttributes(
+					semconv.LLMDECProxyEncodeDisaggregationUsed(true),
+					semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
+					semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
+				)
+				route.path = metricsutil.DisaggPathEncodeDecode
+				if len(prefillHostPort) > 0 {
+					route.path = metricsutil.DisaggPathEncodePrefillDecode
+				}
+				route.encoders = len(allowedEncoders)
+				metrics.RecordDisagg(route.path)
+				s.handleECConnector(w, r, prefillHostPort, allowedEncoders, p2p, apiType)
+				return
 			}
-			route.encoders = len(allowedEncoders)
-			metrics.RecordDisagg(route.path)
-			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, p2p, apiType)
-			return
 		}
 
 		if len(encoderHostPorts) > 0 && len(allowedEncoders) == 0 {

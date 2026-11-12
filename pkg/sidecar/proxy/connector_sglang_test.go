@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"net"
@@ -30,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
 	"google.golang.org/grpc"
@@ -37,6 +37,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
@@ -196,129 +197,6 @@ var _ = Describe("SGLang Connector", func() {
 		<-testInfo.stoppedCh
 	})
 
-	It("should coordinate native gRPC SglangService/Generate P/D over h2c with bootstrap fields", func() {
-		testInfo.decodeBackend.Close()
-		testInfo.prefillBackend.Close()
-
-		prefillBackend := newMockSGLangGRPCServer([]string{""})
-		DeferCleanup(prefillBackend.Stop)
-		decodeBackend := newMockSGLangGRPCServer([]string{"Hi", "Hi world"})
-		DeferCleanup(decodeBackend.Stop)
-
-		decodeURL, err := url.Parse("http://" + decodeBackend.addr)
-		Expect(err).ToNot(HaveOccurred())
-
-		testInfo.proxy = NewProxy(Config{
-			Port:        "0",
-			DecoderURL:  decodeURL,
-			KVConnector: constants.KVConnectorSGLang,
-		})
-		go func() {
-			defer GinkgoRecover()
-			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
-			Expect(testInfo.proxy.Start(testInfo.ctx)).To(Succeed())
-			testInfo.stoppedCh <- struct{}{}
-		}()
-		<-testInfo.proxy.readyCh
-		DeferCleanup(func() {
-			testInfo.cancelFn()
-			<-testInfo.stoppedCh
-		})
-
-		conn, err := grpc.NewClient(testInfo.proxy.addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() { _ = conn.Close() })
-
-		client := sglangapiv1.NewSglangServiceClient(conn)
-		callCtx := metadata.AppendToOutgoingContext(testInfo.ctx, routing.PrefillEndpointHeader, prefillBackend.addr)
-		stream, err := client.Generate(callCtx, &sglangapiv1.GenerateRequest{
-			Text: &sglangapiv1.StringOrList{
-				Value: &sglangapiv1.StringOrList_One{One: "Hello from gRPC"},
-			},
-			Stream: proto.Bool(true),
-		})
-		Expect(err).ToNot(HaveOccurred())
-
-		var gotTexts []string
-		for {
-			item, recvErr := stream.Recv()
-			if errors.Is(recvErr, io.EOF) {
-				break
-			}
-			Expect(recvErr).ToNot(HaveOccurred())
-			gotTexts = append(gotTexts, item.GetFrame().GetText())
-		}
-		Expect(gotTexts).To(Equal([]string{"Hi", "Hi world"}))
-
-		Eventually(prefillBackend.RequestCount).Should(Equal(1))
-		Expect(decodeBackend.RequestCount()).To(Equal(1))
-
-		prefillReq := prefillBackend.LastRequest()
-		decodeReq := decodeBackend.LastRequest()
-		Expect(prefillReq.GetText().GetOne()).To(Equal("Hello from gRPC"))
-		Expect(decodeReq.GetText().GetOne()).To(Equal("Hello from gRPC"))
-
-		expectedHost := extractHost(prefillBackend.addr)
-		Expect(prefillReq.GetBootstrapHost().GetOne().GetValue()).To(Equal(expectedHost))
-		Expect(decodeReq.GetBootstrapHost().GetOne().GetValue()).To(Equal(expectedHost))
-		Expect(prefillReq.GetBootstrapPort().GetOne().GetValue()).To(Equal(int64(sglangBootstrapPort)))
-		Expect(decodeReq.GetBootstrapPort().GetOne().GetValue()).To(Equal(int64(sglangBootstrapPort)))
-
-		roomID := prefillReq.GetBootstrapRoom().GetOne().GetValue()
-		Expect(roomID).To(BeNumerically(">", 0))
-		Expect(decodeReq.GetBootstrapRoom().GetOne().GetValue()).To(Equal(roomID))
-	})
-
-	It("should pass through SglangService/Generate over h2c when prefill header is absent", func() {
-		testInfo.decodeBackend.Close()
-		testInfo.prefillBackend.Close()
-
-		decodeBackend := newMockSGLangGRPCServer([]string{"direct decode"})
-		DeferCleanup(decodeBackend.Stop)
-
-		decodeURL, err := url.Parse("http://" + decodeBackend.addr)
-		Expect(err).ToNot(HaveOccurred())
-
-		testInfo.proxy = NewProxy(Config{
-			Port:        "0",
-			DecoderURL:  decodeURL,
-			KVConnector: constants.KVConnectorSGLang,
-		})
-		go func() {
-			defer GinkgoRecover()
-			testInfo.proxy.allowlistValidator = &AllowlistValidator{enabled: false}
-			Expect(testInfo.proxy.Start(testInfo.ctx)).To(Succeed())
-			testInfo.stoppedCh <- struct{}{}
-		}()
-		<-testInfo.proxy.readyCh
-		DeferCleanup(func() {
-			testInfo.cancelFn()
-			<-testInfo.stoppedCh
-		})
-
-		conn, err := grpc.NewClient(testInfo.proxy.addr.String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-		Expect(err).ToNot(HaveOccurred())
-		DeferCleanup(func() { _ = conn.Close() })
-
-		client := sglangapiv1.NewSglangServiceClient(conn)
-		stream, err := client.Generate(testInfo.ctx, &sglangapiv1.GenerateRequest{
-			Text: &sglangapiv1.StringOrList{
-				Value: &sglangapiv1.StringOrList_One{One: "Passthrough"},
-			},
-		})
-		Expect(err).ToNot(HaveOccurred())
-
-		item, err := stream.Recv()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(item.GetFrame().GetText()).To(Equal("direct decode"))
-		_, err = stream.Recv()
-		Expect(err).To(MatchError(io.EOF))
-
-		gotReq := decodeBackend.LastRequest()
-		Expect(gotReq.GetBootstrapHost()).To(BeNil())
-		Expect(gotReq.GetBootstrapRoom()).To(BeNil())
-	})
-
 	// startGRPCProxy replaces the HTTP mock backends with cfg and starts the
 	// sidecar. It stops the sidecar when the spec ends.
 	startGRPCProxy := func(cfg Config) {
@@ -364,6 +242,70 @@ var _ = Describe("SGLang Connector", func() {
 		return u
 	}
 
+	It("should coordinate native gRPC SglangService/Generate P/D over h2c with bootstrap fields", func() {
+		prefillBackend := newMockSGLangGRPCServer([]string{""})
+		DeferCleanup(prefillBackend.Stop)
+		decodeBackend := newMockSGLangGRPCServer([]string{"Hi", "Hi world"})
+		DeferCleanup(decodeBackend.Stop)
+		startGRPCProxy(Config{DecoderURL: decoderURLOf(decodeBackend), KVConnector: constants.KVConnectorSGLang})
+
+		Expect(generateTexts(&sglangapiv1.GenerateRequest{
+			Text: &sglangapiv1.StringOrList{
+				Value: &sglangapiv1.StringOrList_One{One: "Hello from gRPC"},
+			},
+			Stream: proto.Bool(true),
+		}, routing.PrefillEndpointHeader, prefillBackend.addr)).To(Equal([]string{"Hi", "Hi world"}))
+
+		Eventually(prefillBackend.RequestCount).Should(Equal(1))
+		Expect(decodeBackend.RequestCount()).To(Equal(1))
+
+		prefillReq := prefillBackend.LastRequest()
+		decodeReq := decodeBackend.LastRequest()
+		Expect(prefillReq.GetText().GetOne()).To(Equal("Hello from gRPC"))
+		Expect(decodeReq.GetText().GetOne()).To(Equal("Hello from gRPC"))
+
+		expectedHost := extractHost(prefillBackend.addr)
+		Expect(prefillReq.GetBootstrapHost().GetOne().GetValue()).To(Equal(expectedHost))
+		Expect(decodeReq.GetBootstrapHost().GetOne().GetValue()).To(Equal(expectedHost))
+		Expect(prefillReq.GetBootstrapPort().GetOne().GetValue()).To(Equal(int64(sglangBootstrapPort)))
+		Expect(decodeReq.GetBootstrapPort().GetOne().GetValue()).To(Equal(int64(sglangBootstrapPort)))
+
+		roomID := prefillReq.GetBootstrapRoom().GetOne().GetValue()
+		Expect(roomID).To(BeNumerically(">", 0))
+		Expect(decodeReq.GetBootstrapRoom().GetOne().GetValue()).To(Equal(roomID))
+	})
+
+	It("should pass through SglangService/Generate over h2c when prefill header is absent", func() {
+		decodeBackend := newMockSGLangGRPCServer([]string{"direct decode"})
+		DeferCleanup(decodeBackend.Stop)
+		startGRPCProxy(Config{DecoderURL: decoderURLOf(decodeBackend), KVConnector: constants.KVConnectorSGLang})
+
+		Expect(generateTexts(&sglangapiv1.GenerateRequest{
+			Text: &sglangapiv1.StringOrList{
+				Value: &sglangapiv1.StringOrList_One{One: "Passthrough"},
+			},
+		})).To(Equal([]string{"direct decode"}))
+
+		gotReq := decodeBackend.LastRequest()
+		Expect(gotReq.GetBootstrapHost()).To(BeNil())
+		Expect(gotReq.GetBootstrapRoom()).To(BeNil())
+
+		// Coordinator P/D decode legs arrive without x-llm-d-prefiller-host-port
+		// and carry coordinator-injected bootstrap fields that must pass through
+		// unread, matching JSON /generate.
+		Expect(generateTexts(&sglangapiv1.GenerateRequest{
+			Text:          &sglangapiv1.StringOrList{Value: &sglangapiv1.StringOrList_One{One: "CoordDecode"}},
+			BootstrapHost: &sglangapiv1.OptionalStringOrList{Value: &sglangapiv1.OptionalStringOrList_One{One: &sglangapiv1.OptionalString{Value: proto.String("10.0.0.5")}}},
+			BootstrapPort: &sglangapiv1.OptionalInt64OrList{Value: &sglangapiv1.OptionalInt64OrList_One{One: &sglangapiv1.OptionalInt64{Value: proto.Int64(8998)}}},
+			BootstrapRoom: &sglangapiv1.OptionalInt64OrList{Value: &sglangapiv1.OptionalInt64OrList_One{One: &sglangapiv1.OptionalInt64{Value: proto.Int64(77)}}},
+		})).To(Equal([]string{"direct decode"}))
+
+		coordReq := decodeBackend.LastRequest()
+		Expect(coordReq.GetBootstrapHost().GetOne().GetValue()).To(Equal("10.0.0.5"))
+		Expect(coordReq.GetBootstrapPort().GetOne().GetValue()).To(Equal(int64(8998)))
+		Expect(coordReq.GetBootstrapRoom().GetOne().GetValue()).To(Equal(int64(77)))
+	})
+
 	It("should replace client bootstrap fields with the sidecar's values", func() {
 		prefillBackend := newMockSGLangGRPCServer([]string{""})
 		DeferCleanup(prefillBackend.Stop)
@@ -393,6 +335,14 @@ var _ = Describe("SGLang Connector", func() {
 	})
 
 	It("should run P/D instead of the EC connector for a gRPC request with encoder headers", func() {
+		var logMu sync.Mutex
+		var logged []string
+		testInfo.ctx = log.IntoContext(testInfo.ctx, funcr.New(func(_, args string) {
+			logMu.Lock()
+			defer logMu.Unlock()
+			logged = append(logged, args)
+		}, funcr.Options{}))
+
 		prefillBackend := newMockSGLangGRPCServer([]string{""})
 		DeferCleanup(prefillBackend.Stop)
 		decodeBackend := newMockSGLangGRPCServer([]string{"ok"})
@@ -410,6 +360,12 @@ var _ = Describe("SGLang Connector", func() {
 		Eventually(prefillBackend.RequestCount).Should(Equal(1))
 		Expect(decodeBackend.LastRequest().GetBootstrapRoom().GetOne().GetValue()).
 			To(Equal(prefillBackend.LastRequest().GetBootstrapRoom().GetOne().GetValue()))
+
+		logMu.Lock()
+		defer logMu.Unlock()
+		for _, entry := range logged {
+			Expect(entry).ToNot(ContainSubstring("all encoder targets filtered out"))
+		}
 	})
 
 	It("should forward SglangService/Generate decode-only when kv-connector is not sglang", func() {
@@ -464,6 +420,8 @@ var _ = Describe("SGLang Connector", func() {
 			[]byte{0x00, 0x01}, codes.InvalidArgument),
 		Entry("header declares more bytes than sent", sglangapiv1.SglangService_Generate_FullMethodName, grpcframe.MediaType,
 			[]byte{0, 0, 0, 0, 10, 'a'}, codes.InvalidArgument),
+		Entry("frame header exceeds max frame size", sglangapiv1.SglangService_Generate_FullMethodName, grpcframe.MediaType,
+			[]byte{0x00, 0xff, 0xff, 0xff, 0xff}, codes.ResourceExhausted),
 		Entry("compressed frame", sglangapiv1.SglangService_Generate_FullMethodName, grpcframe.MediaType,
 			compressedFrame, codes.Unimplemented),
 		Entry("corrupt protobuf payload", sglangapiv1.SglangService_Generate_FullMethodName, grpcframe.MediaType,
@@ -549,8 +507,4 @@ func (m *mockSGLangGRPCServer) Generate(req *sglangapiv1.GenerateRequest, stream
 		}
 	}
 	return nil
-}
-
-func (m *mockSGLangGRPCServer) HealthCheck(_ context.Context, _ *sglangapiv1.HealthCheckRequest) (*sglangapiv1.HealthCheckResponse, error) {
-	return &sglangapiv1.HealthCheckResponse{Healthy: true}, nil
 }
