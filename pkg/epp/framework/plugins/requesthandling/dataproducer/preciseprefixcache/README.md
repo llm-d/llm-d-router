@@ -95,3 +95,10 @@ correlate.
 
 Salt isolation is enforced by the engine regardless; the above affects only
 routing accuracy for salted requests.
+
+### Shared event input
+
+Set `externalEvents: true` and bind this producer as an extractor of a
+[`kv-events-source`](../../../datalayer/source/kvevents/README.md) to share decoded
+batches with other consumers. The source owns subscriptions and recovery;
+`kvEventsConfig` transport settings on this producer are inactive.
