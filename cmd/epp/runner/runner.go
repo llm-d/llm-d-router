@@ -571,7 +571,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		setupLog.Error(err, "Failed to setup EPP controllers")
 		return nil, nil, err
 	}
-	if err := r.setupPeerDiscovery(mgr, rawConfig); err != nil {
+	if err := r.setupPeerDiscovery(mgr, rawConfig, gknn.Namespace); err != nil {
 		setupLog.Error(err, "Failed to setup peer discovery")
 		return nil, nil, err
 	}
@@ -1126,7 +1126,7 @@ func (r *Runner) resolveDiscovery(rawConfig *configapiv1.EndpointPickerConfig) (
 // cross-replica syncer when it consumes them. The plugin is expected to have
 // been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo.
-func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.EndpointPickerConfig) error {
+func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.EndpointPickerConfig, poolNamespace string) error {
 	dl := rawConfig.DataLayer
 	if dl == nil || dl.Discovery == nil || dl.Discovery.Peers == nil {
 		return nil
@@ -1140,6 +1140,10 @@ func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.End
 	disc, ok := p.(fwkdl.PeerDiscovery)
 	if !ok {
 		return fmt.Errorf("peerDiscovery: plugin %q does not implement PeerDiscovery", ref)
+	}
+	if k8sPeers, ok := p.(*k8speer.Plugin); ok && k8sPeers.Namespace() != poolNamespace {
+		return fmt.Errorf("peerDiscovery: plugin %q namespace %q must match pool namespace %q: the EPP Pod cache only covers the pool namespace, so peer Pods would never be seen",
+			ref, k8sPeers.Namespace(), poolNamespace)
 	}
 
 	peerStore := statesync.NewMemoryPeerStore()
