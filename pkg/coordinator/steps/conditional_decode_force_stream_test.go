@@ -24,10 +24,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -358,59 +356,6 @@ func TestConditionalDecodeForceStream_PromptTokenParity(t *testing.T) {
 	require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 1.0, counterValue(t, reg, parityMetric, map[string]string{"api_type": "chat_completions"}), 1e-9)
 	require.InDelta(t, 1.0, counterValue(t, reg, stepErrorMetric, map[string]string{"step": ConditionalDecodeStepName, "error_code": coordmetrics.ErrorCodePromptTokenMismatch}), 1e-9)
-}
-
-// condOverRealServer serves one forced probe through a real HTTP server with
-// the given WriteTimeout. afterStep runs on the server after the step returns
-// nil (a deferred probe), standing in for the rest of the pipeline.
-func condOverRealServer(t *testing.T, writeTimeout time.Duration, upstream http.HandlerFunc, afterStep func(http.ResponseWriter)) (int, []byte, error) {
-	t.Helper()
-	server, _ := condUpstream(t, upstream)
-	step, _ := newForcedConditionalStep(t, server.URL, nil)
-	front := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := step.Execute(r.Context(), condForcedRequest(w)); err == nil && afterStep != nil {
-			afterStep(w)
-		}
-	}))
-	front.Config.WriteTimeout = writeTimeout
-	front.Start()
-	t.Cleanup(front.Close)
-
-	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	return resp.StatusCode, body, err
-}
-
-// A forced reply whose generation outlasts WriteTimeout still reaches the client,
-// as it does on decode.
-func TestConditionalDecodeForceStream_OutlastsWriteTimeout(t *testing.T) {
-	status, body, err := condOverRealServer(t, 300*time.Millisecond, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "data: %s\n\n", condForcedFrames[0])
-		w.(http.Flusher).Flush()
-		time.Sleep(900 * time.Millisecond)
-		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", condForcedFrames[1])
-	}, nil)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, status)
-	require.Contains(t, string(body), "cached")
-}
-
-// A deferred probe leaves the server write deadline in place for the rest of
-// the pipeline, which serves a non-streaming reply under it.
-func TestConditionalDecodeForceStream_DeferredKeepsWriteDeadline(t *testing.T) {
-	_, body, err := condOverRealServer(t, 300*time.Millisecond, deferProbe, func(w http.ResponseWriter) {
-		time.Sleep(600 * time.Millisecond)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("late"))
-	})
-	require.False(t, err == nil && string(body) == "late",
-		"a write past WriteTimeout must not reach the client after a deferred probe")
 }
 
 // One client request deferred by conditional-decode and forced by decode

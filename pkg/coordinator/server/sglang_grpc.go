@@ -149,11 +149,6 @@ func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request) {
 
 	logger.V(logutil.DEFAULT).Info("received gRPC request", "path", r.URL.Path, "stream", genReq.Stream)
 
-	// Clear the write deadline: a server-streaming RPC can outlast WriteTimeout.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		logger.V(logutil.DEFAULT).Info("could not clear write deadline for gRPC response", "error", err)
-	}
-
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		if pipeline.IsClientCancellation(ctx, err) {
 			logger.V(logutil.VERBOSE).Info("pipeline aborted: client cancelled", "error", err)

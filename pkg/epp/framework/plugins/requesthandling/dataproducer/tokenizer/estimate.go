@@ -235,6 +235,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 			MultiModalFeatures: features,
 		}}}, nil
 	}
+	if body.Images != nil {
+		raw, features := b.imagesBytes(body.Images)
+		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+			TokenIDs:           packBytes(raw),
+			MultiModalFeatures: features,
+		}}}, nil
+	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
 		return estimateMultiStringCompletions(body.Completions)
@@ -269,8 +276,6 @@ func estimateBytes(body *fwkrequest.InferenceRequestBody) ([]byte, error) {
 		return []byte(body.Embeddings.Input.PlainText()), nil
 	case body.Generate != nil && body.Generate.Text != "":
 		return []byte(body.Generate.Text), nil
-	case body.Images != nil:
-		return []byte(imageGenerationText(body.Images)), nil
 	case body.AudioGenerate != nil:
 		return []byte(audioGenerateText(body.AudioGenerate)), nil
 	case body.TextToSpeech != nil:
@@ -290,6 +295,20 @@ func imageGenerationText(r *fwkrequest.ImagesGenerationsRequest) string {
 		return r.Prompt
 	}
 	return r.Prompt + "\n" + r.NegativePrompt
+}
+
+// imagesBytes flattens an images request's conditioning text and, for an edits
+// request's uploaded image, its placeholder tokens into the byte stream with an
+// image feature, mirroring the chat multimodal representation so downstream
+// consumers treat both alike. A request without an image part (generations)
+// carries the text alone.
+func (b estimateBackend) imagesBytes(images *fwkrequest.ImagesGenerationsRequest) ([]byte, []fwkrequest.MultiModalFeature) {
+	out := []byte(imageGenerationText(images))
+	if images.Image.SizeBytes == 0 {
+		return out, nil
+	}
+	return appendMMAssetHash(out, nil, reqcommon.ModalityImage, images.Image.Hash,
+		b.img.placeholderCountFromHead(images.Image.Head))
 }
 
 // audioGenerateText joins an audio-generate request's prompt with its
@@ -600,11 +619,17 @@ const maxEstimatedPromptTokens = 1 << 20
 // clamped so the stream stays within maxEstimatedPromptTokens, but every asset
 // keeps at least one placeholder so it still carries weight.
 func appendMMAsset(out []byte, features []fwkrequest.MultiModalFeature, modality reqcommon.Modality, content string, count int) ([]byte, []fwkrequest.MultiModalFeature) {
+	return appendMMAssetHash(out, features, modality, xxhash.Sum64String(content), count)
+}
+
+// appendMMAssetHash appends count placeholder tokens (a precomputed content
+// hash repeated count times) so the asset carries weight in the stream, and
+// reports it as a MultiModalFeature with its token offset and span.
+func appendMMAssetHash(out []byte, features []fwkrequest.MultiModalFeature, modality reqcommon.Modality, sum uint64, count int) ([]byte, []fwkrequest.MultiModalFeature) {
 	out = align(out)
 	offset := len(out) / fwkrequest.BytesPerToken
 	count = max(min(count, maxEstimatedPromptTokens-offset), 1)
 
-	sum := xxhash.Sum64String(content)
 	token := make([]byte, fwkrequest.BytesPerToken)
 	binary.LittleEndian.PutUint32(token, uint32(sum)) //#nosec G115 -- intentional hash truncation to build a placeholder token, not an overflow
 	for i := 0; i < count; i++ {

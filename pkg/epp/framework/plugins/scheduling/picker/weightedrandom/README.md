@@ -31,7 +31,7 @@ The plugin config supports:
 - `maxNumOfEndpoints` (default 1)
   - The maximum number of endpoints to pick and return. Must be > 0. If more candidates are available than this limit, only the top subset is returned.
 - `temperature` (default 1.0)
-  - Tunes how sharply selection favors higher scores. Selection probability is proportional to $Score_i^{1/T}$, equivalent to applying softmax temperature to the log-scores. Must be > 0; a non-positive value is rejected and the picker fails to load. The implementation normalizes scores by the maximum before applying the exponent, which preserves these probabilities while keeping the sampling keys numerically stable.
+  - Tunes how sharply selection favors higher scores. Selection probability is proportional to $Score_i^{1/T}$, equivalent to applying softmax temperature to the log-scores. Must be > 0; a non-positive value is rejected and the picker fails to load. The implementation normalizes scores by the maximum and computes the sampling keys in log space, which preserves these probabilities and keeps the keys finite and distinct at low temperatures.
     - `T = 1`: probability proportional to score (default).
     - `T < 1`: sharpens toward the highest-scoring endpoint; as $T \to 0$ it approaches `max-score-picker`.
     - `T > 1`: flattens toward uniform selection; as $T \to \infty$ it approaches `random-picker`.

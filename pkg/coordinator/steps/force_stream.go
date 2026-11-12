@@ -28,7 +28,6 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/go-logr/logr"
@@ -407,18 +406,15 @@ func forceStreamFallbackResult(err error) (result string, ok bool) {
 // releases reserved, the whole reservation, on every exit; generated is the part
 // of it bounding the generated reply, which the per-request ceiling enforces.
 //
-// Once the upstream answers with a stream it clears the server write deadline,
-// as the handler does for a streaming request, since a stream is not bounded by
-// the gateway's response-header timeout. Nothing reaches the client until the
-// whole response is buffered, so every error before the reply is written leaves
-// the client uncommitted. A transport failure returns an unwritten error and the
-// server answers a clean 5xx; an upstream 4xx/5xx, or an error frame streamed
-// after the 200, is forwarded and reported with UpstreamStreamedError so the
-// server does not overwrite it. The fallback sentinels (ceiling, oversize,
-// lossy-frame, unreadable, truncated) instead return so the step runs its
-// pass-through, which can still serve the request or preserve a field the fold
-// would drop. A reply that fails to reach the client is a failure, not a forced
-// success (see writeForcedResponse).
+// Nothing reaches the client until the whole response is buffered, so every error
+// before the reply is written leaves the client uncommitted. A transport failure
+// returns an unwritten error and the server answers a clean 5xx; an upstream
+// 4xx/5xx, or an error frame streamed after the 200, is forwarded and reported
+// with UpstreamStreamedError so the server does not overwrite it. The fallback
+// sentinels (ceiling, oversize, lossy-frame, unreadable, truncated) instead
+// return so the step runs its pass-through, which can still serve the request or
+// preserve a field the fold would drop. A reply that fails to reach the client is
+// a failure, not a forced success (see writeForcedResponse).
 func executeForceStream(ctx context.Context, logger logr.Logger, gwClient *gateway.Client, budget *forceStreamBudget, leg forceStreamLeg,
 	reqCtx *pipeline.RequestContext, shape sseShape, bodyBytes []byte, generated, reserved int64, parity *parityCheck) error {
 	defer budget.release(leg.step, reserved)
@@ -459,17 +455,6 @@ func executeForceStream(ctx context.Context, logger logr.Logger, gwClient *gatew
 	if resp.StatusCode >= http.StatusBadRequest {
 		coordmetrics.IncForceStreamTotal(reqCtx.Model, leg.step, coordmetrics.ForceStreamResultErrorUpstream)
 		return forwardUpstreamError(leg.step, reqCtx, resp)
-	}
-
-	// The client asked for a non-streaming reply, so the handler kept the server
-	// WriteTimeout, but the forced request reads a stream: its headers arrive at
-	// once, so the gateway's response-header timeout no longer bounds the
-	// generation. Clear the write deadline as the handler does for a streaming
-	// request, so a generation that outlasts WriteTimeout still reaches the client.
-	// It is cleared only now: a deadline cannot be restored, so an answer that
-	// sends the request on through the pipeline (a 412) must leave it in place.
-	if err := http.NewResponseController(reqCtx.ResponseWriter).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		logger.V(logutil.DEFAULT).Info("could not clear write deadline for force-stream", "error", err)
 	}
 
 	n := reqcommon.OutputChoiceCount(reqCtx.Body, reqcommon.DetectAPIType(reqCtx.OriginalPath))

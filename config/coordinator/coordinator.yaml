@@ -84,10 +84,6 @@ server:
   # Long enough for HD images inlined as data URLs (~hundreds of KB).
   read_timeout: 30s
 
-  # write_timeout caps the entire response. For streaming completions this
-  # bounds the total in-flight time of a single chat — set generously.
-  write_timeout: 120s
-  
   # drain_timeout is how long the coordinator keeps serving after SIGTERM before
   # shutdown_timeout starts. During the window /readyz returns 503 and each
   # connection is closed after its next response, so clients holding pooled
@@ -97,8 +93,8 @@ server:
   # drain_timeout: 0s
 
   # Kubernetes terminationGracePeriodSeconds must exceed any preStop hook plus
-  # drain_timeout plus shutdown_timeout; SSE streams held open for up to
-  # write_timeout are force-closed once the grace period expires.
+  # drain_timeout plus shutdown_timeout; inference requests still in flight are
+  # force-closed once the grace period expires.
   shutdown_timeout: 25s
 
   # max_request_body_size caps the request body in megabytes. The default is
@@ -179,11 +175,7 @@ pipeline:
   # step's served probes; the two share the budget below. Off by default
   # (streaming and non-streaming replies can carry different fields). A
   # forced request reserves from the budget and falls back to the
-  # pass-through when it is full. Like a streaming request, a forced request
-  # is not bounded by server.write_timeout, nor is the pass-through it falls
-  # back to; the gateway timeout still bounds the wait for the upstream's
-  # response headers. A conditional-decode probe the worker defers (HTTP
-  # 412) keeps server.write_timeout, unless a fallback already cleared it.
+  # pass-through when it is full.
   # With kv_connector: kv-sglang, decode forces no request: an SGLang decode
   # server has no local-prefill path, so a fallback could not recompute the
   # prompt, and every request takes the pass-through, counted

@@ -48,7 +48,6 @@ func newTestServer(t *testing.T, listenAddr string) *server.Server {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 	}, pipeline.New(nil), gateway.NewWithTransport(nil, "http://gateway-stub.invalid"))
 	require.NoError(t, err)
 	return srv
@@ -207,7 +206,6 @@ func TestRun_MetricsDisabled_DrainsCleanlyOnCancel(t *testing.T) {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 		MetricsPort:     0,
 	}
 	srv := newTestServer(t, listenAddr)
@@ -241,7 +239,6 @@ func TestRun_NilListener_DrainsCleanlyOnCancel(t *testing.T) {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 		MetricsPort:     0,
 	}
 	srv := newTestServer(t, listenAddr)
@@ -283,7 +280,6 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 		MetricsPort:     blockedPort,
 	}
 	srv := newTestServer(t, listenAddr)
@@ -322,7 +318,6 @@ func TestRun_InvalidMetricsTLSDrainsCoordinatorServer(t *testing.T) {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 		MetricsPort:     metricsPort,
 		MetricsCertDir:  t.TempDir(),
 	}
@@ -361,7 +356,6 @@ func TestRun_DrainTimeout_ServesWithConnectionCloseThenShutsDown(t *testing.T) {
 		ShutdownTimeout: time.Second,
 		DrainTimeout:    drain,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 	}
 	srv := newTestServer(t, listenAddr)
 
