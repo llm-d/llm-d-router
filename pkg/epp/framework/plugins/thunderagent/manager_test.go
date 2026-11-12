@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // t0 is a fixed base time so tests do not depend on the wall clock.
@@ -155,19 +156,19 @@ func TestFootprint(t *testing.T) {
 }
 
 // Only an admitted session with no turn in flight and no live reservation,
-// idle for at least the idle lease, can give up its room.
+// idle for at least idleGracePeriod, can give up its room.
 func TestReclaimable(t *testing.T) {
 	m := newSessionManager(testConfig())
 	idle := func() *session {
 		return &session{committedTokens: 300, turnCount: 1, lastResponseAt: t0}
 	}
 	later := t0.Add(time.Minute)
-	m.idleLease = time.Minute
+	m.idleGracePeriod = time.Minute
 	require.True(t, m.reclaimableLocked(idle(), later))
-	m.idleLease = 2 * time.Minute
-	require.False(t, m.reclaimableLocked(idle(), later), "inside the lease")
+	m.idleGracePeriod = 2 * time.Minute
+	require.False(t, m.reclaimableLocked(idle(), later), "within idleGracePeriod")
 
-	m.idleLease = 0
+	m.idleGracePeriod = 0
 	s := idle()
 	s.inflightTokens = 100
 	require.False(t, m.reclaimableLocked(s, later), "turn in flight")
@@ -253,4 +254,19 @@ func TestSnapshotCountsPaused(t *testing.T) {
 	require.Equal(t, 1, snap.idle)
 	require.Equal(t, 1, snap.paused)
 	require.Equal(t, float64(300), snap.endpoints["default/ep-a"].workingSet)
+}
+
+func TestSessionManagerTTL(t *testing.T) {
+	for _, tc := range []struct {
+		forceAdmitTimeout time.Duration
+		want              time.Duration
+	}{
+		{forceAdmitTimeout: defaultForceAdmitTimeout, want: 10 * time.Minute},
+		{forceAdmitTimeout: 0, want: 10 * time.Minute},
+		{forceAdmitTimeout: 30 * time.Minute, want: time.Hour},
+	} {
+		cfg := defaultConfig()
+		cfg.ForceAdmitTimeout = metav1.Duration{Duration: tc.forceAdmitTimeout}
+		require.Equal(t, tc.want, newSessionManager(cfg).ttl)
+	}
 }
