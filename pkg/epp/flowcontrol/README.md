@@ -178,11 +178,8 @@ Fixed shares have these costs:
 Flow control dispatches by priority band, then by fairness flow within a band. Three plugins layer
 per-team service classes onto that hierarchy:
 
-* `qos-contract` (RequestHeader) maps each team to a class, and each class to a band priority. It
-  moves traffic outside the team's contract (size limits, a concurrency cap and a daily
-  weighted-token budget) one class down before the request is queued. The fairness ID is the team.
-  Until `mode: enforce-limits` is set it serves each team at its class and only records downgrades
-  and rejections.
+* [`qos-contract`](../framework/plugins/requesthandling/requestheader/qoscontract/README.md) maps
+  each team to a class's band priority and moves traffic outside the team's contract one class down.
 * `program-aware-fairness` with `strategy: las` shares a band between teams by least attained
   service.
 * `latency-reporter` records TTFT and TPOT per class, prompt-length bucket and prefill/decode
