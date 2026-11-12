@@ -795,17 +795,57 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease(t *testin
 	_ = producer.PreRequest(ctx, req, res)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
 	require.Equal(t, int64(4), producer.tokenTracker.get(endpointID), "only input tokens should be tracked")
+	require.Equal(t, int64(1), producer.pendingTracker.get(endpointID))
 
 	// First chunk arrives: tokens released, request still in flight.
 	req.SchedulingResult = res
 	producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID), "request counter should still be held")
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID), "tokens should be released at StartOfStream")
+	require.Equal(t, int64(0), producer.pendingTracker.get(endpointID), "the request is no longer pending after its first chunk")
 
 	// EndOfStream releases the request counter.
 	producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
 	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.pendingTracker.get(endpointID))
+}
+
+// TestInFlightLoadProducer_PendingRequests verifies that a request is pending
+// while its tokens are counted, also when they are 0 (a full cache hit), and
+// that the pending count is released once on every path.
+func TestInFlightLoadProducer_PendingRequests(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	producer.addEstimatedOutputTokens = false
+	ctx := context.Background()
+	endpoint := newStubSchedulingEndpoint("pending-endpoint")
+	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: endpoint}))
+	res := makeSchedulingResult("pending-endpoint")
+
+	pendingRequests := func() int64 {
+		val, ok := endpoint.Get(producer.dk)
+		require.True(t, ok)
+		return val.(*attrconcurrency.InFlightLoad).PendingRequests
+	}
+
+	cached := makeTokenRequest("pending-cached", 0)
+	require.NoError(t, producer.PreRequest(ctx, cached, res))
+	reaped := makeTokenRequest("pending-reaped", 4)
+	require.NoError(t, producer.PreRequest(ctx, reaped, res))
+	require.Equal(t, int64(2), pendingRequests(), "a request with 0 tokens is still pending")
+
+	cached.SchedulingResult = res
+	producer.ResponseBody(ctx, cached, &fwkrh.Response{StartOfStream: true}, nil)
+	producer.ResponseBody(ctx, cached, &fwkrh.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(1), pendingRequests())
+
+	producer.PluginState.Delete(reaped.RequestID)
+	require.Equal(t, int64(0), pendingRequests(), "the janitor releases the pending count")
+	reaped.SchedulingResult = res
+	producer.ResponseBody(ctx, reaped, &fwkrh.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), pendingRequests(), "a late end of stream does not release it twice")
 }
 
 // TestInFlightLoadProducer_ExcludeOutputTokens_PrefillReleasedAtStartOfStream verifies
@@ -1600,4 +1640,222 @@ func TestInFlightLoadProducer_WarnsOnceOnMissingOutlenBucket(t *testing.T) {
 	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w3", 4), res))
 
 	require.Equal(t, 1, warnings, "missing-outlen-bucket warning must fire exactly once")
+}
+
+func TestInFlightLoadProducer_CompletionRate(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpoint := newStubSchedulingEndpoint("rate-endpoint")
+	endpointID := fullEndpointName("rate-endpoint")
+	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: endpoint}))
+
+	completionsPerSecond := func() float64 {
+		val, ok := endpoint.Get(producer.dk)
+		require.True(t, ok)
+		return val.(*attrconcurrency.InFlightLoad).CompletionsPerSecond
+	}
+
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	}
+	req := makeTokenRequest("rate-req", 4)
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
+	require.Zero(t, completionsPerSecond(), "a request that has not ended is not a completion")
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, completionsPerSecond(), 1e-9)
+
+	require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: endpoint}))
+	require.Zero(t, producer.completionTracker.rate(endpointID, time.Now()), "deleting an endpoint clears its rate")
+
+	late := makeTokenRequest("rate-req-late", 4)
+	require.NoError(t, producer.PreRequest(ctx, late, res))
+	late.SchedulingResult = res
+	producer.ResponseBody(ctx, late, &fwkrh.Response{EndOfStream: true}, nil)
+	require.Zero(t, producer.completionTracker.rate(endpointID, time.Now()), "a completion after delete does not recreate the window")
+}
+
+// TestInFlightLoadProducer_CompletionRate_AbortedStream verifies that a request
+// whose stream ends early (client disconnect or error) counts as a completion:
+// the director runs the end-of-stream hooks for it with the termination cause.
+func TestInFlightLoadProducer_CompletionRate_AbortedStream(t *testing.T) {
+	t.Parallel()
+
+	for _, cause := range []fwkrh.TerminationCause{fwkrh.TerminationCauseClientDisconnect, fwkrh.TerminationCauseError} {
+		t.Run(string(cause), func(t *testing.T) {
+			t.Parallel()
+			producer := newTestProducer(t)
+			ctx := context.Background()
+			endpoint := newStubSchedulingEndpoint("aborted-endpoint")
+			endpointID := fullEndpointName("aborted-endpoint")
+			require.NoError(t, producer.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: endpoint}))
+
+			res := makeSchedulingResult("aborted-endpoint")
+			req := makeTokenRequest("aborted-req", 4)
+			require.NoError(t, producer.PreRequest(ctx, req, res))
+			req.SchedulingResult = res
+
+			producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true, EndOfStream: true, TerminationCause: cause}, nil)
+			require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(endpointID, time.Now()), 1e-9)
+			require.Zero(t, producer.requestTracker.get(endpointID))
+		})
+	}
+}
+
+// TestInFlightLoadProducer_CompletionRate_PD verifies that a prefill endpoint completes
+// its part of a request at the first chunk and a decode endpoint at end of stream.
+func TestInFlightLoadProducer_CompletionRate_PD(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	prefillID := fullEndpointName("prefill-endpoint")
+	decodeID := fullEndpointName("decode-endpoint")
+
+	producer.completionTracker.add(prefillID)
+	producer.completionTracker.add(decodeID)
+
+	req := makeTokenRequest("rate-req-pd", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("prefill-endpoint")}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("decode-endpoint")}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(prefillID, time.Now()), 1e-9)
+	require.Zero(t, producer.completionTracker.rate(decodeID, time.Now()))
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(prefillID, time.Now()), 1e-9)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(decodeID, time.Now()), 1e-9)
+}
+
+// TestInFlightLoadProducer_CompletionRate_PDAbortedBeforeFirstChunk verifies that a
+// P/D request that ends before its first chunk counts a completion on both
+// endpoints. The director marks its only ResponseBody call as both the start and
+// the end of the stream.
+func TestInFlightLoadProducer_CompletionRate_PDAbortedBeforeFirstChunk(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	prefillID := fullEndpointName("prefill-endpoint")
+	decodeID := fullEndpointName("decode-endpoint")
+
+	producer.completionTracker.add(prefillID)
+	producer.completionTracker.add(decodeID)
+
+	req := makeTokenRequest("rate-req-pd-aborted", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("prefill-endpoint")}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("decode-endpoint")}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{
+		StartOfStream: true, EndOfStream: true, TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+	}, nil)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(prefillID, time.Now()), 1e-9)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(decodeID, time.Now()), 1e-9)
+	require.Zero(t, producer.requestTracker.get(prefillID))
+	require.Zero(t, producer.requestTracker.get(decodeID))
+}
+
+// TestInFlightLoadProducer_CompletionRate_ProfilesSameEndpoint verifies that a request
+// whose profiles target the same endpoint counts as one completion there.
+func TestInFlightLoadProducer_CompletionRate_ProfilesSameEndpoint(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointID := fullEndpointName("shared-endpoint")
+	producer.completionTracker.add(endpointID)
+
+	req := makeTokenRequest("rate-req-shared", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "a",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"a": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
+			"b": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true, EndOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(endpointID, time.Now()), 1e-9)
+}
+
+// TestInFlightLoadProducer_CompletionRate_PDSameEndpoint verifies that a request
+// whose prefill and decode profiles target the same endpoint counts once there,
+// at end of stream.
+func TestInFlightLoadProducer_CompletionRate_PDSameEndpoint(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointID := fullEndpointName("shared-endpoint")
+	producer.completionTracker.add(endpointID)
+
+	req := makeTokenRequest("rate-req-pd-shared", 4)
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("shared-endpoint")}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	req.SchedulingResult = res
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
+	require.Zero(t, producer.completionTracker.rate(endpointID, time.Now()))
+
+	producer.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true}, nil)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, producer.completionTracker.rate(endpointID, time.Now()), 1e-9)
+}
+
+func TestInFlightLoadProducer_CrossReplicaState(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	spec := producer.CrossReplicaState()
+	endpointID := fullEndpointName("sync-endpoint")
+
+	producer.requestTracker.add(endpointID, 2)
+	producer.tokenTracker.add(endpointID, 200)
+	producer.pendingTracker.add(endpointID, 1)
+	producer.completionTracker.add(endpointID)
+	producer.completionTracker.record(endpointID, time.Now())
+	supplied := spec.Read(endpointID).(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(2), supplied.Requests)
+	require.Equal(t, int64(200), supplied.Tokens)
+	require.Equal(t, int64(1), supplied.PendingRequests)
+	require.InDelta(t, 1.0/completionFallbackWindowSeconds, supplied.CompletionsPerSecond, 1e-9)
+
+	total := spec.Aggregate([]any{
+		&attrconcurrency.InFlightLoad{Requests: 1, Tokens: 100, PendingRequests: 1, CompletionsPerSecond: 0.5},
+		&attrconcurrency.InFlightLoad{Requests: 2, Tokens: 200, PendingRequests: 2, CompletionsPerSecond: 0.25},
+	}).(*attrconcurrency.InFlightLoad)
+	require.Equal(t, int64(3), total.Requests)
+	require.Equal(t, int64(300), total.Tokens)
+	require.Equal(t, int64(3), total.PendingRequests)
+	require.InDelta(t, 0.75, total.CompletionsPerSecond, 1e-9)
 }
