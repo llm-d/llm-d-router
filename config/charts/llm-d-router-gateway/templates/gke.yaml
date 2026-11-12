@@ -34,6 +34,13 @@ spec:
         portSpecification: "USE_FIXED_PORT"
         port: {{ $port }}
         grpcServiceName: "/vllm.grpc.engine.VllmEngine/HealthCheck"
+    {{- else if and (eq (lower .Values.router.modelServers.type) "sglang") (eq .Values.router.modelServers.protocol "grpc") }}
+    config:
+      type: GRPC
+      grpcHealthCheck:
+        portSpecification: "USE_FIXED_PORT"
+        port: {{ $port }}
+        grpcServiceName: "/sglang.api.v1.SglangService/HealthCheck"
     {{- end }}
 {{- $eppHealthPort := int (.Values.router.epp.grpcHealthPort | default 9003) }}
 {{- /* The GKE gateway controller health-checks the EPP backend on gRPC port
