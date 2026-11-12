@@ -92,6 +92,7 @@ Configure a flow-control priority band for each class priority, or rely on dynam
 ## Limitations
 
 - Concurrency counters and daily budgets are held in memory per EPP replica, and no state is shared across replicas. With `N` replicas behind a load balancer, divide each commit by `N`. The configuration fixes the per-replica share, so when `N` changes, through EPP autoscaling or a rolling update, the total commit changes with it until the configuration is updated: scaling from 2 to 3 replicas raises it by half. A replica that starts or restarts mid-day begins with its full daily budget.
+- The daily budget covers one fixed UTC day, the period daily token quotas are usually stated for. It does not spread load across the day: a team can spend the whole budget in the first hour, and its traffic is then downgraded, or rejected in the lowest class, until 00:00 UTC. `maxConcurrency` bounds a team's burst, not the budget.
 - The team ID comes from a client header. Authenticate it upstream, for example at the gateway, before trusting it for quota.
 
 ## Observability
