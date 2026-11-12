@@ -383,8 +383,8 @@ func dayNumber(t time.Time) int {
 	return int(t.UTC().Unix() / 86400)
 }
 
+// untilNextDay returns the time from t to the next UTC midnight. Truncate counts from the zero
+// time, a UTC midnight, so the result does not depend on t's location.
 func untilNextDay(t time.Time) time.Duration {
-	u := t.UTC()
-	next := time.Date(u.Year(), u.Month(), u.Day()+1, 0, 0, 0, 0, time.UTC)
-	return next.Sub(u)
+	return t.Truncate(24 * time.Hour).Add(24 * time.Hour).Sub(t)
 }
