@@ -20,6 +20,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -41,8 +42,27 @@ import (
 // directly, so the request context outlives the steps: the test, not
 // net/http's handler teardown, decides when it ends.
 type sglangPDFixture struct {
-	prefill *PrefillStep
-	decode  *DecodeStep
+	prefill         *PrefillStep
+	decode          *DecodeStep
+	decodeCommitted chan struct{}
+}
+
+// commitNotifyRecorder closes committed on the first body write to the client
+// response. Both steps share reqCtx.ResponseWriter, and PrefillStep writes no
+// body on success. The first Write therefore happens after DecodeStep calls
+// commitHeaders.
+type commitNotifyRecorder struct {
+	*httptest.ResponseRecorder
+	committed chan struct{}
+	once      sync.Once
+}
+
+func (r *commitNotifyRecorder) Write(b []byte) (int, error) {
+	n, err := r.ResponseRecorder.Write(b)
+	if r.committed != nil {
+		r.once.Do(func() { close(r.committed) })
+	}
+	return n, err
 }
 
 // releaseOnCleanup closes stop when the test ends. Register it after the
@@ -54,7 +74,7 @@ func releaseOnCleanup(t *testing.T, stop chan struct{}) {
 	t.Cleanup(func() { close(stop) })
 }
 
-func newSGLangPDFixture(t *testing.T, prefill, decode http.HandlerFunc) *sglangPDFixture {
+func newSGLangPDFixture(t *testing.T, decodeCommitted chan struct{}, prefill, decode http.HandlerFunc) *sglangPDFixture {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
@@ -78,7 +98,11 @@ func newSGLangPDFixture(t *testing.T, prefill, decode http.HandlerFunc) *sglangP
 	require.NoError(t, err)
 	d, err := NewDecodeStep(gw, map[string]any{ParamKVConnector: kv.SGLang})
 	require.NoError(t, err)
-	return &sglangPDFixture{prefill: p.(*PrefillStep), decode: d.(*DecodeStep)}
+	return &sglangPDFixture{
+		prefill:         p.(*PrefillStep),
+		decode:          d.(*DecodeStep),
+		decodeCommitted: decodeCommitted,
+	}
 }
 
 func (f *sglangPDFixture) run(ctx context.Context, t *testing.T) (*httptest.ResponseRecorder, error) {
@@ -88,6 +112,10 @@ func (f *sglangPDFixture) run(ctx context.Context, t *testing.T) (*httptest.Resp
 	})
 	require.NoError(t, err)
 	rec := httptest.NewRecorder()
+	var rw http.ResponseWriter = rec
+	if f.decodeCommitted != nil {
+		rw = &commitNotifyRecorder{ResponseRecorder: rec, committed: f.decodeCommitted}
+	}
 	reqCtx := &pipeline.RequestContext{
 		RequestID:           "req-pd",
 		OriginalHeaders:     http.Header{},
@@ -95,7 +123,7 @@ func (f *sglangPDFixture) run(ctx context.Context, t *testing.T) (*httptest.Resp
 		GRPCGeneratePayload: payload[grpcframe.HeaderLen:],
 		Stream:              true,
 		KVTransferParams:    map[string]any{},
-		ResponseWriter:      rec,
+		ResponseWriter:      rw,
 	}
 	if err := f.prefill.Execute(ctx, reqCtx); err != nil {
 		return rec, err
@@ -132,7 +160,7 @@ func TestSGLangGRPC_PrefillGraceTimerCancelsLingeringPrefill(t *testing.T) {
 
 	prefillDone := make(chan struct{})
 	var prefillCancelledAt atomic.Int64
-	f := newSGLangPDFixture(t,
+	f := newSGLangPDFixture(t, nil,
 		func(w http.ResponseWriter, r *http.Request) {
 			writePrefillHeaders(w)
 			select { // linger until the coordinator cancels
@@ -170,7 +198,7 @@ func TestSGLangGRPC_DecodeFailureCancelsPrefillWithoutRequestContext(t *testing.
 	stop := make(chan struct{})
 
 	prefillDone := make(chan struct{})
-	f := newSGLangPDFixture(t,
+	f := newSGLangPDFixture(t, nil,
 		func(w http.ResponseWriter, r *http.Request) {
 			writePrefillHeaders(w)
 			select {
@@ -196,12 +224,16 @@ func TestSGLangGRPC_DecodeFailureCancelsPrefillWithoutRequestContext(t *testing.
 // A prefill failure that arrives as decode reaches end of stream is reported
 // to the client in place of decode's OK trailer.
 func TestSGLangGRPC_PrefillFailureAfterDecodeEOFIsReported(t *testing.T) {
-	decodeFinished := make(chan struct{})
-	f := newSGLangPDFixture(t,
+	prev := sglangPrefillWaitOnTerminal
+	sglangPrefillWaitOnTerminal = 5 * time.Second
+	t.Cleanup(func() { sglangPrefillWaitOnTerminal = prev })
+
+	decodeCommitted := make(chan struct{})
+	f := newSGLangPDFixture(t, decodeCommitted,
 		func(w http.ResponseWriter, r *http.Request) {
 			writePrefillHeaders(w)
 			select {
-			case <-decodeFinished:
+			case <-decodeCommitted:
 			case <-r.Context().Done():
 				return
 			}
@@ -210,7 +242,6 @@ func TestSGLangGRPC_PrefillFailureAfterDecodeEOFIsReported(t *testing.T) {
 		},
 		func(w http.ResponseWriter, _ *http.Request) {
 			writeDecodeOK(t, w)
-			close(decodeFinished)
 		},
 	)
 
@@ -227,12 +258,16 @@ func TestSGLangGRPC_PrefillFailureAfterDecodeEOFIsReported(t *testing.T) {
 // A prefill stream that ends inside a frame is a failure, not a clean end,
 // even when the upstream closes it with an OK trailer.
 func TestSGLangGRPC_PrefillStreamTruncatedInsideFrameFails(t *testing.T) {
-	decodeFinished := make(chan struct{})
-	f := newSGLangPDFixture(t,
+	prev := sglangPrefillWaitOnTerminal
+	sglangPrefillWaitOnTerminal = 5 * time.Second
+	t.Cleanup(func() { sglangPrefillWaitOnTerminal = prev })
+
+	decodeCommitted := make(chan struct{})
+	f := newSGLangPDFixture(t, decodeCommitted,
 		func(w http.ResponseWriter, r *http.Request) {
 			writePrefillHeaders(w)
 			select {
-			case <-decodeFinished:
+			case <-decodeCommitted:
 			case <-r.Context().Done():
 				return
 			}
@@ -242,7 +277,6 @@ func TestSGLangGRPC_PrefillStreamTruncatedInsideFrameFails(t *testing.T) {
 		},
 		func(w http.ResponseWriter, _ *http.Request) {
 			writeDecodeOK(t, w)
-			close(decodeFinished)
 		},
 	)
 
