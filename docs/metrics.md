@@ -96,6 +96,15 @@ format change means for a scrape.
 Configuring the metrics listener controls scraping; field checks and trace attributes do not
 require that listener.
 
+## Discovery membership diagnostics
+
+`llm_d_epp_discovery_membership_disagreement` is an alpha gauge without labels.
+It is 1 after at least two consecutive successful Kubernetes samples disagree
+with the watch-driven routing datastore, and resets to 0 on agreement.
+It remains unchanged on failed samples. It is 0 when discovery verification is
+disabled. See [Kubernetes discovery freshness](operations.md#kubernetes-discovery-freshness)
+for configuration, request filtering, and diagnostic logs.
+
 ## Metrics catalog
 
 Names below include the full subsystem prefix. EPP metrics use `llm_d_epp_` and the release stage is

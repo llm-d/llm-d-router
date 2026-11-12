@@ -33,23 +33,26 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 )
 
 // DiscoveryFreshness verifies watch-driven routing membership against uncached API reads.
 // It never writes membership; the Kubernetes reconcilers own those updates.
 type DiscoveryFreshness struct {
-	reader    client.Reader
-	datastore datastore.Datastore
-	pool      types.NamespacedName
-	threshold time.Duration
-	clock     clock.Clock
-	validated atomic.Pointer[validatedMembership]
+	reader              client.Reader
+	datastore           datastore.Datastore
+	pool                types.NamespacedName
+	threshold           time.Duration
+	clock               clock.Clock
+	validated           atomic.Pointer[validatedMembership]
+	disagreementSamples int
 }
 
 type validatedMembership struct {
@@ -73,15 +76,21 @@ func (*DiscoveryFreshness) NeedLeaderElection() bool { return false }
 
 func (d *DiscoveryFreshness) Start(ctx context.Context) error {
 	defer d.validated.Store(nil)
+	ready := false
 	for ctx.Err() == nil {
 		// At most 0.4 thresholds between starts plus a one-third-threshold read
 		// leaves time to renew the previous snapshot before it expires.
 		timer := d.clock.NewTimer(wait.Jitter(d.threshold/3, 0.2))
 		attemptCtx, cancel := context.WithTimeout(ctx, d.threshold/3)
 		if err := d.refresh(attemptCtx); err != nil && ctx.Err() == nil {
-			log.FromContext(ctx).Error(err, "Unable to validate Kubernetes discovery membership")
+			log.FromContext(ctx).V(logutil.DEBUG).Info("Unable to sample Kubernetes discovery membership", "error", err)
 		}
 		cancel()
+		nextReady := d.CheckReady() == nil
+		if nextReady != ready {
+			log.FromContext(ctx).Info("Kubernetes discovery freshness state changed", "ready", nextReady, "pool", d.pool.String())
+			ready = nextReady
+		}
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -119,11 +128,11 @@ func (d *DiscoveryFreshness) refresh(ctx context.Context) error {
 		return err
 	}
 	endpoints, err := datastore.VerifyMembership(d.datastore, endpointPool, pods.Items)
-	if err != nil {
-		// A known mismatch cannot use the grace period for unavailable discovery.
+	if endpoints == nil {
 		d.validated.Store(nil)
 		return err
 	}
+	d.observeDisagreement(ctx, err)
 	d.validated.Store(&validatedMembership{at: started, endpoints: endpoints})
 	return nil
 }
@@ -162,4 +171,43 @@ func (d *DiscoveryFreshness) Admit(_ context.Context, _ *fwksched.InferenceReque
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
 	}
 	return nil
+}
+
+// FilterCandidates keeps only candidates represented in a fresh authoritative sample.
+func (d *DiscoveryFreshness) FilterCandidates(ctx context.Context, candidates []fwksched.Endpoint) ([]fwksched.Endpoint, error) {
+	validated := d.validated.Load()
+	if err := d.checkReady(validated); err != nil {
+		return nil, errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
+	}
+	eligible := make([]fwksched.Endpoint, 0, len(candidates))
+	for _, candidate := range candidates {
+		meta := candidate.GetMetadata()
+		if meta != nil && meta.Equal(validated.endpoints[meta.ID]) {
+			eligible = append(eligible, candidate)
+		}
+	}
+	if excluded := len(candidates) - len(eligible); excluded > 0 {
+		log.FromContext(ctx).V(logutil.DEBUG).Info("Excluded candidates outside sampled Kubernetes membership", "excluded", excluded, "eligible", len(eligible))
+	}
+	if len(eligible) == 0 {
+		return nil, errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "no candidates match sampled Kubernetes membership"}
+	}
+	return eligible, nil
+}
+
+func (d *DiscoveryFreshness) observeDisagreement(ctx context.Context, mismatch error) {
+	logger := log.FromContext(ctx)
+	if mismatch != nil {
+		d.disagreementSamples++
+		logger.V(logutil.DEBUG).Info("Kubernetes membership differs from routing datastore", "error", mismatch, "consecutiveSamples", d.disagreementSamples)
+		if d.disagreementSamples == 2 {
+			logger.Info("Kubernetes membership disagreement persists across successful samples", "pool", d.pool.String())
+		}
+	} else {
+		if d.disagreementSamples >= 2 {
+			logger.Info("Kubernetes membership agreement recovered", "pool", d.pool.String())
+		}
+		d.disagreementSamples = 0
+	}
+	metrics.RecordDiscoveryDisagreement(d.disagreementSamples >= 2)
 }

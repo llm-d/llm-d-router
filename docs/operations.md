@@ -283,16 +283,28 @@ within the previous snapshot's freshness budget. Read and comparison time count
 toward the freshness budget. Each replica performs its own verification; choose the
 threshold with the Pod count and API-server load in mind.
 
-After initial validation, failed API reads retain the last validated membership
-until its age reaches the threshold. A known mismatch or deleted pool invalidates
-it immediately. An expired or invalidated check makes readiness report
-`NOT_SERVING` and rejects new inference requests with HTTP 503. The request is
-checked before flow-control admission and again before scheduling, including
-bodyless requests and WebSocket upgrades that select endpoints directly. Liveness
-and already-dispatched response streams are unaffected. Readiness recovers only when
-the datastore matches a successful API snapshot, including removal of withdrawn
-endpoints. Leader Lease renewal and backend metric scrapes do not renew this
-freshness budget.
+After initial validation, failed API reads retain the last sampled membership
+until its age reaches the threshold. Each successful sample replaces that view
+even if the watch-driven datastore has not caught up. Requests use the intersection
+of their datastore candidates and the fresh sample, comparing full routing metadata.
+An unverified addition or changed endpoint is excluded without rejecting other
+matching candidates. A request with no matching candidates receives HTTP 503.
+Bodyless requests and WebSocket upgrades select from matching endpoints and
+validate the selected endpoint before dispatch.
+
+A changed pool configuration or deleted pool invalidates verification immediately.
+An expired or invalidated sample makes readiness report `NOT_SERVING` and rejects
+new inference requests with HTTP 503. Readiness describes sample freshness;
+it does not guarantee that a request has matching candidates. Liveness and
+already-dispatched response streams are unaffected. Leader Lease renewal and
+backend metric scrapes do not renew this freshness budget.
+
+Excluded candidate counts and sampling errors are logged at debug verbosity.
+Disagreement persisting across two consecutive successful samples emits an
+operational log and sets `llm_d_epp_discovery_membership_disagreement` to 1.
+Agreement recovery logs once and resets the metric to 0. The verification loop
+logs transitions into and out of readiness; these are observed after sampling
+attempts, rather than logged on every rejected request.
 
 Configure the gateway to fail closed on EPP unavailability if inference must stop
 during discovery loss. Gateway fail-open routing can bypass EPP checks.
