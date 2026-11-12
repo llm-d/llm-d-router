@@ -108,6 +108,11 @@ func extractFamily(spec *Spec, families sourcemetrics.PrometheusMetricMap) (*dto
 	if len(family.GetMetric()) == 0 {
 		return nil, fmt.Errorf("no metrics found for %q", spec.Name)
 	}
+	switch family.GetType() {
+	case dto.MetricType_GAUGE, dto.MetricType_COUNTER, dto.MetricType_UNTYPED:
+	default:
+		return nil, fmt.Errorf("unsupported metric type %v for %q", family.GetType(), spec.Name)
+	}
 	return family, nil
 }
 

@@ -17,10 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -46,7 +48,6 @@ func newTestServer(t *testing.T, listenAddr string) *server.Server {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 	}, pipeline.New(nil), gateway.NewWithTransport(nil, "http://gateway-stub.invalid"))
 	require.NoError(t, err)
 	return srv
@@ -205,7 +206,6 @@ func TestRun_MetricsDisabled_DrainsCleanlyOnCancel(t *testing.T) {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 		MetricsPort:     0,
 	}
 	srv := newTestServer(t, listenAddr)
@@ -239,7 +239,6 @@ func TestRun_NilListener_DrainsCleanlyOnCancel(t *testing.T) {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 		MetricsPort:     0,
 	}
 	srv := newTestServer(t, listenAddr)
@@ -281,7 +280,6 @@ func TestRun_MetricsPortCollision_DrainsCoordinatorServer(t *testing.T) {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 		MetricsPort:     blockedPort,
 	}
 	srv := newTestServer(t, listenAddr)
@@ -320,7 +318,6 @@ func TestRun_InvalidMetricsTLSDrainsCoordinatorServer(t *testing.T) {
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-		WriteTimeout:    time.Second,
 		MetricsPort:     metricsPort,
 		MetricsCertDir:  t.TempDir(),
 	}
@@ -342,5 +339,67 @@ func TestRun_InvalidMetricsTLSDrainsCoordinatorServer(t *testing.T) {
 	if dialErr == nil {
 		_ = conn.Close()
 		t.Fatalf("coordinator server at %s still accepts connections after run returned", listenAddr)
+	}
+}
+
+// On SIGTERM with a positive DrainTimeout the coordinator keeps accepting for
+// the drain window, reports not ready, and closes each connection after its
+// next response so pooled clients reconnect to another replica.
+func TestRun_DrainTimeout_ServesWithConnectionCloseThenShutsDown(t *testing.T) {
+	lis, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	listenAddr := lis.Addr().String()
+
+	const drain = 500 * time.Millisecond
+	cfg := config.ServerConfig{
+		ListenAddr:      listenAddr,
+		ShutdownTimeout: time.Second,
+		DrainTimeout:    drain,
+		ReadTimeout:     time.Second,
+	}
+	srv := newTestServer(t, listenAddr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, srv, cfg, lis) }()
+	waitForHealthz(t, listenAddr, 2*time.Second)
+
+	// An idle keep-alive connection opened before SIGTERM.
+	conn, err := net.Dial("tcp", listenAddr)
+	require.NoError(t, err)
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	get := func(path string) (status int, closeConn bool) {
+		t.Helper()
+		_, err := fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: x\r\n\r\n", path)
+		require.NoError(t, err)
+		resp, err := http.ReadResponse(br, nil)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		return resp.StatusCode, resp.Close
+	}
+	status, _ := get("/healthz")
+	require.Equal(t, http.StatusOK, status)
+
+	start := time.Now()
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+
+	status, closeConn := get("/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, status)
+	require.True(t, closeConn, "draining response must carry Connection: close")
+
+	fresh, err := http.Get("http://" + listenAddr + "/healthz")
+	require.NoError(t, err, "listener must stay open during the drain window")
+	_ = fresh.Body.Close()
+	require.Equal(t, http.StatusOK, fresh.StatusCode)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, time.Since(start), drain)
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not return within 5s after cancel")
 	}
 }

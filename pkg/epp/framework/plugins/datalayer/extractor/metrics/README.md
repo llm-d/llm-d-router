@@ -77,6 +77,10 @@ The plugin config supports:
 -   `engineConfigs`: A list of engine-specific metric specifications.
     Each engineConfig can include `customMetrics` entries.
     Each entry maps a scalar metric selector to an endpoint attribute key.
+    Gauge, counter, and untyped samples are supported. Histogram and summary
+    families are extraction errors; select a scalar series such as `_sum` or
+    `_count` instead. An unsupported type keeps the attribute's previous value,
+    or leaves it unset if no value has been extracted.
     A source metric missing from the scrape is an extraction error unless its
     `customMetrics` entry sets `optional: true`, which skips that entry for
     the scrape.

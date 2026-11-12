@@ -1,7 +1,7 @@
 # Latency Reporter
 
 **Type:** `latency-reporter`
-**Interfaces:** `requesthandling.ResponseHeaderProcessor`, `requesthandling.ResponseBodyProcessor`
+**Interfaces:** `requesthandling.ResponseHeaderProcessor`, `requesthandling.ResponseBodyProcessor`, `plugin.ConsumerPlugin`
 **Stability:** Alpha
 
 Records each dispatched request's outcome, time to first token (TTFT) and time per output token (TPOT), labeled by served priority, prompt-length bucket and prefill/decode path.

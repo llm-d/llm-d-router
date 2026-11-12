@@ -856,22 +856,65 @@ var errBlockedAddress = fmt.Errorf("address resolves to a blocked range: %w", pi
 // dedicated predicate for.
 var cgnatBlock = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 
+// nat64Block is the RFC 6052 well-known NAT64 prefix; the low 32 bits carry
+// the IPv4 destination.
+var nat64Block = &net.IPNet{IP: net.ParseIP("64:ff9b::"), Mask: net.CIDRMask(96, 128)}
+
+// ipv4CompatBlock is the deprecated IPv4-compatible range ::/96 (RFC 4291).
+var ipv4CompatBlock = &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(96, 128)}
+
+// maxRedirects matches the net/http default, which a custom CheckRedirect drops.
+const maxRedirects = 10
+
 func (g *addressGuard) newClient(timeout time.Duration) *http.Client {
 	// Clone DefaultTransport to keep Proxy: http.ProxyFromEnvironment, so image
 	// fetches still honor HTTP(S)_PROXY, and attach the dial-time IP guard.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	dialer := &net.Dialer{Control: g.dialControl}
 	transport.DialContext = dialer.DialContext
+	transport.Proxy = g.checkedProxy(transport.Proxy)
 
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxRedirects {
+				return fmt.Errorf("stopped after %d redirects: %w", maxRedirects, pipeline.ErrBadRequest)
+			}
+			if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
+				return fmt.Errorf("redirect from https to %q not allowed: %w", req.URL.Scheme, pipeline.ErrBadRequest)
+			}
 			if !g.hostAllowed(req.URL.Hostname()) {
 				return fmt.Errorf("redirect host %q not allowed: %w", req.URL.Hostname(), pipeline.ErrBadRequest)
 			}
 			return nil
 		},
+	}
+}
+
+// checkedProxy wraps proxy so that a request sent through a proxy has its
+// target resolved and checked first: dialControl only sees the proxy's address.
+// The proxy resolves the host again, so a DNS-rebinding target can
+// still differ from the checked IP; allowed_domains closes that if needed.
+func (g *addressGuard) checkedProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request) (*url.URL, error) {
+	if proxy == nil {
+		return nil
+	}
+	return func(r *http.Request) (*url.URL, error) {
+		proxyURL, err := proxy(r)
+		if err != nil || proxyURL == nil {
+			return proxyURL, err
+		}
+		ips, err := net.DefaultResolver.LookupIP(r.Context(), "ip", r.URL.Hostname())
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range ips {
+			if g.blockedIP(ip) {
+				return nil, errBlockedAddress
+			}
+		}
+		return proxyURL, nil
 	}
 }
 
@@ -898,13 +941,16 @@ func (g *addressGuard) blockedIP(ip net.IP) bool {
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}
+	if nat64Block.Contains(ip) {
+		ip = ip.To16()[12:]
+	}
 	if ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
 	if ip.IsLoopback() {
 		return !g.allowLoopback
 	}
-	if cgnatBlock.Contains(ip) {
+	if cgnatBlock.Contains(ip) || ipv4CompatBlock.Contains(ip) {
 		return true
 	}
 	if ip.IsPrivate() {

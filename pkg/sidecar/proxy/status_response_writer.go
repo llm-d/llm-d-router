@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 
 	"github.com/felixge/httpsnoop"
+
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 const sseEventDelimiter = "\n\n"
@@ -115,6 +117,44 @@ func (s *responseStatus) implicitOK() {
 	}
 }
 
+// stampFailedStage wraps w so every response carries routing.FailedStageHeader,
+// for the EPP to charge a failure to the endpoint that ran the failed stage.
+// The values are documented on routing.FailedStageHeader. A value the model
+// server set is dropped, so only the sidecar marks stages. The stamp goes on
+// the first write, header or body: a response can be written without a status,
+// which leaves the headers unset.
+func stampFailedStage(w http.ResponseWriter, summary *requestSummary) http.ResponseWriter {
+	var stamped atomic.Bool
+	stamp := func() {
+		if !stamped.CompareAndSwap(false, true) {
+			return
+		}
+		header := w.Header()
+		header.Del(routing.FailedStageHeader)
+		header.Set(routing.FailedStageHeader, summary.failedStageMarker())
+	}
+	return httpsnoop.Wrap(w, httpsnoop.Hooks{
+		WriteHeader: func(next httpsnoop.WriteHeaderFunc) httpsnoop.WriteHeaderFunc {
+			return func(statusCode int) {
+				stamp()
+				next(statusCode)
+			}
+		},
+		Write: func(next httpsnoop.WriteFunc) httpsnoop.WriteFunc {
+			return func(b []byte) (int, error) {
+				stamp()
+				return next(b)
+			}
+		},
+		ReadFrom: func(next httpsnoop.ReadFromFunc) httpsnoop.ReadFromFunc {
+			return func(src io.Reader) (int64, error) {
+				stamp()
+				return next(src)
+			}
+		},
+	})
+}
+
 // failed reports whether the response carried an error status or could not be
 // delivered to the client. A response that wrote no status at all also counts
 // as failed: the stage produced nothing, and net/http would send the client an
@@ -123,14 +163,15 @@ func (s *responseStatus) failed() bool {
 	return s.statusCode == 0 || isHTTPError(s.statusCode) || s.writeFailed
 }
 
-// deferredCommitWriter wraps a client http.ResponseWriter and holds all writes
-// until the caller decides the outcome (the "commit point"). It is used by the
-// MoRI-IO parallel WRITE dispatch so decode can run concurrently with prefill
-// yet never surface a response to the client before prefill has succeeded:
+// deferredCommitWriter holds all writes until the caller decides the outcome
+// (the "commit point"). It is used by the MoRI-IO parallel WRITE dispatch so
+// decode can run concurrently with prefill yet never surface a response to the
+// client before prefill has succeeded:
 //
-//   - commit(): relay the buffered status/headers/body to the client and switch
-//     to pass-through mode, so any further decode writes stream straight to the
-//     client (SSE/streaming is preserved after the commit point).
+//   - commit(dst): relay the buffered status/headers/body to dst and switch
+//     to pass-through mode, so any further decode writes stream straight to
+//     dst (SSE/streaming is preserved after the commit point). dst is chosen
+//     at the commit point because it can depend on prefill's response.
 //   - abort():  discard the buffered output and drop every subsequent write, so
 //     a failed prefill can never let decode emit a (possibly 200) response; the
 //     caller then writes the prefill error to the client directly.
@@ -157,9 +198,8 @@ type deferredCommitWriter struct {
 	buffer      bytes.Buffer
 }
 
-func newDeferredCommitWriter(dst http.ResponseWriter) *deferredCommitWriter {
+func newDeferredCommitWriter() *deferredCommitWriter {
 	return &deferredCommitWriter{
-		dst:    dst,
 		header: make(http.Header),
 	}
 }
@@ -261,12 +301,12 @@ func (w *deferredCommitWriter) flushCommitLocked() {
 	}
 }
 
-// commit allows decode's response to reach the client, preserving decode's own
+// commit allows decode's response to reach dst, preserving decode's own
 // status, headers, and body. If decode has already produced output it is flushed
 // immediately; otherwise the flush is deferred until decode emits its header, so
 // a fast-succeeding prefill never clobbers decode's status/headers with a
 // synthesized default. Returns false if the writer had already been aborted.
-func (w *deferredCommitWriter) commit() bool {
+func (w *deferredCommitWriter) commit(dst http.ResponseWriter) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.aborted {
@@ -276,6 +316,7 @@ func (w *deferredCommitWriter) commit() bool {
 		return true
 	}
 	w.committed = true
+	w.dst = dst
 	// Only flush now if decode already emitted its header/body; otherwise wait
 	// for decode's WriteHeader/Write so we relay its real status and headers.
 	if w.wroteHeader || w.buffer.Len() > 0 {

@@ -569,6 +569,63 @@ func TestValidateMetricsMTLS(t *testing.T) {
 	}
 }
 
+// The serving-listener client CA mirrors the metrics one: it is only
+// meaningful with TLS on, and Complete parses it so a bad file fails startup.
+func TestClientCAFile(t *testing.T) {
+	validCA := writeCAFile(t)
+	badPEM := filepath.Join(t.TempDir(), "bad.crt")
+	require.NoError(t, os.WriteFile(badPEM, []byte("not a pem"), 0o600))
+
+	t.Run("flag", func(t *testing.T) {
+		opts := NewOptions()
+		fs := pflag.NewFlagSet("flag", pflag.ContinueOnError)
+		opts.AddFlags(fs)
+		require.NoError(t, fs.Parse([]string{"--pool-name", testPoolName, "--client-ca-file", validCA}))
+		require.Equal(t, validCA, opts.ClientCAFile)
+	})
+
+	t.Run("requires secure serving", func(t *testing.T) {
+		opts := NewOptions()
+		opts.AddFlags(pflag.NewFlagSet("validate", pflag.ContinueOnError))
+		opts.PoolName = testPoolName
+		opts.ClientCAFile = validCA
+		opts.SecureServing = false
+		require.ErrorIs(t, opts.Validate(), errClientCARequiresSecureServing)
+		opts.SecureServing = true
+		require.NoError(t, opts.Validate())
+	})
+
+	t.Run("complete", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			path    string
+			wantErr error
+		}{
+			{name: "valid CA", path: validCA},
+			{name: "missing file", path: filepath.Join(t.TempDir(), "missing.crt"), wantErr: errReadClientCA},
+			{name: "not a certificate", path: badPEM, wantErr: errNoValidClientCA},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				opts := NewOptions()
+				opts.AddFlags(pflag.NewFlagSet(tc.name, pflag.ContinueOnError))
+				opts.ClientCAFile = tc.path
+				err := opts.Complete()
+				if tc.wantErr != nil {
+					require.ErrorIs(t, err, tc.wantErr)
+					require.Nil(t, opts.ClientCAPool())
+					return
+				}
+				require.NoError(t, err)
+				require.NotNil(t, opts.ClientCAPool())
+			})
+		}
+		empty := NewOptions()
+		empty.AddFlags(pflag.NewFlagSet("empty", pflag.ContinueOnError))
+		require.NoError(t, empty.Complete())
+		require.Nil(t, empty.ClientCAPool(), "no flag means no client certificate requirement")
+	})
+}
+
 func TestCompleteMetricsCertFiles(t *testing.T) {
 	dir := t.TempDir()
 

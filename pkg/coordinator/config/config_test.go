@@ -54,8 +54,8 @@ func TestLoadDefaults(t *testing.T) {
 		{"server.cert_path", cfg.Server.CertPath, ""},
 		{"server.tls_min_version", cfg.Server.TLSMinVersion, ""},
 		{"server.read_timeout", cfg.Server.ReadTimeout, 30 * time.Second},
-		{"server.write_timeout", cfg.Server.WriteTimeout, 120 * time.Second},
 		{"server.shutdown_timeout", cfg.Server.ShutdownTimeout, 25 * time.Second},
+		{"server.drain_timeout", cfg.Server.DrainTimeout, time.Duration(0)},
 		{"server.max_request_body_size", cfg.Server.MaxRequestBodySize, int64(DefaultMaxRequestBodySize)},
 		{"gateway.max_idle_conns_per_host", cfg.Gateway.MaxIdleConnsPerHost, 100},
 		{"gateway.idle_conn_timeout", cfg.Gateway.IdleConnTimeout, 90 * time.Second},
@@ -74,6 +74,35 @@ func TestLoadDefaults(t *testing.T) {
 
 	if len(cfg.Server.TLSCipherSuites) != 0 {
 		t.Errorf("server.tls_cipher_suites = %v, want empty", cfg.Server.TLSCipherSuites)
+	}
+
+	if len(cfg.DeprecatedKeys) != 0 {
+		t.Errorf("DeprecatedKeys = %v, want empty", cfg.DeprecatedKeys)
+	}
+}
+
+func TestLoadDeprecatedWriteTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		env  bool
+	}{
+		{name: "file", body: "server:\n  write_timeout: 600s\n"},
+		{name: "env", body: "", env: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.env {
+				t.Setenv("COORDINATOR_SERVER_WRITE_TIMEOUT", "600s")
+			}
+			cfg, err := Load(writeConfig(t, tt.body))
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if want := []string{"server.write_timeout"}; !slices.Equal(cfg.DeprecatedKeys, want) {
+				t.Errorf("DeprecatedKeys = %v, want %v", cfg.DeprecatedKeys, want)
+			}
+		})
 	}
 }
 

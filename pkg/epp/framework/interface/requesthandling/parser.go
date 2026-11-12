@@ -131,4 +131,17 @@ type ParsedResponse struct {
 	// "data: " framing this parser already assumes (no-space prefixes, multi-line data fields,
 	// and keep-alive data lines skew it further).
 	StreamedEvents int
+	// DisjointInputTokens is set by parsers of protocols that report the uncached,
+	// cache-read, and cache-creation input counts separately and may spread them
+	// over several stream chunks. Nil when Usage.PromptTokens is complete on its own.
+	DisjointInputTokens *DisjointInputTokens
+}
+
+// DisjointInputTokens holds the input token counts one parse observed, split by
+// prompt cache outcome. A zero is a count the parse did not report. The prompt is
+// the sum of the three.
+type DisjointInputTokens struct {
+	Uncached      int
+	CacheRead     int
+	CacheCreation int
 }

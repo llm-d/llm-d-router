@@ -71,6 +71,7 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		ctx = context.WithValue(ctx, requestStartTimeKey, requestStart)
 		ctx, summary := withRequestSummary(ctx)
 		r = r.WithContext(ctx)
+		w = stampFailedStage(w, summary)
 
 		requestPath := ""
 		if r.URL != nil {
