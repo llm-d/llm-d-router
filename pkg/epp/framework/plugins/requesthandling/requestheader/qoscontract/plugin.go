@@ -174,6 +174,8 @@ func (p *Plugin) lookupTeam(request *scheduling.InferenceRequest) (string, *team
 
 // estimateCost returns the estimated prompt tokens and the weighted cost reserved for the request.
 // The prompt is estimated from the body size because tokenization runs after flow control.
+// The size includes JSON structure, so the estimate runs high for a short prompt with large
+// request fields (tools, stop sequences) and low for multi-byte UTF-8 text.
 func (p *Plugin) estimateCost(request *scheduling.InferenceRequest, cfg TeamConfig) (prompt int64, cost float64) {
 	prompt = int64(request.RequestSizeBytes / fwkrequest.BytesPerToken)
 	var output int64

@@ -17,7 +17,7 @@ The plugin runs in the RequestHeader phase, before flow control queues the reque
 
 At end of stream the reservation of a committed request is settled against the reported usage: unused tokens are refunded to the daily budget, and usage above the reservation is charged to it. A response with no usage block keeps the reservation as the charge. A request that ends without a response body (a flow-control rejection, a scheduling failure, a client disconnect) is refunded in full when its stream ends.
 
-Input tokens are estimated as request bytes / 4, because tokenization runs after flow control. `maxOutput` is the request's output cap, else the team's `maxOutputTokens`, else `defaultOutputReservation`.
+Input tokens are estimated as request bytes / 4, because tokenization runs after flow control. The bytes include the JSON structure, so the estimate runs high for a short prompt with large request fields (tool definitions, many stop sequences) and low for multi-byte UTF-8 text. The daily charge is corrected at settlement; the `maxPromptTokens` check uses the estimate. `maxOutput` is the request's output cap, else the team's `maxOutputTokens`, else `defaultOutputReservation`.
 
 ### Why a RequestHeader Plugin
 
