@@ -146,6 +146,14 @@ var (
 		Help: metricsutil.HelpMsgWithStability(
 			"Total number of messages received from ZMQ subscribers", compbasemetrics.ALPHA),
 	}, []string{podIdentifierLabel})
+	// TopicPodMismatches counts messages a per-pod subscription dropped because
+	// their topic names an address other than the host it dialed.
+	TopicPodMismatches = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_topic_pod_mismatches_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-event messages dropped because their topic names an address other than the dialed host",
+			compbasemetrics.ALPHA),
+	})
 	// ZMQErrors counts errors encountered by ZMQ subscribers, labeled by the
 	// pod identifier and the operation that failed (e.g. "connect", "recv").
 	ZMQErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -176,7 +184,7 @@ func Collectors() []prometheus.Collector {
 		LookupRequests, LookupHits, LookupLatency, MaxPodHitCount,
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
-		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
+		SubscriberActive, SubscriberReconnections, MessagesReceived, TopicPodMismatches, ZMQErrors,
 		PoolQueueDepth, PoolCapacity,
 	}
 }

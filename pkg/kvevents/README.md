@@ -20,7 +20,9 @@ engines.
 
 - **Subscription.** A ZMQ subscriber receives messages from the engine pods.
   `SubscriberManager` maintains one subscription per engine endpoint and tears
-  them down as pods come and go.
+  them down as pods come and go. A per-endpoint subscription attributes its
+  messages to the endpoint it dialed and drops a message whose topic names an
+  address other than the dialed host.
 - **Decoding.** Each message is parsed by the engine adapter for its topic,
   producing canonical block-stored / block-removed / all-blocks-cleared events.
 - **Worker pool.** `Pool` fans messages out to workers keyed by a sharding key
