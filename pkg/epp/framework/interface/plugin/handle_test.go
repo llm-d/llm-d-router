@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // scorerPlugin is a typed plugin used to exercise PluginByType type assertions.
@@ -152,4 +153,30 @@ func TestPluginByType_WrongType(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "bare")
 	assert.Nil(t, got)
+}
+
+func TestValidateProfileName(t *testing.T) {
+	tests := []struct {
+		name      string
+		profiles  sets.Set[string]
+		profile   string
+		expectErr bool
+	}{
+		{name: "defined profile", profiles: sets.New("prefill", "decode"), profile: "prefill"},
+		{name: "undefined profile", profiles: sets.New("prefill", "decode"), profile: "prefil", expectErr: true},
+		{name: "empty name", profiles: sets.New("prefill", "decode"), profile: ""},
+		{name: "profiles not set", profile: "prefil"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := NewEppHandle(context.Background(), nil, WithSchedulingProfileNames(test.profiles))
+			err := ValidateProfileName(h, test.profile)
+			if test.expectErr {
+				assert.EqualError(t, err, "scheduling profile 'prefil' is not defined")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }

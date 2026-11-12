@@ -720,6 +720,67 @@ schedulingProfiles:
   - pluginRef: non-existent-plugin
 `
 
+// errorPluginReferencesUndefinedProfileText has a plugin whose parameters name a profile that wasn't defined.
+const errorPluginReferencesUndefinedProfileText = `
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: profile-filter
+  type: test-profile-name-filter
+  parameters:
+    profileName: prefill
+- name: profileHandler
+  type: test-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: profile-filter
+`
+
+// successPluginReferencesDefinedProfileText has a plugin whose parameters name a defined profile.
+const successPluginReferencesDefinedProfileText = `
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: profile-filter
+  type: test-profile-name-filter
+  parameters:
+    profileName: default
+- name: profileHandler
+  type: test-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: profile-filter
+`
+
+// successPluginOmitsProfileText has a plugin that leaves profileName unset.
+const successPluginOmitsProfileText = `
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: profile-filter
+  type: test-profile-name-filter
+- name: profileHandler
+  type: test-profile-handler
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: profile-filter
+`
+
+// successPluginReferencesImplicitDefaultProfileText names the profile the loader
+// creates when the config defines none.
+const successPluginReferencesImplicitDefaultProfileText = `
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+- name: profile-filter
+  type: test-profile-name-filter
+  parameters:
+    profileName: default
+`
+
 // errorDuplicatePluginText defines the same plugin name twice.
 const errorDuplicatePluginText = `
 apiVersion: llm-d.ai/v1
