@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	extProcFilterPb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
@@ -104,9 +105,10 @@ func (s *StreamingServer) SetMaxRequestBodySize(n int) {
 }
 
 // SetSkipUnmodifiedRequestBody controls whether a request-body response omits
-// body_mutation when the body was not rewritten. Off by default. Safe only when
-// the proxy's request_body_mode is BUFFERED or BUFFERED_PARTIAL; in
-// FULL_DUPLEX_STREAMED the proxy does not retain the original body.
+// body_mutation when the body was not rewritten. Off by default. It only takes
+// effect when Envoy reports a BUFFERED or BUFFERED_PARTIAL request_body_mode in
+// protocol_config; in FULL_DUPLEX_STREAMED the proxy does not retain the
+// original body, so the body is still echoed there.
 func (s *StreamingServer) SetSkipUnmodifiedRequestBody(enabled bool) {
 	s.skipUnmodifiedRequestBody = enabled
 }
@@ -233,6 +235,9 @@ type RequestContext struct {
 	responseHeadersReceivedAt  time.Time
 
 	// Envoy ext_proc protocol state.
+	// requestBodyMode is the request_body_mode Envoy reported in protocol_config;
+	// NONE when Envoy did not send it.
+	requestBodyMode      extProcFilterPb.ProcessingMode_BodySendMode
 	requestState         streamRequestState
 	requestDroppedReason errcommon.RequestDroppedReason
 	modelServerStreaming bool
@@ -664,6 +669,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		}
 		if recvErr != nil {
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", recvErr)
+		}
+		// Envoy sends its body modes in the first message of each stream.
+		if protocolConfig := req.GetProtocolConfig(); protocolConfig != nil {
+			reqCtx.requestBodyMode = protocolConfig.GetRequestBodyMode()
 		}
 
 		switch v := req.Request.(type) {
@@ -1187,13 +1196,22 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 }
 
 // generateRequestBodyResponses builds the ext_proc request-body replies. When
-// skipUnmodifiedRequestBody is set and the scheduled body was not rewritten, the
-// reply has no body mutation so the proxy keeps the body it already holds.
+// skipUnmodifiedRequestBody is set, Envoy reported a buffered request_body_mode,
+// and the scheduled body was not rewritten, the reply has no body mutation so
+// the proxy keeps the body it already holds. In any other mode, or when Envoy
+// did not report the mode, the body is echoed as usual.
 func (s *StreamingServer) generateRequestBodyResponses(reqCtx *RequestContext, setEos bool) []*extProcPb.ProcessingResponse {
-	if s.skipUnmodifiedRequestBody && requestBodyUnmodified(reqCtx) {
+	if s.skipUnmodifiedRequestBody && requestBodyBuffered(reqCtx) && requestBodyUnmodified(reqCtx) {
 		return envoy.GenerateUnmodifiedRequestBodyResponse()
 	}
 	return envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody, setEos)
+}
+
+// requestBodyBuffered reports whether Envoy buffers the request body, so it
+// still holds the original body when the reply carries no mutation.
+func requestBodyBuffered(reqCtx *RequestContext) bool {
+	return reqCtx.requestBodyMode == extProcFilterPb.ProcessingMode_BUFFERED ||
+		reqCtx.requestBodyMode == extProcFilterPb.ProcessingMode_BUFFERED_PARTIAL
 }
 
 func requestBodyUnmodified(reqCtx *RequestContext) bool {

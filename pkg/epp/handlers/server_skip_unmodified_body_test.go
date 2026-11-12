@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	extProcFilterPb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -73,28 +74,39 @@ func TestProcessSkipUnmodifiedRequestBody(t *testing.T) {
 	inbound := []byte(`{"model":"m","messages":[{"role":"user","content":"hello"}]}`)
 	rewritten := []byte(`{"model":"rewritten","messages":[{"role":"user","content":"hello"}]}`)
 
+	buffered := extProcFilterPb.ProcessingMode_BUFFERED
 	tests := []struct {
 		name         string
 		skip         bool
 		mutate       bool
 		trailers     bool
+		bodyMode     *extProcFilterPb.ProcessingMode_BodySendMode
 		wantMutation bool
 		wantBody     []byte
 	}{
 		{
 			name:         "default echoes an unmodified body",
+			bodyMode:     &buffered,
 			wantMutation: true,
 			wantBody:     inbound,
 		},
 		{
 			name:         "skip omits mutation when the body is unchanged",
 			skip:         true,
+			bodyMode:     &buffered,
+			wantMutation: false,
+		},
+		{
+			name:         "skip omits mutation in BUFFERED_PARTIAL mode",
+			skip:         true,
+			bodyMode:     extProcFilterPb.ProcessingMode_BUFFERED_PARTIAL.Enum(),
 			wantMutation: false,
 		},
 		{
 			name:         "skip still forwards a rewritten body",
 			skip:         true,
 			mutate:       true,
+			bodyMode:     &buffered,
 			wantMutation: true,
 			wantBody:     rewritten,
 		},
@@ -102,14 +114,32 @@ func TestProcessSkipUnmodifiedRequestBody(t *testing.T) {
 			name:         "skip with trailers still ends the stream on the trailers response",
 			skip:         true,
 			trailers:     true,
+			bodyMode:     &buffered,
 			wantMutation: false,
+		},
+		{
+			name:         "skip echoes the body in FULL_DUPLEX_STREAMED mode",
+			skip:         true,
+			bodyMode:     extProcFilterPb.ProcessingMode_FULL_DUPLEX_STREAMED.Enum(),
+			wantMutation: true,
+			wantBody:     inbound,
+		},
+		{
+			name:         "skip echoes the body when Envoy does not report the mode",
+			skip:         true,
+			wantMutation: true,
+			wantBody:     inbound,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			headers := newRequestHeaders(map[string]string{":path": reqcommon.PathChatCompletions})
+			if tt.bodyMode != nil {
+				headers.ProtocolConfig = &extProcPb.ProtocolConfiguration{RequestBodyMode: *tt.bodyMode}
+			}
 			reqs := []*extProcPb.ProcessingRequest{
-				newRequestHeaders(map[string]string{":path": reqcommon.PathChatCompletions}),
+				headers,
 				{Request: &extProcPb.ProcessingRequest_RequestBody{RequestBody: &extProcPb.HttpBody{Body: inbound, EndOfStream: !tt.trailers}}},
 			}
 			if tt.trailers {
