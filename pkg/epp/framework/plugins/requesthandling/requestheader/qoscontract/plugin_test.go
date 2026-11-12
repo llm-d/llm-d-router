@@ -21,14 +21,11 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -400,39 +397,6 @@ func TestReportOnlyServesCommittedClass(t *testing.T) {
 	assert.Equal(t, 0, inflight)
 }
 
-// testutilDecisions returns the decision counter values for mode, keyed by
-// team|class|served_class|decision|reason.
-func testutilDecisions(mode string) map[string]float64 {
-	ch := make(chan prometheus.Metric, 1024)
-	go func() { contractDecisions.Collect(ch); close(ch) }()
-	out := map[string]float64{}
-	for m := range ch {
-		var pb dto.Metric
-		if err := m.Write(&pb); err != nil {
-			continue
-		}
-		lb := map[string]string{}
-		for _, l := range pb.GetLabel() {
-			lb[l.GetName()] = l.GetValue()
-		}
-		if lb["mode"] != mode {
-			continue
-		}
-		out[strings.Join([]string{lb["team"], lb["class"], lb["served_class"], lb["decision"], lb["reason"]}, "|")] = pb.GetCounter().GetValue()
-	}
-	return out
-}
-
-// diffDecisions returns the one label set whose count grew between before and after.
-func diffDecisions(before, after map[string]float64) string {
-	for k, v := range after {
-		if v > before[k] {
-			return k
-		}
-	}
-	return ""
-}
-
 // TestReportOnlyAndEnforceLimitsSetTheSamePriority verifies that both modes serve a request within its
 // contract at the team's class, and that the only difference is that report-only mode does not move
 // a request outside its contract to a lower class.
@@ -479,38 +443,40 @@ func TestReportOnlyAndEnforceLimitsSetTheSamePriority(t *testing.T) {
 // TestReportOnlyDecisionsMatchEnforceLimits verifies that report-only mode records the same
 // decisions that enforce-limits mode applies, for the same requests.
 func TestReportOnlyDecisionsMatchEnforceLimits(t *testing.T) {
-	run := func(mode string) []string {
-		p, _ := newTestPlugin(t, func(params *Parameters) { params.Mode = mode })
-		var got []string
-		decide := func(req *fwksched.InferenceRequest) {
-			before := testutilDecisions(mode)
-			_ = p.RequestHeader(t.Context(), req)
-			got = append(got, diffDecisions(before, testutilDecisions(mode)))
-		}
-		for range 3 {
-			decide(newRequest("team-a", 10, 10)) // the third is over concurrency 2
-		}
-		decide(newRequest("team-a", 5000, 10)) // over the size limit
+	for _, mode := range []string{ModeEnforceLimits, ModeReportOnly} {
+		t.Run(mode, func(t *testing.T) {
+			p, _ := newTestPlugin(t, func(params *Parameters) { params.Mode = mode })
+			decide := func(req *fwksched.InferenceRequest, class, servedClass, decision, reason string) {
+				t.Helper()
+				team := req.Headers[metadata.FlowFairnessIDKey]
+				before := decisions(mode, team, class, servedClass, decision, reason)
+				_ = p.RequestHeader(t.Context(), req)
+				assert.InDelta(t, 1, decisions(mode, team, class, servedClass, decision, reason)-before, 1e-9)
+			}
+			for range 2 {
+				decide(newRequest("team-a", 10, 10), "critical", "critical", decisionWithinContract, "")
+			}
+			decide(newRequest("team-a", 10, 10), "critical", "standard", decisionDowngraded, reasonConcurrency)
+			decide(newRequest("team-a", 5000, 10), "critical", "standard", decisionDowngraded, reasonSize)
 
-		// team-b is in the lowest class with a concurrency commit of 1. A would-be rejection must
-		// hold no slot, so once the in-contract request completes the next one is within the contract again.
-		first := newRequest("team-b", 10, 10)
-		decide(first)
-		decide(newRequest("team-b", 10, 10)) // over concurrency
-		complete(p, first, 10, 10)
-		decide(newRequest("team-b", 10, 10))
+			// team-b is in the lowest class with a concurrency commit of 1. A would-be rejection must
+			// hold no slot, so once the in-contract request completes the next one is within the contract again.
+			first := newRequest("team-b", 10, 10)
+			decide(first, "batch", "batch", decisionWithinContract, "")
+			decide(newRequest("team-b", 10, 10), "batch", "", decisionRejectedConcurrency, reasonConcurrency)
+			complete(p, first, 10, 10)
+			decide(newRequest("team-b", 10, 10), "batch", "batch", decisionWithinContract, "")
 
-		decide(newRequest("team-d", 100, 100))
-		decide(newRequest("team-d", 100, 100)) // over the daily budget, lowest class
-		return got
+			decide(newRequest("team-d", 100, 100), "batch", "batch", decisionWithinContract, "")
+			decide(newRequest("team-d", 100, 100), "batch", "", decisionRejectedDaily, reasonDaily)
+		})
 	}
-	assert.Equal(t, run(ModeEnforceLimits), run(ModeReportOnly))
 }
 
-// decisions returns the decision counter for one label combination in enforce-limits mode.
-func decisions(team, class, servedClass, decision, reason string) float64 {
+// decisions returns the decision counter for one label combination.
+func decisions(mode, team, class, servedClass, decision, reason string) float64 {
 	return promtestutil.ToFloat64(contractDecisions.WithLabelValues(
-		team, class, servedClass, decision, reason, ModeEnforceLimits))
+		team, class, servedClass, decision, reason, mode))
 }
 
 // TestDecisionReason verifies that a downgraded or rejected request records the limit it
@@ -589,9 +555,9 @@ func TestDecisionReason(t *testing.T) {
 				require.NoError(t, p.RequestHeader(t.Context(), req))
 			}
 			class := p.classes[p.teams[tc.team].classIndex].Name
-			before := decisions(tc.team, class, tc.servedClass, tc.decision, tc.reason)
+			before := decisions(ModeEnforceLimits, tc.team, class, tc.servedClass, tc.decision, tc.reason)
 			_ = p.RequestHeader(t.Context(), tc.req)
-			assert.InDelta(t, 1, decisions(tc.team, class, tc.servedClass, tc.decision, tc.reason)-before, 1e-9)
+			assert.InDelta(t, 1, decisions(ModeEnforceLimits, tc.team, class, tc.servedClass, tc.decision, tc.reason)-before, 1e-9)
 		})
 	}
 }
