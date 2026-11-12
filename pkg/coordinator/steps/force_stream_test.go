@@ -146,6 +146,29 @@ func forceStreamGauge(t *testing.T, reg *prometheus.Registry) float64 {
 	return total
 }
 
+// forceStreamGaugeByStep reads the buffered-bytes gauge for each step label. It
+// takes no *testing.T, so an upstream handler can call it mid-request.
+func forceStreamGaugeByStep(reg prometheus.Gatherer) (map[string]float64, error) {
+	mfs, err := reg.Gather()
+	if err != nil {
+		return nil, err
+	}
+	byStep := map[string]float64{}
+	for _, mf := range mfs {
+		if mf.GetName() != forceStreamBufferedBytesMetric {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "step" {
+					byStep[l.GetValue()] = m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return byStep, nil
+}
+
 func gatherLabeled(t *testing.T, reg *prometheus.Registry, name, label, value string) float64 {
 	t.Helper()
 	mfs, err := reg.Gather()
@@ -1397,6 +1420,47 @@ func TestForceStream_ClientCancelBeforeHeaders(t *testing.T) {
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
 }
 
+// TestForceStream_FallbackThenCancelRecordsNoOutcome covers a client that leaves
+// before the worker answers a fallback's pass-through: no force-stream outcome is
+// recorded.
+func TestForceStream_FallbackThenCancelRecordsNoOutcome(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	// The pass-through never answers; release lets server.Close finish.
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(raw, &parsed)
+		if parsed["stream"] == true {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: not-json\n\n")
+			return
+		}
+		cancel()
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-fallback-cancel",
+		OriginalPath:     reqcommon.PathChatCompletions,
+		Model:            "llama-3",
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false, "max_tokens": 16,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: httptest.NewRecorder(),
+	}
+
+	err := step.Execute(ctx, reqCtx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.InDelta(t, 0.0, counterValue(t, reg, forceStreamTotalMetric, nil), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
+}
+
 // TestForceStream_Buffered_UpstreamError covers the buffered path's upstream-error
 // accounting: a generate request (n=1 generate takes the buffered path) whose
 // upstream returns a 5xx is forwarded verbatim and counted as error_upstream.
@@ -1802,6 +1866,63 @@ func TestForceStream_SharedStorage_FallbackKeepsKVParams(t *testing.T) {
 	require.Equal(t, calls[0].kvParams, calls[1].kvParams, "the fallback re-sends the same params")
 	require.NotNil(t, reqCtx.PrefillCachedTokens, "the prefill cache-hit count still applies")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnreadable), 1e-9)
+}
+
+// TestForceStream_DeclinedKeepsHandoff covers a NIXL request declined before any
+// forced attempt. Nothing used its one-shot handoff, so the pass-through sends it
+// intact and the prefill cache-hit count still applies.
+func TestForceStream_DeclinedKeepsHandoff(t *testing.T) {
+	messages := []any{map[string]any{"role": "user", "content": "hi"}}
+	for _, tc := range []struct {
+		name   string
+		body   map[string]any
+		result string
+	}{
+		{
+			name:   "lossy request",
+			body:   map[string]any{"model": "llama-3", "stream": false, "max_tokens": 8, "messages": messages, "tools": []any{map[string]any{"type": "function"}}},
+			result: coordmetrics.ForceStreamResultFallbackUnsupported,
+		},
+		{
+			name:   "estimate past the cap",
+			body:   map[string]any{"model": "llama-3", "stream": false, "max_tokens": 1 << 30, "messages": messages},
+			result: coordmetrics.ForceStreamResultFallbackUnbounded,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const passthroughReply = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`
+			var calls []spentHandoffCall
+			server := spentHandoffServer(t, "data: {}\n\n", passthroughReply, &calls)
+			defer server.Close()
+
+			reg := prometheus.NewRegistry()
+			require.NoError(t, coordmetrics.Register(reg))
+			coordmetrics.Reset()
+			step, err := newForcedDecodeStep(t, gateway.New(config.GatewayConfig{Address: server.URL}), "1GiB", "1GiB", map[string]any{ParamKVConnector: kv.NIXL})
+			require.NoError(t, err)
+
+			prefillCached := 32
+			reqCtx := &pipeline.RequestContext{
+				RequestID:           "req-declined-handoff",
+				OriginalPath:        reqcommon.PathChatCompletions,
+				Model:               "llama-3",
+				PrefillCachedTokens: &prefillCached,
+				KVTransferParams: map[string]any{
+					reqcommon.FieldRemoteBlockIDs: []any{1, 2},
+					reqcommon.FieldRemoteEngineID: "prefill-pod-a",
+				},
+				Body:           tc.body,
+				ResponseWriter: httptest.NewRecorder(),
+			}
+
+			require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+			require.Len(t, calls, 1, "no forced attempt; the pass-through serves the request once")
+			require.Equal(t, false, calls[0].stream)
+			require.Contains(t, calls[0].kvParams, reqcommon.FieldRemoteBlockIDs, "the unused handoff is sent intact")
+			require.NotNil(t, reqCtx.PrefillCachedTokens, "the prefill cache-hit count still applies")
+			require.InDelta(t, 1.0, forceStreamCount(t, reg, tc.result), 1e-9)
+		})
+	}
 }
 
 // TestForceStream_LossyFrameSpentHandoff_Recomputes covers the frame-level lossy

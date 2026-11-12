@@ -96,6 +96,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	// here). Every other candidate reserves budget and reassembles the whole reply;
 	// one whose estimate exceeds the per-request cap, or that finds the budget
 	// full, falls through to the pass-through below, which buffers nothing.
+	var forceStreamResult string
 	if s.budget != nil && !reqCtx.Stream {
 		if shape, shapeOK := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); shapeOK {
 			result := coordmetrics.ForceStreamResultFallbackUnsupported
@@ -127,7 +128,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 					reqCtx.PrefillCachedTokens = nil
 				}
 			}
-			coordmetrics.IncForceStreamTotal(reqCtx.Model, DecodeStepName, result)
+			forceStreamResult = result
 		}
 	}
 
@@ -145,6 +146,11 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		// truncated response. Nothing can be written to say so: the status and
 		// the body before the tail are already on the wire.
 		logger.Error(err, "flushing the rewritten usage block failed: client received a partial response")
+	}
+	// As on conditional-decode, a client that left before the worker answered
+	// the pass-through records no outcome.
+	if forceStreamResult != "" && out.Cancelled == nil {
+		coordmetrics.IncForceStreamTotal(reqCtx.Model, DecodeStepName, forceStreamResult)
 	}
 	return out.streamedError(DecodeStepName)
 }

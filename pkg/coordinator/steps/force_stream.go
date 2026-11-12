@@ -287,7 +287,7 @@ func (b *forceStreamBudget) estimateReservation(reqCtx *pipeline.RequestContext)
 
 	maxBytes := b.perRequestMax
 	// parseForceStreamPerRequest rejects a cap at or below the envelope overhead,
-	// so contentBudget is always positive once the step is built.
+	// so contentBudget is always positive once the budget is built.
 	contentBudget := maxBytes - forceStreamBaseOverheadBytes
 
 	n := reqcommon.OutputChoiceCount(reqCtx.Body, apiType)
@@ -344,10 +344,10 @@ type forceStreamLeg struct {
 // tryForceStream force-streams reqCtx's request with body, the step's prepared
 // request body, if it can. Its result is a decline or fallback outcome, so the
 // caller sends body through its pass-through and records result when that
-// counts; sent reports whether the forced request reached the upstream. An
-// empty result means the attempt ended the request: err is nil once the forced
-// reply is written, and otherwise the error to return. The terminal outcomes
-// (forced, error_upstream, error_transport) are recorded here.
+// counts; sent reports whether the forced request was sent. An empty result
+// means the forced attempt is done: err is nil once the forced reply is
+// written, and otherwise the onResponse error or the error to return. The
+// terminal outcomes (forced, error_upstream, error_transport) are recorded here.
 func tryForceStream(ctx context.Context, logger logr.Logger, gwClient *gateway.Client, budget *forceStreamBudget, leg forceStreamLeg,
 	reqCtx *pipeline.RequestContext, body map[string]any, shape sseShape, parity *parityCheck) (result string, sent bool, err error) {
 	if forceStreamLossy(shape, body) {

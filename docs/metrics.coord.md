@@ -145,7 +145,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
     *   `served`: The worker handled the request itself, whether because the prompt was cached or too short to disaggregate. The pipeline stops early (`decode-only`).
     *   `deferred`: The worker returned HTTP 412. The pipeline continues to encode/prefill/decode.
     *   `error`: Any other 4xx/5xx status. The step returns an `UpstreamStreamedError` carrying that status, and the request is classified as `upstream_4xx` or `upstream_5xx`.
-    *   `transport_error`: No response arrived (connection refused, timeout, TCP reset). The step returns an `UpstreamStreamedError` with no status code, and the request is classified as `upstream_transport`.
+    *   `transport_error`: No response arrived (connection refused, timeout, TCP reset). The step returns an upstream error with no status code, and the request is classified as `upstream_transport`.
 *   A probe the client abandons before the worker answers records no result.
 *   A force-streamed probe records the same result for the worker's answer. When it falls back, only the re-sent probe is counted, so each request records one result.
 *   **Note:** Not redundant with `execution_path_total` since a deferred probe does not indicate whether the subsequent path was `prefill-decode` or `encode-prefill-decode`.
@@ -162,6 +162,7 @@ Recorded by the decode and conditional-decode steps when `pipeline.force_stream`
 *   **Labels:** `model_name`, `step` (`decode` or `conditional-decode`), `result`
 *   **Description:** Counts force-stream candidates, the non-streaming requests on a route the step can reassemble, by outcome. The metric's Help string defines each `result` value. `forced` is a reassembled reply. The `fallback_*` values and `error_ceiling` take the non-forced pass-through. `error_upstream` (an upstream 4xx/5xx, or an error frame streamed after the 200) and `error_transport` fail the request and are also counted by `step_errors_total`.
 *   When the forced attempt already consumed a one-shot KV block handoff (`kv-nixl`, `kv-offloading`), the fallback pass-through drops the handoff and the decode worker recomputes the prompt. The request is slower but still served, and is counted under its fallback outcome.
+*   A decline or fallback outcome is recorded once the worker answers the pass-through, so a request whose client leaves before then records none.
 *   conditional-decode records an outcome only for a probe the worker serves or fails. A deferred probe (HTTP 412) records none, including one deferred after a decline or fallback, so a request that continues to decode is counted once, by decode.
 
 #### `force_stream_buffered_bytes` (Gauge)

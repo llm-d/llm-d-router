@@ -230,6 +230,58 @@ func TestConditionalDecodeForceStream_FallbackThenDeferredRecordsNoOutcome(t *te
 	require.InDelta(t, 0.0, probeCount(t, reg, coordmetrics.ProbeResultServed), 1e-9)
 }
 
+// A client that leaves before the worker answers a fallback's re-sent probe
+// records no force-stream outcome.
+func TestConditionalDecodeForceStream_FallbackThenCancelRecordsNoOutcome(t *testing.T) {
+	lossy := `{"id":"c","choices":[{"index":0,"delta":{"reasoning":"think"}}]}`
+	ctx, cancel := context.WithCancel(context.Background())
+	release := make(chan struct{})
+	server, calls := condUpstream(t, sseReply(lossy), func(http.ResponseWriter, *http.Request) {
+		cancel()
+		<-release
+	})
+	defer close(release)
+	step, reg := newForcedConditionalStep(t, server.URL, nil)
+
+	err := step.Execute(ctx, condForcedRequest(httptest.NewRecorder()))
+	require.ErrorIs(t, err, context.Canceled)
+	require.Len(t, *calls, 2)
+	require.InDelta(t, 0.0, condForceStreamTotal(t, reg), 1e-9)
+}
+
+// The forced probe sends the step's prepared body: a completions request carries
+// the rendered token IDs as its prompt, and a chat request forwarding them
+// carries them in kv_transfer_params.
+func TestConditionalDecodeForceStream_SendsPreparedBody(t *testing.T) {
+	t.Run("completions", func(t *testing.T) {
+		server, calls := condUpstream(t, sseReply(
+			`{"id":"t","object":"text_completion","model":"llama-3","choices":[{"index":0,"text":"cached","finish_reason":"stop"}]}`))
+		step, reg := newForcedConditionalStep(t, server.URL, nil)
+		reqCtx := condForcedRequest(httptest.NewRecorder())
+		reqCtx.OriginalPath = reqcommon.PathCompletions
+		reqCtx.Body = map[string]any{"model": "llama-3", "stream": false, "max_tokens": 16, "prompt": "hi"}
+		reqCtx.TokenIDs = []int{1, 2, 3}
+
+		require.ErrorIs(t, step.Execute(context.Background(), reqCtx), pipeline.ErrPipelineDone)
+		require.Len(t, *calls, 1)
+		require.Equal(t, true, (*calls)[0].body["stream"])
+		require.Equal(t, []any{1.0, 2.0, 3.0}, (*calls)[0].body[reqcommon.FieldPrompt])
+		require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+	})
+	t.Run("chat forwarding token IDs", func(t *testing.T) {
+		server, calls := condUpstream(t, sseReply(condForcedFrames...))
+		step, reg := newForcedConditionalStep(t, server.URL, map[string]any{ParamForwardPromptTokenIDs: true})
+		reqCtx := condForcedRequest(httptest.NewRecorder())
+		reqCtx.TokenIDs = []int{1, 2, 3}
+
+		require.ErrorIs(t, step.Execute(context.Background(), reqCtx), pipeline.ErrPipelineDone)
+		require.Len(t, *calls, 1)
+		require.Equal(t, true, (*calls)[0].body["stream"])
+		require.Equal(t, map[string]any{reqcommon.FieldPromptTokenIDs: []any{1.0, 2.0, 3.0}}, (*calls)[0].body[reqcommon.FieldKVTransferParams])
+		require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+	})
+}
+
 // A request declaring a field the reassembler drops takes the probe
 // pass-through without a forced attempt. Its decline is recorded only when the
 // probe serves it.
@@ -385,6 +437,60 @@ func TestConditionalDecodeForceStream_PipelineCountsOnce(t *testing.T) {
 	require.InDelta(t, 1.0, counterValue(t, reg, forceStreamTotalMetric, map[string]string{"step": DecodeStepName, "result": coordmetrics.ForceStreamResultForced}), 1e-9)
 	require.InDelta(t, 1.0, counterValue(t, reg, forceStreamTotalMetric, nil), 1e-9, "one client request, one outcome")
 	require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultDeferred), 1e-9)
+}
+
+// Each step reserves a forced request under its own step label, releases it
+// under the same label, and records its outcome under that label.
+func TestForceStream_MetricsCarryStepLabel(t *testing.T) {
+	for _, tc := range []struct {
+		step    string
+		build   func(t *testing.T, serverURL string) (pipeline.Step, *prometheus.Registry)
+		wantErr error
+	}{
+		{
+			step: DecodeStepName,
+			build: func(t *testing.T, serverURL string) (pipeline.Step, *prometheus.Registry) {
+				return newForceStreamStep(t, serverURL, "1GiB")
+			},
+		},
+		{
+			step: ConditionalDecodeStepName,
+			build: func(t *testing.T, serverURL string) (pipeline.Step, *prometheus.Registry) {
+				return newForcedConditionalStep(t, serverURL, nil)
+			},
+			wantErr: pipeline.ErrPipelineDone,
+		},
+	} {
+		t.Run(tc.step, func(t *testing.T) {
+			var reg *prometheus.Registry
+			var during map[string]float64
+			var gatherErr error
+			server, _ := condUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+				during, gatherErr = forceStreamGaugeByStep(reg)
+				sseReply(condForcedFrames...)(w, r)
+			})
+			var step pipeline.Step
+			step, reg = tc.build(t, server.URL)
+			reqCtx := condForcedRequest(httptest.NewRecorder())
+			reqCtx.KVTransferParams = map[string]any{}
+
+			err := step.Execute(context.Background(), reqCtx)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.NoError(t, gatherErr)
+			require.Len(t, during, 1, "only %s holds a reservation", tc.step)
+			require.Positive(t, during[tc.step])
+			after, err := forceStreamGaugeByStep(reg)
+			require.NoError(t, err)
+			require.Equal(t, map[string]float64{tc.step: 0}, after, "released under the label it reserved under")
+			require.InDelta(t, 1.0, counterValue(t, reg, forceStreamTotalMetric, map[string]string{"step": tc.step, "result": coordmetrics.ForceStreamResultForced}), 1e-9)
+			require.InDelta(t, 1.0, counterValue(t, reg, forceStreamTotalMetric, nil), 1e-9)
+		})
+	}
 }
 
 // EnableForceStream hands one budget to every step that force-streams, and
