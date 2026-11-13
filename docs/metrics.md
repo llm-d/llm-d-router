@@ -112,6 +112,10 @@ enabled and a request carries both, has a cap that defaults to 1000 distinct val
 apply over the lifetime of the process. Once a cap is reached, new values are reported as `other`.
 A value longer than 256 bytes, or one that is not valid UTF-8, is always reported as `other`.
 `default-flow`, the ID given to requests that have none, keeps its own label unless the limit is 0.
+So does each fairness ID named in the `flowWeights` table of a configured
+`weighted-fair-share-fairness-policy`, except a key named `other`. These IDs do not count against
+the cap: each one adds a label value on top of it. The table is matched on the whole fairness ID,
+so a tenant key does not cover composed `<tenant>/<session>` IDs.
 These bounds apply whether or not the `flowControl` feature gate is enabled. When Flow Control is
 enabled, its series for a `fairness_id` are removed when the corresponding flow is garbage collected.
 Composed IDs make the label session-granular for tenant-stamped traffic, so a pool that enables
@@ -789,9 +793,11 @@ because those requests resolve with `source="header"`.
 The `fairness_id` label uses the shared cap described in [Metrics catalog](#metrics-catalog).
 Scheduling and Flow Control always use the original ID; only the label is folded. Per replica:
 
-- `fairness_id` takes at most cap + 2 values (`default-flow` and `other` on top of the cap).
+- `fairness_id` takes at most cap + 2 values (`default-flow` and `other` on top of the cap), plus
+  one for each fairness ID named in a `flowWeights` table.
   `llm_d_epp_fairness_id_resolved_total` has about cap + 3 series, and at most 2 × cap + 5 when
-  the same IDs arrive from both the header and agent identity.
+  the same IDs arrive from both the header and agent identity, plus one for each `flowWeights` ID
+  and source it arrives from.
 - Cap slots are not freed until the EPP restarts. Short-lived agent session IDs can fill the cap,
   after which new header IDs are folded too.
 - A client that sends `default-flow` or `other` as its ID is counted with `source="header"`. A
