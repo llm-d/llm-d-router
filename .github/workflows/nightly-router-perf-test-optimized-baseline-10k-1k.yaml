@@ -162,7 +162,8 @@ jobs:
   # for each further failed run until someone closes it.
   report-perf-failure:
     needs: run-perf-benchmark
-    if: failure()
+    # Runs from other branches would comment on the issue that tracks main.
+    if: failure() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -171,11 +172,16 @@ jobs:
       REPO: ${{ github.repository }}
       WORKFLOW: ${{ github.workflow }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      EVENT: ${{ github.event_name }}
+      TARGET: ${{ inputs.target || 'test/perf/config/targets/optimized-baseline-job1.yaml' }}
+      # Mentioned in every report so the owner also gets later comments.
+      NOTIFY: "@jtechapps"
     steps:
       - name: Open or update the failure issue
         run: |
-          marker="<!-- nightly-perf-failure: ${WORKFLOW} -->"
-          printf '%s\n\n%s failed.\n\nRun: %s\n' "$marker" "$WORKFLOW" "$RUN_URL" > failure-issue.md
+          marker="<!-- nightly-perf-failure: optimized-baseline-10k-1k -->"
+          printf '%s\n\n%s failed. cc %s\n\nRun: %s\nEvent: %s, commit %s, target %s\n' \
+            "$marker" "$WORKFLOW" "$NOTIFY" "$RUN_URL" "$EVENT" "${GITHUB_SHA::7}" "$TARGET" > failure-issue.md
           number=$(gh issue list --repo "$REPO" --state open --label kind/performance --limit 200 --json number,body |
             jq -r --arg marker "$marker" '[.[] | select((.body // "") | contains($marker))][0].number // empty')
           if [ -n "$number" ]; then
