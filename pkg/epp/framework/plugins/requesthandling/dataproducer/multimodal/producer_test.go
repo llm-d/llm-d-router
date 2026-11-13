@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -820,4 +821,8 @@ func TestDumpStateConcurrentWithWrites(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func (h *testHandle) SchedulingProfileNames() sets.Set[string] {
+	return nil
 }

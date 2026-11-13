@@ -64,7 +64,7 @@ func createTestRouter() *PredictedLatency {
 	cfg.StreamingMode = true
 	return &PredictedLatency{
 		sloContextStore: ttlcache.New(
-			ttlcache.WithTTL[string, *predictedLatencyCtx](cfg.ContextTTL),
+			ttlcache.WithTTL[string, *predictedLatencyCtx](cfg.ContextTTL.Duration),
 		),
 		// runningRequestLists is a sync.Map and needs no initialization
 		latencypredictor: nil,

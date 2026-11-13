@@ -25,15 +25,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/single"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/thunderagent"
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
 )
 
-// TestThunderAgentSampleConfigLoads verifies the shipped thunder-agent
-// sample config parses, instantiates its plugins, and builds a flow control
-// config through the production configuration path. The config references
-// one thunder-agent instance from three slots (scorer, saturation detector,
-// fairness policy), so a pass proves the by-name plugin resolution accepts
-// the same instance in all of them.
 func TestThunderAgentSampleConfigLoads(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -48,10 +45,27 @@ func TestThunderAgentSampleConfigLoads(t *testing.T) {
 	r := NewRunner()
 	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 	require.NoError(t, err)
+	require.Empty(t, rawConfig.SchedulingProfiles)
 
 	ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
 	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
 	require.NoError(t, err)
-	require.NotNil(t, eppConfig.FlowControlConfig,
-		"the sample config enables the flowControl gate, so a flow control config should be built")
+
+	ta := r.PluginHandle.Plugin(thunderagent.ThunderAgentPluginType)
+	require.NotNil(t, ta)
+	require.Same(t, ta, eppConfig.SaturationDetector)
+
+	require.NotNil(t, eppConfig.FlowControlConfig)
+	require.Same(t, ta, eppConfig.FlowControlConfig.Registry.DefaultPriorityBand.FairnessPolicy)
+
+	require.Len(t, rawConfig.SchedulingProfiles, 1)
+	profile := rawConfig.SchedulingProfiles[0]
+	require.Equal(t, "default", profile.Name)
+	refs := make([]string, 0, len(profile.Plugins))
+	for _, p := range profile.Plugins {
+		refs = append(refs, p.PluginRef)
+	}
+	require.ElementsMatch(t, []string{thunderagent.ThunderAgentPluginType, maxscore.MaxScorePickerType}, refs)
+	require.NotNil(t, r.PluginHandle.Plugin(single.SingleProfileHandlerType))
+	require.Contains(t, eppConfig.SchedulerConfig.String(), thunderagent.ThunderAgentPluginType)
 }

@@ -97,6 +97,9 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 	if err := params.validate(); err != nil {
 		return nil, fmt.Errorf("invalid parameters of the '%s' filter - %w", SessionAffinityType, err)
 	}
+	if err := plugin.ValidateProfileName(handle, params.ProfileName); err != nil {
+		return nil, fmt.Errorf("invalid profileName of the '%s' filter - %w", SessionAffinityType, err)
+	}
 
 	return &SessionAffinity{
 		typedName: plugin.TypedName{Type: SessionAffinityType, Name: name},

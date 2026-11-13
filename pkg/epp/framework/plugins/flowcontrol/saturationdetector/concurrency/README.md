@@ -40,9 +40,9 @@ This approach allows the Flow Controller to manage average pool load, while the 
 
 ## Inputs consumed
 
-The plugin internally tracks active concurrency by hooking into the request lifecycle (`PreRequest` and `ResponseBody`).
-- **Requests Mode**: Maintains atomic counters of active requests per endpoint.
-- **Tokens Mode**: Uses a `TokenEstimator` to estimate tokens from the incoming request and tracks the aggregate inflight tokens per endpoint.
+The plugin reads the per-endpoint load that an [in-flight load producer](../../../requesthandling/dataproducer/inflightload/README.md) publishes, selected by `inFlightLoadProducerName`:
+- **All modes**: the `InFlightLoad` attribute, with in-flight requests and tokens per endpoint.
+- **Tokens and hybrid modes**: also the `UncachedRequestTokens` attribute, the uncached tokens the incoming request would add to each endpoint.
 
 ## Configuration
 
@@ -53,6 +53,7 @@ The plugin accepts JSON parameters decoding to the following fields:
 - `maxTokenConcurrency` (`int64`): Maximum tokens in flight. The "tokens" mode equivalent of `maxConcurrency`. Must be > 0. (Default: `1000000`)
 - `headroom` (`float64`): Allowed burst capacity above the ideal threshold, expressed as a fraction (e.g., `0.2` for 20%). Must be >= 0.0. (Default: `0.0`)
 - `failOpen` (`bool`): Whether the filter returns all candidates when every candidate is over its limit. When `false` it returns none. (Default: `true`)
+- `inFlightLoadProducerName` (`string`): Name of the `inflight-load-producer` instance to read. Unset selects the instance named `inflight-load-producer`, the name an unnamed instance gets. (Default: unset)
 
 ## Trade-offs
 

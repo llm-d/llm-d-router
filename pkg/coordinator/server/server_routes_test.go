@@ -22,8 +22,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -307,6 +310,193 @@ func TestServerRejectsStatefulResponsesFieldsOnEveryServedForm(t *testing.T) {
 			}
 			if _, upstreamPath, _, _, _ := cap.get(); reached || upstreamPath != "" {
 				t.Fatalf("pipeline reached %v, gateway path %q; want neither", reached, upstreamPath)
+			}
+		})
+	}
+}
+
+func TestServerDrain_InFlightResponse(t *testing.T) {
+	tests := []struct {
+		name       string
+		earlyHints bool
+		respond    func(http.ResponseWriter) error
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name: "explicit headers",
+			respond: func(w http.ResponseWriter) error {
+				w.WriteHeader(http.StatusCreated)
+				_, err := w.Write([]byte("done"))
+				return err
+			},
+			wantStatus: http.StatusCreated,
+			wantBody:   "done",
+		},
+		{
+			name: "implicit headers",
+			respond: func(w http.ResponseWriter) error {
+				_, err := w.Write([]byte("done"))
+				return err
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   "done",
+		},
+		{
+			name: "flush",
+			respond: func(w http.ResponseWriter) error {
+				return http.NewResponseController(w).Flush()
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "empty response",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "informational headers",
+			earlyHints: true,
+			respond: func(w http.ResponseWriter) error {
+				w.WriteHeader(http.StatusCreated)
+				return nil
+			},
+			wantStatus: http.StatusCreated,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var srv *Server
+			step := stubStep{name: "respond", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+				if err := http.NewResponseController(rc.ResponseWriter).SetWriteDeadline(time.Time{}); err != nil {
+					return err
+				}
+				if tt.earlyHints {
+					rc.ResponseWriter.WriteHeader(http.StatusEarlyHints)
+				}
+				srv.StartDrain()
+				if tt.respond != nil {
+					return tt.respond(rc.ResponseWriter)
+				}
+				return nil
+			}}
+			var err error
+			srv, err = New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(nil, stubGatewayURL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ts := httptest.NewServer(srv.httpServer.Handler)
+			defer ts.Close()
+
+			resp, err := ts.Client().Post(ts.URL+reqcommon.PathChatCompletions, "application/json", strings.NewReader(`{"model":"m","stream":false}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tt.wantStatus || string(body) != tt.wantBody {
+				t.Fatalf("response = %d %q, want %d %q", resp.StatusCode, body, tt.wantStatus, tt.wantBody)
+			}
+			if !resp.Close {
+				t.Fatal("response completed during drain must close its connection")
+			}
+		})
+	}
+}
+
+func TestCloseWhenDraining_CommittedResponse(t *testing.T) {
+	srv := &Server{}
+	rec := httptest.NewRecorder()
+	handler := srv.closeWhenDraining(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		srv.StartDrain()
+		if _, err := w.Write([]byte("done")); err != nil {
+			t.Error(err)
+		}
+	}))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := rec.Header().Get("Connection"); got != "" {
+		t.Fatalf("committed response header changed to Connection: %s", got)
+	}
+	if rec.Body.String() != "done" {
+		t.Fatalf("body = %q, want done", rec.Body.String())
+	}
+}
+
+func TestCloseWhenDraining_SwitchingProtocols(t *testing.T) {
+	srv := &Server{}
+	srv.StartDrain()
+	rec := httptest.NewRecorder()
+	handler := srv.closeWhenDraining(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Connection", "Upgrade")
+		w.WriteHeader(http.StatusSwitchingProtocols)
+	}))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSwitchingProtocols)
+	}
+	if got := rec.Header().Get("Connection"); got != "Upgrade" {
+		t.Fatalf("Connection = %q, want Upgrade", got)
+	}
+}
+
+func TestServerDrain_HTTP2InformationalResponse(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+	}{
+		{name: "continue", status: http.StatusContinue},
+		{name: "early hints", status: http.StatusEarlyHints},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var srv *Server
+			step := stubStep{name: "respond", fn: func(_ context.Context, rc *pipeline.RequestContext) error {
+				srv.StartDrain()
+				rc.ResponseWriter.WriteHeader(tt.status)
+				rc.ResponseWriter.WriteHeader(http.StatusCreated)
+				_, err := rc.ResponseWriter.Write([]byte("done"))
+				return err
+			}}
+			var err error
+			srv, err = New(config.ServerConfig{}, pipeline.New([]pipeline.Step{step}), gateway.NewWithTransport(nil, stubGatewayURL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ts := httptest.NewUnstartedServer(srv.httpServer.Handler)
+			ts.EnableHTTP2 = true
+			ts.StartTLS()
+			defer ts.Close()
+
+			var gotStatus int
+			var gotConnection string
+			trace := &httptrace.ClientTrace{
+				Got1xxResponse: func(status int, header textproto.MIMEHeader) error {
+					gotStatus = status
+					gotConnection = header.Get("Connection")
+					return nil
+				},
+			}
+			ctx := httptrace.WithClientTrace(t.Context(), trace)
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+reqcommon.PathChatCompletions, strings.NewReader(`{"model":"m","stream":false}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := ts.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.ProtoMajor != 2 || resp.StatusCode != http.StatusCreated || string(body) != "done" {
+				t.Fatalf("response = %s %d %q, want HTTP/2 201 done", resp.Proto, resp.StatusCode, body)
+			}
+			if gotStatus != tt.status || gotConnection != "" {
+				t.Fatalf("informational response = %d with Connection %q, want %d without Connection", gotStatus, gotConnection, tt.status)
 			}
 		})
 	}
