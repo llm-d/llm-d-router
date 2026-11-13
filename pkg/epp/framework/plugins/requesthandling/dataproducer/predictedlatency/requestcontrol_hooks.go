@@ -86,7 +86,7 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 	predictedLatencyCtx.targetMetadata = targetMetadata
 	decodeEndpoint := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName].TargetEndpoints[0]
 	var prefillEndpoint fwksched.Endpoint
-	if prefillResult, exists := schedulingResult.ProfileResults[ExperimentalDefaultPrefillProfile]; exists && prefillResult != nil && len(prefillResult.TargetEndpoints) > 0 {
+	if prefillResult := schedulingResult.PrefillProfile(); prefillResult != nil && len(prefillResult.TargetEndpoints) > 0 {
 		prefillEndpoint = prefillResult.TargetEndpoints[0]
 		prefillMetadata := prefillEndpoint.GetMetadata()
 		predictedLatencyCtx.prefillTargetMetadata = prefillMetadata
@@ -264,7 +264,11 @@ func processFirstTokenForLatencyPrediction(
 	predictedLatencyCtx.generatedTokenCount = 1
 
 	if prefillTargetMetadata := predictedLatencyCtx.prefillTargetMetadata; prefillTargetMetadata != nil {
-		prefillMetrics, err := getLatestMetricsForProfile(predictedLatencyCtx, ExperimentalDefaultPrefillProfile)
+		prefillProfile := ""
+		if predictedLatencyCtx.schedulingResult != nil {
+			prefillProfile = predictedLatencyCtx.schedulingResult.PrefillProfileName
+		}
+		prefillMetrics, err := getLatestMetricsForProfile(predictedLatencyCtx, prefillProfile)
 		if err == nil {
 			prefillPrefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[prefillTargetMetadata.ID.Name]
 			prefillEncoderMatchedSize := predictedLatencyCtx.encoderMatchedSizeForEndpoints[prefillTargetMetadata.ID.Name]

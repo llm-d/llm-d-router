@@ -261,9 +261,10 @@ func TestPrefixPluginPartialPrefixMatch(t *testing.T) {
 	// Simulate pod1 was picked and pod3 was picked as a prefill node.
 	schedulingResult := &fwksched.SchedulingResult{
 		PrimaryProfileName: "default",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			"default":                         {TargetEndpoints: []fwksched.Endpoint{endpoint1}},
-			experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{endpoint3}},
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint1}},
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{endpoint3}},
 		},
 	}
 	_ = p.PreRequest(context.Background(), req1, schedulingResult)
@@ -321,9 +322,13 @@ func TestPrefixPluginExcludeDecodeWhenDisaggregated(t *testing.T) {
 				_ = p.Produce(context.Background(), req, endpoints)
 				results := map[string]*fwksched.ProfileRunResult{"decode": {TargetEndpoints: []fwksched.Endpoint{decode}}}
 				if withPrefill {
-					results[experimentalDefaultPrefillProfile] = &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{prefill}}
+					results["prefill"] = &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{prefill}}
 				}
-				_ = p.PreRequest(context.Background(), req, &fwksched.SchedulingResult{PrimaryProfileName: "decode", ProfileResults: results})
+				result := &fwksched.SchedulingResult{PrimaryProfileName: "decode", ProfileResults: results}
+				if withPrefill {
+					result.PrefillProfileName = "prefill"
+				}
+				_ = p.PreRequest(context.Background(), req, result)
 				p.wg.Wait()
 			}
 

@@ -43,10 +43,9 @@ import (
 )
 
 const (
-	defaultSpeculativeTTL      = 2 * time.Second
-	experimentalPrefillProfile = "prefill"
-	blockKeysStateKey          = plugin.StateKey("precise-prefix-cache-producer.block-keys")
-	bestAvailableStateKey      = plugin.StateKey("precise-prefix-cache-producer.best-available")
+	defaultSpeculativeTTL = 2 * time.Second
+	blockKeysStateKey     = plugin.StateKey("precise-prefix-cache-producer.block-keys")
+	bestAvailableStateKey = plugin.StateKey("precise-prefix-cache-producer.best-available")
 )
 
 var _ fwkrh.PreRequest = &Producer{}
@@ -223,7 +222,7 @@ func (p *Producer) matchInfo(endpoint scheduling.Endpoint) (*attrprefix.PrefixCa
 // routing decision left behind is separable from the reuse filtering put out of
 // reach.
 func (p *Producer) recordPrediction(ctx context.Context, request *scheduling.InferenceRequest, schedulingResult *scheduling.SchedulingResult) {
-	profile, role := prefixmetrics.PredictionTarget(schedulingResult, experimentalPrefillProfile)
+	profile, role := prefixmetrics.PredictionTarget(schedulingResult)
 	if profile == nil {
 		return
 	}
@@ -415,7 +414,7 @@ func (p *Producer) PreRequest(ctx context.Context,
 	}
 	index := p.kvCacheIndexer.KVBlockIndex()
 	targets := []scheduling.Endpoint{targetEndpoint}
-	if prefill := schedulingResult.ProfileResults[experimentalPrefillProfile].FirstEndpoint(); prefill != nil {
+	if prefill := schedulingResult.PrefillProfile().FirstEndpoint(); prefill != nil {
 		targets = append(targets, prefill)
 	}
 	perPodKeys := make(map[string][][]kvblock.BlockHash, len(targets))

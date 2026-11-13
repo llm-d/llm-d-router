@@ -57,9 +57,6 @@ const (
 	TTFTSLOHeaderKey = metadata.TTFTSLOHeaderKey
 	// TPOTSLOHeaderKey is the header key for the TPOT SLO.
 	TPOTSLOHeaderKey = metadata.TPOTSLOHeaderKey
-
-	// ExperimentalDefaultPrefillProfile is the default profile name for prefill endpoints in disaggregated serving.
-	ExperimentalDefaultPrefillProfile = "prefill"
 )
 
 // PredictedLatency is the latency data provider plugin. It handles:

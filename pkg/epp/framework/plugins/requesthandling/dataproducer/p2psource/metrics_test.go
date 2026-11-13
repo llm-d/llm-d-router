@@ -86,6 +86,7 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 			result: func(p *Producer) *scheduling.SchedulingResult {
 				return &scheduling.SchedulingResult{
 					PrimaryProfileName: "decode",
+					PrefillProfileName: "prefill",
 					ProfileResults: map[string]*scheduling.ProfileRunResult{
 						"decode":  {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-d", "10.0.0.4", 3)}},
 						"prefill": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-p", "10.0.0.2", 1)}},
@@ -117,8 +118,7 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 		{
 			// The pull is for the prefill-h200 endpoint: against the decode
 			// endpoint's 48 cached tokens it would be below the floor. The role
-			// still follows the prefix-cache metrics, which read only the
-			// "prefill" profile.
+			// follows the prefill profile the scheduling result names.
 			name:   "pulled for a disaggregated request with a renamed prefill profile",
 			config: Config{MinCachedTokenDelta: 1, PrefillProfileName: "prefill-h200"},
 			request: func(p *Producer) *scheduling.InferenceRequest {
@@ -127,6 +127,7 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 			result: func(p *Producer) *scheduling.SchedulingResult {
 				return &scheduling.SchedulingResult{
 					PrimaryProfileName: "decode",
+					PrefillProfileName: "prefill-h200",
 					ProfileResults: map[string]*scheduling.ProfileRunResult{
 						"decode":       {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-d", "10.0.0.4", 3)}},
 						"prefill-h200": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-p", "10.0.0.2", 1)}},
@@ -134,7 +135,7 @@ func TestPreRequestRecordsDecisionOutcome(t *testing.T) {
 				}
 			},
 			outcome:      "pulled",
-			role:         "decode",
+			role:         "prefill",
 			pulledTokens: 32,
 		},
 		{

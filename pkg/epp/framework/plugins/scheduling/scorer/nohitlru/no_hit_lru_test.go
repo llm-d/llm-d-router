@@ -462,6 +462,7 @@ func TestNoHitLRUPrefillDecodeTracking(t *testing.T) {
 
 		pdResult := &scheduling.SchedulingResult{
 			PrimaryProfileName: "decode",
+			PrefillProfileName: "prefill",
 			ProfileResults: map[string]*scheduling.ProfileRunResult{
 				"prefill": {
 					TargetEndpoints: []scheduling.Endpoint{prefillEndpointA},
