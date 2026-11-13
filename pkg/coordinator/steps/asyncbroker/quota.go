@@ -19,8 +19,10 @@ package asyncbroker
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -44,14 +46,35 @@ type asyncQuotaClassifier struct {
 	logger logr.Logger
 }
 
+// quotaCallGuardTTL outlasts the retries of one script call. Under the
+// go-redis defaults the last retry runs at most about 53s after the first
+// attempt: the first attempt's 5s read timeout, then three retries of up to
+// 16s each (pool wait, dial and write timeouts). A read_timeout above about
+// 14s or a larger max_retries in the Redis URL can push the retries past
+// this TTL.
+const quotaCallGuardTTL = 2 * time.Minute
+
+// quotaCallGuardKey marks that the call holding token has changed the counter
+// at key. go-redis retries a command whose reply was lost, so a counter script
+// can run twice for one call; the guard keeps the retry from counting again.
+// The format matches the redis-quota gate's guard key, so one Redis ACL key
+// pattern covers both.
+func quotaCallGuardKey(key, token string) string {
+	return fmt.Sprintf("quota-call:%s:%s", key, token)
+}
+
 // quotaAcquireScript matches the redis-quota gate's atomic
-// check-and-increment, including the TTL refresh on every acquire so
-// counters cannot expire while requests are in flight.
+// check-and-increment, including the call guard and the TTL refresh on every
+// acquire so counters cannot expire while requests are in flight.
 var quotaAcquireScript = redis.NewScript(`
+if redis.call("EXISTS", KEYS[2]) == 1 then
+	return 1
+end
 local current = redis.call("GET", KEYS[1])
 if current and tonumber(current) >= tonumber(ARGV[1]) then
 	return 0
 end
+redis.call("SET", KEYS[2], "1", "PX", ARGV[3])
 redis.call("INCR", KEYS[1])
 redis.call("EXPIRE", KEYS[1], ARGV[2])
 return 1
@@ -59,6 +82,9 @@ return 1
 
 //nolint:dupword // Each Lua "end" closes its own nested block.
 var quotaReleaseScript = redis.NewScript(`
+if not redis.call("SET", KEYS[2], "1", "NX", "PX", ARGV[2]) then
+	return
+end
 local current = redis.call("GET", KEYS[1])
 if current and tonumber(current) > 0 then
 	local remaining = redis.call("DECR", KEYS[1])
@@ -80,7 +106,8 @@ func (q *asyncQuotaClassifier) classify(ctx context.Context, tenant string) (asy
 	}
 
 	key := fmt.Sprintf("%s%s:%s", q.cfg.Prefix, q.cfg.Attribute, tenant)
-	res, err := quotaAcquireScript.Run(ctx, q.rdb, []string{key}, limit, q.cfg.WindowSeconds).Result()
+	keys := []string{key, quotaCallGuardKey(key, uuid.NewString())}
+	res, err := quotaAcquireScript.Run(ctx, q.rdb, keys, limit, q.cfg.WindowSeconds, quotaCallGuardTTL.Milliseconds()).Result()
 	if err != nil {
 		return asyncClassificationReserved, nil, fmt.Errorf("quota check failed (failing open): %w", err)
 	}
@@ -93,7 +120,8 @@ func (q *asyncQuotaClassifier) classify(ctx context.Context, tenant string) (asy
 		// context is already canceled. A failed release leaves the counter
 		// elevated until its window TTL, skewing the tenant toward overflow,
 		// so it must leave a trail.
-		if err := quotaReleaseScript.Run(context.Background(), q.rdb, []string{key}, q.cfg.WindowSeconds).Err(); err != nil {
+		keys := []string{key, quotaCallGuardKey(key, uuid.NewString())}
+		if err := quotaReleaseScript.Run(context.Background(), q.rdb, keys, q.cfg.WindowSeconds, quotaCallGuardTTL.Milliseconds()).Err(); err != nil {
 			q.logger.Error(err, "quota release failed, counter stays elevated until the window ttl", "tenant", tenant)
 		}
 	}
