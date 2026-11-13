@@ -427,6 +427,9 @@ spec:
     {{- end }}
     {{- end }}
   {{- with .Values.router.epp.minReadySeconds }}
+  {{- if ge (int .) 600 }}
+  {{- fail "router.epp.minReadySeconds must be smaller than the Deployment's progressDeadlineSeconds (the Kubernetes default of 600; the chart does not set it), otherwise the API server rejects the Deployment" }}
+  {{- end }}
   minReadySeconds: {{ . }}
   {{- end }}
   selector:

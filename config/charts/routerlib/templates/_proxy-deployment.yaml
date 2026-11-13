@@ -17,6 +17,9 @@ spec:
   replicas: {{ .Values.router.proxy.replicas | default 2 }}
   {{- end }}
   {{- with $proxy.minReadySeconds }}
+  {{- if ge (int .) 600 }}
+  {{- fail "router.proxy.minReadySeconds must be smaller than the Deployment's progressDeadlineSeconds (the Kubernetes default of 600; the chart does not set it), otherwise the API server rejects the Deployment" }}
+  {{- end }}
   minReadySeconds: {{ . }}
   {{- end }}
   {{- with $proxy.deploymentStrategy }}

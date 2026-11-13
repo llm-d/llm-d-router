@@ -70,7 +70,7 @@ test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set r
 test_cases_llm_d_router_gateway["pdb"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
-#test_cases_llm_d_router_gateway["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_gateway["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
@@ -258,7 +258,7 @@ test_cases_llm_d_router_standalone["active-active-redis"]="--set router.modelSer
 test_cases_llm_d_router_standalone["active-active-redis-hpa"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.pluginsConfigFile=payload-agnostic.yaml --set router.epp.crossReplica.enabled=true --set router.epp.crossReplica.redis.address=redis.example:6379 --set router.epp.crossReplica.redis.passwordSecretRef.name=redis-auth --set router.epp.crossReplica.redis.passwordSecretRef.key=password --set router.epp.autoscaling.enabled=true --set router.epp.autoscaling.minReplicas=2"
 test_cases_llm_d_router_standalone["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
-#test_cases_llm_d_router_standalone["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+test_cases_llm_d_router_standalone["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
@@ -372,15 +372,21 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
   fi
   if [ "${key}" == "proxy-service-rollout" ]; then
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
-    if [ "$(grep -c "minReadySeconds:" "${epp_yaml}")" -ne 2 ] || ! grep -q "minReadySeconds: 30" "${epp_yaml}" || ! grep -q "minReadySeconds: 10" "${epp_yaml}"; then
-      echo "Validation failed: EPP or proxy minReadySeconds not rendered for test: ${key}"
+    # Select each Deployment and assert its own rollout settings: the combined
+    # YAML would pass with the EPP and proxy values swapped between them.
+    epp_min_ready="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-epp") | .spec.minReadySeconds' "${epp_yaml}")"
+    proxy_min_ready="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.minReadySeconds' "${epp_yaml}")"
+    proxy_max_surge="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.strategy.rollingUpdate.maxSurge' "${epp_yaml}")"
+    proxy_max_unavailable="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.strategy.rollingUpdate.maxUnavailable' "${epp_yaml}")"
+    if [ "${epp_min_ready}" != "30" ] || [ "${proxy_min_ready}" != "10" ] || [ "${proxy_max_surge}" != "1" ] || [ "${proxy_max_unavailable}" != "0" ]; then
+      echo "Validation failed: rollout settings not rendered on their own Deployments for test: ${key} (epp minReadySeconds=${epp_min_ready}, proxy minReadySeconds=${proxy_min_ready}, proxy rollingUpdate ${proxy_max_surge}/${proxy_max_unavailable})"
       exit 1
     fi
-    # The proxy Deployment gets the strategy override; the EPP Deployment keeps its
-    # own default (Recreate in leader-election mode), so exactly one strategy block
-    # may carry maxSurge: 1 -- the proxy's.
-    if ! grep -q "type: RollingUpdate" "${epp_yaml}" || ! grep -q "maxSurge: 1" "${epp_yaml}"; then
-      echo "Validation failed: proxy deploymentStrategy not rendered for test: ${key}"
+    # The strategy override must reach the proxy Deployment only; the EPP
+    # Deployment keeps its own default (Recreate with a single replica).
+    epp_strategy_type="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-epp") | .spec.strategy.type' "${epp_yaml}")"
+    if [ "${epp_strategy_type}" != "Recreate" ]; then
+      echo "Validation failed: proxy deploymentStrategy leaked into the EPP Deployment for test: ${key} (strategy=${epp_strategy_type})"
       exit 1
     fi
   fi
