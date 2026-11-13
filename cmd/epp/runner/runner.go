@@ -530,6 +530,13 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		return nil, nil, err
 	}
 
+	if opts.EnableEndpointsAPI {
+		if err = mgr.AddMetricsServerExtraHandler(runserver.EndpointsAPIPath, runserver.NewEndpointsAPIHandler(ds, ds.PoolHasSynced)); err != nil {
+			setupLog.Error(err, "Failed to setup endpoints API handler")
+			return nil, nil, err
+		}
+	}
+
 	// --- Initialize Core EPP Components ---
 	if r.schedulerConfig == nil {
 		err := errors.New("scheduler config must be set either by config api or through code")
@@ -1436,7 +1443,18 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return runnable.NoLeaderElection(runnable.GRPCServer("health", healthSrv, opts.GRPCHealthPort)).Start(ctx)
 	})
 	g.Add("metrics", func(ctx context.Context) error {
-		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.PluginHandle)
+		var endpointsAPI http.Handler
+		if opts.EnableEndpointsAPI {
+			endpointsAPI = runserver.NewEndpointsAPIHandler(ds, func() bool {
+				select {
+				case <-disc.Ready():
+					return true
+				default:
+					return false
+				}
+			})
+		}
+		return serveMetrics(ctx, opts.MetricsPort, opts.EnablePprof, r.PluginHandle, endpointsAPI)
 	})
 	// A canceled context is the normal shutdown. Any other error ends the
 	// process with exit status 1, and no other line names it.
@@ -1457,7 +1475,8 @@ const metricsShutdownTimeout = 5 * time.Second
 // pkg/epp/metrics.Register), not the prometheus default registry. The handler
 // must serve ctrlmetrics.Registry directly; promhttp.Handler() would expose only
 // Go runtime/process metrics and silently omit every EPP metric.
-func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fwkplugin.HandlePlugins) error {
+// endpointsAPI is served at runserver.EndpointsAPIPath when non-nil.
+func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fwkplugin.HandlePlugins, endpointsAPI http.Handler) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
 	if enablePprof {
@@ -1466,6 +1485,9 @@ func serveMetrics(ctx context.Context, port uint16, enablePprof bool, plugins fw
 		}
 	}
 	mux.Handle(runserver.PluginStateDebugPath, runserver.NewPluginStateDebugHandler(plugins))
+	if endpointsAPI != nil {
+		mux.Handle(runserver.EndpointsAPIPath, endpointsAPI)
+	}
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

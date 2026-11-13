@@ -125,6 +125,7 @@ type Options struct {
 	MetricsPort                uint16   // The metrics port exposed by EPP.
 	GRPCHealthPort             uint16   // The port used for gRPC liveness and readiness probes.
 	EnablePprof                bool     // Enables pprof handlers.
+	EnableEndpointsAPI         bool     // Serves the read-only endpoints API on the metrics server.
 	CertPath                   string   // The path to the certificate for secure serving.
 	EnableCertReload           bool     // Enables certificate reloading of the certificates specified in --cert-path.
 	SecureServing              bool     // Enables secure serving.
@@ -269,6 +270,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"The port used for gRPC liveness and readiness probes.")
 	fs.BoolVar(&opts.EnablePprof, "enable-pprof", opts.EnablePprof,
 		"Enables pprof handlers. Defaults to true. Set to false to disable pprof handlers.")
+	fs.BoolVar(&opts.EnableEndpointsAPI, "enable-endpoints-api", opts.EnableEndpointsAPI,
+		"Serves a read-only list of the pool's endpoints and their labels at "+EndpointsAPIPath+" on the metrics server. Defaults to false.")
 	fs.StringVar(&opts.CertPath, "cert-path", opts.CertPath,
 		"Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing.")
 	fs.BoolVar(&opts.EnableCertReload, "enable-cert-reload", opts.EnableCertReload,
