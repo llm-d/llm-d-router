@@ -16,6 +16,13 @@ spec:
   {{- if not $autoscaling.enabled }}
   replicas: {{ .Values.router.proxy.replicas | default 2 }}
   {{- end }}
+  {{- with $proxy.minReadySeconds }}
+  minReadySeconds: {{ . }}
+  {{- end }}
+  {{- with $proxy.deploymentStrategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "llm-d-router.proxySelectorLabels" . | nindent 6 }}

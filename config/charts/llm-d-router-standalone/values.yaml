@@ -26,6 +26,19 @@ router:
     # draining window time to complete and allows in-flight connections to drain.
     terminationGracePeriodSeconds: 70
 
+    # Rollout settings for the proxy Deployment when mode=service. deploymentStrategy
+    # overrides spec.strategy (unset = the Kubernetes default of RollingUpdate with 25%
+    # maxUnavailable, which can drop serving proxies before their replacements are
+    # Ready); minReadySeconds is how long a new pod must stay Ready before it counts
+    # as available. Both ignored in sidecar mode (router.epp.deploymentStrategy and
+    # router.epp.minReadySeconds govern the shared pod).
+    # deploymentStrategy:
+    #   type: RollingUpdate
+    #   rollingUpdate:
+    #     maxUnavailable: 0
+    #     maxSurge: 1
+    # minReadySeconds: 10
+
     # Pod scheduling for the proxy Deployment when mode=service. In sidecar mode
     # the proxy shares the EPP pod and follows router.epp.nodeSelector, affinity and tolerations.
     nodeSelector: {}

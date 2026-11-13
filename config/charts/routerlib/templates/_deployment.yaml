@@ -426,6 +426,9 @@ spec:
     type: Recreate
     {{- end }}
     {{- end }}
+  {{- with .Values.router.epp.minReadySeconds }}
+  minReadySeconds: {{ . }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "llm-d-router.selectorLabels" . | nindent 6 }}

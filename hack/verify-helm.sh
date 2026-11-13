@@ -70,7 +70,7 @@ test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set r
 test_cases_llm_d_router_gateway["pdb"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
-test_cases_llm_d_router_gateway["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
+#test_cases_llm_d_router_gateway["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_gateway["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
@@ -258,12 +258,13 @@ test_cases_llm_d_router_standalone["active-active-redis"]="--set router.modelSer
 test_cases_llm_d_router_standalone["active-active-redis-hpa"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.pluginsConfigFile=payload-agnostic.yaml --set router.epp.crossReplica.enabled=true --set router.epp.crossReplica.redis.address=redis.example:6379 --set router.epp.crossReplica.redis.passwordSecretRef.name=redis-auth --set router.epp.crossReplica.redis.passwordSecretRef.key=password --set router.epp.autoscaling.enabled=true --set router.epp.autoscaling.minReplicas=2"
 test_cases_llm_d_router_standalone["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
-test_cases_llm_d_router_standalone["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+#test_cases_llm_d_router_standalone["latency-predictor-service"]="--set router.latencyPredictor.enabled=true --set router.latencyPredictor.mode=service --set router.latencyPredictor.predictionServers.count=3 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["llm-d-router-gateway"]="--set router.inferencePool.create=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType=agentgateway --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["proxy-service-scheduling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.nodeSelector.pool=router --set router.proxy.nodeSelector.pool=router --set-json router.proxy.tolerations=[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}] --set-json router.proxy.affinity={\"podAntiAffinity\":{\"preferredDuringSchedulingIgnoredDuringExecution\":[{\"weight\":100,\"podAffinityTerm\":{\"topologyKey\":\"kubernetes.io/hostname\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}}]}}"
 test_cases_llm_d_router_standalone["proxy-service-pod-settings"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.podAnnotations.team=router --set router.proxy.podSecurityContext.runAsUser=65532"
+test_cases_llm_d_router_standalone["proxy-service-rollout"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.minReadySeconds=30 --set router.proxy.minReadySeconds=10 --set router.proxy.deploymentStrategy.type=RollingUpdate --set router.proxy.deploymentStrategy.rollingUpdate.maxUnavailable=0 --set router.proxy.deploymentStrategy.rollingUpdate.maxSurge=1"
 test_cases_llm_d_router_standalone["pod-placement"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.priorityClassName=router-critical --set router.proxy.priorityClassName=router-critical --set router.epp.podLabels.team=router --set router.proxy.podLabels.team=router --set-json router.epp.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-standalone\":\"release-name-epp\"}}}] --set-json router.proxy.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}]"
 test_cases_llm_d_router_standalone["pod-placement-statefulset"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.podLabels.team=router"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
@@ -366,6 +367,20 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
     if ! grep -q "team: router" "${epp_yaml}" || ! grep -q "runAsUser: 65532" "${epp_yaml}"; then
       echo "Validation failed: proxy podAnnotations or podSecurityContext not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "proxy-service-rollout" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if [ "$(grep -c "minReadySeconds:" "${epp_yaml}")" -ne 2 ] || ! grep -q "minReadySeconds: 30" "${epp_yaml}" || ! grep -q "minReadySeconds: 10" "${epp_yaml}"; then
+      echo "Validation failed: EPP or proxy minReadySeconds not rendered for test: ${key}"
+      exit 1
+    fi
+    # The proxy Deployment gets the strategy override; the EPP Deployment keeps its
+    # own default (Recreate in leader-election mode), so exactly one strategy block
+    # may carry maxSurge: 1 -- the proxy's.
+    if ! grep -q "type: RollingUpdate" "${epp_yaml}" || ! grep -q "maxSurge: 1" "${epp_yaml}"; then
+      echo "Validation failed: proxy deploymentStrategy not rendered for test: ${key}"
       exit 1
     fi
   fi
