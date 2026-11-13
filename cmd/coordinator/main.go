@@ -152,7 +152,7 @@ func main() {
 		log.Error(err, "failed to build pipeline")
 		os.Exit(1)
 	}
-	srv, err := server.New(cfg.Server, p, gwClient)
+	srv, err := server.New(cfg.Server, p, gwClient, server.WithWorkerProtocol(cfg.Pipeline.WorkerProtocol))
 	if err != nil {
 		log.Error(err, "failed to create server")
 		os.Exit(1)
