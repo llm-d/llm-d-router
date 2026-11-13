@@ -660,7 +660,7 @@ func TestVLLMGRPC_EncodePrefillDecodeMultimodalAndSkipsJSONSteps(t *testing.T) {
 						Uuid:     "img-hash-1",
 						Source: &vllmpb.MediaItem_Features{
 							Features: &vllmpb.PreprocessedMediaFeatures{
-								Identifier: "ipc",
+								Identifier: "img-hash-1",
 								Offset:     1,
 								Length:     1,
 								MmHash:     proto.String("img-hash-1"),
@@ -691,7 +691,7 @@ func TestVLLMGRPC_EncodePrefillDecodeMultimodalAndSkipsJSONSteps(t *testing.T) {
 			require.Len(t, prefillReq.GetMedia(), 2)
 			require.Equal(t, "img-hash-1", prefillReq.GetMedia()[0].GetUuid())
 			require.Equal(t, vllmpb.Modality_MODALITY_IMAGE, prefillReq.GetMedia()[0].GetModality())
-			require.Equal(t, "ipc", prefillReq.GetMedia()[0].GetFeatures().GetIdentifier())
+			require.Equal(t, "img-hash-1", prefillReq.GetMedia()[0].GetFeatures().GetIdentifier())
 			require.Equal(t, uint64(1), prefillReq.GetMedia()[0].GetFeatures().GetOffset())
 			require.Equal(t, uint64(1), prefillReq.GetMedia()[0].GetFeatures().GetLength())
 			require.Equal(t, "img-hash-1", prefillReq.GetMedia()[0].GetFeatures().GetMmHash())
@@ -1265,6 +1265,7 @@ func TestVLLMHTTPGenerate_WorkerProtocolGRPCAndHTTPDefault(t *testing.T) {
 				"mm_placeholders": map[string]any{"image": []map[string]any{{"offset": 1, "length": 2}}},
 				"kwargs_data":     map[string]any{"image": []string{rawKwargs}},
 			},
+			"content_parts":      nil,
 			"kv_transfer_params": map[string]any{"remote_host": "evil-top"},
 		}
 		bodyBytes, err := json.Marshal(unaryPayload)
@@ -1301,9 +1302,10 @@ func TestVLLMHTTPGenerate_WorkerProtocolGRPCAndHTTPDefault(t *testing.T) {
 		require.NotEqual(t, "evil", prefillReq.GetKv().GetKvTransferParams().AsMap()["remote_host"])
 		// F1/F7: Encode receives full kwargs; prefill after encode strips kwargs and keeps metadata; decode receives MediaNone.
 		require.Len(t, encodeReq.GetMedia(), 1)
+		require.Equal(t, "mm-hash-1", encodeReq.GetMedia()[0].GetFeatures().GetIdentifier())
 		require.Equal(t, []byte("ipc-tensor-bytes"), encodeReq.GetMedia()[0].GetFeatures().GetKwargs())
 		require.Len(t, prefillReq.GetMedia(), 1)
-		require.Equal(t, "ipc", prefillReq.GetMedia()[0].GetFeatures().GetIdentifier())
+		require.Equal(t, "mm-hash-1", prefillReq.GetMedia()[0].GetFeatures().GetIdentifier())
 		require.Equal(t, uint64(1), prefillReq.GetMedia()[0].GetFeatures().GetOffset())
 		require.Equal(t, uint64(2), prefillReq.GetMedia()[0].GetFeatures().GetLength())
 		require.Equal(t, "mm-hash-1", prefillReq.GetMedia()[0].GetFeatures().GetMmHash())
@@ -1653,6 +1655,11 @@ func TestVLLMHTTPGenerate_SamplingParityLogprobsAndUnknownKeyRejection(t *testin
 			name:    "unknown features key",
 			body:    `{"model":"m","token_ids":[1],"features":{"audio_raw":[]}}`,
 			errText: "audio_raw",
+		},
+		{
+			name:    "both features and content_parts",
+			body:    `{"model":"m","token_ids":[1,32000],"features":{"mm_hashes":{"image":["h1"]},"mm_placeholders":{"image":[{"offset":1,"length":1}]}},"content_parts":[{"type":"image_url","url":"https://example.com/a.png"}]}`,
+			errText: "cannot specify both features and content_parts",
 		},
 	}
 	for _, tc := range badInputs {
