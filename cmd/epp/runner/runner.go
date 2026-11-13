@@ -303,6 +303,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		setupLog.Error(err, "Failed to parse configuration")
 		return err
 	}
+	if opts.ValidateConfig {
+		if err := r.validateConfig(ctx, opts, rawConfig); err != nil {
+			setupLog.Error(err, "Configuration is invalid")
+			return err
+		}
+		setupLog.Info("Configuration is valid")
+		return nil
+	}
 	dlCfg := rawConfig.DataLayer
 	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
 		return r.runWithFileDiscovery(ctx, opts, rawConfig)
@@ -532,7 +540,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 
 	// --- Initialize Core EPP Components ---
 	if r.schedulerConfig == nil {
-		err := errors.New("scheduler config must be set either by config api or through code")
+		err := errSchedulerConfigMissing
 		setupLog.Error(err, "failed to create scheduler")
 		return nil, nil, err
 	}
@@ -1041,6 +1049,9 @@ func extractDeploymentName(podName string) (string, error) {
 	return "", fmt.Errorf("failed to parse deployment name from pod name %s", podName)
 }
 
+// errSchedulerConfigMissing reports a configuration that sets no scheduler.
+var errSchedulerConfigMissing = errors.New("scheduler config must be set either by config api or through code")
+
 // validateKubernetesDiscoveryFlags checks the flags the Kubernetes discovery path
 // needs: an InferencePool name or an endpoint selector, but not both.
 func validateKubernetesDiscoveryFlags(opts *runserver.Options) error {
@@ -1267,6 +1278,50 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 	), nil
 }
 
+// validateConfig runs the configuration checks of a real start against an
+// empty datastore: the discovery flags of Kubernetes mode, the objectives
+// file of file-discovery mode, plugin instantiation and the config checks of
+// phase two, the discovery plugin, plugin stability, and the data layer
+// configuration. It needs no Kubernetes cluster and starts no server or data
+// source.
+func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	dl := rawConfig.DataLayer
+	fileDiscovery := dl != nil && dl.Discovery != nil && dl.Discovery.Endpoints != nil
+	if !fileDiscovery {
+		if err := validateKubernetesDiscoveryFlags(opts); err != nil {
+			return err
+		}
+	}
+
+	pool := datalayer.NewEndpointPool(resolvePoolNamespace(opts.PoolNamespace), "epp")
+	ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts)).WithEndpointPool(pool)
+	if _, err := loadObjectivesFile(opts.ObjectivesFile, ds); err != nil {
+		return err
+	}
+	eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
+	if err != nil {
+		return err
+	}
+	if fileDiscovery {
+		if _, err := r.resolveDiscovery(rawConfig); err != nil {
+			return fmt.Errorf("failed to resolve discovery plugin: %w", err)
+		}
+	}
+	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
+		return err
+	}
+	if err := r.dlRuntime.Configure(eppConfig.DataConfig, setupLog); err != nil {
+		return fmt.Errorf("failed to configure datalayer: %w", err)
+	}
+	if r.schedulerConfig == nil {
+		return errSchedulerConfigMissing
+	}
+	return nil
+}
+
 // runWithFileDiscovery handles the execution path when a discovery plugin is configured.
 // It builds the EPP server stack without a Kubernetes cluster or controller manager.
 // SIGTERM starts GracefulStop immediately, without a DrainTimeout window or
@@ -1341,7 +1396,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 
 	if r.schedulerConfig == nil {
-		return errors.New("scheduler config must be set either by config api or through code")
+		return errSchedulerConfigMissing
 	}
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
