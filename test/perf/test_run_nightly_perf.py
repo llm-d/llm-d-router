@@ -781,6 +781,91 @@ class MainWiringTests(OfflineTestCase):
             os.path.join("test", "perf", "config", "router-configs", "optimized-baseline.yaml"),
         )
 
+    def test_main_cleans_up_and_exits_nonzero_on_step_failure(self):
+        err = perf.subprocess.CalledProcessError(
+            1, "kubectl create namespace ns", stderr="auth plugin failed"
+        )
+        create_ns = self.contexts.enter_context(
+            mock.patch.object(perf, "create_namespace", side_effect=err)
+        )
+        cleanup_ns = self.contexts.enter_context(
+            mock.patch.object(perf, "cleanup_namespace")
+        )
+        self.contexts.enter_context(mock.patch("traceback.print_exc"))
+        self.contexts.enter_context(
+            mock.patch.object(
+                perf.sys,
+                "argv",
+                [
+                    "run_nightly_perf.py",
+                    "--gcp-project",
+                    "offline-project",
+                    "--results-dir",
+                    str(self.directory),
+                    "--target",
+                    str(
+                        Path(perf.__file__).resolve().parent
+                        / "config"
+                        / "targets"
+                        / "optimized-baseline-job1.yaml"
+                    ),
+                ],
+            )
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            perf.main()
+        self.assertEqual(ctx.exception.code, 1)
+        create_ns.assert_called_once()
+        cleanup_ns.assert_called_once()
+
+
+class CommandHandlingTests(unittest.TestCase):
+    def test_run_cmd_prints_captured_output_on_failure(self):
+        err = perf.subprocess.CalledProcessError(
+            1,
+            "kubectl create namespace test-ns",
+            output="partial stdout\n",
+            stderr="exec plugin failed\n",
+        )
+        stderr_lines = []
+
+        def fake_print(*args, **kwargs):
+            if kwargs.get("file") is perf.sys.stderr:
+                stderr_lines.append(" ".join(str(a) for a in args))
+
+        with (
+            mock.patch.object(perf.subprocess, "run", side_effect=err),
+            mock.patch.object(perf, "print", side_effect=fake_print),
+        ):
+            with self.assertRaises(perf.subprocess.CalledProcessError):
+                perf.run_cmd("kubectl create namespace test-ns")
+        self.assertEqual(stderr_lines, ["partial stdout", "exec plugin failed"])
+
+    def test_cleanup_namespace_ignores_missing_and_does_not_raise(self):
+        failed = perf.subprocess.CompletedProcess(
+            args="kubectl delete namespace test-ns --ignore-not-found=true --wait=false",
+            returncode=1,
+            stdout="",
+            stderr="connection refused\n",
+        )
+        stderr_lines = []
+
+        def fake_print(*args, **kwargs):
+            if kwargs.get("file") is perf.sys.stderr:
+                stderr_lines.append(" ".join(str(a) for a in args))
+
+        with (
+            mock.patch.object(perf, "run_cmd", return_value=failed) as run_cmd,
+            mock.patch.object(perf, "print", side_effect=fake_print),
+        ):
+            perf.cleanup_namespace("test-ns")
+        run_cmd.assert_called_once_with(
+            "kubectl delete namespace test-ns --ignore-not-found=true --wait=false",
+            check=False,
+        )
+        self.assertEqual(len(stderr_lines), 1)
+        self.assertIn("connection refused", stderr_lines[0])
+
 
 if __name__ == "__main__":
     unittest.main()
