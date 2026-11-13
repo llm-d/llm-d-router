@@ -782,6 +782,50 @@ func TestCallerContextCancellationEvictsRequest(t *testing.T) {
 	}
 }
 
+// TestCallerContextDeadlineEvictsRequest verifies that when a caller-supplied context
+// deadline expires while the request is queued, it is evicted as caller abandonment
+// (EvictedContextCancelled) rather than as a queue TTL expiry.
+func TestCallerContextDeadlineEvictsRequest(t *testing.T) {
+	t.Parallel()
+
+	detector := newBlockedDetector()
+	h := newHarness(t, harnessOpts{
+		detector: detector,
+		controllerCfg: &controller.Config{
+			DefaultRequestTTL:     5 * time.Minute,
+			NoEndpointRequestTTL:  5 * time.Minute,
+			ExpiryCleanupInterval: 10 * time.Millisecond,
+		},
+	})
+
+	key := flowcontrol.FlowKey{ID: "flow-a", Priority: 0}
+
+	reqCtx, reqCancel := context.WithTimeout(h.ctx, 50*time.Millisecond)
+	defer reqCancel()
+
+	results := make(chan dispatchResult, 1)
+	go func() {
+		req := &testRequest{id: "deadline-req", key: key, byteSize: 100, ttl: 5 * time.Minute}
+		outcome, err := h.fc.EnqueueAndWait(reqCtx, req)
+		results <- dispatchResult{id: "deadline-req", outcome: outcome, err: err}
+	}()
+
+	select {
+	case r := <-results:
+		require.Error(t, r.err)
+		require.ErrorIs(t, r.err, fcTypes.ErrEvicted,
+			"deadline-expired request should be wrapped with ErrEvicted")
+		require.ErrorIs(t, r.err, fcTypes.ErrContextCancelled,
+			"caller deadline expiry should wrap ErrContextCancelled")
+		require.NotErrorIs(t, r.err, fcTypes.ErrTTLExpired,
+			"caller deadline expiry should not be attributed to queue TTL expiry")
+		require.Equal(t, fcTypes.QueueOutcomeEvictedContextCancelled, r.outcome,
+			"caller deadline expiry should have QueueOutcomeEvictedContextCancelled")
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not return after caller deadline expiry")
+	}
+}
+
 // ============================================================================
 // Shutdown and Lifecycle Tests
 // ============================================================================
