@@ -264,6 +264,7 @@ test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["proxy-service-scheduling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.nodeSelector.pool=router --set router.proxy.nodeSelector.pool=router --set-json router.proxy.tolerations=[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}] --set-json router.proxy.affinity={\"podAntiAffinity\":{\"preferredDuringSchedulingIgnoredDuringExecution\":[{\"weight\":100,\"podAffinityTerm\":{\"topologyKey\":\"kubernetes.io/hostname\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}}]}}"
 test_cases_llm_d_router_standalone["proxy-service-pod-settings"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.podAnnotations.team=router --set router.proxy.podSecurityContext.runAsUser=65532"
+test_cases_llm_d_router_standalone["proxy-service-rollout"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.minReadySeconds=30 --set router.proxy.minReadySeconds=10 --set router.proxy.deploymentStrategy.type=RollingUpdate --set router.proxy.deploymentStrategy.rollingUpdate.maxUnavailable=0 --set router.proxy.deploymentStrategy.rollingUpdate.maxSurge=1"
 test_cases_llm_d_router_standalone["pod-placement"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.priorityClassName=router-critical --set router.proxy.priorityClassName=router-critical --set router.epp.podLabels.team=router --set router.proxy.podLabels.team=router --set-json router.epp.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-standalone\":\"release-name-epp\"}}}] --set-json router.proxy.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}]"
 test_cases_llm_d_router_standalone["pod-placement-statefulset"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.podLabels.team=router"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
@@ -366,6 +367,26 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
     if ! grep -q "team: router" "${epp_yaml}" || ! grep -q "runAsUser: 65532" "${epp_yaml}"; then
       echo "Validation failed: proxy podAnnotations or podSecurityContext not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "proxy-service-rollout" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    # Select each Deployment and assert its own rollout settings: the combined
+    # YAML would pass with the EPP and proxy values swapped between them.
+    epp_min_ready="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-epp") | .spec.minReadySeconds' "${epp_yaml}")"
+    proxy_min_ready="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.minReadySeconds' "${epp_yaml}")"
+    proxy_max_surge="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.strategy.rollingUpdate.maxSurge' "${epp_yaml}")"
+    proxy_max_unavailable="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.strategy.rollingUpdate.maxUnavailable' "${epp_yaml}")"
+    if [ "${epp_min_ready}" != "30" ] || [ "${proxy_min_ready}" != "10" ] || [ "${proxy_max_surge}" != "1" ] || [ "${proxy_max_unavailable}" != "0" ]; then
+      echo "Validation failed: rollout settings not rendered on their own Deployments for test: ${key} (epp minReadySeconds=${epp_min_ready}, proxy minReadySeconds=${proxy_min_ready}, proxy rollingUpdate ${proxy_max_surge}/${proxy_max_unavailable})"
+      exit 1
+    fi
+    # The strategy override must reach the proxy Deployment only; the EPP
+    # Deployment keeps its own default (Recreate with a single replica).
+    epp_strategy_type="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-epp") | .spec.strategy.type' "${epp_yaml}")"
+    if [ "${epp_strategy_type}" != "Recreate" ]; then
+      echo "Validation failed: proxy deploymentStrategy leaked into the EPP Deployment for test: ${key} (strategy=${epp_strategy_type})"
       exit 1
     fi
   fi

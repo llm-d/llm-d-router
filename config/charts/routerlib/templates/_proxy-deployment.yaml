@@ -16,6 +16,19 @@ spec:
   {{- if not $autoscaling.enabled }}
   replicas: {{ .Values.router.proxy.replicas | default 2 }}
   {{- end }}
+  {{- $proxyMinReadySeconds := $proxy.minReadySeconds }}
+  {{- /* "invalid" = unset or explicit null, the two forms that mean "keep the
+       Kubernetes default"; every other value, however falsy, is validated. */ -}}
+  {{- if not (kindIs "invalid" $proxyMinReadySeconds) }}
+  {{- if not (regexMatch "^(0|[1-9][0-9]?|[1-5][0-9]{2})$" (toString $proxyMinReadySeconds)) }}
+  {{- fail "router.proxy.minReadySeconds must be a whole number from 0 to 599: the Deployment's progressDeadlineSeconds (the Kubernetes default of 600; the chart does not set it) has to exceed it, and the API server rejects anything else" }}
+  {{- end }}
+  minReadySeconds: {{ $proxyMinReadySeconds }}
+  {{- end }}
+  {{- with $proxy.deploymentStrategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "llm-d-router.proxySelectorLabels" . | nindent 6 }}

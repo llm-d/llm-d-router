@@ -63,6 +63,17 @@ epp:
   #     maxUnavailable: 1
   #     maxSurge: 0
 
+  # minReadySeconds for the EPP Deployment: how long a newly Ready pod must stay
+  # Ready before it counts as available. Unset leaves the Kubernetes default of
+  # 0. Paces rollouts: with a RollingUpdate strategy, a pod holds its share of
+  # the maxSurge/maxUnavailable budget until the window passes, so the rollout
+  # cannot run ahead of it (maxSurge > 1 still starts several replacements
+  # together). Must be a whole number from 0 to 599: the Deployment's
+  # progressDeadlineSeconds (the Kubernetes default of 600; the chart does not
+  # set it) has to exceed it, and the API server rejects anything else, so the
+  # render fails fast on out-of-range values.
+  # minReadySeconds: 30
+
   # PodDisruptionBudget for EPP pods. Disabled while unset; enabling it without a
   # disruption field, or with both, fails the render, and minAvailable >= 1 with fewer than 2
   # effective replicas (replicas, autoscaling.minReplicas when autoscaled,
@@ -194,6 +205,23 @@ proxy:
   #     httpGet:
   #       path: /healthcheck/fail
   #       port: admin
+
+  # Overrides the proxy Deployment's spec.strategy when mode=service. Unset
+  # leaves the Kubernetes default (RollingUpdate, 25% maxUnavailable), which can
+  # drop serving proxy pods before their replacements are Ready; a serving
+  # deployment usually wants maxUnavailable: 0. Ignored in sidecar mode, where
+  # router.epp.deploymentStrategy governs the shared pod.
+  #
+  # deploymentStrategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxUnavailable: 0
+  #     maxSurge: 1
+
+  # minReadySeconds for the proxy Deployment when mode=service, same semantics
+  # and progressDeadlineSeconds limit as router.epp.minReadySeconds. Unset
+  # leaves the Kubernetes default of 0.
+  # minReadySeconds: 10
 
 # Tokenizer sidecar. Runs vLLM's `vllm launch render <modelName>` (Python) or
 # `vllm-rs render <modelName>` (Rust) and exposes `/v1/completions/render` and
