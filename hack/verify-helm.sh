@@ -1070,8 +1070,8 @@ for proxy_setting in router.proxy.enabled=false router.proxy.proxyType=agentgate
 done
 
 echo "Verifying Envoy health-checks the EPP gRPC health port only where ext_proc resolves to EPP pods..."
-# name | extra helm flags | health_check_config count | health port | plaintext health transport_socket_match_criteria
-while IFS='|' read -r hc_case hc_flags hc_count hc_port hc_tls; do
+# name | extra helm flags | health_check_config count | health port | plaintext health transport_socket_match_criteria | EPP --drain-timeout value or absent
+while IFS='|' read -r hc_case hc_flags hc_count hc_port hc_tls hc_drain; do
   hc_render_output="${TEMP_DIR}/envoy-epp-health-port-${hc_case}.yaml"
   read -r -a hc_flag_args <<<"${hc_flags}"
   if ! "${HELM}" template hc "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
@@ -1101,12 +1101,22 @@ while IFS='|' read -r hc_case hc_flags hc_count hc_port hc_tls; do
     echo "EPP health port case ${hc_case}: transport_socket_match_criteria rendered with EPP TLS off"
     exit 1
   fi
+  hc_drain_found=$(grep -c -- '--drain-timeout=' "${hc_render_output}" || true)
+  if [[ "${hc_drain}" == absent && "${hc_drain_found}" != 0 ]]; then
+    echo "EPP health port case ${hc_case}: expected no EPP --drain-timeout arg, got ${hc_drain_found}"
+    exit 1
+  fi
+  if [[ "${hc_drain}" != absent ]] && { [[ "${hc_drain_found}" != 1 ]] || ! grep -q -- "--drain-timeout=${hc_drain}\"" "${hc_render_output}"; }; then
+    echo "EPP health port case ${hc_case}: expected one EPP --drain-timeout=${hc_drain} arg, got ${hc_drain_found} --drain-timeout args"
+    exit 1
+  fi
 done <<'EOF_HC_CASES'
-sidecar|--set router.proxy.mode=sidecar|1|9003|present
-service-priority|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true|2|9003|present
-service-discovery|--set router.proxy.mode=service --set router.epp.replicas=2 --set router.epp.haMode=all-active|1|9003|present
-service-clusterip|--set router.proxy.mode=service|0|9003|absent
-service-priority-plaintext|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.grpcHealthPort=9100 --set-string router.epp.flags.secure-serving=false|2|9100|absent
+sidecar|--set router.proxy.mode=sidecar|1|9003|present|45s
+service-priority|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true|2|9003|present|45s
+service-discovery|--set router.proxy.mode=service --set router.epp.replicas=2 --set router.epp.haMode=all-active|1|9003|present|45s
+service-clusterip|--set router.proxy.mode=service|0|9003|absent|absent
+service-priority-plaintext|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.grpcHealthPort=9100 --set-string router.epp.flags.secure-serving=false|2|9100|absent|45s
+service-priority-drain-override|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.flags.drain-timeout=60s|2|9003|present|60s
 EOF_HC_CASES
 
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."

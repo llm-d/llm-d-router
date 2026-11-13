@@ -602,6 +602,17 @@ true
 {{- end -}}
 {{- end -}}
 
+{{/*
+Whether Envoy health-checks EPP's gRPC health port, which reports NOT_SERVING while EPP drains, instead
+of the ext_proc port. ext_proc endpoints resolve to EPP pods (loopback, per-pod or headless DNS) everywhere
+except the single-EPP ClusterIP Service, which exposes only the ext_proc port.
+*/}}
+{{- define "llm-d-router.proxy.eppHealthPortCheck" -}}
+{{- if and (include "llm-d-router.epp.healthCheckingRequired" .) (or (eq (include "llm-d-router.priorityRouting.enabled" .) "true") (ne (include "llm-d-router.proxyMode" .) "service") (include "llm-d-router.proxy.discoveryServiceName" .)) -}}
+true
+{{- end -}}
+{{- end -}}
+
 {{- define "llm-d-router.validations.epp.autoscaling" -}}
 {{- $autoscaling := .Values.router.epp.autoscaling | default dict -}}
 {{- if $autoscaling.enabled }}
@@ -670,11 +681,11 @@ true
 {{- end -}}
 {{- if not $healthChecking -}}
 {{- if $isPriorityRouting -}}
-{{- fail "priorityRouting requires EPP's gRPC health service on port 9002 (router.epp.flags.health-checking cannot be false when priorityRouting.enabled=true)" -}}
+{{- fail "priorityRouting requires EPP's gRPC health service (router.epp.flags.health-checking cannot be false when priorityRouting.enabled=true)" -}}
 {{- else if include "llm-d-router.proxy.discoveryServiceName" . -}}
 {{- fail "active-active Envoy discovery requires EPP's gRPC health service (router.epp.flags.health-checking cannot be false)" -}}
 {{- else -}}
-{{- fail "Envoy active health checks require EPP's gRPC health service on port 9002 (router.epp.flags.health-checking cannot be false)" -}}
+{{- fail "Envoy active health checks require EPP's gRPC health service (router.epp.flags.health-checking cannot be false)" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

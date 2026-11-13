@@ -8,6 +8,10 @@
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $eppFlags "secure-serving")) }}
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
+      {{- /* Outlast Envoy's health-check ejection of a draining EPP: 3 failed checks at 10s by default. */}}
+      {{- if and (include "llm-d-router.proxy.eppHealthPortCheck" .) (not (hasKey $eppFlags "drain-timeout")) }}
+        {{- $_ := set $eppFlags "drain-timeout" "45s" }}
+      {{- end }}
       serviceAccountName: {{ include "llm-d-router.name" . }}
       {{- with .Values.router.epp.priorityClassName }}
       priorityClassName: {{ . | quote }}
