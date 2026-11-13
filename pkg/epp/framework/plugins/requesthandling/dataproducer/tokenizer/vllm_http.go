@@ -262,6 +262,11 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 	}, nil
 }
 
+// renderIdleConnTimeout is below vLLM's default HTTP keep-alive timeout
+// (VLLM_HTTP_TIMEOUT_KEEP_ALIVE, 5s), so a pooled connection is closed by the
+// client before the server closes it under a request.
+const renderIdleConnTimeout = 4 * time.Second
+
 // newRenderTransport returns an http.Transport tuned for the render endpoint:
 // HTTP/2 is disabled (vLLM doesn't support it) and the idle-connection pool
 // is sized for the in-pod sidecar case while still being reasonable for a
@@ -272,7 +277,7 @@ func newRenderTransport(cfg *vllmConfig) (*http.Transport, error) {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.MaxIdleConns = 0
 	t.MaxIdleConnsPerHost = 16
-	t.IdleConnTimeout = 90 * time.Second
+	t.IdleConnTimeout = renderIdleConnTimeout
 	// Disable HTTP/2: vLLM doesn't support it. ForceAttemptHTTP2 alone is
 	// not enough — clearing TLSNextProto prevents ALPN-negotiated h2 too.
 	t.ForceAttemptHTTP2 = false
@@ -593,6 +598,10 @@ func (r *vllmHTTPRenderer) postJSONAttempt(reqCtx context.Context, baseURL, path
 		return false, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	// Render has no side effects. Marking the POST idempotent lets the transport
+	// resend it on a new connection when the server closed a reused one; a nil
+	// value sends no header.
+	httpReq.Header["Idempotency-Key"] = nil
 	// The render endpoint may require the same credential as inference;
 	// forward the inbound Authorization when present.
 	if auth := authHeaderFromContext(reqCtx); auth != "" {
