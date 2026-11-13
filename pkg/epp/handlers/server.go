@@ -191,9 +191,18 @@ type RequestContext struct {
 	// bodyReceived is set once the full request body is buffered; only such requests get an outcome.
 	bodyReceived bool
 
+	// disjointInput holds the input token buckets folded from the response chunks
+	// whose parser reports them separately; Usage.PromptTokens is their sum.
+	disjointInput fwkrh.DisjointInputTokens
+
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
 	sseLineDiscarding bool
+
+	// grpcFrameCarry holds trailing bytes of an incomplete gRPC frame across response chunks.
+	grpcFrameCarry         []byte
+	grpcFrameSkipRemaining uint64
+	grpcStreamCorrupted    bool
 
 	toolCallingSurface             reqcommon.APIType
 	toolCallingRequest             bool
@@ -460,9 +469,16 @@ func extractFairnessAndPriority(reqCtx *RequestContext) (string, string) {
 
 func (s *StreamingServer) putBuffer(buf *bytes.Buffer) {
 	buf.Reset()
-	if buf.Cap() <= s.maxPoolBufferSize || s.maxPoolBufferSize == 0 {
+	if s.poolKeeps(buf) {
 		s.bufferPool.Put(buf)
 	}
+}
+
+// poolKeeps reports whether putBuffer returns buf to the pool. The request body
+// handler relies on this rule: RawBody takes the memory of a buffer the pool
+// does not keep, so such a buffer must never be reused.
+func (s *StreamingServer) poolKeeps(buf *bytes.Buffer) bool {
+	return s.maxPoolBufferSize == 0 || buf.Cap() <= s.maxPoolBufferSize
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
@@ -671,13 +687,16 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			logger.V(logutil.DEFAULT).Info("EPP received request") // Request ID and trace fields are logged as logger context values.
 
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
-		case *extProcPb.ProcessingRequest_RequestBody:
-			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
+		case *extProcPb.ProcessingRequest_RequestBody, *extProcPb.ProcessingRequest_RequestTrailers:
+			// Request trailers end the body: Envoy then sends the last body chunk without EndOfStream.
+			trailers := req.GetRequestTrailers() != nil
+			chunk := req.GetRequestBody().GetBody()
+			loggerTrace.Info("Incoming body chunk", "EoS", req.GetRequestBody().GetEndOfStream(), "trailers", trailers)
 			if buf == nil {
 				buf = s.bufferPool.Get().(*bytes.Buffer)
 				buf.Reset()
 			}
-			if s.maxRequestBodySize > 0 && buf.Len()+len(v.RequestBody.Body) > s.maxRequestBodySize {
+			if s.maxRequestBodySize > 0 && buf.Len()+len(chunk) > s.maxRequestBodySize {
 				err = errcommon.Error{
 					Code: errcommon.PayloadTooLarge,
 					Msg:  fmt.Sprintf("request body exceeds the %d-byte limit", s.maxRequestBodySize),
@@ -685,20 +704,27 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				break
 			}
 			// In the stream case, we can receive multiple request bodies.
-			buf.Write(v.RequestBody.Body)
+			buf.Write(chunk)
 
 			// Message is buffered, we can read and decode.
-			if v.RequestBody.EndOfStream {
+			if req.GetRequestBody().GetEndOfStream() || trailers {
 				loggerTrace.Info("decoding")
 				reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
-				// Keep the buffer intact through comparison. RawBody is a copy
-				// so parser and Director edits cannot change the baseline.
 				inboundBody := buf.Bytes()
-				reqCtx.Request.RawBody = make([]byte, buf.Len())
-				copy(reqCtx.Request.RawBody, inboundBody)
+				if !s.poolKeeps(buf) {
+					// putBuffer drops this buffer, so RawBody takes its memory.
+					// Parsers and the Director replace RawBody on a rewrite and never
+					// write into it, so inboundBody stays the comparison baseline.
+					reqCtx.Request.RawBody = inboundBody
+					buf = nil
+				} else {
+					// RawBody is a copy so the pooled buffer can be reused.
+					reqCtx.Request.RawBody = make([]byte, len(inboundBody))
+					copy(reqCtx.Request.RawBody, inboundBody)
+				}
 
 				// Body stream complete. Capture raw size for flow control.
-				reqCtx.RequestSize = buf.Len()
+				reqCtx.RequestSize = len(inboundBody)
 				reqCtx.bodyReceived = true
 
 				parser, resolveErr := s.getOrResolveParser(reqCtx)
@@ -778,12 +804,14 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				// The response phase can last for the whole generation, so return
 				// the buffer here unless the tool-calling snapshot in ctx still
-				// references its bytes.
-				if hasInboundToolSnapshot {
-					buf.Reset()
-				} else {
-					s.putBuffer(buf)
-					buf = nil
+				// references its bytes. A buffer above the pool cap is already nil.
+				if buf != nil {
+					if hasInboundToolSnapshot {
+						buf.Reset()
+					} else {
+						s.putBuffer(buf)
+						buf = nil
+					}
 				}
 
 				// After scheduling, look up the eviction channel for eviction support.
@@ -799,7 +827,12 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 
 				reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
-				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody)
+				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody, !trailers)
+				if trailers {
+					reqCtx.reqBodyResp = append(reqCtx.reqBodyResp, &extProcPb.ProcessingResponse{
+						Response: &extProcPb.ProcessingResponse_RequestTrailers{RequestTrailers: &extProcPb.TrailersResponse{}},
+					})
+				}
 				fairnessID, priority := extractFairnessAndPriority(reqCtx)
 				metrics.RecordRequestCounter(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, reqCtx.Priority)
 				metrics.RecordRequestSizes(reqCtx.IncomingModelName, reqCtx.TargetModelName, reqCtx.apiSurface, fairnessID, priority, reqCtx.RequestSize)
@@ -810,8 +843,6 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 
 				recordRequestProcessing()
 			}
-		case *extProcPb.ProcessingRequest_RequestTrailers:
-			// This is currently unused.
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
 			// Overwrites the request-phase value on purpose. Response-received plugins
 			// read this through Response.ReqMetadata to learn which endpoint actually

@@ -39,7 +39,8 @@ func TestRegisterMetrics(t *testing.T) {
 }
 
 // Each Filter branch records exactly one decision outcome, so the counter labels
-// distinguish an affinity-driven route from one where load reopened the set.
+// distinguish an affinity-driven route from one where load reopened the set,
+// and with pairing on stores that outcome on the request for PreRequest.
 func TestFilterRecordsDecisionOutcome(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -50,44 +51,44 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 		{
 			name:   "single candidate is not applicable",
 			config: Config{AffinityThreshold: 0.80},
-			input:  []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0)},
+			input:  []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0, -1)},
 			// A single candidate has no set to narrow.
 			outcome: outcomeNotApplicable,
 		},
 		{
 			name:    "disabled threshold is not applicable",
 			config:  Config{AffinityThreshold: 0},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0), makeEndpoint("b", 10, 10, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 10, 0, -1), makeEndpoint("b", 10, 10, 0, -1)},
 			outcome: outcomeNotApplicable,
 		},
 		{
 			name:    "exploration skip",
 			config:  Config{AffinityThreshold: 0.80, ExplorationProbability: 1.0},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 100, 0), makeEndpoint("b", 10, 50, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 100, 0, -1), makeEndpoint("b", 10, 50, 0, -1)},
 			outcome: outcomeExploration,
 		},
 		{
 			name:    "no endpoint meets the threshold",
 			config:  Config{AffinityThreshold: 0.80},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 10, 10, 0), makeEndpoint("b", 20, 20, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 10, 10, 0, -1), makeEndpoint("b", 20, 20, 0, -1)},
 			outcome: outcomeNoMatch,
 		},
 		{
 			name:    "sticky set kept",
 			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 5000, TTFTSource: TTFTSourceLatencyPredictor},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 100, 0), makeEndpoint("b", 85, 120, 0), makeEndpoint("c", 10, 50, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 100, 0, -1), makeEndpoint("b", 85, 120, 0, -1), makeEndpoint("c", 10, 50, 0, -1)},
 			outcome: outcomeSticky,
 		},
 		{
 			name:    "load gate reopens the set",
 			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 500, 0), makeEndpoint("b", 10, 50, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 500, 0, -1), makeEndpoint("b", 10, 50, 0, -1)},
 			outcome: outcomeLoadOverride,
 		},
 		{
 			name:    "missing signal returns all endpoints",
 			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor},
-			input:   []fwksched.Endpoint{makeEndpoint("a", 90, -1, 0), makeEndpoint("b", 10, 50, 0)},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, -1, 0, -1), makeEndpoint("b", 10, 50, 0, -1)},
 			outcome: outcomeMissingSignal,
 		},
 	}
@@ -99,8 +100,11 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 			resetMetrics()
 			t.Cleanup(resetMetrics)
 
-			p := newTestPlugin(test.config)
-			p.Filter(context.Background(), nil, test.input)
+			config := test.config
+			config.P2PSourceProducerName = "p2p"
+			p := newTestPlugin(config)
+			request := &fwksched.InferenceRequest{RequestID: "req", Headers: map[string]string{}}
+			p.Filter(context.Background(), request, test.input)
 
 			for _, outcome := range allOutcomes {
 				want := float64(0)
@@ -110,6 +114,9 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 				got := testutil.ToFloat64(filterDecisions.WithLabelValues("test", outcome))
 				assert.Equalf(t, want, got, "outcome %q", outcome)
 			}
+			stored, ok := fwksched.ReadRequestAttribute[affinityOutcome](request, p.outcomeDataKey)
+			require.True(t, ok, "outcome stored on the request")
+			assert.Equal(t, affinityOutcome(test.outcome), stored)
 		})
 	}
 }

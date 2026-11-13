@@ -876,3 +876,208 @@ func legacyMatchedBlockCountByTier(keys []kvblock.BlockHash, keyToPods map[kvblo
 	}
 	return counts
 }
+
+// tailOnlyBackends scores storage as a tail-only tier: its blocks count only
+// past the longest chain any candidate holds in a primary tier.
+func tailOnlyBackends() []*kvcache.KVCacheBackendConfig {
+	return []*kvcache.KVCacheBackendConfig{
+		{Name: "gpu", Weight: 1.0},
+		{Name: "cpu", Weight: 0.8},
+		{Name: "storage", Weight: 0.6, TailOnly: true},
+	}
+}
+
+func TestMatchBlockKeysTailOnlyTier(t *testing.T) {
+	gpu := func(pod string) kvblock.PodEntry { return kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "gpu"} }
+	cpu := func(pod string) kvblock.PodEntry { return kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "cpu"} }
+	storage := func(pod string) kvblock.PodEntry { return kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "storage"} }
+	disk := func(pod string) kvblock.PodEntry { return kvblock.PodEntry{PodIdentifier: pod, DeviceTier: "disk"} }
+	keys := []kvblock.BlockHash{1, 2, 3, 4}
+
+	tests := []struct {
+		name    string
+		fixture map[kvblock.BlockHash][]kvblock.PodEntry
+		want    map[string]kvcache.PodMatch
+	}{
+		{
+			name: "a primary chain covering the request leaves storage unscored",
+			fixture: map[kvblock.BlockHash][]kvblock.PodEntry{
+				1: {gpu("a"), storage("b")}, 2: {gpu("a"), storage("b")},
+				3: {gpu("a"), storage("b")}, 4: {gpu("a"), storage("b")},
+			},
+			want: map[string]kvcache.PodMatch{
+				"a": {WeightedScore: 4.0, MatchedBlocks: 4, ConfirmedBlocks: 4, BlocksByTier: map[string]int{"gpu": 4}},
+				"b": {WeightedScore: 0, MatchedBlocks: 4, ConfirmedBlocks: 4, BlocksByTier: map[string]int{"storage": 4}},
+			},
+		},
+		{
+			name: "storage scores in full when no candidate holds a primary tier",
+			fixture: map[kvblock.BlockHash][]kvblock.PodEntry{
+				1: {storage("a")}, 2: {storage("a")}, 3: {storage("a")}, 4: {storage("a")},
+			},
+			want: map[string]kvcache.PodMatch{
+				"a": {WeightedScore: 2.4, MatchedBlocks: 4, ConfirmedBlocks: 4, BlocksByTier: map[string]int{"storage": 4}},
+			},
+		},
+		{
+			name: "storage scores only past the longest primary chain",
+			fixture: map[kvblock.BlockHash][]kvblock.PodEntry{
+				1: {gpu("a"), storage("b")}, 2: {cpu("a"), storage("b")},
+				3: {storage("b")}, 4: {storage("b")},
+			},
+			want: map[string]kvcache.PodMatch{
+				"a": {WeightedScore: 1.8, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"gpu": 1}},
+				"b": {WeightedScore: 1.2, MatchedBlocks: 4, ConfirmedBlocks: 4, BlocksByTier: map[string]int{"storage": 4}},
+			},
+		},
+		{
+			name: "a pod's own primary chain is scored before its storage tail",
+			fixture: map[kvblock.BlockHash][]kvblock.PodEntry{
+				1: {gpu("a"), storage("a"), gpu("b")}, 2: {gpu("a"), storage("a"), gpu("b")},
+				3: {storage("a"), gpu("b")}, 4: {storage("a")},
+			},
+			want: map[string]kvcache.PodMatch{
+				"a": {WeightedScore: 2.6, MatchedBlocks: 4, ConfirmedBlocks: 4, BlocksByTier: map[string]int{"gpu": 2, "storage": 4}},
+				"b": {WeightedScore: 3.0, MatchedBlocks: 3, ConfirmedBlocks: 3, BlocksByTier: map[string]int{"gpu": 3}},
+			},
+		},
+		{
+			name: "an unconfigured tier does not extend the primary chain",
+			fixture: map[kvblock.BlockHash][]kvblock.PodEntry{
+				1: {disk("a"), storage("b")}, 2: {disk("a"), storage("b")},
+			},
+			want: map[string]kvcache.PodMatch{
+				"a": {WeightedScore: 0, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"disk": 2}},
+				"b": {WeightedScore: 1.2, MatchedBlocks: 2, ConfirmedBlocks: 2, BlocksByTier: map[string]int{"storage": 2}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(t.Context())
+			walked, idx := newMatcher(t, tailOnlyBackends())
+			populateIndex(t, idx, tt.fixture)
+
+			got, err := walked.MatchBlockKeys(ctx, keys, nil)
+			require.NoError(t, err)
+			assertPodMatches(t, tt.want, got)
+
+			got, err = newMaterializedMatcher(idx, tailOnlyBackends()).MatchBlockKeys(ctx, keys, nil)
+			require.NoError(t, err)
+			assertPodMatches(t, tt.want, got)
+		})
+	}
+}
+
+func TestMatchBlockKeysTailOnlyTierMatchesReference(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(t.Context())
+	rng := rand.New(rand.NewSource(7)) //#nosec G404 -- fixed-seed deterministic test fixture
+	tiers := []string{"gpu", "cpu", "storage", "disk"}
+	backends := tailOnlyBackends()
+
+	for iter := 0; iter < 500; iter++ {
+		numKeys, numPods := 1+rng.Intn(12), 1+rng.Intn(5)
+		keys := make([]kvblock.BlockHash, numKeys)
+		for i := range keys {
+			keys[i] = kvblock.BlockHash(i + 1)
+		}
+		fixture := make(map[kvblock.BlockHash][]kvblock.PodEntry, numKeys)
+		for _, key := range keys {
+			for p := 0; p < numPods; p++ {
+				if rng.Float64() >= 0.8 {
+					continue
+				}
+				for n := 1 + rng.Intn(3); n > 0; n-- {
+					entry := kvblock.PodEntry{PodIdentifier: fmt.Sprintf("pod-%d", p), DeviceTier: tiers[rng.Intn(len(tiers))]}
+					if rng.Float64() < 0.1 {
+						entry.Speculative, entry.DeviceTier = true, ""
+					}
+					fixture[key] = append(fixture[key], entry)
+				}
+			}
+		}
+
+		walked, idx := newMatcher(t, backends)
+		populateIndex(t, idx, fixture)
+		keyToPods, err := idx.Lookup(ctx, keys, nil)
+		require.NoError(t, err)
+		want := referenceTailOnlyScores(keys, keyToPods)
+
+		for _, matcher := range []*kvcache.Indexer{walked, newMaterializedMatcher(idx, backends)} {
+			got, err := matcher.MatchBlockKeys(ctx, keys, nil)
+			require.NoError(t, err)
+			require.Len(t, got, len(want), "iteration %d", iter)
+			for pod, score := range want {
+				assert.InDelta(t, score, got[pod].WeightedScore, 0.0001, "iteration %d pod %q", iter, pod)
+			}
+		}
+	}
+}
+
+// referenceTailOnlyScores scores tailOnlyBackends directly from the
+// definition: M is the longest chain, from the first key, that any candidate
+// holds in a primary tier; a block scores its best primary weight when the
+// pod holds one there, and its storage weight only at positions from M on.
+func referenceTailOnlyScores(keys []kvblock.BlockHash, keyToPods map[kvblock.BlockHash][]kvblock.PodEntry) map[string]float64 {
+	primary := map[string]float64{"gpu": 1.0, "cpu": 0.8, kvcache.SpeculativeTier: 1.0}
+	const storageWeight = 0.6
+	type held struct {
+		any, storage bool
+		primary      float64
+		hasPrimary   bool
+	}
+	at := func(key kvblock.BlockHash, pod string) held {
+		var h held
+		for _, e := range keyToPods[key] {
+			if e.PodIdentifier != pod {
+				continue
+			}
+			h.any = true
+			tier := e.DeviceTier
+			if e.Speculative || tier == kvcache.SpeculativeTier {
+				tier = kvcache.SpeculativeTier
+			}
+			if w, ok := primary[tier]; ok {
+				h.hasPrimary = true
+				h.primary = max(h.primary, w)
+			}
+			if tier == "storage" {
+				h.storage = true
+			}
+		}
+		return h
+	}
+
+	candidates := sets.New[string]()
+	for _, e := range keyToPods[keys[0]] {
+		candidates.Insert(e.PodIdentifier)
+	}
+	longestPrimary := 0
+	for pod := range candidates {
+		n := 0
+		for n < len(keys) && at(keys[n], pod).hasPrimary {
+			n++
+		}
+		longestPrimary = max(longestPrimary, n)
+	}
+
+	scores := map[string]float64{}
+	for pod := range candidates {
+		score := 0.0
+		for pos := 0; pos < len(keys); pos++ {
+			h := at(keys[pos], pod)
+			if !h.any {
+				break
+			}
+			switch {
+			case h.hasPrimary:
+				score += h.primary
+			case h.storage && pos >= longestPrimary:
+				score += storageWeight
+			}
+		}
+		scores[pod] = score
+	}
+	return scores
+}

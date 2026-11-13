@@ -31,6 +31,9 @@ func TestValidatePipeline(t *testing.T) {
 	render := config.StepConfig{Type: steps.RenderStepName}
 	decode := config.StepConfig{Type: steps.DecodeStepName}
 	broker := config.StepConfig{Type: asyncbroker.StepName}
+	forward := map[string]any{steps.ParamForwardPromptTokenIDs: true}
+	forwardDecode := config.StepConfig{Type: steps.DecodeStepName, Params: forward}
+	forwardCondDecode := config.StepConfig{Type: steps.ConditionalDecodeStepName, Params: forward}
 
 	tests := []struct {
 		name    string
@@ -51,6 +54,28 @@ func TestValidatePipeline(t *testing.T) {
 			name:    "tokens-in without render is rejected",
 			cfg:     config.PipelineConfig{UseOpenAIFormat: false, Steps: []config.StepConfig{decode}},
 			wantErr: true,
+		},
+		{
+			name:    "forward_prompt_token_ids with render",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{render, forwardCondDecode, forwardDecode}},
+			wantErr: false,
+		},
+		{
+			name:    "forward_prompt_token_ids on decode without render is rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{forwardDecode}},
+			wantErr: true,
+		},
+		{
+			name:    "forward_prompt_token_ids on conditional-decode without render is rejected",
+			cfg:     config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{forwardCondDecode, decode}},
+			wantErr: true,
+		},
+		{
+			name: "forward_prompt_token_ids false without render",
+			cfg: config.PipelineConfig{UseOpenAIFormat: true, Steps: []config.StepConfig{
+				{Type: steps.DecodeStepName, Params: map[string]any{steps.ParamForwardPromptTokenIDs: false}},
+			}},
+			wantErr: false,
 		},
 		{
 			name:    "async-broker first is accepted",

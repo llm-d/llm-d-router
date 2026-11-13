@@ -85,6 +85,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentlineage"
 	sessionaffinityfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/sessionaffinity"
 	sessionaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
@@ -584,8 +585,10 @@ type mockRequestHeaderPlugin struct {
 	name           string
 	attributeKey   fwkplugin.DataKey
 	attributeValue string
-	modifyFn       func(*fwksched.InferenceRequest)
-	err            error
+	// extraProduces declares additional attribute keys modifyFn may write.
+	extraProduces []fwkplugin.DataKey
+	modifyFn      func(*fwksched.InferenceRequest)
+	err           error
 }
 
 func (m *mockRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
@@ -593,7 +596,11 @@ func (m *mockRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
 }
 
 func (m *mockRequestHeaderPlugin) Produces() map[fwkplugin.DataKey]any {
-	return map[fwkplugin.DataKey]any{m.attributeKey: ""}
+	produces := map[fwkplugin.DataKey]any{m.attributeKey: ""}
+	for _, key := range m.extraProduces {
+		produces[key] = ""
+	}
+	return produces
 }
 
 func (m *mockRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
@@ -1201,6 +1208,124 @@ func TestDirector_HandleRequest(t *testing.T) {
 			},
 			wantFairnessID:     "tenant-1%2Feu",
 			wantSpanFairnessID: "tenant-1%2Feu",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "fairness header and derived-root attribute compose into a tenant-prefixed fairness ID",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1",
+			composeFairnessIDs:     true,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-lineage",
+				attributeKey:   agentlineage.DerivedRootKey,
+				attributeValue: "root-abc",
+			},
+			wantFairnessID:     "tenant-1/root-abc",
+			wantSpanFairnessID: "tenant-1/root-abc",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "derived root wins over agent identity when composing",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1",
+			composeFairnessIDs:     true,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				// A distinct mock name: the scope-spec registry caches a
+				// plugin's declarations per typed name, and this case's mock
+				// produces one more key than the other agent-lineage mocks.
+				name:           "agent-lineage-precedence",
+				attributeKey:   agentlineage.DerivedRootKey,
+				attributeValue: "root-abc",
+				extraProduces:  []fwkplugin.DataKey{agentidentity.AgentIdentityKey},
+				modifyFn: func(req *fwksched.InferenceRequest) {
+					req.PutAttribute(agentidentity.AgentIdentityKey, "session-xyz")
+				},
+			},
+			wantFairnessID:     "tenant-1/root-abc",
+			wantSpanFairnessID: "tenant-1/root-abc",
+			wantSource:         tracing.AttributionSourceHeader,
+		},
+		{
+			name: "derived root without fairness header composes onto the default tenant",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			composeFairnessIDs:     true,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-lineage",
+				attributeKey:   agentlineage.DerivedRootKey,
+				attributeValue: "root-abc",
+			},
+			wantFairnessID:     "default-tenant/root-abc",
+			wantSpanFairnessID: "default-tenant/root-abc",
+			wantSource:         tracing.AttributionSourceDerivedRoot,
+		},
+		{
+			name: "derived root without fairness header keys the flow on the root when composition is disabled",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-lineage",
+				attributeKey:   agentlineage.DerivedRootKey,
+				attributeValue: "root-abc",
+			},
+			wantFairnessID:     "root-abc",
+			wantSpanFairnessID: "root-abc",
+			wantSource:         tracing.AttributionSourceDerivedRoot,
+		},
+		{
+			name: "derived root does not override the fairness header when composition is disabled",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "critical prompt",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			inferenceObjectiveName: objectiveName,
+			fairnessIDHeader:       "tenant-1",
+			requestHeaderPlugin: &mockRequestHeaderPlugin{
+				name:           "agent-lineage",
+				attributeKey:   agentlineage.DerivedRootKey,
+				attributeValue: "root-abc",
+			},
+			wantFairnessID:     "tenant-1",
+			wantSpanFairnessID: "tenant-1",
 			wantSource:         tracing.AttributionSourceHeader,
 		},
 		{
@@ -3075,13 +3200,19 @@ func TestDirector_ReleasesProducerStateOnEarlyReturn(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		admitError    error
-		scheduleError error
-		preRequestErr error
-		wantReleased  int
-		wantAbandoned int
+		name           string
+		flowControlErr error
+		admitError     error
+		scheduleError  error
+		preRequestErr  error
+		wantReleased   int
+		wantAbandoned  int
 	}{
+		{
+			name:           "flow-control rejection releases state through RequestAbandoned",
+			flowControlErr: errors.New("request rejected by flow control"),
+			wantAbandoned:  1,
+		},
 		{
 			name:          "admission denial releases state through RequestAbandoned",
 			admitError:    errors.New("endpoint cannot be admitted"),
@@ -3110,6 +3241,9 @@ func TestDirector_ReleasesProducerStateOnEarlyReturn(t *testing.T) {
 			if tt.scheduleError != nil {
 				dir.scheduler = &mockScheduler{scheduleErr: tt.scheduleError}
 			}
+			if tt.flowControlErr != nil {
+				dir.admissionController = &mockAdmissionController{admitErr: tt.flowControlErr}
+			}
 			producer := newRequestStateProducer("state")
 			preRequest := []fwkrh.PreRequest{producer}
 			if tt.preRequestErr != nil {
@@ -3137,7 +3271,7 @@ func TestDirector_ReleasesProducerStateOnEarlyReturn(t *testing.T) {
 			require.NoError(t, err)
 
 			_, handleErr := dir.HandleRequest(ctx, reqCtx, parseResult.Body)
-			if tt.admitError != nil || tt.scheduleError != nil || tt.preRequestErr != nil {
+			if tt.flowControlErr != nil || tt.admitError != nil || tt.scheduleError != nil || tt.preRequestErr != nil {
 				require.Error(t, handleErr)
 			} else {
 				require.NoError(t, handleErr)

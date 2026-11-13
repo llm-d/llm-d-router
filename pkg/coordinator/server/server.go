@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -32,6 +33,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
@@ -111,6 +113,11 @@ func otelHandler(next http.Handler) http.Handler {
 	)
 }
 
+func isServedInferencePath(cleanPath string) bool {
+	return reqcommon.DetectAPIType(cleanPath).Path() == cleanPath ||
+		cleanPath == sglangapiv1.SglangService_Generate_FullMethodName
+}
+
 // canonicalizeInferencePath rewrites a POST whose path, cleaned by path.Clean,
 // is an inference API path and a POST route of routes, so a trailing slash,
 // repeated slashes, dot segments or an encoded slash reach that route, its
@@ -125,7 +132,7 @@ func canonicalizeInferencePath(routes chi.Routes) func(http.Handler) http.Handle
 				return
 			}
 			c := path.Clean(r.URL.Path)
-			if (c == r.URL.Path && r.URL.RawPath == "") || reqcommon.DetectAPIType(c).Path() != c ||
+			if (c == r.URL.Path && r.URL.RawPath == "") || !isServedInferencePath(c) ||
 				!routes.Match(chi.NewRouteContext(), http.MethodPost, c) {
 				next.ServeHTTP(w, r)
 				return
@@ -180,6 +187,7 @@ type Server struct {
 	secureServing      bool
 	certPath           string
 	tls                tlsProfile
+	draining           atomic.Bool
 }
 
 func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client) (*Server, error) {
@@ -232,8 +240,9 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Post(reqcommon.PathMessages, s.handleInference)
 	r.Post(reqcommon.PathVLLMGenerate, s.handleInference)
 	// r.Post(reqcommon.PathSGLangGenerate, s.handleInference)
+	r.Post(sglangapiv1.SglangService_Generate_FullMethodName, s.handleSGLangGRPC)
 	r.Get(pathHealthz, s.handleHealth)
-	r.Get(pathReadyz, s.handleHealth)
+	r.Get(pathReadyz, s.handleReady)
 	r.NotFound(s.passthrough.ServeHTTP)
 
 	for _, step := range p.Steps() {
@@ -243,10 +252,15 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	}
 
 	s.httpServer = &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      otelHandler(r),
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
+		Addr:        cfg.ListenAddr,
+		Handler:     s.closeWhenDraining(otelHandler(r)),
+		ReadTimeout: cfg.ReadTimeout,
+	}
+	if !cfg.SecureServing {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		s.httpServer.Protocols = protocols
 	}
 
 	return s, nil
@@ -284,6 +298,58 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	s.httpServer.TLSConfig = tlsConfig
 	return s.httpServer.ServeTLS(l, "", "")
 }
+
+// StartDrain makes /readyz return 503 and closes each connection after its
+// next response while the listener keeps accepting. Idle connections stay
+// open so a request already written by a pooled client is served instead of
+// reset; Shutdown closes the ones that stay idle.
+func (s *Server) StartDrain() {
+	s.draining.Store(true)
+}
+
+// closeWhenDraining sets Connection: close on every response during a drain.
+// net/http's HTTP/2 server turns that header into a GOAWAY.
+func (s *Server) closeWhenDraining(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dw := &drainResponseWriter{ResponseWriter: w, draining: &s.draining}
+		next.ServeHTTP(dw, r)
+		dw.WriteHeader(http.StatusOK)
+	})
+}
+
+type drainResponseWriter struct {
+	http.ResponseWriter
+	draining    *atomic.Bool
+	wroteHeader bool
+}
+
+func (w *drainResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	// Non-101 informational responses leave final headers uncommitted and must not carry Connection: close.
+	w.wroteHeader = status >= http.StatusOK || status == http.StatusSwitchingProtocols
+	if w.wroteHeader && status != http.StatusSwitchingProtocols && w.draining.Load() {
+		w.Header().Set("Connection", "close")
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *drainResponseWriter) Write(p []byte) (int, error) {
+	w.WriteHeader(http.StatusOK)
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *drainResponseWriter) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *drainResponseWriter) FlushError() error {
+	w.WriteHeader(http.StatusOK)
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *drainResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)

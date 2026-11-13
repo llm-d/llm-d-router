@@ -27,6 +27,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 	"google.golang.org/protobuf/proto"
 	"k8s.io/utils/ptr"
 
@@ -1408,4 +1410,103 @@ func TestExtractorPublishesBuiltinScalarAttributes(t *testing.T) {
 		assertScalarMetric(t, ep, RunningRequestsSizeKey, 7.0)
 		assertScalarMetric(t, ep, KVCacheUsagePercentKey, 0.85)
 	})
+}
+
+// A customMetrics entry that lists a histogram's _sum series by its own name
+// receives it as an untyped family (see extractValue).
+func TestCustomMetricReadsUntypedSample(t *testing.T) {
+	registry := NewMappingRegistry()
+	mapping, err := NewMappingFromConfig(MappingConfig{
+		Queue:   defaultTotalQueuedRequestsMetric,
+		Running: defaultTotalRunningRequestsMetric,
+		KVUsage: defaultKvCacheUsagePercentageMetric,
+		CustomMetrics: []CustomMetric{
+			{AttributeKey: "prefill_time_sum", Spec: mustSpec(t, "vllm:request_prefill_time_seconds_sum")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewMappingFromConfig() unexpected error: %v", err)
+	}
+	if err := registry.Register(DefaultEngineType, mapping); err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+	extractor, err := NewCoreMetricsExtractor(registry, "")
+	if err != nil {
+		t.Fatalf("NewCoreMetricsExtractor() unexpected error: %v", err)
+	}
+
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	families, err := parser.TextToMetricFamilies(strings.NewReader("vllm:request_prefill_time_seconds_sum{model_name=\"m\"} 12.5\n"))
+	if err != nil {
+		t.Fatalf("TextToMetricFamilies() unexpected error: %v", err)
+	}
+	if got := families["vllm:request_prefill_time_seconds_sum"].GetType(); got != dto.MetricType_UNTYPED {
+		t.Fatalf("parsed family type = %v, want %v", got, dto.MetricType_UNTYPED)
+	}
+	families[defaultTotalQueuedRequestsMetric] = gaugeFamily(2)
+	families[defaultTotalRunningRequestsMetric] = gaugeFamily(1)
+	families[defaultKvCacheUsagePercentageMetric] = gaugeFamily(0.5)
+
+	ep := fwkdl.NewEndpoint(nil, nil)
+	if err := extractor.Extract(t.Context(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: families, Endpoint: ep}); err != nil {
+		t.Fatalf("Extract() unexpected error: %v", err)
+	}
+	assertScalarMetric(t, ep, "prefill_time_sum", 12.5)
+}
+
+func TestCustomMetricRejectsNonScalarFamilies(t *testing.T) {
+	for _, metricType := range []dto.MetricType{dto.MetricType_HISTOGRAM, dto.MetricType_SUMMARY} {
+		for _, aggregation := range []metricAggregation{"", metricAggregationSum} {
+			for _, optional := range []bool{false, true} {
+				t.Run(metricType.String()+"/aggregation="+string(aggregation)+"/optional="+strconv.FormatBool(optional), func(t *testing.T) {
+					registry := NewMappingRegistry()
+					mapping, err := NewMappingFromConfig(MappingConfig{
+						CustomMetrics: []CustomMetric{{
+							AttributeKey: "latency",
+							Spec:         mustSpec(t, "latency"),
+							Aggregation:  aggregation,
+							Optional:     optional,
+						}},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := registry.Register(DefaultEngineType, mapping); err != nil {
+						t.Fatal(err)
+					}
+					extractor, err := NewCoreMetricsExtractor(registry, "")
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					parser := expfmt.NewTextParser(model.LegacyValidation)
+					families, err := parser.TextToMetricFamilies(strings.NewReader(
+						"# TYPE latency " + strings.ToLower(metricType.String()) + "\nlatency_sum 12.5\nlatency_count 2\n"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					ep := fwkdl.NewEndpoint(nil, nil)
+					input := fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: families, Endpoint: ep}
+					for _, seeded := range []bool{false, true} {
+						if seeded {
+							ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey("latency"), attrmetrics.ScalarMetricValue(7))
+						}
+						err := extractor.Extract(t.Context(), input)
+						if optional {
+							if err != nil {
+								t.Fatalf("optional metric: %v", err)
+							}
+						} else if err == nil || !strings.Contains(err.Error(), "unsupported metric type "+metricType.String()+" for \"latency\"") {
+							t.Errorf("expected unsupported metric type error, got %v", err)
+						}
+						if seeded {
+							assertScalarMetric(t, ep, "latency", 7)
+						} else {
+							assertNoScalarMetric(t, ep, "latency")
+						}
+					}
+				})
+			}
+		}
+	}
 }

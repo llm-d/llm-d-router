@@ -207,6 +207,7 @@ func TestConcurrentRecording(t *testing.T) {
 // observation is lost and the last published snapshot sees all of them.
 func TestConcurrentRecordAndPublish(t *testing.T) {
 	p := newObserver(t)
+	p.stateFor("default/a")
 	ctx := context.Background()
 	const observations = 500
 
@@ -234,6 +235,8 @@ func TestConcurrentRecordAndPublish(t *testing.T) {
 
 func TestDumpState(t *testing.T) {
 	p := newObserver(t)
+	p.stateFor("default/busy")
+	p.stateFor("default/quiet")
 	p.record("default/busy", 0.5, 3, time.Now())
 	p.record("default/busy", 0.6, 4, time.Now())
 	p.record("default/quiet", 0.2, 0, time.Now())

@@ -18,12 +18,42 @@ package sessionstate
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type sessionRecord struct {
+	// state is guarded by SessionStateRegistry.mu.
 	state       SessionState
 	firstSeenAt time.Time
+	// pendingRequests counts requests observed at RequestHeader that are not
+	// yet dispatched or abandoned, such as requests waiting in a flow-control
+	// queue. Guarded by SessionStateRegistry.mu.
+	pendingRequests int64
+	// published is a copy of state replaced after every write, so readers on
+	// the request path do not take the registry lock.
+	published atomic.Pointer[SessionState]
+}
+
+func (record *sessionRecord) publishLocked() {
+	state := record.state
+	record.published.Store(&state)
+}
+
+// observation is one request's view of its session. Counters and token totals
+// are read live from the record; LastSeenAt and Duration are fixed when the
+// request is observed.
+type observation struct {
+	record     *sessionRecord
+	observedAt time.Time
+	prevSeenAt time.Time
+}
+
+func (o observation) state() SessionState {
+	state := *o.record.published.Load()
+	state.LastSeenAt = o.prevSeenAt
+	state.Duration = o.observedAt.Sub(o.record.firstSeenAt)
+	return state
 }
 
 // SessionStateRegistry stores session history and owns its concurrency rules.
@@ -31,36 +61,68 @@ type sessionRecord struct {
 type SessionStateRegistry struct {
 	mu       sync.Mutex
 	sessions map[string]*sessionRecord
+	// pending maps the ID of a request observed at RequestHeader to its
+	// session record until the request is dispatched or abandoned.
+	pending map[string]*sessionRecord
+}
+
+// observe marks the session as seen at the current time and returns the
+// request's view of it. A non-empty requestID marks the request as pending,
+// which keeps the session from being evicted until RecordDispatch or
+// ReleasePending is called with the same ID.
+func (r *SessionStateRegistry) observe(identity, requestID string) observation {
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	record := r.getOrCreate(identity, now)
+	if requestID != "" {
+		// A request ID observed twice moves to the newer record, so each
+		// record counts exactly the pending entries that point to it.
+		r.releasePendingLocked(requestID)
+		if r.pending == nil {
+			r.pending = make(map[string]*sessionRecord)
+		}
+		r.pending[requestID] = record
+		record.pendingRequests++
+	}
+	prevSeenAt := record.state.LastSeenAt
+	record.state.LastSeenAt = now
+	record.publishLocked()
+	return observation{record: record, observedAt: now, prevSeenAt: prevSeenAt}
 }
 
 // GetState returns the state observed before the current request and marks the
 // session as seen at the current time.
 func (r *SessionStateRegistry) GetState(identity string) SessionState {
-	now := time.Now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	record := r.getOrCreate(identity, now)
-	state := record.state
-	state.Duration = now.Sub(record.firstSeenAt)
-	record.state.LastSeenAt = now
-	return state
+	return r.observe(identity, "").state()
 }
 
-// RecordDispatch records one request dispatched for the session.
-func (r *SessionStateRegistry) RecordDispatch(identity string) {
+// RecordDispatch records one request dispatched for the session and ends the
+// pending state of requestID, if any.
+func (r *SessionStateRegistry) RecordDispatch(identity, requestID string) {
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.releasePendingLocked(requestID)
 	record := r.getOrCreate(identity, now)
 	record.state.TurnsTaken++
 	record.state.InFlightRequests++
+	record.publishLocked()
+}
+
+// TurnUsage is the token usage reported by one response.
+type TurnUsage struct {
+	InputTokens  int64
+	OutputTokens int64
+	CachedTokens int64
 }
 
 // RecordResponse records the end of a dispatched request's response lifecycle.
 // Only naturally completed responses contribute completion and token totals.
-func (r *SessionStateRegistry) RecordResponse(identity string, naturallyCompleted bool, inputTokens, outputTokens int64) {
+func (r *SessionStateRegistry) RecordResponse(identity string, naturallyCompleted bool, usage TurnUsage) {
+	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -69,16 +131,37 @@ func (r *SessionStateRegistry) RecordResponse(identity string, naturallyComplete
 		return
 	}
 	record.state.InFlightRequests--
-	if !naturallyCompleted {
-		return
+	record.state.LastResponseAt = now
+	if naturallyCompleted {
+		record.state.CompletedRequests++
+		record.state.TotalInputTokens += usage.InputTokens
+		record.state.TotalOutputTokens += usage.OutputTokens
+		record.state.TotalCachedTokens += usage.CachedTokens
 	}
-	record.state.CompletedRequests++
-	record.state.TotalInputTokens += inputTokens
-	record.state.TotalOutputTokens += outputTokens
+	record.publishLocked()
 }
 
-// EvictIdle removes sessions that have been idle longer than ttl. Sessions
-// with in-flight requests are retained until those requests end.
+// ReleasePending ends the pending state of a request that leaves without being
+// dispatched. It is safe to call for an unknown or already released ID.
+func (r *SessionStateRegistry) ReleasePending(requestID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.releasePendingLocked(requestID)
+}
+
+func (r *SessionStateRegistry) releasePendingLocked(requestID string) {
+	if requestID == "" {
+		return
+	}
+	if record, ok := r.pending[requestID]; ok {
+		delete(r.pending, requestID)
+		record.pendingRequests--
+	}
+}
+
+// EvictIdle removes sessions whose latest request or response is older than
+// ttl. Sessions with pending or in-flight requests are retained until those
+// requests are abandoned or end.
 func (r *SessionStateRegistry) EvictIdle(now time.Time, ttl time.Duration) {
 	if ttl <= 0 {
 		return
@@ -87,10 +170,14 @@ func (r *SessionStateRegistry) EvictIdle(now time.Time, ttl time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for identity, record := range r.sessions {
-		if record.state.InFlightRequests > 0 {
+		if record.state.InFlightRequests > 0 || record.pendingRequests > 0 {
 			continue
 		}
-		if now.Sub(record.state.LastSeenAt) > ttl {
+		lastActive := record.state.LastSeenAt
+		if record.state.LastResponseAt.After(lastActive) {
+			lastActive = record.state.LastResponseAt
+		}
+		if now.Sub(lastActive) > ttl {
 			delete(r.sessions, identity)
 		}
 	}
@@ -109,6 +196,7 @@ func (r *SessionStateRegistry) getOrCreate(identity string, now time.Time) *sess
 		},
 		firstSeenAt: now,
 	}
+	record.publishLocked()
 	r.sessions[identity] = record
 	return record
 }

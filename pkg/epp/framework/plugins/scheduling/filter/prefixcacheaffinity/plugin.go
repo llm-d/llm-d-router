@@ -37,6 +37,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
@@ -48,11 +49,18 @@ const (
 	PluginType = "prefix-cache-affinity-filter"
 )
 
-var _ fwksched.Filter = &Plugin{}
+var (
+	_ fwksched.Filter  = &Plugin{}
+	_ fwkrh.PreRequest = &pairedPlugin{}
+)
 
 // TTFTSource selects the per-endpoint TTFT signal used by the load gate. The
 // choice also determines which producer attribute the filter consumes.
 type TTFTSource string
+
+// TTFTEstimate selects the method of estimation for the TTFT per-endpoint with
+// the prefillThroughput source.
+type TTFTEstimate string
 
 const (
 	// TTFTSourceLatencyPredictor reads predicted TTFT from LatencyPredictionInfo
@@ -62,6 +70,14 @@ const (
 	// PeakPrefillThroughput, reading InFlightLoad (produced by the
 	// in-flight-load-producer).
 	TTFTSourcePrefillThroughput TTFTSource = "prefillThroughput"
+)
+
+const (
+	// TTFTEstimateBackLog estimates TTFT only from the endpoint's current load (InFlightLoad).
+	TTFTEstimateBackLog TTFTEstimate = "backlog"
+	// TTFTEstimateFull estimates TTFT from the endpoint's current load (InFlightLoad) plus the
+	// request impact (uncachedRequestTokens).
+	TTFTEstimateFull TTFTEstimate = "full"
 )
 
 type Config struct {
@@ -91,9 +107,20 @@ type Config struct {
 	// (tokens / (tokens/sec) * 1000 = ms). Default: 15928.
 	PeakPrefillThroughput float64 `json:"peakPrefillThroughput,omitempty"`
 
+	// TTFTEstimate selects how to compute the TTFT when the source is set to prefillThroughput.
+	// TTFTEstimateBackLog (default) only accounts inFlightTokens and TTFTEstimateFull also handles
+	// the request's uncached tokens.
+	TTFTEstimate TTFTEstimate `json:"ttftEstimate,omitempty"`
+
 	PrefixMatchInfoProducerName       string `json:"prefixMatchInfoProducerName,omitempty"`
 	LatencyPredictionInfoProducerName string `json:"latencyPredictionInfoProducerName,omitempty"`
 	InFlightLoadProducerName          string `json:"inFlightLoadProducerName,omitempty"`
+
+	// P2PSourceProducerName names the p2p-source-producer whose decision for
+	// each request is paired with this filter's outcome in
+	// llm_d_epp_prefix_cache_affinity_filter_p2p_decisions_total. Empty disables
+	// the pairing.
+	P2PSourceProducerName string `json:"p2pSourceProducerName,omitempty"`
 }
 
 var DefaultConfig = Config{
@@ -104,6 +131,7 @@ var DefaultConfig = Config{
 
 	// Calibrated for Qwen 32B on 2x H100 80GB (TP=2), vLLM 0.19; see README.
 	PeakPrefillThroughput: 15928,
+	TTFTEstimate:          TTFTEstimateBackLog,
 }
 
 type Plugin struct {
@@ -112,7 +140,19 @@ type Plugin struct {
 	prefixMatchDataKey           fwkplugin.DataKey
 	latencyPredictionInfoDataKey fwkplugin.DataKey
 	inFlightLoadDataKey          fwkplugin.DataKey
+	outcomeDataKey               fwkplugin.DataKey
+	p2pDecisionDataKey           fwkplugin.DataKey
+	uncachedRequestDataKey       fwkplugin.DataKey
 }
+
+// pairedPlugin is the filter with p2pSourceProducerName set. Only it implements
+// PreRequest, so an unpaired filter adds no per-request hook.
+type pairedPlugin struct {
+	*Plugin
+}
+
+// affinityOutcome is the outcome Filter stores on the request for PreRequest.
+type affinityOutcome string
 
 func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	config := DefaultConfig
@@ -129,13 +169,20 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 			return nil, err
 		}
 	}
-	return &Plugin{
+	p := &Plugin{
 		typedName:                    fwkplugin.TypedName{Type: PluginType, Name: name},
 		config:                       config,
 		prefixMatchDataKey:           attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(config.PrefixMatchInfoProducerName),
 		latencyPredictionInfoDataKey: attrlatency.LatencyPredictionInfoDataKey.WithNonEmptyProducerName(config.LatencyPredictionInfoProducerName),
 		inFlightLoadDataKey:          attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
-	}, nil
+		outcomeDataKey:               fwkplugin.NewDataKey("affinity-outcome", PluginType).WithNonEmptyProducerName(name),
+		p2pDecisionDataKey:           attrprefix.P2PSourceDecisionDataKey.WithNonEmptyProducerName(config.P2PSourceProducerName),
+		uncachedRequestDataKey:       attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(config.InFlightLoadProducerName),
+	}
+	if p.pairsP2P() {
+		return &pairedPlugin{Plugin: p}, nil
+	}
+	return p, nil
 }
 
 func (c *Config) validate() error {
@@ -156,6 +203,11 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("ttftSource must be %q or %q, got %q", TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput, c.TTFTSource)
 	}
+	switch c.TTFTEstimate {
+	case TTFTEstimateBackLog, TTFTEstimateFull:
+	default:
+		return fmt.Errorf("ttftEstimate must be %q or %q, got %q", TTFTEstimateBackLog, TTFTEstimateFull, c.TTFTEstimate)
+	}
 	if !c.usesLatencyPredictor() && c.MaxTTFTPenaltyMs > 0 && c.PeakPrefillThroughput == 0 {
 		return errors.New("peakPrefillThroughput must be > 0 when ttftSource is prefillThroughput")
 	}
@@ -167,6 +219,10 @@ func (c *Config) validate() error {
 // latencyPredictor selects the predictor.
 func (c *Config) usesLatencyPredictor() bool {
 	return c.TTFTSource == TTFTSourceLatencyPredictor
+}
+
+func (c *Config) usesFullEstimate() bool {
+	return c.TTFTEstimate == TTFTEstimateFull
 }
 
 func (p *Plugin) TypedName() fwkplugin.TypedName {
@@ -195,8 +251,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	}
 
 	if len(endpoints) <= 1 || p.config.AffinityThreshold <= 0 {
-		recordDecision(p.typedName.Name, outcomeNotApplicable)
-		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeNotApplicable))
+		p.decide(request, span, outcomeNotApplicable)
 		return endpoints
 	}
 
@@ -204,8 +259,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	if rand.Float64() < p.config.ExplorationProbability { //#nosec G404 -- exploration sampling, not security-sensitive
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: exploration skip, keeping all",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
-		recordDecision(p.typedName.Name, outcomeExploration)
-		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeExploration))
+		p.decide(request, span, outcomeExploration)
 		return endpoints
 	}
 
@@ -225,8 +279,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 	if len(sticky) == 0 {
 		logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: no sticky endpoints",
 			"affinityThreshold", p.config.AffinityThreshold, "total", len(endpoints))
-		recordDecision(p.typedName.Name, outcomeNoMatch)
-		span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeNoMatch))
+		p.decide(request, span, outcomeNoMatch)
 		return endpoints
 	}
 
@@ -237,8 +290,7 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 		if !stickyOk || !nonStickyOk {
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate skipped, missing signal",
 				"stickyObserved", stickyOk, "nonStickyObserved", nonStickyOk)
-			recordDecision(p.typedName.Name, outcomeMissingSignal)
-			span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeMissingSignal))
+			p.decide(request, span, outcomeMissingSignal)
 			return endpoints
 		}
 		penalty := bestStickyTTFT - bestNonStickyTTFT
@@ -247,17 +299,34 @@ func (p *Plugin) Filter(ctx context.Context, request *fwksched.InferenceRequest,
 			logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: TTFT load gate broken",
 				"bestStickyTTFT", bestStickyTTFT, "bestNonStickyTTFT", bestNonStickyTTFT,
 				"penalty", penalty, "maxPenalty", p.config.MaxTTFTPenaltyMs)
-			recordDecision(p.typedName.Name, outcomeLoadOverride)
-			span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeLoadOverride))
+			p.decide(request, span, outcomeLoadOverride)
 			return endpoints
 		}
 	}
 
 	logger.V(logutil.DEBUG).Info("PrefixCacheAffinityFilter: narrowed to sticky",
 		"affinityThreshold", p.config.AffinityThreshold, "sticky", len(sticky), "total", len(endpoints))
-	recordDecision(p.typedName.Name, outcomeSticky)
-	span.SetAttributes(semconv.LLMDEPPFilterDecision(outcomeSticky))
+	p.decide(request, span, outcomeSticky)
 	return sticky
+}
+
+// decide records the outcome. With pairing on, a repeat call for the same
+// request (the instance runs in several scheduling profiles) stores
+// outcomeMultiple.
+func (p *Plugin) decide(request *fwksched.InferenceRequest, span trace.Span, outcome string) {
+	recordDecision(p.typedName.Name, outcome)
+	span.SetAttributes(semconv.LLMDEPPFilterDecision(outcome))
+	if !p.pairsP2P() || request == nil {
+		return
+	}
+	if _, decided := fwksched.ReadRequestAttribute[affinityOutcome](request, p.outcomeDataKey); decided {
+		outcome = outcomeMultiple
+	}
+	request.PutAttribute(p.outcomeDataKey, affinityOutcome(outcome))
+}
+
+func (p *Plugin) pairsP2P() bool {
+	return p.config.P2PSourceProducerName != ""
 }
 
 func (p *Plugin) Consumes() fwkplugin.DataDependencies {
@@ -269,9 +338,46 @@ func (p *Plugin) Consumes() fwkplugin.DataDependencies {
 			required[p.latencyPredictionInfoDataKey] = attrlatency.LatencyPredictionInfo{}
 		} else {
 			required[p.inFlightLoadDataKey] = attrconcurrency.InFlightLoad{}
+			if p.config.usesFullEstimate() {
+				required[p.uncachedRequestDataKey] = attrconcurrency.UncachedRequestTokens{}
+			}
 		}
 	}
 	return fwkplugin.DataDependencies{Required: required}
+}
+
+// Consumes adds the p2p-source-producer's decision as optional: the filter
+// routes the same without that producer, and the declared read orders the
+// producer's PreRequest before this one.
+func (p *pairedPlugin) Consumes() fwkplugin.DataDependencies {
+	deps := p.Plugin.Consumes()
+	deps.Optional = map[fwkplugin.DataKey]any{p.p2pDecisionDataKey: attrprefix.P2PSourceDecision{}}
+	return deps
+}
+
+// Produces declares the outcome Filter stores on the request; PreRequest reads
+// it back.
+func (p *pairedPlugin) Produces() map[fwkplugin.DataKey]any {
+	return map[fwkplugin.DataKey]any{p.outcomeDataKey: affinityOutcome("")}
+}
+
+// PreRequest pairs the outcome Filter stored for the request with the
+// p2p-source-producer's decision. A request this instance did not filter is
+// not counted.
+func (p *pairedPlugin) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
+	if request == nil {
+		return nil
+	}
+	outcome, ok := fwksched.ReadRequestAttribute[affinityOutcome](request, p.outcomeDataKey)
+	if !ok {
+		return nil
+	}
+	decision, ok := fwksched.ReadRequestAttribute[attrprefix.P2PSourceDecision](request, p.p2pDecisionDataKey)
+	if !ok {
+		decision = attrprefix.P2PSourceDecision{Outcome: p2pOutcomeUnreported}
+	}
+	recordP2PDecision(p.typedName.Name, decision.EndpointRole, string(outcome), decision.Outcome)
+	return nil
 }
 
 func (p *Plugin) prefixCacheScore(ep fwksched.Endpoint) float64 {
@@ -316,6 +422,13 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	if !ok {
 		return 0, false
 	}
+	if p.config.usesFullEstimate() {
+		uncachedTokens, ok := p.uncachedRequestTokens(ep)
+		if !ok {
+			return 0, false
+		}
+		tokens += uncachedTokens
+	}
 	return float64(tokens) / p.config.PeakPrefillThroughput * 1000, true
 }
 
@@ -325,6 +438,18 @@ func (p *Plugin) inFlightTokens(ep fwksched.Endpoint) (int64, bool) {
 	if raw, ok := ep.Get(p.inFlightLoadDataKey); ok {
 		if load, ok := raw.(*attrconcurrency.InFlightLoad); ok && load != nil {
 			return load.Tokens, true
+		}
+	}
+	return 0, false
+}
+
+// uncachedRequestTokens returns the number of tokens from the current request
+// that this endpoint would need to prefill from scratch. If the attribute is
+// absent, it returns ok=false so the caller can treat the signal as missing.
+func (p *Plugin) uncachedRequestTokens(ep fwksched.Endpoint) (int64, bool) {
+	if raw, ok := ep.Get(p.uncachedRequestDataKey); ok {
+		if uncached, ok := raw.(*attrconcurrency.UncachedRequestTokens); ok && uncached != nil {
+			return uncached.Tokens, true
 		}
 	}
 	return 0, false

@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cespare/xxhash/v2"
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -48,7 +49,6 @@ const (
 	responsesAPI       = "responses"
 	chatCompletionsAPI = "chat/completions"
 	completionsAPI     = "completions"
-	promptField        = "prompt"
 
 	formFieldNumInferenceSteps = "num_inference_steps"
 	embeddingsAPI              = "embeddings"
@@ -192,8 +192,8 @@ func (p *OpenAIParser) ParseRequest(ctx context.Context, body []byte, headers ma
 // envelope, and the string fields each keeps opaque. Prompt content is decoded
 // once into the typed body; the original bytes are forwarded unless mutated.
 var envelopeRawFields = map[string][]string{
-	chatCompletionsAPI: {promptField},
-	completionsAPI:     {promptField},
+	chatCompletionsAPI: {reqcommon.FieldPrompt},
+	completionsAPI:     {reqcommon.FieldPrompt},
 	responsesAPI:       {reqcommon.FieldInput, reqcommon.FieldInstructions},
 }
 
@@ -432,9 +432,10 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 			Input        *string `json:"input"`
 			Instructions string  `json:"instructions,omitempty"`
 			RefText      string  `json:"ref_text,omitempty"`
+			CacheSalt    string  `json:"cache_salt,omitempty"`
 		}
 		if err := json.Unmarshal(rawBody, &speechRequest); err != nil {
-			return nil, requestBodyDecodeError(err, errors.New("invalid text to speech request: input, instructions, and ref_text must be strings"))
+			return nil, requestBodyDecodeError(err, errors.New("invalid text to speech request: input, instructions, ref_text, and cache_salt must be strings"))
 		}
 		if speechRequest.Input == nil {
 			return nil, errors.New("invalid text to speech request: must have string input field")
@@ -444,6 +445,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 				Input:        *speechRequest.Input,
 				Instructions: speechRequest.Instructions,
 				RefText:      speechRequest.RefText,
+				CacheSalt:    speechRequest.CacheSalt,
 			},
 		}, nil
 
@@ -533,6 +535,14 @@ func parseDecisionsRequest(body []byte) (*fwkrh.ParseResult, error) {
 }
 
 func parseMultipartFields(body []byte, headers map[string]string, kind string, visit func(string, []byte) error) error {
+	return parseMultipartForm(body, headers, kind, visit, nil, nil)
+}
+
+// parseMultipartForm walks a multipart/form-data body, handing scalar fields
+// to visit and file parts whose name wantFile accepts to visitFile. File parts
+// no callback accepts are drained without capture.
+func parseMultipartForm(body []byte, headers map[string]string, kind string, visit func(string, []byte) error,
+	wantFile func(name string) bool, visitFile func(name string, media request.UploadedMedia) error) error {
 	contentTypeValue, _ := headerValue(headers, reqcommon.HeaderContentType)
 	mediaType, params, err := mime.ParseMediaType(contentTypeValue)
 	if err != nil || mediaType != "multipart/form-data" {
@@ -553,8 +563,18 @@ func parseMultipartFields(body []byte, headers map[string]string, kind string, v
 			return fmt.Errorf("error reading %s multipart body: %w", kind, err)
 		}
 		if part.FileName() != "" {
-			if _, err := io.Copy(io.Discard, part); err != nil {
+			if visitFile == nil || wantFile == nil || !wantFile(part.FormName()) {
+				if _, err := io.Copy(io.Discard, part); err != nil {
+					return fmt.Errorf("error reading %s file part %q: %w", kind, part.FormName(), err)
+				}
+				continue
+			}
+			media, err := readUploadedMedia(part)
+			if err != nil {
 				return fmt.Errorf("error reading %s file part %q: %w", kind, part.FormName(), err)
+			}
+			if err := visitFile(part.FormName(), media); err != nil {
+				return err
 			}
 			continue
 		}
@@ -568,14 +588,48 @@ func parseMultipartFields(body []byte, headers map[string]string, kind string, v
 	}
 }
 
+// readUploadedMedia streams a file part into its routing-relevant properties
+// without retaining the body: size, content type, a bounded head for container
+// sniffing, and a hash of the full stream.
+func readUploadedMedia(part *multipart.Part) (request.UploadedMedia, error) {
+	media := request.UploadedMedia{ContentType: part.Header.Get(reqcommon.HeaderContentType)}
+	digest := xxhash.New()
+	head := make([]byte, 0, request.UploadedMediaHeadBytes)
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := part.Read(buf)
+		if n > 0 {
+			media.SizeBytes += int64(n)
+			if _, err := digest.Write(buf[:n]); err != nil {
+				return request.UploadedMedia{}, err
+			}
+			if len(head) < request.UploadedMediaHeadBytes {
+				head = append(head, buf[:min(n, request.UploadedMediaHeadBytes-len(head))]...)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return request.UploadedMedia{}, err
+		}
+	}
+	media.Head = head
+	media.Hash = digest.Sum64()
+	return media, nil
+}
+
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
+// The uploaded image part is the image-to-image conditioning input, so it is
+// captured as UploadedMedia for input-cost estimation; the original body is
+// forwarded unchanged.
 func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	images := &request.ImagesGenerationsRequest{}
 	extractedBody := &request.InferenceRequestBody{
 		Images:  images,
 		Payload: request.RawPayload(body),
 	}
-	err := parseMultipartFields(body, headers, "images edits", func(name string, value []byte) error {
+	err := parseMultipartForm(body, headers, "images edits", func(name string, value []byte) error {
 		switch name {
 		case reqcommon.FieldModel:
 			extractedBody.Model = string(value)
@@ -604,6 +658,11 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 			}
 			extractedBody.Stream = stream
 		}
+		return nil
+	}, func(name string) bool {
+		return name == "image"
+	}, func(_ string, media request.UploadedMedia) error {
+		images.Image = media
 		return nil
 	})
 	if err != nil {

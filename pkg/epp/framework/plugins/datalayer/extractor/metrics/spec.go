@@ -108,6 +108,11 @@ func extractFamily(spec *Spec, families sourcemetrics.PrometheusMetricMap) (*dto
 	if len(family.GetMetric()) == 0 {
 		return nil, fmt.Errorf("no metrics found for %q", spec.Name)
 	}
+	switch family.GetType() {
+	case dto.MetricType_GAUGE, dto.MetricType_COUNTER, dto.MetricType_UNTYPED:
+	default:
+		return nil, fmt.Errorf("unsupported metric type %v for %q", family.GetType(), spec.Name)
+	}
 	return family, nil
 }
 
@@ -230,7 +235,8 @@ func (spec *Spec) labelsMatch(metricLabels []*dto.LabelPair) bool {
 }
 
 // extractValue gets the numeric value from different metric types.
-// Currently only Gauge and Counter are supported.
+// Gauge, Counter and Untyped samples carry one; the text parser files a
+// sample whose family has no TYPE line as Untyped.
 func extractValue(metric *dto.Metric) float64 {
 	if metric == nil {
 		return 0
@@ -240,6 +246,9 @@ func extractValue(metric *dto.Metric) float64 {
 	}
 	if counter := metric.GetCounter(); counter != nil {
 		return counter.GetValue()
+	}
+	if untyped := metric.GetUntyped(); untyped != nil {
+		return untyped.GetValue()
 	}
 	return 0
 }

@@ -26,10 +26,12 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 const (
@@ -89,6 +91,11 @@ func (s *Server) runConcurrentPD(
 		semconv.LLMDPDProxyConnector(connector),
 		semconv.LLMDPDProxyPrefillAsync(true),
 	)
+	// Lets a consumer of the span (for example the scheduler, which cannot see the prefill response) tie it to the
+	// request it routed. The nixlv2 connector sets the same attribute on its own prefill span.
+	if requestID := r.Header.Get(reqcommon.RequestIDHeaderKey); requestID != "" {
+		prefillSpan.SetAttributes(semconv.LLMDPDProxyRequestID(requestID))
+	}
 	prefillStart := time.Now()
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
@@ -120,12 +127,12 @@ func (s *Server) runConcurrentPD(
 			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 		)
 		// A prefill the sidecar cancelled is not a prefill error.
-		if isHTTPError(pw.statusCode) && prefillCtx.Err() == nil {
-			observeStageError(r.Context(), metrics.StagePrefill)
+		if (isHTTPError(pw.statusCode) || grpcframe.HasErrorStatus(pw.headers)) && prefillCtx.Err() == nil {
+			observeStageError(r.Context(), routing.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 			cancelDecode(&prefillFailedError{response: pw})
 		}
-		observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
+		observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
 		log.FromContext(prefillCtx).V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
 	}()
 
@@ -143,6 +150,9 @@ func (s *Server) runConcurrentPD(
 
 	decodeReq = decodeReq.WithContext(dCtx)
 	decodeWriter, decodeStatus := captureResponseStatus(w)
+	decodeFailed := func() bool {
+		return decodeStatus.failed() || grpcframe.HasErrorStatus(decodeWriter.Header())
+	}
 	decodeReturned := false
 	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	defer func() {
@@ -151,7 +161,7 @@ func (s *Server) runConcurrentPD(
 		}
 		// The request is over once decode has failed; a prefill still running
 		// would compute KV nobody consumes.
-		if !decodeReturned || decodeStatus.failed() {
+		if !decodeReturned || decodeFailed() {
 			cancelPrefill()
 			return
 		}
@@ -170,9 +180,9 @@ func (s *Server) runConcurrentPD(
 	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
-	observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
-	if decodeStatus.failed() {
-		observeStageError(r.Context(), metrics.StageDecode)
+	observeStageDuration(r.Context(), routing.StageDecode, decodeDuration)
+	if decodeFailed() {
+		observeStageError(r.Context(), routing.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
 	decodeSpan.SetAttributes(
@@ -209,6 +219,10 @@ type prefillFailedError struct {
 }
 
 func (e *prefillFailedError) Error() string {
+	if grpcframe.HasErrorStatus(e.response.headers) {
+		code, _ := grpcframe.Status(e.response.headers)
+		return fmt.Sprintf("prefill returned %d (grpc-status %s)", e.response.statusCode, code)
+	}
 	return fmt.Sprintf("prefill returned %d", e.response.statusCode)
 }
 
@@ -219,7 +233,7 @@ func (e *prefillFailedError) Error() string {
 // dispatch. Deferred without recover, so the panic still propagates.
 func recordDecodeAbort(ctx context.Context, returned *bool, start time.Time) {
 	if !*returned {
-		observeStageDuration(ctx, metrics.StageDecode, time.Since(start))
-		observeStageError(ctx, metrics.StageDecode)
+		observeStageDuration(ctx, routing.StageDecode, time.Since(start))
+		observeStageError(ctx, routing.StageDecode)
 	}
 }

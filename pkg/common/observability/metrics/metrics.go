@@ -28,6 +28,15 @@ const (
 	LLMDRouterEndpointPickerSubsystem = "llm_d_epp"
 )
 
+// Build info labels. The EPP, coordinator, and P/D sidecar each export an info
+// gauge with these labels, so dashboards can compare builds across components.
+const (
+	// BuildInfoLabelCommit is the git commit the binary was built from.
+	BuildInfoLabelCommit = "commit"
+	// BuildInfoLabelBuildRef is the build ref the binary was built from.
+	BuildInfoLabelBuildRef = "build_ref"
+)
+
 // Disaggregation path label values, naming the stages a request is split into
 // across pods. The EPP, coordinator, and P/D sidecar label their metrics with
 // these values so dashboards can join the components on them.

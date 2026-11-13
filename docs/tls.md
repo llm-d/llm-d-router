@@ -21,6 +21,7 @@ them. Which sources supply its value differs: see
 | `--tls-min-version` | `VersionTLS12`, `VersionTLS13` | `VersionTLS12` | yes | yes | yes | Minimum TLS version for secure serving. A value below `VersionTLS12` is rejected at startup. |
 | `--tls-cipher-suites` | Go `crypto/tls` cipher suite names (comma-separated or repeated) | `crypto/tls` default | yes | yes | yes | Cipher suites for secure serving. Only effective for TLS 1.2 and below; TLS 1.3 cipher suites are not configurable. |
 | `--enable-cert-reload` | `true` / `false` | `false` | yes | — | — | Reload the `--cert-path` key pair when it changes. |
+| `--client-ca-file` | file path | empty | yes | — | — | PEM CA that requires a verified client certificate on the serving listener. Requires `--secure-serving`. A gateway that presents no certificate, or one from another CA, fails the TLS handshake. |
 | `--secure-proxy` | `true` / `false` | `true` | — | deprecated | — | Deprecated alias for `--secure-serving`. |
 
 ## Differences between components
@@ -28,7 +29,7 @@ them. Which sources supply its value differs: see
 | Behavior | EPP | Sidecar | Coordinator |
 |---|---|---|---|
 | Reloading the certificate key pair | requires `--enable-cert-reload` | whenever a certificate directory is configured | whenever a certificate directory is configured |
-| Accepted cipher suite names | the names `crypto/tls` reports, from `tls.CipherSuites()` and `tls.InsecureCipherSuites()` | same as the EPP | also accepts the legacy spellings `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305` and `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305`, which `crypto/tls` spells with a `_SHA256` suffix |
+| Accepted cipher suite names | the names `crypto/tls` reports, from `tls.CipherSuites()` | same as the EPP | also accepts the legacy spellings `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305` and `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305`, which `crypto/tls` spells with a `_SHA256` suffix |
 | Rejecting an unknown cipher suite name | `unknown cipher suite "NAME"` | same as the EPP | `Cipher suite NAME not supported or doesn't exist` |
 
 ## Metrics endpoint (/metrics)
@@ -61,5 +62,6 @@ logged as `creating self-signed TLS certificate`.
 
 Each component logs the message `server TLS` at startup, whether or not TLS is enabled.
 The entry carries two keys: `tls` is `false` when secure serving is disabled, and
-`cert_path` is empty when no certificate directory is configured. The rendering of the
-keys depends on the log format.
+`cert_path` is empty when no certificate directory is configured. The EPP adds
+`client_ca`, which is `true` when `--client-ca-file` is set. The rendering of the keys
+depends on the log format.

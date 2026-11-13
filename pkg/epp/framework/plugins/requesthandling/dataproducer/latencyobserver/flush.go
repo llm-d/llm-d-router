@@ -47,7 +47,11 @@ func (p *Observer) Dispatch(ctx context.Context, ep fwkdl.Endpoint) error {
 		return nil
 	}
 	id := ep.GetMetadata().ID.String()
-	p.publish(ctx, id, p.stateFor(id), time.Now())
+	state, ok := p.lookup(id)
+	if !ok {
+		return nil
+	}
+	p.publish(ctx, id, state, time.Now())
 	return nil
 }
 

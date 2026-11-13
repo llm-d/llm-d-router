@@ -22,7 +22,7 @@ indexer owns block-key computation, index lookup, and prefix matching.
   [`kvblock.TokenProcessor`](kvblock/README.md) to chunk tokens into
   fixed-size blocks and hash each block (chaining the previous block's hash so a
   key encodes its whole prefix). `extraFeatures` taints the hash with per-block
-  multimodal metadata when present.
+  multimodal metadata and the cache salt when present.
 - **Matching.** `MatchBlockKeys` reads the pods that hold each block key
   from the [`kvblock.Index`](kvblock/README.md), optionally restricted to a
   caller-supplied pod set, and folds them into one `PodMatch` per pod holding
@@ -33,6 +33,12 @@ indexer owns block-key computation, index lookup, and prefix matching.
   one accumulator that holds the matching rules, so every caller and backend
   sees the same semantics. The contiguous-chain hit metrics are recorded
   here, under the index's `enableMetrics` option.
+- **Tail-only tiers.** A backend with `tailOnly: true` scores its blocks
+  only at positions past the longest chain, from block 0, that any candidate
+  pod holds in a tier without `tailOnly`. Marking storage as tail-only lets it
+  steer requests whose prefix no pod holds in memory, without drawing
+  requests away from pods that hold the prefix in GPU or CPU memory.
+  Matched blocks and per-tier run lengths are unchanged.
 - **Scoring.** `ScoreTokens` reports each pod's weighted score, so a pod that
   holds a longer contiguous prefix ranks higher.
 - **Tracing.** Index operations and the matcher emit OpenTelemetry spans,

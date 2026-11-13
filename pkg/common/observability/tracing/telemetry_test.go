@@ -19,6 +19,7 @@ package tracing
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"testing"
@@ -37,6 +38,15 @@ import (
 )
 
 const testServiceName = "llm-d-test"
+
+func TestMain(m *testing.M) {
+	// The first otel.SetErrorHandler call in a process permanently forwards the
+	// default handler to its argument. Claim that call with a handler that outlives
+	// every test, so a test restoring otel.GetErrorHandler() in cleanup does not
+	// leave errors routed to a completed test's logger.
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) { log.Print(err) }))
+	os.Exit(m.Run())
+}
 
 // clearEnv unsets keys for the duration of the test. t.Setenv records the original
 // value so its cleanup restores it; the value it writes is discarded immediately.

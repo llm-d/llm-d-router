@@ -20,6 +20,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"strconv"
 	"strings"
 	"time"
@@ -30,8 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -78,8 +81,11 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 
 	var parsedResp *fwkrh.ParsedResponse
 	parseBytes := responseBytes
-	if isEventStream(reqCtx.Response.Headers[reqcommon.HeaderContentType]) {
+	contentType := reqCtx.Response.Headers[reqcommon.HeaderContentType]
+	if isEventStream(contentType) {
 		parseBytes = completeSSELines(ctx, reqCtx, responseBytes, endOfStream)
+	} else if grpcframe.IsContentType(contentType) {
+		parseBytes = completeGRPCFrames(ctx, reqCtx, responseBytes, endOfStream)
 	}
 	parser, err := s.getOrResolveParser(reqCtx)
 	if err != nil {
@@ -97,6 +103,9 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
+		if parsedResp.DisjointInputTokens != nil {
+			mergeDisjointInput(&reqCtx.Usage, &reqCtx.disjointInput, *parsedResp.DisjointInputTokens)
+		}
 	}
 	if endOfStream {
 		// Recorded once here rather than per chunk: a server reporting cumulative
@@ -211,6 +220,108 @@ func logSSELineDrop(ctx context.Context) {
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized SSE line from response parsing", "limit", maxSSELineBytes)
 }
 
+// maxGRPCFrameBytes caps one buffered gRPC message payload during response parsing.
+const maxGRPCFrameBytes = 4 << 20
+
+// completeGRPCFrames returns contiguous complete gRPC frames from chunk, carrying any
+// trailing partial frame to the next chunk. Frames whose payload exceeds maxGRPCFrameBytes
+// are skipped by exact byte length without buffering so later frames stay aligned.
+func completeGRPCFrames(ctx context.Context, reqCtx *RequestContext, chunk []byte, endOfStream bool) []byte {
+	if reqCtx.grpcStreamCorrupted {
+		return nil
+	}
+	if reqCtx.grpcFrameSkipRemaining > 0 {
+		if uint64(len(chunk)) < reqCtx.grpcFrameSkipRemaining {
+			reqCtx.grpcFrameSkipRemaining -= uint64(len(chunk))
+			if endOfStream {
+				reqCtx.grpcFrameSkipRemaining = 0
+			}
+			return nil
+		}
+		chunk = chunk[reqCtx.grpcFrameSkipRemaining:]
+		reqCtx.grpcFrameSkipRemaining = 0
+	}
+
+	hadCarry := len(reqCtx.grpcFrameCarry) > 0
+	data := chunk
+	if hadCarry {
+		reqCtx.grpcFrameCarry = append(reqCtx.grpcFrameCarry, chunk...)
+		data = reqCtx.grpcFrameCarry
+		reqCtx.grpcFrameCarry = nil
+	}
+
+	var kept []byte
+	copied := false
+	offset := 0
+	for offset < len(data) {
+		rem := data[offset:]
+		if len(rem) < grpcframe.HeaderLen {
+			kept, offset = finishPartialGRPCFrame(reqCtx, rem, kept, offset, len(data), offset == 0 && hadCarry, copied, endOfStream)
+			break
+		}
+		if rem[0] != 0 {
+			reqCtx.grpcStreamCorrupted = true
+			if copied {
+				kept = append(kept, rem...)
+			} else {
+				offset = len(data)
+			}
+			break
+		}
+		msgLen := binary.BigEndian.Uint32(rem[1:grpcframe.HeaderLen])
+		frameLen := uint64(grpcframe.HeaderLen) + uint64(msgLen)
+		if msgLen > maxGRPCFrameBytes {
+			log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized gRPC frame from response parsing", "limit", maxGRPCFrameBytes)
+			if !copied {
+				kept = append(kept, data[:offset]...)
+				copied = true
+			}
+			if uint64(len(rem)) < frameLen {
+				if !endOfStream {
+					reqCtx.grpcFrameSkipRemaining = frameLen - uint64(len(rem))
+				}
+				break
+			}
+			payload := rem[grpcframe.HeaderLen : grpcframe.HeaderLen+msgLen]
+			offset += grpcframe.HeaderLen + len(payload)
+			continue
+		}
+		if uint64(len(rem)) < frameLen {
+			kept, offset = finishPartialGRPCFrame(reqCtx, rem, kept, offset, len(data), offset == 0 && hadCarry, copied, endOfStream)
+			break
+		}
+		payload := rem[grpcframe.HeaderLen : grpcframe.HeaderLen+msgLen]
+		step := grpcframe.HeaderLen + len(payload)
+		if copied {
+			kept = append(kept, rem[:step]...)
+		}
+		offset += step
+	}
+	if copied {
+		return kept
+	}
+	return data[:offset]
+}
+
+func finishPartialGRPCFrame(
+	reqCtx *RequestContext,
+	rem, kept []byte,
+	offset, dataLen int,
+	reuseCarry, copied, endOfStream bool,
+) ([]byte, int) {
+	switch {
+	case endOfStream && copied:
+		return append(kept, rem...), offset
+	case endOfStream:
+		return kept, dataLen
+	case reuseCarry:
+		reqCtx.grpcFrameCarry = rem
+	default:
+		reqCtx.grpcFrameCarry = bytes.Clone(rem)
+	}
+	return kept, offset
+}
+
 // mergeUsage folds a parsed usage block into the usage accumulated for the request.
 // Anthropic streaming reports usage on message_start and again on message_delta, and a
 // block may carry only some of the fields, so a zero is read as "not reported" and
@@ -239,6 +350,26 @@ func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
 }
 
+// mergeDisjointInput folds the input buckets of one chunk into acc and derives the
+// prompt and total from them. A chunk's PromptTokens and TotalTokens cover only the
+// buckets that chunk reported, so mergeUsage alone undercounts when message_delta
+// omits the cache buckets message_start reported in an earlier chunk.
+func mergeDisjointInput(dst *fwkrequest.Usage, acc *fwkrh.DisjointInputTokens, src fwkrh.DisjointInputTokens) {
+	if src.Uncached > 0 {
+		acc.Uncached = src.Uncached
+	}
+	if src.CacheRead > 0 {
+		acc.CacheRead = src.CacheRead
+	}
+	if src.CacheCreation > 0 {
+		acc.CacheCreation = src.CacheCreation
+	}
+	if prompt := acc.Uncached + acc.CacheRead + acc.CacheCreation; prompt > 0 {
+		dst.PromptTokens = prompt
+	}
+	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
+}
+
 func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *RequestContext, resp *extProcPb.ProcessingRequest_ResponseHeaders) *RequestContext {
 	for _, header := range resp.ResponseHeaders.Headers.Headers {
 		reqCtx.Response.Headers[header.Key] = envoy.GetHeaderValue(header)
@@ -246,14 +377,20 @@ func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *Req
 	return s.director.HandleResponseHeader(ctx, reqCtx)
 }
 
+// generateResponseHeaderResponse re-sets the response headers after the
+// response plugins ran. The failed-stage marker the plugins read is left out,
+// and removed from the upstream set when the response carried one, so the
+// client never sees it.
 func (s *StreamingServer) generateResponseHeaderResponse(reqCtx *RequestContext) *extProcPb.ProcessingResponse {
+	mutation := &extProcPb.HeaderMutation{SetHeaders: s.generateResponseHeaders(reqCtx)}
+	if _, ok := reqCtx.Response.Headers[routing.FailedStageHeader]; ok {
+		mutation.RemoveHeaders = []string{routing.FailedStageHeader}
+	}
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &extProcPb.HeadersResponse{
 				Response: &extProcPb.CommonResponse{
-					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: s.generateResponseHeaders(reqCtx),
-					},
+					HeaderMutation: mutation,
 				},
 			},
 		},
@@ -305,9 +442,10 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 		})
 	}
 
-	// Include any non-system-owned headers.
+	// Include any non-system-owned headers. The failed-stage marker is
+	// internal; generateResponseHeaderResponse removes it.
 	for key, value := range reqCtx.Response.Headers {
-		if request.IsSystemOwnedHeader(key) {
+		if request.IsSystemOwnedHeader(key) || key == routing.FailedStageHeader {
 			continue
 		}
 		headers = append(headers, &configPb.HeaderValueOption{

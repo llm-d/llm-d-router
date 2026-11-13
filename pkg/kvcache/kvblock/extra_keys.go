@@ -34,6 +34,11 @@ type BlockExtraFeatures struct {
 	// FirstContinuation classifies MMHashes[0] from its event offset.
 	// It is not part of the block hash.
 	FirstContinuation MMContinuation
+	// CacheSalt is the request's cache salt, which vLLM appends to the first
+	// block's extra keys after the MM items. The block hash takes it after
+	// MMHashes. Events whose MM items are bare identifiers can't tell the salt
+	// apart, so it stays in MMHashes there.
+	CacheSalt string
 }
 
 // MMContinuation reports whether a block's first MM entry continues the item
@@ -62,12 +67,16 @@ type PlaceholderRange struct {
 //     block-relative offset). Only the first entry's offset is kept, as
 //     FirstContinuation.
 //
+// When any entry of the event is a tuple, a bare string is the cache salt and
+// is kept as CacheSalt.
+//
 // nil inner slices produce nil entries. Returns nil if raw is nil.
 func ParseRawExtraKeys(raw [][]any, loraName string) ([]*BlockExtraFeatures, error) {
 	if raw == nil {
 		return nil, nil
 	}
 
+	tupleLayout := hasTupleEntry(raw)
 	result := make([]*BlockExtraFeatures, len(raw))
 	for blockIdx, blockKeys := range raw {
 		if blockKeys == nil {
@@ -81,6 +90,10 @@ func ParseRawExtraKeys(raw [][]any, loraName string) ([]*BlockExtraFeatures, err
 		for _, entry := range blockKeys {
 			switch v := entry.(type) {
 			case string:
+				if tupleLayout {
+					features.CacheSalt = v
+					continue
+				}
 				// vLLM <= v0.18.x: bare identifier string per MM item.
 				features.MMHashes = append(features.MMHashes, MMHash{Hash: v})
 			case []any:
@@ -99,12 +112,23 @@ func ParseRawExtraKeys(raw [][]any, loraName string) ([]*BlockExtraFeatures, err
 			}
 		}
 
-		if len(features.MMHashes) > 0 {
+		if len(features.MMHashes) > 0 || features.CacheSalt != "" {
 			result[blockIdx] = features
 		}
 	}
 
 	return result, nil
+}
+
+func hasTupleEntry(raw [][]any) bool {
+	for _, blockKeys := range raw {
+		for _, entry := range blockKeys {
+			if _, ok := entry.([]any); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func continuationFromOffset(v any) MMContinuation {

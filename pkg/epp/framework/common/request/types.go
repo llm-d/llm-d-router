@@ -83,6 +83,19 @@ func (RawPayload) isRequestPayload()         {}
 func (RawPayload) IsParsed() bool            { return false }
 func (RawPayload) AsMap() (PayloadMap, bool) { return nil, false }
 
+// PayloadBytes is a request body kept in its wire encoding by a parser that
+// rewrites it at the byte level instead of decoding it, for example a protobuf
+// message whose fields are spliced. Unlike RawPayload it implements Marshaler,
+// so the director's rewrite hooks accept it. A parser that returns it must
+// perform every rewrite it declares (PriorityRewriter, ModelNameRewriter) on
+// the bytes themselves.
+type PayloadBytes []byte
+
+func (PayloadBytes) isRequestPayload()          {}
+func (PayloadBytes) IsParsed() bool             { return true }
+func (PayloadBytes) AsMap() (PayloadMap, bool)  { return nil, false }
+func (p PayloadBytes) Marshal() ([]byte, error) { return p, nil }
+
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
 // An InferenceRequestBody must contain exactly one of CompletionsRequest, ChatCompletionsRequest, ResponsesRequest,
@@ -237,6 +250,13 @@ type TokenizedRequest struct {
 	Prompts []PromptTokens
 	// CacheSalt isolates prefix caches across requests. Populated by the token-producer.
 	CacheSalt string
+	// LegacyTranslated marks prompts produced by the token-producer's Go-side
+	// legacy /v1/messages or /v1/responses translation rather than by the
+	// backend renderer. Those translations do not guarantee token parity with
+	// what vLLM renders from the client's request (they drop fields like
+	// thinking, reasoning and tool_choice), so consumers must not forward the
+	// IDs as authoritative.
+	LegacyTranslated bool
 }
 
 // PromptTokens bundles the token IDs and multimodal features for a single
@@ -519,6 +539,8 @@ type TextToSpeechRequest struct {
 	// RefText is the transcript of a reference audio clip for voice cloning
 	// and is tokenized alongside Input.
 	RefText string `json:"ref_text,omitempty"`
+	// CacheSalt isolates prefix caches for security.
+	CacheSalt string `json:"cache_salt,omitempty"`
 }
 
 func (r *TextToSpeechRequest) String() string {
@@ -654,6 +676,10 @@ type ImagesGenerationsRequest struct {
 	// NegativePrompt describes what to avoid in the generated image(s) and is
 	// encoded alongside Prompt for classifier-free guidance.
 	NegativePrompt string `json:"negative_prompt,omitempty"`
+	// Image is the uploaded file part of an images-edits request, the
+	// image-to-image conditioning input. Its zero value means the request
+	// carried no image part (images-generations requests never do).
+	Image UploadedMedia `json:"-"`
 }
 
 func (i *ImagesGenerationsRequest) String() string {
@@ -722,6 +748,26 @@ func (v *VideoGenerationRequest) String() string {
 		derefInt(v.NumFrames), derefFloat(v.FPS),
 		derefInt(v.NumInferenceSteps), derefInt(v.NumOutputsPerPrompt))
 }
+
+// UploadedMedia describes one uploaded multipart file part without retaining
+// its body: Hash covers the full stream, SizeBytes its length, and Head its
+// leading bytes for container sniffing.
+type UploadedMedia struct {
+	// ContentType is the file part's declared MIME type.
+	ContentType string `json:"-"`
+	// SizeBytes is the file part's length in bytes.
+	SizeBytes int64 `json:"-"`
+	// Head holds the leading bytes of the file part.
+	Head []byte `json:"-"`
+	// Hash is the xxhash of the file part's full byte stream.
+	Hash uint64 `json:"-"`
+}
+
+// UploadedMediaHeadBytes bounds how many leading bytes of a media payload are
+// retained for container sniffing: the parser captures this many bytes of an
+// uploaded file part, and the estimator's dimension and duration walks read
+// within it.
+const UploadedMediaHeadBytes = 1024
 
 // GenerateRequest holds pre-tokenized input for native generate endpoints
 // (vLLM /inference/v1/generate and SGLang /generate). Unlike OpenAI-compatible

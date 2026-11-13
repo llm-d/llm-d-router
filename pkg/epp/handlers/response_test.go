@@ -18,9 +18,12 @@ limitations under the License.
 package handlers
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -38,22 +41,30 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/toolcalling"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanggrpc"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllminference"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -971,6 +982,32 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 			},
 			wantUsage: fwkrequest.Usage{}, // Zero values
 		},
+		{
+			name: "Inclusive prompt_tokens with cached_tokens only on second usage chunk",
+			chunks: []chunkStream{
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101,"prompt_tokens_details":null}}` + "\n"), endOfStream: false},
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":64}}}` + "\n" + `data: [DONE]`), endOfStream: true},
+			},
+			wantUsage: fwkrequest.Usage{
+				PromptTokens:       100,
+				CompletionTokens:   10,
+				TotalTokens:        110,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 64},
+			},
+		},
+		{
+			name: "Inclusive prompt_tokens with cached_tokens only on first usage chunk",
+			chunks: []chunkStream{
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101,"prompt_tokens_details":{"cached_tokens":64}}}` + "\n"), endOfStream: false},
+				{body: []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":0}}}` + "\n" + `data: [DONE]`), endOfStream: true},
+			},
+			wantUsage: fwkrequest.Usage{
+				PromptTokens:       100,
+				CompletionTokens:   10,
+				TotalTokens:        110,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 64},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -997,37 +1034,146 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	}
 }
 
-// A cache read reported by message_start must survive a later message_delta
-// that serializes a placeholder zero. Each chunk is parsed into a fresh Usage,
-// so this depends on mergeUsage applying the same "a zero never replaces a
-// known count" rule as the parser does within one Usage.
+// Cache read and cache creation counts reported by message_start must survive
+// a later message_delta delivered in a separate HTTP body chunk, including when
+// Envoy sends end of stream as a separate final frame.
 func TestHandleResponseBodyAnthropicCacheReadAcrossChunks(t *testing.T) {
 	t.Parallel()
 
-	server := &StreamingServer{
-		parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
-		director:       &mockDirector{},
-	}
-	reqCtx := &RequestContext{
-		Response: &Response{
-			Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream},
+	tests := []struct {
+		name         string
+		messageStart string
+		messageDelta string
+		want         fwkrequest.Usage
+	}{
+		{
+			name:         "delta placeholder zero keeps cache read in prompt and total tokens",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2030,
+				CompletionTokens:   15,
+				TotalTokens:        2045,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
 		},
-		Request:           &Request{Headers: map[string]string{":path": reqcommon.APITypeMessages.Path()}},
-		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+		{
+			name:         "delta omitting cache fields keeps cache read and creation in prompt and total tokens",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2130,
+				CompletionTokens:   15,
+				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "delta increasing input tokens below start plus cache creation",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":80,"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2180,
+				CompletionTokens:   15,
+				TotalTokens:        2195,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "delta superseding input tokens keeps earlier cache read",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":2679,"cache_read_input_tokens":800}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":10682,"output_tokens":510,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       11482,
+				CompletionTokens:   510,
+				TotalTokens:        11992,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 800},
+			},
+		},
+		{
+			name:         "delta superseding input tokens with cache creation",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":2679,"cache_read_input_tokens":800,"cache_creation_input_tokens":500}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":10682,"output_tokens":510,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       11982,
+				CompletionTokens:   510,
+				TotalTokens:        12492,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 800},
+			},
+		},
+		{
+			name:         "delta with output tokens only",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2130,
+				CompletionTokens:   15,
+				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "delta updating input tokens keeps earlier cache buckets in the total",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":25,"cache_read_input_tokens":2000,"cache_creation_input_tokens":100}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       2130,
+				CompletionTokens:   15,
+				TotalTokens:        2145,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 2000},
+			},
+		},
+		{
+			name:         "explicit cache miss on start with output tokens only on delta",
+			messageStart: `{"type":"message_start","message":{"usage":{"input_tokens":25,"cache_read_input_tokens":0}}}`,
+			messageDelta: `{"type":"message_delta","usage":{"output_tokens":15}}`,
+			want: fwkrequest.Usage{
+				PromptTokens:       25,
+				CompletionTokens:   15,
+				TotalTokens:        40,
+				PromptTokenDetails: &fwkrequest.PromptTokenDetails{CachedTokens: 0},
+			},
+		},
 	}
 
-	chunks := [][]byte{
-		[]byte("event: message_start\ndata: " + `{"type":"message_start","message":{"usage":{"input_tokens":30,"cache_read_input_tokens":2000}}}` + "\n\n"),
-		[]byte("event: message_delta\ndata: " + `{"type":"message_delta","usage":{"input_tokens":30,"output_tokens":15,"cache_read_input_tokens":0}}` + "\n\n"),
-		[]byte("event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"),
-	}
-	for i, chunk := range chunks {
-		server.HandleResponseBody(context.Background(), reqCtx, chunk, i == len(chunks)-1)
+	stop := "event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"
+	blockDelta := "event: content_block_delta\ndata: " + `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}` + "\n\n"
+	layouts := []struct {
+		name   string
+		chunks func(start, delta string) []string
+	}{
+		{"message_delta in final frame", func(start, delta string) []string { return []string{start, blockDelta, delta + stop} }},
+		{"message_stop final frame", func(start, delta string) []string { return []string{start, delta, stop} }},
+		{"empty final frame", func(start, delta string) []string { return []string{start, delta, ""} }},
 	}
 
-	require.NotNil(t, reqCtx.Usage.PromptTokenDetails)
-	assert.Equal(t, 2000, reqCtx.Usage.PromptTokenDetails.CachedTokens,
-		"a delta placeholder zero must not replace the cache read from message_start")
+	for _, tc := range tests {
+		for _, layout := range layouts {
+			t.Run(tc.name+"/"+layout.name, func(t *testing.T) {
+				server := &StreamingServer{
+					parserRegistry: NewParserRegistry([]fwkrh.Parser{anthropic.NewAnthropicParser()}, logr.Discard()),
+					director:       &mockDirector{},
+				}
+				reqCtx := &RequestContext{
+					Response: &Response{
+						Headers: map[string]string{reqcommon.HeaderContentType: reqcommon.MediaTypeEventStream},
+					},
+					Request:           &Request{Headers: map[string]string{":path": reqcommon.APITypeMessages.Path()}},
+					SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+				}
+
+				chunks := layout.chunks(
+					"event: message_start\ndata: "+tc.messageStart+"\n\n",
+					"event: message_delta\ndata: "+tc.messageDelta+"\n\n",
+				)
+				for i, chunk := range chunks {
+					server.HandleResponseBody(t.Context(), reqCtx, []byte(chunk), i == len(chunks)-1)
+				}
+
+				assert.Equal(t, tc.want, reqCtx.Usage)
+			})
+		}
+	}
 }
 
 // A large response.completed event split across chunks must still yield usage.
@@ -1807,4 +1953,206 @@ func TestRequestContextLifecycleAccessors(t *testing.T) {
 	assert.Equal(t, first, reqCtx.FirstTokenTimestamp())
 	assert.Equal(t, complete, reqCtx.ResponseCompleteTimestamp())
 	assert.True(t, reqCtx.ModelServerStreaming())
+}
+
+func TestHandleResponseBody_GRPCFrameCarryAndOversizedSkip(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	frame1, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+		Item: &sglangapiv1.GenerateStreamItem_Frame{
+			Frame: &sglangapiv1.GenerateResponse{
+				Text: "Hi",
+				MetaInfo: &sglangapiv1.GenerateMetaInfo{
+					PromptTokens:     15,
+					CompletionTokens: 2,
+					CachedTokens:     9,
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	frame2, err := grpcframe.MarshalProto(&sglangapiv1.GenerateStreamItem{
+		Item: &sglangapiv1.GenerateStreamItem_Frame{
+			Frame: &sglangapiv1.GenerateResponse{
+				Text: "Hello",
+				MetaInfo: &sglangapiv1.GenerateMetaInfo{
+					PromptTokens:     15,
+					CompletionTokens: 6,
+					CachedTokens:     9,
+					FinishReason: &sglangapiv1.FinishReason{
+						Kind: &sglangapiv1.FinishReason_Length{
+							Length: &sglangapiv1.FinishLength{Length: proto.Uint64(6)},
+						},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	t.Run("frames split across header and payload boundaries", func(t *testing.T) {
+		server := &StreamingServer{
+			parserRegistry: NewParserRegistry([]fwkrh.Parser{sglanggrpc.NewSGLangGRPCParser()}, logr.Discard()),
+			director:       &mockDirector{},
+		}
+		combined := append(append([]byte{}, frame1...), frame2...)
+		reqCtx := &RequestContext{
+			Request:              &Request{Headers: map[string]string{":path": sglangapiv1.SglangService_Generate_FullMethodName}},
+			Response:             &Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType + "+proto"}},
+			SchedulingRequest:    &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+			modelServerStreaming: true,
+		}
+		// Cut inside the 5-byte header of frame1, then inside frame2's payload, then finish on trailer.
+		cut1 := 3
+		cut2 := len(frame1) + 4
+		server.HandleResponseBody(ctx, reqCtx, combined[:cut1], false)
+		assert.Equal(t, 0, reqCtx.StreamedEvents)
+		server.HandleResponseBody(ctx, reqCtx, combined[cut1:cut2], false)
+		assert.Equal(t, 1, reqCtx.StreamedEvents)
+		server.HandleResponseBody(ctx, reqCtx, combined[cut2:], false)
+		assert.Equal(t, 2, reqCtx.StreamedEvents)
+		server.HandleResponseBody(ctx, reqCtx, nil, true)
+
+		assert.Equal(t, fwkrequest.Usage{
+			PromptTokens:     15,
+			CompletionTokens: 6,
+			TotalTokens:      21,
+			PromptTokenDetails: &fwkrequest.PromptTokenDetails{
+				CachedTokens: 9,
+			},
+		}, reqCtx.Usage)
+	})
+
+	t.Run("oversized frame skipped without buffering while preserving subsequent terminal frame", func(t *testing.T) {
+		server := &StreamingServer{
+			parserRegistry: NewParserRegistry([]fwkrh.Parser{sglanggrpc.NewSGLangGRPCParser()}, logr.Discard()),
+			director:       &mockDirector{},
+		}
+		reqCtx := &RequestContext{
+			Request:              &Request{Headers: map[string]string{":path": sglangapiv1.SglangService_Generate_FullMethodName}},
+			Response:             &Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}},
+			SchedulingRequest:    &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+			modelServerStreaming: true,
+		}
+		oversizedLen := uint32(maxGRPCFrameBytes + 32)
+		headerAndHead := make([]byte, grpcframe.HeaderLen+16)
+		binary.BigEndian.PutUint32(headerAndHead[1:grpcframe.HeaderLen], oversizedLen)
+
+		// First chunk: valid frame1 followed by start of oversized frame.
+		server.HandleResponseBody(ctx, reqCtx, append(append([]byte{}, frame1...), headerAndHead...), false)
+		assert.Equal(t, 1, reqCtx.StreamedEvents)
+		assert.Empty(t, reqCtx.grpcFrameCarry)
+		assert.Equal(t, uint64(oversizedLen)-16, reqCtx.grpcFrameSkipRemaining)
+
+		// Second chunk: rest of oversized frame followed by valid terminal frame2.
+		secondChunk := append(bytes.Repeat([]byte{0}, int(oversizedLen)-16), frame2...)
+		server.HandleResponseBody(ctx, reqCtx, secondChunk, false)
+		server.HandleResponseBody(ctx, reqCtx, nil, true)
+
+		assert.Equal(t, 2, reqCtx.StreamedEvents)
+		assert.Equal(t, 6, reqCtx.Usage.CompletionTokens)
+		assert.Equal(t, 15, reqCtx.Usage.PromptTokens)
+	})
+}
+
+// The vllm.Inference stream splits usage across frames: prompt_info on the
+// start frame and finish_info on the final one. The handler keeps the start
+// frame's prompt count when later chunks report none, and leaves the cached
+// token details unset until finish_info arrives. The oversized-frame path is
+// engine-agnostic and TestHandleResponseBody_GRPCFrameCarryAndOversizedSkip
+// covers it.
+func TestHandleResponseBody_VllmInferenceSplitFrames(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	cached9 := uint32(9)
+	startFrame := grpctest.Frame(t, &vllmpb.GenerateResponse{
+		PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 15},
+	})
+	deltaFrame := grpctest.Frame(t, &vllmpb.GenerateResponse{
+		Outputs: &vllmpb.SequenceOutput{Text: "hey", NumTokens: 1},
+	})
+	endFrame := grpctest.Frame(t, &vllmpb.GenerateResponse{
+		Outputs: &vllmpb.SequenceOutput{
+			Text:      "lo",
+			NumTokens: 1,
+			FinishInfo: &vllmpb.FinishInfo{
+				NumOutputTokens: 6,
+				FinishReason:    vllmpb.FinishInfo_STOP,
+				NumCachedTokens: &cached9,
+			},
+		},
+	})
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{vllminference.NewVllmInferenceParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	combined := slices.Concat(startFrame, deltaFrame, endFrame)
+	reqCtx := &RequestContext{
+		Request:              &Request{Headers: map[string]string{":path": vllmpb.Inference_GenerateStream_FullMethodName}},
+		Response:             &Response{Headers: map[string]string{reqcommon.HeaderContentType: grpcframe.MediaType}},
+		SchedulingRequest:    &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+		modelServerStreaming: true,
+	}
+
+	// Cut inside deltaFrame's header, then inside endFrame's header.
+	cut1 := len(startFrame) + 2
+	cut2 := len(startFrame) + len(deltaFrame) + 3
+	server.HandleResponseBody(ctx, reqCtx, combined[:cut1], false)
+	assert.Equal(t, 0, reqCtx.StreamedEvents)
+	assert.Equal(t, 15, reqCtx.Usage.PromptTokens)
+	assert.Nil(t, reqCtx.Usage.PromptTokenDetails)
+
+	server.HandleResponseBody(ctx, reqCtx, combined[cut1:cut2], false)
+	assert.Equal(t, 1, reqCtx.StreamedEvents)
+
+	server.HandleResponseBody(ctx, reqCtx, combined[cut2:], false)
+	server.HandleResponseBody(ctx, reqCtx, nil, true)
+	assert.Equal(t, 2, reqCtx.StreamedEvents)
+	assert.Equal(t, fwkrequest.Usage{
+		PromptTokens:     15,
+		CompletionTokens: 6,
+		TotalTokens:      21,
+		PromptTokenDetails: &fwkrequest.PromptTokenDetails{
+			CachedTokens: 9,
+		},
+	}, reqCtx.Usage)
+}
+
+// TestGenerateResponseHeaderResponseStripsFailedStage covers the failed-stage
+// marker on the response header mutation: the client never sees it, and the
+// mutation of a response that carried none stays unchanged.
+func TestGenerateResponseHeaderResponseStripsFailedStage(t *testing.T) {
+	server := &StreamingServer{}
+	setValue := func(mutation *extProcPb.HeaderMutation, key string) (string, bool) {
+		for _, header := range mutation.GetSetHeaders() {
+			if header.GetHeader().GetKey() == key {
+				return string(header.GetHeader().GetRawValue()), true
+			}
+		}
+		return "", false
+	}
+
+	withMarker := &RequestContext{Response: &Response{Headers: map[string]string{
+		routing.FailedStageHeader: routing.StagePrefill,
+		"content-type":            "application/json",
+	}}}
+	mutation := server.generateResponseHeaderResponse(withMarker).
+		GetResponseHeaders().GetResponse().GetHeaderMutation()
+	require.Equal(t, []string{routing.FailedStageHeader}, mutation.GetRemoveHeaders())
+	_, present := setValue(mutation, routing.FailedStageHeader)
+	assert.False(t, present, "the marker must not be re-set")
+	value, present := setValue(mutation, "content-type")
+	require.True(t, present)
+	assert.Equal(t, "application/json", value)
+
+	withoutMarker := &RequestContext{Response: &Response{Headers: map[string]string{
+		"content-type": "application/json",
+	}}}
+	mutation = server.generateResponseHeaderResponse(withoutMarker).
+		GetResponseHeaders().GetResponse().GetHeaderMutation()
+	assert.Empty(t, mutation.GetRemoveHeaders())
+	value, present = setValue(mutation, "content-type")
+	require.True(t, present)
+	assert.Equal(t, "application/json", value)
 }

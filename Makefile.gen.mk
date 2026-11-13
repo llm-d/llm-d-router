@@ -3,6 +3,8 @@
 # Extract upstream CRD versions from go.mod so references stay in sync with Go dependencies.
 GIE_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api-inference-extension)
 GATEWAY_API_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api)
+# Pinned vllm-project/vllm ref (tag or commit SHA) for upstream vLLM .proto schemas (rust/proto).
+VLLM_REF ?= 2fb5111bbac7a2e31c0c19c1eb0aa01df5ecb664
 # Pinned sgl-project/sglang ref (tag or commit SHA) for SGLang .proto schemas.
 SGLANG_REF ?= 93a936d007ada66544cb5ac855de540a596c2ca4
 
@@ -70,18 +72,38 @@ controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessar
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
 
+VLLM_GRPC_DIR := pkg/common/grpc/vllm
 SGLANG_GRPC_DIR := pkg/common/grpc/sglang
 
-.PHONY: generate-proto generate-proto-vllm generate-proto-sglang
+.PHONY: generate-proto generate-proto-vllm generate-proto-vllm-engine generate-proto-vllm-upstream generate-proto-sglang
 generate-proto: generate-proto-vllm generate-proto-sglang ## Generate Golang code from protobuf files.
 
-generate-proto-vllm: protoc-gen-go protoc-gen-go-grpc
+generate-proto-vllm: generate-proto-vllm-engine generate-proto-vllm-upstream
+
+generate-proto-vllm-engine: protoc-gen-go protoc-gen-go-grpc ## Generate Go bindings for the legacy Python VllmEngine .proto.
 	PATH="$(LOCALBIN):$$PATH" $(PROTOC) \
 		-I pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto \
 		-I . \
 		--go_out=module=github.com/llm-d/llm-d-router:. \
 		--go-grpc_out=module=github.com/llm-d/llm-d-router:. \
 		pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/proto/*.proto
+
+generate-proto-vllm-upstream: buf protoc-gen-go protoc-gen-go-grpc ## Generate upstream vLLM Go bindings from vllm-project/vllm@$(VLLM_REF).
+	PATH="$(LOCALBIN):$$PATH" $(BUF) generate \
+		--template $(VLLM_GRPC_DIR)/buf.gen.yaml \
+		--path inference.proto \
+		--path control.proto \
+		"https://github.com/vllm-project/vllm.git#ref=$(VLLM_REF),subdir=rust/proto,depth=1"
+
+.PHONY: verify-vllm-proto
+verify-vllm-proto: generate-proto-vllm-upstream ## Check that upstream vLLM Go bindings match vllm-project/vllm@$(VLLM_REF).
+	@status="$$(git status --porcelain -- $(VLLM_GRPC_DIR))"; \
+	if [ -n "$$status" ]; then \
+		echo "ERROR: $(VLLM_GRPC_DIR) differs from vllm-project/vllm@$(VLLM_REF). Run 'make generate-proto-vllm-upstream' and commit the result:"; \
+		echo "$$status"; \
+		git diff -- $(VLLM_GRPC_DIR); \
+		exit 1; \
+	fi
 
 generate-proto-sglang: buf protoc-gen-go protoc-gen-go-grpc ## Generate SGLang Go bindings from sgl-project/sglang@$(SGLANG_REF).
 	PATH="$(LOCALBIN):$$PATH" $(BUF) generate \

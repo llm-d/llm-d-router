@@ -47,6 +47,7 @@ var _ = Describe("NIXL Connector (v2)", func() {
 
 	BeforeEach(func() {
 		testInfo = sidecarConnectionTestSetup(constants.KVConnectorNIXLV2)
+		testInfo.proxy.config.ForwardPromptTokenIDs = true
 	})
 
 	startProxy := func() string {
@@ -174,6 +175,66 @@ var _ = Describe("NIXL Connector (v2)", func() {
 		details := usage["prompt_tokens_details"].(map[string]any)
 		Expect(details["cached_tokens"]).To(BeNumerically("==", 7))
 
+	})
+
+	It("should carry client prompt_token_ids into both the prefill and decode kv_transfer_params", func() {
+		proxyBaseAddr := startProxy()
+
+		body := `{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}],
+			"max_tokens": 50, "kv_transfer_params": {"prompt_token_ids": [5, 6, 7]}}`
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+		want := []any{float64(5), float64(6), float64(7)}
+		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+		pkv := testInfo.prefillHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(pkv).To(HaveKeyWithValue("prompt_token_ids", want))
+		Expect(pkv).To(HaveKeyWithValue(reqcommon.FieldDoRemoteDecode, true))
+
+		Expect(testInfo.decodeHandler.CompletionRequests).To(HaveLen(1))
+		dkv := testInfo.decodeHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(dkv).To(HaveKeyWithValue("prompt_token_ids", want))
+	})
+
+	// When the prefill response omits kv_transfer_params (the decode-recompute
+	// fallback), the client's forwarded prompt_token_ids must still reach the decode
+	// request instead of being wiped by a nil kv_transfer_params.
+	It("should carry client prompt_token_ids to decode when prefill omits kv_transfer_params", func() {
+		testInfo.prefillHandler.RawResponse = `{"usage": {"prompt_tokens": 64, "completion_tokens": 1, "total_tokens": 65, "prompt_tokens_details": {}}}`
+		proxyBaseAddr := startProxy()
+
+		body := `{"model": "Qwen/Qwen2-0.5B", "messages": [{"role": "user", "content": "Hello"}],
+			"max_tokens": 50, "kv_transfer_params": {"prompt_token_ids": [5, 6, 7]}}`
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		req.Header.Add(routing.PrefillEndpointHeader, testInfo.prefillBackend.URL[len("http://"):])
+		rp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer rp.Body.Close()
+		Expect(rp.StatusCode).To(Equal(http.StatusOK))
+
+		want := []any{float64(5), float64(6), float64(7)}
+		Expect(testInfo.prefillHandler.CompletionRequests).To(HaveLen(1))
+		pkv := testInfo.prefillHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(pkv).To(HaveKeyWithValue("prompt_token_ids", want))
+
+		Eventually(func() int { return len(testInfo.decodeHandler.CompletionRequests) }).Should(Equal(1))
+		dkv := testInfo.decodeHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(dkv).To(HaveKeyWithValue("prompt_token_ids", want))
+	})
+
+	It("should not add prompt_token_ids when the client sent none", func() {
+		proxyBaseAddr := startProxy()
+		sendChatCompletionsRequest(proxyBaseAddr)
+		pkv := testInfo.prefillHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(pkv).ToNot(HaveKey("prompt_token_ids"))
+		dkv := testInfo.decodeHandler.CompletionRequests[0][reqcommon.FieldKVTransferParams].(map[string]any)
+		Expect(dkv).ToNot(HaveKey("prompt_token_ids"))
 	})
 
 	It("should forward untouched fields byte-for-byte, preserving nested key order", func() {

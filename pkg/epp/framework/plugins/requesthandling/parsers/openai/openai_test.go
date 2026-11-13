@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/google/go-cmp/cmp"
 	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -1175,6 +1176,16 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "text to speech request with non-string cache_salt",
+			headers: map[string]string{":path": "/v1/audio/speech"},
+			body: map[string]any{
+				"model":      "test",
+				"input":      "hello",
+				"cache_salt": 42,
+			},
+			wantErr: true,
+		},
+		{
 			name:    "text to speech request with non-string instructions",
 			headers: map[string]string{":path": "/v1/audio/speech"},
 			body: map[string]any{
@@ -1586,6 +1597,15 @@ func buildMultipartBody(t *testing.T, fields map[string]string) ([]byte, string)
 func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 	parser := NewOpenAIParser()
 
+	// The captured form of the file part buildMultipartBody attaches to every
+	// request: 14 bytes read as one head, hashed in full.
+	attachedImage := request.UploadedMedia{
+		ContentType: "application/octet-stream",
+		SizeBytes:   int64(len("fake png bytes")),
+		Head:        []byte("fake png bytes"),
+		Hash:        xxhash.Sum64([]byte("fake png bytes")),
+	}
+
 	tests := []struct {
 		name        string
 		path        string
@@ -1614,13 +1634,14 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				Size:              "1024x1024",
 				NumInferenceSteps: ptr.To[int64](30),
 				NegativePrompt:    "blurry",
+				Image:             attachedImage,
 			},
 		},
 		{
 			name:       "images edits request with prompt only",
 			path:       "/v1/images/edits",
 			fields:     map[string]string{"prompt": "make it night"},
-			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night"},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", Image: attachedImage},
 		},
 		{
 			name: "images edits request with stream",
@@ -1630,13 +1651,13 @@ func TestOpenAIParser_ParseRequest_ImagesEdits(t *testing.T) {
 				"stream": "true",
 			},
 			wantStream: true,
-			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night"},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", Image: attachedImage},
 		},
 		{
 			name:       "images edits request via prefix-mounted path",
 			path:       "/openai/v1/images/edits",
 			fields:     map[string]string{"prompt": "make it night"},
-			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night"},
+			wantImages: &request.ImagesGenerationsRequest{Prompt: "make it night", Image: attachedImage},
 		},
 		{
 			name:    "images edits request missing prompt",
@@ -2791,23 +2812,80 @@ func TestOpenAIParser_ParseRequestVideosForwardsFieldBounds(t *testing.T) {
 }
 
 func TestOpenAIParser_ImagesEditsSharesMultipartReader(t *testing.T) {
+	media := string([]byte{0, 255, '\r', '\n'})
 	body, ct := buildVideoForm(t,
 		videoFormPart{name: "prompt", value: "add a hat"},
 		videoFormPart{name: "n", value: "2"},
-		videoFormPart{name: "image", value: string([]byte{0, 255, '\r', '\n'}), filename: "input.png", mediaType: "image/png"},
+		videoFormPart{name: "image", value: media, filename: "input.png", mediaType: "image/png"},
 	)
 	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
 		map[string]string{":path": "/v1/images/edits", reqcommon.HeaderContentType: ct})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := &request.ImagesGenerationsRequest{Prompt: "add a hat", N: ptr.To[int64](2)}
+	want := &request.ImagesGenerationsRequest{
+		Prompt: "add a hat",
+		N:      ptr.To[int64](2),
+		Image: request.UploadedMedia{
+			ContentType: "image/png",
+			SizeBytes:   int64(len(media)),
+			Head:        []byte(media),
+			Hash:        xxhash.Sum64([]byte(media)),
+		},
+	}
 	if diff := cmp.Diff(want, result.Body.Images); diff != "" {
 		t.Errorf("Images mismatch (-want +got):\n%s", diff)
 	}
 	raw, ok := result.Body.Payload.(request.RawPayload)
 	if !ok || !bytes.Equal(raw, body) {
 		t.Errorf("Payload = %T, want unchanged RawPayload", result.Body.Payload)
+	}
+}
+
+// The uploaded image part is captured for input-cost estimation: size, head,
+// content type, and a hash of the full stream. A file part under any other
+// name is not the conditioning image and is ignored.
+func TestOpenAIParser_ImagesEditsCapturesImagePart(t *testing.T) {
+	media := strings.Repeat("x", request.UploadedMediaHeadBytes+2048)
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "prompt", value: "add a hat"},
+		videoFormPart{name: "image", value: media, filename: "input.png", mediaType: "image/png"},
+		videoFormPart{name: "mask", value: "maskbytes", filename: "mask.png", mediaType: "image/png"},
+	)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/images/edits", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := result.Body.Images.Image
+	if image.SizeBytes != int64(len(media)) {
+		t.Errorf("SizeBytes = %d, want %d", image.SizeBytes, len(media))
+	}
+	if len(image.Head) != request.UploadedMediaHeadBytes || string(image.Head) != media[:request.UploadedMediaHeadBytes] {
+		t.Errorf("Head = %d bytes, want the leading %d", len(image.Head), request.UploadedMediaHeadBytes)
+	}
+	if image.Hash != xxhash.Sum64String(media) {
+		t.Error("Hash does not cover the full image part")
+	}
+	if image.ContentType != "image/png" {
+		t.Errorf("ContentType = %q, want image/png", image.ContentType)
+	}
+}
+
+// A request without an image part (or a generations request, which shares the
+// typed body) leaves the captured media at its zero value.
+func TestOpenAIParser_ImagesEditsNoImagePart(t *testing.T) {
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "prompt", value: "add a hat"},
+		videoFormPart{name: "other", value: "not an image", filename: "other.bin", mediaType: "application/octet-stream"},
+	)
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/images/edits", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image := result.Body.Images.Image; image.SizeBytes != 0 || image.Head != nil || image.Hash != 0 {
+		t.Errorf("Image = %+v, want the zero value", image)
 	}
 }
 

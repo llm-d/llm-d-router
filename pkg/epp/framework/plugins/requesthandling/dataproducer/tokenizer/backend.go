@@ -206,6 +206,8 @@ func CacheSaltFromBody(body *fwkrequest.InferenceRequestBody) string {
 		return body.Embeddings.CacheSalt
 	case body.Generate != nil:
 		return body.Generate.CacheSalt
+	case body.TextToSpeech != nil:
+		return body.TextToSpeech.CacheSalt
 	default:
 		return ""
 	}

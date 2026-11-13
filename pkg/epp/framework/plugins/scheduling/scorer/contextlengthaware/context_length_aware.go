@@ -59,6 +59,11 @@ type contextLengthAwareParameters struct {
 	// reusable prefix token count is subtracted from the total token count
 	// across all prompts. Empty disables cache subtraction.
 	ReusableTokensProducerName string `json:"reusableTokensProducerName,omitempty"`
+
+	// IncludeMaxOutputTokens adds the request's output token cap to the
+	// routing length, so a range bounds prompt plus requested output. A
+	// request without a cap adds nothing.
+	IncludeMaxOutputTokens bool `json:"includeMaxOutputTokens,omitempty"`
 }
 
 // contextRange represents a single context length range.
@@ -90,6 +95,11 @@ func Factory(name string, rawParameters *json.Decoder, _ plugin.Handle) (plugin.
 	if parameters.ReusableTokensProducerName != "" && parameters.Label == DefaultContextLengthLabel {
 		return nil, fmt.Errorf("invalid configuration for '%s' plugin: reusableTokensProducerName requires a work-range label other than %q", ContextLengthAwareType, DefaultContextLengthLabel)
 	}
+	// A prefill work range excludes reusable tokens and prefill generates one
+	// token, so the output cap does not belong in it.
+	if parameters.ReusableTokensProducerName != "" && parameters.IncludeMaxOutputTokens {
+		return nil, fmt.Errorf("invalid configuration for '%s' plugin: includeMaxOutputTokens cannot be combined with reusableTokensProducerName", ContextLengthAwareType)
+	}
 
 	return NewContextLengthAware(name, parameters), nil
 }
@@ -100,6 +110,7 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 		typedName:                  plugin.TypedName{Type: ContextLengthAwareType, Name: name},
 		labelName:                  params.Label,
 		enableFiltering:            params.EnableFiltering,
+		includeMaxOutputTokens:     params.IncludeMaxOutputTokens,
 		reusableTokensProducerName: params.ReusableTokensProducerName,
 		reusableTokensDataKey: attrprefix.ReusablePrefixTokensDataKey.
 			WithNonEmptyProducerName(params.ReusableTokensProducerName),
@@ -117,9 +128,10 @@ func NewContextLengthAware(name string, params *contextLengthAwareParameters) *C
 // InferenceRequestBody.TokenizedRequest. With DefaultContextLengthLabel it is
 // the token count of the longest prompt, because a model server checks each
 // prompt against its maximum model length separately. When
-// reusableTokensProducerName is configured, the request-wide reusable prefix
-// token floor is subtracted from the total. Missing tokens are treated as 0
-// (unknown).
+// includeMaxOutputTokens is configured, InferenceRequestBody.MaxOutputTokens
+// is added to the count. When reusableTokensProducerName is configured, the
+// request-wide reusable prefix token floor is subtracted from the total.
+// Missing tokens are treated as 0 (unknown).
 type ContextLengthAware struct {
 	// typedName defines the plugin typed name
 	typedName plugin.TypedName
@@ -127,6 +139,8 @@ type ContextLengthAware struct {
 	labelName string
 	// enableFiltering indicates whether filtering is enabled
 	enableFiltering bool
+	// includeMaxOutputTokens adds the request's output token cap to the context length.
+	includeMaxOutputTokens bool
 	// reusableTokensProducerName enables cache subtraction when non-empty.
 	reusableTokensProducerName string
 	// reusableTokensDataKey identifies the configured producer's request data.
@@ -258,9 +272,10 @@ func (p *ContextLengthAware) Category() scheduling.ScorerCategory {
 // getContextLength returns the context length described on ContextLengthAware.
 // With cache subtraction enabled, positive token counts have at least one
 // token of prefill work, and missing reusable-token data leaves the total
-// token count unchanged. When tokens are unavailable it returns 0. With cache
-// subtraction enabled, the result is stored per request and plugin instance so
-// Filter and Score use the same value.
+// token count unchanged. When tokens are unavailable it returns 0. With
+// includeMaxOutputTokens, the output token cap is added to the token count.
+// With cache subtraction enabled, the result is stored per request and plugin
+// instance so Filter and Score use the same value.
 func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceRequest) int {
 	if request == nil {
 		return 0
@@ -269,10 +284,14 @@ func (p *ContextLengthAware) getContextLength(request *scheduling.InferenceReque
 		if request.Body == nil {
 			return 0
 		}
+		length := request.Body.TokenizedRequest.TokenCount()
 		if p.labelName == DefaultContextLengthLabel {
-			return request.Body.TokenizedRequest.MaxPromptTokenCount()
+			length = request.Body.TokenizedRequest.MaxPromptTokenCount()
 		}
-		return request.Body.TokenizedRequest.TokenCount()
+		if p.includeMaxOutputTokens && request.Body.MaxOutputTokens != nil {
+			length += int(*request.Body.MaxOutputTokens)
+		}
+		return length
 	}
 	if routingLength, ok := scheduling.ReadRequestAttribute[int](request, p.routingLengthDataKey); ok {
 		return routingLength
