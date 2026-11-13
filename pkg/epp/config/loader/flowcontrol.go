@@ -68,7 +68,15 @@ func buildFlowControlConfig(
 		return nil, fmt.Errorf("failed to resolve band selection policy: %w", err)
 	}
 
-	return flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy, bandSelectionPolicy), nil
+	cfg := flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy, bandSelectionPolicy)
+	if apiConfig != nil && apiConfig.DispatchGatePluginRef != "" {
+		gate, err := resolvePlugin[fwkfc.DispatchGate](handle, apiConfig.DispatchGatePluginRef)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve dispatch gate: %w", err)
+		}
+		cfg.DispatchGate = gate
+	}
+	return cfg, nil
 }
 
 func buildPriorityBandPolicyDefaults(handle fwkplugin.Handle) (registry.PriorityBandPolicyDefaults, error) {
