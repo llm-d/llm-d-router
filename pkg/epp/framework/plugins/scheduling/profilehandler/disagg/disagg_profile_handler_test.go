@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"testing"
 
@@ -1537,6 +1538,84 @@ func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
 
 	want := net.JoinHostPort("10.0.0.1", "8000") + "," + net.JoinHostPort("10.0.0.2", "8000")
 	assert.Equal(t, want, request.Headers[routing.EncoderEndpointsHeader])
+}
+
+func TestHandler_PreRequest_DataParallelRankHeaders(t *testing.T) {
+	rankEndpoint := func(address, rank string) scheduling.Endpoint {
+		md := &fwkdl.EndpointMetadata{Address: address, Port: "30000"}
+		if rank != "" {
+			md.Attributes = map[string]string{DataParallelRankAttribute: rank}
+		}
+		return scheduling.NewEndpoint(md, nil, nil)
+	}
+	stale := map[string]string{
+		routing.PrefillDataParallelRankHeader: "7",
+		routing.DecodeDataParallelRankHeader:  "7",
+	}
+
+	tests := []struct {
+		name        string
+		prefill     []scheduling.Endpoint
+		decode      []scheduling.Endpoint
+		wantPrefill string
+		wantDecode  string
+	}{
+		{
+			name:        "ranks of the selected prefill and decode endpoints",
+			prefill:     []scheduling.Endpoint{rankEndpoint("10.0.0.1", "1")},
+			decode:      []scheduling.Endpoint{rankEndpoint("10.0.0.2", "0")},
+			wantPrefill: "1",
+			wantDecode:  "0",
+		},
+		{
+			name:    "endpoints without a rank attribute",
+			prefill: []scheduling.Endpoint{rankEndpoint("10.0.0.1", "")},
+			decode:  []scheduling.Endpoint{rankEndpoint("10.0.0.2", "")},
+		},
+		{
+			name:    "negative and non-integer ranks",
+			prefill: []scheduling.Endpoint{rankEndpoint("10.0.0.1", "-1")},
+			decode:  []scheduling.Endpoint{rankEndpoint("10.0.0.2", "one")},
+		},
+		{
+			name:        "several decode targets",
+			prefill:     []scheduling.Endpoint{rankEndpoint("10.0.0.1", "1")},
+			decode:      []scheduling.Endpoint{rankEndpoint("10.0.0.2", "0"), rankEndpoint("10.0.0.2", "1")},
+			wantPrefill: "1",
+		},
+		{
+			name:   "no prefill stage",
+			decode: []scheduling.Endpoint{rankEndpoint("10.0.0.2", "0")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			h := NewDisaggProfileHandler("decode", "prefill", "", nil, nil)
+			request := &scheduling.InferenceRequest{Headers: maps.Clone(stale)}
+			results := map[string]*scheduling.ProfileRunResult{"decode": {TargetEndpoints: tt.decode}}
+			if tt.prefill != nil {
+				results["prefill"] = &scheduling.ProfileRunResult{TargetEndpoints: tt.prefill}
+			}
+
+			assert.NoError(t, h.PreRequest(ctx, request, &scheduling.SchedulingResult{
+				PrimaryProfileName: "decode",
+				ProfileResults:     results,
+			}))
+
+			for header, want := range map[string]string{
+				routing.PrefillDataParallelRankHeader: tt.wantPrefill,
+				routing.DecodeDataParallelRankHeader:  tt.wantDecode,
+			} {
+				got, ok := request.Headers[header]
+				if want == "" {
+					assert.False(t, ok, "%s must not be set", header)
+				} else {
+					assert.Equal(t, want, got, header)
+				}
+			}
+		})
+	}
 }
 
 func TestHandler_Pick_PD_StampsPeerEndpointBeforePrefill(t *testing.T) {

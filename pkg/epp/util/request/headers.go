@@ -72,6 +72,8 @@ var (
 		routing.KVCacheSourceHeader,
 		routing.EncoderEndpointsHeader,
 		routing.DataParallelEndpointHeader,
+		routing.PrefillDataParallelRankHeader,
+		routing.DecodeDataParallelRankHeader,
 	)...)
 
 	// ScreeningHeaders are client headers that screener plugins read. They stay
