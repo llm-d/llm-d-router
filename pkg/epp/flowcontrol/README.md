@@ -173,6 +173,21 @@ Fixed shares have these costs:
   positive integer, so the remainder of a limit that the replica count does not divide goes unused,
   and a limit lower than the replica count cannot be enforced.
 
+### Per-team QoS classes
+
+Flow control dispatches by priority band, then by fairness flow within a band. Three plugins layer
+per-team service classes onto that hierarchy:
+
+* [`qos-contract`](../framework/plugins/requesthandling/requestheader/qoscontract/README.md) maps
+  each team to a class's band priority and moves traffic outside the team's contract one class down.
+* `program-aware-fairness` with `strategy: las` shares a band between teams by least attained
+  service.
+* `latency-reporter` records TTFT and TPOT per class, prompt-length bucket and prefill/decode
+  path; latency targets are applied in PromQL.
+
+A sample is shipped at
+[`test/e2e/artifacts/config/qos-epp-config.yaml`](../../../test/e2e/artifacts/config/qos-epp-config.yaml).
+
 ### High Level Architecture
 
 The following diagram illustrates the high-level dependency model and request flow for the system. It shows how

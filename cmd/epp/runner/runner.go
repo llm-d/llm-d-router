@@ -131,6 +131,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentlineage"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/outlenbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/qoscontract"
 	respondermodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responder/models"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responsereceived/headercopy"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/responsereceived/latencyreporter"
@@ -867,6 +868,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(agentidentity.PluginType, fwkplugin.StabilityAlpha, agentidentity.PluginFactory)
 	fwkplugin.Register(agentlineage.PluginType, fwkplugin.StabilityAlpha, agentlineage.PluginFactory)
 	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
+	fwkplugin.Register(qoscontract.PluginType, fwkplugin.StabilityAlpha, qoscontract.PluginFactory)
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapiv1.EndpointPickerConfig, error) {
