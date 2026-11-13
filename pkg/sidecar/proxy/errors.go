@@ -21,7 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
+	"google.golang.org/grpc/codes"
+
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
 
@@ -66,11 +71,59 @@ func errorInternalServerError(w http.ResponseWriter, r *http.Request, err error)
 
 // sendError writes msg in the error envelope of the API r was sent to. A path
 // that is not an inference route, which only the decoder catch-all serves, and
-// a request or URL net/http never produces both get the OpenAI envelope.
+// a request or URL net/http never produces both get the OpenAI envelope. gRPC
+// requests receive a trailers-only gRPC status response.
 func sendError(w http.ResponseWriter, r *http.Request, status int, msg string) error {
+	if isGRPCRequest(r) {
+		grpcframe.WriteError(w, httpStatusToGRPCCode(status), msg)
+		return nil
+	}
 	path := ""
 	if r != nil && r.URL != nil {
 		path = r.URL.Path
 	}
 	return reqcommon.WriteAPIError(w, reqcommon.DetectAPIType(path), status, msg)
+}
+
+// grpcMethodRoutes maps served gRPC method paths to their request API types.
+var grpcMethodRoutes = map[string]reqcommon.APIType{
+	vllmpb.Inference_Generate_FullMethodName:       reqcommon.APITypeVLLMGenerate,
+	vllmpb.Inference_GenerateStream_FullMethodName: reqcommon.APITypeVLLMGenerate,
+}
+
+func isVLLMGRPCPath(p string) bool {
+	_, ok := grpcMethodRoutes[strings.TrimSuffix(p, "/")]
+	return ok
+}
+
+func isVLLMGRPCRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && isVLLMGRPCPath(r.URL.Path)
+}
+
+func isGRPCRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
+		return true
+	}
+	return isVLLMGRPCRequest(r)
+}
+
+// httpStatusToGRPCCode maps statuses emitted by sidecar-local sendError calls
+// to gRPC codes. Local 500 errors map to Internal rather than retryable
+// Unavailable, while upstream HTTP transport errors on gRPC legs are relayed directly.
+func httpStatusToGRPCCode(status int) codes.Code {
+	switch status {
+	case http.StatusBadRequest:
+		return codes.InvalidArgument
+	case http.StatusForbidden:
+		return codes.PermissionDenied
+	case http.StatusBadGateway, http.StatusServiceUnavailable:
+		return codes.Unavailable
+	case http.StatusGatewayTimeout:
+		return codes.DeadlineExceeded
+	default:
+		return codes.Internal
+	}
 }

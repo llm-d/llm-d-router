@@ -120,17 +120,19 @@ func (s *Server) runConcurrentPD(
 			}
 		}()
 		pw := &bufferedResponseWriter{}
-		prefillHandler.ServeHTTP(pw, prefillReq)
+		prefillErr := servePrefill(prefillHandler, pw, prefillReq)
 		prefillDuration := time.Since(prefillStart)
 		prefillSpan.SetAttributes(
 			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 		)
 		// A prefill the sidecar cancelled is not a prefill error.
-		if (isHTTPError(pw.statusCode) || grpcframe.HasErrorStatus(pw.headers)) && prefillCtx.Err() == nil {
-			observeStageError(r.Context(), routing.StagePrefill)
-			prefillSpan.SetStatus(codes.Error, "prefill request failed")
-			cancelDecode(&prefillFailedError{response: pw})
+		if prefillCtx.Err() == nil {
+			if failed, relay := s.concurrentPrefillFailed(prefillReq, pw, prefillErr); failed {
+				observeStageError(r.Context(), routing.StagePrefill)
+				prefillSpan.SetStatus(codes.Error, "prefill request failed")
+				cancelDecode(&prefillFailedError{response: relay})
+			}
 		}
 		observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
 		log.FromContext(prefillCtx).V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
@@ -216,6 +218,54 @@ func (s *Server) runConcurrentPD(
 // with when prefill fails. The decoder proxy returns its response to the client.
 type prefillFailedError struct {
 	response *bufferedResponseWriter
+}
+
+func (s *Server) concurrentPrefillFailed(prefillReq *http.Request, pw *bufferedResponseWriter, prefillErr error) (bool, *bufferedResponseWriter) {
+	if isHTTPError(pw.statusCode) || grpcframe.HasErrorStatus(pw.headers) {
+		return true, pw
+	}
+	if !isVLLMGRPCRequest(prefillReq) {
+		return false, nil
+	}
+	if _, err := extractVLLMPrefillFinishInfo(pw, prefillErr); err != nil {
+		log.FromContext(prefillReq.Context()).Error(err, "concurrent-dispatch gRPC prefill stream incomplete")
+		synth := &bufferedResponseWriter{}
+		_ = errorBadGateway(synth, prefillReq)
+		return true, synth
+	}
+	return false, nil
+}
+
+// recordSequentialPDTimingAttrs records end-to-end sequential P/D timing
+// attributes on decodeSpan. True TTFT measures gateway request start to decode
+// start, including scheduling, prefill, and coordination overhead.
+func recordSequentialPDTimingAttrs(
+	ctx context.Context,
+	decodeSpan trace.Span,
+	prefillStart time.Time,
+	prefillDuration time.Duration,
+	decodeStart time.Time,
+	decodeDuration time.Duration,
+) {
+	if !decodeSpan.SpanContext().IsValid() {
+		return
+	}
+	var totalDuration, trueTTFT time.Duration
+	if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
+		if requestStart, ok := requestStartValue.(time.Time); ok {
+			totalDuration = time.Since(requestStart)
+			trueTTFT = decodeStart.Sub(requestStart)
+		}
+	}
+	coordinatorOverhead := decodeStart.Sub(prefillStart.Add(prefillDuration))
+	decodeSpan.SetAttributes(
+		semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
+		semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
+		semconv.LLMDPDProxyPrefillDurationMsSummary(float64(prefillDuration.Milliseconds())),
+		semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),
+		semconv.LLMDPDProxyCoordinatorOverheadMs(float64(coordinatorOverhead.Milliseconds())),
+		semconv.LLMDPDProxyConcurrentPD(false),
+	)
 }
 
 func (e *prefillFailedError) Error() string {
