@@ -126,9 +126,7 @@ router:
                 "upstream" "%UPSTREAM_HOST%"
                 "upstream_failure" "%UPSTREAM_TRANSPORT_FAILURE_REASON%"
               -}}
-              {{- /* ext_proc endpoints resolve to EPP pods (loopback, per-pod or headless DNS) everywhere
-              except the single-EPP ClusterIP Service, which exposes only the ext_proc port. */ -}}
-              {{- $eppHealthPortCheck := or $isPriorityRouting (ne (include "llm-d-router.proxyMode" .) "service") (ne (include "llm-d-router.proxy.discoveryServiceName" .) "") -}}
+              {{- $eppHealthPortCheck := eq (include "llm-d-router.proxy.eppHealthPortCheck" .) "true" -}}
               {{- $eppHealthPort := .Values.router.epp.grpcHealthPort | default 9003 -}}
               admin:
                 address:
@@ -516,7 +514,6 @@ router:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
                                 {{- if $eppHealthPortCheck }}
-                                # Health-check EPP's gRPC health port: unlike the ext_proc port, it reports NOT_SERVING while EPP drains.
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}
                                 {{- end }}
@@ -536,7 +533,6 @@ router:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
                                 {{- if $eppHealthPortCheck }}
-                                # Health-check EPP's gRPC health port: unlike the ext_proc port, it reports NOT_SERVING while EPP drains.
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}
                                 {{- end }}
@@ -552,7 +548,6 @@ router:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
                                     port_value: 9002
                                 {{- if $eppHealthPortCheck }}
-                                # Health-check EPP's gRPC health port: unlike the ext_proc port, it reports NOT_SERVING while EPP drains.
                                 health_check_config:
                                   port_value: {{ $eppHealthPort }}
                                 {{- end }}
