@@ -247,12 +247,9 @@ func inferenceRoute(path string) string {
 }
 
 // inspectedRequestFields lists the top-level request fields the handler and
-// the pipeline steps read as Go values. decodeRequestBody decodes only these;
-// every other field stays a json.RawMessage so its bytes are forwarded
-// unchanged. encoding/json sorts map keys at every depth on Marshal, which
-// would reorder free-form content such as tools[].function.parameters that
-// chat templates render into the prompt verbatim. The steps that read messages
-// or input decode them on use (promptItems).
+// the pipeline steps read as Go values; see reqcommon.DecodeRequestBody for why
+// every other field stays raw. The steps that read messages or input decode
+// them on use (promptItems).
 var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldModel:          {},
 	reqcommon.FieldStream:         {},
