@@ -714,10 +714,10 @@ func TestTLSMinVersionFlag(t *testing.T) {
 
 func TestTLSCipherSuitesFlag(t *testing.T) {
 	tests := []struct {
-		name       string
-		args       []string
-		wantSuites []uint16
-		wantErr    bool
+		name            string
+		args            []string
+		wantSuites      []uint16
+		wantErrContains string
 	}{
 		{
 			name: "single cipher",
@@ -764,19 +764,24 @@ func TestTLSCipherSuitesFlag(t *testing.T) {
 			wantSuites: nil,
 		},
 		{
-			name:    "unknown cipher",
-			args:    []string{"--tls-cipher-suites", "FAKE_CIPHER_SUITE"},
-			wantErr: true,
+			name:       "legacy CHACHA20 alias",
+			args:       []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"},
+			wantSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256},
 		},
 		{
-			name:    "insecure cipher",
-			args:    []string{"--tls-cipher-suites", "TLS_RSA_WITH_RC4_128_SHA"},
-			wantErr: true,
+			name:            "unknown cipher",
+			args:            []string{"--tls-cipher-suites", "FAKE_CIPHER_SUITE"},
+			wantErrContains: "invalid tls-cipher-suites: Cipher suite FAKE_CIPHER_SUITE not supported or doesn't exist",
 		},
 		{
-			name:    "insecure cipher among secure ones",
-			args:    []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"},
-			wantErr: true,
+			name:            "insecure cipher",
+			args:            []string{"--tls-cipher-suites", "TLS_RSA_WITH_RC4_128_SHA"},
+			wantErrContains: `invalid tls-cipher-suites: insecure cipher suite "TLS_RSA_WITH_RC4_128_SHA"`,
+		},
+		{
+			name:            "insecure cipher among secure ones",
+			args:            []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"},
+			wantErrContains: `invalid tls-cipher-suites: insecure cipher suite "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"`,
 		},
 	}
 	for _, tt := range tests {
@@ -789,8 +794,8 @@ func TestTLSCipherSuitesFlag(t *testing.T) {
 			require.NoError(t, fs.Parse(argv))
 
 			err := opts.Complete()
-			if tt.wantErr {
-				require.Error(t, err)
+			if tt.wantErrContains != "" {
+				require.ErrorContains(t, err, tt.wantErrContains)
 				return
 			}
 			require.NoError(t, err)

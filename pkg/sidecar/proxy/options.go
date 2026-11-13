@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -33,9 +32,9 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/pflag"
-	cliflag "k8s.io/component-base/cli/flag"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -410,43 +409,22 @@ func (opts *Options) Complete() error {
 	opts.InsecureSkipVerifyForPrefiller = slices.Contains(opts.tlsInsecureSkipVerify, prefillStage)
 	opts.InsecureSkipVerifyForEncoder = slices.Contains(opts.tlsInsecureSkipVerify, encodeStage)
 	opts.InsecureSkipVerifyForDecoder = slices.Contains(opts.tlsInsecureSkipVerify, decodeStage)
-	if opts.tlsMinVersion != "" {
-		version, err := cliflag.TLSVersion(opts.tlsMinVersion)
-		if err != nil {
-			return fmt.Errorf("invalid %s %q: unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", tlsMinVersion, opts.tlsMinVersion, opts.tlsMinVersion)
-		}
-		if version < tls.VersionTLS12 {
-			return fmt.Errorf("invalid %s %q: tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", tlsMinVersion, opts.tlsMinVersion, opts.tlsMinVersion)
-		}
-		opts.TLSMinVersion = version
+	version, err := tlsutil.ParseTLSVersion(opts.tlsMinVersion)
+	if err != nil {
+		return err
 	}
-	if len(opts.tlsCipherSuites) > 0 {
-		// cliflag.TLSCipherSuites also resolves tls.InsecureCipherSuites(); reject those.
-		insecure := cliflag.InsecureTLSCiphers()
-		names := make([]string, 0, len(opts.tlsCipherSuites))
-		for _, name := range opts.tlsCipherSuites {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			if _, ok := insecure[name]; ok {
-				return fmt.Errorf("invalid %s: insecure cipher suite %q is not supported", tlsCipherSuites, name)
-			}
-			names = append(names, name)
-		}
-		suites, err := cliflag.TLSCipherSuites(names)
-		if err != nil {
-			return fmt.Errorf("invalid %s: %w", tlsCipherSuites, err)
-		}
-		opts.TLSCipherSuites = suites
+	opts.TLSMinVersion = version
+	suites, err := tlsutil.ParseCipherSuites(opts.tlsCipherSuites)
+	if err != nil {
+		return err
 	}
+	opts.TLSCipherSuites = suites
 
 	// Compute Config.DecoderURL from modelServerPort and decoder TLS setting
 	scheme := "http"
 	if opts.UseTLSForDecoder {
 		scheme = schemeHTTPS
 	}
-	var err error
 	opts.DecoderURL, err = url.Parse(scheme + "://localhost:" + opts.modelServerPort)
 	if err != nil {
 		return fmt.Errorf("failed to parse target URL: %w", err)

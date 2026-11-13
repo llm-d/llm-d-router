@@ -33,10 +33,10 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/leaderelection"
-	cliflag "k8s.io/component-base/cli/flag"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -397,36 +397,16 @@ func (opts *Options) Complete() error {
 		opts.clientCAs = pool
 	}
 
-	if opts.TLSMinVersion != "" {
-		v, err := cliflag.TLSVersion(opts.TLSMinVersion)
-		if err != nil {
-			return fmt.Errorf("invalid tls-min-version %q: unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", opts.TLSMinVersion, opts.TLSMinVersion)
-		}
-		if v < tls.VersionTLS12 {
-			return fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", opts.TLSMinVersion)
-		}
-		opts.tlsMinVersionValue = v
+	v, err := tlsutil.ParseTLSVersion(opts.TLSMinVersion)
+	if err != nil {
+		return err
 	}
-	if len(opts.TLSCipherSuites) > 0 {
-		// cliflag.TLSCipherSuites also resolves tls.InsecureCipherSuites(); reject those.
-		insecure := cliflag.InsecureTLSCiphers()
-		names := make([]string, 0, len(opts.TLSCipherSuites))
-		for _, name := range opts.TLSCipherSuites {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-			if _, ok := insecure[name]; ok {
-				return fmt.Errorf("invalid tls-cipher-suites: insecure cipher suite %q is not supported", name)
-			}
-			names = append(names, name)
-		}
-		suites, err := cliflag.TLSCipherSuites(names)
-		if err != nil {
-			return fmt.Errorf("invalid tls-cipher-suites: %w", err)
-		}
-		opts.tlsCipherSuiteValues = suites
+	opts.tlsMinVersionValue = v
+	suites, err := tlsutil.ParseCipherSuites(opts.TLSCipherSuites)
+	if err != nil {
+		return err
 	}
+	opts.tlsCipherSuiteValues = suites
 
 	// Complete logging options.
 	return opts.LoggingOptions.Complete()

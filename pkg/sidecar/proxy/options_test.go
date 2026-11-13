@@ -1486,6 +1486,11 @@ func TestCompleteTLSServingProfile(t *testing.T) {
 			flags: []string{},
 		},
 		{
+			name:                 "legacy CHACHA20 alias",
+			flags:                []string{"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"},
+			expectedCipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256},
+		},
+		{
 			name:          "invalid cipher suite",
 			flags:         []string{"--tls-cipher-suites=FAKE_CIPHER_SUITE"},
 			expectedError: `invalid tls-cipher-suites: Cipher suite FAKE_CIPHER_SUITE not supported or doesn't exist`,
@@ -1493,12 +1498,12 @@ func TestCompleteTLSServingProfile(t *testing.T) {
 		{
 			name:          "insecure cipher suite",
 			flags:         []string{"--tls-cipher-suites=TLS_RSA_WITH_RC4_128_SHA"},
-			expectedError: `invalid tls-cipher-suites: insecure cipher suite "TLS_RSA_WITH_RC4_128_SHA" is not supported`,
+			expectedError: `invalid tls-cipher-suites: insecure cipher suite "TLS_RSA_WITH_RC4_128_SHA"`,
 		},
 		{
 			name:          "insecure cipher suite among secure ones",
 			flags:         []string{"--tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"},
-			expectedError: `insecure cipher suite "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256" is not supported`,
+			expectedError: `invalid tls-cipher-suites: insecure cipher suite "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"`,
 		},
 	}
 
