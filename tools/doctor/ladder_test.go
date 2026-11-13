@@ -75,7 +75,7 @@ func TestLadderSharedPrefixRoundRobin(t *testing.T) {
 
 func TestLadderCapacityEvictsTailFirst(t *testing.T) {
 	// One endpoint and room for three blocks. Storing B evicts one block of A;
-	// the engine frees a request's blocks tail first, so A keeps its first block.
+	// the engine frees a request's blocks last to first, so A keeps its first block.
 	one := []string{"e1"}
 	l, err := computeLadder([]capture.Record{
 		record(0, "e1", one, 1, 2),
@@ -175,6 +175,20 @@ func TestLadderSkipsFailedAndEmptyRecords(t *testing.T) {
 	require.Equal(t, 1, l.noHashes)
 }
 
+func TestLadderSkippedRecordsNeedNoHashMetadata(t *testing.T) {
+	// A failed or hashless record may carry no hash scheme or block size; it
+	// is skipped, so it must not stop the replay, even when it comes first.
+	failed := record(0, "", both)
+	failed.HashScheme, failed.BlockSize = "", 0
+	hashless := record(1, "e1", both)
+	hashless.HashScheme = "precise"
+	l, err := computeLadder([]capture.Record{failed, hashless, record(2, "e1", both, 1, 2)}, 100)
+	require.NoError(t, err)
+	require.Equal(t, 1, l.records)
+	require.Equal(t, 1, l.failed)
+	require.Equal(t, 1, l.noHashes)
+}
+
 func TestLadderRejects(t *testing.T) {
 	otherScheme := record(1, "e1", both, 1)
 	otherScheme.HashScheme = "precise"
@@ -182,18 +196,27 @@ func TestLadderRejects(t *testing.T) {
 	otherSize.BlockSize = 16
 	newer := record(1, "e1", both, 1)
 	newer.SchemaVersion = capture.SchemaVersion + 1
+	newerFailed := record(1, "", both)
+	newerFailed.SchemaVersion = capture.SchemaVersion + 1
+	noSize := record(0, "e1", both, 1)
+	noSize.BlockSize = 0
+	failedNoScheme := record(0, "", both)
+	failedNoScheme.HashScheme = ""
 
 	for name, tc := range map[string]struct {
 		records     []capture.Record
 		fleetBlocks int
 		wantErr     string
 	}{
-		"mixed hash schemes":      {[]capture.Record{record(0, "e1", both, 1), otherScheme}, 100, "hash scheme"},
-		"mixed block sizes":       {[]capture.Record{record(0, "e1", both, 1), otherSize}, 100, "block size"},
-		"unknown schema version":  {[]capture.Record{newer}, 100, "schema version"},
-		"no fleet capacity":       {[]capture.Record{record(0, "e1", both, 1)}, 0, "--fleet-kv-blocks"},
-		"fewer blocks than pods":  {[]capture.Record{record(0, "e1", both, 1)}, 1, "--fleet-kv-blocks"},
-		"no record with a prompt": {[]capture.Record{record(0, "e1", both)}, 100, "no record"},
+		"mixed hash schemes":                          {[]capture.Record{record(0, "e1", both, 1), otherScheme}, 100, "hash scheme"},
+		"mixed block sizes":                           {[]capture.Record{record(0, "e1", both, 1), otherSize}, 100, "block size"},
+		"unknown schema version":                      {[]capture.Record{newer}, 100, "schema version"},
+		"skipped record of an unknown schema version": {[]capture.Record{record(0, "e1", both, 1), newerFailed}, 100, "schema version"},
+		"replayed record without a block size":        {[]capture.Record{noSize}, 100, "block size 0"},
+		"mixed hash schemes after a skipped record":   {[]capture.Record{failedNoScheme, record(1, "e1", both, 1), otherScheme}, 100, "hash scheme"},
+		"no fleet capacity":                           {[]capture.Record{record(0, "e1", both, 1)}, 0, "--fleet-kv-blocks"},
+		"fewer blocks than pods":                      {[]capture.Record{record(0, "e1", both, 1)}, 1, "--fleet-kv-blocks"},
+		"no record with a prompt":                     {[]capture.Record{record(0, "e1", both)}, 100, "no record"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := computeLadder(tc.records, tc.fleetBlocks)

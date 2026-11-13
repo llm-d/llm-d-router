@@ -157,18 +157,26 @@ func perfectPick(caches map[string]*lru, candidates []string, blocks []uint64) (
 	return best, bestHits
 }
 
-// checkComparable rejects records whose hashes can't be compared with the
-// first record's.
+// checkComparable rejects records of another schema version, and replayed
+// records whose hashes can't be compared with the first replayed record's.
 func checkComparable(records []capture.Record) error {
-	for _, r := range records {
+	var first *capture.Record
+	for i := range records {
+		r := &records[i]
 		if r.SchemaVersion != capture.SchemaVersion {
 			return fmt.Errorf("request %s: schema version %d, this tool reads %d", r.RequestID, r.SchemaVersion, capture.SchemaVersion)
 		}
-		if r.HashScheme != records[0].HashScheme {
-			return fmt.Errorf("request %s: hash scheme %q differs from %q", r.RequestID, r.HashScheme, records[0].HashScheme)
+		if r.Endpoint == "" || len(r.BlockHashes) == 0 {
+			continue // skipped by computeLadder, so its hash metadata may be unset
 		}
-		if r.BlockSize != records[0].BlockSize {
-			return fmt.Errorf("request %s: block size %d differs from %d", r.RequestID, r.BlockSize, records[0].BlockSize)
+		if first == nil {
+			first = r
+		}
+		if r.HashScheme != first.HashScheme {
+			return fmt.Errorf("request %s: hash scheme %q differs from %q", r.RequestID, r.HashScheme, first.HashScheme)
+		}
+		if r.BlockSize != first.BlockSize {
+			return fmt.Errorf("request %s: block size %d differs from %d", r.RequestID, r.BlockSize, first.BlockSize)
 		}
 		if r.BlockSize < 1 {
 			return fmt.Errorf("request %s: block size %d", r.RequestID, r.BlockSize)
@@ -226,8 +234,8 @@ func (c *lru) prefix(blocks []uint64) int {
 }
 
 // store caches blocks after a request ran. They are stored last to first so
-// that the request's tail is evicted before its head, as the engine frees a
-// finished request's blocks tail first.
+// that a request's trailing blocks are evicted before its leading blocks, in
+// the order the engine frees a finished request's blocks.
 func (c *lru) store(blocks []uint64) {
 	for i := len(blocks) - 1; i >= 0; i-- {
 		h := blocks[i]
