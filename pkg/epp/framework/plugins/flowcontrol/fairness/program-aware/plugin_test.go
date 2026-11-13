@@ -37,6 +37,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 )
 
 func decoder(s string) *json.Decoder { return json.NewDecoder(strings.NewReader(s)) }
@@ -525,4 +527,34 @@ func TestConfigValidate_TurnPriority(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+func TestDataDependencies_TurnPriorityConsumesSessionStateOptionally(t *testing.T) {
+	fairness, err := ProgramAwarePluginFactory(ProgramAwarePluginType, decoder(`{"strategy":"turn-priority"}`), nil)
+	require.NoError(t, err)
+
+	ordered, err := datalayer.ValidateAndOrderDataDependencies([]plugin.Plugin{fairness})
+	require.NoError(t, err, "the policy must load without session-state-producer")
+	assert.Equal(t, []string{fairness.TypedName().String()}, ordered)
+
+	identity, err := agentidentity.PluginFactory(agentidentity.PluginType, nil, nil)
+	require.NoError(t, err)
+	producer, err := sessionstate.Factory(sessionstate.SessionStateProducerType, nil, nil)
+	require.NoError(t, err)
+	ordered, err = datalayer.ValidateAndOrderDataDependencies([]plugin.Plugin{fairness, producer, identity})
+	require.NoError(t, err, "the policy consumes session state published before flow control")
+	assert.Equal(t, []string{
+		identity.TypedName().String(),
+		producer.TypedName().String(),
+		fairness.TypedName().String(),
+	}, ordered)
+}
+
+func TestDataDependencies_LASConsumesNothing(t *testing.T) {
+	fairness, err := ProgramAwarePluginFactory(ProgramAwarePluginType, nil, nil)
+	require.NoError(t, err)
+
+	deps := fairness.(plugin.ConsumerPlugin).Consumes()
+	assert.Empty(t, deps.Required)
+	assert.Empty(t, deps.Optional)
 }

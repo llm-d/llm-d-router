@@ -31,6 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 )
 
 const ProgramAwarePluginType = "program-aware-fairness"
@@ -97,6 +98,7 @@ var (
 	_ fwkrh.ResponseBodyProcessor = &ProgramAwarePlugin{}
 	_ plugin.StateDumper          = &ProgramAwarePlugin{}
 	_ plugin.ProducerPlugin       = &ProgramAwarePlugin{}
+	_ plugin.ConsumerPlugin       = &ProgramAwarePlugin{}
 )
 
 func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
@@ -147,6 +149,18 @@ func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 // plugin's own PreRequest to read back.
 func (p *ProgramAwarePlugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{enqueueTimeAttributeKey: time.Time{}}
+}
+
+// Consumes declares the session state published by session-state-producer as an
+// optional input of turn-priority, which falls back to per-program counters
+// without it.
+func (p *ProgramAwarePlugin) Consumes() plugin.DataDependencies {
+	if _, ok := p.strategy.(*turnPriorityStrategy); !ok {
+		return plugin.DataDependencies{}
+	}
+	return plugin.DataDependencies{
+		Optional: map[plugin.DataKey]any{sessionstate.SessionStateDataKey: sessionstate.SessionState{}},
+	}
 }
 
 // fairnessDumpState is the sanitized snapshot returned by DumpState. Program IDs
