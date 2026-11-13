@@ -170,16 +170,47 @@ var (
 	sseDoneMarker = []byte(reqcommon.SSEDoneMarker)
 )
 
+// EnableForceStream turns on force-streaming for every step in steps that
+// supports it (decode and conditional-decode), sharing one budget built from the
+// pipeline's force_stream_buffer_size and force_stream_max_request_size. An
+// empty size takes its default. A size that fails validation is an error, so a
+// mistyped budget fails config load.
+func EnableForceStream(steps []pipeline.Step, bufferSize, maxRequestSize string) error {
+	budget, err := parseForceStreamBudget(bufferSize, maxRequestSize)
+	if err != nil {
+		return err
+	}
+	for _, step := range steps {
+		if fs, ok := step.(forceStreamer); ok {
+			fs.enableForceStream(budget)
+		}
+	}
+	return nil
+}
+
+// forceStreamer is a step that can force-stream, given the shared budget.
+type forceStreamer interface {
+	enableForceStream(*forceStreamBudget)
+}
+
+// rejectForceStreamParams returns an error if params sets a force-stream key.
+// They are pipeline settings, so a step-level value would otherwise be ignored
+// and the step would not force-stream.
+func rejectForceStreamParams(step string, params map[string]any) error {
+	for _, key := range []string{ParamForceStream, ParamForceStreamBufferSize, ParamForceStreamMaxRequestSize} {
+		if _, ok := params[key]; ok {
+			return fmt.Errorf("%s: %s is not a step parameter; set pipeline.%s", step, key, key)
+		}
+	}
+	return nil
+}
+
 // parseForceStreamBudget reads force_stream_buffer_size into a byte budget,
 // applying defaultForceStreamBufferSize when the operator leaves it unset. The
 // value is a human-readable size ("512MiB", "1GiB"); a string that fails to
 // parse, is zero, or exceeds int64 is a configuration error rather than a silent
 // fallback, so a mistyped budget fails config load instead of running a default.
-func parseForceStreamBudget(params map[string]any) (*forceStreamBudget, error) {
-	sizeStr, err := paramString(params, ParamForceStreamBufferSize)
-	if err != nil {
-		return nil, err
-	}
+func parseForceStreamBudget(sizeStr, perRequestStr string) (*forceStreamBudget, error) {
 	if sizeStr == "" {
 		sizeStr = defaultForceStreamBufferSize
 	}
@@ -198,7 +229,7 @@ func parseForceStreamBudget(params map[string]any) (*forceStreamBudget, error) {
 		return nil, fmt.Errorf("%s: %q does not exceed the %d-byte reply-envelope overhead, so no request could buffer output", ParamForceStreamBufferSize, sizeStr, forceStreamBaseOverheadBytes)
 	}
 
-	perRequest, err := parseForceStreamPerRequest(params, budgetMax)
+	perRequest, err := parseForceStreamPerRequest(perRequestStr, budgetMax)
 	if err != nil {
 		return nil, err
 	}
@@ -213,11 +244,7 @@ func parseForceStreamBudget(params map[string]any) (*forceStreamBudget, error) {
 // shared budget: a cap at or below the envelope overhead would force-stream
 // nothing, and one above the budget could never bind, so either fails config load
 // rather than silently degrading.
-func parseForceStreamPerRequest(params map[string]any, budgetMax int64) (int64, error) {
-	sizeStr, err := paramString(params, ParamForceStreamMaxRequestSize)
-	if err != nil {
-		return 0, err
-	}
+func parseForceStreamPerRequest(sizeStr string, budgetMax int64) (int64, error) {
 	if sizeStr == "" {
 		if budgetMax < defaultForceStreamMaxRequestBytes {
 			return budgetMax, nil
@@ -255,12 +282,12 @@ func parseForceStreamPerRequest(params map[string]any, budgetMax int64) (int64, 
 // request adds its echoed body on top (see responsesEchoBytes). The estimate reserves n completions, each tokenLimit
 // tokens, plus the reply envelope; over-reserving only sends more requests to the
 // pass-through, never past the budget.
-func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64, bool) {
+func (b *forceStreamBudget) estimateReservation(reqCtx *pipeline.RequestContext) (int64, bool) {
 	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
 
-	maxBytes := s.budget.perRequestMax
+	maxBytes := b.perRequestMax
 	// parseForceStreamPerRequest rejects a cap at or below the envelope overhead,
-	// so contentBudget is always positive once the step is built.
+	// so contentBudget is always positive once the budget is built.
 	contentBudget := maxBytes - forceStreamBaseOverheadBytes
 
 	n := reqcommon.OutputChoiceCount(reqCtx.Body, apiType)
@@ -302,6 +329,78 @@ func responsesEchoBytes(shape sseShape, bodyBytes []byte) int64 {
 	return int64(len(bodyBytes))
 }
 
+// forceStreamLeg is what differs between the steps that force-stream: the step
+// name their errors and metrics carry, the upstream label of the call, headers
+// added to the forced request, and onResponse, which inspects the response
+// headers before anything is read (conditional-decode reads its probe outcome
+// there). An onResponse error is returned as is, with nothing written.
+type forceStreamLeg struct {
+	step       string
+	upstream   string
+	headers    map[string]string
+	onResponse func(*http.Response) error
+}
+
+// tryForceStream force-streams reqCtx's request with body, the step's prepared
+// request body, if it can. Its result is a decline or fallback outcome, so the
+// caller sends body through its pass-through and records result when that
+// counts; sent reports whether the forced request was sent. An empty result
+// means the forced attempt is done: err is nil once the forced reply is
+// written, and otherwise the onResponse error or the error to return. The
+// terminal outcomes (forced, error_upstream, error_transport) are recorded here.
+func tryForceStream(ctx context.Context, logger logr.Logger, gwClient *gateway.Client, budget *forceStreamBudget, leg forceStreamLeg,
+	reqCtx *pipeline.RequestContext, body map[string]any, shape sseShape, parity *parityCheck) (result string, sent bool, err error) {
+	if forceStreamLossy(shape, body) {
+		return coordmetrics.ForceStreamResultFallbackUnsupported, false, nil
+	}
+	generated, ok := budget.estimateReservation(reqCtx)
+	if !ok {
+		return coordmetrics.ForceStreamResultFallbackUnbounded, false, nil
+	}
+	// The forced body is built before the reservation because the Responses
+	// reservation includes its size (see responsesEchoBytes).
+	bodyBytes, err := json.Marshal(forceStreamBody(body, shape))
+	if err != nil {
+		return "", false, fmt.Errorf("%s: force-stream marshal: %w", leg.step, err)
+	}
+	reserved := generated + responsesEchoBytes(shape, bodyBytes)
+	if !budget.tryReserve(leg.step, reserved) {
+		return coordmetrics.ForceStreamResultFallbackBudget, false, nil
+	}
+	err = executeForceStream(ctx, logger, gwClient, budget, leg, reqCtx, shape, bodyBytes, generated, reserved, parity)
+	if fallback, isFallback := forceStreamFallbackResult(err); isFallback {
+		// The attempt failed with nothing written to the client, so the caller's
+		// pass-through re-sends the request and the pod may run it twice.
+		return fallback, true, nil
+	}
+	return "", true, err
+}
+
+// forceStreamFallbackResult classifies a force-stream error as fallback-eligible,
+// returning the outcome label to record when the request takes the pass-through. It
+// leaves the client uncommitted, so the caller may fall back; nil (a forced
+// success) and every other error are not fallbacks, so ok is false and the caller
+// returns them directly.
+func forceStreamFallbackResult(err error) (result string, ok bool) {
+	switch {
+	case errors.Is(err, errForceStreamOversize):
+		return coordmetrics.ForceStreamResultFallbackOversize, true
+	case errors.Is(err, errForceStreamUnreadable):
+		return coordmetrics.ForceStreamResultFallbackUnreadable, true
+	case errors.Is(err, errForceStreamLossyFrame):
+		// Its own label: unlike fallback_unsupported, which declines before any
+		// upstream call, the pod already ran one attempt, and a non-replay-safe
+		// handoff makes the fallback recompute the prompt.
+		return coordmetrics.ForceStreamResultFallbackLossyFrame, true
+	case errors.Is(err, errForceStreamCeiling):
+		// A ceiling abort falls back like the others; it keeps the error_ceiling
+		// label so the byte-estimate shortfall stays visible for alerting.
+		return coordmetrics.ForceStreamResultErrorCeiling, true
+	default:
+		return "", false
+	}
+}
+
 // executeForceStream sends the forced body upstream, reassembles the streamed
 // frames into one non-streaming reply, and writes that reply to the client. It
 // releases reserved, the whole reservation, on every exit; generated is the part
@@ -309,37 +408,53 @@ func responsesEchoBytes(shape sseShape, bodyBytes []byte) int64 {
 //
 // Nothing reaches the client until the whole response is buffered, so every error
 // before the reply is written leaves the client uncommitted. A transport failure
-// returns a plain error and the server answers a clean 5xx; an upstream 4xx/5xx,
-// or an error frame streamed after the 200, is forwarded and reported with
-// UpstreamStreamedError so the server does not overwrite it. The fallback
-// sentinels (ceiling, oversize, lossy-frame, unreadable, truncated) instead return
-// so decode runs the pass-through, which can still serve the request or preserve a
-// field the fold would drop. A reply that fails to reach the client is a failure,
-// not a forced success (see writeForcedResponse).
-func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, bodyBytes []byte, generated, reserved int64, parity *parityCheck) error {
-	defer s.budget.release(reserved)
+// returns an unwritten error and the server answers a clean 5xx; an upstream
+// 4xx/5xx, or an error frame streamed after the 200, is forwarded and reported
+// with UpstreamStreamedError so the server does not overwrite it. The fallback
+// sentinels (ceiling, oversize, lossy-frame, unreadable, truncated) instead
+// return so the step runs its pass-through, which can still serve the request or
+// preserve a field the fold would drop. A reply that fails to reach the client is
+// a failure, not a forced success (see writeForcedResponse).
+func executeForceStream(ctx context.Context, logger logr.Logger, gwClient *gateway.Client, budget *forceStreamBudget, leg forceStreamLeg,
+	reqCtx *pipeline.RequestContext, shape sseShape, bodyBytes []byte, generated, reserved int64, parity *parityCheck) error {
+	defer budget.release(leg.step, reserved)
 
 	headers := forceStreamHeaders(reqCtx)
+	for k, v := range leg.headers {
+		headers[k] = v
+	}
 
 	logger.V(logutil.DEFAULT).Info("force-streaming request", "path", reqCtx.OriginalPath, "reservedBytes", reserved)
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
 		v.Info("force-stream request body", "method", "POST", "path", reqCtx.OriginalPath, "bodyLen", len(bodyBytes), "headers", httplog.RedactedHeaders(headers))
 	}
 
-	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamDecode)
-	resp, err := s.gwClient.Post(ctx, reqCtx.OriginalPath, bodyBytes, headers)
+	call := coordmetrics.StartUpstreamCall(leg.upstream)
+	resp, err := gwClient.Post(ctx, reqCtx.OriginalPath, bodyBytes, headers)
 	call.Done()
 	if err != nil {
-		// No response headers arrived, so nothing is on the wire; a plain error
-		// lets the server answer a clean 502.
-		coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultErrorTransport)
-		return fmt.Errorf("%s: force-stream request: %w", DecodeStepName, err)
+		// A round trip that failed because the client left is the cancellation,
+		// not a transport fault, so it records no outcome.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			logger.V(logutil.VERBOSE).Info("force-stream: client cancelled", "error", err)
+			return fmt.Errorf("%s: %w", leg.step, ctxErr)
+		}
+		// No response headers arrived, so nothing is on the wire; an unwritten
+		// error lets the server answer a clean 502. The status-less UpstreamError
+		// classifies it upstream_transport, as the pass-through's failure is.
+		coordmetrics.IncForceStreamTotal(reqCtx.Model, leg.step, coordmetrics.ForceStreamResultErrorTransport)
+		return fmt.Errorf("force-stream request: %w: %w", &pipeline.UpstreamError{Step: leg.step}, err)
 	}
 	defer resp.Body.Close()
 
+	if leg.onResponse != nil {
+		if err := leg.onResponse(resp); err != nil {
+			return err
+		}
+	}
 	if resp.StatusCode >= http.StatusBadRequest {
-		coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultErrorUpstream)
-		return forwardUpstreamError(reqCtx, resp)
+		coordmetrics.IncForceStreamTotal(reqCtx.Model, leg.step, coordmetrics.ForceStreamResultErrorUpstream)
+		return forwardUpstreamError(leg.step, reqCtx, resp)
 	}
 
 	n := reqcommon.OutputChoiceCount(reqCtx.Body, reqcommon.DetectAPIType(reqCtx.OriginalPath))
@@ -349,19 +464,20 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 		var upstreamErr *forceStreamUpstreamError
 		switch {
 		case errors.As(err, &upstreamErr):
-			coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultErrorUpstream)
+			coordmetrics.IncForceStreamTotal(reqCtx.Model, leg.step, coordmetrics.ForceStreamResultErrorUpstream)
 			copyUpstreamHeaders(reqCtx.ResponseWriter.Header(), upstreamHeader)
-			return writeUpstreamError(reqCtx, upstreamErr.status, reqcommon.ContentTypeJSON, upstreamErr.payload)
+			return writeUpstreamError(leg.step, reqCtx, upstreamErr.status, reqcommon.ContentTypeJSON, upstreamErr.payload)
 		case errors.Is(err, errForceStreamCeiling):
-			// decode records error_ceiling and runs the pass-through. A buffered reply
-			// past its reservation usually means the per-token byte estimate came up
-			// short, not that the pod ignored the limit, so falling back serves the
-			// reply rather than failing a conforming request; nothing reached the
-			// client, so the fallback is available here as it is for oversize.
+			// The step records error_ceiling and runs its pass-through. A buffered
+			// reply past its reservation usually means the per-token byte estimate
+			// came up short, not that the pod ignored the limit, so falling back
+			// serves the reply rather than failing a conforming request; nothing
+			// reached the client, so the fallback is available here as it is for
+			// oversize.
 		case errors.Is(err, errForceStreamOversize):
-			// decode records fallback_oversize and runs the pass-through.
+			// The step records fallback_oversize and runs its pass-through.
 		case errors.Is(err, errForceStreamLossyFrame):
-			// decode records fallback_lossy_frame and runs the pass-through, which
+			// The step records fallback_lossy_frame and runs its pass-through, which
 			// preserves the field the fold would drop.
 		default:
 			// A request whose context already ended (client disconnected, or a
@@ -371,22 +487,22 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 			// neither counted fallback_unreadable nor re-sent.
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				logger.V(logutil.VERBOSE).Info("force-stream: client cancelled", "error", ctxErr)
-				return fmt.Errorf("%s: %w", DecodeStepName, ctxErr)
+				return fmt.Errorf("%s: %w", leg.step, ctxErr)
 			}
 			// The upstream returned 200 but no complete reply reached the client: an
 			// unreadable stream (bad JSON, interrupted read) or one cut off before a
-			// terminal marker. Log the detail; decode records fallback_unreadable and
-			// runs the pass-through.
+			// terminal marker. Log the detail; the step records fallback_unreadable
+			// and runs its pass-through.
 			logger.Error(err, "force-stream fell back: incomplete upstream stream")
 			return errForceStreamUnreadable
 		}
-		return fmt.Errorf("%s: %w", DecodeStepName, err)
+		return fmt.Errorf("%s: %w", leg.step, err)
 	}
 
 	// The client asked for a non-streaming reply, so no include_usage was injected.
 	writer, finalize := parityResponseWriter(reqCtx, parity, false)
 	copyUpstreamHeaders(writer.Header(), upstreamHeader)
-	return writeForcedResponse(ctx, logger, reqCtx, writer, finalize, reassembler)
+	return writeForcedResponse(ctx, logger, leg.step, reqCtx, writer, finalize, reassembler)
 }
 
 // thinkingTypeDisabled is the Anthropic Messages thinking.type that turns
@@ -517,7 +633,7 @@ func boolField(body map[string]any, field string) bool {
 	return ok && set
 }
 
-// forceStreamHeaders builds the forced decode request's forwarding headers,
+// forceStreamHeaders builds the forced request's forwarding headers,
 // matching the pass-through's (see newDecodeProxyRequest), including the peer
 // topology the EPP's topology-affinity plugins read on the decode leg.
 func forceStreamHeaders(reqCtx *pipeline.RequestContext) map[string]string {
@@ -652,14 +768,14 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, generated, ech
 }
 
 // writeForcedResponse marshals the reassembled reply and writes it as one
-// non-streaming JSON response through w, the decode step's response writer, so
+// non-streaming JSON response through w, the step's response writer, so
 // the forced reply gets the same usage rewrite as the pass-through; finalize
 // flushes what w buffered. A marshal failure returns a plain error before any
 // write, so the server answers a clean 502.
-func writeForcedResponse(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, w http.ResponseWriter, finalize func() error, reassembler *sseReassembler) error {
+func writeForcedResponse(ctx context.Context, logger logr.Logger, step string, reqCtx *pipeline.RequestContext, w http.ResponseWriter, finalize func() error, reassembler *sseReassembler) error {
 	payload, err := json.Marshal(reassembler.result())
 	if err != nil {
-		return fmt.Errorf("%s: force-stream marshal response: %w", DecodeStepName, err)
+		return fmt.Errorf("%s: force-stream marshal response: %w", step, err)
 	}
 
 	w.Header().Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
@@ -676,12 +792,12 @@ func writeForcedResponse(ctx context.Context, logger logr.Logger, reqCtx *pipeli
 		// the pass-through's.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			logger.V(logutil.VERBOSE).Info("force-stream: client left before the reply was written", "error", ctxErr)
-			return fmt.Errorf("%s: %w", DecodeStepName, ctxErr)
+			return fmt.Errorf("%s: %w", step, ctxErr)
 		}
 		logger.Error(err, "force-stream client write incomplete")
-		return &pipeline.ResponseWrittenError{Step: DecodeStepName, StatusCode: http.StatusOK, Cause: err}
+		return &pipeline.ResponseWrittenError{Step: step, StatusCode: http.StatusOK, Cause: err}
 	}
-	coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultForced)
+	coordmetrics.IncForceStreamTotal(reqCtx.Model, step, coordmetrics.ForceStreamResultForced)
 	logger.V(logutil.DEFAULT).Info("force-stream complete", "bytes", len(payload))
 	return nil
 }
@@ -690,14 +806,14 @@ func writeForcedResponse(ctx context.Context, logger logr.Logger, reqCtx *pipeli
 // its status and body, matching what the non-forced pass-through would stream.
 // It returns UpstreamStreamedError so the server records the failure without
 // writing another response.
-func forwardUpstreamError(reqCtx *pipeline.RequestContext, resp *http.Response) error {
+func forwardUpstreamError(step string, reqCtx *pipeline.RequestContext, resp *http.Response) error {
 	respBody := readErrorBody(resp.Body)
 	contentType := resp.Header.Get(gateway.ContentTypeHeader)
 	if contentType == "" {
 		contentType = reqcommon.ContentTypeJSON
 	}
 	copyUpstreamHeaders(reqCtx.ResponseWriter.Header(), resp.Header)
-	return writeUpstreamError(reqCtx, resp.StatusCode, contentType, respBody)
+	return writeUpstreamError(step, reqCtx, resp.StatusCode, contentType, respBody)
 }
 
 // streamOnlyHeaders describe the event stream the forced request read rather than
@@ -727,12 +843,12 @@ func copyUpstreamHeaders(dst, src http.Header) {
 // writeUpstreamError writes an upstream error status and body to the client and
 // returns UpstreamStreamedError, so the server records the failure without
 // writing another response.
-func writeUpstreamError(reqCtx *pipeline.RequestContext, status int, contentType string, body []byte) error {
+func writeUpstreamError(step string, reqCtx *pipeline.RequestContext, status int, contentType string, body []byte) error {
 	w := reqCtx.ResponseWriter
 	w.Header().Set(gateway.ContentTypeHeader, contentType)
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
-	return &pipeline.UpstreamStreamedError{Step: DecodeStepName, StatusCode: status}
+	return &pipeline.UpstreamStreamedError{Step: step, StatusCode: status}
 }
 
 // upstreamErrorStatus returns the HTTP status a streamed error frame names: the

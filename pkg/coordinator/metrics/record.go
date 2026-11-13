@@ -115,22 +115,22 @@ func IncConditionalDecodeProbes(result string) {
 }
 
 // AddForceStreamBufferedBytes adds n to the force-stream buffer gauge when a
-// forced request reserves budget.
-func AddForceStreamBufferedBytes(n int64) {
-	forceStreamBufferedBytes.WithLabelValues().Add(float64(n))
+// forced request of step reserves budget.
+func AddForceStreamBufferedBytes(step string, n int64) {
+	forceStreamBufferedBytes.WithLabelValues(step).Add(float64(n))
 }
 
 // SubForceStreamBufferedBytes subtracts n from the force-stream buffer gauge
-// when a forced request releases its reservation. Balance with
+// when a forced request of step releases its reservation. Balance with
 // AddForceStreamBufferedBytes.
-func SubForceStreamBufferedBytes(n int64) {
-	forceStreamBufferedBytes.WithLabelValues().Sub(float64(n))
+func SubForceStreamBufferedBytes(step string, n int64) {
+	forceStreamBufferedBytes.WithLabelValues(step).Sub(float64(n))
 }
 
 // IncForceStreamTotal increments force_stream_total for one model's candidate
-// outcome. The outcome label values are the ForceStreamResult* constants.
-func IncForceStreamTotal(modelName, result string) {
-	forceStreamTotal.WithLabelValues(boundModel(modelName), result).Inc()
+// outcome in step. The outcome label values are the ForceStreamResult* constants.
+func IncForceStreamTotal(modelName, step, result string) {
+	forceStreamTotal.WithLabelValues(boundModel(modelName), step, result).Inc()
 }
 
 // RecordEncodeSubrequests observes the number of Encode subrequests for one

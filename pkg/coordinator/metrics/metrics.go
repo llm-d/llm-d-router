@@ -147,6 +147,9 @@ var (
 	// decode leg carried the rendered token IDs (so a mismatch means the
 	// worker ignored them) or rendered the prompt itself (renderer drift).
 	parityLabels = []string{"model_name", "api_type", "ids_forwarded"}
+	// forceStreamLabels are model_name, the step that force-streamed the
+	// request (decode or conditional-decode), and the request's outcome.
+	forceStreamLabels = []string{"model_name", "step", "result"}
 )
 
 // withLabel returns a fresh slice of base followed by extra. It allocates a

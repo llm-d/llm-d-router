@@ -68,11 +68,14 @@ type GatewayConfig struct {
 }
 
 type PipelineConfig struct {
-	KVConnector            string       `mapstructure:"kv_connector"`
-	ECConnector            string       `mapstructure:"ec_connector"`
-	UseOpenAIFormat        bool         `mapstructure:"use_openai_format"`
-	ForwardResponseHeaders []string     `mapstructure:"forward_response_headers"`
-	Steps                  []StepConfig `mapstructure:"steps"`
+	KVConnector               string       `mapstructure:"kv_connector"`
+	ECConnector               string       `mapstructure:"ec_connector"`
+	UseOpenAIFormat           bool         `mapstructure:"use_openai_format"`
+	ForwardResponseHeaders    []string     `mapstructure:"forward_response_headers"`
+	ForceStream               bool         `mapstructure:"force_stream"`
+	ForceStreamBufferSize     string       `mapstructure:"force_stream_buffer_size"`
+	ForceStreamMaxRequestSize string       `mapstructure:"force_stream_max_request_size"`
+	Steps                     []StepConfig `mapstructure:"steps"`
 }
 
 type StepConfig struct {

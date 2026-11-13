@@ -103,5 +103,10 @@ func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, er
 
 		pipelineSteps = append(pipelineSteps, step)
 	}
+	if cfg.Pipeline.ForceStream {
+		if err := steps.EnableForceStream(pipelineSteps, cfg.Pipeline.ForceStreamBufferSize, cfg.Pipeline.ForceStreamMaxRequestSize); err != nil {
+			return nil, fmt.Errorf("pipeline: %w", err)
+		}
+	}
 	return pipeline.NewWithForwardResponseHeaders(pipelineSteps, cfg.Pipeline.ForwardResponseHeaders)
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package builder
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -158,5 +159,62 @@ func TestBuildRejectsInvalidForwardResponseHeaders(t *testing.T) {
 	}}
 	if _, err := Build(cfg, nil); err == nil {
 		t.Fatal("Build() expected an error for a non-forwardable response header")
+	}
+}
+
+// loadYAML writes body to a coordinator.yaml in a temp dir and loads it.
+func loadYAML(t *testing.T, body string) *config.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "coordinator.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	return cfg
+}
+
+// TestBuildForceStreamFromPipelineConfig loads the pipeline-level force-stream
+// settings and builds a pipeline whose steps share them; a size that fails
+// validation fails Build.
+func TestBuildForceStreamFromPipelineConfig(t *testing.T) {
+	const pipelineYAML = "pipeline:\n" +
+		"  force_stream: true\n" +
+		"  force_stream_buffer_size: %s\n" +
+		"  steps:\n" +
+		"    - type: " + steps.ConditionalDecodeStepName + "\n" +
+		"    - type: " + steps.DecodeStepName + "\n"
+
+	cfg := loadYAML(t, fmt.Sprintf(pipelineYAML, "512MiB"))
+	if !cfg.Pipeline.ForceStream || cfg.Pipeline.ForceStreamBufferSize != "512MiB" {
+		t.Fatalf("pipeline force-stream settings not loaded: %+v", cfg.Pipeline)
+	}
+	if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err != nil {
+		t.Fatalf("Build() unexpected error: %v", err)
+	}
+
+	cfg = loadYAML(t, fmt.Sprintf(pipelineYAML, "1KiB"))
+	if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err == nil {
+		t.Fatal("Build() expected an error for a buffer below the reply-envelope overhead")
+	}
+}
+
+// TestBuildRejectsStepLevelForceStream covers a coordinator.yaml that sets
+// force_stream under a step's params. Build must fail rather than build a
+// pipeline that does not force-stream.
+func TestBuildRejectsStepLevelForceStream(t *testing.T) {
+	for _, stepType := range []string{steps.DecodeStepName, steps.ConditionalDecodeStepName} {
+		t.Run(stepType, func(t *testing.T) {
+			cfg := loadYAML(t, "pipeline:\n"+
+				"  steps:\n"+
+				"    - type: "+stepType+"\n"+
+				"      params:\n"+
+				"        force_stream: true\n")
+			if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err == nil {
+				t.Fatalf("Build() expected an error for %q setting force_stream", stepType)
+			}
+		})
 	}
 }
