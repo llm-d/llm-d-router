@@ -1285,3 +1285,83 @@ for c in "sidecar:${envoy_default_output}:--concurrency:8:1" "sidecar-cpuset:${e
     exit 1
   fi
 done
+
+echo "Verifying llm-d-router-standalone as two aliased dependencies of one umbrella chart..."
+umbrella_dir="${TEMP_DIR}/umbrella"
+mkdir -p "${umbrella_dir}"
+standalone_chart_dir="$(cd "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" && pwd)"
+cat > "${umbrella_dir}/Chart.yaml" <<UMBRELLA
+apiVersion: v2
+name: umbrella
+version: 0.0.0
+dependencies:
+  - name: llm-d-router-standalone
+    alias: router-qwen
+    version: 0.0.0
+    repository: file://${standalone_chart_dir}
+  - name: llm-d-router-standalone
+    alias: router-gemma
+    version: 0.0.0
+    repository: file://${standalone_chart_dir}
+UMBRELLA
+cat > "${umbrella_dir}/values.yaml" <<'UMBRELLA'
+router-qwen:
+  router:
+    fullnameOverride: qwen
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: qwen
+router-gemma:
+  router:
+    fullnameOverride: gemma
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: gemma
+UMBRELLA
+${HELM} dependency update "${umbrella_dir}" >/dev/null || { echo "Helm dependency update failed for the umbrella chart"; exit 1; }
+umbrella_output_dir="${SCRIPT_ROOT}/bin/llm-d-router-standalone-umbrella-aliases"
+rm -rf "${umbrella_output_dir}"
+${HELM} template umbrella "${umbrella_dir}" --namespace umbrella-ns --output-dir="${umbrella_output_dir}" >/dev/null || { echo "Helm template failed for the umbrella chart"; exit 1; }
+${KUBECTL_VALIDATE} "${umbrella_output_dir}" --local-crds "${TEMP_DIR}" || { echo "Kubectl validation failed for the umbrella chart"; exit 1; }
+umbrella_render="${TEMP_DIR}/umbrella-render.yaml"
+find "${umbrella_output_dir}" -name '*.yaml' -exec cat {} + > "${umbrella_render}"
+umbrella_duplicates=$(${YQ} -N 'select(.kind) | .kind + "/" + .metadata.name' "${umbrella_render}" | sort | uniq -d)
+if [ -n "${umbrella_duplicates}" ]; then
+  echo "Umbrella chart rendered duplicate resources:"
+  echo "${umbrella_duplicates}"
+  exit 1
+fi
+for base in qwen gemma; do
+  proxy_container=$(${YQ} -N "select(.kind == \"Deployment\" and .metadata.name == \"${base}-epp\") | .spec.template.spec.containers[] | select(.name == \"envoy-proxy\") | (.args | length | tostring) + \":\" + (.ports | length | tostring)" "${umbrella_render}")
+  case "${proxy_container}" in
+    ""|0:*|*:0) echo "Umbrella instance ${base}: Deployment ${base}-epp has no envoy-proxy container with args and ports (got '${proxy_container}')"; exit 1 ;;
+  esac
+  for resource in "ConfigMap/${base}-envoy" "Service/${base}-epp-model-servers"; do
+    if ! ${YQ} -N 'select(.kind) | .kind + "/" + .metadata.name' "${umbrella_render}" | grep -qx -- "${resource}"; then
+      echo "Umbrella instance ${base}: ${resource} not rendered"
+      exit 1
+    fi
+  done
+done
+
+echo "Verifying llm-d-router-standalone keeps its proxy presets when published under a suffixed name..."
+suffixed_chart_dir="${TEMP_DIR}/suffixed/llm-d-router-standalone"
+mkdir -p "$(dirname "${suffixed_chart_dir}")"
+cp -r "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" "${suffixed_chart_dir}"
+${YQ} -i '.name = .name + "-dev"' "${suffixed_chart_dir}/Chart.yaml"
+suffixed_render="${TEMP_DIR}/suffixed-render.yaml"
+${HELM} template suffixed "${suffixed_chart_dir}" --namespace suffixed-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false > "${suffixed_render}" || { echo "Helm template failed for the suffixed chart"; exit 1; }
+if ! arg_rendered "${suffixed_render}" --concurrency 8; then
+  echo "Suffixed chart did not render the Envoy preset args"
+  exit 1
+fi
+for resource in "ConfigMap/suffixed-envoy" "Service/suffixed-epp-model-servers"; do
+  if ! ${YQ} -N 'select(.kind) | .kind + "/" + .metadata.name' "${suffixed_render}" | grep -qx -- "${resource}"; then
+    echo "Suffixed chart: ${resource} not rendered"
+    exit 1
+  fi
+done

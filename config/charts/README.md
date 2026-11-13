@@ -53,6 +53,46 @@ helm install my-standalone-router ./config/charts/llm-d-router-standalone \
   --set router.proxy.replicas=3
 ```
 
+#### Several Standalone Routers in One Umbrella Chart
+An umbrella chart can declare `llm-d-router-standalone` once per model under different aliases. The instances share the release name, which is the default base of every resource name, so they would render the same objects. Each instance sets `router.fullnameOverride` to a distinct value, used as the base of its resource names in place of the release name: with the values below, the first instance creates `qwen-epp`, `qwen-envoy` and so on, the second `gemma-epp`, `gemma-envoy`.
+
+Each instance also sets `router.inferencePool.create=false`. The `InferencePool` keeps the release name, so two instances creating one would collide.
+
+Changing `router.fullnameOverride` on an installed release renames its resources: Helm deletes the old objects and creates new ones, which interrupts traffic.
+
+```yaml
+# Chart.yaml
+dependencies:
+  - name: llm-d-router-standalone
+    alias: router-qwen
+    version: <chart-version>
+    repository: oci://ghcr.io/llm-d/charts
+  - name: llm-d-router-standalone
+    alias: router-gemma
+    version: <chart-version>
+    repository: oci://ghcr.io/llm-d/charts
+```
+
+```yaml
+# values.yaml
+router-qwen:
+  router:
+    fullnameOverride: qwen
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: qwen
+router-gemma:
+  router:
+    fullnameOverride: gemma
+    inferencePool:
+      create: false
+    modelServers:
+      matchLabels:
+        app: gemma
+```
+
 ---
 
 ### 2. Gateway Mode (`llm-d-router-gateway`)
@@ -690,7 +730,7 @@ helm install vllm-qwen3-32b ./config/charts/llm-d-router-gateway \
 
 ### 7. RBAC
 
-The EPP caches pods, InferencePools, InferenceObjectives and InferenceModelRewrites, and holds its leader-election lease, in the release namespace only, so those permissions are namespaced `Role`s. Objects rendered by the charts, with names in Kind order (one name applies to both objects). `<name>` is `<release[:40]>-epp`, the release name truncated to 40 characters plus `-epp`; `<release>` is the full release name; `<ns>` is the release namespace.
+The EPP caches pods, InferencePools, InferenceObjectives and InferenceModelRewrites, and holds its leader-election lease, in the release namespace only, so those permissions are namespaced `Role`s. Objects rendered by the charts, with names in Kind order (one name applies to both objects). `<name>` is `<release[:40]>-epp`, the release name truncated to 40 characters plus `-epp`; `<release>` is the full release name, or `router.fullnameOverride` when it is set in the standalone chart; `<ns>` is the release namespace.
 
 | Name | Kind | Rendered when | Grants |
 |---|---|---|---|
