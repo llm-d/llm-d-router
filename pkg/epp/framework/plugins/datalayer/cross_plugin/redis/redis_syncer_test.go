@@ -39,6 +39,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/internal/crossreplica"
 )
 
 const (
@@ -163,7 +164,7 @@ func newTestSyncer(t testing.TB, server *miniredis.Miniredis, replicaID string) 
 
 func seedReplica(t testing.TB, server *miniredis.Miniredis, key fwkdl.StateKey, replicaID string, value any) {
 	t.Helper()
-	data, err := encodeValue(value)
+	data, err := crossreplica.EncodeValue(value)
 	require.NoError(t, err)
 	server.HSet(string(key)+":"+testEndpointID, replicaID, string(data))
 }
@@ -295,7 +296,7 @@ func TestSetSupportsUnregisteredConcreteValue(t *testing.T) {
 }
 
 func TestEncodeValueUsesConcreteValueStream(t *testing.T) {
-	data, err := encodeValue(&customValue{Count: 7})
+	data, err := crossreplica.EncodeValue(&customValue{Count: 7})
 	require.NoError(t, err)
 
 	decoder := gob.NewDecoder(bytes.NewReader(data))
@@ -306,10 +307,10 @@ func TestEncodeValueUsesConcreteValueStream(t *testing.T) {
 
 func TestEncodeValueSupportsInFlightLoad(t *testing.T) {
 	want := &attrconcurrency.InFlightLoad{Tokens: 7, Requests: 2}
-	data, err := encodeValue(want)
+	data, err := crossreplica.EncodeValue(want)
 	require.NoError(t, err)
 
-	actual, err := gobDecode(data, &attrconcurrency.InFlightLoad{})
+	actual, err := crossreplica.DecodeValue(data, &attrconcurrency.InFlightLoad{})
 	require.NoError(t, err)
 	require.Equal(t, want, actual)
 }
@@ -546,7 +547,7 @@ func TestGetOrSetDoesNotCollideWithEndpointHashes(t *testing.T) {
 	syncer, _ := newTestSyncer(t, server, testReplicaID)
 	ctx := context.Background()
 
-	peer, err := encodeValue(7)
+	peer, err := crossreplica.EncodeValue(7)
 	require.NoError(t, err)
 	server.HSet(syncer.hashKey("request", "request-id"), "epp-b", string(peer))
 	require.NoError(t, syncer.set(ctx, "request", "request-id", 4, sumInts))

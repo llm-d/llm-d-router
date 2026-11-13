@@ -84,8 +84,12 @@ contributor's live local value. If no peer value is available, `Get` returns the
 local value.
 
 Values are encoded with `encoding/gob` and decoded into the type supplied by
-the local contributor, as with the Redis syncer. Values received for a state key
-before the EPP first publishes that key are decoded when it does.
+the local contributor, as with the Redis syncer. An EPP keeps a peer's value
+only for an endpoint it has sent itself under the same state key. A value that
+arrives before that is dropped, and the peer sends it again within
+`refreshInterval`. An EPP holds values from at most 64 peer replicas at once;
+messages from further replicas are dropped until a held replica goes `stateTTL`
+without a message.
 
 ## Connections
 
@@ -96,8 +100,10 @@ that peer. The link queues at most 256 messages and drops new ones beyond that;
 each value is resent within `refreshInterval` of the link draining.
 
 A message larger than 16 MiB is not sent, and a received one ends its stream.
+A received message that does not decode is skipped, and its stream stays open.
 Each incoming connection is set up on its own with a 5 s limit, so a client
-that connects and sends nothing holds only its own connection.
+that connects and sends nothing holds only its own connection. An EPP accepts
+at most 64 connections, with at most 2 streams on each.
 
 The peer set comes from peer discovery and is read every 50 ms:
 
@@ -114,8 +120,9 @@ The peer set comes from peer discovery and is read every 50 ms:
   connection that stopped delivering after a network partition.
 
 Opening, connecting, losing and closing a link, a link not connected for
-`stateTTL`, the first message from a peer, and a peer going `stateTTL` without
-a message are logged at the default level.
+`stateTTL`, the first message from a peer replica, and a peer replica going
+`stateTTL` without a message are logged at the default level. After the first
+64 peer replicas, a new one is logged at most once every 30 s.
 
 ## Scheduling and Admission
 
@@ -137,7 +144,9 @@ endpoints when `GetOrSet` fails.
 
 The plugin needs no server. Every EPP replica must be able to reach every other
 replica's `port` over TCP, and the replicas must be in the peer set of the
-discovery plugin. Connections use unencrypted TCP with no authentication.
+discovery plugin. Connections use unencrypted TCP with no authentication, so
+`port` should be reachable only from EPP pods, for example through a
+NetworkPolicy.
 
 The plugin binds `port` when it is created, so a port in use fails EPP startup.
 Peers that are not reachable yet do not prevent startup: their links connect

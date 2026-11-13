@@ -35,6 +35,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/internal/crossreplica"
 )
 
 type batchPipelineHook struct {
@@ -85,7 +86,7 @@ func TestSetBatchMatchesSetAcrossChunks(t *testing.T) {
 				id    string
 				value cloneableInt
 			}{{"epp-z", 9}, {"epp-b", 7}} {
-				data, err := encodeValue(peer.value)
+				data, err := crossreplica.EncodeValue(peer.value)
 				require.NoError(t, err)
 				server.HSet(key, peer.id, string(data))
 			}
@@ -400,7 +401,7 @@ func TestSetBatchConcurrentChunksPreserveEndpointResults(t *testing.T) {
 		}
 		return cloneableInt(4)
 	}
-	peer, err := encodeValue(cloneableInt(7))
+	peer, err := crossreplica.EncodeValue(cloneableInt(7))
 	require.NoError(t, err)
 	old := &aggregateCacheEntry{value: cloneableInt(99)}
 	for _, id := range ids {
