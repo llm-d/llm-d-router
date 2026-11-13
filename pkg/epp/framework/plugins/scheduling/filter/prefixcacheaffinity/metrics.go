@@ -19,11 +19,13 @@ package prefixcacheaffinity
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
@@ -79,6 +81,37 @@ var p2pDecisions = prometheus.NewCounterVec(
 	[]string{"plugin_name", "endpoint_role", "affinity_outcome", "p2p_outcome"},
 )
 
+// ttftBuckets are the histogram buckets, in seconds, for the estimated and the
+// actual TTFT of a request.
+var ttftBuckets = []float64{
+	0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 45,
+	60, 90, 120, 180, 300, 600,
+}
+
+// ttftLabels are the labels of the estimated and actual TTFT histograms, as on
+// the predicted-latency producer's TTFT histograms.
+var ttftLabels = []string{"plugin_name", "plugin_type", "target_model_name"}
+
+var estimatedTTFT = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "prefix_cache_affinity_filter_estimated_ttft_seconds",
+		Help:      metricsutil.HelpMsgWithStability("TTFT the filter estimated for the endpoint that served the request, in seconds.", compbasemetrics.ALPHA),
+		Buckets:   ttftBuckets,
+	},
+	ttftLabels,
+)
+
+var actualTTFT = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "prefix_cache_affinity_filter_actual_ttft_seconds",
+		Help:      metricsutil.HelpMsgWithStability("TTFT measured from the filter's decision to the first response chunk, for requests with an estimate, in seconds.", compbasemetrics.ALPHA),
+		Buckets:   ttftBuckets,
+	},
+	ttftLabels,
+)
+
 // registerMetrics registers the filter collectors on the given registerer. A nil
 // registerer is a no-op, so the filter runs without metrics when the handle
 // supplies no recorder. Repeated registration of the same collector is tolerated.
@@ -86,7 +119,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return nil
 	}
-	for _, collector := range []prometheus.Collector{filterDecisions, p2pDecisions} {
+	for _, collector := range []prometheus.Collector{filterDecisions, p2pDecisions, estimatedTTFT, actualTTFT} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
 			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == collector {
@@ -106,8 +139,16 @@ func recordP2PDecision(pluginName, role, affinityOutcome, p2pOutcome string) {
 	p2pDecisions.WithLabelValues(pluginName, role, affinityOutcome, p2pOutcome).Inc()
 }
 
+// recordTTFT records a request's estimated and actual TTFT.
+func recordTTFT(plugin fwkplugin.TypedName, targetModel string, estimated, actual time.Duration) {
+	estimatedTTFT.WithLabelValues(plugin.Name, plugin.Type, targetModel).Observe(estimated.Seconds())
+	actualTTFT.WithLabelValues(plugin.Name, plugin.Type, targetModel).Observe(actual.Seconds())
+}
+
 // resetMetrics clears the collectors between tests.
 func resetMetrics() {
 	filterDecisions.Reset()
 	p2pDecisions.Reset()
+	estimatedTTFT.Reset()
+	actualTTFT.Reset()
 }

@@ -63,8 +63,20 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
   `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
   `prefillThroughput` (default); when `ttftEstimate` is `backlog` the numerator
   is `inFlightTokens`, and when `ttftEstimate` is `full` it becomes
-  `inFlightTokens + uncachedRequestTokens`. The TTFT comes
-  from the latency predictor when `ttftSource` is `latencyPredictor`
+  `inFlightTokens + uncachedRequestTokens`. With `full`, the estimate also adds
+  `queued / completionsPerSecond * 1000`, the time a new request waits to be admitted.
+  `queued` is the EPP's in-flight requests beyond `maxNumSeqs` (when `maxNumSeqs > 0`),
+  or, when KV cache usage is at or above `queueWaitKVCacheThreshold`, the model
+  server's `waitingQueueSize` if that is larger. `maxNumSeqs` must match the model
+  server's `--max-num-seqs`. The queued requests' own prefill follows their wait, so
+  their share of `inFlightTokens` is left out, taken as `queued` of the requests whose
+  tokens are still counted. `completionsPerSecond` counts requests routed by the EPP
+  that finished, failed or were cancelled on the endpoint, over the last 30 s, or over
+  the last 120 s when the 30 s window holds fewer than 5; a rate of 0 is taken as one
+  completion in 30 s. With the queue wait, `maxTTFTPenaltyMs` acts as a budget for
+  queueing on the sticky endpoint: its queue grows until its wait exceeds the other
+  endpoints' by about that much, then requests spill over. The TTFT comes from the latency predictor when
+  `ttftSource` is `latencyPredictor`
 - If either the sticky or non-sticky set has no endpoint with the TTFT source attribute
   (`LatencyPredictionInfo` or `InFlightLoad`, plus `UncachedRequestTokens` when
   `ttftEstimate` is `full`), the TTFT load gate is skipped and all
@@ -123,6 +135,8 @@ documents the strategy and its calibration.
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
 | `p2pSourceProducerName` | `string` | No | (empty) | Name of the `p2p-source-producer` whose decision is paired with this filter's outcome per request; empty disables the pairing |
 | `ttftEstimate` | `string` | No | `backlog` | TTFT estimation method with `prefillThroughput` source: `backlog` or `full` |
+| `maxNumSeqs` | `int` | No | `0` | Model server's running-request limit (vLLM `max_num_seqs`); with `ttftEstimate: full`, a value > 0 adds the slot queue wait to the estimate |
+| `queueWaitKVCacheThreshold` | `float64` | No | `0.95` | KV cache usage in [0, 1] at or above which waiting requests wait for KV cache; with `ttftEstimate: full`, a value > 0 adds their wait to the estimate |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
 2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
@@ -138,10 +152,22 @@ contains that extra prefill. A `backlog`-tuned `maxTTFTPenaltyMs` under `full` m
 stickiness later than intended. With `full`, set `maxTTFTPenaltyMs` lower than a
 `backlog`-tuned value.
 
+## Metrics
+
+- `llm_d_epp_prefix_cache_affinity_filter_decisions_total` (`plugin_name`, `outcome`): one
+  count per filter run, by decision outcome.
+- `llm_d_epp_prefix_cache_affinity_filter_estimated_ttft_seconds` and
+  `llm_d_epp_prefix_cache_affinity_filter_actual_ttft_seconds` (`plugin_name`, `plugin_type`,
+  `target_model_name`): with
+  `ttftSource: prefillThroughput`, at a request's first response chunk, the TTFT the filter
+  estimated for the endpoint that served it and the time from the filter's run to that chunk.
+  Requests served by an endpoint the filter did not see, such as a decode endpoint when the
+  filter runs in the prefill profile, are not recorded.
+
 ## Dependencies
 
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
-- Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer`)
+- Reads `InFlightLoad` (tokens and completion rate) and the endpoint's `WaitingQueueSize`, `RunningRequestsSize` and `KVCacheUsagePercent` metrics for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer` and the metrics extractor)
 - Reads `UncachedRequestTokens` for the TTFT load gate when `ttftEstimate` is `full` (from `in-flight-load-producer`)
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 - Reads `P2PSourceDecision` in `PreRequest` when `p2pSourceProducerName` is set (from `p2p-source-producer`; optional)
