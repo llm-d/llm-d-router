@@ -30,6 +30,7 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/latencypredictorclient"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/latencypredictorclient/protocol"
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -390,52 +391,25 @@ type predictedLatencyCtx struct {
 	avgPredictedTPOT          float64
 	predictedTPOTObservations []float64
 
-	inputTokenCount int
+	requestFeatures *protocol.Features
 
-	prefixCacheScoresForEndpoints map[string]float64
-
-	// encoderInputSize is the request's total multimodal encoder item size;
-	// encoderMatchedSizeForEndpoints is the per-endpoint portion likely present
-	// in that endpoint's encoder cache, keyed by endpoint name. Both stay 0
-	// when encoder-cache features are disabled or the request is text-only.
-	encoderInputSize               int
-	encoderMatchedSizeForEndpoints map[string]int
-
-	// inFlightLoadForEndpoints holds the in-flight load captured for every
-	// candidate endpoint during Produce, keyed by NamespacedName.String().
-	// Produce is DAG-ordered, so capturing here (rather than re-reading the live
-	// attribute in PreRequest, whose hook order is undefined) keeps the dispatch
-	// training features deterministic and identical to the prediction features.
-	inFlightLoadForEndpoints map[string]inFlightLoadSnapshot
+	// Endpoint features are captured in DAG-ordered Produce and reused by all
+	// hooks. PreRequest hooks can mutate live load attributes in any order.
+	endpointFeatures map[string]*protocol.Features
 
 	ttftSLO    float64
 	avgTPOTSLO float64
 
 	predictionsForScheduling map[string]endpointPredictionResult
-
-	prefillTokensAtDispatch          int64
-	prefillTokensAtDispatchOnPrefill int64
-	decodeTokensAtDispatch           int64
-
-	requestsAtDispatch          int
-	requestsAtDispatchOnPrefill int
 }
 
 func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLatencyCtx {
-	inputTokenCount := 0
-	if request.Body != nil {
-		if tp := request.Body.TokenizedRequest; tp != nil {
-			inputTokenCount = tp.TokenCount()
-		}
-	}
 	return &predictedLatencyCtx{
-		targetModel:                    request.TargetModel,
-		inputTokenCount:                inputTokenCount,
-		lastSeenMetrics:                make(map[string]*fwkdl.Metrics),
-		prefixCacheScoresForEndpoints:  make(map[string]float64),
-		encoderMatchedSizeForEndpoints: make(map[string]int),
-		inFlightLoadForEndpoints:       make(map[string]inFlightLoadSnapshot),
-		predictionsForScheduling:       make(map[string]endpointPredictionResult),
+		targetModel:              request.TargetModel,
+		requestFeatures:          captureFeatures(featureInput{request: request}, requestFeature),
+		lastSeenMetrics:          make(map[string]*fwkdl.Metrics),
+		endpointFeatures:         make(map[string]*protocol.Features),
+		predictionsForScheduling: make(map[string]endpointPredictionResult),
 	}
 }
 

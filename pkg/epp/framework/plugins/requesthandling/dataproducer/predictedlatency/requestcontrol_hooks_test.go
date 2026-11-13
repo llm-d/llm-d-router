@@ -23,6 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/latencypredictorclient/protocol"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"github.com/jellydator/ttlcache/v3"
@@ -81,12 +84,12 @@ func TestNewPredictedLatencyContext(t *testing.T) {
 
 	assert.NotNil(t, ctx)
 	assert.Equal(t, request.TargetModel, ctx.targetModel)
-	assert.Equal(t, 2, ctx.inputTokenCount)
+	assert.Equal(t, 2, int(ctx.requestFeatures.GetInputTokenLength()))
 	assert.NotNil(t, ctx.lastSeenMetrics)
-	assert.NotNil(t, ctx.prefixCacheScoresForEndpoints)
+	assert.NotNil(t, ctx.endpointFeatures)
 	assert.NotNil(t, ctx.predictionsForScheduling)
 	assert.Empty(t, ctx.lastSeenMetrics)
-	assert.Empty(t, ctx.prefixCacheScoresForEndpoints)
+	assert.Empty(t, ctx.endpointFeatures)
 }
 
 func TestNewPredictedLatencyContext_NilBody(t *testing.T) {
@@ -97,7 +100,7 @@ func TestNewPredictedLatencyContext_NilBody(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Equal(t, 0, ctx.inputTokenCount)
+	assert.Equal(t, 0, int(ctx.requestFeatures.GetInputTokenLength()))
 }
 
 func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
@@ -105,7 +108,7 @@ func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Equal(t, 8, ctx.inputTokenCount)
+	assert.Equal(t, 8, int(ctx.requestFeatures.GetInputTokenLength()))
 }
 
 func TestNewPredictedLatencyContext_GenerateUsesTokenIDCount(t *testing.T) {
@@ -116,7 +119,7 @@ func TestNewPredictedLatencyContext_GenerateUsesTokenIDCount(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Equal(t, 5, ctx.inputTokenCount)
+	assert.Equal(t, 5, int(ctx.requestFeatures.GetInputTokenLength()))
 }
 
 func TestPredictedLatency_SetAndGetSLOContext(t *testing.T) {
@@ -809,7 +812,7 @@ func TestPredictedLatency_ResponseBody_CleansUpContext_WhenPreRequestSkipped(t *
 	predictedLatencyCtx.schedulingResult = schedulingResult
 	predictedLatencyCtx.targetModel = request.TargetModel
 	predictedLatencyCtx.requestReceivedTimestamp = time.Now().Add(-50 * time.Millisecond)
-	predictedLatencyCtx.inputTokenCount = 4096
+	predictedLatencyCtx.requestFeatures.InputTokenLength = proto.Int64(4096)
 	router.setPredictedLatencyContextForRequest(request, predictedLatencyCtx)
 
 	queue := newRequestPriorityQueue()
@@ -861,7 +864,7 @@ func TestPredictedLatencyContext_Fields(t *testing.T) {
 
 	// Test all field initialization
 	assert.NotNil(t, ctx.lastSeenMetrics)
-	assert.NotNil(t, ctx.prefixCacheScoresForEndpoints)
+	assert.NotNil(t, ctx.endpointFeatures)
 	assert.NotNil(t, ctx.predictionsForScheduling)
 	assert.Empty(t, ctx.predictedTPOTObservations)
 	assert.Zero(t, ctx.generatedTokenCount)
@@ -869,7 +872,7 @@ func TestPredictedLatencyContext_Fields(t *testing.T) {
 	assert.Zero(t, ctx.avgTPOT)
 	assert.Nil(t, ctx.targetMetadata)
 	assert.Nil(t, ctx.schedulingResult)
-	assert.Equal(t, 2, ctx.inputTokenCount)
+	assert.Equal(t, 2, int(ctx.requestFeatures.GetInputTokenLength()))
 }
 
 func TestPredictedLatencyContext_UpdateMetrics(t *testing.T) {
@@ -908,13 +911,13 @@ func TestPredictedLatencyContext_PrefixCacheScores(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	// Set prefix cache scores
-	ctx.prefixCacheScoresForEndpoints["pod1"] = 0.8
-	ctx.prefixCacheScoresForEndpoints["pod2"] = 0.6
-	ctx.prefixCacheScoresForEndpoints["pod3"] = 0.9
+	ctx.endpointFeatures["pod1"] = &protocol.Features{PrefixCacheScore: proto.Float64(0.8)}
+	ctx.endpointFeatures["pod2"] = &protocol.Features{PrefixCacheScore: proto.Float64(0.6)}
+	ctx.endpointFeatures["pod3"] = &protocol.Features{PrefixCacheScore: proto.Float64(0.9)}
 
-	assert.Len(t, ctx.prefixCacheScoresForEndpoints, 3)
-	assert.Equal(t, 0.8, ctx.prefixCacheScoresForEndpoints["pod1"])
-	assert.Equal(t, 0.9, ctx.prefixCacheScoresForEndpoints["pod3"])
+	assert.Len(t, ctx.endpointFeatures, 3)
+	assert.Equal(t, 0.8, ctx.endpointFeatures["pod1"].GetPrefixCacheScore())
+	assert.Equal(t, 0.9, ctx.endpointFeatures["pod3"].GetPrefixCacheScore())
 }
 
 func TestPredictedLatency_ConcurrentContextAccess(t *testing.T) {

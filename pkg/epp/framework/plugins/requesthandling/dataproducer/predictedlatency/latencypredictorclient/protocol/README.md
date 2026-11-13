@@ -12,7 +12,8 @@ are separate responsibilities.
 
 The Go client serializes prediction and training requests with these messages.
 Legacy public struct fields remain as compatibility accessors; additional raw
-features travel in the generated `Features` message. Model-info
+features travel in the generated `Features` message. Request options accept
+schema fields without changing positional constructor arguments. Model-info
 and coefficient JSON decoding also use the generated types.
 
 Use `PredictionFromFeatures` or `TrainingFromFeatures` to initialize a facade

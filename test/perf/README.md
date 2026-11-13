@@ -150,6 +150,161 @@ What to expect from the rule:
   comparison happens after 5 comparable successful runs: 4 for the baseline
   and the previous run.
 
+### Predicted latency A-C acceptance
+
+[Issue 913](https://github.com/llm-d/llm-d-router/issues/913) requires separate
+before/after measurements for the schema and registry phases. Compare the schema
+phase with its prerequisite revision, then compare the registry phase with the
+schema revision. For each phase, measure four configurations against the same
+model backends: Kubernetes baseline, load-plus-prefix with weights `(1, 1, 1)`,
+and predicted latency before and after the change. The Kubernetes baseline needs
+an actual Kubernetes endpoint; a local round-robin proxy cannot supply that result.
+
+The [load-plus-prefix values](config/router-configs/latency-load-prefix-111.yaml)
+configure queue, KV-cache utilization and prefix scorers with weight 1 each.
+The `optimized-baseline.yaml` recipe uses weights `(2, 2, 3)` and an additional
+scorer, so it represents a different comparison. Pin the image and deployment
+settings in the benchmark environment, provide the model-server label selector,
+and save the effective EPP configuration. Use consistent prefix producers,
+tokenization and cache settings across the comparison.
+
+Use the same predicted-latency scheduling configuration before and after each
+phase. Record its affinity filters, picker, prefix producer, prediction endpoints,
+model state and `streamingMode`; an omitted `streamingMode` defaults to false.
+The chart's default predicted-latency profile includes affinity and SLO filters,
+so a smoke setup containing only a latency scorer and picker is not the same
+profile. Check effective configuration and prediction/fallback telemetry during
+the run. Confirm any differences from the published setup before comparing its
+absolute results. The standalone proxy defaults to fail-open, which can bypass
+the EPP when it is unavailable. Use the same fail-open setting across strategies
+and verify that measured requests were handled by the intended path.
+
+`generate_latency_workloads.py` prepares twelve JSON configurations per phase
+for [inference-perf v0.6.0](https://github.com/kubernetes-sigs/inference-perf/tree/v0.6.0).
+JSON configurations are accepted by its YAML reader. The generator starts no
+services, sends no requests, and downloads no tokenizer or model. Supply an
+existing local tokenizer directory and the four comparison endpoints:
+
+```bash
+python3 test/perf/generate_latency_workloads.py \
+    --phase schema \
+    --target k8s=http://k8s-baseline.invalid \
+    --target load-prefix=http://load-prefix.invalid \
+    --target pred-before=http://pred-before.invalid \
+    --target pred-after=http://pred-after.invalid \
+    --model MODEL_NAME --tokenizer-path /path/to/local/tokenizer \
+    --qps 1 2 4 8 --workers 2 --max-concurrency-per-worker 64 \
+    --clip-sigma 4 --output-dir /path/to/results/schema-configs
+```
+
+The endpoints, QPS values, worker count, concurrency and length clipping in this
+example are placeholders. Select them for the approved benchmark environment.
+Repeat with `--phase registry` and the corresponding before/after endpoints.
+Keep every workload and load setting identical across the four strategies in
+each comparison. The manifest records `prepared-not-run` and the tool version;
+retain it alongside the generated configurations and actual run results.
+
+The [published workloads](https://llm-d.ai/blog/predicted-latency-based-scheduling-for-llms)
+use multi-turn requests and the following token distributions:
+
+| Scenario | Groups | Users/group | System | Question mean | Question std |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A | 6 | 1000 | 1000 | 30 | 9 |
+| B | 6 | 1000 | 1000 | 3000 | 900 |
+| C | 150 | 5 | 6000 | 1200 | 360 |
+
+Output length has mean 1000 and standard deviation 300 in all scenarios. The
+generator uses normal distributions with minimum 1 and maximum
+`ceil(mean + clip_sigma * standard_deviation)`. The publication does not specify
+clipping bounds, so record the selected bounds and establish their suitability
+with the maintainers before claiming equivalent workload reproduction. Context
+length and KV capacity must accommodate the long prompts and growing multi-turn
+history. A 2048-token functional smoke test cannot cover these workloads.
+
+Run each prepared configuration with the pinned tool only when the endpoints
+and resource allocation are ready:
+
+```bash
+inference-perf --config_file /path/to/results/schema-configs/schema-A-pred-after.json
+```
+
+The generated stages offer load for 100 seconds each. The tool waits for stage
+requests to finish before advancing. Keep per-request output and reject runs
+with failed stages, incomplete requests or a load generator that cannot maintain
+the offered QPS. Choose worker capacity above the expected outstanding load and
+verify actual send times; a client concurrency cap can hide backend saturation.
+Use the same QPS grid for all strategies and include points below, near and
+above saturation. Shared GPU smoke measurements do not establish these gates.
+
+The pinned tool starts its shared-prefix sequence again and clears user sessions
+at each stage boundary. A 100-second stage schedules `int(QPS * 100)` requests;
+the first 6000 requests in A and B, or 750 in C, use distinct sessions. Only
+later requests can exercise another turn in that stage. The manifest records
+the nominal number of repeated-session requests for every stage and scenario;
+it does not prove that those requests completed successfully. Inspect the
+per-request `chat_round` values in the actual results. The per-request export
+has no stage ID; for completed, non-overlapping stages, sort by start time and
+use each stage summary's request count to group the records. A stage with zero
+repeated requests can still be part of the required QPS comparison, but it does
+not test multi-turn history. If the sweep does not exercise history, include a
+separate sustained multi-turn run and record any deviation from the published
+workload.
+
+Record router and predictor revisions, image digests, model revision, GPU and
+replica topology, serving arguments, workload seed, and initial predictor
+artifacts. Keep training schedules, cache state, warm-up and reset procedures
+consistent. Alternate repeated before/after runs to assess measurement noise.
+The small-model alternative requires agreement on its acceptance scope.
+
+Calculate per-request NTPOT as end-to-end request latency divided by completed
+output tokens. Decode-only TPOT and scheduler latency measure different work.
+Retain timestamps and token counts so stage NTPOT and output tokens per second
+can be recomputed with the same aggregation and measurement window. Report
+errors, actual offered QPS and drain time with the latency and throughput data.
+
+In inference-perf v0.6.0, the [lifecycle summary implementation](https://github.com/kubernetes-sigs/inference-perf/blob/v0.6.0/inference_perf/reportgen/base.py)
+uses request start and end timestamps for NTPOT and sets NTPOT to zero for a
+successful request with no recorded output tokens. Inspect per-request records
+and reject a run containing such requests; otherwise the mean can look
+artificially low. Compare scheduled and achieved load using the stage summary's
+schedule-delay distribution. The per-request export does not include the
+scheduled timestamp, so it cannot reconstruct arrival-to-completion latency.
+The tool's output-token throughput divides completed tokens by the interval
+from the first request start to the last completion, including drain time.
+Use the same definition for every strategy and retain that interval.
+
+With the tool's optional `analysis` dependencies installed, it can plot four
+completed report directories using its existing analysis command. Keep the
+generated legend and check the input paths before publication:
+
+```bash
+mkdir -p /path/to/analysis
+inference-perf --analyze \
+    /path/to/k8s /path/to/load-prefix \
+    /path/to/pred-before /path/to/pred-after \
+    --unified_analysis_dir /path/to/analysis
+```
+
+The [analysis implementation](https://github.com/kubernetes-sigs/inference-perf/blob/v0.6.0/inference_perf/analysis/analyze.py)
+plots against achieved rate. Compare the requested QPS stages as well, and do
+not use a delayed or under-driven load stage to establish a saturation gate.
+
+For each phase and scenario, publish NTPOT-versus-QPS and output-tokens-per-second
+curves with all four configurations. Include a table at approximately half
+saturation, saturation and post-saturation with exact QPS, NTPOT and throughput.
+Apply the issue's gates:
+
+- NTPOT regresses by at most 5% at every QPS through saturation.
+- Saturation output tokens per second regress by at most 5%.
+- The saturation knee moves left by at most one QPS step.
+- Predicted latency after the change beats Kubernetes at every QPS and matches
+  or beats load-plus-prefix in the regime where the published results do so.
+- Scenario A's baseline predicted-latency curve beats both baselines throughout
+  the sweep, and the after curve beats both at saturation.
+- Scenario B's after curve beats both baselines past eviction onset, and its
+  crossover with load-plus-prefix moves right by at most one QPS step.
+- Scenario C remains within 5% of load-plus-prefix and strictly beats Kubernetes.
+
 ### Offline regression tests
 
 With Python and `pyyaml` installed, run from the repository root:
