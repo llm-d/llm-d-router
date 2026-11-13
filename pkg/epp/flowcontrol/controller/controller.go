@@ -251,22 +251,6 @@ func (fc *FlowController) EnqueueAndWait(
 	flowKey := req.FlowKey()
 	priority := strconv.Itoa(flowKey.Priority)
 	reqBytes := req.ByteSize()
-	metrics.IncFlowControlQueueSize(
-		flowKey.ID, priority,
-		req.InferencePoolName(),
-		req.ModelName(), req.TargetModelName())
-	defer metrics.DecFlowControlQueueSize(
-		flowKey.ID, priority,
-		req.InferencePoolName(),
-		req.ModelName(), req.TargetModelName())
-	metrics.AddFlowControlQueueBytes(
-		flowKey.ID, priority,
-		req.InferencePoolName(),
-		req.ModelName(), req.TargetModelName(), reqBytes)
-	defer metrics.SubFlowControlQueueBytes(
-		flowKey.ID, priority,
-		req.InferencePoolName(),
-		req.ModelName(), req.TargetModelName(), reqBytes)
 
 	// Capture the logical enqueue time before acquiring the flow. The band's TTL is only available
 	// from the acquired connection, but time spent acquiring it still counts against the queue budget.
@@ -275,6 +259,25 @@ func (fc *FlowController) EnqueueAndWait(
 	// 2. Acquire a lease for the Flow.
 	// We hold this lease for the entire duration of the request (Distribution + Queueing).
 	err := fc.withConnectionWithFallback(req, func(conn contracts.ActiveFlowConnection, effectiveReq flowcontrol.FlowControlRequest) error {
+		effectiveFlowKey := effectiveReq.FlowKey()
+		priority = strconv.Itoa(effectiveFlowKey.Priority)
+		metrics.IncFlowControlQueueSize(
+			effectiveFlowKey.ID, priority,
+			effectiveReq.InferencePoolName(),
+			effectiveReq.ModelName(), effectiveReq.TargetModelName())
+		defer metrics.DecFlowControlQueueSize(
+			effectiveFlowKey.ID, priority,
+			effectiveReq.InferencePoolName(),
+			effectiveReq.ModelName(), effectiveReq.TargetModelName())
+		metrics.AddFlowControlQueueBytes(
+			effectiveFlowKey.ID, priority,
+			effectiveReq.InferencePoolName(),
+			effectiveReq.ModelName(), effectiveReq.TargetModelName(), reqBytes)
+		defer metrics.SubFlowControlQueueBytes(
+			effectiveFlowKey.ID, priority,
+			effectiveReq.InferencePoolName(),
+			effectiveReq.ModelName(), effectiveReq.TargetModelName(), reqBytes)
+
 		bandDefaultRequestTTL, bandDefaultRequestTTLSet := conn.DefaultRequestTTL()
 		reqCtx, cancel, saturationTTL := fc.createRequestContext(
 			ctx, effectiveReq, bandDefaultRequestTTL, bandDefaultRequestTTLSet, enqueueTime,
@@ -388,6 +391,7 @@ func (fc *FlowController) tryDistribution(
 ) (*internal.FlowItem, error) {
 	// We must create a fresh FlowItem on each attempt as finalization is per-lifecycle.
 	item := internal.NewItem(reqCtx, req, saturationTTL, enqueueTime, fc.logger)
+	item.SetClock(fc.clock)
 
 	dp := conn.GetDataPlane()
 	_, err := dp.ManagedQueue(conn.FlowKey())
