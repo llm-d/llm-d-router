@@ -10,6 +10,16 @@ numbers. Optional zero values retain presence. Unknown HTTP fields are ignored
 and discarded. Application validation, defaults and model feature selection
 are separate responsibilities.
 
+The Go client serializes prediction and training requests with these messages.
+Legacy public struct fields remain as compatibility accessors; additional raw
+features travel in the generated `Features` message. Model-info
+and coefficient JSON decoding also use the generated types.
+
+Use `PredictionFromFeatures` or `TrainingFromFeatures` to initialize a facade
+from a schema message. For fields that also have legacy accessors, encoding uses
+the accessor value, including zero, rather than the value in `Features`. Mutate
+the accessor after initialization when changing one of those fields.
+
 ## Generate and verify
 
 Use protoc 25.3 and the repository's protoc-gen-go target. Generation reads
@@ -33,4 +43,5 @@ go test -race ./pkg/epp/framework/plugins/requesthandling/dataproducer/predicted
 
 The tests cover flat single and bulk rows, presence, exact 64-bit integers,
 training metadata, model artifacts and decoding through the existing Go types.
-End-to-end routing performance requires the issue's GPU scenarios.
+The plugin tests exercise capture timing, dependency declarations and training
+projections. End-to-end routing performance requires the issue's GPU scenarios.
