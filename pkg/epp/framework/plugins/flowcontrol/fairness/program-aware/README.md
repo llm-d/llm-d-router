@@ -20,7 +20,7 @@ Under `las`:
 Under `turn-priority`:
 
 * **Sessions are long and prefix reuse dominates cost**: Multi-turn sessions share a growing prefix, and dispatching the deepest ones keeps that prefix resident instead of re-prefilling it.
-* **Fairness IDs identify sessions**: Traffic carries a session header, so one fairness ID is one session: a bare session ID or a composed `<tenant>/<session>` ID. This strategy is not the right choice for a pool whose requests share a single ID.
+* **Requests identify their session**: Traffic carries a session header. With [`session-state-producer`](../../../requesthandling/dataproducer/sessionstate/README.md) enabled, each head request is scored by the depth of its own session, whatever its fairness ID. Without it, one fairness ID must be one session: a bare session ID or a composed `<tenant>/<session>` ID. This strategy is not the right choice for a pool whose requests share a single ID and carry no session header.
 
 ## What it does
 
@@ -65,7 +65,9 @@ The default of `120` leaves a margin over the longest gap observed within an act
 
 Under contention a prefix is evicted by capacity pressure while its program is still active, and ordering by turn depth is what keeps those prefixes resident. A low prefix-cache hit rate is therefore weak evidence for lowering this value.
 
-This strategy requires one fairness ID per session. It reads a program's dispatched count as the depth of a single conversation, which holds only when the ID identifies one session: a per-session `x-llm-d-inference-fairness-id` header, the `agent-identity` attribute that the request-header plugin derives from a session header, or a composed `<tenant>/<session>` ID when `requestHandler.composeFairnessIDs` is enabled and the request also carries a tenant fairness ID. With composition disabled, a request carrying both resolves to the tenant header and its sessions share one count.
+When `session-state-producer` publishes session state, depth comes from the head request's own session: its `TurnsTaken`, `InFlightRequests` and `LastResponseAt` stand in for the program's dispatched count, in-flight count and last completion time, so the inactivity reset also applies per session. A session is one `agent-identity` value, so a flow that carries several sessions, such as a tenant fairness ID with composition disabled, is scored by the session whose request is at the head of the queue.
+
+Without session state, this strategy requires one fairness ID per session. It reads a program's dispatched count as the depth of a single conversation, which holds only when the ID identifies one session: a per-session `x-llm-d-inference-fairness-id` header, the `agent-identity` attribute that the request-header plugin derives from a session header, or a composed `<tenant>/<session>` ID when `requestHandler.composeFairnessIDs` is enabled and the request also carries a tenant fairness ID. With composition disabled, a request carrying both resolves to the tenant header and its sessions share one count.
 
 Requests carrying neither share `default-flow`. Its dispatched count is the sum over unrelated clients, so it is not a session depth, it grows with total unlabeled traffic, and it rarely stays idle long enough for the inactivity reset to fire. Ordering it against real sessions by that count is not meaningful, and a pool that mixes labeled and unlabeled traffic gives `default-flow` a depth no single session can match. Route unlabeled traffic to a priority band on a different fairness policy.
 
@@ -89,7 +91,7 @@ Per-program Prometheus series and per-flow queue metrics are labeled by the full
 
 ## Unit of Fairness
 
-Under `turn-priority`, **session depth**: the count of requests already dispatched for the program, plus the waiting request.
+Under `turn-priority`, **session depth**: the count of requests already dispatched for the head request's session, or for the program without session state, plus the waiting request.
 
 Under `las`, **attained service**, measured as a weighted sum of input and output tokens consumed by the program. Output tokens are weighted twice as much as input tokens to reflect their relative compute cost.
 
@@ -98,7 +100,7 @@ Under `las`, **attained service**, measured as a weighted sum of input and outpu
 * **Program identity**: From the request's `FairnessID` field, which the Director populates from the fairness ID header, the agent-identity attribute, or their `<tenant>/<session>` composition.
 * **Queue state**: Reads queue length and the head item's enqueue time from the `FlowQueueAccessor`.
 * **Token usage** (`las`): From `Response.Usage` on stream completion, falling back to `Response.StreamedEvents` for output tokens when `Response.Usage.CompletionTokens` is zero and `Response.StreamedEvents` is positive.
-* **Dispatched count, in-flight count, last completion time** (`turn-priority`): From the per-program metrics maintained across the request lifecycle.
+* **Dispatched count, in-flight count, last completion time** (`turn-priority`): From the head request's `SessionState` when `session-state-producer` publishes it, which the plugin declares as an optional data dependency. Otherwise from the per-program metrics maintained across the request lifecycle.
 
 ## Configuration
 
@@ -125,7 +127,7 @@ flowControl:
 | `lasWeightHeadWait` | `0.2` | Weight on the head-of-queue age. Acts as a tiebreaker on cold start when programs have equal attained service. |
 | `lasHalfLifeSeconds` | `60` | Wall-clock half-life of attained service. `0` disables decay, making attained service cumulative for the program's lifetime. |
 | `turnPriorityTimeWeight` | `0.05` | (`turn-priority`) Score contribution per second of head wait, against one point per turn of depth. `turnPriorityTimeWeight * requestTTL` bounds the depth a waiting request can overcome, which at the default is 3 turns. `0` orders on depth alone, with longer head wait breaking ties. |
-| `turnPriorityInactivitySeconds` | `120` | (`turn-priority`) A program idle for longer than this has its next request scored as turn one. `0` disables the inactivity reset. Depth is still lost when the program is evicted after `evictionTtlSeconds`. |
+| `turnPriorityInactivitySeconds` | `120` | (`turn-priority`) A program idle for longer than this has its next request scored as turn one. `0` disables the inactivity reset. Depth is still lost when the program is evicted after `evictionTtlSeconds`, or with session state, when `session-state-producer` evicts the session. |
 | `evictionTtlSeconds` | `3600` | A program with no completion in this window is evicted from the metrics map. |
 | `evictionSweepSeconds` | `300` | How often the eviction sweep runs. Must be `> 0`. |
 
