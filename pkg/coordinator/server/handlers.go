@@ -17,7 +17,6 @@ limitations under the License.
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -248,12 +247,9 @@ func inferenceRoute(path string) string {
 }
 
 // inspectedRequestFields lists the top-level request fields the handler and
-// the pipeline steps read as Go values. decodeRequestBody decodes only these;
-// every other field stays a json.RawMessage so its bytes are forwarded
-// unchanged. encoding/json sorts map keys at every depth on Marshal, which
-// would reorder free-form content such as tools[].function.parameters that
-// chat templates render into the prompt verbatim. The steps that read messages
-// or input decode them on use (promptItems).
+// the pipeline steps read as Go values; see reqcommon.DecodeRequestBody for why
+// every other field stays raw. The steps that read messages or input decode
+// them on use (promptItems).
 var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldModel:          {},
 	reqcommon.FieldStream:         {},
@@ -265,26 +261,7 @@ var inspectedRequestFields = map[string]struct{}{
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, err
-	}
-	if fields == nil {
-		return nil, errors.New("request body is not a JSON object")
-	}
-	parsed := make(map[string]any, len(fields))
-	for k, v := range fields {
-		if _, ok := inspectedRequestFields[k]; !ok {
-			parsed[k] = v
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		parsed[k] = decoded
-	}
-	return parsed, nil
+	return reqcommon.DecodeRequestBody(raw, inspectedRequestFields)
 }
 
 // classifyPipelineError maps a pipeline error to a client-facing status and
