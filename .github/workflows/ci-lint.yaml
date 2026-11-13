@@ -57,6 +57,7 @@ jobs:
               - hack/**
               - pkg/common/observability/semconv/registry/**
               - docs/telemetry.md
+              - docs/metrics.md
               - test/**
               - .github/workflows/ci-lint.yaml
 

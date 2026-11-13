@@ -1,0 +1,5 @@
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+{% for metric in ctx %}
+| `{{ metric.metric_name }}` | {{ metric.instrument | capitalize }} | {% for attr in metric.attributes %}`{{ attr.name }}`{% if not loop.last %}, {% endif %}{% else %}-{% endfor %} | {{ metric.brief | replace("|", "\|") }}{% if metric.note %} {{ metric.note | replace("|", "\|") }}{% endif %} |
+{% endfor %}
