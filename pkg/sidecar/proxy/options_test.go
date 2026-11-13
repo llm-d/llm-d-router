@@ -66,6 +66,7 @@ pool-group: "pool-group-file"
 max-idle-conns-per-host: 300
 prefill-max-retries: 3
 prefill-retry-backoff: "500ms"
+prefill-timeout: "5s"
 decode-chunk-size: 128
 mooncake-bootstrap-port: 9000
 tracing: true
@@ -110,6 +111,7 @@ func TestSidecarConfiguration(t *testing.T) {
 		max-idle-conns-per-host: 200,
 		prefill-max-retries: 2,
 		prefill-retry-backoff: '300ms',
+		prefill-timeout: '150ms',
 		decode-chunk-size: 256,
 		mooncake-bootstrap-port: 9001,
 		tracing: true
@@ -168,6 +170,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.PrefillMaxRetries = 2
 				o.PrefillRetryBackoff = 300 * time.Millisecond
+				o.PrefillTimeout = 150 * time.Millisecond
 
 				o.DecodeChunkSize = 256
 				o.Tracing = true
@@ -217,6 +220,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.PrefillMaxRetries = 3
 				o.PrefillRetryBackoff = 500 * time.Millisecond
+				o.PrefillTimeout = 5 * time.Second
 
 				o.DecodeChunkSize = 128
 				o.Tracing = true
@@ -280,6 +284,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.PrefillMaxRetries = 2
 				o.PrefillRetryBackoff = 300 * time.Millisecond
+				o.PrefillTimeout = 150 * time.Millisecond
 
 				o.DecodeChunkSize = 256
 				o.Tracing = true
@@ -357,6 +362,7 @@ func TestSidecarConfiguration(t *testing.T) {
 
 				o.PrefillMaxRetries = 3
 				o.PrefillRetryBackoff = 500 * time.Millisecond
+				o.PrefillTimeout = 5 * time.Second
 
 				o.DecodeChunkSize = 128
 				o.Tracing = true
@@ -535,6 +541,7 @@ func compareOptions(t *testing.T, expected, actual *Options) {
 
 	assertEqual(prefillMaxRetries, expected.PrefillMaxRetries, actual.PrefillMaxRetries)
 	assertEqual(prefillRetryBackoff, expected.PrefillRetryBackoff, actual.PrefillRetryBackoff)
+	assertEqual(prefillTimeout, expected.PrefillTimeout, actual.PrefillTimeout)
 
 	assertEqual(decodeChunkSize, expected.DecodeChunkSize, actual.DecodeChunkSize)
 	assertEqual(tracingFlag, expected.Tracing, actual.Tracing)
@@ -856,6 +863,30 @@ func TestValidateDataParallelSize(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := NewOptions()
 			opts.DataParallelSize = tt.dataParallelSize
+			_ = opts.Complete()
+			err := opts.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidatePrefillTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		wantErr bool
+	}{
+		{"zero disables it", 0, false},
+		{"positive valid", 5 * time.Second, false},
+		{"negative invalid", -time.Second, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.PrefillTimeout = tt.timeout
 			_ = opts.Complete()
 			err := opts.Validate()
 			if (err != nil) != tt.wantErr {
