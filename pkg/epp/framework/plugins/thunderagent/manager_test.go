@@ -270,3 +270,17 @@ func TestSessionManagerTTL(t *testing.T) {
 		require.Equal(t, tc.want, newSessionManager(cfg).ttl)
 	}
 }
+
+// Deleting an endpoint unbinds its sessions and clears the paused state they
+// held on it, so a session whose pod left the pool re-enters as a new session.
+func TestRemoveEndpointClearsPaused(t *testing.T) {
+	m := newSessionManager(testConfig())
+	ep := m.ensureEndpointLocked("default/pod-a", 1000, t0)
+	s := m.bindLocked("s1", ep)
+	s.committedTokens, s.turnCount, s.paused = 300, 1, true
+
+	m.removeEndpoint("default/pod-a")
+
+	require.Nil(t, s.endpoint)
+	require.False(t, s.paused)
+}
