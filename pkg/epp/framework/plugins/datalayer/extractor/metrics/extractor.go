@@ -90,9 +90,10 @@ var _ fwkplugin.ProducerPlugin = &Extractor{}
 
 // Produces declares the built-in and custom scalar metric attributes stored in
 // the endpoint's AttributeMap as ScalarMetricValue, plus the LoRA adapter maps
-// written into the endpoint's Metrics struct that scorers declare as Consumes()
-// dependencies. Declaring all of them lets the data-attribute registry and the
-// DAG builder validate the scorers and filters that read them.
+// and the scalar samples written into the endpoint's Metrics struct that
+// scorers declare as Consumes() dependencies. Declaring all of them lets the
+// data-attribute registry and the DAG builder validate the scorers and filters
+// that read them.
 func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 	produced := map[fwkplugin.DataKey]any{
 		attrmetrics.ScalarMetricDataKey(KVCacheUsagePercentKey):      attrmetrics.ScalarMetricValue(0),
@@ -100,10 +101,15 @@ func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 		attrmetrics.ScalarMetricDataKey(RunningRequestsSizeKey):      attrmetrics.ScalarMetricValue(0),
 		fwkplugin.NewDataKey(ActiveModelsKey, MetricsExtractorType):  map[string]int{},
 		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType): map[string]int{},
+
+		attrmetrics.ScalarSampleDataKey(fwkdl.ScalarFieldWaitingQueueSize):    fwkdl.ScalarSample{},
+		attrmetrics.ScalarSampleDataKey(fwkdl.ScalarFieldRunningRequestsSize): fwkdl.ScalarSample{},
+		attrmetrics.ScalarSampleDataKey(fwkdl.ScalarFieldKVCacheUsagePercent): fwkdl.ScalarSample{},
 	}
 	for _, mapping := range ext.registry.Mappings() {
 		for _, custom := range mapping.CustomMetrics {
 			produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
+			produced[attrmetrics.CustomScalarSampleDataKey(custom.AttributeKey)] = fwkdl.ScalarSample{}
 		}
 	}
 	return produced
@@ -141,6 +147,9 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	current := ep.GetMetrics()
 	clone := current.Clone()
 	updated := false
+	// UpdateTime and every sample this scrape observes share one timestamp.
+	scrapeTime := time.Now()
+	samples := fwkdl.NewScalarSampleUpdate(clone.ScalarSamples, mapping, scrapeTime, len(mapping.CustomMetrics))
 
 	if spec := mapping.TotalQueuedRequests; spec != nil { // extract queued requests
 		if value, err := spec.aggregateMetric(families, aggregateSum); err != nil {
@@ -148,6 +157,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		} else {
 			clone.WaitingQueueSize = int(value)
 			putBuiltinScalarAttribute(ep, mapping, WaitingQueueSizeKey, value)
+			samples.Observe(fwkdl.ScalarFieldWaitingQueueSize, value)
 			updated = true
 		}
 	}
@@ -158,6 +168,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		} else {
 			clone.RunningRequestsSize = int(value)
 			putBuiltinScalarAttribute(ep, mapping, RunningRequestsSizeKey, value)
+			samples.Observe(fwkdl.ScalarFieldRunningRequestsSize, value)
 			updated = true
 		}
 	}
@@ -168,6 +179,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		} else {
 			clone.KVCacheUsagePercent = value
 			putBuiltinScalarAttribute(ep, mapping, KVCacheUsagePercentKey, value)
+			samples.Observe(fwkdl.ScalarFieldKVCacheUsagePercent, value)
 			updated = true
 		}
 	}
@@ -237,11 +249,15 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			continue
 		}
 		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(value))
+		samples.ObserveCustom(custom.AttributeKey, value)
 		updated = true
 	}
 
+	// A mapping change discards the samples even when the scrape observed
+	// nothing, so they never describe the metrics of another mapping.
+	clone.ScalarSamples = samples.Result()
 	if updated {
-		clone.UpdateTime = time.Now()
+		clone.UpdateTime = scrapeTime
 		// Guarded: this runs per endpoint per scrape tick, and the logger
 		// construction, MetricNames slice, and boxed args all allocate even
 		// when TRACE is off.
@@ -252,6 +268,8 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 				"updated", clone,
 			)
 		}
+	}
+	if updated || clone.ScalarSamples != current.ScalarSamples {
 		ep.UpdateMetrics(clone)
 	}
 
