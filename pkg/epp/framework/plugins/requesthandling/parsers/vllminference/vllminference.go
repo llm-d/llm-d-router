@@ -198,6 +198,12 @@ func convertGenerateRequest(req *vllmwire.Request, stream bool) (*fwkrequest.Inf
 	}, nil
 }
 
+// extractMMFeatures reads one hash per media item into MMHashes, keyed by
+// modality and in request order. Consumers zip MMPlaceholders[modality] with
+// MMHashes[modality] by index, so a modality gets placeholder ranges only
+// when every hashed item of that modality carries PreprocessedMediaFeatures.
+// A raw item with a uuid has no token span, and mixing it into the same
+// modality would pair its hash with another item's range.
 func extractMMFeatures(req *vllmwire.Request) (*tokenization.MultiModalFeatures, error) {
 	if !req.HasMedia() {
 		return nil, nil //nolint:nilnil
@@ -208,6 +214,7 @@ func extractMMFeatures(req *vllmwire.Request) (*tokenization.MultiModalFeatures,
 	}
 	var hashes map[string][]string
 	var placeholders map[string][]kvblock.PlaceholderRange
+	var unaligned map[string]bool // modalities with a hashed item that has no range
 	for i := range items {
 		item := &items[i]
 		if !item.HasFeatures {
@@ -220,9 +227,11 @@ func extractMMFeatures(req *vllmwire.Request) (*tokenization.MultiModalFeatures,
 			}
 			if hashes == nil {
 				hashes = make(map[string][]string, 1)
+				unaligned = make(map[string]bool, 1)
 			}
 			key := string(mod)
 			hashes[key] = append(hashes[key], item.UUID)
+			unaligned[key] = true
 			continue
 		}
 		mod, err := modalityName(item.Modality)
@@ -257,6 +266,12 @@ func extractMMFeatures(req *vllmwire.Request) (*tokenization.MultiModalFeatures,
 	}
 	if len(hashes) == 0 {
 		return nil, nil //nolint:nilnil
+	}
+	for key := range unaligned {
+		delete(placeholders, key)
+	}
+	if len(placeholders) == 0 {
+		placeholders = nil
 	}
 	return &tokenization.MultiModalFeatures{
 		MMHashes:       hashes,

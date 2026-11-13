@@ -155,6 +155,48 @@ func TestVllmInferenceParser_ParseRequest(t *testing.T) {
 			wantStream:    true,
 		},
 		{
+			// A raw uuid item and a preprocessed item of one modality would
+			// pair the uuid with the other item's token span, so that
+			// modality keeps its hashes and drops its placeholder ranges.
+			// A modality with preprocessed items only keeps both.
+			name: "a modality that mixes raw uuid and preprocessed items keeps hashes in order and no placeholder ranges",
+			path: vllmpb.Inference_Generate_FullMethodName,
+			req: &vllmpb.GenerateRequest{
+				Prompt: &vllmpb.GenerateRequest_Text{Text: "describe media"},
+				Media: []*vllmpb.MediaItem{
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Uuid:     "raw-first",
+						Source:   &vllmpb.MediaItem_Url{Url: "https://example.com/a.png"},
+					},
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Source: &vllmpb.MediaItem_Features{
+							Features: &vllmpb.PreprocessedMediaFeatures{Identifier: "img-hash-2", Offset: 5, Length: 4},
+						},
+					},
+					{
+						Modality: vllmpb.Modality_MODALITY_AUDIO,
+						Source: &vllmpb.MediaItem_Features{
+							Features: &vllmpb.PreprocessedMediaFeatures{Identifier: "audio-hash", Offset: 12, Length: 2},
+						},
+					},
+				},
+			},
+			wantGenerate: &fwkrequest.GenerateRequest{
+				Text: "describe media",
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{
+						string(reqcommon.ModalityImage): {"raw-first", "img-hash-2"},
+						string(reqcommon.ModalityAudio): {"audio-hash"},
+					},
+					MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+						string(reqcommon.ModalityAudio): {{Offset: 12, Length: 2}},
+					},
+				},
+			},
+		},
+		{
 			name: "raw media items with uuid populate MMHashes without placeholder ranges while skipping unnamed raw media",
 			path: vllmpb.Inference_Generate_FullMethodName,
 			req: &vllmpb.GenerateRequest{
