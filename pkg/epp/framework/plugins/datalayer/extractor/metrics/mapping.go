@@ -26,10 +26,13 @@ import (
 // Mapping holds specifications for the well-known metrics defined
 // in the Model Server Protocol.
 type Mapping struct {
-	TotalQueuedRequests  *Spec
-	TotalRunningRequests *Spec
-	KVCacheUtilization   *Spec
-	LoraRequestInfo      *LoRASpec
+	TotalQueuedRequests *Spec
+	// DeferredQueuedRequests is the part of TotalQueuedRequests that waits on
+	// something other than a batch slot. Optional.
+	DeferredQueuedRequests *Spec
+	TotalRunningRequests   *Spec
+	KVCacheUtilization     *Spec
+	LoraRequestInfo        *LoRASpec
 	// CacheInfo is used for info-style gauge metrics where block_size and
 	// num_gpu_blocks are exposed as label values.
 	CacheInfo *Spec
@@ -48,6 +51,7 @@ type Mapping struct {
 // MappingConfig holds configuration used to build a Mapping.
 type MappingConfig struct {
 	Queue               string
+	Deferred            string
 	Running             string
 	KVUsage             string
 	Lora                string
@@ -92,6 +96,9 @@ func (m *Mapping) specs() []namedSpec {
 		namedSpec{"lora", loraSpec, m.LoraRequestInfo != nil},
 		namedSpec{"cacheInfo", m.CacheInfo, m.CacheInfo != nil},
 	)
+	if m.DeferredQueuedRequests != nil {
+		specs = append(specs, namedSpec{"deferred", m.DeferredQueuedRequests, true})
+	}
 	for _, custom := range m.CustomMetrics {
 		specs = append(specs, namedSpec{
 			name:    custom.AttributeKey,
@@ -156,6 +163,10 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	deferredSpec, err := parseStringToSpec(cfg.Deferred)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	runningSpec, err := parseStringToSpec(cfg.Running)
 	if err != nil {
 		errs = append(errs, err)
@@ -187,16 +198,17 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		return nil, errors.Join(errs...)
 	}
 	return &Mapping{
-		TotalQueuedRequests:  queueSpec,
-		TotalRunningRequests: runningSpec,
-		KVCacheUtilization:   kvusageSpec,
-		LoraRequestInfo:      loraSpec,
-		CacheInfo:            cacheInfoSpec,
-		CacheBlockSizeLabel:  cfg.CacheBlockSizeLabel,
-		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,
-		CacheBlockSize:       cacheBlockSizeSpec,
-		CacheNumBlocks:       cacheNumBlocksSpec,
-		CustomMetrics:        customMetrics,
+		TotalQueuedRequests:    queueSpec,
+		DeferredQueuedRequests: deferredSpec,
+		TotalRunningRequests:   runningSpec,
+		KVCacheUtilization:     kvusageSpec,
+		LoraRequestInfo:        loraSpec,
+		CacheInfo:              cacheInfoSpec,
+		CacheBlockSizeLabel:    cfg.CacheBlockSizeLabel,
+		CacheNumBlocksLabel:    cfg.CacheNumBlocksLabel,
+		CacheBlockSize:         cacheBlockSizeSpec,
+		CacheNumBlocks:         cacheNumBlocksSpec,
+		CustomMetrics:          customMetrics,
 	}, nil
 }
 

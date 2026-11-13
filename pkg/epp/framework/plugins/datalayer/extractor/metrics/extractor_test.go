@@ -983,8 +983,8 @@ func TestExtractorMetricFamiliesCoverEveryEngineSpec(t *testing.T) {
 	}
 	for _, engine := range defaultEngineConfigs {
 		raws := []string{
-			engine.QueuedRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec, engine.LoRASpec,
-			engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+			engine.QueuedRequestsSpec, engine.DeferredRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec,
+			engine.LoRASpec, engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
 		}
 		for _, custom := range engine.CustomMetrics {
 			raws = append(raws, custom.MetricSpec)
@@ -1287,7 +1287,7 @@ func TestExtractorProducesBuiltinScalarAttributes(t *testing.T) {
 		t.Fatalf("newCoreMetricsExtractorPlugin() unexpected error: %v", err)
 	}
 	produced := ext.Produces()
-	for _, key := range []string{WaitingQueueSizeKey, RunningRequestsSizeKey, KVCacheUsagePercentKey} {
+	for _, key := range []string{WaitingQueueSizeKey, DeferredQueueSizeKey, RunningRequestsSizeKey, KVCacheUsagePercentKey} {
 		dk := attrmetrics.ScalarMetricDataKey(key)
 		got, ok := produced[dk]
 		if !ok {
