@@ -71,8 +71,10 @@ const (
 // Scoring, picking, and admission are handled by separate sub-plugins:
 // LatencyScorer, AffinityWeightedPicker, and LatencyAdmission.
 type PredictedLatency struct {
-	typedName           plugin.TypedName
-	latencypredictor    latencypredictor.PredictorInterface
+	typedName        plugin.TypedName
+	latencypredictor latencypredictor.PredictorInterface
+	// runningRequestLists uses sync.Map because the scheduling path reads it lock-free
+	// while writes are serialized by runningRequestsMu.
 	runningRequestLists sync.Map // Key: types.NamespacedName, Value: *requestPriorityQueue
 	// runningRequestsMu serializes writers of runningRequestLists. Reads stay lock-free,
 	// but add (get-or-create + Add) and remove (Remove + delete-if-empty) are compound
@@ -527,8 +529,12 @@ func (pl *PredictedLatency) getRunningRequestList(endpointName types.NamespacedN
 func (pl *PredictedLatency) addRequestToEndpoint(endpointName types.NamespacedName, requestID string, tpot float64) bool {
 	pl.runningRequestsMu.Lock()
 	defer pl.runningRequestsMu.Unlock()
-	actual, _ := pl.runningRequestLists.LoadOrStore(endpointName, newRequestPriorityQueue())
-	return actual.(*requestPriorityQueue).Add(requestID, tpot)
+	queue := pl.getRunningRequestList(endpointName)
+	if queue == nil {
+		queue = newRequestPriorityQueue()
+		pl.runningRequestLists.Store(endpointName, queue)
+	}
+	return queue.Add(requestID, tpot)
 }
 
 func (pl *PredictedLatency) removeRequestFromEndpoint(endpointName types.NamespacedName, requestID string) {

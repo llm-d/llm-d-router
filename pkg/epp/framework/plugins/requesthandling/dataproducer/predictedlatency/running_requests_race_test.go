@@ -69,7 +69,13 @@ func TestPredictedLatency_RunningRequestCountSurvivesConcurrentCompletion(t *tes
 				wg.Add(1 + len(news))
 				go func() { defer wg.Done(); <-gate; finish(old) }()
 				for _, req := range news {
-					go func() { defer wg.Done(); <-gate; _ = router.PreRequest(ctx, req, result) }()
+					go func() {
+						defer wg.Done()
+						<-gate
+						if err := router.PreRequest(ctx, req, result); err != nil {
+							t.Errorf("iteration %d: PreRequest(new): %v", i, err)
+						}
+					}()
 				}
 				close(gate)
 				wg.Wait()
