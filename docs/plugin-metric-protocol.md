@@ -114,13 +114,13 @@ offload tier.
 
 ### KVCacheOffloadDetection (optional)
 
-A metric whose presence reports that the model server offloads KV cache to another tier. When it
-is present and TotalKVCacheTokens is not, the approximate prefix cache logs a warning that the
-index covers the HBM tier only.
+A metric whose value above zero reports that the model server has offloaded KV cache to another
+tier. When it is above zero and TotalKVCacheTokens is not reported, the approximate prefix cache
+logs a warning, once per pod, that the index covers the HBM tier only.
 
 | Model server | Metric |
 | --- | --- |
-| vLLM | `vllm:kv_offload_total_bytes_total`, registered by the `OffloadingConnector` at startup. |
+| vLLM | `vllm:kv_offload_total_bytes_total`. The `OffloadingConnector` registers it at zero on startup, so a zero value does not count. |
 
 ## LoRA Adapter Serving
 

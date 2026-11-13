@@ -70,8 +70,8 @@ type (
 		// capacity (e.g. vLLM's cpu_kv_cache_size_tokens on vllm:kv_offload_config_info). Empty reads
 		// the gauge value.
 		CacheTotalTokensLabelName string `json:"cacheTotalTokensLabelName,omitempty"`
-		// CacheOffloadDetectionSpec defines a metric whose presence reports that the engine offloads
-		// KV cache to another tier (e.g. vLLM's OffloadingConnector transfer counters). Optional.
+		// CacheOffloadDetectionSpec defines a metric whose value above zero reports that the engine has
+		// offloaded KV cache to another tier (e.g. vLLM's OffloadingConnector transfer counters). Optional.
 		CacheOffloadDetectionSpec string `json:"cacheOffloadDetectionSpec,omitempty"`
 		// CustomMetrics defines engine-specific scalar metrics to extract as endpoint attributes.
 		CustomMetrics []customMetricConfigParams `json:"customMetrics,omitempty"`
@@ -118,12 +118,13 @@ var defaultEngineConfigs = []engineConfigParams{
 		// vllm:kv_offload_config_info (vLLM after v0.32.0, from the engine's first
 		// scheduler step). With TieringOffloadingSpec the label is on the
 		// tier="0:primary" series. The connector registers the transfer counters at
-		// startup, so their presence reports offloading on every vLLM release;
-		// total_bytes is the one name that exists on releases both before and
-		// after the counters were renamed to load_bytes and store_bytes. It is
-		// deprecated upstream; remove CacheOffloadDetectionSpec once the oldest
-		// supported vLLM reports kv_offload_config_info, since the warning it
-		// drives has nothing to say on those releases.
+		// zero on startup, before that label exists, so offloading is detected
+		// from a counter above zero. total_bytes is the one name that exists on
+		// releases both before and after the counters were renamed to load_bytes
+		// and store_bytes. It is deprecated upstream; remove
+		// CacheOffloadDetectionSpec once the oldest supported vLLM reports
+		// kv_offload_config_info, since the warning it drives has nothing to say
+		// on those releases.
 		CacheTotalTokensSpec:      "vllm:kv_offload_config_info",
 		CacheTotalTokensLabelName: "cpu_kv_cache_size_tokens",
 		CacheOffloadDetectionSpec: "vllm:kv_offload_total_bytes_total",

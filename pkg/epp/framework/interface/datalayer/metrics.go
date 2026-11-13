@@ -41,8 +41,8 @@ type Metrics struct {
 	// HiCache host pool or vLLM's CPU offload tier. It is 0 until the model
 	// server has reported it; servers without an offload tier never do.
 	KvCacheMaxTokenCapacity int
-	// KvCacheOffloadDetected is true when the model server reports KV cache
-	// offloading activity, whether or not it also reports the offload tier's
+	// KvCacheOffloadDetected is true when the model server reports that it has
+	// offloaded KV cache, whether or not it also reports the offload tier's
 	// capacity in KvCacheMaxTokenCapacity.
 	KvCacheOffloadDetected bool
 	CacheBlockSize         int

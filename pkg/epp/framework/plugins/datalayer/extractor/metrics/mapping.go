@@ -49,8 +49,8 @@ type Mapping struct {
 	// matching series instead of the gauge value.
 	CacheTotalTokens      *Spec
 	CacheTotalTokensLabel string
-	// CacheOffloadDetection is a metric whose presence reports that the engine
-	// offloads KV cache to another tier. Optional.
+	// CacheOffloadDetection is a metric whose value above zero reports that the
+	// engine has offloaded KV cache to another tier. Optional.
 	CacheOffloadDetection *Spec
 	CustomMetrics         []CustomMetric
 }

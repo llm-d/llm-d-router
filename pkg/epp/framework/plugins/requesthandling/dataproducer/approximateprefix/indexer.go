@@ -47,10 +47,13 @@ type podCache struct {
 	// capacityFromMetrics records whether the LRU's capacity came from the
 	// endpoint's metrics; see resizeIfNeeded.
 	capacityFromMetrics bool
+	// warnedOffload records that the offload undercount warning was logged for
+	// this pod; see Add.
+	warnedOffload bool
 	// Pad to one 64-byte cache line. Without it podCache lands in the 48-byte
 	// size class, where caches straddle cache lines and concurrent RLocks on
 	// neighboring pods contend: about 15% slower matching in BenchmarkParallel.
-	_ [64 - unsafe.Sizeof(sync.RWMutex{}) - unsafe.Sizeof((*hashLRU)(nil)) - unsafe.Sizeof(false)]byte
+	_ [64 - unsafe.Sizeof(sync.RWMutex{}) - unsafe.Sizeof((*hashLRU)(nil)) - 2*unsafe.Sizeof(false)]byte
 }
 
 // newIndexer initializes an indexer with size limits and starts cache size reporting.
@@ -90,24 +93,19 @@ func (i *indexer) podCacheFor(pod server) *podCache {
 		i.pods[pod.ServerID] = pc
 		i.logger.V(logutil.VERBOSE).Info("Created prefix index for pod",
 			"pod", pod.ServerID, "capacityBlocks", lruSize, "capacityFromMetrics", pod.CapacityFromMetrics)
-		i.warnIfOffloadCapacityUnknown(pod, lruSize)
 	}
 	return pc
 }
 
-// warnIfOffloadCapacityUnknown logs, when a pod's index is created or resized
-// from a capacity that covers the HBM tier only while the engine offloads KV
-// cache, so the undercount is visible to the operator. It fires once per
-// sizing, not per request.
-func (i *indexer) warnIfOffloadCapacityUnknown(pod server, capacityBlocks int) {
-	if !pod.OffloadCapacityUnknown {
-		return
-	}
+// warnOffloadCapacityUnknown logs that a pod's index covers the HBM tier only
+// while the engine offloads KV cache, so the undercount is visible to the
+// operator.
+func (i *indexer) warnOffloadCapacityUnknown(pod ServerID, capacityBlocks int) {
 	i.logger.V(logutil.DEFAULT).Info("WARNING: the model server offloads KV cache but does not report the offload tier's capacity; "+
 		"the prefix index covers the HBM tier only, so prefix matches on this pod are under-reported. "+
 		"Disable autoTune and set lruCapacityPerServer to the offload-extended capacity, "+
 		"or run a model server version that reports it.",
-		"pod", pod.ServerID, "capacityBlocks", capacityBlocks)
+		"pod", pod, "capacityBlocks", capacityBlocks)
 }
 
 // resizeIfNeeded applies pod's capacity to pc, whose lock the caller must
@@ -129,7 +127,6 @@ func (i *indexer) resizeIfNeeded(pc *podCache, pod server) {
 	pc.lru.Resize(newSize)
 	i.logger.V(logutil.DEFAULT).Info("Resized prefix index for pod",
 		"pod", pod.ServerID, "fromBlocks", oldSize, "toBlocks", newSize, "capacityFromMetrics", pod.CapacityFromMetrics)
-	i.warnIfOffloadCapacityUnknown(pod, newSize)
 }
 
 // Add inserts hashes tail-first: matching is anchored at the first block, so
@@ -148,6 +145,12 @@ func (i *indexer) Add(hashes []blockHash, pod server) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	i.resizeIfNeeded(pc, pod)
+	// Checked on every Add rather than when the index is sized: the endpoint
+	// can start reporting the undercount after sizing, with the size unchanged.
+	if pod.OffloadCapacityUnknown && !pc.warnedOffload {
+		pc.warnedOffload = true
+		i.warnOffloadCapacityUnknown(pod.ServerID, pc.lru.Cap())
+	}
 	for idx := len(hashes) - 1; idx >= 0; idx-- {
 		pc.lru.Add(hashes[idx])
 	}

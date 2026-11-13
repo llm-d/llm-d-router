@@ -57,7 +57,7 @@ type server struct {
 	// OffloadCapacityUnknown reports that the index covers the offload tier but
 	// the endpoint offloads KV cache without reporting that tier's capacity, so
 	// NumOfGPUBlocks covers the HBM tier only and undercounts the cache. The
-	// indexer warns when it sizes a pod's index from such a capacity.
+	// indexer logs a warning for such a pod once.
 	OffloadCapacityUnknown bool
 }
 

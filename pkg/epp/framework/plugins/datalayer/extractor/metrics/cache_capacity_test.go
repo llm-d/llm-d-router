@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -90,14 +91,67 @@ sglang:hicache_host_total_tokens{model_name="m",tp_rank="1"} 400001.0
 		require.NoError(t, err)
 		assert.Equal(t, 400001, ep.GetMetrics().KvCacheMaxTokenCapacity)
 	})
+	t.Run("a series at zero is skipped", func(t *testing.T) {
+		perEngine := `# TYPE sglang:hicache_host_total_tokens gauge
+sglang:hicache_host_total_tokens{model_name="m",tp_rank="0"} 0.0
+sglang:hicache_host_total_tokens{model_name="m",tp_rank="1"} 400001.0
+`
+		ep, err := scrapeText(t, "sglang", sglangSchedulingExposition+perEngine, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 400001, ep.GetMetrics().KvCacheMaxTokenCapacity)
+	})
 }
 
-// vllmOffloadCountersExposition is the deprecated transfer counter that vLLM's
-// OffloadingConnector registers at startup on every release, as captured in
-// testdata/vllm-flag.prom.
-const vllmOffloadCountersExposition = `# TYPE vllm:kv_offload_total_bytes_total counter
+// TestCacheTotalTokensUnusableSeriesKeepsLastValue checks that a scrape where
+// one matching series is NaN, infinite, or beyond the int range leaves the
+// capacity of the previous scrape in place. Taking the largest of the
+// remaining series would lower the capacity and shrink the prefix index.
+func TestCacheTotalTokensUnusableSeriesKeepsLastValue(t *testing.T) {
+	const gaugeFamily = "# TYPE sglang:hicache_host_total_tokens gauge\n"
+	const rank0 = `sglang:hicache_host_total_tokens{model_name="m",tp_rank="0"} 300000.0` + "\n"
+	const rank1 = `sglang:hicache_host_total_tokens{model_name="m",tp_rank="1"} `
+	for _, unusable := range []string{"NaN", "+Inf", "-Inf", "1e30", "9223372036854775808"} {
+		t.Run("gauge "+unusable, func(t *testing.T) {
+			ep, err := scrapeText(t, "sglang", sglangSchedulingExposition+gaugeFamily+rank0+rank1+"400001.0\n", nil)
+			require.NoError(t, err)
+			require.Equal(t, 400001, ep.GetMetrics().KvCacheMaxTokenCapacity)
+
+			_, err = scrapeText(t, "sglang", sglangSchedulingExposition+gaugeFamily+rank0+rank1+unusable+"\n", ep)
+			require.NoError(t, err)
+			assert.Equal(t, 400001, ep.GetMetrics().KvCacheMaxTokenCapacity)
+		})
+	}
+
+	const infoFamily = "# TYPE vllm:kv_offload_config_info gauge\n"
+	const engine0 = `vllm:kv_offload_config_info{cpu_kv_cache_size_tokens="524288",engine="0",model_name="m"} 1.0` + "\n"
+	const engine1 = `vllm:kv_offload_config_info{cpu_kv_cache_size_tokens="%s",engine="1",model_name="m"} 1.0` + "\n"
+	for _, unusable := range []string{"NaN", "Inf", "1e30"} {
+		t.Run("label "+unusable, func(t *testing.T) {
+			ep, err := scrapeText(t, "vllm", vllmSchedulingExposition+infoFamily+engine0+fmt.Sprintf(engine1, "1048576"), nil)
+			require.NoError(t, err)
+			require.Equal(t, 1048576, ep.GetMetrics().KvCacheMaxTokenCapacity)
+
+			_, err = scrapeText(t, "vllm", vllmSchedulingExposition+infoFamily+engine0+fmt.Sprintf(engine1, unusable), ep)
+			require.NoError(t, err)
+			assert.Equal(t, 1048576, ep.GetMetrics().KvCacheMaxTokenCapacity)
+		})
+	}
+}
+
+// vllmOffloadIdleCountersExposition is the deprecated transfer counter as
+// vLLM's OffloadingConnector registers it at startup, before any KV block is
+// offloaded, as captured in testdata/vllm-flag.prom.
+const vllmOffloadIdleCountersExposition = `# TYPE vllm:kv_offload_total_bytes_total counter
 vllm:kv_offload_total_bytes_total{engine="0",model_name="Qwen/Qwen3-8B",transfer_type="CPU_to_GPU"} 0.0
 vllm:kv_offload_total_bytes_total{engine="0",model_name="Qwen/Qwen3-8B",transfer_type="GPU_to_CPU"} 0.0
+`
+
+// vllmOffloadActiveCountersExposition is the same counter after the engine has
+// stored KV blocks in the CPU tier and loaded none back. The values are
+// written for the test rather than captured from a running engine.
+const vllmOffloadActiveCountersExposition = `# TYPE vllm:kv_offload_total_bytes_total counter
+vllm:kv_offload_total_bytes_total{engine="0",model_name="Qwen/Qwen3-8B",transfer_type="CPU_to_GPU"} 0.0
+vllm:kv_offload_total_bytes_total{engine="0",model_name="Qwen/Qwen3-8B",transfer_type="GPU_to_CPU"} 3.3554432e+07
 `
 
 // vllmOffloadConfigInfoExposition is vllm:kv_offload_config_info as a
@@ -111,7 +165,7 @@ vllm:kv_offload_config_info{cpu_blocks_per_chunk="4",cpu_kv_cache_size_bytes="21
 
 // TestCacheTotalTokensVLLM checks that the built-in vLLM config reads the CPU
 // tier capacity from the kv_offload_config_info label and reports offloading
-// from the connector counters, across the engine's lifecycle.
+// once the connector counters are above zero, across the engine's lifecycle.
 func TestCacheTotalTokensVLLM(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -124,19 +178,31 @@ func TestCacheTotalTokensVLLM(t *testing.T) {
 			exposition: vllmSchedulingExposition,
 		},
 		{
-			name:         "offloading before the first scheduler step",
-			exposition:   vllmSchedulingExposition + vllmOffloadCountersExposition,
+			// The counters exist at zero from startup, while the capacity label
+			// appears with the first scheduler step. Detecting offloading here
+			// would report an unknown capacity on an engine that reports it.
+			name:       "offloading enabled before any transfer",
+			exposition: vllmSchedulingExposition + vllmOffloadIdleCountersExposition,
+		},
+		{
+			name:       "capacity label before any transfer",
+			exposition: vllmSchedulingExposition + vllmOffloadIdleCountersExposition + vllmOffloadConfigInfoExposition,
+			wantTokens: 1048576,
+		},
+		{
+			name:         "transfers on a release without the capacity label",
+			exposition:   vllmSchedulingExposition + vllmOffloadActiveCountersExposition,
 			wantDetected: true,
 		},
 		{
-			name:         "offloading with the capacity label",
-			exposition:   vllmSchedulingExposition + vllmOffloadCountersExposition + vllmOffloadConfigInfoExposition,
+			name:         "transfers with the capacity label",
+			exposition:   vllmSchedulingExposition + vllmOffloadActiveCountersExposition + vllmOffloadConfigInfoExposition,
 			wantTokens:   1048576,
 			wantDetected: true,
 		},
 		{
 			name: "tiering puts the label on the primary tier series",
-			exposition: vllmSchedulingExposition + vllmOffloadCountersExposition + `# TYPE vllm:kv_offload_config_info gauge
+			exposition: vllmSchedulingExposition + vllmOffloadActiveCountersExposition + `# TYPE vllm:kv_offload_config_info gauge
 vllm:kv_offload_config_info{cpu_kv_cache_size_tokens="1048576",engine="0",fs_path="",model_name="m",tier="0:primary"} 1.0
 vllm:kv_offload_config_info{cpu_kv_cache_size_tokens="",engine="0",fs_path="/mnt/kv",model_name="m",tier="1:fs"} 1.0
 `,
@@ -145,7 +211,7 @@ vllm:kv_offload_config_info{cpu_kv_cache_size_tokens="",engine="0",fs_path="/mnt
 		},
 		{
 			name: "capacity the engine cannot compute reads None",
-			exposition: vllmSchedulingExposition + vllmOffloadCountersExposition + `# TYPE vllm:kv_offload_config_info gauge
+			exposition: vllmSchedulingExposition + vllmOffloadActiveCountersExposition + `# TYPE vllm:kv_offload_config_info gauge
 vllm:kv_offload_config_info{cpu_kv_cache_size_tokens="None",cpu_num_chunks="16384",engine="0",model_name="m"} 1.0
 `,
 			wantDetected: true,
@@ -167,7 +233,7 @@ vllm:kv_offload_config_info{cpu_kv_cache_size_tokens="None",cpu_num_chunks="1638
 // capacity metric keeps the capacity a previous scrape reported, while the
 // offload signal follows the current scrape.
 func TestCacheTotalTokensKeepsLastValue(t *testing.T) {
-	ep, err := scrapeText(t, "vllm", vllmSchedulingExposition+vllmOffloadCountersExposition+vllmOffloadConfigInfoExposition, nil)
+	ep, err := scrapeText(t, "vllm", vllmSchedulingExposition+vllmOffloadActiveCountersExposition+vllmOffloadConfigInfoExposition, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1048576, ep.GetMetrics().KvCacheMaxTokenCapacity)
 	require.True(t, ep.GetMetrics().KvCacheOffloadDetected)
@@ -219,8 +285,10 @@ func TestVLLMFixtures(t *testing.T) {
 		wantDetected bool
 	}{
 		{fixture: "vllm-none.prom", wantDetected: false},
-		{fixture: "vllm-flag.prom", wantDetected: true},
-		{fixture: "vllm-conn.prom", wantDetected: true},
+		// Both offloading fixtures were captured before the engine served a
+		// request, so the transfer counters are present at zero.
+		{fixture: "vllm-flag.prom", wantDetected: false},
+		{fixture: "vllm-conn.prom", wantDetected: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.fixture, func(t *testing.T) {
