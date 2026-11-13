@@ -252,6 +252,15 @@ func TestEstimateBackend_TextToSpeechEstimatesPseudoTokens(t *testing.T) {
 	assert.Equal(t, packBytes([]byte(input)), tp.Prompts[0].TokenIDs)
 }
 
+func TestEstimateBackend_ARTTSRequiresParsedConditioning(t *testing.T) {
+	tp, err := (estimateBackend{arTTS: true}).produce(t.Context(), &fwkrequest.InferenceRequestBody{
+		TextToSpeech: &fwkrequest.TextToSpeechRequest{Input: "hello"},
+		Payload:      fwkrequest.RawPayload(`{"input":"hello","voice":"vivian"}`),
+	})
+	require.ErrorContains(t, err, "AR TTS cache estimation requires a parsed JSON payload")
+	require.Nil(t, tp)
+}
+
 // TestEstimateBackend_TextToSpeechIncludesInstructions asserts TTS
 // instructions are folded into the estimated text alongside input, matching
 // vLLM Omni's usage accounting.

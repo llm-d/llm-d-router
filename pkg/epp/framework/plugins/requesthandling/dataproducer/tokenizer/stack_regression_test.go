@@ -138,6 +138,44 @@ func TestSuppliedTokensReachScheduling(t *testing.T) {
 	}
 }
 
+func TestARTTSOptInPreservesOtherEstimates(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body string
+		arTTS            bool
+	}{
+		{
+			name: "speech disabled", path: "/v1/audio/speech",
+			body: `{"input":"hello","voice":"vivian","cache_salt":"tenant-a","extra_params":{"use_random":true}}`,
+		},
+		{
+			name: "audio generation", path: "/v1/audio/generate", arTTS: true,
+			body: `{"input":"hello","negative_prompt":"noise"}`,
+		},
+		{
+			name: "text completions", path: "/v1/completions", arTTS: true,
+			body: `{"prompt":"hello","cache_salt":"tenant-a"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := openai.NewOpenAIParser().ParseRequest(t.Context(), []byte(tc.body), map[string]string{":path": tc.path})
+			require.NoError(t, err)
+			body := *parsed.Body
+			baseline, err := NewPlugin(t.Context(), "plain", &tokenizerPluginConfig{})
+			require.NoError(t, err)
+			configured, err := NewPlugin(t.Context(), "configured", &tokenizerPluginConfig{
+				Estimate: &estimateConfig{ARTTS: tc.arTTS},
+			})
+			require.NoError(t, err)
+			req := &scheduling.InferenceRequest{Body: parsed.Body}
+			require.NoError(t, baseline.Produce(t.Context(), req, nil))
+			expected := req.Body.TokenizedRequest
+			req.Body = &body
+			require.NoError(t, configured.Produce(t.Context(), req, nil))
+			require.Equal(t, expected, req.Body.TokenizedRequest)
+		})
+	}
+}
+
 func TestCompletionTokenBatchesUseRenderedTokens(t *testing.T) {
 	const raw = ` {"model":"m","prompt":[[1,2,3],[4,5,6]],"truncate_prompt_tokens":2,"cache_salt":"tenant-a"} `
 	parsed, err := openai.NewOpenAIParser().ParseRequest(context.Background(), []byte(raw), map[string]string{":path": "/v1/completions"})
