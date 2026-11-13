@@ -87,6 +87,9 @@ type Options struct {
 	GRPCMaxSendMsgSizeStr string        // Raw string value from CLI flag for send limit.
 	MaxRequestBodySize    int           // Maximum request body size in bytes; 0 means unlimited.
 	MaxRequestBodySizeStr string        // Raw string value from CLI flag for the request body limit.
+	// SkipUnmodifiedRequestBody omits body_mutation on the request-body response when the body was not rewritten.
+	// Applies only when Envoy reports a BUFFERED or BUFFERED_PARTIAL request_body_mode; otherwise the body is echoed.
+	SkipUnmodifiedRequestBody bool
 	//
 	// InferencePool.
 	//
@@ -218,6 +221,11 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&opts.MaxRequestBodySizeStr, "max-request-body-size", opts.MaxRequestBodySizeStr,
 		"Maximum size of a request body (e.g., 64MiB, 100MB). A larger body is rejected with 413 as soon as the "+
 			"buffered chunks exceed it. Empty or 0 means unlimited.")
+	fs.BoolVar(&opts.SkipUnmodifiedRequestBody, "skip-unmodified-request-body", opts.SkipUnmodifiedRequestBody,
+		"Omit body_mutation on the request-body ext_proc response when the EPP did not rewrite the body. "+
+			"Applies only when Envoy reports request_body_mode BUFFERED or BUFFERED_PARTIAL in protocol_config; in other "+
+			"modes, such as FULL_DUPLEX_STREAMED where the proxy does not retain the original body, the body is still "+
+			"echoed. Off by default.")
 	fs.StringVar(&opts.PoolGroup, "pool-group", opts.PoolGroup,
 		"Kubernetes resource group of the InferencePool this Endpoint Picker is associated with. "+
 			"Only `inference.networking.k8s.io` is currently supported.")

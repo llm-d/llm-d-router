@@ -935,3 +935,21 @@ func TestLeaderElectionOverride(t *testing.T) {
 		t.Errorf("override changed manager options with leader election disabled: %+v", disabled)
 	}
 }
+
+func TestSkipUnmodifiedRequestBodyFlag(t *testing.T) {
+	def := NewOptions()
+	def.AddFlags(pflag.NewFlagSet("default", pflag.ContinueOnError))
+	if def.SkipUnmodifiedRequestBody {
+		t.Errorf("SkipUnmodifiedRequestBody default = true, want false")
+	}
+
+	opts := NewOptions()
+	fs := pflag.NewFlagSet("set", pflag.ContinueOnError)
+	opts.AddFlags(fs)
+	if err := fs.Parse([]string{"--skip-unmodified-request-body"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	if !opts.SkipUnmodifiedRequestBody {
+		t.Errorf("SkipUnmodifiedRequestBody = false, want true")
+	}
+}
