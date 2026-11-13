@@ -183,6 +183,11 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	}
 	go indexer.Run(ctx)
 
+	if kc := config.KVEventsConfig; kc.IndexSlidingWindowGroups && kc.WindowIndexConfig == nil &&
+		config.IndexerConfig.KVBlockIndexConfig != nil {
+		kc.WindowIndexConfig = config.IndexerConfig.KVBlockIndexConfig.InMemoryConfig
+	}
+
 	adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)

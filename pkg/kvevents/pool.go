@@ -158,6 +158,14 @@ type Config struct {
 	// event path are emitted by the traced Index wrapper and are not gated
 	// here, so an exporter still receives those with this unset.
 	Tracing bool `json:"tracing,omitempty"`
+	// IndexSlidingWindowGroups, when true, indexes the stores and removals of
+	// sliding-window KV cache groups into the Pool's WindowIndex, keyed by
+	// group, once the group's window size is known. The prefix index that
+	// scoring reads never receives them.
+	IndexSlidingWindowGroups bool `json:"indexSlidingWindowGroups,omitempty"`
+	// WindowIndexConfig sizes the WindowIndex. Nil selects the in-memory index
+	// defaults.
+	WindowIndexConfig *kvblock.InMemoryIndexConfig `json:"windowIndexConfig,omitempty"`
 	// DiscoverPods enables the Kubernetes pod reconciler for automatic
 	// per-pod subscriber management. When enabled, the reconciler watches
 	// Kubernetes pods and creates/removes ZMQ subscribers dynamically.
@@ -228,6 +236,9 @@ type Pool struct {
 	adapter        EngineAdapter
 	groupCatalog   *kvblock.GroupCatalog
 	cacheFormats   *kvblock.CacheFormatCatalog
+	// windowIndex holds sliding-window group entries; nil unless
+	// Config.IndexSlidingWindowGroups is set.
+	windowIndex kvblock.Index
 	// dedup lives in the Pool, not as an Index decorator, because its scope is
 	// built from event fields absent from the Index.Evict signature (device
 	// tier, KV-cache group, DP rank) and a store must be counted only after
@@ -272,6 +283,14 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		cacheFormats:   kvblock.NewCacheFormatCatalog(),
 		dedup:          newEventDedupFilter(),
 		tracer:         newEventTracer(cfg.Tracing),
+	}
+
+	if cfg.IndexSlidingWindowGroups {
+		windowIndex, err := kvblock.NewInMemoryIndex(cfg.WindowIndexConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create the sliding-window index: %w", err)
+		}
+		p.windowIndex = windowIndex
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -325,6 +344,23 @@ func (p *Pool) addQueueDepth(delta int64) {
 // GroupCatalog returns the KV cache group metadata learned from events.
 func (p *Pool) GroupCatalog() *kvblock.GroupCatalog {
 	return p.groupCatalog
+}
+
+// WindowIndex returns the index of sliding-window group entries, or nil
+// unless Config.IndexSlidingWindowGroups is set.
+func (p *Pool) WindowIndex() kvblock.Index {
+	return p.windowIndex
+}
+
+// slidingWindowGroup reports whether the pod's group is a sliding-window group
+// with a known window size.
+func (p *Pool) slidingWindowGroup(podIdentifier string, groupIdx *int) bool {
+	if groupIdx == nil {
+		return false
+	}
+	meta, found := p.groupCatalog.Get(podIdentifier, kvblock.GroupID(*groupIdx))
+	return found && meta.Kind == string(KVCacheSpecKindSlidingWindow) &&
+		meta.SlidingWindowSize != nil && *meta.SlidingWindowSize > 0
 }
 
 // CacheFormats returns per-pod cache formats learned from store events.
@@ -498,6 +534,12 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 		debugLogger.Error(err, "Failed to clear pod from index",
 			"podIdentifier", podIdentifier)
 	}
+	if p.windowIndex != nil {
+		if err := p.windowIndex.Clear(ctx, podIdentifier); err != nil {
+			debugLogger.Error(err, "Failed to clear pod from the sliding-window index",
+				"podIdentifier", podIdentifier)
+		}
+	}
 	p.dedup.clear(podIdentifier)
 	if retire {
 		p.groupCatalog.Clear(podIdentifier)
@@ -622,6 +664,48 @@ func (p *Pool) handleDeviceTierUpdate(
 	return true
 }
 
+// windowStore is a sliding-window store that processEventBatch holds for
+// addWindowStores.
+type windowStore struct {
+	hashes  []uint64
+	entries []kvblock.PodEntry
+	scope   blockScope
+}
+
+// addWindowStores adds sliding-window stores to the window index. A
+// sliding-window store holds only the blocks inside the window, so its hashes
+// need not cover its token span. Each hash goes to the request key the prefix
+// index maps it to, which the full-attention store of the same block sets.
+// vLLM publishes that store later in the batch, so processEventBatch holds the
+// sliding-window stores until the batch ends or a sliding-window removal comes.
+// Hashes the prefix index does not map are left out.
+func (p *Pool) addWindowStores(ctx context.Context, stores []windowStore, podIdentifier string, modelSeed uint64) {
+	for _, s := range stores {
+		var hashes []uint64
+		var engineKeys, requestKeys []kvblock.BlockHash
+		for _, hash := range s.hashes {
+			engineKey := namespacedEngineKey(modelSeed, hash)
+			rk, err := p.index.GetRequestKey(ctx, engineKey)
+			if err != nil {
+				continue
+			}
+			hashes = append(hashes, hash)
+			engineKeys = append(engineKeys, engineKey)
+			requestKeys = append(requestKeys, rk)
+		}
+		if len(requestKeys) == 0 {
+			metrics.KVEventStoresSkipped.WithLabelValues(string(KVCacheSpecKindSlidingWindow), "unresolved_window_blocks").Inc()
+			continue
+		}
+		if err := p.windowIndex.Add(ctx, engineKeys, requestKeys, s.entries); err != nil {
+			log.FromContext(ctx).V(logging.DEBUG).Error(err, "Failed to add sliding-window store to the window index",
+				"podIdentifier", podIdentifier)
+			continue
+		}
+		p.dedup.trackStore(s.scope, hashes)
+	}
+}
+
 // processEventBatch processes a batch of events using type switches.
 func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIdentifier, modelName string) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
@@ -631,6 +715,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 		"eventCount", len(batch.Events))
 	modelSeed := xxhash.Sum64String(modelName)
 
+	var windowStores []windowStore
 	// Process each event in the batch
 	for _, genericEvent := range batch.Events {
 		switch ev := genericEvent.(type) {
@@ -668,6 +753,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			}
 
 			digestible, reason := blockStoredEventDigestible(ev, p.tokenProcessor.BlockSize())
+			windowed := p.windowIndex != nil && ev.KVCacheSpecKind == KVCacheSpecKindSlidingWindow
+			if windowed && reason == "non_dense_block_span" {
+				// addWindowStores does not need a dense span.
+				reason = "unsupported_cache_kind"
+			}
 			if ev.GroupIdx != nil && len(ev.Tokens) > 0 && ev.KVCacheSpecKind != "" &&
 				(digestible || reason == "unsupported_cache_kind") {
 				g := kvblock.GroupID(*ev.GroupIdx)
@@ -677,11 +767,28 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					meta.Kind == string(ev.KVCacheSpecKind) && meta.BlockSize > ev.BlockSize {
 					digestible, reason = false, "conflicting_block_size"
 				} else if hasExplicitKind {
+					window := ev.KVCacheSpecSlidingWindowSize
+					if window == nil && found && meta.Kind == string(ev.KVCacheSpecKind) {
+						// The window size is optional on a store; keep the one
+						// already learned for this group.
+						window = meta.SlidingWindowSize
+					}
 					p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
 						Kind:              string(ev.KVCacheSpecKind),
 						BlockSize:         ev.BlockSize,
-						SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
+						SlidingWindowSize: window,
 					})
+				}
+			}
+			if windowed && reason == "unsupported_cache_kind" {
+				switch {
+				case !p.slidingWindowGroup(podIdentifier, ev.GroupIdx):
+					reason = "unknown_sliding_window"
+				case ev.BlockSize < p.tokenProcessor.BlockSize():
+					reason = "incomplete_canonical_block"
+				default:
+					windowStores = append(windowStores, windowStore{hashes: ev.BlockHashes, entries: podEntries, scope: storeScope})
+					continue
 				}
 			}
 			if !digestible {
@@ -849,10 +956,18 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 		case *BlockRemovedEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+			index := p.index
 			if ev.GroupIdx != nil {
 				groupIdx := kvblock.GroupID(*ev.GroupIdx)
 				meta, found := p.groupCatalog.Get(podIdentifier, groupIdx)
-				if !found || !isPrefixIndexableSpecKind(KVCacheSpecKind(meta.Kind)) {
+				if p.windowIndex != nil && found && meta.Kind == string(KVCacheSpecKindSlidingWindow) {
+					// By kind, not by a known window size: Evict of blocks the
+					// window index never stored is a no-op. The batch's earlier
+					// sliding-window stores go in first.
+					p.addWindowStores(ctx, windowStores, podIdentifier, modelSeed)
+					windowStores = nil
+					index = p.windowIndex
+				} else if !found || !isPrefixIndexableSpecKind(KVCacheSpecKind(meta.Kind)) {
 					reason := "unsupported_cache_kind"
 					if !found {
 						reason = "unknown_group"
@@ -908,7 +1023,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			for i, hash := range hashesToEvict {
 				engineKeys[i] = namespacedEngineKey(modelSeed, hash)
 			}
-			if err := p.index.Evict(ctx, kvblock.EngineKey, engineKeys, podEntries); err != nil {
+			if err := index.Evict(ctx, kvblock.EngineKey, engineKeys, podEntries); err != nil {
 				debugLogger.Error(err, "Failed to evict engine keys from index",
 					"podIdentifier", podIdentifier, "keyCount", len(engineKeys))
 			}
@@ -931,9 +1046,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"podIdentifier", podIdentifier, "deviceTier", ev.DeviceTier)
 			}
 			p.clearPod(ctx, podIdentifier, false)
+			windowStores = nil
 
 		default:
 			debugLogger.Info("Unknown event", "podIdentifier", podIdentifier, "event", genericEvent)
 		}
 	}
+	p.addWindowStores(ctx, windowStores, podIdentifier, modelSeed)
 }
