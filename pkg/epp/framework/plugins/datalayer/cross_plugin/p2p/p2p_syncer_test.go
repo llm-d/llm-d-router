@@ -17,7 +17,9 @@ limitations under the License.
 package p2p
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -35,7 +37,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
-	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/internal/crossreplica"
 )
 
 const (
@@ -236,22 +238,48 @@ func TestGetCombinesLiveLocalWithPeerValue(t *testing.T) {
 	assert.Equal(t, int64(6), b.requests(testEndpointID), "the local part of Get is live")
 }
 
-func TestValuesReceivedBeforeFirstPublishCountAfterIt(t *testing.T) {
-	a := newReplica(t, "a", 5*time.Second, time.Second)
-	b := newReplica(t, "b", 5*time.Second, time.Second)
+func TestValuesForEndpointsNotSentHereAreDroppedUntilSent(t *testing.T) {
+	a := newReplica(t, "a", 5*time.Second, 100*time.Millisecond)
+	b := newReplica(t, "b", 5*time.Second, 100*time.Millisecond)
 	mesh(a, b)
 	a.loads.set(testEndpointID, 5)
+	a.loads.set("x/other", 1)
+	both := []string{testEndpointID, "x/other"}
 
 	require.Eventually(t, func() bool {
-		a.publish(t)
-		b.syncer.recvMu.Lock()
-		defer b.syncer.recvMu.Unlock()
-		return len(b.syncer.received[testStateKey][testEndpointID]) == 1
+		a.syncer.SetBatch(context.Background(), a.loads.spec(), both, time.Second)
+		b.syncer.SetBatch(context.Background(), b.loads.spec(), []string{"x/other"}, time.Second)
+		return b.requests("x/other") == 1
 	}, eventually, tick)
-	assert.Equal(t, int64(0), b.requests(testEndpointID), "values of an unregistered key are not decoded")
+	b.syncer.recvMu.Lock()
+	assert.Empty(t, b.syncer.received[testStateKey][testEndpointID], "b has not sent this endpoint")
+	b.syncer.recvMu.Unlock()
 
-	b.publish(t)
-	assert.Equal(t, int64(5), b.requests(testEndpointID))
+	start := time.Now()
+	require.Eventually(t, func() bool {
+		a.syncer.SetBatch(context.Background(), a.loads.spec(), both, time.Second)
+		b.syncer.SetBatch(context.Background(), b.loads.spec(), both, time.Second)
+		return b.requests(testEndpointID) == 5
+	}, eventually, tick)
+	assert.Less(t, time.Since(start), time.Second, "the dropped value is resent within refreshInterval")
+}
+
+func TestKeyTakesItsTypeFromTheFirstEndpointWithAValue(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	spec := a.loads.spec()
+	read := spec.Read
+	spec.Read = func(endpointID string) fwkdl.Cloneable {
+		if endpointID == "x/empty" {
+			return nil
+		}
+		return read(endpointID)
+	}
+	failures := a.syncer.SetBatch(context.Background(), spec, []string{"x/empty", testEndpointID}, time.Second)
+	assert.Contains(t, failures, "x/empty")
+	assert.NotContains(t, failures, testEndpointID)
+	a.syncer.recvMu.Lock()
+	defer a.syncer.recvMu.Unlock()
+	assert.Contains(t, a.syncer.specs, testStateKey)
 }
 
 func TestChangedValueReachesPeerBeforeRefresh(t *testing.T) {
@@ -672,27 +700,89 @@ func TestPartitionedReplicaExpiresAndRecovers(t *testing.T) {
 	assert.Less(t, time.Since(healed), 2*redialMaxDelay+dialTimeout, "values return within a redial after the partition heals")
 }
 
-func TestUnchangedValueWithDifferentCloneIsNotResent(t *testing.T) {
-	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
-	// Read returns nil Prompts; Clone of it returns an empty slice.
-	spec := fwkdl.CrossReplicaSpec{
-		StateKey:  "prefix",
-		Read:      func(string) fwkdl.Cloneable { return &attrprefix.PrefixHashSet{} },
-		Aggregate: func(values []any) any { return values[0] },
-	}
-	require.Empty(t, a.syncer.SetBatch(context.Background(), spec, []string{"x/a"}, time.Second))
-	sentAt := func() time.Time {
-		a.syncer.sendMu.Lock()
-		defer a.syncer.sendMu.Unlock()
-		return a.syncer.sent[spec.StateKey]["x/a"].sentAt
-	}
-	first := sentAt()
-	time.Sleep(2 * time.Millisecond)
-	require.Empty(t, a.syncer.SetBatch(context.Background(), spec, []string{"x/a"}, time.Second))
-	assert.Equal(t, first, sentAt(), "an unchanged value is not resent within refreshInterval")
+// blob is a value of a set size.
+type blob struct {
+	Data []byte
 }
 
-func TestOversizedOrMalformedInputDoesNotStopTheReplica(t *testing.T) {
+func (b *blob) Clone() fwkdl.Cloneable {
+	return &blob{Data: append([]byte(nil), b.Data...)}
+}
+
+func TestBatchOverMessageLimitFailsItsEndpointsUntilItFits(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	size := maxMessageBytes
+	spec := fwkdl.CrossReplicaSpec{
+		StateKey:  "blob",
+		Read:      func(string) fwkdl.Cloneable { return &blob{Data: make([]byte, size)} },
+		Aggregate: func(values []any) any { return values[0] },
+	}
+	for range 2 {
+		failures := a.syncer.SetBatch(context.Background(), spec, []string{"x/a"}, time.Second)
+		require.ErrorContains(t, failures["x/a"], "exceeds")
+	}
+	size = 1
+	assert.Empty(t, a.syncer.SetBatch(context.Background(), spec, []string{"x/a"}, time.Second))
+}
+
+func TestUndecodableMessageKeepsItsStreamOpen(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	a.publish(t)
+
+	conn, err := grpc.NewClient(a.address(), grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(frameCodec{})))
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	stream, err := conn.NewStream(context.Background(), &publishStream, publishMethod)
+	require.NoError(t, err)
+	require.NoError(t, stream.SendMsg([]byte("not a gob message")))
+
+	value, err := crossreplica.EncodeValue(&attrconcurrency.InFlightLoad{Requests: 9})
+	require.NoError(t, err)
+	var msg bytes.Buffer
+	require.NoError(t, gob.NewEncoder(&msg).Encode(envelope{
+		Key: string(testStateKey), Replica: "peer-1", Pod: "peer", Values: map[string][]byte{testEndpointID: value},
+	}))
+	require.NoError(t, stream.SendMsg(msg.Bytes()))
+	require.Eventually(t, func() bool { return a.requests(testEndpointID) == 9 }, eventually, tick)
+}
+
+func TestValuesFromReplicasBeyondMaxPeersAreDropped(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	a.publish(t)
+	value, err := crossreplica.EncodeValue(&attrconcurrency.InFlightLoad{Requests: 1})
+	require.NoError(t, err)
+
+	now := time.Now()
+	for i := range maxPeers + 1 {
+		a.syncer.apply(testStateKey, envelope{
+			Replica: fmt.Sprintf("peer-%d", i), Pod: "peer", Values: map[string][]byte{testEndpointID: value},
+		}, now)
+	}
+	assert.Equal(t, int64(maxPeers), a.requests(testEndpointID))
+	a.syncer.recvMu.Lock()
+	defer a.syncer.recvMu.Unlock()
+	assert.Len(t, a.syncer.peers, maxPeers)
+}
+
+func TestConnectionHoldsAtMostMaxStreams(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	conn, err := grpc.NewClient(a.address(), grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.ForceCodec(frameCodec{})))
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	for range maxStreamsPerConnection {
+		stream, err := conn.NewStream(context.Background(), &publishStream, publishMethod)
+		require.NoError(t, err)
+		require.NoError(t, stream.SendMsg([]byte("open")))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err = conn.NewStream(ctx, &publishStream, publishMethod)
+	require.Error(t, err, "a stream beyond the limit waits until one closes")
+}
+
+func TestOversizedMessageOrNonGRPCBytesEndOnlyTheirConnection(t *testing.T) {
 	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
 	b := newReplica(t, "b", 30*time.Second, 10*time.Second)
 

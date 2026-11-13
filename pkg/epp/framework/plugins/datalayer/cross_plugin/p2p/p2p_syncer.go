@@ -26,7 +26,6 @@ import (
 	"maps"
 	"net"
 	"os"
-	"reflect"
 	"slices"
 	"strconv"
 	"sync"
@@ -34,6 +33,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/net/netutil"
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -45,13 +45,19 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/internal/crossreplica"
 )
 
 const (
 	P2PSyncerType          = "p2p-syncer"
 	defaultStateTTL        = 2 * time.Second
 	defaultRefreshInterval = 100 * time.Millisecond
-	minimumDuration        = time.Millisecond
+	// maxPeers bounds the peer replicas whose values one replica holds at once
+	// and the connections it accepts.
+	maxPeers = 64
+	// maxStreamsPerConnection bounds the streams open on one connection. A peer
+	// keeps one stream open and opens the next when it ends.
+	maxStreamsPerConnection = 2
 	// maintenanceInterval paces peer link reconciliation, heartbeats and
 	// expiry of peer values.
 	maintenanceInterval = 50 * time.Millisecond
@@ -74,12 +80,14 @@ const (
 	dialTimeout      = time.Second
 	redialMaxDelay   = time.Second
 	errorLogPeriod   = 30 * time.Second
-	publishMethod    = "/llmd.epp.p2psyncer.v1.PeerSync/Publish"
+	serviceName      = "llmd.epp.p2psyncer.v1.PeerSync"
+	publishName      = "Publish"
+	publishMethod    = "/" + serviceName + "/" + publishName
 )
 
 // publishStream is the one RPC between replicas: a stream of messages from
 // the replica that dials to the replica that listens.
-var publishStream = grpc.StreamDesc{StreamName: "Publish", ClientStreams: true}
+var publishStream = grpc.StreamDesc{StreamName: publishName, ClientStreams: true}
 
 // ErrCoordinationUnsupported is returned by GetOrSet. Peer-to-peer sync has no
 // store that every replica writes through, so it cannot provide the
@@ -113,32 +121,33 @@ type P2PSyncer struct {
 	closeOnce sync.Once
 	listener  net.Listener
 	server    *grpc.Server
-	source    atomic.Pointer[peerSourceRef]
+	source    atomic.Pointer[fwkdl.PeerSource]
 
 	linksMu sync.Mutex
 	links   map[types.NamespacedName]*peerLink
 	// linkList is the current set of links, read without linksMu on publish.
 	linkList atomic.Pointer[[]*peerLink]
 
+	// sendMu guards sent. recvMu is taken before sendMu when both are held.
 	sendMu sync.Mutex
 	sent   map[fwkdl.StateKey]map[string]*sentValue
 
 	recvMu   sync.Mutex
 	specs    map[fwkdl.StateKey]*keySpec
 	received map[fwkdl.StateKey]map[string]map[string]*receivedValue
-	// heard records when each peer pod last delivered a message.
-	heard map[string]time.Time
+	// peers holds the replicas heard from within stateTTL, at most maxPeers.
+	peers map[string]*peerState
 
 	cache sync.Map
 
 	// lastSend is the UnixNano time of the last message sent to peers.
 	lastSend atomic.Int64
 
-	errorLog rate.Sometimes
-}
-
-type peerSourceRef struct {
-	fwkdl.PeerSource
+	queueFullLog rate.Sometimes
+	decodeLog    rate.Sometimes
+	dialLog      rate.Sometimes
+	newPeerLog   rate.Sometimes
+	peerLimitLog rate.Sometimes
 }
 
 type keySpec struct {
@@ -152,9 +161,13 @@ type sentValue struct {
 }
 
 type receivedValue struct {
-	raw        []byte
 	value      any
 	receivedAt time.Time
+}
+
+type peerState struct {
+	pod     string
+	heardAt time.Time
 }
 
 type aggregateCacheEntry struct {
@@ -214,8 +227,8 @@ func parseDuration(name, raw string, defaultValue time.Duration) (time.Duration,
 	if err != nil {
 		return 0, fmt.Errorf("p2p-syncer: invalid %s %q: %w", name, raw, err)
 	}
-	if d < minimumDuration {
-		return 0, fmt.Errorf("p2p-syncer: %s must be at least %s, got %s", name, minimumDuration, d)
+	if d < crossreplica.MinimumDuration {
+		return 0, fmt.Errorf("p2p-syncer: %s must be at least %s, got %s", name, crossreplica.MinimumDuration, d)
 	}
 	return d, nil
 }
@@ -275,24 +288,29 @@ func newP2PSyncer(ctx context.Context, name, podName, listenAddress, port string
 		refreshInterval: refreshInterval,
 		ctx:             ctx,
 		stop:            stop,
-		listener:        listener,
+		listener:        netutil.LimitListener(listener, maxPeers),
 		links:           map[types.NamespacedName]*peerLink{},
 		sent:            map[fwkdl.StateKey]map[string]*sentValue{},
 		specs:           map[fwkdl.StateKey]*keySpec{},
 		received:        map[fwkdl.StateKey]map[string]map[string]*receivedValue{},
-		heard:           map[string]time.Time{},
-		errorLog:        rate.Sometimes{Interval: errorLogPeriod},
+		peers:           map[string]*peerState{},
+		queueFullLog:    rate.Sometimes{Interval: errorLogPeriod},
+		decodeLog:       rate.Sometimes{Interval: errorLogPeriod},
+		dialLog:         rate.Sometimes{Interval: errorLogPeriod},
+		newPeerLog:      rate.Sometimes{First: maxPeers, Interval: errorLogPeriod},
+		peerLimitLog:    rate.Sometimes{Interval: errorLogPeriod},
 	}
 	s.linkList.Store(&[]*peerLink{})
 	s.server = grpc.NewServer(
 		grpc.ForceServerCodec(frameCodec{}),
 		grpc.MaxRecvMsgSize(maxMessageBytes),
+		grpc.MaxConcurrentStreams(maxStreamsPerConnection),
 		grpc.ConnectionTimeout(handshakeTimeout),
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: keepaliveTime, Timeout: keepaliveTimeout}),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: keepaliveTime / 2, PermitWithoutStream: true}),
 	)
 	s.server.RegisterService(&grpc.ServiceDesc{
-		ServiceName: "llmd.epp.p2psyncer.v1.PeerSync",
+		ServiceName: serviceName,
 		HandlerType: (*any)(nil),
 		Streams: []grpc.StreamDesc{{
 			StreamName:    publishStream.StreamName,
@@ -300,7 +318,7 @@ func newP2PSyncer(ctx context.Context, name, podName, listenAddress, port string
 			ClientStreams: true,
 		}},
 	}, s)
-	go func() { _ = s.server.Serve(listener) }()
+	go func() { _ = s.server.Serve(s.listener) }()
 	go s.maintain()
 	context.AfterFunc(ctx, s.close)
 	return s, nil
@@ -313,33 +331,11 @@ func (s *P2PSyncer) TypedName() fwkplugin.TypedName {
 // SetPeerSource supplies the discovered peer set. Peers are read on every
 // maintenance tick, so peers that join or leave later are picked up.
 func (s *P2PSyncer) SetPeerSource(source fwkdl.PeerSource) {
-	s.source.Store(&peerSourceRef{PeerSource: source})
+	s.source.Store(&source)
 }
 
 func (s *P2PSyncer) cacheKey(key fwkdl.StateKey, endpointID string) string {
 	return string(key) + ":" + endpointID
-}
-
-func encodeValue(value any) ([]byte, error) {
-	if value == nil {
-		return nil, errors.New("cannot encode nil value")
-	}
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(value); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func gobDecode(data []byte, prototype any) (any, error) {
-	if prototype == nil {
-		return nil, errors.New("cannot decode stored value without a type prototype")
-	}
-	target := reflect.New(reflect.TypeOf(prototype))
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(target.Interface()); err != nil {
-		return nil, err
-	}
-	return target.Elem().Interface(), nil
 }
 
 func (s *P2PSyncer) Set(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) error {
@@ -354,22 +350,18 @@ func (s *P2PSyncer) SetBatch(ctx context.Context, spec fwkdl.CrossReplicaSpec, e
 	if len(endpointIDs) == 0 {
 		return failures
 	}
-	s.registerSpec(spec, endpointIDs[0])
+	s.registerSpec(spec, endpointIDs)
 
 	now := time.Now()
 	values := make(map[string][]byte)
 	s.sendMu.Lock()
 	sent := s.sent[spec.StateKey]
-	if sent == nil {
-		sent = make(map[string]*sentValue)
-		s.sent[spec.StateKey] = sent
-	}
 	for _, endpointID := range endpointIDs {
 		if err := ctx.Err(); err != nil {
 			failures[endpointID] = err
 			continue
 		}
-		data, err := encodeValue(spec.Read(endpointID))
+		data, err := crossreplica.EncodeValue(spec.Read(endpointID))
 		if err != nil {
 			failures[endpointID] = fmt.Errorf("p2p-syncer: encode: %w", err)
 			continue
@@ -378,7 +370,6 @@ func (s *P2PSyncer) SetBatch(ctx context.Context, spec fwkdl.CrossReplicaSpec, e
 			continue
 		}
 		values[endpointID] = data
-		sent[endpointID] = &sentValue{data: data, sentAt: now}
 	}
 	s.sendMu.Unlock()
 
@@ -389,7 +380,16 @@ func (s *P2PSyncer) SetBatch(ctx context.Context, spec fwkdl.CrossReplicaSpec, e
 		for endpointID := range values {
 			failures[endpointID] = err
 		}
+		return failures
 	}
+	s.sendMu.Lock()
+	if s.sent[spec.StateKey] == nil {
+		s.sent[spec.StateKey] = make(map[string]*sentValue)
+	}
+	for endpointID, data := range values {
+		s.sent[spec.StateKey][endpointID] = &sentValue{data: data, sentAt: now}
+	}
+	s.sendMu.Unlock()
 	if v := ctrl.LoggerFrom(ctx).V(logutil.TRACE); v.Enabled() {
 		v.Info("p2p-syncer: SetBatch", "key", string(spec.StateKey), "sent", len(values), "endpoints", len(endpointIDs))
 	}
@@ -415,7 +415,7 @@ func (s *P2PSyncer) broadcast(key fwkdl.StateKey, env envelope) error {
 		select {
 		case link.queue <- msg:
 		default:
-			s.errorLog.Do(func() {
+			s.queueFullLog.Do(func() {
 				ctrl.LoggerFrom(s.ctx).Error(errors.New("send queue full"), "p2p-syncer: dropped a message", "peer", link.id.String())
 			})
 		}
@@ -445,43 +445,24 @@ func (s *P2PSyncer) GetOrSet(context.Context, fwkdl.StateKey, string, any) (any,
 	return nil, false, ErrCoordinationUnsupported
 }
 
-// registerSpec records the value type and aggregate for key, and decodes
-// values received before the first local publish.
-func (s *P2PSyncer) registerSpec(spec fwkdl.CrossReplicaSpec, endpointID string) {
+// registerSpec records the value type and aggregate for key, taking the type
+// from the first endpoint that has a value.
+func (s *P2PSyncer) registerSpec(spec fwkdl.CrossReplicaSpec, endpointIDs []string) {
 	s.recvMu.Lock()
 	defer s.recvMu.Unlock()
 	if _, ok := s.specs[spec.StateKey]; ok {
 		return
 	}
-	prototype := spec.Read(endpointID)
-	if prototype == nil {
-		return
-	}
-	ks := &keySpec{prototype: prototype, aggregate: spec.Aggregate}
-	s.specs[spec.StateKey] = ks
-	for id, byReplica := range s.received[spec.StateKey] {
-		for replica, rv := range byReplica {
-			if err := s.decodeInto(rv, ks); err != nil {
-				delete(byReplica, replica)
-			}
+	for _, endpointID := range endpointIDs {
+		if prototype := spec.Read(endpointID); prototype != nil {
+			s.specs[spec.StateKey] = &keySpec{prototype: prototype, aggregate: spec.Aggregate}
+			return
 		}
-		s.refreshAggregateLocked(spec.StateKey, id)
 	}
 }
 
-func (s *P2PSyncer) decodeInto(rv *receivedValue, ks *keySpec) error {
-	value, err := gobDecode(rv.raw, ks.prototype)
-	if err != nil {
-		if v := ctrl.LoggerFrom(s.ctx).V(logutil.DEBUG); v.Enabled() {
-			v.Info("p2p-syncer: decode error", "error", err)
-		}
-		return err
-	}
-	rv.value = value
-	return nil
-}
-
-// receive applies the messages of one peer's stream until the stream ends.
+// receive applies the messages of one peer's stream until the stream ends. A
+// message that does not decode is skipped and the stream stays open.
 func (s *P2PSyncer) receive(stream grpc.ServerStream) error {
 	for {
 		var msg []byte
@@ -490,25 +471,41 @@ func (s *P2PSyncer) receive(stream grpc.ServerStream) error {
 		}
 		var env envelope
 		if err := gob.NewDecoder(bytes.NewReader(msg)).Decode(&env); err != nil {
-			s.errorLog.Do(func() { ctrl.LoggerFrom(s.ctx).Error(err, "p2p-syncer: decode message failed") })
+			s.decodeLog.Do(func() { ctrl.LoggerFrom(s.ctx).Error(err, "p2p-syncer: decode message failed") })
 			continue
 		}
 		s.apply(fwkdl.StateKey(env.Key), env, time.Now())
 	}
 }
 
-// apply stores a peer's values and refreshes the aggregates they feed.
+// apply stores a peer's values and refreshes the aggregates they feed. It
+// keeps values only for endpoints this replica has sent under the same key,
+// and from at most maxPeers replicas at once. A dropped value is resent
+// within refreshInterval.
 func (s *P2PSyncer) apply(key fwkdl.StateKey, env envelope, now time.Time) {
 	if env.Replica == s.replicaID {
 		return
 	}
 	s.recvMu.Lock()
 	defer s.recvMu.Unlock()
-	if _, ok := s.heard[env.Pod]; !ok {
-		ctrl.LoggerFrom(s.ctx).Info("p2p-syncer: receiving from peer", "pod", env.Pod, "replica", env.Replica)
+	peer, ok := s.peers[env.Replica]
+	if !ok {
+		if len(s.peers) >= maxPeers {
+			s.peerLimitLog.Do(func() {
+				ctrl.LoggerFrom(s.ctx).Error(fmt.Errorf("more than %d peer replicas", maxPeers),
+					"p2p-syncer: dropped a message", "pod", env.Pod, "replica", env.Replica)
+			})
+			return
+		}
+		peer = &peerState{pod: env.Pod}
+		s.peers[env.Replica] = peer
+		s.newPeerLog.Do(func() {
+			ctrl.LoggerFrom(s.ctx).Info("p2p-syncer: receiving from peer", "pod", env.Pod, "replica", env.Replica)
+		})
 	}
-	s.heard[env.Pod] = now
-	if len(env.Values) == 0 && len(env.Deleted) == 0 {
+	peer.heardAt = now
+	ks := s.specs[key]
+	if ks == nil || (len(env.Values) == 0 && len(env.Deleted) == 0) {
 		return
 	}
 	byEndpoint := s.received[key]
@@ -516,10 +513,19 @@ func (s *P2PSyncer) apply(key fwkdl.StateKey, env envelope, now time.Time) {
 		byEndpoint = make(map[string]map[string]*receivedValue)
 		s.received[key] = byEndpoint
 	}
-	ks := s.specs[key]
+	s.sendMu.Lock()
+	sent := s.sent[key]
+	accepted := make(map[string][]byte, len(env.Values))
 	for endpointID, raw := range env.Values {
-		rv := &receivedValue{raw: raw, receivedAt: now}
-		if ks != nil && s.decodeInto(rv, ks) != nil {
+		if _, ok := sent[endpointID]; ok {
+			accepted[endpointID] = raw
+		}
+	}
+	s.sendMu.Unlock()
+	for endpointID, raw := range accepted {
+		value, err := crossreplica.DecodeValue(raw, ks.prototype)
+		if err != nil {
+			s.decodeLog.Do(func() { ctrl.LoggerFrom(s.ctx).Error(err, "p2p-syncer: decode value failed", "key", string(key)) })
 			continue
 		}
 		byReplica := byEndpoint[endpointID]
@@ -527,7 +533,7 @@ func (s *P2PSyncer) apply(key fwkdl.StateKey, env envelope, now time.Time) {
 			byReplica = make(map[string]*receivedValue)
 			byEndpoint[endpointID] = byReplica
 		}
-		byReplica[env.Replica] = rv
+		byReplica[env.Replica] = &receivedValue{value: value, receivedAt: now}
 		s.refreshAggregateLocked(key, endpointID)
 	}
 	for _, endpointID := range env.Deleted {
@@ -605,10 +611,11 @@ func (s *P2PSyncer) expire(now time.Time) {
 			}
 		}
 	}
-	for pod, at := range s.heard {
-		if now.Sub(at) > s.stateTTL {
-			delete(s.heard, pod)
-			ctrl.LoggerFrom(s.ctx).Info("p2p-syncer: no message from peer for stateTTL", "pod", pod, "stateTTL", s.stateTTL)
+	for replica, peer := range s.peers {
+		if now.Sub(peer.heardAt) > s.stateTTL {
+			delete(s.peers, replica)
+			ctrl.LoggerFrom(s.ctx).Info("p2p-syncer: no message from peer for stateTTL", "pod", peer.pod, "replica", replica,
+				"stateTTL", s.stateTTL)
 		}
 	}
 }
@@ -618,12 +625,12 @@ func (s *P2PSyncer) expire(now time.Time) {
 // replica that leaves the set while it drains keeps sending, and its values
 // expire stateTTL after its last message.
 func (s *P2PSyncer) reconcileLinks(now time.Time) {
-	ref := s.source.Load()
-	if ref == nil {
+	source := s.source.Load()
+	if source == nil {
 		return
 	}
 	desired := make(map[types.NamespacedName]string)
-	for _, peer := range ref.Peers() {
+	for _, peer := range (*source).Peers() {
 		port := peer.Port
 		if port == "" {
 			port = s.port
@@ -648,7 +655,7 @@ func (s *P2PSyncer) reconcileLinks(now time.Time) {
 		if !ok {
 			var err error
 			if link, err = s.dial(id, address, now); err != nil {
-				s.errorLog.Do(func() { ctrl.LoggerFrom(s.ctx).Error(err, "p2p-syncer: open peer link failed", "peer", id.String()) })
+				s.dialLog.Do(func() { ctrl.LoggerFrom(s.ctx).Error(err, "p2p-syncer: open peer link failed", "peer", id.String()) })
 				continue
 			}
 			s.links[id] = link

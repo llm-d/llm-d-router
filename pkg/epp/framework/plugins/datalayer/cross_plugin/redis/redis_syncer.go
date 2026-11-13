@@ -17,15 +17,12 @@ limitations under the License.
 package redis
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -38,6 +35,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/internal/crossreplica"
 )
 
 const (
@@ -45,7 +43,6 @@ const (
 	defaultAddress         = "localhost:6379"
 	defaultStateTTL        = 2 * time.Second
 	defaultCoordinationTTL = 180 * time.Second
-	minimumTTL             = time.Millisecond
 	batchSize              = 100
 	batchConcurrency       = 8
 )
@@ -88,8 +85,8 @@ func parseTTL(name, raw string, defaultValue time.Duration) (time.Duration, erro
 	if err != nil {
 		return 0, fmt.Errorf("redis-syncer: invalid %s %q: %w", name, raw, err)
 	}
-	if ttl < minimumTTL {
-		return 0, fmt.Errorf("redis-syncer: %s must be at least %s, got %s", name, minimumTTL, ttl)
+	if ttl < crossreplica.MinimumDuration {
+		return 0, fmt.Errorf("redis-syncer: %s must be at least %s, got %s", name, crossreplica.MinimumDuration, ttl)
 	}
 	return ttl, nil
 }
@@ -180,39 +177,12 @@ func (s *RedisSyncer) coordKey(key fwkdl.StateKey, id string) string {
 	return "coord:" + string(key) + ":" + id
 }
 
-func encodeValue(value any) ([]byte, error) {
-	if value == nil {
-		return nil, errors.New("cannot encode nil value")
-	}
-
-	var buf bytes.Buffer
-	encoder := gob.NewEncoder(&buf)
-	if err := encoder.Encode(value); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func gobDecode(data []byte, prototype any) (any, error) {
-	if prototype == nil {
-		return nil, errors.New("cannot decode stored value without a type prototype")
-	}
-
-	decoder := gob.NewDecoder(bytes.NewReader(data))
-	valueType := reflect.TypeOf(prototype)
-	target := reflect.New(valueType)
-	if err := decoder.Decode(target.Interface()); err != nil {
-		return nil, err
-	}
-	return target.Elem().Interface(), nil
-}
-
 // set publishes this replica's value and prepares the peer aggregate returned
 // by get.
 func (s *RedisSyncer) set(ctx context.Context, key fwkdl.StateKey, endpointID string, value any, aggregate func([]any) any) error {
 	logger := ctrl.LoggerFrom(ctx)
 
-	data, err := encodeValue(value)
+	data, err := crossreplica.EncodeValue(value)
 	if err != nil {
 		return fmt.Errorf("redis-syncer: encode: %w", err)
 	}
@@ -247,7 +217,7 @@ func (s *RedisSyncer) cachePeerAggregate(ctx context.Context, hashKey string, va
 			continue
 		}
 		encoded := raw[field]
-		remoteValue, err := gobDecode([]byte(encoded), value)
+		remoteValue, err := crossreplica.DecodeValue([]byte(encoded), value)
 		if err != nil {
 			if v := logger.V(logutil.DEBUG); v.Enabled() {
 				v.Info("redis-syncer: decode error", "field", field, "error", err)
@@ -328,7 +298,7 @@ func (s *RedisSyncer) setBatchChunk(ctx context.Context, spec fwkdl.CrossReplica
 	publications := make([]publication, 0, len(chunk))
 	for _, endpointID := range chunk {
 		value := spec.Read(endpointID)
-		data, err := encodeValue(value)
+		data, err := crossreplica.EncodeValue(value)
 		if err != nil {
 			failures[endpointID] = fmt.Errorf("redis-syncer: encode: %w", err)
 			continue
@@ -424,7 +394,7 @@ func (s *RedisSyncer) GetOrSet(ctx context.Context, key fwkdl.StateKey, id strin
 		return nil, false, errors.New("redis-syncer: getorset candidate must not be nil")
 	}
 
-	data, err := encodeValue(candidate)
+	data, err := crossreplica.EncodeValue(candidate)
 	if err != nil {
 		return nil, false, fmt.Errorf("redis-syncer: getorset encode: %w", err)
 	}
@@ -441,7 +411,7 @@ func (s *RedisSyncer) GetOrSet(ctx context.Context, key fwkdl.StateKey, id strin
 		return nil, false, fmt.Errorf("redis-syncer: getorset: %w", err)
 	}
 
-	actual, err := gobDecode([]byte(stored), candidate)
+	actual, err := crossreplica.DecodeValue([]byte(stored), candidate)
 	if err != nil {
 		return nil, false, fmt.Errorf("redis-syncer: getorset decode: %w", err)
 	}
