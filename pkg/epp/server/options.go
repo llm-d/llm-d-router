@@ -143,6 +143,12 @@ type Options struct {
 	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. default-flow does not count
 	// against the cap. Bounds metric cardinality in deployments with many distinct fairness IDs.
 	FairnessIDMetricLabelLimit int
+	// SchedulingDecisionsHistory is the number of recent scheduling decisions retained for
+	// /debug/scheduling/recent. 0 disables the endpoint and decision collection.
+	SchedulingDecisionsHistory int
+	// SchedulingDecisionsTopEndpoints is the number of highest-scoring endpoints recorded per
+	// profile in each retained decision.
+	SchedulingDecisionsTopEndpoints int
 	//
 	// Configuration.
 	//
@@ -185,6 +191,8 @@ func NewOptions() *Options {
 		FairnessIDMetricLabelLimit:       metricsutil.DefaultFairnessIDLabelLimit,
 		GRPCHealthPort:                   9003,
 		EnablePprof:                      true,
+		SchedulingDecisionsHistory:       0,
+		SchedulingDecisionsTopEndpoints:  5,
 		SecureServing:                    true,
 		MetricsEndpointAuth:              true,
 	}
@@ -269,6 +277,12 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"The port used for gRPC liveness and readiness probes.")
 	fs.BoolVar(&opts.EnablePprof, "enable-pprof", opts.EnablePprof,
 		"Enables pprof handlers. Defaults to true. Set to false to disable pprof handlers.")
+	fs.IntVar(&opts.SchedulingDecisionsHistory, "scheduling-decisions-history", opts.SchedulingDecisionsHistory,
+		"Number of recent scheduling decisions retained for the /debug/scheduling/recent endpoint. "+
+			"0 disables the endpoint and decision collection. Defaults to 0.")
+	fs.IntVar(&opts.SchedulingDecisionsTopEndpoints, "scheduling-decisions-top-endpoints", opts.SchedulingDecisionsTopEndpoints,
+		"Number of highest-scoring endpoints recorded per scheduler profile in each retained decision. "+
+			"Only effective when scheduling-decisions-history is greater than 0. Defaults to 5.")
 	fs.StringVar(&opts.CertPath, "cert-path", opts.CertPath,
 		"Directory with tls.crt and tls.key for secure serving. Empty generates a self-signed certificate, which is only suitable for testing.")
 	fs.BoolVar(&opts.EnableCertReload, "enable-cert-reload", opts.EnableCertReload,
@@ -475,6 +489,13 @@ func (opts *Options) Validate() error {
 
 	if opts.ConfigText != "" && opts.ConfigFile != "" {
 		return fmt.Errorf("both the %q and %q flags cannot be set at the same time", "config-file", "config-text")
+	}
+
+	if opts.SchedulingDecisionsHistory < 0 {
+		return fmt.Errorf("flag %q must not be negative", "scheduling-decisions-history")
+	}
+	if opts.SchedulingDecisionsHistory > 0 && opts.SchedulingDecisionsTopEndpoints < 1 {
+		return fmt.Errorf("flag %q must be at least 1 when decision history is enabled", "scheduling-decisions-top-endpoints")
 	}
 
 	if opts.MetricsClientCAFile != "" && opts.MetricsCertDir == "" {
