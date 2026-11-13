@@ -677,7 +677,7 @@ func (r *Runner) registerInTreePlugins() {
 	// request control screeners
 	// Alpha
 	fwkplugin.RegisterWithPluginDependencies(disaggregatedsetrollout.PluginType, fwkplugin.StabilityAlpha,
-		disaggregatedsetrollout.Factory, disaggregatedsetrollout.ConfigParser)
+		disaggregatedsetrollout.Factory, disaggregatedsetrollout.DependencyParser)
 	fwkplugin.Register(endpointpin.PluginType, fwkplugin.StabilityAlpha, endpointpin.Factory)
 
 	// request control pre-request handlers

@@ -329,6 +329,7 @@ request. Do not add it to a scheduling profile.
 | `revisionGating.roleLabelKey` | string | No | `disaggregatedset.x-k8s.io/role` | Label identifying a Pod role. |
 | `revisionGating.disableCoordination` | boolean | No | `false` | Disables coordination of rollout revisions across parallel requests. Set only for known sequential P/D deployments; E/P/D requires coordination. |
 | `revisionGating.overflow.guardPluginName` | string | No | | Enables overflow: when this filter admits no endpoint of `overflow.role` in the drawn revision, the request goes to a revision where it admits one; see [Revision Overflow](#revision-overflow). A fail-closed scheduling filter. |
+| `revisionGating.overflow.guards` | list | No | | Role and Guard pairs checked with AND semantics; mutually exclusive with legacy fields. |
 | `revisionGating.overflow.role` | string | No | `prefill` | The role whose endpoints must have room; one of `requiredRoles`. |
 | `revisionGating.affinity.mode` | string | No | `none` | `none` draws each request's revision at random. `prefix` keys weighted rendezvous selection on a session identifier from `affinity.sources` or the text conversation prefix; see [Revision Affinity](#revision-affinity). |
 | `revisionGating.affinity.sources` | array | No | | With `prefix`, sources that resolve a session identifier in priority order, ahead of the conversation prefix. Each entry sets exactly one of `header` (a request header) or `attribute` (a request attribute such as `agent-identity`), with an optional `producer`. |
@@ -339,9 +340,35 @@ request. Do not add it to a scheduling profile.
 
 ## Revision Overflow
 
+To check capacity for multiple roles, configure:
+
+```yaml
+overflow:
+  guards:
+  - role: prefill
+    guardPluginName: prefill-concurrency-guard
+  - role: decode
+    guardPluginName: decode-concurrency
+```
+
+Every listed Guard must admit at least one endpoint of its role in the same
+revision and scope. Eligible alternatives retain their shares and the configured
+random or affinity selection policy. Each role must occur in `requiredRoles`.
+Empty lists, duplicate roles, missing role or Guard names, and mixing `guards`
+with legacy `role` or `guardPluginName` are rejected. The legacy form below is
+equivalent to a one-element list, with `prefill` as its default role.
+
+Guard checks observe capacity without reserving it. Concurrent requests can
+observe the same available capacity. Checks apply to every configured role,
+including Prefill for requests that the P/D decider later serves Decode-only.
+Guards must support repeated early evaluation without admission side effects;
+stateful Filters that perform admission side effects are unsuitable. Guard
+data dependencies run during request handling before screening.
+
 Flow control admits on the average load of the whole pool, so during a rollout
-one revision can be full while the other has room. A fail-closed concurrency
-filter then rejects the request with HTTP 429 although capacity exists.
+one revision can be full while the other has room. If a fail-closed concurrency
+filter leaves a scheduling profile with no endpoints, the EPP returns HTTP 503
+although another revision has capacity.
 
 ```yaml
     - type: concurrency-detector
@@ -373,10 +400,8 @@ filter then rejects the request with HTTP 429 although capacity exists.
   overflowed request leaves the drawn revision.
 - When no revision has room, the drawn revision is kept. A strict revision
   header is never overridden.
-- The guard runs before the data producers, so a token limit sees the
-  endpoint's in-flight tokens but not the uncached tokens of this request. A
-  full endpoint of another role (for example decode) does not trigger
-  overflow.
+- Guards consume their declared request and endpoint data before screening. A
+  full endpoint of an unconfigured role does not trigger overflow.
 - The Screener runs before the P/D decider, so it checks prefill room even for
   a request the decider will later serve decode-only; with an always-disaggregate
   decider every request uses prefill. It also sees the endpoints before other
