@@ -30,6 +30,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -80,6 +81,9 @@ func newCrossReplicaPublisher(syncer fwkdl.CrossReplicaSyncer, extractors *extra
 	if publishTimeout <= 0 {
 		publishTimeout = defaultCrossReplicaPublishTimeout
 	}
+	for _, c := range contributors {
+		metrics.InitCrossReplicaPublishMetrics(string(c.CrossReplicaState().StateKey))
+	}
 	return &crossReplicaPublisher{
 		syncer:            syncer,
 		contributors:      contributors,
@@ -120,6 +124,8 @@ func (p *crossReplicaPublisher) run(ctx context.Context) {
 }
 
 func (p *crossReplicaPublisher) publishAll(ctx context.Context) {
+	start := time.Now()
+	defer func() { metrics.RecordCrossReplicaPublishCycle(time.Since(start)) }()
 	snapshot := p.endpointSnapshot()
 	if syncer, ok := p.syncer.(fwkdl.CrossReplicaBatchSyncer); ok {
 		p.publishBatch(ctx, syncer, snapshot)
@@ -153,6 +159,7 @@ func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.C
 	for _, spec := range specs {
 		wg.Go(func() {
 			failures := syncer.SetBatch(ctx, spec, endpointIDs, p.publishTimeout)
+			recordPublishes(spec, len(endpointIDs), len(failures))
 			if len(failures) == 0 {
 				return
 			}
@@ -216,7 +223,9 @@ func (p *crossReplicaPublisher) reconcileRemoved(ctx context.Context, syncer fwk
 	var wg sync.WaitGroup
 	for _, spec := range specs {
 		wg.Go(func() {
-			for endpointID, err := range syncer.SetBatch(ctx, spec, revived, p.publishTimeout) {
+			failures := syncer.SetBatch(ctx, spec, revived, p.publishTimeout)
+			recordPublishes(spec, len(revived), len(failures))
+			for endpointID, err := range failures {
 				p.publishFailureLog.Do(func() {
 					logger.Error(err, "cross-replica batch republish failed", "key", spec.StateKey, "endpoint", endpointID)
 				})
@@ -302,11 +311,21 @@ func (p *crossReplicaPublisher) publish(ctx context.Context, key types.Namespace
 		spec := c.CrossReplicaState()
 		wg.Go(func() {
 			if err := p.set(ctx, spec, key); err != nil {
+				recordPublishes(spec, 1, 1)
 				p.publishFailureLog.Do(func() {
 					logger.Error(err, "cross-replica publish failed", "key", spec.StateKey)
 				})
+				return
 			}
+			recordPublishes(spec, 1, 0)
 		})
 	}
 	wg.Wait()
+}
+
+// recordPublishes counts the endpoints one state key attempted and how many of
+// them the syncer failed. The failure log is rate limited, so these counters
+// are the only complete record of a syncer outage.
+func recordPublishes(spec fwkdl.CrossReplicaSpec, attempted, failed int) {
+	metrics.RecordCrossReplicaPublishes(string(spec.StateKey), attempted-failed, failed, time.Now())
 }

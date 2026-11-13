@@ -135,6 +135,9 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollDuration)
+		metrics.Registry.MustRegister(LlmdCrossReplicaPublishesTotal)
+		metrics.Registry.MustRegister(LlmdCrossReplicaLastPublishTimestamp)
+		metrics.Registry.MustRegister(LlmdCrossReplicaPublishCycleDuration)
 		metrics.Registry.MustRegister(llmdToolCallingFieldStatusTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -200,6 +203,9 @@ func Reset() {
 	LlmdDataLayerExtractErrorsTotal.Reset()
 	LlmdDataLayerPollsTotal.Reset()
 	LlmdDataLayerPollDuration.Reset()
+	LlmdCrossReplicaPublishesTotal.Reset()
+	LlmdCrossReplicaLastPublishTimestamp.Reset()
+	LlmdCrossReplicaPublishCycleDuration.Reset()
 	llmdToolCallingFieldStatusTotal.Reset()
 }
 
@@ -756,6 +762,40 @@ func InitDataLayerPollMetrics(sourceType string) {
 func RecordDataLayerPoll(sourceType, outcome string, duration time.Duration) {
 	LlmdDataLayerPollsTotal.WithLabelValues(sourceType, outcome).Inc()
 	LlmdDataLayerPollDuration.WithLabelValues(sourceType).Observe(duration.Seconds())
+}
+
+// Outcome label values of LlmdCrossReplicaPublishesTotal.
+const (
+	// CrossReplicaPublishOutcomeSuccess: the syncer accepted the endpoint's value.
+	CrossReplicaPublishOutcomeSuccess = "success"
+	// CrossReplicaPublishOutcomeError: the syncer returned an error for the
+	// endpoint, including an endpoint left unattempted when the cycle ended.
+	CrossReplicaPublishOutcomeError = "error"
+)
+
+// InitCrossReplicaPublishMetrics creates both outcome series for a state key at
+// zero, so the first failed publish is an increment on an existing series that
+// rate() and increase() can see. Safe to call repeatedly.
+func InitCrossReplicaPublishMetrics(stateKey string) {
+	LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, CrossReplicaPublishOutcomeSuccess)
+	LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, CrossReplicaPublishOutcomeError)
+}
+
+// RecordCrossReplicaPublishes counts the endpoints one state key published and
+// failed to publish, and stamps the last-publish time when any succeeded.
+func RecordCrossReplicaPublishes(stateKey string, succeeded, failed int, now time.Time) {
+	if succeeded > 0 {
+		LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, CrossReplicaPublishOutcomeSuccess).Add(float64(succeeded))
+		LlmdCrossReplicaLastPublishTimestamp.WithLabelValues(stateKey).Set(float64(now.UnixNano()) / float64(time.Second))
+	}
+	if failed > 0 {
+		LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, CrossReplicaPublishOutcomeError).Add(float64(failed))
+	}
+}
+
+// RecordCrossReplicaPublishCycle observes the duration of one publish cycle.
+func RecordCrossReplicaPublishCycle(duration time.Duration) {
+	LlmdCrossReplicaPublishCycleDuration.WithLabelValues().Observe(duration.Seconds())
 }
 
 // RecordToolCallingFieldStatuses records outcomes only for fields present on at

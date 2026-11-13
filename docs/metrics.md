@@ -494,6 +494,46 @@ All three `outcome` series and the duration histogram are created at zero when a
 starts for a source type, so a first `error` or `timeout` after a healthy run is a 0 to 1
 increment that `rate()` and `increase()` can see, not a series that first appears at `1`.
 
+### Cross-replica state sync
+
+These metrics are emitted only when a cross-replica syncer is configured and at least one
+plugin shares state through it. They describe what this replica publishes to its peers.
+`state_key` is the key a plugin shares state under (for example the in-flight load of one
+`inflight-load-producer` instance); no endpoint or pod labels are emitted.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_cross_replica_publishes_total` | Counter | `state_key`, `outcome` | Endpoint values handed to the syncer, by outcome. `outcome` is `success` or `error`. One publish cycle adds one count per registered endpoint and state key. |
+| `llm_d_epp_cross_replica_last_publish_timestamp_seconds` | Gauge | `state_key` | Unix time of the last cycle in which at least one endpoint was published. Absent until the first successful publish. |
+| `llm_d_epp_cross_replica_publish_cycle_duration_seconds` | Histogram | none | Wall-clock time of one publish cycle over every registered endpoint. Buckets run from 0.5 ms to 2.5 s. |
+
+The publish failure log is rate limited to one line every 30 seconds, so during a syncer outage
+these counters are the complete record. Both `outcome` series are created at zero when the
+publisher starts.
+
+Peers keep using the last value this replica published until the syncer's `stateTTL` expires
+it, so the age of the last publish is how stale this replica's load can look to them:
+
+```promql
+time() - llm_d_epp_cross_replica_last_publish_timestamp_seconds
+```
+
+To alert on a syncer that is failing for this replica:
+
+```promql
+sum by (pod, state_key) (rate(llm_d_epp_cross_replica_publishes_total{outcome="error"}[5m])) > 0
+```
+
+A publish cycle that takes longer than `crossReplicaSyncInterval` delays the next one, so
+peers see older state than the interval suggests. Compare the cycle duration with the interval:
+
+```promql
+histogram_quantile(0.99, sum by (le) (rate(llm_d_epp_cross_replica_publish_cycle_duration_seconds_bucket[5m])))
+```
+
+These metrics cover the publish side only. How old the peer values a replica reads are depends
+on the syncer and is not reported.
+
 ### Endpoint health
 
 These metrics belong to `endpoint-health-filter`. They are registered when the filter is configured
