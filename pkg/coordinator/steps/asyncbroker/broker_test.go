@@ -513,16 +513,18 @@ func TestAsyncBrokerWaitDeliversResult(t *testing.T) {
 	require.NoError(t, err)
 	key := resultKey("team-a", "req-test-1")
 	require.NoError(t, rdb.LPush(t.Context(), key, string(res)).Err())
+	require.NoError(t, rdb.Expire(t.Context(), key, time.Hour).Err())
 
 	err = step.Execute(t.Context(), reqCtx)
 	require.True(t, errors.Is(err, pipeline.ErrPipelineDone))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "chat.completion")
 
-	// Delivered on the held connection: the mailbox is reclaimed.
-	exists, err := rdb.Exists(t.Context(), key).Result()
+	// Delivery shrinks the mailbox to the grace window, which other attached
+	// waiters and retries read within.
+	ttl, err := rdb.TTL(t.Context(), key).Result()
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), exists)
+	assert.Equal(t, resultFetchGraceTTL, ttl)
 }
 
 func TestAsyncBrokerWaitDeliversStoredError(t *testing.T) {
@@ -921,9 +923,8 @@ func TestWriteResultReportsWriteFailure(t *testing.T) {
 	}
 }
 
-// TestAsyncBrokerUndeliveredErrorResultIsRetained covers the cleanup paths
-// that reclaim the mailbox only after confirmed delivery: a stored error
-// result whose body write fails must stay fetchable by id.
+// TestAsyncBrokerUndeliveredErrorResultIsRetained covers a stored error
+// result whose body write fails: it must stay fetchable by id.
 func TestAsyncBrokerUndeliveredErrorResultIsRetained(t *testing.T) {
 	seed := func(t *testing.T, rdb *redis.Client, id string) string {
 		t.Helper()
