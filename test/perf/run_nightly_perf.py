@@ -38,10 +38,17 @@ TARGET_SECTIONS = ("setup", "trend")
 
 def run_cmd(cmd, check=True, capture_output=True, text=True):
     print(f"Running: {cmd}")
-    if isinstance(cmd, str):
-        res = subprocess.run(cmd, shell=True, check=check, capture_output=capture_output, text=text)
-    else:
-        res = subprocess.run(cmd, check=check, capture_output=capture_output, text=text)
+    try:
+        if isinstance(cmd, str):
+            res = subprocess.run(cmd, shell=True, check=check, capture_output=capture_output, text=text)
+        else:
+            res = subprocess.run(cmd, check=check, capture_output=capture_output, text=text)
+    except subprocess.CalledProcessError as e:
+        for stream in (e.stdout, e.stderr):
+            if stream:
+                text_out = stream.decode(errors="replace") if isinstance(stream, bytes) else stream
+                print(text_out.rstrip(), file=sys.stderr)
+        raise
     return res
 
 def create_namespace(ns):
@@ -562,7 +569,10 @@ def run_benchmark(ns, job_values_path, chart_path, release_name, service_name=No
 
 def cleanup_namespace(ns):
     print(f"Cleaning up namespace: {ns}")
-    run_cmd(f"kubectl delete namespace {ns} --wait=false")
+    res = run_cmd(f"kubectl delete namespace {ns} --ignore-not-found=true --wait=false", check=False)
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout or "").strip()
+        print(f"Warning: failed to delete namespace {ns}: {detail}", file=sys.stderr)
 
 def write_results_to_markdown_folder(results_dir, test_name, run_time, ns, router_config_path, perf_job, machine_family, sim_replicas, images, idle_metrics, peak_metrics, p50, p95, p99, status, profile_results=None):
     os.makedirs(results_dir, exist_ok=True)
@@ -1087,6 +1097,9 @@ def main():
                 print(f"Uploading performance results to GCS bucket {gcs_dest}...")
                 run_cmd(f"gcloud storage cp -r {args.results_dir}/* {gcs_dest}/")
                 print(f"Successfully uploaded performance results to {gcs_dest}")
+
+    if status == "FAILED":
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
