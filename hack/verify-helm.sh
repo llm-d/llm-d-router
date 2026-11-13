@@ -67,6 +67,8 @@ test_cases_llm_d_router_gateway["active-active-redis"]="--set router.modelServer
 test_cases_llm_d_router_gateway["active-active-redis-hpa"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.pluginsConfigFile=payload-agnostic.yaml --set router.epp.crossReplica.enabled=true --set router.epp.crossReplica.redis.address=redis.example:6379 --set router.epp.crossReplica.redis.passwordSecretRef.name=redis-auth --set router.epp.crossReplica.redis.passwordSecretRef.key=password --set router.epp.autoscaling.enabled=true --set router.epp.autoscaling.minReplicas=2"
 test_cases_llm_d_router_gateway["basic-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["gke-provider"]="--set provider.name=gke --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["vllm-grpc-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway"
+test_cases_llm_d_router_gateway["vllm-grpc-override-gke"]="--set provider.name=gke --set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.grpcServiceName=/vllm.grpc.engine.VllmEngine/HealthCheck --set router.epp.parsers[0]=vllmgrpc-parser --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["pdb"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.epp.replicas=2 --set router.epp.podDisruptionBudget.enabled=true --set router.epp.podDisruptionBudget.minAvailable=1"
 test_cases_llm_d_router_gateway["multiple-replicas"]="--set router.replicas=3 --set router.modelServers.matchLabels.app=llm-instance-gateway"
 test_cases_llm_d_router_gateway["latency-predictor"]="--set router.latencyPredictor.enabled=true --set router.modelServers.matchLabels.app=llm-instance-gateway"
@@ -108,6 +110,36 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
   if [ "${key}" == "triton" ]; then
     if ! grep -q "passthrough-parser" "${output_dir}/llm-d-router-gateway/templates/inferenceextension.yaml"; then
       echo "Validation failed: passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "vllm-grpc-gke" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "pluginRef: vllminference-parser" "${epp_yaml}" || ! grep -q "pluginRef: vllmgrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: vllminference-parser, vllmgrpc-parser, and passthrough-parser not found in rendered output for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'appProtocol: "kubernetes.io/h2c"' "${epp_yaml}"; then
+      echo "Validation failed: h2c appProtocol not found in InferencePool for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'grpcServiceName: "vllm.Inference"' "${gke_yaml}"; then
+      echo "Validation failed: vLLM gRPC HealthCheckPolicy not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+
+  if [ "${key}" == "vllm-grpc-override-gke" ]; then
+    epp_yaml="${output_dir}/llm-d-router-gateway/templates/epp.yaml"
+    gke_yaml="${output_dir}/llm-d-router-gateway/templates/gke.yaml"
+    if ! grep -q "pluginRef: vllmgrpc-parser" "${epp_yaml}" || grep -q "pluginRef: vllminference-parser" "${epp_yaml}"; then
+      echo "Validation failed: explicit router.epp.parsers override not respected for test: ${key}"
+      exit 1
+    fi
+    if ! grep -q 'grpcServiceName: "/vllm.grpc.engine.VllmEngine/HealthCheck"' "${gke_yaml}"; then
+      echo "Validation failed: explicit router.modelServers.grpcServiceName override not respected for test: ${key}"
       exit 1
     fi
   fi
@@ -272,6 +304,7 @@ test_cases_llm_d_router_standalone["lifecycle-override-service"]="--set router.m
 test_cases_llm_d_router_standalone["proxy-autoscaling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.autoscaling.enabled=true --set router.proxy.autoscaling.minReplicas=2 --set router.proxy.autoscaling.maxReplicas=6 --set router.proxy.autoscaling.targetCPUUtilizationPercentage=70"
 test_cases_llm_d_router_standalone["agentgateway-service"]="--set router.proxy.proxyType=agentgateway --set router.proxy.mode=service --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set 'router.modelServers.targetPorts[0].number=8000'"
 test_cases_llm_d_router_standalone["triton"]="--set router.modelServers.type=triton --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
+test_cases_llm_d_router_standalone["vllm-grpc"]="--set router.modelServers.type=vllm --set router.modelServers.protocol=grpc --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false"
 test_cases_llm_d_router_standalone["tokenizer-python"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.modelName=test-model"
 test_cases_llm_d_router_standalone["tokenizer-rust"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.tokenizer.enabled=true --set router.tokenizer.flavor=rust --set router.tokenizer.modelName=test-model"
 
@@ -310,6 +343,13 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
   if [ "${key}" == "tokenizer-python" ]; then
     if ! grep -q "vllm" "${output_dir}/llm-d-router-standalone/templates/epp.yaml" || ! grep -q "launch" "${output_dir}/llm-d-router-standalone/templates/epp.yaml"; then
       echo "Validation failed: vllm launch not found in rendered output for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "vllm-grpc" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    if ! grep -q "pluginRef: vllminference-parser" "${epp_yaml}" || ! grep -q "pluginRef: vllmgrpc-parser" "${epp_yaml}" || ! grep -q "pluginRef: passthrough-parser" "${epp_yaml}"; then
+      echo "Validation failed: vllminference-parser, vllmgrpc-parser, and passthrough-parser not found in rendered output for test: ${key}"
       exit 1
     fi
   fi
