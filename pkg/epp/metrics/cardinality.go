@@ -60,7 +60,7 @@ func BoundModelName(modelName string) string {
 	return modelLabelLimiter.Bound(modelName)
 }
 
-// boundModels caps the model-name labels shared by request metrics.
-func boundModels(modelName, targetModelName string) (string, string) {
+// BoundModels caps the model-name labels shared by EPP metrics and plugins.
+func BoundModels(modelName, targetModelName string) (string, string) {
 	return modelLabelLimiter.Bound(modelName), modelLabelLimiter.Bound(targetModelName)
 }

@@ -19,12 +19,15 @@ package predictedlatency
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 )
 
 func TestRegisterMetrics(t *testing.T) {
@@ -121,6 +124,73 @@ func TestRecordRequestLatencyMetricsRejectNegativeValues(t *testing.T) {
 	require.False(t, recordRequestPredictedTPOT(ctx, "test-plugin", "test-type", "model", "target", -1))
 	require.False(t, recordRequestTPOTPredictionDuration(ctx, "test-plugin", "test-type", "model", "target", -1))
 	require.False(t, recordRequestTPOTWithSLO(ctx, "test-plugin", "test-type", "model", "target", -1, 1))
+}
+
+func TestRecordRequestLatencyMetricsBoundModelNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		modelName string
+		wantLabel string
+	}{
+		{name: "invalid UTF-8", modelName: "model\xff", wantLabel: metricsutil.OverflowValue},
+		{
+			name:      "oversized",
+			modelName: strings.Repeat("m", metricsutil.MaxLabelValueLength+1),
+			wantLabel: metricsutil.OverflowValue,
+		},
+		{
+			name:      "at length limit",
+			modelName: strings.Repeat("m", metricsutil.MaxLabelValueLength),
+			wantLabel: strings.Repeat("m", metricsutil.MaxLabelValueLength),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetMetrics()
+			t.Cleanup(resetMetrics)
+			registry := prometheus.NewRegistry()
+			require.NoError(t, registerMetrics(registry))
+			ctx := t.Context()
+
+			require.True(t, recordRequestTTFT(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 0.5))
+			require.True(t, recordRequestPredictedTTFT(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 0.4))
+			require.True(t, recordRequestTTFTPredictionDuration(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 0.1))
+			require.True(t, recordRequestTTFTWithSLO(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 2, 1))
+			require.True(t, recordRequestTTFTWithSLO(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 0.5, 1))
+			require.True(t, recordRequestTPOT(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 0.05))
+			require.True(t, recordRequestPredictedTPOT(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 0.04))
+			require.True(t, recordRequestTPOTPredictionDuration(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 0.2))
+			require.True(t, recordRequestTPOTWithSLO(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 3, 1))
+			require.True(t, recordRequestTPOTWithSLO(ctx, "test-plugin", "test-type", tt.modelName, tt.modelName, 0.5, 1))
+
+			families, err := registry.Gather()
+			require.NoError(t, err)
+			wantFamilies := map[string]bool{
+				"llm_d_epp_inference_request_metric":                 false,
+				"llm_d_epp_request_predicted_ttft_seconds":           false,
+				"llm_d_epp_request_ttft_prediction_duration_seconds": false,
+				"llm_d_epp_request_predicted_tpot_seconds":           false,
+				"llm_d_epp_request_tpot_prediction_duration_seconds": false,
+				"llm_d_epp_request_slo_violation_total":              false,
+			}
+			for _, family := range families {
+				if _, found := wantFamilies[family.GetName()]; !found {
+					continue
+				}
+				wantFamilies[family.GetName()] = true
+				for _, metric := range family.GetMetric() {
+					for _, label := range metric.GetLabel() {
+						if label.GetName() == "model_name" || label.GetName() == "target_model_name" {
+							require.Equal(t, tt.wantLabel, label.GetValue(), family.GetName())
+						}
+					}
+				}
+			}
+			for family, found := range wantFamilies {
+				require.Truef(t, found, "current metric family %q must be recorded", family)
+			}
+		})
+	}
 }
 
 const (
