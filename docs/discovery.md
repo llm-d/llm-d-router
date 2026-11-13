@@ -240,6 +240,7 @@ endpoints:
     address: <IPv4>             # required -- must be a valid IPv4 address
     port: <string>              # required -- integer 1-65535 as a string
     rankIndex: <int>            # optional -- defaults to 0, must be >= 0
+    zmqPort: <int>              # optional -- KV-events socket port, 1-65535
     labels:                     # optional -- arbitrary key/value labels
       <key>: <value>
 ```
@@ -304,11 +305,54 @@ endpoints:
     rankIndex: 1
 ```
 
+#### Per-worker KV events
+
+With `kvEventsConfig.discoverPods: true`, the `precise-prefix-cache-producer`
+subscribes to the KV-events socket of every endpoint the discovery plugin adds
+and drops the subscriber when the endpoint is removed. This works the same way
+for file discovery as for Kubernetes pods, so every EPP replica builds a full
+KV index from the same endpoints file. Wire the producer as an extractor of an
+`endpoint-notification-source`:
+
+```yaml
+plugins:
+  - type: endpoint-notification-source
+  - type: precise-prefix-cache-producer
+    parameters:
+      kvEventsConfig:
+        discoverPods: true
+        podDiscoveryConfig:
+          socketPort: 5557
+dataLayer:
+  sources:
+    - pluginRef: endpoint-notification-source
+      extractors:
+        - pluginRef: precise-prefix-cache-producer
+```
+
+The producer dials `tcp://<address>:<socketPort + rankIndex>`. An entry whose
+socket is on another port sets `zmqPort`, which is used as the exact port.
+`replaySocketPort` and `snapshotSocketPort` still use the configured port plus
+`rankIndex`. `podLabelSelector` filters endpoints by their `labels`.
+
+```yaml
+endpoints:
+  - name: vllm-0
+    address: "10.0.0.1"
+    port: "8000"
+    zmqPort: 6001
+  - name: vllm-1
+    address: "10.0.0.1"
+    port: "8001"
+    zmqPort: 7002
+```
+
 **Constraints:**
 
 - `address` must be a literal IPv4 address (IPv6 is not supported).
 - `port` must be a decimal integer in the range 1-65535.
 - `rankIndex` must be an integer greater than or equal to 0.
+- `zmqPort`, when set, must be an integer in the range 1-65535.
 - The file must not exceed 1 MiB.
 - Duplicate names within the same namespace result in the last `Upsert`
   winning (the file is processed top-to-bottom).

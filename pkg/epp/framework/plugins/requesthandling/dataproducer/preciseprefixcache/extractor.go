@@ -62,13 +62,17 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 
 // ensureSubscriber idempotently installs a KV-events subscriber for the given
 // endpoint, dialing SocketPort + RankIndex to match standard inference-engine port offsetting
-// (one ZMQ PUB socket per DP rank on the same pod IP).
+// (one ZMQ PUB socket per DP rank on the same pod IP), or the endpoint's
+// ZMQPort when discovery sets one.
 func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
 	if meta == nil || meta.Address == "" {
 		return nil
 	}
 	endpointKey := meta.ID.String()
 	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
+	if meta.ZMQPort > 0 {
+		port = meta.ZMQPort
+	}
 	zmqEndpoint := "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(port))
 	replayEndpoint := ""
 	if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {

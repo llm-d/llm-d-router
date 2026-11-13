@@ -57,6 +57,9 @@ type EndpointEntry struct {
 	// ports (for example the KV-events socket) when multiple engines are
 	// co-located on the same address. Defaults to 0.
 	RankIndex int `json:"rankIndex,omitempty" yaml:"rankIndex,omitempty"`
+	// ZMQPort is the endpoint's KV-events socket port, used as-is instead of
+	// the producer's socketPort + rankIndex. Optional; 0 means unset.
+	ZMQPort int `json:"zmqPort,omitempty" yaml:"zmqPort,omitempty"`
 }
 
 // EndpointsFile is the top-level structure of the endpoints YAML/JSON file.
@@ -282,6 +285,10 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			errs = append(errs, fmt.Errorf("endpoint %q: invalid rankIndex %d", e.Name, e.RankIndex))
 			continue
 		}
+		if e.ZMQPort < 0 || e.ZMQPort > 65535 {
+			errs = append(errs, fmt.Errorf("endpoint %q: invalid zmqPort %d", e.Name, e.ZMQPort))
+			continue
+		}
 		ns := e.Namespace
 		if ns == "" {
 			ns = "default"
@@ -300,6 +307,7 @@ func (f *FileDiscovery) load(notifier fwkdl.DiscoveryNotifier) error {
 			Labels:      e.Labels,
 			Attributes:  e.Attributes,
 			RankIndex:   e.RankIndex,
+			ZMQPort:     e.ZMQPort,
 		}
 		incoming[meta.ID] = struct{}{}
 		notifier.Upsert(meta)

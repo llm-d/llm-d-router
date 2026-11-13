@@ -271,6 +271,22 @@ endpoints:
 	assert.ErrorContains(t, err, "invalid rankIndex")
 }
 
+func TestStart_InvalidZMQPort(t *testing.T) {
+	for _, zmqPort := range []string{"-1", "65536"} {
+		t.Run(zmqPort, func(t *testing.T) {
+			path := writeTemp(t, `
+endpoints:
+  - name: ep1
+    address: "10.0.0.1"
+    port: "8000"
+    zmqPort: `+zmqPort+`
+`)
+			err := newFD(path, false).Start(context.Background(), &recordingNotifier{})
+			assert.ErrorContains(t, err, "invalid zmqPort")
+		})
+	}
+}
+
 func TestStart_InvalidPort(t *testing.T) {
 	path := writeTemp(t, `
 endpoints:

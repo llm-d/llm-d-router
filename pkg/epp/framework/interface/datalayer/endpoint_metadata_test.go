@@ -135,6 +135,12 @@ func TestEndpointMetadataEqual(t *testing.T) {
 				meta.RankIndex = 2
 			},
 		},
+		{
+			name: "zmq port",
+			mutate: func(meta *EndpointMetadata) {
+				meta.ZMQPort = 6001
+			},
+		},
 	}
 
 	for _, tt := range tests {
