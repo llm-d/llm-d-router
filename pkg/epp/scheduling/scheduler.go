@@ -61,9 +61,9 @@ type Scheduler struct {
 }
 
 // WithDecisionRecorder sets the recorder that retains recent scheduling
-// decisions for the /debug/scheduling/recent endpoint. Without a recorder,
-// decision collection stays disabled and the scheduling hot path is
-// unchanged.
+// decisions for the /debug/scheduling/recent endpoint. Without a recorder no
+// decision is collected, and each profile run adds one context lookup per
+// scheduling stage.
 func (s *Scheduler) WithDecisionRecorder(recorder *decisionhistory.Recorder) *Scheduler {
 	s.decisionHistory = recorder
 	return s
@@ -198,8 +198,9 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 func runSchedulerProfile(ctx context.Context, name string, profile fwksched.SchedulerProfile,
 	request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint,
 ) (*fwksched.ProfileRunResult, error) {
-	if c := decisionhistory.CollectorFromContext(ctx); c != nil {
-		c.ProfileStarted(name, len(candidateEndpoints))
+	collector := decisionhistory.CollectorFromContext(ctx)
+	if collector != nil {
+		collector.ProfileStarted(name, len(candidateEndpoints))
 	}
 	profileCtx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanRunSchedulerProfile,
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -208,10 +209,8 @@ func runSchedulerProfile(ctx context.Context, name string, profile fwksched.Sche
 	defer span.End()
 
 	result, err := profile.Run(profileCtx, request, candidateEndpoints)
-	if err != nil {
-		if c := decisionhistory.CollectorFromContext(ctx); c != nil {
-			c.ProfileFailed(err.Error())
-		}
+	if err != nil && collector != nil {
+		collector.ProfileFailed(err.Error())
 	}
 	return result, err
 }
@@ -224,9 +223,5 @@ func primaryEndpointID(result *fwksched.SchedulingResult) string {
 	if endpoint == nil {
 		return ""
 	}
-	metadata := endpoint.GetMetadata()
-	if metadata == nil {
-		return ""
-	}
-	return metadata.ID.String()
+	return endpointID(endpoint)
 }

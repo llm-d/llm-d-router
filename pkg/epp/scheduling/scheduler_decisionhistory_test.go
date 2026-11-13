@@ -141,6 +141,68 @@ func TestScheduleRecordsDecisionHistoryFilterDrain(t *testing.T) {
 	assert.Empty(t, p.TargetEndpoints)
 }
 
+// Verifies that a result returned together with an error records the failure
+// reason only: an undeclared handler write fails the attempt after the
+// handler produced a result.
+func TestScheduleRecordsDecisionHistoryResultWithError(t *testing.T) {
+	profile := NewSchedulerProfile().WithPicker(maxscore.NewMaxScorePicker(1))
+
+	scheduler := NewSchedulerWithConfig(NewSchedulerConfig(
+		&stubProfileHandler{primary: "default", writeUndeclared: true},
+		map[string]fwksched.SchedulerProfile{"default": profile},
+	))
+	recorder := decisionhistory.NewRecorder(4, 2)
+	scheduler.WithDecisionRecorder(recorder)
+
+	req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "model-a"}
+	result, err := scheduler.Schedule(context.Background(), req, newDecisionHistoryEndpoints())
+	require.Error(t, err)
+	require.NotNil(t, result.PrimaryEndpoint())
+
+	decisions := recorder.Snapshot()
+	require.Len(t, decisions, 1)
+	assert.Equal(t, "profile_handler_error", decisions[0].FailureReason)
+	assert.Empty(t, decisions[0].TargetEndpoint)
+}
+
+// An endpoint without metadata must not panic decision collection; its ID is
+// recorded as empty.
+func TestScheduleRecordsDecisionHistoryNilMetadata(t *testing.T) {
+	scorer := &testPlugin{
+		typedName: fwkplugin.TypedName{Type: "test-scorer", Name: "my-scorer"},
+		ScoreRes:  1,
+	}
+	profile := NewSchedulerProfile().
+		WithScorers(NewWeightedScorer(scorer, 1)).
+		WithPicker(maxscore.NewMaxScorePicker(1))
+
+	scheduler := NewSchedulerWithConfig(NewSchedulerConfig(
+		single.NewSingleProfileHandler(),
+		map[string]fwksched.SchedulerProfile{"default": profile},
+	))
+	recorder := decisionhistory.NewRecorder(4, 2)
+	scheduler.WithDecisionRecorder(recorder)
+
+	req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "model-a"}
+	endpoints := []fwksched.Endpoint{fwksched.NewEndpoint(nil, &fwkdl.Metrics{}, nil)}
+	var err error
+	require.NotPanics(t, func() {
+		_, err = scheduler.Schedule(context.Background(), req, endpoints)
+	})
+	require.NoError(t, err)
+
+	decisions := recorder.Snapshot()
+	require.Len(t, decisions, 1)
+	d := decisions[0]
+	assert.Empty(t, d.TargetEndpoint)
+	require.Len(t, d.Profiles, 1)
+	p := d.Profiles[0]
+	assert.Equal(t, []string{""}, p.TargetEndpoints)
+	require.Len(t, p.TopEndpoints, 1)
+	assert.Empty(t, p.TopEndpoints[0].Endpoint)
+	assert.Equal(t, map[string]float64{"my-scorer/test-scorer": 1}, p.TopEndpoints[0].ScorerScores)
+}
+
 // A scheduler without a recorder must behave exactly as before: no collector
 // reaches the plugin call sites.
 func TestScheduleWithoutDecisionRecorder(t *testing.T) {

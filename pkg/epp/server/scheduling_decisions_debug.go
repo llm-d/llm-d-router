@@ -29,8 +29,8 @@ import (
 const SchedulingDecisionsDebugPath = "/debug/scheduling/recent"
 
 // SetupSchedulingDecisionsDebugHandler registers the recent scheduling
-// decisions endpoint on the metrics/admin server. The recorder is nil unless
-// decision history is enabled, in which case setup fails.
+// decisions endpoint on the metrics/admin server. It returns an error when
+// the registrar or the recorder is nil.
 func SetupSchedulingDecisionsDebugHandler(registrar MetricsHandlerRegistrar, recorder *decisionhistory.Recorder) error {
 	if registrar == nil {
 		return errors.New("metrics handler registrar is not configured")
