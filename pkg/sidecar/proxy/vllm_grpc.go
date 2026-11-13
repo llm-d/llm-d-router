@@ -53,16 +53,11 @@ func setUnaryGeneratePath(req *http.Request) {
 // readVLLMGRPCRequest reads a single-frame vllm.Inference GenerateRequest from
 // r.Body and scans its protobuf wire structure without decoding untouched fields.
 func (s *Server) readVLLMGRPCRequest(r *http.Request, w http.ResponseWriter) (*vllmwire.Request, bool) {
-	defer r.Body.Close()
 	logger := log.FromContext(r.Context())
 
-	frame, err := grpcframe.ReadMessage(r.Body, grpcframe.MaxPayloadLen)
+	frame, code, err := grpcframe.ReadUnaryRequest(r, grpcframe.MaxPayloadLen)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("invalid gRPC request frame", "error", err)
-		code := grpccodes.InvalidArgument
-		if errors.Is(err, grpcframe.ErrTooLarge) {
-			code = grpccodes.ResourceExhausted
-		}
 		grpcframe.WriteError(w, code, err.Error())
 		return nil, false
 	}
@@ -171,14 +166,7 @@ func (s *Server) buildLegFrameOrWriteError(
 	return frame, true
 }
 
-func prefillMediaMode(p2p p2pRouting) vllmwire.MediaMode {
-	if p2p.encodeRan {
-		return vllmwire.MediaMetadataOnly
-	}
-	return vllmwire.MediaAll
-}
-
-func decodeOnlyMediaMode(p2p p2pRouting) vllmwire.MediaMode {
+func mediaMode(p2p p2pRouting) vllmwire.MediaMode {
 	if p2p.encodeRan {
 		return vllmwire.MediaMetadataOnly
 	}
@@ -448,7 +436,7 @@ func (l *vllmNIXLSerialLeg) preparePrefill(
 	segs, ok := l.s.buildLegSegmentsOrWriteError(w, r, l.scanned, vllmwire.LegOptions{
 		RequestID:        uuidStr,
 		CapSingleToken:   true,
-		Media:            prefillMediaMode(l.p2p),
+		Media:            mediaMode(l.p2p),
 		KVTransferParams: prefillKV,
 		ECTransferParams: l.p2p.ecParams,
 	})
@@ -621,7 +609,7 @@ func (s *Server) handleNIXLV2VLLMGRPC(w http.ResponseWriter, r *http.Request, pr
 		psegs, pok := s.buildLegSegmentsOrWriteError(w, r, scanned, vllmwire.LegOptions{
 			RequestID:        uuidStr,
 			CapSingleToken:   true,
-			Media:            prefillMediaMode(p2p),
+			Media:            mediaMode(p2p),
 			KVTransferParams: prefillKV,
 			ECTransferParams: p2p.ecParams,
 		})
@@ -671,7 +659,7 @@ func (s *Server) handleMooncakeVLLMGRPC(w http.ResponseWriter, r *http.Request, 
 
 	prefillBody, pok := s.buildLegFrameOrWriteError(w, r, scanned, vllmwire.LegOptions{
 		CapSingleToken:   true,
-		Media:            prefillMediaMode(p2p),
+		Media:            mediaMode(p2p),
 		KVTransferParams: prefillKV,
 		ECTransferParams: p2p.ecParams,
 	})
@@ -781,7 +769,7 @@ func (s *Server) handleP2PVLLMGRPC(w http.ResponseWriter, r *http.Request, prefi
 	psegs, pok := s.buildLegSegmentsOrWriteError(w, r, scanned, vllmwire.LegOptions{
 		RequestID:        reqIDOverride,
 		CapSingleToken:   true,
-		Media:            prefillMediaMode(p2p),
+		Media:            mediaMode(p2p),
 		KVTransferParams: prefillKV,
 		ECTransferParams: p2p.ecParams,
 	})
@@ -823,7 +811,7 @@ func (s *Server) decodeWithP2PSourceVLLMGRPC(w http.ResponseWriter, r *http.Requ
 
 	dsegs, dok := s.buildLegSegmentsOrWriteError(w, r, scanned, vllmwire.LegOptions{
 		CapSingleToken:   false,
-		Media:            decodeOnlyMediaMode(p2p),
+		Media:            mediaMode(p2p),
 		KVTransferParams: decodeKV,
 		ECTransferParams: p2p.ecParams,
 	})
@@ -851,7 +839,7 @@ func (s *Server) handleSharedStorageVLLMGRPC(w http.ResponseWriter, r *http.Requ
 	psegs, pok := s.buildLegSegmentsOrWriteError(w, r, scanned, vllmwire.LegOptions{
 		RequestID:        reqIDOverride,
 		CapSingleToken:   true,
-		Media:            prefillMediaMode(p2p),
+		Media:            mediaMode(p2p),
 		ECTransferParams: p2p.ecParams,
 	})
 	if !pok {
@@ -924,6 +912,8 @@ func prepareVLLMEncoderPlan(scanned *vllmwire.Request, uuidOverrides []string) (
 	bosToken := promptTokenIDs[0]
 	promptLen := uint64(len(promptTokenIDs))
 	for i, item := range items {
+		// EncoderSubFrame places the item at FeaturesOffset=1 after bosToken, so
+		// placeholder spans must have positive length.
 		if item.Length == 0 || item.Offset > promptLen || item.Length > promptLen-item.Offset {
 			return vllmEncoderPlan{}, fmt.Errorf("media[%d] features range [%d, +%d) exceeds prompt length %d", i, item.Offset, item.Length, promptLen)
 		}
@@ -1119,6 +1109,9 @@ func (s *Server) handleECNIXLVLLMGRPC(
 			}
 			paramsMu.Lock()
 			defer paramsMu.Unlock()
+			// Repeated items in one prompt round-robin across encoder pods and return
+			// distinct peer descriptors for the same mm_hash. Any live encoder peer
+			// that just encoded the item can serve the pull, matching fanoutEncoderCollect.
 			maps.Copy(params, outcome.ecTransferParams)
 			contributed++
 			return nil
@@ -1359,7 +1352,7 @@ func (s *Server) runVLLMGRPCPDPipeline(
 
 	dsegs, dok := s.buildLegSegmentsOrWriteError(w, pdRequest, scanned, vllmwire.LegOptions{
 		CapSingleToken:   false,
-		Media:            decodeOnlyMediaMode(nextP2P),
+		Media:            mediaMode(nextP2P),
 		ECTransferParams: ecParams,
 	})
 	if !dok {

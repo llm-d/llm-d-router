@@ -257,8 +257,11 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			}
 			r = cloneRequestWithBody(r.Context(), r, raw)
 		}
-		// Rebuild the clean gRPC frame only when bypassing P/D, EC, and P2P source pull.
-		if p2p.grpcReq != nil && (p2p.source == nil || (s.forwardDataParallel && r.Header.Get(routing.DataParallelEndpointHeader) != "")) {
+		if p2p.grpcReq != nil {
+			if p2p.source != nil {
+				s.decodeWithP2PSourceVLLMGRPC(w, r, p2p)
+				return
+			}
 			var ok bool
 			r, ok = s.rebuildSanitizedVLLMGRPCRequest(w, r, p2p.grpcReq)
 			if !ok {

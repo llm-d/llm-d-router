@@ -360,14 +360,17 @@ func TestVLLMGRPCPassthroughWithoutPrefillOrEncoder(t *testing.T) {
 	}, nil)
 	client := newVLLMGRPCClient(t, sidecarAddr)
 
-	untrustedKV, err := structpb.NewStruct(map[string]any{"custom_key": "kept_on_passthrough"})
+	// Decoder-only passthrough without P/D, EC, or x-llm-d-kv-cache-source
+	// streams the request body unread, matching TestServer_DecoderOnlyPassthroughLeavesBodyUnread
+	// (coordinator ingress strips client transfer params in coordinator deployments).
+	passthroughKV, err := structpb.NewStruct(map[string]any{"custom_key": "kept_on_passthrough"})
 	require.NoError(t, err)
 	req := &vllmpb.GenerateRequest{
 		RequestId: "passthrough-1",
 		Model:     "llama",
 		Prompt:    &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 10, 20}}},
 		Stopping:  &vllmpb.StoppingCriteria{MaxNewTokens: 32, MinNewTokens: 8},
-		Kv:        &vllmpb.KVCacheParameters{CacheSalt: "salt-pass", KvTransferParams: untrustedKV},
+		Kv:        &vllmpb.KVCacheParameters{CacheSalt: "salt-pass", KvTransferParams: passthroughKV},
 		Media: []*vllmpb.MediaItem{
 			{
 				Modality: vllmpb.Modality_MODALITY_IMAGE,
@@ -759,16 +762,22 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 
 func TestVLLMGRPCP2PSourcePullAndSSRFStripping(t *testing.T) {
 	decodeSrv := grpctest.NewVLLMUpstream(t, grpctest.VLLMUpstreamOptions{})
+	dpDecodeSrv := grpctest.NewVLLMUpstream(t, grpctest.VLLMUpstreamOptions{})
 	decodeURL, err := url.Parse(decodeSrv.URL())
+	require.NoError(t, err)
+	dpDecodeURL, err := url.Parse(dpDecodeSrv.URL())
 	require.NoError(t, err)
 
 	allowedPeerHost := "10.20.0.5"
+	dpTarget := "10.20.0.9:8001"
 	sidecarAddr := startCustomSidecar(t, Config{
 		Port:          "0",
 		DecoderURL:    decodeURL,
 		KVConnector:   constants.KVConnectorNIXLV2,
 		EnableP2PPull: true,
 	}, func(s *Server) {
+		s.forwardDataParallel = true
+		s.dataParallelProxies[dpTarget] = s.createDecoderProxyHandler(dpDecodeURL, false)
 		s.allowlistValidator = &AllowlistValidator{
 			enabled:        true,
 			allowedTargets: set.New(net.JoinHostPort(allowedPeerHost, "8000")),
@@ -847,6 +856,51 @@ func TestVLLMGRPCP2PSourcePullAndSSRFStripping(t *testing.T) {
 	assert.Nil(t, calls[1].Request.GetKv().GetKvTransferParams())
 	require.Len(t, calls[1].Request.GetMedia(), 1)
 	assert.Equal(t, []byte("src-pixels"), calls[1].Request.GetMedia()[0].GetRawBytes())
+
+	// 3. Allowed remote_kv_source + x-data-parallel-host-port: DP rank receives sanitized remote_kv_source.
+	ctxDPAllowed := metadata.AppendToOutgoingContext(t.Context(),
+		routing.KVCacheSourceHeader, net.JoinHostPort(allowedPeerHost, "28888"),
+		routing.DataParallelEndpointHeader, dpTarget,
+	)
+	_, err = client.Generate(ctxDPAllowed, &vllmpb.GenerateRequest{
+		Model:  "m",
+		Prompt: &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2}}},
+		Kv:     &vllmpb.KVCacheParameters{CacheSalt: "s3", KvTransferParams: validSourceKV},
+		Media:  media,
+	})
+	require.NoError(t, err)
+
+	// 4. Denied remote_kv_source + x-data-parallel-host-port: DP rank receives sanitized frame without source.
+	ctxDPDenied := metadata.AppendToOutgoingContext(t.Context(),
+		routing.KVCacheSourceHeader, "169.254.169.254:28888",
+		routing.DataParallelEndpointHeader, dpTarget,
+	)
+	_, err = client.Generate(ctxDPDenied, &vllmpb.GenerateRequest{
+		Model:  "m",
+		Prompt: &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2}}},
+		Kv:     &vllmpb.KVCacheParameters{CacheSalt: "s4", KvTransferParams: deniedSourceKV},
+		Media:  media,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, decodeSrv.Calls(), 2, "DP-forwarded requests must not hit default decoder")
+	dpCalls := dpDecodeSrv.Calls()
+	require.Len(t, dpCalls, 2)
+
+	gotDPAllowedKV := dpCalls[0].Request.GetKv().GetKvTransferParams().AsMap()
+	assert.NotContains(t, gotDPAllowedKV, "attacker_extra")
+	dpSrcMap, ok := gotDPAllowedKV["remote_kv_source"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "cached-req-1", dpSrcMap["kv_request_id"])
+	assert.Equal(t, allowedPeerHost, dpSrcMap["remote_host"])
+	assert.NotContains(t, dpSrcMap, "extra_field")
+	require.Len(t, dpCalls[0].Request.GetMedia(), 1)
+	assert.Equal(t, []byte("src-pixels"), dpCalls[0].Request.GetMedia()[0].GetRawBytes())
+
+	assert.Equal(t, "s4", dpCalls[1].Request.GetKv().GetCacheSalt())
+	assert.Nil(t, dpCalls[1].Request.GetKv().GetKvTransferParams())
+	require.Len(t, dpCalls[1].Request.GetMedia(), 1)
+	assert.Equal(t, []byte("src-pixels"), dpCalls[1].Request.GetMedia()[0].GetRawBytes())
 }
 
 func TestVLLMGRPCECDisaggregationConnectors(t *testing.T) {
@@ -1263,11 +1317,13 @@ func TestVLLMGRPCMalformedClientFramesRejectedBeforeUpstream(t *testing.T) {
 
 	for _, tc := range []struct {
 		name     string
+		encoding string
 		body     []byte
 		wantCode codes.Code
 	}{
 		{name: "truncated_header", body: []byte{0, 0, 0}, wantCode: codes.InvalidArgument},
-		{name: "compressed_flag_set", body: []byte{1, 0, 0, 0, 0}, wantCode: codes.InvalidArgument},
+		{name: "compressed_flag_set", body: []byte{1, 0, 0, 0, 0}, wantCode: codes.Unimplemented},
+		{name: "grpc_encoding_gzip", encoding: "gzip", body: []byte{0, 0, 0, 0, 0}, wantCode: codes.Unimplemented},
 		{name: "truncated_payload", body: []byte{0, 0, 0, 0, 10, 1, 2}, wantCode: codes.InvalidArgument},
 		{name: "corrupt_protobuf", body: []byte{0, 0, 0, 0, 2, 0xff, 0xff}, wantCode: codes.InvalidArgument},
 		{name: "frame_exceeds_max_payload", body: []byte{0, 0xff, 0xff, 0xff, 0xff}, wantCode: codes.ResourceExhausted},
@@ -1281,6 +1337,9 @@ func TestVLLMGRPCMalformedClientFramesRejectedBeforeUpstream(t *testing.T) {
 			)
 			require.NoError(t, err)
 			req.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+			if tc.encoding != "" {
+				req.Header.Set(grpcframe.HeaderEncoding, tc.encoding)
+			}
 			req.Header.Set(routing.PrefillEndpointHeader, prefillURL.Host)
 
 			resp, err := h2cClient.Do(req)
