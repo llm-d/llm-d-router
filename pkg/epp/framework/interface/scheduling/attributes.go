@@ -19,6 +19,7 @@ package scheduling
 import (
 	"sync"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -29,6 +30,25 @@ import (
 func (r *InferenceRequest) InitializeAttributeStore() {
 	if r.attributes == nil {
 		r.attributes = &sync.Map{}
+	}
+}
+
+// CopyAttributesFrom copies visible attributes, cloning mutable values that
+// implement Cloneable. Dynamic attributes keep their getter so queued copies
+// still see updates when read.
+func (r *InferenceRequest) CopyAttributesFrom(source *InferenceRequest) {
+	if source.attributes == nil {
+		return
+	}
+	for _, key := range source.AttributeKeys() {
+		value, ok := source.attributes.Load(key)
+		if !ok {
+			continue
+		}
+		if cloneable, ok := value.(fwkdl.Cloneable); ok {
+			value = cloneable.Clone()
+		}
+		r.PutAttribute(key, value)
 	}
 }
 

@@ -28,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
 )
 
 // stubSyncerPlugin satisfies plugin.Plugin so tests can mark a CrossReplicaSyncer
@@ -86,7 +87,8 @@ func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	podID := k8stypes.NamespacedName{Namespace: "ns", Name: "decode-0"}
 	endpointID := podID.String()
 	pod := server{ServerID: ServerID(podID), NumOfGPUBlocks: 100}
-	hashes := []blockHash{101, 102, 103}
+	request := &fwksched.InferenceRequest{RequestID: "peer-cache", Body: tokenizedBody(make([]uint32, 3*cfg.BlockSizeTokens))}
+	hashes := prefixhash.GetBlockHashes(ctx, request, cfg.BlockSizeTokens, unlimitedPrefixBlocks)[0]
 
 	producerA.indexerInst.Add(hashes, pod)
 	producerA.recent.record(endpointID, hashes)
@@ -97,7 +99,7 @@ func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	agg := specA.Aggregate([]any{localA})
 	set, ok := agg.(*attrprefix.PrefixHashSet)
 	require.True(t, ok)
-	require.Equal(t, [][]uint64{{101, 102, 103}}, set.Prompts)
+	require.Equal(t, promptsToUint64([][]blockHash{hashes}), set.Prompts)
 
 	ep := fwksched.NewEndpoint(
 		&fwkdl.EndpointMetadata{ID: podID},
@@ -118,6 +120,15 @@ func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	require.Equal(t, []int{0}, producerB.indexerInst.MatchLongestPrefix(hashes, candidates))
 	producerB.mergeRemoteHashes([]fwksched.Endpoint{ep})
 	require.Equal(t, []int{3}, producerB.indexerInst.MatchLongestPrefix(hashes, candidates))
+
+	// Queued preparation cannot rely on an unreconciled peer index.
+	require.NoError(t, producerB.PrepareForAdmission(ctx, request, []fwksched.Endpoint{ep}))
+	_, discounted := ep.Get(producerB.dk)
+	require.False(t, discounted)
+	require.NoError(t, producerB.Produce(ctx, request, []fwksched.Endpoint{ep}))
+	info, ok := ep.Get(producerB.dk)
+	require.True(t, ok)
+	require.Equal(t, 3, info.(*attrprefix.PrefixCacheMatchInfo).MatchBlocks())
 
 	// Merged hashes must not enter B's recent window (no echo).
 	require.Nil(t, producerB.recent.snapshot(endpointID))

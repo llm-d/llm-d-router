@@ -112,6 +112,12 @@ func (d *detector) TypedName() fwkplugin.TypedName {
 	return d.typedName
 }
 
+// RequiresRequestCost reports whether dispatch can be rejected by the
+// projected token cost of a queued request.
+func (d *detector) RequiresRequestCost() bool {
+	return d.config.failClosed && (d.config.mode == modeTokens || d.config.mode == modeHybrid)
+}
+
 func (d *detector) Consumes() fwkplugin.DataDependencies {
 	required := map[fwkplugin.DataKey]any{
 		d.inFlightLoadDataKey: attrconcurrency.InFlightLoad{},
