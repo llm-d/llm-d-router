@@ -33,7 +33,7 @@ Runs each scheduling stage in sequence and assembles the final result from all s
 
 #### How It Works
 
-The handler is invoked repeatedly by the framework until all stages are complete. Each optional stage is gated by a decider: if the decider returns false for a request, the stage is marked as skipped so the handler doesn't revisit it on the next invocation. If the decode stage finds no suitable endpoint, all remaining stages are skipped and the request fails.
+The handler is invoked repeatedly by the framework until all stages are complete. Each optional stage is gated by a decider: if the decider returns false for a request, the stage is marked as skipped so the handler doesn't revisit it on the next invocation. By default, if the decode stage finds no suitable endpoint, all remaining stages are skipped and the request fails. See [experimental aggregated P/D fallback](#experimental-aggregated-pd-fallback) for an optional backup path.
 
 #### Inputs consumed
 
@@ -47,6 +47,7 @@ The handler is invoked repeatedly by the framework until all stages are complete
 | `profiles.decode` | `string` | No | `"decode"` | Name of the decode scheduling profile. |
 | `profiles.prefill` | `string` | No | `"prefill"` | Name of the prefill scheduling profile. |
 | `profiles.encode` | `string` | No | `"encode"` | Name of the encode scheduling profile. |
+| `profiles.fallback` | `string` | No | — | Name of the aggregated fallback scheduling profile. |
 | `deciders.prefill` | `string` | No | — | Name of the prefill decider plugin. When set, enables P/D disaggregation. |
 | `deciders.encode` | `string` | No | — | Name of the encode decider plugin. When set, enables E disaggregation. |
 
@@ -81,7 +82,50 @@ plugins:
 
 - Without a configured decider, the corresponding stage is disabled for all requests — this is a static decision at startup, not per-request.
 - The names in `deciders.prefill` and `deciders.encode` must match plugin names declared earlier in the same configuration.
-- When using P/D disaggregation, a `PrefixCachePlugin` must be configured in the prefill and decode scheduling profiles.
+- `prefix-based-pd-decider` requires prefix cache data on the selected decode endpoint.
+
+#### Experimental Aggregated P/D Fallback
+
+##### What it does
+
+During a temporary Decode outage, the router can keep serving new requests through a backup worker. When the Decode pool has no Ready candidates, the router tries the fallback profile once to find a worker that can handle the full request locally. The same backup pool can help when a request requires Prefill and the Prefill pool has no Ready candidates. New requests return to normal P/D routing as the pools recover.
+
+##### Configuration
+
+1. Reserve backup workers in the same InferencePool. You can use existing workers from either workload or run a dedicated backup workload that scales separately. Backup workers must run Prefill and Decode locally, plus Encode for multimodal requests. Label them `llm-d.ai/role: prefill-decode` in this example.
+2. Use `label-selector-filter` to keep backup workers out of both normal profiles. The built-in `decode-filter` and `prefill-filter` also match `prefill-decode` workers. The backup profile must have a selector that restricts worker labels.
+3. Set `profiles.fallback` to the backup profile name. Fallback requires `stageOrder: decode-first`, the default.
+
+```yaml
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - name: dedicated-decode
+    type: label-selector-filter
+    parameters: {matchLabels: {llm-d.ai/role: decode}}
+  - name: dedicated-prefill
+    type: label-selector-filter
+    parameters: {matchLabels: {llm-d.ai/role: prefill}}
+  - name: backup-workers
+    type: label-selector-filter
+    parameters: {matchLabels: {llm-d.ai/role: prefill-decode}}
+  - type: always-disagg-pd-decider
+  - type: disagg-profile-handler
+    parameters:
+      profiles: {fallback: aggregated-fallback}
+      deciders: {prefill: always-disagg-pd-decider}
+schedulingProfiles:
+  - name: decode
+    plugins: [{pluginRef: dedicated-decode}]
+  - name: prefill
+    plugins: [{pluginRef: dedicated-prefill}]
+  - name: aggregated-fallback
+    plugins: [{pluginRef: backup-workers}]
+```
+
+Pool membership is determined from screened Ready candidates before profile filters such as capacity filters run. A normal profile without a pool selector counts all screened candidates as members. If a normal pool has members but its filters reject them all, or if fallback finds no worker, the request returns `503 rejected-no-endpoints`.
+
+Skipping Prefill, finding no Encode target, and admission or flow control rejections do not trigger fallback.
 
 ---
 

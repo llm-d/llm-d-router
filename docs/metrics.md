@@ -895,6 +895,7 @@ This plugin records the routing decision for each request.
         *   `prefill-decode` - split into prefill and decode stages (P/D or EP/D)
         *   `encode-decode` - encode disaggregation with local prefill+decode (E/PD)
         *   `encode-prefill-decode` - full three-stage pipeline (E/P/D)
+        *   `fallback` - backup worker selected to handle the full request
 *   **Description:** Counts requests processed, broken down by the disaggregation routing decision.
     Requests rejected because a required prefill stage found no endpoint are not counted.
 *   **Actionability:** Monitor the distribution across decision types to understand engagement per
