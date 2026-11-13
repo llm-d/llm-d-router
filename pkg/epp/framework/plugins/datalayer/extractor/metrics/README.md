@@ -18,6 +18,7 @@ The Core Metrics Extractor is a data layer plugin responsible for extracting mod
     -   **KV Cache Usage**: Percentage of KV cache currently utilized.
     -   **LoRA Adapters**: Information about active and waiting LoRA adapters.
     -   **Cache Configuration**: Block size and total number of GPU blocks.
+    -   **Offload-extended KV cache capacity** (optional): The token capacity of a host-memory KV cache tier (`cacheTotalTokensSpec`, read from a label when `cacheTotalTokensLabelName` is set) and whether the engine has offloaded KV cache at all (`cacheOffloadDetectionSpec`, true while the metric is above zero). The built-in configs read SGLang's `sglang:hicache_host_total_tokens` and vLLM's `cpu_kv_cache_size_tokens` label on `vllm:kv_offload_config_info`, and detect vLLM offloading from `vllm:kv_offload_total_bytes_total`. A scrape without these families is not an extraction error. See [TotalKVCacheTokens](../../../../../../../docs/plugin-metric-protocol.md#totalkvcachetokens-optional).
     -   **Tiered Offloading** (optional): vLLM KV cache tiering metrics (`kv_offload_tiering_*`, vLLM 0.28.0 or later) when vLLM is configured with `TieringOffloadingSpec`. Skipped without an extraction error on non-tiering deployments.
 5.  Stores these values as attributes on the endpoint, making them available to scheduling plugins.
 
@@ -27,6 +28,7 @@ A model server that runs several engines in one Pod exposes one series per engin
 
 -   `WaitingQueueSize` and `RunningRequestsSize` are the sum over the matching series, so both count requests for the whole Pod. The utilization detector's scrape-lag credit compares their sum with the Pod's in-flight request count, and queue-depth thresholds apply to the Pod total.
 -   `KVCacheUsagePercent` is the maximum over the matching series: the engine closest to its limit describes the Pod, and the value stays a fraction.
+-   `KvCacheMaxTokenCapacity` is the maximum over the matching series, in line with the block count, which is read from one series: each engine's offload tier is sized for that engine, and the prefix cache index is sized per engine's cache.
 -   The tiered offloading attributes are the sum over the matching series, so they cover every engine rank of the Pod. Series of the primary tier (`tier="0:primary"`) are never included.
 
 A family with a single matching series yields that series' value. A NaN or infinite value on any matching series fails the extraction of that attribute, which keeps its previous value. LoRA, cache configuration, and `customMetrics` entries without `aggregation` read one series. A `customMetrics` entry with `aggregation: sum` adds every matching series.

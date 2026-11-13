@@ -32,13 +32,21 @@ type Metrics struct {
 	WaitingModels map[string]int
 	// MaxActiveModels is the maximum number of adapters the model server can load (max_lora).
 	// It is 0 until the model server has reported it.
-	MaxActiveModels         int
-	RunningRequestsSize     int
-	WaitingQueueSize        int
-	KVCacheUsagePercent     float64
+	MaxActiveModels     int
+	RunningRequestsSize int
+	WaitingQueueSize    int
+	KVCacheUsagePercent float64
+	// KvCacheMaxTokenCapacity is the KV cache capacity in tokens that the model
+	// server reports for its offload-extended cache, for example SGLang's
+	// HiCache host pool or vLLM's CPU offload tier. It is 0 until the model
+	// server has reported it; servers without an offload tier never do.
 	KvCacheMaxTokenCapacity int
-	CacheBlockSize          int
-	CachePrefixMatchUnit    int
+	// KvCacheOffloadDetected is true when the model server reports that it has
+	// offloaded KV cache, whether or not it also reports the offload tier's
+	// capacity in KvCacheMaxTokenCapacity.
+	KvCacheOffloadDetected bool
+	CacheBlockSize         int
+	CachePrefixMatchUnit   int
 	// Number of GPU blocks in the model server for KV Cache.
 	CacheNumBlocks int
 
@@ -86,6 +94,7 @@ func (m *Metrics) Clone() *Metrics {
 		WaitingQueueSize:        m.WaitingQueueSize,
 		KVCacheUsagePercent:     m.KVCacheUsagePercent,
 		KvCacheMaxTokenCapacity: m.KvCacheMaxTokenCapacity,
+		KvCacheOffloadDetected:  m.KvCacheOffloadDetected,
 		CacheBlockSize:          m.CacheBlockSize,
 		CachePrefixMatchUnit:    m.CachePrefixMatchUnit,
 		CacheNumBlocks:          m.CacheNumBlocks,

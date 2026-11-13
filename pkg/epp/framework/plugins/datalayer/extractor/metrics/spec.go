@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 
 	dto "github.com/prometheus/client_model/go"
@@ -201,6 +202,61 @@ func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, ag
 		)
 	}
 	return result, nil
+}
+
+// maxValue returns the largest positive integer value across the series
+// matching Spec, read from the gauge or counter value or, when labelName is
+// set, from that label. A pod running several engines reports one series per
+// engine, and each series is one engine's value. Series whose value is
+// missing, non-numeric (vLLM writes "None" for a capacity it cannot compute),
+// or not positive are skipped. ok is false when no series qualifies, and when
+// any matching series is NaN, infinite, or beyond the int range: the largest
+// of the remaining series can be lower than the true maximum.
+func (spec *Spec) maxValue(families sourcemetrics.PrometheusMetricMap, labelName string) (value int, ok bool) {
+	family, err := extractFamily(spec, families)
+	if err != nil {
+		return 0, false
+	}
+	for _, metric := range family.GetMetric() {
+		if !spec.labelsMatch(metric.GetLabel()) {
+			continue
+		}
+		var v float64
+		if labelName == "" {
+			v = extractValue(metric)
+		} else {
+			raw, found := labelValue(metric, labelName)
+			if !found {
+				continue
+			}
+			parsed, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				continue
+			}
+			v = parsed
+		}
+		// float64(math.MaxInt) rounds up to 2^63, which does not fit an int.
+		if math.IsNaN(v) || math.IsInf(v, 0) || v >= float64(math.MaxInt) {
+			return 0, false
+		}
+		if v <= 0 {
+			continue
+		}
+		if int(v) > value {
+			value, ok = int(v), true
+		}
+	}
+	return value, ok
+}
+
+// labelValue returns the value of the named label on metric.
+func labelValue(metric *dto.Metric, name string) (string, bool) {
+	for _, label := range metric.GetLabel() {
+		if label.GetName() == name {
+			return label.GetValue(), true
+		}
+	}
+	return "", false
 }
 
 // labelsMatch checks if metric labels match the specification labels.

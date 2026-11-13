@@ -117,7 +117,7 @@ func (ext *Extractor) MetricFamilies() []string {
 	var names []string
 	for _, mapping := range ext.registry.Mappings() {
 		names = append(names, mapping.MetricNames()...)
-		for _, spec := range []*Spec{mapping.CacheBlockSize, mapping.CacheNumBlocks} {
+		for _, spec := range []*Spec{mapping.CacheBlockSize, mapping.CacheNumBlocks, mapping.CacheTotalTokens, mapping.CacheOffloadDetection} {
 			if spec != nil {
 				names = append(names, spec.Name)
 			}
@@ -211,6 +211,26 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, err)
 		} else {
 			clone.CacheNumBlocks = int(extractValue(metric))
+			updated = true
+		}
+	}
+
+	// The offload tier's capacity and the offload signal are optional: an engine
+	// reports them only when offloading is configured, and some only after the
+	// first request, so an absent family is neither an error nor a reset.
+	if spec := mapping.CacheTotalTokens; spec != nil {
+		if tokens, ok := spec.maxValue(families, mapping.CacheTotalTokensLabel); ok {
+			clone.KvCacheMaxTokenCapacity = tokens
+			updated = true
+		}
+	}
+
+	if spec := mapping.CacheOffloadDetection; spec != nil {
+		// A positive value rather than the family's presence: vLLM registers its
+		// transfer counters at zero on startup, before the capacity label exists.
+		_, detected := spec.maxValue(families, "")
+		if detected != clone.KvCacheOffloadDetected {
+			clone.KvCacheOffloadDetected = detected
 			updated = true
 		}
 	}

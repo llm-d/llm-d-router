@@ -985,6 +985,7 @@ func TestExtractorMetricFamiliesCoverEveryEngineSpec(t *testing.T) {
 		raws := []string{
 			engine.QueuedRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec, engine.LoRASpec,
 			engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+			engine.CacheTotalTokensSpec, engine.CacheOffloadDetectionSpec,
 		}
 		for _, custom := range engine.CustomMetrics {
 			raws = append(raws, custom.MetricSpec)
