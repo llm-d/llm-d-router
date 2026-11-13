@@ -110,18 +110,15 @@ func isGRPCRequest(r *http.Request) bool {
 	return isVLLMGRPCRequest(r)
 }
 
+// httpStatusToGRPCCode maps statuses emitted by sidecar-local sendError calls
+// to gRPC codes. Local 500 errors map to Internal rather than retryable
+// Unavailable, while upstream HTTP transport errors on gRPC legs are relayed directly.
 func httpStatusToGRPCCode(status int) codes.Code {
 	switch status {
 	case http.StatusBadRequest:
 		return codes.InvalidArgument
-	case http.StatusUnauthorized:
-		return codes.Unauthenticated
 	case http.StatusForbidden:
 		return codes.PermissionDenied
-	case http.StatusNotFound:
-		return codes.NotFound
-	case http.StatusTooManyRequests:
-		return codes.ResourceExhausted
 	case http.StatusBadGateway, http.StatusServiceUnavailable:
 		return codes.Unavailable
 	case http.StatusGatewayTimeout:
