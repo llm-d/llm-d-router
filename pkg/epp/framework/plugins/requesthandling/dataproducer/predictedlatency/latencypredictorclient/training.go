@@ -400,7 +400,7 @@ func (p *Predictor) getXGBoostTrees(ctx context.Context) (*XGBoostTrees, error) 
 		return nil, fmt.Errorf("TTFT trees request failed: %d %s, body: %s", ttftResp.StatusCode, ttftResp.Status, string(body))
 	}
 
-	if err := json.NewDecoder(ttftResp.Body).Decode(&trees.TTFTTrees); err != nil {
+	if trees.TTFTTrees, err = readTrees(ttftResp.Body); err != nil {
 		return nil, fmt.Errorf("failed to decode TTFT trees: %w", err)
 	}
 
@@ -422,7 +422,7 @@ func (p *Predictor) getXGBoostTrees(ctx context.Context) (*XGBoostTrees, error) 
 		return nil, fmt.Errorf("TPOT trees request failed: %d %s, body: %s", tpotResp.StatusCode, tpotResp.Status, string(body))
 	}
 
-	if err := json.NewDecoder(tpotResp.Body).Decode(&trees.TPOTTrees); err != nil {
+	if trees.TPOTTrees, err = readTrees(tpotResp.Body); err != nil {
 		return nil, fmt.Errorf("failed to decode TPOT trees: %w", err)
 	}
 
