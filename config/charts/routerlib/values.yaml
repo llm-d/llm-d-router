@@ -64,12 +64,14 @@ epp:
   #     maxSurge: 0
 
   # minReadySeconds for the EPP Deployment: how long a newly Ready pod must stay
-  # Ready before it counts as available, which also paces rollouts (a replacement
-  # pod is not started until the previous one passes this window). Unset leaves
-  # the Kubernetes default of 0. Must stay below the Deployment's
+  # Ready before it counts as available. Unset leaves the Kubernetes default of
+  # 0. Paces rollouts: with a RollingUpdate strategy, a pod holds its share of
+  # the maxSurge/maxUnavailable budget until the window passes, so the rollout
+  # cannot run ahead of it (maxSurge > 1 still starts several replacements
+  # together). Must be a whole number from 0 to 599: the Deployment's
   # progressDeadlineSeconds (the Kubernetes default of 600; the chart does not
-  # set it) -- the API server rejects the Deployment otherwise, so the render
-  # fails fast on values >= 600.
+  # set it) has to exceed it, and the API server rejects anything else, so the
+  # render fails fast on out-of-range values.
   # minReadySeconds: 30
 
   # PodDisruptionBudget for EPP pods. Disabled while unset; enabling it without a

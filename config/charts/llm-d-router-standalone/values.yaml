@@ -30,11 +30,11 @@ router:
     # overrides spec.strategy (unset = the Kubernetes default of RollingUpdate with 25%
     # maxUnavailable, which can drop serving proxies before their replacements are
     # Ready); minReadySeconds is how long a new pod must stay Ready before it counts
-    # as available, and must stay below the Deployment's progressDeadlineSeconds
-    # (the Kubernetes default of 600) -- the API server rejects the Deployment
-    # otherwise, so the render fails fast on values >= 600. Both ignored in sidecar
-    # mode (router.epp.deploymentStrategy and router.epp.minReadySeconds govern the
-    # shared pod).
+    # as available, and must be a whole number from 0 to 599: the Deployment's
+    # progressDeadlineSeconds (the Kubernetes default of 600) has to exceed it,
+    # and the API server rejects anything else, so the render fails fast on
+    # out-of-range values. Both ignored in sidecar mode (router.epp.
+    # deploymentStrategy and router.epp.minReadySeconds govern the shared pod).
     # deploymentStrategy:
     #   type: RollingUpdate
     #   rollingUpdate:
