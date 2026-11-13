@@ -197,22 +197,10 @@ func (p *Predictor) flushTraining(ctx context.Context) {
 }
 
 // ValidateTrainingEntry validates that a training entry has all required fields
-// with valid values, including the new prefix_cache_score field.
+// with values allowed by the shared schema.
 func (p *Predictor) ValidateTrainingEntry(entry TrainingEntry) error {
-	if entry.KVCachePercentage < 0.0 || entry.KVCachePercentage > 1.0 {
-		return fmt.Errorf("kv_cache_percentage must be between 0.0 and 1.0, got %f", entry.KVCachePercentage)
-	}
-	if entry.InputTokenLength < 0 {
-		return fmt.Errorf("input_token_length must be non-negative, got %d", entry.InputTokenLength)
-	}
-	if entry.NumRequestWaiting < 0 {
-		return fmt.Errorf("num_request_waiting must be non-negative, got %d", entry.NumRequestWaiting)
-	}
-	if entry.NumRequestRunning < 0 {
-		return fmt.Errorf("num_request_running must be non-negative, got %d", entry.NumRequestRunning)
-	}
-	if entry.NumTokensGenerated < 0 {
-		return fmt.Errorf("num_tokens_generated must be non-negative, got %d", entry.NumTokensGenerated)
+	if err := validateFeatures(facadeFeatures(entry, entry.Features)); err != nil {
+		return err
 	}
 	if entry.ActualTTFT < 0.0 {
 		return fmt.Errorf("actual_ttft_ms must be non-negative, got %f", entry.ActualTTFT)
@@ -231,15 +219,6 @@ func (p *Predictor) ValidateTrainingEntry(entry TrainingEntry) error {
 	}
 	if entry.PredictedTPOT != nil && (math.IsNaN(*entry.PredictedTPOT) || math.IsInf(*entry.PredictedTPOT, 0)) {
 		return fmt.Errorf("predicted_tpot_ms must be a finite number, got %f", *entry.PredictedTPOT)
-	}
-	if entry.PrefixCacheScore < 0.0 || entry.PrefixCacheScore > 1.0 {
-		return fmt.Errorf("prefix_cache_score must be between 0.0 and 1.0, got %f", entry.PrefixCacheScore)
-	}
-	if entry.EncoderInputSize < 0 {
-		return fmt.Errorf("encoder_input_size must be non-negative, got %d", entry.EncoderInputSize)
-	}
-	if entry.EncoderMatchedSize < 0 || entry.EncoderMatchedSize > entry.EncoderInputSize {
-		return fmt.Errorf("encoder_matched_size must be between 0 and encoder_input_size (%d), got %d", entry.EncoderInputSize, entry.EncoderMatchedSize)
 	}
 	return nil
 }

@@ -18,7 +18,9 @@ package latencypredictorclient
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 
@@ -154,4 +156,125 @@ func (entry TrainingEntry) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(object)
+}
+
+func validateFeatures(features *protocol.Features) error {
+	message := features.ProtoReflect()
+	fields := message.Descriptor().Fields()
+	for index := range fields.Len() {
+		field := fields.Get(index)
+		rules := protocol.RulesFor(field)
+		if !rules.GetGoValidate() {
+			continue
+		}
+		number, err := featureNumber(message, field)
+		if err != nil {
+			return err
+		}
+		if rules.Minimum != nil && number < rules.GetMinimum() {
+			return fmt.Errorf("%s must be at least %v, got %v", field.Name(), rules.GetMinimum(), number)
+		}
+		if rules.Maximum != nil && number > rules.GetMaximum() {
+			return fmt.Errorf("%s must be at most %v, got %v", field.Name(), rules.GetMaximum(), number)
+		}
+	}
+	if features.GetEncoderMatchedSize() > features.GetEncoderInputSize() {
+		return fmt.Errorf("encoder_matched_size must not exceed encoder_input_size (%d), got %d", features.GetEncoderInputSize(), features.GetEncoderMatchedSize())
+	}
+	return nil
+}
+
+func ridgeFields(target string) []protoreflect.FieldDescriptor {
+	fields := (&protocol.Features{}).ProtoReflect().Descriptor().Fields()
+	result := make([]protoreflect.FieldDescriptor, 0, fields.Len())
+	order := func(field protoreflect.FieldDescriptor) int32 {
+		rules := protocol.RulesFor(field)
+		if target == "ttft" {
+			return rules.GetRidgeTtftOrder()
+		}
+		return rules.GetRidgeTpotOrder()
+	}
+	for index := range fields.Len() {
+		if field := fields.Get(index); order(field) > 0 {
+			result = append(result, field)
+		}
+	}
+	slices.SortFunc(result, func(a, b protoreflect.FieldDescriptor) int { return int(order(a) - order(b)) })
+	return result
+}
+
+var ridgeTTFTFields = ridgeFields("ttft")
+var ridgeTPOTFields = ridgeFields("tpot")
+
+// PredictionRequestOption adds features without extending positional arguments.
+type PredictionRequestOption func(*PredictionRequest) error
+
+// WithFeatures accepts the fields generated from the shared schema.
+func WithFeatures(features *protocol.Features) PredictionRequestOption {
+	return func(request *PredictionRequest) error {
+		if features == nil {
+			return nil
+		}
+		merged := facadeFeatures(*request, request.Features)
+		proto.Merge(merged, features)
+		*request = PredictionFromFeatures(merged)
+		return nil
+	}
+}
+
+// WithFeature sets a field declared in the schema and validates its JSON value.
+func WithFeature(name string, value any) PredictionRequestOption {
+	return func(request *PredictionRequest) error {
+		field := (&protocol.Features{}).ProtoReflect().Descriptor().Fields().ByName(protoreflect.Name(name))
+		if field == nil {
+			return fmt.Errorf("unknown prediction feature %q", name)
+		}
+		data, err := json.Marshal(map[string]any{name: value})
+		if err != nil {
+			return err
+		}
+		message := &protocol.Features{}
+		if err := protocol.Unmarshal(data, message); err != nil {
+			return err
+		}
+		return WithFeatures(message)(request)
+	}
+}
+
+func ridgePrediction(intercept float64, coefficients map[string]float64, features *protocol.Features, fields []protoreflect.FieldDescriptor) (float64, error) {
+	message := features.ProtoReflect()
+	for _, field := range fields {
+		number, err := featureNumber(message, field)
+		if err != nil {
+			return 0, err
+		}
+		intercept += coefficients[string(field.Name())] * number
+	}
+	return intercept, nil
+}
+
+func featureNumber(message protoreflect.Message, field protoreflect.FieldDescriptor) (float64, error) {
+	value := message.Get(field)
+	if !message.Has(field) {
+		var err error
+		value, err = protocol.DefaultFor(field)
+		if err != nil {
+			return 0, err
+		}
+	}
+	switch field.Kind() {
+	case protoreflect.DoubleKind, protoreflect.FloatKind:
+		return value.Float(), nil
+	case protoreflect.Int32Kind, protoreflect.Int64Kind, protoreflect.Sint32Kind, protoreflect.Sint64Kind, protoreflect.Sfixed32Kind, protoreflect.Sfixed64Kind:
+		return float64(value.Int()), nil
+	case protoreflect.Uint32Kind, protoreflect.Uint64Kind, protoreflect.Fixed32Kind, protoreflect.Fixed64Kind:
+		return float64(value.Uint()), nil
+	case protoreflect.BoolKind:
+		if value.Bool() {
+			return 1, nil
+		}
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("feature %s must be numeric", field.Name())
+	}
 }

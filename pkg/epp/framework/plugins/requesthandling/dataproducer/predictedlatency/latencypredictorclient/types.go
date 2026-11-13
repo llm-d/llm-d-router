@@ -164,6 +164,7 @@ type PredictorInterface interface {
 // --- Data Models ---
 
 type TrainingEntry struct {
+	// Features carries additional schema fields. TrainingFromFeatures initializes both representations.
 	Features           *protocol.Features `json:"-"`
 	KVCachePercentage  float64            `json:"kv_cache_percentage"`
 	InputTokenLength   int                `json:"input_token_length"`
@@ -194,6 +195,7 @@ type BulkTrainingRequest struct {
 }
 
 type PredictionRequest struct {
+	// Features carries additional schema fields. PredictionFromFeatures initializes both representations.
 	Features           *protocol.Features `json:"-"`
 	KVCachePercentage  float64            `json:"kv_cache_percentage"`
 	InputTokenLength   int                `json:"input_token_length"`

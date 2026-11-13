@@ -54,7 +54,7 @@ func TestPredictedLatency_TerminalCleanupDoesNotAddToken(t *testing.T) {
 			// One real token has been observed. The synthetic cleanup callback
 			// for a truncated stream carries no additional data event.
 			state.requestReceivedTimestamp = time.Now().Add(-time.Second)
-			processFirstTokenForLatencyPrediction(context.Background(), predictor, true, router.config.EndpointRoleLabel, state, state.requestReceivedTimestamp.Add(100*time.Millisecond))
+			processFirstTokenForLatencyPrediction(context.Background(), predictor, true, state, state.requestReceivedTimestamp.Add(100*time.Millisecond))
 			require.Equal(t, 1, state.generatedTokenCount)
 			predictor.capturedTrainingEntries = nil
 			events, wantTokens, wantTraining := 1, 1, 0
@@ -92,7 +92,7 @@ func TestPredictedLatency_TruncatedStreamUsesLastTokenTime(t *testing.T) {
 			require.NoError(t, router.PreRequest(context.Background(), request, createTestSchedulingResult(endpoint.GetMetadata())))
 
 			state.requestReceivedTimestamp = time.Now().Add(-time.Second)
-			processFirstTokenForLatencyPrediction(context.Background(), predictor, true, router.config.EndpointRoleLabel, state, state.requestReceivedTimestamp.Add(100*time.Millisecond))
+			processFirstTokenForLatencyPrediction(context.Background(), predictor, true, state, state.requestReceivedTimestamp.Add(100*time.Millisecond))
 			processTokenForLatencyPrediction(context.Background(), state, state.requestReceivedTimestamp.Add(125*time.Millisecond))
 			processTokenForLatencyPrediction(context.Background(), state, state.requestReceivedTimestamp.Add(150*time.Millisecond))
 			predictor.capturedTrainingEntries = nil

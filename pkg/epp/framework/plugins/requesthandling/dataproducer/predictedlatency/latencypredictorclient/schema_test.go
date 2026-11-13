@@ -18,6 +18,7 @@ package latencypredictorclient
 
 import (
 	"encoding/json"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,6 +29,26 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestFeatureOptionsAndLegacyFieldMutation(t *testing.T) {
+	features := &protocol.Features{EncoderInputSize: proto.Int64(8), EncoderMatchedSize: proto.Int64(3)}
+	request, err := NewPredictionRequest(0.5, 100, 2, 3, 1, 0.25, WithFeatures(features), WithFeature("prefill_tokens_in_flight", int64(1<<53)+1))
+	require.NoError(t, err)
+	features.EncoderInputSize = proto.Int64(999)
+	assert.Equal(t, 8, request.EncoderInputSize)
+	request.InputTokenLength = 200
+	data, err := json.Marshal(request)
+	require.NoError(t, err)
+	parsed := &protocol.PredictionRequest{}
+	require.NoError(t, protocol.Unmarshal(data, parsed))
+	assert.Equal(t, int64(200), parsed.GetFeatures().GetInputTokenLength())
+	assert.Equal(t, int64(8), parsed.GetFeatures().GetEncoderInputSize())
+	assert.Equal(t, int64(1<<53)+1, parsed.GetFeatures().GetPrefillTokensInFlight())
+	_, err = NewPredictionRequest(0.5, 100, 2, 3, 1, 0.25, WithFeature("missing_feature", 1))
+	require.Error(t, err)
+	_, err = NewPredictionRequest(0.5, 100, 2, 3, 1, 0.25, WithFeature("encoder_input_size", -1))
+	require.Error(t, err)
+}
 
 func TestLegacyAccessorsOverrideOverlappingSchemaFields(t *testing.T) {
 	features := &protocol.Features{InputTokenLength: proto.Int64(123)}
@@ -127,6 +148,29 @@ func BenchmarkBulkPredictionWire(b *testing.B) {
 				}
 			})
 		})
+	}
+}
+
+func TestRidgeRegistryPreservesLegacyFormula(t *testing.T) {
+	random := rand.New(rand.NewPCG(1, 2))
+	for range 100 {
+		request := PredictionRequest{KVCachePercentage: random.Float64(), InputTokenLength: random.IntN(1000), NumRequestWaiting: random.IntN(10), NumRequestRunning: random.IntN(10), NumTokensGenerated: random.IntN(20), PrefixCacheScore: random.Float64(), EncoderInputSize: 7, EncoderMatchedSize: 2}
+		coefficients := map[string]float64{}
+		for _, field := range ridgeTTFTFields {
+			coefficients[string(field.Name())] = random.Float64()
+		}
+		for _, field := range ridgeTPOTFields {
+			coefficients[string(field.Name())] = random.Float64()
+		}
+		expectedTTFT := 1 + coefficients["kv_cache_percentage"]*request.KVCachePercentage + coefficients["input_token_length"]*float64(request.InputTokenLength) + coefficients["num_request_waiting"]*float64(request.NumRequestWaiting) + coefficients["num_request_running"]*float64(request.NumRequestRunning) + coefficients["prefix_cache_score"]*request.PrefixCacheScore + coefficients["encoder_input_size"]*float64(request.EncoderInputSize) + coefficients["encoder_matched_size"]*float64(request.EncoderMatchedSize)
+		expectedTPOT := 2 + coefficients["kv_cache_percentage"]*request.KVCachePercentage + coefficients["input_token_length"]*float64(request.InputTokenLength) + coefficients["num_request_waiting"]*float64(request.NumRequestWaiting) + coefficients["num_request_running"]*float64(request.NumRequestRunning) + coefficients["num_tokens_generated"]*float64(request.NumTokensGenerated)
+		features := facadeFeatures(request, nil)
+		actualTTFT, err := ridgePrediction(1, coefficients, features, ridgeTTFTFields)
+		require.NoError(t, err)
+		actualTPOT, err := ridgePrediction(2, coefficients, features, ridgeTPOTFields)
+		require.NoError(t, err)
+		assert.Equal(t, expectedTTFT, actualTTFT)
+		assert.Equal(t, expectedTPOT, actualTPOT)
 	}
 }
 

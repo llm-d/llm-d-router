@@ -19,20 +19,15 @@ package predictedlatency
 
 import (
 	"context"
-	"math"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
-	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
-	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 )
 
 var _ fwkrh.DataProducer = &PredictedLatency{}
@@ -44,33 +39,8 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	predictedLatencyCtx := pl.getOrMakePredictedLatencyContextForRequest(request)
 
 	pl.parseSLOHeaders(ctx, request, predictedLatencyCtx)
-	var prefixCacheScore float64
 	for _, endpoint := range endpoints {
-
-		if prefixCacheInfoRaw, ok := endpoint.Get(pl.prefixMatchDataKey); ok {
-			prefixCacheInfo := prefixCacheInfoRaw.(*attrprefix.PrefixCacheMatchInfo)
-			prefixCacheScore = float64(prefixCacheInfo.MatchBlocks()) / float64(prefixCacheInfo.TotalBlocks())
-			if !math.IsNaN(prefixCacheScore) {
-				logger.V(logutil.DEBUG).Info("Found prefix cache score in pod attribute", "pod", endpoint.GetMetadata().ID.Name, "score", prefixCacheScore)
-			} else {
-				prefixCacheScore = 0.0
-				logger.V(logutil.DEBUG).Info("Prefix cache score is NaN, defaulting to 0", "pod", endpoint.GetMetadata().ID.Name)
-			}
-		} else {
-			logger.V(logutil.DEBUG).Info("No prefix cache score found in pod attribute, defaulting to 0", "pod", endpoint.GetMetadata().ID.Name)
-			prefixCacheScore = 0.0
-		}
-		predictedLatencyCtx.prefixCacheScoresForEndpoints[endpoint.GetMetadata().ID.Name] = prefixCacheScore
-
-		if pl.config.UseEncoderCacheFeatures {
-			pl.captureEncoderCacheSizes(ctx, predictedLatencyCtx, endpoint)
-		}
-
-		// Capture the in-flight load here, in the DAG-ordered Produce hook, and
-		// reuse it for both the prediction features and the dispatch-time training
-		// features. Re-reading the live attribute in PreRequest would make the
-		// value depend on undefined PreRequest hook ordering.
-		predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().ID.String()] = pl.readInFlightLoad(endpoint)
+		predictedLatencyCtx.endpointFeatures[endpoint.GetMetadata().ID.String()] = pl.captureEndpointFeatures(endpoint)
 	}
 	if !pl.config.PredictInProduce {
 		logger.V(logutil.DEBUG).Info("PredictInProduce disabled, skipping predictions")
@@ -126,40 +96,6 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 	return nil
 }
 
-// captureEncoderCacheSizes stores the request's total multimodal encoder item
-// size and the endpoint's matched portion in the request context. The match
-// data is attached by the multimodal encoder-cache producer, which the DAG
-// orders before this plugin; absence means a text-only request and leaves the
-// sizes at 0.
-func (pl *PredictedLatency) captureEncoderCacheSizes(ctx context.Context, predictedLatencyCtx *predictedLatencyCtx, endpoint fwksched.Endpoint) {
-	logger := log.FromContext(ctx)
-	raw, ok := endpoint.Get(pl.encoderCacheDataKey)
-	if !ok {
-		return
-	}
-	matchInfo, ok := raw.(*attrmm.EncoderCacheMatchInfo)
-	if !ok || matchInfo == nil {
-		return
-	}
-	inputSize := sumItemSizes(matchInfo.RequestItems())
-	matchedSize := sumItemSizes(matchInfo.MatchedItems())
-	// The predictor rejects matched > input, so clamp inconsistent match data
-	// rather than dropping the whole prediction or training entry.
-	if matchedSize > inputSize {
-		logger.V(logutil.DEBUG).Info("Encoder cache matched size exceeds input size, clamping",
-			"pod", endpoint.GetMetadata().String(),
-			"encoderInputSize", inputSize,
-			"encoderMatchedSize", matchedSize)
-		matchedSize = inputSize
-	}
-	predictedLatencyCtx.encoderInputSize = inputSize
-	predictedLatencyCtx.encoderMatchedSizeForEndpoints[endpoint.GetMetadata().ID.Name] = matchedSize
-	logger.V(logutil.DEBUG).Info("Encoder cache sizes for pod",
-		"pod", endpoint.GetMetadata().String(),
-		"encoderInputSize", inputSize,
-		"encoderMatchedSize", matchedSize)
-}
-
 func sumItemSizes(items []attrmm.MatchItem) int {
 	total := 0
 	for _, item := range items {
@@ -175,15 +111,12 @@ func (pl *PredictedLatency) Produces() map[plugin.DataKey]any {
 }
 
 func (pl *PredictedLatency) Consumes() plugin.DataDependencies {
-	required := map[plugin.DataKey]any{
-		pl.prefixMatchDataKey:                attrprefix.PrefixCacheMatchInfo{},
-		pl.inFlightLoadDataKey:               attrconcurrency.InFlightLoad{},
-		tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{},
-	}
-	// Required (not Optional) because only Required dependencies create DAG
-	// ordering edges; the encoder-cache producer must run before this plugin.
-	if pl.config.UseEncoderCacheFeatures {
-		required[pl.encoderCacheDataKey] = attrmm.EncoderCacheMatchInfo{}
+	required := make(map[plugin.DataKey]any)
+	for _, provider := range featureProviders {
+		if provider.dependency != nil && (provider.enabled == nil || provider.enabled(pl)) {
+			key, witness := provider.dependency(pl)
+			required[key] = witness
+		}
 	}
 	return plugin.DataDependencies{Required: required}
 }
