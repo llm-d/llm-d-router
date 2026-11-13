@@ -204,26 +204,14 @@ func (spec *Spec) aggregateMetric(families sourcemetrics.PrometheusMetricMap, ag
 	return result, nil
 }
 
-// present reports whether the families hold at least one series matching Spec.
-func (spec *Spec) present(families sourcemetrics.PrometheusMetricMap) bool {
-	family, err := extractFamily(spec, families)
-	if err != nil {
-		return false
-	}
-	for _, metric := range family.GetMetric() {
-		if spec.labelsMatch(metric.GetLabel()) {
-			return true
-		}
-	}
-	return false
-}
-
 // maxValue returns the largest positive integer value across the series
-// matching Spec, read from the gauge value or, when labelName is set, from
-// that label. A pod running several engines reports one series per engine,
-// and each series is one engine's capacity. Series whose value is missing,
-// non-numeric (vLLM writes "None" for a capacity it cannot compute), or not
-// positive are skipped; ok is false when no series qualifies.
+// matching Spec, read from the gauge or counter value or, when labelName is
+// set, from that label. A pod running several engines reports one series per
+// engine, and each series is one engine's value. Series whose value is
+// missing, non-numeric (vLLM writes "None" for a capacity it cannot compute),
+// or not positive are skipped. ok is false when no series qualifies, and when
+// any matching series is NaN, infinite, or beyond the int range: the largest
+// of the remaining series can be lower than the true maximum.
 func (spec *Spec) maxValue(families sourcemetrics.PrometheusMetricMap, labelName string) (value int, ok bool) {
 	family, err := extractFamily(spec, families)
 	if err != nil {
@@ -247,7 +235,11 @@ func (spec *Spec) maxValue(families sourcemetrics.PrometheusMetricMap, labelName
 			}
 			v = parsed
 		}
-		if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+		// float64(math.MaxInt) rounds up to 2^63, which does not fit an int.
+		if math.IsNaN(v) || math.IsInf(v, 0) || v >= float64(math.MaxInt) {
+			return 0, false
+		}
+		if v <= 0 {
 			continue
 		}
 		if int(v) > value {
