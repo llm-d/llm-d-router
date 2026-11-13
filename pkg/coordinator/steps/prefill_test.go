@@ -1218,7 +1218,7 @@ func TestPrefillStep_CoercesInvalidKVTransferParams(t *testing.T) {
 			if len(reqCtx.KVTransferParams) != 0 {
 				t.Fatalf("expected no kv_transfer_params recorded, got %v", reqCtx.KVTransferParams)
 			}
-			gotWarn := countLogMsgs(sink.infos, "prefill returned no kv_transfer_params")
+			gotWarn := countLogMsgs(sink.infos, "prefill returned no kv_transfer_params.remote_block_ids")
 			if tc.wantWarn && gotWarn == 0 {
 				t.Fatalf("expected a warning log for missing kv_transfer_params with %s, infos=%v", tc.kvConn, sink.infos)
 			}

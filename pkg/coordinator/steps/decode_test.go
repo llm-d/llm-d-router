@@ -25,6 +25,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -130,7 +131,7 @@ func TestDecodeStep_NonStreaming(t *testing.T) {
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
-		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
+		KVTransferParams: map[string]any{"block_id": "xyz", "remote_block_ids": []any{float64(1)}, "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
 			"model":  "llama-3",
 			"stream": false,
@@ -229,7 +230,7 @@ func TestDecodeStep_Responses_NonStreaming(t *testing.T) {
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
-		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
+		KVTransferParams: map[string]any{"block_id": "xyz", "remote_block_ids": []any{float64(1)}, "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
 			"model": "llama-3",
 			"input": []any{
@@ -285,7 +286,7 @@ func TestDecodeStep_Messages_NonStreaming(t *testing.T) {
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: testImageHash, Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 3}},
 		},
-		KVTransferParams: map[string]any{"block_id": "xyz", "peer_host": "10.0.0.5", "peer_port": 7777},
+		KVTransferParams: map[string]any{"block_id": "xyz", "remote_block_ids": []any{float64(1)}, "peer_host": "10.0.0.5", "peer_port": 7777},
 		Body: map[string]any{
 			"model":      "llama-3",
 			"max_tokens": 50,
@@ -605,6 +606,47 @@ func TestDecodeStep_PromptTokenIDsInKVParams(t *testing.T) {
 	}
 }
 
+// TestDecodeStep_NIXL_NoRemoteBlockIDs verifies that when the prefill
+// response carries no remote_block_ids the kv-nixl decode body carries no
+// transfer fields, while forwarded prompt token IDs still reach it.
+func TestDecodeStep_NIXL_NoRemoteBlockIDs(t *testing.T) {
+	nixl := map[string]any{ParamKVConnector: kv.NIXL}
+	tests := []struct {
+		name     string
+		params   map[string]any
+		path     string
+		incoming map[string]any
+		want     map[string]any
+	}{
+		{name: "chat", params: nixl, path: reqcommon.PathChatCompletions, want: map[string]any{}},
+		{name: "chat with forwarded ids", params: map[string]any{ParamKVConnector: kv.NIXL, ParamForwardPromptTokenIDs: true}, path: reqcommon.PathChatCompletions, want: map[string]any{reqcommon.FieldPromptTokenIDs: []int{1, 2, 3}}},
+		{name: "chat with empty remote_block_ids", params: nixl, path: reqcommon.PathChatCompletions, incoming: map[string]any{"remote_block_ids": []any{}, "remote_engine_id": "e", "remote_host": "h", "remote_port": float64(1)}, want: map[string]any{}},
+		{name: "completions", params: nixl, path: reqcommon.PathCompletions, want: map[string]any{}},
+		{name: "generate", params: nixl, path: reqcommon.PathVLLMGenerate, want: map[string]any{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), tc.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reqCtx := &pipeline.RequestContext{
+				OriginalPath:     tc.path,
+				TokenIDs:         []int{1, 2, 3},
+				KVTransferParams: tc.incoming,
+				Body:             map[string]any{"model": "m"},
+			}
+			if err := step.(*DecodeStep).prepareDecodeBody(context.Background(), reqCtx); err != nil {
+				t.Fatal(err)
+			}
+			got := reqCtx.Body[reqcommon.FieldKVTransferParams]
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("kv_transfer_params = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDecodeStep_ForwardPromptTokenIDs_RejectsNonBool(t *testing.T) {
 	if _, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: "http://unused"}), map[string]any{ParamForwardPromptTokenIDs: "yes"}); err == nil {
 		t.Fatal("expected an error for a non-bool forward_prompt_token_ids")
@@ -637,7 +679,7 @@ func TestDecodeStep_GenerateFormat_ToplevelKV(t *testing.T) {
 		OriginalPath:     reqcommon.PathVLLMGenerate,
 		Model:            "test-model",
 		TokenIDs:         []int{1, 2, 3, 4, 5},
-		KVTransferParams: map[string]any{"block_id": wantBlockID, "peer_host": "10.0.0.42", "peer_port": 7777},
+		KVTransferParams: map[string]any{"block_id": wantBlockID, "remote_block_ids": []any{float64(1)}, "peer_host": "10.0.0.42", "peer_port": 7777},
 		Body: map[string]any{
 			"model":           "test-model",
 			"token_ids":       []int{1, 2, 3, 4, 5},
