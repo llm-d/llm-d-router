@@ -526,6 +526,10 @@ It always triggers disaggregation, regardless of prefix cache state or prompt ch
 
 It’s useful for validating end-to-end prefill/decode splitting and comparing system performance under forced disaggregation.
 
+#### NIXL-Health PD Decider
+
+The `nixl-health-pd-decider` wraps another PD decider. It declines remote prefill for a decode endpoint whose engine reports failed NIXL KV cache transfers (`vllm:nixl_num_failed_transfers_total`) at or above a threshold within a window, and the decode endpoint serves the request without remote prefill. Parameters and limitations are in the [plugin README](../pkg/epp/framework/plugins/scheduling/profilehandler/disagg/README.md#nixlhealthpddecider).
+
 ### Encode Deciders
 
 Encode deciders determine whether multimodal encoding should be offloaded to dedicated encode workers.

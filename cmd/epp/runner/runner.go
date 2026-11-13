@@ -756,6 +756,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(preciseproducer.PluginType, fwkplugin.StabilityBeta, preciseproducer.PluginFactory)
 	// Alpha
 	fwkplugin.Register(headerprofile.HeaderProfileHandlerType, fwkplugin.StabilityAlpha, headerprofile.HeaderProfileHandlerFactory)
+	fwkplugin.RegisterWithPluginDependencies(disagg.NixlHealthPDDeciderPluginType, fwkplugin.StabilityAlpha, disagg.NixlHealthPDDeciderPluginFactory, disagg.NixlHealthPDDeciderConfigParser)
 	fwkplugin.Register(endpointattribute.EndpointAttributeScorerType, fwkplugin.StabilityAlpha, endpointattribute.EndpointAttributeScorerFactory)
 	fwkplugin.Register(latencyobservation.ScorerType, fwkplugin.StabilityAlpha, latencyobservation.ScorerFactory)
 	fwkplugin.Register(topologyaffinityscorer.ScorerType, fwkplugin.StabilityAlpha, topologyaffinityscorer.Factory)

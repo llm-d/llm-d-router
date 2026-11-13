@@ -9,6 +9,7 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
 - [Decider Plugins](#decider-plugins)
   - [PrefixBasedPDDecider](#prefixbasedpddecider)
   - [AlwaysDisaggPDDecider](#alwaysdisaggpddecider)
+  - [NixlHealthPDDecider](#nixlhealthpddecider)
   - [AlwaysDisaggMultimodalDecider](#alwaysdisaggmultimodaldecider)
 
 ---
@@ -165,6 +166,72 @@ None — ignores request content and endpoint state.
 ##### Parameters
 
 None.
+
+---
+
+### NixlHealthPDDecider
+
+**Type:** `nixl-health-pd-decider`
+
+Declines P/D disaggregation for a decode endpoint whose engine reports failed NIXL KV cache transfers at or above a threshold within a window. For every other decode endpoint it returns the decision of the PD decider it wraps.
+
+#### What it does
+
+1. Read the `NixlFailedTransfers` attribute from the decode endpoint. If the endpoint does not report it, return the wrapped decider's decision.
+2. Record the increase of the counter since the previous evaluation of the endpoint.
+3. If the increases recorded within `window` add up to `failedTransfersThreshold` or more, return false. The decode endpoint serves the request without remote prefill.
+4. Otherwise return the wrapped decider's decision.
+
+#### How It Works
+
+vLLM increments `vllm:nixl_num_failed_transfers_total` on the engine that pulls the KV cache, which in P/D is the decode engine. The built-in `vllm` engine config of the `core-metrics-extractor` stores the counter as the `NixlFailedTransfers` endpoint attribute when the engine runs with the NixlConnector.
+
+The counter is cumulative. The decider records increases at the times it evaluates the endpoint, so failures counted before its first evaluation of an endpoint do not count toward the threshold. A decrease of the counter means the engine restarted, and clears the recorded failures. The history of an endpoint that is not evaluated for one `window` is dropped.
+
+A decline takes the same path as a wrapped decider returning false, so the request completes on the decode endpoint instead of failing the way a required prefill stage with no endpoint does. While the decode endpoint serves requests without remote prefill it makes no NIXL transfers, so the counter stops increasing. When the recorded failures age out of the window, P/D resumes for the endpoint, and failures on a link that is still broken decline it again.
+
+The plugin logs when an endpoint reaches the threshold and when it falls back below it.
+
+#### Inputs consumed
+
+- `NixlFailedTransfers`: optional endpoint attribute from the `core-metrics-extractor`, read from the decode endpoint.
+- Everything the wrapped decider consumes.
+
+#### Configuration
+
+##### Parameters
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `decider` | `string` | Yes | | Name of the PD decider whose decision applies to decode endpoints below the threshold. It must be declared in the same configuration. |
+| `failedTransfersThreshold` | `int` | No | `5` | Failed NIXL transfers within `window` at which the decode endpoint serves requests without remote prefill. Must be positive. |
+| `window` | `duration` | No | `1m` | Period over which failed transfers are counted. Must be positive. |
+
+##### Example
+```yaml
+plugins:
+  - type: prefix-based-pd-decider
+    parameters:
+      nonCachedTokens: 512
+  - type: nixl-health-pd-decider
+    parameters:
+      decider: prefix-based-pd-decider
+      failedTransfersThreshold: 5
+      window: 1m
+  - type: disagg-profile-handler
+    parameters:
+      deciders:
+        prefill: nixl-health-pd-decider
+```
+
+#### Limitations
+
+- The plugin is Alpha, so the EPP must run with `--allow-experimental-plugins`.
+- The disagg profile handler accepts a prefill decider only in the `decode-first` stage order.
+- The counter does not identify the prefill endpoint of a failed transfer. With several prefill endpoints, failures with one of them decline P/D for the decode endpoint with all of them.
+- vLLM counts failed transfers, and one request can count more than one.
+- A transfer that hangs, for example on a network path that drops packets, does not increase the counter, so the decider does not decline P/D for it.
+- Increases are recorded when the decider evaluates the endpoint, so an endpoint that receives fewer requests within `window` than `failedTransfersThreshold` cannot reach the threshold.
+- The attribute holds the counter as of the last metrics scrape of the endpoint.
 
 ---
 
