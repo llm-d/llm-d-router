@@ -749,6 +749,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 
 	if endOfStream {
 		response.TerminationCause = cause
+		response.Completion = reqCtx.Completion
 		response.ReceivedTimestamp = reqCtx.RequestReceivedTimestamp
 		response.FirstTokenTimestamp = reqCtx.FirstTokenTimestamp()
 		response.CompleteTimestamp = reqCtx.ResponseCompleteTimestamp()

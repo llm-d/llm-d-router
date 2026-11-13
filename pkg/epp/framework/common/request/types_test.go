@@ -832,3 +832,17 @@ func TestMaxOutputTokensFromPayload(t *testing.T) {
 		})
 	}
 }
+
+func TestCompletionsRequestEchoDisabled(t *testing.T) {
+	for raw, want := range map[string]bool{
+		`{"prompt":"p"}`:              true,
+		`{"prompt":"p","echo":false}`: true,
+		`{"prompt":"p","echo":null}`:  true,
+		`{"prompt":"p","echo":true}`:  false,
+		`{"prompt":"p","echo":"yes"}`: false,
+	} {
+		var r CompletionsRequest
+		require.NoError(t, json.Unmarshal([]byte(raw), &r), raw)
+		assert.Equal(t, want, r.EchoDisabled(), raw)
+	}
+}

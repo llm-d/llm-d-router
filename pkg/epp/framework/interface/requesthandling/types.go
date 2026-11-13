@@ -77,6 +77,8 @@ type Response struct {
 	StreamedEvents int
 	// TerminationCause labels how the stream ended.
 	TerminationCause TerminationCause
+	// Completion is set only on the end-of-stream call; see ParsedResponse.
+	Completion *Completion
 	// ReceivedTimestamp is when the EPP received the request. Set only at end of stream.
 	ReceivedTimestamp time.Time
 	// FirstTokenTimestamp is when the first response body bytes were received; zero if none

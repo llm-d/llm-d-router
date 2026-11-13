@@ -209,13 +209,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 	if body.ChatCompletions != nil {
 		raw, features := b.chatCompletionsBytes(body.ChatCompletions, mmMetadataFromContext(ctx))
 		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
-			TokenIDs:           packBytes(raw),
+			TokenIDs:           PackBytes(raw),
 			MultiModalFeatures: features,
 		}}}, nil
 	}
 	if body.Messages != nil {
 		raw, features := b.messagesBytes(body.Messages)
-		tokens := packBytes(raw)
+		tokens := PackBytes(raw)
 		log.FromContext(ctx).V(logutil.DEBUG).Info("Anthropic messages prefix-cache estimation",
 			"messageCount", len(body.Messages.Messages),
 			"rawBytes", len(raw),
@@ -231,7 +231,7 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 	if body.Responses != nil {
 		raw, features := b.responsesBytes(body.Responses)
 		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
-			TokenIDs:           packBytes(raw),
+			TokenIDs:           PackBytes(raw),
 			MultiModalFeatures: features,
 		}}}, nil
 	}
@@ -251,13 +251,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 	if err != nil {
 		return nil, err
 	}
-	return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: packBytes(raw)}}}, nil
+	return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{TokenIDs: PackBytes(raw)}}}, nil
 }
 
 func estimateMultiStringCompletions(req *fwkrequest.CompletionsRequest) (*fwkrequest.TokenizedRequest, error) {
 	prompts := make([]fwkrequest.PromptTokens, 0, len(req.Prompt.Strings))
 	for _, s := range req.Prompt.Strings {
-		ids := packBytes([]byte(s))
+		ids := PackBytes([]byte(s))
 		prompts = append(prompts, fwkrequest.PromptTokens{TokenIDs: ids})
 	}
 	return &fwkrequest.TokenizedRequest{Prompts: prompts}, nil
@@ -645,9 +645,9 @@ func appendMMAssetHash(out []byte, features []fwkrequest.MultiModalFeature, moda
 	return out, features
 }
 
-// packBytes packs bytes into little-endian uint32 tokens (zero-padded tail).
+// PackBytes packs bytes into little-endian uint32 tokens (zero-padded tail).
 // Reinterpreting them reproduces the input, so locality keys are unchanged.
-func packBytes(raw []byte) []uint32 {
+func PackBytes(raw []byte) []uint32 {
 	if len(raw) == 0 {
 		return nil
 	}

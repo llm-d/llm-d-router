@@ -466,6 +466,14 @@ type CompletionsRequest struct {
 	Prompt Prompt `json:"prompt"`
 	// CacheSalt is an optional request parameter to isolate prefix caches for security reasons.
 	CacheSalt string `json:"cache_salt,omitempty"`
+	// Echo is kept raw so a malformed value does not fail request parsing.
+	Echo json.RawMessage `json:"echo,omitempty"`
+}
+
+// EchoDisabled reports whether the request leaves echo unset or sets it to false.
+func (r *CompletionsRequest) EchoDisabled() bool {
+	e := bytes.TrimSpace(r.Echo)
+	return len(e) == 0 || bytes.Equal(e, []byte("false")) || bytes.Equal(e, []byte("null"))
 }
 
 func (r *CompletionsRequest) String() string {

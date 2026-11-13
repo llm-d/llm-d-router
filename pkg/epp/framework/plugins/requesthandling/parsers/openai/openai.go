@@ -74,6 +74,13 @@ const (
 
 	octetStreamType = "application/octet-stream"
 
+	textCompletionObject = "text_completion"
+	finishReasonStop     = "stop"
+	finishReasonLength   = "length"
+	// maxCompletionResponseBytes bounds the non-streamed completions body whose text is
+	// returned in ParsedResponse.Completion. Larger bodies are not decoded for text.
+	maxCompletionResponseBytes = 1 << 20
+
 	// Text to speech api response format:
 	// https://docs.vllm.ai/projects/vllm-omni/en/latest/serving/speech_api/#response-format
 	vllmOmniInputTokensHeader  = "x-vllm-omni-input-tokens"  //#nosec G101 -- HTTP header name, not a credential
@@ -273,11 +280,30 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 		return p.parseStreamResponse(body)
 	}
 
-	usage, err := extractUsage(body)
-	if err != nil {
-		return nil, err
+	return extractResponse(body)
+}
+
+// completionChoices holds the fields of a completions response that
+// ParsedResponse.Completion is built from.
+type completionChoices struct {
+	Object  string `json:"object"`
+	Choices []struct {
+		Text         *string `json:"text"`
+		FinishReason string  `json:"finish_reason"`
+	} `json:"choices"`
+}
+
+// completion returns the text of a completions response with exactly one choice
+// that finished with "stop" or "length", or nil.
+func (c *completionChoices) completion(bodyLen int) *fwkrh.Completion {
+	if bodyLen > maxCompletionResponseBytes || c.Object != textCompletionObject || len(c.Choices) != 1 {
+		return nil
 	}
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	choice := c.Choices[0]
+	if choice.Text == nil || (choice.FinishReason != finishReasonStop && choice.FinishReason != finishReasonLength) {
+		return nil
+	}
+	return &fwkrh.Completion{Text: *choice.Text, FinishReason: choice.FinishReason}
 }
 
 func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
@@ -773,6 +799,25 @@ func toInt(v any) int {
 	return 0
 }
 
+// extractResponse reads usage and completion text in one decode. A type
+// mismatch outside "usage" leaves Completion nil and does not fail usage.
+func extractResponse(responseBytes []byte) (*fwkrh.ParsedResponse, error) {
+	var responseBody struct {
+		Usage map[string]any `json:"usage"`
+		completionChoices
+	}
+	var completion *fwkrh.Completion
+	err := json.Unmarshal(responseBytes, &responseBody)
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case err == nil:
+		completion = responseBody.completion(len(responseBytes))
+	case !errors.As(err, &typeErr) || typeErr.Field == reqcommon.FieldUsage:
+		return nil, err
+	}
+	return &fwkrh.ParsedResponse{Usage: usageFromFields(responseBody.Usage), Completion: completion}, nil
+}
+
 func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	var responseBody struct {
 		Usage map[string]any `json:"usage"`
@@ -781,15 +826,20 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if responseBody.Usage == nil {
-		return nil, nil //nolint:nilnil
+	return usageFromFields(responseBody.Usage), nil
+}
+
+// usageFromFields converts a decoded "usage" object, or returns nil when absent.
+func usageFromFields(fields map[string]any) *request.Usage {
+	if fields == nil {
+		return nil
 	}
 
 	usage := request.Usage{}
 
 	// Chat/Completions APIs use prompt_tokens. Responses/Conversations APIs use input_tokens.
 	for _, inputTokens := range []string{reqcommon.FieldPromptTokens, reqcommon.FieldInputTokens} {
-		if v, ok := responseBody.Usage[inputTokens]; ok && v != nil {
+		if v, ok := fields[inputTokens]; ok && v != nil {
 			usage.PromptTokens = toInt(v)
 			break
 		}
@@ -797,7 +847,7 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 
 	// Chat/Completions APIs use completion_tokens. Responses/Conversations APIs use output_tokens.
 	for _, outputTokens := range []string{reqcommon.FieldCompletionTokens, reqcommon.FieldOutputTokens} {
-		if v, ok := responseBody.Usage[outputTokens]; ok && v != nil {
+		if v, ok := fields[outputTokens]; ok && v != nil {
 			usage.CompletionTokens = toInt(v)
 			break
 		}
@@ -805,7 +855,7 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 
 	// Chat/Completions APIs use prompt_tokens_details. Responses/Conversations APIs use input_tokens_details.
 	for _, details := range []string{reqcommon.FieldPromptTokensDetails, reqcommon.FieldInputTokensDetails} {
-		if detailsMap, ok := responseBody.Usage[details].(map[string]any); ok {
+		if detailsMap, ok := fields[details].(map[string]any); ok {
 			if cachedTokens, ok := detailsMap[reqcommon.FieldCachedTokens]; ok {
 				usage.PromptTokenDetails = &request.PromptTokenDetails{
 					CachedTokens: toInt(cachedTokens),
@@ -815,11 +865,11 @@ func extractUsage(responseBytes []byte) (*request.Usage, error) {
 	}
 
 	// total_tokens field name is consistent across all API types.
-	if v, ok := responseBody.Usage[reqcommon.FieldTotalTokens]; ok && v != nil {
+	if v, ok := fields[reqcommon.FieldTotalTokens]; ok && v != nil {
 		usage.TotalTokens = toInt(v)
 	}
 
-	return &usage, nil
+	return &usage
 }
 
 // Example message if "stream_options": {"include_usage": "true"} is included in the request:

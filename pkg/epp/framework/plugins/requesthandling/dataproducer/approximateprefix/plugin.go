@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -60,6 +61,7 @@ var minBlockSizeTokens = 64
 var (
 	_ fwkrh.DataProducer                = &dataProducer{}
 	_ fwkrh.PreRequest                  = &dataProducer{}
+	_ fwkrh.ResponseBodyProcessor       = &dataProducer{}
 	_ plugin.StateDumper                = &dataProducer{}
 	_ datalayer.EndpointExtractor       = (*dataProducer)(nil)
 	_ datalayer.Registrant              = &dataProducer{}
@@ -87,6 +89,9 @@ type dataProducer struct {
 	// the map stays bounded and prompts that leave and return can be re-indexed.
 	// Values are *mergedKeySet.
 	peerMerged sync.Map
+	// estimateTokens is set during startup dependency validation when the
+	// token-producer this plugin consumes is the estimate backend.
+	estimateTokens atomic.Bool
 }
 
 // mergedKeySet is the per-endpoint set stored in peerMerged. keys holds only
@@ -169,7 +174,10 @@ func (p *dataProducer) Produces() map[plugin.DataKey]any {
 // Produce reads the syncer-backed attribute to merge peer recent windows.
 func (p *dataProducer) Consumes() plugin.DataDependencies {
 	deps := plugin.DataDependencies{
-		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: fwkrequest.TokenizedRequest{}},
+		Required: map[plugin.DataKey]any{tokenproducer.TokenizedPromptDataKey: plugin.ConsumedData{
+			Type:    fwkrequest.TokenizedRequest{},
+			Matches: p.recordTokenBackend,
+		}},
 	}
 	if p.syncCrossReplicaState {
 		deps.Optional = map[plugin.DataKey]any{p.syncHashDK: attrprefix.PrefixHashSet{}}
@@ -351,6 +359,7 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 		PrefixCacheServers:        prefixCacheServers,
 		PredictedCachedTokens:     predictedCachedTokens,
 		BestAvailableCachedTokens: bestAvailable,
+		BlockSize:                 blockSize,
 	}
 
 	p.pluginState.Write(request.RequestID, plugin.StateKey(p.typedName.Name), state)
@@ -513,10 +522,12 @@ func (p *dataProducer) forgetPeerMerged(endpointID string) {
 // PreRequest records in the shared indexer the result of the scheduling selection.
 // It updates the indexer with the prefix hashes for the selected endpoint(s).
 func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
-	// Delete the state to avoid memory leak.
-	defer p.pluginState.Delete(request.RequestID)
+	// Delete the scheduling state to avoid memory leak. Continuation state, when
+	// written below, is deleted by ResponseBody.
+	defer p.pluginState.DeleteKey(request.RequestID, plugin.StateKey(p.typedName.Name))
 	primaryProfileResult := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if len(primaryProfileResult.TargetEndpoints) == 0 {
+		p.pluginState.Delete(request.RequestID)
 		return nil
 	}
 
@@ -524,8 +535,11 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	pr, disaggregated := schedulingResult.ProfileResults[experimentalDefaultPrefillProfile]
 	disaggregated = disaggregated && pr != nil && len(pr.TargetEndpoints) > 0
 	servers := make([]server, 0, 2)
+	var decode *server
 	if !disaggregated || !p.config.ExcludeDecodeWhenDisaggregated {
-		servers = append(servers, p.makeserver(targetEndpoint))
+		d := p.makeserver(targetEndpoint)
+		servers = append(servers, d)
+		decode = &d
 	}
 	// Also record for prefill node if present in P/D disaggregated mode.
 	if disaggregated {
@@ -536,16 +550,25 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 	state, err := plugin.ReadPluginStateKey[*SchedulingContextState](p.pluginState, request.RequestID, plugin.StateKey(p.typedName.Name))
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to read prefix plugin state", "requestID", request.RequestID)
+		p.pluginState.Delete(request.RequestID)
 		return nil
 	}
+	promptIndexed := p.trackContinuation(ctx, request, decode, state.BlockSize)
 
 	// Update indexer asynchronously to avoid blocking the request path.
 	p.wg.Go(func() {
-		for _, s := range servers {
+		var decodeEntry []blockHash
+		if promptIndexed != nil {
+			defer func() { promptIndexed <- decodeEntry }()
+		}
+		for i, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
 				p.indexerInst.Add(hashes, s)
 				if p.syncerActive() {
-					p.recent.record(s.String(), hashes)
+					entry := p.recent.record(s.String(), hashes)
+					if i == 0 && decode != nil {
+						decodeEntry = entry
+					}
 				}
 			}
 		}
