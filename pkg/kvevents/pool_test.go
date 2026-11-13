@@ -58,6 +58,48 @@ func newTestPool(t *testing.T, blockSize int) (
 	return pool, idx, tp
 }
 
+// A bound global socket takes the pod identity from the topic, so NewPool
+// refuses to bind it where other hosts can reach it unless the config opts in.
+func TestNewPoolRejectsNonLocalGlobalSocket(t *testing.T) {
+	idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+	tp, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 16, HashSeed: "test"})
+	require.NoError(t, err)
+
+	tests := []struct {
+		endpoint string
+		allow    bool
+		wantErr  bool
+	}{
+		{endpoint: "", wantErr: false},
+		{endpoint: "tcp://127.0.0.1:5557", wantErr: false},
+		{endpoint: "tcp://localhost:5557", wantErr: false},
+		{endpoint: "tcp://[::1]:5557", wantErr: false},
+		{endpoint: "ipc:///tmp/kv-events", wantErr: false},
+		{endpoint: "inproc://kv-events", wantErr: false},
+		{endpoint: "tcp://0.0.0.0:5557", wantErr: true},
+		{endpoint: "tcp://*:5557", wantErr: true},
+		{endpoint: "tcp://[::]:5557", wantErr: true},
+		{endpoint: "tcp://10.0.0.5:5557", wantErr: true},
+		{endpoint: "tcp://epp.ns.svc:5557", wantErr: true},
+		{endpoint: "tcp://5557", wantErr: true},
+		{endpoint: "tcp://0.0.0.0:5557", allow: true, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s allow=%t", tt.endpoint, tt.allow), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.ZMQEndpoint = tt.endpoint
+			cfg.AllowUntrustedPublishers = tt.allow
+			_, err := NewPool(cfg, idx, tp, nil)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "allowUntrustedPublishers")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 type recordingIndex struct {
 	kvblock.Index
 	getRequestKeyCalls int
