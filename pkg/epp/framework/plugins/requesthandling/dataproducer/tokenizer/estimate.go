@@ -242,6 +242,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 			MultiModalFeatures: features,
 		}}}, nil
 	}
+	if body.Transcriptions != nil {
+		raw, features := b.transcriptionsBytes(body.Transcriptions, mmMetadataFromContext(ctx))
+		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+			TokenIDs:           packBytes(raw),
+			MultiModalFeatures: features,
+		}}}, nil
+	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
 		return estimateMultiStringCompletions(body.Completions)
@@ -335,6 +342,15 @@ func ttsText(r *fwkrequest.TextToSpeechRequest) string {
 		text += "\n" + r.RefText
 	}
 	return text
+}
+
+// transcriptionsBytes flattens a transcription request's conditioning text and
+// uploaded audio into pseudo-token bytes with one audio feature, mirroring the
+// chat multimodal representation so downstream consumers treat both alike.
+func (b estimateBackend) transcriptionsBytes(tr *fwkrequest.TranscriptionRequest, meta mmMetadata) ([]byte, []fwkrequest.MultiModalFeature) {
+	out := []byte(tr.Prompt)
+	return appendMMAssetHash(out, nil, reqcommon.ModalityAudio, tr.Audio.Hash,
+		b.aud.placeholderCountUploaded(tr.Audio.Head, tr.Audio.SizeBytes, meta.audio))
 }
 
 // chatCompletionsBytes flattens roles + text into pseudo-token bytes, folding
