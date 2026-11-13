@@ -620,9 +620,9 @@ func readUploadedMedia(part *multipart.Part) (request.UploadedMedia, error) {
 }
 
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
-// The uploaded image part is the image-to-image conditioning input, so it is
-// captured as UploadedMedia for input-cost estimation; the original body is
-// forwarded unchanged.
+// Each uploaded image part, under the "image" or "image[]" form name, is an
+// image-to-image conditioning input, so it is captured as UploadedMedia for
+// input-cost estimation; the original body is forwarded unchanged.
 func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	images := &request.ImagesGenerationsRequest{}
 	extractedBody := &request.InferenceRequestBody{
@@ -660,9 +660,9 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 		}
 		return nil
 	}, func(name string) bool {
-		return name == "image"
+		return name == "image" || name == "image[]"
 	}, func(_ string, media request.UploadedMedia) error {
-		images.Image = media
+		images.InputImages = append(images.InputImages, media)
 		return nil
 	})
 	if err != nil {
