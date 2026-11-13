@@ -69,7 +69,7 @@ func newKVCRHarness(t *testing.T, ctx context.Context) *kvcrHarness {
 }
 
 // publish delivers one vLLM event batch from pod.
-func (h *kvcrHarness) publish(t *testing.T, ctx context.Context, pod string, events ...[]any) {
+func (h *kvcrHarness) publish(t *testing.T, ctx context.Context, pod string, events ...map[string]any) {
 	t.Helper()
 
 	payload, err := msgpack.Marshal([]any{1234567890.0, events, nil})
@@ -92,32 +92,41 @@ func (h *kvcrHarness) matches(t *testing.T, ctx context.Context, tokens []uint32
 	return matches
 }
 
-// kvcrBlockStored is vLLM's array-encoded BlockStored up to ownership. vLLM
-// omits the trailing session_id and lookahead_token_ids when unset. A nil
-// parent marks the first block of a sequence.
-func kvcrBlockStored(hashes []uint64, parent any, tokens []uint32, blockSize int, medium string, ownership any) []any {
-	return []any{
-		"BlockStored", hashes, parent, tokens, blockSize,
-		nil,              // lora_id
-		medium,           // medium
-		nil,              // lora_name
-		nil,              // extra_keys
-		0,                // group_idx
-		"full_attention", // kv_cache_spec_kind
-		nil,              // kv_cache_spec_sliding_window
-		nil,              // locality
-		ownership,        // ownership
+// kvcrBlockStored is BlockStored as vLLM publishes it: a map tagged by "type"
+// that carries the fields without defaults, nil when unset, and omits unset
+// optional fields. A nil parent marks the first block of a sequence; an empty
+// ownership is vLLM's own tier.
+func kvcrBlockStored(hashes []uint64, parent any, tokens []uint32, blockSize int, medium, ownership string) map[string]any {
+	ev := map[string]any{
+		"type":               "BlockStored",
+		"block_hashes":       hashes,
+		"parent_block_hash":  parent,
+		"token_ids":          tokens,
+		"block_size":         blockSize,
+		"lora_id":            nil,
+		"medium":             medium,
+		"lora_name":          nil,
+		"group_idx":          0,
+		"kv_cache_spec_kind": "full_attention",
 	}
+	if ownership != "" {
+		ev["ownership"] = ownership
+	}
+	return ev
 }
 
 // kvcrPlaceholderStored is the BlockStored vLLM emits for an offloaded key it
 // holds no request metadata for: one hash, no tokens and block_size 0.
-func kvcrPlaceholderStored(hash uint64, medium string) []any {
+func kvcrPlaceholderStored(hash uint64, medium string) map[string]any {
 	return kvcrBlockStored([]uint64{hash}, nil, []uint32{}, 0, medium, kvcrOwnership)
 }
 
-func kvcrBlockRemoved(hashes []uint64, medium string, ownership any) []any {
-	return []any{"BlockRemoved", hashes, medium, 0, nil, ownership}
+func kvcrBlockRemoved(hashes []uint64, medium, ownership string) map[string]any {
+	ev := map[string]any{"type": "BlockRemoved", "block_hashes": hashes, "medium": medium, "group_idx": 0}
+	if ownership != "" {
+		ev["ownership"] = ownership
+	}
+	return ev
 }
 
 func kvcrTokens(n int, base uint32) []uint32 {
@@ -143,14 +152,14 @@ func TestKVCRInventory_LocalTiersKeepPodScoredAfterGPUEviction(t *testing.T) {
 	prompt := kvcrTokens(4*kvcrBlockSize, 1)
 	hashes := kvcrHashes(4, 100)
 	h.publish(t, ctx, "pod-a",
-		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", nil),
+		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""),
 		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "CPU", kvcrOwnership),
 		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "STORAGE", kvcrOwnership),
 	)
 	h.publish(t, ctx, "pod-b",
-		kvcrBlockStored(kvcrHashes(4, 500), nil, kvcrTokens(4*kvcrBlockSize, 1000), kvcrBlockSize, "GPU", nil),
+		kvcrBlockStored(kvcrHashes(4, 500), nil, kvcrTokens(4*kvcrBlockSize, 1000), kvcrBlockSize, "GPU", ""),
 	)
-	h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, "GPU", nil))
+	h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, "GPU", ""))
 
 	m, ok := h.matches(t, ctx, prompt)["pod-a"]
 	require.True(t, ok, "KVCR tiers must keep the prefix on pod-a after GPU eviction")
@@ -178,14 +187,14 @@ func TestKVCRInventory_PlaceholderStoresResolveThroughEngineKeys(t *testing.T) {
 
 	prompt := kvcrTokens(4*kvcrBlockSize, 1)
 	hashes := kvcrHashes(4, 100)
-	h.publish(t, ctx, "pod-a", kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", nil))
+	h.publish(t, ctx, "pod-a", kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""))
 
-	placeholders := make([][]any, 0, len(hashes))
+	placeholders := make([]map[string]any, 0, len(hashes))
 	for _, hash := range hashes {
 		placeholders = append(placeholders, kvcrPlaceholderStored(hash, "STORAGE"))
 	}
 	h.publish(t, ctx, "pod-a", placeholders...)
-	h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, "GPU", nil))
+	h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, "GPU", ""))
 
 	m, ok := h.matches(t, ctx, prompt)["pod-a"]
 	require.True(t, ok, "placeholder stores must resolve through the GPU store's engine keys")
@@ -205,13 +214,13 @@ func TestKVCRInventory_CPUTierSharedWithPrimaryOffload(t *testing.T) {
 	prompt := kvcrTokens(4*kvcrBlockSize, 1)
 	hashes := kvcrHashes(4, 100)
 	h.publish(t, ctx, "pod-a",
-		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", nil),
-		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "CPU", nil),
+		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""),
+		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "CPU", ""),
 		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "CPU", kvcrOwnership),
 	)
 	h.publish(t, ctx, "pod-a",
-		kvcrBlockRemoved(hashes, "GPU", nil),
-		kvcrBlockRemoved(hashes, "CPU", nil),
+		kvcrBlockRemoved(hashes, "GPU", ""),
+		kvcrBlockRemoved(hashes, "CPU", ""),
 	)
 
 	m, ok := h.matches(t, ctx, prompt)["pod-a"]
@@ -233,13 +242,13 @@ func TestKVCRInventory_StoreAfterLastRemovalInOneBatch(t *testing.T) {
 	prompt := kvcrTokens(8*kvcrBlockSize, 1)
 	hashes := kvcrHashes(8, 100)
 	h.publish(t, ctx, "pod-a",
-		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", nil),
-		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "CPU", nil),
+		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""),
+		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "CPU", ""),
 	)
 
 	h.publish(t, ctx, "pod-a",
-		kvcrBlockRemoved(hashes, "GPU", nil),
-		kvcrBlockRemoved(hashes, "CPU", nil),
+		kvcrBlockRemoved(hashes, "GPU", ""),
+		kvcrBlockRemoved(hashes, "CPU", ""),
 		kvcrBlockStored(hashes[:4], nil, prompt[:4*kvcrBlockSize], kvcrBlockSize, "CPU", kvcrOwnership),
 		kvcrBlockStored(hashes[4:], hashes[3], prompt[4*kvcrBlockSize:], kvcrBlockSize, "CPU", kvcrOwnership),
 	)
