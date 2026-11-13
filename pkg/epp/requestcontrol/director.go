@@ -249,7 +249,6 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	span.SetAttributes(
 		attribute.String("target_model", reqCtx.TargetModelName),
-		attribute.Int("request_prio", priority),
 	)
 
 	fairnessID, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
@@ -337,6 +336,17 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	tracing.SetRequestAttribution(ctx, reqCtx.SchedulingRequest.FairnessID, source)
 	tracing.AttributeRequest(ctx, span)
 	metrics.RecordFairnessIDResolution(d.poolName, reqCtx.SchedulingRequest.FairnessID, source)
+
+	// The agent-lineage plugin resolves a parented child's band from its
+	// parent's recorded band. Applying it here, before admission, is the one
+	// place a request's band is set: bands resolve once and queued requests
+	// never migrate across them.
+	if resolvedBand, ok := fwksched.ReadRequestAttribute[int](reqCtx.SchedulingRequest, agentlineage.ResolvedBandKey); ok {
+		priority = resolvedBand
+		reqCtx.Priority = resolvedBand
+		reqCtx.SchedulingRequest.Objectives.Priority = resolvedBand
+	}
+	span.SetAttributes(attribute.Int("request_prio", priority))
 
 	admitting = true
 	// Admit may block until flow control admits the request.
