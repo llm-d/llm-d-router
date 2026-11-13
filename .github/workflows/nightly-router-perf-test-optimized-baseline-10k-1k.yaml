@@ -156,3 +156,31 @@ jobs:
             gh issue create --repo "$REPO" --title "Nightly perf trend: ${target_id} regressed" \
               --label kind/performance --body-file trend-output/trend-issue.md
           fi
+
+  # report-perf-trend is skipped when the benchmark fails, so a broken run would
+  # otherwise go unnoticed. Open an issue on the first failure and comment on it
+  # for each further failed run until someone closes it.
+  report-perf-failure:
+    needs: run-perf-benchmark
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      WORKFLOW: ${{ github.workflow }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the failure issue
+        run: |
+          marker="<!-- nightly-perf-failure: ${WORKFLOW} -->"
+          printf '%s\n\n%s failed.\n\nRun: %s\n' "$marker" "$WORKFLOW" "$RUN_URL" > failure-issue.md
+          number=$(gh issue list --repo "$REPO" --state open --label kind/performance --limit 200 --json number,body |
+            jq -r --arg marker "$marker" '[.[] | select((.body // "") | contains($marker))][0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$REPO" --body-file failure-issue.md
+          else
+            gh issue create --repo "$REPO" --title "${WORKFLOW} failed" \
+              --label kind/performance --body-file failure-issue.md
+          fi
