@@ -356,24 +356,28 @@ func TestAddedTokensEntry_Clone(t *testing.T) {
 	require.Nil(t, nilEntry.Clone())
 
 	entry := &addedTokensEntry{
-		tokenCounter:   &atomic.Int64{},
+		tokenCounters:  &tokenCounters{},
 		requestCounter: &atomic.Int64{},
 		tokenGauge:     prometheus.NewGauge(prometheus.GaugeOpts{Name: "clone_tokens"}),
 		requestGauge:   prometheus.NewGauge(prometheus.GaugeOpts{Name: "clone_requests"}),
 	}
-	entry.tokens.Store(15)
+	entry.textTokens.Store(15)
+	entry.nonTextTokens.Store(6)
 	entry.requests.Store(1)
 
 	cloned := entry.Clone().(*addedTokensEntry)
-	require.Same(t, entry.tokenCounter, cloned.tokenCounter)
+	require.Same(t, entry.tokenCounters, cloned.tokenCounters)
 	require.Same(t, entry.requestCounter, cloned.requestCounter)
 	require.Same(t, entry.tokenGauge, cloned.tokenGauge)
 	require.Same(t, entry.requestGauge, cloned.requestGauge)
-	require.Equal(t, int64(15), cloned.tokens.Load())
+	require.Equal(t, int64(15), cloned.textTokens.Load())
+	require.Equal(t, int64(6), cloned.nonTextTokens.Load())
 	require.Equal(t, int32(1), cloned.requests.Load())
 
-	cloned.tokens.Store(0)
-	require.Equal(t, int64(15), entry.tokens.Load())
+	cloned.textTokens.Store(0)
+	cloned.nonTextTokens.Store(0)
+	require.Equal(t, int64(15), entry.textTokens.Load())
+	require.Equal(t, int64(6), entry.nonTextTokens.Load())
 }
 
 // The plugin's fairness_id label shares the cardinality cap, so a flood of distinct client IDs
