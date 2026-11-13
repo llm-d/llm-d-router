@@ -148,6 +148,36 @@ type Index interface {
 	Clear(ctx context.Context, podIdentifier string) error
 }
 
+// EngineKeyAdder inserts entries using existing engine mappings in one operation.
+// Implementations coordinate mapping resolution and insertion with invalidation.
+type EngineKeyAdder interface {
+	AddByEngineKeys(ctx context.Context, engineKeys []BlockHash, entries []PodEntry) (int, error)
+}
+
+// AddByEngineKeys returns the number of distinct request keys updated.
+// Backends with EngineKeyAdder provide atomic resolution and insertion.
+func AddByEngineKeys(ctx context.Context, index Index, engineKeys []BlockHash, entries []PodEntry) (int, error) {
+	if adder, ok := index.(EngineKeyAdder); ok {
+		return adder.AddByEngineKeys(ctx, engineKeys, entries)
+	}
+	seen := sets.New[BlockHash]()
+	var requestKeys []BlockHash
+	for _, key := range engineKeys {
+		requestKey, err := index.GetRequestKey(ctx, key)
+		if err == nil && !seen.Has(requestKey) {
+			seen.Insert(requestKey)
+			requestKeys = append(requestKeys, requestKey)
+		}
+	}
+	if len(requestKeys) == 0 {
+		return 0, nil
+	}
+	if err := index.Add(ctx, nil, requestKeys, entries); err != nil {
+		return 0, err
+	}
+	return len(requestKeys), nil
+}
+
 // KeyType indicates whether a key passed to Evict is an engine key or a request key.
 type KeyType int
 
