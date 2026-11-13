@@ -35,6 +35,52 @@ type requestSummary struct {
 	mu          sync.Mutex
 	durations   map[string]time.Duration
 	failedStage string
+	// pending counts stages still running after the handler may return, such
+	// as the unawaited prefill of concurrent P/D. flush, set by finish, writes
+	// the line once the last of them ends.
+	pending int
+	flush   func()
+}
+
+// beginStage marks a stage that may outlive the handler, so the summary line
+// waits for it. Every beginStage must be paired with endStage.
+func (s *requestSummary) beginStage() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.pending++
+	s.mu.Unlock()
+}
+
+// endStage ends a stage started with beginStage and writes the summary line
+// if the handler has finished and no other stage is pending.
+func (s *requestSummary) endStage() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.pending--
+	var flush func()
+	if s.pending == 0 {
+		flush, s.flush = s.flush, nil
+	}
+	s.mu.Unlock()
+	if flush != nil {
+		flush()
+	}
+}
+
+// finish runs write now, or once the last pending stage ends.
+func (s *requestSummary) finish(write func()) {
+	s.mu.Lock()
+	if s.pending > 0 {
+		s.flush = write
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+	write()
 }
 
 type requestSummaryKey struct{}

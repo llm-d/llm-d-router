@@ -111,7 +111,11 @@ func (s *Server) runConcurrentPD(
 
 	// Aggregate before starting the worker so reporting does not wait for prefill.
 	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
+	// The request's summary line waits for this prefill's outcome.
+	summary := requestSummaryFrom(r.Context())
+	summary.beginStage()
 	go func() {
+		defer summary.endStage()
 		defer cancelPrefill()
 		defer prefillSpan.End()
 		defer func() {
