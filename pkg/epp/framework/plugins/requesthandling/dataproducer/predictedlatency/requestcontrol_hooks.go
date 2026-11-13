@@ -69,16 +69,13 @@ func (pl *PredictedLatency) PreRequest(ctx context.Context, request *fwksched.In
 
 	id := request.RequestID
 
-	actual, _ := pl.runningRequestLists.LoadOrStore(endpointName, newRequestPriorityQueue())
-	endpointRequestList := actual.(*requestPriorityQueue)
-
 	predictedLatencyCtx, err := pl.getPredictedLatencyContextForRequest(request)
 	if err != nil {
 		logger.V(logutil.DEBUG).Info("PredictedLatency.PreRequest: Failed to get SLO context for request", "error", err, "requestID", id)
 		return nil
 	}
 
-	added := endpointRequestList.Add(id, predictedLatencyCtx.avgTPOTSLO)
+	added := pl.addRequestToEndpoint(endpointName, id, predictedLatencyCtx.avgTPOTSLO)
 	if !added {
 		logger.V(logutil.TRACE).Info("PredictedLatency: Item already exists in queue", "endpointName", endpointName, "requestID", id)
 	}
