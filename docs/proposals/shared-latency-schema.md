@@ -424,19 +424,19 @@ sequenceDiagram
     participant C as Go predictor client
     participant P as Prediction service
     participant T as Training service
-    R->>R: Tokenize; capture request and endpoint features in Produce
+    R->>R: Tokenize#59; capture request and endpoint features in Produce
     R->>C: Compose one scheduling row per candidate endpoint
     C->>P: POST /predict/bulk/strict with flat JSON rows
-    P->>P: Validate; build target frames; align to loaded artifact columns
+    P->>P: Validate#59; build target frames#59; align to loaded artifact columns
     P-->>C: Ordered TTFT/TPOT predictions
     C-->>R: Predictions used by the existing scheduler
     R->>R: PreRequest records selected primary/prefill endpoints
-    R->>C: First token TTFT row; completion average-TPOT row
+    R->>C: First token TTFT row#59; completion average-TPOT row
     C->>T: Buffered POST /add_training_data_bulk
-    T->>T: Existing split/buckets; feature plan; fit and export artifacts
+    T->>T: Existing split/buckets#59; feature plan#59; fit and export artifacts
     P->>T: Existing model info/download endpoints
     T-->>P: joblib model/scaler files
-    P->>P: Validate candidate columns; swap ready model references
+    P->>P: Validate candidate columns#59; swap ready model references
 ```
 
 `newPredictedLatencyContext()` creates immutable request-feature snapshots and the endpoint snapshot map. `generatePredictions()` converts composed rows through `PredictionFromFeatures`; `PredictBulkStrict()` preserves validation, coalescing, cancellation and output-count checks. Strict and ordinary batch calls retain their HTTP paths. Single `Predict()` retains local Ridge calculation and HTTP prediction for tree models. Endpoint selection and prediction fallback retain their existing contracts.
