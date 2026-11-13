@@ -724,6 +724,7 @@ Configures routing policies, target Gateway interfaces, and priority objectives 
 | `provider.name` | Name of Gateway implementation. Options: `[none, gke, istio]`. | `none` |
 | `provider.istio.destinationRule.host` | Custom host value for Istio DestinationRule. | `""` |
 | `provider.istio.destinationRule.trafficPolicy.connectionPool` | Connection pool settings for Istio DestinationRule. | `{}` |
+| `provider.gke.backendTimeoutSec` | `timeoutSec` of the `GCPBackendPolicy`. Raise it above the longest time EPP can hold a request in its flow-control queue. | `300` |
 | `provider.gke.preferredBackends.enabled` | Enable Preferred Backends high availability routing for GKE. | `false` |
 | `provider.gke.preferredBackends.preferredReplicas` | Replica count for primary active pod ordinals pinned to PREFERRED tier. | `1` |
 | `provider.gke.preferredBackends.defaultReplicas` | Replica count for standby backup pod ordinals pinned to DEFAULT tier. | `1` |
@@ -789,6 +790,7 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.autoscaling.behavior` | Scaling behavior policies for proxy HPA scale-up and scale-down. | `{}` |
 | `router.proxy.autoscaling.metrics` | Custom HPA v2 metrics override for the proxy; replaces auto-generated CPU and memory metrics. Target percentage fields remain range-validated if defined. | `[]` |
 | `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. Requests EPP did not schedule are load-balanced across the model servers through a headless Service (`<release>-epp-model-servers`) selecting `router.modelServers.matchLabels` on the first `router.modelServers.targetPorts` entry, without endpoint picking. Applies to `proxyType=envoy` only; Agentgateway exposes no fail-open setting and rejects requests (fails closed) when EPP is unreachable. | `true` |
+| `router.proxy.extProcMessageTimeout` | Envoy `ext_proc` `message_timeout`: how long Envoy waits for each EPP response. Raise it above the longest time EPP can hold a request in its flow-control queue. Applies to `proxyType=envoy` only. | `1000s` |
 | `router.proxy.tracing.enabled` | Enable OpenTelemetry tracing in Envoy. Envoy creates a span per request on the main listener and propagates the trace context on the ext_proc gRPC stream to EPP, so EPP spans (`router.tracing.enabled`) join the request trace. Applies to `proxyType=envoy` only. | `false` |
 | `router.proxy.tracing.collectorEndpoint` | OTLP gRPC collector endpoint (`host:port`, scheme optional, port defaults to `4317`) for Envoy spans. Falls back to `router.tracing.otelExporterEndpoint` when empty. | `""` |
 | `router.proxy.tracing.serviceName` | `service.name` reported on Envoy spans. | `envoy-proxy` |
