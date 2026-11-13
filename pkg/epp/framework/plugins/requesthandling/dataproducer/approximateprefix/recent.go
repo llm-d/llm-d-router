@@ -19,6 +19,8 @@ package approximateprefix
 import (
 	"encoding/binary"
 	"sync"
+
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
 )
 
 // recentWindow buffers recently recorded prompt hash sequences per endpoint.
@@ -27,7 +29,10 @@ import (
 type recentWindow struct {
 	mu      sync.Mutex
 	pending map[string][][]blockHash
-	max     int
+	// base is the generation of pending[endpointID][0]. It advances by one for
+	// each prompt trimmed, so a generation always names the same prompt.
+	base map[string]uint64
+	max  int
 }
 
 func newRecentWindow(max int) *recentWindow {
@@ -36,6 +41,7 @@ func newRecentWindow(max int) *recentWindow {
 	}
 	return &recentWindow{
 		pending: make(map[string][][]blockHash),
+		base:    make(map[string]uint64),
 		max:     max,
 	}
 }
@@ -59,16 +65,24 @@ func (w *recentWindow) record(endpointID string, hashes []blockHash) {
 
 	buf := w.pending[endpointID]
 	buf = append(buf, cp)
-	w.pending[endpointID] = trimPromptHashes(buf, w.max)
+	trimmed, dropped := trimPromptHashes(buf, w.max)
+	w.pending[endpointID] = trimmed
+	w.base[endpointID] += clamp.Uint64(dropped)
 }
 
 // snapshot returns a deep copy of pending prompts for endpointID without clearing.
-// The syncer replaces each replica field on every Set, so draining would wipe
+// Peers read the window as a whole on every publish, so draining would wipe
 // peer-visible hashes on the next idle publish tick.
 func (w *recentWindow) snapshot(endpointID string) [][]blockHash {
+	prompts, _ := w.snapshotWindow(endpointID)
+	return prompts
+}
+
+// snapshotWindow is snapshot plus the generation of the first prompt.
+func (w *recentWindow) snapshotWindow(endpointID string) ([][]blockHash, uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return copyPromptHashes(w.pending[endpointID])
+	return copyPromptHashes(w.pending[endpointID]), w.base[endpointID]
 }
 
 // forget drops the buffer for endpointID when the endpoint leaves the pool.
@@ -76,28 +90,27 @@ func (w *recentWindow) forget(endpointID string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.pending, endpointID)
+	delete(w.base, endpointID)
 }
 
-// trimPromptHashes drops oldest whole prompts until total hashes <= max.
-// If one prompt still exceeds max, it is head-capped.
-func trimPromptHashes(prompts [][]blockHash, max int) [][]blockHash {
+// trimPromptHashes drops oldest whole prompts until total hashes <= max and
+// reports how many it dropped. record caps each prompt at max before calling
+// it, so the last prompt always fits.
+func trimPromptHashes(prompts [][]blockHash, max int) ([][]blockHash, int) {
 	if max <= 0 || len(prompts) == 0 {
-		return prompts
+		return prompts, 0
 	}
 	total := promptHashCount(prompts)
+	dropped := 0
 	for total > max && len(prompts) > 1 {
 		total -= len(prompts[0])
 		prompts = prompts[1:]
-	}
-	if total > max {
-		head := make([]blockHash, max)
-		copy(head, prompts[0][:max])
-		return [][]blockHash{head}
+		dropped++
 	}
 	// Own the slice so a later append cannot overwrite retained prompts.
 	out := make([][]blockHash, len(prompts))
 	copy(out, prompts)
-	return out
+	return out, dropped
 }
 
 func promptHashCount(prompts [][]blockHash) int {
