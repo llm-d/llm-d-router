@@ -695,7 +695,8 @@ func addedTokensKey(endpointID, profileName string) string {
 // prefill as one in GPU memory. For very long prompts
 // where the prefix index is capped (MaxPrefixTokensToMatch), any tail beyond the
 // cap is added back from the (estimated) inputTokens so the full prompt cost is
-// still reflected.
+// still reflected. An explicit TotalTokens supplies the full prompt cost in
+// the same units as the cache match.
 //
 // When the attribute is missing, we fall back to the estimated inputTokens.
 func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMatchInfoKey fwkplugin.DataKey) int64 {
@@ -709,6 +710,10 @@ func uncachedInputTokens(endpoint fwksched.Endpoint, inputTokens int64, prefixMa
 	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
 	if !ok || info == nil || info.BlockSizeTokens() <= 0 {
 		return nonNeg(inputTokens)
+	}
+
+	if count, ok := info.TotalTokens(); ok {
+		inputTokens = int64(count)
 	}
 
 	blockSize := int64(info.BlockSizeTokens())
