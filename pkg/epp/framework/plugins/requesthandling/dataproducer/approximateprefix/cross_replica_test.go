@@ -68,6 +68,26 @@ func TestRecentWindowKeepsPromptBoundaries(t *testing.T) {
 		"drop oldest prompt when total exceeds max")
 }
 
+func TestRecentWindowRemovePrompt(t *testing.T) {
+	w := newRecentWindow(10)
+	w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3, 4})
+	w.removePrompt("ep", []blockHash{3, 4})
+	require.Equal(t, [][]blockHash{{1, 2}}, w.snapshot("ep"), "removed prompt leaves the window")
+
+	// A recording head-capped to the window's max is matched by its full hashes.
+	capped := newRecentWindow(3)
+	capped.record("ep", []blockHash{1, 2, 3, 4, 5})
+	require.Equal(t, [][]blockHash{{1, 2, 3}}, capped.snapshot("ep"))
+	capped.removePrompt("ep", []blockHash{1, 2, 3, 4, 5})
+	require.Nil(t, capped.snapshot("ep"), "capped recording removed by full hashes")
+
+	// Removing an unknown prompt, or from an unknown endpoint, is a no-op.
+	w.removePrompt("ep", []blockHash{99})
+	w.removePrompt("other", []blockHash{1, 2})
+	require.Equal(t, [][]blockHash{{1, 2}}, w.snapshot("ep"))
+}
+
 func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {
 	syncOn := true
 	cfg := defaultConfig
