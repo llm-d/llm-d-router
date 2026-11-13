@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -87,7 +88,7 @@ func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.Inf
 	var result [][]BlockHash
 	var promptTokens []int
 	for _, p := range tp.Prompts {
-		hashes := computeBlockHashes(request, p.TokenIDs, blockSizeTokens, maxPrefixBlocks)
+		hashes := computeBlockHashes(request, p.TokenIDs, p.MultiModalFeatures, blockSizeTokens, maxPrefixBlocks)
 		if len(hashes) > 0 {
 			result = append(result, hashes)
 			promptTokens = append(promptTokens, len(p.TokenIDs))
@@ -103,8 +104,10 @@ func GetBlockHashesWithPromptTokens(ctx context.Context, request *scheduling.Inf
 // computeBlockHashes hashes a prompt in blocks of blockSizeTokens tokens, the
 // last possibly partial, up to maxPrefixBlocks blocks. Block i's hash is xxhash
 // over its content hash and block i-1's hash, both little-endian; block 0
-// chains from a seed hashed over the target model and cache salt.
-func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, blockSizeTokens, maxPrefixBlocks int) []BlockHash {
+// chains from a seed hashed over the target model and cache salt. A block that
+// overlaps a multimodal placeholder range also covers that item's hash, because
+// placeholder token IDs are the same for every item of a given size.
+func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, mmFeatures []fwkrequest.MultiModalFeature, blockSizeTokens, maxPrefixBlocks int) []BlockHash {
 	if len(tokens) == 0 || blockSizeTokens <= 0 || maxPrefixBlocks <= 0 {
 		return nil
 	}
@@ -124,8 +127,13 @@ func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, b
 
 	var buf [16]byte
 	for i := range count {
-		block := HashBlock{Tokens: tokens[i*blockSizeTokens : min((i+1)*blockSizeTokens, len(tokens))]}
-		PutBlockHash(buf[:8], BlockHash(block.Hash()))
+		start, end := i*blockSizeTokens, min((i+1)*blockSizeTokens, len(tokens))
+		block := HashBlock{Tokens: tokens[start:end]}
+		content := block.Hash()
+		if len(mmFeatures) > 0 {
+			content = withMMHashes(content, mmFeatures, start, end)
+		}
+		PutBlockHash(buf[:8], BlockHash(content))
 		PutBlockHash(buf[8:], prevBlockHash)
 		prevBlockHash = BlockHash(xxhash.Sum64(buf[:]))
 		blockHashes = append(blockHashes, prevBlockHash)
@@ -149,4 +157,30 @@ func writeLengthPrefixedString(d *xxhash.Digest, lenBuf []byte, s string) {
 	binary.LittleEndian.PutUint64(lenBuf, uint64(len(s)))
 	_, _ = d.Write(lenBuf)
 	_, _ = d.WriteString(s)
+}
+
+// withMMHashes returns tokenHash unchanged when no item in mm overlaps the
+// block [start, end), so text-only blocks keep their hashes. Otherwise it
+// hashes tokenHash followed by each overlapping item's hash, length-prefixed,
+// in mm order.
+func withMMHashes(tokenHash uint64, mm []fwkrequest.MultiModalFeature, start, end int) uint64 {
+	var d xxhash.Digest
+	var buf [8]byte
+	mixed := false
+	for _, f := range mm {
+		if f.Offset >= end || f.Offset+f.Length <= start {
+			continue
+		}
+		if !mixed {
+			d.Reset()
+			binary.LittleEndian.PutUint64(buf[:], tokenHash)
+			_, _ = d.Write(buf[:])
+			mixed = true
+		}
+		writeLengthPrefixedString(&d, buf[:], f.Hash)
+	}
+	if !mixed {
+		return tokenHash
+	}
+	return d.Sum64()
 }
