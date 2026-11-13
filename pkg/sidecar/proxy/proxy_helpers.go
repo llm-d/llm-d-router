@@ -223,11 +223,8 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 }
 
 // inspectedRequestFields lists the top-level request fields the sidecar reads
-// as Go values. decodeRequestBody decodes only these; every other field stays
-// a json.RawMessage so its bytes are forwarded unchanged. encoding/json sorts
-// map keys at every depth on Marshal, which would reorder free-form content
-// such as tools[].function.parameters that chat templates render into the
-// prompt verbatim.
+// as Go values; see reqcommon.DecodeRequestBody for why every other field stays
+// raw.
 var inspectedRequestFields = map[string]struct{}{
 	// kv_transfer_params is deliberately NOT decoded as Go values: the only
 	// reader, clientPromptTokenIDs, handles the raw json.RawMessage form, and
