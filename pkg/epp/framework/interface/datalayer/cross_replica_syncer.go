@@ -70,6 +70,17 @@ type CrossReplicaBatchSyncer interface {
 	SetBatch(ctx context.Context, spec CrossReplicaSpec, endpointIDs []string, timeout time.Duration) map[string]error
 }
 
+// CrossReplicaPeerReader is optionally implemented by a CrossReplicaSyncer.
+// PeerSnapshot returns the peer-only aggregate prepared by the last successful
+// Set or SetBatch for endpointID and a version that changes whenever any
+// peer's raw value or the set of peers changes. With no peers it returns
+// spec.Aggregate(nil) and a version of its own. ok is false before the first
+// successful Set and after Delete. The returned value is shared and must not
+// be modified.
+type CrossReplicaPeerReader interface {
+	PeerSnapshot(spec CrossReplicaSpec, endpointID string) (peer any, version uint64, ok bool)
+}
+
 // CrossReplicaContributor is an opt-in interface for endpoint extractors that
 // want their installed attributes to reflect cross-replica aggregate state.
 // The plugin's Extract method is unchanged; the runtime detects this interface

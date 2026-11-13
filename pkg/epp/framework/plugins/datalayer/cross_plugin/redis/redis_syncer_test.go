@@ -243,8 +243,9 @@ func TestGetAggregatesLiveLocalWithoutPeers(t *testing.T) {
 	syncer.cache.Store(hashKey, &aggregateCacheEntry{value: 7})
 
 	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
-	_, cached := syncer.cache.Load(hashKey)
-	require.False(t, cached)
+	cached, ok := syncer.cache.Load(hashKey)
+	require.True(t, ok)
+	require.Zero(t, cached.(*aggregateCacheEntry).peers)
 	total := getSum(t, syncer, testStateKey, testEndpointID, 5)
 	require.Equal(t, 5, total)
 }
@@ -328,6 +329,92 @@ func TestSetRefreshesPreparedAggregate(t *testing.T) {
 	total = getSum(t, syncer, testStateKey, testEndpointID, 4)
 	require.Equal(t, 13, total)
 	require.Equal(t, int64(2), counter.count.Load())
+}
+
+func peerSnapshot(t testing.TB, syncer *RedisSyncer) (any, uint64, bool) {
+	t.Helper()
+	return syncer.PeerSnapshot(fwkdl.CrossReplicaSpec{StateKey: testStateKey, Aggregate: sumInts}, testEndpointID)
+}
+
+func TestSetSkipsDecodeWhenPeersUnchanged(t *testing.T) {
+	server := miniredis.RunT(t)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	seedReplica(t, server, testStateKey, "epp-b", 7)
+	var aggregateCalls atomic.Int64
+	aggregate := func(values []any) any {
+		aggregateCalls.Add(1)
+		return sumInts(values)
+	}
+
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, aggregate))
+	first, firstVersion, ok := peerSnapshot(t, syncer)
+	require.True(t, ok)
+	require.Equal(t, 7, first)
+	require.Equal(t, int64(1), aggregateCalls.Load())
+
+	// A change to this replica's own field does not change the peer version.
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 5, aggregate))
+	_, version, _ := peerSnapshot(t, syncer)
+	require.Equal(t, firstVersion, version)
+	require.Equal(t, int64(1), aggregateCalls.Load())
+
+	seedReplica(t, server, testStateKey, "epp-b", 9)
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 5, aggregate))
+	peer, version, _ := peerSnapshot(t, syncer)
+	require.Equal(t, 9, peer)
+	require.NotEqual(t, firstVersion, version)
+	require.Equal(t, int64(2), aggregateCalls.Load())
+}
+
+func TestPeerSnapshotVersionTracksPeerSet(t *testing.T) {
+	server := miniredis.RunT(t)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	hashKey := syncer.hashKey(testStateKey, testEndpointID)
+	seedReplica(t, server, testStateKey, "epp-b", 7)
+	seedReplica(t, server, testStateKey, "epp-c", 9)
+
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	peer, both, _ := peerSnapshot(t, syncer)
+	require.Equal(t, 16, peer)
+
+	server.HDel(hashKey, "epp-c")
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	peer, onlyB, _ := peerSnapshot(t, syncer)
+	require.Equal(t, 7, peer)
+	require.NotEqual(t, both, onlyB)
+
+	seedReplica(t, server, testStateKey, "epp-c", 9)
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	peer, rejoined, _ := peerSnapshot(t, syncer)
+	require.Equal(t, 16, peer)
+	require.Equal(t, both, rejoined)
+
+	server.HDel(hashKey, "epp-b")
+	server.HDel(hashKey, "epp-c")
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	peer, none, ok := peerSnapshot(t, syncer)
+	require.True(t, ok)
+	require.Equal(t, 0, peer)
+	require.NotEqual(t, both, none)
+	require.NotEqual(t, onlyB, none)
+	require.Equal(t, 5, getSum(t, syncer, testStateKey, testEndpointID, 5))
+}
+
+func TestPeerSnapshotBeforeSetAndAfterDelete(t *testing.T) {
+	server := miniredis.RunT(t)
+	syncer, _ := newTestSyncer(t, server, testReplicaID)
+	seedReplica(t, server, testStateKey, "epp-b", 7)
+
+	_, _, ok := peerSnapshot(t, syncer)
+	require.False(t, ok)
+
+	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	_, _, ok = peerSnapshot(t, syncer)
+	require.True(t, ok)
+
+	require.NoError(t, syncer.Delete(context.Background(), testStateKey, testEndpointID))
+	_, _, ok = peerSnapshot(t, syncer)
+	require.False(t, ok)
 }
 
 func TestSetAggregatesPeersInReplicaIDOrder(t *testing.T) {
@@ -798,6 +885,7 @@ func TestPeerAggregateHeldWhileRedisIsUnreachable(t *testing.T) {
 	syncer.stateTTL = 20 * time.Millisecond
 	seedReplica(t, server, testStateKey, "epp-b", 7)
 	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
+	_, version, _ := peerSnapshot(t, syncer)
 
 	server.Close()
 	time.Sleep(3 * syncer.stateTTL)
@@ -806,6 +894,10 @@ func TestPeerAggregateHeldWhileRedisIsUnreachable(t *testing.T) {
 	require.Error(t, syncer.set(ctx, testStateKey, testEndpointID, 4, sumInts))
 
 	require.Equal(t, 11, getSum(t, syncer, testStateKey, testEndpointID, 4))
+	peer, heldVersion, ok := peerSnapshot(t, syncer)
+	require.True(t, ok)
+	require.Equal(t, 7, peer)
+	require.Equal(t, version, heldVersion)
 }
 
 func TestSetAfterOutageDropsDepartedPeers(t *testing.T) {
@@ -825,6 +917,7 @@ func TestSetAfterOutageDropsDepartedPeers(t *testing.T) {
 	require.NoError(t, syncer.set(context.Background(), testStateKey, testEndpointID, 4, sumInts))
 
 	require.Equal(t, 4, getSum(t, syncer, testStateKey, testEndpointID, 4))
-	_, cached := syncer.cache.Load(syncer.hashKey(testStateKey, testEndpointID))
-	require.False(t, cached)
+	cached, ok := syncer.cache.Load(syncer.hashKey(testStateKey, testEndpointID))
+	require.True(t, ok)
+	require.Zero(t, cached.(*aggregateCacheEntry).peers)
 }
