@@ -133,10 +133,11 @@ func (p *VllmGRPCParser) ParseRequest(ctx context.Context, body []byte, headers 
 	}
 }
 
-// ParseResponse parses the response body and returns a ParsedResponse
+// ParseResponse parses the response body and returns a ParsedResponse. A body
+// chunk carries one or more gRPC frames; when several of them report usage, the
+// last one wins. A frame that cannot be read is reported in the returned error
+// while the usage of the frames before it is still returned.
 func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
-	logger := log.FromContext(ctx)
-
 	// The handler calls the parser once more with an empty body when a gRPC
 	// stream ends on its trailer. There is no frame to read, so report no usage
 	// rather than a parse error that would be logged on every completed stream.
@@ -144,15 +145,28 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 		return &fwkrh.ParsedResponse{}, nil
 	}
 
-	resp := &pb.GenerateResponse{}
+	result := &fwkrh.ParsedResponse{}
+	var errs []error
+	if err := grpcframe.ForEachPayload(body, func(payload []byte) {
+		if err := parseResponsePayload(ctx, payload, result); err != nil {
+			errs = append(errs, err)
+		}
+	}); err != nil {
+		errs = append(errs, fmt.Errorf("parsing gRPC response payload: %w", err))
+	}
+	return result, errors.Join(errs...)
+}
 
-	// Try to parse as GenerateResponse first. If it fails or the response field is nil,
-	// try to parse as EmbedResponse.
-	if err := toGenerateResponse(body, resp); err != nil || resp.Response == nil {
+// parseResponsePayload records in result the usage carried by one gRPC message
+// payload, trying GenerateResponse first and falling back to EmbedResponse.
+func parseResponsePayload(ctx context.Context, payload []byte, result *fwkrh.ParsedResponse) error {
+	logger := log.FromContext(ctx)
+
+	resp := &pb.GenerateResponse{}
+	if err := proto.Unmarshal(payload, resp); err != nil || resp.Response == nil {
 		embedResp := &pb.EmbedResponse{}
-		if err := toEmbedResponse(body, embedResp); err == nil && (len(embedResp.Embedding) > 0 || embedResp.PromptTokens > 0) {
+		if err := proto.Unmarshal(payload, embedResp); err == nil && (len(embedResp.Embedding) > 0 || embedResp.PromptTokens > 0) {
 			logger.V(logutil.DEBUG).Info("parsed EmbedResponse", "promptTokens", embedResp.PromptTokens)
-			result := &fwkrh.ParsedResponse{}
 			if embedResp.PromptTokens > 0 {
 				result.Usage = &fwkrequest.Usage{
 					PromptTokens:     int(embedResp.PromptTokens),
@@ -160,12 +174,10 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 					TotalTokens:      int(embedResp.PromptTokens),
 				}
 			}
-			return result, nil
+			return nil
 		}
-		return nil, fmt.Errorf("failed to parse gRPC response payload as GenerateResponse or EmbedResponse: %w", err)
+		return fmt.Errorf("failed to parse gRPC response payload as GenerateResponse or EmbedResponse: %w", err)
 	}
-
-	result := &fwkrh.ParsedResponse{}
 
 	switch v := resp.Response.(type) {
 	case *pb.GenerateResponse_Chunk:
@@ -186,18 +198,9 @@ func (p *VllmGRPCParser) ParseResponse(ctx context.Context, body []byte, headers
 		}
 
 	default:
-		return nil, errors.New("unrecognized response type in GenerateResponse")
+		return errors.New("unrecognized response type in GenerateResponse")
 	}
-
-	return result, nil
-}
-
-func toGenerateResponse(payload []byte, resp *pb.GenerateResponse) error {
-	parsedPayload, err := grpcframe.ParsePayload(payload)
-	if err != nil {
-		return err
-	}
-	return proto.Unmarshal(parsedPayload, resp)
+	return nil
 }
 
 func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrequest.InferenceRequestBody, error) {
@@ -293,12 +296,4 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrequest.Inf
 		return nil, errors.New("missing tokenized input in EmbedRequest")
 	}
 	return body, nil
-}
-
-func toEmbedResponse(payload []byte, resp *pb.EmbedResponse) error {
-	parsedPayload, err := grpcframe.ParsePayload(payload)
-	if err != nil {
-		return err
-	}
-	return proto.Unmarshal(parsedPayload, resp)
 }
