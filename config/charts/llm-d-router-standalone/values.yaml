@@ -113,6 +113,10 @@ router:
               {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
               {{- $fallback := eq (include "llm-d-router.proxy.failOpenFallback.enabled" .) "true" -}}
               {{- $tracing := .Values.router.proxy.tracing | default dict -}}
+              {{- /* ext_proc endpoints resolve to EPP pods (loopback, per-pod or headless DNS) everywhere
+              except the single-EPP ClusterIP Service, which exposes only the ext_proc port. */ -}}
+              {{- $eppHealthPortCheck := or $isPriorityRouting (ne (include "llm-d-router.proxyMode" .) "service") (ne (include "llm-d-router.proxy.discoveryServiceName" .) "") -}}
+              {{- $eppHealthPort := .Values.router.epp.grpcHealthPort | default 9003 -}}
               admin:
                 address:
                   socket_address:
@@ -444,7 +448,21 @@ router:
                         reuse_connection: true
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
+                        {{- if not $eppHealthPortCheck }}
               {{ include "llm-d-router.proxy.envoyExtProcTLSOptions" . | indent 10 }}
+                        {{- else if eq (include "llm-d-router.proxy.eppSecureServing" .) "true" }}
+                        # EPP's gRPC health port is plaintext even when ext_proc serves TLS.
+                        transport_socket_match_criteria:
+                          health: plaintext
+                    transport_socket_matches:
+                      - name: plaintext-health
+                        match:
+                          health: plaintext
+                        transport_socket:
+                          name: envoy.transport_sockets.raw_buffer
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+                        {{- end }}
               {{ include "llm-d-router.proxy.envoyExtProcTransportSocket" . | indent 6 }}
                     typed_extension_protocol_options:
                       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -477,6 +495,11 @@ router:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
+                                {{- if $eppHealthPortCheck }}
+                                # Health-check EPP's gRPC health port: unlike the ext_proc port, it reports NOT_SERVING while EPP drains.
+                                health_check_config:
+                                  port_value: {{ $eppHealthPort }}
+                                {{- end }}
                               load_balancing_weight: 1
                             {{- end }}
                         - locality:
@@ -492,6 +515,11 @@ router:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
+                                {{- if $eppHealthPortCheck }}
+                                # Health-check EPP's gRPC health port: unlike the ext_proc port, it reports NOT_SERVING while EPP drains.
+                                health_check_config:
+                                  port_value: {{ $eppHealthPort }}
+                                {{- end }}
                               load_balancing_weight: 1
                             {{- end }}
                         {{- else }}
@@ -503,6 +531,11 @@ router:
                                   socket_address:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
                                     port_value: 9002
+                                {{- if $eppHealthPortCheck }}
+                                # Health-check EPP's gRPC health port: unlike the ext_proc port, it reports NOT_SERVING while EPP drains.
+                                health_check_config:
+                                  port_value: {{ $eppHealthPort }}
+                                {{- end }}
                               load_balancing_weight: 1
                         {{- end }}
         name: envoy-proxy

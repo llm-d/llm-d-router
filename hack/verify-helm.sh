@@ -1069,6 +1069,46 @@ for proxy_setting in router.proxy.enabled=false router.proxy.proxyType=agentgate
   fi
 done
 
+echo "Verifying Envoy health-checks the EPP gRPC health port only where ext_proc resolves to EPP pods..."
+# name | extra helm flags | health_check_config count | health port | plaintext health transport_socket_match_criteria
+while IFS='|' read -r hc_case hc_flags hc_count hc_port hc_tls; do
+  hc_render_output="${TEMP_DIR}/envoy-epp-health-port-${hc_case}.yaml"
+  read -r -a hc_flag_args <<<"${hc_flags}"
+  if ! "${HELM}" template hc "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+    "${hc_flag_args[@]}" > "${hc_render_output}"; then
+    echo "Envoy Helm render failed for EPP health port case ${hc_case}"
+    exit 1
+  fi
+  hc_found=$(grep -c -- 'health_check_config:' "${hc_render_output}" || true)
+  if [[ "${hc_found}" != "${hc_count}" ]]; then
+    echo "EPP health port case ${hc_case}: expected ${hc_count} ext_proc health_check_config, got ${hc_found}"
+    exit 1
+  fi
+  if [[ "${hc_count}" != 0 ]]; then
+    hc_port_found=$(grep -A1 -- 'health_check_config:' "${hc_render_output}" | grep -c -- "port_value: ${hc_port}" || true)
+    if [[ "${hc_port_found}" != "${hc_count}" ]]; then
+      echo "EPP health port case ${hc_case}: expected ${hc_count} health_check_config on port ${hc_port}, got ${hc_port_found}"
+      exit 1
+    fi
+  fi
+  if [[ "${hc_tls}" == present ]] && ! { grep -A1 -- 'transport_socket_match_criteria:' "${hc_render_output}" | grep -q -- 'health: plaintext' \
+    && grep -A6 -- 'name: plaintext-health' "${hc_render_output}" | grep -q -- 'envoy.transport_sockets.raw_buffer'; }; then
+    echo "EPP health port case ${hc_case}: plaintext health check transport socket match missing with EPP TLS on"
+    exit 1
+  fi
+  if [[ "${hc_tls}" == absent ]] && grep -q -- 'transport_socket_match_criteria' "${hc_render_output}"; then
+    echo "EPP health port case ${hc_case}: transport_socket_match_criteria rendered with EPP TLS off"
+    exit 1
+  fi
+done <<'EOF_HC_CASES'
+sidecar|--set router.proxy.mode=sidecar|1|9003|present
+service-priority|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true|2|9003|present
+service-discovery|--set router.proxy.mode=service --set router.epp.replicas=2 --set router.epp.haMode=all-active|1|9003|present
+service-clusterip|--set router.proxy.mode=service|0|9003|absent
+service-priority-plaintext|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.grpcHealthPort=9100 --set-string router.epp.flags.secure-serving=false|2|9100|absent
+EOF_HC_CASES
+
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."
 fail_closed_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fail-closed-render.yaml"
 ${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.failOpen=false > "${fail_closed_render_output}"
