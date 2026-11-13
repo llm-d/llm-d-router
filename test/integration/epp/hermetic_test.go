@@ -382,6 +382,7 @@ dataLayer:
 					// Labels are empty because we skipped the Request phase.
 					wantMetrics: map[string]string{},
 				},
+				trailerTerminatedModelRewriteCase(prio),
 			}
 			tests := append(commonTestCases(prio), hermeticTests...)
 
@@ -475,6 +476,75 @@ dataLayer:
 				})
 			}
 		})
+	}
+}
+
+// trailerTerminatedModelRewriteCase drives a streamed response that ends on trailers
+// instead of an end-of-stream body chunk while the model-name occurrence is split across
+// the chunk boundary. The EPP cannot rewrite the held-back prefix until the next chunk or
+// the trailers arrives, so this is the sequence where the prefix must still be forwarded
+// ahead of the trailers response instead of being dropped with the stream.
+func trailerTerminatedModelRewriteCase(prio func(int) int) testCase {
+	const prompt = "test-trailer-carry"
+
+	upstream := `data: {"id":"c1","object":"chat.completion.chunk","model":"` + modelAfterRewrite +
+		`","choices":[{"index":0,"delta":{"content":"hi"}}]}` + "\n\n"
+	// cut ends the body chunk inside the backend model name, so the EPP holds back the
+	// bytes that could still complete an occurrence and forwards the rest.
+	cut := strings.Index(upstream, `"model":"`) + len(`"mo`)
+	heldStart := cut - len(`"mo`)
+	chunk, heldBack := upstream[:heldStart], upstream[heldStart:cut]
+
+	requests := append(fwkepp.ReqLLM(Logger(), prompt, modelToBeWritten, modelAfterRewrite),
+		&extProcPb.ProcessingRequest{
+			Request: &extProcPb.ProcessingRequest_ResponseHeaders{
+				ResponseHeaders: &extProcPb.HttpHeaders{
+					Headers: &configPb.HeaderMap{Headers: buildEnvoyHeaders(map[string]string{
+						"content-type": "text/event-stream",
+						"status":       "200",
+					})},
+				},
+			},
+		},
+		&extProcPb.ProcessingRequest{
+			Request: &extProcPb.ProcessingRequest_ResponseBody{
+				ResponseBody: &extProcPb.HttpBody{Body: []byte(upstream[:cut])},
+			},
+		},
+		&extProcPb.ProcessingRequest{
+			Request: &extProcPb.ProcessingRequest_ResponseTrailers{
+				ResponseTrailers: &extProcPb.HttpTrailers{},
+			},
+		},
+	)
+
+	wantResponses := append(ExpectRouteTo("192.168.1.1:8000", modelAfterRewrite, prompt, prio(0)),
+		fwkepp.NewResponseHeaders(
+			&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+				Key: "x-went-into-resp-headers", RawValue: []byte("true"),
+			}},
+			&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+				Key: "content-type", RawValue: []byte("text/event-stream"),
+			}},
+			&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+				Key: "status", RawValue: []byte("200"),
+			}},
+		),
+		fwkepp.NewResponseStreamChunk(chunk, false),
+		fwkepp.NewResponseStreamChunk(heldBack, false),
+		&extProcPb.ProcessingResponse{
+			Response: &extProcPb.ProcessingResponse_ResponseTrailers{
+				ResponseTrailers: &extProcPb.TrailersResponse{},
+			},
+		},
+	)
+
+	return testCase{
+		name:          "response streaming: model rewrite carry flushes before trailers",
+		requests:      requests,
+		pods:          []PodState{P(0, 0, 0.1, modelAfterRewrite)},
+		wantResponses: wantResponses,
+		wantMetrics:   map[string]string{},
 	}
 }
 
