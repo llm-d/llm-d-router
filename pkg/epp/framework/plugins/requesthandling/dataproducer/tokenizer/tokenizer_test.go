@@ -343,17 +343,24 @@ func TestProduce_TokenizerError(t *testing.T) {
 	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
+// A body neither backend can read, such as the passthrough parser's raw
+// payload, yields no tokenized request and no error.
 func TestProduce_UnsupportedBodyType(t *testing.T) {
-	p := newTestPlugin(&mockTokenizer{})
-	req := &scheduling.InferenceRequest{
-		Body: &fwkrequest.InferenceRequestBody{
-			Payload: fwkrequest.PayloadMap{},
-		},
+	for name, p := range map[string]*Plugin{
+		"render":   newTestPlugin(&mockTokenizer{}),
+		"estimate": {typedName: plugin.TypedName{Type: PluginType, Name: "test"}, backend: estimateBackend{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for bodyName, body := range map[string]*fwkrequest.InferenceRequestBody{
+				"raw payload": {Payload: fwkrequest.RawPayload(`{"prompt":"hi"}`)},
+				"empty map":   {Payload: fwkrequest.PayloadMap{}},
+			} {
+				req := &scheduling.InferenceRequest{Body: body}
+				require.NoError(t, p.Produce(context.Background(), req, nil), bodyName)
+				assert.Nil(t, req.Body.TokenizedRequest, bodyName)
+			}
+		})
 	}
-	err := p.Produce(context.Background(), req, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported request body type")
-	assert.Nil(t, req.Body.TokenizedRequest)
 }
 
 func TestProduce_GenerateUsesPreTokenizedIDs(t *testing.T) {
@@ -397,9 +404,7 @@ func TestProduce_EmptyGenerateSkipsTokenization(t *testing.T) {
 	req := &scheduling.InferenceRequest{
 		Body: &fwkrequest.InferenceRequestBody{Generate: &fwkrequest.GenerateRequest{}},
 	}
-	err := p.Produce(context.Background(), req, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported request body type")
+	require.NoError(t, p.Produce(context.Background(), req, nil))
 	assert.Nil(t, req.Body.TokenizedRequest)
 }
 

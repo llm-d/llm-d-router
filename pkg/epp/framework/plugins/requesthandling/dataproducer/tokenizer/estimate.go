@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"strconv"
 	"strings"
 
@@ -281,7 +280,7 @@ func estimateBytes(body *fwkrequest.InferenceRequestBody) ([]byte, error) {
 	case body.TextToSpeech != nil:
 		return []byte(ttsText(body.TextToSpeech)), nil
 	default:
-		return nil, errors.New("unsupported request body type, skipping estimation")
+		return nil, errUnsupportedBody
 	}
 }
 
