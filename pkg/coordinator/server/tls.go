@@ -24,8 +24,6 @@ import (
 	"path/filepath"
 	"slices"
 
-	"k8s.io/component-base/cli/flag"
-
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
 )
@@ -42,25 +40,16 @@ type tlsProfile struct {
 // An empty suite list uses the crypto/tls default.
 func parseTLSProfile(minVersion string, cipherSuites []string) (tlsProfile, error) {
 	profile := tlsProfile{minVersion: tls.VersionTLS12}
-	if minVersion != "" {
-		version, err := flag.TLSVersion(minVersion)
-		if err != nil {
-			return tlsProfile{}, fmt.Errorf("invalid tls-min-version %q: unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", minVersion, minVersion)
-		}
-		if version < tls.VersionTLS12 {
-			return tlsProfile{}, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", minVersion)
-		}
+	version, err := tlsutil.ParseTLSVersion(minVersion)
+	if err != nil {
+		return tlsProfile{}, err
+	}
+	if version != 0 {
 		profile.minVersion = version
 	}
-	suites, err := flag.TLSCipherSuites(cipherSuites)
+	suites, err := tlsutil.ParseCipherSuites(cipherSuites)
 	if err != nil {
-		return tlsProfile{}, fmt.Errorf("invalid tls-cipher-suites: %w", err)
-	}
-	// flag.TLSCipherSuites also resolves the names in tls.InsecureCipherSuites().
-	for _, s := range tls.InsecureCipherSuites() {
-		if slices.Contains(suites, s.ID) {
-			return tlsProfile{}, fmt.Errorf("invalid tls-cipher-suites: insecure cipher suite %q", s.Name)
-		}
+		return tlsProfile{}, err
 	}
 	// net/http's HTTP/2 server refuses to start without one of these when
 	// TLS 1.2 is allowed, so reject the list here instead of at Serve.

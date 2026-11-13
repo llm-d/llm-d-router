@@ -25,10 +25,51 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	cliflag "k8s.io/component-base/cli/flag"
 )
+
+// ParseTLSVersion resolves a crypto/tls version name. Empty returns 0.
+// Versions below TLS 1.2 are rejected.
+func ParseTLSVersion(s string) (uint16, error) {
+	if s == "" {
+		return 0, nil
+	}
+	v, err := cliflag.TLSVersion(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid tls-min-version %q: unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", s, s)
+	}
+	if v < tls.VersionTLS12 {
+		return 0, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", s)
+	}
+	return v, nil
+}
+
+// ParseCipherSuites resolves crypto/tls cipher suite names, skipping blank
+// entries. A list with no names returns nil so tls.Config keeps its defaults.
+// Insecure suites are rejected.
+func ParseCipherSuites(names []string) ([]uint16, error) {
+	insecure := cliflag.InsecureTLSCiphers()
+	trimmed := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := insecure[name]; ok {
+			return nil, fmt.Errorf("invalid tls-cipher-suites: insecure cipher suite %q", name)
+		}
+		trimmed = append(trimmed, name)
+	}
+	suites, err := cliflag.TLSCipherSuites(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tls-cipher-suites: %w", err)
+	}
+	return suites, nil
+}
 
 // CreateSelfSignedTLSCertificate creates a self-signed cert the server can use to serve TLS.
 // The certificate carries no subject alternative names, so clients cannot verify it. The log
