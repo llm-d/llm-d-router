@@ -127,11 +127,12 @@ func idsForwardedIn(body map[string]any, apiType reqcommon.APIType) bool {
 // untouched; with only a check the writer is a passthrough that reads usage on
 // the side.
 func parityResponseWriter(reqCtx *pipeline.RequestContext, check *parityCheck, injected bool) (http.ResponseWriter, func() error) {
-	if reqCtx.PrefillCachedTokens == nil && check == nil {
+	if reqCtx.PrefillCachedTokens == nil && reqCtx.PrefillCreatedCacheTokens == nil && check == nil {
 		return reqCtx.ResponseWriter, func() error { return nil }
 	}
 	opts := usage.Options{
 		CachedTokens:       reqCtx.PrefillCachedTokens,
+		CreatedCacheTokens: reqCtx.PrefillCreatedCacheTokens,
 		DropUsageOnlyFrame: injected,
 	}
 	if check != nil {

@@ -177,6 +177,7 @@ const (
 	FieldPromptTokensDetails      = "prompt_tokens_details"       //#nosec G101 -- JSON field name, not a credential
 	FieldInputTokensDetails       = "input_tokens_details"        //#nosec G101 -- JSON field name, not a credential
 	FieldCachedTokens             = "cached_tokens"               //#nosec G101 -- JSON field name, not a credential
+	FieldCreatedCacheTokens       = "created_cache_tokens"        //#nosec G101 -- JSON field name, not a credential
 	FieldCacheReadInputTokens     = "cache_read_input_tokens"     //#nosec G101 -- JSON field name, not a credential
 	FieldCacheCreationInputTokens = "cache_creation_input_tokens" //#nosec G101 -- JSON field name, not a credential
 )

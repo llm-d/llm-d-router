@@ -137,6 +137,8 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	if prefillResp.Usage != nil && !decodeRecomputesPrompt {
 		cachedTokens, _ := usage.CachedTokens(prefillResp.Usage)
 		reqCtx.PrefillCachedTokens = &cachedTokens
+		createdCacheTokens, _ := usage.CreatedCacheTokens(prefillResp.Usage)
+		reqCtx.PrefillCreatedCacheTokens = &createdCacheTokens
 	}
 
 	reqCtx.CaptureResponseHeaders(resp.Header)
