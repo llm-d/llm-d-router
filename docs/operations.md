@@ -300,11 +300,14 @@ already-dispatched response streams are unaffected. Leader Lease renewal and
 backend metric scrapes do not renew this freshness budget.
 
 Excluded candidate counts and sampling errors are logged at debug verbosity.
-Disagreement persisting across two consecutive successful samples emits an
-operational log and sets `llm_d_epp_discovery_membership_disagreement` to 1.
-Agreement recovery logs once and resets the metric to 0. The verification loop
-logs transitions into and out of readiness; these are observed after sampling
-attempts, rather than logged on every rejected request.
+The same endpoint ID disagreeing across two consecutive successful samples emits
+an operational log and sets `llm_d_epp_discovery_membership_disagreement` to 1.
+When no endpoint ID remains persistently mismatched, a transition is logged
+and the metric resets to 0. Endpoint IDs include namespace and rank. Debug logs
+identify each endpoint and whether it is absent from either view or has different
+metadata. The verification loop logs transitions into and out of readiness;
+these are observed after sampling attempts, rather than logged on every
+rejected request.
 
 Configure the gateway to fail closed on EPP unavailability if inference must stop
 during discovery loss. Gateway fail-open routing can bypass EPP checks.

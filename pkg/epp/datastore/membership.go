@@ -44,6 +44,13 @@ func VerifyPool(ds Datastore, pool *datalayer.EndpointPool) error {
 	return nil
 }
 
+// MembershipDisagreement describes each endpoint that differs between the two views.
+type MembershipDisagreement map[types.NamespacedName]string
+
+func (m MembershipDisagreement) Error() string {
+	return fmt.Sprintf("%d routing endpoints differ from Kubernetes membership", len(m))
+}
+
 // VerifyMembership returns authoritative metadata and reports disagreement with routing membership.
 func VerifyMembership(ds Datastore, pool *datalayer.EndpointPool, pods []corev1.Pod) (map[types.NamespacedName]*fwkdl.EndpointMetadata, error) {
 	if err := VerifyPool(ds, pool); err != nil {
@@ -59,15 +66,26 @@ func VerifyMembership(ds Datastore, pool *datalayer.EndpointPool, pods []corev1.
 			expected[meta.ID] = meta
 		}
 	}
-	endpoints := ds.PodList(AllPodsPredicate)
-	if len(endpoints) != len(expected) {
-		return expected, errors.New("routing endpoints do not match Kubernetes membership")
-	}
-	for _, ep := range endpoints {
+	mismatches := make(MembershipDisagreement)
+	seen := make(map[types.NamespacedName]struct{})
+	for _, ep := range ds.PodList(AllPodsPredicate) {
 		meta := ep.GetMetadata()
-		if !meta.Equal(expected[meta.ID]) {
-			return expected, fmt.Errorf("routing endpoint %s does not match Kubernetes membership", meta.ID)
+		seen[meta.ID] = struct{}{}
+		sampled := expected[meta.ID]
+		switch {
+		case sampled == nil:
+			mismatches[meta.ID] = "absent from API sample"
+		case !meta.Equal(sampled):
+			mismatches[meta.ID] = "metadata differs"
 		}
+	}
+	for id := range expected {
+		if _, ok := seen[id]; !ok {
+			mismatches[id] = "absent from datastore"
+		}
+	}
+	if len(mismatches) > 0 {
+		return expected, mismatches
 	}
 	return expected, nil
 }

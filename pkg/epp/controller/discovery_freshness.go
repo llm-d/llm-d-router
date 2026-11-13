@@ -46,13 +46,14 @@ import (
 // DiscoveryFreshness verifies watch-driven routing membership against uncached API reads.
 // It never writes membership; the Kubernetes reconcilers own those updates.
 type DiscoveryFreshness struct {
-	reader              client.Reader
-	datastore           datastore.Datastore
-	pool                types.NamespacedName
-	threshold           time.Duration
-	clock               clock.Clock
-	validated           atomic.Pointer[validatedMembership]
-	disagreementSamples int
+	reader                 client.Reader
+	datastore              datastore.Datastore
+	pool                   types.NamespacedName
+	threshold              time.Duration
+	clock                  clock.Clock
+	validated              atomic.Pointer[validatedMembership]
+	previousDisagreement   datastore.MembershipDisagreement
+	persistentDisagreement bool
 }
 
 type validatedMembership struct {
@@ -132,7 +133,13 @@ func (d *DiscoveryFreshness) refresh(ctx context.Context) error {
 		d.validated.Store(nil)
 		return err
 	}
-	d.observeDisagreement(ctx, err)
+	var mismatches datastore.MembershipDisagreement
+	if err != nil {
+		if !errors.As(err, &mismatches) {
+			return err
+		}
+	}
+	d.observeDisagreement(ctx, mismatches)
 	d.validated.Store(&validatedMembership{at: started, endpoints: endpoints})
 	return nil
 }
@@ -195,19 +202,23 @@ func (d *DiscoveryFreshness) FilterCandidates(ctx context.Context, candidates []
 	return eligible, nil
 }
 
-func (d *DiscoveryFreshness) observeDisagreement(ctx context.Context, mismatch error) {
+func (d *DiscoveryFreshness) observeDisagreement(ctx context.Context, mismatches datastore.MembershipDisagreement) {
 	logger := log.FromContext(ctx)
-	if mismatch != nil {
-		d.disagreementSamples++
-		logger.V(logutil.DEBUG).Info("Kubernetes membership differs from routing datastore", "error", mismatch, "consecutiveSamples", d.disagreementSamples)
-		if d.disagreementSamples == 2 {
-			logger.Info("Kubernetes membership disagreement persists across successful samples", "pool", d.pool.String())
+	persistent := false
+	for id, reason := range mismatches {
+		if _, ok := d.previousDisagreement[id]; ok {
+			persistent = true
 		}
-	} else {
-		if d.disagreementSamples >= 2 {
-			logger.Info("Kubernetes membership agreement recovered", "pool", d.pool.String())
-		}
-		d.disagreementSamples = 0
+		logger.V(logutil.DEBUG).Info("Kubernetes membership differs from routing datastore", "endpoint", id.String(), "reason", reason)
 	}
-	metrics.RecordDiscoveryDisagreement(d.disagreementSamples >= 2)
+	if persistent != d.persistentDisagreement {
+		if persistent {
+			logger.Info("Kubernetes membership disagreement persists across successful samples", "pool", d.pool.String())
+		} else {
+			logger.Info("Persistent Kubernetes membership disagreement cleared", "pool", d.pool.String())
+		}
+	}
+	d.previousDisagreement = mismatches
+	d.persistentDisagreement = persistent
+	metrics.RecordDiscoveryDisagreement(persistent)
 }
