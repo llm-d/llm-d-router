@@ -70,6 +70,14 @@ Tuning knobs, all under the `flowControl:` config section:
   refused only by its own flow's limit gets 429 with reason `rejected-flow-limit`; a request refused
   by a full band or global limit gets `rejected-saturated`, even if its flow is also at its limit.
   With no endpoints, every capacity refusal is 503 `rejected-no-endpoints`.
+* Per-band `fairAdmission` (off by default): when only the band's `maxRequests` refuses an arrival, it
+  evicts the newest request of the longest other flow if that flow leads the arrival's by at least two
+  queued requests. The evicted request gets 429 with reason `rejected-fair-admission`. Other limits
+  still reject, so keep `maxRequests` below `maxBytes` divided by mean request size, or long-context
+  traffic hits `maxBytes` first. Victims ignore ordering and weights; pair with
+  `round-robin-fairness-policy`. Requires `requestHandler.composeFairnessIDs` off and a non-empty
+  `x-llm-d-inference-fairness-id` that the gateway sets on every request, overwriting any client-sent
+  value.
 * `defaultRequestTTL` — the queue-wait budget against a pool that has endpoints, and the other way a
   request is shed. Keep it under the client or gateway deadline, and size it to the time-to-first-token
   budget you are willing to spend waiting on a saturated pool. Priority-band entries and templates

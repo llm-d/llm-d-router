@@ -189,6 +189,7 @@ func fullyPopulatedV1alpha1() *configapiv1alpha1.EndpointPickerConfig {
 	band := configapiv1alpha1.PriorityBandConfig{
 		MaxBytesPerFlow:    resource.NewQuantity(512, resource.DecimalSI),
 		MaxRequestsPerFlow: resource.NewQuantity(4, resource.DecimalSI),
+		FairAdmission:      true,
 		Priority:           10,
 		MaxBytes:           resource.NewQuantity(1024, resource.DecimalSI),
 		MaxRequests:        resource.NewQuantity(64, resource.DecimalSI),

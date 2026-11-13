@@ -85,6 +85,7 @@ func newManagedQueue(
 	bandStats *occupancyStats,
 	registryStats *occupancyStats,
 	onActiveTransition func(mq *managedQueue, active bool),
+	lenIndex *queueLenIndex,
 ) *managedQueue {
 	mqLogger := logger.WithName("managed-queue").WithValues("flowKey", key)
 	mq := &managedQueue{
@@ -97,12 +98,28 @@ func newManagedQueue(
 		logger:             mqLogger,
 	}
 	mq.flowQueueAccessor = &flowQueueAccessor{mq: mq}
+	// lenIndex is set only in bands that enable fair admission; other bands use the queue undecorated.
+	if lenIndex != nil {
+		mq.queue = &fairQueue{SafeQueue: queue, mq: mq, index: lenIndex}
+	}
 	return mq
 }
 
 // FlowQueueAccessor returns a read-only, flow-aware view of this queue.
 func (mq *managedQueue) FlowQueueAccessor() flowcontrol.FlowQueueAccessor {
 	return mq.flowQueueAccessor
+}
+
+// lastAdded returns the last-added item still in the queue, or nil if the queue is empty or its band does not enable
+// fair admission.
+func (mq *managedQueue) lastAdded() flowcontrol.QueueItemAccessor {
+	fq, ok := mq.queue.(*fairQueue)
+	if !ok {
+		return nil
+	}
+	mq.mu.Lock()
+	defer mq.mu.Unlock()
+	return fq.lastAdded()
 }
 
 // Add enqueues an item into the underlying queue and propagates the measured statistics delta.

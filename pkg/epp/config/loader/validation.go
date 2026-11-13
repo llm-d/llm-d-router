@@ -71,7 +71,38 @@ func validateConfig(cfg *configapiv1.EndpointPickerConfig) error {
 	if err := validateMetrics(cfg); err != nil {
 		return fmt.Errorf("metrics validation failed: %w", err)
 	}
+	if err := validateFairAdmission(cfg); err != nil {
+		return fmt.Errorf("flow control validation failed: %w", err)
+	}
 	return nil
+}
+
+// validateFairAdmission rejects fairAdmission on any priority band or band template while
+// requestHandler.composeFairnessIDs is on: fair admission evicts by fairness ID, and a composed ID carries a
+// client-chosen session part.
+func validateFairAdmission(cfg *configapiv1.EndpointPickerConfig) error {
+	if cfg.RequestHandler == nil || !cfg.RequestHandler.ComposeFairnessIDs || cfg.FlowControl == nil {
+		return nil
+	}
+	fc := cfg.FlowControl
+	field := ""
+	switch {
+	case fc.DefaultPriorityBand != nil && fc.DefaultPriorityBand.FairAdmission:
+		field = "defaultPriorityBand"
+	case fc.DefaultNegativePriorityBand != nil && fc.DefaultNegativePriorityBand.FairAdmission:
+		field = "defaultNegativePriorityBand"
+	default:
+		for i := range fc.PriorityBands {
+			if fc.PriorityBands[i].FairAdmission {
+				field = fmt.Sprintf("priorityBands[%d]", i)
+				break
+			}
+		}
+		if field == "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("flowControl.%s.fairAdmission cannot be combined with requestHandler.composeFairnessIDs", field)
 }
 
 // validateMetrics validates the metrics section of the configuration file. A
