@@ -744,6 +744,10 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterWithPluginDependencies(disagg.DisaggProfileHandlerType, fwkplugin.StabilityBeta, disagg.HandlerFactory, disagg.DisaggProfileHandlerConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggPDDeciderPluginFactory)
 	fwkplugin.Register(disagg.PrefixBasedPDDeciderPluginType, fwkplugin.StabilityBeta, disagg.PrefixBasedPDDeciderPluginFactory)
+	fwkplugin.RegisterWithPluginDependencies(disagg.KVCompatPDDeciderPluginType, fwkplugin.StabilityAlpha,
+		disagg.KVCompatPDDeciderPluginFactory, disagg.KVCompatPDDeciderConfigParser)
+	fwkplugin.RegisterWithPluginDependencies(disagg.KVCompatFilterPluginType, fwkplugin.StabilityAlpha,
+		disagg.KVCompatFilterPluginFactory, disagg.KVCompatFilterConfigParser)
 	fwkplugin.Register(disagg.AlwaysDisaggMulimodalPluginType, fwkplugin.StabilityBeta, disagg.AlwaysDisaggMulimodalDeciderPluginFactory)
 	fwkplugin.Register(kvcacheutilization.KvCacheUtilizationScorerType, fwkplugin.StabilityBeta, kvcacheutilization.KvCacheUtilizationScorerFactory)
 	fwkplugin.Register(queuedepth.QueueScorerType, fwkplugin.StabilityBeta, queuedepth.QueueScorerFactory)
