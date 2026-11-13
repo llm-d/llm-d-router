@@ -38,11 +38,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-// vllmPreprocessedKwargsIdentifier is the PreprocessedMediaFeatures.identifier
-// value expected by vLLM's vllm.Inference gRPC servicer for MessagePack-encoded
-// MmKwargsItem payloads (matching HTTP features.kwargs_data after base64 decode).
-const vllmPreprocessedKwargsIdentifier = "ipc"
-
 func scanVLLMGenerate(r *http.Request, payload []byte) (grpcScanResult, error) {
 	genReq, err := vllmwire.ScanGenerateRequest(payload)
 	if err != nil {
@@ -72,8 +67,8 @@ var (
 		reqcommon.FieldStreamOptions:        {},
 		"lora_name":                         {},
 		"lora_request":                      {},
-		"priority":                          {},
-		"cache_salt":                        {},
+		reqcommon.FieldPriority:             {},
+		reqcommon.FieldCacheSalt:            {},
 		"bypass_prefix_cache":               {},
 		reqcommon.FieldTruncatePromptTokens: {},
 		"session_id":                        {},
@@ -91,7 +86,7 @@ var (
 
 	allowedSamplingParamsFields = map[string]struct{}{
 		"temperature":                        {},
-		"n":                                  {},
+		reqcommon.FieldN:                     {},
 		"top_p":                              {},
 		"top_k":                              {},
 		"min_p":                              {},
@@ -109,8 +104,8 @@ var (
 		"guided_choice":                      {},
 		"guided_grammar":                     {},
 		"structural_tag":                     {},
-		"max_tokens":                         {},
-		"min_tokens":                         {},
+		reqcommon.FieldMaxTokens:             {},
+		reqcommon.FieldMinTokens:             {},
 		"stop":                               {},
 		"stop_token_ids":                     {},
 		"include_stop_str_in_output":         {},
@@ -136,7 +131,7 @@ var (
 	}
 
 	allowedVLLMXargsFields = map[string]struct{}{
-		"cache_salt":                    {},
+		reqcommon.FieldCacheSalt:        {},
 		"bypass_prefix_cache":           {},
 		reqcommon.FieldKVTransferParams: {},
 		reqcommon.FieldECTransferParams: {},
@@ -224,7 +219,7 @@ func prepareVLLMGenerateFromHTTP(parsed map[string]any, fallbackRequestID string
 		}
 	}
 
-	if prio, ok, err := decodeOptionalInt32Field(parsed, "priority"); err != nil {
+	if prio, ok, err := decodeOptionalInt32Field(parsed, reqcommon.FieldPriority); err != nil {
 		return httpVLLMGenerateResult{}, err
 	} else if ok {
 		pbReq.Priority = prio
@@ -332,7 +327,7 @@ func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any
 		bypassPrefixCache bool
 		hasKV             bool
 	)
-	if cs, ok, err := decodeOptionalStringField(parsed, "cache_salt"); err != nil {
+	if cs, ok, err := decodeOptionalStringField(parsed, reqcommon.FieldCacheSalt); err != nil {
 		return false, err
 	} else if ok && cs != "" {
 		cacheSalt = cs
@@ -400,7 +395,7 @@ func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any
 
 		var sampling vllmpb.RandomSampling
 		hasSampling := false
-		if n, ok, err := decodeOptionalUint32Field(sp, "n"); err != nil {
+		if n, ok, err := decodeOptionalUint32Field(sp, reqcommon.FieldN); err != nil {
 			return false, err
 		} else if ok {
 			sampling.NumSequences = n
@@ -494,13 +489,13 @@ func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any
 
 		var stopping vllmpb.StoppingCriteria
 		hasStopping := false
-		if maxToks, ok, err := decodeOptionalUint32Field(sp, "max_tokens"); err != nil {
+		if maxToks, ok, err := decodeOptionalUint32Field(sp, reqcommon.FieldMaxTokens); err != nil {
 			return false, err
 		} else if ok {
 			stopping.MaxNewTokens = maxToks
 			hasStopping = true
 		}
-		if minToks, ok, err := decodeOptionalUint32Field(sp, "min_tokens"); err != nil {
+		if minToks, ok, err := decodeOptionalUint32Field(sp, reqcommon.FieldMinTokens); err != nil {
 			return false, err
 		} else if ok {
 			stopping.MinNewTokens = minToks
@@ -586,7 +581,7 @@ func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any
 			if _, hasECTransfer := xargs[reqcommon.FieldECTransferParams]; hasECTransfer {
 				droppedTransfer = true
 			}
-			if cs, ok, err := decodeOptionalStringField(xargs, "cache_salt"); err != nil {
+			if cs, ok, err := decodeOptionalStringField(xargs, reqcommon.FieldCacheSalt); err != nil {
 				return false, err
 			} else if ok && cs != "" {
 				cacheSalt = cs
@@ -611,6 +606,9 @@ func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any
 		}
 	}
 
+	// /inference/v1/generate defaults to token-only output (output_mode="tokens")
+	// so --tokens-only decode workers do not detokenize unless stop strings or
+	// explicit sampling_params.detokenize require it.
 	outputText := len(stopStrings) > 0
 	if detokenize != nil {
 		if !*detokenize && len(stopStrings) > 0 {
@@ -1008,17 +1006,25 @@ func parseStringChoiceArray(m map[string]any, field, qualified string) ([]string
 }
 
 func extractHTTPMediaItems(parsed map[string]any, tokenCount int) ([]*vllmpb.MediaItem, int, int, error) {
+	features, hasFeatures, err := decodeOptionalObjectField(parsed, "features")
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	rawParts, hasParts, err := decodeOptionalArrayField(parsed, "content_parts")
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if hasFeatures && hasParts {
+		return nil, 0, 0, errors.New("cannot specify both features and content_parts")
+	}
+
 	var (
 		items      []*vllmpb.MediaItem
 		imageCount int
 		otherCount int
 	)
 
-	if rawFeatures := parsed["features"]; rawFeatures != nil {
-		features, ok := rawFeatures.(map[string]any)
-		if !ok {
-			return nil, 0, 0, errors.New("features must be an object")
-		}
+	if hasFeatures {
 		if err := validateKnownKeys(features, "features", allowedFeaturesFields); err != nil {
 			return nil, 0, 0, err
 		}
@@ -1031,10 +1037,6 @@ func extractHTTPMediaItems(parsed map[string]any, tokenCount int) ([]*vllmpb.Med
 		otherCount += othN
 	}
 
-	rawParts, hasParts, err := decodeOptionalArrayField(parsed, "content_parts")
-	if err != nil {
-		return nil, 0, 0, err
-	}
 	if hasParts {
 		for _, elem := range rawParts {
 			part, ok := elem.(map[string]any)
@@ -1164,7 +1166,6 @@ func convertHTTPFeaturesToMedia(features map[string]any, tokenCount int) ([]*vll
 			}
 
 			var kwargsBytes []byte
-			var identifier string
 			if hasModKwargs && rawKwargs[i] != nil {
 				kwargStr, ok := rawKwargs[i].(string)
 				if !ok {
@@ -1175,7 +1176,6 @@ func convertHTTPFeaturesToMedia(features map[string]any, tokenCount int) ([]*vll
 					if err != nil {
 						return nil, 0, 0, errors.New("features.kwargs_data entry is not valid base64")
 					}
-					identifier = vllmPreprocessedKwargsIdentifier
 				}
 			}
 
@@ -1190,7 +1190,7 @@ func convertHTTPFeaturesToMedia(features map[string]any, tokenCount int) ([]*vll
 				Source: &vllmpb.MediaItem_Features{
 					Features: &vllmpb.PreprocessedMediaFeatures{
 						Kwargs:     kwargsBytes,
-						Identifier: identifier,
+						Identifier: hash,
 						Offset:     uint64(offset), //#nosec G115 -- NonNegativeInt verified >= 0
 						Length:     uint64(length), //#nosec G115 -- NonNegativeInt verified >= 0
 						MmHash:     proto.String(hash),

@@ -254,15 +254,8 @@ type RequestContext struct {
 	GRPC GRPCRequest
 }
 
-// GRPC protocol names returned by GRPCRequest.Protocol.
-const (
-	GRPCProtocolSGLang = "sglang"
-	GRPCProtocolVLLM   = "vllm"
-)
-
 // GRPCRequest carries protocol-specific gRPC state on RequestContext.
 type GRPCRequest interface {
-	Protocol() string
 	isNativeGRPC() bool
 	closeStream()
 }
@@ -280,7 +273,6 @@ type SGLangGRPCRequest struct {
 	PrefillStream *SGLangPrefillStream
 }
 
-func (*SGLangGRPCRequest) Protocol() string   { return GRPCProtocolSGLang }
 func (*SGLangGRPCRequest) isNativeGRPC() bool { return true }
 func (r *SGLangGRPCRequest) closeStream() {
 	if r != nil && r.PrefillStream != nil {
@@ -322,7 +314,6 @@ type VLLMGRPCRequest struct {
 	PrefillPromptTokens *uint32
 }
 
-func (*VLLMGRPCRequest) Protocol() string     { return GRPCProtocolVLLM }
 func (r *VLLMGRPCRequest) isNativeGRPC() bool { return r != nil && r.HTTP == nil }
 func (*VLLMGRPCRequest) closeStream()         {}
 

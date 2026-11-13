@@ -244,7 +244,7 @@ func TestVLLMGRPC_MediaStrippingAcrossAllPipelineTopologies(t *testing.T) {
 					Uuid:     "uuid-img-42",
 					Source: &vllmpb.MediaItem_Features{
 						Features: &vllmpb.PreprocessedMediaFeatures{
-							Identifier: "ipc",
+							Identifier: "mm-hash-42",
 							Offset:     1,
 							Length:     2,
 							MmHash:     proto.String("mm-hash-42"),
@@ -345,7 +345,7 @@ func TestVLLMGRPC_MediaStrippingAcrossAllPipelineTopologies(t *testing.T) {
 		pm := prefillReq.GetMedia()[0]
 		require.Equal(t, vllmpb.Modality_MODALITY_IMAGE, pm.GetModality())
 		require.Equal(t, "uuid-img-42", pm.GetUuid())
-		require.Equal(t, "ipc", pm.GetFeatures().GetIdentifier())
+		require.Equal(t, "mm-hash-42", pm.GetFeatures().GetIdentifier())
 		require.Equal(t, uint64(1), pm.GetFeatures().GetOffset())
 		require.Equal(t, uint64(2), pm.GetFeatures().GetLength())
 		require.Equal(t, "mm-hash-42", pm.GetFeatures().GetMmHash())
