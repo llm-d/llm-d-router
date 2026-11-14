@@ -17,6 +17,8 @@ limitations under the License.
 package kvevents
 
 import (
+	"context"
+
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -26,4 +28,10 @@ import (
 // reported by a pod whose KV-events topic names modelName.
 func ModelEngineKey(modelName string, hash uint64) kvblock.BlockHash {
 	return namespacedEngineKey(xxhash.Sum64String(modelName), hash)
+}
+
+// ProcessRawMessageForTest decodes and applies msg synchronously, so external
+// tests can drive a real engine adapter, which this package cannot import.
+func (p *Pool) ProcessRawMessageForTest(ctx context.Context, msg *RawMessage) {
+	p.processRawMessage(ctx, msg)
 }
