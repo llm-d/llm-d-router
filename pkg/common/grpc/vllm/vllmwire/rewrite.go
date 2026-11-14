@@ -41,3 +41,11 @@ func RewriteModel(frame []byte, model string) ([]byte, error) {
 func RewriteLoraName(frame []byte, name string) ([]byte, error) {
 	return protoscan.ReplaceBytesField(frame, reqLoraName, name)
 }
+
+// RewriteKVHints returns a new frame with GenerateRequest.kv_hints set to
+// envelope, a serialized KVHintsEnvelope, dropping every client occurrence of
+// the field. An empty envelope drops the field. When frame has no kv_hints and
+// envelope is empty it returns frame itself without a copy.
+func RewriteKVHints(frame, envelope []byte) ([]byte, error) {
+	return protoscan.ReplaceBytesField(frame, reqKVHints, envelope)
+}

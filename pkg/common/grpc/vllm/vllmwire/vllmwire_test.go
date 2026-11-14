@@ -972,6 +972,91 @@ func TestRewritePriority(t *testing.T) {
 	require.Error(t, err)
 }
 
+// kvFetchHints returns a one-action KVHintsEnvelope naming source.
+func kvFetchHints(t testing.TB, source string) *vllmpb.KVHintsEnvelope {
+	t.Helper()
+	return &vllmpb.KVHintsEnvelope{
+		ProtocolVersion: "1",
+		MessageId:       "msg-" + source,
+		Actions: []*vllmpb.KVHintAction{{
+			ActionId:   "fetch-0",
+			ActionType: "kv.fetch",
+			Payload:    mustStruct(t, map[string]any{"source": source}),
+		}},
+	}
+}
+
+func TestScanGenerateRequestKVHints(t *testing.T) {
+	plain := &vllmpb.GenerateRequest{Model: "m", Prompt: &vllmpb.GenerateRequest_Text{Text: "hi"}}
+	req, err := ScanGenerateRequest(mustMarshal(t, plain))
+	require.NoError(t, err)
+	require.False(t, req.HasKVHints())
+
+	hinted := proto.Clone(plain).(*vllmpb.GenerateRequest)
+	hinted.KvHints = kvFetchHints(t, "203.0.113.7:7000")
+	req, err = ScanGenerateRequest(mustMarshal(t, hinted))
+	require.NoError(t, err)
+	require.True(t, req.HasKVHints())
+
+	// The scan only records the field; frames built from it keep kv_hints.
+	framed, err := req.Frame(LegOptions{})
+	require.NoError(t, err)
+	requireProtoEqual(t, hinted, decodeRequestFrame(t, framed))
+}
+
+func TestRewriteKVHints(t *testing.T) {
+	base := &vllmpb.GenerateRequest{
+		Model:    "m",
+		Prompt:   &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2, 3}}},
+		Kv:       &vllmpb.KVCacheParameters{CacheSalt: "salt"},
+		Priority: 2,
+	}
+	withoutHints, err := grpcframe.MarshalProto(base)
+	require.NoError(t, err)
+	client := proto.Clone(base).(*vllmpb.GenerateRequest)
+	client.KvHints = kvFetchHints(t, "203.0.113.7:7000")
+	withHints, err := grpcframe.MarshalProto(client)
+	require.NoError(t, err)
+
+	eppHints := kvFetchHints(t, "10.0.0.9:5600")
+	envelope := mustMarshal(t, eppHints)
+	want := proto.Clone(base).(*vllmpb.GenerateRequest)
+	want.KvHints = eppHints
+
+	for _, frame := range [][]byte{withHints, withoutHints} {
+		framed, err := RewriteKVHints(frame, envelope)
+		require.NoError(t, err)
+		requireProtoEqual(t, want, decodeRequestFrame(t, framed))
+	}
+
+	// An empty envelope drops the client's hints.
+	framed, err := RewriteKVHints(withHints, nil)
+	require.NoError(t, err)
+	requireProtoEqual(t, base, decodeRequestFrame(t, framed))
+
+	// The engine merges repeated kv_hints fields, so every one is dropped.
+	merged, err := grpcframe.FramePayload(concat(
+		withHints[grpcframe.HeaderLen:],
+		mustMarshal(t, &vllmpb.GenerateRequest{KvHints: kvFetchHints(t, "198.51.100.1:7000")}),
+	))
+	require.NoError(t, err)
+	framed, err = RewriteKVHints(merged, envelope)
+	require.NoError(t, err)
+	requireProtoEqual(t, want, decodeRequestFrame(t, framed))
+
+	// No hints and nothing to write: the same frame, no allocation.
+	same, err := RewriteKVHints(withoutHints, nil)
+	require.NoError(t, err)
+	require.Same(t, &withoutHints[0], &same[0])
+	require.Zero(t, testing.AllocsPerRun(100, func() { _, _ = RewriteKVHints(withoutHints, nil) }))
+	require.Equal(t, 1.0, testing.AllocsPerRun(100, func() { _, _ = RewriteKVHints(withHints, envelope) }))
+
+	_, err = RewriteKVHints([]byte{0, 0, 0, 0, 3, 0x12, 0x05, 'a'}, envelope)
+	require.ErrorIs(t, err, ErrMalformed)
+	_, err = RewriteKVHints([]byte{0, 0}, nil)
+	require.Error(t, err)
+}
+
 func TestRewriteModelAndLoraName(t *testing.T) {
 	base, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
 		Model: "old-model", LoraName: "old-lora", Prompt: &vllmpb.GenerateRequest_Text{Text: "hi"}, Priority: 99,
