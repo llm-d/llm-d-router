@@ -33,7 +33,9 @@ type CrossReplicaSyncer interface {
 	fwkplugin.Plugin
 
 	// Set publishes the live local value for endpointID and refreshes the peer
-	// aggregate used by Get.
+	// aggregate used by Get. endpointID identifies one value within spec.StateKey;
+	// it is usually an endpoint's namespaced name, but callers whose state is not
+	// tied to an endpoint, such as flow control priority bands, pass their own ID.
 	Set(ctx context.Context, spec CrossReplicaSpec, endpointID string) error
 
 	// Get reads the live local value for endpointID and combines it with the
