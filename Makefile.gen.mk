@@ -75,6 +75,13 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 VLLM_GRPC_DIR := pkg/common/grpc/vllm
 SGLANG_GRPC_DIR := pkg/common/grpc/sglang
 
+.PHONY: generate-proto-latencypredictor verify-latencypredictor-proto
+generate-proto-latencypredictor: protoc-gen-go ## Generate latency predictor messages from Router's canonical schema.
+	python3 hack/generate-latency-proto.py --protoc "$(PROTOC)" --protoc-gen-go "$(PROTOC_GEN_GO)"
+
+verify-latencypredictor-proto: protoc-gen-go ## Verify latency predictor messages and shared fixtures without changing files.
+	python3 hack/generate-latency-proto.py --protoc "$(PROTOC)" --protoc-gen-go "$(PROTOC_GEN_GO)" --check
+
 .PHONY: generate-proto generate-proto-vllm generate-proto-vllm-engine generate-proto-vllm-upstream generate-proto-sglang
 generate-proto: generate-proto-vllm generate-proto-sglang ## Generate Golang code from protobuf files.
 
