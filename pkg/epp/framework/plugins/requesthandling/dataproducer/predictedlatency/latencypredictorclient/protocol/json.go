@@ -39,7 +39,12 @@ func Marshal(message proto.Message) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return transformMessage(data, message.ProtoReflect().Descriptor(), true)
+	descriptor := message.ProtoReflect().Descriptor()
+	plan := planFor(descriptor)
+	if plan.features != nil || plan.flatBatch {
+		return streamJSON(data, descriptor)
+	}
+	return transformMessage(data, descriptor, true)
 }
 
 // Unmarshal ignores unknown HTTP fields for mixed-version rollout.
@@ -67,8 +72,10 @@ type jsonField struct {
 }
 
 type jsonPlan struct {
-	fields   []jsonField
-	features []jsonField
+	fields    []jsonField
+	features  []jsonField
+	byName    map[string]protoreflect.FieldDescriptor
+	flatBatch bool
 }
 
 var jsonPlans sync.Map
@@ -98,7 +105,13 @@ func planFor(descriptor protoreflect.MessageDescriptor) *jsonPlan {
 	if cached, ok := jsonPlans.Load(descriptor); ok {
 		return cached.(*jsonPlan)
 	}
-	plan := &jsonPlan{fields: fieldsFor(descriptor)}
+	plan := &jsonPlan{fields: fieldsFor(descriptor), byName: make(map[string]protoreflect.FieldDescriptor)}
+	for _, field := range plan.fields {
+		plan.byName[string(field.descriptor.Name())] = field.descriptor
+		if field.descriptor.IsList() && field.descriptor.Kind() == protoreflect.MessageKind && flatMessages()[field.descriptor.Message().FullName()] {
+			plan.flatBatch = true
+		}
+	}
 	if flatMessages()[descriptor.FullName()] {
 		plan.features = fieldsFor(descriptor.Fields().ByName("features").Message())
 	}
