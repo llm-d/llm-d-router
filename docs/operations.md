@@ -288,7 +288,16 @@ until its age reaches the threshold. Each successful sample replaces that view
 even if the watch-driven datastore has not caught up. Requests use the intersection
 of their datastore candidates and the fresh sample, comparing full routing metadata.
 An unverified addition or changed endpoint is excluded without rejecting other
-matching candidates. A request with no matching candidates receives HTTP 503.
+matching candidates. If a nonempty candidate set has no match while verification
+is fresh, the request waits for an on-demand API sample and retries eligibility.
+Concurrent requests and periodic verification share sampling work. Actual sampling
+attempts are limited to ten per second per replica. The request waits at most the
+smaller of one second and a third of the threshold, and can retry once if a joined
+sample started before its candidates changed. It receives HTTP 503 if verification
+fails, the wait expires, or no candidates match after verification. This avoids
+waiting for the periodic interval during a healthy singleton metadata change,
+while preserving full metadata validation. Requests with matching candidates,
+empty candidate sets, or expired verification do not initiate on-demand reads.
 Bodyless requests and WebSocket upgrades select from matching endpoints and
 validate the selected endpoint before dispatch.
 
