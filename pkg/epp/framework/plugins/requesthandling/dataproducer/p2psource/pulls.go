@@ -1,0 +1,206 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package p2psource
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+	compbasemetrics "k8s.io/component-base/metrics"
+
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+)
+
+var inFlightPulls = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Subsystem: metricsutil.LLMDRouterEndpointPickerSubsystem,
+		Name:      "p2p_inflight_pulls",
+		Help:      metricsutil.HelpMsgWithStability("Current number of P2P KV cache pulls directed at each source endpoint, as tracked by the p2p-source-producer.", compbasemetrics.ALPHA),
+	},
+	[]string{"endpoint_name", "namespace", "producer_name"},
+)
+
+var inFlightPullTokens = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Subsystem: metricsutil.LLMDRouterEndpointPickerSubsystem,
+		Name:      "p2p_inflight_pull_tokens",
+		Help:      metricsutil.HelpMsgWithStability("Current number of prompt tokens in the P2P KV cache pulls directed at each source endpoint, as tracked by the p2p-source-producer.", compbasemetrics.ALPHA),
+	},
+	[]string{"endpoint_name", "namespace", "producer_name"},
+)
+
+// registerPullMetrics registers the in-flight pull gauges. They are
+// package-level vectors, so a second producer instance registering them is a
+// no-op; producer_name keeps each instance's series distinct.
+func registerPullMetrics(registerer prometheus.Registerer) error {
+	if registerer == nil {
+		return errors.New("in-flight pull metrics registerer is required")
+	}
+	for _, gauge := range []*prometheus.GaugeVec{inFlightPulls, inFlightPullTokens} {
+		if err := registerer.Register(gauge); err != nil {
+			var alreadyRegistered prometheus.AlreadyRegisteredError
+			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == gauge {
+				continue
+			}
+			return fmt.Errorf("register in-flight pull metric: %w", err)
+		}
+	}
+	return nil
+}
+
+const pullStateKey plugin.StateKey = "inflight-pull"
+
+// pullTracker counts the pulls one producer has directed at each source
+// endpoint and not yet released, and the prompt tokens they pull. Each
+// request holds at most one pull, kept in PluginState so the janitor releases
+// it if no response or abandonment ever arrives.
+type pullTracker struct {
+	producerName string
+	state        *plugin.PluginState
+
+	mu    sync.Mutex
+	loads map[fwkdl.ID]pullLoad
+}
+
+// pullLoad is a source's unreleased pulls and the prompt tokens they pull.
+type pullLoad struct {
+	pulls  int
+	tokens int
+}
+
+func newPullTracker(ctx context.Context, producerName string) *pullTracker {
+	return &pullTracker{
+		producerName: producerName,
+		state:        plugin.NewPluginState(ctx),
+		loads:        map[fwkdl.ID]pullLoad{},
+	}
+}
+
+// acquire counts a pull from source for the request and adds its tokens to
+// the source's load. A second acquire for the same request is ignored. ctx
+// keeps the janitor from releasing the pull while the request is alive.
+func (t *pullTracker) acquire(ctx context.Context, requestID string, source fwkdl.ID, tokens int) {
+	if requestID == "" {
+		return
+	}
+	// Count before the entry is stored, so a release can't run before the count.
+	t.add(source, 1, tokens)
+	if _, existed := t.state.ReadOrWrite(requestID, pullStateKey, &pullEntry{tracker: t, source: source, tokens: tokens}); existed {
+		t.add(source, -1, -tokens)
+		return
+	}
+	t.state.BindLiveness(ctx, requestID)
+}
+
+// release drops the request's pull, if it holds one. Repeated calls are no-ops.
+func (t *pullTracker) release(requestID string) {
+	if requestID == "" {
+		return
+	}
+	t.state.Delete(requestID)
+}
+
+// add changes the source's load and its gauge series together. A source
+// whose pull count reaches zero is dropped with its series, so an endpoint
+// that leaves the pool leaves no series behind once its pulls are released.
+func (t *pullTracker) add(source fwkdl.ID, pulls, tokens int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	load := t.loads[source]
+	load.pulls += pulls
+	load.tokens += tokens
+	if load.pulls <= 0 {
+		delete(t.loads, source)
+		inFlightPulls.DeleteLabelValues(source.Name, source.Namespace, t.producerName)
+		inFlightPullTokens.DeleteLabelValues(source.Name, source.Namespace, t.producerName)
+		return
+	}
+	t.loads[source] = load
+	inFlightPulls.WithLabelValues(source.Name, source.Namespace, t.producerName).Set(float64(load.pulls))
+	inFlightPullTokens.WithLabelValues(source.Name, source.Namespace, t.producerName).Set(float64(load.tokens))
+}
+
+// pullEntry is a request's pull. PluginState evicts an entry at most once,
+// on release or by the janitor, so its load is returned exactly once.
+type pullEntry struct {
+	tracker *pullTracker
+	source  fwkdl.ID
+	tokens  int
+}
+
+var _ plugin.EvictableStateData = (*pullEntry)(nil)
+
+func (e *pullEntry) Clone() plugin.StateData {
+	return &pullEntry{tracker: e.tracker, source: e.source, tokens: e.tokens}
+}
+
+func (e *pullEntry) OnEvicted(_ string, _ plugin.StateKey) {
+	e.tracker.add(e.source, -1, -e.tokens)
+}
+
+// trackingProducer is the Producer with the hooks that release in-flight
+// pulls. PluginFactory returns it only when TrackInFlightPulls is set, so a
+// producer without tracking is not called for every response chunk.
+type trackingProducer struct {
+	*Producer
+	// ttft records TTFT by decision from the same response hook. Nil unless
+	// ttftByDecision is set.
+	ttft *ttftRecorder
+}
+
+var (
+	_ fwkrh.DataProducer          = &trackingProducer{}
+	_ fwkrh.PreRequest            = &trackingProducer{}
+	_ fwkrh.ResponseBodyProcessor = &trackingProducer{}
+	_ fwkrh.RequestAbandoned      = &trackingProducer{}
+)
+
+// ResponseBody releases the request's pull at its first response chunk, by
+// which time the computing pod has prefilled and the pull is done. The
+// end-of-stream call, which the director also makes for a request that fails
+// after scheduling, releases a pull that no earlier chunk did. With
+// ttftByDecision set, it then passes the chunk to the TTFT recorder. The two
+// keep separate per-request state, so the order changes no result; releasing
+// first keeps the release independent of the recorder's early returns.
+func (p *trackingProducer) ResponseBody(ctx context.Context, request *scheduling.InferenceRequest, response *fwkrh.Response, md *fwkdl.EndpointMetadata) {
+	if request == nil || response == nil {
+		return
+	}
+	if response.StartOfStream || response.EndOfStream {
+		p.pulls.release(request.RequestID)
+	}
+	if p.ttft != nil {
+		p.ttft.ResponseBody(ctx, request, response, md)
+	}
+}
+
+// RequestAbandoned releases the request's pull when the director drops the
+// request before sending it, for example after another PreRequest plugin
+// fails.
+func (p *trackingProducer) RequestAbandoned(_ context.Context, request *scheduling.InferenceRequest) {
+	if request == nil {
+		return
+	}
+	p.pulls.release(request.RequestID)
+}

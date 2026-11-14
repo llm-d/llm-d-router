@@ -74,6 +74,7 @@ available.
 - `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. If the profile has no target, the primary profile target is used. See [Prefill profile name](#prefill-profile-name).
 - `p2pConnectorPort` (int, optional, default: `7777`): `OffloadingConnector` P2P tier port of data parallel rank 0 on every endpoint; rank `r` listens on `p2pConnectorPort + r`, which must stay within 1-65535: an endpoint beyond that is skipped as a source, and a request to a prefill endpoint beyond it fails. Must match the P2P tier's configured port.
 - `costModel` (object, optional): When set, the source is written only when the pull's gain exceeds its cost, evaluated after the `minCachedTokenDelta` floor. Omitted, the fixed-delta decision applies. See [Cost model](#cost-model).
+- `trackInFlightPulls` (bool, optional, default: `false`): Counts the pulls this producer has directed at each source endpoint and the prompt tokens they pull, and exports them as the `llm_d_epp_p2p_inflight_pulls` and `llm_d_epp_p2p_inflight_pull_tokens` gauges. See [In-flight pulls](#in-flight-pulls).
 - `ttftByDecision` (bool, optional, default: `false`): Records the TTFT of each streaming request whose stream ends naturally in `llm_d_epp_p2p_source_request_ttft_seconds`, labelled with this producer's decision. Adds a response-body hook to the producer.
 
 ## Cost model
@@ -123,6 +124,10 @@ The [reusable prefix floor](#reusable-prefix-floor) is published in Produce from
         requeueMs: 400
         fleetWeight: 1
 ```
+
+## In-flight pulls
+
+With `trackInFlightPulls: true`, a pull counts against its source from the `PreRequest` that writes the source until the request's first response chunk. The computing pod sends its first chunk after it has prefilled, so a streamed request stops counting once its pulled blocks are in use. A non-streaming response arrives as a single chunk, so its pull counts until the response ends. A request that ends without a response chunk (an error or a client disconnect after scheduling) is released at its end of stream. `llm_d_epp_p2p_inflight_pull_tokens` sums the sizes of the same pulls, each the tokens its source holds beyond the computing pod. Each EPP replica counts only the pulls it directed. Source selection does not read either gauge. With `ttftByDecision` also set, the same response hook releases the pull and records the TTFT; each option keeps its own per-request state.
 
 ## Configuration
 
