@@ -1,0 +1,125 @@
+{
+  "prediction_zero": {
+    "kv_cache_percentage": 0,
+    "input_token_length": 0,
+    "num_request_waiting": 0,
+    "num_request_running": 0,
+    "num_tokens_generated": 0,
+    "prefix_cache_score": 0,
+    "encoder_input_size": 0,
+    "encoder_matched_size": 0,
+    "prefill_tokens_in_flight": 0,
+    "decode_tokens_in_flight": 0
+  },
+  "prediction_extended": {
+    "kv_cache_percentage": 0.75,
+    "input_token_length": 1200,
+    "num_request_waiting": 3,
+    "num_request_running": 8,
+    "num_tokens_generated": 1,
+    "prefix_cache_score": 0.25,
+    "encoder_input_size": 1024,
+    "encoder_matched_size": 512,
+    "pod_type": "prefill",
+    "prefill_tokens_in_flight": 9007199254740993,
+    "decode_tokens_in_flight": 9223372036854775807
+  },
+  "prediction_legacy": {
+    "kv_cache_percentage": 0.5,
+    "input_token_length": 100,
+    "num_request_waiting": 0,
+    "num_request_running": 2,
+    "num_tokens_generated": 1,
+    "prefix_cache_score": 0.75
+  },
+  "training_ttft": {
+    "kv_cache_percentage": 0.75,
+    "input_token_length": 1200,
+    "num_request_waiting": 3,
+    "num_request_running": 8,
+    "num_tokens_generated": 0,
+    "prefix_cache_score": 0.25,
+    "encoder_input_size": 1024,
+    "encoder_matched_size": 512,
+    "pod_type": "prefill",
+    "prefill_tokens_in_flight": 9007199254740993,
+    "decode_tokens_in_flight": 0,
+    "actual_ttft_ms": 100,
+    "actual_tpot_ms": 0,
+    "predicted_ttft_ms": 80,
+    "timestamp": "2026-11-09T16:24:02.123456Z"
+  },
+  "training_tpot": {
+    "kv_cache_percentage": 0.5,
+    "input_token_length": 1200,
+    "num_request_waiting": 1,
+    "num_request_running": 4,
+    "num_tokens_generated": 0,
+    "prefix_cache_score": 0,
+    "encoder_input_size": 0,
+    "encoder_matched_size": 0,
+    "pod_type": "decode",
+    "prefill_tokens_in_flight": 5000,
+    "decode_tokens_in_flight": 0,
+    "actual_ttft_ms": 0,
+    "actual_tpot_ms": 12.5,
+    "predicted_tpot_ms": 10,
+    "timestamp": "2026-11-09T16:24:03Z"
+  },
+  "training_legacy": {
+    "kv_cache_percentage": 0.5,
+    "input_token_length": 100,
+    "num_request_waiting": 0,
+    "num_request_running": 2,
+    "num_tokens_generated": 0,
+    "prefix_cache_score": 0.75,
+    "actual_ttft_ms": 50,
+    "actual_tpot_ms": 0
+  },
+  "coefficients": {
+    "ttft_intercept": 0,
+    "ttft_coefficients": {
+      "input_token_length": 0.5,
+      "encoder_input_size": 0.125
+    },
+    "tpot_intercept": 8,
+    "tpot_coefficients": {}
+  },
+  "trees": {
+    "ttft_trees": [
+      {
+        "nodeid": 0,
+        "depth": 0,
+        "split": "input_token_length",
+        "split_condition": 500,
+        "yes": 1,
+        "no": 2,
+        "missing": 2,
+        "children": [
+          {"nodeid": 1, "leaf": 0.25},
+          {"nodeid": 2, "leaf": 0.75}
+        ]
+      }
+    ],
+    "tpot_trees": []
+  },
+  "buckets": {
+    "buckets": [
+      {"model": "ttft", "queue_bucket": 0, "cache_bucket": 1, "prefix_bucket": 2, "count": 9007199254740993},
+      {"model": "tpot", "queue_bucket": 1, "cache_bucket": 0, "prefix_bucket": 0, "count": 0}
+    ]
+  },
+  "model_info": {
+    "model_type": "xgboost",
+    "objective_type": "quantile",
+    "model_status": {"ttft_model": true, "tpot_model": false},
+    "quantile": 0.9
+  },
+  "export_metadata": {
+    "model_type": "xgboost",
+    "quantile_alpha": 0.9,
+    "exported_at": "2026-11-09T16:24:02Z",
+    "ttft_samples": 9007199254740993,
+    "tpot_samples": 0
+  }
+}
