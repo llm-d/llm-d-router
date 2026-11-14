@@ -1547,3 +1547,11 @@ llm_d_epp_datalayer_polls_total{outcome="timeout",source_type="http-type"} 0
 	require.Equal(t, 3, promtestutil.CollectAndCount(LlmdDataLayerPollsTotal), "no new series after a poll")
 	require.Equal(t, float64(1), promtestutil.ToFloat64(LlmdDataLayerPollsTotal.WithLabelValues("http-type", DataLayerPollOutcomeTimeout)))
 }
+
+func TestDiscoveryDisagreementMetricTracksRecovery(t *testing.T) {
+	t.Cleanup(func() { RecordDiscoveryDisagreement(false) })
+	RecordDiscoveryDisagreement(true)
+	require.Equal(t, float64(1), promtestutil.ToFloat64(llmdDiscoveryMembershipDisagreement))
+	RecordDiscoveryDisagreement(false)
+	require.Zero(t, promtestutil.ToFloat64(llmdDiscoveryMembershipDisagreement))
+}

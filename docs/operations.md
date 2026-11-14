@@ -268,6 +268,61 @@ The router supports multiple High Availability (HA) modes:
    - **GKE Preferred Backends (Gateway Mode, Recommended on GKE)**: Uses GKE `GCPBackendPolicy` (`PREFERRED` and `DEFAULT` tiers) and `HealthCheckPolicy` for warm-standby failover and rate/capacity spillover; see [GKE Preferred Backends (Gateway Mode)](#gke-preferred-backends-gateway-mode).
    - **Leader Election with Fail-Open**: Uses Kubernetes `coordination.k8s.io/Lease` coordination so only the elected leader serves inference extension requests while standby pods remain out of rotation until acquiring the lease; see [Leader Election and Fail-Open](#leader-election-and-fail-open).
 
+### Kubernetes discovery freshness
+
+`--discovery-staleness-threshold=30s` enables bounded verification of Kubernetes
+InferencePool membership. The default, `0`, disables verification. A positive
+threshold must be at least `2s`. This option requires Kubernetes InferencePool
+discovery; file discovery and `--endpoint-selector` do not support it.
+
+Pod and InferencePool watches maintain membership. A background verifier reads
+the InferencePool and lists its matching Pods through an uncached API reader,
+then compares their routing metadata with the datastore. It does not update
+membership. It starts attempts approximately every third of the threshold with
+up to 20 percent jitter, with each attempt limited to a third of the threshold.
+The cadence is measured from the attempt's start, so successful reads complete
+within the previous snapshot's freshness budget. Read and comparison time count
+toward the freshness budget. Each replica performs its own verification; choose the
+threshold with the Pod count and API-server load in mind.
+
+After initial validation, failed API reads retain the last sampled membership
+until its age reaches the threshold. Each successful sample replaces that view
+even if the watch-driven datastore has not caught up. Requests use the intersection
+of their datastore candidates and the fresh sample, comparing full routing metadata.
+An unverified addition or changed endpoint is excluded without rejecting other
+matching candidates. If a nonempty candidate set has no match while verification
+is fresh, the request waits for an on-demand API sample and retries eligibility.
+Concurrent requests and periodic verification share sampling work. Actual sampling
+attempts are limited to ten per second per replica. The request waits at most the
+smaller of one second and a third of the threshold, and can retry once if a joined
+sample started before its candidates changed. It receives HTTP 503 if verification
+fails, the wait expires, or no candidates match after verification. This avoids
+waiting for the periodic interval during a healthy singleton metadata change,
+while preserving full metadata validation. Requests with matching candidates,
+empty candidate sets, or expired verification do not initiate on-demand reads.
+Bodyless requests and WebSocket upgrades select from matching endpoints and
+validate the selected endpoint before dispatch.
+
+A changed pool configuration or deleted pool invalidates verification immediately.
+An expired or invalidated sample makes readiness report `NOT_SERVING` and rejects
+new inference requests with HTTP 503. Readiness describes sample freshness;
+it does not guarantee that a request has matching candidates. Liveness and
+already-dispatched response streams are unaffected. Leader Lease renewal and
+backend metric scrapes do not renew this freshness budget.
+
+Excluded candidate counts and sampling errors are logged at debug verbosity.
+The same endpoint ID disagreeing across two consecutive successful samples emits
+an operational log and sets `llm_d_epp_discovery_membership_disagreement` to 1.
+When no endpoint ID remains persistently mismatched, a transition is logged
+and the metric resets to 0. Endpoint IDs include namespace and rank. Debug logs
+identify each endpoint and whether it is absent from either view or has different
+metadata. The verification loop logs transitions into and out of readiness;
+these are observed after sampling attempts, rather than logged on every
+rejected request.
+
+Configure the gateway to fail closed on EPP unavailability if inference must stop
+during discovery loss. Gateway fail-open routing can bypass EPP checks.
+
 ### Active-Active Mode
 
 To run multiple EPP replicas concurrently with shared in-flight load, configure

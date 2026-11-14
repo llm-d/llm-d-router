@@ -1,0 +1,485 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/go-logr/logr/funcr"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clocktesting "k8s.io/utils/clock/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
+)
+
+func TestDiscoveryFreshnessExpiresWhenMembershipReadsFail(t *testing.T) {
+	for _, failure := range []string{"pool", "pods"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := t.Context()
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, v1.Install(scheme))
+			pool := fwkgaie.MakeInferencePool("pool").Namespace("default").
+				Selector(map[string]string{"app": "model"}).TargetPorts(8000).ObjRef()
+			pod := fwkk8s.MakePod("model").Namespace("default").
+				Labels(map[string]string{"app": "model"}).ReadyCondition().ObjRef()
+			api := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, pod).Build()
+			ds := datastore.NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+			require.NoError(t, ds.PoolSet(ctx, api, poolutil.InferencePoolToEndpointPool(pool)))
+			unavailable := false
+			var readDelay time.Duration
+			clock := clocktesting.NewFakeClock(time.Now())
+			reader := interceptor.NewClient(api, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if unavailable && failure == "pool" {
+						return errors.New("discovery unavailable")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if unavailable && failure == "pods" {
+						return errors.New("discovery unavailable")
+					}
+					clock.Step(readDelay)
+					return c.List(ctx, list, opts...)
+				},
+			})
+			d := NewDiscoveryFreshness(reader, ds, types.NamespacedName{Namespace: pool.Namespace, Name: pool.Name}, 10*time.Second)
+			d.clock = clock
+			require.Error(t, d.CheckReady())
+			require.NoError(t, d.refresh(ctx))
+			require.NoError(t, d.CheckReady())
+			endpoint := ds.PodList(datastore.AllPodsPredicate)[0]
+			candidates := []fwksched.Endpoint{fwksched.NewEndpoint(endpoint.GetMetadata(), endpoint.GetMetrics(), endpoint.GetAttributes())}
+			require.NoError(t, d.Admit(ctx, nil, candidates))
+			changed := endpoint.GetMetadata().Clone()
+			changed.Port = "9000"
+			require.Error(t, d.Admit(ctx, nil, []fwksched.Endpoint{fwksched.NewEndpoint(changed, endpoint.GetMetrics(), endpoint.GetAttributes())}))
+
+			unavailable = true
+			clock.Step(9 * time.Second)
+			require.Error(t, d.refresh(ctx))
+			require.NoError(t, d.CheckReady(), "a failed read retains the bounded grace period")
+			clock.Step(time.Second)
+			require.Error(t, d.CheckReady(), "lease renewal cannot extend membership freshness")
+			var rejection errcommon.Error
+			require.ErrorAs(t, d.Admit(ctx, nil, nil), &rejection)
+			require.Equal(t, errcommon.ServiceUnavailable, rejection.Code)
+			require.ErrorAs(t, d.Admit(ctx, nil, nil), &rejection)
+
+			// The API recovers before the watch-driven routing store catches up.
+			require.NoError(t, api.Delete(ctx, pod))
+			unavailable = false
+			require.NoError(t, d.refresh(ctx))
+			require.NoError(t, d.CheckReady())
+			ds.PodDelete(pod.Name)
+			require.NoError(t, d.refresh(ctx))
+			require.NoError(t, d.CheckReady())
+			require.NoError(t, d.Admit(ctx, nil, nil))
+			require.ErrorAs(t, d.Admit(ctx, nil, candidates), &rejection)
+			require.Equal(t, errcommon.ServiceUnavailable, rejection.Code)
+			readDelay = 10 * time.Second
+			require.NoError(t, d.refresh(ctx))
+			require.Error(t, d.CheckReady(), "slow API reads must not extend the freshness budget")
+		})
+	}
+}
+
+func TestDiscoveryFreshnessInvalidatesKnownMembershipChanges(t *testing.T) {
+	for _, change := range []string{"selector", "not-ready", "deleted-pool", "selector-list-failure", "ports-list-failure", "protocol-list-failure"} {
+		t.Run(change, func(t *testing.T) {
+			ctx := t.Context()
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, v1.Install(scheme))
+			pool := fwkgaie.MakeInferencePool("pool").Namespace("default").
+				Selector(map[string]string{"app": "model"}).TargetPorts(8000).ObjRef()
+			pod := fwkk8s.MakePod("model").Namespace("default").
+				Labels(map[string]string{"app": "model"}).ReadyCondition().ObjRef()
+			api := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, pod).WithStatusSubresource(pod).Build()
+			ds := datastore.NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+			require.NoError(t, ds.PoolSet(ctx, api, poolutil.InferencePoolToEndpointPool(pool)))
+			d := NewDiscoveryFreshness(api, ds, client.ObjectKeyFromObject(pool), time.Minute)
+			require.NoError(t, d.refresh(ctx))
+			require.NoError(t, d.CheckReady())
+			if strings.HasSuffix(change, "list-failure") {
+				d.reader = interceptor.NewClient(api, interceptor.Funcs{
+					List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+						return errors.New("Pod list unavailable")
+					},
+				})
+			}
+			switch change {
+			case "selector", "selector-list-failure":
+				pool.Spec.Selector.MatchLabels = map[v1.LabelKey]v1.LabelValue{"app": "withdrawn"}
+				require.NoError(t, api.Update(ctx, pool))
+			case "ports-list-failure":
+				pool.Spec.TargetPorts = []v1.Port{{Number: 9000}}
+				require.NoError(t, api.Update(ctx, pool))
+			case "protocol-list-failure":
+				pool.Spec.AppProtocol = "kubernetes.io/h2c"
+				require.NoError(t, api.Update(ctx, pool))
+			case "not-ready":
+				pod.Status.Conditions = nil
+				require.NoError(t, api.Status().Update(ctx, pod))
+			case "deleted-pool":
+				require.NoError(t, api.Delete(ctx, pool))
+			}
+			if change == "not-ready" {
+				require.NoError(t, d.refresh(ctx))
+				require.NoError(t, d.CheckReady())
+				require.Empty(t, d.validated.Load().endpoints)
+			} else {
+				require.Error(t, d.refresh(ctx))
+				require.Error(t, d.CheckReady(), "changed pool configuration must not use the discovery-error grace period")
+			}
+		})
+	}
+}
+
+func TestDiscoveryFreshnessLoopKeepsDelayedSuccessfulReadsReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, v1.Install(scheme))
+	pool := fwkgaie.MakeInferencePool("pool").Namespace("default").Selector(map[string]string{"app": "model"}).TargetPorts(8000).ObjRef()
+	api := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build()
+	ds := datastore.NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+	require.NoError(t, ds.PoolSet(ctx, api, poolutil.InferencePoolToEndpointPool(pool)))
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	reader := interceptor.NewClient(api, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			select {
+			case started <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			select {
+			case <-finish:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	d := NewDiscoveryFreshness(reader, ds, client.ObjectKeyFromObject(pool), 10*time.Second)
+	clock := clocktesting.NewFakeClock(time.Now())
+	d.clock = clock
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+	t.Cleanup(func() { cancel(); require.NoError(t, <-done) })
+	receive := func() {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("verification did not start within its cadence")
+		}
+	}
+	receive()
+	for cycle := range 4 {
+		snapshotStarted := clock.Now()
+		clock.Step(3 * time.Second)
+		if cycle > 0 {
+			require.NoError(t, d.CheckReady(), "previous snapshot must cover the next successful read")
+		}
+		finish <- struct{}{}
+		require.Eventually(t, func() bool {
+			validated := d.validated.Load()
+			return validated != nil && validated.at.Equal(snapshotStarted)
+		}, time.Second, time.Millisecond)
+		require.NoError(t, d.CheckReady())
+		clock.Step(time.Second)
+		receive()
+	}
+}
+
+func TestDiscoveryFreshnessSamplesMembershipBeforeWatchCatchesUp(t *testing.T) {
+	ctx := t.Context()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, v1.Install(scheme))
+	pool := fwkgaie.MakeInferencePool("pool").Namespace("default").Selector(map[string]string{"app": "model"}).TargetPorts(8000).ObjRef()
+	pod := fwkk8s.MakePod("model").Namespace("default").Labels(map[string]string{"app": "model"}).ReadyCondition().ObjRef()
+	api := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, pod).Build()
+	ds := datastore.NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+	require.NoError(t, ds.PoolSet(ctx, api, poolutil.InferencePoolToEndpointPool(pool)))
+	d := NewDiscoveryFreshness(api, ds, client.ObjectKeyFromObject(pool), time.Minute)
+	require.NoError(t, d.refresh(ctx))
+	added := pod.DeepCopy()
+	added.Name = "added"
+	added.ResourceVersion = ""
+	require.NoError(t, api.Create(ctx, added))
+	require.NoError(t, d.refresh(ctx), "healthy sampling must tolerate a watch that has not observed an addition")
+	require.NoError(t, d.CheckReady())
+	require.NoError(t, api.Delete(ctx, pod))
+	require.NoError(t, d.refresh(ctx), "withdrawal must publish the authoritative membership without waiting for the watch")
+	require.NoError(t, d.CheckReady())
+}
+
+func TestDiscoveryFreshnessFiltersMixedCandidates(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	d := &DiscoveryFreshness{clock: clock, threshold: time.Minute}
+	valid := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "valid"}, Port: "8000"}
+	changed := valid.Clone()
+	changed.Port = "9000"
+	d.validated.Store(&validatedMembership{at: clock.Now(), endpoints: map[types.NamespacedName]*fwkdl.EndpointMetadata{valid.ID: valid}})
+	candidates := []fwksched.Endpoint{fwksched.NewEndpoint(changed, nil, nil), fwksched.NewEndpoint(valid, nil, nil)}
+	eligible, err := d.FilterCandidates(t.Context(), candidates)
+	require.NoError(t, err)
+	require.Equal(t, candidates[1:], eligible)
+	_, err = d.FilterCandidates(t.Context(), candidates[:1])
+	require.Error(t, err)
+	clock.Step(time.Minute)
+	_, err = d.FilterCandidates(t.Context(), candidates)
+	require.Error(t, err)
+}
+
+func TestDiscoveryFreshnessLogsPersistentDisagreementAndRecoveryOnce(t *testing.T) {
+	var entries []string
+	logger := funcr.New(func(_, entry string) { entries = append(entries, entry) }, funcr.Options{Verbosity: 5})
+	ctx := log.IntoContext(t.Context(), logger)
+	d := &DiscoveryFreshness{}
+	mismatch := datastore.MembershipDisagreement{types.NamespacedName{Namespace: "default", Name: "first-rank-0"}: "absent from datastore"}
+	d.observeDisagreement(ctx, mismatch)
+	require.NotContains(t, strings.Join(entries, "\n"), "persists across")
+	d.observeDisagreement(ctx, mismatch)
+	d.observeDisagreement(ctx, mismatch)
+	d.observeDisagreement(ctx, nil)
+	d.observeDisagreement(ctx, nil)
+	output := strings.Join(entries, "\n")
+	require.Equal(t, 1, strings.Count(output, "persists across successful samples"))
+	require.Equal(t, 1, strings.Count(output, "membership disagreement cleared"))
+}
+
+func TestDiscoveryFreshnessDoesNotTreatDifferentEndpointsAsPersistent(t *testing.T) {
+	first := types.NamespacedName{Namespace: "default", Name: "first-rank-0"}
+	for _, second := range []types.NamespacedName{
+		{Namespace: "default", Name: "second-rank-0"},
+		{Namespace: "other", Name: "first-rank-0"},
+		{Namespace: "default", Name: "first-rank-1"},
+	} {
+		t.Run(second.String(), func(t *testing.T) {
+			var entries []string
+			logger := funcr.New(func(_, entry string) { entries = append(entries, entry) }, funcr.Options{Verbosity: 5})
+			ctx := log.IntoContext(t.Context(), logger)
+			d := &DiscoveryFreshness{}
+			d.observeDisagreement(ctx, datastore.MembershipDisagreement{first: "absent from datastore"})
+			d.observeDisagreement(ctx, datastore.MembershipDisagreement{second: "absent from datastore"})
+			require.False(t, d.persistentDisagreement)
+			require.NotContains(t, strings.Join(entries, "\n"), "persists across successful samples")
+			require.Contains(t, strings.Join(entries, "\n"), second.String())
+			require.Contains(t, strings.Join(entries, "\n"), "absent from datastore")
+			d.observeDisagreement(ctx, datastore.MembershipDisagreement{second: "metadata differs"})
+			require.True(t, d.persistentDisagreement, "a repeated endpoint ID persists even if the mismatch reason changes")
+			d.observeDisagreement(ctx, datastore.MembershipDisagreement{first: "absent from API sample"})
+			require.False(t, d.persistentDisagreement, "a new mismatch must not retain the resolved endpoint's state")
+			require.Len(t, d.previousDisagreement, 1)
+		})
+	}
+}
+
+type labelRefreshFixture struct {
+	stop    func()
+	ctx     context.Context
+	api     client.Client
+	store   datastore.Datastore
+	checker *DiscoveryFreshness
+	pod     *corev1.Pod
+}
+
+func newLabelRefreshFixture(t *testing.T, hooks interceptor.Funcs) *labelRefreshFixture {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, v1.Install(scheme))
+	pool := fwkgaie.MakeInferencePool("pool").Namespace("default").Selector(map[string]string{"app": "model"}).TargetPorts(8000).ObjRef()
+	pod := fwkk8s.MakePod("model").Namespace("default").Labels(map[string]string{"app": "model"}).ReadyCondition().ObjRef()
+	api := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, pod).Build()
+	store := datastore.NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+	require.NoError(t, store.PoolSet(ctx, api, poolutil.InferencePoolToEndpointPool(pool)))
+	checker := NewDiscoveryFreshness(interceptor.NewClient(api, hooks), store, client.ObjectKeyFromObject(pool), 30*time.Second)
+	done := make(chan error, 1)
+	go func() { done <- checker.Start(ctx) }()
+	var stopped sync.Once
+	stop := func() {
+		stopped.Do(func() {
+			cancel()
+			require.NoError(t, <-done)
+			require.Error(t, checker.CheckReady())
+			require.False(t, checker.running.Load())
+		})
+	}
+	t.Cleanup(stop)
+	require.Eventually(t, func() bool { return checker.CheckReady() == nil }, time.Second, time.Millisecond)
+	return &labelRefreshFixture{ctx: ctx, api: api, store: store, checker: checker, pod: pod, stop: stop}
+}
+
+func (f *labelRefreshFixture) changeLabels(t *testing.T) []fwksched.Endpoint {
+	t.Helper()
+	f.pod.Labels["version"] = "v2"
+	require.NoError(t, f.api.Update(f.ctx, f.pod))
+	require.NoError(t, f.store.PodUpdateOrAddIfNotExist(f.ctx, f.pod))
+	ep := f.store.PodList(datastore.AllPodsPredicate)[0]
+	return []fwksched.Endpoint{fwksched.NewEndpoint(ep.GetMetadata(), ep.GetMetrics(), ep.GetAttributes())}
+}
+
+func TestDiscoveryFreshnessVerifiesSingletonLabelChangeWithoutWaitingForPeriodicSample(t *testing.T) {
+	f := newLabelRefreshFixture(t, interceptor.Funcs{})
+	candidates := f.changeLabels(t)
+	requestCtx, stop := context.WithTimeout(f.ctx, time.Second)
+	defer stop()
+	eligible, err := f.checker.FilterCandidates(requestCtx, candidates)
+	require.NoError(t, err, "a healthy label edit must verify on demand instead of rejecting until the next periodic sample")
+	require.Equal(t, candidates, eligible)
+	require.NoError(t, f.checker.Admit(f.ctx, nil, eligible))
+}
+
+func TestDiscoveryFreshnessSharesVerificationAndIsolatesWaiterCancellation(t *testing.T) {
+	var lists atomic.Int32
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	f := newLabelRefreshFixture(t, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		if lists.Add(1) > 1 {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return c.List(ctx, list, opts...)
+	}})
+	candidates := f.changeLabels(t)
+	requestCtx, cancel := context.WithCancel(f.ctx)
+	canceled := make(chan error, 1)
+	go func() { _, err := f.checker.FilterCandidates(requestCtx, candidates); canceled <- err }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("on-demand verification did not start")
+	}
+	results := make(chan error, 8)
+	entered := make(chan struct{}, 8)
+	for range 8 {
+		go func() { entered <- struct{}{}; _, err := f.checker.FilterCandidates(f.ctx, candidates); results <- err }()
+	}
+	for range 8 {
+		<-entered
+	}
+	cancel()
+	require.ErrorContains(t, <-canceled, "context canceled")
+	close(release)
+	for range 8 {
+		require.NoError(t, <-results)
+	}
+	require.Equal(t, int32(2), lists.Load(), "the initial and shared on-demand sample are the only API Pod lists")
+}
+
+func TestDiscoveryFreshnessOnDemandVerificationRemainsFailClosed(t *testing.T) {
+	for _, failure := range []string{"API failure", "withdrawn", "expired"} {
+		t.Run(failure, func(t *testing.T) {
+			var unavailable atomic.Bool
+			var reads atomic.Int32
+			f := newLabelRefreshFixture(t, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				reads.Add(1)
+				if unavailable.Load() {
+					return errors.New("discovery unavailable")
+				}
+				return c.List(ctx, list, opts...)
+			}})
+			candidates := f.changeLabels(t)
+			previous := f.checker.validated.Load()
+			switch failure {
+			case "API failure":
+				unavailable.Store(true)
+			case "withdrawn":
+				require.NoError(t, f.api.Delete(f.ctx, f.pod))
+			case "expired":
+				f.checker.validated.Store(&validatedMembership{at: time.Now().Add(-time.Minute), endpoints: previous.endpoints})
+			}
+			eligible, err := f.checker.FilterCandidates(f.ctx, candidates)
+			require.Error(t, err)
+			require.Empty(t, eligible)
+			switch failure {
+			case "API failure":
+				require.Same(t, previous, f.checker.validated.Load(), "failed API reads must not renew the freshness budget")
+			case "withdrawn":
+				require.Empty(t, f.checker.validated.Load().endpoints)
+			case "expired":
+				require.Equal(t, int32(1), reads.Load(), "expired requests must not start on-demand reads")
+			}
+		})
+	}
+}
+
+func TestDiscoveryFreshnessShutdownJoinsDemandVerification(t *testing.T) {
+	var lists atomic.Int32
+	started := make(chan struct{}, 1)
+	finished := make(chan struct{})
+	f := newLabelRefreshFixture(t, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		if lists.Add(1) > 1 {
+			started <- struct{}{}
+			<-ctx.Done()
+			close(finished)
+			return ctx.Err()
+		}
+		return c.List(ctx, list, opts...)
+	}})
+	candidates := f.changeLabels(t)
+	result := make(chan error, 1)
+	go func() { _, err := f.checker.FilterCandidates(f.ctx, candidates); result <- err }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("verification did not start")
+	}
+	f.stop()
+	select {
+	case <-finished:
+	default:
+		t.Fatal("shutdown returned before sampling stopped")
+	}
+	require.Error(t, <-result)
+	require.Nil(t, f.checker.validated.Load())
+}

@@ -350,15 +350,7 @@ func (ds *datastore) PodUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 	return ds.podUpdateOrAddIfNotExist(ctx, pod, pool)
 }
 
-// podUpdateOrAddIfNotExist is the lock-free inner implementation.
-// Callers must ensure pool is a non-nil consistent snapshot (either read under lock
-// or already held, as in podResyncAll which runs under ds.mu.Lock via PoolSet).
-// It returns a joined error covering every endpoint of the pod whose registration was dropped.
-func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.Pod, pool *datalayer.EndpointPool) error {
-	if pool == nil {
-		return nil
-	}
-
+func endpointMetadataForPod(pod *corev1.Pod, pool *datalayer.EndpointPool) []*fwkdl.EndpointMetadata {
 	labels := make(map[string]string, len(pod.GetLabels()))
 	maps.Copy(labels, pod.GetLabels())
 
@@ -380,6 +372,18 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 				RankIndex:   idx,
 			})
 	}
+	return pods
+}
+
+// podUpdateOrAddIfNotExist is the lock-free inner implementation.
+// Callers must ensure pool is a non-nil consistent snapshot (either read under lock
+// or already held, as in podResyncAll which runs under ds.mu.Lock via PoolSet).
+// It returns a joined error covering every endpoint of the pod whose registration was dropped.
+func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.Pod, pool *datalayer.EndpointPool) error {
+	if pool == nil {
+		return nil
+	}
+	pods := endpointMetadataForPod(pod, pool)
 
 	if len(pods) == 0 {
 		logger := log.FromContext(ctx)
@@ -411,12 +415,12 @@ func (ds *datastore) podUpdateOrAddIfNotExist(ctx context.Context, pod *corev1.P
 	}
 
 	// remove endpoints that are no longer active in the pool
-	for idx, port := range pool.TargetPorts {
-		if activePorts.Has(port) {
+	for idx := range pool.TargetPorts {
+		namespacedName := createEndpointNamespacedName(pod, idx)
+		if existingEpSet.Has(namespacedName) {
 			continue
 		}
 
-		namespacedName := createEndpointNamespacedName(pod, idx)
 		if ep, ok := ds.pods.Load(namespacedName); ok {
 			ds.pods.Delete(namespacedName)
 			ds.podsVersion.Add(1)

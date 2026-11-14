@@ -55,6 +55,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/config"
 	"github.com/llm-d/llm-d-router/pkg/epp/config/loader"
+	"github.com/llm-d/llm-d-router/pkg/epp/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
@@ -554,8 +555,20 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	endpointCandidates := contracts.EndpointCandidates(requestcontrol.NewDatastoreEndpointCandidates(ds,
 		requestcontrol.WithDisableEndpointSubsetFilter(opts.DisableEndpointSubsetFilter)))
 	endpointCandidates, admissionController, priorityBandControlPlane, requestEvictor := r.initAdmissionControl(servingCtx, opts, eppConfig, endpointCandidates)
+	var discoveryFreshness *controller.DiscoveryFreshness
+	if opts.DiscoveryStalenessThreshold > 0 {
+		discoveryFreshness = controller.NewDiscoveryFreshness(mgr.GetAPIReader(), ds, gknn.NamespacedName, opts.DiscoveryStalenessThreshold)
+		if err := mgr.Add(discoveryFreshness); err != nil {
+			return nil, nil, fmt.Errorf("failed to register discovery freshness verification: %w", err)
+		}
+		r.requestControlConfig.AddPlugins(discoveryFreshness)
+	}
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig, gknn.Name)
+	if discoveryFreshness != nil {
+		director.SetEndpointSelectionCheck(discoveryFreshness.CheckEndpoints)
+		director.SetEndpointCandidateFilter(discoveryFreshness.FilterCandidates)
+	}
 	if requestEvictor != nil {
 		director.SetRequestEvictor(requestEvictor)
 	}
@@ -595,6 +608,9 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	r.healthGRPCPort = opts.GRPCHealthPort
 	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
 	readinessCheckers = append(readinessCheckers, r.dlRuntime)
+	if discoveryFreshness != nil {
+		readinessCheckers = append(readinessCheckers, discoveryFreshness)
+	}
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
 	return mgr, ds, nil
 }
@@ -1272,6 +1288,9 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 // SIGTERM starts GracefulStop immediately, without a DrainTimeout window or
 // readiness draining. Only already-open streams finish.
 func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
+	if opts.DiscoveryStalenessThreshold > 0 {
+		return errors.New("discovery-staleness-threshold requires Kubernetes InferencePool discovery")
+	}
 	r.servingCtx, r.cancelServing = context.WithCancel(context.WithoutCancel(ctx))
 	defer r.cancelServing()
 

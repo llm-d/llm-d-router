@@ -43,7 +43,13 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
@@ -51,14 +57,19 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/controller"
+	eppdl "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 )
 
 func TestExtractTraceContext(t *testing.T) {
@@ -1624,6 +1635,67 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 				}
 			}
 			require.Equal(t, wantAttrs, gotAttrs)
+		})
+	}
+}
+
+type freshnessFallbackDirector struct {
+	Director
+	check func(...*datalayer.EndpointMetadata) error
+	pick  func() *datalayer.EndpointMetadata
+}
+
+func (d *freshnessFallbackDirector) CheckEndpointSelection(endpoints ...*datalayer.EndpointMetadata) error {
+	if err := d.check(endpoints...); err != nil {
+		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
+	}
+	return nil
+}
+func (d *freshnessFallbackDirector) GetRandomEndpoint() *datalayer.EndpointMetadata { return d.pick() }
+func (d *freshnessFallbackDirector) GetRandomDecodeEndpoint() *datalayer.EndpointMetadata {
+	return d.pick()
+}
+func TestHandleRequestHeadersRejectsWithdrawnSelectedEndpoint(t *testing.T) {
+	for _, websocket := range []bool{false, true} {
+		t.Run(strconv.FormatBool(websocket), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			scheme := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(scheme))
+			require.NoError(t, v1.Install(scheme))
+			pool := &v1.InferencePool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}, Spec: v1.InferencePoolSpec{TargetPorts: []v1.Port{{Number: 8000}}, Selector: v1.LabelSelector{MatchLabels: map[v1.LabelKey]v1.LabelValue{"app": "model"}}}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default", Labels: map[string]string{"app": "model"}}, Status: corev1.PodStatus{PodIP: "192.168.1.1", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+			api := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, pod).Build()
+			ds := datastore.NewDatastore(ctx, eppdl.NewTestRuntime(t, time.Second))
+			require.NoError(t, ds.PoolSet(ctx, api, poolutil.InferencePoolToEndpointPool(pool)))
+			freshness := controller.NewDiscoveryFreshness(api, ds, client.ObjectKeyFromObject(pool), 2*time.Second)
+			done := make(chan error, 1)
+			go func() { done <- freshness.Start(ctx) }()
+			defer func() { cancel(); require.NoError(t, <-done) }()
+			require.Eventually(t, func() bool { return freshness.CheckReady() == nil }, time.Second, time.Millisecond)
+			stale := ds.PodList(datastore.AllPodsPredicate)[0].GetMetadata()
+			director := &freshnessFallbackDirector{check: freshness.CheckEndpoints, pick: func() *datalayer.EndpointMetadata {
+				// Pause between reading a candidate and the caller checking freshness.
+				require.NoError(t, api.Delete(ctx, pod))
+				ds.PodDelete(pod.Name)
+				time.Sleep(2500 * time.Millisecond)
+				require.NoError(t, freshness.CheckReady())
+				require.Error(t, freshness.Admit(ctx, nil, []fwksched.Endpoint{fwksched.NewEndpoint(stale, nil, datalayer.NewAttributes())}))
+				return stale
+			}}
+			server := NewStreamingServer(ds, director, nil, 0)
+			req := &RequestContext{Request: &Request{Headers: map[string]string{}}, Response: &Response{Headers: map[string]string{}}}
+			frame := headersFrame(map[string]string{":method": "GET"})
+			frame.RequestHeaders.EndOfStream = !websocket
+			if websocket {
+				frame = headersFrame(map[string]string{":method": "GET", "connection": "upgrade", "upgrade": "websocket"})
+			}
+			err := server.HandleRequestHeaders(ctx, req, frame)
+			require.Error(t, err)
+			require.Empty(t, req.TargetEndpoint)
+			var rejection errcommon.Error
+			require.ErrorAs(t, err, &rejection)
+			require.Equal(t, errcommon.ServiceUnavailable, rejection.Code)
 		})
 	}
 }
