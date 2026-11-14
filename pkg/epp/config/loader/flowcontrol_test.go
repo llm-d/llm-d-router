@@ -29,6 +29,7 @@ import (
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
@@ -616,6 +617,59 @@ func TestBuildFlowControlConfig_Errors(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "non-existent-policy")
 	})
+}
+
+func TestBuildFlowControlConfig_CrossReplica(t *testing.T) {
+	t.Parallel()
+	syncer := &testCrossReplicaSyncer{}
+	handle := newFlowControlTestHandle(t)
+	handle.AddPlugin("redis", syncer)
+	handle.AddPlugin("not-a-syncer", usagelimits.NewConstPolicy("not-a-syncer", 1.0))
+
+	t.Run("unset publishes nothing", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := buildFlowControlConfig(&configapiv1.FlowControlConfig{}, handle)
+		require.NoError(t, err)
+		assert.Equal(t, controller.CrossReplicaConfig{}, cfg.CrossReplica)
+	})
+
+	t.Run("resolves every field", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := buildFlowControlConfig(&configapiv1.FlowControlConfig{
+			CrossReplica: &configapiv1.CrossReplicaConfig{
+				SyncerPluginRef: "redis",
+				SyncInterval:    &metav1.Duration{Duration: 50 * time.Millisecond},
+				PublishTimeout:  &metav1.Duration{Duration: 2 * time.Second},
+			},
+		}, handle)
+		require.NoError(t, err)
+		assert.Equal(t, controller.CrossReplicaConfig{
+			Syncer: syncer, SyncInterval: 50 * time.Millisecond, PublishTimeout: 2 * time.Second,
+		}, cfg.CrossReplica)
+	})
+
+	t.Run("syncer ref is not a syncer", func(t *testing.T) {
+		t.Parallel()
+		_, err := buildFlowControlConfig(&configapiv1.FlowControlConfig{
+			CrossReplica: &configapiv1.CrossReplicaConfig{SyncerPluginRef: "not-a-syncer"},
+		}, handle)
+		require.ErrorContains(t, err, "not-a-syncer")
+	})
+
+	t.Run("non-positive publish timeout", func(t *testing.T) {
+		t.Parallel()
+		_, err := buildFlowControlConfig(&configapiv1.FlowControlConfig{
+			CrossReplica: &configapiv1.CrossReplicaConfig{PublishTimeout: &metav1.Duration{}},
+		}, handle)
+		require.ErrorContains(t, err, "flowControl.crossReplica.publishTimeout must be positive")
+	})
+}
+
+func TestFlowControlSettingsConfiguredIncludesCrossReplica(t *testing.T) {
+	t.Parallel()
+	assert.True(t, flowControlSettingsConfigured(&configapiv1.FlowControlConfig{
+		CrossReplica: &configapiv1.CrossReplicaConfig{SyncerPluginRef: "redis"},
+	}))
 }
 
 func TestBuildPriorityBandPolicyDefaults(t *testing.T) {
