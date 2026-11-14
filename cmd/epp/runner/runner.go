@@ -1237,6 +1237,7 @@ func (r *Runner) initAdmissionControl(
 		EndpointCandidates:  endpointCandidates,
 		UsageLimitPolicy:    eppConfig.FlowControlConfig.UsageLimitPolicy,
 		BandSelectionPolicy: eppConfig.FlowControlConfig.BandSelectionPolicy,
+		CrossReplica:        eppConfig.FlowControlConfig.CrossReplica,
 	}
 
 	var requestEvictor *fceviction.RequestEvictor
