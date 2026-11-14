@@ -142,6 +142,16 @@ it must use this helper.
 {{- $name -}}
 {{- end -}}
 
+{{/*
+Effective name of the metrics reader token Secret. A user-supplied
+router.monitoring.prometheus.auth.secretName wins; otherwise the name is
+release-scoped so two releases can share a namespace. Both the Secret and the
+ServiceMonitor that reads it must use this helper.
+*/}}
+{{- define "llm-d-router.metricsReaderSecretName" -}}
+{{- .Values.router.monitoring.prometheus.auth.secretName | default (printf "%s-metrics-reader-secret" .Release.Name) -}}
+{{- end -}}
+
 {{/* Headless Service for active-active Envoy endpoint discovery. */}}
 {{- define "llm-d-router.proxy.discoveryServiceName" -}}
 {{- $proxy := .Values.router.proxy | default dict -}}
