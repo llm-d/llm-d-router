@@ -243,7 +243,7 @@ func (dlc *DataLayerConfig) String() string {
 		dlc.Sources, dlc.Discovery, dlc.CrossReplica)
 }
 
-// CrossReplicaConfig configures publication of local per-endpoint state to peer EPP replicas.
+// CrossReplicaConfig configures publication of local state to peer EPP replicas.
 type CrossReplicaConfig struct {
 	// +optional
 	// SyncerPluginRef names the plugin instance to use as the cross-EPP cross-replica
@@ -550,6 +550,12 @@ type FlowControlConfig struct {
 	// saturation detector. See docs/flow-control-eviction.md.
 	// Defaults to false.
 	EnableEviction bool `json:"enableEviction,omitempty"`
+
+	// +optional
+	// CrossReplica publishes this replica's queued requests and bytes per priority band to other
+	// EPP replicas. It is independent of dataLayer.crossReplica. PublishTimeout bounds one band
+	// publish. If SyncerPluginRef is unset, nothing is published.
+	CrossReplica *CrossReplicaConfig `json:"crossReplica,omitempty"`
 }
 
 func (fcc *FlowControlConfig) String() string {
@@ -604,6 +610,10 @@ func (fcc *FlowControlConfig) String() string {
 
 	if fcc.EnableEviction {
 		parts = append(parts, "EnableEviction: true")
+	}
+
+	if fcc.CrossReplica != nil {
+		parts = append(parts, fmt.Sprintf("CrossReplica: %v", fcc.CrossReplica))
 	}
 
 	return "{" + strings.Join(parts, ", ") + "}"
