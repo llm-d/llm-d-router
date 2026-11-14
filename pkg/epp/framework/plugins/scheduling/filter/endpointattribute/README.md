@@ -50,6 +50,11 @@ These policies apply to all four algorithms:
 - **`onMissing`** — what happens to an endpoint that does not have the attribute: `Pass` keeps it (the default), `Fail` drops it. For `topK` and `percentile`, missing-attribute endpoints are excluded from ranking and then kept or dropped according to this policy.
 - **`fallbackOnEmpty`** — when every endpoint is filtered out and this is `true`, the original candidate list is returned unchanged, so the request can still be routed somewhere. Default `false`.
 
+Choose `onMissing` by what a missing attribute means:
+
+- **Load metrics** (`WaitingQueueSize`, `RunningRequestsSize`, `KVCacheUsagePercent`) are published only after an endpoint's first successful scrape, so an endpoint without the attribute has unknown load. Use `Fail` with `fallbackOnEmpty: true`, which still routes requests before any endpoint has been scraped. With `Pass`, an unscraped endpoint stays in while loaded endpoints are dropped, and can receive all of the traffic.
+- **Attributes that some endpoints do not publish by design**: use `Pass` to keep those endpoints.
+
 The attribute is a numeric `ScalarMetricValue` endpoint attribute. With `producer` unset it reads a built-in scalar metric (`WaitingQueueSize`, `RunningRequestsSize`, `KVCacheUsagePercent`) or a `customMetrics` entry of the core metrics extractor (see the [metrics extractor](../../../datalayer/extractor/metrics/README.md)); set `producer` to read the attribute of another plugin, such as the [DCGM extractor](../../../datalayer/extractor/dcgm/README.md).
 
 ## Inputs consumed
@@ -103,7 +108,7 @@ plugins:
     name: drop-loaded-endpoints
     parameters:
       attribute: "RunningRequestsSize"
-      onMissing: "Pass"
+      onMissing: "Fail"
       fallbackOnEmpty: true
       algorithm:
         type: "threshold"
@@ -162,7 +167,7 @@ plugins:
     name: least-loaded-quartile
     parameters:
       attribute: "waiting_queue"
-      onMissing: "Pass"
+      onMissing: "Fail"
       fallbackOnEmpty: true
       algorithm:
         type: "percentile"
