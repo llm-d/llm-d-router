@@ -77,6 +77,13 @@ func TestStringers(t *testing.T) {
 			want: "{MaxBytes: 1024, MaxRequests: unlimited, DefaultRequestTTL: 30s, PriorityBands: [{Priority: 10, MaxBytes: 512, DefaultRequestTTL: 5s}], SaturationDetector: {PluginRef: test-plugin}}",
 		},
 		{
+			name: "FlowControlConfig with CrossReplica",
+			obj: &FlowControlConfig{
+				CrossReplica: &CrossReplicaConfig{SyncerPluginRef: "redis"},
+			},
+			want: "{MaxBytes: unlimited, MaxRequests: unlimited, CrossReplica: {SyncerPluginRef: redis}}",
+		},
+		{
 			name: "RequestHandlerConfig",
 			obj: &RequestHandlerConfig{
 				Parsers: []ParserConfig{
