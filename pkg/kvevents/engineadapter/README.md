@@ -12,6 +12,10 @@ recover the model and sharding key, decodes the payload, and returns canonical
 block-stored / block-removed / all-blocks-cleared events. It also exposes the
 sharding key so the pool can order events for the same block.
 
+Topics take the form `kv@<pod-id>@<model-name>`. With per-pod subscriptions
+the subscriber already knows the pod, so `kv@<model-name>` works too, and every
+replica of a model server can run with the same arguments.
+
 ## Adapters
 
 | Engine | Constructor | Notes |
