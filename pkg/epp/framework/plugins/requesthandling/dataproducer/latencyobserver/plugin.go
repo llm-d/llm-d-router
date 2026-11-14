@@ -148,6 +148,8 @@ func (c Config) resolve() (resolvedConfig, error) {
 		return out, fmt.Errorf("maxRequests (%d) must be <= windowSize (%d)", c.MaxRequests, c.WindowSize)
 	case c.MinRequests <= 0:
 		return out, fmt.Errorf("minRequests must be > 0, got %d", c.MinRequests)
+	case c.MinRequests > c.MaxRequests:
+		return out, fmt.Errorf("minRequests (%d) must be <= maxRequests (%d)", c.MinRequests, c.MaxRequests)
 	case c.BucketHistorySize < 2:
 		return out, fmt.Errorf("bucketHistorySize must be >= 2, got %d", c.BucketHistorySize)
 	case c.LowPercentile <= 0 || c.TypicalPercentile >= 100 || c.LowPercentile >= c.TypicalPercentile:

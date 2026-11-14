@@ -127,7 +127,7 @@ parameter configures the threshold, the field carries it to consumers.
 | `intervalDuration` | 1s | How often the snapshot is recomputed and published | Lower to react sooner; rounded to a multiple of the datalayer's tick |
 | `maxObservationAge` | 3m | Age bound for the short window | Lower to follow load changes faster; raise if routing flaps |
 | `maxRequests` | 100 | Count bound for the short window. Must be `<= windowSize` | Same direction as `maxObservationAge` |
-| `minRequests` | 10 | Observations before an anchor is calibrated; published as `CalibrationThreshold` | Lower so new endpoints get traffic sooner, at the cost of noisier data |
+| `minRequests` | 10 | Observations before an anchor is calibrated; published as `CalibrationThreshold`. Must be `<= maxRequests` | Lower so new endpoints get traffic sooner, at the cost of noisier data |
 | `lowPercentile` | 25 | Low-load anchor percentile, sets `LowLoadTTFT` / `InflightAtLowLoad` | Leave alone unless the latency curve bends somewhere unusual |
 | `typicalPercentile` | 50 | Typical-load anchor percentile, sets `TypicalLoadTTFT` / `InflightAtTypicalLoad`. Must satisfy `0 < low < typical < 100` | As above |
 | `windowSize` | 5000 | Ring buffer capacity per endpoint, allocated up front (~200 KB) | Lower to cut per-endpoint memory; keep `>= maxRequests` |
