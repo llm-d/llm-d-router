@@ -1,0 +1,87 @@
+name: CI - PR - Docker Container Image
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+# One build per PR: a new push supersedes the previous run and overwrites the
+# pr-<n> image and chart tags.
+concurrency:
+  group: pr-images-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  set-params:
+    # Fork pull requests have no access to the quay credentials and are covered
+    # by the local build and scan in ci-pr-checks instead.
+    if: github.event.pull_request.head.repo.fork != true
+    runs-on: ubuntu-latest
+    outputs:
+      epp_name: ${{ steps.version.outputs.epp_name }}
+      sidecar_name: ${{ steps.version.outputs.sidecar_name }}
+      coordinator_name: ${{ steps.version.outputs.coordinator_name }}
+      tag: ${{ steps.tag.outputs.tag }}
+      short_sha: ${{ steps.sha.outputs.short_sha }}
+      chart_version_base: ${{ steps.chart-base.outputs.base }}
+    steps:
+      - name: Set image names
+        id: version
+        run: |
+          repo="${GITHUB_REPOSITORY##*/}"
+          echo "epp_name=${repo}-endpoint-picker" >> "$GITHUB_OUTPUT"
+          echo "sidecar_name=${repo}-disagg-sidecar" >> "$GITHUB_OUTPUT"
+          echo "coordinator_name=${repo}-coordinator" >> "$GITHUB_OUTPUT"
+
+      - name: Set PR number as tag
+        id: tag
+        run: |
+          echo "tag=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set short commit SHA of the PR head
+        id: sha
+        run: |
+          sha="${{ github.event.pull_request.head.sha }}"
+          echo "short_sha=${sha:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set chart version base from the latest release tag
+        id: chart-base
+        run: |
+          git clone --quiet --bare "https://github.com/${GITHUB_REPOSITORY}.git" repo.git
+          base=$(git --git-dir=repo.git tag -l 'v*' | sort -V | tail -1)
+          rm -rf repo.git
+          if [ -z "$base" ]; then
+            echo "::warning::No release tags found, falling back to v0.0.0"
+            base="v0.0.0"
+          fi
+          echo "base=${base}" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    if: github.event.pull_request.head.repo.fork != true
+    needs: set-params
+    uses: ./.github/workflows/ci-build-images.yaml
+    with:
+      registry: quay.io/llm-d
+      epp-image-name: ${{ needs.set-params.outputs.epp_name }}
+      sidecar-image-name: ${{ needs.set-params.outputs.sidecar_name }}
+      coordinator-image-name: ${{ needs.set-params.outputs.coordinator_name }}
+      tag: ${{ needs.set-params.outputs.tag }}
+      prerelease: true
+      chart-suffix: ""
+      pr-number: ${{ github.event.pull_request.number }}
+      pr-sha: ${{ needs.set-params.outputs.short_sha }}
+      commit-sha: ${{ github.event.pull_request.head.sha }}
+      chart-version-base: ${{ needs.set-params.outputs.chart_version_base }}
+      epp-additional-tags: quay.io/llm-d/${{ needs.set-params.outputs.epp_name }}:sha-${{ needs.set-params.outputs.short_sha }}
+      sidecar-additional-tags: quay.io/llm-d/${{ needs.set-params.outputs.sidecar_name }}:sha-${{ needs.set-params.outputs.short_sha }}
+      coordinator-additional-tags: quay.io/llm-d/${{ needs.set-params.outputs.coordinator_name }}:sha-${{ needs.set-params.outputs.short_sha }}
+    secrets:
+      QUAY_USER: ${{ secrets.QUAY_USER }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
