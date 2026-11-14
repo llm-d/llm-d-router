@@ -181,32 +181,45 @@ func TestKVCRInventory_LocalTiersKeepPodScoredAfterGPUEviction(t *testing.T) {
 	assert.False(t, ok, "the prefix leaves the index with its last KVCR copy")
 }
 
+// vLLM emits a placeholder in whichever KVCR tier the store lands in.
 func TestKVCRInventory_PlaceholderStoresResolveThroughEngineKeys(t *testing.T) {
-	ctx := logging.NewTestLoggerIntoContext(context.Background())
-	h := newKVCRHarness(t, ctx)
+	for _, tc := range []struct {
+		medium string
+		tier   string
+	}{
+		{medium: "CPU", tier: "cpu"},
+		{medium: "STORAGE", tier: "storage"},
+	} {
+		t.Run(tc.medium, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			h := newKVCRHarness(t, ctx)
 
-	prompt := kvcrTokens(4*kvcrBlockSize, 1)
-	hashes := kvcrHashes(4, 100)
-	h.publish(t, ctx, "pod-a", kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""))
+			prompt := kvcrTokens(4*kvcrBlockSize, 1)
+			hashes := kvcrHashes(4, 100)
+			h.publish(t, ctx, "pod-a", kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""))
 
-	placeholders := make([]map[string]any, 0, len(hashes))
-	for _, hash := range hashes {
-		placeholders = append(placeholders, kvcrPlaceholderStored(hash, "STORAGE"))
+			placeholders := make([]map[string]any, 0, len(hashes))
+			for _, hash := range hashes {
+				placeholders = append(placeholders, kvcrPlaceholderStored(hash, tc.medium))
+			}
+			h.publish(t, ctx, "pod-a", placeholders...)
+			h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, "GPU", ""))
+
+			m, ok := h.matches(t, ctx, prompt)["pod-a"]
+			require.True(t, ok, "placeholder stores must resolve through the GPU store's engine keys")
+			assert.Equal(t, map[string]int{tc.tier: 4}, m.BlocksByTier)
+
+			h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, tc.medium, kvcrOwnership))
+			_, ok = h.matches(t, ctx, prompt)["pod-a"]
+			assert.False(t, ok)
+		})
 	}
-	h.publish(t, ctx, "pod-a", placeholders...)
-	h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, "GPU", ""))
-
-	m, ok := h.matches(t, ctx, prompt)["pod-a"]
-	require.True(t, ok, "placeholder stores must resolve through the GPU store's engine keys")
-	assert.Equal(t, map[string]int{"storage": 4}, m.BlocksByTier)
-
-	h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, "STORAGE", kvcrOwnership))
-	_, ok = h.matches(t, ctx, prompt)["pod-a"]
-	assert.False(t, ok)
 }
 
 // vLLM's primary CPU tier and KVCR's DRAM both report medium CPU, so one
-// owner's removal must not drop the block the other still holds.
+// owner's removal must not drop the block the other still holds. The pool
+// counts stores per pod, tier and KV-cache group, not per ownership, so the two
+// stores hold two references to one entry.
 func TestKVCRInventory_CPUTierSharedWithPrimaryOffload(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	h := newKVCRHarness(t, ctx)
