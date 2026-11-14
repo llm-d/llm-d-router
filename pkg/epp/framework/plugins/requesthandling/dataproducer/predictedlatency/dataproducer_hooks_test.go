@@ -83,9 +83,9 @@ func TestProduce_CapturesEncoderCacheSizes(t *testing.T) {
 
 	plCtx, err := pl.getPredictedLatencyContextForRequest(request)
 	require.NoError(t, err)
-	assert.Equal(t, 2, plCtx.encoderInputSize)
-	assert.Equal(t, 1, plCtx.encoderMatchedSizeForEndpoints["pod-matched"])
-	assert.Equal(t, 0, plCtx.encoderMatchedSizeForEndpoints["pod-unmatched"])
+	assert.Equal(t, 2, int(endpointFeaturesFor(plCtx, matched.GetMetadata()).GetEncoderInputSize()))
+	assert.Equal(t, 1, int(endpointFeaturesFor(plCtx, matched.GetMetadata()).GetEncoderMatchedSize()))
+	assert.Equal(t, 0, int(endpointFeaturesFor(plCtx, unmatched.GetMetadata()).GetEncoderMatchedSize()))
 }
 
 // TestProduce_ClampsInconsistentEncoderMatchData verifies that match data
@@ -108,8 +108,8 @@ func TestProduce_ClampsInconsistentEncoderMatchData(t *testing.T) {
 
 	plCtx, err := pl.getPredictedLatencyContextForRequest(request)
 	require.NoError(t, err)
-	assert.Equal(t, 1, plCtx.encoderInputSize)
-	assert.Equal(t, 1, plCtx.encoderMatchedSizeForEndpoints["pod-a"])
+	assert.Equal(t, 1, int(endpointFeaturesFor(plCtx, endpoint.GetMetadata()).GetEncoderInputSize()))
+	assert.Equal(t, 1, int(endpointFeaturesFor(plCtx, endpoint.GetMetadata()).GetEncoderMatchedSize()))
 }
 
 // TestProduce_EncoderCacheFeatureDisabledIgnoresMatchData is the negative
@@ -128,8 +128,8 @@ func TestProduce_EncoderCacheFeatureDisabledIgnoresMatchData(t *testing.T) {
 
 	plCtx, err := pl.getPredictedLatencyContextForRequest(request)
 	require.NoError(t, err)
-	assert.Equal(t, 0, plCtx.encoderInputSize)
-	assert.Empty(t, plCtx.encoderMatchedSizeForEndpoints)
+	assert.Equal(t, 0, int(endpointFeaturesFor(plCtx, endpoint.GetMetadata()).GetEncoderInputSize()))
+	assert.Zero(t, endpointFeaturesFor(plCtx, endpoint.GetMetadata()).GetEncoderMatchedSize())
 }
 
 // TestProduce_CancelledContextDoesNotPublish verifies that when the

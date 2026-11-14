@@ -20,6 +20,9 @@ package predictedlatency
 import (
 	"testing"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/latencypredictorclient/protocol"
+	"google.golang.org/protobuf/proto"
+
 	latencypredictor "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/latencypredictorclient"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/types"
@@ -148,11 +151,11 @@ func TestValidatePrediction_PrefillEndpointNeutralizeTPOT(t *testing.T) {
 	decodeEp := createTestEndpointWithLabels("decode-pod", 0.3, 0, 0, map[string]string{"role": "decode"})
 
 	plCtx := &predictedLatencyCtx{
-		ttftSLO:                       100,
-		avgTPOTSLO:                    30,
-		inputTokenCount:               1,
-		prefixCacheScoresForEndpoints: map[string]float64{"prefill-pod": 0, "decode-pod": 0, "unlabeled-pod": 0},
-		predictionsForScheduling:      make(map[string]endpointPredictionResult),
+		ttftSLO:                  100,
+		avgTPOTSLO:               30,
+		requestFeatures:          &protocol.Features{InputTokenLength: proto.Int64(1)},
+		endpointFeatures:         map[string]*protocol.Features{},
+		predictionsForScheduling: make(map[string]endpointPredictionResult),
 	}
 
 	// Mock predictor that returns TTFT=50 (within SLO) but TPOT=999 (violates SLO)
