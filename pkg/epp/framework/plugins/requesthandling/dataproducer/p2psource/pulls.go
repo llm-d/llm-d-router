@@ -41,19 +41,30 @@ var inFlightPulls = prometheus.NewGaugeVec(
 	[]string{"endpoint_name", "namespace", "producer_name"},
 )
 
-// registerPullMetrics registers the in-flight pull gauge. The gauge is a
-// package-level vector, so a second producer instance registering it is a
+var inFlightPullTokens = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Subsystem: metricsutil.LLMDRouterEndpointPickerSubsystem,
+		Name:      "p2p_inflight_pull_tokens",
+		Help:      metricsutil.HelpMsgWithStability("Current number of prompt tokens in the P2P KV cache pulls directed at each source endpoint, as tracked by the p2p-source-producer.", compbasemetrics.ALPHA),
+	},
+	[]string{"endpoint_name", "namespace", "producer_name"},
+)
+
+// registerPullMetrics registers the in-flight pull gauges. They are
+// package-level vectors, so a second producer instance registering them is a
 // no-op; producer_name keeps each instance's series distinct.
 func registerPullMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return errors.New("in-flight pull metrics registerer is required")
 	}
-	if err := registerer.Register(inFlightPulls); err != nil {
-		var alreadyRegistered prometheus.AlreadyRegisteredError
-		if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == inFlightPulls {
-			return nil
+	for _, gauge := range []*prometheus.GaugeVec{inFlightPulls, inFlightPullTokens} {
+		if err := registerer.Register(gauge); err != nil {
+			var alreadyRegistered prometheus.AlreadyRegisteredError
+			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == gauge {
+				continue
+			}
+			return fmt.Errorf("register in-flight pull metric: %w", err)
 		}
-		return fmt.Errorf("register in-flight pull metric: %w", err)
 	}
 	return nil
 }
@@ -61,36 +72,42 @@ func registerPullMetrics(registerer prometheus.Registerer) error {
 const pullStateKey plugin.StateKey = "inflight-pull"
 
 // pullTracker counts the pulls one producer has directed at each source
-// endpoint and not yet released. Each request holds at most one pull, kept
-// in PluginState so the janitor releases it if no response or abandonment
-// ever arrives.
+// endpoint and not yet released, and the prompt tokens they pull. Each
+// request holds at most one pull, kept in PluginState so the janitor releases
+// it if no response or abandonment ever arrives.
 type pullTracker struct {
 	producerName string
 	state        *plugin.PluginState
 
-	mu     sync.Mutex
-	counts map[fwkdl.ID]int
+	mu    sync.Mutex
+	loads map[fwkdl.ID]pullLoad
+}
+
+// pullLoad is a source's unreleased pulls and the prompt tokens they pull.
+type pullLoad struct {
+	pulls  int
+	tokens int
 }
 
 func newPullTracker(ctx context.Context, producerName string) *pullTracker {
 	return &pullTracker{
 		producerName: producerName,
 		state:        plugin.NewPluginState(ctx),
-		counts:       map[fwkdl.ID]int{},
+		loads:        map[fwkdl.ID]pullLoad{},
 	}
 }
 
-// acquire counts a pull from source for the request. A second acquire for
-// the same request is ignored. ctx keeps the janitor from releasing the pull
-// while the request is alive.
-func (t *pullTracker) acquire(ctx context.Context, requestID string, source fwkdl.ID) {
+// acquire counts a pull from source for the request and adds its tokens to
+// the source's load. A second acquire for the same request is ignored. ctx
+// keeps the janitor from releasing the pull while the request is alive.
+func (t *pullTracker) acquire(ctx context.Context, requestID string, source fwkdl.ID, tokens int) {
 	if requestID == "" {
 		return
 	}
 	// Count before the entry is stored, so a release can't run before the count.
-	t.add(source, 1)
-	if _, existed := t.state.ReadOrWrite(requestID, pullStateKey, &pullEntry{tracker: t, source: source}); existed {
-		t.add(source, -1)
+	t.add(source, 1, tokens)
+	if _, existed := t.state.ReadOrWrite(requestID, pullStateKey, &pullEntry{tracker: t, source: source, tokens: tokens}); existed {
+		t.add(source, -1, -tokens)
 		return
 	}
 	t.state.BindLiveness(ctx, requestID)
@@ -104,37 +121,42 @@ func (t *pullTracker) release(requestID string) {
 	t.state.Delete(requestID)
 }
 
-// add changes the source's count and its gauge series together. A source
-// whose count reaches zero is dropped with its series, so an endpoint that
-// leaves the pool leaves no series behind once its pulls are released.
-func (t *pullTracker) add(source fwkdl.ID, delta int) {
+// add changes the source's load and its gauge series together. A source
+// whose pull count reaches zero is dropped with its series, so an endpoint
+// that leaves the pool leaves no series behind once its pulls are released.
+func (t *pullTracker) add(source fwkdl.ID, pulls, tokens int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	n := t.counts[source] + delta
-	if n <= 0 {
-		delete(t.counts, source)
+	load := t.loads[source]
+	load.pulls += pulls
+	load.tokens += tokens
+	if load.pulls <= 0 {
+		delete(t.loads, source)
 		inFlightPulls.DeleteLabelValues(source.Name, source.Namespace, t.producerName)
+		inFlightPullTokens.DeleteLabelValues(source.Name, source.Namespace, t.producerName)
 		return
 	}
-	t.counts[source] = n
-	inFlightPulls.WithLabelValues(source.Name, source.Namespace, t.producerName).Set(float64(n))
+	t.loads[source] = load
+	inFlightPulls.WithLabelValues(source.Name, source.Namespace, t.producerName).Set(float64(load.pulls))
+	inFlightPullTokens.WithLabelValues(source.Name, source.Namespace, t.producerName).Set(float64(load.tokens))
 }
 
 // pullEntry is a request's pull. PluginState evicts an entry at most once,
-// on release or by the janitor, so the count is returned exactly once.
+// on release or by the janitor, so its load is returned exactly once.
 type pullEntry struct {
 	tracker *pullTracker
 	source  fwkdl.ID
+	tokens  int
 }
 
 var _ plugin.EvictableStateData = (*pullEntry)(nil)
 
 func (e *pullEntry) Clone() plugin.StateData {
-	return &pullEntry{tracker: e.tracker, source: e.source}
+	return &pullEntry{tracker: e.tracker, source: e.source, tokens: e.tokens}
 }
 
 func (e *pullEntry) OnEvicted(_ string, _ plugin.StateKey) {
-	e.tracker.add(e.source, -1)
+	e.tracker.add(e.source, -1, -e.tokens)
 }
 
 // trackingProducer is the Producer with the hooks that release in-flight

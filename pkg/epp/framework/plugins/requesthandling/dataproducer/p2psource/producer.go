@@ -90,9 +90,10 @@ type Config struct {
 	// after the MinCachedTokenDelta floor. Nil keeps the fixed-delta decision.
 	CostModel *CostModelConfig `json:"costModel,omitempty"`
 	// TrackInFlightPulls, when true, counts the pulls this producer has
-	// directed at each source endpoint and not yet released, and exports the
-	// count as the llm_d_epp_p2p_inflight_pulls gauge. Source selection does
-	// not read the count.
+	// directed at each source endpoint and not yet released, and the prompt
+	// tokens they pull, and exports them as the llm_d_epp_p2p_inflight_pulls
+	// and llm_d_epp_p2p_inflight_pull_tokens gauges. Source selection does
+	// not read them.
 	TrackInFlightPulls bool `json:"trackInFlightPulls,omitempty"`
 	// TTFTByDecision records the TTFT of each streaming request whose stream
 	// ends naturally in p2p_source_request_ttft_seconds, labelled with this
@@ -718,7 +719,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		kv = append(kv, "p2pPort", best.p2pPort)
 	}
 	if p.pulls != nil {
-		p.pulls.acquire(ctx, request.RequestID, best.id)
+		p.pulls.acquire(ctx, request.RequestID, best.id, delta)
 	}
 	return nil
 }

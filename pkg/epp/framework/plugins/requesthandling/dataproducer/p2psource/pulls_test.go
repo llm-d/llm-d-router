@@ -24,23 +24,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
+// pullTokens is the size of a pull from pull: pod-b caches two blocks more
+// than pod-a.
+const pullTokens = 2 * testBlockSize
+
+func resetPullMetrics() {
+	inFlightPulls.Reset()
+	inFlightPullTokens.Reset()
+}
+
 // newTrackingProducer builds a producer through the factory with
-// trackInFlightPulls set and a fresh gauge.
+// trackInFlightPulls set and fresh gauges.
 func newTrackingProducer(t *testing.T, name string) *trackingProducer {
 	t.Helper()
-	inFlightPulls.Reset()
-	t.Cleanup(inFlightPulls.Reset)
+	resetPullMetrics()
+	t.Cleanup(resetPullMetrics)
 	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
 	t.Cleanup(cancel)
 	dec := json.NewDecoder(strings.NewReader(`{"trackInFlightPulls": true}`))
@@ -53,10 +64,17 @@ func newTrackingProducer(t *testing.T, name string) *trackingProducer {
 // out-caches the computing pod, pod-a, so the source is written.
 func pull(t *testing.T, p *Producer, requestID string) *scheduling.InferenceRequest {
 	t.Helper()
+	return pullBlocks(t, p, requestID, 3)
+}
+
+// pullBlocks is pull with pod-b caching sourceBlocks blocks against pod-a's
+// one.
+func pullBlocks(t *testing.T, p *Producer, requestID string, sourceBlocks int) *scheduling.InferenceRequest {
+	t.Helper()
 	ctx := utils.NewTestContext(t)
 	computing := endpoint(p, "pod-a", "10.0.0.1", 1)
 	req := &scheduling.InferenceRequest{RequestID: requestID, Headers: map[string]string{}, Body: bodyWith(map[string]any{})}
-	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{computing, endpoint(p, "pod-b", "10.0.0.2", 3)}))
+	require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{computing, endpoint(p, "pod-b", "10.0.0.2", sourceBlocks)}))
 	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(computing)))
 	assertSource(t, req, "10.0.0.2", defaultP2PConnectorPort)
 	return req
@@ -66,20 +84,33 @@ func chunk(start, end bool) *fwkrh.Response {
 	return &fwkrh.Response{StartOfStream: start, EndOfStream: end}
 }
 
-// requirePulls checks the gauge: one pod-b series with the given value, or
-// no series at all when want is 0.
+// requirePulls checks the gauges for want pulls from pull.
 func requirePulls(t *testing.T, producerName string, want int) {
 	t.Helper()
-	if want == 0 {
+	requireLoad(t, producerName, want, want*pullTokens)
+}
+
+// requireLoad checks the gauges: one pod-b series each with the given pulls
+// and tokens, or no series at all when pulls is 0.
+func requireLoad(t *testing.T, producerName string, pulls, tokens int) {
+	t.Helper()
+	if pulls == 0 {
 		require.Equal(t, 0, promtestutil.CollectAndCount(inFlightPulls))
+		require.Equal(t, 0, promtestutil.CollectAndCount(inFlightPullTokens))
 		return
 	}
 	expected := fmt.Sprintf(`
 # HELP llm_d_epp_p2p_inflight_pulls [ALPHA] Current number of P2P KV cache pulls directed at each source endpoint, as tracked by the p2p-source-producer.
 # TYPE llm_d_epp_p2p_inflight_pulls gauge
 llm_d_epp_p2p_inflight_pulls{endpoint_name="pod-b",namespace="",producer_name=%q} %d
-`, producerName, want)
+`, producerName, pulls)
 	require.NoError(t, promtestutil.CollectAndCompare(inFlightPulls, strings.NewReader(expected), "llm_d_epp_p2p_inflight_pulls"))
+	expected = fmt.Sprintf(`
+# HELP llm_d_epp_p2p_inflight_pull_tokens [ALPHA] Current number of prompt tokens in the P2P KV cache pulls directed at each source endpoint, as tracked by the p2p-source-producer.
+# TYPE llm_d_epp_p2p_inflight_pull_tokens gauge
+llm_d_epp_p2p_inflight_pull_tokens{endpoint_name="pod-b",namespace="",producer_name=%q} %d
+`, producerName, tokens)
+	require.NoError(t, promtestutil.CollectAndCompare(inFlightPullTokens, strings.NewReader(expected), "llm_d_epp_p2p_inflight_pull_tokens"))
 }
 
 // Only a tracking producer takes the response and abandonment hooks.
@@ -136,6 +167,23 @@ func TestInFlightPulls_ReleasedAtFirstChunk(t *testing.T) {
 	requirePulls(t, "p2p", 0)
 }
 
+// Each pull adds its own size to the token gauge, and a release removes the
+// size of the pull it releases.
+func TestInFlightPulls_TokensPerPull(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := newTrackingProducer(t, "test")
+
+	small := pullBlocks(t, p.Producer, "req-small", 3)
+	large := pullBlocks(t, p.Producer, "req-large", 4)
+	requireLoad(t, "test", 2, 5*testBlockSize)
+
+	p.ResponseBody(ctx, large, chunk(true, false), nil)
+	requireLoad(t, "test", 1, 2*testBlockSize)
+
+	p.RequestAbandoned(ctx, small)
+	requirePulls(t, "test", 0)
+}
+
 // A request that ends without a first chunk is released at end of stream.
 func TestInFlightPulls_ReleasedAtEndOfStream(t *testing.T) {
 	ctx := utils.NewTestContext(t)
@@ -188,7 +236,7 @@ func TestInFlightPulls_NoHeaderNoCount(t *testing.T) {
 
 // With tracking off, a pull is not counted.
 func TestInFlightPulls_Off(t *testing.T) {
-	inFlightPulls.Reset()
+	resetPullMetrics()
 	p, err := PluginFactory("test", nil, nil)
 	require.NoError(t, err)
 
@@ -202,8 +250,8 @@ func TestInFlightPulls_Off(t *testing.T) {
 func TestInFlightPulls_WithTTFTByDecision(t *testing.T) {
 	resetMetrics()
 	t.Cleanup(resetMetrics)
-	inFlightPulls.Reset()
-	t.Cleanup(inFlightPulls.Reset)
+	resetPullMetrics()
+	t.Cleanup(resetPullMetrics)
 	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
 	t.Cleanup(cancel)
 	dec := json.NewDecoder(strings.NewReader(`{"trackInFlightPulls": true, "ttftByDecision": true}`))
@@ -236,4 +284,18 @@ func TestInFlightPulls_WithTTFTByDecision(t *testing.T) {
 	requirePulls(t, "p2p", 1)
 	p.RequestAbandoned(ctx, abandoned)
 	requirePulls(t, "p2p", 0)
+}
+
+// Both gauges are registered, and a second registration is not an error.
+func TestRegisterPullMetrics(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	require.NoError(t, registerPullMetrics(registry))
+	require.NoError(t, registerPullMetrics(registry))
+	assert.True(t, registry.Unregister(inFlightPulls))
+	assert.True(t, registry.Unregister(inFlightPullTokens))
+}
+
+func TestPullEntryClone(t *testing.T) {
+	e := &pullEntry{source: fwkdl.ID{Name: "pod-b"}, tokens: pullTokens}
+	assert.Equal(t, e, e.Clone())
 }
