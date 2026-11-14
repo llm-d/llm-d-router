@@ -659,6 +659,43 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   fi
 done
 
+echo "Verifying metrics reader token Secret names..."
+render_metrics_reader_secret() {
+  local chart="$1" release="$2"
+  shift 2
+  local output="${TEMP_DIR}/${chart}-metrics-reader-secret.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template "${release}" "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace metrics-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    --set router.monitoring.prometheus.enabled=true "${args[@]}" "$@" > "${output}"; then
+    echo "Metrics reader Secret rendering failed for ${chart}: ${release} $*"
+    exit 1
+  fi
+  local credentials_name
+  metrics_reader_secret=$("${YQ}" -N 'select(.kind == "Secret" and .type == "kubernetes.io/service-account-token") | .metadata.name' "${output}")
+  credentials_name=$("${YQ}" -N 'select(.kind == "ServiceMonitor") | .spec.endpoints[].authorization.credentials.name' "${output}")
+  if [ -z "${metrics_reader_secret}" ] || [ "${credentials_name}" != "${metrics_reader_secret}" ]; then
+    echo "${chart}: ServiceMonitor credentials '${credentials_name}' must name the token Secret '${metrics_reader_secret}' for ${release}; flags: $*"
+    exit 1
+  fi
+}
+
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  render_metrics_reader_secret "${chart}" alpha
+  if [ "${metrics_reader_secret}" != "alpha-metrics-reader-secret" ]; then
+    echo "${chart}: expected token Secret alpha-metrics-reader-secret, got ${metrics_reader_secret}"
+    exit 1
+  fi
+  render_metrics_reader_secret "${chart}" alpha --set router.monitoring.prometheus.auth.secretName=custom-reader
+  if [ "${metrics_reader_secret}" != "custom-reader" ]; then
+    echo "${chart}: expected the secretName override custom-reader, got ${metrics_reader_secret}"
+    exit 1
+  fi
+done
+
 echo "Running llm-d-router-standalone negative validation tests..."
 missing_endpoint_selector_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.inferencePool.create=false --set router.modelServers.type=vllm --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
 echo "Executing: ${missing_endpoint_selector_command}"

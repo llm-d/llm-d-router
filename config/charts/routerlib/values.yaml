@@ -260,8 +260,9 @@ monitoring:
       # Prometheus scraping and Istio metrics-merging, which do not send Bearer tokens.
       # When true, the chart creates cluster-scoped RBAC for the EPP. See docs/metrics.md.
       enabled: true
-      # Service account token secret for authentication
-      secretName: inference-gateway-sa-metrics-reader-secret
+      # Service account token Secret the ServiceMonitor authenticates with.
+      # Empty means <release>-metrics-reader-secret. Set a name to override it.
+      secretName: ""
     # additional labels for the ServiceMonitor
     extraLabels: {}
 
