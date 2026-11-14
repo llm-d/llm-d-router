@@ -18,7 +18,6 @@ package thunderagent
 
 import (
 	"errors"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	compbasemetrics "k8s.io/component-base/metrics"
@@ -38,9 +37,9 @@ type thunderMetrics struct {
 	starvationPromotions prometheus.Counter
 }
 
-func newThunderMetrics(mgr *sessionManager) *thunderMetrics {
+func newThunderMetrics(agent *ThunderAgent) *thunderMetrics {
 	return &thunderMetrics{
-		ledger: newLedgerCollector(mgr),
+		ledger: newLedgerCollector(agent),
 		delayedDispatches: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "thunder_agent_delayed_dispatches_total",
@@ -98,18 +97,18 @@ func registerOrReuse[C prometheus.Collector](reg prometheus.Registerer, target *
 // ledgerCollector reports the session ledger at scrape time, so the gauges
 // stay current when no request arrives.
 type ledgerCollector struct {
-	mgr        *sessionManager
+	agent      *ThunderAgent
 	sessions   *prometheus.Desc
 	workingSet *prometheus.Desc
 	capacity   *prometheus.Desc
 }
 
-func newLedgerCollector(mgr *sessionManager) *ledgerCollector {
+func newLedgerCollector(agent *ThunderAgent) *ledgerCollector {
 	fqName := func(name string) string {
 		return prometheus.BuildFQName("", eppmetrics.LLMDRouterEndpointPickerSubsystem, name)
 	}
 	return &ledgerCollector{
-		mgr: mgr,
+		agent: agent,
 		sessions: prometheus.NewDesc(fqName("thunder_agent_sessions"),
 			metricsutil.HelpMsgWithStability("Tracked sessions by state.", compbasemetrics.ALPHA),
 			[]string{"state"}, nil),
@@ -129,7 +128,7 @@ func (c *ledgerCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *ledgerCollector) Collect(ch chan<- prometheus.Metric) {
-	snap := c.mgr.snapshot(time.Now())
+	snap := c.agent.snapshot()
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.running), "running")
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.idle), "idle")
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(snap.paused), "paused")
