@@ -63,8 +63,11 @@ func newKVCRHarness(t *testing.T, ctx context.Context) *kvcrHarness {
 	require.NoError(t, err)
 	indexer, err := kvcache.NewKVCacheIndexer(ctx, cfg, tp)
 	require.NoError(t, err)
-	pool, err := kvevents.NewPool(kvevents.DefaultConfig(), indexer.KVBlockIndex(), tp, engineadapter.NewVLLMAdapter())
+	poolConfig := kvevents.DefaultConfig()
+	poolConfig.Concurrency = 1
+	pool, err := kvevents.NewPool(poolConfig, indexer.KVBlockIndex(), tp, engineadapter.NewVLLMAdapter())
 	require.NoError(t, err)
+	t.Cleanup(func() { pool.Shutdown(ctx) })
 	return &kvcrHarness{pool: pool, indexer: indexer, tp: tp}
 }
 
@@ -129,10 +132,10 @@ func kvcrBlockRemoved(hashes []uint64, medium, ownership string) map[string]any 
 	return ev
 }
 
-func kvcrTokens(n int, base uint32) []uint32 {
+func kvcrTokens(n int) []uint32 {
 	tokens := make([]uint32, n)
 	for i := range tokens {
-		tokens[i] = base + uint32(i) //#nosec G115 -- test data is small
+		tokens[i] = 1 + uint32(i) //#nosec G115 -- test data is small
 	}
 	return tokens
 }
@@ -149,26 +152,32 @@ func TestKVCRInventory_LocalTiersKeepPodScoredAfterGPUEviction(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	h := newKVCRHarness(t, ctx)
 
-	prompt := kvcrTokens(4*kvcrBlockSize, 1)
+	prompt := kvcrTokens(4 * kvcrBlockSize)
 	hashes := kvcrHashes(4, 100)
 	h.publish(t, ctx, "pod-a",
 		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""),
 		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "CPU", kvcrOwnership),
 		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "STORAGE", kvcrOwnership),
 	)
-	h.publish(t, ctx, "pod-b",
-		kvcrBlockStored(kvcrHashes(4, 500), nil, kvcrTokens(4*kvcrBlockSize, 1000), kvcrBlockSize, "GPU", ""),
-	)
+	// pod-b holds the same prompt on GPU only, under its own engine hashes.
+	podBHashes := kvcrHashes(4, 500)
+	h.publish(t, ctx, "pod-b", kvcrBlockStored(podBHashes, nil, prompt, kvcrBlockSize, "GPU", ""))
+
+	scores, err := h.indexer.ScoreTokens(ctx, prompt, kvcrModel, []string{"pod-a", "pod-b"}, nil)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"pod-a", "pod-b"}, slices.Collect(maps.Keys(scores)), "both pods score while the prefix is on their GPUs")
+
 	h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, "GPU", ""))
+	h.publish(t, ctx, "pod-b", kvcrBlockRemoved(podBHashes, "GPU", ""))
 
 	m, ok := h.matches(t, ctx, prompt)["pod-a"]
 	require.True(t, ok, "KVCR tiers must keep the prefix on pod-a after GPU eviction")
 	assert.Equal(t, map[string]int{"cpu": 4, "storage": 4}, m.BlocksByTier)
 	assert.InDelta(t, 4*0.8, m.WeightedScore, 1e-9, "each block scores its best tier, cpu")
 
-	scores, err := h.indexer.ScoreTokens(ctx, prompt, kvcrModel, []string{"pod-a", "pod-b"}, nil)
+	scores, err = h.indexer.ScoreTokens(ctx, prompt, kvcrModel, []string{"pod-a", "pod-b"}, nil)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"pod-a"}, slices.Collect(maps.Keys(scores)), "only the pod holding the prefix in KVCR scores")
+	assert.Equal(t, []string{"pod-a"}, slices.Collect(maps.Keys(scores)), "after GPU eviction only the pod holding the prefix in KVCR scores")
 
 	h.publish(t, ctx, "pod-a", kvcrBlockRemoved(hashes, "CPU", kvcrOwnership))
 	m, ok = h.matches(t, ctx, prompt)["pod-a"]
@@ -194,7 +203,7 @@ func TestKVCRInventory_PlaceholderStoresResolveThroughEngineKeys(t *testing.T) {
 			ctx := logging.NewTestLoggerIntoContext(context.Background())
 			h := newKVCRHarness(t, ctx)
 
-			prompt := kvcrTokens(4*kvcrBlockSize, 1)
+			prompt := kvcrTokens(4 * kvcrBlockSize)
 			hashes := kvcrHashes(4, 100)
 			h.publish(t, ctx, "pod-a", kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""))
 
@@ -217,14 +226,14 @@ func TestKVCRInventory_PlaceholderStoresResolveThroughEngineKeys(t *testing.T) {
 }
 
 // vLLM's primary CPU tier and KVCR's DRAM both report medium CPU, so one
-// owner's removal must not drop the block the other still holds. The pool
-// counts stores per pod, tier and KV-cache group, not per ownership, so the two
-// stores hold two references to one entry.
+// owner's removal must not drop the block the other still holds. The pool's
+// store reference count is keyed by pod, tier and KV-cache group and ignores
+// ownership, so the two stores hold two references to one entry.
 func TestKVCRInventory_CPUTierSharedWithPrimaryOffload(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	h := newKVCRHarness(t, ctx)
 
-	prompt := kvcrTokens(4*kvcrBlockSize, 1)
+	prompt := kvcrTokens(4 * kvcrBlockSize)
 	hashes := kvcrHashes(4, 100)
 	h.publish(t, ctx, "pod-a",
 		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""),
@@ -246,13 +255,15 @@ func TestKVCRInventory_CPUTierSharedWithPrimaryOffload(t *testing.T) {
 }
 
 // vLLM can place a primary-tier removal ahead of the KVCR store for the same
-// keys in one batch. Removing the last copy drops the engine-to-request key
-// mapping, so the KVCR stores must index from their own tokens and parents.
+// keys in one batch. It keeps a block's tokens until the batch's stores have
+// registered, so those stores carry tokens. Removing the last copy drops the
+// engine-to-request key mapping, so the KVCR stores must index from their own
+// tokens and parents.
 func TestKVCRInventory_StoreAfterLastRemovalInOneBatch(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	h := newKVCRHarness(t, ctx)
 
-	prompt := kvcrTokens(8*kvcrBlockSize, 1)
+	prompt := kvcrTokens(8 * kvcrBlockSize)
 	hashes := kvcrHashes(8, 100)
 	h.publish(t, ctx, "pod-a",
 		kvcrBlockStored(hashes, nil, prompt, kvcrBlockSize, "GPU", ""),
