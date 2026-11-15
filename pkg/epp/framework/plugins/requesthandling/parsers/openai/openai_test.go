@@ -1743,18 +1743,55 @@ func TestOpenAIParser_ParseRequestPreservesJSONError(t *testing.T) {
 func TestOpenAIParser_RequestFieldErrors(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
+		path      string
 		body      string
 		wantField string
+		wantErr   string
 	}{
-		{name: "tools type", body: `{"messages":[{"role":"user","content":"hello"}],"tools":{}}`, wantField: "tools"},
-		{name: "message role type", body: `{"messages":[{"role":123}],"tools":[]}`, wantField: "messages"},
-		{name: "missing messages", body: `{"tools":[]}`},
-		{name: "malformed JSON", body: `{"tools":[`},
+		{
+			name: "tools type", body: `{"messages":[{"role":"user","content":"hello"}],"tools":{}}`, wantField: "tools",
+			wantErr: "invalid chat completions request: tools: cannot unmarshal object into array",
+		},
+		{
+			name: "message role type", body: `{"messages":[{"role":123}],"tools":[]}`, wantField: "messages",
+			wantErr: "invalid chat completions request: messages.0.role: cannot unmarshal number into string",
+		},
+		{
+			name: "bool field from number", body: `{"messages":[{"role":"user","content":"hi"}],"add_generation_prompt":1}`, wantField: "add_generation_prompt",
+			wantErr: "invalid chat completions request: add_generation_prompt: cannot unmarshal number into bool",
+		},
+		{
+			name: "bool field from string", body: `{"messages":[{"role":"user","content":"hi"}],"continue_final_message":"false"}`, wantField: "continue_final_message",
+			wantErr: "invalid chat completions request: continue_final_message: cannot unmarshal string into bool",
+		},
+		{
+			name: "object field from array", body: `{"messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":[]}`, wantField: "chat_template_kwargs",
+			wantErr: "invalid chat completions request: chat_template_kwargs: cannot unmarshal array into object",
+		},
+		{
+			name: "responses number out of range", path: reqcommon.PathResponses,
+			body:      `{"input":"hi","tools":[{"type":"function","parameters":{"type":"object","maximum":1e400}}]}`,
+			wantField: "tools",
+			wantErr:   "invalid responses request: tools.0.parameters.maximum: cannot unmarshal number 1e400 into float64",
+		},
+		{
+			name: "completions string field from number", path: reqcommon.PathCompletions, body: `{"prompt":"hi","cache_salt":1}`, wantField: "cache_salt",
+			wantErr: "invalid completions request: cache_salt: cannot unmarshal number into string",
+		},
+		{name: "missing messages", body: `{"tools":[]}`, wantErr: "invalid chat completions request: must have valid messages field"},
+		{name: "malformed JSON", body: `{"tools":[`, wantErr: "unexpected end of JSON input"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": reqcommon.PathChatCompletions})
+			path := tt.path
+			if path == "" {
+				path = reqcommon.PathChatCompletions
+			}
+			_, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": path})
 			if err == nil {
 				t.Fatal("expected parser failure")
+			}
+			if got, want := err.Error(), "error extracting request body: "+tt.wantErr; got != want {
+				t.Fatalf("error = %q, want %q", got, want)
 			}
 			var fieldErr *fwkrh.RequestFieldError
 			if got := errors.As(err, &fieldErr); got != (tt.wantField != "") {
