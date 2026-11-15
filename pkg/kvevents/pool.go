@@ -484,10 +484,24 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 // the host a per-pod subscriber dialed. Only addresses are compared: a topic
 // that names no pod, or names the pod by name (kv@vllm-0@<model>), keeps the
 // dialed endpoint. Ports are ignored because an engine's data-parallel ranks
-// share one topic while each rank is dialed on its own port.
+// share one topic while each rank is dialed on its own port. An unbracketed
+// IPv6 topic may or may not end in a port (fd00::1:2 is that address, or
+// fd00::1 on port 2), so it matches when either reading is the dialed host.
 func topicNamesSource(topicPod, sourceEndpoint string) bool {
-	topicIP, sourceIP := hostIP(topicPod), hostIP(sourceEndpoint)
-	return topicIP == nil || sourceIP == nil || topicIP.Equal(sourceIP)
+	sourceIP := hostIP(sourceEndpoint)
+	if sourceIP == nil {
+		return true
+	}
+	namesIP := false
+	for _, s := range []string{topicPod, endpointHost(topicPod)} {
+		if ip := net.ParseIP(s); ip != nil {
+			if ip.Equal(sourceIP) {
+				return true
+			}
+			namesIP = true
+		}
+	}
+	return !namesIP
 }
 
 // hostIP returns the IP address s names, with or without a port, or nil when s

@@ -372,6 +372,7 @@ func TestProcessRawMessage_DropsTopicNamingAnotherPod(t *testing.T) {
 		{"no pod", "", "10.0.0.1:8000", "10.0.0.1:8000"},
 		{"IPv6 rank on its own port", "fd00::1:8000", "fd00::1:8001", "fd00::1:8001"},
 		{"IPv6 host without port", "fd00::1", "fd00::1:8000", "fd00::1:8000"},
+		{"IPv6 host without port ending in groups", "fd00::1:2", "fd00::1:2:8000", "fd00::1:2:8000"},
 		{"bracketed IPv6", "[fd00::1]:8000", "fd00::1:8000", "fd00::1:8000"},
 		{"IPv6 written another way", "fd00:0:0::1:8000", "fd00::1:8000", "fd00::1:8000"},
 		{"pod name", "vllm-0", "10.0.0.1:8000", "10.0.0.1:8000"},
@@ -382,6 +383,7 @@ func TestProcessRawMessage_DropsTopicNamingAnotherPod(t *testing.T) {
 		{"another pod without port", "10.0.0.2", "10.0.0.1:8000", ""},
 		{"another IPv6 pod", "fd00::2:8000", "fd00::1:8000", ""},
 		{"another IPv6 host without port", "fd00::2", "fd00::1:8000", ""},
+		{"another IPv6 host without port ending in groups", "fd00::2:3", "fd00::1:2:8000", ""},
 		{"bracketed IPv6 of another pod", "[fd00::2]:8000", "fd00::1:8000", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
