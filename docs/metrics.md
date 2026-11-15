@@ -1174,6 +1174,9 @@ load reported for a replacement endpoint with the same labels.
 These metrics belong to `p2p-source-producer`. They are registered only when the producer sets
 `trackInFlightPulls: true`.
 
+Source endpoint removal prunes its series. Late releases do not recreate deleted series or change
+the count reported for a replacement endpoint with the same labels.
+
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_p2p_inflight_pulls` | Gauge | `endpoint_name`, `namespace`, `producer_name` | Current pulls directed at each source endpoint. |
@@ -1190,7 +1193,7 @@ These metrics belong to `p2p-source-producer`. They are registered only when the
 *   **Description:** P2P KV cache pulls this EPP replica has directed at each source endpoint
     that are still in flight. A pull counts from the request's `PreRequest` until its first
     response chunk, or until its end of stream if the request ends without one. A source's
-    series is removed when its count returns to zero.
+    series is removed when its count returns to zero or the source endpoint leaves the pool.
 *   **Usage:** Pull load per source under a shared hot prefix. Sum across EPP replicas for the
     fleet-wide count.
 
@@ -1205,7 +1208,7 @@ These metrics belong to `p2p-source-producer`. They are registered only when the
 *   **Description:** Sum of the sizes of the pulls counted by `llm_d_epp_p2p_inflight_pulls`. A
     pull's size is the prompt tokens its source holds beyond the computing endpoint, the value
     `llm_d_epp_p2p_source_predicted_pulled_tokens` records for the request. The series is removed
-    when the source's pull count returns to zero.
+    when the source's pull count returns to zero or the source endpoint leaves the pool.
 *   **Usage:** Transfer load per source. A source's send time grows with these tokens. Sum across
     EPP replicas for the fleet-wide total.
 

@@ -34,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -113,11 +114,34 @@ llm_d_epp_p2p_inflight_pull_tokens{endpoint_name="pod-b",namespace="",producer_n
 	require.NoError(t, promtestutil.CollectAndCompare(inFlightPullTokens, strings.NewReader(expected), "llm_d_epp_p2p_inflight_pull_tokens"))
 }
 
-// Only a tracking producer takes the response and abandonment hooks.
+// sourceEndpoint builds a datalayer endpoint for pod-b, the source pull and
+// pullBlocks pull from. Each call returns a distinct endpoint, as a pod
+// recreated under the same name gets.
+func sourceEndpoint() fwkdl.Endpoint {
+	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: fwkdl.ID{Name: "pod-b"}, Address: "10.0.0.2", Port: "8080"}, nil)
+}
+
+func extract(t *testing.T, p *trackingProducer, eventType fwkdl.EventType, ep fwkdl.Endpoint) {
+	t.Helper()
+	require.NoError(t, p.Extract(utils.NewTestContext(t), fwkdl.EndpointEvent{Type: eventType, Endpoint: ep}))
+}
+
+type recordingRegistrar struct {
+	registrations []fwkdl.PendingRegistration
+}
+
+func (r *recordingRegistrar) Register(registration fwkdl.PendingRegistration) error {
+	r.registrations = append(r.registrations, registration)
+	return nil
+}
+
+// Only a tracking producer takes the response and abandonment hooks and the
+// endpoint lifecycle events.
 func TestPluginFactory_TrackInFlightPulls(t *testing.T) {
 	var on plugin.Plugin = newTrackingProducer(t, "test")
 	assert.Implements(t, (*fwkrh.ResponseBodyProcessor)(nil), on)
 	assert.Implements(t, (*fwkrh.RequestAbandoned)(nil), on)
+	assert.Implements(t, (*fwkdl.EndpointExtractor)(nil), on)
 
 	off, err := PluginFactory("test", nil, nil)
 	require.NoError(t, err)
@@ -125,6 +149,8 @@ func TestPluginFactory_TrackInFlightPulls(t *testing.T) {
 	_, ok := off.(fwkrh.ResponseBodyProcessor)
 	assert.False(t, ok)
 	_, ok = off.(fwkrh.RequestAbandoned)
+	assert.False(t, ok)
+	_, ok = off.(fwkdl.Registrant)
 	assert.False(t, ok)
 
 	_, err = PluginFactory("test", json.NewDecoder(strings.NewReader(`{"trackInFlightPulls": true}`)), nil)
@@ -286,6 +312,96 @@ func TestInFlightPulls_WithTTFTByDecision(t *testing.T) {
 	requirePulls(t, "p2p", 0)
 }
 
+// A tracking producer subscribes to endpoint lifecycle events, adding an
+// endpoint-notification-source when none is configured.
+func TestInFlightPulls_RegisterDependencies(t *testing.T) {
+	p := newTrackingProducer(t, "test")
+	registrar := &recordingRegistrar{}
+	require.NoError(t, p.RegisterDependencies(registrar))
+	require.Len(t, registrar.registrations, 1)
+	registration := registrar.registrations[0]
+	assert.Equal(t, p.TypedName(), registration.Owner)
+	assert.Equal(t, sourcenotifications.EndpointNotificationSourceType, registration.SourceType)
+	assert.Same(t, p, registration.Extractor)
+	assert.NotNil(t, registration.DefaultSource)
+}
+
+// Deleting a source drops its pulls and both series while a request still
+// holds a pull from it, and that request's later release changes nothing.
+func TestInFlightPulls_DroppedWithDeletedSource(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := newTrackingProducer(t, "test")
+	source := sourceEndpoint()
+	extract(t, p, fwkdl.EventAddOrUpdate, source)
+
+	req := pull(t, p.Producer, "req-1")
+	requirePulls(t, "test", 1)
+
+	extract(t, p, fwkdl.EventDelete, source)
+	requirePulls(t, "test", 0)
+
+	p.ResponseBody(ctx, req, chunk(true, false), nil)
+	requirePulls(t, "test", 0)
+}
+
+// An endpoint that replaces a deleted source under the same ID starts at
+// zero, and a release of a pull from the deleted source does not decrement
+// it.
+func TestInFlightPulls_ReplacedSourceStartsAtZero(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := newTrackingProducer(t, "test")
+	old := sourceEndpoint()
+	extract(t, p, fwkdl.EventAddOrUpdate, old)
+	stale := pullBlocks(t, p.Producer, "req-old", 4)
+	requireLoad(t, "test", 1, 3*testBlockSize)
+
+	extract(t, p, fwkdl.EventDelete, old)
+	replacement := sourceEndpoint()
+	extract(t, p, fwkdl.EventAddOrUpdate, replacement)
+	requirePulls(t, "test", 0)
+
+	live := pull(t, p.Producer, "req-new")
+	requirePulls(t, "test", 1)
+
+	p.ResponseBody(ctx, stale, chunk(true, false), nil)
+	requirePulls(t, "test", 1)
+
+	p.ResponseBody(ctx, live, chunk(true, false), nil)
+	requirePulls(t, "test", 0)
+}
+
+// When a replacement's add arrives before the old endpoint's delete, the add
+// drops the old endpoint's pulls and the late delete is ignored, so the
+// replacement keeps its own pulls. An update of the same endpoint keeps them
+// too.
+func TestInFlightPulls_StaleDeleteIgnored(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := newTrackingProducer(t, "test")
+	old := sourceEndpoint()
+	extract(t, p, fwkdl.EventAddOrUpdate, old)
+	stale := pull(t, p.Producer, "req-old")
+	requirePulls(t, "test", 1)
+
+	replacement := sourceEndpoint()
+	extract(t, p, fwkdl.EventAddOrUpdate, replacement)
+	requirePulls(t, "test", 0)
+	live := pull(t, p.Producer, "req-new")
+	extract(t, p, fwkdl.EventAddOrUpdate, replacement)
+	requirePulls(t, "test", 1)
+
+	extract(t, p, fwkdl.EventDelete, old)
+	requirePulls(t, "test", 1)
+	p.RequestAbandoned(ctx, stale)
+	requirePulls(t, "test", 1)
+
+	extract(t, p, fwkdl.EventDelete, replacement)
+	requirePulls(t, "test", 0)
+	p.ResponseBody(ctx, live, chunk(true, false), nil)
+	requirePulls(t, "test", 0)
+
+	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventDelete}))
+}
+
 // Both gauges are registered, and a second registration is not an error.
 func TestRegisterPullMetrics(t *testing.T) {
 	registry := prometheus.NewRegistry()
@@ -296,6 +412,8 @@ func TestRegisterPullMetrics(t *testing.T) {
 }
 
 func TestPullEntryClone(t *testing.T) {
-	e := &pullEntry{source: fwkdl.ID{Name: "pod-b"}, tokens: pullTokens}
-	assert.Equal(t, e, e.Clone())
+	e := &pullEntry{source: fwkdl.ID{Name: "pod-b"}, load: &pullLoad{pulls: 1, tokens: pullTokens}, tokens: pullTokens}
+	clone := e.Clone().(*pullEntry)
+	assert.Equal(t, e, clone)
+	assert.Same(t, e.load, clone.load, "a clone releases into the load the pull was counted in")
 }
