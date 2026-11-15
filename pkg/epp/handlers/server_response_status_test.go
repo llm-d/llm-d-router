@@ -227,16 +227,22 @@ func (closedEvictLookup) Deregister(string) {}
 // requestErrorCount sums llm_d_epp_request_error_total over every series with the given error code.
 func requestErrorCount(t *testing.T, code string) float64 {
 	t.Helper()
+	return counterSum(t, "llm_d_epp_request_error_total", map[string]string{"error_code": code})
+}
+
+// counterSum sums the counter name over every series that has the given labels.
+func counterSum(t *testing.T, name string, labels map[string]string) float64 {
+	t.Helper()
 
 	families, err := ctrlmetrics.Registry.Gather()
 	require.NoError(t, err)
 	var total float64
 	for _, family := range families {
-		if family.GetName() != "llm_d_epp_request_error_total" {
+		if family.GetName() != name {
 			continue
 		}
 		for _, metric := range family.GetMetric() {
-			if metricHasLabels(metric, map[string]string{"error_code": code}) {
+			if metricHasLabels(metric, labels) {
 				total += metric.GetCounter().GetValue()
 			}
 		}

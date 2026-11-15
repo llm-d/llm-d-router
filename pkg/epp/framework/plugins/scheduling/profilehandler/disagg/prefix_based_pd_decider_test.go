@@ -25,7 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
-	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -776,14 +775,8 @@ func TestPreRequest_ConditionalDecodeGate(t *testing.T) {
 			require.NoError(t, err)
 
 			req := withHeaders(tt.request, tt.headers)
-			err = decider.PreRequest(ctx, req, tt.result)
-			if !tt.wantReject {
-				assert.NoError(t, err)
-				return
-			}
-			var e errcommon.Error
-			require.ErrorAs(t, err, &e)
-			assert.Equal(t, errcommon.PreconditionFailed, e.Code)
+			require.NoError(t, decider.PreRequest(ctx, req, tt.result))
+			assert.Equal(t, tt.wantReject, markedCacheMiss(req))
 		})
 	}
 }
@@ -824,20 +817,28 @@ func TestPreRequest_UsesUnweightedCachedBlockCount(t *testing.T) {
 
 	fixed := newEndpoint(attrprefix.NewPrefixCacheMatchInfo(ramWeightedScore, totalBlocks, blockSize).
 		WithCachedBlockCount(cachedBlocks))
-	assert.NoError(t, decider.PreRequest(ctx, newRequest(), resultWithEndpoint(fixed)),
+	fixedReq := newRequest()
+	require.NoError(t, decider.PreRequest(ctx, fixedReq, resultWithEndpoint(fixed)))
+	assert.False(t, markedCacheMiss(fixedReq),
 		"RAM-cached prefix must forward when the unweighted cached-block count is used")
 
 	weightedOnly := newEndpoint(attrprefix.NewPrefixCacheMatchInfo(ramWeightedScore, totalBlocks, blockSize))
-	err = decider.PreRequest(ctx, newRequest(), resultWithEndpoint(weightedOnly))
-	var e errcommon.Error
-	require.ErrorAs(t, err, &e, "the tier-weighted score alone undercounts cached blocks and misroutes")
-	assert.Equal(t, errcommon.PreconditionFailed, e.Code)
+	weightedReq := newRequest()
+	require.NoError(t, decider.PreRequest(ctx, weightedReq, resultWithEndpoint(weightedOnly)))
+	assert.True(t, markedCacheMiss(weightedReq), "the tier-weighted score alone undercounts cached blocks and misroutes")
+}
+
+// markedCacheMiss reports whether PreRequest marked req as a conditional-decode
+// cache miss, which the director answers with 204.
+func markedCacheMiss(req *scheduling.InferenceRequest) bool {
+	decision, _ := req.GetAttribute(fwkrh.ConditionalDecodeHandledAttributeKey)
+	return decision == fwkrh.ConditionalDecodeMiss
 }
 
 // TestNeedsRemotePrefill_MemoizesOnRequest pins the guarantee that PreRequest
 // reuses the decision disaggregate made during scheduling: after disaggregate
 // records "no remote prefill", PreRequest returns nil even against an endpoint
-// whose cache state would otherwise trip the 412 gate.
+// whose cache state would otherwise trip the gate.
 func TestNeedsRemotePrefill_MemoizesOnRequest(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
@@ -853,7 +854,8 @@ func TestNeedsRemotePrefill_MemoizesOnRequest(t *testing.T) {
 	// A follow-up PreRequest with an endpoint that would fail the gate on its
 	// own (0 cached blocks → non-cached suffix 10 >= 5) must still forward,
 	// proving PreRequest reused the memoized decision.
-	assert.NoError(t, decider.PreRequest(ctx, req, resultWithEndpoint(makeTestEndpoint(0))))
+	require.NoError(t, decider.PreRequest(ctx, req, resultWithEndpoint(makeTestEndpoint(0))))
+	assert.False(t, markedCacheMiss(req))
 }
 
 // TestPreRequest_ClaimsConditionalDecodeAttribute pins the contract with the

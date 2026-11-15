@@ -28,6 +28,7 @@ import (
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
@@ -146,6 +147,12 @@ type StreamingServer struct {
 // Exported fields are read and written by the request-control layers (director and
 // admission control). Unexported fields are private to this package.
 type RequestContext struct {
+	// AnswerStatus, when set after HandleRequest, is the status of a bodiless
+	// immediate response sent to the caller in place of forwarding the request.
+	AnswerStatus envoyTypePb.StatusCode
+	// answered reports that the AnswerStatus response reached Envoy.
+	answered bool
+
 	TargetPod      *fwkdl.EndpointMetadata
 	TargetEndpoint string
 	// TargetEndpointScores maps endpoint address to the scheduler's score for it, covering
@@ -251,6 +258,13 @@ type Response struct {
 	Headers         map[string]string
 	DynamicMetadata *structpb.Struct
 }
+
+// HasAnswer reports whether the EPP answers the caller itself in place of
+// forwarding the request to a model server.
+func (r *RequestContext) HasAnswer() bool {
+	return r.AnswerStatus != envoyTypePb.StatusCode_Empty
+}
+
 type streamRequestState int
 
 const (
@@ -386,6 +400,8 @@ func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCau
 	switch {
 	case reqCtx.requestState == requestEvicted:
 		return fwkrh.TerminationCauseEvicted
+	case reqCtx.answered:
+		return fwkrh.TerminationCauseAnswered
 	case reqCtx.requestState == requestResponseProcessingSkipped:
 		return fwkrh.TerminationCauseNotObserved
 	case ctxErr != nil:
@@ -393,6 +409,21 @@ func terminationCause(reqCtx *RequestContext, ctxErr error) fwkrh.TerminationCau
 	default:
 		return fwkrh.TerminationCauseError
 	}
+}
+
+// sendImmediateResponse sends resp, which ends the request at Envoy. A send that fails on a
+// cancelled stream returns the context error. Any other failure is logged and returned as
+// an Unknown status.
+func sendImmediateResponse(ctx context.Context, srv extProcPb.ExternalProcessor_ProcessServer, logger logr.Logger, resp *extProcPb.ProcessingResponse) error {
+	if err := srv.Send(resp); err != nil {
+		if ctx.Err() == context.Canceled {
+			logger.V(logutil.DEBUG).Info("Request stream cancelled while sending response")
+			return ctx.Err()
+		}
+		logger.Error(err, "Send failed")
+		return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
+	}
+	return nil
 }
 
 func terminationCauseFromGRPCTrailers(trailers *extProcPb.HttpTrailers) fwkrh.TerminationCause {
@@ -418,6 +449,7 @@ const (
 	outcomeEvicted   = "evicted"
 	outcomeCancelled = "cancelled"
 	outcomeFailed    = "failed"
+	outcomeDeferred  = "deferred"
 )
 
 // requestOutcome reports how a request ended. ok is false when the EPP did not
@@ -443,6 +475,8 @@ func requestOutcome(reqCtx *RequestContext, err, ctxErr error) (outcome, reason 
 		return outcomeFailed, errcommon.CanonicalCode(err), true
 	case reqCtx.responseStatusCode != "":
 		return outcomeFailed, reqCtx.responseStatusCode, true
+	case reqCtx.answered:
+		return outcomeDeferred, "", true
 	case reqCtx.responseComplete:
 		if reqCtx.TerminationCause == fwkrh.TerminationCauseError {
 			return outcomeFailed, errcommon.ModelServerError, true
@@ -814,6 +848,24 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					}
 				}
 
+				if reqCtx.HasAnswer() {
+					recordRequestProcessing()
+					// TargetPod stays set and the response is not marked complete, so the
+					// deferred cleanup releases per-request plugin state on return, with
+					// TerminationCauseAnswered. request_total does not count the answer.
+					resp := envoy.BuildImmediateResponse(reqCtx.AnswerStatus, nil, nil)
+					if sendErr := sendImmediateResponse(ctx, srv, logger, resp); sendErr != nil {
+						// A cancelled stream ends as cancelled, so it is not a request error.
+						if !errors.Is(sendErr, context.Canceled) {
+							err = sendErr
+						}
+						return sendErr
+					}
+					reqCtx.answered = true
+					logger.V(logutil.DEFAULT).Info("Answered request without forwarding", "status", reqCtx.AnswerStatus)
+					return nil
+				}
+
 				// After scheduling, look up the eviction channel for eviction support.
 				// Setting evictCh from nil to a real channel dynamically enables the
 				// eviction case in the main select.
@@ -926,15 +978,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			if err != nil {
 				return err
 			}
-			if err := srv.Send(resp); err != nil {
-				if ctx.Err() == context.Canceled {
-					logger.V(logutil.DEBUG).Info("Request stream cancelled while sending response")
-					return ctx.Err()
-				}
-				logger.Error(err, "Send failed")
-				return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
-			}
-			return nil
+			return sendImmediateResponse(ctx, srv, logger, resp)
 		}
 		loggerTrace.Info("checking", "request state", reqCtx.requestState)
 		if err := reqCtx.updateStateAndSendIfNeeded(srv, logger, span); err != nil {

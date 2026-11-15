@@ -226,6 +226,21 @@ func TestOutcomeAndPath(t *testing.T) {
 	}
 }
 
+// A request the EPP answered itself was not dispatched, so no outcome counts it.
+func TestAnsweredRequestIsNotCounted(t *testing.T) {
+	p := newTestPlugin(t, `{}`)
+	const prio = "350"
+	outcomes := []string{outcomeCompleted, outcomeFailed, outcomeCancelled, outcomeEvicted}
+	before := map[string]float64{}
+	for _, o := range outcomes {
+		before[o] = count(prio, "le1024", pathLocal, false, o)
+	}
+	run(p, "req-answered", reqSpec{priority: 350, prompt: 100, cause: fwkrh.TerminationCauseAnswered})
+	for _, o := range outcomes {
+		assert.InDelta(t, before[o], count(prio, "le1024", pathLocal, false, o), 1e-9, "outcome %q", o)
+	}
+}
+
 type stubProfile struct{}
 
 func (stubProfile) Run(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {

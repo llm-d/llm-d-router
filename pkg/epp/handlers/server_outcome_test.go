@@ -18,18 +18,27 @@ package handlers
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -155,6 +164,132 @@ func TestProcessRecordsRequestOutcome(t *testing.T) {
 			require.NoError(t, server.Process(srv))
 
 			require.Equal(t, map[[2]string]float64{{tt.wantOutcome, tt.wantReason}: 1}, requestOutcomes(t))
+		})
+	}
+}
+
+// answeringDirector picks a pod and then answers the caller with status answer. It records
+// the cause of the end-of-stream cleanup.
+type answeringDirector struct {
+	mockDirector
+	answer envoyTypePb.StatusCode
+	causes []fwkrh.TerminationCause
+}
+
+func (d *answeringDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
+	reqCtx.TargetPod = &fwkdl.EndpointMetadata{Address: "10.0.3.7", Port: "8000"}
+	reqCtx.AnswerStatus = d.answer
+	return reqCtx, nil
+}
+
+func (d *answeringDirector) HandleResponseBody(_ context.Context, reqCtx *RequestContext, endOfStream bool) *RequestContext {
+	if endOfStream {
+		d.causes = append(d.causes, reqCtx.TerminationCause)
+	}
+	return reqCtx
+}
+
+// An answer reaches the caller with its status and no headers or body. It ends as deferred,
+// with no error count, no Error span status and no error log line, and the picked pod's
+// per-request state is released with the answered cause. An answer lost to a cancelled stream
+// ends as cancelled, and an answer that cannot be sent is a failure.
+func TestProcessAnswersWithoutForwarding(t *testing.T) {
+	tests := []struct {
+		name           string
+		director       *answeringDirector
+		sendErr        error
+		cancelOnSend   bool
+		wantOutcome    [2]string
+		wantErrors     float64
+		wantSpanStatus otelcodes.Code
+		wantErrorLogs  int
+		wantInfoLogs   int
+		wantCause      fwkrh.TerminationCause
+	}{
+		{
+			name:           "answer",
+			director:       &answeringDirector{answer: envoyTypePb.StatusCode_NoContent},
+			wantOutcome:    [2]string{"deferred", ""},
+			wantSpanStatus: otelcodes.Unset,
+			wantInfoLogs:   1,
+			wantCause:      fwkrh.TerminationCauseAnswered,
+		},
+		{
+			name:           "answer lost to a cancelled stream",
+			director:       &answeringDirector{answer: envoyTypePb.StatusCode_NoContent},
+			sendErr:        errors.New("stream closed"),
+			cancelOnSend:   true,
+			wantOutcome:    [2]string{"cancelled", ""},
+			wantSpanStatus: otelcodes.Unset,
+			wantCause:      fwkrh.TerminationCauseClientDisconnect,
+		},
+		{
+			name:           "answer that cannot be sent",
+			director:       &answeringDirector{answer: envoyTypePb.StatusCode_NoContent},
+			sendErr:        errors.New("stream closed"),
+			wantOutcome:    [2]string{"failed", errcommon.Unknown},
+			wantErrors:     1,
+			wantSpanStatus: otelcodes.Error,
+			wantErrorLogs:  1,
+			wantCause:      fwkrh.TerminationCauseError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eppmetrics.Register()
+			eppmetrics.Reset()
+			t.Cleanup(eppmetrics.Reset)
+			exporter := tracetest.NewInMemoryExporter()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter), sdktrace.WithSampler(sdktrace.AlwaysSample()))
+			useTracerProvider(t, provider)
+			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+
+			var errorLines, infoLines []string
+			capture := funcr.New(func(prefix, args string) {
+				if strings.Contains(args, `"error"=`) {
+					errorLines = append(errorLines, prefix+" "+args)
+				} else if strings.Contains(args, "Answered request without forwarding") {
+					infoLines = append(infoLines, prefix+" "+args)
+				}
+			}, funcr.Options{Verbosity: logutil.DEFAULT})
+
+			ctx, cancel := context.WithCancel(log.IntoContext(context.Background(), capture))
+			t.Cleanup(cancel)
+			srv := &replayProcessServer{
+				ctx:     ctx,
+				reqs:    outcomeRequest("/v1/completions", outcomeTestBody),
+				sendErr: tt.sendErr,
+			}
+			if tt.cancelOnSend {
+				srv.cancelOnSend = cancel
+			}
+			server := NewStreamingServer(nil, tt.director, NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()), 0)
+
+			err := server.Process(srv)
+			require.Equal(t, tt.sendErr != nil, err != nil, "Process error: %v", err)
+
+			require.Len(t, srv.sentResponses, 1)
+			immediate := srv.sentResponses[0].GetImmediateResponse()
+			require.Equal(t, envoyTypePb.StatusCode_NoContent, immediate.GetStatus().GetCode())
+			require.Empty(t, immediate.GetBody())
+			require.Empty(t, immediate.GetHeaders().GetSetHeaders())
+
+			require.Equal(t, map[[2]string]float64{tt.wantOutcome: 1}, requestOutcomes(t))
+			require.InDelta(t, tt.wantErrors, requestErrorCount(t, tt.wantOutcome[1]), 1e-9)
+			require.InDelta(t, 0.0, counterSum(t, "llm_d_epp_request_total", nil), 1e-9, "an undispatched request is not in request_total")
+			require.Len(t, errorLines, tt.wantErrorLogs, "error log lines: %v", errorLines)
+			require.Len(t, infoLines, tt.wantInfoLogs, "info log lines: %v", infoLines)
+			require.Equal(t, []fwkrh.TerminationCause{tt.wantCause}, tt.director.causes)
+
+			var requestSpans tracetest.SpanStubs
+			for _, span := range exporter.GetSpans() {
+				if span.Name == "request" {
+					requestSpans = append(requestSpans, span)
+				}
+			}
+			require.Len(t, requestSpans, 1)
+			require.Equal(t, tt.wantSpanStatus, requestSpans[0].Status.Code)
 		})
 	}
 }

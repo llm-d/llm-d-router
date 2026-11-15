@@ -112,7 +112,12 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 
 	if cacheMiss {
-		logger.V(logutil.DEFAULT).Info("cache miss, continuing pipeline", "status", out.Status)
+		if out.Status == http.StatusPreconditionFailed {
+			logger.V(logutil.DEFAULT).Info("warning: cache miss answered with 412, continuing pipeline: " +
+				"the router answers 412 when it has no conditional-decode gate plugin configured")
+		} else {
+			logger.V(logutil.DEFAULT).Info("cache miss, continuing pipeline")
+		}
 		return nil
 	}
 	if out.TransportErr != nil {
@@ -129,8 +134,8 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 }
 
 // isCacheMiss reports whether status is EPP's answer that no decode worker can
-// serve the probe from its KV cache: 412, or 204 from an EPP that answers a
-// miss without an error status.
+// serve the probe from its KV cache. The conditional-decode gate answers 204.
+// EPP answers 412 when no gate plugin is configured.
 func isCacheMiss(status int) bool {
 	return status == http.StatusNoContent || status == http.StatusPreconditionFailed
 }

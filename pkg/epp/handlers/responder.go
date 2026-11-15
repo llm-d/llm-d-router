@@ -80,13 +80,5 @@ func immediateResponse(resp *fwkrh.LocalResponse) *extProcPb.ProcessingResponse 
 		statusCode = http.StatusOK
 	}
 
-	return &extProcPb.ProcessingResponse{
-		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
-			ImmediateResponse: &extProcPb.ImmediateResponse{
-				Status:  &envoyTypePb.HttpStatus{Code: envoyTypePb.StatusCode(statusCode)},
-				Headers: &extProcPb.HeaderMutation{SetHeaders: envoy.GenerateHeadersMutation(resp.Headers)},
-				Body:    resp.Body,
-			},
-		},
-	}
+	return envoy.BuildImmediateResponse(envoyTypePb.StatusCode(statusCode), envoy.GenerateHeadersMutation(resp.Headers), resp.Body)
 }

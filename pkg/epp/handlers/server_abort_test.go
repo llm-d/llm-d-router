@@ -129,11 +129,19 @@ func TestTerminationCause(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		state  streamRequestState
-		ctxErr error
-		want   fwkrh.TerminationCause
+		name     string
+		state    streamRequestState
+		answered bool
+		ctxErr   error
+		want     fwkrh.TerminationCause
 	}{
+		{
+			name:     "a delivered answer is answered",
+			state:    requestReceived,
+			answered: true,
+			ctxErr:   context.Canceled,
+			want:     fwkrh.TerminationCauseAnswered,
+		},
 		{
 			name:   "evicted outranks a cancelled context",
 			state:  requestEvicted,
@@ -167,7 +175,7 @@ func TestTerminationCause(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			reqCtx := &RequestContext{requestState: tt.state}
+			reqCtx := &RequestContext{requestState: tt.state, answered: tt.answered}
 			assert.Equal(t, tt.want, terminationCause(reqCtx, tt.ctxErr))
 		})
 	}

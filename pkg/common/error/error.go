@@ -138,13 +138,5 @@ func BuildErrResponse(err error, apiType reqcommon.APIType) (*extProcPb.Processi
 	}
 	setHeaders := append([]*configPb.HeaderValueOption{contentType}, envoy.GenerateHeadersMutation(e.Headers)...)
 
-	return &extProcPb.ProcessingResponse{
-		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
-			ImmediateResponse: &extProcPb.ImmediateResponse{
-				Status:  &envoyTypePb.HttpStatus{Code: httpCode},
-				Body:    body,
-				Headers: &extProcPb.HeaderMutation{SetHeaders: setHeaders},
-			},
-		},
-	}, nil
+	return envoy.BuildImmediateResponse(httpCode, setHeaders, body), nil
 }

@@ -452,7 +452,7 @@ PD deciders determine whether prefill should be offloaded to a separate worker, 
 The `prefix-based-pd-decider` plugin compares the request's non-cached suffix on the selected decode endpoint against a threshold. Which role the plugin fills depends on the deployment topology:
 
 - **Sidecar-based P/D deployments** wire the plugin as a `disagg-profile-handler` decider — it routes prefill remotely when the threshold is met (see [Profile Handler Configuration](#profile-handler-configuration)). Sidecar deployments do not emit `Prefer: if-available`, so the conditional-decode gate is dormant here.
-- **Coordinator-based deployments** use the default profile handler and declare the plugin at the top level. Only its `PreRequest` hook runs, enforcing the conditional-decode gate — `Prefer: if-available` requests are rejected with HTTP 412 when the same threshold would trigger remote prefill.
+- **Coordinator-based deployments** use the default profile handler and declare the plugin at the top level. Only its `PreRequest` hook runs, enforcing the conditional-decode gate: `Prefer: if-available` requests are answered with HTTP 204 and not forwarded when the same threshold would trigger remote prefill.
 
 Both roles read the same `nonCachedTokens` / `promptTokens` parameters. Declaring **two named instances** of this plugin in the same config (e.g., one wired as a decider, another as a standalone gate) with different parameters is not supported: the plugin memoizes its per-request decision keyed by plugin type, so the first instance to evaluate a given request populates the cache and the second reads that cached decision — its own parameters silently do not apply.
 
@@ -477,15 +477,15 @@ Both roles read the same `nonCachedTokens` / `promptTokens` parameters. Declarin
 
 **Parameter:**
 
-- `nonCachedTokens`: Non-cached suffix length in tokens at which the plugin's gate fires — triggering disaggregation for normal requests, or returning HTTP 412 Precondition Failed for `Prefer: if-available` requests. `0` disables both.
-- `promptTokens`: Minimum prompt length in tokens before the plugin's routing and gating logic applies. Prompts shorter than this run locally on the decode worker without remote prefill; the 412 gate honors the same shortcut. `0` disables it.
-- `prefixMatchInfoProducerName`: Name of the prefix-cache producer whose cache state the decider reads for both the disaggregation decision and the conditional-decode 412 gate. If unspecified, the `approx-prefix-cache-producer` is used.
+- `nonCachedTokens`: Non-cached suffix length in tokens at which the plugin's gate fires: it triggers disaggregation for normal requests, or answers HTTP 204 No Content for `Prefer: if-available` requests. `0` disables both.
+- `promptTokens`: Minimum prompt length in tokens before the plugin's routing and gating logic applies. Prompts shorter than this run locally on the decode worker without remote prefill; the conditional-decode gate honors the same shortcut. `0` disables it.
+- `prefixMatchInfoProducerName`: Name of the prefix-cache producer whose cache state the decider reads for both the disaggregation decision and the conditional-decode gate. If unspecified, the `approx-prefix-cache-producer` is used.
 
-**Conditional-decode 412 gate**
+**Conditional-decode gate**
 
-Requests carrying `Prefer: if-available` (used by the coordinator's speculative early-decode step, see [coordinator_architecture.md](coordinator_architecture.md)) are gated by the plugin using the same `promptTokens` / `nonCachedTokens` thresholds as the disaggregation decision: when the chosen decode endpoint's non-cached suffix would trigger remote prefill, the plugin returns HTTP 412 Precondition Failed so the coordinator restarts the pipeline at encode/prefill/decode. Cache state is read as unweighted contiguous blocks, so a RAM-cached prefix contributes its full token count.
+Requests carrying `Prefer: if-available` (used by the coordinator's speculative early-decode step, see [coordinator_architecture.md](coordinator_architecture.md)) are gated by the plugin using the same `promptTokens` / `nonCachedTokens` thresholds as the disaggregation decision: when the chosen decode endpoint's non-cached suffix would trigger remote prefill, the plugin answers HTTP 204 No Content so the coordinator continues the pipeline at encode/prefill/decode. The router does not count this answer as an error (see [metrics.md](metrics.md#request-outcomes)). Cache state is read as unweighted contiguous blocks, so a RAM-cached prefix contributes its full token count.
 
-Deployments that do not declare any conditional-decode gate plugin still reject `Prefer: if-available` requests: the director rejects unclaimed conditional-decode requests with 412 by default so a missing gate plugin surfaces as the coordinator's cache-miss fallback rather than a silent forward.
+Deployments that do not declare any conditional-decode gate plugin still reject `Prefer: if-available` requests: the director rejects unclaimed conditional-decode requests with 412 Precondition Failed by default so a missing gate plugin surfaces as the coordinator's cache-miss fallback rather than a silent forward. The router counts this 412 as an error.
 
 A minimal coordinator-topology configuration:
 

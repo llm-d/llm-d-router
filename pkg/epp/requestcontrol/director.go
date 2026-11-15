@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -439,6 +440,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		reservationPending = false
 	}
 	reachedPreRequest = true
+	// An answered request is not forwarded, so its body is not rewritten.
+	if reqCtx.HasAnswer() {
+		return reqCtx, nil
+	}
 	if err := d.priorityRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
@@ -655,11 +660,17 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	// claimed the header. Ensures a missing gate plugin surfaces as a 412 so
 	// the coordinator's cache-miss fallback runs, instead of a silent forward.
 	if routing.IsConditionalDecode(reqCtx.SchedulingRequest.Headers) {
-		if _, handled := reqCtx.SchedulingRequest.GetAttribute(fwkrh.ConditionalDecodeHandledAttributeKey); !handled {
+		decision, handled := reqCtx.SchedulingRequest.GetAttribute(fwkrh.ConditionalDecodeHandledAttributeKey)
+		if !handled {
 			return reqCtx, errcommon.Error{
 				Code: errcommon.PreconditionFailed,
 				Msg:  "conditional-decode request received but no gate plugin is configured",
 			}
+		}
+		if decision == fwkrh.ConditionalDecodeMiss {
+			// An answered request is not forwarded, so it is not tracked for eviction.
+			reqCtx.AnswerStatus = envoyTypePb.StatusCode_NoContent
+			return reqCtx, nil
 		}
 	}
 
@@ -723,8 +734,9 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	}
 
 	// The eviction tracker must observe stream termination even when no streaming plugins are
-	// registered, so this runs before the early return below.
-	if endOfStream && d.requestEvictor != nil {
+	// registered, so this runs before the early return below. It does not track an answered
+	// request.
+	if endOfStream && d.requestEvictor != nil && !reqCtx.HasAnswer() {
 		d.requestEvictor.ResponseBody(ctx, reqCtx.SchedulingRequest, &fwkrh.Response{
 			RequestID:        reqCtx.Request.ID,
 			EndOfStream:      true,

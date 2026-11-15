@@ -411,16 +411,18 @@ func forEachMissStatus(t *testing.T, test func(t *testing.T, status int)) {
 	}
 }
 
-// A miss, answered with 204 or 412, continues the pipeline, writes nothing and
-// counts as deferred.
+// A miss continues the pipeline, writes nothing and counts as deferred. The
+// gate answers 204; 412 is the answer of an EPP without a gate plugin, which
+// the step logs as a warning.
 func TestConditionalDecodeStep_CacheMiss(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		status int
-		body   string
+		name        string
+		status      int
+		body        string
+		wantWarning bool
 	}{
-		{name: "204", status: http.StatusNoContent},
-		{name: "412 with a body", status: http.StatusPreconditionFailed, body: "no cache available"},
+		{name: "204 from the gate", status: http.StatusNoContent},
+		{name: "412 with a body", status: http.StatusPreconditionFailed, body: "no cache available", wantWarning: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -459,7 +461,12 @@ func TestConditionalDecodeStep_CacheMiss(t *testing.T) {
 			if len(respBody) != 0 {
 				t.Fatalf("expected empty response body on cache miss, got: %s", string(respBody))
 			}
+			wantWarnings := 0
+			if tc.wantWarning {
+				wantWarnings = 1
+			}
 			require.Equal(t, 1, countRecords(records(), "cache miss"), "one log line for a miss: %v", records())
+			require.Equal(t, wantWarnings, countRecords(records(), "cache miss", "warning: "), "log lines: %v", records())
 			require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultDeferred), 1e-9)
 			for _, other := range []string{coordmetrics.ProbeResultServed, coordmetrics.ProbeResultError} {
 				require.InDelta(t, 0.0, probeCount(t, reg, other), 1e-9, "a miss must not count as %q", other)
