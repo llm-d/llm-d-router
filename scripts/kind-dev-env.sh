@@ -445,9 +445,10 @@ kubectl kustomize --enable-helm ${KUSTOMIZE_DIR} \
     # item per flag; any other value is substituted unchanged, as envsubst does, and YAML reads it.
     /^[[:space:]]*-[[:space:]]+"?[$][{]VLLM_EXTRA_ARGS_[EPD][}]"?[[:space:]]*$/ {
       match($0, /VLLM_EXTRA_ARGS_[EPD]/); name = substr($0, RSTART, RLENGTH); v = ENVIRON[name]
-      if (v ~ /^[[:space:]]*--[A-Za-z0-9_=.,\/:+@%-]+([[:space:]]+--[A-Za-z0-9_=.,\/:+@%-]+)+[[:space:]]*$/ && v !~ /:[[:space:]]/) {
+      tok = "--[A-Za-z0-9_=.,/:+@%-]+"
+      if (v ~ ("^[[:blank:]]*" tok "([[:blank:]]+" tok ")+[[:blank:]]*$") && v !~ /:[[:blank:]]/) {
         match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
-        n = split(v, flags, /[[:space:]]+/)
+        n = split(v, flags, /[[:blank:]]+/)
         for (i = 1; i <= n; i++) if (flags[i] != "") print indent "- \"" flags[i] "\""
         next
       }
