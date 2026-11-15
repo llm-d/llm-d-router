@@ -440,18 +440,24 @@ kubectl kustomize --enable-helm ${KUSTOMIZE_DIR} \
   ${KV_CONNECTOR_TYPE} ${EC_CONNECTOR_TYPE} ${CONNECTOR_TYPE} ${KV_CACHE_ENABLED} ${HF_TOKEN} ${VLLM_SIM_MODE} \
   ${DECODE_ROLE} ${VLLM_EXTRA_ARGS_E} ${VLLM_EXTRA_ARGS_P} ${VLLM_EXTRA_ARGS_D}' \
   | awk '
-    /^[[:space:]]*-[[:space:]]+".*"[[:space:]]*$/ {
+    # kustomize may emit the ${VLLM_EXTRA_ARGS_*} list items with or without quotes.
+    /^[[:space:]]*-([[:space:]].*)?$/ {
       match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
       content = $0
-      sub(/^[[:space:]]*-[[:space:]]+"/, "", content)
-      sub(/"[[:space:]]*$/, "", content)
+      sub(/^[[:space:]]*-[[:space:]]*/, "", content)
+      sub(/[[:space:]]*$/, "", content)
+      quoted = content ~ /^".*"$/
+      if (quoted) content = substr(content, 2, length(content) - 2)
       if (content == "") { next }
-      if (substr(content, 1, 2) == "--") {
+      if (substr(content, 1, 2) == "--" && index(content, " --") > 0) {
         n = split(content, flags, " --")
         for (i = 1; i <= n; i++) {
           flag = flags[i]
           if (i > 1) flag = "--" flag
-          if (flag != "") print indent "- \"" flag "\""
+          if (flag == "") continue
+          # An unquoted value carries no YAML escapes, so it is emitted single-quoted, where only a quote needs escaping.
+          if (quoted) print indent "- \"" flag "\""
+          else { gsub(/\047/, "\047\047", flag); print indent "- \047" flag "\047" }
         }
         next
       }
