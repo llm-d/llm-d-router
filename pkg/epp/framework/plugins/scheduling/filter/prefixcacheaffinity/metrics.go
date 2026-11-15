@@ -36,7 +36,8 @@ const (
 	// outcomeNoMatch: no endpoint met the affinity threshold, so all were kept.
 	outcomeNoMatch = "no_match"
 	// outcomeLoadOverride: the TTFT load gate discarded a non-empty sticky set
-	// because those endpoints were too slow, reopening all endpoints.
+	// because those endpoints were too slow, reopening all endpoints or the
+	// set MaxSpillEndpoints bounds.
 	outcomeLoadOverride = "load_override"
 	// outcomeExploration: the gate was skipped for exploration.
 	outcomeExploration = "exploration"

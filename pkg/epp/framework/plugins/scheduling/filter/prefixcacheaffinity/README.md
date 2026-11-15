@@ -65,6 +65,17 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
   is `inFlightTokens`, and when `ttftEstimate` is `full` it becomes
   `inFlightTokens + uncachedRequestTokens`. The TTFT comes
   from the latency predictor when `ttftSource` is `latencyPredictor`
+- With `maxSpillEndpoints` above 0, a broken gate keeps the sticky endpoints plus at most
+  that many non-sticky endpoints. A non-sticky endpoint qualifies when its own
+  TTFT estimate is lower than the best sticky estimate by more than `maxTTFTPenaltyMs`;
+  with `ttftEstimate: full` that estimate includes the request's prefill on the endpoint.
+  Qualifying endpoints are taken in rendezvous-hash order of the request's cached prefix:
+  the first prompt's tokens up to the deepest prefix a sticky endpoint holds, hashed with
+  the target model and cache salt (the sticky endpoint's ID when the request has no
+  tokens). Requests for one prefix spill to the same endpoints from every filter instance
+  that sees the same cached prefix. An endpoint that stops qualifying passes the spill to
+  the next one in order, and removing an endpoint changes only the spill sets that
+  contained it
 - If either the sticky or non-sticky set has no endpoint with the TTFT source attribute
   (`LatencyPredictionInfo` or `InFlightLoad`, plus `UncachedRequestTokens` when
   `ttftEstimate` is `full`), the TTFT load gate is skipped and all
@@ -76,9 +87,10 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 
 The filter narrows the candidate set or leaves it unchanged; the routing decision is made
 by the scorers and picker that run after it. When the TTFT load gate breaks stickiness, the
-filter keeps all endpoints, and the request moves off the sticky set only if downstream
-scoring prefers the less-loaded endpoints. Nothing tells the scorers that a break happened;
-they apply the same weights to whatever candidates arrive.
+filter keeps all endpoints (or the set `maxSpillEndpoints` bounds), and the request moves
+off the sticky set only if downstream scoring prefers the less-loaded endpoints. Nothing
+tells the scorers that a break happened; they apply the same weights to whatever candidates
+arrive.
 
 Scorers running after this filter must not include a separately weighted prefix-affinity
 scorer. Each scorer's output is clamped to [0, 1] before weighting, so the other scorers can
@@ -123,6 +135,7 @@ documents the strategy and its calibration.
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
 | `p2pSourceProducerName` | `string` | No | (empty) | Name of the `p2p-source-producer` whose decision is paired with this filter's outcome per request; empty disables the pairing |
 | `ttftEstimate` | `string` | No | `backlog` | TTFT estimation method with `prefillThroughput` source: `backlog` or `full` |
+| `maxSpillEndpoints` | `int` | No | `0` | Non-sticky endpoints a broken TTFT gate keeps alongside the sticky set; 0 keeps all endpoints |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
 2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
