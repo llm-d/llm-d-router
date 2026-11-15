@@ -19,10 +19,14 @@ package preciseprefixcache
 import (
 	"testing"
 
+	"github.com/go-logr/logr"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
@@ -64,4 +68,47 @@ func TestProducer_RegisterDependencies(t *testing.T) {
 		require.NoError(t, p.RegisterDependencies(r))
 		assert.Empty(t, r.registrations)
 	})
+}
+
+func TestProducer_RuntimeSubscribesPodsThroughRegistration(t *testing.T) {
+	ctx := discardCtx(t)
+	endpointSource := func() *datalayer.DataSourceConfig {
+		return &datalayer.DataSourceConfig{
+			Plugin: sourcenotifications.NewEndpointDataSource(
+				sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+		}
+	}
+	for _, tc := range []struct {
+		name         string
+		zmqEndpoint  string
+		wireExplicit bool
+		otherSource  bool
+		want         int
+	}{
+		{name: "pull mode without dataLayer wiring", want: 1},
+		{name: "pull mode with explicit wiring", wireExplicit: true, want: 1},
+		{name: "global socket with an endpoint source for other plugins", zmqEndpoint: "tcp://0.0.0.0:5557", otherSource: true, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newExtractorProducer(t, true)
+			defer p.subscribersManager.Shutdown(ctx)
+			p.kvEventsConfig.ZMQEndpoint = tc.zmqEndpoint
+
+			rt := datalayer.NewRuntime(0)
+			require.NoError(t, p.RegisterDependencies(rt))
+			var cfg *datalayer.Config
+			if tc.wireExplicit || tc.otherSource {
+				src := endpointSource()
+				if tc.wireExplicit {
+					src.Extractors = []plugin.Plugin{p}
+				}
+				cfg = &datalayer.Config{Sources: []datalayer.DataSourceConfig{*src}}
+			}
+			require.NoError(t, rt.Configure(cfg, logr.Discard()))
+
+			rt.NewEndpoint(ctx, newEndpoint("pod-a", "10.0.0.1").GetMetadata())
+			ids, _ := p.subscribersManager.GetActiveSubscribers()
+			assert.Len(t, ids, tc.want)
+		})
+	}
 }
