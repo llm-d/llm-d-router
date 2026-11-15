@@ -438,26 +438,37 @@ kubectl kustomize --enable-helm ${KUSTOMIZE_DIR} \
   ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${TARGET_PORTS} ${NAMESPACE} \
   ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE} \
   ${KV_CONNECTOR_TYPE} ${EC_CONNECTOR_TYPE} ${CONNECTOR_TYPE} ${KV_CACHE_ENABLED} ${HF_TOKEN} ${VLLM_SIM_MODE} \
-  ${DECODE_ROLE} ${VLLM_EXTRA_ARGS_E} ${VLLM_EXTRA_ARGS_P} ${VLLM_EXTRA_ARGS_D}' \
+  ${DECODE_ROLE}' \
   | awk '
-    # kustomize may emit the ${VLLM_EXTRA_ARGS_*} list items with or without quotes.
-    /^[[:space:]]*-([[:space:]].*)?$/ {
+    # kustomize renders the "${VLLM_EXTRA_ARGS_*}" list items without their quotes, so the quoted-item
+    # step below never sees them. A value that is one line of plain flag tokens is written as one quoted
+    # item per flag; any other value is substituted unchanged, as envsubst does, and YAML reads it.
+    /^[[:space:]]*-[[:space:]]+"?[$][{]VLLM_EXTRA_ARGS_[EPD][}]"?[[:space:]]*$/ {
+      match($0, /VLLM_EXTRA_ARGS_[EPD]/); name = substr($0, RSTART, RLENGTH); v = ENVIRON[name]
+      if (v ~ /^[[:space:]]*--[A-Za-z0-9_=.,\/:+@%-]+([[:space:]]+--[A-Za-z0-9_=.,\/:+@%-]+)+[[:space:]]*$/ && v !~ /:[[:space:]]/) {
+        match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
+        n = split(v, flags, /[[:space:]]+/)
+        for (i = 1; i <= n; i++) if (flags[i] != "") print indent "- \"" flags[i] "\""
+        next
+      }
+      i = index($0, "${" name "}")
+      $0 = substr($0, 1, i - 1) v substr($0, i + length(name) + 3)
+    }
+    { print }
+  ' \
+  | awk '
+    /^[[:space:]]*-[[:space:]]+".*"[[:space:]]*$/ {
       match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
       content = $0
-      sub(/^[[:space:]]*-[[:space:]]*/, "", content)
-      sub(/[[:space:]]*$/, "", content)
-      quoted = content ~ /^".*"$/
-      if (quoted) content = substr(content, 2, length(content) - 2)
+      sub(/^[[:space:]]*-[[:space:]]+"/, "", content)
+      sub(/"[[:space:]]*$/, "", content)
       if (content == "") { next }
-      if (substr(content, 1, 2) == "--" && index(content, " --") > 0) {
+      if (substr(content, 1, 2) == "--") {
         n = split(content, flags, " --")
         for (i = 1; i <= n; i++) {
           flag = flags[i]
           if (i > 1) flag = "--" flag
-          if (flag == "") continue
-          # An unquoted value carries no YAML escapes, so it is emitted single-quoted, where only a quote needs escaping.
-          if (quoted) print indent "- \"" flag "\""
-          else { gsub(/\047/, "\047\047", flag); print indent "- \047" flag "\047" }
+          if (flag != "") print indent "- \"" flag "\""
         }
         next
       }
