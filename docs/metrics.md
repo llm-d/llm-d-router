@@ -126,7 +126,7 @@ lifecycle handled by the router.
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests processed after successful parsing and scheduling. |
-| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. A model server response with a 5xx status is counted with `error_code="ModelServerError"`, and one with a 4xx status with `error_code="ModelServerClientError"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_outcome_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `outcome`, `reason` | Requests by how they ended. See [Request outcomes](#request-outcomes). |
 | `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | End-to-end request latency on response completion. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Request body size. |
@@ -240,14 +240,14 @@ whose body reached the EPP and whose ending the EPP observes.
 
 | `outcome` | Meaning | `reason` |
 |---|---|---|
-| `completed` | The model server answered with status 200 and the response finished. | empty |
+| `completed` | The model server answered with a status below 400 and the response finished. | empty |
 | `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated` or `rejected-flow-limit`. |
 | `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
 | `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
-| `failed` | Any other error, before or after dispatch, including a response status other than 200 or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
+| `failed` | Any other error, before or after dispatch, including a 4xx or 5xx response status or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
 
 When more than one applies, `evicted` wins over the error that ends the stream, and an error or a
-non-200 status wins over `cancelled`, unless the error only says the client left while queued.
+4xx or 5xx status wins over `cancelled`, unless the error only says the client left while queued.
 
 Routes that skip response processing, such as `/render`, are not counted because the EPP stops
 observing them once they are routed. `llm_d_epp_request_total` still counts them, but it does not
