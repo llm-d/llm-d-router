@@ -497,8 +497,9 @@ and the decode request names the prefill pod with it. A prefill response without
 header, or with a value that is not a `host:port` with a TCP port, fails the request
 before decode is sent.
 
-`p2p-source-producer` writes the prefill pod's P2P address only when its
-`prefillProfileName` parameter (default `prefill`) names the profile the prefill EPP ran,
+`p2p-source-producer` writes the prefill pod's P2P address only when the prefill profile
+name it resolves (its `prefillProfileName` parameter, else the name in the scheduling
+result, else `prefill`) names the profile the prefill EPP ran,
 which `header-profile-handler` picks from `x-llm-d-epp-profile: prefill`. See
 [Prefill profile name](../pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/README.md#prefill-profile-name).
 

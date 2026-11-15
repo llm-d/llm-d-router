@@ -214,6 +214,10 @@ type ProfileRunResult struct {
 	ScoredCandidates []ScoredEndpoint
 }
 
+// DefaultPrefillProfile is the prefill profile name a profile handler runs when
+// it does not name one.
+const DefaultPrefillProfile = "prefill"
+
 // SchedulingResult captures the result of the scheduling cycle.
 type SchedulingResult struct {
 	ProfileResults     map[string]*ProfileRunResult

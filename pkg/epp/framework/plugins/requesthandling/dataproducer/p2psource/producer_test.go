@@ -853,6 +853,25 @@ func TestPreRequest_ConfiguredPrefillProfileName(t *testing.T) {
 	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
 }
 
+// An unset prefillProfileName follows the profile the scheduling result names.
+func TestPreRequest_PrefillProfileNameFromResult(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	req := preRequest(p, "req-result-profile", peer("10.0.0.2", 48))
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill-h200",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode":       {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-a", "10.0.0.1", 0)}},
+			"prefill-h200": {TargetEndpoints: []scheduling.Endpoint{endpoint(p, "pod-b", "10.0.0.2", 3)}},
+		},
+	}
+	require.NoError(t, p.PreRequest(ctx, req, result))
+	assertNoSource(t, req)
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
+}
+
 // A prefillProfileName that matches no profile result sets no prefill header,
 // and the decision log names the configured profile so the mismatch is
 // visible from the EPP side.
@@ -878,11 +897,12 @@ func TestPreRequest_DecisionLogNamesUnmatchedPrefillProfile(t *testing.T) {
 	assert.Contains(t, lines[0], `"prefillEndpoint"=false`)
 }
 
-// Factory wires a custom prefillProfileName; default is "prefill".
+// Factory wires a custom prefillProfileName; the default follows the scheduling
+// result.
 func TestPluginFactory_PrefillProfileName(t *testing.T) {
 	def, err := PluginFactory("d", nil, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "prefill", def.(*Producer).prefillProfile)
+	assert.Equal(t, "", def.(*Producer).prefillProfile)
 
 	dec := json.NewDecoder(strings.NewReader(`{"prefillProfileName": "P"}`))
 	custom, err := PluginFactory("c", dec, nil)
