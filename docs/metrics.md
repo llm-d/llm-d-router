@@ -579,8 +579,8 @@ match data but is not instrumented here. Requests that reach no endpoint are not
 | `llm_d_epp_prefix_mm_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Multimodal prompt tokens the multimodal prediction was measured against. |
 
 For a request disaggregated into prefill and decode stages, the prediction is recorded for the
-`prefill` profile's endpoint and `endpoint_role` is `prefill`, since the sidecar's default `nixlv2`
-KV connector returns the prefiller's cached-token count. For every other request it is recorded for
+endpoint of the prefill profile the scheduling result names, and `endpoint_role` is `prefill`,
+since the sidecar's default `nixlv2` KV connector returns the prefiller's cached-token count. For every other request it is recorded for
 the primary profile's endpoint, and `endpoint_role` is `decode`.
 
 The `modality` label holds the modalities the request carries as a comma-joined sorted list (`none`

@@ -50,6 +50,10 @@ import (
 const (
 	testPodPort = "8000"
 
+	// DefaultPrefillProfile is the scheduling default these tests configure
+	// handlers with.
+	DefaultPrefillProfile = scheduling.DefaultPrefillProfile
+
 	// Custom profile names for testing user-defined configurations.
 	customDecodeProfile  = "my-decode"
 	customPrefillProfile = "my-prefill"
@@ -1573,7 +1577,7 @@ func TestHandler_Factory_NilDeciders(t *testing.T) {
 		description string
 	}{
 		{
-			name: "prefillProfile set, no pdDecider → valid (decider optional)",
+			name: "DefaultPrefillProfile set, no pdDecider → valid (decider optional)",
 			params: map[string]any{
 				"profiles": map[string]any{"prefill": "prefill"},
 			},
