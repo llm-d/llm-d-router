@@ -38,7 +38,14 @@ const podIdentifierLabel = "pod_identifier"
 const (
 	cacheKindLabel = "cache_kind"
 	reasonLabel    = "reason"
+	tagLabel       = "tag"
 )
+
+// maxUnknownTagLabelValues caps the distinct tag label values. Tags are read
+// from the engine's wire payload, so their number is not bounded by the router.
+const maxUnknownTagLabelValues = 32
+
+var unknownTagLimiter = metricsutil.NewBoundedLabel(maxUnknownTagLabelValues)
 
 var (
 	Admissions = prometheus.NewCounter(prometheus.CounterOpts{
@@ -120,6 +127,14 @@ var (
 			"Total number of KV-cache removal events skipped for groups excluded from prefix indexing",
 			compbasemetrics.ALPHA),
 	}, []string{cacheKindLabel, reasonLabel})
+	// KVEventUnknownTagsSkipped counts events skipped because the engine
+	// adapter does not know their tag.
+	KVEventUnknownTagsSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_unknown_tag_skipped_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Total number of KV-cache events skipped because the engine adapter does not know their tag",
+			compbasemetrics.ALPHA),
+	}, []string{tagLabel})
 
 	// SubscriberActive tracks the number of ZMQ subscribers currently managed by
 	// the SubscriberManager. A subscriber is counted from creation until it is
@@ -175,10 +190,19 @@ func Collectors() []prometheus.Collector {
 		Admissions, Evictions,
 		LookupRequests, LookupHits, LookupLatency, MaxPodHitCount,
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
-		KVEventStoresSkipped, KVEventRemovalsSkipped,
+		KVEventStoresSkipped, KVEventRemovalsSkipped, KVEventUnknownTagsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
 		PoolQueueDepth, PoolCapacity,
 	}
+}
+
+// RecordUnknownTagSkipped counts one event skipped for an unknown tag and
+// returns the tag label value it was counted under, which differs from tag
+// when the limiter folds it.
+func RecordUnknownTagSkipped(tag string) string {
+	label := unknownTagLimiter.Bound(tag)
+	KVEventUnknownTagsSkipped.WithLabelValues(label).Inc()
+	return label
 }
 
 // CleanupSubscriber drops every per-pod kvevents series for podIdentifier so

@@ -20,14 +20,17 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -2074,6 +2077,65 @@ func (stubAdapter) ParseMessage(_ *RawMessage) (string, string, EventBatch, erro
 }
 
 func (stubAdapter) ShardingKey(_ *RawMessage) string { return "pod-1" }
+
+// skippedTagsAdapter decodes every message to a batch with no events and the
+// configured skipped tags.
+type skippedTagsAdapter struct {
+	tags []string
+}
+
+func (a *skippedTagsAdapter) ParseMessage(*RawMessage) (string, string, EventBatch, error) {
+	return "pod-1", "model-1", EventBatch{SkippedTags: a.tags}, nil
+}
+
+func (a *skippedTagsAdapter) ShardingKey(*RawMessage) string { return "pod-1" }
+
+// TestProcessRawMessage_ReportsSkippedTags verifies that every skipped event is
+// counted under its tag while the log line appears once per tag per pool.
+func TestProcessRawMessage_ReportsSkippedTags(t *testing.T) {
+	const tagA, tagB = "PoolTestUnknownA", "PoolTestUnknownB"
+
+	// The default funcr verbosity drops V(1) and above, so a captured line
+	// was logged at the level operators see without raising verbosity.
+	var skipLogs []string
+	logger := funcr.New(func(_, args string) {
+		if strings.Contains(args, "Skipping KV events with an unknown tag") {
+			skipLogs = append(skipLogs, args)
+		}
+	}, funcr.Options{})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	skipped := func(tag string) float64 {
+		return counterValue(t, metrics.KVEventUnknownTagsSkipped.WithLabelValues(tag))
+	}
+	beforeA, beforeB := skipped(tagA), skipped(tagB)
+
+	adapter := &skippedTagsAdapter{tags: []string{tagA, tagB, tagA}}
+	pool, _, _ := newTestPool(t, 4)
+	pool.adapter = adapter
+
+	msg := &RawMessage{Topic: "kv@pod-1@model-1"}
+	pool.processRawMessage(ctx, msg)
+	pool.processRawMessage(ctx, msg)
+
+	assert.Equal(t, 4.0, skipped(tagA)-beforeA)
+	assert.Equal(t, 2.0, skipped(tagB)-beforeB)
+
+	require.Len(t, skipLogs, 2, "each tag is logged once across both messages")
+	assert.Contains(t, skipLogs[0], `"tag"="`+tagA+`"`)
+	assert.Contains(t, skipLogs[0], `"podIdentifier"="pod-1"`)
+	assert.Contains(t, skipLogs[0], `"modelName"="model-1"`)
+	assert.Contains(t, skipLogs[1], `"tag"="`+tagB+`"`)
+
+	other, _, _ := newTestPool(t, 4)
+	other.adapter = adapter
+	other.processRawMessage(ctx, msg)
+	assert.Len(t, skipLogs, 4, "a new pool logs each tag again")
+
+	adapter.tags = nil
+	other.processRawMessage(ctx, msg)
+	assert.Len(t, skipLogs, 4, "a batch without skipped tags logs nothing")
+}
 
 // A non-positive worker count leaves no shard for AddTask to select; the
 // first event would divide by zero in the subscriber goroutine. The

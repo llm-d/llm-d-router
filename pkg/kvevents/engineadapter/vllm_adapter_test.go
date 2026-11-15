@@ -731,6 +731,7 @@ func TestVLLMUnknownTag(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, event)
 	assert.ErrorIs(t, err, errUnknownTypedEventTag)
+	assert.ErrorContains(t, err, "UnknownEventType")
 }
 
 // TestVLLMMalformedPayload tests error handling for malformed msgpack data.
@@ -933,30 +934,46 @@ func TestVLLMParseMessage_SkipsUnknownEventTags(t *testing.T) {
 	}
 	unknownArray := []any{"SomethingNew", []any{uint64(7)}, map[string]any{"a": []any{1, 2}}}
 	unknownTagOnly := []any{"SomethingNew"}
+	unknownOther := []any{"AnotherNew"}
 
 	for name, tc := range map[string]struct {
-		events []any
-		want   []kvevents.EventType
+		events      []any
+		want        []kvevents.EventType
+		wantSkipped []string
 	}{
 		"map-encoded between known events": {
-			events: []any{stored, unknownMap, removed},
-			want:   []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+			events:      []any{stored, unknownMap, removed},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+			wantSkipped: []string{"SomethingNew"},
 		},
 		"array-encoded between known events": {
-			events: []any{stored, unknownArray, removed},
-			want:   []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+			events:      []any{stored, unknownArray, removed},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+			wantSkipped: []string{"SomethingNew"},
 		},
 		"array-encoded with tag only": {
-			events: []any{unknownTagOnly, removed},
-			want:   []kvevents.EventType{kvevents.EventTypeBlockRemoved},
+			events:      []any{unknownTagOnly, removed},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockRemoved},
+			wantSkipped: []string{"SomethingNew"},
 		},
 		"first and last": {
-			events: []any{unknownArray, stored, unknownMap},
-			want:   []kvevents.EventType{kvevents.EventTypeBlockStored},
+			events:      []any{unknownArray, stored, unknownMap},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockStored},
+			wantSkipped: []string{"SomethingNew", "SomethingNew"},
 		},
 		"only unknown": {
-			events: []any{unknownMap, unknownArray},
-			want:   []kvevents.EventType{},
+			events:      []any{unknownMap, unknownArray},
+			want:        []kvevents.EventType{},
+			wantSkipped: []string{"SomethingNew", "SomethingNew"},
+		},
+		"distinct tags in wire order": {
+			events:      []any{unknownOther, stored, unknownMap},
+			want:        []kvevents.EventType{kvevents.EventTypeBlockStored},
+			wantSkipped: []string{"AnotherNew", "SomethingNew"},
+		},
+		"only known": {
+			events: []any{stored, removed},
+			want:   []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
 		},
 	} {
 		payload, err := msgpack.Marshal([]any{1.0, tc.events, nil})
@@ -970,6 +987,7 @@ func TestVLLMParseMessage_SkipsUnknownEventTags(t *testing.T) {
 			got = append(got, ev.Type())
 		}
 		assert.Equal(t, tc.want, got, name)
+		assert.Equal(t, tc.wantSkipped, batch.SkippedTags, name)
 	}
 }
 
