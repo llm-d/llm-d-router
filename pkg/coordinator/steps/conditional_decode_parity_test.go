@@ -77,12 +77,12 @@ func TestConditionalDecodeStep_PromptTokenParity_HitMismatchCounts(t *testing.T)
 	}
 }
 
-// A 412 writes nothing, so there is no usage to compare and the pipeline goes
+// A miss writes nothing, so there is no usage to compare and the pipeline goes
 // on; the decode step then sees the client's body without any injection.
 func TestConditionalDecodeStep_PromptTokenParity_MissIsSilent(t *testing.T) {
 	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusPreconditionFailed)
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
@@ -170,7 +170,7 @@ func TestConditionalDecodeStep_PromptTokenParity_OffAndErrorModes(t *testing.T) 
 func TestConditionalDecodeStep_PromptTokenParity_MissKeepsClientStreamOptions(t *testing.T) {
 	metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusPreconditionFailed)
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 

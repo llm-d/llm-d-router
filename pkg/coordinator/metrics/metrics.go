@@ -67,8 +67,8 @@ const (
 )
 
 // Result label values for conditional_decode_probes_total. Served covers 2xx/3xx
-// (the worker answered the request inline). Deferred is exactly HTTP 412 (cache
-// miss, pipeline continues). Error covers any other 4xx/5xx: the worker's
+// except 204 (the worker answered the request inline). Deferred is HTTP 204 or
+// 412 (cache miss, pipeline continues). Error covers any other 4xx/5xx: the worker's
 // response is still streamed to the client, but the outcome is not a hit.
 // TransportError covers a round-trip failure before headers arrive
 // (connection refused, timeout, TCP reset); no worker response was received

@@ -595,7 +595,8 @@ Like chat completions, the body is sent unchanged:
 | Status Code | Action |
 |-------------|--------|
 | 412 Precondition Failed | KV cache not available. Pipeline continues with encode/prefill/decode as normal. |
-| 2xx (success) | Response is propagated directly to the client. Pipeline processing stops. |
+| 204 No Content | Handled as 412. |
+| Other 2xx (success) | Response is propagated directly to the client. Pipeline processing stops. |
 | Any other error | Generic error response is propagated to the client. Pipeline processing stops. |
 
 > [!NOTE]
