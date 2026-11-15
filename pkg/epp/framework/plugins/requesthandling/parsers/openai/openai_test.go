@@ -1740,6 +1740,39 @@ func TestOpenAIParser_ParseRequestPreservesJSONError(t *testing.T) {
 	}
 }
 
+func TestOpenAIParser_ParseRequestCompletionsPromptEmbeds(t *testing.T) {
+	parser := NewOpenAIParser()
+	headers := map[string]string{":path": "/v1/completions"}
+
+	for _, tt := range []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "null prompt with prompt_embeds", body: `{"model":"m","prompt":null,"prompt_embeds":"AAAA"}`},
+		{name: "empty prompt with prompt_embeds", body: `{"model":"m","prompt":"","prompt_embeds":"AAAA"}`},
+		{name: "prompt_embeds without prompt", body: `{"model":"m","prompt_embeds":["AAAA","BBBB"]}`},
+		{name: "null prompt without prompt_embeds", body: `{"model":"m","prompt":null}`, wantErr: true},
+		{name: "null prompt_embeds", body: `{"model":"m","prompt_embeds":null}`, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseRequest(context.Background(), []byte(tt.body), headers)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseRequest() error = nil, want prompt validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseRequest() error = %v", err)
+			}
+			if got.Body.Completions == nil || got.Body.Model != "m" {
+				t.Fatalf("ParseRequest() body = %+v, want completions request for model m", got.Body)
+			}
+		})
+	}
+}
+
 func TestOpenAIParser_RequestFieldErrors(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
