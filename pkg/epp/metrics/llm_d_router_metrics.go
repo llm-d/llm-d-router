@@ -620,6 +620,45 @@ var (
 		},
 		[]string{"source_type"},
 	)
+
+	// LlmdCrossReplicaPublishesTotal records cross-replica state pushes per state
+	// key and outcome. One endpoint push of one state key counts once, in both
+	// the batch and the per-endpoint publish paths.
+	LlmdCrossReplicaPublishesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cross_replica_publishes_total",
+			Help:      metricsutil.HelpMsgWithStability("Cross-replica state pushes per state key and outcome.", compbasemetrics.ALPHA),
+		},
+		[]string{"state_key", "outcome"},
+	)
+
+	// LlmdCrossReplicaLastSuccessTimestamp is the unix time, in seconds, of the
+	// last publish of a state key that pushed every endpoint without error. A
+	// partial failure leaves it unchanged, so its age also covers a degraded
+	// sync where only some endpoints fail.
+	LlmdCrossReplicaLastSuccessTimestamp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cross_replica_last_success_timestamp_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Unix time of the last fully successful cross-replica publish per state key.", compbasemetrics.ALPHA),
+		},
+		[]string{"state_key"},
+	)
+
+	// LlmdCrossReplicaPublishDuration records the wall time of one publish cycle,
+	// which publishes every registered endpoint once. Compare it with the
+	// configured sync interval: a histogram mass above the interval means cycles
+	// run back to back and peer state ages faster than the interval suggests.
+	LlmdCrossReplicaPublishDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cross_replica_publish_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Wall time of one cross-replica publish cycle.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2.5},
+		},
+		nil,
+	)
 )
 
 // --- Tool-calling request field integrity metric ---

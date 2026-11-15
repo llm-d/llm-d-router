@@ -30,6 +30,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const (
@@ -120,6 +121,8 @@ func (p *crossReplicaPublisher) run(ctx context.Context) {
 }
 
 func (p *crossReplicaPublisher) publishAll(ctx context.Context) {
+	start := time.Now()
+	defer func() { metrics.RecordCrossReplicaPublishCycle(time.Since(start)) }()
 	snapshot := p.endpointSnapshot()
 	if syncer, ok := p.syncer.(fwkdl.CrossReplicaBatchSyncer); ok {
 		p.publishBatch(ctx, syncer, snapshot)
@@ -153,6 +156,7 @@ func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.C
 	for _, spec := range specs {
 		wg.Go(func() {
 			failures := syncer.SetBatch(ctx, spec, endpointIDs, p.publishTimeout)
+			recordCrossReplicaPublish(string(spec.StateKey), len(endpointIDs), len(failures))
 			if len(failures) == 0 {
 				return
 			}
@@ -259,14 +263,14 @@ func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event f
 	})
 }
 
-func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplicaSpec, key types.NamespacedName) error {
+func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplicaSpec, key types.NamespacedName) (bool, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	// The endpoint may have been deleted after publishAll took its snapshot.
 	if !p.endpoints.Has(key) {
-		return nil
+		return false, nil
 	}
-	return p.syncer.Set(ctx, spec, key.String())
+	return true, p.syncer.Set(ctx, spec, key.String())
 }
 
 func (p *crossReplicaPublisher) get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
@@ -301,12 +305,31 @@ func (p *crossReplicaPublisher) publish(ctx context.Context, key types.Namespace
 	for _, c := range p.contributors {
 		spec := c.CrossReplicaState()
 		wg.Go(func() {
-			if err := p.set(ctx, spec, key); err != nil {
+			pushed, err := p.set(ctx, spec, key)
+			if !pushed {
+				return
+			}
+			if err != nil {
+				recordCrossReplicaPublish(string(spec.StateKey), 1, 1)
 				p.publishFailureLog.Do(func() {
 					logger.Error(err, "cross-replica publish failed", "key", spec.StateKey)
 				})
+				return
 			}
+			recordCrossReplicaPublish(string(spec.StateKey), 1, 0)
 		})
 	}
 	wg.Wait()
+}
+
+// recordCrossReplicaPublish counts one state key's push of n endpoints, of which
+// failures did not land, and moves the last-success timestamp only when every
+// one of them landed.
+func recordCrossReplicaPublish(stateKey string, endpoints, failures int) {
+	successes := endpoints - failures
+	metrics.RecordCrossReplicaPublish(stateKey, metrics.CrossReplicaPublishOutcomeSuccess, successes)
+	metrics.RecordCrossReplicaPublish(stateKey, metrics.CrossReplicaPublishOutcomeError, failures)
+	if failures == 0 && successes > 0 {
+		metrics.RecordCrossReplicaPublishSuccess(stateKey, time.Now())
+	}
 }

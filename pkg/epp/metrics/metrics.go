@@ -135,6 +135,9 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollDuration)
+		metrics.Registry.MustRegister(LlmdCrossReplicaPublishesTotal)
+		metrics.Registry.MustRegister(LlmdCrossReplicaLastSuccessTimestamp)
+		metrics.Registry.MustRegister(LlmdCrossReplicaPublishDuration)
 		metrics.Registry.MustRegister(llmdToolCallingFieldStatusTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -200,6 +203,9 @@ func Reset() {
 	LlmdDataLayerExtractErrorsTotal.Reset()
 	LlmdDataLayerPollsTotal.Reset()
 	LlmdDataLayerPollDuration.Reset()
+	LlmdCrossReplicaPublishesTotal.Reset()
+	LlmdCrossReplicaLastSuccessTimestamp.Reset()
+	LlmdCrossReplicaPublishDuration.Reset()
 	llmdToolCallingFieldStatusTotal.Reset()
 }
 
@@ -756,6 +762,37 @@ func InitDataLayerPollMetrics(sourceType string) {
 func RecordDataLayerPoll(sourceType, outcome string, duration time.Duration) {
 	LlmdDataLayerPollsTotal.WithLabelValues(sourceType, outcome).Inc()
 	LlmdDataLayerPollDuration.WithLabelValues(sourceType).Observe(duration.Seconds())
+}
+
+// Outcome label values of LlmdCrossReplicaPublishesTotal.
+const (
+	// CrossReplicaPublishOutcomeSuccess: every endpoint the push covered accepted it.
+	CrossReplicaPublishOutcomeSuccess = "success"
+	// CrossReplicaPublishOutcomeError: the push failed for at least one endpoint.
+	CrossReplicaPublishOutcomeError = "error"
+)
+
+// RecordCrossReplicaPublish counts n endpoint pushes of one state key under one
+// outcome. A batch push reports its successes and its failures separately, so
+// the counter means the same thing in the batch and per-endpoint paths.
+func RecordCrossReplicaPublish(stateKey, outcome string, n int) {
+	if n <= 0 {
+		return
+	}
+	LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, outcome).Add(float64(n))
+}
+
+// RecordCrossReplicaPublishSuccess records the time of a publish of one state
+// key that pushed every covered endpoint without error. A partial failure must
+// not call it: the gauge is meant to age when any endpoint cannot be pushed.
+func RecordCrossReplicaPublishSuccess(stateKey string, at time.Time) {
+	LlmdCrossReplicaLastSuccessTimestamp.WithLabelValues(stateKey).
+		Set(float64(at.UnixNano()) / float64(time.Second))
+}
+
+// RecordCrossReplicaPublishCycle observes the wall time of one publish cycle.
+func RecordCrossReplicaPublishCycle(duration time.Duration) {
+	LlmdCrossReplicaPublishDuration.WithLabelValues().Observe(duration.Seconds())
 }
 
 // RecordToolCallingFieldStatuses records outcomes only for fields present on at

@@ -467,11 +467,20 @@ type; no endpoint, pod or plugin-instance labels are emitted.
 | `llm_d_epp_datalayer_poll_duration_seconds` | Histogram | `source_type` | Wall-clock time of each `Dispatch` call, from the call to its return. The histogram uses cumulative buckets with finite upper bounds from 0.5 ms to 2.5 s. The per-poll deadline is 1 s. |
 | `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Polls whose `Dispatch` returned an error. |
 | `llm_d_epp_datalayer_extract_errors_total` | Counter | `source_type`, `extractor_type` | Extractor failures. |
+| `llm_d_epp_cross_replica_publishes_total` | Counter | `state_key`, `outcome` | Endpoint pushes of one cross-replica state key, by outcome. One endpoint push counts once in both the batch and per-endpoint publish paths. |
+| `llm_d_epp_cross_replica_last_success_timestamp_seconds` | Gauge | `state_key` | Unix time of the last publish cycle that pushed every endpoint of this state key without error. A partial failure leaves it unchanged, so its age covers a degraded sync too. |
+| `llm_d_epp_cross_replica_publish_duration_seconds` | Histogram | none | Wall time of one publish cycle, which pushes every registered endpoint once. Compare it with the configured sync interval: mass above the interval means cycles run back to back. |
 
 A poll is one `Dispatch` call on a polling source for one endpoint. Ticks a source skips because
 of its configured interval are not polls and are not counted. A poll interrupted by collector
 shutdown (the parent context is cancelled) is dropped from `polls_total` and
 `poll_duration_seconds` and leaves `poll_errors_total` and the endpoint's `PollStatus` untouched.
+
+The three `cross_replica_*` metrics cover the state pushes a cycle makes. Deletes of state for
+removed endpoints, and the republish that follows that cleanup, are not counted. The
+last-success timestamp is per state key rather than per endpoint, so one permanently failing
+endpoint keeps the whole key's timestamp from moving; the `outcome="error"` series shows how many
+pushes failed.
 
 `outcome` is decided after `Dispatch` returns:
 
