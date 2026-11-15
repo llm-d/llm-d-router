@@ -27,9 +27,33 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
-var _ fwkdl.EndpointExtractor = &Producer{}
+var (
+	_ fwkdl.EndpointExtractor = &Producer{}
+	_ fwkdl.Registrant        = &Producer{}
+)
+
+// RegisterDependencies attaches the producer to endpoint lifecycle events in
+// pull mode: pod discovery enabled and no global zmqEndpoint. Without it, a
+// configuration that omits the endpoint-notification source starts with no
+// per-pod subscribers. A global zmqEndpoint keeps discoverPods at its default
+// of true, so registering there would add per-pod subscriptions to the bound
+// socket.
+func (p *Producer) RegisterDependencies(r fwkdl.Registrar) error {
+	kc := p.kvEventsConfig
+	if !kc.DiscoverPods || kc.PodDiscoveryConfig == nil || kc.ZMQEndpoint != "" {
+		return nil
+	}
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      p.TypedName(),
+		SourceType: sourcenotifications.EndpointNotificationSourceType,
+		Extractor:  p,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(
+			sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+	})
+}
 
 // Extract subscribes matching endpoints to per-pod KV events when discovery is
 // enabled. Deleted endpoints and endpoints that stop matching lose their
