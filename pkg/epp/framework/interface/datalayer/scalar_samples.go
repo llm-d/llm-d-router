@@ -16,7 +16,11 @@ limitations under the License.
 
 package datalayer
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // ScalarSample is the last valid observation of one scalar metric.
 type ScalarSample struct {
@@ -96,6 +100,34 @@ func (s *ScalarSamples) Equal(other *ScalarSamples) bool {
 	return true
 }
 
+// String renders each observed sample as name=value with its age, for logs.
+// Metrics.String prints the snapshot through it.
+func (s *ScalarSamples) String() string {
+	if s == nil {
+		return "<nil>"
+	}
+	now := time.Now()
+	var b strings.Builder
+	b.WriteByte('{')
+	write := func(name string, sample ScalarSample) {
+		if sample.ScrapeTime.IsZero() {
+			return
+		}
+		if b.Len() > 1 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%s=%g age=%s", name, sample.Value, now.Sub(sample.ScrapeTime).Round(time.Millisecond))
+	}
+	for field := ScalarField(0); field < scalarFieldCount; field++ {
+		write(field.String(), s.standard[field])
+	}
+	for _, entry := range s.custom {
+		write(entry.attributeKey, entry.sample)
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
 func (s *ScalarSamples) customSample(attributeKey string) (ScalarSample, bool) {
 	for _, entry := range s.custom {
 		if entry.attributeKey == attributeKey {
@@ -138,11 +170,12 @@ type ScalarSampleUpdate struct {
 }
 
 // NewScalarSampleUpdate starts an update of prev for a scrape at scrapeTime
-// under the mapping identified by origin. origin must be comparable. When it
-// differs from the origin of prev, the previous samples are discarded.
-// customCount is the number of custom metrics the mapping configures.
-func NewScalarSampleUpdate(prev *ScalarSamples, origin any, scrapeTime time.Time, customCount int) ScalarSampleUpdate {
-	if prev != nil && prev.origin != origin {
+// under the mapping identified by origin. When origin differs from the origin
+// of prev, the previous samples are discarded. The comparable constraint keeps
+// that comparison from panicking. customCount is the number of custom metrics
+// the mapping configures.
+func NewScalarSampleUpdate[T comparable](prev *ScalarSamples, origin T, scrapeTime time.Time, customCount int) ScalarSampleUpdate {
+	if prev != nil && prev.origin != any(origin) {
 		prev = nil
 	}
 	return ScalarSampleUpdate{prev: prev, origin: origin, scrapeTime: scrapeTime, customCount: customCount}

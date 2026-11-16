@@ -52,7 +52,7 @@ The three scalar load and utilization metrics (`WaitingQueueSize`, `RunningReque
 -   `GetMetrics().ScalarSample(field)` for `WaitingQueueSize`, `RunningRequestsSize`, and `KVCacheUsagePercent`, declared in `Consumes()` as `ScalarSampleDataKey(field)`.
 -   `GetMetrics().CustomScalarSample(attributeKey)` for each `customMetrics` entry, declared as `CustomScalarSampleDataKey(attributeKey)`.
 
-A scrape that observes a valid value records it with the same time it writes to `UpdateTime`. A missing metric, a NaN or infinite value, and a failed poll leave the sample unchanged, so `ScalarSample.FreshWithin(maxAge)` turns false once `maxAge` passes. A `ScrapeTime` older than `UpdateTime` shows that a later scrape extracted other metrics without this one. When the endpoint resolves to a different engine mapping, its samples are discarded.
+A scrape that observes a valid value records it with the same time it writes to `UpdateTime`. A missing metric, a NaN or infinite value, and a failed poll leave the sample unchanged, so `ScalarSample.FreshWithin(maxAge)` turns false once `maxAge` passes. A `ScrapeTime` older than `UpdateTime` shows that a later scrape extracted other metrics without this one. When the endpoint resolves to a different engine mapping, its samples are discarded. The `Metrics` fields and the scalar attributes are not reset: they keep the previous mapping's values until the new mapping observes each metric, so a consumer that must not act on them reads the sample instead.
 
 The built-in `vllm` config also stores the NIXL KV transfer failure counters as scalar attributes. vLLM reports them only when it runs with the NixlConnector, and an endpoint that has never reported them carries none of these attributes.
 

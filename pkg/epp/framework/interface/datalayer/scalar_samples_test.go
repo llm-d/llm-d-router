@@ -151,3 +151,18 @@ func TestScalarSampleAllocations(t *testing.T) {
 	})
 	assert.LessOrEqual(t, scrape, 2.0)
 }
+
+func TestScalarSamplesString(t *testing.T) {
+	update := NewScalarSampleUpdate(nil, "mapping", time.Now().Add(-1500*time.Millisecond), 1)
+	update.Observe(ScalarFieldWaitingQueueSize, 5)
+	update.ObserveCustom("custom", 0.25)
+	samples := update.Result()
+
+	rendered := samples.String()
+	assert.Regexp(t, `^\{WaitingQueueSize=5 age=1\.5\d*s, custom=0\.25 age=1\.5\d*s\}$`, rendered,
+		"observed samples render with value and age; unobserved fields are omitted")
+	assert.Contains(t, (&Metrics{ScalarSamples: samples}).String(), "ScalarSamples:"+rendered,
+		"Metrics.String renders the snapshot, not its address")
+	assert.Equal(t, "<nil>", (*ScalarSamples)(nil).String())
+	assert.Contains(t, (&Metrics{}).String(), "ScalarSamples:<nil>")
+}

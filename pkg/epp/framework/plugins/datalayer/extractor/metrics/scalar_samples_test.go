@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -237,4 +238,90 @@ func TestExtractorProducesScalarSampleKeys(t *testing.T) {
 		assert.IsType(t, fwkdl.ScalarSample{}, produced[attrmetrics.CustomScalarSampleDataKey(key)], key)
 		assert.IsType(t, attrmetrics.ScalarMetricValue(0), produced[attrmetrics.ScalarMetricDataKey(key)], key)
 	}
+}
+
+func TestExtractorRecordsNoSampleForNonScalarCustomMetric(t *testing.T) {
+	// A customMetrics entry naming a histogram or summary family is an extract
+	// error, so it records no sample and keeps the last valid one.
+	extractor := newSampleExtractor(t)
+	ep := fwkdl.NewEndpoint(nil, nil)
+	require.NoError(t, extractAfterTick(t, extractor, ep, sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric:    gaugeFamily(5),
+		defaultTotalRunningRequestsMetric:   gaugeFamily(2),
+		defaultKvCacheUsagePercentageMetric: gaugeFamily(0.4),
+		sampleCustomMetric:                  gaugeFamily(9),
+	}))
+	first := ep.GetMetrics().UpdateTime
+
+	histogram := &dto.MetricFamily{
+		Type:   dto.MetricType_HISTOGRAM.Enum(),
+		Metric: []*dto.Metric{{Histogram: &dto.Histogram{}}},
+	}
+	summary := &dto.MetricFamily{
+		Type:   dto.MetricType_SUMMARY.Enum(),
+		Metric: []*dto.Metric{{Summary: &dto.Summary{}}},
+	}
+	err := extractAfterTick(t, extractor, ep, sourcemetrics.PrometheusMetricMap{
+		defaultTotalQueuedRequestsMetric:    gaugeFamily(6),
+		defaultTotalRunningRequestsMetric:   gaugeFamily(2),
+		defaultKvCacheUsagePercentageMetric: gaugeFamily(0.4),
+		sampleCustomMetric:                  histogram,
+		sampleOptionalMetric:                summary,
+	})
+	require.ErrorContains(t, err, "unsupported metric type HISTOGRAM")
+	require.True(t, ep.GetMetrics().UpdateTime.After(first))
+	assert.Equal(t, fwkdl.ScalarSample{Value: 9, ScrapeTime: first}, customSample(t, ep, sampleCustomKey))
+	assertScalarMetric(t, ep, sampleCustomKey, 9)
+	_, ok := ep.GetMetrics().CustomScalarSample(sampleOptionalKey)
+	assert.False(t, ok, "an optional summary family records no sample")
+}
+
+func TestExtractorScalarSamplesConcurrentReads(t *testing.T) {
+	// Request paths read the snapshot while a scrape builds the next one from
+	// it. Run with -race: a scrape that writes into the custom samples it
+	// shares with the published snapshot is a data race.
+	extractor := newSampleExtractor(t)
+	ep := fwkdl.NewEndpoint(nil, nil)
+	const scrapes = 300
+
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(done)
+		for i := range scrapes {
+			_ = extractor.Extract(t.Context(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{
+				Endpoint: ep,
+				Payload: sourcemetrics.PrometheusMetricMap{
+					defaultTotalQueuedRequestsMetric: gaugeFamily(float64(i)),
+					sampleCustomMetric:               gaugeFamily(float64(i)),
+					sampleOptionalMetric:             gaugeFamily(float64(i)),
+				},
+			})
+		}
+	}()
+
+	reads := 0
+	for running := true; running; {
+		select {
+		case <-done:
+			running = false
+		default:
+		}
+		metrics := ep.GetMetrics()
+		custom, okCustom := metrics.CustomScalarSample(sampleCustomKey)
+		optional, okOptional := metrics.Clone().CustomScalarSample(sampleOptionalKey)
+		queue, _ := metrics.ScalarSample(fwkdl.ScalarFieldWaitingQueueSize)
+		_ = metrics.ScalarSamples.String()
+		if okCustom && okOptional {
+			// One snapshot holds the values of one scrape.
+			require.Equal(t, custom, optional)
+			require.Equal(t, custom, queue)
+			reads++
+		}
+	}
+	wg.Wait()
+	assert.Equal(t, float64(scrapes-1), customSample(t, ep, sampleCustomKey).Value)
+	t.Logf("%d consistent snapshot reads", reads)
 }

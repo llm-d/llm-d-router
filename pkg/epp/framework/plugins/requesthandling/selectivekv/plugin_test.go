@@ -329,6 +329,28 @@ func TestSelectiveKVThresholdPolicyIgnoresStaleWaitingQueueSample(t *testing.T) 
 	assert.NotContains(t, run(time.Now().Add(-2*time.Second)), "kv_transfer_params")
 }
 
+func TestSelectiveKVThresholdPolicyIgnoresStaleQueueSampleWithFreshUpdateTime(t *testing.T) {
+	// Issue #2890: the queue metric disappears while other metrics keep
+	// advancing UpdateTime. The retained value must age out on its own scrape
+	// time, not on UpdateTime.
+	p, err := New("test", Config{
+		LoadPolicy:                     PolicyThreshold,
+		OffloadPolicy:                  PolicyPreserve,
+		MinExternalReusableTokens:      1024,
+		MaxWaitingRequests:             8,
+		WaitingQueueStalenessThreshold: &metav1.Duration{Duration: time.Second},
+	})
+	require.NoError(t, err)
+
+	now := time.Now()
+	result := thresholdResultWithMetrics(p, map[string]int{"gpu": 4, "cpu": 20},
+		queueMetricsUpdatedAt(8, now.Add(-2*time.Second), now))
+	payload := fwkrequest.PayloadMap{"model": "test"}
+	require.NoError(t, p.PreRequest(context.Background(),
+		&scheduling.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{Payload: payload}}, result))
+	assert.NotContains(t, payload, "kv_transfer_params")
+}
+
 func TestSelectiveKVThresholdPolicy(t *testing.T) {
 	p := newThresholdPlugin(t)
 
@@ -806,6 +828,11 @@ func thresholdResult(p *Plugin, byTier map[string]int) *scheduling.SchedulingRes
 
 func thresholdResultWithQueue(p *Plugin, byTier map[string]int, waiting int,
 	updateTime time.Time) *scheduling.SchedulingResult {
+	return thresholdResultWithMetrics(p, byTier, queueMetrics(waiting, updateTime))
+}
+
+func thresholdResultWithMetrics(p *Plugin, byTier map[string]int,
+	metrics *fwkdl.Metrics) *scheduling.SchedulingResult {
 	endpoint := scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
 			ID: k8stypes.NamespacedName{
@@ -813,7 +840,7 @@ func thresholdResultWithQueue(p *Plugin, byTier map[string]int, waiting int,
 				Name:      "model-server",
 			},
 		},
-		queueMetrics(waiting, updateTime),
+		metrics,
 		nil,
 	)
 	if byTier != nil {
@@ -832,7 +859,13 @@ func thresholdResultWithQueue(p *Plugin, byTier map[string]int, waiting int,
 // queueMetrics returns metrics whose waiting-queue sample was scraped at
 // scrapeTime. A zero scrapeTime leaves the queue metric unobserved.
 func queueMetrics(waiting int, scrapeTime time.Time) *fwkdl.Metrics {
-	metrics := &fwkdl.Metrics{WaitingQueueSize: waiting, UpdateTime: scrapeTime}
+	return queueMetricsUpdatedAt(waiting, scrapeTime, scrapeTime)
+}
+
+// queueMetricsUpdatedAt is queueMetrics with a later scrape that extracted
+// other metrics at updateTime.
+func queueMetricsUpdatedAt(waiting int, scrapeTime, updateTime time.Time) *fwkdl.Metrics {
+	metrics := &fwkdl.Metrics{WaitingQueueSize: waiting, UpdateTime: updateTime}
 	if !scrapeTime.IsZero() {
 		samples := fwkdl.NewScalarSampleUpdate(nil, "test", scrapeTime, 0)
 		samples.Observe(fwkdl.ScalarFieldWaitingQueueSize, float64(waiting))

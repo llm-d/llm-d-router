@@ -53,8 +53,9 @@ const (
 	waitingQueueEWMAHalfLife = 2 * time.Second
 	waitingQueueReopenRatio  = 0.5
 
-	// defaultWaitingQueueStalenessThreshold matches the default of
-	// --metrics-staleness-threshold.
+	// defaultWaitingQueueStalenessThreshold tolerates many missed polls at the
+	// default scrape interval. It must exceed the metrics data source interval
+	// plus fetch latency, or the queue veto flaps open under load.
 	defaultWaitingQueueStalenessThreshold = 2 * time.Second
 )
 
