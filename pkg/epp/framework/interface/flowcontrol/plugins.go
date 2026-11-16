@@ -176,6 +176,30 @@ type DispatchGate interface {
 	Allow(ctx context.Context, item QueueItemAccessor, saturation float64) bool
 }
 
+// DispatchPreference optionally asks the processor to pick among gate-eligible queues first.
+// A DispatchGate may implement it so preferred siblings are selected before held ones, instead
+// of relying on a rejected first pick and a retry.
+//
+// PreferEligibleFirst reports whether the first fairness pick should see only queues whose head
+// Allow accepts at this saturation.
+//
+// EmptyEligibleFallback reports whether fairness may then pick from the full band when that
+// eligible set is empty. True is work-conserving (an empty preferred lane does not idle the
+// pool). False keeps the cycle empty until an eligible request arrives or the hold releases.
+type DispatchPreference interface {
+	PreferEligibleFirst(saturation float64) bool
+	EmptyEligibleFallback(saturation float64) bool
+}
+
+// BandEnqueuePolicy optionally reserves band queue capacity for preferred items. A DispatchGate
+// may implement it so held traffic cannot fill the shared band and starve siblings at enqueue.
+//
+// EffectiveBandRequestCapacity returns the band request capacity this item may use. capacity is
+// the configured band maxRequests; 0 means unlimited and must be returned unchanged.
+type BandEnqueuePolicy interface {
+	EffectiveBandRequestCapacity(item QueueItemAccessor, capacity uint64) uint64
+}
+
 // UsageLimitPolicy computes the usage limit of a priority band dynamically.
 //
 // The goal of this policy is to enable adaptive capacity management by gating lower-priority traffic

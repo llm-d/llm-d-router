@@ -21,6 +21,11 @@ limitations under the License.
 // queues hits and misses as sibling flows at the same customer priority (see FlowID). When the
 // same plugin is configured as flowControl.dispatchGatePluginRef, Allow holds a ready miss
 // while pool saturation is at or above shedThreshold and still dispatches hits in that band.
+// Holding latches until saturation falls below releaseThreshold so brief dips do not reopen
+// the miss lane. missHold selects how the latch behaves: off disables hold; prefer picks
+// gate-eligible (hit) queues first and may fall back to the full band when none are waiting;
+// strict never dispatches a ready miss while latched. BandEnqueuePolicy may reserve band
+// queue slots for hits so held misses cannot fill shared maxRequests and starve hit enqueue.
 package cacheclass
 
 import (
@@ -28,6 +33,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -46,6 +52,15 @@ const (
 	// Type is the registered plugin type.
 	Type = "cache-class-router"
 
+	// MissHoldOff disables miss hold: the gate always allows dispatch.
+	MissHoldOff = "off"
+	// MissHoldPrefer holds ready misses at high saturation, prefers hits, and may dispatch a
+	// miss when no hit is waiting (work-conserving).
+	MissHoldPrefer = "prefer"
+	// MissHoldStrict holds ready misses at high saturation and never dispatches them until
+	// the latch releases, even if the hit lane is empty.
+	MissHoldStrict = "strict"
+
 	// A pseudo-token is 4 bytes (tokenizer.bytesPerToken), so 64 pseudo-tokens covers 256 bytes
 	// of prompt text -- coarse enough to keep the index small, fine enough that two requests
 	// sharing a conversation prefix agree on many leading blocks.
@@ -57,8 +72,15 @@ const (
 	defaultIndexCapacity = 100_000
 	// Fraction of the prompt that must be indexed for the request to count as a hit.
 	defaultHitMatchRatio = 0.3
-	// Saturation at or above which a ready miss stays queued. Hits are not held by this gate.
-	defaultShedThreshold = 0.85
+	// Saturation at or above which ready misses are held and hit siblings are preferred first.
+	// Early enough that cold cannot own most of the high-sat serving mix before prefer starts.
+	defaultShedThreshold = 0.80
+	// Saturation below which a latched miss hold releases. Brief dips between this value and
+	// shedThreshold keep holding so cold does not reopen on chatter.
+	defaultReleaseThreshold = 0.70
+	// Fraction of band maxRequests reserved for hits under missHold=strict when hitQueueShare
+	// is omitted. Prefer/off default to 0 (no reservation) unless hitQueueShare is set.
+	defaultStrictHitQueueShare = 0.25
 	// Cached pseudo-tokens a request must carry before its hit is worth protecting. A short
 	// prompt can be fully cached and still represent almost no committed prefill, so ratio
 	// alone would hand it the protected band ahead of a long request holding real investment.
@@ -118,9 +140,18 @@ type Parameters struct {
 	// HitMatchRatio is the match fraction at or above which a request counts as a hit.
 	// Optional; must be in (0,1].
 	HitMatchRatio float64 `json:"hitMatchRatio,omitempty"`
+	// MissHold selects miss-hold behavior: off, prefer (default), or strict.
+	MissHold string `json:"missHold,omitempty"`
 	// ShedThreshold is the pool saturation at or above which a ready miss stays queued.
-	// Optional; must be in (0,1].
+	// Optional; must be in (0,1]. Ignored when missHold is off.
 	ShedThreshold *float64 `json:"shedThreshold,omitempty"`
+	// ReleaseThreshold is the pool saturation below which a latched miss hold releases.
+	// Optional; must be in (0, shedThreshold]. Defaults to min(0.70, shedThreshold).
+	ReleaseThreshold *float64 `json:"releaseThreshold,omitempty"`
+	// HitQueueShare is the fraction of band maxRequests reserved for hits and not-ready
+	// classes. Ready misses may only fill the remaining share. Optional; must be in [0,1).
+	// When omitted, strict defaults to 0.25 and prefer/off default to 0.
+	HitQueueShare *float64 `json:"hitQueueShare,omitempty"`
 	// MinMatchedTokens is the cached-token floor below which a request is treated as a miss
 	// regardless of its match ratio, so the protected band is reserved for requests carrying
 	// real prefill investment. Optional; 0 disables the floor.
@@ -138,7 +169,11 @@ type Plugin struct {
 	maxPrefixBlocks  int
 	hitMatchRatio    float64
 	minMatchedTokens int
+	missHold         string
 	shedThreshold    float64
+	releaseThreshold float64
+	hitQueueShare    float64
+	holdingMisses    atomic.Bool
 
 	warmupBlocks  int
 	pendingTTL    time.Duration
@@ -164,6 +199,8 @@ var (
 	_ fwkrh.RequestHeaderProcessor = &Plugin{}
 	_ fwkrh.PreRequest             = &Plugin{}
 	_ fwkfc.DispatchGate           = &Plugin{}
+	_ fwkfc.DispatchPreference     = &Plugin{}
+	_ fwkfc.BandEnqueuePolicy      = &Plugin{}
 )
 
 // Factory builds the plugin from JSON configuration.
@@ -179,6 +216,7 @@ func Factory(name string, raw *json.Decoder, handle fwkplugin.Handle) (fwkplugin
 	minMatched := defaultMinMatchedTokens
 	warmup := defaultWarmupBlocks
 	shed := defaultShedThreshold
+	missHold := MissHoldPrefer
 	if raw != nil {
 		if err := raw.Decode(&params); err != nil {
 			return nil, fmt.Errorf("failed to parse parameters for '%s' plugin: %w", Type, err)
@@ -196,11 +234,43 @@ func Factory(name string, raw *json.Decoder, handle fwkplugin.Handle) (fwkplugin
 	if params.HitMatchRatio <= 0 || params.HitMatchRatio > 1 {
 		return nil, fmt.Errorf("plugin '%s': hitMatchRatio must be in (0,1], got %g", Type, params.HitMatchRatio)
 	}
+	if params.MissHold != "" {
+		switch params.MissHold {
+		case MissHoldOff, MissHoldPrefer, MissHoldStrict:
+			missHold = params.MissHold
+		default:
+			return nil, fmt.Errorf("plugin '%s': missHold must be %q, %q, or %q, got %q",
+				Type, MissHoldOff, MissHoldPrefer, MissHoldStrict, params.MissHold)
+		}
+	}
 	if params.ShedThreshold != nil {
 		if *params.ShedThreshold <= 0 || *params.ShedThreshold > 1 {
 			return nil, fmt.Errorf("plugin '%s': shedThreshold must be in (0,1], got %g", Type, *params.ShedThreshold)
 		}
 		shed = *params.ShedThreshold
+	}
+	release := defaultReleaseThreshold
+	if release > shed {
+		release = shed
+	}
+	if params.ReleaseThreshold != nil {
+		if *params.ReleaseThreshold <= 0 || *params.ReleaseThreshold > 1 {
+			return nil, fmt.Errorf("plugin '%s': releaseThreshold must be in (0,1], got %g", Type, *params.ReleaseThreshold)
+		}
+		if *params.ReleaseThreshold > shed {
+			return nil, fmt.Errorf("plugin '%s': releaseThreshold (%g) must be <= shedThreshold (%g)", Type, *params.ReleaseThreshold, shed)
+		}
+		release = *params.ReleaseThreshold
+	}
+	hitShare := 0.0
+	if missHold == MissHoldStrict {
+		hitShare = defaultStrictHitQueueShare
+	}
+	if params.HitQueueShare != nil {
+		if *params.HitQueueShare < 0 || *params.HitQueueShare >= 1 {
+			return nil, fmt.Errorf("plugin '%s': hitQueueShare must be in [0,1), got %g", Type, *params.HitQueueShare)
+		}
+		hitShare = *params.HitQueueShare
 	}
 	if params.MinMatchedTokens != nil {
 		if *params.MinMatchedTokens < 0 {
@@ -226,7 +296,10 @@ func Factory(name string, raw *json.Decoder, handle fwkplugin.Handle) (fwkplugin
 		maxPrefixBlocks:  params.MaxPrefixBlocks,
 		hitMatchRatio:    params.HitMatchRatio,
 		minMatchedTokens: minMatched,
+		missHold:         missHold,
 		shedThreshold:    shed,
+		releaseThreshold: release,
+		hitQueueShare:    hitShare,
 		warmupBlocks:     warmup,
 		pendingTTL:       defaultPendingTTL,
 		sweepInterval:    defaultSweepInterval,
@@ -305,22 +378,86 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceR
 	return nil
 }
 
+// updateHoldLatch advances the miss-hold latch from the current saturation sample.
+func (p *Plugin) updateHoldLatch(saturation float64) bool {
+	holding := p.holdingMisses.Load()
+	switch {
+	case saturation >= p.shedThreshold:
+		p.holdingMisses.Store(true)
+		return true
+	case holding && saturation < p.releaseThreshold:
+		p.holdingMisses.Store(false)
+		return false
+	default:
+		return holding
+	}
+}
+
+// PreferEligibleFirst implements flowcontrol.DispatchPreference.
+// While missHold is prefer or strict and the latch is set, fairness picks among gate-eligible
+// queues first so waiting hits are chosen before held misses.
+func (p *Plugin) PreferEligibleFirst(saturation float64) bool {
+	if p.missHold == MissHoldOff {
+		return false
+	}
+	return p.updateHoldLatch(saturation)
+}
+
+// EmptyEligibleFallback implements flowcontrol.DispatchPreference.
+// prefer may dispatch from the full band when no hit is waiting; strict does not.
+func (p *Plugin) EmptyEligibleFallback(saturation float64) bool {
+	return p.missHold == MissHoldPrefer && p.updateHoldLatch(saturation)
+}
+
 // Allow implements flowcontrol.DispatchGate.
-// A ready miss stays queued once saturation reaches shedThreshold. Hits, classes that are not
-// Ready, and requests with no class dispatch.
+// With missHold prefer or strict, a ready miss stays queued once saturation reaches
+// shedThreshold until it falls below releaseThreshold. Hits, classes that are not Ready, and
+// requests with no class dispatch. missHold off always allows.
 func (p *Plugin) Allow(_ context.Context, item fwkfc.QueueItemAccessor, saturation float64) bool {
-	if item == nil || saturation < p.shedThreshold {
+	if item == nil || p.missHold == MissHoldOff {
 		return true
 	}
-	req := item.OriginalRequest()
-	if req == nil || req.InferenceRequest() == nil {
+	if !p.updateHoldLatch(saturation) {
 		return true
 	}
-	class, ok := fwksched.ReadRequestAttribute[*CacheClass](req.InferenceRequest(), CacheClassKey)
-	if !ok || class == nil || !class.Ready || class.Hit {
+	class := classOfItem(item)
+	if class == nil || !class.Ready || class.Hit {
 		return true
 	}
 	return false
+}
+
+// EffectiveBandRequestCapacity implements flowcontrol.BandEnqueuePolicy.
+// Ready misses may only use the band slots not reserved by hitQueueShare, so held cold traffic
+// cannot exhaust shared maxRequests and block hit enqueue.
+func (p *Plugin) EffectiveBandRequestCapacity(item fwkfc.QueueItemAccessor, capacity uint64) uint64 {
+	if capacity == 0 || p.hitQueueShare <= 0 {
+		return capacity
+	}
+	class := classOfItem(item)
+	if class == nil || !class.Ready || class.Hit {
+		return capacity
+	}
+	reserved := uint64(float64(capacity) * p.hitQueueShare)
+	if reserved >= capacity {
+		return 0
+	}
+	return capacity - reserved
+}
+
+func classOfItem(item fwkfc.QueueItemAccessor) *CacheClass {
+	if item == nil {
+		return nil
+	}
+	req := item.OriginalRequest()
+	if req == nil || req.InferenceRequest() == nil {
+		return nil
+	}
+	class, ok := fwksched.ReadRequestAttribute[*CacheClass](req.InferenceRequest(), CacheClassKey)
+	if !ok {
+		return nil
+	}
+	return class
 }
 
 // FlowID returns the queue ID flow control should use. A Ready class splits hits and misses

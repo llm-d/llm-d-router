@@ -163,11 +163,16 @@ func TestUnhashableRequestFailsOpen(t *testing.T) {
 
 func TestFactoryRejectsInvalidConfig(t *testing.T) {
 	for name, cfg := range map[string]string{
-		"shed threshold above one": `{"shedThreshold": 1.5}`,
-		"ratio above one":          `{"hitMatchRatio": 1.5}`,
-		"ratio at zero":            `{"hitMatchRatio": 0}`,
-		"zero capacity":            `{"indexCapacity": 0}`,
-		"negative blocks":          `{"maxPrefixBlocks": -1}`,
+		"shed threshold above one":  `{"shedThreshold": 1.5}`,
+		"release above shed":        `{"shedThreshold": 0.9, "releaseThreshold": 0.95}`,
+		"release threshold at zero": `{"releaseThreshold": 0}`,
+		"hit queue share at one":    `{"hitQueueShare": 1}`,
+		"hit queue share negative":  `{"hitQueueShare": -0.1}`,
+		"unknown missHold":          `{"missHold": "aggressive"}`,
+		"ratio above one":           `{"hitMatchRatio": 1.5}`,
+		"ratio at zero":             `{"hitMatchRatio": 0}`,
+		"zero capacity":             `{"indexCapacity": 0}`,
+		"negative blocks":           `{"maxPrefixBlocks": -1}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Factory("x", json.NewDecoder(bytes.NewBufferString(cfg)), nil); err == nil {
@@ -335,7 +340,7 @@ func TestWarmIndexMarksReadyHit(t *testing.T) {
 }
 
 func TestAllowHoldsReadyMissAboveThreshold(t *testing.T) {
-	p := newPlugin(t, `{"shedThreshold": 0.85, "warmupBlocks": 0}`)
+	p := newPlugin(t, `{"missHold": "prefer", "shedThreshold": 0.80, "releaseThreshold": 0.70, "warmupBlocks": 0}`)
 	miss := &CacheClass{Hit: false, Ready: true}
 	hit := &CacheClass{Hit: true, Ready: true}
 	cold := &CacheClass{Hit: false, Ready: false}
@@ -343,8 +348,32 @@ func TestAllowHoldsReadyMissAboveThreshold(t *testing.T) {
 	if !p.Allow(context.Background(), itemWithClass(miss), 0.5) {
 		t.Fatal("miss below threshold should dispatch")
 	}
-	if p.Allow(context.Background(), itemWithClass(miss), 0.85) {
+	if p.PreferEligibleFirst(0.75) {
+		t.Fatal("prefer-eligible should be off before latch")
+	}
+	if !p.Allow(context.Background(), itemWithClass(miss), 0.75) {
+		t.Fatal("miss below shedThreshold should still dispatch before latch")
+	}
+	if p.Allow(context.Background(), itemWithClass(miss), 0.80) {
 		t.Fatal("ready miss at threshold should stay queued")
+	}
+	if !p.PreferEligibleFirst(0.75) {
+		t.Fatal("prefer-eligible should stay on between release and shed")
+	}
+	if !p.EmptyEligibleFallback(0.75) {
+		t.Fatal("prefer mode should allow empty-eligible fallback while latched")
+	}
+	if p.Allow(context.Background(), itemWithClass(miss), 0.75) {
+		t.Fatal("latched hold must keep miss queued between release and shed")
+	}
+	if !p.Allow(context.Background(), itemWithClass(miss), 0.69) {
+		t.Fatal("miss below releaseThreshold should dispatch and clear latch")
+	}
+	if p.PreferEligibleFirst(0.75) {
+		t.Fatal("after release, prefer-eligible should be off below shed")
+	}
+	if !p.Allow(context.Background(), itemWithClass(miss), 0.75) {
+		t.Fatal("after release, miss below shedThreshold should dispatch again")
 	}
 	if !p.Allow(context.Background(), itemWithClass(hit), 0.99) {
 		t.Fatal("hit should dispatch above threshold")
@@ -376,6 +405,66 @@ func TestAllowHoldsReadyMissAboveThreshold(t *testing.T) {
 
 	if _, ok := p.Produces()[CacheClassKey]; !ok {
 		t.Fatal("Produces() must declare CacheClassKey")
+	}
+}
+
+func TestEffectiveBandRequestCapacityReservesHitShare(t *testing.T) {
+	p := newPlugin(t, `{"hitQueueShare": 0.25, "warmupBlocks": 0}`)
+	miss := &CacheClass{Hit: false, Ready: true}
+	hit := &CacheClass{Hit: true, Ready: true}
+	cold := &CacheClass{Hit: false, Ready: false}
+
+	const bandCap uint64 = 64
+	if got := p.EffectiveBandRequestCapacity(itemWithClass(hit), bandCap); got != bandCap {
+		t.Fatalf("hit capacity = %d, want %d", got, bandCap)
+	}
+	if got := p.EffectiveBandRequestCapacity(itemWithClass(cold), bandCap); got != bandCap {
+		t.Fatalf("not-ready capacity = %d, want %d", got, bandCap)
+	}
+	wantMiss := bandCap - uint64(float64(bandCap)*0.25)
+	if got := p.EffectiveBandRequestCapacity(itemWithClass(miss), bandCap); got != wantMiss {
+		t.Fatalf("miss capacity = %d, want %d", got, wantMiss)
+	}
+	if got := p.EffectiveBandRequestCapacity(itemWithClass(miss), 0); got != 0 {
+		t.Fatalf("unlimited band must stay 0, got %d", got)
+	}
+
+	off := newPlugin(t, `{"hitQueueShare": 0, "warmupBlocks": 0}`)
+	if got := off.EffectiveBandRequestCapacity(itemWithClass(miss), bandCap); got != bandCap {
+		t.Fatalf("disabled share: miss capacity = %d, want %d", got, bandCap)
+	}
+
+	strict := newPlugin(t, `{"missHold": "strict", "warmupBlocks": 0}`)
+	if got := strict.EffectiveBandRequestCapacity(itemWithClass(miss), bandCap); got != wantMiss {
+		t.Fatalf("strict default share miss capacity = %d, want %d", got, wantMiss)
+	}
+}
+
+func TestMissHoldOffNeverHolds(t *testing.T) {
+	p := newPlugin(t, `{"missHold": "off", "warmupBlocks": 0}`)
+	miss := &CacheClass{Hit: false, Ready: true}
+	if !p.Allow(context.Background(), itemWithClass(miss), 0.99) {
+		t.Fatal("missHold off must allow ready miss at high sat")
+	}
+	if p.PreferEligibleFirst(0.99) {
+		t.Fatal("missHold off must not prefer-eligible")
+	}
+	if p.EmptyEligibleFallback(0.99) {
+		t.Fatal("missHold off must not report empty-eligible fallback")
+	}
+}
+
+func TestMissHoldStrictDisablesEmptyEligibleFallback(t *testing.T) {
+	p := newPlugin(t, `{"missHold": "strict", "shedThreshold": 0.80, "releaseThreshold": 0.70, "warmupBlocks": 0}`)
+	miss := &CacheClass{Hit: false, Ready: true}
+	if p.Allow(context.Background(), itemWithClass(miss), 0.90) {
+		t.Fatal("strict must hold ready miss while latched")
+	}
+	if !p.PreferEligibleFirst(0.90) {
+		t.Fatal("strict must prefer-eligible while latched")
+	}
+	if p.EmptyEligibleFallback(0.90) {
+		t.Fatal("strict must not fall back to the full band while latched")
 	}
 }
 
