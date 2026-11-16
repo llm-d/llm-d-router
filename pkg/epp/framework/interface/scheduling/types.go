@@ -43,7 +43,10 @@ type InferenceRequest struct {
 	TargetModel string
 	// Data contains the request-body fields that we parse out as user input.
 	Body *fwkrequest.InferenceRequestBody
-	// Headers is a map of the request headers.
+	// Headers is a map of the request headers. Edits made before the request is
+	// forwarded apply to it, except to EPP-owned headers: a header set in the
+	// map is forwarded with its value, and a client header deleted from the map
+	// is removed.
 	Headers map[string]string
 	// Request Objective
 	Objectives RequestObjectives
