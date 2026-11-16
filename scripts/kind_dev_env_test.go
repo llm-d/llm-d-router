@@ -27,19 +27,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// renderedDeployment is a decode Deployment as kubectl kustomize renders it, before envsubst.
-const renderedDeployment = `apiVersion: apps/v1
-kind: Deployment
-spec:
-  template:
-    spec:
-      containers:
-      - name: vllm
-        args:
-        - --port=8000
-        - ${VLLM_EXTRA_ARGS_D}
-`
-
 // renderPipeline returns the variables kind-dev-env.sh passes to envsubst for the scenario manifests, and the awk
 // programs it pipes them through afterwards, in order.
 func renderPipeline(t *testing.T) ([]string, []string) {
@@ -48,13 +35,14 @@ func renderPipeline(t *testing.T) ([]string, []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	block := string(src)
-	start := strings.Index(block, "# Deploy scenario-specific vLLM components")
-	end := strings.Index(block[start:], "| kubectl --context ${KUBE_CONTEXT} apply -f -")
-	if start < 0 || end < 0 {
+	_, block, ok := strings.Cut(string(src), "# Deploy scenario-specific vLLM components")
+	if !ok {
 		t.Fatal("scenario render pipeline not found in kind-dev-env.sh")
 	}
-	block = block[start : start+end]
+	block, _, ok = strings.Cut(block, "| kubectl --context ${KUBE_CONTEXT} apply -f -")
+	if !ok {
+		t.Fatal("the scenario render pipeline does not end in kubectl apply")
+	}
 	_, rest, ok := strings.Cut(block, "envsubst '")
 	if !ok {
 		t.Fatal("no envsubst in the scenario render pipeline")
@@ -83,8 +71,21 @@ func renderPipeline(t *testing.T) ([]string, []string) {
 	return names, stages
 }
 
+// renderArgs renders a decode Deployment, as kubectl kustomize emits it, through the script's pipeline and returns
+// its container args, with a null item as "<null>".
 func renderArgs(t *testing.T, envsubst, stages []string, value string) []string {
 	t.Helper()
+	const renderedDeployment = `apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+      - name: vllm
+        args:
+        - --port=8000
+        - ${VLLM_EXTRA_ARGS_D}
+`
 	env := map[string]string{"VLLM_EXTRA_ARGS_D": value}
 	out := renderedDeployment
 	for _, name := range envsubst {
@@ -114,11 +115,13 @@ func renderArgs(t *testing.T, envsubst, stages []string, value string) []string 
 	if err := yaml.Unmarshal([]byte(out), &d); err != nil {
 		t.Fatalf("rendered manifest is not valid YAML: %v\n%s", err, out)
 	}
-	var args []string
-	for _, a := range d.Spec.Template.Spec.Containers[0].Args[1:] {
-		if a != nil {
-			args = append(args, a.(string))
+	args := make([]string, 0, len(d.Spec.Template.Spec.Containers[0].Args))
+	for _, a := range d.Spec.Template.Spec.Containers[0].Args {
+		if a == nil {
+			args = append(args, "<null>")
+			continue
 		}
+		args = append(args, a.(string))
 	}
 	return args
 }
@@ -133,16 +136,24 @@ func TestKindDevEnvExtraArgs(t *testing.T) {
 		value string
 		want  []string
 	}{
-		{name: "empty", value: "", want: nil},
-		{name: "one flag", value: "--kv-cache-size=256", want: []string{"--kv-cache-size=256"}},
+		{name: "empty keeps a null item", value: "", want: []string{"--port=8000", "<null>"}},
+		{name: "one flag", value: "--kv-cache-size=256", want: []string{"--port=8000", "--kv-cache-size=256"}},
 		{name: "two flags", value: "--max-model-len=131072 --kv-cache-size=8192",
-			want: []string{"--max-model-len=131072", "--kv-cache-size=8192"}},
+			want: []string{"--port=8000", "--max-model-len=131072", "--kv-cache-size=8192"}},
 		{name: "tab separated", value: "--strict\t--max-model-len=131072",
-			want: []string{"--strict", "--max-model-len=131072"}},
-		{name: "a JSON value stays one argument", value: `--mm-processor-kwargs={"num_crops":4}`,
-			want: []string{`--mm-processor-kwargs={"num_crops":4}`}},
+			want: []string{"--port=8000", "--strict", "--max-model-len=131072"}},
+		{name: "a JSON value", value: `--mm-processor-kwargs={"num_crops":4}`,
+			want: []string{"--port=8000", `--mm-processor-kwargs={"num_crops":4}`}},
+		{name: "a JSON value with another flag stays one argument", value: `--mm-processor-kwargs={"num_crops":4} --max-model-len=131072`,
+			want: []string{"--port=8000", `--mm-processor-kwargs={"num_crops":4} --max-model-len=131072`}},
+		{name: "a quoted value with another flag stays one argument", value: "--chat-template='a b' --max-model-len=4096",
+			want: []string{"--port=8000", "--chat-template='a b' --max-model-len=4096"}},
+		{name: "a backslash with another flag stays one argument", value: `--model=foo\path --strict`,
+			want: []string{"--port=8000", `--model=foo\path --strict`}},
 		{name: "multi-line list form", value: "--max-model-len=131072\n        - --strict",
-			want: []string{"--max-model-len=131072", "--strict"}},
+			want: []string{"--port=8000", "--max-model-len=131072", "--strict"}},
+		{name: "multi-line continuation folds into one argument", value: "--model=foo\n          --literal",
+			want: []string{"--port=8000", "--model=foo --literal"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := renderArgs(t, envsubst, stages, tc.value); !reflect.DeepEqual(got, tc.want) {
