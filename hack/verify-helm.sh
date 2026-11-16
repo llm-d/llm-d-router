@@ -1285,3 +1285,14 @@ for c in "sidecar:${envoy_default_output}:--concurrency:8:1" "sidecar-cpuset:${e
     exit 1
   fi
 done
+
+echo "Verifying llm-d-router-standalone Envoy ext_proc HTTP/2 keepalive..."
+# #4203: without PING keepalive a killed EPP hangs in-flight streamed responses until message_timeout.
+for c in "sidecar:${envoy_default_output}" "service:${proxy_service_render_output}"; do
+  IFS=: read -r name file <<< "${c}"
+  got=$(${YQ} 'select(.kind == "ConfigMap" and (.data | has("envoy.yaml"))) | .data."envoy.yaml"' "${file}" | ${YQ} '.static_resources.clusters[] | select(.name == "ext_proc") | .typed_extension_protocol_options."envoy.extensions.upstreams.http.v3.HttpProtocolOptions".explicit_http_config.http2_protocol_options.connection_keepalive | (.interval // "null") + ":" + (.timeout // "null")')
+  if [ "${got}" != "15s:3s" ]; then
+    echo "Envoy ext_proc connection_keepalive for ${name}: got ${got}, want 15s:3s"
+    exit 1
+  fi
+done
