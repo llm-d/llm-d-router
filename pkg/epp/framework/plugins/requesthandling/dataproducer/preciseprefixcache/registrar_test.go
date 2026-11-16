@@ -17,6 +17,7 @@ limitations under the License.
 package preciseprefixcache
 
 import (
+	"context"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -28,7 +29,25 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
+
+// newRegistrationProducer builds a producer with only what registration and Extract read, and a fake subscriber
+// manager, so no KV-events pool or queue goroutines are started.
+func newRegistrationProducer(discoverPods bool, zmqEndpoint string) (*Producer, *fakeSubscriberManager) {
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = discoverPods
+	cfg.ZMQEndpoint = zmqEndpoint
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+	subscribers := &fakeSubscriberManager{}
+	return &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      context.Background(),
+	}, subscribers
+}
 
 type recordingRegistrar struct {
 	registrations []fwkdl.PendingRegistration
@@ -41,7 +60,7 @@ func (r *recordingRegistrar) Register(reg fwkdl.PendingRegistration) error {
 
 func TestProducer_RegisterDependencies(t *testing.T) {
 	t.Run("pod discovery registers the endpoint-notification source by default", func(t *testing.T) {
-		p := newExtractorProducer(t, true)
+		p, _ := newRegistrationProducer(true, "")
 		r := &recordingRegistrar{}
 		require.NoError(t, p.RegisterDependencies(r))
 
@@ -55,15 +74,14 @@ func TestProducer_RegisterDependencies(t *testing.T) {
 	})
 
 	t.Run("pod discovery disabled registers nothing", func(t *testing.T) {
-		p := newExtractorProducer(t, false)
+		p, _ := newRegistrationProducer(false, "")
 		r := &recordingRegistrar{}
 		require.NoError(t, p.RegisterDependencies(r))
 		assert.Empty(t, r.registrations)
 	})
 
 	t.Run("global socket with the default discoverPods registers nothing", func(t *testing.T) {
-		p := newExtractorProducer(t, true)
-		p.kvEventsConfig.ZMQEndpoint = "tcp://0.0.0.0:5557"
+		p, _ := newRegistrationProducer(true, "tcp://0.0.0.0:5557")
 		r := &recordingRegistrar{}
 		require.NoError(t, p.RegisterDependencies(r))
 		assert.Empty(t, r.registrations)
@@ -85,10 +103,7 @@ func TestProducer_RuntimeSubscribesPodsThroughRegistration(t *testing.T) {
 		{name: "global socket with the source configured for other plugins", zmqEndpoint: "tcp://0.0.0.0:5557", otherSource: true, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := newExtractorProducer(t, true)
-			p.kvEventsConfig.ZMQEndpoint = tc.zmqEndpoint
-			subscribers := &fakeSubscriberManager{}
-			p.subscribersManager = subscribers
+			p, subscribers := newRegistrationProducer(true, tc.zmqEndpoint)
 
 			rt := datalayer.NewRuntime(0)
 			require.NoError(t, p.RegisterDependencies(rt))
