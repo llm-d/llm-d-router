@@ -632,10 +632,68 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 				assert.Equal(t, v, gotSet[k])
 			}
 			// The context is unsampled, so client copies of the attribution handoff are removed too.
-			wantRemoved := slices.Concat(tc.wantRemoved, []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader})
+			wantRemoved := slices.Concat(tc.wantRemoved, clientControlHeaders, []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader})
 			assert.ElementsMatch(t, wantRemoved, mutation.GetRemoveHeaders())
 		})
 	}
+}
+
+// clientControlHeaders are the names EPP reads as control input or injects
+// itself and never sets on the forwarded request, deprecated aliases included.
+var clientControlHeaders = []string{
+	metadata.FlowFairnessIDKey,
+	metadata.OldFlowFairnessIDKey,
+	metadata.InferenceTTLHeaderKey,
+	metadata.ObjectiveKey,
+	metadata.OldObjectiveKey,
+	metadata.ModelNameRewriteKey,
+	metadata.OldModelNameRewriteKey,
+	metadata.SubsetFilterKey,
+	metadata.TTFTSLOHeaderKey,
+	metadata.OldTTFTSLOHeaderKey,
+	metadata.TPOTSLOHeaderKey,
+	metadata.OldTPOTSLOHeaderKey,
+	metadata.VideoFPSHeaderKey,
+	metadata.VideoDurationHeaderKey,
+	metadata.VideoResolutionHeaderKey,
+	metadata.AudioDurationHeaderKey,
+	metadata.AudioBytesPerSecondHeaderKey,
+	reqcommon.RevisionDecisionIDHeaderKey,
+	metadata.DestinationEndpointServedKey,
+	metadata.FlowQueueDurationHeaderKey,
+	errcommon.RequestDroppedReasonHeaderKey,
+}
+
+// Envoy keeps a client header unless the mutation removes it, so a client copy
+// of a control or injection name reaches the model server unless it is listed
+// in RemoveHeaders.
+func TestGenerateRequestHeaderResponse_RemovesClientControlHeaders(t *testing.T) {
+	t.Parallel()
+
+	headers := map[string]string{metadata.DestinationEndpointKey: "9.9.9.9:1"}
+	for _, h := range clientControlHeaders {
+		headers[h] = "client-value"
+	}
+	reqCtx := &RequestContext{
+		TargetEndpoint: "1.2.3.4:8080",
+		Request:        &Request{Headers: headers},
+		Response:       &Response{},
+	}
+
+	mutation := (&StreamingServer{}).generateRequestHeaderResponse(context.Background(), reqCtx).
+		GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+	gotSet := make(map[string]string)
+	for _, h := range mutation.GetSetHeaders() {
+		gotSet[h.Header.Key] = string(h.Header.RawValue)
+	}
+	for _, h := range clientControlHeaders {
+		assert.Contains(t, mutation.GetRemoveHeaders(), h)
+		assert.NotContains(t, gotSet, h)
+	}
+	// EPP replaces the client's destination, so the name is set and not removed.
+	assert.Equal(t, "1.2.3.4:8080", gotSet[metadata.DestinationEndpointKey])
+	assert.NotContains(t, mutation.GetRemoveHeaders(), metadata.DestinationEndpointKey)
 }
 
 func TestFallbackToRandomEndpoint(t *testing.T) {
