@@ -27,6 +27,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -704,4 +705,8 @@ func TestDumpStateConcurrentWithPreRequest(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func (h *fakeHandle) SchedulingProfileNames() sets.Set[string] {
+	return nil
 }

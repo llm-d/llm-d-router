@@ -158,7 +158,7 @@ list may arrive after that.
 |---|---|---|---|
 | `selector` | `string` | yes | Kubernetes label selector matching this EPP Deployment's pods (e.g. `app=my-epp`). |
 | `port` | `string` | yes | Port peer replicas listen on for state sync. Pods do not self-report a service port, so it comes from config. Values must be in the range 1 through 65535. |
-| `namespace` | `string` | yes | Namespace of this EPP Deployment's pods. It must match the EPP deployment namespace because the Pod cache is scoped to that namespace. When the `NAMESPACE` environment variable is set, the plugin validates the value at startup. |
+| `namespace` | `string` | yes | Namespace of this EPP Deployment's pods. It must match the pool namespace (`--pool-namespace`, else the `NAMESPACE` environment variable, else `default`) because the Pod cache is scoped to the pool namespace; the EPP fails at startup otherwise. When the `NAMESPACE` environment variable is set, the plugin also validates the value against it at startup. |
 
 The plugin uses `POD_IP` to exclude this replica from the peer set. When it is
 unset, the plugin uses the Pod hostname instead. If `NAMESPACE` is unset, the

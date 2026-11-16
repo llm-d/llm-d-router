@@ -126,7 +126,7 @@ func TestSetupPeerDiscoveryConnectsStoreToSyncer(t *testing.T) {
 	r := runnerWithPeerPlugins(t, disc, syncer)
 	mgr := &addOnlyManager{}
 
-	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("my-peers")))
+	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("my-peers"), "pool-ns"))
 	require.Len(t, mgr.added, 1, "discovery runs as a manager runnable")
 	require.NotNil(t, syncer.source, "the syncer was given the peer set")
 	assert.Empty(t, syncer.source.Peers())
@@ -159,7 +159,7 @@ func TestSetupPeerDiscoveryLeavesNonConsumingSyncer(t *testing.T) {
 	r := runnerWithPeerPlugins(t, newStubPeerDiscovery(), &externalStoreSyncer{})
 	mgr := &addOnlyManager{}
 
-	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("my-peers")))
+	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("my-peers"), "pool-ns"))
 	assert.Len(t, mgr.added, 1)
 }
 
@@ -168,7 +168,7 @@ func TestSetupPeerDiscoveryWithoutSyncer(t *testing.T) {
 	r := runnerWithPeerPlugins(t, newStubPeerDiscovery(), nil)
 	mgr := &addOnlyManager{}
 
-	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("my-peers")))
+	require.NoError(t, r.setupPeerDiscovery(mgr, peersConfigRef("my-peers"), "pool-ns"))
 	assert.Len(t, mgr.added, 1)
 }
 
@@ -177,18 +177,18 @@ func TestSetupPeerDiscoveryDisabled(t *testing.T) {
 	r := runnerWithPeerPlugins(t, newStubPeerDiscovery(), &peerConsumingSyncer{})
 	mgr := &addOnlyManager{}
 
-	require.NoError(t, r.setupPeerDiscovery(mgr, &configapiv1.EndpointPickerConfig{}))
+	require.NoError(t, r.setupPeerDiscovery(mgr, &configapiv1.EndpointPickerConfig{}, "pool-ns"))
 	assert.Empty(t, mgr.added)
 }
 
 func TestSetupPeerDiscoveryPluginRefNotFound(t *testing.T) {
 	r := runnerWithPeerPlugins(t, newStubPeerDiscovery(), nil)
-	err := r.setupPeerDiscovery(&addOnlyManager{}, peersConfigRef("missing"))
+	err := r.setupPeerDiscovery(&addOnlyManager{}, peersConfigRef("missing"), "pool-ns")
 	assert.ErrorContains(t, err, "missing")
 }
 
 func TestSetupPeerDiscoveryNotPeerDiscovery(t *testing.T) {
 	r := runnerWithPeerPlugins(t, &externalStoreSyncer{}, nil)
-	err := r.setupPeerDiscovery(&addOnlyManager{}, peersConfigRef("my-peers"))
+	err := r.setupPeerDiscovery(&addOnlyManager{}, peersConfigRef("my-peers"), "pool-ns")
 	assert.ErrorContains(t, err, "PeerDiscovery")
 }
