@@ -37,14 +37,96 @@ Successful responses carry:
 |---|---|
 | `x-llm-d-qos-class` | Class that served the request |
 | `x-llm-d-qos-concurrency-remaining` | Unused concurrency slots |
+| `x-llm-d-qos-slo-status` | Team's promise status at admission; see [SLO Validation](#slo-validation) |
 
-The concurrency header is present only for a team with a `maxConcurrency` commit.
+The concurrency header is present only for a team with a `maxConcurrency` commit, and the SLO status header only for a request within the contract of a team with a `promise`.
 
 A `429` adds `retry-after` (seconds: `1` for concurrency, until the next UTC day for the daily budget) and `x-llm-d-request-dropped-reason: rejected-over-quota`, and reports the team's committed class in `x-llm-d-qos-class`. A `400` reports `rejected-size-limit` and the team's committed class.
 
 ## Report-Only Mode
 
 The plugin starts in `mode: report-only` (the default). It serves every request at its team's committed class: it sets the class priority and, when the request has none, the fairness ID, as `enforce-limits` mode does. Every decision is computed and recorded in `llm_d_epp_qos_contract_decisions_total{mode="report-only"}`, but a request outside the contract is neither moved down a class nor rejected, and the plugin adds no response headers. Commits are counted as they would be when enforced: a request recorded as `within_contract` holds a concurrency slot and a daily charge until it completes, and one recorded as `downgraded` or `rejected_*` holds neither. Use it to compare commits against real traffic, then set `mode: enforce-limits` to apply the decisions.
+
+## SLO Validation
+
+`RequestHeader` has two entry points, run in order for the request's team:
+
+1. **Limits enforcement** decides the class from the team's limits and commits, as described above.
+2. **SLO validation** checks whether the team's latency promise is met. It runs only for a request served within the contract, the traffic the promise covers, and changes no decision.
+
+A team's `promise` sets any of three latency objectives, each a percentile and a threshold, held while the team stays within its limits:
+
+| Objective | Validated against | Notes |
+|---|---|---|
+| `ttft` | `llm_d_epp_request_ttft_seconds{streaming="true"}` | Receipt at the EPP to first token, including flow-control queue wait. Non-streaming TTFT is end-to-end latency, so it is excluded. |
+| `tpot` | `llm_d_epp_request_streaming_tpot_seconds` | Mean time per output token of each streamed request. |
+| `itl` | `llm_d_epp_request_streaming_itl_seconds` | Time between consecutive streamed chunks. |
+
+The plugin cannot query Prometheus per request, so a background loop validates every promise each `interval` and caches the result. Prometheus is the source because it holds the traffic of every EPP replica, not only this one's. For each objective it queries, over `window`:
+
+- **guaranteed**: the team's traffic at its committed class, `{fairness_id=<team>, priority=<committed class priority>}`. The promise is validated on it.
+- **all**: all of the team's traffic, at any class, for comparison. Traffic moved down a class carries the lower priority, so it falls in `all` only.
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(llm_d_epp_request_ttft_seconds_bucket{fairness_id=~"(team-a)(/.*)?",priority="100",streaming="true"}[5m])))
+```
+
+An objective is `met` when the latency at its percentile is at most `thresholdMs`, `violated` when above, `insufficient_data` when the window holds fewer than `minRequests` guaranteed requests, and `unknown` when a query failed. A team's status is the most severe of its objectives, in the order `violated`, `unknown`, `insufficient_data`, `met`. A status older than three intervals reads as `unknown`, so a stalled loop is not reported as a current verdict.
+
+At admission, SLO validation records the team's current status in `llm_d_epp_qos_slo_admissions_total` and, in `enforce-limits` mode, returns it in `x-llm-d-qos-slo-status`.
+
+The fairness ID pattern also matches a composed `<team>/<program>` fairness ID. The default team's promise covers every fairness ID the contract does not list.
+
+```yaml
+plugins:
+- type: qos-contract
+  parameters:
+    mode: enforce-limits
+    classes:
+    - {name: critical, priority: 100}
+    - {name: standard, priority: 10}
+    defaultTeam:
+      class: standard
+    teams:
+    - id: team-a
+      class: critical
+      maxConcurrency: 20
+      maxPromptTokens: 8192
+      maxOutputTokens: 4096
+      promise:
+        ttft: {percentile: p95, thresholdMs: 2000}
+        tpot: {percentile: p95, thresholdMs: 33}
+        itl:  {percentile: p95, thresholdMs: 50}
+    sloValidation:
+      prometheusURL: https://thanos-querier.openshift-monitoring.svc:9091
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      caFile: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+      labelSelector: namespace="llm-d"
+      window: 5m
+      interval: 1m
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `teams[].promise.ttft`, `.tpot`, `.itl` | none | `{percentile, thresholdMs}`. `percentile` is `p95`, `p99.9` and so on. At least one is required in a `promise`. `defaultTeam` may have a promise too. |
+| `sloValidation.prometheusURL` | required | Prometheus or Thanos querier HTTP API base URL. |
+| `sloValidation.bearerTokenFile` | none | Token file, read for every query. |
+| `sloValidation.caFile` | none | CA bundle for the Prometheus server certificate. |
+| `sloValidation.insecureSkipVerify` | `false` | Skip server certificate verification. |
+| `sloValidation.interval` | `1m` | How often promises are validated. |
+| `sloValidation.window` | `5m` | PromQL range a promise is evaluated over. |
+| `sloValidation.queryTimeout` | `10s` | Bound on one validation cycle. |
+| `sloValidation.minRequests` | `20` | Fewest guaranteed requests in the window for a verdict. |
+| `sloValidation.labelSelector` | none | Extra label matchers, without braces, added to every query. Use it to select this pool's EPP series. |
+
+`sloValidation` is required when a team has a promise, and a promise requires `teamHeader` to be the fairness ID header, because the series are labeled by fairness ID.
+
+Limitations:
+
+- `histogram_quantile` interpolates within a bucket, and caps a quantile in the `+Inf` bucket at the largest finite bound, so a threshold above that bound can never be violated. Choose thresholds within the histogram's buckets; the TPOT and ITL buckets are set by EPP flags.
+- In `report-only` mode every request is served at its team's committed class, so `guaranteed` and `all` cover the same traffic.
+- With `composeFairnessIDs`, each program is its own fairness ID, and programs past the fairness ID label cap are folded into the overflow value, which matches no team.
+- A client-supplied fairness ID header names the team, as for the limits; authenticate it upstream.
 
 ## Configuration
 
@@ -102,6 +184,13 @@ Configure a flow-control priority band for each class priority, or rely on dynam
 | `llm_d_epp_qos_contract_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | Decisions: `within_contract`, `downgraded`, `rejected_concurrency`, `rejected_size`, `rejected_daily`, and the limit that caused each downgrade or rejection. |
 | `llm_d_epp_qos_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens consumed after refunds, including downgraded traffic. Showback. |
 | `llm_d_epp_qos_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
+| `llm_d_epp_qos_slo_status` | Gauge | `team`, `class`, `slo`, `status` | Last validation of each objective: `1` for the current `status` (`met`, `violated`, `insufficient_data`, `unknown`), `0` for the others. |
+| `llm_d_epp_qos_slo_observed_seconds` | Gauge | `team`, `class`, `slo`, `scope` | Latency at the promised percentile over the window, for `scope="guaranteed"` and `scope="all"`. Absent when there is no data. |
+| `llm_d_epp_qos_slo_window_requests` | Gauge | `team`, `class`, `slo` | Guaranteed requests in the window the objective was validated on. |
+| `llm_d_epp_qos_slo_validation_errors_total` | Counter | `team`, `slo` | Failed Prometheus queries. |
+| `llm_d_epp_qos_slo_admissions_total` | Counter | `team`, `class`, `status` | Requests within the contract, by the team's promise status at admission. |
+
+The SLO gauges are the same on every EPP replica, since each reads the same Prometheus; take `max` rather than `sum` across replicas. The admissions counter is per replica; sum it.
 
 The `team` label shares the fairness ID cardinality bound.
 
