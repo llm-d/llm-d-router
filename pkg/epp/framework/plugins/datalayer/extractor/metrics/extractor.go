@@ -40,9 +40,8 @@ const (
 	// --- Internal Keys (for Legacy/Gauge Usage) ---
 	KVCacheUsagePercentKey = "KVCacheUsagePercent"
 	WaitingQueueSizeKey    = "WaitingQueueSize"
-	// DeferredQueueSizeKey holds the part of WaitingQueueSize that waits on
-	// something other than a batch slot. Published for engine configs with a
-	// deferredRequestsSpec; 0 on a scrape without the series.
+	// DeferredQueueSizeKey is published for engine configs with a
+	// deferredRequestsSpec.
 	DeferredQueueSizeKey   = "DeferredQueueSize"
 	RunningRequestsSizeKey = "RunningRequestsSize"
 	ActiveModelsKey        = "ActiveModels"

@@ -19,6 +19,7 @@ package utilization
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -75,4 +76,16 @@ func TestDetector_Saturation_QueueTermLeavesDeferredOut(t *testing.T) {
 	// of step and leaves the queue term at the waiting queue: qRatio 1/3.
 	require.InDelta(t, 1.0/3.0, detector.Saturation(ctx, []fwkdl.Endpoint{pod(1, 0, 3)}), 1e-4,
 		"deferred above waiting leaves the queue term unchanged")
+
+	// Every waiting request deferred: no queue term, the KV term remains
+	// (0.1 / 1.0).
+	require.InDelta(t, 0.1, detector.Saturation(ctx, []fwkdl.Endpoint{pod(2, 0, 2)}), 1e-4,
+		"a fully deferred queue has no queue term")
+
+	// A negative or infinite deferred count leaves the queue term at the
+	// waiting queue: qRatio 2/3.
+	require.InDelta(t, 2.0/3.0, detector.Saturation(ctx, []fwkdl.Endpoint{pod(2, 0, -1)}), 1e-4,
+		"negative deferred leaves the queue term unchanged")
+	require.InDelta(t, 2.0/3.0, detector.Saturation(ctx, []fwkdl.Endpoint{pod(2, 0, math.Inf(1))}), 1e-4,
+		"infinite deferred leaves the queue term unchanged")
 }

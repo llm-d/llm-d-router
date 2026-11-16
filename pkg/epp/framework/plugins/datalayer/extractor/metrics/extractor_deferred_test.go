@@ -131,6 +131,27 @@ func TestExtractorPublishesDeferredWaitingRequests(t *testing.T) {
 	}
 }
 
+// TestExtractorSkipsDeferredWithoutWaitingFamily: a scrape that has the
+// by-reason family but not the waiting family publishes no DeferredQueueSize.
+func TestExtractorSkipsDeferredWithoutWaitingFamily(t *testing.T) {
+	ctx := context.Background()
+	ext, err := newCoreMetricsExtractorPlugin(ctx, "core", nil)
+	if err != nil {
+		t.Fatalf("new extractor: %v", err)
+	}
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{}, nil)
+	data := sourcemetrics.PrometheusMetricMap{
+		"vllm:num_requests_waiting_by_reason": familyOf(labeledGauge(4, "reason", "capacity"), labeledGauge(2, "reason", "deferred")),
+		"vllm:num_requests_running":           familyOf(labeledGauge(0)),
+		"vllm:kv_cache_usage_perc":            familyOf(labeledGauge(0)),
+	}
+	if err := ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}); err == nil {
+		t.Fatal("Extract: want an error for the missing waiting family")
+	}
+	assertNoScalarMetric(t, ep, "WaitingQueueSize")
+	assertNoScalarMetric(t, ep, "DeferredQueueSize")
+}
+
 // TestExtractorWithoutDeferredSpecLeavesAttributeUnset pins the engines that
 // name no deferredRequestsSpec: they publish no DeferredQueueSize attribute.
 func TestExtractorWithoutDeferredSpecLeavesAttributeUnset(t *testing.T) {

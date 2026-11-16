@@ -153,7 +153,7 @@ func (d *Detector) queueDepth(m *datalayer.Metrics, attrs datalayer.AttributeMap
 		return waiting
 	}
 	queued := waiting
-	if deferred, ok := attrmetrics.ReadScalarMetricValue(attrs, deferredQueueSizeDataKey); ok && int64(deferred) <= waiting {
+	if deferred, ok := attrmetrics.ReadScalarMetricValue(attrs, deferredQueueSizeDataKey); ok && deferred >= 0 && float64(deferred) <= float64(waiting) {
 		queued = waiting - int64(deferred)
 	}
 	if val, ok := attrs.Get(d.inFlightLoadDataKey); ok {

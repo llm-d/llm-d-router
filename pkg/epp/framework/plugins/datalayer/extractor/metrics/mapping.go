@@ -29,8 +29,7 @@ import (
 // in the Model Server Protocol.
 type Mapping struct {
 	TotalQueuedRequests *Spec
-	// DeferredQueuedRequests is the part of TotalQueuedRequests that waits on
-	// something other than a batch slot. Optional.
+	// DeferredQueuedRequests is the deferredRequestsSpec of the engine config. Optional.
 	DeferredQueuedRequests *Spec
 	TotalRunningRequests   *Spec
 	KVCacheUtilization     *Spec

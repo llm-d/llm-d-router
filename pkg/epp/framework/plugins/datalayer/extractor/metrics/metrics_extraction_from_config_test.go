@@ -276,6 +276,43 @@ func TestMetricsExtractionLoRADisabledViaConfig(t *testing.T) {
 	assert.Zero(t, m.MaxActiveModels)
 }
 
+// TestMetricsExtractionDeferredDroppedByEngineConfigOverride: an engineConfigs
+// entry named vllm replaces the built-in config, so one without
+// deferredRequestsSpec publishes no DeferredQueueSize.
+func TestMetricsExtractionDeferredDroppedByEngineConfigOverride(t *testing.T) {
+	srv := createMockServer([]MetricMock{
+		{Name: WaitingMetric, Value: 5},
+		{Name: "vllm:num_requests_waiting_by_reason", Value: 2, Labels: map[string]string{"reason": "deferred"}},
+		{Name: RunningMetric, Value: 2},
+		{Name: KVCacheMetric, Value: 0.3},
+	})
+	defer srv.Close()
+
+	params := &modelServerExtractorParams{
+		EngineConfigs: []engineConfigParams{
+			{
+				Name:                "vllm",
+				QueuedRequestsSpec:  "vllm:num_requests_waiting",
+				RunningRequestsSpec: "vllm:num_requests_running",
+				KVUsageSpec:         "vllm:kv_cache_usage_perc",
+			},
+		},
+	}
+
+	p, err := buildPipeline(t, srv.URL, params)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ep := newEndpointAt(mustHost(t, srv.URL), map[string]string{
+		DefaultEngineTypeLabelKey: "vllm",
+	})
+
+	require.NoError(t, p.Poll(ctx, ep))
+
+	assert.Equal(t, 5, ep.GetMetrics().WaitingQueueSize)
+	assertNoScalarMetric(t, ep, "DeferredQueueSize")
+}
+
 // TestMetricsExtractionMissingMetricFamilyReturnsError verifies the error-path behavior:
 // when the server does not serve a required metric that the extractor is configured to
 // collect, Poll returns an error whose message names the missing metric family.
