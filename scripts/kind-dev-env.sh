@@ -440,9 +440,8 @@ kubectl kustomize --enable-helm ${KUSTOMIZE_DIR} \
   ${KV_CONNECTOR_TYPE} ${EC_CONNECTOR_TYPE} ${CONNECTOR_TYPE} ${KV_CACHE_ENABLED} ${HF_TOKEN} ${VLLM_SIM_MODE} \
   ${DECODE_ROLE}' \
   | awk '
-    # kustomize renders the "${VLLM_EXTRA_ARGS_*}" list items without their quotes, so the quoted-item
-    # step below never sees them. A value that is one line of plain flag tokens is written as one quoted
-    # item per flag; any other value is substituted unchanged, as envsubst does, and YAML reads it.
+    # kustomize drops the quotes around the "${VLLM_EXTRA_ARGS_*}" items, so a plain multi-flag value
+    # is split here; any other value is substituted unchanged, as envsubst would.
     /^[[:space:]]*-[[:space:]]+"?[$][{]VLLM_EXTRA_ARGS_[EPD][}]"?[[:space:]]*$/ {
       match($0, /VLLM_EXTRA_ARGS_[EPD]/); name = substr($0, RSTART, RLENGTH); v = ENVIRON[name]
       tok = "--[A-Za-z0-9_=.,/:+@%-]+"
