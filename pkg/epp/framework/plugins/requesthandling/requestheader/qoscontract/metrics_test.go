@@ -45,9 +45,14 @@ func TestTeamLabelIgnoresFairnessIDLimit(t *testing.T) {
 // TestMetricNames verifies that every qos-contract metric carries the qos_contract segment.
 func TestMetricNames(t *testing.T) {
 	want := map[prometheus.Collector]string{
-		contractDecisions: "llm_d_epp_qos_contract_decisions_total",
-		chargedTokens:     "llm_d_epp_qos_contract_charged_tokens_total",
-		inflightRequests:  "llm_d_epp_qos_contract_inflight_requests",
+		contractDecisions:   "llm_d_epp_qos_contract_decisions_total",
+		chargedTokens:       "llm_d_epp_qos_contract_charged_tokens_total",
+		inflightRequests:    "llm_d_epp_qos_contract_inflight_requests",
+		sloPromiseStatus:    "llm_d_epp_qos_contract_slo_status",
+		sloObservedSeconds:  "llm_d_epp_qos_contract_slo_observed_seconds",
+		sloWindowRequests:   "llm_d_epp_qos_contract_slo_window_requests",
+		sloValidationErrors: "llm_d_epp_qos_contract_slo_validation_errors_total",
+		sloAdmissions:       "llm_d_epp_qos_contract_slo_admissions_total",
 	}
 	for collector, name := range want {
 		descs := make(chan *prometheus.Desc, 1)

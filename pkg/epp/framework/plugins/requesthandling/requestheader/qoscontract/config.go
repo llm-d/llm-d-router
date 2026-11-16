@@ -85,6 +85,9 @@ type TeamConfig struct {
 	// RateWindow is the sliding window MaxReqsPerSec is measured over, and the burst of
 	// MaxInputTokensPerSec and MaxUncachedTokensPerSec. Unset uses the plugin's RateWindow.
 	RateWindow *metav1.Duration `json:"rateWindow,omitempty"`
+	// Promise is the latency promised to the team's traffic within the contract. It is checked
+	// against collected metrics, and requires sloValidation.
+	Promise *PromiseConfig `json:"promise,omitempty"`
 }
 
 // Parameters is the plugin configuration.
@@ -109,6 +112,9 @@ type Parameters struct {
 	DefaultTeam TeamConfig `json:"defaultTeam"`
 	// Teams lists the teams with a contract.
 	Teams []TeamConfig `json:"teams,omitempty"`
+	// SLOValidation checks team promises against the latency metrics collected in Prometheus.
+	// Required when a team has a promise.
+	SLOValidation *SLOValidationConfig `json:"sloValidation,omitempty"`
 }
 
 func defaultParameters() Parameters {
@@ -175,6 +181,24 @@ func (p *Parameters) validate() error {
 			return fmt.Errorf("teams[%d] %q: %w", i, t.ID, err)
 		}
 	}
+	hasPromise := p.DefaultTeam.Promise != nil
+	for i := range p.Teams {
+		hasPromise = hasPromise || p.Teams[i].Promise != nil
+	}
+	if hasPromise {
+		if p.SLOValidation == nil {
+			return errors.New("sloValidation is required when a team has a promise")
+		}
+		// Promises are read from series labeled by fairness ID, so the team has to be it.
+		if p.TeamHeader != metadata.FlowFairnessIDKey {
+			return fmt.Errorf("a promise requires teamHeader to be the fairness ID header %q", metadata.FlowFairnessIDKey)
+		}
+	}
+	if p.SLOValidation != nil {
+		if _, err := p.SLOValidation.resolve(); err != nil {
+			return fmt.Errorf("sloValidation: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -185,6 +209,11 @@ func validateTeam(t *TeamConfig, classes map[string]struct{}, defaultWindow time
 	if t.MaxConcurrency < 0 || t.MaxPromptTokens < 0 || t.MaxOutputTokens < 0 || t.DailyTokens < 0 || t.MaxReqsPerSec < 0 ||
 		t.MaxInputTokensPerSec < 0 || t.MaxUncachedTokensPerSec < 0 {
 		return errors.New("limits must be >= 0")
+	}
+	if t.Promise != nil {
+		if err := t.Promise.validate(); err != nil {
+			return fmt.Errorf("promise: %w", err)
+		}
 	}
 	if t.RateWindow != nil && t.RateWindow.Duration <= 0 {
 		return fmt.Errorf("rateWindow must be > 0, got %s", t.RateWindow.Duration)

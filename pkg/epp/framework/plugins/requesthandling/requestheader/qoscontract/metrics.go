@@ -54,13 +54,59 @@ var (
 		},
 		[]string{"team"},
 	)
+
+	sloPromiseStatus = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "qos_contract_slo_status",
+			Help:      metricsutil.HelpMsgWithStability("Last validation of a team's latency promise, 1 for the current status: met, violated, insufficient_data or unknown.", compbasemetrics.ALPHA),
+		},
+		[]string{"team", "class", "slo", "status"},
+	)
+
+	sloObservedSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "qos_contract_slo_observed_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Latency at a team's promised percentile over the validation window, for its traffic within the contract (scope guaranteed) and all of it (scope all).", compbasemetrics.ALPHA),
+		},
+		[]string{"team", "class", "slo", "scope"},
+	)
+
+	sloWindowRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "qos_contract_slo_window_requests",
+			Help:      metricsutil.HelpMsgWithStability("Requests within the contract a team's promise was validated on, over the validation window.", compbasemetrics.ALPHA),
+		},
+		[]string{"team", "class", "slo"},
+	)
+
+	sloValidationErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "qos_contract_slo_validation_errors_total",
+			Help:      metricsutil.HelpMsgWithStability("Failed Prometheus queries while validating a team's latency promise.", compbasemetrics.ALPHA),
+		},
+		[]string{"team", "slo"},
+	)
+
+	sloAdmissions = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "qos_contract_slo_admissions_total",
+			Help:      metricsutil.HelpMsgWithStability("Requests within a team's contract, by the status of its promise when they were admitted.", compbasemetrics.ALPHA),
+		},
+		[]string{"team", "class", "status"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return nil
 	}
-	for _, collector := range []prometheus.Collector{contractDecisions, chargedTokens, inflightRequests} {
+	for _, collector := range []prometheus.Collector{contractDecisions, chargedTokens, inflightRequests,
+		sloPromiseStatus, sloObservedSeconds, sloWindowRequests, sloValidationErrors, sloAdmissions} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
 			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == collector {

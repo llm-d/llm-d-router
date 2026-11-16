@@ -18,7 +18,8 @@ limitations under the License.
 // contracts before flow control: it maps a team to a service class (a priority band), and moves
 // traffic outside the team's contract (its size limits and its commits) to the next lower class.
 // The commits are concurrency, a daily token budget, a request rate, and input and uncached
-// prompt-token rates.
+// prompt-token rates. It also validates each team's latency promise (TTFT, TPOT, ITL) against the
+// latency metrics collected in Prometheus, and reports whether it is met.
 package qoscontract
 
 import (
@@ -90,6 +91,9 @@ type teamState struct {
 	cfg        TeamConfig
 	classIndex int
 
+	// slo is the team's promise and its last validation; nil when the team has no promise.
+	slo *teamSLO
+
 	mu        sync.Mutex
 	inflight  int
 	dailyDay  int
@@ -123,6 +127,9 @@ type hold struct {
 	day int
 	// errorStatus is set when the model server answered with a non-2xx status.
 	errorStatus atomic.Bool
+	// sloStatus is the team's promise status when the request was admitted within the contract;
+	// empty when no promise applies.
+	sloStatus string
 }
 
 // Plugin enforces per-team QoS contracts. See the package README.
@@ -136,6 +143,8 @@ type Plugin struct {
 	teams        map[string]*teamState
 	defaultTeam  *teamState
 	now          func() time.Time
+	// validator checks team promises against Prometheus; nil when no team has a promise.
+	validator *sloValidator
 
 	holds sync.Map // key: RequestID, value: *hold
 }
@@ -155,6 +164,9 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	if handle != nil {
 		if err := registerMetrics(handle.Metrics()); err != nil {
 			return nil, err
+		}
+		if p.validator != nil {
+			go p.validator.run(handle.Context())
 		}
 	}
 	return p, nil
@@ -187,8 +199,16 @@ func newPlugin(name string, params Parameters, now func() time.Time) (*Plugin, e
 		return st
 	}
 	teams := make(map[string]*teamState, len(params.Teams))
+	listed := make([]*teamState, 0, len(params.Teams))
 	for _, t := range params.Teams {
-		teams[t.ID] = newState(t)
+		st := newState(t)
+		teams[t.ID] = st
+		listed = append(listed, st)
+	}
+	defaultTeam := newState(params.DefaultTeam)
+	validator, err := newSLOValidator(params, listed, defaultTeam, now)
+	if err != nil {
+		return nil, fmt.Errorf("%s plugin %q: %w", PluginType, name, err)
 	}
 	return &Plugin{
 		typedName:    plugin.TypedName{Type: PluginType, Name: name},
@@ -198,8 +218,9 @@ func newPlugin(name string, params Parameters, now func() time.Time) (*Plugin, e
 		defaultOut:   params.DefaultOutputReservation,
 		classes:      params.Classes,
 		teams:        teams,
-		defaultTeam:  newState(params.DefaultTeam),
+		defaultTeam:  defaultTeam,
 		now:          now,
+		validator:    validator,
 	}, nil
 }
 
@@ -242,13 +263,38 @@ func requestedOutput(request *scheduling.InferenceRequest) (int64, bool) {
 	return *request.Body.MaxOutputTokens, true
 }
 
-// RequestHeader decides the request's class. A request within the team's contract (its size
-// limits and its commits) is served at the committed class and charged; a request outside it
-// moves one class down without a charge, and is rejected in the lowest class.
+// RequestHeader has two entry points, run in order for the request's team: enforceLimits decides
+// the request's class from the team's limits, and validateSLO checks whether the team's promise is
+// met for a request served within the contract.
 func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceRequest) error {
 	if request == nil {
 		return nil
 	}
+	rec, err := p.enforceLimits(request)
+	if err != nil || rec == nil {
+		return err
+	}
+	p.validateSLO(rec)
+	return nil
+}
+
+// validateSLO checks the promise of the request's team against the last validation of the
+// collected metrics, and records the status the request was admitted under. It applies only to a
+// request within the contract, the traffic the promise covers, and changes no decision.
+func (p *Plugin) validateSLO(rec *hold) {
+	team := rec.team
+	if !rec.committed || team.slo == nil {
+		return
+	}
+	rec.sloStatus = team.slo.current(p.now())
+	sloAdmissions.WithLabelValues(team.cfg.ID, team.slo.class, rec.sloStatus).Inc()
+}
+
+// enforceLimits decides the request's class. A request within the team's contract (its size
+// limits and its commits) is served at the committed class and charged; a request outside it
+// moves one class down without a charge, and is rejected in the lowest class. It returns the
+// request's hold, or nil when the request was rejected.
+func (p *Plugin) enforceLimits(request *scheduling.InferenceRequest) (*hold, error) {
 	teamID, team := p.lookupTeam(request)
 	committed := p.classes[team.classIndex]
 	prompt, cost := p.estimateCost(request, team.cfg)
@@ -311,25 +357,25 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 		served, decision = p.classes[team.classIndex+1], decisionDowngraded
 	case overSize:
 		team.mu.Unlock()
-		return p.reject(team, committed, decisionRejectedSize, reason, p.sizeError(team, committed.Name))
+		return nil, p.reject(team, committed, decisionRejectedSize, reason, p.sizeError(team, committed.Name))
 	case overDaily:
 		team.mu.Unlock()
-		return p.reject(team, committed, decisionRejectedDaily, reason, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
+		return nil, p.reject(team, committed, decisionRejectedDaily, reason, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
 	case overConcurrency:
 		team.mu.Unlock()
-		return p.reject(team, committed, decisionRejectedConcurrency, reason, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
+		return nil, p.reject(team, committed, decisionRejectedConcurrency, reason, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
 	case overRate:
 		retryAfter := team.rate.retryAfter(now)
 		team.mu.Unlock()
-		return p.reject(team, committed, decisionRejectedRate, reason, p.quotaError(team, committed.Name, retryAfter, "request rate limit reached"))
+		return nil, p.reject(team, committed, decisionRejectedRate, reason, p.quotaError(team, committed.Name, retryAfter, "request rate limit reached"))
 	case overInputRate:
 		retryAfter := team.inputRate.retryAfter(inputCost)
 		team.mu.Unlock()
-		return p.reject(team, committed, decisionRejectedInputRate, reason, p.quotaError(team, committed.Name, retryAfter, "input token rate limit reached"))
+		return nil, p.reject(team, committed, decisionRejectedInputRate, reason, p.quotaError(team, committed.Name, retryAfter, "input token rate limit reached"))
 	default: // over the uncached-token rate
 		retryAfter := team.uncachedRate.retryAfter(uncachedCost)
 		team.mu.Unlock()
-		return p.reject(team, committed, decisionRejectedUncachedRate, reason, p.quotaError(team, committed.Name, retryAfter, "uncached token rate limit reached"))
+		return nil, p.reject(team, committed, decisionRejectedUncachedRate, reason, p.quotaError(team, committed.Name, retryAfter, "uncached token rate limit reached"))
 	}
 	team.mu.Unlock()
 
@@ -348,7 +394,7 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	if !p.reportOnly {
 		setClass(request, teamID, served)
 	}
-	return nil
+	return rec, nil
 }
 
 // Produces declares the priority and tenant the plugin sets. The Director applies them to the
@@ -385,6 +431,9 @@ func (p *Plugin) ResponseHeader(_ context.Context, request *scheduling.Inference
 		return
 	}
 	response.Headers[ClassHeader] = rec.servedClass
+	if rec.sloStatus != "" {
+		response.Headers[SLOStatusHeader] = rec.sloStatus
+	}
 	for k, val := range p.quotaHeaders(rec.team) {
 		response.Headers[k] = val
 	}
