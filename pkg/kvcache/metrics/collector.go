@@ -47,6 +47,10 @@ const maxUnknownTagLabelValues = 32
 
 var unknownTagLimiter = metricsutil.NewBoundedLabel(maxUnknownTagLabelValues)
 
+// emptyTagLabel is the tag label value for an event whose tag is the empty
+// string. Prometheus treats an empty label value as a missing label.
+const emptyTagLabel = "empty"
+
 var (
 	Admissions = prometheus.NewCounter(prometheus.CounterOpts{
 		Subsystem: routerSubsystem, Name: "kv_cache_index_admissions_total",
@@ -130,7 +134,7 @@ var (
 	// KVEventUnknownTagsSkipped counts events skipped because the engine
 	// adapter does not know their tag.
 	KVEventUnknownTagsSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Subsystem: routerSubsystem, Name: "kv_cache_events_unknown_tag_skipped_total",
+		Subsystem: routerSubsystem, Name: "kv_cache_events_unknown_tags_skipped_total",
 		Help: metricsutil.HelpMsgWithStability(
 			"Total number of KV-cache events skipped because the engine adapter does not know their tag",
 			compbasemetrics.ALPHA),
@@ -198,8 +202,11 @@ func Collectors() []prometheus.Collector {
 
 // RecordUnknownTagSkipped counts one event skipped for an unknown tag and
 // returns the tag label value it was counted under, which differs from tag
-// when the limiter folds it.
+// when the tag is empty or the limiter folds it.
 func RecordUnknownTagSkipped(tag string) string {
+	if tag == "" {
+		tag = emptyTagLabel
+	}
 	label := unknownTagLimiter.Bound(tag)
 	KVEventUnknownTagsSkipped.WithLabelValues(label).Inc()
 	return label

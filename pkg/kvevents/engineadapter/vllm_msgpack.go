@@ -40,21 +40,15 @@ const maxDecodeDepth = 64
 // Limit hash processing because only the final bytes contribute to the hash.
 const maxDecodeHashBytes = 64
 
-// errUnknownTypedEventTag is returned only after all fields of the event are
-// consumed, so a batch decoder can continue with the next event.
-var errUnknownTypedEventTag = errors.New("unknown typed event tag")
-
-// unknownTypedEventTagError carries the skipped tag to the batch decoder.
+// unknownTypedEventTagError carries the skipped tag to the batch decoder. It is
+// returned only after all fields of the event are consumed, so a batch decoder
+// can continue with the next event.
 type unknownTypedEventTagError struct {
 	tag string
 }
 
-func (e *unknownTypedEventTagError) Unwrap() error {
-	return errUnknownTypedEventTag
-}
-
 func (e *unknownTypedEventTagError) Error() string {
-	return fmt.Sprintf("%s: %s", errUnknownTypedEventTag, e.tag)
+	return "unknown typed event tag: " + e.tag
 }
 
 type eventWireSchema struct {

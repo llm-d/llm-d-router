@@ -1207,12 +1207,24 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_events_dedup_removed_hashes_forwarded_total` | Counter | - | Deduplicated removal hashes forwarded. |
 | `llm_d_epp_kv_cache_events_stores_skipped_total` | Counter | `cache_kind`, `reason` | KV store events skipped before prefix indexing. |
 | `llm_d_epp_kv_cache_events_removals_skipped_total` | Counter | `cache_kind`, `reason` | KV removal events skipped before prefix indexing. |
+| `llm_d_epp_kv_cache_events_unknown_tags_skipped_total` | Counter | `tag` | KV events skipped because the engine adapter does not know their tag. |
 | `llm_d_epp_kv_cache_events_active_subscribers` | Gauge | - | ZMQ subscribers currently managed. |
 | `llm_d_epp_kv_cache_events_subscriber_reconnections_total` | Counter | `pod_identifier` | ZMQ subscriber reconnection attempts. |
 | `llm_d_epp_kv_cache_events_messages_received_total` | Counter | `pod_identifier` | Messages received from ZMQ subscribers. |
 | `llm_d_epp_kv_cache_events_zmq_errors_total` | Counter | `pod_identifier`, `operation` | ZMQ subscriber errors. |
 | `llm_d_epp_kv_cache_events_pool_queue_depth` | Gauge | - | Messages queued across event-pool workers. |
 | `llm_d_epp_kv_cache_events_pool_capacity` | Gauge | - | Event-pool worker capacity. |
+
+A vLLM release can publish an event type that the router's vLLM adapter does not know. The adapter
+skips such an event and applies the other events in the same message to the index.
+`llm_d_epp_kv_cache_events_unknown_tags_skipped_total` counts each skipped event, whether or not
+`enableMetrics` is set. The `tag` label is the event tag as the engine sent it, and an empty tag is
+reported as `empty`. The label takes at most 32 distinct tags plus `other`, and the cap rules in
+[Metrics catalog](#metrics-catalog) apply. A series appears when the first event with that tag is
+skipped. The EPP also logs
+`Skipping KV events with an unknown tag` at INFO level the first time it skips each `tag` value,
+with the pod and model of that event. A rising count for a tag means the engine sends an event type
+that this router version ignores.
 
 ### P/D sidecar request and stage metrics
 

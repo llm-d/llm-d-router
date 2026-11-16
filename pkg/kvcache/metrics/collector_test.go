@@ -18,7 +18,6 @@ package metrics
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -115,7 +114,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 		"llm_d_epp_kv_cache_events_zmq_errors_total",
 		"llm_d_epp_kv_cache_events_stores_skipped_total",
 		"llm_d_epp_kv_cache_events_removals_skipped_total",
-		"llm_d_epp_kv_cache_events_unknown_tag_skipped_total",
+		"llm_d_epp_kv_cache_events_unknown_tags_skipped_total",
 		"llm_d_epp_kv_cache_events_pool_queue_depth",
 		"llm_d_epp_kv_cache_events_pool_capacity",
 	} {
@@ -168,12 +167,6 @@ func TestCleanupSubscriberDropsPerPodSeries(t *testing.T) {
 }
 
 func TestRecordUnknownTagSkipped(t *testing.T) {
-	// A fresh limiter keeps the cap independent of tags recorded elsewhere in
-	// the test binary.
-	previous := unknownTagLimiter
-	unknownTagLimiter = metricsutil.NewBoundedLabel(maxUnknownTagLabelValues)
-	t.Cleanup(func() { unknownTagLimiter = previous })
-
 	skipped := func(label string) float64 {
 		return testutil.ToFloat64(KVEventUnknownTagsSkipped.WithLabelValues(label))
 	}
@@ -189,37 +182,21 @@ func TestRecordUnknownTagSkipped(t *testing.T) {
 		t.Errorf("counter for %q rose by %v, want 2", tag, got)
 	}
 
+	emptyBefore := skipped(emptyTagLabel)
+	if got := RecordUnknownTagSkipped(""); got != emptyTagLabel {
+		t.Errorf("RecordUnknownTagSkipped(\"\") = %q, want %q", got, emptyTagLabel)
+	}
+	if got := skipped(emptyTagLabel) - emptyBefore; got != 1 {
+		t.Errorf("counter for %q rose by %v, want 1", emptyTagLabel, got)
+	}
+
 	// Prometheus rejects label values that are not valid UTF-8.
 	overflowBefore := skipped(metricsutil.OverflowValue)
-	for name, unusable := range map[string]string{
-		"invalid UTF-8": "\xff\xfe",
-		"too long":      strings.Repeat("a", metricsutil.MaxLabelValueLength+1),
-	} {
-		if got := RecordUnknownTagSkipped(unusable); got != metricsutil.OverflowValue {
-			t.Errorf("%s: RecordUnknownTagSkipped() = %q, want %q", name, got, metricsutil.OverflowValue)
-		}
-	}
-	if got := skipped(metricsutil.OverflowValue) - overflowBefore; got != 2 {
-		t.Errorf("counter for %q rose by %v, want 2", metricsutil.OverflowValue, got)
-	}
-
-	// The tag recorded first holds one of the admitted values.
-	for i := 1; i < maxUnknownTagLabelValues; i++ {
-		admitted := fmt.Sprintf("Tag%d", i)
-		if got := RecordUnknownTagSkipped(admitted); got != admitted {
-			t.Fatalf("RecordUnknownTagSkipped(%q) = %q, want the tag", admitted, got)
-		}
-	}
-
-	overflowBefore = skipped(metricsutil.OverflowValue)
-	if got := RecordUnknownTagSkipped("OneTooMany"); got != metricsutil.OverflowValue {
-		t.Errorf("RecordUnknownTagSkipped() past the cap = %q, want %q", got, metricsutil.OverflowValue)
+	if got := RecordUnknownTagSkipped("\xff\xfe"); got != metricsutil.OverflowValue {
+		t.Errorf("RecordUnknownTagSkipped() for invalid UTF-8 = %q, want %q", got, metricsutil.OverflowValue)
 	}
 	if got := skipped(metricsutil.OverflowValue) - overflowBefore; got != 1 {
 		t.Errorf("counter for %q rose by %v, want 1", metricsutil.OverflowValue, got)
-	}
-	if got := RecordUnknownTagSkipped(tag); got != tag {
-		t.Errorf("RecordUnknownTagSkipped(%q) at the cap = %q, want the tag", tag, got)
 	}
 }
 

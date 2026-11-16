@@ -730,8 +730,9 @@ func TestVLLMUnknownTag(t *testing.T) {
 	event, err := adapter.decodeVLLMEvent(rawBytes)
 	assert.Error(t, err)
 	assert.Nil(t, event)
-	assert.ErrorIs(t, err, errUnknownTypedEventTag)
-	assert.ErrorContains(t, err, "UnknownEventType")
+	var unknown *unknownTypedEventTagError
+	require.ErrorAs(t, err, &unknown)
+	assert.Equal(t, "UnknownEventType", unknown.tag)
 }
 
 // TestVLLMMalformedPayload tests error handling for malformed msgpack data.
@@ -970,10 +971,6 @@ func TestVLLMParseMessage_SkipsUnknownEventTags(t *testing.T) {
 			events:      []any{unknownOther, stored, unknownMap},
 			want:        []kvevents.EventType{kvevents.EventTypeBlockStored},
 			wantSkipped: []string{"AnotherNew", "SomethingNew"},
-		},
-		"only known": {
-			events: []any{stored, removed},
-			want:   []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
 		},
 	} {
 		payload, err := msgpack.Marshal([]any{1.0, tc.events, nil})

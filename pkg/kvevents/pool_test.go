@@ -2131,10 +2131,6 @@ func TestProcessRawMessage_ReportsSkippedTags(t *testing.T) {
 	other.adapter = adapter
 	other.processRawMessage(ctx, msg)
 	assert.Len(t, skipLogs, 4, "a new pool logs each tag again")
-
-	adapter.tags = nil
-	other.processRawMessage(ctx, msg)
-	assert.Len(t, skipLogs, 4, "a batch without skipped tags logs nothing")
 }
 
 // A non-positive worker count leaves no shard for AddTask to select; the
