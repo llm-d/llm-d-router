@@ -27,7 +27,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"slices"
 	"strconv"
 	"time"
 
@@ -37,14 +36,13 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
 
-	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
-	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 const (
@@ -442,45 +440,14 @@ func NewImmediateErrorResponse(code envoyTypePb.StatusCode, body string, headers
 // --- Internal Helpers ---
 
 // makeDestinationMetadata helper to construct the Envoy dynamic metadata for routing.
-// unsetRoutingHeaders lists every spelling of the internal routing headers Envoy
-// is told to strip when no plugin set them, deprecated aliases and retired
-// names included, plus the screening, control and injection headers EPP never
-// sets and the attribution handoff EPP only sends on sampled traces.
-var unsetRoutingHeaders = slices.Concat(
-	routing.AllHeaderNames(
-		routing.PrefillEndpointHeader,
-		routing.KVCachePrefillHeader,
-		routing.KVCacheSourceHeader,
-		routing.EncoderEndpointsHeader,
-		routing.DataParallelEndpointHeader,
-		routing.EndpointPinHeader,
-		tracing.FairnessIDHandoffHeader,
-		tracing.FairnessSourceHandoffHeader,
-	),
-	[]string{
-		metadata.FlowFairnessIDKey,
-		metadata.OldFlowFairnessIDKey,
-		metadata.InferenceTTLHeaderKey,
-		metadata.ObjectiveKey,
-		metadata.OldObjectiveKey,
-		metadata.ModelNameRewriteKey,
-		metadata.OldModelNameRewriteKey,
-		metadata.SubsetFilterKey,
-		metadata.TTFTSLOHeaderKey,
-		metadata.OldTTFTSLOHeaderKey,
-		metadata.TPOTSLOHeaderKey,
-		metadata.OldTPOTSLOHeaderKey,
-		metadata.VideoFPSHeaderKey,
-		metadata.VideoDurationHeaderKey,
-		metadata.VideoResolutionHeaderKey,
-		metadata.AudioDurationHeaderKey,
-		metadata.AudioBytesPerSecondHeaderKey,
-		reqcommon.RevisionDecisionIDHeaderKey,
-		metadata.DestinationEndpointServedKey,
-		metadata.FlowQueueDurationHeaderKey,
-		errcommon.RequestDroppedReasonHeaderKey,
-	},
-)
+// unsetRoutingHeaders lists the EPP-owned headers Envoy is told to remove on a
+// request with no plugin-set routing headers and an unsampled trace: every name
+// except the destination endpoint, which EPP always sets.
+var unsetRoutingHeaders = sets.List(request.InputControlHeaders.
+	Union(request.ScreeningHeaders).
+	Union(request.OutputInjectionHeaders).
+	Union(request.InternalRoutingHeaders).
+	Difference(sets.New(metadata.DestinationEndpointKey)))
 
 func makeDestinationMetadata(endpoint string) *structpb.Struct {
 	return &structpb.Struct{

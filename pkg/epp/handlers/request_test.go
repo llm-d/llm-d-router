@@ -43,6 +43,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
@@ -59,6 +60,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 func TestExtractTraceContext(t *testing.T) {
@@ -638,31 +640,15 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 	}
 }
 
-// clientControlHeaders are the names EPP reads as control input or injects
-// itself and never sets on the forwarded request, deprecated aliases included.
-var clientControlHeaders = []string{
-	metadata.FlowFairnessIDKey,
-	metadata.OldFlowFairnessIDKey,
-	metadata.InferenceTTLHeaderKey,
-	metadata.ObjectiveKey,
-	metadata.OldObjectiveKey,
-	metadata.ModelNameRewriteKey,
-	metadata.OldModelNameRewriteKey,
-	metadata.SubsetFilterKey,
-	metadata.TTFTSLOHeaderKey,
-	metadata.OldTTFTSLOHeaderKey,
-	metadata.TPOTSLOHeaderKey,
-	metadata.OldTPOTSLOHeaderKey,
-	metadata.VideoFPSHeaderKey,
-	metadata.VideoDurationHeaderKey,
-	metadata.VideoResolutionHeaderKey,
-	metadata.AudioDurationHeaderKey,
-	metadata.AudioBytesPerSecondHeaderKey,
-	reqcommon.RevisionDecisionIDHeaderKey,
-	metadata.DestinationEndpointServedKey,
-	metadata.FlowQueueDurationHeaderKey,
-	errcommon.RequestDroppedReasonHeaderKey,
-}
+// clientControlHeaders are the input control and output injection names,
+// aliases included, that generateHeaders leaves unset on an unsampled request.
+var clientControlHeaders = sets.List(request.InputControlHeaders.
+	Union(request.OutputInjectionHeaders).
+	Difference(sets.New(
+		metadata.DestinationEndpointKey,
+		tracing.FairnessIDHandoffHeader,
+		tracing.FairnessSourceHandoffHeader,
+	)))
 
 // Envoy keeps a client header unless the mutation removes it, so a client copy
 // of a control or injection name reaches the model server unless it is listed
