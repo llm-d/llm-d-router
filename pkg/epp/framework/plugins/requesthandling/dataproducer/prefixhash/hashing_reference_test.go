@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
+	"sort"
 	"testing"
 	"unsafe"
 
@@ -48,13 +49,15 @@ func referenceSeed(model, salt string) uint64 {
 // referenceBlockHashes is an independent statement of the block hash chain:
 // the seed is xxhash over the length-prefixed model and salt; block i hashes
 // its token bytes, and its chain hash is xxhash(LE(block hash) || LE(chain hash
-// of block i-1)). Every prompt starts from the seed, the final block may be
-// partial, and empty prompts produce no entry.
-func referenceBlockHashes(model, salt string, prompts [][]uint32, blockSize, maxBlocks int) ([][]BlockHash, []int) {
+// of block i-1) || mmExtra), where mmExtra covers the multimodal features
+// overlapping the block in offset order. Every prompt starts from the seed,
+// the final block may be partial, and empty prompts produce no entry.
+func referenceBlockHashes(model, salt string, prompts []fwkrequest.PromptTokens, blockSize, maxBlocks int) ([][]BlockHash, []int) {
 	var hashes [][]BlockHash
 	var tokens []int
 	seed := referenceSeed(model, salt)
-	for _, prompt := range prompts {
+	for _, p := range prompts {
+		prompt := p.TokenIDs
 		if len(prompt) == 0 || blockSize <= 0 {
 			continue
 		}
@@ -63,10 +66,13 @@ func referenceBlockHashes(model, salt string, prompts [][]uint32, blockSize, max
 		for start := 0; start < len(prompt) && len(chain) < maxBlocks; start += blockSize {
 			block := prompt[start:min(start+blockSize, len(prompt))]
 			content := xxhash.Sum64(unsafe.Slice((*byte)(unsafe.Pointer(&block[0])), len(block)*4)) //#nosec G103 -- test reference over a non-empty slice
+			input := make([]byte, 0, 16)
 			var buf [16]byte
 			binary.LittleEndian.PutUint64(buf[:8], content)
 			binary.LittleEndian.PutUint64(buf[8:], prev)
-			prev = xxhash.Sum64(buf[:])
+			input = append(input, buf[:]...)
+			input = append(input, referenceMMExtra(p.MultiModalFeatures, start, start+len(block))...)
+			prev = xxhash.Sum64(input)
 			chain = append(chain, BlockHash(prev))
 		}
 		hashes = append(hashes, chain)
@@ -78,16 +84,54 @@ func referenceBlockHashes(model, salt string, prompts [][]uint32, blockSize, max
 	return hashes, tokens
 }
 
+// referenceMMExtra is the independent statement of the media bytes mixed into
+// a block's hash: for each feature overlapping [start, end), in offset order,
+// its length-prefixed hash followed by its entry offset from the block start.
+// The end is the block's clamped extent, so a span past a partial final block
+// is ignored.
+func referenceMMExtra(features []fwkrequest.MultiModalFeature, start, end int) []byte {
+	sorted := append([]fwkrequest.MultiModalFeature(nil), features...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Offset < sorted[j].Offset })
+	var out []byte
+	var lenBuf [8]byte
+	for _, f := range sorted {
+		if f.Length <= 0 {
+			continue
+		}
+		if f.Offset >= end || f.Offset+f.Length <= start {
+			continue
+		}
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(f.Hash)))
+		out = append(out, lenBuf[:]...)
+		out = append(out, f.Hash...)
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(max(f.Offset, start)-start))
+		out = append(out, lenBuf[:]...)
+	}
+	return out
+}
+
 // TestGetBlockHashesMatchesReference compares GetBlockHashesWithPromptTokens
 // with the reference chain over random prompts, block sizes, caps, and salts.
 func TestGetBlockHashesMatchesReference(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 1))
 	for iter := range 2000 {
-		prompts := make([][]uint32, rng.IntN(4))
+		prompts := make([]fwkrequest.PromptTokens, rng.IntN(4))
 		for i := range prompts {
-			prompts[i] = make([]uint32, rng.IntN(70))
-			for j := range prompts[i] {
-				prompts[i][j] = rng.Uint32()
+			tokens := make([]uint32, rng.IntN(70))
+			for j := range tokens {
+				tokens[j] = rng.Uint32()
+			}
+			prompts[i] = fwkrequest.PromptTokens{TokenIDs: tokens}
+			// Features: in-range spans, spans past the prompt end, zero
+			// lengths, and duplicate offsets, so the reference covers the
+			// mixing, the clamped block end, and the position ordering.
+			for range rng.IntN(4) {
+				prompts[i].MultiModalFeatures = append(prompts[i].MultiModalFeatures, fwkrequest.MultiModalFeature{
+					Modality: "image",
+					Hash:     fmt.Sprintf("hash-%d", rng.IntN(5)),
+					Offset:   rng.IntN(len(tokens)+10) - 2,
+					Length:   rng.IntN(9) - 1,
+				})
 			}
 		}
 		blockSize := rng.IntN(18) - 1
@@ -99,10 +143,7 @@ func TestGetBlockHashesMatchesReference(t *testing.T) {
 		model := fmt.Sprintf("model-%d", rng.IntN(3))
 
 		req := &fwksched.InferenceRequest{TargetModel: model, Body: &fwkrequest.InferenceRequestBody{
-			TokenizedRequest: &fwkrequest.TokenizedRequest{CacheSalt: salt}}}
-		for _, p := range prompts {
-			req.Body.TokenizedRequest.Prompts = append(req.Body.TokenizedRequest.Prompts, fwkrequest.PromptTokens{TokenIDs: p})
-		}
+			TokenizedRequest: &fwkrequest.TokenizedRequest{CacheSalt: salt, Prompts: prompts}}}
 
 		gotHashes, gotTokens := GetBlockHashesWithPromptTokens(context.Background(), req, blockSize, maxBlocks)
 		wantHashes, wantTokens := referenceBlockHashes(model, salt, prompts, blockSize, maxBlocks)
