@@ -73,7 +73,7 @@ func renderPipeline(t *testing.T) ([]string, []string) {
 
 // renderArgs renders a decode Deployment, as kubectl kustomize emits it, through the script's pipeline and returns
 // its container args, with a null item as "<null>".
-func renderArgs(t *testing.T, envsubst, stages []string, value string) []string {
+func renderArgs(t *testing.T, envsubst, stages []string, variable, value string) []string {
 	t.Helper()
 	const renderedDeployment = `apiVersion: apps/v1
 kind: Deployment
@@ -84,20 +84,22 @@ spec:
       - name: vllm
         args:
         - --port=8000
-        - ${VLLM_EXTRA_ARGS_D}
+        - ${VAR}
 `
-	env := map[string]string{"VLLM_EXTRA_ARGS_D": value}
-	out := renderedDeployment
+	env := map[string]string{variable: value}
+	out := strings.ReplaceAll(renderedDeployment, "${VAR}", "${"+variable+"}")
 	for _, name := range envsubst {
 		out = strings.ReplaceAll(out, "${"+name+"}", env[name])
 	}
 	for _, prog := range stages {
 		cmd := exec.Command("awk", prog)
-		cmd.Env = append(os.Environ(), "VLLM_EXTRA_ARGS_D="+value)
+		cmd.Env = append(os.Environ(), variable+"="+value)
 		cmd.Stdin = strings.NewReader(out)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
 		b, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("awk: %v", err)
+			t.Fatalf("awk: %v\n%s", err, stderr.String())
 		}
 		out = string(b)
 	}
@@ -140,6 +142,8 @@ func TestKindDevEnvExtraArgs(t *testing.T) {
 		{name: "one flag", value: "--kv-cache-size=256", want: []string{"--port=8000", "--kv-cache-size=256"}},
 		{name: "two flags", value: "--max-model-len=131072 --kv-cache-size=8192",
 			want: []string{"--port=8000", "--max-model-len=131072", "--kv-cache-size=8192"}},
+		{name: "three flags with surrounding and repeated whitespace", value: "  --a=1   --b=2 \t--c=3  ",
+			want: []string{"--port=8000", "--a=1", "--b=2", "--c=3"}},
 		{name: "tab separated", value: "--strict\t--max-model-len=131072",
 			want: []string{"--port=8000", "--strict", "--max-model-len=131072"}},
 		{name: "a JSON value", value: `--mm-processor-kwargs={"num_crops":4}`,
@@ -155,10 +159,12 @@ func TestKindDevEnvExtraArgs(t *testing.T) {
 		{name: "multi-line continuation folds into one argument", value: "--model=foo\n          --literal",
 			want: []string{"--port=8000", "--model=foo --literal"}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := renderArgs(t, envsubst, stages, tc.value); !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("args %q, want %q", got, tc.want)
-			}
-		})
+		for _, variable := range []string{"VLLM_EXTRA_ARGS_E", "VLLM_EXTRA_ARGS_P", "VLLM_EXTRA_ARGS_D"} {
+			t.Run(variable+"/"+tc.name, func(t *testing.T) {
+				if got := renderArgs(t, envsubst, stages, variable, tc.value); !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("args %q, want %q", got, tc.want)
+				}
+			})
+		}
 	}
 }
