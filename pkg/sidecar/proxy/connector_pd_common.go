@@ -111,7 +111,9 @@ func (s *Server) runConcurrentPD(
 
 	// Aggregate before starting the worker so reporting does not wait for prefill.
 	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
+	prefillDone := make(chan struct{})
 	go func() {
+		defer close(prefillDone)
 		defer cancelPrefill()
 		defer prefillSpan.End()
 		defer func() {
@@ -156,13 +158,12 @@ func (s *Server) runConcurrentPD(
 	decodeReturned := false
 	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	defer func() {
-		if prefillCtx.Err() != nil {
-			return
-		}
-		// The request is over once decode has failed; a prefill still running
-		// would compute KV nobody consumes.
-		if !decodeReturned || decodeFailed() {
+		if prefillCtx.Err() != nil || !decodeReturned || decodeFailed() {
+			// The request is over once decode has failed; a prefill still running
+			// would compute KV nobody consumes. Wait for prefill to stop, so the
+			// request's summary line includes the prefill stage.
 			cancelPrefill()
+			<-prefillDone
 			return
 		}
 		// Prefill has no deadline of its own; one that never responds would

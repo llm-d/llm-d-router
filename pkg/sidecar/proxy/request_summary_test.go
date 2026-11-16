@@ -82,6 +82,8 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
 		prefill       bool
+		connector     string
+		prefillWaits  bool
 		decodeStatus  int
 		wantStatus    string
 		wantPath      string
@@ -113,6 +115,17 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 			wantStages:   []string{"prefillDuration", "decodeDuration"},
 			wantFailed:   "decode",
 		},
+		{
+			name:         "concurrent decode fails while prefill runs",
+			prefill:      true,
+			connector:    constants.KVConnectorSGLang,
+			prefillWaits: true,
+			decodeStatus: http.StatusInternalServerError,
+			wantStatus:   "500",
+			wantPath:     "prefill-decode",
+			wantStages:   []string{"prefillDuration", "decodeDuration"},
+			wantFailed:   "decode",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -123,7 +136,13 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 				logged = append(logged, prefix+" "+args)
 			}, funcr.Options{Verbosity: 0})
 
-			prefill := httptest.NewServer(statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`))
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.prefillWaits {
+					_, _ = io.Copy(io.Discard, r.Body)
+					<-r.Context().Done() // until the sidecar cancels prefill
+				}
+				statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
+			}))
 			defer prefill.Close()
 			decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = io.Copy(io.Discard, r.Body)
@@ -135,7 +154,11 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 			prefillURL, err := url.Parse(prefill.URL)
 			require.NoError(t, err)
 
-			s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: constants.KVConnectorNIXLV2})
+			connector := constants.KVConnectorNIXLV2
+			if tt.connector != "" {
+				connector = tt.connector
+			}
+			s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: connector})
 			s.logger = logger
 			s.allowlistValidator = &AllowlistValidator{}
 			sidecar := httptest.NewServer(otelhttp.NewHandler(s.createRoutes(), "sidecar-http"))
