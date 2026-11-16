@@ -667,7 +667,7 @@ func TestFactoryConfiguration(t *testing.T) {
 		{
 			name:                "defaults",
 			params:              fmt.Sprintf("{\"address\": %q}", server.Addr()),
-			wantStateTTL:        defaultStateTTL,
+			wantStateTTL:        crossreplica.DefaultStateTTL,
 			wantCoordinationTTL: defaultCoordinationTTL,
 		},
 		{

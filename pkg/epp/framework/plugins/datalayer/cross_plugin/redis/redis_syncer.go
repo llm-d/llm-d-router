@@ -41,7 +41,6 @@ import (
 const (
 	RedisSyncerType        = "redis-syncer"
 	defaultAddress         = "localhost:6379"
-	defaultStateTTL        = 2 * time.Second
 	defaultCoordinationTTL = 180 * time.Second
 	batchSize              = 100
 	batchConcurrency       = 8
@@ -127,7 +126,7 @@ func RedisSyncerFactory(name string, params *json.Decoder, handle fwkplugin.Hand
 		cfg.Address = defaultAddress
 	}
 
-	stateTTL, err := parseTTL("stateTTL", cfg.StateTTL, defaultStateTTL)
+	stateTTL, err := parseTTL("stateTTL", cfg.StateTTL, crossreplica.DefaultStateTTL)
 	if err != nil {
 		return nil, err
 	}

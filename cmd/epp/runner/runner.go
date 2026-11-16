@@ -1126,12 +1126,18 @@ func (r *Runner) resolveDiscovery(rawConfig *configapiv1.EndpointPickerConfig) (
 // setupPeerDiscovery runs the PeerDiscovery plugin referenced by
 // rawConfig.DataLayer.Discovery.Peers, when set, as a manager runnable on
 // every replica. Discovered peers land in a store handed to the configured
-// cross-replica syncer when it consumes them. The plugin is expected to have
-// been instantiated and registered in r.PluginHandle by
+// cross-replica syncer when it consumes them. A syncer that consumes them
+// fails setup without it, since it would never exchange state. The plugin is
+// expected to have been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo.
 func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.EndpointPickerConfig, poolNamespace string) error {
 	dl := rawConfig.DataLayer
 	if dl == nil || dl.Discovery == nil || dl.Discovery.Peers == nil {
+		syncer := r.PluginHandle.CrossReplicaSyncer()
+		if _, ok := syncer.(fwkdl.PeerConsumer); ok {
+			return fmt.Errorf("peerDiscovery: cross-replica syncer %q consumes the peer set, but dataLayer.discovery.peers is not configured",
+				syncer.TypedName().Name)
+		}
 		return nil
 	}
 

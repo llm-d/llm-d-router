@@ -16,7 +16,8 @@ The plugin does not support request-level coordination: `GetOrSet` returns
 ## Configuration
 
 Enable this Alpha plugin with `--allow-experimental-plugins=true`. The plugin
-needs peer discovery to find its peers.
+needs peer discovery to find its peers, and EPP fails at startup when
+`dataLayer.discovery.peers` is not configured.
 
 ```yaml
 plugins:
@@ -96,14 +97,18 @@ without a message.
 Each EPP serves one gRPC listener on `port` and keeps one client connection
 and one stream per discovered peer, on which it sends its messages; the peer
 never replies. A peer that stops reading its stream blocks only the link to
-that peer. The link queues at most 256 messages and drops new ones beyond that;
-each value is resent within `refreshInterval` of the link draining.
+that peer. The link queues at most 256 messages or 8 MiB and drops new ones
+beyond that; each value is resent within `refreshInterval` of the link
+draining.
 
-A message larger than 16 MiB is not sent, and a received one ends its stream.
-A received message that does not decode is skipped, and its stream stays open.
-Each incoming connection is set up on its own with a 5 s limit, so a client
-that connects and sends nothing holds only its own connection. An EPP accepts
-at most 64 connections, with at most 2 streams on each.
+A message is at most 1 MiB. `SetBatch` splits the values it sends across
+messages that fit; a value whose encoding does not fit in one message is not
+sent, and its endpoint reports an error. A received message over 1 MiB ends its
+stream, and a received message that does not decode is skipped while its stream
+stays open. Each incoming connection is set up on its own with a 5 s limit, so
+a client that connects and sends nothing holds only its own connection. An EPP
+accepts at most 64 connections with one stream each, so it receives at most 64
+messages at once.
 
 The peer set comes from peer discovery and is read every 50 ms:
 
@@ -122,7 +127,8 @@ The peer set comes from peer discovery and is read every 50 ms:
 Opening, connecting, losing and closing a link, a link not connected for
 `stateTTL`, the first message from a peer replica, and a peer replica going
 `stateTTL` without a message are logged at the default level. After the first
-64 peer replicas, a new one is logged at most once every 30 s.
+64 of each, a new peer replica and a peer replica going `stateTTL` without a
+message are each logged at most once every 30 s.
 
 ## Scheduling and Admission
 
@@ -134,11 +140,10 @@ decisions before either observes the other's latest work. The window is one
 This synchronization does not implement an atomic cluster-wide admission quota.
 
 `GetOrSet` returns `ErrCoordinationUnsupported`, because there is no store that
-every replica writes through and so no linearizable request-level value. A
-plugin that calls `GetOrSet` must not be configured to coordinate across
-replicas with this syncer. For `disaggregatedset-rollout-screener`, set
-`disableCoordination: true`; with coordination on, the screener returns no
-endpoints when `GetOrSet` fails.
+every replica writes through and so no linearizable request-level value. EPP
+fails at startup when a configured plugin requires `GetOrSet`. For
+`disaggregatedset-rollout-screener` with revision gating active, set
+`disableCoordination: true`.
 
 ## Deployment
 
@@ -146,7 +151,10 @@ The plugin needs no server. Every EPP replica must be able to reach every other
 replica's `port` over TCP, and the replicas must be in the peer set of the
 discovery plugin. Connections use unencrypted TCP with no authentication, so
 `port` should be reachable only from EPP pods, for example through a
-NetworkPolicy.
+NetworkPolicy. The connection, stream and replica caps do not protect against a
+pod that can reach `port`: it can hold every connection, take the place of peer
+replicas, and send values for this EPP's endpoints. Network isolation is the
+only control.
 
 The plugin binds `port` when it is created, so a port in use fails EPP startup.
 Peers that are not reachable yet do not prevent startup: their links connect

@@ -115,7 +115,8 @@ type PeerSource interface {
 }
 ```
 
-A `CrossReplicaSyncer` that needs the peer set, such as a peer-to-peer syncer
+A `CrossReplicaSyncer` that needs the peer set, such as
+[`p2p-syncer`](../pkg/epp/framework/plugins/datalayer/cross_plugin/p2p/README.md)
 with no external store, opts in by implementing `PeerConsumer`:
 
 ```go

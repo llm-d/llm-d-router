@@ -26,9 +26,14 @@ import (
 	"time"
 )
 
-// MinimumDuration is the shortest duration a syncer accepts in its
-// configuration.
-const MinimumDuration = time.Millisecond
+const (
+	// MinimumDuration is the shortest duration a syncer accepts in its
+	// configuration.
+	MinimumDuration = time.Millisecond
+	// DefaultStateTTL is how long a peer value counts after it was last
+	// refreshed, when the syncer's stateTTL is unset.
+	DefaultStateTTL = 2 * time.Second
+)
 
 // EncodeValue gob-encodes a contributor value.
 func EncodeValue(value any) ([]byte, error) {

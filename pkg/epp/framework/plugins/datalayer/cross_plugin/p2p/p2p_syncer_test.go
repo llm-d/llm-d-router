@@ -277,9 +277,11 @@ func TestKeyTakesItsTypeFromTheFirstEndpointWithAValue(t *testing.T) {
 	failures := a.syncer.SetBatch(context.Background(), spec, []string{"x/empty", testEndpointID}, time.Second)
 	assert.Contains(t, failures, "x/empty")
 	assert.NotContains(t, failures, testEndpointID)
-	a.syncer.recvMu.Lock()
-	defer a.syncer.recvMu.Unlock()
-	assert.Contains(t, a.syncer.specs, testStateKey)
+
+	value, err := crossreplica.EncodeValue(&attrconcurrency.InFlightLoad{Requests: 4})
+	require.NoError(t, err)
+	a.syncer.apply(testStateKey, envelope{Replica: "peer-1", Pod: "peer", Values: map[string][]byte{testEndpointID: value}}, time.Now())
+	assert.Equal(t, int64(4), a.requests(testEndpointID), "a peer value decodes into the registered type")
 }
 
 func TestChangedValueReachesPeerBeforeRefresh(t *testing.T) {
@@ -384,7 +386,8 @@ func TestJoiningPeerReceivesStateBeforeRefresh(t *testing.T) {
 func TestGetOrSetReturnsCoordinationUnsupported(t *testing.T) {
 	a := newReplica(t, "a", time.Second, 100*time.Millisecond)
 	_, _, err := a.syncer.GetOrSet(context.Background(), testStateKey, "request-1", "candidate")
-	require.ErrorIs(t, err, ErrCoordinationUnsupported)
+	require.ErrorIs(t, err, fwkdl.ErrCoordinationUnsupported)
+	require.ErrorIs(t, a.syncer.CheckCoordination(), fwkdl.ErrCoordinationUnsupported)
 }
 
 func TestSetBatchReportsCancelledEndpoints(t *testing.T) {
@@ -725,6 +728,71 @@ func TestBatchOverMessageLimitFailsItsEndpointsUntilItFits(t *testing.T) {
 	assert.Empty(t, a.syncer.SetBatch(context.Background(), spec, []string{"x/a"}, time.Second))
 }
 
+func TestBatchOverMessageLimitIsSplitAndFailsOnlyValuesThatDoNotFit(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	b := newReplica(t, "b", 30*time.Second, 10*time.Second)
+	mesh(a, b)
+	sizes := map[string]int{"x/big": maxMessageBytes}
+	endpointIDs := make([]string, 0, 8)
+	for i := range 8 {
+		endpointID := fmt.Sprintf("x/%d", i)
+		sizes[endpointID] = maxMessageBytes / 4
+		endpointIDs = append(endpointIDs, endpointID)
+	}
+	spec := fwkdl.CrossReplicaSpec{
+		StateKey:  "blob",
+		Read:      func(endpointID string) fwkdl.Cloneable { return &blob{Data: make([]byte, sizes[endpointID])} },
+		Aggregate: func(values []any) any { return values[0] },
+	}
+	require.Eventually(t, func() bool {
+		b.syncer.SetBatch(context.Background(), spec, endpointIDs, time.Second)
+		failures := a.syncer.SetBatch(context.Background(), spec, append([]string{"x/big"}, endpointIDs...), time.Second)
+		require.Len(t, failures, 1)
+		require.ErrorContains(t, failures["x/big"], "exceeds")
+		for _, endpointID := range endpointIDs {
+			if _, ok := b.syncer.cache.Load(b.syncer.cacheKey(spec.StateKey, endpointID)); !ok {
+				return false
+			}
+		}
+		return true
+	}, eventually, tick)
+}
+
+func TestValuesQueuedWhileAStreamOpensStayDue(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	a.syncer.sendMu.Lock()
+	resends := a.syncer.resends
+	a.syncer.sendMu.Unlock()
+	a.syncer.resendAll()
+	a.syncer.recordSent(testStateKey, map[string][]byte{testEndpointID: {1}}, map[string]error{}, time.Now(), resends)
+
+	a.syncer.sendMu.Lock()
+	defer a.syncer.sendMu.Unlock()
+	assert.True(t, a.syncer.sent[testStateKey][testEndpointID].sentAt.IsZero(), "the stream that opened still gets the value")
+}
+
+func TestLinkQueueHoldsAtMostMaxQueuedBytes(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	link := &peerLink{queue: make(chan []byte, sendQueueLimit)}
+	a.syncer.linkList.Store(&[]*peerLink{link})
+	for range maxQueuedBytes/maxMessageBytes + 2 {
+		a.syncer.enqueue(make([]byte, maxMessageBytes))
+	}
+	assert.Len(t, link.queue, maxQueuedBytes/maxMessageBytes)
+	assert.Equal(t, int64(maxQueuedBytes), link.queuedBytes.Load())
+}
+
+func TestReconcileAfterCloseOpensNoLinks(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	b := newReplica(t, "b", 30*time.Second, 10*time.Second)
+	a.syncer.close()
+	a.peers.set(peerOf("b", b.address()))
+	a.syncer.reconcileLinks(time.Now())
+	a.syncer.linksMu.Lock()
+	defer a.syncer.linksMu.Unlock()
+	assert.Empty(t, a.syncer.links)
+}
+
 func TestUndecodableMessageKeepsItsStreamOpen(t *testing.T) {
 	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
 	a.publish(t)
@@ -761,8 +829,15 @@ func TestValuesFromReplicasBeyondMaxPeersAreDropped(t *testing.T) {
 	}
 	assert.Equal(t, int64(maxPeers), a.requests(testEndpointID))
 	a.syncer.recvMu.Lock()
-	defer a.syncer.recvMu.Unlock()
 	assert.Len(t, a.syncer.peers, maxPeers)
+	a.syncer.recvMu.Unlock()
+
+	later := now.Add(31 * time.Second)
+	a.syncer.expire(later)
+	a.syncer.apply(testStateKey, envelope{
+		Replica: "peer-new", Pod: "peer", Values: map[string][]byte{testEndpointID: value},
+	}, later)
+	assert.Equal(t, int64(1), a.requests(testEndpointID), "a replica silent for stateTTL frees its slot")
 }
 
 func TestConnectionHoldsAtMostMaxStreams(t *testing.T) {

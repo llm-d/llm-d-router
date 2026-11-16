@@ -50,14 +50,14 @@ import (
 
 const (
 	P2PSyncerType          = "p2p-syncer"
-	defaultStateTTL        = 2 * time.Second
 	defaultRefreshInterval = 100 * time.Millisecond
 	// maxPeers bounds the peer replicas whose values one replica holds at once
 	// and the connections it accepts.
 	maxPeers = 64
 	// maxStreamsPerConnection bounds the streams open on one connection. A peer
-	// keeps one stream open and opens the next when it ends.
-	maxStreamsPerConnection = 2
+	// keeps one stream open and opens the next when it ends. With maxPeers and
+	// maxMessageBytes it bounds the messages a replica receives at once.
+	maxStreamsPerConnection = 1
 	// maintenanceInterval paces peer link reconciliation, heartbeats and
 	// expiry of peer values.
 	maintenanceInterval = 50 * time.Millisecond
@@ -65,11 +65,14 @@ const (
 	// it has sent nothing for refreshInterval, so peers can tell it is
 	// reachable.
 	heartbeatKey = ""
-	// sendQueueLimit bounds the messages queued for one peer. Messages beyond
-	// it are dropped; each value is resent within refreshInterval.
+	// sendQueueLimit and maxQueuedBytes bound the messages queued for one
+	// peer. Messages beyond either are dropped; each value is resent within
+	// refreshInterval.
 	sendQueueLimit = 256
-	// maxMessageBytes bounds one message in both directions.
-	maxMessageBytes = 16 << 20
+	maxQueuedBytes = 8 * maxMessageBytes
+	// maxMessageBytes bounds one message in both directions. Values that do
+	// not fit in one message are split across several.
+	maxMessageBytes = 1 << 20
 	// A connection whose peer acknowledges nothing for keepaliveTime plus
 	// keepaliveTimeout is closed and redialed. 10s is the shortest client
 	// keepalive time gRPC allows.
@@ -85,16 +88,15 @@ const (
 	publishMethod    = "/" + serviceName + "/" + publishName
 )
 
+// errMessageTooLarge reports a message over maxMessageBytes.
+var errMessageTooLarge = errors.New("message exceeds the size limit")
+
 // publishStream is the one RPC between replicas: a stream of messages from
 // the replica that dials to the replica that listens.
 var publishStream = grpc.StreamDesc{StreamName: publishName, ClientStreams: true}
 
-// ErrCoordinationUnsupported is returned by GetOrSet. Peer-to-peer sync has no
-// store that every replica writes through, so it cannot provide the
-// linearizable request-level coordination GetOrSet requires.
-var ErrCoordinationUnsupported = errors.New("p2p-syncer: GetOrSet requires a linearizable store shared by every replica")
-
 var _ fwkdl.CrossReplicaSyncer = (*P2PSyncer)(nil)
+var _ fwkdl.CoordinationChecker = (*P2PSyncer)(nil)
 var _ fwkdl.CrossReplicaBatchSyncer = (*P2PSyncer)(nil)
 var _ fwkdl.PeerConsumer = (*P2PSyncer)(nil)
 
@@ -128,9 +130,12 @@ type P2PSyncer struct {
 	// linkList is the current set of links, read without linksMu on publish.
 	linkList atomic.Pointer[[]*peerLink]
 
-	// sendMu guards sent. recvMu is taken before sendMu when both are held.
+	// sendMu guards sent and resends. recvMu is taken before sendMu when both
+	// are held.
 	sendMu sync.Mutex
 	sent   map[fwkdl.StateKey]map[string]*sentValue
+	// resends counts resendAll calls.
+	resends uint64
 
 	recvMu   sync.Mutex
 	specs    map[fwkdl.StateKey]*keySpec
@@ -147,6 +152,7 @@ type P2PSyncer struct {
 	decodeLog    rate.Sometimes
 	dialLog      rate.Sometimes
 	newPeerLog   rate.Sometimes
+	lostPeerLog  rate.Sometimes
 	peerLimitLog rate.Sometimes
 }
 
@@ -189,7 +195,9 @@ type peerLink struct {
 	address string
 	conn    *grpc.ClientConn
 	queue   chan []byte
-	cancel  context.CancelFunc
+	// queuedBytes is the size of the messages in queue.
+	queuedBytes atomic.Int64
+	cancel      context.CancelFunc
 	// downSince is when the link last lost its stream, in Unix nanoseconds,
 	// or 0 while the stream is open.
 	downSince atomic.Int64
@@ -247,7 +255,7 @@ func P2PSyncerFactory(name string, params *json.Decoder, handle fwkplugin.Handle
 	if port, err := strconv.Atoi(cfg.Port); err != nil || port < 1 || port > 65535 {
 		return nil, fmt.Errorf("p2p-syncer: port must be in the range 1 through 65535, got %q", cfg.Port)
 	}
-	stateTTL, err := parseDuration("stateTTL", cfg.StateTTL, defaultStateTTL)
+	stateTTL, err := parseDuration("stateTTL", cfg.StateTTL, crossreplica.DefaultStateTTL)
 	if err != nil {
 		return nil, err
 	}
@@ -298,6 +306,7 @@ func newP2PSyncer(ctx context.Context, name, podName, listenAddress, port string
 		decodeLog:       rate.Sometimes{Interval: errorLogPeriod},
 		dialLog:         rate.Sometimes{Interval: errorLogPeriod},
 		newPeerLog:      rate.Sometimes{First: maxPeers, Interval: errorLogPeriod},
+		lostPeerLog:     rate.Sometimes{First: maxPeers, Interval: errorLogPeriod},
 		peerLimitLog:    rate.Sometimes{Interval: errorLogPeriod},
 	}
 	s.linkList.Store(&[]*peerLink{})
@@ -343,8 +352,8 @@ func (s *P2PSyncer) Set(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpoi
 }
 
 // SetBatch sends each endpoint whose value changed since it was last sent, or
-// that was last sent refreshInterval or longer ago, in one message per call.
-// It never waits on a peer, so timeout is unused.
+// that was last sent refreshInterval or longer ago, in as few messages as fit
+// maxMessageBytes. It never waits on a peer, so timeout is unused.
 func (s *P2PSyncer) SetBatch(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointIDs []string, _ time.Duration) map[string]error {
 	failures := make(map[string]error)
 	if len(endpointIDs) == 0 {
@@ -355,6 +364,7 @@ func (s *P2PSyncer) SetBatch(ctx context.Context, spec fwkdl.CrossReplicaSpec, e
 	now := time.Now()
 	values := make(map[string][]byte)
 	s.sendMu.Lock()
+	resends := s.resends
 	sent := s.sent[spec.StateKey]
 	for _, endpointID := range endpointIDs {
 		if err := ctx.Err(); err != nil {
@@ -376,51 +386,113 @@ func (s *P2PSyncer) SetBatch(ctx context.Context, spec fwkdl.CrossReplicaSpec, e
 	if len(values) == 0 {
 		return failures
 	}
-	if err := s.broadcast(spec.StateKey, envelope{Values: values}); err != nil {
-		for endpointID := range values {
-			failures[endpointID] = err
-		}
-		return failures
-	}
-	s.sendMu.Lock()
-	if s.sent[spec.StateKey] == nil {
-		s.sent[spec.StateKey] = make(map[string]*sentValue)
-	}
-	for endpointID, data := range values {
-		s.sent[spec.StateKey][endpointID] = &sentValue{data: data, sentAt: now}
-	}
-	s.sendMu.Unlock()
+	s.sendValues(spec.StateKey, values, failures)
+	queued := s.recordSent(spec.StateKey, values, failures, now, resends)
 	if v := ctrl.LoggerFrom(ctx).V(logutil.TRACE); v.Enabled() {
-		v.Info("p2p-syncer: SetBatch", "key", string(spec.StateKey), "sent", len(values), "endpoints", len(endpointIDs))
+		v.Info("p2p-syncer: SetBatch", "key", string(spec.StateKey), "sent", queued, "endpoints", len(endpointIDs))
 	}
 	return failures
 }
 
-// broadcast queues one message for every peer link. A peer that does not
-// read its stream fills only its own queue.
+// recordSent records the values that were queued, read at now when resendAll
+// had run resends times, and returns how many there were. Values read before a
+// resendAll that ran since are recorded as due, so the next SetBatch sends
+// them on the stream that opened.
+func (s *P2PSyncer) recordSent(key fwkdl.StateKey, values map[string][]byte, failures map[string]error, now time.Time, resends uint64) int {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if s.resends != resends {
+		now = time.Time{}
+	}
+	if s.sent[key] == nil {
+		s.sent[key] = make(map[string]*sentValue)
+	}
+	queued := 0
+	for endpointID, data := range values {
+		if _, failed := failures[endpointID]; failed {
+			continue
+		}
+		s.sent[key][endpointID] = &sentValue{data: data, sentAt: now}
+		queued++
+	}
+	return queued
+}
+
+// sendValues queues values for every peer, split across messages that each
+// fit in maxMessageBytes, and records an error for each endpoint whose value
+// does not fit on its own.
+func (s *P2PSyncer) sendValues(key fwkdl.StateKey, values map[string][]byte, failures map[string]error) {
+	msg, err := s.encodeMessage(key, envelope{Values: values})
+	if errors.Is(err, errMessageTooLarge) && len(values) > 1 {
+		first, second := make(map[string][]byte), make(map[string][]byte)
+		for endpointID, data := range values {
+			if len(first) < len(values)/2 {
+				first[endpointID] = data
+			} else {
+				second[endpointID] = data
+			}
+		}
+		s.sendValues(key, first, failures)
+		s.sendValues(key, second, failures)
+		return
+	}
+	if err != nil {
+		for endpointID := range values {
+			failures[endpointID] = err
+		}
+		return
+	}
+	s.enqueue(msg)
+}
+
+// broadcast queues one message for every peer link.
 func (s *P2PSyncer) broadcast(key fwkdl.StateKey, env envelope) error {
+	msg, err := s.encodeMessage(key, env)
+	if err != nil {
+		return err
+	}
+	s.enqueue(msg)
+	return nil
+}
+
+func (s *P2PSyncer) encodeMessage(key fwkdl.StateKey, env envelope) ([]byte, error) {
 	env.Key = string(key)
 	env.Replica = s.replicaID
 	env.Pod = s.podName
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(env); err != nil {
-		return fmt.Errorf("p2p-syncer: encode message: %w", err)
+		return nil, fmt.Errorf("p2p-syncer: encode message: %w", err)
 	}
 	if buf.Len() > maxMessageBytes {
-		return fmt.Errorf("p2p-syncer: message of %d bytes exceeds %d", buf.Len(), maxMessageBytes)
+		return nil, fmt.Errorf("p2p-syncer: %w: %d bytes, limit %d", errMessageTooLarge, buf.Len(), maxMessageBytes)
 	}
-	msg := buf.Bytes()
+	return buf.Bytes(), nil
+}
+
+// enqueue queues msg for every peer link. A peer that does not read its
+// stream fills only its own queue.
+func (s *P2PSyncer) enqueue(msg []byte) {
 	s.lastSend.Store(time.Now().UnixNano())
+	size := int64(len(msg))
 	for _, link := range *s.linkList.Load() {
+		if link.queuedBytes.Add(size) > maxQueuedBytes {
+			link.queuedBytes.Add(-size)
+			s.logQueueFull(link)
+			continue
+		}
 		select {
 		case link.queue <- msg:
 		default:
-			s.queueFullLog.Do(func() {
-				ctrl.LoggerFrom(s.ctx).Error(errors.New("send queue full"), "p2p-syncer: dropped a message", "peer", link.id.String())
-			})
+			link.queuedBytes.Add(-size)
+			s.logQueueFull(link)
 		}
 	}
-	return nil
+}
+
+func (s *P2PSyncer) logQueueFull(link *peerLink) {
+	s.queueFullLog.Do(func() {
+		ctrl.LoggerFrom(s.ctx).Error(errors.New("send queue full"), "p2p-syncer: dropped a message", "peer", link.id.String())
+	})
 }
 
 func (s *P2PSyncer) Get(_ context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
@@ -441,8 +513,15 @@ func (s *P2PSyncer) Delete(_ context.Context, key fwkdl.StateKey, endpointID str
 	return s.broadcast(key, envelope{Deleted: []string{endpointID}})
 }
 
+// GetOrSet returns fwkdl.ErrCoordinationUnsupported. Peer-to-peer sync has no
+// store that every replica writes through, so it cannot provide linearizable
+// request-level state.
 func (s *P2PSyncer) GetOrSet(context.Context, fwkdl.StateKey, string, any) (any, bool, error) {
-	return nil, false, ErrCoordinationUnsupported
+	return nil, false, fwkdl.ErrCoordinationUnsupported
+}
+
+func (s *P2PSyncer) CheckCoordination() error {
+	return fwkdl.ErrCoordinationUnsupported
 }
 
 // registerSpec records the value type and aggregate for key, taking the type
@@ -614,8 +693,10 @@ func (s *P2PSyncer) expire(now time.Time) {
 	for replica, peer := range s.peers {
 		if now.Sub(peer.heardAt) > s.stateTTL {
 			delete(s.peers, replica)
-			ctrl.LoggerFrom(s.ctx).Info("p2p-syncer: no message from peer for stateTTL", "pod", peer.pod, "replica", replica,
-				"stateTTL", s.stateTTL)
+			s.lostPeerLog.Do(func() {
+				ctrl.LoggerFrom(s.ctx).Info("p2p-syncer: no message from peer for stateTTL", "pod", peer.pod, "replica", replica,
+					"stateTTL", s.stateTTL)
+			})
 		}
 	}
 }
@@ -640,6 +721,11 @@ func (s *P2PSyncer) reconcileLinks(now time.Time) {
 
 	s.linksMu.Lock()
 	defer s.linksMu.Unlock()
+	// close cancels ctx before it empties the links under linksMu, so a link
+	// dialed after this check would never be closed.
+	if s.ctx.Err() != nil {
+		return
+	}
 	changed := false
 	for id, link := range s.links {
 		if address, ok := desired[id]; ok && address == link.address {
@@ -737,6 +823,7 @@ func (s *P2PSyncer) stream(ctx context.Context, link *peerLink) error {
 		case err := <-ended:
 			return fmt.Errorf("stream ended: %w", err)
 		case msg := <-link.queue:
+			link.queuedBytes.Add(-int64(len(msg)))
 			if err := stream.SendMsg(msg); err != nil {
 				return err
 			}
@@ -747,6 +834,7 @@ func (s *P2PSyncer) stream(ctx context.Context, link *peerLink) error {
 func (s *P2PSyncer) resendAll() {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
+	s.resends++
 	for _, sent := range s.sent {
 		for _, sv := range sent {
 			sv.sentAt = time.Time{}
