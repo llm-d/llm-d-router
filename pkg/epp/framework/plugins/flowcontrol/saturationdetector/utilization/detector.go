@@ -260,6 +260,7 @@ func (d *Detector) maybeLogStaleEndpoints(staleCount, total int) {
 // Filter blocks traffic to specific pods that are physically saturated or exceeding their safety limits.
 //
 // It applies a relaxed limit (Threshold * (1 + Headroom)) to allow for scheduling flexibility and burst tolerance.
+// The KV cache limit is capped at 1.0.
 // The queue depth includes the same scrape-lag compensation as Saturation.
 func (d *Detector) Filter(
 	_ context.Context,
