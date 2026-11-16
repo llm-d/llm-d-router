@@ -78,6 +78,14 @@ func TestProducer_RegisterDependencies(t *testing.T) {
 		assert.Empty(t, r.registrations)
 	})
 
+	t.Run("pod discovery without a discovery config registers nothing", func(t *testing.T) {
+		p, _ := newRegistrationProducer(true, "")
+		p.kvEventsConfig.PodDiscoveryConfig = nil
+		r := &recordingRegistrar{}
+		require.NoError(t, p.RegisterDependencies(r))
+		assert.Empty(t, r.registrations)
+	})
+
 	t.Run("global socket with the default discoverPods registers nothing", func(t *testing.T) {
 		p, _ := newRegistrationProducer(true, "tcp://0.0.0.0:5557")
 		r := &recordingRegistrar{}
@@ -99,6 +107,7 @@ func TestProducer_RuntimeSubscribesPodsThroughRegistration(t *testing.T) {
 		{name: "pull mode with the source listed but not wired", otherSource: true, want: 1},
 		{name: "pull mode with explicit wiring", wireExplicit: true, want: 1},
 		{name: "global socket with the source configured for other plugins", zmqEndpoint: "tcp://0.0.0.0:5557", otherSource: true, want: 0},
+		{name: "global socket with explicit wiring", zmqEndpoint: "tcp://0.0.0.0:5557", wireExplicit: true, want: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, subscribers := newRegistrationProducer(true, tc.zmqEndpoint)
