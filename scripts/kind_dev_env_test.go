@@ -72,8 +72,8 @@ func renderPipeline(t *testing.T) ([]string, []string) {
 }
 
 // renderArgs renders a decode Deployment, as kubectl kustomize emits it, through the script's pipeline and returns
-// its container args, with a null item as "<null>".
-func renderArgs(t *testing.T, envsubst, stages []string, variable, value string) []string {
+// its container args, with a null item as "<null>". quoted keeps the quotes around the placeholder item.
+func renderArgs(t *testing.T, envsubst, stages []string, variable, value string, quoted bool) []string {
 	t.Helper()
 	const renderedDeployment = `apiVersion: apps/v1
 kind: Deployment
@@ -87,7 +87,11 @@ spec:
         - ${VAR}
 `
 	env := map[string]string{variable: value}
-	out := strings.ReplaceAll(renderedDeployment, "${VAR}", "${"+variable+"}")
+	placeholder := "${" + variable + "}"
+	if quoted {
+		placeholder = `"` + placeholder + `"`
+	}
+	out := strings.ReplaceAll(renderedDeployment, "${VAR}", placeholder)
 	for _, name := range envsubst {
 		out = strings.ReplaceAll(out, "${"+name+"}", env[name])
 	}
@@ -134,9 +138,10 @@ func TestKindDevEnvExtraArgs(t *testing.T) {
 	}
 	envsubst, stages := renderPipeline(t)
 	for _, tc := range []struct {
-		name  string
-		value string
-		want  []string
+		name   string
+		value  string
+		quoted bool
+		want   []string
 	}{
 		{name: "empty keeps a null item", value: "", want: []string{"--port=8000", "<null>"}},
 		{name: "one flag", value: "--kv-cache-size=256", want: []string{"--port=8000", "--kv-cache-size=256"}},
@@ -158,10 +163,19 @@ func TestKindDevEnvExtraArgs(t *testing.T) {
 			want: []string{"--port=8000", "--max-model-len=131072", "--strict"}},
 		{name: "multi-line continuation folds into one argument", value: "--model=foo\n          --literal",
 			want: []string{"--port=8000", "--model=foo --literal"}},
+		{name: "quoted empty drops the item", value: "", quoted: true, want: []string{"--port=8000"}},
+		{name: "quoted one flag", value: "--kv-cache-size=256", quoted: true,
+			want: []string{"--port=8000", "--kv-cache-size=256"}},
+		{name: "quoted two flags", value: "--max-model-len=131072 --kv-cache-size=8192", quoted: true,
+			want: []string{"--port=8000", "--max-model-len=131072", "--kv-cache-size=8192"}},
+		{name: "quoted three flags with surrounding and repeated whitespace", value: "  --a=1   --b=2 \t--c=3  ", quoted: true,
+			want: []string{"--port=8000", "--a=1", "--b=2", "--c=3"}},
+		{name: "quoted tab separated", value: "--strict\t--max-model-len=131072", quoted: true,
+			want: []string{"--port=8000", "--strict", "--max-model-len=131072"}},
 	} {
 		for _, variable := range []string{"VLLM_EXTRA_ARGS_E", "VLLM_EXTRA_ARGS_P", "VLLM_EXTRA_ARGS_D"} {
 			t.Run(variable+"/"+tc.name, func(t *testing.T) {
-				if got := renderArgs(t, envsubst, stages, variable, tc.value); !reflect.DeepEqual(got, tc.want) {
+				if got := renderArgs(t, envsubst, stages, variable, tc.value, tc.quoted); !reflect.DeepEqual(got, tc.want) {
 					t.Fatalf("args %q, want %q", got, tc.want)
 				}
 			})
