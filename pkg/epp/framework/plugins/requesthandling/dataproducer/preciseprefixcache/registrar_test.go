@@ -72,43 +72,42 @@ func TestProducer_RegisterDependencies(t *testing.T) {
 
 func TestProducer_RuntimeSubscribesPodsThroughRegistration(t *testing.T) {
 	ctx := discardCtx(t)
-	endpointSource := func() *datalayer.DataSourceConfig {
-		return &datalayer.DataSourceConfig{
-			Plugin: sourcenotifications.NewEndpointDataSource(
-				sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
-		}
-	}
 	for _, tc := range []struct {
 		name         string
 		zmqEndpoint  string
-		wireExplicit bool
 		otherSource  bool
+		wireExplicit bool
 		want         int
 	}{
-		{name: "pull mode without dataLayer wiring", want: 1},
+		{name: "pull mode without an endpoint-notification source", want: 1},
+		{name: "pull mode with the source listed but not wired", otherSource: true, want: 1},
 		{name: "pull mode with explicit wiring", wireExplicit: true, want: 1},
-		{name: "global socket with an endpoint source for other plugins", zmqEndpoint: "tcp://0.0.0.0:5557", otherSource: true, want: 0},
+		{name: "global socket with the source configured for other plugins", zmqEndpoint: "tcp://0.0.0.0:5557", otherSource: true, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newExtractorProducer(t, true)
-			defer p.subscribersManager.Shutdown(ctx)
 			p.kvEventsConfig.ZMQEndpoint = tc.zmqEndpoint
+			subscribers := &fakeSubscriberManager{}
+			p.subscribersManager = subscribers
 
 			rt := datalayer.NewRuntime(0)
 			require.NoError(t, p.RegisterDependencies(rt))
 			var cfg *datalayer.Config
-			if tc.wireExplicit || tc.otherSource {
-				src := endpointSource()
+			if tc.otherSource || tc.wireExplicit {
+				// A source name distinct from its type, so the default registration resolves the source by type.
+				src := datalayer.DataSourceConfig{
+					Plugin: sourcenotifications.NewEndpointDataSource(sourcenotifications.EndpointNotificationSourceType, "endpoints"),
+				}
 				if tc.wireExplicit {
 					src.Extractors = []plugin.Plugin{p}
 				}
-				cfg = &datalayer.Config{Sources: []datalayer.DataSourceConfig{*src}}
+				cfg = &datalayer.Config{Sources: []datalayer.DataSourceConfig{src}}
 			}
 			require.NoError(t, rt.Configure(cfg, logr.Discard()))
 
 			rt.NewEndpoint(ctx, newEndpoint("pod-a", "10.0.0.1").GetMetadata())
-			ids, _ := p.subscribersManager.GetActiveSubscribers()
-			assert.Len(t, ids, tc.want)
+			// Each EnsureSubscriber call is recorded, so a producer wired twice would show two calls.
+			assert.Len(t, subscribers.ids, tc.want)
 		})
 	}
 }

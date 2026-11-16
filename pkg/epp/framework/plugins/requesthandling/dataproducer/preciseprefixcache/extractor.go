@@ -35,12 +35,8 @@ var (
 	_ fwkdl.Registrant        = &Producer{}
 )
 
-// RegisterDependencies attaches the producer to endpoint lifecycle events in
-// pull mode: pod discovery enabled and no global zmqEndpoint. Without it, a
-// configuration that omits the endpoint-notification source starts with no
-// per-pod subscribers. A global zmqEndpoint keeps discoverPods at its default
-// of true, so registering there would add per-pod subscriptions to the bound
-// socket.
+// RegisterDependencies requests endpoint events for per-pod subscriptions.
+// A global zmqEndpoint can leave discoverPods enabled but needs no such events.
 func (p *Producer) RegisterDependencies(r fwkdl.Registrar) error {
 	kc := p.kvEventsConfig
 	if !kc.DiscoverPods || kc.PodDiscoveryConfig == nil || kc.ZMQEndpoint != "" {
