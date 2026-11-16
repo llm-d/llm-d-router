@@ -11,6 +11,7 @@
   - [Ordering contract](#ordering-contract)
   - [Wiring to the datastore](#wiring-to-the-datastore)
 - [Selecting a discovery plugin in the EPP config](#selecting-a-discovery-plugin-in-the-epp-config)
+- [EndpointSlice Discovery plugin](#endpointslice-discovery-plugin)
 - [File Discovery plugin](#file-discovery-plugin)
   - [Parameters](#parameters)
   - [Endpoints file format](#endpoints-file-format)
@@ -211,6 +212,19 @@ dataLayer:
 When `dataLayer.discovery.endpoints` is present the EPP skips the Kubernetes
 setup entirely.  When it is absent the EPP uses the default Kubernetes-based
 discovery (backwards compatible).
+
+---
+
+## EndpointSlice Discovery plugin
+
+**Plugin type:** `endpointslice-discovery`
+
+Watches Kubernetes EndpointSlices and reports one endpoint per slice
+endpoint. Use it when a controller publishes the model servers' addresses as
+EndpointSlices of a selector-less Service, for example when the servers are
+not Pods with routable Pod IPs. Parameters, readiness handling and RBAC are
+described in the
+[plugin README](../pkg/epp/framework/plugins/datalayer/discovery/endpointslice/README.md).
 
 ---
 
