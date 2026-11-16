@@ -267,7 +267,7 @@ func (d *Detector) Filter(
 	endpoints []fwksched.Endpoint,
 ) []fwksched.Endpoint {
 	qLimit := float64(d.config.QueueDepthThreshold) * (1.0 + d.config.Headroom)
-	kvLimit := d.config.KVCacheUtilThreshold * (1.0 + d.config.Headroom)
+	kvLimit := min(1.0, d.config.KVCacheUtilThreshold*(1.0+d.config.Headroom))
 
 	// Pre-allocate assuming most endpoints will pass the filter to minimize allocations.
 	filtered := make([]fwksched.Endpoint, 0, len(endpoints))
