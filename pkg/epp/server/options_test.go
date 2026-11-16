@@ -677,6 +677,11 @@ func TestTLSMinVersionFlag(t *testing.T) {
 			wantErrContains: "unknown TLS version",
 		},
 		{
+			name:            "lowercase versiontls12",
+			args:            []string{"--tls-min-version", "versiontls12"},
+			wantErrContains: "unknown TLS version",
+		},
+		{
 			name:            "VersionTLS10",
 			args:            []string{"--tls-min-version", "VersionTLS10"},
 			wantErrContains: "below the TLS 1.2 minimum",
@@ -709,10 +714,10 @@ func TestTLSMinVersionFlag(t *testing.T) {
 
 func TestTLSCipherSuitesFlag(t *testing.T) {
 	tests := []struct {
-		name       string
-		args       []string
-		wantSuites []uint16
-		wantErr    bool
+		name            string
+		args            []string
+		wantSuites      []uint16
+		wantErrContains string
 	}{
 		{
 			name: "single cipher",
@@ -730,14 +735,53 @@ func TestTLSCipherSuitesFlag(t *testing.T) {
 			},
 		},
 		{
+			name:       "leading space",
+			args:       []string{"--tls-cipher-suites", " TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"},
+			wantSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			name: "space after comma",
+			args: []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"},
+			wantSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			},
+		},
+		{
+			name:       "trailing comma",
+			args:       []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,"},
+			wantSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256},
+		},
+		{
+			// Stays nil so tls.Config falls back to its defaults; a non-nil empty slice would disable every TLS 1.2 suite.
+			name:       "only empty elements",
+			args:       []string{"--tls-cipher-suites=,"},
+			wantSuites: nil,
+		},
+		{
 			name:       "not set",
 			args:       []string{},
 			wantSuites: nil,
 		},
 		{
-			name:    "unknown cipher",
-			args:    []string{"--tls-cipher-suites", "FAKE_CIPHER_SUITE"},
-			wantErr: true,
+			name:       "legacy CHACHA20 alias",
+			args:       []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305"},
+			wantSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256},
+		},
+		{
+			name:            "unknown cipher",
+			args:            []string{"--tls-cipher-suites", "FAKE_CIPHER_SUITE"},
+			wantErrContains: "invalid tls-cipher-suites: Cipher suite FAKE_CIPHER_SUITE not supported or doesn't exist",
+		},
+		{
+			name:            "insecure cipher",
+			args:            []string{"--tls-cipher-suites", "TLS_RSA_WITH_RC4_128_SHA"},
+			wantErrContains: `invalid tls-cipher-suites: insecure cipher suite "TLS_RSA_WITH_RC4_128_SHA"`,
+		},
+		{
+			name:            "insecure cipher among secure ones",
+			args:            []string{"--tls-cipher-suites", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"},
+			wantErrContains: `invalid tls-cipher-suites: insecure cipher suite "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"`,
 		},
 	}
 	for _, tt := range tests {
@@ -750,39 +794,14 @@ func TestTLSCipherSuitesFlag(t *testing.T) {
 			require.NoError(t, fs.Parse(argv))
 
 			err := opts.Complete()
-			if tt.wantErr {
-				require.Error(t, err)
+			if tt.wantErrContains != "" {
+				require.ErrorContains(t, err, tt.wantErrContains)
 				return
 			}
 			require.NoError(t, err)
 			require.Equal(t, tt.wantSuites, opts.TLSCipherSuiteValues())
 		})
 	}
-}
-
-func TestParseTLSVersion(t *testing.T) {
-	for name, want := range tlsVersions {
-		got, err := parseTLSVersion(name)
-		require.NoError(t, err, name)
-		require.Equal(t, want, got, name)
-	}
-	_, err := parseTLSVersion("invalid")
-	require.Error(t, err)
-}
-
-func TestParseCipherSuites(t *testing.T) {
-	ids, err := parseCipherSuites([]string{
-		"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-		"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
-	})
-	require.NoError(t, err)
-	require.Equal(t, []uint16{
-		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-	}, ids)
-
-	_, err = parseCipherSuites([]string{"BOGUS"})
-	require.Error(t, err)
 }
 
 func TestValidatePoolGroupFlag(t *testing.T) {
