@@ -38,8 +38,6 @@ func newRegistrationProducer(discoverPods bool, zmqEndpoint string) (*Producer, 
 	cfg := kvevents.DefaultConfig()
 	cfg.DiscoverPods = discoverPods
 	cfg.ZMQEndpoint = zmqEndpoint
-	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
-	cfg.PodDiscoveryConfig.SocketPort = 5557
 	subscribers := &fakeSubscriberManager{}
 	return &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
