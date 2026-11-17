@@ -311,3 +311,71 @@ func TestWindowIndex_ConfiguredSize(t *testing.T) {
 	requireGroups(ctx, t, pool.WindowIndex(), keys[:2])
 	requireGroups(ctx, t, pool.WindowIndex(), keys[2:], 1)
 }
+
+// A CPU-tier copy of a sliding-window store comes as a placeholder with
+// block_size 0 and no tokens. It takes the group's GPU block size, so it is
+// indexed for the CPU tier next to the GPU store.
+func TestWindowIndex_CPUTierPlaceholderStore(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, tp := newWindowTestPool(t)
+	window := 128
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 4100)
+	group := 1
+
+	process(ctx, pool,
+		groupStore(0, KVCacheSpecKindFullAttention, nil, tokens, engineKeys, 0),
+		groupStore(1, KVCacheSpecKindSlidingWindow, &window, tokens, engineKeys, 0))
+	process(ctx, pool, &BlockStoredEvent{
+		BlockHashes: engineKeys, GroupIdx: &group, KVCacheSpecKind: KVCacheSpecKindSlidingWindow, DeviceTier: "CPU",
+	})
+
+	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
+	require.NoError(t, err)
+	require.Len(t, keys, 4)
+	for _, key := range keys {
+		result, err := pool.WindowIndex().Lookup(ctx, []kvblock.BlockHash{key}, nil)
+		require.NoError(t, err)
+		var tiers []string
+		for _, entry := range result[key] {
+			require.Equal(t, kvblock.GroupID(1), entry.GroupIdx)
+			tiers = append(tiers, entry.DeviceTier)
+		}
+		require.ElementsMatch(t, []string{"gpu", "cpu"}, tiers, "key %v", key)
+	}
+}
+
+// With engine blocks larger than the canonical block, an engine block resolves
+// to only the last canonical block it covers, so its sliding-window stores are
+// skipped, CPU-tier placeholders included.
+func TestWindowIndex_LargerEngineBlockSkipped(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newWindowTestPool(t)
+	window := 128
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(2, 4200)
+	fullGroup, windowGroup := 0, 1
+	metric := metrics.KVEventStoresSkipped.WithLabelValues(
+		string(KVCacheSpecKindSlidingWindow), "engine_block_larger_than_canonical")
+	before := counterValue(t, metric)
+
+	process(ctx, pool,
+		&BlockStoredEvent{
+			BlockHashes: engineKeys, Tokens: tokens, BlockSize: 32,
+			GroupIdx: &fullGroup, KVCacheSpecKind: KVCacheSpecKindFullAttention,
+		},
+		&BlockStoredEvent{
+			BlockHashes: engineKeys, Tokens: tokens, BlockSize: 32,
+			GroupIdx: &windowGroup, KVCacheSpecKind: KVCacheSpecKindSlidingWindow, KVCacheSpecSlidingWindowSize: &window,
+		})
+	process(ctx, pool, &BlockStoredEvent{
+		BlockHashes: engineKeys, GroupIdx: &windowGroup, KVCacheSpecKind: KVCacheSpecKindSlidingWindow, DeviceTier: "CPU",
+	})
+
+	assert.Equal(t, 2.0, counterValue(t, metric)-before)
+	keys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, windowTestModel, nil)
+	require.NoError(t, err)
+	require.Len(t, keys, 4)
+	requireGroups(ctx, t, idx, keys, 0)
+	requireGroups(ctx, t, pool.WindowIndex(), keys)
+}

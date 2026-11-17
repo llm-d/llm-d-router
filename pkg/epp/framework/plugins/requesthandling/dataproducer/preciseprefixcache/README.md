@@ -58,7 +58,9 @@ Set `kvEventsConfig.indexSlidingWindowGroups` to `true` to index the
 sliding-window KV cache groups of hybrid models (for example gpt-oss) once a
 group's events report its window size. Their stores and removals go to a
 separate in-memory window index, keyed by group, which scoring does not read.
-It defaults to `false`, and sliding-window stores are then skipped.
+It defaults to `false`, and sliding-window stores are then skipped. With it on,
+a store whose engine blocks are larger than `blockSizeTokens` is skipped too,
+since the prefix index resolves such a block to only its last canonical block.
 `kvEventsConfig.windowIndexConfig` sizes the window index (`size` and
 `podCacheSize`, as in `inMemoryConfig`); it defaults to
 `indexerConfig.kvBlockIndexConfig.inMemoryConfig`.

@@ -354,6 +354,21 @@ func (p *Pool) WindowIndex() kvblock.Index {
 
 // slidingWindowGroup reports whether the pod's group is a sliding-window group
 // with a known window size.
+// windowStoreBlockSize is the engine block size of a sliding-window store. A
+// CPU-tier store comes as a placeholder with block_size 0 and no tokens; it
+// copies GPU blocks, so it takes the size the group's GPU stores reported.
+func (p *Pool) windowStoreBlockSize(podIdentifier string, ev *BlockStoredEvent) int {
+	if ev.BlockSize > 0 {
+		return ev.BlockSize
+	}
+	if ev.GroupIdx != nil {
+		if meta, found := p.groupCatalog.Get(podIdentifier, kvblock.GroupID(*ev.GroupIdx)); found && meta.BlockSize > 0 {
+			return meta.BlockSize
+		}
+	}
+	return engineBlockSize(ev)
+}
+
 func (p *Pool) slidingWindowGroup(podIdentifier string, groupIdx *int) bool {
 	if groupIdx == nil {
 		return false
@@ -776,11 +791,16 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				}
 			}
 			if windowed && reason == "unsupported_cache_kind" {
-				switch {
+				switch size := p.windowStoreBlockSize(podIdentifier, ev); {
 				case !p.slidingWindowGroup(podIdentifier, ev.GroupIdx):
 					reason = "unknown_sliding_window"
-				case ev.BlockSize < p.tokenProcessor.BlockSize():
+				case size > 0 && size < p.tokenProcessor.BlockSize():
 					reason = "incomplete_canonical_block"
+				case size > p.tokenProcessor.BlockSize():
+					// GetRequestKey resolves an engine block to the last of the
+					// canonical blocks it covers, so a larger engine block would
+					// mark only that one.
+					reason = "engine_block_larger_than_canonical"
 				default:
 					windowStores = append(windowStores, windowStore{hashes: ev.BlockHashes, entries: podEntries, scope: storeScope})
 					continue
