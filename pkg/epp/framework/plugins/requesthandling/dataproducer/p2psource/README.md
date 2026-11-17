@@ -73,6 +73,8 @@ available.
 - `minCachedTokenDelta` (int, optional, default: `1`): Minimum cached-token advantage required to write the source. Must be `>= 1`. Higher values avoid transfers for prefixes that are cheap to recompute.
 - `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. If the profile has no target, the primary profile target is used. See [Prefill profile name](#prefill-profile-name).
 - `p2pConnectorPort` (int, optional, default: `7777`): `OffloadingConnector` P2P tier port of data parallel rank 0 on every endpoint; rank `r` listens on `p2pConnectorPort + r`, which must stay within 1-65535: an endpoint beyond that is skipped as a source, and a request to a prefill endpoint beyond it fails. Must match the P2P tier's configured port.
+- `transport` (string, optional, default: `offloading`): How the source reaches the pod computing the prefix. `offloading` writes the outputs above for the vLLM `OffloadingConnector` P2P tier. `kvcr` writes a KVCR `kv.fetch` hint instead; see [KVCR transport](#kvcr-transport).
+- `kvcrControlPort` (int, required with `transport: kvcr`): KVCR control port of data parallel rank 0 on every endpoint; rank `r` listens on `kvcrControlPort + r`.
 - `costModel` (object, optional): When set, the source is written only when the pull's gain exceeds its cost, evaluated after the `minCachedTokenDelta` floor. Omitted, the fixed-delta decision applies. See [Cost model](#cost-model).
 - `ttftByDecision` (bool, optional, default: `false`): Records the TTFT of each streaming request whose stream ends naturally in `llm_d_epp_p2p_source_request_ttft_seconds`, labelled with this producer's decision. Adds a response-body hook to the producer.
 
@@ -208,6 +210,38 @@ schedulingProfiles:
   - name: decode
     plugins: [...]
 ```
+
+## KVCR transport
+
+With `transport: kvcr`, the source goes to vLLM's KV Cache Runner (KVCR) tier
+instead of the P2P tier. Source selection, the cost model, the reusable prefix
+floor and the metrics are unchanged. In `PreRequest`, a kept source is written
+into `GenerateRequest.kv_hints` of a `vllm.Inference` Generate or
+GenerateStream request as one `kv.fetch` action whose
+`source_control_endpoint` is `tcp://<source address>:<kvcrControlPort + rank>`,
+replacing any `kv_hints` the request carries. No body field or header for the P2P tier is written, including
+`x-llm-d-kv-cache-prefill-p2p-host-port`. Other requests, such as OpenAI HTTP,
+get no hint and record the `unsupported-request` outcome.
+
+`kv.fetch` requires a non-empty `block_hashes` list. The plugin sends one
+placeholder value and relies on KVCR's `opportunistic_query`, which vLLM's
+KVCR tier enables by default: KVCR then treats every block of the request as
+fetchable from the named source without reading the hashes. With
+`opportunistic_query: false` the hint is accepted and fetches nothing.
+
+```yaml
+  - type: p2p-source-producer
+    parameters:
+      prefixMatchInfoProducerName: precise-cache
+      transport: kvcr
+      kvcrControlPort: 17771
+```
+
+Requirements on every endpoint:
+
+- vLLM serves `vllm.Inference` over gRPC, and `OffloadingConnector` has a `kvcr` secondary tier with `opportunistic_query` unset or `true`.
+- The tier's `control_ports` are consecutive, starting at `kvcrControlPort` for local data parallel rank 0, and `control_advertise_host` is the pod address the EPP sees.
+- The precise producer receives the tier's KV events. KVCR host memory reports as the `cpu` tier, the only tier a source is chosen from.
 
 ## Deployment Requirements
 
