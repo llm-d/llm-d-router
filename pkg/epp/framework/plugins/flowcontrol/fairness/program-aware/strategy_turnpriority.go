@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
@@ -45,13 +46,13 @@ var _ Strategy = &turnPriorityStrategy{}
 // workload means raising the weight, which trades prefix retention for admission
 // latency.
 //
-// When session-state-producer publishes SessionState on the head request, depth
-// comes from the head's own session, so a flow that carries several sessions is
-// scored by the session whose request is next. Otherwise depth is the flow's
-// dispatched count, which requires one fairness ID per session. That holds for
-// traffic carrying a session header. Requests with no fairness ID share a single
-// flow whose dispatched count aggregates unrelated clients, so that count is not
-// a session depth and the ordering it produces is not meaningful. Such traffic
+// When the head request carries SessionState under sessionStateKey, depth comes
+// from the head's own session, so a flow that carries several sessions is scored
+// by the session whose request is next. Otherwise depth is the flow's dispatched
+// count, which requires one fairness ID per session. That holds for traffic
+// carrying a session header. Requests with no fairness ID share a single flow
+// whose dispatched count aggregates unrelated clients, so that count is not a
+// session depth and the ordering it produces is not meaningful. Such traffic
 // belongs in a priority band on a different fairness policy.
 //
 // The turn counter resets once the session or program has been inactive for
@@ -59,6 +60,9 @@ var _ Strategy = &turnPriorityStrategy{}
 type turnPriorityStrategy struct {
 	timeWeight        float64
 	inactivitySeconds float64
+	// sessionStateKey is the request attribute of the configured
+	// session-state-producer instance.
+	sessionStateKey plugin.DataKey
 }
 
 func (s *turnPriorityStrategy) Name() string { return turnPriorityStrategyName }
@@ -84,7 +88,7 @@ func (s *turnPriorityStrategy) Pick(_ int, queues map[string]QueueInfo) flowcont
 			headWait = 0
 		}
 
-		score := float64(s.headTurnNumber(head, qi.Metrics)) + s.timeWeight*headWait
+		score := float64(s.headTurnNumber(head, qi.Metrics, headEnqueue)) + s.timeWeight*headWait
 		// Tie-break on the longer head wait so equal depth dispatches in arrival
 		// order rather than by map iteration order.
 		if score > bestScore || (score == bestScore && headWait > bestWait) {
@@ -106,16 +110,27 @@ func (s *turnPriorityStrategy) EvictProgram(_ string) {}
 
 func (s *turnPriorityStrategy) Collectors() []prometheus.Collector { return nil }
 
-// headTurnNumber returns the turn number of a flow's head request, counted over
-// the head's session when its SessionState is published and over the program's
-// metrics otherwise.
-func (s *turnPriorityStrategy) headTurnNumber(head flowcontrol.QueueItemAccessor, metrics *ProgramMetrics) int64 {
-	if session, ok := headSessionState(head); ok {
-		return s.turnNumber(session.TurnsTaken, session.InFlightRequests, session.LastResponseAt, head.EnqueueTime())
+// Consumes declares the session state as optional: a head without it is scored
+// from the per-program metrics.
+func (s *turnPriorityStrategy) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{
+		Optional: map[plugin.DataKey]any{s.sessionStateKey: sessionstate.SessionState{}},
 	}
-	return s.turnNumberFor(metrics, head.EnqueueTime())
 }
 
+// headTurnNumber returns the turn number of a flow's head request, counted over
+// the head's session when the head carries SessionState and over the program's
+// metrics otherwise.
+func (s *turnPriorityStrategy) headTurnNumber(head flowcontrol.QueueItemAccessor, metrics *ProgramMetrics, headEnqueue time.Time) int64 {
+	if session, ok := s.headSessionState(head); ok {
+		return s.turnNumber(session.TurnsTaken, session.InFlightRequests, session.LastResponseAt, headEnqueue)
+	}
+	return s.turnNumberFor(metrics, headEnqueue)
+}
+
+// turnNumberFor returns the turn number of a head request from its program's
+// metrics. A program without metrics has dispatched nothing, so its head is
+// turn one.
 func (s *turnPriorityStrategy) turnNumberFor(metrics *ProgramMetrics, headEnqueue time.Time) int64 {
 	if metrics == nil {
 		return 1
@@ -144,8 +159,9 @@ func (s *turnPriorityStrategy) turnNumber(dispatched, inFlight int64, lastComple
 	return dispatched + 1
 }
 
-// headSessionState returns the session state of a queue head, if published.
-func headSessionState(head flowcontrol.QueueItemAccessor) (sessionstate.SessionState, bool) {
+// headSessionState returns the session state the configured producer published
+// on a queue head, if any.
+func (s *turnPriorityStrategy) headSessionState(head flowcontrol.QueueItemAccessor) (sessionstate.SessionState, bool) {
 	orig := head.OriginalRequest()
 	if orig == nil {
 		return sessionstate.SessionState{}, false
@@ -154,5 +170,5 @@ func headSessionState(head flowcontrol.QueueItemAccessor) (sessionstate.SessionS
 	if req == nil {
 		return sessionstate.SessionState{}, false
 	}
-	return sessionstate.ReadSessionState(req)
+	return fwksched.ReadRequestAttribute[sessionstate.SessionState](req, s.sessionStateKey)
 }

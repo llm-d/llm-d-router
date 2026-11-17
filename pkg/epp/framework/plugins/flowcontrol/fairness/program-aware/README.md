@@ -20,7 +20,7 @@ Under `las`:
 Under `turn-priority`:
 
 * **Sessions are long and prefix reuse dominates cost**: Multi-turn sessions share a growing prefix, and dispatching the deepest ones keeps that prefix resident instead of re-prefilling it.
-* **Requests identify their session**: Traffic carries a session header. With [`session-state-producer`](../../../requesthandling/dataproducer/sessionstate/README.md) enabled, each head request is scored by the depth of its own session, whatever its fairness ID. Without it, one fairness ID must be one session: a bare session ID or a composed `<tenant>/<session>` ID. This strategy is not the right choice for a pool whose requests share a single ID and carry no session header.
+* **Requests identify their session**: Traffic carries a session header. When the head request carries session state from [`session-state-producer`](../../../requesthandling/dataproducer/sessionstate/README.md), it is scored by the depth of its own session. Session state requires a session header that `agent-identity` resolves, so by default a session identified only by a per-session `x-llm-d-inference-fairness-id` header has none. A head without session state is scored by its flow's dispatched count, so one fairness ID must then be one session: a bare session ID or a composed `<tenant>/<session>` ID. This strategy is not the right choice for a pool whose requests share a single ID and carry no session header.
 
 ## What it does
 
@@ -65,11 +65,15 @@ The default of `120` leaves a margin over the longest gap observed within an act
 
 Under contention a prefix is evicted by capacity pressure while its program is still active, and ordering by turn depth is what keeps those prefixes resident. A low prefix-cache hit rate is therefore weak evidence for lowering this value.
 
-When `session-state-producer` publishes session state, depth comes from the head request's own session: its `TurnsTaken`, `InFlightRequests` and `LastResponseAt` stand in for the program's dispatched count, in-flight count and last completion time, so the inactivity reset also applies per session. A session is one `agent-identity` value, so a flow that carries several sessions, such as a tenant fairness ID with composition disabled, is scored by the session whose request is at the head of the queue.
+When the head request carries session state, depth comes from that request's own session: its `TurnsTaken`, `InFlightRequests` and `LastResponseAt` stand in for the program's dispatched count, in-flight count and last completion time, so the inactivity reset also applies per session. The `session-state-producer` instance selected by `sessionStateProducerName` publishes session state for each request whose session header `agent-identity` resolves. The choice is made per head request, so a request without such a header is scored from the per-program counters even when the producer is enabled.
 
-Without session state, this strategy requires one fairness ID per session. It reads a program's dispatched count as the depth of a single conversation, which holds only when the ID identifies one session: a per-session `x-llm-d-inference-fairness-id` header, the `agent-identity` attribute that the request-header plugin derives from a session header, or a composed `<tenant>/<session>` ID when `requestHandler.composeFairnessIDs` is enabled and the request also carries a tenant fairness ID. With composition disabled, a request carrying both resolves to the tenant header and its sessions share one count.
+A session is one `agent-identity` value, so a flow that carries several sessions, such as a tenant fairness ID with composition disabled, is scored by the session whose request is at the head of the queue. A first-turn request at the head of such a flow holds back deeper sessions queued behind it in the same flow until it dispatches or is shed. Per-session or composed `<tenant>/<session>` fairness IDs give each session its own flow and avoid this.
+
+For a head without session state, this strategy requires one fairness ID per session. It reads a program's dispatched count as the depth of a single conversation, which holds only when the ID identifies one session: a per-session `x-llm-d-inference-fairness-id` header, the `agent-identity` attribute that the request-header plugin derives from a session header, or a composed `<tenant>/<session>` ID when `requestHandler.composeFairnessIDs` is enabled and the request also carries a tenant fairness ID. With composition disabled, a request carrying both resolves to the tenant header and its sessions share one count.
 
 Requests carrying neither share `default-flow`. Its dispatched count is the sum over unrelated clients, so it is not a session depth, it grows with total unlabeled traffic, and it rarely stays idle long enough for the inactivity reset to fire. Ordering it against real sessions by that count is not meaningful, and a pool that mixes labeled and unlabeled traffic gives `default-flow` a depth no single session can match. Route unlabeled traffic to a priority band on a different fairness policy.
+
+A shared flow can mix the two cases in the same way, for example a tenant fairness ID whose clients send a session header on some requests only. A head with session state is scored by its session's depth, and a head without it by the flow's dispatched count, which includes every session in the flow and is much larger. Send session headers on all requests of a shared flow or on none of them.
 
 ## Composed flow IDs (multi-tenant pools)
 
@@ -79,7 +83,7 @@ Composition is opt-in. A pool that stamps each tenant with a fairness ID header,
 <tenant-fairness-id>/<agent-session-id>    e.g. acme/1f3b-...
 ```
 
-and flow control keys one queue per composed ID. Both strategies then run on those per-session queues: `las` accumulates attained service per session, and `turn-priority` counts dispatched requests per session, which is what makes a session's depth meaningful once tenants are stamped. The tenant prefix also keeps sessions from different tenants distinct, so two tenants that reuse the same session identifier do not share a flow, and it stays visible in the `fairness_id` metric label.
+and flow control keys one queue per composed ID. Both strategies then run on those per-session queues: `las` accumulates attained service per session, and `turn-priority` counts dispatched requests per session, which is what makes a session's depth meaningful once tenants are stamped. The tenant prefix also keeps sessions from different tenants distinct, so two tenants that reuse the same session identifier do not share a flow, and it stays visible in the `fairness_id` metric label. Session state is keyed on the `agent-identity` value alone, so under `turn-priority` with `session-state-producer` two such tenants keep separate flows but share one session depth.
 
 With composition off (the default), the fairness-ID header keys the flow on its own and the session identity is not part of the flow key. Enable it only when the pool's fairness policy should treat a session as the scheduling unit; see [Why choose this policy?](#why-choose-this-policy).
 
@@ -100,7 +104,7 @@ Under `las`, **attained service**, measured as a weighted sum of input and outpu
 * **Program identity**: From the request's `FairnessID` field, which the Director populates from the fairness ID header, the agent-identity attribute, or their `<tenant>/<session>` composition.
 * **Queue state**: Reads queue length and the head item's enqueue time from the `FlowQueueAccessor`.
 * **Token usage** (`las`): From `Response.Usage` on stream completion, falling back to `Response.StreamedEvents` for output tokens when `Response.Usage.CompletionTokens` is zero and `Response.StreamedEvents` is positive.
-* **Dispatched count, in-flight count, last completion time** (`turn-priority`): From the head request's `SessionState` when `session-state-producer` publishes it, which the plugin declares as an optional data dependency. Otherwise from the per-program metrics maintained across the request lifecycle.
+* **Dispatched count, in-flight count, last completion time** (`turn-priority`): From the head request's `SessionState` when it carries one from the `session-state-producer` instance selected by `sessionStateProducerName`, which the plugin declares as an optional data dependency. Otherwise from the per-program metrics maintained across the request lifecycle.
 
 ## Configuration
 
@@ -128,6 +132,7 @@ flowControl:
 | `lasHalfLifeSeconds` | `60` | Wall-clock half-life of attained service. `0` disables decay, making attained service cumulative for the program's lifetime. |
 | `turnPriorityTimeWeight` | `0.05` | (`turn-priority`) Score contribution per second of head wait, against one point per turn of depth. `turnPriorityTimeWeight * requestTTL` bounds the depth a waiting request can overcome, which at the default is 3 turns. `0` orders on depth alone, with longer head wait breaking ties. |
 | `turnPriorityInactivitySeconds` | `120` | (`turn-priority`) A program idle for longer than this has its next request scored as turn one. `0` disables the inactivity reset. Depth is still lost when the program is evicted after `evictionTtlSeconds`, or with session state, when `session-state-producer` evicts the session. |
+| `sessionStateProducerName` | unset | (`turn-priority`) Name of the `session-state-producer` instance whose session state is read. Unset selects the instance named `session-state-producer`, the name an unnamed instance gets. |
 | `evictionTtlSeconds` | `3600` | A program with no completion in this window is evicted from the metrics map. |
 | `evictionSweepSeconds` | `300` | How often the eviction sweep runs. Must be `> 0`. |
 

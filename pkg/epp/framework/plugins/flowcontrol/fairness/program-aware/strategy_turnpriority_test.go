@@ -17,6 +17,8 @@ limitations under the License.
 package programaware
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentidentity"
 )
 
 // seedTurns advances a program to the given turn depth, leaving nothing in flight
@@ -224,6 +227,27 @@ func TestTurnPriority_EqualDepthBreaksTieOnHeadWait(t *testing.T) {
 func sessionTurnInfo(id string, metrics *ProgramMetrics, headEnqueue time.Time, state func() sessionstate.SessionState) (string, QueueInfo) {
 	req := &fwksched.InferenceRequest{FairnessID: id}
 	req.PutAttribute(sessionstate.SessionStateDataKey, &fwksched.DynamicRequestAttribute{Get: func() any { return state() }})
+	return headTurnInfo(id, metrics, headEnqueue, req)
+}
+
+// producedTurnInfo builds a flow for one session whose head request was observed
+// by producer after the session dispatched turns earlier requests.
+func producedTurnInfo(t *testing.T, producer *sessionstate.Producer, session string, turns int, headEnqueue time.Time) (string, QueueInfo) {
+	t.Helper()
+	ctx := context.Background()
+	observe := func(requestID string) *fwksched.InferenceRequest {
+		req := &fwksched.InferenceRequest{RequestID: requestID, FairnessID: session}
+		req.PutAttribute(agentidentity.AgentIdentityKey, session)
+		require.NoError(t, producer.RequestHeader(ctx, req))
+		return req
+	}
+	for i := range turns {
+		require.NoError(t, producer.PreRequest(ctx, observe(fmt.Sprintf("%s-%d", session, i)), nil))
+	}
+	return headTurnInfo(session, &ProgramMetrics{}, headEnqueue, observe(session+"-head"))
+}
+
+func headTurnInfo(id string, metrics *ProgramMetrics, headEnqueue time.Time, req *fwksched.InferenceRequest) (string, QueueInfo) {
 	q := &fwkfcmocks.MockFlowQueueAccessor{
 		LenV:     1,
 		FlowKeyV: flowcontrol.FlowKey{ID: id},
@@ -240,7 +264,7 @@ func fixedSession(state sessionstate.SessionState) func() sessionstate.SessionSt
 }
 
 func TestTurnPriority_ReadsDepthFromSessionState(t *testing.T) {
-	s := &turnPriorityStrategy{timeWeight: 0}
+	s := &turnPriorityStrategy{sessionStateKey: sessionstate.SessionStateDataKey}
 	now := time.Now()
 
 	idA, qA := sessionTurnInfo("a", seedTurns(20, now), now,
@@ -254,7 +278,7 @@ func TestTurnPriority_ReadsDepthFromSessionState(t *testing.T) {
 }
 
 func TestTurnPriority_FallsBackToProgramMetricsWithoutSessionState(t *testing.T) {
-	s := &turnPriorityStrategy{timeWeight: 0}
+	s := &turnPriorityStrategy{sessionStateKey: sessionstate.SessionStateDataKey}
 	now := time.Now()
 
 	idA, qA := sessionTurnInfo("session", &ProgramMetrics{}, now,
@@ -271,7 +295,7 @@ func TestTurnPriority_FallsBackToProgramMetricsWithoutSessionState(t *testing.T)
 // prefix the next dispatch reuses, so its depth is scored rather than the
 // flow's dispatched total.
 func TestTurnPriority_SharedFlowScoresHeadSession(t *testing.T) {
-	s := &turnPriorityStrategy{timeWeight: 0}
+	s := &turnPriorityStrategy{sessionStateKey: sessionstate.SessionStateDataKey}
 	now := time.Now()
 
 	idA, qA := sessionTurnInfo("tenant", seedTurns(40, now), now,
@@ -285,10 +309,10 @@ func TestTurnPriority_SharedFlowScoresHeadSession(t *testing.T) {
 }
 
 func TestTurnPriority_SessionStateInactivityResetsTurnCount(t *testing.T) {
-	s := &turnPriorityStrategy{inactivitySeconds: 60}
+	s := &turnPriorityStrategy{inactivitySeconds: 60, sessionStateKey: sessionstate.SessionStateDataKey}
 	now := time.Now()
 
-	// The idle flow's head waited longer, so without the reset it would win.
+	// The idle flow is deeper, so without the reset it would win.
 	idle := sessionstate.SessionState{TurnsTaken: 30, LastResponseAt: now.Add(-10 * time.Minute)}
 	idA, qA := sessionTurnInfo("idle", &ProgramMetrics{}, now.Add(-time.Second),
 		func() sessionstate.SessionState { return idle })
@@ -309,7 +333,7 @@ func TestTurnPriority_SessionStateInactivityResetsTurnCount(t *testing.T) {
 // The producer publishes a getter, so a queued head observes turns its session
 // records after the head was enqueued.
 func TestTurnPriority_ReadsLiveSessionStateWhileQueued(t *testing.T) {
-	s := &turnPriorityStrategy{timeWeight: 0}
+	s := &turnPriorityStrategy{sessionStateKey: sessionstate.SessionStateDataKey}
 	now := time.Now()
 
 	live := sessionstate.SessionState{TurnsTaken: 2, LastResponseAt: now}
@@ -327,4 +351,33 @@ func TestTurnPriority_ReadsLiveSessionStateWhileQueued(t *testing.T) {
 	got = s.Pick(0, queues)
 	require.NotNil(t, got)
 	assert.Equal(t, "growing", got.FlowKey().ID)
+}
+
+func turnPriorityFromConfig(t *testing.T, params string) Strategy {
+	t.Helper()
+	p, err := ProgramAwarePluginFactory(ProgramAwarePluginType, decoder(params), nil)
+	require.NoError(t, err)
+	return p.(*ProgramAwarePlugin).strategy
+}
+
+func TestTurnPriority_ReadsConfiguredSessionStateProducer(t *testing.T) {
+	plg, err := sessionstate.Factory("sessions", nil, nil)
+	require.NoError(t, err)
+	producer := plg.(*sessionstate.Producer)
+	now := time.Now()
+
+	// The new session's head waited longer, so it wins whenever depth is not read.
+	idA, qA := producedTurnInfo(t, producer, "new", 0, now.Add(-time.Second))
+	idB, qB := producedTurnInfo(t, producer, "deep", 5, now)
+	queues := map[string]QueueInfo{idA: qA, idB: qB}
+
+	named := turnPriorityFromConfig(t, `{"strategy":"turn-priority","turnPriorityTimeWeight":0,"sessionStateProducerName":"sessions"}`)
+	got := named.Pick(0, queues)
+	require.NotNil(t, got)
+	assert.Equal(t, "deep", got.FlowKey().ID, "the configured producer instance supplies the depth")
+
+	unnamed := turnPriorityFromConfig(t, `{"strategy":"turn-priority","turnPriorityTimeWeight":0}`)
+	got = unnamed.Pick(0, queues)
+	require.NotNil(t, got)
+	assert.Equal(t, "new", got.FlowKey().ID, "state from another producer instance is not read")
 }

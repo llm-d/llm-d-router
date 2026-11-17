@@ -558,3 +558,21 @@ func TestDataDependencies_LASConsumesNothing(t *testing.T) {
 	assert.Empty(t, deps.Required)
 	assert.Empty(t, deps.Optional)
 }
+
+func TestDataDependencies_TurnPriorityConsumesNamedSessionStateProducer(t *testing.T) {
+	fairness, err := ProgramAwarePluginFactory(ProgramAwarePluginType,
+		decoder(`{"strategy":"turn-priority","sessionStateProducerName":"sessions"}`), nil)
+	require.NoError(t, err)
+	identity, err := agentidentity.PluginFactory(agentidentity.PluginType, nil, nil)
+	require.NoError(t, err)
+	producer, err := sessionstate.Factory("sessions", nil, nil)
+	require.NoError(t, err)
+
+	ordered, err := datalayer.ValidateAndOrderDataDependencies([]plugin.Plugin{fairness, producer, identity})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		identity.TypedName().String(),
+		producer.TypedName().String(),
+		fairness.TypedName().String(),
+	}, ordered)
+}
