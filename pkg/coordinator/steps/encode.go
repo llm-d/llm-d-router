@@ -153,7 +153,6 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxParallel)
 	for resultIndex, entryIndex := range requestIndices {
-		resultIndex, entryIndex := resultIndex, entryIndex
 		g.Go(func() error {
 			result, headers, err := s.executeOne(gCtx, logger, reqCtx, entryIndex, bodies[entryIndex], format)
 			results[resultIndex] = result
