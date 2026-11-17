@@ -90,12 +90,17 @@ type CrossReplicaBatchSyncer interface {
 	SetBatch(ctx context.Context, spec CrossReplicaSpec, endpointIDs []string, timeout time.Duration) map[string]error
 }
 
+// MaxSequencedElementBytes is the largest encoded element a sequenced value
+// publishes. A larger element is a retraction of its own generation.
+const MaxSequencedElementBytes = 1 << 20
+
 // SequencedValue is an optional interface for a Read value made of elements at
 // consecutive generations, appended at the newest end and dropped from the
 // oldest end. A generation is not reused for different content while the
-// value's generations keep increasing. A syncer can replicate such a value by
-// sending only the elements it has not sent before. Methods do not modify the
-// receiver.
+// value's generations keep increasing. An element bigger than
+// MaxSequencedElementBytes is a retraction of that generation. A syncer can
+// replicate such a value by sending only the elements it has not sent before.
+// Methods do not modify the receiver.
 type SequencedValue interface {
 	Cloneable
 	// SequenceBase is the generation of the oldest element.

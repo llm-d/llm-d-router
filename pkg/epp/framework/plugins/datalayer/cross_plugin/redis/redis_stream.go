@@ -42,7 +42,7 @@ const (
 	markerPrefix       = "stream:"
 	streamElementField = "e"
 	// maxStreamElementBytes bounds one decoded peer element.
-	maxStreamElementBytes = 1 << 20
+	maxStreamElementBytes = fwkdl.MaxSequencedElementBytes
 )
 
 // streamCursor is what this replica's stream for one hash key holds: the
@@ -198,11 +198,11 @@ func (s *RedisSyncer) queueStream(ctx context.Context, pipe goredis.Pipeliner, k
 	sent := 0
 	for gen := next.tip; gen < tip; gen++ {
 		n := v.ElementSize(gen)
-		// Readers reject entries above this size; publishing one would stall
-		// every peer until the prompt is trimmed from the window.
+		// An element that does not fit is a retraction of this generation. One that
+		// is still over the limit is not written, and the cursor stays here.
 		if n > maxStreamElementBytes {
 			if v := ctrl.LoggerFrom(ctx).V(logutil.DEBUG); v.Enabled() {
-				v.Info("redis-syncer: prompt exceeds stream element limit, waiting for eviction",
+				v.Info("redis-syncer: encoded element exceeds stream limit",
 					"key", string(key), "generation", gen, "bytes", n, "limit", maxStreamElementBytes)
 			}
 			break

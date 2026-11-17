@@ -21,27 +21,37 @@ import (
 	"sync"
 
 	"github.com/llm-d/llm-d-router/pkg/common/clamp"
+	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 )
 
+// windowSlot is one sequenced element. A drop slot retracts dropGen.
+// Empty hashes are a withdrawn prompt.
+type windowSlot struct {
+	hashes  []blockHash
+	drop    bool
+	dropGen uint64
+}
+
+// endpointWindow holds one endpoint's sequenced elements. slots[start:] are
+// live. Trimmed elements stay in front of start until compaction moves the live
+// tail to the front, so trimming is amortized constant per element.
+type endpointWindow struct {
+	slots []windowSlot
+	start int
+	// total is the hash count of live content slots.
+	total int
+	// base is the generation of slots[start]. It advances by one for each
+	// element trimmed, so a generation always names the same element.
+	base uint64
+}
+
 // recentWindow buffers recently recorded prompt hash sequences per endpoint.
-// Each inner slice is one prompt's hashes starting at block 0. Cap is on total
+// Each content slot is one prompt's hashes starting at block 0. Cap is on total
 // hashes across prompts so cross-replica publish payloads stay small.
 type recentWindow struct {
 	mu      sync.Mutex
 	pending map[string]*endpointWindow
 	max     int
-}
-
-// endpointWindow holds one endpoint's prompts. prompts[start:] are live. Trimmed
-// prompts stay in front of start until compaction moves the live tail to the
-// front, so trimming is amortized constant per prompt.
-type endpointWindow struct {
-	prompts [][]blockHash
-	start   int
-	total   int
-	// base is the generation of prompts[start]. It advances by one for each
-	// prompt trimmed, so a generation always names the same prompt.
-	base uint64
 }
 
 func newRecentWindow(max int) *recentWindow {
@@ -76,21 +86,9 @@ func (w *recentWindow) record(endpointID string, hashes []blockHash) {
 		buf = &endpointWindow{}
 		w.pending[endpointID] = buf
 	}
-	for buf.total > w.max-len(cp) {
-		buf.total -= len(buf.prompts[buf.start])
-		buf.prompts[buf.start] = nil
-		buf.start++
-		buf.base++
-	}
-	// Compact only after enough trims to amortize copying the retained prompts.
-	if buf.start > 0 && buf.start >= len(buf.prompts)-buf.start {
-		n := copy(buf.prompts, buf.prompts[buf.start:])
-		clear(buf.prompts[n:])
-		buf.prompts = buf.prompts[:n]
-		buf.start = 0
-	}
-	buf.prompts = append(buf.prompts, cp)
+	buf.slots = append(buf.slots, windowSlot{hashes: cp})
 	buf.total += len(cp)
+	buf.trim(w.max)
 }
 
 // snapshot returns a deep copy of pending prompts for endpointID without clearing.
@@ -98,10 +96,20 @@ func (w *recentWindow) record(endpointID string, hashes []blockHash) {
 // peer-visible hashes on the next idle publish tick.
 func (w *recentWindow) snapshot(endpointID string) [][]blockHash {
 	prompts, _ := w.snapshotWindow(endpointID)
-	return prompts
+	live := prompts[:0:0]
+	for _, p := range prompts {
+		if len(p) > 0 {
+			live = append(live, p)
+		}
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	return live
 }
 
-// snapshotWindow is snapshot plus the generation of the first prompt.
+// snapshotWindow returns content slots, including empty withdrawn prompts, and
+// the generation of the first element. Retraction slots are omitted.
 func (w *recentWindow) snapshotWindow(endpointID string) ([][]blockHash, uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -109,7 +117,34 @@ func (w *recentWindow) snapshotWindow(endpointID string) ([][]blockHash, uint64)
 	if buf == nil {
 		return nil, 0
 	}
-	return copyPromptHashes(buf.prompts[buf.start:]), buf.base
+	var prompts [][]blockHash
+	for _, slot := range buf.slots[buf.start:] {
+		if slot.drop {
+			continue
+		}
+		prompts = append(prompts, append([]blockHash(nil), slot.hashes...))
+	}
+	return prompts, buf.base
+}
+
+// sequenced is the value incremental replication publishes for endpointID.
+func (w *recentWindow) sequenced(endpointID string) *attrprefix.PrefixHashSet {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	set := &attrprefix.PrefixHashSet{}
+	buf := w.pending[endpointID]
+	if buf == nil {
+		return set
+	}
+	set.Base = buf.base
+	for _, slot := range buf.slots[buf.start:] {
+		if slot.drop {
+			set.AppendRetract(slot.dropGen)
+			continue
+		}
+		set.AppendContent(hashesToUint64(slot.hashes))
+	}
+	return set
 }
 
 // forget drops the buffer for endpointID when the endpoint leaves the pool.
@@ -119,11 +154,9 @@ func (w *recentWindow) forget(endpointID string) {
 	delete(w.pending, endpointID)
 }
 
-// removePrompt drops one prompt's hashes from endpointID's buffer so a request
-// that failed stops being published to peers. hashes are normalized with the
-// same head-cap record applies, so a recording that was capped is still
-// matched. A prompt already trimmed out by a later record is a no-op.
-// Leading removals advance base so remaining prompts keep their generations.
+// removePrompt empties a matching prompt and appends a retraction of its
+// generation, then trims. Hashes use the same head cap as record. A prompt
+// already trimmed out is a no-op.
 func (w *recentWindow) removePrompt(endpointID string, hashes []blockHash) {
 	if len(hashes) == 0 {
 		return
@@ -139,34 +172,74 @@ func (w *recentWindow) removePrompt(endpointID string, hashes []blockHash) {
 	if buf == nil {
 		return
 	}
-	out := make([][]blockHash, 0, len(buf.prompts)-buf.start)
-	leadingDropped := 0
-	stillLeading := true
-	for _, p := range buf.prompts[buf.start:] {
-		if promptKey(p) == key {
-			buf.total -= len(p)
-			if stillLeading {
-				leadingDropped++
-			}
+	matched := false
+	for j := buf.start; j < len(buf.slots); j++ {
+		slot := &buf.slots[j]
+		if slot.drop || promptKey(slot.hashes) != key {
 			continue
 		}
-		stillLeading = false
-		out = append(out, p)
+		gen := buf.base + clamp.Uint64(j-buf.start)
+		buf.total -= len(slot.hashes)
+		slot.hashes = nil
+		buf.slots = append(buf.slots, windowSlot{drop: true, dropGen: gen})
+		matched = true
 	}
-	buf.prompts = out
-	buf.start = 0
-	buf.base += clamp.Uint64(leadingDropped)
+	if !matched {
+		return
+	}
+	buf.trim(w.max)
 }
 
-func copyPromptHashes(prompts [][]blockHash) [][]blockHash {
-	if len(prompts) == 0 {
-		return nil
+// trim drops the oldest slots until the hash count and the slot count are each
+// at most max, then drops a leading run of withdrawn slots. Those hold no
+// hashes, so the hash cap alone does not bound them.
+func (e *endpointWindow) trim(max int) {
+	for e.total > max && len(e.slots)-e.start > 1 {
+		e.dropFront()
 	}
-	out := make([][]blockHash, len(prompts))
-	for i, p := range prompts {
-		cp := make([]blockHash, len(p))
-		copy(cp, p)
-		out[i] = cp
+	for len(e.slots)-e.start > max {
+		e.dropFront()
+	}
+	for len(e.slots)-e.start > 0 && withdrawnSlot(e.slots[e.start]) {
+		e.dropFront()
+	}
+	e.compact()
+}
+
+func (e *endpointWindow) dropFront() {
+	slot := e.slots[e.start]
+	if !slot.drop {
+		e.total -= len(slot.hashes)
+	}
+	e.slots[e.start] = windowSlot{}
+	e.start++
+	e.base++
+}
+
+// compact moves the live slots to the front once the trimmed prefix is at
+// least as long as the live part.
+func (e *endpointWindow) compact() {
+	live := len(e.slots) - e.start
+	if e.start == 0 || e.start < live {
+		return
+	}
+	n := copy(e.slots, e.slots[e.start:])
+	clear(e.slots[n:])
+	e.slots = e.slots[:n]
+	e.start = 0
+}
+
+func withdrawnSlot(slot windowSlot) bool {
+	return slot.drop || len(slot.hashes) == 0
+}
+
+func hashesToUint64(hashes []blockHash) []uint64 {
+	if len(hashes) == 0 {
+		return []uint64{}
+	}
+	out := make([]uint64, len(hashes))
+	for i, h := range hashes {
+		out[i] = uint64(h)
 	}
 	return out
 }

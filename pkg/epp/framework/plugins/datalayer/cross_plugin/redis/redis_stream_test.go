@@ -153,12 +153,12 @@ func (r *streamReplica) publish(t *testing.T) {
 }
 
 func (r *streamReplica) append(prompts ...[]uint64) {
-	r.window = &attrprefix.PrefixHashSet{Base: r.window.Base, Prompts: append(append([][]uint64{}, r.window.Prompts...), prompts...)}
+	for _, prompt := range prompts {
+		r.window.AppendContent(prompt)
+	}
 }
 
-func (r *streamReplica) evict(n int) {
-	r.window = &attrprefix.PrefixHashSet{Base: r.window.Base + uint64(n), Prompts: r.window.Prompts[n:]}
-}
+func (r *streamReplica) evict(n int) { r.window.Trim(n) }
 
 // peers returns the cached peer aggregate's prompts.
 func (r *streamReplica) peers(t *testing.T) [][]uint64 {
@@ -197,6 +197,58 @@ func TestStreamUnchangedWindowRefreshesTTLWithoutAppending(t *testing.T) {
 	require.Zero(t, a.log.count("hset"), "an unchanged marker is not rewritten")
 	require.Equal(t, testStateTTL, server.TTL(a.streamKey()))
 	require.Equal(t, testStateTTL, server.TTL(a.hashKey()))
+}
+
+func TestStreamShorterTipRepublishesWindow(t *testing.T) {
+	server := miniredis.RunT(t)
+	a := newStreamReplica(t, server, "epp-a", true)
+	b := newStreamReplica(t, server, "epp-b", true)
+	a.append([]uint64{1}, []uint64{2}, []uint64{3})
+	a.publish(t)
+	b.publish(t)
+	require.Equal(t, [][]uint64{{1}, {2}, {3}}, b.peers(t))
+	a.log.reset()
+	b.log.reset()
+
+	// A shorter tip starts a new epoch and republishes the remaining prompts.
+	a.window = &attrprefix.PrefixHashSet{Prompts: [][]uint64{{1}, {3}}}
+	a.publish(t)
+	require.Equal(t, 1, a.log.count("del"), "shorter tip deletes the stream")
+	require.Equal(t, 2, a.log.count("xadd"), "remaining prompts are rewritten")
+	require.Equal(t, uint64(2), a.cursor(t).epoch)
+}
+
+func TestStreamRetractionDoesNotRepublishWindow(t *testing.T) {
+	server := miniredis.RunT(t)
+	a := newStreamReplica(t, server, "epp-a", true)
+	b := newStreamReplica(t, server, "epp-b", true)
+	a.append([]uint64{1}, []uint64{2}, []uint64{3})
+	a.publish(t)
+	b.publish(t)
+	require.Equal(t, [][]uint64{{1}, {2}, {3}}, b.peers(t))
+	a.log.reset()
+	b.log.reset()
+
+	require.True(t, a.window.Retract([]uint64{2}))
+	a.publish(t)
+	require.Zero(t, a.log.count("del"))
+	require.Equal(t, 1, a.log.count("xadd"), "only the retraction is written")
+	require.Zero(t, a.log.count("xtrim"))
+	require.Equal(t, uint64(1), a.cursor(t).epoch)
+	require.Equal(t, uint64(4), a.cursor(t).tip)
+
+	b.publish(t)
+	require.Equal(t, [][]uint64{{1}, {3}}, livePrompts(b.peers(t)))
+}
+
+func livePrompts(prompts [][]uint64) [][]uint64 {
+	var out [][]uint64
+	for _, p := range prompts {
+		if len(p) > 0 {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func TestStreamAppendsOnlyNewPrompts(t *testing.T) {
@@ -482,16 +534,26 @@ func TestStreamRestoresMissingMarker(t *testing.T) {
 func TestStreamSkipsOversizedPrompt(t *testing.T) {
 	server := miniredis.RunT(t)
 	a := newStreamReplica(t, server, "epp-a", true)
+	b := newStreamReplica(t, server, "epp-b", true)
 	huge := make([]uint64, maxStreamElementBytes/8+1)
-	a.window = &attrprefix.PrefixHashSet{Prompts: [][]uint64{huge}}
+	a.append([]uint64{1}, huge, []uint64{2})
 	a.publish(t)
-	require.Zero(t, a.log.take("xadd"))
-	require.Equal(t, uint64(0), a.cursor(t).tip)
+	require.Equal(t, 3, a.log.count("xadd"), "the oversized prompt occupies its generation")
+	require.Equal(t, uint64(1), a.cursor(t).epoch)
+	require.Equal(t, uint64(3), a.cursor(t).tip)
+	entries, err := a.syncer.client.XRange(context.Background(), a.streamKey(), "-", "+").Result()
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+	require.Len(t, entries[1].Values["e"], 9)
 
-	a.window = &attrprefix.PrefixHashSet{Base: 1, Prompts: [][]uint64{{7, 8}}}
+	b.publish(t)
+	require.Equal(t, [][]uint64{{1}, {2}}, livePrompts(b.peers(t)))
+
+	a.log.reset()
 	a.publish(t)
-	require.Equal(t, 1, a.log.take("xadd"))
-	require.Equal(t, uint64(2), a.cursor(t).tip)
+	require.Zero(t, a.log.count("xadd"))
+	require.Zero(t, a.log.count("del"))
+	require.Equal(t, uint64(3), a.cursor(t).tip)
 }
 
 func TestStreamDeleteRemovesStreamAndMarker(t *testing.T) {

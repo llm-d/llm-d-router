@@ -71,7 +71,7 @@ func TestRecentWindowMatchesReference(t *testing.T) {
 	for _, budget := range []int{1, 2, 3, 7, 32} {
 		t.Run(strconv.Itoa(budget), func(t *testing.T) {
 			w := newRecentWindow(budget)
-			want := make(map[string][][]blockHash)
+			want := make(map[string]*referenceWindow)
 			rng := rand.New(rand.NewPCG(1, uint64(budget)))
 			endpoints := []string{"ep-a", "ep-b", "ep-c"}
 			for step := range 4000 {
@@ -86,24 +86,22 @@ func TestRecentWindowMatchesReference(t *testing.T) {
 					delete(want, id)
 				case 1, 2, 3:
 					// Also withdraw known records, including duplicate sequences.
-					if len(want[id]) > 0 && rng.IntN(2) == 0 {
-						hashes = slices.Clone(want[id][rng.IntN(len(want[id]))])
+					if visible := want[id].visible(); len(visible) > 0 && rng.IntN(2) == 0 {
+						hashes = slices.Clone(visible[rng.IntN(len(visible))])
 					}
 					w.removePrompt(id, hashes)
-					prompt := hashes[:min(len(hashes), budget)]
-					want[id] = slices.DeleteFunc(want[id], func(p []blockHash) bool {
-						return slices.Equal(p, prompt)
-					})
+					referenceOf(want, id).remove(hashes, budget)
 				default:
 					w.record(id, hashes)
-					want[id] = referenceRecentRecord(want[id], hashes, budget)
+					referenceOf(want, id).record(hashes, budget)
 				}
 				for _, endpoint := range endpoints {
 					got := w.snapshot(endpoint)
-					if len(want[endpoint]) == 0 {
+					expected := want[endpoint].visible()
+					if len(expected) == 0 {
 						require.Nil(t, got, "step %d endpoint %s", step, endpoint)
 					} else {
-						require.Equal(t, want[endpoint], got, "step %d endpoint %s", step, endpoint)
+						require.Equal(t, expected, got, "step %d endpoint %s", step, endpoint)
 					}
 				}
 			}
@@ -111,21 +109,101 @@ func TestRecentWindowMatchesReference(t *testing.T) {
 	}
 }
 
-// referenceRecentRecord recomputes the budget from all records on every append.
-func referenceRecentRecord(prompts [][]blockHash, hashes []blockHash, budget int) [][]blockHash {
+// referenceSlot is one element in referenceWindow. A drop slot is a retraction.
+// Empty hashes are a withdrawn prompt.
+type referenceSlot struct {
+	hashes []blockHash
+	drop   bool
+}
+
+// referenceWindow models recentWindow independently: the same integer is the
+// hash budget and the slot budget. A withdrawal keeps its slot and appends a
+// retraction, and both count toward the slot budget.
+type referenceWindow struct {
+	slots []referenceSlot
+	total int
+}
+
+func referenceOf(windows map[string]*referenceWindow, id string) *referenceWindow {
+	w := windows[id]
+	if w == nil {
+		w = &referenceWindow{}
+		windows[id] = w
+	}
+	return w
+}
+
+func (w *referenceWindow) visible() [][]blockHash {
+	if w == nil {
+		return nil
+	}
+	var out [][]blockHash
+	for _, slot := range w.slots {
+		if slot.drop || len(slot.hashes) == 0 {
+			continue
+		}
+		out = append(out, slot.hashes)
+	}
+	return out
+}
+
+func (w *referenceWindow) record(hashes []blockHash, budget int) {
 	if len(hashes) == 0 {
-		return prompts
+		return
 	}
-	prompts = append(prompts, slices.Clone(hashes[:min(len(hashes), budget)]))
-	total := 0
-	for _, p := range prompts {
-		total += len(p)
+	prompt := hashes
+	if len(prompt) > budget {
+		prompt = prompt[:budget]
 	}
-	for total > budget {
-		total -= len(prompts[0])
-		prompts = prompts[1:]
+	cp := slices.Clone(prompt)
+	w.slots = append(w.slots, referenceSlot{hashes: cp})
+	w.total += len(cp)
+	w.trim(budget)
+}
+
+func (w *referenceWindow) remove(hashes []blockHash, budget int) {
+	if len(hashes) == 0 {
+		return
 	}
-	return slices.Clone(prompts)
+	prompt := hashes
+	if len(prompt) > budget {
+		prompt = prompt[:budget]
+	}
+	matched := false
+	n := len(w.slots)
+	for i := 0; i < n; i++ {
+		slot := &w.slots[i]
+		if slot.drop || !slices.Equal(slot.hashes, prompt) {
+			continue
+		}
+		w.total -= len(slot.hashes)
+		slot.hashes = nil
+		w.slots = append(w.slots, referenceSlot{drop: true})
+		matched = true
+	}
+	if !matched {
+		return
+	}
+	w.trim(budget)
+}
+
+func (w *referenceWindow) trim(budget int) {
+	for w.total > budget && len(w.slots) > 1 {
+		w.dropFront()
+	}
+	for len(w.slots) > budget {
+		w.dropFront()
+	}
+	for len(w.slots) > 0 && (w.slots[0].drop || len(w.slots[0].hashes) == 0) {
+		w.dropFront()
+	}
+}
+
+func (w *referenceWindow) dropFront() {
+	if !w.slots[0].drop {
+		w.total -= len(w.slots[0].hashes)
+	}
+	w.slots = w.slots[1:]
 }
 
 func TestRecentWindowConcurrentAccess(t *testing.T) {
