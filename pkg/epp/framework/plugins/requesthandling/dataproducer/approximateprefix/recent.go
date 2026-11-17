@@ -78,6 +78,31 @@ func (w *recentWindow) forget(endpointID string) {
 	delete(w.pending, endpointID)
 }
 
+// removePrompt drops one prompt's hashes from endpointID's buffer so a request
+// that failed stops being published to peers. hashes are normalized with the
+// same head-cap record applies, so a recording that was capped is still
+// matched. A prompt already trimmed out by a later record is a no-op.
+func (w *recentWindow) removePrompt(endpointID string, hashes []blockHash) {
+	if len(hashes) == 0 {
+		return
+	}
+	prompt := hashes
+	if len(prompt) > w.max {
+		prompt = prompt[:w.max]
+	}
+	key := promptKey(prompt)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	buf := w.pending[endpointID]
+	out := make([][]blockHash, 0, len(buf))
+	for _, p := range buf {
+		if promptKey(p) != key {
+			out = append(out, p)
+		}
+	}
+	w.pending[endpointID] = out
+}
+
 // trimPromptHashes drops oldest whole prompts until total hashes <= max.
 // If one prompt still exceeds max, it is head-capped.
 func trimPromptHashes(prompts [][]blockHash, max int) [][]blockHash {
