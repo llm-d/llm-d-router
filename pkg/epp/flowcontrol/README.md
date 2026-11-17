@@ -180,6 +180,7 @@ per-team service classes onto that hierarchy:
 
 * [`qos-contract`](../framework/plugins/requesthandling/requestheader/qoscontract/README.md) maps
   each team to a class's band priority and moves traffic outside the team's contract one class down.
+  It can also report whether each team's latency promise is met.
 * `program-aware-fairness` with `strategy: las` shares a band between teams by least attained
   service.
 * `latency-reporter` records TTFT and TPOT per class, prompt-length bucket and prefill/decode

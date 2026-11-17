@@ -21,14 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -36,38 +34,45 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
-// fakeQuerier answers each query from a table; an absent query returns no sample.
-type fakeQuerier struct {
-	answers map[string]fakeAnswer
-	queries []string
+// latencyMetrics stands in for the EPP request latency histograms, in a registry of its own.
+type latencyMetrics struct {
+	registry        *prometheus.Registry
+	ttft, tpot, itl *prometheus.HistogramVec
 }
 
-type fakeAnswer struct {
-	value float64
-	err   error
+var testBuckets = []float64{0.01, 0.02, 0.05, 0.5, 1, 2, 4}
+
+func newLatencyMetrics(t *testing.T) *latencyMetrics {
+	t.Helper()
+	m := &latencyMetrics{registry: prometheus.NewRegistry()}
+	newVec := func(name string, labels ...string) *prometheus.HistogramVec {
+		v := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: name, Buckets: testBuckets},
+			append([]string{"model_name", "fairness_id", "priority"}, labels...))
+		m.registry.MustRegister(v)
+		return v
+	}
+	m.ttft = newVec(sloSeries[sloTTFT].metric, "streaming")
+	m.tpot = newVec(sloSeries[sloTPOT].metric)
+	m.itl = newVec(sloSeries[sloITL].metric)
+	return m
 }
 
-func (f *fakeQuerier) Query(_ context.Context, query string, _ time.Time) (float64, bool, error) {
-	f.queries = append(f.queries, query)
-	a, ok := f.answers[query]
-	if !ok {
-		return 0, false, nil
+// observeTTFT records n TTFT observations of seconds each.
+func (m *latencyMetrics) observeTTFT(fairnessID, priority, streaming string, seconds float64, n int) {
+	for range n {
+		m.ttft.WithLabelValues("llama", fairnessID, priority, streaming).Observe(seconds)
 	}
-	if a.err != nil {
-		return 0, false, a.err
-	}
-	return a.value, true, nil
 }
 
 func sloParams(p *Parameters) {
-	p.SLOValidation = &SLOValidationConfig{PrometheusURL: "http://prometheus:9090", MinRequests: 10, LabelSelector: `namespace="llm-d"`}
+	p.SLOValidation = &SLOValidationConfig{MinRequests: 10}
 	p.Teams[0].Promise = &PromiseConfig{
 		TTFT: &LatencyObjective{Percentile: "p95", ThresholdMs: 2000},
 		TPOT: &LatencyObjective{Percentile: "p95", ThresholdMs: 33},
 	}
 }
 
-func newSLOTestPlugin(t *testing.T, mutate func(*Parameters)) (*Plugin, *fakeClock, *fakeQuerier) {
+func newSLOTestPlugin(t *testing.T, mutate func(*Parameters)) (*Plugin, *fakeClock, *latencyMetrics) {
 	t.Helper()
 	p, clock := newTestPlugin(t, func(params *Parameters) {
 		sloParams(params)
@@ -76,42 +81,34 @@ func newSLOTestPlugin(t *testing.T, mutate func(*Parameters)) (*Plugin, *fakeClo
 		}
 	})
 	require.NotNil(t, p.validator)
-	q := &fakeQuerier{answers: map[string]fakeAnswer{}}
-	p.validator.querier = q
-	return p, clock, q
+	m := newLatencyMetrics(t)
+	p.validator.gatherer = m.registry
+	return p, clock, m
 }
 
-func checkFor(t *testing.T, st *teamState, slo string) sloCheck {
+func result(t *testing.T, st *teamState, slo string) sloResult {
 	t.Helper()
-	for _, c := range st.slo.checks {
-		if c.slo == slo {
-			return c
-		}
-	}
-	t.Fatalf("no %s check", slo)
-	return sloCheck{}
+	snap := st.slo.snapshot.Load()
+	require.NotNil(t, snap, "not validated")
+	r, ok := snap.results[slo]
+	require.True(t, ok, "no %s result", slo)
+	return r
 }
 
-// answer sets the results of a check's queries.
-func (f *fakeQuerier) answer(c sloCheck, count, observed, observedAll float64) {
-	f.answers[c.countQuery] = fakeAnswer{value: count}
-	f.answers[c.observedQuery] = fakeAnswer{value: observed}
-	f.answers[c.observedAllQuery] = fakeAnswer{value: observedAll}
-}
+func ttftOnly(p *Parameters) { p.Teams[0].Promise.TPOT = nil }
 
 func TestSLOConfig_Invalid(t *testing.T) {
 	cases := map[string]func(*Parameters){
-		"promise without sloValidation": func(p *Parameters) { p.SLOValidation = nil },
-		"empty promise":                 func(p *Parameters) { p.Teams[0].Promise = &PromiseConfig{} },
-		"bad percentile":                func(p *Parameters) { p.Teams[0].Promise.TTFT.Percentile = "95" },
-		"p100":                          func(p *Parameters) { p.Teams[0].Promise.TTFT.Percentile = "p100" },
-		"zero threshold":                func(p *Parameters) { p.Teams[0].Promise.TPOT.ThresholdMs = 0 },
-		"custom team header":            func(p *Parameters) { p.TeamHeader = "x-team" },
-		"bad url":                       func(p *Parameters) { p.SLOValidation.PrometheusURL = "prometheus:9090" },
-		"bad window":                    func(p *Parameters) { p.SLOValidation.Window = "5 minutes" },
-		"zero interval":                 func(p *Parameters) { p.SLOValidation.Interval = "0s" },
-		"negative min requests":         func(p *Parameters) { p.SLOValidation.MinRequests = -1 },
-		"selector with braces":          func(p *Parameters) { p.SLOValidation.LabelSelector = `{job="epp"}` },
+		"empty promise":         func(p *Parameters) { p.Teams[0].Promise = &PromiseConfig{} },
+		"bad percentile":        func(p *Parameters) { p.Teams[0].Promise.TTFT.Percentile = "95" },
+		"p100":                  func(p *Parameters) { p.Teams[0].Promise.TTFT.Percentile = "p100" },
+		"p0":                    func(p *Parameters) { p.Teams[0].Promise.TTFT.Percentile = "p0" },
+		"zero threshold":        func(p *Parameters) { p.Teams[0].Promise.TPOT.ThresholdMs = 0 },
+		"custom team header":    func(p *Parameters) { p.TeamHeader = "x-team" },
+		"bad window":            func(p *Parameters) { p.SLOValidation.Window = "5 minutes" },
+		"zero interval":         func(p *Parameters) { p.SLOValidation.Interval = "0s" },
+		"window below interval": func(p *Parameters) { p.SLOValidation.Interval, p.SLOValidation.Window = "5m", "1m" },
+		"negative min requests": func(p *Parameters) { p.SLOValidation.MinRequests = -1 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -124,9 +121,20 @@ func TestSLOConfig_Invalid(t *testing.T) {
 	}
 }
 
+func TestSLOConfig_DefaultsWithoutSection(t *testing.T) {
+	p, _ := newTestPlugin(t, func(params *Parameters) {
+		sloParams(params)
+		params.SLOValidation = nil
+	})
+	require.NotNil(t, p.validator, "a promise is validated with the default settings")
+	assert.Equal(t, time.Minute, p.validator.cfg.interval)
+	assert.Equal(t, 5*time.Minute, p.validator.cfg.window)
+	assert.InDelta(t, defaultMinRequests, p.validator.cfg.minRequests, 0)
+}
+
 func TestSLOConfig_NoPromiseNoValidator(t *testing.T) {
 	p, _ := newTestPlugin(t, func(params *Parameters) {
-		params.SLOValidation = &SLOValidationConfig{PrometheusURL: "http://prometheus:9090"}
+		params.SLOValidation = &SLOValidationConfig{Window: "10m"}
 	})
 	assert.Nil(t, p.validator, "validation runs only for teams with a promise")
 }
@@ -135,78 +143,101 @@ func TestSLOConfig_FactoryParsesPromise(t *testing.T) {
 	raw := `{"classes":[{"name":"critical","priority":100},{"name":"batch","priority":-1}],
 		"defaultTeam":{"class":"batch"},
 		"teams":[{"id":"a","class":"critical","maxConcurrency":3,
-			"promise":{"ttft":{"percentile":"p95","thresholdMs":2000},"itl":{"percentile":"p99","thresholdMs":50}}}],
-		"sloValidation":{"prometheusURL":"https://thanos:9091","window":"10m","interval":"30s"}}`
+			"promise":{"ttft":{"percentile":"p95","thresholdMs":2000},"itl":{"percentile":"p99.9","thresholdMs":50}}}],
+		"sloValidation":{"window":"1d","interval":"30s"}}`
 	got, err := PluginFactory("qos", fwkplugin.StrictDecoder(json.RawMessage(raw)), nil)
 	require.NoError(t, err)
 	p := got.(*Plugin)
 	require.NotNil(t, p.validator)
 	assert.Equal(t, 30*time.Second, p.validator.cfg.interval)
-	assert.Equal(t, "10m", p.validator.cfg.window)
+	assert.Equal(t, 24*time.Hour, p.validator.cfg.window)
 	checks := p.teams["a"].slo.checks
 	require.Len(t, checks, 2)
 	assert.Equal(t, sloTTFT, checks[0].slo)
 	assert.Equal(t, sloITL, checks[1].slo)
-	assert.InDelta(t, 0.99, checks[1].quantile, 1e-12)
+	assert.InDelta(t, 0.999, checks[1].quantile, 0)
 	assert.InDelta(t, 0.05, checks[1].threshold, 1e-12)
 }
 
-func TestSLOQueries(t *testing.T) {
-	p, _, _ := newSLOTestPlugin(t, func(params *Parameters) {
-		params.DefaultTeam.Promise = &PromiseConfig{ITL: &LatencyObjective{Percentile: "p99.9", ThresholdMs: 100}}
-	})
+func TestSLOConfig_PrometheusConnectionFieldsAreGone(t *testing.T) {
+	raw := `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},
+		"sloValidation":{"prometheusURL":"http://prometheus:9090"}}`
+	_, err := PluginFactory("qos", fwkplugin.StrictDecoder(json.RawMessage(raw)), nil)
+	assert.Error(t, err, "the metrics are read in-process")
+}
 
-	ttft := checkFor(t, p.teams["team-a"], sloTTFT)
-	assert.Equal(t,
-		`histogram_quantile(0.95, sum by (le) (rate(llm_d_epp_request_ttft_seconds_bucket{fairness_id=~"(team-a)(/.*)?",priority="100",streaming="true",namespace="llm-d"}[5m])))`,
-		ttft.observedQuery)
-	assert.Equal(t,
-		`histogram_quantile(0.95, sum by (le) (rate(llm_d_epp_request_ttft_seconds_bucket{fairness_id=~"(team-a)(/.*)?",streaming="true",namespace="llm-d"}[5m])))`,
-		ttft.observedAllQuery, "the all scope covers the team's traffic at any class")
-	assert.Equal(t,
-		`sum(increase(llm_d_epp_request_ttft_seconds_count{fairness_id=~"(team-a)(/.*)?",priority="100",streaming="true",namespace="llm-d"}[5m]))`,
-		ttft.countQuery)
+func TestHistogramQuantile(t *testing.T) {
+	// 10 at most 1, 20 in (1, 2], 10 in (2, 4], 10 above 4.
+	h := histogram{bounds: []float64{1, 2, 4}, counts: []float64{10, 30, 40}, total: 50}
+	cases := []struct {
+		q, want float64
+	}{
+		{0.1, 0.5},  // rank 5 in the first bucket, interpolated from 0
+		{0.5, 1.75}, // rank 25: 15 of the 20 in (1, 2]
+		{0.8, 4},    // rank 40: the top of (2, 4]
+		{0.9, 4},    // rank 45 in +Inf: the largest finite bound
+	}
+	for _, tc := range cases {
+		got, ok := h.quantile(tc.q)
+		assert.True(t, ok)
+		assert.InDelta(t, tc.want, got, 1e-12, "q=%v", tc.q)
+	}
+	_, ok := histogram{}.quantile(0.5)
+	assert.False(t, ok, "no observations")
+}
 
-	tpot := checkFor(t, p.teams["team-a"], sloTPOT)
-	assert.Contains(t, tpot.observedQuery, `llm_d_epp_request_streaming_tpot_seconds_bucket{fairness_id=~"(team-a)(/.*)?",priority="100",namespace="llm-d"}`)
+func TestHistogramSub(t *testing.T) {
+	now := histogram{bounds: []float64{1, 2}, counts: []float64{5, 8}, total: 10}
+	base := histogram{bounds: []float64{1, 2}, counts: []float64{2, 3}, total: 4}
+	assert.Equal(t, histogram{bounds: []float64{1, 2}, counts: []float64{3, 5}, total: 6}, now.sub(base))
+	assert.Equal(t, now, now.sub(histogram{}), "a zero base keeps everything")
+	assert.Equal(t, now, now.sub(histogram{bounds: []float64{1}, counts: []float64{1}, total: 1}), "other buckets cannot be a base")
+	assert.Equal(t, base, base.sub(now), "a count that went down is a reset")
+}
 
-	// The default team covers every fairness ID the contract does not list.
-	itl := checkFor(t, p.defaultTeam, sloITL)
-	assert.Equal(t,
-		`histogram_quantile(0.999, sum by (le) (rate(llm_d_epp_request_streaming_itl_seconds_bucket{fairness_id!~"(team-a|team-b|team-d)(/.*)?",priority="10",namespace="llm-d"}[5m])))`,
-		itl.observedQuery)
+func TestValidate_SelectsGuaranteedAndAllTraffic(t *testing.T) {
+	p, _, m := newSLOTestPlugin(t, ttftOnly)
+	m.observeTTFT("team-a", "100", "true", 0.3, 40)           // guaranteed
+	m.observeTTFT("team-a/program-1", "100", "true", 0.3, 10) // guaranteed, composed fairness ID
+	m.observeTTFT("team-a", "10", "true", 3, 50)              // downgraded: all only
+	m.observeTTFT("team-a", "100", "false", 30, 50)           // non-streaming: excluded
+	m.observeTTFT("team-ab", "100", "true", 30, 50)           // another team with the same prefix
+	m.observeTTFT("team-b", "100", "true", 30, 50)            // another team
+
+	p.validator.validate(context.Background())
+
+	r := result(t, p.teams["team-a"], sloTTFT)
+	assert.InDelta(t, 50, r.requests, 0)
+	assert.Equal(t, sloStatusMet, r.status)
+	// All 50 guaranteed requests are in (0.05, 0.5]: rank 47.5 interpolates to 0.05 + 0.45*47.5/50.
+	assert.InDelta(t, 0.4775, r.observed, 1e-9)
+	// The 50 downgraded requests are in (2, 4]: rank 95 of 100 is 45 of those 50, 2 + 2*45/50.
+	assert.InDelta(t, 3.8, r.observedAll, 1e-9)
+	assert.InDelta(t, r.observedAll, promtestutil.ToFloat64(sloObservedSeconds.WithLabelValues("team-a", "critical", sloTTFT, scopeAll)), 1e-12)
 }
 
 func TestValidate_Verdicts(t *testing.T) {
 	cases := []struct {
-		name     string
-		count    float64
-		observed float64
-		want     string
+		name    string
+		seconds float64
+		n       int
+		want    string
 	}{
-		{"within threshold", 100, 1.5, sloStatusMet},
-		{"at threshold", 100, 2, sloStatusMet},
-		{"above threshold", 100, 2.5, sloStatusViolated},
-		{"too few requests", 9, 2.5, sloStatusInsufficientData},
+		{"within threshold", 1.5, 100, sloStatusMet},
+		{"above threshold", 3, 100, sloStatusViolated},
+		{"too few requests", 3, 9, sloStatusInsufficientData},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p, _, q := newSLOTestPlugin(t, func(params *Parameters) { params.Teams[0].Promise.TPOT = nil })
-			team := p.teams["team-a"]
-			c := checkFor(t, team, sloTTFT)
-			q.answer(c, tc.count, tc.observed, 3)
+			p, _, m := newSLOTestPlugin(t, ttftOnly)
+			m.observeTTFT("team-a", "100", "true", tc.seconds, tc.n)
 
 			p.validator.validate(context.Background())
 
-			snap := team.slo.snapshot.Load()
-			require.NotNil(t, snap)
-			assert.Equal(t, tc.want, snap.status)
-			r := snap.results[sloTTFT]
-			assert.Equal(t, tc.want, r.status)
-			assert.InDelta(t, tc.observed, r.observed, 1e-12)
-			assert.InDelta(t, 3, r.observedAll, 1e-12)
+			team := p.teams["team-a"]
+			assert.Equal(t, tc.want, result(t, team, sloTTFT).status)
+			assert.Equal(t, tc.want, team.slo.snapshot.Load().status)
 			assert.InDelta(t, 1, promtestutil.ToFloat64(sloPromiseStatus.WithLabelValues(team.label, "critical", sloTTFT, tc.want)), 0)
-			assert.InDelta(t, tc.observed, promtestutil.ToFloat64(sloObservedSeconds.WithLabelValues(team.label, "critical", sloTTFT, scopeGuaranteed)), 1e-12)
 		})
 	}
 }
@@ -214,47 +245,94 @@ func TestValidate_Verdicts(t *testing.T) {
 func TestValidate_NoDataIsInsufficient(t *testing.T) {
 	p, _, _ := newSLOTestPlugin(t, nil)
 	p.validator.validate(context.Background())
-	snap := p.teams["team-a"].slo.snapshot.Load()
-	require.NotNil(t, snap)
-	assert.Equal(t, sloStatusInsufficientData, snap.status)
-	assert.True(t, math.IsNaN(snap.results[sloTTFT].observed))
+	r := result(t, p.teams["team-a"], sloTPOT)
+	assert.Equal(t, sloStatusInsufficientData, r.status)
+	assert.True(t, math.IsNaN(r.observed))
 }
 
-func TestValidate_QueryErrorIsUnknown(t *testing.T) {
-	p, _, q := newSLOTestPlugin(t, nil)
+func TestValidate_WindowDropsOldObservations(t *testing.T) {
+	p, clock, m := newSLOTestPlugin(t, ttftOnly) // interval 1m, window 5m
 	team := p.teams["team-a"]
-	ttft, tpot := checkFor(t, team, sloTTFT), checkFor(t, team, sloTPOT)
-	q.answer(ttft, 100, 1, 1)
-	q.answer(tpot, 100, 0.02, 0.02)
-	q.answers[tpot.countQuery] = fakeAnswer{err: errors.New("prometheus down")}
-	before := promtestutil.ToFloat64(sloValidationErrors.WithLabelValues(team.label, sloTPOT))
+	m.observeTTFT("team-a", "100", "true", 3, 50)
+	p.validator.validate(context.Background())
+	assert.Equal(t, sloStatusViolated, result(t, team, sloTTFT).status, "before a full window, everything since the start counts")
+
+	for range 4 {
+		clock.t = clock.t.Add(time.Minute)
+		p.validator.validate(context.Background())
+		assert.Equal(t, sloStatusViolated, result(t, team, sloTTFT).status)
+	}
+	clock.t = clock.t.Add(time.Minute)
+	p.validator.validate(context.Background())
+	r := result(t, team, sloTTFT)
+	assert.Equal(t, sloStatusInsufficientData, r.status, "the slow requests are older than the window")
+	assert.InDelta(t, 0, r.requests, 0)
+
+	m.observeTTFT("team-a", "100", "true", 0.3, 50)
+	clock.t = clock.t.Add(time.Minute)
+	p.validator.validate(context.Background())
+	r = result(t, team, sloTTFT)
+	assert.Equal(t, sloStatusMet, r.status)
+	assert.InDelta(t, 50, r.requests, 0)
+	assert.LessOrEqual(t, len(team.slo.checks[0].samples), 7, "samples older than the window are dropped")
+}
+
+func TestValidate_DefaultTeamExcludesListedTeams(t *testing.T) {
+	p, _, m := newSLOTestPlugin(t, func(params *Parameters) {
+		params.DefaultTeam.Promise = &PromiseConfig{TTFT: &LatencyObjective{Percentile: "p95", ThresholdMs: 1000}}
+	})
+	m.observeTTFT("someone", "10", "true", 0.3, 30)
+	m.observeTTFT("other", "10", "true", 0.3, 30)
+	m.observeTTFT("team-a", "10", "true", 30, 30) // a listed team downgraded to the default class
 
 	p.validator.validate(context.Background())
 
-	snap := team.slo.snapshot.Load()
-	assert.Equal(t, sloStatusMet, snap.results[sloTTFT].status)
-	assert.Equal(t, sloStatusUnknown, snap.results[sloTPOT].status)
-	assert.Equal(t, sloStatusUnknown, snap.status, "an unknown objective outranks a met one")
-	assert.InDelta(t, before+1, promtestutil.ToFloat64(sloValidationErrors.WithLabelValues(team.label, sloTPOT)), 0)
+	r := result(t, p.defaultTeam, sloTTFT)
+	assert.InDelta(t, 60, r.requests, 0)
+	assert.Equal(t, sloStatusMet, r.status)
 }
 
-func TestValidate_ViolationOutranksUnknown(t *testing.T) {
-	p, _, q := newSLOTestPlugin(t, nil)
-	team := p.teams["team-a"]
-	ttft, tpot := checkFor(t, team, sloTTFT), checkFor(t, team, sloTPOT)
-	q.answer(ttft, 100, 5, 5)
-	q.answers[tpot.countQuery] = fakeAnswer{err: errors.New("prometheus down")}
+func TestValidate_TPOTAndITL(t *testing.T) {
+	p, _, m := newSLOTestPlugin(t, func(params *Parameters) {
+		params.Teams[0].Promise = &PromiseConfig{
+			TPOT: &LatencyObjective{Percentile: "p95", ThresholdMs: 33},
+			ITL:  &LatencyObjective{Percentile: "p99", ThresholdMs: 20},
+		}
+	})
+	for range 30 {
+		m.tpot.WithLabelValues("llama", "team-a", "100").Observe(0.015)
+		m.itl.WithLabelValues("llama", "team-a", "100").Observe(0.04)
+	}
 
 	p.validator.validate(context.Background())
-	assert.Equal(t, sloStatusViolated, team.slo.snapshot.Load().status)
+
+	team := p.teams["team-a"]
+	assert.Equal(t, sloStatusMet, result(t, team, sloTPOT).status)
+	assert.Equal(t, sloStatusViolated, result(t, team, sloITL).status)
+	assert.Equal(t, sloStatusViolated, team.slo.snapshot.Load().status, "the team takes its most severe objective")
+}
+
+func TestValidate_GatherErrorIsUnknown(t *testing.T) {
+	p, _, _ := newSLOTestPlugin(t, nil)
+	p.validator.gatherer = prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
+		return nil, errors.New("gather failed")
+	})
+	before := promtestutil.ToFloat64(sloValidationErrors)
+
+	p.validator.validate(context.Background())
+
+	team := p.teams["team-a"]
+	assert.Equal(t, sloStatusUnknown, team.slo.snapshot.Load().status)
+	assert.Equal(t, sloStatusUnknown, result(t, team, sloTTFT).status)
+	assert.InDelta(t, before+1, promtestutil.ToFloat64(sloValidationErrors), 0)
 }
 
 func TestValidateSLO_StatusIsStaleAfterThreeIntervals(t *testing.T) {
-	p, clock, q := newSLOTestPlugin(t, func(params *Parameters) { params.Teams[0].Promise.TPOT = nil })
+	p, clock, m := newSLOTestPlugin(t, ttftOnly)
 	team := p.teams["team-a"]
 	assert.Equal(t, sloStatusUnknown, team.slo.current(clock.now()), "unknown before the first validation")
 
-	q.answer(checkFor(t, team, sloTTFT), 100, 1, 1)
+	m.observeTTFT("team-a", "100", "true", 0.3, 50)
 	p.validator.validate(context.Background())
 	assert.Equal(t, sloStatusMet, team.slo.current(clock.now()))
 
@@ -265,9 +343,9 @@ func TestValidateSLO_StatusIsStaleAfterThreeIntervals(t *testing.T) {
 }
 
 func TestRequestHeader_ReportsSLOStatusWithinContract(t *testing.T) {
-	p, _, q := newSLOTestPlugin(t, func(params *Parameters) { params.Teams[0].Promise.TPOT = nil })
+	p, _, m := newSLOTestPlugin(t, ttftOnly)
 	team := p.teams["team-a"]
-	q.answer(checkFor(t, team, sloTTFT), 100, 5, 5)
+	m.observeTTFT("team-a", "100", "true", 3, 50)
 	p.validator.validate(context.Background())
 	before := promtestutil.ToFloat64(sloAdmissions.WithLabelValues(team.label, "critical", sloStatusViolated))
 
@@ -293,53 +371,4 @@ func TestRequestHeader_ReportsSLOStatusWithinContract(t *testing.T) {
 	resp = &fwkrh.Response{Headers: map[string]string{}}
 	p.ResponseHeader(context.Background(), other, resp, nil)
 	assert.NotContains(t, resp.Headers, SLOStatusHeader)
-}
-
-func TestPrometheusQuerier(t *testing.T) {
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	require.NoError(t, os.WriteFile(tokenFile, []byte("secret\n"), 0o600))
-
-	responses := map[string]string{
-		"one":   `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1700000000,"0.25"]}]}}`,
-		"none":  `{"status":"success","data":{"resultType":"vector","result":[]}}`,
-		"nan":   `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1700000000,"NaN"]}]}}`,
-		"many":  `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"a":"1"},"value":[1700000000,"1"]},{"metric":{"a":"2"},"value":[1700000000,"2"]}]}}`,
-		"error": `{"status":"error","errorType":"bad_data","error":"parse error"}`,
-	}
-	var auth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth = r.Header.Get("Authorization")
-		require.NoError(t, r.ParseForm())
-		body := responses[r.Form.Get("query")]
-		w.Header().Set("Content-Type", "application/json")
-		if r.Form.Get("query") == "error" {
-			w.WriteHeader(http.StatusBadRequest)
-		}
-		_, _ = w.Write([]byte(body))
-	}))
-	defer srv.Close()
-
-	q, err := newPrometheusQuerier(SLOValidationConfig{PrometheusURL: srv.URL, BearerTokenFile: tokenFile})
-	require.NoError(t, err)
-	ctx := context.Background()
-
-	v, ok, err := q.Query(ctx, "one", time.Now())
-	require.NoError(t, err)
-	assert.True(t, ok)
-	assert.InDelta(t, 0.25, v, 1e-12)
-	assert.Equal(t, "Bearer secret", auth)
-
-	_, ok, err = q.Query(ctx, "none", time.Now())
-	require.NoError(t, err)
-	assert.False(t, ok)
-
-	_, ok, err = q.Query(ctx, "nan", time.Now())
-	require.NoError(t, err)
-	assert.False(t, ok, "histogram_quantile over no data is NaN")
-
-	_, _, err = q.Query(ctx, "many", time.Now())
-	assert.Error(t, err)
-
-	_, _, err = q.Query(ctx, "error", time.Now())
-	assert.Error(t, err)
 }

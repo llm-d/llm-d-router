@@ -18,7 +18,7 @@ limitations under the License.
 // contracts before flow control: it maps a team to a service class (a priority band), and moves
 // traffic outside the team's contract (size limits, concurrency and a daily budget) to the next
 // lower class. It also validates each team's latency promise (TTFT, TPOT, ITL) against the
-// latency metrics collected in Prometheus, and reports whether it is met.
+// latency metrics this EPP records, and reports whether it is met.
 package qoscontract
 
 import (
@@ -113,7 +113,8 @@ type Plugin struct {
 	teams        map[string]*teamState
 	defaultTeam  *teamState
 	now          func() time.Time
-	// validator checks team promises against Prometheus; nil when no team has a promise.
+	// validator checks team promises against the EPP latency histograms; nil when no team has a
+	// promise.
 	validator *sloValidator
 
 	holds sync.Map // key: RequestID, value: *hold

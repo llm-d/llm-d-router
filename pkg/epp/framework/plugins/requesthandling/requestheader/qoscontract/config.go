@@ -61,7 +61,7 @@ type TeamConfig struct {
 	// DailyTokens is the committed weighted-token budget per UTC day. 0 is unlimited.
 	DailyTokens float64 `json:"dailyTokens,omitempty"`
 	// Promise is the latency promised to the team's traffic within the contract. It is checked
-	// against collected metrics, and requires sloValidation.
+	// against the latency metrics this EPP records, as sloValidation sets.
 	Promise *PromiseConfig `json:"promise,omitempty"`
 }
 
@@ -84,8 +84,8 @@ type Parameters struct {
 	DefaultTeam TeamConfig `json:"defaultTeam"`
 	// Teams lists the teams with a contract.
 	Teams []TeamConfig `json:"teams,omitempty"`
-	// SLOValidation checks team promises against the latency metrics collected in Prometheus.
-	// Required when a team has a promise.
+	// SLOValidation sets how often and over how long team promises are validated. Optional; its
+	// defaults apply when a team has a promise.
 	SLOValidation *SLOValidationConfig `json:"sloValidation,omitempty"`
 }
 
@@ -148,14 +148,9 @@ func (p *Parameters) validate() error {
 	for i := range p.Teams {
 		hasPromise = hasPromise || p.Teams[i].Promise != nil
 	}
-	if hasPromise {
-		if p.SLOValidation == nil {
-			return errors.New("sloValidation is required when a team has a promise")
-		}
-		// Promises are read from series labeled by fairness ID, so the team has to be it.
-		if p.TeamHeader != metadata.FlowFairnessIDKey {
-			return fmt.Errorf("a promise requires teamHeader to be the fairness ID header %q", metadata.FlowFairnessIDKey)
-		}
+	// Promises are read from series labeled by fairness ID, so the team has to be it.
+	if hasPromise && p.TeamHeader != metadata.FlowFairnessIDKey {
+		return fmt.Errorf("a promise requires teamHeader to be the fairness ID header %q", metadata.FlowFairnessIDKey)
 	}
 	if p.SLOValidation != nil {
 		if _, err := p.SLOValidation.resolve(); err != nil {

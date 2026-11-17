@@ -18,22 +18,17 @@ package qoscontract
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"math"
-	"net/http"
-	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	promapi "github.com/prometheus/client_golang/api"
-	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
-	"github.com/prometheus/common/model"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -97,16 +92,153 @@ func (p *PromiseConfig) objectives() []namedObjective {
 	return out
 }
 
-// sloCheck is one objective of one team's promise, with the queries that validate it.
+// histogram is a cumulative histogram: counts[i] observations are at most bounds[i], and total
+// observations in all, the +Inf bucket included. The zero value has no observations.
+type histogram struct {
+	bounds []float64
+	counts []float64
+	total  float64
+}
+
+// add sums o into h. A histogram with other bucket bounds is skipped.
+func (h *histogram) add(o histogram) {
+	if h.total == 0 && len(h.bounds) == 0 {
+		h.bounds = append([]float64(nil), o.bounds...)
+		h.counts = append([]float64(nil), o.counts...)
+		h.total = o.total
+		return
+	}
+	if !sameBounds(h.bounds, o.bounds) {
+		return
+	}
+	for i := range h.counts {
+		h.counts[i] += o.counts[i]
+	}
+	h.total += o.total
+}
+
+// sub returns the observations made after base. When base cannot precede h (other buckets, or
+// a count that went down because a series was removed), it returns h.
+func (h histogram) sub(base histogram) histogram {
+	if base.total == 0 {
+		return h
+	}
+	if !sameBounds(h.bounds, base.bounds) || h.total < base.total {
+		return h
+	}
+	out := histogram{bounds: h.bounds, counts: make([]float64, len(h.counts)), total: h.total - base.total}
+	for i := range h.counts {
+		if h.counts[i] < base.counts[i] {
+			return h
+		}
+		out.counts[i] = h.counts[i] - base.counts[i]
+	}
+	return out
+}
+
+// quantile estimates the q-quantile as PromQL histogram_quantile does: linear interpolation
+// within the bucket holding the rank, starting from 0 in the first bucket. A rank in the +Inf
+// bucket returns the largest finite bound. ok is false when there are no observations.
+func (h histogram) quantile(q float64) (value float64, ok bool) {
+	if h.total == 0 || len(h.bounds) == 0 {
+		return math.NaN(), false
+	}
+	rank := q * h.total
+	b := -1
+	for i, c := range h.counts {
+		if c >= rank {
+			b = i
+			break
+		}
+	}
+	if b < 0 {
+		return h.bounds[len(h.bounds)-1], true
+	}
+	start, below := 0.0, 0.0
+	if b > 0 {
+		start, below = h.bounds[b-1], h.counts[b-1]
+	} else if h.bounds[0] <= 0 {
+		return h.bounds[0], true
+	}
+	return start + (h.bounds[b]-start)*((rank-below)/(h.counts[b]-below)), true
+}
+
+func sameBounds(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// seriesFilter selects the series of one scope of a team's traffic.
+type seriesFilter struct {
+	// fairnessIDs are matched alone or as the tenant of a composed "<tenant>/<program>" fairness ID.
+	fairnessIDs []string
+	// exclude selects the series whose fairness ID matches none of fairnessIDs.
+	exclude       bool
+	priority      string // empty matches any priority
+	streamingOnly bool
+}
+
+func (f seriesFilter) matches(labels map[string]string) bool {
+	if f.priority != "" && labels["priority"] != f.priority {
+		return false
+	}
+	if f.streamingOnly && labels["streaming"] != "true" {
+		return false
+	}
+	id := labels["fairness_id"]
+	in := false
+	for _, t := range f.fairnessIDs {
+		if id == t || strings.HasPrefix(id, t+"/") {
+			in = true
+			break
+		}
+	}
+	return in != f.exclude
+}
+
+// sloSample is one reading of a check's cumulative histograms.
+type sloSample struct {
+	at                     time.Time
+	guaranteed, allTraffic histogram
+}
+
+// sloCheck is one objective of one team's promise. Its samples are read and written only by the
+// validation loop.
 type sloCheck struct {
-	slo       string
-	quantile  float64
-	threshold float64 // seconds
-	// observedQuery and observedAllQuery return the latency at the promised percentile for the
-	// guaranteed and the all scope. countQuery returns the guaranteed requests in the window.
-	observedQuery    string
-	observedAllQuery string
-	countQuery       string
+	slo        string
+	metric     string
+	quantile   float64
+	threshold  float64 // seconds
+	guaranteed seriesFilter
+	allTraffic seriesFilter
+	samples    []sloSample
+}
+
+// windowBase returns the reading the window starts from: the newest one at or before at-window,
+// so the window covers at least its length. Older readings are dropped. Before the validator
+// has run for a window, the base is the zero histogram, and the window covers everything since
+// the validator started.
+func (c *sloCheck) windowBase(at time.Time, window time.Duration) sloSample {
+	start := at.Add(-window)
+	i := -1
+	for j, s := range c.samples {
+		if s.at.After(start) {
+			break
+		}
+		i = j
+	}
+	if i < 0 {
+		return sloSample{}
+	}
+	c.samples = c.samples[i:]
+	return c.samples[0]
 }
 
 // sloResult is the last validation of one check.
@@ -127,7 +259,7 @@ type sloSnapshot struct {
 // teamSLO is a team's promise and its last validation.
 type teamSLO struct {
 	class      string
-	checks     []sloCheck
+	checks     []*sloCheck
 	staleAfter time.Duration
 	snapshot   atomic.Pointer[sloSnapshot]
 }
@@ -144,12 +276,9 @@ func (s *teamSLO) current(now time.Time) string {
 // newTeamSLO builds the checks for team. For the default team, whose traffic carries the
 // requester's own fairness ID, the series of every listed team are excluded instead.
 func newTeamSLO(team *teamState, class ClassConfig, isDefault bool, listedLabels []string, v sloValidation) (*teamSLO, error) {
-	var fairness string
-	switch {
-	case !isDefault:
-		fairness = "fairness_id=~" + strconv.Quote(fairnessPattern([]string{team.label}))
-	case len(listedLabels) > 0:
-		fairness = "fairness_id!~" + strconv.Quote(fairnessPattern(listedLabels))
+	fairness := seriesFilter{fairnessIDs: []string{team.label}}
+	if isDefault {
+		fairness = seriesFilter{fairnessIDs: listedLabels, exclude: true}
 	}
 	s := &teamSLO{class: class.Name, staleAfter: staleIntervals * v.interval}
 	for _, o := range team.cfg.Promise.objectives() {
@@ -158,132 +287,61 @@ func newTeamSLO(team *teamState, class ClassConfig, isDefault bool, listedLabels
 			return nil, err
 		}
 		series := sloSeries[o.slo]
-		all := matchers(fairness, series.streamingOnly, v.cfg.LabelSelector, "")
-		guaranteed := matchers(fairness, series.streamingOnly, v.cfg.LabelSelector, strconv.Itoa(class.Priority))
-		s.checks = append(s.checks, sloCheck{
-			slo:              o.slo,
-			quantile:         q,
-			threshold:        o.ThresholdMs / 1000,
-			observedQuery:    quantileQuery(q, series.metric, guaranteed, v.window),
-			observedAllQuery: quantileQuery(q, series.metric, all, v.window),
-			countQuery:       fmt.Sprintf("sum(increase(%s_count{%s}[%s]))", series.metric, guaranteed, v.window),
+		all := fairness
+		all.streamingOnly = series.streamingOnly
+		guaranteed := all
+		guaranteed.priority = strconv.Itoa(class.Priority)
+		s.checks = append(s.checks, &sloCheck{
+			slo:        o.slo,
+			metric:     series.metric,
+			quantile:   q,
+			threshold:  o.ThresholdMs / 1000,
+			guaranteed: guaranteed,
+			allTraffic: all,
 		})
 	}
 	return s, nil
 }
 
-// fairnessPattern matches the given fairness IDs, alone or as the tenant of a composed
-// "<tenant>/<program>" fairness ID. PromQL anchors the regex at both ends.
-func fairnessPattern(labels []string) string {
-	quoted := make([]string, len(labels))
-	for i, l := range labels {
-		quoted[i] = regexp.QuoteMeta(l)
-	}
-	return "(" + strings.Join(quoted, "|") + ")(/.*)?"
-}
-
-func matchers(fairness string, streamingOnly bool, extra, priority string) string {
-	var m []string
-	if fairness != "" {
-		m = append(m, fairness)
-	}
-	if priority != "" {
-		m = append(m, "priority="+strconv.Quote(priority))
-	}
-	if streamingOnly {
-		m = append(m, `streaming="true"`)
-	}
-	if extra = strings.TrimSpace(extra); extra != "" {
-		m = append(m, extra)
-	}
-	return strings.Join(m, ",")
-}
-
-func quantileQuery(q float64, metric, sel, window string) string {
-	return fmt.Sprintf("histogram_quantile(%s, sum by (le) (rate(%s_bucket{%s}[%s])))",
-		strconv.FormatFloat(q, 'g', -1, 64), metric, sel, window)
-}
-
-// promQuerier evaluates instant queries that return at most one sample.
-type promQuerier interface {
-	// Query returns the query's single sample. ok is false when the query returns no sample, or
-	// a NaN one.
-	Query(ctx context.Context, query string, ts time.Time) (value float64, ok bool, err error)
-}
-
-type prometheusQuerier struct{ api promv1.API }
-
-func newPrometheusQuerier(cfg SLOValidationConfig) (promQuerier, error) {
-	tlsConfig := &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify} //nolint:gosec // opt-in, for self-signed in-cluster Prometheus.
-	if cfg.CAFile != "" {
-		pem, err := os.ReadFile(cfg.CAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read caFile: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("caFile %q holds no PEM certificate", cfg.CAFile)
-		}
-		tlsConfig.RootCAs = pool
-	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = tlsConfig
-	var rt http.RoundTripper = transport
-	if cfg.BearerTokenFile != "" {
-		rt = &bearerTokenFileRoundTripper{file: cfg.BearerTokenFile, next: rt}
-	}
-	client, err := promapi.NewClient(promapi.Config{Address: cfg.PrometheusURL, RoundTripper: rt})
-	if err != nil {
-		return nil, fmt.Errorf("prometheus client: %w", err)
-	}
-	return &prometheusQuerier{api: promv1.NewAPI(client)}, nil
-}
-
-func (q *prometheusQuerier) Query(ctx context.Context, query string, ts time.Time) (float64, bool, error) {
-	v, _, err := q.api.Query(ctx, query, ts)
-	if err != nil {
-		return 0, false, err
-	}
-	vec, ok := v.(model.Vector)
-	if !ok {
-		return 0, false, fmt.Errorf("query returned %s, want a vector", v.Type())
-	}
-	switch len(vec) {
-	case 0:
-		return 0, false, nil
-	case 1:
-		f := float64(vec[0].Value)
-		if math.IsNaN(f) {
-			return 0, false, nil
-		}
-		return f, true, nil
-	default:
-		return 0, false, fmt.Errorf("query returned %d series, want at most 1", len(vec))
-	}
-}
-
-// bearerTokenFileRoundTripper reads the token for every request, so a rotated token is used.
-type bearerTokenFileRoundTripper struct {
-	file string
-	next http.RoundTripper
-}
-
-func (rt *bearerTokenFileRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	token, err := os.ReadFile(rt.file)
-	if err != nil {
-		return nil, fmt.Errorf("read bearerTokenFile: %w", err)
-	}
-	req = req.Clone(req.Context())
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
-	return rt.next.RoundTrip(req)
-}
-
-// sloValidator periodically validates team promises against Prometheus.
+// sloValidator periodically validates team promises against the EPP's own latency histograms.
 type sloValidator struct {
-	cfg     sloValidation
-	querier promQuerier
-	now     func() time.Time
-	teams   []*teamState // teams with a promise
+	cfg      sloValidation
+	gatherer prometheus.Gatherer
+	now      func() time.Time
+	teams    []*teamState // teams with a promise
+}
+
+// newSLOValidator builds the validator for the teams with a promise, and sets their checks. It
+// returns nil when no team has a promise.
+func newSLOValidator(params Parameters, listed []*teamState, defaultTeam *teamState, now func() time.Time) (*sloValidator, error) {
+	var cfg SLOValidationConfig
+	if params.SLOValidation != nil {
+		cfg = *params.SLOValidation
+	}
+	v, err := cfg.resolve()
+	if err != nil {
+		return nil, fmt.Errorf("sloValidation: %w", err)
+	}
+	listedLabels := make([]string, len(listed))
+	for i, t := range listed {
+		listedLabels[i] = t.label
+	}
+	validator := &sloValidator{cfg: v, gatherer: ctrlmetrics.Registry, now: now}
+	for _, t := range append(append([]*teamState{}, listed...), defaultTeam) {
+		if t.cfg.Promise == nil {
+			continue
+		}
+		s, err := newTeamSLO(t, params.Classes[t.classIndex], t == defaultTeam, listedLabels, v)
+		if err != nil {
+			return nil, fmt.Errorf("team %q: %w", t.cfg.ID, err)
+		}
+		t.slo = s
+		validator.teams = append(validator.teams, t)
+	}
+	if len(validator.teams) == 0 {
+		return nil, nil
+	}
+	return validator, nil
 }
 
 // run validates at once and then every interval until ctx is done.
@@ -301,16 +359,31 @@ func (v *sloValidator) run(ctx context.Context) {
 	}
 }
 
-// validate runs one validation cycle, bounded by the query timeout.
+// validate reads the latency histograms once and validates every promise against them.
 func (v *sloValidator) validate(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, v.cfg.queryTimeout)
-	defer cancel()
 	ts := v.now()
+	families, err := v.gatherer.Gather()
+	if err != nil {
+		sloValidationErrors.Inc()
+		log.FromContext(ctx).Error(err, "QoS promise validation could not read the latency metrics")
+		if len(families) == 0 {
+			v.storeUnknown(ts)
+			return
+		}
+	}
+	byName := make(map[string]*dto.MetricFamily, len(sloSeries))
+	for _, mf := range families {
+		byName[mf.GetName()] = mf
+	}
 	for _, team := range v.teams {
 		s := team.slo
 		snap := &sloSnapshot{status: sloStatusMet, results: make(map[string]sloResult, len(s.checks)), at: ts}
 		for _, c := range s.checks {
-			r := v.evaluate(ctx, team, c, ts)
+			mf := byName[c.metric]
+			sample := sloSample{at: ts, guaranteed: aggregate(mf, c.guaranteed), allTraffic: aggregate(mf, c.allTraffic)}
+			base := c.windowBase(ts, v.cfg.window)
+			c.samples = append(c.samples, sample)
+			r := v.evaluate(c, sample.guaranteed.sub(base.guaranteed), sample.allTraffic.sub(base.allTraffic))
 			snap.results[c.slo] = r
 			if sloStatusRank[r.status] > sloStatusRank[snap.status] {
 				snap.status = r.status
@@ -321,33 +394,29 @@ func (v *sloValidator) validate(ctx context.Context) {
 	}
 }
 
-// evaluate validates one check. The promise is met when the observed latency at the promised
-// percentile, over the guaranteed traffic in the window, is within the threshold.
-func (v *sloValidator) evaluate(ctx context.Context, team *teamState, c sloCheck, ts time.Time) sloResult {
-	r := sloResult{status: sloStatusUnknown, observed: math.NaN(), observedAll: math.NaN()}
-	query := func(q, what string) (float64, bool, bool) {
-		val, ok, err := v.querier.Query(ctx, q, ts)
-		if err != nil {
-			sloValidationErrors.WithLabelValues(team.label, c.slo).Inc()
-			log.FromContext(ctx).Error(err, "QoS promise validation query failed", "team", team.cfg.ID, "slo", c.slo, "query", what)
-			return 0, false, false
+// storeUnknown records every promise as unknown.
+func (v *sloValidator) storeUnknown(ts time.Time) {
+	for _, team := range v.teams {
+		s := team.slo
+		snap := &sloSnapshot{status: sloStatusUnknown, results: make(map[string]sloResult, len(s.checks)), at: ts}
+		for _, c := range s.checks {
+			r := sloResult{status: sloStatusUnknown, observed: math.NaN(), observedAll: math.NaN()}
+			snap.results[c.slo] = r
+			recordSLOResult(team.label, s.class, c.slo, r)
 		}
-		return val, ok, true
+		s.snapshot.Store(snap)
 	}
-	count, _, okCount := query(c.countQuery, "count")
-	observed, hasObserved, okObserved := query(c.observedQuery, scopeGuaranteed)
-	if all, hasAll, _ := query(c.observedAllQuery, scopeAll); hasAll {
-		r.observedAll = all
-	}
-	if !okCount || !okObserved {
-		return r
-	}
-	r.requests = count
-	if hasObserved {
-		r.observed = observed
-	}
+}
+
+// evaluate validates one check over the window. The promise is met when the latency at the
+// promised percentile of the guaranteed traffic is within the threshold.
+func (v *sloValidator) evaluate(c *sloCheck, guaranteed, allTraffic histogram) sloResult {
+	r := sloResult{requests: guaranteed.total}
+	observed, ok := guaranteed.quantile(c.quantile)
+	r.observed = observed
+	r.observedAll, _ = allTraffic.quantile(c.quantile)
 	switch {
-	case !hasObserved || count < v.cfg.minRequests:
+	case !ok || guaranteed.total < v.cfg.minRequests:
 		r.status = sloStatusInsufficientData
 	case observed <= c.threshold:
 		r.status = sloStatusMet
@@ -357,39 +426,33 @@ func (v *sloValidator) evaluate(ctx context.Context, team *teamState, c sloCheck
 	return r
 }
 
-// newSLOValidator builds the validator for the teams with a promise, and sets their checks. It
-// returns nil when no team has a promise.
-func newSLOValidator(params Parameters, listed []*teamState, defaultTeam *teamState, now func() time.Time) (*sloValidator, error) {
-	if params.SLOValidation == nil {
-		return nil, nil
+// aggregate sums the histogram series of mf that f selects.
+func aggregate(mf *dto.MetricFamily, f seriesFilter) histogram {
+	var out histogram
+	if mf == nil || mf.GetType() != dto.MetricType_HISTOGRAM {
+		return out
 	}
-	v, err := params.SLOValidation.resolve()
-	if err != nil {
-		return nil, fmt.Errorf("sloValidation: %w", err)
-	}
-	listedLabels := make([]string, len(listed))
-	for i, t := range listed {
-		listedLabels[i] = t.label
-	}
-	validator := &sloValidator{cfg: v, now: now}
-	for _, t := range append(append([]*teamState{}, listed...), defaultTeam) {
-		if t.cfg.Promise == nil {
+	labels := map[string]string{}
+	for _, m := range mf.GetMetric() {
+		clear(labels)
+		for _, lp := range m.GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if !f.matches(labels) {
 			continue
 		}
-		s, err := newTeamSLO(t, params.Classes[t.classIndex], t == defaultTeam, listedLabels, v)
-		if err != nil {
-			return nil, fmt.Errorf("team %q: %w", t.cfg.ID, err)
+		h := m.GetHistogram()
+		series := histogram{total: float64(h.GetSampleCount())}
+		for _, b := range h.GetBucket() {
+			if math.IsInf(b.GetUpperBound(), 1) {
+				continue
+			}
+			series.bounds = append(series.bounds, b.GetUpperBound())
+			series.counts = append(series.counts, float64(b.GetCumulativeCount()))
 		}
-		t.slo = s
-		validator.teams = append(validator.teams, t)
+		out.add(series)
 	}
-	if len(validator.teams) == 0 {
-		return nil, nil
-	}
-	if validator.querier, err = newPrometheusQuerier(v.cfg); err != nil {
-		return nil, fmt.Errorf("sloValidation: %w", err)
-	}
-	return validator, nil
+	return out
 }
 
 // recordSLOResult exports one check's result. A latency with no data removes its series rather
