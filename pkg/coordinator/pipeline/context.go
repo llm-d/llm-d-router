@@ -225,6 +225,14 @@ type RequestContext struct {
 	// consumer that treats nil as zero reports no cache hits for a request that
 	// had them.
 	PrefillCachedTokens *int
+	// PrefillCreatedCacheTokens is the KV/prefix-cache write count the prefill
+	// worker reported at usage.prompt_tokens_details.created_cache_tokens (or
+	// input_tokens_details on the Responses routes). The decode step substitutes
+	// it into the usage block it streams to the client, because a decode worker
+	// never runs the prefill, so the count it reports describes nothing rather
+	// than the cache writes. It follows the nil/zero semantics of
+	// PrefillCachedTokens and is left nil under the same conditions.
+	PrefillCreatedCacheTokens *int
 	// PeerTopology carries the prefill endpoint's encoded topology from the
 	// prefill response to the decode request, for topology-affinity-filter
 	// and topology-affinity-scorer running in the decode EPP's profile.

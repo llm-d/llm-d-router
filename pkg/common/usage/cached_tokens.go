@@ -30,10 +30,11 @@ import (
 )
 
 type cachedTokensUsageRewriter struct {
-	header        http.Header
-	cachedTokens  *int
-	onUsage       func(block map[string]any)
-	dropUsageOnly bool
+	header              http.Header
+	cachedTokens        *int
+	createdCacheTokens  *int
+	onUsage             func(block map[string]any)
+	dropUsageOnly       bool
 	// passthrough is set when no option can change a byte: the writer then
 	// forwards every write as it arrives, keeps Content-Length, and only reads
 	// the body on the side to report usage to the observer.
@@ -58,6 +59,13 @@ type Options struct {
 	// CachedTokens, when set, is written into every usage block as its
 	// cached-token count (see NewCachedTokensResponseWriter).
 	CachedTokens *int
+	// CreatedCacheTokens, when set, is written into every usage block as its
+	// created-cache-token count, the tokens a prefill worker wrote to the
+	// KV/prefix cache (vLLM reports them at
+	// prompt_tokens_details.created_cache_tokens). A decode worker never runs
+	// the prefill, so its count is zero; the coordinator or sidecar sets this
+	// option with the prefiller's measurement so the client sees the writes.
+	CreatedCacheTokens *int
 	// OnUsage is called with each usage block the response carries, decoded,
 	// before any rewrite. Streamed responses can carry more than one.
 	OnUsage func(block map[string]any)
@@ -95,12 +103,13 @@ func NewResponseWriter(
 	w http.ResponseWriter, opts Options, streaming bool,
 ) (http.ResponseWriter, func() error) {
 	rewriter := &cachedTokensUsageRewriter{
-		header:        w.Header(),
-		cachedTokens:  opts.CachedTokens,
-		onUsage:       opts.OnUsage,
-		dropUsageOnly: opts.DropUsageOnlyFrame,
-		passthrough:   opts.CachedTokens == nil && !opts.DropUsageOnlyFrame,
-		streaming:     streaming,
+		header:             w.Header(),
+		cachedTokens:       opts.CachedTokens,
+		createdCacheTokens: opts.CreatedCacheTokens,
+		onUsage:            opts.OnUsage,
+		dropUsageOnly:      opts.DropUsageOnlyFrame,
+		passthrough:        opts.CachedTokens == nil && opts.CreatedCacheTokens == nil && !opts.DropUsageOnlyFrame,
+		streaming:          streaming,
 	}
 	// httpsnoop preserves optional ResponseWriter interfaces such as
 	// http.Flusher, http.Hijacker, http.Pusher, and io.ReaderFrom.
@@ -311,6 +320,23 @@ func CachedTokens(block any) (int, bool) {
 	return intValue(details[reqcommon.FieldCachedTokens])
 }
 
+// CreatedCacheTokens reads the created-cache-token count out of a response's
+// usage block: the tokens a prefill worker wrote to the KV/prefix cache,
+// which vLLM reports at prompt_tokens_details.created_cache_tokens. It follows
+// the same conventions as CachedTokens: false when the block or the count is
+// absent, and callers that need a number treat that as zero.
+func CreatedCacheTokens(block any) (int, bool) {
+	fields, ok := block.(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	details, ok := tokenDetails(fields)
+	if !ok {
+		return 0, false
+	}
+	return intValue(details[reqcommon.FieldCreatedCacheTokens])
+}
+
 // tokenDetails returns the object a usage block carries its cached-token count
 // in. Responses and Conversations report input_tokens_details, the chat,
 // completions, and generate routes report prompt_tokens_details; a block
@@ -375,7 +401,7 @@ func (r *cachedTokensUsageRewriter) processJSON(body []byte) ([]byte, bool) {
 		return nil, false
 	}
 	block, wrapper := r.observe(response)
-	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
+	if !r.rewritesCounts() || !rewritable(wrapper) || !r.applyTokenCounts(block) {
 		return body, true
 	}
 	return marshalWithUsage(response, wrapper, block, body), true
@@ -443,7 +469,7 @@ func (r *cachedTokensUsageRewriter) processSSELine(line []byte) (out []byte, isD
 	if r.dropUsageOnly && block != nil && wrapper == "" && hasEmptyChoices(response) {
 		return nil, true, true
 	}
-	if r.cachedTokens == nil || !rewritable(wrapper) || !setCachedTokens(block, *r.cachedTokens) {
+	if !r.rewritesCounts() || !rewritable(wrapper) || !r.applyTokenCounts(block) {
 		return line, true, false
 	}
 	updated := make([]byte, 0, len(line))
@@ -536,25 +562,46 @@ func hasEmptyChoices(response map[string]json.RawMessage) bool {
 	return json.Unmarshal(raw, &choices) == nil && len(choices) == 0
 }
 
-func setCachedTokens(block map[string]any, cachedTokens int) bool {
+// rewritesCounts reports whether any option rewrites the usage block.
+func (r *cachedTokensUsageRewriter) rewritesCounts() bool {
+	return r.cachedTokens != nil || r.createdCacheTokens != nil
+}
+
+// applyTokenCounts writes the counts the options select into block, creating
+// the details object the block's schema documents when it is absent. It
+// reports whether anything changed.
+func (r *cachedTokensUsageRewriter) applyTokenCounts(block map[string]any) bool {
+	changed := false
+	if r.cachedTokens != nil {
+		changed = setTokenCount(block, reqcommon.FieldCachedTokens, *r.cachedTokens) || changed
+	}
+	if r.createdCacheTokens != nil {
+		changed = setTokenCount(block, reqcommon.FieldCreatedCacheTokens, *r.createdCacheTokens) || changed
+	}
+	return changed
+}
+
+// setTokenCount writes count into the details object block carries under
+// field. Some decoder chunks report prompt_tokens with the details object
+// omitted or null; the field is created then, but only on a block that
+// documents prompt_tokens: a block carrying neither details object nor
+// prompt_tokens follows another schema (the Messages API reports
+// cache_read_input_tokens) and is left alone rather than given a field it does
+// not define.
+func setTokenCount(block map[string]any, field string, count int) bool {
 	if block == nil {
 		return false
 	}
 	details, ok := tokenDetails(block)
 	if !ok {
-		// Some decoder chunks report prompt_tokens with the details object
-		// omitted or null; create the field those routes document. A block
-		// carrying neither details object nor prompt_tokens follows another
-		// schema (the Messages API reports cache_read_input_tokens) and is left
-		// alone rather than given a field it does not define.
 		if _, documented := block[reqcommon.FieldPromptTokens]; !documented {
 			return false
 		}
-		block[reqcommon.FieldPromptTokensDetails] = map[string]any{reqcommon.FieldCachedTokens: cachedTokens}
+		block[reqcommon.FieldPromptTokensDetails] = map[string]any{field: count}
 		return true
 	}
-	if current, ok := intValue(details[reqcommon.FieldCachedTokens]); !ok || current != cachedTokens {
-		details[reqcommon.FieldCachedTokens] = cachedTokens
+	if current, ok := intValue(details[field]); !ok || current != count {
+		details[field] = count
 		return true
 	}
 	return false

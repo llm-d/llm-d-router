@@ -544,3 +544,164 @@ func BenchmarkResponseWriterChunkedJSON(b *testing.B) {
 		})
 	}
 }
+
+func TestCreatedCacheTokens(t *testing.T) {
+	tests := []struct {
+		name   string
+		block  any
+		want   int
+		wantOK bool
+	}{
+		{
+			name:  "absent usage block",
+			block: nil,
+		},
+		{
+			name:  "usage without prompt token details",
+			block: map[string]any{"prompt_tokens": float64(64)},
+		},
+		{
+			name:  "details without created cache tokens",
+			block: map[string]any{"prompt_tokens_details": map[string]any{"cached_tokens": float64(49)}},
+		},
+		{
+			name:   "explicit zero",
+			block:  map[string]any{"prompt_tokens_details": map[string]any{"created_cache_tokens": float64(0)}},
+			wantOK: true,
+		},
+		{
+			name:   "created cache tokens",
+			block:  map[string]any{"prompt_tokens_details": map[string]any{"created_cache_tokens": float64(4608)}},
+			want:   4608,
+			wantOK: true,
+		},
+		{
+			name:   "responses created cache tokens",
+			block:  map[string]any{"input_tokens_details": map[string]any{"created_cache_tokens": float64(4608)}},
+			want:   4608,
+			wantOK: true,
+		},
+		{
+			name:  "messages cache counts",
+			block: map[string]any{"cache_creation_input_tokens": float64(4608), "input_tokens": float64(64)},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := CreatedCacheTokens(test.block)
+			if ok != test.wantOK || got != test.want {
+				t.Errorf("CreatedCacheTokens() = (%d, %t), want (%d, %t)", got, ok, test.want, test.wantOK)
+			}
+		})
+	}
+}
+
+func TestResponseWriter_RewritesCreatedCacheTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "json usage",
+			body: `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":0}}}`,
+			want: `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":4608}}}`,
+		},
+		{
+			name: "json usage details without created cache tokens",
+			body: `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":0}}}`,
+			want: `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":4608}}}`,
+		},
+		{
+			name: "json usage without details",
+			body: `{"usage":{"prompt_tokens":64}}`,
+			want: `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"created_cache_tokens":4608}}}`,
+		},
+		{
+			name: "responses usage",
+			body: `{"usage":{"input_tokens":64,"input_tokens_details":{"cached_tokens":0,"created_cache_tokens":0},"total_tokens":68}}`,
+			want: `{"usage":{"input_tokens":64,"input_tokens_details":{"cached_tokens":0,"created_cache_tokens":4608},"total_tokens":68}}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			created := 4608
+			writer, finalize := NewResponseWriter(recorder, Options{CreatedCacheTokens: &created}, false)
+			writeChunk(t, writer, test.body)
+			if err := finalize(); err != nil {
+				t.Fatal(err)
+			}
+			if got := recorder.Body.String(); got != test.want {
+				t.Errorf("body = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+// A decode worker reports zero created cache tokens because it never runs the
+// prefill; with the prefiller's count the client must see the writes, and the
+// hit count the prefiller measured must be substituted at the same time.
+func TestResponseWriter_RewritesBothCounts(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", reqcommon.ContentTypeJSON)
+	cached, created := 7, 4608
+	writer, finalize := NewResponseWriter(recorder, Options{CachedTokens: &cached, CreatedCacheTokens: &created}, false)
+
+	writeChunk(t, writer, `{"usage":{"prompt_tokens":64,`)
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("partial JSON was forwarded: %s", recorder.Body.String())
+	}
+	writeChunk(t, writer, `"prompt_tokens_details":{"cached_tokens":49,"created_cache_tokens":0}}}`)
+	if err := finalize(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":7,"created_cache_tokens":4608}}}`
+	if got := recorder.Body.String(); got != want {
+		t.Errorf("body = %s, want %s", got, want)
+	}
+}
+
+func TestResponseWriter_RewritesCreatedCacheTokensStreamed(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Type", "text/event-stream")
+	created := 4608
+	writer, finalize := NewResponseWriter(recorder, Options{CreatedCacheTokens: &created}, true)
+
+	writeChunk(t, writer, `data: {"choices":[],"usage":{"prompt_tokens":64,`)
+	writeChunk(t, writer, `"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":0}}}`+"\n\n")
+	writeChunk(t, writer, "data: [DONE]\n")
+	if err := finalize(); err != nil {
+		t.Fatal(err)
+	}
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"created_cache_tokens":4608`) {
+		t.Errorf("streamed usage frame was not rewritten: %s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("stream terminator was dropped: %s", body)
+	}
+}
+
+// An option that is not set must not inject the field it governs: a writer
+// built for the hit count alone leaves created_cache_tokens as the worker
+// sent it, absent or not.
+func TestResponseWriter_DoesNotInjectUnsetCounts(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	cached := 7
+	writer, finalize := NewResponseWriter(recorder, Options{CachedTokens: &cached}, false)
+
+	writeChunk(t, writer, `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":49}}}`)
+	if err := finalize(); err != nil {
+		t.Fatal(err)
+	}
+
+	want := `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":7}}}`
+	if got := recorder.Body.String(); got != want {
+		t.Errorf("body = %s, want %s", got, want)
+	}
+}

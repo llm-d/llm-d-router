@@ -326,6 +326,10 @@ retryLoop:
 	pKVParams, _ := pKVTransferParams.(map[string]any)
 	rewriteCachedTokens := pUsage != nil && len(pKVParams) > 0
 	pCachedTokens, hasPCachedTokens := usage.CachedTokens(pUsage)
+	// The prefiller's cache-write count needs the same correction as its hit
+	// count: a decode worker never runs the prefill, so the count it reports at
+	// created_cache_tokens is zero rather than the prefill stage's measurement.
+	pCreatedCacheTokens, hasPCreatedCacheTokens := usage.CreatedCacheTokens(pUsage)
 
 	if trace := logger.V(logging.TRACE); trace.Enabled() {
 		// The count is logged only when it was measured, so a logged zero is a
@@ -334,9 +338,13 @@ retryLoop:
 			"kvTransferParamsPresent", pKVTransferParams != nil,
 			"rewriteCachedTokens", rewriteCachedTokens,
 			"hasCachedTokens", hasPCachedTokens,
+			"hasCreatedCacheTokens", hasPCreatedCacheTokens,
 		}
 		if hasPCachedTokens {
 			fields = append(fields, "cachedTokens", pCachedTokens)
+		}
+		if hasPCreatedCacheTokens {
+			fields = append(fields, "createdCacheTokens", pCreatedCacheTokens)
 		}
 		trace.Info("received prefiller response", fields...)
 	}
@@ -474,7 +482,7 @@ retryLoop:
 		trace.Info("sending request to decoder", logBodyBytesKey, len(dbody))
 	}
 	statusWriter, decodeStatus := captureResponseStatus(w)
-	decodeWriter, finalizeDecodeWriter := decodeResponseWriter(statusWriter, pCachedTokens, rewriteCachedTokens, streamingEnabled)
+	decodeWriter, finalizeDecodeWriter := decodeResponseWriter(statusWriter, pCachedTokens, pCreatedCacheTokens, rewriteCachedTokens, streamingEnabled)
 	decodeReturned := false
 	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq, func() {
@@ -551,11 +559,14 @@ func servePrefill(h http.Handler, pw *bufferedResponseWriter, r *http.Request) (
 // decodeResponseWriter returns the writer the decode response is streamed
 // through, and the function that flushes whatever it buffered. Without a prefill
 // count to apply the client gets the decode worker's bytes untouched.
-func decodeResponseWriter(w http.ResponseWriter, cachedTokens int, rewrite, streaming bool) (http.ResponseWriter, func() error) {
+func decodeResponseWriter(w http.ResponseWriter, cachedTokens, createdCacheTokens int, rewrite, streaming bool) (http.ResponseWriter, func() error) {
 	if !rewrite {
 		return w, func() error { return nil }
 	}
-	return usage.NewCachedTokensResponseWriter(w, cachedTokens, streaming)
+	return usage.NewResponseWriter(w, usage.Options{
+		CachedTokens:       &cachedTokens,
+		CreatedCacheTokens: &createdCacheTokens,
+	}, streaming)
 }
 
 // runNIXLProtocolV2WriteParallel is the MoRI-IO WRITE-mode concurrent-dispatch
@@ -886,7 +897,8 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 				pUsage := prefillerResponse[reqcommon.FieldUsage]
 				pKVParams, _ := prefillerResponse[reqcommon.FieldKVTransferParams].(map[string]any)
 				pCachedTokens, _ := usage.CachedTokens(pUsage)
-				decodeWriter, finalize := decodeResponseWriter(w, pCachedTokens, pUsage != nil && len(pKVParams) > 0, streamingEnabled)
+				pCreatedCacheTokens, _ := usage.CreatedCacheTokens(pUsage)
+				decodeWriter, finalize := decodeResponseWriter(w, pCachedTokens, pCreatedCacheTokens, pUsage != nil && len(pKVParams) > 0, streamingEnabled)
 				finalizeDecodeWriter = finalize
 				if !dcw.commit(decodeWriter) {
 					logger.Error(nil, "concurrent-dispatch: decode aborted before prefill-success commit",
