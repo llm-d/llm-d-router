@@ -184,6 +184,32 @@ dataLayer:
 	require.Equal(t, "192.168.1.1:8000", headerValue(resp.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey))
 	_, err = existing.Recv()
 	require.NoError(t, err)
+	pod.Labels["version"] = "v2"
+	require.NoError(t, api.Update(ctx, pod))
+	require.Eventually(t, func() bool {
+		endpoints := ds.PodList(datastore.AllPodsPredicate)
+		return len(endpoints) == 1 && endpoints[0].GetMetadata().Labels["version"] == "v2"
+	}, time.Second, 5*time.Millisecond)
+	labelStream, labelResponse := send()
+	require.Equal(t, "192.168.1.1:8000", headerValue(labelResponse.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey), "normal routing must survive a singleton label change")
+	require.NoError(t, labelStream.CloseSend())
+	for _, upgrade := range []bool{false, true} {
+		pod.Labels["version"] = fmt.Sprintf("v-%t", upgrade)
+		require.NoError(t, api.Update(ctx, pod))
+		require.Eventually(t, func() bool {
+			endpoints := ds.PodList(datastore.AllPodsPredicate)
+			return len(endpoints) == 1 && endpoints[0].GetMetadata().Labels["version"] == pod.Labels["version"]
+		}, time.Second, 5*time.Millisecond)
+		stream, err := extProcPb.NewExternalProcessorClient(conn).Process(ctx)
+		require.NoError(t, err)
+		headers := fwkepp.ReqRaw(map[string]string{":path": "/v1/realtime", ":method": "GET", "connection": "upgrade", "upgrade": "websocket"}, "")[0]
+		headers.GetRequestHeaders().EndOfStream = !upgrade
+		require.NoError(t, stream.Send(headers))
+		response, err := stream.Recv()
+		require.NoError(t, err)
+		require.Equal(t, "192.168.1.1:8000", headerValue(response.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey), "bodyless and WebSocket routing must survive singleton label changes")
+		require.NoError(t, stream.CloseSend())
+	}
 	leaseKey := types.NamespacedName{Namespace: namespace, Name: fmt.Sprintf("epp-%s-%s.llm-d.ai", namespace, pool.Name)}
 	lease := &coordinationv1.Lease{}
 	require.NoError(t, api.Get(ctx, leaseKey, lease))

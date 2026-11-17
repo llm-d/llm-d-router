@@ -23,6 +23,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -54,6 +56,10 @@ type DiscoveryFreshness struct {
 	validated              atomic.Pointer[validatedMembership]
 	previousDisagreement   datastore.MembershipDisagreement
 	persistentDisagreement bool
+	refreshes              singleflight.Group
+	refreshLimiter         *rate.Limiter
+	runCtx                 context.Context
+	running                atomic.Bool
 }
 
 type validatedMembership struct {
@@ -66,7 +72,7 @@ var _ fwkrh.Admitter = (*DiscoveryFreshness)(nil)
 
 // NewDiscoveryFreshness requires an uncached reader and a positive threshold.
 func NewDiscoveryFreshness(reader client.Reader, ds datastore.Datastore, pool types.NamespacedName, threshold time.Duration) *DiscoveryFreshness {
-	return &DiscoveryFreshness{reader: reader, datastore: ds, pool: pool, threshold: threshold, clock: clock.RealClock{}}
+	return &DiscoveryFreshness{reader: reader, datastore: ds, pool: pool, threshold: threshold, clock: clock.RealClock{}, refreshLimiter: rate.NewLimiter(rate.Every(100*time.Millisecond), 1)}
 }
 
 func (*DiscoveryFreshness) TypedName() fwkplugin.TypedName {
@@ -76,17 +82,23 @@ func (*DiscoveryFreshness) TypedName() fwkplugin.TypedName {
 func (*DiscoveryFreshness) NeedLeaderElection() bool { return false }
 
 func (d *DiscoveryFreshness) Start(ctx context.Context) error {
-	defer d.validated.Store(nil)
+	d.runCtx = ctx
+	d.running.Store(true)
+	defer func() {
+		d.running.Store(false)
+		// Join a demand refresh before clearing the final validated state.
+		<-d.refreshShared(ctx, d.threshold/3)
+		d.validated.Store(nil)
+	}()
 	ready := false
 	for ctx.Err() == nil {
 		// At most 0.4 thresholds between starts plus a one-third-threshold read
 		// leaves time to renew the previous snapshot before it expires.
 		timer := d.clock.NewTimer(wait.Jitter(d.threshold/3, 0.2))
-		attemptCtx, cancel := context.WithTimeout(ctx, d.threshold/3)
-		if err := d.refresh(attemptCtx); err != nil && ctx.Err() == nil {
-			log.FromContext(ctx).V(logutil.DEBUG).Info("Unable to sample Kubernetes discovery membership", "error", err)
+		result := <-d.refreshShared(ctx, d.threshold/3)
+		if result.Err != nil && ctx.Err() == nil {
+			log.FromContext(ctx).V(logutil.DEBUG).Info("Unable to sample Kubernetes discovery membership", "error", result.Err)
 		}
-		cancel()
 		nextReady := d.CheckReady() == nil
 		if nextReady != ready {
 			log.FromContext(ctx).Info("Kubernetes discovery freshness state changed", "ready", nextReady, "pool", d.pool.String())
@@ -100,6 +112,18 @@ func (d *DiscoveryFreshness) Start(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// refreshShared serializes sampling without holding request-path state locks.
+func (d *DiscoveryFreshness) refreshShared(ctx context.Context, timeout time.Duration) <-chan singleflight.Result {
+	return d.refreshes.DoChan("membership", func() (any, error) {
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		if err := d.refreshLimiter.Wait(attemptCtx); err != nil {
+			return nil, err
+		}
+		return nil, d.refresh(attemptCtx)
+	})
 }
 
 func (d *DiscoveryFreshness) refresh(ctx context.Context) error {
@@ -182,6 +206,36 @@ func (d *DiscoveryFreshness) Admit(_ context.Context, _ *fwksched.InferenceReque
 
 // FilterCandidates keeps only candidates represented in a fresh authoritative sample.
 func (d *DiscoveryFreshness) FilterCandidates(ctx context.Context, candidates []fwksched.Endpoint) ([]fwksched.Endpoint, error) {
+	eligible, err := d.filterCandidates(ctx, candidates)
+	if err == nil || len(candidates) == 0 || !d.running.Load() || d.CheckReady() != nil {
+		return eligible, err
+	}
+	budget := min(d.threshold/3, time.Second)
+	waitCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	// A joined periodic read may have started before the candidate changed.
+	for range 2 {
+		if waitCtx.Err() != nil {
+			break
+		}
+		result := d.refreshShared(d.runCtx, budget)
+		select {
+		case <-waitCtx.Done():
+			return nil, errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: waitCtx.Err().Error()}
+		case refreshed := <-result:
+			if refreshed.Err != nil {
+				return nil, errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: refreshed.Err.Error()}
+			}
+		}
+		eligible, err = d.filterCandidates(ctx, candidates)
+		if err == nil || d.CheckReady() != nil {
+			return eligible, err
+		}
+	}
+	return eligible, err
+}
+
+func (d *DiscoveryFreshness) filterCandidates(ctx context.Context, candidates []fwksched.Endpoint) ([]fwksched.Endpoint, error) {
 	validated := d.validated.Load()
 	if err := d.checkReady(validated); err != nil {
 		return nil, errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
