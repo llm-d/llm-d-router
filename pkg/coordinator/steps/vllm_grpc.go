@@ -572,6 +572,7 @@ func forwardVLLMAsHTTPStreamGenerate(
 	}
 
 	reqID := httpGenerateRequestID(reqCtx, vllmReq.HTTP)
+	outputMode := httpGenerateOutputMode(vllmReq.HTTP)
 	returnPromptIDs := vllmReq.HTTP != nil && vllmReq.HTTP.ReturnTokenIDs
 	includeUsage := vllmReq.HTTP != nil && vllmReq.HTTP.IncludeUsage
 	checkParity := parityMode != promptTokenParityOff && vllmReq.PrefillPromptTokens != nil
@@ -669,10 +670,11 @@ func forwardVLLMAsHTTPStreamGenerate(
 			}
 		}
 
-		choiceBuf[0] = buildHTTPGenerateStreamChoice(seq)
+		choiceBuf[0] = buildHTTPGenerateStreamChoice(seq, outputMode)
 		chunk := httpGenerateStreamChunk{
 			RequestID:      reqID,
 			Model:          reqCtx.Model,
+			OutputMode:     outputMode,
 			Choices:        choiceBuf[:],
 			PromptTokenIDs: pendingPromptTokenIDs,
 			PromptLogprobs: pendingPromptLogprobs,
@@ -722,10 +724,11 @@ func forwardVLLMAsHTTPStreamGenerate(
 		}
 		usageVal := buildHTTPGenerateUsage(promptTokens, completionTokens, cachedPtr)
 		usageChunk := httpGenerateStreamChunk{
-			RequestID: reqID,
-			Model:     reqCtx.Model,
-			Choices:   []httpGenerateStreamChoice{},
-			Usage:     &usageVal,
+			RequestID:  reqID,
+			Model:      reqCtx.Model,
+			OutputMode: outputMode,
+			Choices:    []httpGenerateStreamChoice{},
+			Usage:      &usageVal,
 		}
 		if err := writeSSEChunk(&usageChunk); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -748,6 +751,7 @@ type httpGenerateUnaryResponse struct {
 	RequestID        string                `json:"request_id"`
 	Created          int64                 `json:"created"`
 	Model            string                `json:"model,omitempty"`
+	OutputMode       string                `json:"output_mode"`
 	Choices          [1]httpGenerateChoice `json:"choices"`
 	Usage            httpGenerateUsage     `json:"usage"`
 	PromptTokenIDs   []uint32              `json:"prompt_token_ids,omitempty"`
@@ -757,7 +761,7 @@ type httpGenerateUnaryResponse struct {
 
 type httpGenerateChoice struct {
 	Index        uint32                `json:"index"`
-	Text         string                `json:"text,omitempty"`
+	Text         *string               `json:"text,omitempty"`
 	TokenIDs     []uint32              `json:"token_ids"`
 	FinishReason *string               `json:"finish_reason"`
 	StopReason   any                   `json:"stop_reason"`
@@ -767,6 +771,7 @@ type httpGenerateChoice struct {
 type httpGenerateStreamChunk struct {
 	RequestID      string                     `json:"request_id"`
 	Model          string                     `json:"model,omitempty"`
+	OutputMode     string                     `json:"output_mode"`
 	Choices        []httpGenerateStreamChoice `json:"choices"`
 	PromptTokenIDs []uint32                   `json:"prompt_token_ids,omitempty"`
 	PromptLogprobs *httpGenerateLogprobs      `json:"prompt_logprobs,omitempty"`
@@ -775,7 +780,7 @@ type httpGenerateStreamChunk struct {
 
 type httpGenerateStreamChoice struct {
 	Index        uint32                `json:"index"`
-	Text         string                `json:"text,omitempty"`
+	Text         *string               `json:"text,omitempty"`
 	TokenIDs     []uint32              `json:"token_ids"`
 	FinishReason *string               `json:"finish_reason"`
 	StopReason   any                   `json:"stop_reason"`
@@ -817,6 +822,13 @@ func httpGenerateRequestID(reqCtx *pipeline.RequestContext, reply *pipeline.HTTP
 	return reqCtx.RequestID
 }
 
+func httpGenerateOutputMode(reply *pipeline.HTTPGenerateReply) string {
+	if reply != nil && reply.OutputMode != "" {
+		return reply.OutputMode
+	}
+	return pipeline.GenerateOutputModeTokens
+}
+
 func buildHTTPGenerateResponse(
 	reqCtx *pipeline.RequestContext,
 	reply *pipeline.HTTPGenerateReply,
@@ -838,16 +850,18 @@ func buildHTTPGenerateResponse(
 		cachedPtr = reqCtx.PrefillCachedTokens
 	}
 
-	sc := buildHTTPGenerateStreamChoice(seq)
+	outputMode := httpGenerateOutputMode(reply)
+	sc := buildHTTPGenerateStreamChoice(seq, outputMode)
 	var promptTokenIDs []uint32
 	if reply != nil && reply.ReturnTokenIDs && len(pi.GetTokenIds()) > 0 {
 		promptTokenIDs = pi.GetTokenIds()
 	}
 
 	return httpGenerateUnaryResponse{
-		RequestID: httpGenerateRequestID(reqCtx, reply),
-		Created:   time.Now().Unix(),
-		Model:     reqCtx.Model,
+		RequestID:  httpGenerateRequestID(reqCtx, reply),
+		Created:    time.Now().Unix(),
+		Model:      reqCtx.Model,
+		OutputMode: outputMode,
 		Choices: [1]httpGenerateChoice{{
 			Index:        sc.Index,
 			Text:         sc.Text,
@@ -863,7 +877,7 @@ func buildHTTPGenerateResponse(
 	}
 }
 
-func buildHTTPGenerateStreamChoice(seq *vllmpb.SequenceOutput) httpGenerateStreamChoice {
+func buildHTTPGenerateStreamChoice(seq *vllmpb.SequenceOutput, outputMode string) httpGenerateStreamChoice {
 	tokenIDs := seq.GetTokenIds()
 	if tokenIDs == nil {
 		tokenIDs = []uint32{}
@@ -874,9 +888,13 @@ func buildHTTPGenerateStreamChoice(seq *vllmpb.SequenceOutput) httpGenerateStrea
 		finishReason = mapVLLMFinishReason(fin.GetFinishReason())
 		stopReason = mapVLLMStopReason(fin)
 	}
+	var textPtr *string
+	if t := seq.GetText(); t != "" || outputMode == pipeline.GenerateOutputModeText {
+		textPtr = &t
+	}
 	return httpGenerateStreamChoice{
 		Index:        seq.GetIndex(),
-		Text:         seq.GetText(),
+		Text:         textPtr,
 		TokenIDs:     tokenIDs,
 		FinishReason: finishReason,
 		StopReason:   stopReason,

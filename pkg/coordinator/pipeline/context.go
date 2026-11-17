@@ -280,6 +280,12 @@ func (r *SGLangGRPCRequest) closeStream() {
 	}
 }
 
+// GenerateOutputMode values for vLLM /inference/v1/generate responses.
+const (
+	GenerateOutputModeTokens = "tokens"
+	GenerateOutputModeText   = "text"
+)
+
 // HTTPGenerateReply carries response-formatting options when an inbound HTTP
 // POST /inference/v1/generate request is executed over vllm.Inference gRPC.
 type HTTPGenerateReply struct {
@@ -289,6 +295,9 @@ type HTTPGenerateReply struct {
 	// ReturnTokenIDs reports whether the HTTP request asked to echo prompt
 	// token IDs in the response.
 	ReturnTokenIDs bool
+	// OutputMode is the /inference/v1/generate response level ("tokens" or
+	// "text"). Empty defaults to GenerateOutputModeTokens.
+	OutputMode string
 	// ClientRequestID holds a request_id supplied in the HTTP JSON body so
 	// translated responses echo the client's identifier when present.
 	ClientRequestID string

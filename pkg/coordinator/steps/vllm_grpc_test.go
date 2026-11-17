@@ -577,3 +577,41 @@ func TestVLLMGRPC_FrameSegmentsWithTransferParamsAllocationBudget(t *testing.T) 
 	require.LessOrEqual(t, prefillAllocs, 4.0, "prefill FrameSegments with NIXL KV must not regress to structpb allocations")
 	require.LessOrEqual(t, decodeAllocs, 4.0, "decode FrameSegments with NIXL KV must not regress to structpb allocations")
 }
+
+func TestBuildHTTPGenerateResponse_OutputMode(t *testing.T) {
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "req-out-mode",
+		Model:     "llama",
+	}
+	genResp := &vllmpb.GenerateResponse{
+		PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 4},
+		Outputs: &vllmpb.SequenceOutput{
+			NumTokens: 1,
+			TokenIds:  []uint32{7},
+			Text:      "",
+			FinishInfo: &vllmpb.FinishInfo{
+				FinishReason:    vllmpb.FinishInfo_STOP,
+				NumOutputTokens: 1,
+			},
+		},
+	}
+
+	tokResp := buildHTTPGenerateResponse(reqCtx, &pipeline.HTTPGenerateReply{}, genResp)
+	tokRaw, err := json.Marshal(&tokResp)
+	require.NoError(t, err)
+	var tokMap map[string]any
+	require.NoError(t, json.Unmarshal(tokRaw, &tokMap))
+	require.Equal(t, pipeline.GenerateOutputModeTokens, tokMap["output_mode"])
+	_, hasTokText := tokMap["choices"].([]any)[0].(map[string]any)["text"]
+	require.False(t, hasTokText)
+
+	txtResp := buildHTTPGenerateResponse(reqCtx, &pipeline.HTTPGenerateReply{OutputMode: pipeline.GenerateOutputModeText}, genResp)
+	txtRaw, err := json.Marshal(&txtResp)
+	require.NoError(t, err)
+	var txtMap map[string]any
+	require.NoError(t, json.Unmarshal(txtRaw, &txtMap))
+	require.Equal(t, pipeline.GenerateOutputModeText, txtMap["output_mode"])
+	txtVal, hasTxtText := txtMap["choices"].([]any)[0].(map[string]any)["text"]
+	require.True(t, hasTxtText)
+	require.Equal(t, "", txtVal)
+}

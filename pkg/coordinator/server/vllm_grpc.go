@@ -38,10 +38,15 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
+var errNumSequencesUnsupported = errors.New("num_sequences > 1 is not supported")
+
 func scanVLLMGenerate(r *http.Request, payload []byte) (grpcScanResult, error) {
 	genReq, err := vllmwire.ScanGenerateRequest(payload)
 	if err != nil {
 		return grpcScanResult{}, err
+	}
+	if n, ok := genReq.NumSequences(); ok && n > 1 {
+		return grpcScanResult{}, errNumSequencesUnsupported
 	}
 	stream := r.URL.Path == vllmpb.Inference_GenerateStream_FullMethodName
 	return grpcScanResult{
@@ -74,6 +79,7 @@ var (
 		"session_id":                        {},
 		"watermarking":                      {},
 		"structured_outputs":                {},
+		"output_mode":                       {},
 		reqcommon.FieldReturnTokenIDs:       {},
 		reqcommon.FieldECTransferParams:     {},
 		reqcommon.FieldKVTransferParams:     {},
@@ -162,6 +168,7 @@ type httpVLLMGenerateResult struct {
 	req                   vllmwire.Request
 	includeUsage          bool
 	returnTokenIDs        bool
+	outputMode            string
 	clientRequestID       string
 	droppedTransferParams bool
 }
@@ -254,7 +261,20 @@ func prepareVLLMGenerateFromHTTP(parsed map[string]any, fallbackRequestID string
 	}
 	out.returnTokenIDs = returnTokenIDs
 
-	droppedSamplingTransfer, err := applyHTTPSamplingAndKV(&pbReq, parsed, returnTokenIDs)
+	outputMode := pipeline.GenerateOutputModeTokens
+	if rawMode, ok, err := decodeOptionalStringField(parsed, "output_mode"); err != nil {
+		return httpVLLMGenerateResult{}, err
+	} else if ok {
+		switch rawMode {
+		case pipeline.GenerateOutputModeTokens, pipeline.GenerateOutputModeText:
+			outputMode = rawMode
+		default:
+			return httpVLLMGenerateResult{}, fmt.Errorf("unsupported output_mode %q", rawMode)
+		}
+	}
+	out.outputMode = outputMode
+
+	droppedSamplingTransfer, err := applyHTTPSamplingAndKV(&pbReq, parsed, returnTokenIDs, outputMode)
 	if err != nil {
 		return httpVLLMGenerateResult{}, err
 	}
@@ -319,7 +339,7 @@ func applyHTTPPrompt(pbReq *vllmpb.GenerateRequest, parsed map[string]any) (int,
 	return 0, errors.New("token_ids or prompt is required")
 }
 
-func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any, returnTokenIDs bool) (bool, error) {
+func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any, returnTokenIDs bool, outputMode string) (bool, error) {
 	droppedTransfer := false
 
 	var (
@@ -398,6 +418,12 @@ func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any
 		if n, ok, err := decodeOptionalUint32Field(sp, reqcommon.FieldN); err != nil {
 			return false, err
 		} else if ok {
+			if n < 1 {
+				return false, errors.New("sampling_params.n must be >= 1")
+			}
+			if n > 1 {
+				return false, errors.New("sampling_params.n > 1 is not supported")
+			}
 			sampling.NumSequences = n
 			hasSampling = true
 		}
@@ -607,14 +633,20 @@ func applyHTTPSamplingAndKV(pbReq *vllmpb.GenerateRequest, parsed map[string]any
 	}
 
 	// /inference/v1/generate defaults to token-only output (output_mode="tokens")
-	// so --tokens-only decode workers do not detokenize unless stop strings or
-	// explicit sampling_params.detokenize require it.
-	outputText := len(stopStrings) > 0
+	// so --tokens-only decode workers do not detokenize unless output_mode="text",
+	// stop strings, or explicit sampling_params.detokenize require it.
+	outputText := outputMode == pipeline.GenerateOutputModeText || len(stopStrings) > 0
 	if detokenize != nil {
+		if !*detokenize && outputMode == pipeline.GenerateOutputModeText {
+			return false, errors.New(`output_mode="text" requires sampling_params.detokenize to be true`)
+		}
 		if !*detokenize && len(stopStrings) > 0 {
 			return false, errors.New("sampling_params.detokenize=false cannot be combined with stop strings")
 		}
 		outputText = *detokenize
+	}
+	if outputMode == pipeline.GenerateOutputModeText && outputLogprobs {
+		return false, errors.New(`output_mode="text" with sampling_params.logprobs is not supported with worker_protocol=grpc`)
 	}
 
 	pbReq.Response = &vllmpb.ResponseOptions{

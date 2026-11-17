@@ -1516,7 +1516,8 @@ func TestVLLMHTTPGenerate_SamplingParityLogprobsAndUnknownKeyRejection(t *testin
 	require.True(t, pbReq.GetResponse().GetPromptLogprobs())
 	require.Equal(t, []uint32{22}, pbReq.GetResponse().GetPromptCandidates().GetTokenIds().GetIds())
 
-	// Verify response echoed prompt_token_ids, text, output logprobs, and prompt_logprobs (with null first NaN logprob).
+	// Verify response echoed output_mode, prompt_token_ids, text, output logprobs, and prompt_logprobs (with null first NaN logprob).
+	require.Equal(t, pipeline.GenerateOutputModeTokens, got["output_mode"])
 	require.Equal(t, []any{float64(11), float64(22)}, got["prompt_token_ids"])
 	choice0 := got["choices"].([]any)[0].(map[string]any)
 	require.Equal(t, `{"answer":42}`, choice0["text"])
@@ -1586,6 +1587,14 @@ func TestVLLMHTTPGenerate_SamplingParityLogprobsAndUnknownKeyRejection(t *testin
 			check: func(t *testing.T, d *vllmpb.DecodingParameters) {
 				require.Len(t, d.GetBadWordsTokenIds(), 1)
 				require.Equal(t, []uint32{777, 778}, d.GetBadWordsTokenIds()[0].GetIds())
+			},
+		},
+		{
+			name: "n equals 1",
+			sp:   map[string]any{"n": 1},
+			check: func(t *testing.T, _ *vllmpb.DecodingParameters) {
+				last, _ := upstream.LastCall()
+				require.Equal(t, uint32(1), last.Request.GetSampling().GetNumSequences())
 			},
 		},
 	}
@@ -1661,14 +1670,40 @@ func TestVLLMHTTPGenerate_SamplingParityLogprobsAndUnknownKeyRejection(t *testin
 			body:    `{"model":"m","token_ids":[1,32000],"features":{"mm_hashes":{"image":["h1"]},"mm_placeholders":{"image":[{"offset":1,"length":1}]}},"content_parts":[{"type":"image_url","url":"https://example.com/a.png"}]}`,
 			errText: "cannot specify both features and content_parts",
 		},
+		{
+			name:    "sampling_params.n above 1",
+			body:    `{"model":"m","token_ids":[1],"sampling_params":{"n":2}}`,
+			errText: "sampling_params.n > 1 is not supported",
+		},
+		{
+			name:    "sampling_params.n zero",
+			body:    `{"model":"m","token_ids":[1],"sampling_params":{"n":0}}`,
+			errText: "sampling_params.n must be >= 1",
+		},
+		{
+			name:    "unsupported output_mode derender",
+			body:    `{"model":"m","token_ids":[1],"output_mode":"derender"}`,
+			errText: "unsupported output_mode",
+		},
+		{
+			name:    "output_mode text with detokenize false",
+			body:    `{"model":"m","token_ids":[1],"output_mode":"text","sampling_params":{"detokenize":false}}`,
+			errText: "requires sampling_params.detokenize to be true",
+		},
+		{
+			name:    "output_mode text with logprobs",
+			body:    `{"model":"m","token_ids":[1],"output_mode":"text","sampling_params":{"logprobs":1}}`,
+			errText: `output_mode="text" with sampling_params.logprobs is not supported`,
+		},
 	}
 	for _, tc := range badInputs {
 		t.Run("400 "+tc.name, func(t *testing.T) {
 			st, errJSON := postJSON(tc.body)
 			require.Equal(t, http.StatusBadRequest, st)
 			if tc.errText != "" {
-				raw, _ := json.Marshal(errJSON)
-				require.Contains(t, string(raw), tc.errText)
+				errObj, _ := errJSON["error"].(map[string]any)
+				msg, _ := errObj["message"].(string)
+				require.Contains(t, msg, tc.errText)
 			}
 		})
 	}
@@ -1838,5 +1873,167 @@ func TestVLLMHTTPGenerate_ConditionalDecodeHitMidStreamSSEErrorAndCancel(t *test
 		case <-testCtx(t).Done():
 			t.Fatal("timed out waiting for upstream decode cancellation on SSE cancel")
 		}
+	})
+}
+
+func TestVLLMGRPC_OutputModeAndNumSequencesParity(t *testing.T) {
+	gw := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		genReq := unmarshalGatewayVLLMReq(t, r)
+		outputText := genReq.GetResponse().GetOutputText()
+		firstText := ""
+		if outputText && genReq.GetModel() != "empty-text" {
+			firstText = "hi"
+		}
+		if r.URL.Path == vllmpb.Inference_GenerateStream_FullMethodName {
+			writeGatewayVLLMFrames(t, w,
+				&vllmpb.GenerateResponse{
+					PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 2},
+					Outputs: &vllmpb.SequenceOutput{
+						NumTokens: 1,
+						TokenIds:  []uint32{41},
+						Text:      firstText,
+					},
+				},
+				&vllmpb.GenerateResponse{
+					Outputs: &vllmpb.SequenceOutput{
+						NumTokens: 0,
+						TokenIds:  []uint32{},
+						Text:      "",
+						FinishInfo: &vllmpb.FinishInfo{
+							FinishReason:    vllmpb.FinishInfo_STOP,
+							NumOutputTokens: 1,
+						},
+					},
+				},
+			)
+			return
+		}
+		writeGatewayVLLMFrames(t, w, &vllmpb.GenerateResponse{
+			PromptInfo: &vllmpb.PromptInfo{NumPromptTokens: 2},
+			Outputs: &vllmpb.SequenceOutput{
+				NumTokens: 1,
+				TokenIds:  []uint32{41},
+				Text:      firstText,
+				FinishInfo: &vllmpb.FinishInfo{
+					FinishReason:    vllmpb.FinishInfo_STOP,
+					NumOutputTokens: 1,
+				},
+			},
+		})
+	}))
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gw.URL})
+	decodeStep, err := steps.NewDecodeStep(gwClient, map[string]any{steps.ParamKVConnector: kv.SharedStorage})
+	require.NoError(t, err)
+	addr := startCoordinatorH2C(
+		t,
+		config.ServerConfig{},
+		pipeline.New([]pipeline.Step{decodeStep}),
+		gwClient,
+		server.WithWorkerProtocol(config.WorkerProtocolGRPC),
+	)
+	httpClient := &http.Client{}
+
+	t.Run("HTTP unary output_mode tokens vs text", func(t *testing.T) {
+		// Default output_mode="tokens" omits empty text.
+		tokReq, err := http.NewRequestWithContext(testCtx(t), http.MethodPost, "http://"+addr+reqcommon.PathVLLMGenerate, strings.NewReader(`{"model":"m","token_ids":[1,2]}`))
+		require.NoError(t, err)
+		tokResp, err := httpClient.Do(tokReq)
+		require.NoError(t, err)
+		var tokJSON map[string]any
+		require.NoError(t, json.NewDecoder(tokResp.Body).Decode(&tokJSON))
+		_ = tokResp.Body.Close()
+		require.Equal(t, http.StatusOK, tokResp.StatusCode)
+		require.Equal(t, pipeline.GenerateOutputModeTokens, tokJSON["output_mode"])
+		tokChoice := tokJSON["choices"].([]any)[0].(map[string]any)
+		_, hasText := tokChoice["text"]
+		require.False(t, hasText, "tokens output_mode must omit empty text")
+
+		// output_mode="text" requests detokenization and preserves empty text string.
+		txtReq, err := http.NewRequestWithContext(testCtx(t), http.MethodPost, "http://"+addr+reqcommon.PathVLLMGenerate, strings.NewReader(`{"model":"empty-text","token_ids":[1,2],"output_mode":"text"}`))
+		require.NoError(t, err)
+		txtResp, err := httpClient.Do(txtReq)
+		require.NoError(t, err)
+		var txtJSON map[string]any
+		require.NoError(t, json.NewDecoder(txtResp.Body).Decode(&txtJSON))
+		_ = txtResp.Body.Close()
+		require.Equal(t, http.StatusOK, txtResp.StatusCode)
+		require.Equal(t, pipeline.GenerateOutputModeText, txtJSON["output_mode"])
+		txtChoice := txtJSON["choices"].([]any)[0].(map[string]any)
+		txtVal, hasText := txtChoice["text"]
+		require.True(t, hasText, "text output_mode must emit text even when empty")
+		require.Equal(t, "", txtVal)
+	})
+
+	t.Run("HTTP stream SSE emits output_mode on choice and usage chunks", func(t *testing.T) {
+		sReq, err := http.NewRequestWithContext(
+			testCtx(t),
+			http.MethodPost,
+			"http://"+addr+reqcommon.PathVLLMGenerate,
+			strings.NewReader(`{"model":"m","token_ids":[1,2],"output_mode":"text","stream":true,"stream_options":{"include_usage":true}}`),
+		)
+		require.NoError(t, err)
+		sResp, err := httpClient.Do(sReq)
+		require.NoError(t, err)
+		rawSSE, err := io.ReadAll(sResp.Body)
+		_ = sResp.Body.Close()
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, sResp.StatusCode)
+
+		var chunks []map[string]any
+		for _, line := range strings.Split(string(rawSSE), "\n") {
+			if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+				continue
+			}
+			var chunk map[string]any
+			require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk))
+			chunks = append(chunks, chunk)
+		}
+		require.Len(t, chunks, 3, "expected 2 choice chunks + 1 usage chunk")
+		for i, chunk := range chunks {
+			require.Equal(t, pipeline.GenerateOutputModeText, chunk["output_mode"], "chunk %d missing output_mode", i)
+		}
+		require.Equal(t, "hi", chunks[0]["choices"].([]any)[0].(map[string]any)["text"])
+		secondChoice := chunks[1]["choices"].([]any)[0].(map[string]any)
+		emptyText, hasSecondText := secondChoice["text"]
+		require.True(t, hasSecondText, "terminal text-mode chunk must keep empty text field")
+		require.Equal(t, "", emptyText)
+		require.Empty(t, chunks[2]["choices"].([]any))
+		require.NotNil(t, chunks[2]["usage"])
+	})
+
+	t.Run("native gRPC rejects num_sequences above 1", func(t *testing.T) {
+		client := dialVLLMClient(t, addr)
+		_, err := client.Generate(testCtx(t), &vllmpb.GenerateRequest{
+			Model:    "m",
+			Prompt:   &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2}}},
+			Sampling: &vllmpb.RandomSampling{NumSequences: 2},
+		})
+		require.Error(t, err)
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		require.Equal(t, codes.InvalidArgument, st.Code())
+		require.Contains(t, st.Message(), "num_sequences > 1 is not supported")
+
+		stream, err := client.GenerateStream(testCtx(t), &vllmpb.GenerateRequest{
+			Model:    "m",
+			Prompt:   &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2}}},
+			Sampling: &vllmpb.RandomSampling{NumSequences: 2},
+		})
+		require.NoError(t, err)
+		_, recvErr := stream.Recv()
+		require.Error(t, recvErr)
+		st, ok = status.FromError(recvErr)
+		require.True(t, ok)
+		require.Equal(t, codes.InvalidArgument, st.Code())
+		require.Contains(t, st.Message(), "num_sequences > 1 is not supported")
+
+		okResp, err := client.Generate(testCtx(t), &vllmpb.GenerateRequest{
+			Model:    "m",
+			Prompt:   &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 2}}},
+			Sampling: &vllmpb.RandomSampling{NumSequences: 1},
+		})
+		require.NoError(t, err)
+		require.Equal(t, []uint32{41}, okResp.GetOutputs().GetTokenIds())
 	})
 }

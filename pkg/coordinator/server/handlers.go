@@ -205,6 +205,7 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 			HTTP: &pipeline.HTTPGenerateReply{
 				IncludeUsage:    converted.includeUsage,
 				ReturnTokenIDs:  converted.returnTokenIDs,
+				OutputMode:      converted.outputMode,
 				ClientRequestID: converted.clientRequestID,
 			},
 		}

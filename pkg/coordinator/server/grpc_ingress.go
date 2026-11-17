@@ -163,7 +163,11 @@ func (s *Server) serveGRPC(w http.ResponseWriter, r *http.Request, scan grpcScan
 	scanned, err := scan(r, body[grpcframe.HeaderLen:])
 	if err != nil {
 		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-		grpcframe.WriteError(cw, codes.InvalidArgument, "invalid GenerateRequest payload")
+		msg := "invalid GenerateRequest payload"
+		if errors.Is(err, errNumSequencesUnsupported) {
+			msg = err.Error()
+		}
+		grpcframe.WriteError(cw, codes.InvalidArgument, msg)
 		return
 	}
 	parseDuration = time.Since(parseStart)
