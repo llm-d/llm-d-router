@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -31,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
@@ -123,7 +125,7 @@ func TestSelectiveKVRemovesWaitingQueueStateForDeletedEndpoint(t *testing.T) {
 	})
 	require.NoError(t, err)
 	result := thresholdResultWithQueue(p,
-		map[string]int{"gpu": 4, "cpu": 20}, 8, time.Unix(1, 0))
+		map[string]int{"gpu": 4, "cpu": 20}, 8, time.Now())
 	endpoint := selectedEndpoint(result)
 
 	assert.True(t, p.waitingQueueVeto(endpoint))
@@ -196,6 +198,16 @@ func TestSelectiveKVPluginFactoryRejectsInvalidConfig(t *testing.T) {
 			}`,
 			wantError: "maxWaitingRequests requires threshold loadPolicy",
 		},
+		{
+			name: "waiting queue staleness threshold must be positive",
+			parameters: `{
+				"loadPolicy":"threshold",
+				"minExternalReusableTokens":1,
+				"maxWaitingRequests":8,
+				"waitingQueueStalenessThreshold":"0s"
+			}`,
+			wantError: "waitingQueueStalenessThreshold must be positive",
+		},
 	}
 
 	for _, test := range tests {
@@ -219,7 +231,8 @@ func TestSelectiveKVThresholdPolicyVetoesWaitingQueuePressure(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	start := time.Unix(1, 0)
+	// Scrape times must be fresh relative to the wall clock.
+	start := time.Now()
 	tests := []struct {
 		name         string
 		waiting      int
@@ -284,6 +297,57 @@ func TestSelectiveKVThresholdPolicyIgnoresMissingWaitingQueueSample(t *testing.T
 	require.NoError(t, p.PreRequest(context.Background(),
 		&scheduling.InferenceRequest{Body: body}, result))
 	assert.False(t, body.Mutated)
+	assert.NotContains(t, payload, "kv_transfer_params")
+}
+
+func TestSelectiveKVThresholdPolicyIgnoresStaleWaitingQueueSample(t *testing.T) {
+	p, err := New("test", Config{
+		LoadPolicy:                     PolicyThreshold,
+		OffloadPolicy:                  PolicyPreserve,
+		MinExternalReusableTokens:      1024,
+		MaxWaitingRequests:             8,
+		WaitingQueueStalenessThreshold: &metav1.Duration{Duration: time.Second},
+	})
+	require.NoError(t, err)
+
+	run := func(scrapeTime time.Time) fwkrequest.PayloadMap {
+		result := thresholdResultWithQueue(p,
+			map[string]int{"gpu": 4, "cpu": 20}, 8, scrapeTime)
+		payload := fwkrequest.PayloadMap{"model": "test"}
+		require.NoError(t, p.PreRequest(context.Background(),
+			&scheduling.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{Payload: payload}}, result))
+		return payload
+	}
+
+	// A fresh sample at the threshold closes loading.
+	params, ok := run(time.Now())["kv_transfer_params"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, json.Number("0"), params["max_load_tokens"])
+
+	// The same value, last observed beyond the staleness threshold, no longer
+	// vetoes loading even though the gate was closed.
+	assert.NotContains(t, run(time.Now().Add(-2*time.Second)), "kv_transfer_params")
+}
+
+func TestSelectiveKVThresholdPolicyIgnoresStaleQueueSampleWithFreshUpdateTime(t *testing.T) {
+	// Issue #2890: the queue metric disappears while other metrics keep
+	// advancing UpdateTime. The retained value must age out on its own scrape
+	// time, not on UpdateTime.
+	p, err := New("test", Config{
+		LoadPolicy:                     PolicyThreshold,
+		OffloadPolicy:                  PolicyPreserve,
+		MinExternalReusableTokens:      1024,
+		MaxWaitingRequests:             8,
+		WaitingQueueStalenessThreshold: &metav1.Duration{Duration: time.Second},
+	})
+	require.NoError(t, err)
+
+	now := time.Now()
+	result := thresholdResultWithMetrics(p, map[string]int{"gpu": 4, "cpu": 20},
+		queueMetricsUpdatedAt(8, now.Add(-2*time.Second), now))
+	payload := fwkrequest.PayloadMap{"model": "test"}
+	require.NoError(t, p.PreRequest(context.Background(),
+		&scheduling.InferenceRequest{Body: &fwkrequest.InferenceRequestBody{Payload: payload}}, result))
 	assert.NotContains(t, payload, "kv_transfer_params")
 }
 
@@ -508,11 +572,43 @@ func TestSelectiveKVThresholdPolicyConsumesConfiguredData(t *testing.T) {
 
 	dependencies := p.Consumes()
 	assert.Contains(t, dependencies.Required, p.prefixMatchInfoDataKey)
-	assert.Contains(t, dependencies.Required, plugin.NewDataKey(
-		extractormetrics.WaitingQueueSizeKey,
-		extractormetrics.MetricsExtractorType))
+	assert.Equal(t, fwkdl.ScalarSample{},
+		dependencies.Required[attrmetrics.ScalarSampleDataKey(fwkdl.ScalarFieldWaitingQueueSize)])
 	assert.Empty(t, dependencies.Optional)
 }
+
+func TestSelectiveKVWaitingQueueSampleDependencyMatchesCoreExtractor(t *testing.T) {
+	p, err := New("test", Config{
+		LoadPolicy:                PolicyThreshold,
+		OffloadPolicy:             PolicyPreserve,
+		MinExternalReusableTokens: 1,
+		MaxWaitingRequests:        8,
+	})
+	require.NoError(t, err)
+	mappings := extractormetrics.NewMappingRegistry()
+	mapping, err := extractormetrics.NewMapping("vllm:num_requests_waiting", "", "", "", "")
+	require.NoError(t, err)
+	require.NoError(t, mappings.Register(extractormetrics.DefaultEngineType, mapping))
+	extractor, err := extractormetrics.NewCoreMetricsExtractor(mappings, "")
+	require.NoError(t, err)
+
+	prefix := &stubProducer{
+		typedName: plugin.TypedName{Type: preciseproducer.PluginType, Name: preciseproducer.PluginType},
+		produces:  map[plugin.DataKey]any{p.prefixMatchInfoDataKey: attrprefix.PrefixCacheMatchInfo{}},
+	}
+
+	registry, err := fwkdl.BuildRegistry([]plugin.Plugin{extractor, prefix})
+	require.NoError(t, err)
+	require.NoError(t, registry.ValidateConsumer(p))
+}
+
+type stubProducer struct {
+	typedName plugin.TypedName
+	produces  map[plugin.DataKey]any
+}
+
+func (s *stubProducer) TypedName() plugin.TypedName      { return s.typedName }
+func (s *stubProducer) Produces() map[plugin.DataKey]any { return s.produces }
 
 func TestSelectiveKVPreRequestAppliesIndependentPolicies(t *testing.T) {
 	tests := []struct {
@@ -732,6 +828,11 @@ func thresholdResult(p *Plugin, byTier map[string]int) *scheduling.SchedulingRes
 
 func thresholdResultWithQueue(p *Plugin, byTier map[string]int, waiting int,
 	updateTime time.Time) *scheduling.SchedulingResult {
+	return thresholdResultWithMetrics(p, byTier, queueMetrics(waiting, updateTime))
+}
+
+func thresholdResultWithMetrics(p *Plugin, byTier map[string]int,
+	metrics *fwkdl.Metrics) *scheduling.SchedulingResult {
 	endpoint := scheduling.NewEndpoint(
 		&fwkdl.EndpointMetadata{
 			ID: k8stypes.NamespacedName{
@@ -739,10 +840,7 @@ func thresholdResultWithQueue(p *Plugin, byTier map[string]int, waiting int,
 				Name:      "model-server",
 			},
 		},
-		&fwkdl.Metrics{
-			WaitingQueueSize: waiting,
-			UpdateTime:       updateTime,
-		},
+		metrics,
 		nil,
 	)
 	if byTier != nil {
@@ -756,6 +854,24 @@ func thresholdResultWithQueue(p *Plugin, byTier map[string]int, waiting int,
 			"default": {TargetEndpoints: []scheduling.Endpoint{endpoint}},
 		},
 	}
+}
+
+// queueMetrics returns metrics whose waiting-queue sample was scraped at
+// scrapeTime. A zero scrapeTime leaves the queue metric unobserved.
+func queueMetrics(waiting int, scrapeTime time.Time) *fwkdl.Metrics {
+	return queueMetricsUpdatedAt(waiting, scrapeTime, scrapeTime)
+}
+
+// queueMetricsUpdatedAt is queueMetrics with a later scrape that extracted
+// other metrics at updateTime.
+func queueMetricsUpdatedAt(waiting int, scrapeTime, updateTime time.Time) *fwkdl.Metrics {
+	metrics := &fwkdl.Metrics{WaitingQueueSize: waiting, UpdateTime: updateTime}
+	if !scrapeTime.IsZero() {
+		samples := fwkdl.NewScalarSampleUpdate(nil, "test", scrapeTime, 0)
+		samples.Observe(fwkdl.ScalarFieldWaitingQueueSize, float64(waiting))
+		metrics.ScalarSamples = samples.Result()
+	}
+	return metrics
 }
 
 func newThresholdPlugin(t *testing.T) *Plugin {

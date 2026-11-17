@@ -46,6 +46,34 @@ func ScalarMetricDataKey(attributeKey string) plugin.DataKey {
 	return plugin.NewDataKey(attributeKey, MetricsExtractorType)
 }
 
+const (
+	scalarSampleKeyPrefix       = "ScalarSample:"
+	customScalarSampleKeyPrefix = "CustomScalarSample:"
+)
+
+// IsReservedAttributeKey reports whether a scalar metric attributeKey starts
+// with a prefix of the sample keys. ScalarMetricDataKey of such a key would
+// equal a sample key, so the extractor rejects it.
+func IsReservedAttributeKey(attributeKey string) bool {
+	return strings.HasPrefix(attributeKey, scalarSampleKeyPrefix) ||
+		strings.HasPrefix(attributeKey, customScalarSampleKeyPrefix)
+}
+
+// ScalarSampleDataKey returns the key a consumer declares to read
+// Metrics.ScalarSample(field). The sample is stored in Metrics rather than in
+// the AttributeMap, which is cloned per endpoint on every request.
+func ScalarSampleDataKey(field fwkdl.ScalarField) plugin.DataKey {
+	return plugin.NewDataKey(scalarSampleKeyPrefix+field.String(), MetricsExtractorType)
+}
+
+// CustomScalarSampleDataKey returns the key a consumer declares to read
+// Metrics.CustomScalarSample(attributeKey). Its prefix differs from
+// ScalarSampleDataKey, so a custom metric that overrides a standard
+// attributeKey keeps its own key.
+func CustomScalarSampleDataKey(attributeKey string) plugin.DataKey {
+	return plugin.NewDataKey(customScalarSampleKeyPrefix+attributeKey, MetricsExtractorType)
+}
+
 func ReadScalarMetricValue(attrs fwkdl.AttributeMap, key plugin.DataKey) (ScalarMetricValue, bool) {
 	return fwkdl.ReadAttribute[ScalarMetricValue](attrs, key)
 }
