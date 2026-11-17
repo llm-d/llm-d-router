@@ -78,6 +78,7 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		}
 
 		// Register other metrics
+		metrics.Registry.MustRegister(llmdDiscoveryMembershipDisagreement)
 		metrics.Registry.MustRegister(llmdRequestCounter)
 		metrics.Registry.MustRegister(llmdRequestErrCounter)
 		metrics.Registry.MustRegister(llmdFairnessIDResolvedCounter)
@@ -772,4 +773,13 @@ func RecordToolCallingFieldStatuses(component, direction string, statuses []tool
 			string(fieldStatus.Status),
 		).Inc()
 	}
+}
+
+// RecordDiscoveryDisagreement records persistent disagreement with sampled membership.
+func RecordDiscoveryDisagreement(persistent bool) {
+	value := 0.0
+	if persistent {
+		value = 1
+	}
+	llmdDiscoveryMembershipDisagreement.Set(value)
 }

@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,11 +32,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
 	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
@@ -100,8 +103,8 @@ func TestDiscoveryFreshnessExpiresWhenMembershipReadsFail(t *testing.T) {
 			// The API recovers before the watch-driven routing store catches up.
 			require.NoError(t, api.Delete(ctx, pod))
 			unavailable = false
-			require.Error(t, d.refresh(ctx))
-			require.Error(t, d.CheckReady())
+			require.NoError(t, d.refresh(ctx))
+			require.NoError(t, d.CheckReady())
 			ds.PodDelete(pod.Name)
 			require.NoError(t, d.refresh(ctx))
 			require.NoError(t, d.CheckReady())
@@ -155,8 +158,14 @@ func TestDiscoveryFreshnessInvalidatesKnownMembershipChanges(t *testing.T) {
 			case "deleted-pool":
 				require.NoError(t, api.Delete(ctx, pool))
 			}
-			require.Error(t, d.refresh(ctx))
-			require.Error(t, d.CheckReady(), "known stale membership must not use the discovery-error grace period")
+			if change == "not-ready" {
+				require.NoError(t, d.refresh(ctx))
+				require.NoError(t, d.CheckReady())
+				require.Empty(t, d.validated.Load().endpoints)
+			} else {
+				require.Error(t, d.refresh(ctx))
+				require.Error(t, d.CheckReady(), "changed pool configuration must not use the discovery-error grace period")
+			}
 		})
 	}
 }
@@ -217,4 +226,62 @@ func TestDiscoveryFreshnessLoopKeepsDelayedSuccessfulReadsReady(t *testing.T) {
 		clock.Step(time.Second)
 		receive()
 	}
+}
+
+func TestDiscoveryFreshnessSamplesMembershipBeforeWatchCatchesUp(t *testing.T) {
+	ctx := t.Context()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, v1.Install(scheme))
+	pool := fwkgaie.MakeInferencePool("pool").Namespace("default").Selector(map[string]string{"app": "model"}).TargetPorts(8000).ObjRef()
+	pod := fwkk8s.MakePod("model").Namespace("default").Labels(map[string]string{"app": "model"}).ReadyCondition().ObjRef()
+	api := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, pod).Build()
+	ds := datastore.NewDatastore(ctx, datalayer.NewTestRuntime(t, time.Second))
+	require.NoError(t, ds.PoolSet(ctx, api, poolutil.InferencePoolToEndpointPool(pool)))
+	d := NewDiscoveryFreshness(api, ds, client.ObjectKeyFromObject(pool), time.Minute)
+	require.NoError(t, d.refresh(ctx))
+	added := pod.DeepCopy()
+	added.Name = "added"
+	added.ResourceVersion = ""
+	require.NoError(t, api.Create(ctx, added))
+	require.NoError(t, d.refresh(ctx), "healthy sampling must tolerate a watch that has not observed an addition")
+	require.NoError(t, d.CheckReady())
+	require.NoError(t, api.Delete(ctx, pod))
+	require.NoError(t, d.refresh(ctx), "withdrawal must publish the authoritative membership without waiting for the watch")
+	require.NoError(t, d.CheckReady())
+}
+
+func TestDiscoveryFreshnessFiltersMixedCandidates(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	d := &DiscoveryFreshness{clock: clock, threshold: time.Minute}
+	valid := &fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "valid"}, Port: "8000"}
+	changed := valid.Clone()
+	changed.Port = "9000"
+	d.validated.Store(&validatedMembership{at: clock.Now(), endpoints: map[types.NamespacedName]*fwkdl.EndpointMetadata{valid.ID: valid}})
+	candidates := []fwksched.Endpoint{fwksched.NewEndpoint(changed, nil, nil), fwksched.NewEndpoint(valid, nil, nil)}
+	eligible, err := d.FilterCandidates(t.Context(), candidates)
+	require.NoError(t, err)
+	require.Equal(t, candidates[1:], eligible)
+	_, err = d.FilterCandidates(t.Context(), candidates[:1])
+	require.Error(t, err)
+	clock.Step(time.Minute)
+	_, err = d.FilterCandidates(t.Context(), candidates)
+	require.Error(t, err)
+}
+
+func TestDiscoveryFreshnessLogsPersistentDisagreementAndRecoveryOnce(t *testing.T) {
+	var entries []string
+	logger := funcr.New(func(_, entry string) { entries = append(entries, entry) }, funcr.Options{Verbosity: 5})
+	ctx := log.IntoContext(t.Context(), logger)
+	d := &DiscoveryFreshness{}
+	mismatch := errors.New("membership differs")
+	d.observeDisagreement(ctx, mismatch)
+	require.NotContains(t, strings.Join(entries, "\n"), "persists across")
+	d.observeDisagreement(ctx, mismatch)
+	d.observeDisagreement(ctx, mismatch)
+	d.observeDisagreement(ctx, nil)
+	d.observeDisagreement(ctx, nil)
+	output := strings.Join(entries, "\n")
+	require.Equal(t, 1, strings.Count(output, "persists across successful samples"))
+	require.Equal(t, 1, strings.Count(output, "agreement recovered"))
 }

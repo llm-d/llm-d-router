@@ -229,7 +229,15 @@ dataLayer:
 	fault.blocked = false
 	fault.mu.Unlock()
 	require.Eventually(t, ready, 20*time.Second, 50*time.Millisecond)
-	recovered, resp := send()
-	require.Equal(t, "192.168.1.2:8000", headerValue(resp.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey))
-	require.NoError(t, recovered.CloseSend())
+	require.Eventually(t, func() bool {
+		recovered, response := send()
+		defer func() { _ = recovered.CloseSend() }()
+		if immediate := response.GetImmediateResponse(); immediate != nil {
+			require.Equal(t, envoyTypePb.StatusCode_ServiceUnavailable, immediate.GetStatus().GetCode())
+			return false
+		}
+		destination := headerValue(response.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders(), metadata.DestinationEndpointKey)
+		require.Equal(t, "192.168.1.2:8000", destination, "recovery must never route to the withdrawn Pod")
+		return destination == "192.168.1.2:8000"
+	}, 20*time.Second, 50*time.Millisecond, "routing recovers when sampled membership intersects the watch-driven candidates")
 }

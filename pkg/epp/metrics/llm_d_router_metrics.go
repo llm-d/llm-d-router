@@ -674,3 +674,9 @@ var (
 		}, nil,
 	)
 )
+
+var llmdDiscoveryMembershipDisagreement = prometheus.NewGauge(prometheus.GaugeOpts{
+	Subsystem: LLMDRouterEndpointPickerSubsystem,
+	Name:      "discovery_membership_disagreement",
+	Help:      metricsutil.HelpMsgWithStability("Whether routing membership has differed from direct Kubernetes samples for at least two consecutive successful samples.", compbasemetrics.ALPHA),
+})
