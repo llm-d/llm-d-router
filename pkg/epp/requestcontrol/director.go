@@ -183,6 +183,8 @@ type Director struct {
 	// poolName is the inference_pool label on per-request metrics. It must match the name the
 	// runner passes to metrics.InitFairnessIDResolutionMetrics.
 	poolName string
+
+	endpointSelectionCheck func() error
 }
 
 // getInferenceObjective fetches the inferenceObjective from the datastore otherwise creates a new one based on reqCtx.
@@ -208,6 +210,9 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 // HandleRequest orchestrates the request lifecycle.
 // It always returns the requestContext even in the error case, as the request context is used in error handling.
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
+	if err := d.CheckEndpointSelection(); err != nil {
+		return reqCtx, err
+	}
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
 	// An error while admitting (admission controller, candidate lookup, screeners, Admitter plugins)
@@ -677,6 +682,21 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 // Must be called before the Director serves traffic.
 func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 	d.requestEvictor = re
+}
+
+// SetEndpointSelectionCheck installs a check before the director serves traffic.
+func (d *Director) SetEndpointSelectionCheck(check func() error) {
+	d.endpointSelectionCheck = check
+}
+
+// CheckEndpointSelection checks whether discovery permits selecting an endpoint.
+func (d *Director) CheckEndpointSelection() error {
+	if d.endpointSelectionCheck != nil {
+		if err := d.endpointSelectionCheck(); err != nil {
+			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
+		}
+	}
+	return nil
 }
 
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
