@@ -57,4 +57,9 @@ limitations under the License.
 //     computed as ReceivedTimestamp + x-llm-d-slo-ttft-ms header (interpreted as milliseconds).
 //     Requests without a valid header are scheduled after SLO-bound requests.
 //     This maximizes the number of requests served before the deadlines computed on the defined SLO expire.
+//
+//   - WSPT ("Weighted Shortest Processing Time") ("wspt-ordering-policy"): Orders requests by their byte size
+//     (smallest first), using FCFS as a tie-breaker. An optional maxDelaySeconds limits overtaking to requests that
+//     arrived within that many seconds after the request.
+//     This minimizes the average time requests wait in the queue.
 package ordering

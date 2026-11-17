@@ -96,6 +96,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/edf"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/fcfs"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/slodeadline"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/ordering/wspt"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/composite"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
@@ -787,6 +788,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(evictfiltering.SheddableFilterType, fwkplugin.StabilityAlpha, evictfiltering.SheddableFilterFactory)
 	fwkplugin.Register(evictordering.PriorityThenTimeOrderingType, fwkplugin.StabilityAlpha, evictordering.PriorityThenTimeOrderingFactory)
 	fwkplugin.Register(weightedfairshare.WeightedFairShareFairnessPolicyType, fwkplugin.StabilityAlpha, weightedfairshare.WeightedFairShareFairnessPolicyFactory)
+	fwkplugin.Register(wspt.WSPTOrderingPolicyType, fwkplugin.StabilityAlpha, wspt.WSPTOrderingPolicyFactory)
 	fwkplugin.Register(softreflectiveceiling.PolicyType, fwkplugin.StabilityAlpha, softreflectiveceiling.Factory)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
