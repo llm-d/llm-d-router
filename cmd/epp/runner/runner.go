@@ -566,7 +566,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 
 	director := requestcontrol.NewDirectorWithConfig(ds, scheduler, admissionController, endpointCandidates, r.requestControlConfig, gknn.Name)
 	if discoveryFreshness != nil {
-		director.SetEndpointSelectionCheck(discoveryFreshness.CheckReady)
+		director.SetEndpointSelectionCheck(discoveryFreshness.CheckEndpoints)
 	}
 	if requestEvictor != nil {
 		director.SetRequestEvictor(requestEvictor)

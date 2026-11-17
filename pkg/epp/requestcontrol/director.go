@@ -184,7 +184,7 @@ type Director struct {
 	// runner passes to metrics.InitFairnessIDResolutionMetrics.
 	poolName string
 
-	endpointSelectionCheck func() error
+	endpointSelectionCheck func(...*fwkdl.EndpointMetadata) error
 }
 
 // getInferenceObjective fetches the inferenceObjective from the datastore otherwise creates a new one based on reqCtx.
@@ -685,14 +685,14 @@ func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 }
 
 // SetEndpointSelectionCheck installs a check before the director serves traffic.
-func (d *Director) SetEndpointSelectionCheck(check func() error) {
+func (d *Director) SetEndpointSelectionCheck(check func(...*fwkdl.EndpointMetadata) error) {
 	d.endpointSelectionCheck = check
 }
 
 // CheckEndpointSelection checks whether discovery permits selecting an endpoint.
-func (d *Director) CheckEndpointSelection() error {
+func (d *Director) CheckEndpointSelection(endpoints ...*fwkdl.EndpointMetadata) error {
 	if d.endpointSelectionCheck != nil {
-		if err := d.endpointSelectionCheck(); err != nil {
+		if err := d.endpointSelectionCheck(endpoints...); err != nil {
 			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
 		}
 	}
