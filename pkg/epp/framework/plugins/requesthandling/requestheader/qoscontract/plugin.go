@@ -169,6 +169,9 @@ func newPlugin(name string, params Parameters, now func() time.Time) (*Plugin, e
 	if err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", PluginType, name, err)
 	}
+	if len(validator.teams) == 0 {
+		validator = nil // no team has a promise, so there is nothing to validate
+	}
 	return &Plugin{
 		typedName:    plugin.TypedName{Type: PluginType, Name: name},
 		reportOnly:   params.Mode == ModeReportOnly,
