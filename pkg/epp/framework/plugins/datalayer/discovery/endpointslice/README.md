@@ -60,7 +60,10 @@ type `endpointslice-discovery` in `plugins`.
 | `namespace` | `string` | yes | -- | Namespace of the EndpointSlices. |
 | `selector` | `string` | no | all slices | Label selector, for example `kubernetes.io/service-name=model-server`. |
 | `portName` | `string` | no | -- | Slice port to route to. When empty, a slice must declare exactly one port. |
-| `kubeconfig` | `string` | no | in-cluster | Kubeconfig path. When empty, the in-cluster config is used, then `$KUBECONFIG`. |
+
+The plugin connects to the API server with the same client config as the
+Kubernetes discovery modes (`ctrl.GetConfig()`): the EPP's `--kubeconfig`
+flag, then `$KUBECONFIG`, then the in-cluster config.
 
 ### RBAC
 

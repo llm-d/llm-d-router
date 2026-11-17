@@ -26,7 +26,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"sort"
 	"strconv"
 	"sync"
 
@@ -37,6 +36,7 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/internal/debugdump"
 )
 
 const PluginType = "file-discovery"
@@ -142,38 +142,15 @@ func validateIPv4Address(address string) error {
 
 func (f *FileDiscovery) TypedName() fwkplugin.TypedName { return f.typedName }
 
-const maxDebugDumpEndpoints = 100
-
-// discoveryState is the sanitized snapshot returned by DumpState: discovered
-// endpoint identities only, never their addresses or labels. The dump is partial
-// when TotalEndpoints exceeds MaxEndpoints.
-type discoveryState struct {
-	Endpoints      []string `json:"endpoints"`
-	TotalEndpoints int      `json:"totalEndpoints"`
-	MaxEndpoints   int      `json:"maxEndpoints"`
-}
-
 // DumpState reports the endpoint identities currently loaded from the file,
-// sorted and capped to maxDebugDumpEndpoints so the payload stays bounded. The
+// sorted and capped to debugdump.MaxEndpoints so the payload stays bounded. The
 // set is snapshotted under a read lock, so a concurrent reload may not yet be
 // reflected; best-effort visibility is enough for a debug endpoint.
 func (f *FileDiscovery) DumpState() (json.RawMessage, error) {
 	f.mu.RLock()
-	names := make([]string, 0, len(f.endpoints))
-	for id := range f.endpoints {
-		names = append(names, id.String())
-	}
+	names := debugdump.Names(f.endpoints)
 	f.mu.RUnlock()
-
-	total := len(names)
-	sort.Strings(names)
-
-	state := discoveryState{TotalEndpoints: total, MaxEndpoints: maxDebugDumpEndpoints}
-	if len(names) > maxDebugDumpEndpoints {
-		names = names[:maxDebugDumpEndpoints]
-	}
-	state.Endpoints = names
-	return json.Marshal(state)
+	return debugdump.Marshal(names)
 }
 
 // Ready returns a channel closed after the first successful load of the

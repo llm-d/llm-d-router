@@ -33,6 +33,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/internal/debugdump"
 )
 
 const (
@@ -112,6 +113,12 @@ func start(t *testing.T, client *fake.Clientset, p params) (*EndpointSliceDiscov
 	if err != nil {
 		t.Fatalf("newEndpointSliceDiscovery: %v", err)
 	}
+	return d, startDiscovery(t, d)
+}
+
+// startDiscovery runs d until the test ends and waits for it to become ready.
+func startDiscovery(t *testing.T, d *EndpointSliceDiscovery) *recordingNotifier {
+	t.Helper()
 	n := newRecordingNotifier()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -124,7 +131,7 @@ func start(t *testing.T, client *fake.Clientset, p params) (*EndpointSliceDiscov
 	case <-time.After(10 * time.Second):
 		t.Fatal("plugin did not become ready")
 	}
-	return d, n
+	return n
 }
 
 func eventually(t *testing.T, what string, cond func() bool) {
@@ -251,17 +258,51 @@ func TestPortSelection(t *testing.T) {
 
 func TestUnchangedSliceNotUpsertedAgain(t *testing.T) {
 	client := fake.NewClientset(slice("model-server-d0", "d0", "2001:db8::20", true, nil))
-	_, n := start(t, client, testParams)
+	d, err := newEndpointSliceDiscovery("test", testParams, client)
+	if err != nil {
+		t.Fatalf("newEndpointSliceDiscovery: %v", err)
+	}
+	// Closed once a reconcile has read the updated slice, so the assertion
+	// below cannot pass before the second reconcile ran.
+	sawUpdate := make(chan struct{})
+	var once sync.Once
+	d.afterReconcile = func(slices []*discoveryv1.EndpointSlice) {
+		for _, s := range slices {
+			if s.Name == "model-server-d0" && s.ResourceVersion == "2" {
+				once.Do(func() { close(sawUpdate) })
+			}
+		}
+	}
+	n := startDiscovery(t, d)
+
 	s := slice("model-server-d0", "d0", "2001:db8::20", true, nil)
 	s.ResourceVersion = "2"
 	if _, err := client.DiscoveryV1().EndpointSlices(testNamespace).Update(context.Background(), s, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-sawUpdate:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no reconcile observed the updated slice")
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.upserts != 1 {
 		t.Errorf("upserts = %d, want 1", n.upserts)
+	}
+}
+
+func TestEndpointIDFallsBackToAddress(t *testing.T) {
+	s := slice("model-server-d0", "", "2001:db8::20", true, nil)
+	s.Endpoints[0].Hostname = nil
+	_, n := start(t, fake.NewClientset(s), testParams)
+	id := types.NamespacedName{Namespace: testNamespace, Name: testService + ".2001:db8::20"}
+	m := n.get(id)
+	if m == nil {
+		t.Fatalf("endpoint %s missing", id)
+	}
+	if m.Address != "2001:db8::20" || m.Port != "9080" {
+		t.Errorf("endpoint = %+v", m)
 	}
 }
 
@@ -271,7 +312,7 @@ func TestDumpStateOmitsAddresses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var st discoveryState
+	var st debugdump.State
 	if err := json.Unmarshal(raw, &st); err != nil {
 		t.Fatal(err)
 	}

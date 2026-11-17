@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"maps"
 	"net"
-	"os"
 	"sort"
 	"strconv"
 	"sync"
@@ -37,14 +36,14 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	discoverylisters "k8s.io/client-go/listers/discovery/v1"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/internal/debugdump"
 )
 
 const PluginType = "endpointslice-discovery"
@@ -61,9 +60,6 @@ type params struct {
 	// PortName is the slice port to route to. Empty requires the slice to
 	// declare exactly one port.
 	PortName string `json:"portName"`
-	// Kubeconfig is an optional kubeconfig path. When empty the in-cluster
-	// config is used, then $KUBECONFIG.
-	Kubeconfig string `json:"kubeconfig"`
 }
 
 // EndpointSliceDiscovery implements EndpointDiscovery over EndpointSlices.
@@ -82,6 +78,10 @@ type EndpointSliceDiscovery struct {
 
 	ready     chan struct{}
 	readyOnce sync.Once
+
+	// afterReconcile, when set, is called at the end of every reconcile with
+	// the slices it read. Tests use it to observe that a reconcile ran.
+	afterReconcile func(slices []*discoveryv1.EndpointSlice)
 }
 
 var (
@@ -100,7 +100,10 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 	if p.Namespace == "" {
 		return nil, errors.New(PluginType + ": 'namespace' parameter is required")
 	}
-	cfg, err := restConfig(p.Kubeconfig)
+	// The discovery path runs without a controller manager, so the plugin
+	// builds its own client from the same config the manager would use:
+	// --kubeconfig, $KUBECONFIG, in-cluster, then ~/.kube/config.
+	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, fmt.Errorf("%s: building client config: %w", PluginType, err)
 	}
@@ -131,21 +134,6 @@ func newEndpointSliceDiscovery(name string, p params, client kubernetes.Interfac
 		endpoints: make(map[types.NamespacedName]*fwkdl.EndpointMetadata),
 		ready:     make(chan struct{}),
 	}, nil
-}
-
-// restConfig resolves the client config. The discovery path runs without a
-// controller manager, so the plugin cannot borrow the manager's client.
-func restConfig(kubeconfig string) (*rest.Config, error) {
-	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
-	}
-	if cfg, err := rest.InClusterConfig(); err == nil {
-		return cfg, nil
-	}
-	if env := os.Getenv("KUBECONFIG"); env != "" {
-		return clientcmd.BuildConfigFromFlags("", env)
-	}
-	return nil, errors.New("not running in a cluster and neither 'kubeconfig' nor $KUBECONFIG is set")
 }
 
 func (d *EndpointSliceDiscovery) TypedName() fwkplugin.TypedName { return d.typedName }
@@ -241,6 +229,9 @@ func (d *EndpointSliceDiscovery) reconcile(ctx context.Context, lister discovery
 			notifier.Delete(id)
 		}
 	}
+	if d.afterReconcile != nil {
+		d.afterReconcile(slices)
+	}
 }
 
 func (d *EndpointSliceDiscovery) endpointsFrom(ctx context.Context, slices []*discoveryv1.EndpointSlice) map[types.NamespacedName]*fwkdl.EndpointMetadata {
@@ -325,31 +316,11 @@ func (d *EndpointSliceDiscovery) count() int {
 	return len(d.endpoints)
 }
 
-// maxDebugDumpEndpoints caps DumpState so the debug payload stays bounded.
-const maxDebugDumpEndpoints = 100
-
-// discoveryState is the snapshot returned by DumpState: endpoint identities
-// only, never addresses or labels.
-type discoveryState struct {
-	TotalEndpoints int      `json:"totalEndpoints"`
-	MaxEndpoints   int      `json:"maxEndpoints"`
-	Endpoints      []string `json:"endpoints"`
-}
-
-// DumpState reports the endpoint identities from the last reconcile.
+// DumpState reports the endpoint identities from the last reconcile, in the
+// format shared with the other discovery plugins.
 func (d *EndpointSliceDiscovery) DumpState() (json.RawMessage, error) {
 	d.mu.RLock()
-	names := make([]string, 0, len(d.endpoints))
-	for id := range d.endpoints {
-		names = append(names, id.String())
-	}
+	names := debugdump.Names(d.endpoints)
 	d.mu.RUnlock()
-
-	sort.Strings(names)
-	state := discoveryState{TotalEndpoints: len(names), MaxEndpoints: maxDebugDumpEndpoints}
-	if len(names) > maxDebugDumpEndpoints {
-		names = names[:maxDebugDumpEndpoints]
-	}
-	state.Endpoints = names
-	return json.Marshal(state)
+	return debugdump.Marshal(names)
 }
