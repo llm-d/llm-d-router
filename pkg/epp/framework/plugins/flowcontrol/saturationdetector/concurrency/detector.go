@@ -201,7 +201,9 @@ func (d *detector) getIncomingTokens(m datalayer.AttributeMap) int64 {
 // InFlightLoadProducer increments at dispatch and decrements on request
 // completion, so the signal already reflects completions with no scrape lag.
 func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
+	stage := flowcontrol.SaturationStageFromContext(ctx)
 	if len(endpoints) == 0 {
+		metrics.RecordFlowControlDetectorCapacity(d.typedName.Name, stage, 0, 0)
 		return 1.0
 	}
 
@@ -231,7 +233,6 @@ func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoin
 			ratio(load.Tokens, tokCap),
 		)
 	}
-	stage := flowcontrol.SaturationStageFromContext(ctx)
 	metrics.RecordFlowControlDetectorCapacity(d.typedName.Name, stage, reqCapacity, tokCapacity)
 	pendingDispatches := d.pendingDispatches.Load()
 

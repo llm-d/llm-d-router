@@ -28,13 +28,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 const cleanEndpoint = "clean-endpoint"
@@ -1252,4 +1255,46 @@ func TestDetector_EndpointOverrides(t *testing.T) {
 		require.EqualValues(t, 10, req)
 		require.EqualValues(t, 1000, tok)
 	})
+
+	t.Run("capacity gauge reports the evaluated sum per stage", func(t *testing.T) {
+		t.Parallel()
+		eppmetrics.Register()
+		reg := newLocalRegistry()
+		// A unique detector name isolates this test's gauge series from parallel tests.
+		const detectorName = "overrides-capacity-gauge"
+		d := newDetector(detectorName, *cfg, logr.Discard())
+		small := newFakeEndpoint(reg, "small")
+		big := newFakeEndpoint(reg, "big")
+		big.GetMetadata().Labels = bigLabels
+
+		d.Saturation(flowcontrol.WithSaturationStage(t.Context(), flowcontrol.SaturationStageDecode), []datalayer.Endpoint{small, big})
+		require.Equal(t, 40.0, capacityGaugeValue(t, detectorName, flowcontrol.SaturationStageDecode, "requests"))
+		require.Equal(t, 4000.0, capacityGaugeValue(t, detectorName, flowcontrol.SaturationStageDecode, "tokens"))
+
+		d.Saturation(t.Context(), nil)
+		require.Equal(t, 0.0, capacityGaugeValue(t, detectorName, "", "requests"), "an empty pool reports zero capacity")
+	})
+}
+
+// capacityGaugeValue reads the llm_d_epp_flow_control_detector_capacity series for the given
+// detector, stage and unit. It returns -1 when the series is absent.
+func capacityGaugeValue(t *testing.T, detectorName, stage, unit string) float64 {
+	t.Helper()
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != "llm_d_epp_flow_control_detector_capacity" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			got := map[string]string{}
+			for _, l := range m.GetLabel() {
+				got[l.GetName()] = l.GetValue()
+			}
+			if got["detector"] == detectorName && got["stage"] == stage && got["unit"] == unit {
+				return m.GetGauge().GetValue()
+			}
+		}
+	}
+	return -1 // Series absent.
 }
