@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
@@ -1069,5 +1070,186 @@ func TestDetector_NilEndpointInList(t *testing.T) {
 	require.NotPanics(t, func() {
 		filtered := d.Filter(t.Context(), nil, []fwksched.Endpoint{nil})
 		require.Empty(t, filtered, "nil endpoint should be skipped by filter")
+	})
+}
+
+// TestDetector_EndpointOverrides covers per-endpoint capacities selected by pod labels: config
+// validation, selector precedence, and their effect on saturation and filtering.
+func TestDetector_EndpointOverrides(t *testing.T) {
+	t.Parallel()
+
+	t.Run("config validation", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name    string
+			params  string
+			wantErr string
+		}{
+			{
+				name:   "matchLabels with both limits",
+				params: `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxConcurrency":30,"maxTokenConcurrency":3000}]}`,
+			},
+			{
+				name:   "matchExpressions with one limit",
+				params: `{"endpointOverrides":[{"matchExpressions":[{"key":"gpu","operator":"In","values":["big","huge"]}],"maxConcurrency":30}]}`,
+			},
+			{
+				name:    "selector required",
+				params:  `{"endpointOverrides":[{"maxConcurrency":30}]}`,
+				wantErr: "matchLabels or matchExpressions is required",
+			},
+			{
+				name:    "limit required",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"}}]}`,
+				wantErr: "maxConcurrency or maxTokenConcurrency is required",
+			},
+			{
+				name:    "non-positive limit",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxConcurrency":0}]}`,
+				wantErr: "maxConcurrency must be strictly positive",
+			},
+			{
+				name:    "invalid expression operator",
+				params:  `{"endpointOverrides":[{"matchExpressions":[{"key":"gpu","operator":"Near","values":["big"]}],"maxConcurrency":30}]}`,
+				wantErr: "invalid selector",
+			},
+			{
+				name:    "unknown field",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxRequests":30}]}`,
+				wantErr: "unknown field",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				handle := fwkplugin.NewEppHandle(t.Context(), func() []types.NamespacedName { return nil })
+				_, err := ConcurrencyDetectorFactory("test", fwkplugin.StrictDecoder([]byte(tc.params)), handle)
+				if tc.wantErr == "" {
+					require.NoError(t, err)
+					return
+				}
+				require.ErrorContains(t, err, tc.wantErr)
+			})
+		}
+	})
+
+	t.Run("unset limit keeps the pool value", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := buildConfig(&apiConfig{
+			MaxConcurrency:      ptr.To[int64](10),
+			MaxTokenConcurrency: ptr.To[int64](1000),
+			EndpointOverrides: []apiEndpointOverride{{
+				LabelSelector:  metav1.LabelSelector{MatchLabels: map[string]string{"gpu": "big"}},
+				MaxConcurrency: ptr.To[int64](30),
+			}},
+		})
+		require.NoError(t, err)
+		require.Len(t, cfg.endpointOverrides, 1)
+		require.EqualValues(t, 30, cfg.endpointOverrides[0].maxConcurrency)
+		require.EqualValues(t, 1000, cfg.endpointOverrides[0].maxTokenConcurrency)
+	})
+
+	// Two hardware classes: "big" endpoints take 30 requests, every other endpoint takes 10.
+	cfg, err := buildConfig(&apiConfig{
+		MaxConcurrency:      ptr.To[int64](10),
+		MaxTokenConcurrency: ptr.To[int64](1000),
+		EndpointOverrides: []apiEndpointOverride{
+			{
+				LabelSelector:       metav1.LabelSelector{MatchLabels: map[string]string{"gpu": "big"}},
+				MaxConcurrency:      ptr.To[int64](30),
+				MaxTokenConcurrency: ptr.To[int64](3000),
+			},
+			// Also matches "big" endpoints; never selected because the first match applies.
+			{
+				LabelSelector:  metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "gpu", Operator: metav1.LabelSelectorOpExists}}},
+				MaxConcurrency: ptr.To[int64](1),
+			},
+		},
+	})
+	require.NoError(t, err)
+	bigLabels := map[string]string{"gpu": "big"}
+
+	t.Run("saturation sums per-endpoint capacity", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		ctx := t.Context()
+		d := newDetector("overrides", *cfg, logr.Discard())
+		small := newFakeEndpoint(reg, "small")
+		big := newFakeEndpoint(reg, "big")
+		big.GetMetadata().Labels = bigLabels
+
+		driveLoad(ctx, reg, d, "small", 5)
+		driveLoad(ctx, reg, d, "big", 15)
+		// 20 in flight over a capacity of 10 + 30.
+		require.InDelta(t, 0.5, d.Saturation(ctx, []datalayer.Endpoint{small, big}), 1e-9)
+
+		// Without the override the pool reads as 20 / 20.
+		plain := newDetector("plain", config{mode: modeRequests, maxConcurrency: 10, maxTokenConcurrency: 1000}, logr.Discard())
+		require.InDelta(t, 1.0, plain.Saturation(ctx, []datalayer.Endpoint{small, big}), 1e-9)
+	})
+
+	t.Run("hybrid saturation uses per-endpoint ratios", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		ctx := t.Context()
+		hybrid := *cfg
+		hybrid.mode = modeHybrid
+		d := newDetector("overrides-hybrid", hybrid, logr.Discard())
+		big := newFakeEndpoint(reg, "big")
+		big.GetMetadata().Labels = bigLabels
+
+		driveLoad(ctx, reg, d, "big", 15)
+		// 15 / 30 for the single endpoint, and 15 / 30 in aggregate.
+		require.InDelta(t, 0.5, d.Saturation(ctx, []datalayer.Endpoint{big}), 1e-9)
+	})
+
+	t.Run("filter applies the matched limit", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		ctx := t.Context()
+		d := newDetector("overrides-filter", *cfg, logr.Discard())
+		small := newStubSchedulingEndpoint(reg, "small")
+		big := newStubSchedulingEndpoint(reg, "big")
+		big.metadata.Labels = bigLabels
+
+		driveLoad(ctx, reg, d, "small", 10)
+		driveLoad(ctx, reg, d, "big", 10)
+		kept := d.Filter(ctx, nil, []fwksched.Endpoint{small, big})
+		require.Len(t, kept, 1, "the small endpoint is at its limit, the big one has room")
+		require.Equal(t, "big", kept[0].GetMetadata().ID.Name)
+
+		driveLoad(ctx, reg, d, "big", 20)
+		kept = d.Filter(ctx, nil, []fwksched.Endpoint{small, big})
+		require.Len(t, kept, 2, "both at their limits: fail open returns every endpoint")
+	})
+
+	t.Run("token filter applies the matched limit", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		ctx := t.Context()
+		tokens := *cfg
+		tokens.mode = modeTokens
+		d := newDetector("overrides-tokens", tokens, logr.Discard())
+		small := newStubSchedulingEndpoint(reg, "small")
+		big := newStubSchedulingEndpoint(reg, "big")
+		big.metadata.Labels = bigLabels
+		// 1 input token loads 3 tokens, so 500 requests put 1500 tokens on each endpoint.
+		reqs := make([]*fwksched.InferenceRequest, 500)
+		for i := range reqs {
+			reqs[i] = makeTokenRequest(fmt.Sprintf("r-%d", i), 1)
+		}
+		driveTokenLoad(ctx, reg, d, "small", reqs)
+		driveTokenLoad(ctx, reg, d, "big", reqs)
+
+		kept := d.Filter(ctx, nil, []fwksched.Endpoint{small, big})
+		require.Len(t, kept, 1, "1500 tokens exceed the 1000 pool limit but fit the 3000 override")
+		require.Equal(t, "big", kept[0].GetMetadata().ID.Name)
+	})
+
+	t.Run("nil metadata uses the pool value", func(t *testing.T) {
+		t.Parallel()
+		d := newDetector("overrides-nil", *cfg, logr.Discard())
+		req, tok := d.capacityFor(nil)
+		require.EqualValues(t, 10, req)
+		require.EqualValues(t, 1000, tok)
 	})
 }

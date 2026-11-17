@@ -119,6 +119,7 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		// llm_d_epp prefix only.
 		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
 		metrics.Registry.MustRegister(llmdFlowControlDetectorSaturation)
+		metrics.Registry.MustRegister(llmdFlowControlDetectorCapacity)
 		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationRequests)
 		metrics.Registry.MustRegister(llmdFlowControlCapacityUtilizationBytes)
 		metrics.Registry.MustRegister(llmdFlowControlGlobalCapacityUtilizationRequests)
@@ -183,6 +184,7 @@ func Reset() {
 	llmdFlowControlPoolSaturation.Reset()
 	llmdFlowControlStaleEndpoints.Reset()
 	llmdFlowControlDetectorSaturation.Reset()
+	llmdFlowControlDetectorCapacity.Reset()
 	llmdFlowControlCapacityUtilizationRequests.Reset()
 	llmdFlowControlCapacityUtilizationBytes.Reset()
 	llmdFlowControlGlobalCapacityUtilizationRequests.Reset()
@@ -623,6 +625,19 @@ func RecordFlowControlDetectorSaturation(detector, stage string, saturation floa
 // detector for a pipeline stage.
 func DeleteFlowControlDetectorSaturationStage(stage string) {
 	llmdFlowControlDetectorSaturation.DeletePartialMatch(prometheus.Labels{"stage": stage})
+}
+
+// RecordFlowControlDetectorCapacity records the aggregate request and token capacity of the
+// endpoints a concurrency detector evaluated for a pipeline stage.
+func RecordFlowControlDetectorCapacity(detector, stage string, requests, tokens int64) {
+	llmdFlowControlDetectorCapacity.WithLabelValues(detector, stage, "requests").Set(float64(requests))
+	llmdFlowControlDetectorCapacity.WithLabelValues(detector, stage, "tokens").Set(float64(tokens))
+}
+
+// DeleteFlowControlDetectorCapacityStage removes the per-detector capacity series of every
+// detector for a pipeline stage.
+func DeleteFlowControlDetectorCapacityStage(stage string) {
+	llmdFlowControlDetectorCapacity.DeletePartialMatch(prometheus.Labels{"stage": stage})
 }
 
 // RecordFlowControlCapacityUtilizationRequests sets the request-count capacity utilization ratio

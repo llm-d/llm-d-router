@@ -454,6 +454,21 @@ var (
 		[]string{"detector", "stage"},
 	)
 
+	llmdFlowControlDetectorCapacity = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_detector_capacity",
+			Help: metricsutil.HelpMsgWithStability(
+				"Aggregate capacity of the endpoints a concurrency-detector evaluated, as of its most recent "+
+					"evaluation: the sum of each endpoint's maxConcurrency (unit 'requests') or maxTokenConcurrency "+
+					"(unit 'tokens'), with endpointOverrides applied. Labeled by the detector plugin name and by the "+
+					"pipeline stage ('prefill' or 'decode') whose endpoints were evaluated; the stage label is empty "+
+					"when the detector is evaluated without stage partitioning.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"detector", "stage", "unit"},
+	)
+
 	llmdFlowControlCapacityUtilizationRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
