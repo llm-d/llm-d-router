@@ -45,14 +45,14 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"k8s.io/apimachinery/pkg/util/sets"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
-	inflightload "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/tokenload"
 )
@@ -60,17 +60,17 @@ import (
 // fakeHandle satisfies fwkplugin.Handle for factory construction.
 type fakeHandle struct{}
 
-func (fakeHandle) Context() context.Context            { return context.Background() }
-func (fakeHandle) Plugin(string) fwkplugin.Plugin      { return nil }
-func (fakeHandle) AddPlugin(string, fwkplugin.Plugin)  {}
-func (fakeHandle) GetAllPlugins() []fwkplugin.Plugin   { return nil }
+func (fakeHandle) Context() context.Context                            { return context.Background() }
+func (fakeHandle) Plugin(string) fwkplugin.Plugin                      { return nil }
+func (fakeHandle) AddPlugin(string, fwkplugin.Plugin)                  {}
+func (fakeHandle) GetAllPlugins() []fwkplugin.Plugin                   { return nil }
 func (fakeHandle) GetAllPluginsWithNames() map[string]fwkplugin.Plugin { return nil }
-func (fakeHandle) PodList() []k8stypes.NamespacedName  { return nil }
-func (fakeHandle) Metrics() fwkplugin.MetricsRecorder  { return prometheus.DefaultRegisterer }
-func (fakeHandle) CrossReplicaSyncer() fwkplugin.Plugin { return nil }
-func (fakeHandle) SetCrossReplicaSyncer(fwkplugin.Plugin) {}
-func (fakeHandle) RefreshMetricsInterval() time.Duration { return 0 }
-func (fakeHandle) SchedulingProfileNames() sets.Set[string]  { return nil }
+func (fakeHandle) PodList() []k8stypes.NamespacedName                  { return nil }
+func (fakeHandle) Metrics() fwkplugin.MetricsRecorder                  { return prometheus.DefaultRegisterer }
+func (fakeHandle) CrossReplicaSyncer() fwkplugin.Plugin                { return nil }
+func (fakeHandle) SetCrossReplicaSyncer(fwkplugin.Plugin)              {}
+func (fakeHandle) RefreshMetricsInterval() time.Duration               { return 0 }
+func (fakeHandle) SchedulingProfileNames() sets.Set[string]            { return nil }
 
 const (
 	producerName = "inflight-load-producer"

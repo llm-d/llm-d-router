@@ -142,19 +142,19 @@ var (
 )
 
 type InFlightLoadProducer struct {
-	typedName                fwkplugin.TypedName
-	requestTracker           *concurrencyTracker
-	tokenTracker             *concurrencyTracker
+	typedName      fwkplugin.TypedName
+	requestTracker *concurrencyTracker
+	tokenTracker   *concurrencyTracker
 	// reservationTracker holds pick-time reservations (issue #1598): requests
 	// scheduled but not yet dispatched. Included in the InFlightLoad the
 	// scorers read, so concurrent scheduling cycles see each other's picks.
-	reservationTracker       *concurrencyTracker
+	reservationTracker *concurrencyTracker
 	// reservationTokenTracker holds the reserved uncached-token estimates.
 	reservationTokenTracker *concurrencyTracker
 	// reservationTouch records the last Reserve time per endpoint so the
 	// sweeper can drop reservations from requests that never dispatched.
-	reservationTouch *sync.Map // key: endpointID, value: time.Time
-	tokenEstimator   TokenEstimator
+	reservationTouch         *sync.Map // key: endpointID, value: time.Time
+	tokenEstimator           TokenEstimator
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
 	dk                       fwkplugin.DataKey
