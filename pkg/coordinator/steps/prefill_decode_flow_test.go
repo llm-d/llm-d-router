@@ -92,9 +92,10 @@ func TestECTransferParams_NotForwardedToDecodeBackend(t *testing.T) {
 func TestKVTransferParams_FlowFromPrefillToDecode(t *testing.T) {
 	const revisionDecisionID = "decision-id"
 	expectedKVParams := map[string]any{
-		"block_id":  "block-999",
-		"peer_host": "10.0.0.42",
-		"peer_port": float64(7777),
+		"block_id":         "block-999",
+		"remote_block_ids": []any{float64(1)},
+		"peer_host":        "10.0.0.42",
+		"peer_port":        float64(7777),
 	}
 
 	var decodeReceivedKVParams map[string]any
@@ -361,7 +362,7 @@ func TestCachedTokens_FlowFromPrefillToDecode(t *testing.T) {
 				switch r.Header.Get(reqcommon.EPPProfileHeaderKey) {
 				case gateway.PhasePrefill:
 					_ = json.NewEncoder(w).Encode(map[string]any{
-						"kv_transfer_params": map[string]any{"block_id": "block-1"},
+						"kv_transfer_params": map[string]any{"block_id": "block-1", "remote_block_ids": []any{1}},
 						"usage":              usageBlockFor(responses, prefillCachedTokens),
 					})
 				case gateway.PhaseDecode:
