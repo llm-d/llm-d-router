@@ -15,7 +15,17 @@ The plugin runs in the RequestHeader phase, before flow control queues the reque
 3. Moves a request outside the contract to the next lower class, without taking a slot or a charge. In the lowest class it is rejected: with `400` when it is above a size limit, else with `429`.
 4. Produces the served class priority (`request-priority`) and, when no fairness ID was supplied, the team as the tenant (`request-tenant`). The Director applies both to the request before flow control.
 
-At end of stream the reservation of a committed request is settled against the reported usage: unused tokens are refunded to the daily budget, and usage above the reservation is charged to it. A response with no usage block keeps the reservation as the charge. A request that leaves before it is dispatched (a flow-control rejection, a client that leaves while queued, a scheduling failure) is refunded in full through `RequestAbandoned`. A dispatched request is settled at end of stream, which the EPP forces when the stream ends early, so a client that disconnects mid-generation is still charged.
+A request that leaves before it is dispatched (a flow-control rejection, a client that leaves while queued, a scheduling failure) is refunded in full through `RequestAbandoned`. A dispatched request is settled at end of stream, which the EPP forces when the stream ends early, so a client that disconnects mid-generation is still charged. Settlement replaces the reservation with the charge below, refunding the difference to the daily budget or charging an overrun to it:
+
+| How the request ended | Charge |
+|---|---|
+| Usage reported, however the stream ended | `promptTokens + outputTokenWeight * completionTokens` |
+| Error status (non-2xx) from the model server, no usage | Nothing |
+| Stream cut short (`client-disconnect`, `evicted`, `error`), no usage | The prompt estimate plus `outputTokenWeight` per streamed event, or nothing when nothing was streamed |
+| Natural end, no usage | The reservation |
+| Response not observed (the route skips response processing) | The reservation |
+
+A streamed event approximates one output token. A streaming response carries usage only when the request sets `stream_options.include_usage` or the model server forces it (vLLM: `--enable-force-include-usage`).
 
 Until settlement, output is charged at its cap, not at a running estimate, because usage is reported only at end of stream. Reserving the cap keeps requests that stay within their caps from together spending more than the budget. The cost is that in-flight requests hold more of the budget than they will use, so near the end of the budget a request can be downgraded while reservations that will be partly refunded hold the rest.
 
@@ -93,6 +103,7 @@ Configure a flow-control priority band for each class priority, or rely on dynam
 
 - Concurrency counters and daily budgets are held in memory per EPP replica, and no state is shared across replicas. With `N` replicas behind a load balancer, divide each commit by `N`. The configuration fixes the per-replica share, so when `N` changes, through EPP autoscaling or a rolling update, the total commit changes with it until the configuration is updated: scaling from 2 to 3 replicas raises it by half. A replica that starts or restarts mid-day begins with its full daily budget.
 - The daily budget covers one fixed UTC day, the period daily token quotas are usually stated for. It does not spread load across the day: a team can spend the whole budget in the first hour, and its traffic is then downgraded, or rejected in the lowest class, until 00:00 UTC. `maxConcurrency` bounds a team's burst, not the budget.
+- A request whose route skips response processing is settled when it is routed: the EPP never sees its response, so it is charged the reservation and its concurrency slot is released while it still runs.
 - The team ID comes from a client header. Authenticate it upstream, for example at the gateway, before trusting it for quota.
 
 ## Observability
