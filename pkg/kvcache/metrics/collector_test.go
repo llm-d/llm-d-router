@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -180,6 +181,15 @@ func TestRecordUnknownTagSkipped(t *testing.T) {
 	}
 	if got := skipped(tag) - before; got != 2 {
 		t.Errorf("counter for %q rose by %v, want 2", tag, got)
+	}
+
+	// The cap is filled before the empty tag is recorded: an empty tag keeps
+	// its own label when the limiter folds every other new tag.
+	for i := range maxUnknownTagLabelValues {
+		RecordUnknownTagSkipped("Tag" + strconv.Itoa(i))
+	}
+	if got := RecordUnknownTagSkipped("PastTheCap"); got != metricsutil.OverflowValue {
+		t.Errorf("RecordUnknownTagSkipped() past the cap = %q, want %q", got, metricsutil.OverflowValue)
 	}
 
 	emptyBefore := skipped(emptyTagLabel)

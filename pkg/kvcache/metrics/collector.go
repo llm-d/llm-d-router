@@ -204,10 +204,11 @@ func Collectors() []prometheus.Collector {
 // returns the tag label value it was counted under, which differs from tag
 // when the tag is empty or the limiter folds it.
 func RecordUnknownTagSkipped(tag string) string {
-	if tag == "" {
-		tag = emptyTagLabel
+	// An empty tag is not passed to the limiter, so a full cap cannot fold it.
+	label := emptyTagLabel
+	if tag != "" {
+		label = unknownTagLimiter.Bound(tag)
 	}
-	label := unknownTagLimiter.Bound(tag)
 	KVEventUnknownTagsSkipped.WithLabelValues(label).Inc()
 	return label
 }

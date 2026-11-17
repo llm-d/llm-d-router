@@ -1218,10 +1218,10 @@ use the labels shown below.
 A vLLM release can publish an event type that the router's vLLM adapter does not know. The adapter
 skips such an event and applies the other events in the same message to the index.
 `llm_d_epp_kv_cache_events_unknown_tags_skipped_total` counts each skipped event, whether or not
-`enableMetrics` is set. The `tag` label is the event tag as the engine sent it, and an empty tag is
-reported as `empty`. The label takes at most 32 distinct tags plus `other`, and the cap rules in
-[Metrics catalog](#metrics-catalog) apply. A series appears when the first event with that tag is
-skipped. The EPP also logs
+`enableMetrics` is set. The `tag` label is the event tag as the engine sent it. The label takes at
+most 32 distinct tags plus `other`, and the cap rules in [Metrics catalog](#metrics-catalog) apply.
+An empty tag is reported as `empty` and does not count toward the 32. A series appears when the
+first event with that tag is skipped. The EPP also logs
 `Skipping KV events with an unknown tag` at INFO level the first time it skips each `tag` value,
 with the pod and model of that event. A rising count for a tag means the engine sends an event type
 that this router version ignores.
