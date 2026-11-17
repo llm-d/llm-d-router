@@ -311,8 +311,8 @@ type sloValidator struct {
 	teams    []*teamState // teams with a promise
 }
 
-// newSLOValidator builds the validator for the teams with a promise, and sets their checks. It
-// returns nil when no team has a promise.
+// newSLOValidator builds the validator for the teams with a promise, and sets their checks. Its
+// teams are empty when no team has a promise.
 func newSLOValidator(params Parameters, listed []*teamState, defaultTeam *teamState, now func() time.Time) (*sloValidator, error) {
 	var cfg SLOValidationConfig
 	if params.SLOValidation != nil {
@@ -337,9 +337,6 @@ func newSLOValidator(params Parameters, listed []*teamState, defaultTeam *teamSt
 		}
 		t.slo = s
 		validator.teams = append(validator.teams, t)
-	}
-	if len(validator.teams) == 0 {
-		return nil, nil
 	}
 	return validator, nil
 }
