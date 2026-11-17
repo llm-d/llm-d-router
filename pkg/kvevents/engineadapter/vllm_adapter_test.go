@@ -37,6 +37,76 @@ func TestVLLMShardingKey(t *testing.T) {
 	assert.Equal(t, "fallback", adapter.ShardingKey(&kvevents.RawMessage{Topic: "fallback"}))
 }
 
+func TestVLLMSessionEventFields(t *testing.T) {
+	for _, encoding := range []string{"array", "map tag first", "map tag last"} {
+		for _, sessionID := range []any{nil, "", "request-42"} {
+			t.Run(fmt.Sprintf("%s/session=%v", encoding, sessionID), func(t *testing.T) {
+				stored := []any{"BlockStored", []uint64{10, 20}, uint64(5), []uint32{1, 2}, 16,
+					nil, "gpu", nil, nil, 2, "full_attention", nil, "LOCAL", "", sessionID,
+					[]any{[]uint32{3}}, // Unrecognized lookahead field follows the session fields.
+				}
+				removed := []any{"BlockRemoved", []uint64{20}, "cpu", 2, "REMOTE", "offloader"}
+				var events []any
+				if encoding == "array" {
+					events = []any{stored, removed}
+				} else {
+					for i, fields := range [][]any{stored, removed} {
+						names := []string{"block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium", "lora_name", "extra_keys", "group_idx", "kv_cache_spec_kind", "kv_cache_spec_sliding_window", "locality", "ownership", "session_id", "lookahead_token_ids"}
+						if i == 1 {
+							names = []string{"block_hashes", "medium", "group_idx", "locality", "ownership"}
+						}
+						var buf bytes.Buffer
+						enc := msgpack.NewEncoder(&buf)
+						require.NoError(t, enc.EncodeMapLen(len(fields)))
+						if encoding == "map tag first" {
+							require.NoError(t, enc.EncodeMulti("type", fields[0]))
+						}
+						for j, name := range names {
+							require.NoError(t, enc.EncodeMulti(name, fields[j+1]))
+						}
+						if encoding == "map tag last" {
+							require.NoError(t, enc.EncodeMulti("type", fields[0]))
+						}
+						events = append(events, msgpack.RawMessage(buf.Bytes()))
+					}
+				}
+				payload, err := msgpack.Marshal([]any{0.0, events, 3})
+				require.NoError(t, err)
+				_, _, batch, err := NewVLLMAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
+				require.NoError(t, err)
+				require.Len(t, batch.Events, 2)
+				store := batch.Events[0].(*kvevents.BlockStoredEvent)
+				if sessionID == nil {
+					require.Nil(t, store.SessionID)
+				} else {
+					require.NotNil(t, store.SessionID)
+					require.Equal(t, sessionID, *store.SessionID)
+				}
+				require.Equal(t, "LOCAL", store.Locality)
+				require.Empty(t, store.Ownership)
+				require.Equal(t, []uint64{10, 20}, store.BlockHashes)
+				removal := batch.Events[1].(*kvevents.BlockRemovedEvent)
+				require.Equal(t, "REMOTE", removal.Locality)
+				require.Equal(t, "offloader", removal.Ownership)
+				require.Equal(t, []uint64{20}, removal.BlockHashes)
+			})
+		}
+	}
+}
+
+func TestVLLMSessionEventFieldsRejectNonStrings(t *testing.T) {
+	for _, name := range []string{"session_id", "locality", "ownership"} {
+		t.Run(name, func(t *testing.T) {
+			payload, err := msgpack.Marshal(map[string]any{
+				"type": "BlockStored", "block_hashes": []uint64{1}, "token_ids": []uint32{1}, "block_size": 1, name: 42,
+			})
+			require.NoError(t, err)
+			_, err = decodeVLLMEvent(payload)
+			require.ErrorContains(t, err, name)
+		})
+	}
+}
+
 func TestVLLMClampsOutOfRangeTokenIDs(t *testing.T) {
 	for name, tc := range map[string]struct {
 		token any
@@ -391,7 +461,10 @@ func TestDecodeVLLMEvent_BlockStoredExtraTrailingFields(t *testing.T) {
 		uint64(0),                     // [9] group_idx
 		"full_attention",              // [10] kv_cache_spec_kind
 		nil,                           // [11] kv_cache_spec_sliding_window
-		"completely-unknown-field",    // [12] future unknown — silently ignored
+		nil,                           // [12] locality
+		nil,                           // [13] ownership
+		nil,                           // [14] session_id
+		"completely-unknown-field",    // [15] future unknown field
 	}
 
 	rawBytes, err := msgpack.Marshal(vllmEvent)
@@ -425,7 +498,9 @@ func TestDecodeVLLMEvent_BlockRemovedExtraTrailingFields(t *testing.T) {
 		[]any{uint64(500)},
 		"cpu",
 		uint64(1),        // [3] group_idx
-		"future-field-1", // [4] future unknown — silently ignored
+		nil,              // [4] locality
+		nil,              // [5] ownership
+		"future-field-1", // [6] future unknown field
 	}
 
 	rawBytes, err := msgpack.Marshal(vllmEvent)

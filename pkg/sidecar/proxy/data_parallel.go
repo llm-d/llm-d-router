@@ -49,7 +49,9 @@ func (s *Server) dataParallelHandler(w http.ResponseWriter, r *http.Request, bef
 		} else {
 			// Shouldn't happen, send to default server
 			logger.V(logging.DEBUG).Info("Didn't find the Data Parallel Proxy", "for", dataParallelPodHostPort)
-			w.WriteHeader(http.StatusBadRequest)
+			if err := sendError(w, r, http.StatusBadRequest, "unknown data parallel endpoint"); err != nil {
+				logger.Error(err, "failed to send error response to client")
+			}
 		}
 		return true
 	}

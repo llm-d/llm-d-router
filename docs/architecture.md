@@ -231,6 +231,11 @@ The fields in a schedulingProfile entry are:
 - **pluginRef**: reference to the name of the plugin instance to be used
 - **weight**: weight to be used if the referenced plugin is a scorer.
 
+Exactly one profile handler chooses which scheduling profiles run for each request. The EPP fails
+to start when the configuration lists more than one profile handler, or defines more than one
+scheduling profile without one. `single-profile-handler` supports exactly one profile; for more
+profiles, configure `disagg-profile-handler` or `header-profile-handler`.
+
 A complete configuration might look like this:
 
 ```yaml

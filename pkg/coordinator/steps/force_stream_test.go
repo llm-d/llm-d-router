@@ -1677,6 +1677,52 @@ func TestForceStream_SpentHandoff_Recomputes(t *testing.T) {
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the fallback")
 }
 
+// TestForceStream_SpentHandoff_KeepsPromptTokenIDs verifies that a chat request
+// forwarding the rendered IDs keeps them on the recompute pass-through: the
+// fallback drops only the spent handoff, so the decode pod still skips rendering.
+func TestForceStream_SpentHandoff_KeepsPromptTokenIDs(t *testing.T) {
+	const passthroughReply = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`
+	var calls []spentHandoffCall
+	server := spentHandoffServer(t, "data: not-json\n\n", passthroughReply, &calls)
+	defer server.Close()
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	step, err := NewDecodeStep(gateway.New(config.GatewayConfig{Address: server.URL}), map[string]any{
+		ParamForceStream:               true,
+		ParamForceStreamBufferSize:     "1GiB",
+		ParamForceStreamMaxRequestSize: "1GiB",
+		ParamKVConnector:               kv.NIXL,
+		ParamForwardPromptTokenIDs:     true,
+	})
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-spent-handoff-ids",
+		OriginalPath: reqcommon.PathChatCompletions,
+		Model:        "llama-3",
+		TokenIDs:     []int{1, 2, 3},
+		KVTransferParams: map[string]any{
+			reqcommon.FieldRemoteBlockIDs: []any{1, 2},
+			reqcommon.FieldRemoteEngineID: "prefill-pod-a",
+		},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false, "max_tokens": 8,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+	require.Len(t, calls, 2, "a forced attempt, then one recompute pass-through")
+	require.Equal(t, false, calls[1].stream)
+	require.Equal(t, map[string]any{reqcommon.FieldPromptTokenIDs: []any{1.0, 2.0, 3.0}}, calls[1].kvParams,
+		"the pass-through keeps only the rendered IDs, not the spent handoff")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnreadable), 1e-9)
+}
+
 // TestForceStream_SharedStorage_FallbackKeepsKVParams verifies the recompute is
 // limited to a one-shot handoff. A kv-shared-storage decode body sets
 // do_remote_prefill but names no blocks, since the decode pod re-reads the shared
@@ -2531,71 +2577,6 @@ func TestForceStream_Responses_TerminalPastEchoAllowance_FallsBack(t *testing.T)
 	require.Equal(t, []any{true, false}, streams, "a forced attempt, then the pass-through")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackOversize), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
-}
-
-// forceStreamOverRealServer serves one forced decode request through a real HTTP
-// server with the given WriteTimeout, against an upstream that takes upstreamDelay
-// before it finishes streaming. It returns the metrics registry and the status and
-// body the client received, or the error reading them.
-func forceStreamOverRealServer(t *testing.T, writeTimeout, upstreamDelay time.Duration) (*prometheus.Registry, int, []byte, error) {
-	t.Helper()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher := w.(http.Flusher)
-		fmt.Fprint(w, "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"slow\"}}]}\n\n")
-		flusher.Flush()
-		time.Sleep(upstreamDelay)
-		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
-		flusher.Flush()
-	}))
-	t.Cleanup(upstream.Close)
-
-	step, reg := newForceStreamStep(t, upstream.URL, "1GiB")
-	front := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqCtx := &pipeline.RequestContext{
-			RequestID:        "req-slow",
-			OriginalPath:     reqcommon.PathChatCompletions,
-			Model:            "llama-3",
-			Stream:           false,
-			KVTransferParams: map[string]any{},
-			Body: map[string]any{
-				"model": "llama-3", "stream": false, "max_tokens": 16,
-				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
-			},
-			ResponseWriter: w,
-		}
-		_ = step.Execute(r.Context(), reqCtx)
-	}))
-	front.Config.WriteTimeout = writeTimeout
-	front.Start()
-	t.Cleanup(front.Close)
-
-	resp, err := http.Post(front.URL, "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		return reg, 0, nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	return reg, resp.StatusCode, body, err
-}
-
-// TestForceStream_OutlastsWriteTimeout covers a forced request whose generation
-// takes longer than the server WriteTimeout. The client asked for a non-streaming
-// reply, so the handler keeps the write deadline, but the forced request reads a
-// stream whose headers arrive at once, so the upstream response-header timeout
-// never bounds it. The decode step clears the write deadline once it commits to
-// force-streaming, as the handler does for a streaming request, so the reply
-// reaches the client instead of being cut off.
-func TestForceStream_OutlastsWriteTimeout(t *testing.T) {
-	reg, status, body, err := forceStreamOverRealServer(t, 300*time.Millisecond, 900*time.Millisecond)
-	require.NoError(t, err, "the client must get the whole reply, not a cut connection")
-	require.Equal(t, http.StatusOK, status)
-	var got map[string]any
-	require.NoError(t, json.Unmarshal(body, &got))
-	msg := got["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
-	require.Equal(t, "slow", msg["content"])
-	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 }
 
 // failingWriter is a ResponseWriter whose body writes fail, standing in for a

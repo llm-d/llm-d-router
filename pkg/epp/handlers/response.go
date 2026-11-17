@@ -34,6 +34,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -102,6 +103,9 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
+		if parsedResp.DisjointInputTokens != nil {
+			mergeDisjointInput(&reqCtx.Usage, &reqCtx.disjointInput, *parsedResp.DisjointInputTokens)
+		}
 	}
 	if endOfStream {
 		// Recorded once here rather than per chunk: a server reporting cumulative
@@ -346,6 +350,26 @@ func mergeUsage(dst *fwkrequest.Usage, src fwkrequest.Usage) {
 	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
 }
 
+// mergeDisjointInput folds the input buckets of one chunk into acc and derives the
+// prompt and total from them. A chunk's PromptTokens and TotalTokens cover only the
+// buckets that chunk reported, so mergeUsage alone undercounts when message_delta
+// omits the cache buckets message_start reported in an earlier chunk.
+func mergeDisjointInput(dst *fwkrequest.Usage, acc *fwkrh.DisjointInputTokens, src fwkrh.DisjointInputTokens) {
+	if src.Uncached > 0 {
+		acc.Uncached = src.Uncached
+	}
+	if src.CacheRead > 0 {
+		acc.CacheRead = src.CacheRead
+	}
+	if src.CacheCreation > 0 {
+		acc.CacheCreation = src.CacheCreation
+	}
+	if prompt := acc.Uncached + acc.CacheRead + acc.CacheCreation; prompt > 0 {
+		dst.PromptTokens = prompt
+	}
+	dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
+}
+
 func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *RequestContext, resp *extProcPb.ProcessingRequest_ResponseHeaders) *RequestContext {
 	for _, header := range resp.ResponseHeaders.Headers.Headers {
 		reqCtx.Response.Headers[header.Key] = envoy.GetHeaderValue(header)
@@ -353,14 +377,20 @@ func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *Req
 	return s.director.HandleResponseHeader(ctx, reqCtx)
 }
 
+// generateResponseHeaderResponse re-sets the response headers after the
+// response plugins ran. The failed-stage marker the plugins read is left out,
+// and removed from the upstream set when the response carried one, so the
+// client never sees it.
 func (s *StreamingServer) generateResponseHeaderResponse(reqCtx *RequestContext) *extProcPb.ProcessingResponse {
+	mutation := &extProcPb.HeaderMutation{SetHeaders: s.generateResponseHeaders(reqCtx)}
+	if _, ok := reqCtx.Response.Headers[routing.FailedStageHeader]; ok {
+		mutation.RemoveHeaders = []string{routing.FailedStageHeader}
+	}
 	return &extProcPb.ProcessingResponse{
 		Response: &extProcPb.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &extProcPb.HeadersResponse{
 				Response: &extProcPb.CommonResponse{
-					HeaderMutation: &extProcPb.HeaderMutation{
-						SetHeaders: s.generateResponseHeaders(reqCtx),
-					},
+					HeaderMutation: mutation,
 				},
 			},
 		},
@@ -412,9 +442,10 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 		})
 	}
 
-	// Include any non-system-owned headers.
+	// Include any non-system-owned headers. The failed-stage marker is
+	// internal; generateResponseHeaderResponse removes it.
 	for key, value := range reqCtx.Response.Headers {
-		if request.IsSystemOwnedHeader(key) {
+		if request.IsSystemOwnedHeader(key) || key == routing.FailedStageHeader {
 			continue
 		}
 		headers = append(headers, &configPb.HeaderValueOption{

@@ -19,6 +19,7 @@ package metrics
 import (
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/llm-d/llm-d-router/pkg/common/request"
 )
@@ -28,6 +29,13 @@ import (
 // label value from the cap-overflow value should keep their own sentinel and
 // gate empty inputs at the wrapper layer.
 const OverflowValue = "other"
+
+// MaxLabelValueLength is the longest request-derived label value BoundedLabel
+// admits. Longer values fold to OverflowValue. Prometheus keeps every admitted
+// value for the process lifetime and re-serializes it on every scrape, so a
+// client that sends one multi-megabyte model name would pin that string in
+// memory and on every scrape.
+const MaxLabelValueLength = 256
 
 // BoundedLabel caps the distinct values a Prometheus label may take. Values beyond
 // the cap collapse to OverflowValue. Values passed to Pin are always admitted and
@@ -55,7 +63,10 @@ func NewBoundedLabel(limit int) *BoundedLabel {
 }
 
 // Bound returns v if it is empty, pinned, already admitted, or there is room
-// to admit it; otherwise OverflowValue. A value, once admitted, always returns
+// to admit it; otherwise OverflowValue. A value that is not valid UTF-8 or is
+// longer than MaxLabelValueLength always returns OverflowValue: Prometheus
+// panics on a label value that is not valid UTF-8, and request headers can
+// carry arbitrary bytes. A value, once admitted, always returns
 // itself, so paired calls (e.g. running-request increment and decrement) stay
 // balanced. The one exception is a value that folded to OverflowValue and is
 // later pinned: pairs in flight across that instant can leave a small bounded
@@ -70,6 +81,9 @@ func (b *BoundedLabel) Bound(v string) string {
 func (b *BoundedLabel) BoundWithOverflow(v string) (string, bool) {
 	if v == "" {
 		return v, false
+	}
+	if len(v) > MaxLabelValueLength || !utf8.ValidString(v) {
+		return OverflowValue, true
 	}
 	b.mu.RLock()
 	_, pin := b.pinned[v]

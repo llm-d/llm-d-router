@@ -22,7 +22,7 @@ indexer owns block-key computation, index lookup, and prefix matching.
   [`kvblock.TokenProcessor`](kvblock/README.md) to chunk tokens into
   fixed-size blocks and hash each block (chaining the previous block's hash so a
   key encodes its whole prefix). `extraFeatures` taints the hash with per-block
-  multimodal metadata when present.
+  multimodal metadata and the cache salt when present.
 - **Matching.** `MatchBlockKeys` reads the pods that hold each block key
   from the [`kvblock.Index`](kvblock/README.md), optionally restricted to a
   caller-supplied pod set, and folds them into one `PodMatch` per pod holding

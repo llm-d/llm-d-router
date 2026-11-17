@@ -33,7 +33,7 @@ SIDECAR_IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/$(SIDECAR_IMAGE_NAME)
 SIDECAR_TAG ?= dev
 export SIDECAR_IMAGE ?= $(SIDECAR_IMAGE_TAG_BASE):$(SIDECAR_TAG)
 
-VLLM_SIMULATOR_TAG ?= v1.1.0
+VLLM_SIMULATOR_TAG ?= v1.2.0
 VLLM_SIMULATOR_TAG_BASE ?= $(IMAGE_REGISTRY)/$(VLLM_SIMULATOR_IMAGE_NAME)
 export VLLM_IMAGE ?= $(VLLM_SIMULATOR_TAG_BASE):$(VLLM_SIMULATOR_TAG)
 
@@ -182,7 +182,9 @@ sidecar_TEST_PACKAGES = ./pkg/sidecar/...
 # block (epp+sidecar only); CI's baseline cache unions all coverage/*.out, so
 # framework enters the CI baseline once this is on main. The PR run reports
 # coverage/framework.out as a new component.
-framework_TEST_PACKAGES = ./test/framework/...
+# The EPP harness is excluded: it is envtest-driven and exercised (though not
+# measured) by make test-integration-hermetic, so unit coverage would report 0%.
+framework_TEST_PACKAGES = $$(go list ./test/framework/... | grep -vE '/test/framework/epp/harness($$|/)' | tr '\n' ' ')
 
 # Internal variables for generic targets
 epp_IMAGE = $(EPP_IMAGE)

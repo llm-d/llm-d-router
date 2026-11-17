@@ -49,10 +49,12 @@ The EPP's scaling behavior and effectiveness are highly dependent on the configu
   | 3 | 2.7x |
   | 4 | 3.5x |
 
-  - **Note (Flow Control)**: Flow control queues and fairness accounting are per replica.
-    In Active-Active mode, priority and fairness are enforced
-    only within each replica's share of the traffic, and per-band capacity limits apply per
-    replica, so the fleet-wide queued volume scales with the replica count.
+  - **Note (Flow Control)**: Flow control queues and fairness accounting are per replica. In
+    Active-Active mode, priority and fairness are enforced only within each replica's share of the
+    traffic, and the queue capacity limits apply per replica, so the fleet-wide queued volume scales
+    with the replica count. Whether the dispatch limit covers all replicas depends on the saturation
+    detector and the cross-replica syncer; see
+    [Multiple active replicas](../pkg/epp/flowcontrol/README.md#multiple-active-replicas).
   - **Plugin Compatibility**: EPP replicas do not share routing state by default. Active-Active mode works with stateless schedulers (`random-picker`), session affinity (`session-affinity-filter`), or plugins that read metrics from backend model servers. The optional Redis syncer shares in-flight load. Approximate prefix routing (`approx-prefix-cache-producer`) is supported in Active-Active when a `CrossReplicaSyncer` (for example `redis-syncer`) is configured and `syncCrossReplicaState` is left enabled (the default); without that sync path, each replica only learns prefixes from traffic it routed, so approximate hit rate drops under Active-Active.
   - For more technical details and context on EPP replica state sync and scaling limitations, see [Issue #1290](https://github.com/llm-d/llm-d-router/issues/1290).
 
@@ -329,6 +331,7 @@ router:
 | `router.proxy.healthCheckTimeout` | `2s` | Health check probe timeout. |
 | `router.proxy.healthCheckUnhealthyThreshold` | `3` | Number of failed probes before marking an endpoint unhealthy. |
 | `router.proxy.healthCheckHealthyThreshold` | `2` | Number of passing probes required before admitting recreated pods. |
+| `router.proxy.healthCheckNoTrafficInterval` | `healthCheckInterval` | Probe interval while the `ext_proc` cluster has not carried traffic, such as after an EPP pod starts. |
 | `router.epp.terminationGracePeriodSeconds` | `130` | Grace period (seconds) before SIGKILL on pod teardown. |
 
 ### GKE Preferred Backends (Gateway Mode)

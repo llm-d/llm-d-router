@@ -513,7 +513,8 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 // to all its constituent canonical sub-blocks.
 // For many:1 (engine BS < canonical BS): features from the engine blocks whose tokens
 // fall in a canonical block are merged into it, and engine blocks past the last full
-// canonical block are dropped.
+// canonical block are dropped. The cache salt goes to the canonical block holding
+// its engine block.
 //
 // When all entries are nil (text-only prompts), this simply produces a nil-filled
 // slice of the correct length.
@@ -556,13 +557,17 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 				// while ComputeBlockExtraFeatures lists it once per canonical block.
 				// Placeholders don't overlap, so only the item ending engine block i-1
 				// can continue into block i, where it is the first entry. Block i-1 is
-				// searched whole because block 0 ends with the cache salt, if any.
+				// searched whole because, with bare identifiers, block 0 ends with the
+				// cache salt, if any.
 				// The event offset, when present, tells a continuation from a new copy.
 				if prev != nil && len(hashes) > 0 && ef.FirstContinuation != kvblock.MMContinuationNew &&
 					slices.Contains(prev.MMHashes, hashes[0]) {
 					hashes = hashes[1:]
 				}
 				canonical[canonicalIdx].MMHashes = append(canonical[canonicalIdx].MMHashes, hashes...)
+				if ef.CacheSalt != "" {
+					canonical[canonicalIdx].CacheSalt = ef.CacheSalt
+				}
 			}
 			prev = ef
 		}

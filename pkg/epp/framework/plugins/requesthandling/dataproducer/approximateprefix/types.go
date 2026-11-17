@@ -19,6 +19,7 @@ package approximateprefix
 
 import (
 	"math"
+	"sync"
 	"time"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -34,8 +35,13 @@ type indexerInterface interface {
 	// blocks of hashes the candidate holds.
 	MatchLongestPrefix(hashes []blockHash, candidates []ServerID) []int
 	// Add records that server holds hashes. hashes must be a prompt's block
-	// hashes starting at block 0; MatchLongestPrefix relies on this.
-	Add(hashes []blockHash, server server)
+	// hashes starting at block 0; MatchLongestPrefix relies on this. It
+	// returns the hashes this call newly inserted; hashes already present
+	// are refreshed and not returned.
+	Add(hashes []blockHash, server server) []blockHash
+	// Remove deletes hashes from server, undoing an Add whose request never
+	// ran on the server.
+	Remove(hashes []blockHash, server ServerID)
 	RemovePod(server ServerID)
 	Pods() []ServerID
 	PodBlockCounts() map[ServerID]int
@@ -104,6 +110,36 @@ func (s *SchedulingContextState) Clone() plugin.StateData {
 		PredictedCachedTokens:     predictedCachedTokens,
 		BestAvailableCachedTokens: s.BestAvailableCachedTokens,
 	}
+}
+
+// updateCell coordinates the asynchronous indexer Add queued in PreRequest
+// with a rollback in ResponseBody that can run before the queued Add does.
+type updateCell struct {
+	mu         sync.Mutex
+	rolledBack bool
+}
+
+// indexUpdateRecord is the set of indexer entries PreRequest added for one
+// request: the prompt hashes and the servers they were recorded for. It
+// survives until the response reports whether the request ran, so a failed
+// response can remove entries no pod computed.
+type indexUpdateRecord struct {
+	servers         []server
+	perPromptHashes [][]blockHash
+	// inserted holds, per server, the block hashes this request's Add newly
+	// inserted. The rollback removes only those, so blocks an earlier request
+	// contributed stay indexed. Written by the queued Add under cell.mu.
+	inserted map[ServerID][][]blockHash
+	// cell is shared, not copied, so every holder of the record observes one
+	// rollback flag.
+	cell *updateCell
+}
+
+// Clone shares cell and inserted deliberately: they are coordination state
+// between the queued Add and the rollback.
+func (r *indexUpdateRecord) Clone() plugin.StateData {
+	cp := *r
+	return &cp
 }
 
 const (

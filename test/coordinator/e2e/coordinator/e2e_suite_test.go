@@ -18,8 +18,9 @@ limitations under the License.
 // against the e-p-d-pools topology: a single InferencePool covering the
 // encode, prefill, and decode worker pods, served by one EPP that runs the
 // scheduling profile named by each request's x-llm-d-epp-profile header, behind a
-// hand-rolled standalone Envoy routing on that same header, and the
-// coordinator deployed as a pod. No Istio, no Gateway/HTTPRoute CRDs.
+// standalone gateway routing on that same header, and the coordinator deployed
+// as a pod. The gateway is a hand-rolled Envoy, or agentgateway with
+// E2E_GATEWAY=agentgateway. No Istio, no Gateway/HTTPRoute CRDs.
 package coordinate2e
 
 import (
@@ -67,7 +68,7 @@ const (
 
 	// EPP resources are the shared inference-gateway component's split files.
 	// Gateway/HTTPRoute manifests in that component are unused: the coordinator
-	// e2e fronts the EPP with a hand-rolled Envoy, matching the router e2e.
+	// e2e fronts the EPP with a standalone gateway (see gatewayKind).
 	eppManifest               = "../../../e2e/artifacts/components/inference-gateway/deployment.yaml"
 	poolManifest              = "../../../e2e/artifacts/components/inference-gateway/inference-pools.yaml"
 	eppRbacManifest           = "../../../e2e/artifacts/components/inference-gateway/rbac.yaml"
@@ -90,7 +91,15 @@ const (
 	envoy3EPPManifest = "../../../e2e/artifacts/environments/dev/coordinator-e2e-infra/envoy-3-epp.yaml"
 	pool3EPPManifest  = "../../../e2e/artifacts/environments/dev/coordinator-e2e-infra/inference-pools-3-epp.yaml"
 
+	// agentgatewayManifest holds the agentgateway ConfigMap, Deployment and
+	// Service used instead of the Envoy manifests when E2E_GATEWAY=agentgateway.
+	agentgatewayManifest = "../../../e2e/artifacts/environments/dev/coordinator-e2e-infra/agentgateway.yaml"
+
 	crdGIEPath = "../../../e2e/artifacts/components/crds-gie"
+
+	// E2E_GATEWAY values; each is also the gateway's Service name.
+	gatewayEnvoy        = "envoy"
+	gatewayAgentgateway = "agentgateway"
 )
 
 var (
@@ -106,9 +115,12 @@ var (
 	// the eppConfigLeastBusy (encode, decode) and eppConfigPrefill configs.
 	threeEPP = env.GetEnvString("E2E_EPP_TOPOLOGY", "single", ginkgo.GinkgoLogr) == "3epp"
 
+	// gatewayKind selects the gateway in front of the coordinator and EPP.
+	gatewayKind = env.GetEnvString("E2E_GATEWAY", gatewayEnvoy, ginkgo.GinkgoLogr)
+
 	containerRuntime = env.GetEnvString("CONTAINER_RUNTIME", "docker", ginkgo.GinkgoLogr)
 	eppImage         = env.GetEnvString("EPP_IMAGE", "ghcr.io/llm-d/llm-d-router-endpoint-picker:dev", ginkgo.GinkgoLogr)
-	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v1.1.0", ginkgo.GinkgoLogr)
+	vllmSimImage     = env.GetEnvString("VLLM_IMAGE", "ghcr.io/llm-d/llm-d-inference-sim:v1.2.0", ginkgo.GinkgoLogr)
 	vllmRenderImage  = env.GetEnvString("VLLM_RENDER_IMAGE", vllmSimImage, ginkgo.GinkgoLogr)
 	vllmRenderPort   = env.GetEnvString("VLLM_RENDER_PORT", "8082", ginkgo.GinkgoLogr)
 	coordinatorImage = env.GetEnvString("COORDINATOR_IMAGE", "", ginkgo.GinkgoLogr)
@@ -169,6 +181,10 @@ func TestCoordinatorE2E(t *testing.T) {
 // the single renderer in baseNsName that each process's coordinator reaches
 // cross-namespace. Every other process only needs its own client.
 var _ = ginkgo.SynchronizedBeforeSuite(func() {
+	gomega.Expect(gatewayKind).To(gomega.BeElementOf(gatewayEnvoy, gatewayAgentgateway),
+		"E2E_GATEWAY must be "+gatewayEnvoy+" or "+gatewayAgentgateway)
+	gomega.Expect(threeEPP && gatewayKind == gatewayAgentgateway).To(gomega.BeFalse(),
+		"the 3-EPP per-role check parses Envoy access logs; run E2E_EPP_TOPOLOGY=3epp with E2E_GATEWAY=envoy")
 	gomega.Expect(coordinatorImage).NotTo(gomega.BeEmpty(), "COORDINATOR_IMAGE must be set")
 
 	testutils.RequireParallelProcessesMatch(numProcesses)
@@ -197,7 +213,7 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() {
 // ReportAfterSuite receives the full suite report and uses report.SuiteSucceeded
 // to detect any failure, including failures in the suite setup nodes, which a
 // ReportAfterEach would miss. It tears down only what process 1 created; the
-// per-group namespace, Envoy, and Services are torn down by testWrapper.
+// per-group namespace, gateway, and Services are torn down by testWrapper.
 var _ = ginkgo.ReportAfterSuite("cleanup", func(report ginkgo.Report) {
 	if !report.SuiteSucceeded {
 		// baseNsName holds the shared renderer, and is the only namespace still
@@ -322,7 +338,7 @@ func getGatewayPort() int {
 	return testutils.ProcessPort(baseGatewayPort)
 }
 
-// getGatewayNodePort returns the envoy Service's NodePort for this process. It
+// getGatewayNodePort returns the gateway Service's NodePort for this process. It
 // derives from defaultGatewayHostPort rather than baseGatewayPort because it is
 // the cluster-side port: it must match the containerPort BuildExtraPortMappings
 // maps to the host, and stay inside the Kubernetes NodePort range whatever host

@@ -134,6 +134,25 @@ func TestDecodeStep_PromptTokenParity_MismatchCountsAndKeepsResponse(t *testing.
 	}
 }
 
+// A chat leg that forwards prompt_token_ids is labeled ids_forwarded=true, so a
+// mismatch there means the worker ignored the IDs.
+func TestDecodeStep_PromptTokenParity_ForwardedChatIDsLabel(t *testing.T) {
+	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+	server := parityServer(t, 7)
+	defer server.Close()
+
+	step, reqCtx, _, err := parityRequest(server, map[string]any{ParamForwardPromptTokenIDs: true}, []int{1, 2, 3, 4, 5}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := counterValue(t, reg, parityMetric, map[string]string{"model_name": "llama-3", "api_type": "chat_completions", "ids_forwarded": "true"}); got != 1 {
+		t.Fatalf("mismatch counter = %v, want 1", got)
+	}
+}
+
 func TestDecodeStep_PromptTokenParity_MatchIsSilent(t *testing.T) {
 	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
 	server := parityServer(t, 5)

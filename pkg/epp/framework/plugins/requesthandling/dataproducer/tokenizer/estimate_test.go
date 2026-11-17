@@ -17,10 +17,13 @@ limitations under the License.
 package tokenizer
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"image"
+	"image/png"
 	"strconv"
 	"strings"
 	"testing"
@@ -114,6 +117,89 @@ func TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt(t *testing.T)
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
+}
+
+// pngBytes encodes a width x height PNG so a captured image head carries a
+// decodable dimension header.
+func pngBytes(t *testing.T, width, height int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
+}
+
+// imageTokens is the expected placeholder count for pixel dimensions under the
+// built-in defaults, spelled out so each case states its own resolution.
+func imageTokens(w, h int) int {
+	n := (w * h) / imageTokenFactor
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// TestImagesEstimator_CapturedImageDimensionTokens asserts an edits request's
+// uploaded image is estimated from its decoded dimensions: a 128x64 PNG yields
+// 128*64/factor placeholder tokens, reported as an image feature behind the
+// conditioning text and counted in the request's tokens.
+func TestImagesEstimator_CapturedImageDimensionTokens(t *testing.T) {
+	png := pngBytes(t, 128, 64)
+	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: int64(len(png)), Head: png, Hash: xxhash.Sum64(png)}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, reqcommon.ModalityImage, features[0].Modality)
+	assert.Equal(t, imageTokens(128, 64), features[0].Length)
+	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
+	assert.Equal(t, len(packBytes([]byte("add a hat"))), features[0].Offset)
+	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
+}
+
+// TestImagesEstimator_UndecodableHeadUsesDefaultResolution asserts an image
+// head that carries no readable dimension header falls back to the default
+// resolution, so the request still carries image weight.
+func TestImagesEstimator_UndecodableHeadUsesDefaultResolution(t *testing.T) {
+	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: 4096, Head: []byte("not an image header")}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+	})
+	require.NoError(t, err)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, imageTokens(defaultImageWidth, defaultImageHeight), features[0].Length)
+}
+
+// TestImagesEstimator_WebPHeadDimensions asserts a WebP upload resolves to its
+// real dimensions the way chat webp content does, by hand-peeking the header
+// no Go decoder is registered for.
+func TestImagesEstimator_WebPHeadDimensions(t *testing.T) {
+	head := webpHeader("VP8L", 512, 256)
+	media := fwkrequest.UploadedMedia{ContentType: "image/webp", SizeBytes: int64(len(head)), Head: head, Hash: xxhash.Sum64(head)}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", Image: media},
+	})
+	require.NoError(t, err)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, imageTokens(512, 256), features[0].Length)
+}
+
+// TestImagesEstimator_GenerationsCarriesNoFeature asserts a request without an
+// uploaded image (images-generations shares the typed body) estimates the text
+// alone and reports no features.
+func TestImagesEstimator_GenerationsCarriesNoFeature(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "a cat wearing a hat"},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Empty(t, tp.Prompts[0].MultiModalFeatures)
 	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
 }
 
@@ -1154,6 +1240,73 @@ func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
 	assert.Equal(t, 3*13+2, tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3omni-shaped audio length")
 }
 
+// transcriptionsBody builds a request body carrying an uploaded audio file part,
+// the shape the openai parser produces for /v1/audio/transcriptions.
+func transcriptionsBody(prompt string, media fwkrequest.UploadedMedia) *fwkrequest.InferenceRequestBody {
+	return &fwkrequest.InferenceRequestBody{Transcriptions: &fwkrequest.TranscriptionRequest{
+		Prompt: prompt,
+		Audio:  media,
+	}}
+}
+
+// uploadedWAV returns the UploadedMedia the parser captures for a WAV file
+// part. Head carries the same leading bytes the parser retains.
+func uploadedWAV(t *testing.T, sampleRate, channels, dataLen int) fwkrequest.UploadedMedia {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(wavBase64(sampleRate, channels, dataLen))
+	require.NoError(t, err)
+	head := raw
+	if len(head) > fwkrequest.UploadedMediaHeadBytes {
+		head = head[:fwkrequest.UploadedMediaHeadBytes]
+	}
+	return fwkrequest.UploadedMedia{ContentType: "audio/wav", SizeBytes: int64(len(raw)), Head: head, Hash: xxhash.Sum64(raw)}
+}
+
+// TestTranscriptionsEstimator_WAVDuration asserts an uploaded WAV file part
+// resolves to its exact duration: 48000 data bytes at 32000 B/s is 1.5s. The
+// feature mirrors the chat audio representation: hash, offset behind the
+// conditioning text, and placeholder span counted in the request's tokens.
+func TestTranscriptionsEstimator_WAVDuration(t *testing.T) {
+	media := uploadedWAV(t, 16000, 1, 48000)
+	tp, err := estimateBackend{}.produce(context.Background(), transcriptionsBody("hint", media))
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, reqcommon.ModalityAudio, features[0].Modality)
+	assert.Equal(t, audioTokens(1.5), features[0].Length)
+	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
+	assert.Equal(t, len(packBytes([]byte("hint"))), features[0].Offset)
+	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
+}
+
+// TestTranscriptionsEstimator_NonWAVUsesByteRate asserts an uploaded file that
+// is not a WAV converts through the byte rate: 48000 bytes at the default
+// 16000 B/s is 3s.
+func TestTranscriptionsEstimator_NonWAVUsesByteRate(t *testing.T) {
+	media := fwkrequest.UploadedMedia{ContentType: "audio/mpeg", SizeBytes: 48000, Head: []byte("ID3 not a riff header")}
+	tp, err := estimateBackend{}.produce(context.Background(), transcriptionsBody("", media))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(3), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestTranscriptionsEstimator_DurationHeaderWins asserts a header-declared
+// duration beats the payload-derived one.
+func TestTranscriptionsEstimator_DurationHeaderWins(t *testing.T) {
+	media := fwkrequest.UploadedMedia{ContentType: "audio/mpeg", SizeBytes: 480000}
+	tp, err := estimateBackend{}.produce(audioCtx(audioMetadata{duration: 5}), transcriptionsBody("", media))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(5), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestTranscriptionsEstimator_NoFilePart asserts a form without a file part
+// still carries the default-duration weight rather than zero.
+func TestTranscriptionsEstimator_NoFilePart(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), transcriptionsBody("", fwkrequest.UploadedMedia{}))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(defaultAudioDuration), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
 // TestEstimateBackend_ChatAudioWeightingDistinct asserts two clips of different
 // length produce different token streams, so audio weighting reaches the
 // locality keys instead of collapsing to one placeholder.
@@ -1475,4 +1628,20 @@ func TestEstimateBackend_ChatToolCallsAffectPrefix(t *testing.T) {
 
 	long := chatEstimate(t, turn("write_file", strings.Repeat("x", 4000)))
 	assert.Greater(t, len(long), len(noCall)+900, "tool call arguments must count toward the estimate")
+}
+
+// A payload that cannot decode as standard base64 -- URL-safe alphabet, for
+// example -- still has a length, so the byte-rate estimate applies. Falling
+// back to the default duration here would weigh such clips at 10 s regardless
+// of size.
+func TestAudioEstimator_UndecodableBase64UsesByteRate(t *testing.T) {
+	// 64,000 URL-safe characters: no standard-base64 decode, but
+	// Base64DecodedLen still yields 48,000 bytes, 3 s at the default rate.
+	payload := strings.Repeat("_-", 32000)
+	tp, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(payload, "wav"))
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, audioTokens(3), tp.Prompts[0].MultiModalFeatures[0].Length)
+	assert.NotEqual(t, audioTokens(defaultAudioDuration), tp.Prompts[0].MultiModalFeatures[0].Length,
+		"an undecodable payload must not fall back to the default duration")
 }
