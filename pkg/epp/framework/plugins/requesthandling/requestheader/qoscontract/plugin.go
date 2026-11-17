@@ -70,6 +70,7 @@ var (
 	_ requesthandling.RequestHeaderProcessor  = &Plugin{}
 	_ requesthandling.ResponseHeaderProcessor = &Plugin{}
 	_ requesthandling.ResponseBodyProcessor   = &Plugin{}
+	_ requesthandling.RequestAbandoned        = &Plugin{}
 	_ plugin.ProducerPlugin                   = &Plugin{}
 )
 
@@ -93,7 +94,6 @@ type hold struct {
 	// committed is true when the request was served within the contract and so holds a
 	// concurrency slot and a daily-budget charge.
 	committed bool
-	stop      func() bool
 }
 
 // Plugin enforces per-team QoS contracts. See the package README.
@@ -194,7 +194,7 @@ func (p *Plugin) estimateCost(request *scheduling.InferenceRequest, cfg TeamConf
 // RequestHeader decides the request's class. A request within the team's contract (its size
 // limits and its commits) is served at the committed class and charged; a request outside it
 // moves one class down without a charge, and is rejected in the lowest class.
-func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.InferenceRequest) error {
+func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceRequest) error {
 	if request == nil {
 		return nil
 	}
@@ -242,13 +242,10 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 
 	contractDecisions.WithLabelValues(team.label, committed.Name, served.Name, decision, reason, p.mode()).Inc()
 	rec := &hold{team: team, servedClass: served.Name, reserved: cost, committed: withinContract}
+	// The hold is settled exactly once: by RequestAbandoned when the request leaves the director
+	// before dispatch, otherwise at end of stream, which the handler forces for every dispatched
+	// request, completed or not.
 	p.holds.Store(request.RequestID, rec)
-	// ctx is the ext_proc stream context (srv.Context() in handlers.Process), not one scoped to
-	// this phase. The EPP runs one stream per request, so ctx is done only when the request ends.
-	// A request that never reaches end of stream (flow-control rejection, scheduling failure,
-	// client disconnect) is released in full then.
-	requestID := request.RequestID
-	rec.stop = context.AfterFunc(ctx, func() { p.finish(requestID, nil) })
 
 	// Report-only mode only records the decision: the request keeps the priority its
 	// InferenceObjective set and the fairness ID it arrived with.
@@ -292,6 +289,15 @@ func (p *Plugin) ResponseHeader(_ context.Context, request *scheduling.Inference
 	}
 }
 
+// RequestAbandoned refunds a request that left the director before dispatch: a flow-control
+// rejection, a client that left while queued, a scheduling failure, or a later plugin's error.
+func (p *Plugin) RequestAbandoned(_ context.Context, request *scheduling.InferenceRequest) {
+	if request == nil {
+		return
+	}
+	p.finish(request.RequestID, nil)
+}
+
 // ResponseBody settles the reservation against the reported usage at end of stream.
 func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRequest, response *requesthandling.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
@@ -310,9 +316,6 @@ func (p *Plugin) finish(requestID string, usage *fwkrequest.Usage) {
 		return
 	}
 	rec := v.(*hold)
-	if rec.stop != nil {
-		rec.stop()
-	}
 	actual := 0.0
 	if usage != nil {
 		actual = rec.reserved

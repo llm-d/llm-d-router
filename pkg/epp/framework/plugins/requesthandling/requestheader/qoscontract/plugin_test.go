@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -364,34 +365,79 @@ func TestResponseBody_UsageAboveReservationIsCharged(t *testing.T) {
 	_ = requireCode(t, p.RequestHeader(t.Context(), newRequest("team-d", 1, 1)), errcommon.ResourceExhausted)
 }
 
-func TestStreamEndReleasesUncompletedRequest(t *testing.T) {
+func TestRequestAbandonedRefundsInFull(t *testing.T) {
 	p, _ := newTestPlugin(t, nil)
-	ctx, cancel := context.WithCancel(t.Context())
 	req := newRequest("team-d", 100, 100)
-	require.NoError(t, p.RequestHeader(ctx, req))
+	require.NoError(t, p.RequestHeader(t.Context(), req))
 	inflight, _ := usage(p, "team-d")
 	require.Equal(t, 1, inflight)
 
-	cancel()
-	require.Eventually(t, func() bool {
-		inflight, _ := usage(p, "team-d")
-		return inflight == 0
-	}, time.Second, 5*time.Millisecond)
-	_, daily := usage(p, "team-d")
-	assert.InDelta(t, 0, daily, 1e-9, "an unserved request is refunded in full")
+	p.RequestAbandoned(t.Context(), req)
+	inflight, daily := usage(p, "team-d")
+	assert.Equal(t, 0, inflight)
+	assert.InDelta(t, 0, daily, 1e-9, "a request that was never dispatched is refunded in full")
+
+	complete(p, req, 100, 90)
+	_, daily = usage(p, "team-d")
+	assert.InDelta(t, 0, daily, 1e-9, "a later end of stream does not settle again")
 }
 
-func TestCompletedRequestIsNotReleasedAgainOnStreamEnd(t *testing.T) {
+func TestRequestAbandonedAfterCompletionIsNoOp(t *testing.T) {
+	p, _ := newTestPlugin(t, nil)
+	req := newRequest("team-d", 100, 100)
+	require.NoError(t, p.RequestHeader(t.Context(), req))
+	complete(p, req, 100, 100)
+	p.RequestAbandoned(t.Context(), req)
+	inflight, daily := usage(p, "team-d")
+	assert.Equal(t, 0, inflight)
+	assert.InDelta(t, 300, daily, 1e-9)
+}
+
+// TestDisconnectIsSettledAtEndOfStream verifies that the end of the request's stream context does
+// not settle the request: a client that reads a generation and disconnects before the usage
+// chunk is still charged when the forced end of stream arrives.
+func TestDisconnectIsSettledAtEndOfStream(t *testing.T) {
 	p, _ := newTestPlugin(t, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	req := newRequest("team-d", 100, 100)
 	require.NoError(t, p.RequestHeader(ctx, req))
-	complete(p, req, 100, 100)
 	cancel()
-	time.Sleep(20 * time.Millisecond)
+	inflight, _ := usage(p, "team-d")
+	assert.Equal(t, 1, inflight, "the slot is held until end of stream")
+
+	complete(p, req, 100, 90)
 	inflight, daily := usage(p, "team-d")
 	assert.Equal(t, 0, inflight)
-	assert.InDelta(t, 300, daily, 1e-9)
+	assert.InDelta(t, 280, daily, 1e-9, "100 + 2*90 weighted tokens served")
+}
+
+// TestConcurrentSettlement runs requests that settle by end of stream and by abandonment in
+// parallel. Run under -race.
+func TestConcurrentSettlement(t *testing.T) {
+	p, _ := newTestPlugin(t, func(params *Parameters) {
+		params.Teams = append(params.Teams, TeamConfig{ID: "team-x", Class: "batch", MaxConcurrency: 1000})
+	})
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 20 {
+				req := newRequest("team-x", 1, 1)
+				if err := p.RequestHeader(t.Context(), req); err != nil {
+					continue
+				}
+				if i%2 == 0 {
+					p.RequestAbandoned(t.Context(), req)
+				} else {
+					complete(p, req, 1, 1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	inflight, _ := usage(p, "team-x")
+	assert.Equal(t, 0, inflight)
 }
 
 // objectivePriority is the priority the InferenceObjective sets in the report-only tests. It is
