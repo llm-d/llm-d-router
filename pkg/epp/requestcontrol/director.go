@@ -1107,13 +1107,28 @@ func (d *Director) runResponseHeaderPlugins(ctx context.Context, request *fwksch
 	}
 }
 
+// releaseProducerState calls RequestAbandoned on every DataProducer and RequestHeaderProcessor
+// that implements it, once per plugin.
 func (d *Director) releaseProducerState(ctx context.Context, request *fwksched.InferenceRequest) {
+	released := map[fwkplugin.TypedName]struct{}{}
+	release := func(p fwkplugin.Plugin) {
+		abandoner, ok := p.(fwkrh.RequestAbandoned)
+		if !ok {
+			return
+		}
+		if _, done := released[p.TypedName()]; done {
+			return
+		}
+		released[p.TypedName()] = struct{}{}
+		abandoner.RequestAbandoned(ctx, request)
+	}
 	for _, plugins := range [][]fwkrh.DataProducer{d.requestControlPlugins.requestHandlingDataProducers, d.requestControlPlugins.dataProducerPlugins} {
 		for _, p := range plugins {
-			if abandoner, ok := p.(fwkrh.RequestAbandoned); ok {
-				abandoner.RequestAbandoned(ctx, request)
-			}
+			release(p)
 		}
+	}
+	for _, p := range d.requestControlPlugins.requestHeaderPlugins {
+		release(p)
 	}
 }
 

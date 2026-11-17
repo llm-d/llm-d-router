@@ -4019,6 +4019,49 @@ func runOverrideRequest(t *testing.T, headers map[string]string, plugins ...fwkr
 	return reqCtx, admission, err
 }
 
+// abandonTrackingRequestHeaderPlugin counts RequestAbandoned calls.
+type abandonTrackingRequestHeaderPlugin struct {
+	abandoned int
+}
+
+func (m *abandonTrackingRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: "abandon", Type: "mock-abandon"}
+}
+
+func (m *abandonTrackingRequestHeaderPlugin) RequestHeader(context.Context, *fwksched.InferenceRequest) error {
+	return nil
+}
+
+func (m *abandonTrackingRequestHeaderPlugin) RequestAbandoned(context.Context, *fwksched.InferenceRequest) {
+	m.abandoned++
+}
+
+// failingRequestHeaderPlugin fails every request.
+type failingRequestHeaderPlugin struct{}
+
+func (m *failingRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: "zz-fail", Type: "mock-fail"}
+}
+
+func (m *failingRequestHeaderPlugin) RequestHeader(context.Context, *fwksched.InferenceRequest) error {
+	return errcommon.Error{Code: errcommon.BadRequest, Msg: "rejected"}
+}
+
+// TestDirector_RequestHeaderPluginRequestAbandoned verifies that a RequestHeaderProcessor that
+// implements RequestAbandoned is called once when the request leaves before dispatch, and not
+// when it is dispatched.
+func TestDirector_RequestHeaderPluginRequestAbandoned(t *testing.T) {
+	dispatched := &abandonTrackingRequestHeaderPlugin{}
+	_, _, err := runOverrideRequest(t, nil, dispatched)
+	require.NoError(t, err)
+	assert.Equal(t, 0, dispatched.abandoned, "a dispatched request is settled at end of stream")
+
+	abandoned := &abandonTrackingRequestHeaderPlugin{}
+	_, _, err = runOverrideRequest(t, nil, abandoned, &failingRequestHeaderPlugin{})
+	require.Error(t, err)
+	assert.Equal(t, 1, abandoned.abandoned, "a request a later plugin fails is abandoned")
+}
+
 // TestDirector_RequestHeaderPluginSetsDeclaredPriority verifies that a priority produced through
 // PriorityKey is the one admission control and the request context see.
 func TestDirector_RequestHeaderPluginSetsDeclaredPriority(t *testing.T) {
