@@ -140,13 +140,13 @@ func (d *Detector) Consumes() fwkplugin.DataDependencies {
 }
 
 // deferredQueueSizeDataKey is the extractor attribute for the part of
-// WaitingQueueSize that waits on something other than a batch slot.
+// WaitingQueueSize that the engine cannot schedule yet.
 var deferredQueueSizeDataKey = attrmetrics.ScalarMetricDataKey(extractormetrics.DeferredQueueSizeKey)
 
-// queueDepth returns the scraped waiting queue less the requests the engine
-// reports as deferred, plus the in-flight requests the scrape does not yet
-// reflect (see Saturation). A deferred count above the waiting queue comes
-// from series scraped out of step and leaves the queue term unchanged.
+// queueDepth returns the scraped waiting queue less DeferredQueueSize, plus
+// the in-flight requests the scrape does not yet reflect (see Saturation). A
+// deferred count above the waiting queue comes from series scraped out of
+// step and leaves the queue term unchanged.
 func (d *Detector) queueDepth(m *datalayer.Metrics, attrs datalayer.AttributeMap) int64 {
 	waiting := int64(m.WaitingQueueSize)
 	if attrs == nil {

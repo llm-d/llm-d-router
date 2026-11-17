@@ -298,7 +298,7 @@ FlowControl:
   does, it is also appended as a filter to every scheduling profile that does not list it, whether or
   not the `flowControl` feature gate is enabled. With default parameters, `utilization-detector`
   removes endpoints whose metrics are missing or older than 200ms, whose waiting queue, less the
-  requests the engine reports as deferred, is 5 or more, or whose KV cache utilization is 0.8 or
+  requests whose KV transfer has not finished, is 5 or more, or whose KV cache utilization is 0.8 or
   more. When that would remove every endpoint, it keeps them all.
 
 DataLayer:

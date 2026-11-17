@@ -42,8 +42,8 @@ type (
 		// QueuedRequestsSpec defines the metric specification string for retrieving queued request count.
 		QueuedRequestsSpec string `json:"queuedRequestsSpec"`
 		// DeferredRequestsSpec defines the metric specification string for the part of the queued
-		// request count that waits on something other than a batch slot, such as a KV transfer, a
-		// LoRA slot or a grammar compile. Published as the DeferredQueueSize attribute. Optional.
+		// request count that the engine cannot schedule yet, such as requests whose KV transfer has
+		// not finished. Published as the DeferredQueueSize attribute. Optional.
 		DeferredRequestsSpec string `json:"deferredRequestsSpec,omitempty"`
 		// RunningRequestsSpec defines the metric specification string for retrieving running requests count.
 		RunningRequestsSpec string `json:"runningRequestsSpec"`
@@ -114,7 +114,7 @@ var defaultEngineConfigs = []engineConfigParams{
 	{ //#nosec G101 -- CacheTotalTokensSpec names a metric, not a credential
 		Name:                 "vllm",
 		QueuedRequestsSpec:   "vllm:num_requests_waiting",
-		DeferredRequestsSpec: `vllm:num_requests_waiting_by_reason{reason="deferred"}`,
+		DeferredRequestsSpec: `vllm:num_requests_kv_fetch_by_stage{stage="in_progress"}`,
 		RunningRequestsSpec:  "vllm:num_requests_running",
 		KVUsageSpec:          "vllm:kv_cache_usage_perc",
 		LoRASpec:             "vllm:lora_requests_info",

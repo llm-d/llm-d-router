@@ -282,7 +282,7 @@ func TestMetricsExtractionLoRADisabledViaConfig(t *testing.T) {
 func TestMetricsExtractionDeferredDroppedByEngineConfigOverride(t *testing.T) {
 	srv := createMockServer([]MetricMock{
 		{Name: WaitingMetric, Value: 5},
-		{Name: "vllm:num_requests_waiting_by_reason", Value: 2, Labels: map[string]string{"reason": "deferred"}},
+		{Name: "vllm:num_requests_kv_fetch_by_stage", Value: 2, Labels: map[string]string{"stage": "in_progress"}},
 		{Name: RunningMetric, Value: 2},
 		{Name: KVCacheMetric, Value: 0.3},
 	})

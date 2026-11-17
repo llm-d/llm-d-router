@@ -32,16 +32,16 @@ import (
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 )
 
-// TestExtractorPublishesDeferredWaitingRequests covers the queue split vLLM
-// reports as num_requests_waiting_by_reason: the deferred part is published
-// as its own attribute, WaitingQueueSize stays the queue total, and a scrape
-// without the series reports 0 deferred requests.
+// TestExtractorPublishesDeferredWaitingRequests covers a deferredRequestsSpec
+// that selects one stage of vllm:num_requests_kv_fetch_by_stage: that stage is
+// published as its own attribute, WaitingQueueSize stays the queue total, and
+// a scrape without the series reports 0 deferred requests.
 func TestExtractorPublishesDeferredWaitingRequests(t *testing.T) {
 	ctx := context.Background()
 	config := `{"engineConfigs": [{
 		"name": "vllm",
 		"queuedRequestsSpec": "vllm:num_requests_waiting",
-		"deferredRequestsSpec": "vllm:num_requests_waiting_by_reason{reason=\"deferred\"}",
+		"deferredRequestsSpec": "vllm:num_requests_kv_fetch_by_stage{stage=\"in_progress\"}",
 		"runningRequestsSpec": "vllm:num_requests_running",
 		"kvUsageSpec": "vllm:kv_cache_usage_perc"
 	}]}`
@@ -54,18 +54,18 @@ func TestExtractorPublishesDeferredWaitingRequests(t *testing.T) {
 		t.Fatalf("new extractor: %v", err)
 	}
 
-	scrape := func(byReason *dto.MetricFamily, waiting ...*dto.Metric) sourcemetrics.PrometheusMetricMap {
+	scrape := func(byStage *dto.MetricFamily, waiting ...*dto.Metric) sourcemetrics.PrometheusMetricMap {
 		data := sourcemetrics.PrometheusMetricMap{
 			"vllm:num_requests_waiting": familyOf(waiting...),
 			"vllm:num_requests_running": familyOf(labeledGauge(0)),
 			"vllm:kv_cache_usage_perc":  familyOf(labeledGauge(0)),
 		}
-		if byReason != nil {
-			data["vllm:num_requests_waiting_by_reason"] = byReason
+		if byStage != nil {
+			data["vllm:num_requests_kv_fetch_by_stage"] = byStage
 		}
 		return data
 	}
-	split := familyOf(labeledGauge(4, "reason", "capacity"), labeledGauge(2, "reason", "deferred"))
+	stages := familyOf(labeledGauge(2, "stage", "in_progress"), labeledGauge(3, "stage", "completed_waiting"))
 
 	tests := []struct {
 		name string
@@ -76,35 +76,35 @@ func TestExtractorPublishesDeferredWaitingRequests(t *testing.T) {
 		wantDeferred float64
 	}{
 		{
-			name:         "by-reason series present",
-			data:         scrape(split, labeledGauge(6)),
+			name:         "stage series present",
+			data:         scrape(stages, labeledGauge(6)),
 			wantWaiting:  6,
 			wantDeferred: 2,
 		},
 		{
-			name:         "by-reason series absent",
+			name:         "stage series absent",
 			data:         scrape(nil, labeledGauge(6)),
 			wantWaiting:  6,
 			wantDeferred: 0,
 		},
 		{
-			name:         "by-reason series absent after a scrape that had it",
-			previous:     scrape(split, labeledGauge(6)),
+			name:         "stage series absent after a scrape that had it",
+			previous:     scrape(stages, labeledGauge(6)),
 			data:         scrape(nil, labeledGauge(6)),
 			wantWaiting:  6,
 			wantDeferred: 0,
 		},
 		{
 			name:         "non-finite deferred series counts as not reported",
-			data:         scrape(familyOf(labeledGauge(4, "reason", "capacity"), labeledGauge(math.NaN(), "reason", "deferred")), labeledGauge(6)),
+			data:         scrape(familyOf(labeledGauge(math.NaN(), "stage", "in_progress"), labeledGauge(3, "stage", "completed_waiting")), labeledGauge(6)),
 			wantWaiting:  6,
 			wantDeferred: 0,
 		},
 		{
 			name: "deferred series per engine of a data-parallel pod",
 			data: scrape(familyOf(
-				labeledGauge(1, "engine", "0", "reason", "capacity"), labeledGauge(4, "engine", "0", "reason", "deferred"),
-				labeledGauge(3, "engine", "1", "reason", "capacity"), labeledGauge(0, "engine", "1", "reason", "deferred")),
+				labeledGauge(4, "engine", "0", "stage", "in_progress"), labeledGauge(1, "engine", "0", "stage", "completed_waiting"),
+				labeledGauge(0, "engine", "1", "stage", "in_progress"), labeledGauge(2, "engine", "1", "stage", "completed_waiting")),
 				labeledGauge(5, "engine", "0"), labeledGauge(3, "engine", "1")),
 			wantWaiting:  8,
 			wantDeferred: 4,
@@ -132,7 +132,7 @@ func TestExtractorPublishesDeferredWaitingRequests(t *testing.T) {
 }
 
 // TestExtractorSkipsDeferredWithoutWaitingFamily: a scrape that has the
-// by-reason family but not the waiting family publishes no DeferredQueueSize.
+// stage family but not the waiting family publishes no DeferredQueueSize.
 func TestExtractorSkipsDeferredWithoutWaitingFamily(t *testing.T) {
 	ctx := context.Background()
 	ext, err := newCoreMetricsExtractorPlugin(ctx, "core", nil)
@@ -141,7 +141,7 @@ func TestExtractorSkipsDeferredWithoutWaitingFamily(t *testing.T) {
 	}
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{}, nil)
 	data := sourcemetrics.PrometheusMetricMap{
-		"vllm:num_requests_waiting_by_reason": familyOf(labeledGauge(4, "reason", "capacity"), labeledGauge(2, "reason", "deferred")),
+		"vllm:num_requests_kv_fetch_by_stage": familyOf(labeledGauge(2, "stage", "in_progress")),
 		"vllm:num_requests_running":           familyOf(labeledGauge(0)),
 		"vllm:kv_cache_usage_perc":            familyOf(labeledGauge(0)),
 	}
@@ -196,10 +196,12 @@ func familyOf(series ...*dto.Metric) *dto.MetricFamily {
 	return &dto.MetricFamily{Type: dto.MetricType_GAUGE.Enum(), Metric: series}
 }
 
-// TestBuiltinVLLMConfigReadsDeferredWaitingRequests pins the built-in vllm
-// engine config: with no configuration it reads the deferred reason of
-// vllm:num_requests_waiting_by_reason into DeferredQueueSize.
-func TestBuiltinVLLMConfigReadsDeferredWaitingRequests(t *testing.T) {
+// TestBuiltinVLLMConfigReadsKVTransfersInProgress pins the built-in vllm
+// engine config: with no configuration DeferredQueueSize is the in_progress
+// stage of vllm:num_requests_kv_fetch_by_stage. A request whose transfer has
+// finished (completed_waiting) still carries the deferred reason and is not
+// counted.
+func TestBuiltinVLLMConfigReadsKVTransfersInProgress(t *testing.T) {
 	ctx := context.Background()
 	ext, err := newCoreMetricsExtractorPlugin(ctx, "core", nil)
 	if err != nil {
@@ -208,15 +210,17 @@ func TestBuiltinVLLMConfigReadsDeferredWaitingRequests(t *testing.T) {
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{}, nil)
 	data := sourcemetrics.PrometheusMetricMap{
 		"vllm:num_requests_waiting":           familyOf(labeledGauge(6)),
-		"vllm:num_requests_waiting_by_reason": familyOf(labeledGauge(4, "reason", "capacity"), labeledGauge(2, "reason", "deferred")),
-		"vllm:num_requests_running":           familyOf(labeledGauge(0)),
-		"vllm:kv_cache_usage_perc":            familyOf(labeledGauge(0)),
-		"vllm:lora_requests_info":             familyOf(labeledGauge(1, "running_lora_adapters", "", "waiting_lora_adapters", "", "max_lora", "0")),
-		"vllm:cache_config_info":              familyOf(labeledGauge(1, "block_size", "16", "num_gpu_blocks", "1000")),
+		"vllm:num_requests_waiting_by_reason": familyOf(labeledGauge(3, "reason", "capacity"), labeledGauge(3, "reason", "deferred")),
+		"vllm:num_requests_kv_fetch_by_stage": familyOf(
+			labeledGauge(0, "stage", "waiting_to_start"), labeledGauge(1, "stage", "in_progress"), labeledGauge(2, "stage", "completed_waiting")),
+		"vllm:num_requests_running": familyOf(labeledGauge(0)),
+		"vllm:kv_cache_usage_perc":  familyOf(labeledGauge(0)),
+		"vllm:lora_requests_info":   familyOf(labeledGauge(1, "running_lora_adapters", "", "waiting_lora_adapters", "", "max_lora", "0")),
+		"vllm:cache_config_info":    familyOf(labeledGauge(1, "block_size", "16", "num_gpu_blocks", "1000")),
 	}
 	if err := ext.Extract(ctx, fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}); err != nil {
 		t.Fatalf("Extract: %v", err)
 	}
 	assertScalarMetric(t, ep, "WaitingQueueSize", 6)
-	assertScalarMetric(t, ep, "DeferredQueueSize", 2)
+	assertScalarMetric(t, ep, "DeferredQueueSize", 1)
 }

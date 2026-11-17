@@ -31,10 +31,9 @@ import (
 	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 )
 
-// TestDetector_Saturation_QueueTermLeavesDeferredOut: requests the engine
-// reports as deferred (parked on a KV transfer, a LoRA slot or a grammar
-// compile) are part of WaitingQueueSize but not of the queue-depth term; the
-// scrape-lag credit still counts them as observed.
+// TestDetector_Saturation_QueueTermLeavesDeferredOut: the requests counted in
+// DeferredQueueSize are part of WaitingQueueSize but not of the queue-depth
+// term; the scrape-lag credit still counts them as observed.
 func TestDetector_Saturation_QueueTermLeavesDeferredOut(t *testing.T) {
 	t.Parallel()
 
