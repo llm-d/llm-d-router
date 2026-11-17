@@ -198,9 +198,9 @@ func familyOf(series ...*dto.Metric) *dto.MetricFamily {
 
 // TestBuiltinVLLMConfigReadsKVTransfersInProgress pins the built-in vllm
 // engine config: with no configuration DeferredQueueSize is the in_progress
-// stage of vllm:num_requests_kv_fetch_by_stage. A request whose transfer has
-// finished (completed_waiting) still carries the deferred reason and is not
-// counted.
+// stage of vllm:num_requests_kv_fetch_by_stage. Requests whose transfer has
+// not started (waiting_to_start) or has finished (completed_waiting) are not
+// counted; the finished ones still carry the deferred reason.
 func TestBuiltinVLLMConfigReadsKVTransfersInProgress(t *testing.T) {
 	ctx := context.Background()
 	ext, err := newCoreMetricsExtractorPlugin(ctx, "core", nil)
@@ -212,7 +212,7 @@ func TestBuiltinVLLMConfigReadsKVTransfersInProgress(t *testing.T) {
 		"vllm:num_requests_waiting":           familyOf(labeledGauge(6)),
 		"vllm:num_requests_waiting_by_reason": familyOf(labeledGauge(3, "reason", "capacity"), labeledGauge(3, "reason", "deferred")),
 		"vllm:num_requests_kv_fetch_by_stage": familyOf(
-			labeledGauge(0, "stage", "waiting_to_start"), labeledGauge(1, "stage", "in_progress"), labeledGauge(2, "stage", "completed_waiting")),
+			labeledGauge(2, "stage", "waiting_to_start"), labeledGauge(1, "stage", "in_progress"), labeledGauge(2, "stage", "completed_waiting")),
 		"vllm:num_requests_running": familyOf(labeledGauge(0)),
 		"vllm:kv_cache_usage_perc":  familyOf(labeledGauge(0)),
 		"vllm:lora_requests_info":   familyOf(labeledGauge(1, "running_lora_adapters", "", "waiting_lora_adapters", "", "max_lora", "0")),

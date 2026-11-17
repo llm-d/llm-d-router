@@ -129,7 +129,8 @@ func NewDetector(name string, cfg Config, logger logr.Logger) *Detector {
 
 // Consumes declares InFlightLoad as an optional dependency: it supplies the
 // scrape-lag compensation in Saturation and Filter, but the detector still functions on
-// scraped metrics alone when no inflight-load-producer is configured.
+// scraped metrics alone when no inflight-load-producer is configured. DeferredQueueSize is
+// optional too: only engine configs with a deferredRequestsSpec publish it.
 func (d *Detector) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Optional: map[fwkplugin.DataKey]any{
@@ -139,8 +140,6 @@ func (d *Detector) Consumes() fwkplugin.DataDependencies {
 	}
 }
 
-// deferredQueueSizeDataKey is the extractor attribute for the part of
-// WaitingQueueSize that the engine cannot schedule yet.
 var deferredQueueSizeDataKey = attrmetrics.ScalarMetricDataKey(extractormetrics.DeferredQueueSizeKey)
 
 // queueDepth returns the scraped waiting queue less DeferredQueueSize, plus
@@ -179,6 +178,9 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 //	PodScore = Max(WaitingQueue / QueueThreshold, KVCacheUsage / KVCacheThreshold)
 //
+// WaitingQueue is WaitingQueueSize less the DeferredQueueSize attribute when the extractor
+// publishes one.
+//
 // Pods with missing or stale metrics contribute 1.0 under the saturated policy, or are excluded
 // from the average under the ignore policy.
 //
@@ -195,9 +197,7 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 //
 //	credit = max(0, InFlightRequests - (WaitingQueueSize + RunningRequestsSize))
 //
-// The queue-depth term is WaitingQueueSize less the DeferredQueueSize attribute
-// when the extractor publishes one. The credit corrects each endpoint's score
-// before aggregation. It is added
+// The credit corrects each endpoint's score before aggregation. It is added
 // only to the queue-depth term (the fast, controllable signal); the KV-cache
 // term is left as measured. Endpoints without the attribute contribute zero
 // credit and fall back to the scraped queue depth. See the package README for

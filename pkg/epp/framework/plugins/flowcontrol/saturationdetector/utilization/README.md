@@ -49,7 +49,7 @@ the last known score for a bounded window) can be added later.
     Credit = max(0, InFlightRequests - (WaitingQueueSize + RunningRequestsSize))
     QueueScore = (WaitingQueueSize - DeferredQueueSize + Credit) / QueueThreshold
 
-`InFlightRequests` is the producer's per-endpoint counter, incremented at dispatch and decremented on request completion, so the correction already accounts for requests that returned since the last scrape. Endpoints without the attribute contribute zero credit. `DeferredQueueSize` is the `core-metrics-extractor` attribute for the part of `WaitingQueueSize` that the engine cannot schedule yet (vLLM: requests whose KV transfer has not finished); endpoints whose engine config names no `deferredRequestsSpec` carry no such attribute, and a deferred count above the waiting queue (series scraped out of step) leaves the queue term unchanged.
+`InFlightRequests` is the producer's per-endpoint counter, incremented at dispatch and decremented on request completion, so the correction already accounts for requests that returned since the last scrape. Endpoints without the attribute contribute zero credit. `DeferredQueueSize` is the `core-metrics-extractor` attribute for the queued requests that wait on a KV transfer in progress; endpoints whose engine config names no `deferredRequestsSpec` carry no such attribute, and a deferred count above the waiting queue (series scraped out of step) leaves the queue term unchanged.
 
 The correction rests on these assumptions:
 

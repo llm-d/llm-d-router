@@ -41,9 +41,8 @@ type (
 		Name string `json:"name"`
 		// QueuedRequestsSpec defines the metric specification string for retrieving queued request count.
 		QueuedRequestsSpec string `json:"queuedRequestsSpec"`
-		// DeferredRequestsSpec defines the metric specification string for the part of the queued
-		// request count that the engine cannot schedule yet, such as requests whose KV transfer has
-		// not finished. Published as the DeferredQueueSize attribute. Optional.
+		// DeferredRequestsSpec defines the metric specification string for the queued requests that
+		// wait on a KV transfer in progress. Published as the DeferredQueueSize attribute. Optional.
 		DeferredRequestsSpec string `json:"deferredRequestsSpec,omitempty"`
 		// RunningRequestsSpec defines the metric specification string for retrieving running requests count.
 		RunningRequestsSpec string `json:"runningRequestsSpec"`
