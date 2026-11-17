@@ -46,7 +46,25 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/agentlineage"
 )
+
+// TestConfig_OrderPlugins_AgentLineageAfterTenantProducer verifies that agent-lineage, which
+// scopes lineage by the fairness ID, runs after a processor that sets the tenant, even when the
+// producer's name sorts after it.
+func TestConfig_OrderPlugins_AgentLineageAfterTenantProducer(t *testing.T) {
+	lineage, err := agentlineage.PluginFactory("agent-lineage", nil, nil)
+	require.NoError(t, err)
+	producer := &overrideRequestHeaderPlugin{name: "zzz-tenant"}
+
+	cfg := NewConfig()
+	cfg.AddPlugins(lineage, producer)
+	sorted, err := datalayer.ValidateAndOrderDataDependencies([]fwkplugin.Plugin{lineage, producer})
+	require.NoError(t, err)
+	cfg.OrderPlugins(sorted)
+
+	assert.Equal(t, []string{"zzz-tenant/mock-override", "agent-lineage/agent-lineage"}, names(cfg.requestHeaderPlugins))
+}
 
 // orderTestData is the payload type exchanged between the producer and consumer
 // mocks below. buildDAG compares produced and consumed types, so both sides must

@@ -3916,22 +3916,73 @@ func (m *priorityCapturingAdmissionController) Admit(_ context.Context, _ *handl
 	return nil
 }
 
-type priorityOverrideRequestHeaderPlugin struct {
-	priority int
+// overrideRequestHeaderPlugin sets a priority and a tenant. By default it writes them through
+// PriorityKey and TenantKey, declared in Produces. With direct it writes the request fields
+// instead; with undeclared it writes the keys without declaring them.
+type overrideRequestHeaderPlugin struct {
+	name       string
+	priority   *int
+	tenant     string
+	direct     bool
+	undeclared bool
 }
 
-func (m *priorityOverrideRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Name: "override", Type: "mock-priority-override"}
+func (m *overrideRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock-override"}
 }
 
-func (m *priorityOverrideRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
-	request.Objectives.Priority = m.priority
+func (m *overrideRequestHeaderPlugin) Produces() map[fwkplugin.DataKey]any {
+	if m.undeclared || m.direct {
+		return nil
+	}
+	return map[fwkplugin.DataKey]any{fwkrh.PriorityKey: 0, fwkrh.TenantKey: ""}
+}
+
+func (m *overrideRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
+	if m.direct {
+		if m.priority != nil {
+			request.Objectives.Priority = *m.priority
+		}
+		if m.tenant != "" {
+			request.FairnessID = m.tenant
+		}
+		return nil
+	}
+	if m.priority != nil {
+		request.PutAttribute(fwkrh.PriorityKey, *m.priority)
+	}
+	if m.tenant != "" {
+		request.PutAttribute(fwkrh.TenantKey, m.tenant)
+	}
 	return nil
 }
 
-// TestDirector_RequestHeaderPluginOverridesPriority verifies that a priority set by a
-// RequestHeaderProcessor is the one admission control and the request context see.
-func TestDirector_RequestHeaderPluginOverridesPriority(t *testing.T) {
+// observingRequestHeaderPlugin records the priority and fairness ID it sees. It consumes the
+// override keys, as a processor that relies on them must.
+type observingRequestHeaderPlugin struct {
+	priority   int
+	fairnessID string
+}
+
+func (m *observingRequestHeaderPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: "observer", Type: "mock-observer"}
+}
+
+func (m *observingRequestHeaderPlugin) Consumes() fwkplugin.DataDependencies {
+	return fwkplugin.DataDependencies{Optional: map[fwkplugin.DataKey]any{fwkrh.PriorityKey: 0, fwkrh.TenantKey: ""}}
+}
+
+func (m *observingRequestHeaderPlugin) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
+	m.priority = request.Objectives.Priority
+	m.fairnessID = request.FairnessID
+	return nil
+}
+
+// runOverrideRequest runs one request with the given headers through a director whose only
+// RequestHeader processors are plugins.
+func runOverrideRequest(t *testing.T, headers map[string]string, plugins ...fwkrh.RequestHeaderProcessor) (
+	*handlers.RequestContext, *priorityCapturingAdmissionController, error) {
+	t.Helper()
 	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
 		Address: "192.168.1.100",
 		Port:    "8000",
@@ -3946,30 +3997,84 @@ func TestDirector_RequestHeaderPluginOverridesPriority(t *testing.T) {
 	dir, ctx := newSinglePodDirector(t, result)
 	admission := &priorityCapturingAdmissionController{}
 	dir.admissionController = admission
-	dir.requestControlPlugins = *NewConfig().WithRequestHeaderPlugins(&priorityOverrideRequestHeaderPlugin{priority: -7})
+	dir.requestControlPlugins = *NewConfig().WithRequestHeaderPlugins(plugins...)
 
 	body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
 	require.NoError(t, err)
+	allHeaders := map[string]string{
+		reqcommon.RequestIDHeaderKey: "test-override",
+		":path":                      "/v1/completions",
+	}
+	for k, v := range headers {
+		allHeaders[k] = v
+	}
 	reqCtx := &handlers.RequestContext{
-		Request: &handlers.Request{
-			ID: "test-priority-override",
-			Headers: map[string]string{
-				reqcommon.RequestIDHeaderKey: "test-priority-override",
-				":path":                      "/v1/completions",
-			},
-			RawBody: body,
-		},
-		Parser: openai.NewOpenAIParser(),
+		Request: &handlers.Request{ID: "test-override", Headers: allHeaders, RawBody: body},
+		Parser:  openai.NewOpenAIParser(),
 	}
 	parseResult, err := reqCtx.Parser.ParseRequest(ctx, body, reqCtx.Request.Headers)
 	require.NoError(t, err)
 
-	_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
+	reqCtx, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)
+	return reqCtx, admission, err
+}
+
+// TestDirector_RequestHeaderPluginSetsDeclaredPriority verifies that a priority produced through
+// PriorityKey is the one admission control and the request context see.
+func TestDirector_RequestHeaderPluginSetsDeclaredPriority(t *testing.T) {
+	reqCtx, admission, err := runOverrideRequest(t, nil, &overrideRequestHeaderPlugin{name: "override", priority: ptr.To(-7)})
 	require.NoError(t, err)
 	require.True(t, admission.called)
 	assert.Equal(t, -7, admission.priority)
 	assert.Equal(t, -7, reqCtx.Priority)
 	assert.Equal(t, -7, reqCtx.SchedulingRequest.Objectives.Priority)
+}
+
+// TestDirector_RequestHeaderPluginSetsDeclaredTenant verifies that a tenant produced through
+// TenantKey becomes the fairness ID only when the request has no fairness-ID header.
+func TestDirector_RequestHeaderPluginSetsDeclaredTenant(t *testing.T) {
+	plugin := &overrideRequestHeaderPlugin{name: "override", tenant: "team-a"}
+
+	reqCtx, _, err := runOverrideRequest(t, nil, plugin)
+	require.NoError(t, err)
+	assert.Equal(t, "team-a", reqCtx.SchedulingRequest.FairnessID)
+
+	reqCtx, _, err = runOverrideRequest(t, map[string]string{metadata.FlowFairnessIDKey: "from-header"}, plugin)
+	require.NoError(t, err)
+	assert.Equal(t, "from-header", reqCtx.SchedulingRequest.FairnessID, "the fairness-ID header wins")
+}
+
+// TestDirector_LaterRequestHeaderPluginSeesDeclaredOverrides verifies that the director applies
+// the produced priority and tenant before the next processor runs.
+func TestDirector_LaterRequestHeaderPluginSeesDeclaredOverrides(t *testing.T) {
+	observer := &observingRequestHeaderPlugin{}
+	_, _, err := runOverrideRequest(t, nil,
+		&overrideRequestHeaderPlugin{name: "override", priority: ptr.To(-7), tenant: "team-a"}, observer)
+	require.NoError(t, err)
+	assert.Equal(t, -7, observer.priority)
+	assert.Equal(t, "team-a", observer.fairnessID)
+}
+
+// TestDirector_RequestHeaderPluginDirectFieldWritesAreIgnored verifies that a processor cannot
+// change the priority or fairness ID by writing the request fields.
+func TestDirector_RequestHeaderPluginDirectFieldWritesAreIgnored(t *testing.T) {
+	reqCtx, admission, err := runOverrideRequest(t, nil,
+		&overrideRequestHeaderPlugin{name: "direct", priority: ptr.To(-7), tenant: "team-a", direct: true})
+	require.NoError(t, err)
+	assert.Equal(t, 0, admission.priority)
+	assert.Equal(t, 0, reqCtx.Priority)
+	assert.NotEqual(t, "team-a", reqCtx.SchedulingRequest.FairnessID)
+}
+
+// TestDirector_RequestHeaderPluginUndeclaredOverrideFails verifies that writing PriorityKey
+// without declaring it fails the request, like any undeclared attribute write.
+func TestDirector_RequestHeaderPluginUndeclaredOverrideFails(t *testing.T) {
+	_, admission, err := runOverrideRequest(t, nil,
+		&overrideRequestHeaderPlugin{name: "undeclared", priority: ptr.To(-7), undeclared: true})
+	var e errcommon.Error
+	require.True(t, errors.As(err, &e), "want errcommon.Error, got %v", err)
+	assert.Equal(t, errcommon.Internal, e.Code)
+	assert.False(t, admission.called)
 }
 
 // TestDirector_HandleResponseBody_LifecycleTimestamps verifies that the end-of-stream response

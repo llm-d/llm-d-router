@@ -94,6 +94,25 @@ func newRequest(team string, promptTokens int, maxOut int64) *fwksched.Inference
 	}
 }
 
+// servedPriority returns the priority the director applies after the plugin runs: the produced
+// PriorityKey, or the request's own priority when the plugin produced none.
+func servedPriority(req *fwksched.InferenceRequest) int {
+	if p, ok := fwksched.ReadRequestAttribute[int](req, fwkrh.PriorityKey); ok {
+		return p
+	}
+	return req.Objectives.Priority
+}
+
+// servedFairnessID returns the fairness ID the director applies after the plugin runs: the
+// request's own fairness ID, or the produced TenantKey when the request has none.
+func servedFairnessID(req *fwksched.InferenceRequest) string {
+	if req.FairnessID != "" {
+		return req.FairnessID
+	}
+	tenant, _ := fwksched.ReadRequestAttribute[string](req, fwkrh.TenantKey)
+	return tenant
+}
+
 func complete(p *Plugin, req *fwksched.InferenceRequest, prompt, completion int) {
 	resp := &fwkrh.Response{EndOfStream: true}
 	resp.Usage.PromptTokens = prompt
@@ -150,8 +169,8 @@ func TestRequestHeader_ServesAtCommittedClass(t *testing.T) {
 
 	require.NoError(t, p.RequestHeader(t.Context(), req))
 
-	assert.Equal(t, 100, req.Objectives.Priority)
-	assert.Equal(t, "team-a", req.FairnessID)
+	assert.Equal(t, 100, servedPriority(req))
+	assert.Equal(t, "team-a", servedFairnessID(req))
 	inflight, daily := usage(p, "team-a")
 	assert.Equal(t, 1, inflight)
 	assert.InDelta(t, 200, daily, 1e-9, "reserve = 100 + 2*50")
@@ -166,13 +185,13 @@ func TestRequestHeader_UnknownTeamUsesDefault(t *testing.T) {
 	p, _ := newTestPlugin(t, nil)
 	req := newRequest("stranger", 10, 10)
 	require.NoError(t, p.RequestHeader(t.Context(), req))
-	assert.Equal(t, 10, req.Objectives.Priority)
-	assert.Equal(t, "stranger", req.FairnessID, "the team header still identifies the flow")
+	assert.Equal(t, 10, servedPriority(req))
+	assert.Equal(t, "stranger", servedFairnessID(req), "the team header still identifies the flow")
 
 	anon := newRequest("", 10, 10)
 	require.NoError(t, p.RequestHeader(t.Context(), anon))
-	assert.Equal(t, 10, anon.Objectives.Priority)
-	assert.Empty(t, anon.FairnessID, "the director assigns the default flow")
+	assert.Equal(t, 10, servedPriority(anon))
+	assert.Empty(t, servedFairnessID(anon), "the director assigns the default flow")
 }
 
 func TestRequestHeader_ExplicitFairnessIDIsKept(t *testing.T) {
@@ -180,7 +199,14 @@ func TestRequestHeader_ExplicitFairnessIDIsKept(t *testing.T) {
 	req := newRequest("team-a", 10, 10)
 	req.FairnessID = "session-42"
 	require.NoError(t, p.RequestHeader(t.Context(), req))
-	assert.Equal(t, "session-42", req.FairnessID)
+	assert.Equal(t, "session-42", servedFairnessID(req))
+	_, produced := req.GetAttribute(fwkrh.TenantKey)
+	assert.False(t, produced, "a request with a fairness ID gets no tenant")
+}
+
+func TestProducesPriorityAndTenant(t *testing.T) {
+	p, _ := newTestPlugin(t, nil)
+	assert.Equal(t, map[fwkplugin.DataKey]any{fwkrh.PriorityKey: 0, fwkrh.TenantKey: ""}, p.Produces())
 }
 
 func TestRequestHeader_OverSizeLimitDowngradesOneClass(t *testing.T) {
@@ -191,7 +217,7 @@ func TestRequestHeader_OverSizeLimitDowngradesOneClass(t *testing.T) {
 		"output": newRequest("team-a", 10, 500),
 	} {
 		require.NoError(t, p.RequestHeader(t.Context(), req), name)
-		assert.Equal(t, 10, req.Objectives.Priority, "%s above the size limit moves to the next class", name)
+		assert.Equal(t, 10, servedPriority(req), "%s above the size limit moves to the next class", name)
 
 		resp := &fwkrh.Response{Headers: map[string]string{}}
 		p.ResponseHeader(t.Context(), req, resp, nil)
@@ -234,7 +260,7 @@ func TestRequestHeader_OverConcurrencyCommitDowngradesOneClass(t *testing.T) {
 
 	over := newRequest("team-a", 10, 10)
 	require.NoError(t, p.RequestHeader(t.Context(), over))
-	assert.Equal(t, 10, over.Objectives.Priority, "over commit moves to the next class")
+	assert.Equal(t, 10, servedPriority(over), "over commit moves to the next class")
 
 	resp := &fwkrh.Response{Headers: map[string]string{}}
 	p.ResponseHeader(t.Context(), over, resp, nil)
@@ -250,7 +276,7 @@ func TestRequestHeader_OverConcurrencyCommitDowngradesOneClass(t *testing.T) {
 	complete(p, r1, 10, 10)
 	next := newRequest("team-a", 10, 10)
 	require.NoError(t, p.RequestHeader(t.Context(), next))
-	assert.Equal(t, 100, next.Objectives.Priority, "a completion frees a committed slot")
+	assert.Equal(t, 100, servedPriority(next), "a completion frees a committed slot")
 }
 
 func TestRequestHeader_OverDailyCommitDowngradesOneClass(t *testing.T) {
@@ -260,11 +286,11 @@ func TestRequestHeader_OverDailyCommitDowngradesOneClass(t *testing.T) {
 	})
 	first := newRequest("team-a", 100, 100) // 300
 	require.NoError(t, p.RequestHeader(t.Context(), first))
-	require.Equal(t, 100, first.Objectives.Priority)
+	require.Equal(t, 100, servedPriority(first))
 
 	over := newRequest("team-a", 100, 100)
 	require.NoError(t, p.RequestHeader(t.Context(), over))
-	assert.Equal(t, 10, over.Objectives.Priority, "300 + 300 exceeds the 500 daily commit")
+	assert.Equal(t, 10, servedPriority(over), "300 + 300 exceeds the 500 daily commit")
 	complete(p, over, 100, 100)
 	_, daily := usage(p, "team-a")
 	assert.InDelta(t, 300, daily, 1e-9, "the downgraded request is not charged to the budget")
@@ -272,7 +298,7 @@ func TestRequestHeader_OverDailyCommitDowngradesOneClass(t *testing.T) {
 	clock.t = clock.t.Add(12 * time.Hour)
 	next := newRequest("team-a", 100, 100)
 	require.NoError(t, p.RequestHeader(t.Context(), next))
-	assert.Equal(t, 100, next.Objectives.Priority, "the budget resets at the UTC day boundary")
+	assert.Equal(t, 100, servedPriority(next), "the budget resets at the UTC day boundary")
 }
 
 func TestRequestHeader_LowestClassOverConcurrencyRejects(t *testing.T) {
@@ -375,14 +401,14 @@ func TestReportOnlyServesCommittedClass(t *testing.T) {
 
 	oversized := newRequest("team-a", 5000, 10)
 	require.NoError(t, p.RequestHeader(t.Context(), oversized), "a would-be downgrade is recorded, not applied")
-	assert.Equal(t, 100, oversized.Objectives.Priority, "team-a stays at its committed critical class")
-	assert.Equal(t, "team-a", oversized.FairnessID)
+	assert.Equal(t, 100, servedPriority(oversized), "team-a stays at its committed critical class")
+	assert.Equal(t, "team-a", servedFairnessID(oversized))
 
 	reqs := make([]*fwksched.InferenceRequest, 0, 5)
 	for range 5 {
 		req := newRequest("team-b", 10, 10)
 		require.NoError(t, p.RequestHeader(t.Context(), req), "a would-be rejection is recorded, not applied")
-		assert.Equal(t, -10, req.Objectives.Priority, "team-b stays at its committed batch class")
+		assert.Equal(t, -10, servedPriority(req), "team-b stays at its committed batch class")
 		resp := &fwkrh.Response{Headers: map[string]string{}}
 		p.ResponseHeader(t.Context(), req, resp, nil)
 		assert.Empty(t, resp.Headers, "report-only mode adds no response headers")
@@ -434,7 +460,7 @@ func TestReportOnlyAndEnforceLimitsSetTheSamePriority(t *testing.T) {
 				if mode == ModeReportOnly {
 					want = tc.reportOnlyPrio
 				}
-				assert.Equal(t, want, req.Objectives.Priority, mode)
+				assert.Equal(t, want, servedPriority(req), mode)
 			}
 		})
 	}
