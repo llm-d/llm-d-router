@@ -106,7 +106,22 @@ func TestRecentWindowGenerationAdvancesWithTrimmedPrompts(t *testing.T) {
 	require.Zero(t, base)
 }
 
-func TestRecentWindowRemovePromptAdvancesBase(t *testing.T) {
+func TestRecentWindowRemovePromptKeepsLaterGenerations(t *testing.T) {
+	w := newRecentWindow(10)
+	w.record("ep", []blockHash{1, 2})
+	w.record("ep", []blockHash{3, 4})
+	w.record("ep", []blockHash{5, 6})
+	w.removePrompt("ep", []blockHash{3, 4})
+	prompts, base := w.snapshotWindow("ep")
+	require.Equal(t, [][]blockHash{{1, 2}, nil, {5, 6}}, prompts)
+	require.Zero(t, base, "a withdrawn slot that is not oldest keeps its generation")
+	require.Equal(t, [][]blockHash{{1, 2}, {5, 6}}, w.snapshot("ep"))
+	set := w.sequenced("ep")
+	require.Equal(t, uint64(4), set.SequenceTip())
+	require.Equal(t, 9, set.ElementSize(3))
+}
+
+func TestRecentWindowRemoveOldestDropsLeadingSlot(t *testing.T) {
 	w := newRecentWindow(10)
 	w.record("ep", []blockHash{1, 2})
 	w.record("ep", []blockHash{3, 4})
@@ -114,7 +129,28 @@ func TestRecentWindowRemovePromptAdvancesBase(t *testing.T) {
 	w.removePrompt("ep", []blockHash{1, 2})
 	prompts, base := w.snapshotWindow("ep")
 	require.Equal(t, [][]blockHash{{3, 4}, {5, 6}}, prompts)
-	require.Equal(t, uint64(1), base, "leading removal keeps later generations")
+	require.Equal(t, uint64(1), base, "generation 1 still names prompt {3, 4}")
+	set := w.sequenced("ep")
+	require.Equal(t, uint64(4), set.SequenceTip())
+	require.Equal(t, 9, set.ElementSize(3))
+}
+
+func TestRecentWindowWithdrawalsStayWithinCap(t *testing.T) {
+	const maxSlots = 4
+	w := newRecentWindow(maxSlots)
+	w.record("ep", []blockHash{1})
+	var tip uint64
+	for i := range 30 {
+		h := []blockHash{blockHash(100 + i)}
+		w.record("ep", h)
+		w.removePrompt("ep", h)
+		win := w.pending["ep"]
+		require.LessOrEqual(t, len(win.slots)-win.start, maxSlots)
+		set := w.sequenced("ep")
+		require.GreaterOrEqual(t, set.SequenceTip(), tip)
+		tip = set.SequenceTip()
+		require.LessOrEqual(t, int(set.SequenceTip()-set.SequenceBase()), maxSlots)
+	}
 }
 
 func TestCrossReplicaMergeLetsPeerMatch(t *testing.T) {

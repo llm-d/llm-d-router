@@ -45,7 +45,9 @@ func (b *byteBudget) refillLocked() {
 	b.last = now
 }
 
-// take charges n bytes and reports true if any budget was left.
+// take charges n bytes and reports true if any budget was left. A failed
+// publish is not refunded: Redis may have applied it, and the debt delays the
+// retry until the bucket refills.
 func (b *byteBudget) take(n int) bool {
 	if b == nil {
 		return true

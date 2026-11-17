@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 func encodeAll(s *PrefixHashSet) [][]byte {
@@ -72,6 +74,32 @@ func TestPrefixHashSetAdvance(t *testing.T) {
 		})
 	}
 	require.Equal(t, [][]uint64{{1}, {2}, {3}}, prev.Prompts, "Advance does not modify the receiver")
+}
+
+func TestPrefixHashSetRetractionRoundTrip(t *testing.T) {
+	src := &PrefixHashSet{Base: 4, Prompts: [][]uint64{{1}, {2}, {3}}}
+	require.True(t, src.Retract([]uint64{2}))
+	require.Equal(t, uint64(8), src.SequenceTip())
+	got, err := (&PrefixHashSet{}).NewSequence(4, encodeAll(src))
+	require.NoError(t, err)
+	require.Equal(t, [][]uint64{{1}, {}, {3}, nil}, got.(*PrefixHashSet).Prompts)
+	require.Equal(t, 9, got.(*PrefixHashSet).ElementSize(7))
+
+	prev := &PrefixHashSet{Base: 4, Prompts: [][]uint64{{1}, {2}, {3}}}
+	advanced, err := prev.Advance(4, [][]byte{src.AppendElement(nil, 7)})
+	require.NoError(t, err)
+	require.Equal(t, [][]uint64{{1}, {}, {3}, nil}, advanced.(*PrefixHashSet).Prompts)
+	require.Equal(t, [][]uint64{{1}, {2}, {3}}, prev.Prompts)
+}
+
+func TestPrefixHashSetOversizedPromptEncodesAsRetract(t *testing.T) {
+	huge := make([]uint64, fwkdl.MaxSequencedElementBytes/8+1)
+	src := &PrefixHashSet{Prompts: [][]uint64{{1}, huge, {2}}}
+	require.Equal(t, 9, src.ElementSize(1))
+	require.Equal(t, huge, src.Prompts[1], "the local prompt is kept")
+	got, err := (&PrefixHashSet{}).NewSequence(0, encodeAll(src))
+	require.NoError(t, err)
+	require.Equal(t, [][]uint64{{1}, nil, {2}}, got.(*PrefixHashSet).Prompts)
 }
 
 func TestPrefixHashSetCloneKeepsBase(t *testing.T) {

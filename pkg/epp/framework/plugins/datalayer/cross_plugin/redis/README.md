@@ -113,19 +113,24 @@ local value. If no peer value is available, `Get` returns the local value.
 With `windowReplication: incremental`, a replica publishes a sequenced value
 as a stream next to the hash, `{<hash key>}:stream:<replica field>`. Entry
 `0-(g+1)` holds generation `g`; for approximate-prefix windows a generation is
-one prompt, packed as little-endian 8-byte hashes. The replica's hash field
+one prompt, packed as little-endian 8-byte hashes. A prompt larger than 1 MiB
+is stored as a retraction of that generation, and readers skip it. The replica's hash field
 `stream:<replica field>` holds the marker `epoch base tip size`, naming the
 generations `[base, tip)` the stream holds and their total bytes. Each tick
 appends generations the replica has not written, trims entries below `base`
 when the window evicts prompts, and refreshes the TTLs of the hash, marker
 field, and stream. An unchanged window costs a few commands and no payload.
 
-Readers fetch only the generations past the last tip they hold. When a write
-is lost or a stream is missing or truncated, the writer starts a new epoch and
-republishes from `base`; readers that see a new epoch or a gap reread from
-`base`. When the byte budget is spent the writer stops appending and readers
-stop fetching for that tick, and peers catch up on later ticks. A cold
-window, after a restart or reset, reaches peers over several ticks.
+Readers fetch only the generations past the last tip they hold. A withdrawn
+prompt keeps its generation until it is dropped from the oldest end. The
+writer appends a 9-byte retraction of that generation, and the tip does not
+move backwards.
+When a write is lost, a stream is missing or truncated, or the tip does move
+backwards, the writer starts a new epoch and republishes from `base`; readers
+that see a new epoch or a gap reread from `base`. When the byte budget is spent
+the writer stops appending and readers stop fetching for that tick, and peers
+catch up on later ticks. A cold window, after a restart or reset, reaches
+peers over several ticks.
 
 Readers in either mode merge stream peers and whole-value peers, so a fleet
 can switch modes one replica at a time: roll out the new version in `full`
