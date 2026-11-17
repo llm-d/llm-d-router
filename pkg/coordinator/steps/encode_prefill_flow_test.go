@@ -212,6 +212,92 @@ func TestEncodeToPrefill_ECTransferParamsFlow(t *testing.T) {
 	}
 }
 
+func TestEncodeToPrefill_DeduplicatesRepeatedHashes(t *testing.T) {
+	var (
+		prefillBody map[string]any
+		mu          sync.Mutex
+		requests    = make(map[string]int)
+	)
+
+	gwServer := newEncodePrefillGateway(t, &prefillBody,
+		map[string]any{"block_id": "b1"},
+		func(_, hash string) map[string]any {
+			mu.Lock()
+			requests[hash]++
+			count := requests[hash]
+			mu.Unlock()
+			if hash == "" {
+				return nil
+			}
+			return map[string]any{"peer_host": "10.0.0.1", "peer_port": 5500 + count}
+		})
+	defer gwServer.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: gwServer.URL})
+	reqCtx := &pipeline.RequestContext{
+		RequestID: "encode-prefill-duplicate-hash",
+		Model:     "llama-3",
+		TokenIDs:  []int{1, 32000, 32000, 32000, 32000},
+		MultimodalEntries: []pipeline.MultimodalEntry{
+			{Modality: reqcommon.ModalityImage, Hash: "same-hash", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
+			{Modality: reqcommon.ModalityImage, Hash: "same-hash", KwargsData: "dDE=", Placeholder: pipeline.PlaceholderRange{Offset: 2, Length: 1}},
+			{Modality: reqcommon.ModalityImage, KwargsData: "dDI=", Placeholder: pipeline.PlaceholderRange{Offset: 3, Length: 1}},
+			{Modality: reqcommon.ModalityImage, KwargsData: "dDM=", Placeholder: pipeline.PlaceholderRange{Offset: 4, Length: 1}},
+		},
+		KVTransferParams: make(map[string]any),
+	}
+
+	encodeStep, err := NewEncodeStep(gwClient, map[string]any{
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := encodeStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+
+	prefillStep, err := NewPrefillStep(gwClient, map[string]any{
+		"use_openai_format": false,
+		ParamECConnector:    ec.NIXL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prefillStep.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("prefill failed: %v", err)
+	}
+	if prefillBody == nil {
+		t.Fatal("prefill was not called")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if requests["same-hash"] != 1 {
+		t.Errorf("same hash encode requests = %d, want 1", requests["same-hash"])
+	}
+	if requests[""] != 2 {
+		t.Errorf("empty hash encode requests = %d, want 2", requests[""])
+	}
+	if reqCtx.EncodeFanout != 3 {
+		t.Errorf("encode fanout = %d, want 3", reqCtx.EncodeFanout)
+	}
+	if len(reqCtx.ECTransferParams) != 1 {
+		t.Errorf("EC transfer responses = %d, want 1", len(reqCtx.ECTransferParams))
+	}
+	ecParams, ok := prefillBody["ec_transfer_params"].(map[string]any)
+	if !ok {
+		t.Fatalf("prefill ec_transfer_params = %T, want map", prefillBody["ec_transfer_params"])
+	}
+	if len(ecParams) != 1 {
+		t.Errorf("prefill EC transfer params = %d entries, want 1: %v", len(ecParams), ecParams)
+	}
+	if _, ok := ecParams["same-hash"]; !ok {
+		t.Errorf("prefill EC transfer params missing same-hash: %v", ecParams)
+	}
+}
+
 // TestEncodeToPrefill_PartialECResponse verifies that when only some encoders
 // return ec_transfer_params (others return 200 OK with no EC field), the
 // flow does not panic, prefill is still sent, and ec_transfer_params on the
