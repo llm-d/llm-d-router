@@ -30,7 +30,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -191,6 +190,27 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		ParseDuration:    parseDuration,
 	}
 
+	if apiType == reqcommon.APITypeVLLMGenerate && s.workerProtocol == config.WorkerProtocolGRPC {
+		converted, convErr := prepareVLLMGenerateFromHTTP(parsed, requestID)
+		if convErr != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+			rejectInference(serverLog, cw, apiType, http.StatusBadRequest, convErr.Error())
+			return
+		}
+		if converted.droppedTransferParams {
+			clientKVTransferParams = true
+		}
+		reqCtx.GRPC = &pipeline.VLLMGRPCRequest{
+			Req: converted.req,
+			HTTP: &pipeline.HTTPGenerateReply{
+				IncludeUsage:    converted.includeUsage,
+				ReturnTokenIDs:  converted.returnTokenIDs,
+				OutputMode:      converted.outputMode,
+				ClientRequestID: converted.clientRequestID,
+			},
+		}
+	}
+
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
 	ctx = tracing.LoggerWithSpanContext(ctx, trace.SpanFromContext(ctx))
@@ -230,6 +250,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 // inferenceRoute maps an inbound path onto the bounded route label used by
 // orchestration_overhead_seconds.
 func inferenceRoute(path string) string {
+	if gr, ok := lookupGRPCRoute(path); ok {
+		return gr.route
+	}
 	switch path {
 	case reqcommon.PathChatCompletions:
 		return coordmetrics.RouteChatCompletions
@@ -239,7 +262,7 @@ func inferenceRoute(path string) string {
 		return coordmetrics.RouteResponses
 	case reqcommon.PathMessages:
 		return coordmetrics.RouteMessages
-	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate, sglangapiv1.SglangService_Generate_FullMethodName:
+	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate:
 		return coordmetrics.RouteGenerate
 	default:
 		return coordmetrics.RouteUnknown
