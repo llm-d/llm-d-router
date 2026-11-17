@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
@@ -105,6 +106,9 @@ func isGRPCRequest(r *http.Request) bool {
 		return false
 	}
 	if grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) {
+		return true
+	}
+	if r.URL != nil && strings.TrimSuffix(r.URL.Path, "/") == sglangapiv1.SglangService_Generate_FullMethodName {
 		return true
 	}
 	return isVLLMGRPCRequest(r)

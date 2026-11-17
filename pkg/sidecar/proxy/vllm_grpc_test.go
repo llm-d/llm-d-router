@@ -1625,6 +1625,23 @@ func TestVLLMGRPCDataParallelDecodeRoutingWithCachedTokens(t *testing.T) {
 		assert.Empty(t, c.Request.GetMedia())
 		assert.Equal(t, "dp-prefill-1", c.Request.GetKv().GetKvTransferParams().AsMap()["remote_engine_id"])
 	}
+
+	// Unknown x-data-parallel-host-port must return gRPC InvalidArgument on both
+	// decoder-only and P/D gRPC calls instead of a bare HTTP 400 transport error.
+	unknownDecCtx := metadata.AppendToOutgoingContext(t.Context(),
+		routing.DataParallelEndpointHeader, "10.0.0.2:9999",
+	)
+	_, err = client.Generate(unknownDecCtx, req)
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+
+	unknownPDCtx := metadata.AppendToOutgoingContext(t.Context(),
+		routing.PrefillEndpointHeader, prefillSrv.Addr(),
+		routing.DataParallelEndpointHeader, "10.0.0.2:9999",
+	)
+	_, err = client.Generate(unknownPDCtx, req)
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
 func TestVLLMGRPCECEncoderFailureCancelsPeersAndAbortsPD(t *testing.T) {
