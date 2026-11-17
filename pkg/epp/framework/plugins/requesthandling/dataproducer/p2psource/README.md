@@ -243,6 +243,11 @@ Requirements on every endpoint:
 - The tier's `control_ports` are consecutive, starting at `kvcrControlPort` for local data parallel rank 0, and `control_advertise_host` is the pod address the EPP sees.
 - The precise producer receives the tier's KV events. KVCR host memory reports as the `cpu` tier, the only tier a source is chosen from.
 
+The EPP must parse the requests with `vllminference-parser`, listed under
+`requestHandler.parsers`. Without that list, the EPP's default parsers send
+gRPC requests to `passthrough-parser`, nothing is tokenized, and every request
+records `no-best-match`.
+
 ## Deployment Requirements
 
 The source results in a transfer only when the serving deployment can
