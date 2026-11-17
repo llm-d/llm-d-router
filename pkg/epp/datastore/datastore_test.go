@@ -72,12 +72,15 @@ func TestVerifyMembershipWaitsForWithdrawnEndpointRemoval(t *testing.T) {
 		Labels(map[string]string{"app": "model"}).ReadyCondition().ObjRef()
 	ds := NewDatastore(t.Context(), &mockEndpointFactory{}).WithEndpointPool(pool)
 	require.NoError(t, ds.PodUpdateOrAddIfNotExist(t.Context(), pod))
-	require.NoError(t, VerifyMembership(ds, pool, []corev1.Pod{*pod}))
+	_, err := VerifyMembership(ds, pool, []corev1.Pod{*pod})
+	require.NoError(t, err)
 
 	// API recovery cannot validate an endpoint still retained by the routing store.
-	require.Error(t, VerifyMembership(ds, pool, nil))
+	_, err = VerifyMembership(ds, pool, nil)
+	require.Error(t, err)
 	ds.PodDelete(pod.Name)
-	require.NoError(t, VerifyMembership(ds, pool, nil))
+	_, err = VerifyMembership(ds, pool, nil)
+	require.NoError(t, err)
 }
 
 // mockEndpointFactory is a minimal EndpointFactory for EndpointUpsert/Delete tests.

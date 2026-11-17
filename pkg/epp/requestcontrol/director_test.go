@@ -68,6 +68,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/epp/controller"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fccontractmocks "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
@@ -3661,4 +3662,42 @@ func TestDirector_HandleResponseBody_LifecycleTimestamps(t *testing.T) {
 	assert.Equal(t, reqCtx.FirstTokenTimestamp(), resp.FirstTokenTimestamp)
 	assert.Equal(t, reqCtx.ResponseCompleteTimestamp(), resp.CompleteTimestamp)
 	assert.Equal(t, reqCtx.ModelServerStreaming(), resp.Streaming)
+}
+
+func TestHandleRequestRejectsWithdrawnCandidateAfterDiscoveryRenewal(t *testing.T) {
+	dir, ctx := newSinglePodDirector(t, singlePodSchedulingResult())
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ds := dir.datastore.(datastore.Datastore)
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, v1.Install(scheme))
+	pool := &v1.InferencePool{ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"}, Spec: v1.InferencePoolSpec{TargetPorts: []v1.Port{{Number: 8000}}, Selector: v1.LabelSelector{MatchLabels: map[v1.LabelKey]v1.LabelValue{"app": "inference"}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "default", Labels: map[string]string{"app": "inference"}}, Status: corev1.PodStatus{PodIP: "192.168.1.100", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+	api := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool, pod).Build()
+	freshness := controller.NewDiscoveryFreshness(api, ds, types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, 2*time.Second)
+	done := make(chan error, 1)
+	go func() { done <- freshness.Start(ctx) }()
+	defer func() { cancel(); require.NoError(t, <-done) }()
+	require.Eventually(t, func() bool { return freshness.CheckReady() == nil }, time.Second, time.Millisecond)
+	dir.SetEndpointSelectionCheck(freshness.CheckReady)
+	dir.requestControlPlugins.AddPlugins(freshness)
+	dir.requestControlPlugins.screeners = append(dir.requestControlPlugins.screeners, &mockScreener{name: "pause-after-snapshot", screen: func(candidates []fwksched.Endpoint) []fwksched.Endpoint {
+		require.NoError(t, api.Delete(ctx, pod))
+		ds.PodDelete(pod.Name)
+		// Renew empty membership beyond the original freshness budget.
+		time.Sleep(2500 * time.Millisecond)
+		require.NoError(t, freshness.CheckReady())
+		require.Empty(t, ds.PodList(datastore.AllPodsPredicate))
+		return candidates
+	}})
+	reqCtx, request := requestHandlingTestRequest(t, "withdrawn-candidate")
+	parsed, err := reqCtx.Parser.ParseRequest(ctx, request.RawBody, request.Headers)
+	require.NoError(t, err)
+	result, err := dir.HandleRequest(ctx, reqCtx, parsed.Body)
+	require.Error(t, err)
+	require.Empty(t, result.TargetEndpoint)
+	var admissionErr errcommon.Error
+	require.ErrorAs(t, err, &admissionErr)
+	require.Equal(t, errcommon.ServiceUnavailable, admissionErr.Code)
 }

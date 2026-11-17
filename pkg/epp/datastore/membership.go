@@ -44,10 +44,10 @@ func VerifyPool(ds Datastore, pool *datalayer.EndpointPool) error {
 	return nil
 }
 
-// VerifyMembership checks that routing membership matches an authoritative snapshot.
-func VerifyMembership(ds Datastore, pool *datalayer.EndpointPool, pods []corev1.Pod) error {
+// VerifyMembership returns authoritative metadata after checking routing membership.
+func VerifyMembership(ds Datastore, pool *datalayer.EndpointPool, pods []corev1.Pod) (map[types.NamespacedName]*fwkdl.EndpointMetadata, error) {
 	if err := VerifyPool(ds, pool); err != nil {
-		return err
+		return nil, err
 	}
 	expected := make(map[types.NamespacedName]*fwkdl.EndpointMetadata)
 	for i := range pods {
@@ -61,13 +61,13 @@ func VerifyMembership(ds Datastore, pool *datalayer.EndpointPool, pods []corev1.
 	}
 	endpoints := ds.PodList(AllPodsPredicate)
 	if len(endpoints) != len(expected) {
-		return errors.New("routing endpoints do not match Kubernetes membership")
+		return nil, errors.New("routing endpoints do not match Kubernetes membership")
 	}
 	for _, ep := range endpoints {
 		meta := ep.GetMetadata()
 		if !meta.Equal(expected[meta.ID]) {
-			return fmt.Errorf("routing endpoint %s does not match Kubernetes membership", meta.ID)
+			return nil, fmt.Errorf("routing endpoint %s does not match Kubernetes membership", meta.ID)
 		}
 	}
-	return nil
+	return expected, nil
 }
