@@ -892,17 +892,19 @@ Control alone does not emit them. `program_id` is the request's fairness ID and 
 These metrics are owned by the `qos-contract` RequestHeader plugin and are registered only when
 it is configured. The `team` label takes only the team IDs in the configuration and the `defaultTeam` ID, so the configuration bounds its cardinality. The plugin defaults to
 `mode="report-only"`, where downgrades and rejections are recorded but not applied and each request
-keeps its InferenceObjective priority.
+keeps its InferenceObjective priority. The `qos_contract_slo_*` series appear only when a team has a latency
+`promise`; each replica validates the promise against its own latency histograms, so take `max`
+across replicas for the gauges.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_qos_contract_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | `decision` is `within_contract`, `downgraded`, `rejected_concurrency`, `rejected_size`, `rejected_daily`, `rejected_rate`, `rejected_input_rate` or `rejected_uncached_rate`. `reason` is the limit a downgraded or rejected request exceeded (`size`, `daily`, `concurrency`, `rate`, `input_rate` or `uncached_rate`) and is empty within the contract. `served_class` is empty for rejections. |
 | `llm_d_epp_qos_contract_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens charged after refunds. |
 | `llm_d_epp_qos_contract_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
-| `llm_d_epp_qos_contract_slo_status` | Gauge | `team`, `class`, `slo`, `status` | Last validation of a team's latency promise against Prometheus. `slo` is `ttft`, `tpot` or `itl`; `1` for the current `status` (`met`, `violated`, `insufficient_data`, `unknown`). |
+| `llm_d_epp_qos_contract_slo_status` | Gauge | `team`, `class`, `slo`, `status` | Last validation of a team's latency promise against this replica's latency histograms. `slo` is `ttft`, `tpot` or `itl`; `1` for the current `status` (`met`, `violated`, `insufficient_data`, `unknown`). |
 | `llm_d_epp_qos_contract_slo_observed_seconds` | Gauge | `team`, `class`, `slo`, `scope` | Latency at the promised percentile over the validation window. `scope` is `guaranteed` (at the committed class) or `all`. |
 | `llm_d_epp_qos_contract_slo_window_requests` | Gauge | `team`, `class`, `slo` | Guaranteed requests in the validation window. |
-| `llm_d_epp_qos_contract_slo_validation_errors_total` | Counter | `team`, `slo` | Failed promise-validation queries. |
+| `llm_d_epp_qos_contract_slo_validation_errors_total` | Counter | - | Validation cycles that failed to read the EPP latency metrics. |
 | `llm_d_epp_qos_contract_slo_admissions_total` | Counter | `team`, `class`, `status` | Requests within the contract, by the team's promise status at admission. |
 
 ### Latency by prompt bucket and path

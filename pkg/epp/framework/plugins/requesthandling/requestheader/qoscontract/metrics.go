@@ -82,13 +82,12 @@ var (
 		[]string{"team", "class", "slo"},
 	)
 
-	sloValidationErrors = prometheus.NewCounterVec(
+	sloValidationErrors = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "qos_contract_slo_validation_errors_total",
-			Help:      metricsutil.HelpMsgWithStability("Failed Prometheus queries while validating a team's latency promise.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Validation cycles that failed to read the EPP latency metrics.", compbasemetrics.ALPHA),
 		},
-		[]string{"team", "slo"},
 	)
 
 	sloAdmissions = prometheus.NewCounterVec(

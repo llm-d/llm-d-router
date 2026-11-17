@@ -19,7 +19,6 @@ package qoscontract
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,7 +30,6 @@ import (
 const (
 	defaultValidationInterval = "1m"
 	defaultValidationWindow   = "5m"
-	defaultQueryTimeout       = "10s"
 	defaultMinRequests        = 20
 )
 
@@ -54,29 +52,17 @@ type LatencyObjective struct {
 	ThresholdMs float64 `json:"thresholdMs"`
 }
 
-// SLOValidationConfig configures the validation of team promises against the latency histograms
-// the EPP exports, read back from Prometheus so that the traffic of every EPP replica counts.
+// SLOValidationConfig configures how team promises are validated against the latency histograms
+// this EPP records. Every field has a default.
 type SLOValidationConfig struct {
-	// PrometheusURL is the Prometheus (or Thanos querier) HTTP API base URL.
-	PrometheusURL string `json:"prometheusURL"`
-	// BearerTokenFile is read for every query and sent as a bearer token. Optional.
-	BearerTokenFile string `json:"bearerTokenFile,omitempty"`
-	// CAFile verifies the Prometheus server certificate. Optional.
-	CAFile string `json:"caFile,omitempty"`
-	// InsecureSkipVerify disables verification of the Prometheus server certificate.
-	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 	// Interval is how often the promises are validated. Default "1m".
 	Interval string `json:"interval,omitempty"`
-	// Window is the PromQL range a promise is evaluated over. Default "5m".
+	// Window is the stretch of recent traffic a promise is evaluated over. It must be at least
+	// Interval. Default "5m".
 	Window string `json:"window,omitempty"`
-	// QueryTimeout bounds one validation cycle. Default "10s".
-	QueryTimeout string `json:"queryTimeout,omitempty"`
 	// MinRequests is the fewest requests in the window for a verdict. Below it the status is
 	// insufficient_data. Default 20.
 	MinRequests int `json:"minRequests,omitempty"`
-	// LabelSelector is extra PromQL label matchers added to every query, without braces, for
-	// example `namespace="llm-d",model_name="llama"`. Use it to select this pool's EPP series.
-	LabelSelector string `json:"labelSelector,omitempty"`
 }
 
 func (p *PromiseConfig) validate() error {
@@ -103,7 +89,7 @@ func parsePercentile(s string) (float64, error) {
 		return 0, fmt.Errorf("percentile must look like p95 or p99.9, got %q", s)
 	}
 	// Shift the decimal point in the string rather than divide by 100, so p99.9 is exactly the
-	// float nearest 0.999 and prints as 0.999 in a query.
+	// float nearest 0.999.
 	whole, frac, _ := strings.Cut(s[1:], ".")
 	if len(whole) == 1 {
 		whole = "0" + whole
@@ -117,46 +103,40 @@ func parsePercentile(s string) (float64, error) {
 
 // sloValidation is the resolved SLOValidationConfig.
 type sloValidation struct {
-	cfg          SLOValidationConfig
-	interval     time.Duration
-	window       string // PromQL range
-	queryTimeout time.Duration
-	minRequests  float64
+	interval    time.Duration
+	window      time.Duration
+	minRequests float64
 }
 
 // resolve validates the configuration and applies the defaults.
 func (c *SLOValidationConfig) resolve() (sloValidation, error) {
-	out := sloValidation{cfg: *c, minRequests: defaultMinRequests}
-	if u, err := url.Parse(c.PrometheusURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return out, fmt.Errorf("prometheusURL must be an http(s) URL, got %q", c.PrometheusURL)
-	}
+	out := sloValidation{minRequests: defaultMinRequests}
 	for _, d := range []struct {
 		field, value, def string
-		set               func(model.Duration)
+		dst               *time.Duration
 	}{
-		{"interval", c.Interval, defaultValidationInterval, func(v model.Duration) { out.interval = time.Duration(v) }},
-		// The window goes into a PromQL range selector, so it is kept in PromQL syntax.
-		{"window", c.Window, defaultValidationWindow, func(v model.Duration) { out.window = v.String() }},
-		{"queryTimeout", c.QueryTimeout, defaultQueryTimeout, func(v model.Duration) { out.queryTimeout = time.Duration(v) }},
+		{"interval", c.Interval, defaultValidationInterval, &out.interval},
+		{"window", c.Window, defaultValidationWindow, &out.window},
 	} {
 		v := d.value
 		if v == "" {
 			v = d.def
 		}
+		// Prometheus duration syntax, which also accepts days and weeks (1d, 1w).
 		parsed, err := model.ParseDuration(v)
 		if err != nil || parsed <= 0 {
 			return out, fmt.Errorf("%s must be a positive duration such as 5m, got %q", d.field, v)
 		}
-		d.set(parsed)
+		*d.dst = time.Duration(parsed)
+	}
+	if out.window < out.interval {
+		return out, fmt.Errorf("window %s must be at least interval %s", out.window, out.interval)
 	}
 	if c.MinRequests < 0 {
 		return out, fmt.Errorf("minRequests must be >= 0, got %d", c.MinRequests)
 	}
 	if c.MinRequests > 0 {
 		out.minRequests = float64(c.MinRequests)
-	}
-	if strings.ContainsAny(c.LabelSelector, "{}") {
-		return out, fmt.Errorf("labelSelector must be label matchers without braces, got %q", c.LabelSelector)
 	}
 	return out, nil
 }
