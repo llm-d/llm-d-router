@@ -213,6 +213,13 @@ func (p *Plugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{DerivedRootKey: ""}
 }
 
+// Consumes declares TenantKey as optional. The plugin scopes lineage links by
+// request.FairnessID, which a RequestHeaderProcessor producing TenantKey can
+// set, so the declaration orders this plugin after any such producer.
+func (p *Plugin) Consumes() plugin.DataDependencies {
+	return plugin.DataDependencies{Optional: map[plugin.DataKey]any{fwkrh.TenantKey: ""}}
+}
+
 // RequestHeader resolves the request's own session and parent IDs, records
 // the child -> parent link when a parent is named, and publishes the root
 // reached by walking recorded links. A request with neither a session nor a

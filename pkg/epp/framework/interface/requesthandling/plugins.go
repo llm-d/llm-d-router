@@ -162,11 +162,11 @@ type Admitter interface {
 
 // RequestHeaderProcessor runs after InferenceRequest creation but before admission control.
 // It processes request metadata (headers, path, method) to attach attributes to the request
-// via request.PutAttribute(). It may also reassign the request's Objectives and FairnessID, for
-// example to downgrade its priority. The processors run one after another, and each sees the
-// reassignments of the ones before it. The order follows the data dependencies the plugins
-// declare (Produces and Consumes), then the plugin name, so a processor that relies on another's
-// reassignment must consume a data key the other produces.
+// via request.PutAttribute(). A processor changes the request priority or tenant only by
+// producing PriorityKey or TenantKey; it cannot reassign Objectives or FairnessID directly. The
+// processors run one after another, ordered by the data keys they declare (Produces and
+// Consumes) and then by plugin name. A processor that relies on another's priority or tenant
+// must consume the key, which orders it after the producer.
 type RequestHeaderProcessor interface {
 	plugin.Plugin
 	RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error

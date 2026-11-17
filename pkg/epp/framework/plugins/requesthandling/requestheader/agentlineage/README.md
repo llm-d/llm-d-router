@@ -26,7 +26,7 @@ The plugin runs after request assembly and before admission control. It resolves
    - Neither: publish nothing.
 4. Publish the root via `request.PutAttribute(DerivedRootKey, root)`.
 
-The parent map is scoped by the fairness-ID header value (the tenant, `""` when absent), so links never cross tenants. Reading a link refreshes it, so an in-use program never expires; a link unused for `parentEntryTtlSeconds` is dropped. At `maxParentEntries` the least-recently-used link is evicted — never for a key already in the map, since harnesses resend both headers every turn and re-declaring a recorded session does not grow the map. A lineage cycle ends the walk at the current node with a stable result, and the walk follows at most 64 links, so a client chaining links up to the map bound cannot extend the walk's cost.
+The parent map is scoped by the request's fairness ID (the tenant, `""` when absent), so links never cross tenants. A request without a fairness-ID header takes the tenant a RequestHeader processor produced through `request-tenant`, if any. Reading a link refreshes it, so an in-use program never expires; a link unused for `parentEntryTtlSeconds` is dropped. At `maxParentEntries` the least-recently-used link is evicted — never for a key already in the map, since harnesses resend both headers every turn and re-declaring a recorded session does not grow the map. A lineage cycle ends the walk at the current node with a stable result, and the walk follows at most 64 links, so a client chaining links up to the map bound cannot extend the walk's cost.
 
 After the plugin returns, the Director derives `FairnessID` (`requestHandler.composeFairnessIDs` opt-in):
 
@@ -43,7 +43,8 @@ The tenant part is percent-encoded (`%` becomes `%25`, `/` becomes `%2F`) so the
 ## Inputs Consumed
 
 - `scheduling.InferenceRequest.Headers` — read-only lookup of the headers above (built-in defaults plus any from `additionalSessionHeaders` / `additionalParentHeaders`). Keys are expected lowercase (Envoy normalizes inbound headers).
-- `scheduling.InferenceRequest.FairnessID` — read-only: the fairness-ID header value at classification time, used as the parent map's tenant scope. The plugin never rewrites it.
+- `scheduling.InferenceRequest.FairnessID` — read-only: the fairness-ID header value, or the `request-tenant` a RequestHeader processor produced for a request without one, used as the parent map's tenant scope. The plugin never rewrites it.
+- `scheduling.InferenceRequest` attribute `"request-tenant"` (`string`), optional — declared so the plugin runs after any processor that produces it; the Director has already copied it into `FairnessID`.
 
 ## Outputs Produced
 

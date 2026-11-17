@@ -13,7 +13,7 @@ The plugin runs in the RequestHeader phase, before flow control queues the reque
 1. Resolves the team from `teamHeader` (default: the fairness ID header). A missing or unlisted team uses `defaultTeam`.
 2. Checks the contract. A request is within it when its prompt is at most `maxPromptTokens`, its output cap is at most `maxOutputTokens`, the team has a free `maxConcurrency` slot, and the reservation `input + outputTokenWeight * maxOutput` fits in what is left of `dailyTokens`. Such a request takes a slot, held from this phase, queueing included, to completion, and is charged the reservation against the daily budget.
 3. Moves a request outside the contract to the next lower class, without taking a slot or a charge. In the lowest class it is rejected: with `400` when it is above a size limit, else with `429`.
-4. Sets the request priority to the served class and sets the fairness ID to the team when no fairness ID was supplied.
+4. Produces the served class priority (`request-priority`) and, when no fairness ID was supplied, the team as the tenant (`request-tenant`). The Director applies both to the request before flow control.
 
 At end of stream the reservation of a committed request is settled against the reported usage: unused tokens are refunded to the daily budget, and usage above the reservation is charged to it. A response with no usage block keeps the reservation as the charge. A request that ends without a response body (a flow-control rejection, a scheduling failure, a client disconnect) is refunded in full when its stream ends.
 

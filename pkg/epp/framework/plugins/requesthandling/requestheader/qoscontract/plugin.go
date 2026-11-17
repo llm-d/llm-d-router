@@ -70,6 +70,7 @@ var (
 	_ requesthandling.RequestHeaderProcessor  = &Plugin{}
 	_ requesthandling.ResponseHeaderProcessor = &Plugin{}
 	_ requesthandling.ResponseBodyProcessor   = &Plugin{}
+	_ plugin.ProducerPlugin                   = &Plugin{}
 )
 
 // teamState is the mutable accounting for one team contract.
@@ -257,12 +258,21 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	return nil
 }
 
+// Produces declares the priority and tenant the plugin sets. The Director applies them to the
+// request after the plugin runs.
+func (p *Plugin) Produces() map[plugin.DataKey]any {
+	return map[plugin.DataKey]any{
+		requesthandling.PriorityKey: 0,
+		requesthandling.TenantKey:   "",
+	}
+}
+
 // setClass serves the request at class and makes the team the fairness flow when the request
 // has no fairness ID.
 func setClass(request *scheduling.InferenceRequest, teamID string, class ClassConfig) {
-	request.Objectives.Priority = class.Priority
+	request.PutAttribute(requesthandling.PriorityKey, class.Priority)
 	if request.FairnessID == "" && teamID != "" {
-		request.FairnessID = teamID
+		request.PutAttribute(requesthandling.TenantKey, teamID)
 	}
 }
 

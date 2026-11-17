@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -265,9 +266,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		RequestSizeBytes: reqCtx.RequestSize,
 	}
 
-	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
+	// The priority is bound after the RequestHeader phase, which may change it.
+	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName)
 	ctx = log.IntoContext(ctx, logger)
-	logger.V(logutil.DEBUG).Info("LLM request assembled")
+	logger.V(logutil.DEBUG).Info("LLM request assembled", "objectivePriority", priority)
 
 	// Producers may hold per-request state between RequestHeader or Produce and
 	// PreRequest, where they normally release it. Release it here for every path
@@ -285,13 +287,15 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
-	// A RequestHeaderProcessor may reassign the priority (e.g. a QoS class downgrade); admission,
-	// metrics and the body priority rewrite all follow the reassigned value.
+	// A RequestHeaderProcessor may set the priority through PriorityKey (e.g. a QoS class
+	// downgrade); admission, metrics, logs and the body priority rewrite all follow it.
 	if p := reqCtx.SchedulingRequest.Objectives.Priority; p != priority {
 		priority = p
 		reqCtx.Priority = p
 		span.SetAttributes(attribute.Int("request_prio", p))
 	}
+	logger = logger.WithValues("priority", priority)
+	ctx = log.IntoContext(ctx, logger)
 	// Derive the FairnessID from the fairness-ID header (tenant identity) and
 	// the derived-root or agent-identity attribute (program/session identity).
 	// The derived root, published by the agent-lineage plugin, is the session
@@ -886,6 +890,8 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 	logger := log.FromContext(ctx)
 	loggerDebug := logger.V(logutil.DEBUG)
 	debugEnabled := loggerDebug.Enabled()
+	// The fairness-ID header takes precedence over a produced TenantKey.
+	hadHeaderTenant := request.FairnessID != ""
 	for _, plugin := range d.requestControlPlugins.requestHeaderPlugins {
 		name := plugin.TypedName()
 		if debugEnabled {
@@ -896,19 +902,40 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 		if err := plugin.RequestHeader(ctx, scopedRequest); err != nil {
 			return err
 		}
-		// The scoped request is a shallow copy; carry back the fields a RequestHeaderProcessor may
-		// reassign (e.g. a QoS class downgrade sets the priority and fairness ID).
-		request.Objectives = scopedRequest.Objectives
-		request.FairnessID = scopedRequest.FairnessID
 		metrics.RecordPluginProcessingLatency(fwkrh.RequestHeaderExtensionPoint, name.Type, name.Name, time.Since(before))
 		if err := violations.Write(); err != nil {
 			return errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("RequestHeader %q failed: %w", name.String(), err).Error()}
 		}
+		applyDeclaredOverrides(logger, request, hadHeaderTenant)
 		if debugEnabled {
 			loggerDebug.Info("Completed running RequestHeaderProcessor plugin successfully", "plugin", name)
 		}
 	}
 	return nil
+}
+
+// applyDeclaredOverrides copies the priority and tenant that RequestHeaderProcessors produced
+// through PriorityKey and TenantKey onto the request, so later processors and flow control see
+// them. The scope already rejected undeclared writes. The tenant applies only to a request that
+// arrived without a fairness-ID header. A value of the wrong type is ignored.
+func applyDeclaredOverrides(logger logr.Logger, request *fwksched.InferenceRequest, hadHeaderTenant bool) {
+	if v, ok := request.GetAttribute(fwkrh.PriorityKey); ok {
+		if priority, ok := v.(int); ok {
+			request.Objectives.Priority = priority
+		} else {
+			logger.Info("Warning: ignoring a request priority that is not an int", "dataKey", fwkrh.PriorityKey.String(), "type", fmt.Sprintf("%T", v))
+		}
+	}
+	if hadHeaderTenant {
+		return
+	}
+	if v, ok := request.GetAttribute(fwkrh.TenantKey); ok {
+		if tenant, ok := v.(string); ok {
+			request.FairnessID = tenant
+		} else {
+			logger.Info("Warning: ignoring a request tenant that is not a string", "dataKey", fwkrh.TenantKey.String(), "type", fmt.Sprintf("%T", v))
+		}
+	}
 }
 
 // runDataProducers runs one phase's producers. missing holds the keys of
