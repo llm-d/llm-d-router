@@ -595,3 +595,79 @@ func TestReadFrameHeaderWithoutPayloadIsUnexpectedEOF(t *testing.T) {
 	_, err = fr2.Next()
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
+
+type closeTrackingReader struct {
+	io.Reader
+	closed bool
+}
+
+func (c *closeTrackingReader) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestReadUnaryRequest(t *testing.T) {
+	frame, err := FramePayload([]byte("hello"))
+	require.NoError(t, err)
+	const limit = 64
+
+	for _, enc := range []string{"", "identity", "IDENTITY"} {
+		body := &closeTrackingReader{Reader: bytes.NewReader(frame)}
+		req := httptest.NewRequest(http.MethodPost, "/vllm.Inference/Generate", body)
+		if enc != "" {
+			req.Header.Set(HeaderEncoding, enc)
+		}
+		got, code, rErr := ReadUnaryRequest(req, limit)
+		require.NoError(t, rErr)
+		require.Equal(t, codes.OK, code)
+		require.Equal(t, frame, got)
+		require.True(t, body.closed)
+	}
+
+	tests := []struct {
+		name     string
+		encoding string
+		body     []byte
+		wantCode codes.Code
+		wantErr  error
+	}{
+		{
+			name:     "gzip encoding header",
+			encoding: "gzip",
+			body:     frame,
+			wantCode: codes.Unimplemented,
+			wantErr:  ErrCompressed,
+		},
+		{
+			name:     "compressed frame flag",
+			body:     []byte{1, 0, 0, 0, 0},
+			wantCode: codes.Unimplemented,
+			wantErr:  ErrCompressed,
+		},
+		{
+			name:     "oversized frame",
+			body:     []byte{0, 0, 0, 1, 0},
+			wantCode: codes.ResourceExhausted,
+			wantErr:  ErrTooLarge,
+		},
+		{
+			name:     "truncated frame",
+			body:     []byte{0, 0, 0},
+			wantCode: codes.InvalidArgument,
+			wantErr:  ErrMalformed,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := &closeTrackingReader{Reader: bytes.NewReader(tc.body)}
+			req := httptest.NewRequest(http.MethodPost, "/vllm.Inference/Generate", body)
+			if tc.encoding != "" {
+				req.Header.Set(HeaderEncoding, tc.encoding)
+			}
+			_, code, rErr := ReadUnaryRequest(req, limit)
+			require.ErrorIs(t, rErr, tc.wantErr)
+			require.Equal(t, tc.wantCode, code)
+			require.True(t, body.closed)
+		})
+	}
+}
