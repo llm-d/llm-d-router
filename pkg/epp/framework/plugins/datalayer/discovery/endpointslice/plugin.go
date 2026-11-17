@@ -16,6 +16,12 @@ limitations under the License.
 
 // Package endpointslice provides an EndpointDiscovery implementation that
 // builds the endpoint datastore from Kubernetes EndpointSlices instead of Pods.
+//
+// The plugin owns no Kubernetes client or watch. It registers an EndpointSlice
+// notification source scoped to its namespace and selector; the datalayer
+// runtime binds that source to a controller manager and delivers deep-copied
+// slice events to the plugin's extractor. The plugin only maps slices to
+// endpoints.
 package endpointslice
 
 import (
@@ -30,20 +36,15 @@ import (
 	"sync"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	discoverylisters "k8s.io/client-go/listers/discovery/v1"
-	"k8s.io/client-go/tools/cache"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/internal/debugdump"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
 const PluginType = "endpointslice-discovery"
@@ -68,7 +69,19 @@ type EndpointSliceDiscovery struct {
 	namespace string
 	selector  labels.Selector
 	portName  string
-	client    kubernetes.Interface
+
+	// events carries slice changes from the extractor to Start, which applies
+	// them on its own goroutine because DiscoveryNotifier is not
+	// goroutine-safe.
+	events chan sliceEvent
+	// stopped is closed when Start returns, so the extractor never blocks on
+	// a plugin that is no longer running.
+	stopped     chan struct{}
+	stoppedOnce sync.Once
+
+	// slices is the current set of selected slices, keyed by name. Only the
+	// Start goroutine touches it.
+	slices map[types.NamespacedName]*discoveryv1.EndpointSlice
 
 	// endpoints holds the endpoints last applied to the datastore, keyed by
 	// endpoint ID. reconcile diffs the newly computed set against it. mu
@@ -78,14 +91,20 @@ type EndpointSliceDiscovery struct {
 
 	ready     chan struct{}
 	readyOnce sync.Once
+}
 
-	// afterReconcile, when set, is called at the end of every reconcile with
-	// the slices it read. Tests use it to observe that a reconcile ran.
-	afterReconcile func(slices []*discoveryv1.EndpointSlice)
+// sliceEvent is one slice change, produced by the extractor and applied by
+// Start. done is closed once the change is applied to the datastore.
+type sliceEvent struct {
+	kind  fwkdl.EventType
+	key   types.NamespacedName
+	slice *discoveryv1.EndpointSlice // set for EventAddOrUpdate
+	done  chan struct{}
 }
 
 var (
 	_ fwkdl.EndpointDiscovery = (*EndpointSliceDiscovery)(nil)
+	_ fwkdl.Registrant        = (*EndpointSliceDiscovery)(nil)
 	_ fwkplugin.StateDumper   = (*EndpointSliceDiscovery)(nil)
 )
 
@@ -97,24 +116,10 @@ func Factory(name string, parameters *json.Decoder, _ fwkplugin.Handle) (fwkplug
 			return nil, fmt.Errorf("%s: failed to parse parameters: %w", PluginType, err)
 		}
 	}
-	if p.Namespace == "" {
-		return nil, errors.New(PluginType + ": 'namespace' parameter is required")
-	}
-	// The discovery path runs without a controller manager, so the plugin
-	// builds its own client from the same config the manager would use:
-	// --kubeconfig, $KUBECONFIG, in-cluster, then ~/.kube/config.
-	cfg, err := ctrl.GetConfig()
-	if err != nil {
-		return nil, fmt.Errorf("%s: building client config: %w", PluginType, err)
-	}
-	client, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("%s: building client: %w", PluginType, err)
-	}
-	return newEndpointSliceDiscovery(name, p, client)
+	return newEndpointSliceDiscovery(name, p)
 }
 
-func newEndpointSliceDiscovery(name string, p params, client kubernetes.Interface) (*EndpointSliceDiscovery, error) {
+func newEndpointSliceDiscovery(name string, p params) (*EndpointSliceDiscovery, error) {
 	if p.Namespace == "" {
 		return nil, errors.New(PluginType + ": 'namespace' parameter is required")
 	}
@@ -130,7 +135,9 @@ func newEndpointSliceDiscovery(name string, p params, client kubernetes.Interfac
 		namespace: p.Namespace,
 		selector:  sel,
 		portName:  p.PortName,
-		client:    client,
+		events:    make(chan sliceEvent),
+		stopped:   make(chan struct{}),
+		slices:    make(map[types.NamespacedName]*discoveryv1.EndpointSlice),
 		endpoints: make(map[types.NamespacedName]*fwkdl.EndpointMetadata),
 		ready:     make(chan struct{}),
 	}, nil
@@ -138,70 +145,80 @@ func newEndpointSliceDiscovery(name string, p params, client kubernetes.Interfac
 
 func (d *EndpointSliceDiscovery) TypedName() fwkplugin.TypedName { return d.typedName }
 
-// Ready returns a channel closed after the first reconcile of the synced
-// informer cache. See EndpointDiscovery.Ready for the contract.
+// RegisterDependencies registers the EndpointSlice notification source,
+// scoped to the configured namespace and selector, and the extractor that
+// hands slice events to Start. The datalayer runtime owns the watch.
+func (d *EndpointSliceDiscovery) RegisterDependencies(r fwkdl.Registrar) error {
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      d.typedName,
+		SourceType: notifications.NotificationSourceType,
+		Extractor:  &sliceExtractor{plugin: d},
+		DefaultSource: notifications.NewK8sNotificationSource(
+			notifications.NotificationSourceType,
+			d.typedName.Name+"/endpointslice",
+			endpointSliceGVK,
+			notifications.WithNamespace(d.namespace),
+			notifications.WithLabelSelector(d.selector),
+		),
+	})
+}
+
+// Ready returns a channel closed once Start is applying slice events. The
+// runner additionally waits for the notification source's initial list to be
+// processed, and the extractor returns only after its event is applied, so
+// the datastore holds the initial endpoints before serving starts.
 func (d *EndpointSliceDiscovery) Ready() <-chan struct{} { return d.ready }
 
-// Start watches the selected EndpointSlices and reconciles the datastore.
-// Blocks until ctx is cancelled or the informer cache fails to sync.
+// Start applies slice events from the extractor to notifier until ctx is
+// cancelled.
 func (d *EndpointSliceDiscovery) Start(ctx context.Context, notifier fwkdl.DiscoveryNotifier) error {
-	logger := log.FromContext(ctx).WithValues("plugin", PluginType, "namespace", d.namespace,
-		"selector", d.selector.String())
-
-	factory := informers.NewSharedInformerFactoryWithOptions(d.client, 0,
-		informers.WithNamespace(d.namespace),
-		informers.WithTweakListOptions(func(o *metav1.ListOptions) { o.LabelSelector = d.selector.String() }))
-	sliceInformer := factory.Discovery().V1().EndpointSlices()
-	lister := sliceInformer.Lister()
-
-	// Informer handlers only signal a change. All notifier calls happen on
-	// this goroutine because DiscoveryNotifier is not goroutine-safe.
-	trigger := make(chan struct{}, 1)
-	kick := func() {
-		select {
-		case trigger <- struct{}{}:
-		default:
-		}
-	}
-	if _, err := sliceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(any) { kick() },
-		UpdateFunc: func(any, any) { kick() },
-		DeleteFunc: func(any) { kick() },
-	}); err != nil {
-		return fmt.Errorf("%s: adding event handler: %w", PluginType, err)
-	}
-
-	factory.Start(ctx.Done())
-	defer factory.Shutdown()
-	if !cache.WaitForCacheSync(ctx.Done(), sliceInformer.Informer().HasSynced) {
-		if ctx.Err() != nil {
-			return nil
-		}
-		return fmt.Errorf("%s: EndpointSlice cache did not sync", PluginType)
-	}
-
-	d.reconcile(ctx, lister, notifier)
+	defer d.stoppedOnce.Do(func() { close(d.stopped) })
 	d.readyOnce.Do(func() { close(d.ready) })
-	logger.Info("initial EndpointSlice sync complete", "endpoints", d.count())
-
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-trigger:
-			d.reconcile(ctx, lister, notifier)
+		case ev := <-d.events:
+			switch ev.kind {
+			case fwkdl.EventAddOrUpdate:
+				d.slices[ev.key] = ev.slice
+			case fwkdl.EventDelete:
+				delete(d.slices, ev.key)
+			}
+			d.reconcile(ctx, notifier)
+			close(ev.done)
 		}
 	}
 }
 
-// reconcile recomputes the endpoint set from the informer cache and applies
+// emit hands an event to Start and waits until Start has applied it, so a
+// successful Extract means the datastore reflects the slice.
+func (d *EndpointSliceDiscovery) emit(ctx context.Context, ev sliceEvent) error {
+	ev.done = make(chan struct{})
+	select {
+	case d.events <- ev:
+	case <-d.stopped:
+		return fmt.Errorf("%s: discovery is not running", PluginType)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-ev.done:
+		return nil
+	case <-d.stopped:
+		return fmt.Errorf("%s: discovery stopped before applying slice %s", PluginType, ev.key)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// reconcile recomputes the endpoint set from the current slices and applies
 // the difference from the previous reconcile.
-func (d *EndpointSliceDiscovery) reconcile(ctx context.Context, lister discoverylisters.EndpointSliceLister, notifier fwkdl.DiscoveryNotifier) {
+func (d *EndpointSliceDiscovery) reconcile(ctx context.Context, notifier fwkdl.DiscoveryNotifier) {
 	logger := log.FromContext(ctx).WithValues("plugin", PluginType)
-	slices, err := lister.EndpointSlices(d.namespace).List(d.selector)
-	if err != nil {
-		logger.Error(err, "failed to list EndpointSlices from cache")
-		return
+	slices := make([]*discoveryv1.EndpointSlice, 0, len(d.slices))
+	for _, s := range d.slices {
+		slices = append(slices, s)
 	}
 	desired := d.endpointsFrom(ctx, slices)
 
@@ -228,9 +245,6 @@ func (d *EndpointSliceDiscovery) reconcile(ctx context.Context, lister discovery
 			logger.V(logutil.DEFAULT).Info("deleting endpoint", "id", id.String())
 			notifier.Delete(id)
 		}
-	}
-	if d.afterReconcile != nil {
-		d.afterReconcile(slices)
 	}
 }
 
@@ -308,12 +322,6 @@ func usable(ep discoveryv1.Endpoint) bool {
 func sameEndpoint(a, b *fwkdl.EndpointMetadata) bool {
 	return a.Address == b.Address && a.Port == b.Port && a.MetricsHost == b.MetricsHost &&
 		maps.Equal(a.Labels, b.Labels)
-}
-
-func (d *EndpointSliceDiscovery) count() int {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return len(d.endpoints)
 }
 
 // DumpState reports the endpoint identities from the last reconcile, in the

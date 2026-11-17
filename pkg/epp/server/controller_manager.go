@@ -160,3 +160,25 @@ func NewDefaultManager(controllerCfg ControllerConfig, gknn common.GKNN, restCon
 	}
 	return manager, nil
 }
+
+// NewNotificationManager creates the controller manager used in discovery
+// plugin mode, where no InferencePool or Pod reconciler runs. It only hosts
+// the datalayer notification sources, so its cache holds just the GVKs those
+// sources watch, scoped by byObject. Leader election, the metrics server and
+// the health probe server stay off: discovery runs on every replica, and the
+// discovery path serves metrics and health itself.
+func NewNotificationManager(restConfig *rest.Config, byObject map[client.Object]cache.ByObject) (ctrl.Manager, error) {
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme:                 scheme,
+		Cache:                  cache.Options{ByObject: byObject},
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+		LeaderElection:         false,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create notification manager: %w", err)
+	}
+	return mgr, nil
+}

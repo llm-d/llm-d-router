@@ -17,14 +17,17 @@ those slices.
 
 ## How It Works
 
-- **Watch.** On `Start`, the plugin creates its own client and an informer on
-  EndpointSlices in `namespace` that match `selector`. The discovery path runs
-  without a controller manager, so the plugin does not share a manager cache.
-- **Reconcile.** Every informer event triggers a level-triggered reconcile on
-  the `Start` goroutine: the endpoint set is recomputed from the informer
-  cache and the difference from the previous reconcile is applied with
-  `notifier.Upsert` and `notifier.Delete`. An endpoint whose address, port
-  and labels are unchanged is not upserted again.
+- **Watch.** The plugin owns no Kubernetes client. It registers a
+  `k8s-notification-source` for EndpointSlices scoped to `namespace` and
+  `selector`; the EPP binds it to its notification manager, whose cache holds
+  only those slices (see
+  [Kubernetes-backed discovery plugins](../../../../../../../docs/discovery.md#kubernetes-backed-discovery-plugins)).
+- **Reconcile.** The plugin's extractor hands every slice event to the
+  `Start` goroutine, which updates its set of slices, recomputes the endpoint
+  set and applies the difference from the previous reconcile with
+  `notifier.Upsert` and `notifier.Delete`. The extractor returns only after
+  the event is applied. An endpoint whose address, port and labels are
+  unchanged is not upserted again.
 - **Endpoints.** Each slice endpoint becomes one EPP endpoint, using its first
   address (the only one the EndpointSlice API defines as meaningful) and the
   slice port selected by `portName`. The endpoint ID is
@@ -38,8 +41,9 @@ those slices.
   controller that writes the slices sets the keys EPP plugins read, for
   example `llm-d.ai/role` for the role filters and `llm-d.ai/engine-type` for
   the metrics extractor.
-- **Ready channel.** `Ready()` is closed after the first reconcile of the
-  synced cache.
+- **Ready channel.** `Ready()` is closed when `Start` runs. The EPP
+  additionally waits until the notification source has processed its initial
+  list before serving, so the datastore holds the existing endpoints first.
 
 ## Inputs Consumed
 
@@ -61,9 +65,9 @@ type `endpointslice-discovery` in `plugins`.
 | `selector` | `string` | no | all slices | Label selector, for example `kubernetes.io/service-name=model-server`. |
 | `portName` | `string` | no | -- | Slice port to route to. When empty, a slice must declare exactly one port. |
 
-The plugin connects to the API server with the same client config as the
-Kubernetes discovery modes (`ctrl.GetConfig()`): the EPP's `--kubeconfig`
-flag, then `$KUBECONFIG`, then the in-cluster config.
+The EPP's notification manager connects to the API server with the same
+client config as the Kubernetes discovery modes (`ctrl.GetConfig()`): the
+EPP's `--kubeconfig` flag, then `$KUBECONFIG`, then the in-cluster config.
 
 ### RBAC
 
@@ -130,9 +134,9 @@ endpoints:
   for example different roles.
 - Terminating endpoints are not reported even when their `serving` condition
   is true.
-- The EPP runs without a Kubernetes controller manager in this mode, so the
-  same K8s-only features as in file discovery are inactive (see
-  [docs/discovery.md](../../../../../../../docs/discovery.md)).
+- The `InferencePool` reconcilers do not run in this mode, so the same
+  K8s-only features as in file discovery are inactive (see
+  [docs/discovery.md](../../../../../../../docs/discovery.md#kubernetes-only-features-that-do-not-run-in-discovery-plugin-mode)).
 
 ## Related Documentation
 

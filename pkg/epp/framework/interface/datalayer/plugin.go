@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8slabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -112,6 +113,20 @@ type NotificationSource interface {
 	// Returns nil event to signal Runtime to skip extractor dispatch.
 	// TODO: why accept event but return *event?
 	Notify(ctx context.Context, event NotificationEvent) (*NotificationEvent, error)
+}
+
+// ScopedNotificationSource is an optional NotificationSource extension that
+// narrows the watch for its GVK. Where the framework builds the controller
+// manager for the source (discovery plugin mode), it restricts the manager's
+// cache for the GVK to Namespace and LabelSelector, so only matching objects
+// are listed, watched and dispatched, and RBAC can be namespaced.
+type ScopedNotificationSource interface {
+	NotificationSource
+	// Namespace returns the namespace to watch. Empty watches all namespaces.
+	Namespace() string
+	// LabelSelector returns the label selector objects must match. Nil or
+	// empty matches every object.
+	LabelSelector() k8slabels.Selector
 }
 
 // EndpointEvent carries an endpoint lifecycle event.

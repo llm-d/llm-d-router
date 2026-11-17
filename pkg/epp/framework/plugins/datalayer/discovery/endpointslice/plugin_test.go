@@ -28,12 +28,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/internal/debugdump"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
 const (
@@ -76,6 +78,12 @@ func (r *recordingNotifier) len() int {
 	return len(r.state)
 }
 
+func (r *recordingNotifier) upsertCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.upserts
+}
+
 // slice builds an EndpointSlice of a selector-less headless Service with one
 // externally managed IPv6 endpoint and no targetRef.
 func slice(name, hostname, addr string, ready bool, extraLabels map[string]string) *discoveryv1.EndpointSlice {
@@ -84,6 +92,7 @@ func slice(name, hostname, addr string, ready bool, extraLabels map[string]strin
 		l[k] = v
 	}
 	return &discoveryv1.EndpointSlice{
+		TypeMeta: metav1.TypeMeta{APIVersion: "discovery.k8s.io/v1", Kind: "EndpointSlice"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: testNamespace,
@@ -107,18 +116,29 @@ var testParams = params{
 
 var d0ID = types.NamespacedName{Namespace: testNamespace, Name: testService + ".d0"}
 
-func start(t *testing.T, client *fake.Clientset, p params) (*EndpointSliceDiscovery, *recordingNotifier) {
+// harness runs a plugin's Start and feeds notifications to its extractor, as
+// the datalayer runtime does.
+type harness struct {
+	t         *testing.T
+	d         *EndpointSliceDiscovery
+	extractor fwkdl.NotificationExtractor
+	n         *recordingNotifier
+}
+
+func start(t *testing.T, p params) *harness {
 	t.Helper()
-	d, err := newEndpointSliceDiscovery("test", p, client)
+	d, err := newEndpointSliceDiscovery("test", p)
 	if err != nil {
 		t.Fatalf("newEndpointSliceDiscovery: %v", err)
 	}
-	return d, startDiscovery(t, d)
-}
-
-// startDiscovery runs d until the test ends and waits for it to become ready.
-func startDiscovery(t *testing.T, d *EndpointSliceDiscovery) *recordingNotifier {
-	t.Helper()
+	reg := &recordingRegistrar{}
+	if err := d.RegisterDependencies(reg); err != nil {
+		t.Fatalf("RegisterDependencies: %v", err)
+	}
+	extractor, ok := reg.registrations[0].Extractor.(fwkdl.NotificationExtractor)
+	if !ok {
+		t.Fatalf("registered extractor %T is not a NotificationExtractor", reg.registrations[0].Extractor)
+	}
 	n := newRecordingNotifier()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -131,47 +151,88 @@ func startDiscovery(t *testing.T, d *EndpointSliceDiscovery) *recordingNotifier 
 	case <-time.After(10 * time.Second):
 		t.Fatal("plugin did not become ready")
 	}
-	return n
+	return &harness{t: t, d: d, extractor: extractor, n: n}
 }
 
-func eventually(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+func (h *harness) notify(kind fwkdl.EventType, s *discoveryv1.EndpointSlice) {
+	h.t.Helper()
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(s)
+	if err != nil {
+		h.t.Fatalf("ToUnstructured: %v", err)
 	}
-	t.Fatalf("timed out waiting for %s", what)
+	if err := h.extractor.Extract(context.Background(), fwkdl.NotificationEvent{Type: kind, Object: &unstructured.Unstructured{Object: obj}}); err != nil {
+		h.t.Fatalf("Extract: %v", err)
+	}
+}
+
+func (h *harness) apply(slices ...*discoveryv1.EndpointSlice) {
+	h.t.Helper()
+	for _, s := range slices {
+		h.notify(fwkdl.EventAddOrUpdate, s)
+	}
+}
+
+type recordingRegistrar struct {
+	registrations []fwkdl.PendingRegistration
+}
+
+func (r *recordingRegistrar) Register(p fwkdl.PendingRegistration) error {
+	r.registrations = append(r.registrations, p)
+	return nil
 }
 
 func TestNewRequiresNamespace(t *testing.T) {
-	if _, err := newEndpointSliceDiscovery("", params{}, fake.NewClientset()); err == nil {
+	if _, err := newEndpointSliceDiscovery("", params{}); err == nil {
 		t.Fatal("expected error for missing namespace")
 	}
 }
 
 func TestNewRejectsInvalidSelector(t *testing.T) {
-	if _, err := newEndpointSliceDiscovery("", params{Namespace: testNamespace, Selector: "a in ("}, fake.NewClientset()); err == nil {
+	if _, err := newEndpointSliceDiscovery("", params{Namespace: testNamespace, Selector: "a in ("}); err == nil {
 		t.Fatal("expected error for invalid selector")
 	}
 }
 
+func TestRegistersScopedEndpointSliceSource(t *testing.T) {
+	d, err := newEndpointSliceDiscovery("slices", testParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := &recordingRegistrar{}
+	if err := d.RegisterDependencies(reg); err != nil {
+		t.Fatal(err)
+	}
+	if len(reg.registrations) != 1 {
+		t.Fatalf("registrations = %d, want 1", len(reg.registrations))
+	}
+	got := reg.registrations[0]
+	if got.SourceType != notifications.NotificationSourceType {
+		t.Errorf("SourceType = %q", got.SourceType)
+	}
+	src, ok := got.DefaultSource.(fwkdl.ScopedNotificationSource)
+	if !ok {
+		t.Fatalf("DefaultSource %T is not a ScopedNotificationSource", got.DefaultSource)
+	}
+	if src.GVK() != endpointSliceGVK || src.Namespace() != testNamespace ||
+		src.LabelSelector().String() != testParams.Selector {
+		t.Errorf("source = gvk %v namespace %q selector %q", src.GVK(), src.Namespace(), src.LabelSelector())
+	}
+	if ext, ok := got.Extractor.(fwkdl.NotificationExtractor); !ok || ext.GVK() != endpointSliceGVK {
+		t.Errorf("extractor = %T", got.Extractor)
+	}
+}
+
 func TestInitialSync(t *testing.T) {
-	other := slice("other-abc", "other", "2001:db8::99", true, nil)
-	other.Labels[discoveryv1.LabelServiceName] = "other"
-	client := fake.NewClientset(
+	h := start(t, testParams)
+	h.apply(
 		slice("model-server-p0", "p0", "2001:db8::10", true, map[string]string{"llm-d.ai/role": "prefill"}),
 		slice("model-server-d0", "d0", "2001:db8::20", true, map[string]string{"llm-d.ai/role": "decode"}),
-		other,
 	)
-	_, n := start(t, client, testParams)
 
-	if got := n.len(); got != 2 {
+	if got := h.n.len(); got != 2 {
 		t.Fatalf("endpoints = %d, want 2", got)
 	}
-	d0 := n.get(d0ID)
+	d0 := h.n.get(d0ID)
 	if d0 == nil {
 		t.Fatal("d0 endpoint missing")
 	}
@@ -184,57 +245,82 @@ func TestInitialSync(t *testing.T) {
 	}
 }
 
+func TestIgnoresSlicesOutsideScope(t *testing.T) {
+	h := start(t, testParams)
+	other := slice("other-abc", "other", "2001:db8::99", true, nil)
+	other.Labels[discoveryv1.LabelServiceName] = "other"
+	elsewhere := slice("model-server-x0", "x0", "2001:db8::98", true, nil)
+	elsewhere.Namespace = "elsewhere"
+	h.apply(other, elsewhere)
+	if got := h.n.len(); got != 0 {
+		t.Fatalf("endpoints = %d, want 0", got)
+	}
+}
+
+func TestSliceLeavingSelectorIsRemoved(t *testing.T) {
+	h := start(t, testParams)
+	h.apply(slice("model-server-d0", "d0", "2001:db8::20", true, nil))
+	moved := slice("model-server-d0", "d0", "2001:db8::20", true, nil)
+	moved.Labels[discoveryv1.LabelServiceName] = "other"
+	h.apply(moved)
+	if h.n.get(d0ID) != nil {
+		t.Fatal("endpoint of a slice that left the selector is still reported")
+	}
+}
+
 func TestReadinessAddressChangeAndDeletion(t *testing.T) {
-	client := fake.NewClientset(slice("model-server-d0", "d0", "2001:db8::20", true, nil))
-	_, n := start(t, client, testParams)
-	ctx := context.Background()
-	slices := client.DiscoveryV1().EndpointSlices(testNamespace)
+	h := start(t, testParams)
+	h.apply(slice("model-server-d0", "d0", "2001:db8::20", true, nil))
 
-	if _, err := slices.Update(ctx, slice("model-server-d0", "d0", "2001:db8::20", false, nil), metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
+	h.apply(slice("model-server-d0", "d0", "2001:db8::20", false, nil))
+	if h.n.get(d0ID) != nil {
+		t.Fatal("not-ready endpoint still reported")
 	}
-	eventually(t, "not-ready endpoint removed", func() bool { return n.get(d0ID) == nil })
 
-	if _, err := slices.Update(ctx, slice("model-server-d0", "d0", "2001:db8::21", true, nil), metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
+	h.apply(slice("model-server-d0", "d0", "2001:db8::21", true, nil))
+	if m := h.n.get(d0ID); m == nil || m.Address != "2001:db8::21" {
+		t.Fatalf("endpoint after address change = %+v", m)
 	}
-	eventually(t, "endpoint re-added with new address", func() bool {
-		m := n.get(d0ID)
-		return m != nil && m.Address == "2001:db8::21"
-	})
 
-	if err := slices.Delete(ctx, "model-server-d0", metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
+	h.notify(fwkdl.EventDelete, slice("model-server-d0", "d0", "2001:db8::21", true, nil))
+	if got := h.n.len(); got != 0 {
+		t.Fatalf("endpoints after slice deletion = %d, want 0", got)
 	}
-	eventually(t, "endpoint deleted with its slice", func() bool { return n.len() == 0 })
 }
 
 func TestUnsetReadyCountsAsReady(t *testing.T) {
+	h := start(t, testParams)
 	s := slice("model-server-d0", "d0", "2001:db8::20", true, nil)
 	s.Endpoints[0].Conditions = discoveryv1.EndpointConditions{}
-	_, n := start(t, fake.NewClientset(s), testParams)
-	if n.get(d0ID) == nil {
+	h.apply(s)
+	if h.n.get(d0ID) == nil {
 		t.Fatal("endpoint with unset ready condition missing")
 	}
 }
 
 func TestTerminatingSkipped(t *testing.T) {
+	h := start(t, testParams)
 	s := slice("model-server-d0", "d0", "2001:db8::20", true, nil)
 	s.Endpoints[0].Conditions.Terminating = ptr.To(true)
-	_, n := start(t, fake.NewClientset(s), testParams)
-	if n.len() != 0 {
+	h.apply(s)
+	if h.n.len() != 0 {
 		t.Fatal("terminating endpoint reported")
 	}
 }
 
 func TestEndpointInTwoSlicesReportedOnce(t *testing.T) {
-	client := fake.NewClientset(
+	h := start(t, testParams)
+	h.apply(
 		slice("model-server-a", "d0", "2001:db8::20", true, nil),
 		slice("model-server-b", "d0", "2001:db8::20", true, nil),
 	)
-	_, n := start(t, client, testParams)
-	if got := n.len(); got != 1 {
+	if got := h.n.len(); got != 1 {
 		t.Fatalf("endpoints = %d, want 1", got)
+	}
+	// The endpoint stays while one of its slices remains.
+	h.notify(fwkdl.EventDelete, slice("model-server-a", "d0", "2001:db8::20", true, nil))
+	if h.n.get(d0ID) == nil {
+		t.Fatal("endpoint removed although another slice still lists it")
 	}
 }
 
@@ -244,60 +330,39 @@ func TestPortSelection(t *testing.T) {
 
 	p := testParams
 	p.PortName = ""
-	_, n := start(t, fake.NewClientset(multi), p)
-	if n.len() != 0 {
+	h := start(t, p)
+	h.apply(multi)
+	if h.n.len() != 0 {
 		t.Error("slice with two ports reported without portName")
 	}
 
 	p.PortName = "metrics"
-	_, n = start(t, fake.NewClientset(multi), p)
-	if m := n.get(d0ID); m == nil || m.Port != "9090" {
+	h = start(t, p)
+	h.apply(multi)
+	if m := h.n.get(d0ID); m == nil || m.Port != "9090" {
 		t.Errorf("portName=metrics: endpoint = %+v", m)
 	}
 }
 
 func TestUnchangedSliceNotUpsertedAgain(t *testing.T) {
-	client := fake.NewClientset(slice("model-server-d0", "d0", "2001:db8::20", true, nil))
-	d, err := newEndpointSliceDiscovery("test", testParams, client)
-	if err != nil {
-		t.Fatalf("newEndpointSliceDiscovery: %v", err)
-	}
-	// Closed once a reconcile has read the updated slice, so the assertion
-	// below cannot pass before the second reconcile ran.
-	sawUpdate := make(chan struct{})
-	var once sync.Once
-	d.afterReconcile = func(slices []*discoveryv1.EndpointSlice) {
-		for _, s := range slices {
-			if s.Name == "model-server-d0" && s.ResourceVersion == "2" {
-				once.Do(func() { close(sawUpdate) })
-			}
-		}
-	}
-	n := startDiscovery(t, d)
-
+	h := start(t, testParams)
+	h.apply(slice("model-server-d0", "d0", "2001:db8::20", true, nil))
 	s := slice("model-server-d0", "d0", "2001:db8::20", true, nil)
 	s.ResourceVersion = "2"
-	if _, err := client.DiscoveryV1().EndpointSlices(testNamespace).Update(context.Background(), s, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-sawUpdate:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no reconcile observed the updated slice")
-	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.upserts != 1 {
-		t.Errorf("upserts = %d, want 1", n.upserts)
+	// Extract returns after Start applied the event, so no wait is needed.
+	h.apply(s)
+	if got := h.n.upsertCount(); got != 1 {
+		t.Errorf("upserts = %d, want 1", got)
 	}
 }
 
 func TestEndpointIDFallsBackToAddress(t *testing.T) {
+	h := start(t, testParams)
 	s := slice("model-server-d0", "", "2001:db8::20", true, nil)
 	s.Endpoints[0].Hostname = nil
-	_, n := start(t, fake.NewClientset(s), testParams)
+	h.apply(s)
 	id := types.NamespacedName{Namespace: testNamespace, Name: testService + ".2001:db8::20"}
-	m := n.get(id)
+	m := h.n.get(id)
 	if m == nil {
 		t.Fatalf("endpoint %s missing", id)
 	}
@@ -306,9 +371,34 @@ func TestEndpointIDFallsBackToAddress(t *testing.T) {
 	}
 }
 
+func TestExtractFailsAfterStop(t *testing.T) {
+	d, err := newEndpointSliceDiscovery("test", testParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx, newRecordingNotifier()) }()
+	<-d.Ready()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ext := &sliceExtractor{plugin: d}
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(slice("model-server-d0", "d0", "2001:db8::20", true, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ext.Extract(context.Background(), fwkdl.NotificationEvent{Type: fwkdl.EventAddOrUpdate, Object: &unstructured.Unstructured{Object: obj}})
+	if err == nil {
+		t.Fatal("Extract after Start returned: got nil error, want an error")
+	}
+}
+
 func TestDumpStateOmitsAddresses(t *testing.T) {
-	d, _ := start(t, fake.NewClientset(slice("model-server-d0", "d0", "2001:db8::20", true, nil)), testParams)
-	raw, err := d.DumpState()
+	h := start(t, testParams)
+	h.apply(slice("model-server-d0", "d0", "2001:db8::20", true, nil))
+	raw, err := h.d.DumpState()
 	if err != nil {
 		t.Fatal(err)
 	}
