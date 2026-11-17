@@ -845,8 +845,8 @@ Control alone does not emit them. `program_id` is the request's fairness ID and 
 
 These metrics are owned by the `qos-contract` RequestHeader plugin and are registered only when
 it is configured. The `team` label shares the fairness ID cardinality bound. The plugin defaults to
-`mode="report-only"`, where each team is served at its committed class and downgrades and rejections
-are recorded but not applied.
+`mode="report-only"`, where downgrades and rejections are recorded but not applied and each request
+keeps its InferenceObjective priority.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|

@@ -230,13 +230,13 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 		served, decision = p.classes[team.classIndex+1], decisionDowngraded
 	case overSize:
 		team.mu.Unlock()
-		return p.reject(request, teamID, team, committed, decisionRejectedSize, reason, p.sizeError(team, committed.Name))
+		return p.reject(team, committed, decisionRejectedSize, reason, p.sizeError(team, committed.Name))
 	case overDaily:
 		team.mu.Unlock()
-		return p.reject(request, teamID, team, committed, decisionRejectedDaily, reason, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
+		return p.reject(team, committed, decisionRejectedDaily, reason, p.quotaError(team, committed.Name, untilNextDay(now), "daily token budget exhausted"))
 	default:
 		team.mu.Unlock()
-		return p.reject(request, teamID, team, committed, decisionRejectedConcurrency, reason, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
+		return p.reject(team, committed, decisionRejectedConcurrency, reason, p.quotaError(team, committed.Name, time.Second, "concurrency limit reached"))
 	}
 	team.mu.Unlock()
 
@@ -250,11 +250,11 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *scheduling.Inferenc
 	requestID := request.RequestID
 	rec.stop = context.AfterFunc(ctx, func() { p.finish(requestID, nil) })
 
-	// Report-only mode serves the team's committed class: a downgrade is recorded, not applied.
-	if p.reportOnly {
-		served = committed
+	// Report-only mode only records the decision: the request keeps the priority its
+	// InferenceObjective set and the fairness ID it arrived with.
+	if !p.reportOnly {
+		setClass(request, teamID, served)
 	}
-	setClass(request, teamID, served)
 	return nil
 }
 
@@ -341,16 +341,13 @@ func (p *Plugin) mode() string {
 }
 
 // reject records a rejection and returns err. In report-only mode it returns nil instead.
-func (p *Plugin) reject(request *scheduling.InferenceRequest, teamID string, team *teamState, committed ClassConfig,
-	decision, reason string, err errcommon.Error) error {
+func (p *Plugin) reject(team *teamState, committed ClassConfig, decision, reason string, err errcommon.Error) error {
 	contractDecisions.WithLabelValues(team.label, committed.Name, "", decision, reason, p.mode()).Inc()
 	if !p.reportOnly {
 		return err
 	}
-	// Report-only mode serves a would-be rejection at the team's committed class. Like a
-	// rejection, it holds no concurrency slot and no budget charge, so later decisions match
-	// enforce-limits mode.
-	setClass(request, teamID, committed)
+	// Report-only mode serves a would-be rejection unchanged. Like a rejection, it holds no
+	// concurrency slot and no budget charge, so later decisions match enforce-limits mode.
 	return nil
 }
 

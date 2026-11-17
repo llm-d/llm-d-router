@@ -4,7 +4,7 @@
 **Interfaces:** `requesthandling.RequestHeaderProcessor`, `requesthandling.ResponseHeaderProcessor`, `requesthandling.ResponseBodyProcessor`
 **Stability:** Alpha
 
-Enforces per-team QoS contracts ahead of flow control. Until `mode: enforce-limits` is set it serves each team at its committed class and only records downgrades and rejections; see [Report-Only Mode](#report-only-mode). Each team is committed to a service class, and each class is a flow-control priority band. A team's contract is its size limits (`maxPromptTokens`, `maxOutputTokens`) and its commits: its concurrency (`maxConcurrency`) and its daily weighted-token budget (`dailyTokens`). Traffic within the contract is served at the team's class. Traffic outside it moves one class down, and is rejected when no lower class exists: `400` above a size limit, `429` above a commit.
+Enforces per-team QoS contracts ahead of flow control. Until `mode: enforce-limits` is set it only records the downgrades and rejections it would make and leaves every request as it arrived; see [Report-Only Mode](#report-only-mode). Each team is committed to a service class, and each class is a flow-control priority band. A team's contract is its size limits (`maxPromptTokens`, `maxOutputTokens`) and its commits: its concurrency (`maxConcurrency`) and its daily weighted-token budget (`dailyTokens`). Traffic within the contract is served at the team's class. Traffic outside it moves one class down, and is rejected when no lower class exists: `400` above a size limit, `429` above a commit.
 
 ## What It Does
 
@@ -44,7 +44,7 @@ A `429` adds `retry-after` (seconds: `1` for concurrency, until the next UTC day
 
 ## Report-Only Mode
 
-The plugin starts in `mode: report-only` (the default). It serves every request at its team's committed class: it sets the class priority and, when the request has none, the fairness ID, as `enforce-limits` mode does. Every decision is computed and recorded in `llm_d_epp_qos_contract_decisions_total{mode="report-only"}`, but a request outside the contract is neither moved down a class nor rejected, and the plugin adds no response headers. Commits are counted as they would be when enforced: a request recorded as `within_contract` holds a concurrency slot and a daily charge until it completes, and one recorded as `downgraded` or `rejected_*` holds neither. Use it to compare commits against real traffic, then set `mode: enforce-limits` to apply the decisions.
+The plugin starts in `mode: report-only` (the default). It only records: every decision is computed and recorded in `llm_d_epp_qos_contract_decisions_total{mode="report-only"}`, but the plugin leaves every request as it arrived. A request keeps the priority its InferenceObjective set and its fairness ID, so a sheddable objective stays sheddable. No request is moved down a class or rejected, and the plugin adds no response headers. Class priorities, and the team as the fairness ID, apply only in `enforce-limits` mode. Commits are counted as they would be when enforced: a request recorded as `within_contract` holds a concurrency slot and a daily charge until it completes, and one recorded as `downgraded` or `rejected_*` holds neither. Use it to compare commits against real traffic, then set `mode: enforce-limits` to apply the decisions.
 
 ## Configuration
 
@@ -74,7 +74,7 @@ plugins:
 
 | Field | Default | Description |
 |---|---|---|
-| `mode` | `report-only` | `report-only` serves each team at its committed class and records downgrades and rejections without applying them; `enforce-limits` applies them. |
+| `mode` | `report-only` | `report-only` records downgrades and rejections and leaves requests unchanged; `enforce-limits` serves each team at its class and applies them. |
 | `teamHeader` | `x-llm-d-inference-fairness-id` | Request header carrying the team ID. |
 | `outputTokenWeight` | `2` | Cost of one output token relative to one input token. Must be `> 0`. |
 | `defaultOutputReservation` | `1000` | Output tokens reserved when neither the request nor the team sets a cap. |
@@ -115,14 +115,14 @@ The metrics are served on the EPP `/metrics` endpoint with the other EPP metrics
 |---|---|
 | `team` | Team resolved from `teamHeader`, or the `defaultTeam` ID |
 | `class` | The team's committed class |
-| `served_class` | Class the request is served at: `class` when `within_contract`, the next lower class when `downgraded`, empty for a rejection |
+| `served_class` | Class the request is served at, or in report-only mode would be: `class` when `within_contract`, the next lower class when `downgraded`, empty for a rejection |
 | `decision` | `within_contract`, `downgraded`, `rejected_size` (`400`), `rejected_concurrency` or `rejected_daily` (`429`) |
 | `reason` | Limit the request exceeded: `size` (`maxPromptTokens` or `maxOutputTokens`), `daily` (`dailyTokens`) or `concurrency` (`maxConcurrency`). Empty when `within_contract` |
 | `mode` | `report-only` when the decision was only recorded, `enforce-limits` when it was applied |
 
 A request over several limits reports one reason, the first of `size`, `daily` and `concurrency`; the same order decides its rejection. For a rejection `reason` repeats what the `decision` name already says, so one query can group downgrades and rejections by cause.
 
-In report-only mode the counter is the report of what enforcement would do; every request is served at its team's committed class.
+In report-only mode the counter is the report of what enforcement would do; every request keeps its InferenceObjective priority.
 
 ### PromQL
 

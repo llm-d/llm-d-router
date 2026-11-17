@@ -394,21 +394,42 @@ func TestCompletedRequestIsNotReleasedAgainOnStreamEnd(t *testing.T) {
 	assert.InDelta(t, 300, daily, 1e-9)
 }
 
-// TestReportOnlyServesCommittedClass verifies that report-only mode serves every request at its team's
-// committed class: downgrades and rejections are recorded, not applied.
-func TestReportOnlyServesCommittedClass(t *testing.T) {
+// objectivePriority is the priority the InferenceObjective sets in the report-only tests. It is
+// sheddable (negative), so a test catches report-only mode making it non-sheddable.
+const objectivePriority = -5
+
+// newObjectiveRequest is newRequest with an output cap of 10 and the InferenceObjective priority set.
+func newObjectiveRequest(team string, promptTokens int) *fwksched.InferenceRequest {
+	req := newRequest(team, promptTokens, 10)
+	req.Objectives.Priority = objectivePriority
+	return req
+}
+
+// requireUnchanged asserts that the plugin produced no priority and no tenant for req.
+func requireUnchanged(t *testing.T, req *fwksched.InferenceRequest, msgAndArgs ...any) {
+	t.Helper()
+	_, priority := req.GetAttribute(fwkrh.PriorityKey)
+	_, tenant := req.GetAttribute(fwkrh.TenantKey)
+	assert.False(t, priority, msgAndArgs...)
+	assert.False(t, tenant, msgAndArgs...)
+	assert.Equal(t, objectivePriority, servedPriority(req), msgAndArgs...)
+}
+
+// TestReportOnlyLeavesRequestUnchanged verifies that report-only mode records downgrades and
+// rejections without applying them, and leaves the request's priority and fairness ID alone.
+func TestReportOnlyLeavesRequestUnchanged(t *testing.T) {
 	p, _ := newTestPlugin(t, func(params *Parameters) { params.Mode = ModeReportOnly })
 
-	oversized := newRequest("team-a", 5000, 10)
+	oversized := newObjectiveRequest("team-a", 5000)
 	require.NoError(t, p.RequestHeader(t.Context(), oversized), "a would-be downgrade is recorded, not applied")
-	assert.Equal(t, 100, servedPriority(oversized), "team-a stays at its committed critical class")
-	assert.Equal(t, "team-a", servedFairnessID(oversized))
+	requireUnchanged(t, oversized, "team-a keeps its objective priority")
+	assert.Empty(t, servedFairnessID(oversized), "the team is not made the fairness ID")
 
 	reqs := make([]*fwksched.InferenceRequest, 0, 5)
 	for range 5 {
-		req := newRequest("team-b", 10, 10)
+		req := newObjectiveRequest("team-b", 10)
 		require.NoError(t, p.RequestHeader(t.Context(), req), "a would-be rejection is recorded, not applied")
-		assert.Equal(t, -10, servedPriority(req), "team-b stays at its committed batch class")
+		requireUnchanged(t, req, "team-b keeps its objective priority")
 		resp := &fwkrh.Response{Headers: map[string]string{}}
 		p.ResponseHeader(t.Context(), req, resp, nil)
 		assert.Empty(t, resp.Headers, "report-only mode adds no response headers")
@@ -423,31 +444,30 @@ func TestReportOnlyServesCommittedClass(t *testing.T) {
 	assert.Equal(t, 0, inflight)
 }
 
-// TestReportOnlyAndEnforceLimitsSetTheSamePriority verifies that both modes serve a request within its
-// contract at the team's class, and that the only difference is that report-only mode does not move
-// a request outside its contract to a lower class.
-func TestReportOnlyAndEnforceLimitsSetTheSamePriority(t *testing.T) {
+// TestOnlyEnforceLimitsSetsTheClassPriority verifies that enforce-limits mode serves each request
+// at its team's class or the class below, and that report-only mode keeps the objective
+// priority in every case, so a sheddable objective stays sheddable.
+func TestOnlyEnforceLimitsSetsTheClassPriority(t *testing.T) {
 	cases := []struct {
 		name                string
 		req                 func() *fwksched.InferenceRequest
 		setup               int // team-a requests served within the contract first, to fill its concurrency commit of 2
 		enforceLimitsPrio   int
-		reportOnlyPrio      int
 		enforceLimitsErrors bool
 	}{
-		{name: "critical within contract", req: func() *fwksched.InferenceRequest { return newRequest("team-a", 10, 10) }, enforceLimitsPrio: 100, reportOnlyPrio: 100},
-		{name: "standard within contract", req: func() *fwksched.InferenceRequest { return newRequest("stranger", 10, 10) }, enforceLimitsPrio: 10, reportOnlyPrio: 10},
-		{name: "batch within contract", req: func() *fwksched.InferenceRequest { return newRequest("team-b", 10, 10) }, enforceLimitsPrio: -10, reportOnlyPrio: -10},
-		{name: "critical over size", req: func() *fwksched.InferenceRequest { return newRequest("team-a", 5000, 10) }, enforceLimitsPrio: 10, reportOnlyPrio: 100},
-		{name: "critical over concurrency", req: func() *fwksched.InferenceRequest { return newRequest("team-a", 10, 10) }, setup: 2, enforceLimitsPrio: 10, reportOnlyPrio: 100},
-		{name: "batch over size", req: func() *fwksched.InferenceRequest { return newRequest("team-b", 5000, 10) }, enforceLimitsErrors: true, reportOnlyPrio: -10},
+		{name: "critical within contract", req: func() *fwksched.InferenceRequest { return newObjectiveRequest("team-a", 10) }, enforceLimitsPrio: 100},
+		{name: "unlisted team within contract", req: func() *fwksched.InferenceRequest { return newObjectiveRequest("stranger", 10) }, enforceLimitsPrio: 10},
+		{name: "batch within contract", req: func() *fwksched.InferenceRequest { return newObjectiveRequest("team-b", 10) }, enforceLimitsPrio: -10},
+		{name: "critical over size", req: func() *fwksched.InferenceRequest { return newObjectiveRequest("team-a", 5000) }, enforceLimitsPrio: 10},
+		{name: "critical over concurrency", req: func() *fwksched.InferenceRequest { return newObjectiveRequest("team-a", 10) }, setup: 2, enforceLimitsPrio: 10},
+		{name: "batch over size", req: func() *fwksched.InferenceRequest { return newObjectiveRequest("team-b", 5000) }, enforceLimitsErrors: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, mode := range []string{ModeEnforceLimits, ModeReportOnly} {
 				p, _ := newTestPlugin(t, func(params *Parameters) { params.Mode = mode })
 				for range tc.setup {
-					require.NoError(t, p.RequestHeader(t.Context(), newRequest("team-a", 10, 10)))
+					require.NoError(t, p.RequestHeader(t.Context(), newObjectiveRequest("team-a", 10)))
 				}
 				req := tc.req()
 				err := p.RequestHeader(t.Context(), req)
@@ -456,11 +476,11 @@ func TestReportOnlyAndEnforceLimitsSetTheSamePriority(t *testing.T) {
 					continue
 				}
 				require.NoError(t, err)
-				want := tc.enforceLimitsPrio
 				if mode == ModeReportOnly {
-					want = tc.reportOnlyPrio
+					requireUnchanged(t, req, mode)
+					continue
 				}
-				assert.Equal(t, want, servedPriority(req), mode)
+				assert.Equal(t, tc.enforceLimitsPrio, servedPriority(req), mode)
 			}
 		})
 	}
