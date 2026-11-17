@@ -274,7 +274,7 @@ func TestDiscoveryFreshnessLogsPersistentDisagreementAndRecoveryOnce(t *testing.
 	logger := funcr.New(func(_, entry string) { entries = append(entries, entry) }, funcr.Options{Verbosity: 5})
 	ctx := log.IntoContext(t.Context(), logger)
 	d := &DiscoveryFreshness{}
-	mismatch := errors.New("membership differs")
+	mismatch := datastore.MembershipDisagreement{types.NamespacedName{Namespace: "default", Name: "first-rank-0"}: "absent from datastore"}
 	d.observeDisagreement(ctx, mismatch)
 	require.NotContains(t, strings.Join(entries, "\n"), "persists across")
 	d.observeDisagreement(ctx, mismatch)
@@ -283,5 +283,32 @@ func TestDiscoveryFreshnessLogsPersistentDisagreementAndRecoveryOnce(t *testing.
 	d.observeDisagreement(ctx, nil)
 	output := strings.Join(entries, "\n")
 	require.Equal(t, 1, strings.Count(output, "persists across successful samples"))
-	require.Equal(t, 1, strings.Count(output, "agreement recovered"))
+	require.Equal(t, 1, strings.Count(output, "membership disagreement cleared"))
+}
+
+func TestDiscoveryFreshnessDoesNotTreatDifferentEndpointsAsPersistent(t *testing.T) {
+	first := types.NamespacedName{Namespace: "default", Name: "first-rank-0"}
+	for _, second := range []types.NamespacedName{
+		{Namespace: "default", Name: "second-rank-0"},
+		{Namespace: "other", Name: "first-rank-0"},
+		{Namespace: "default", Name: "first-rank-1"},
+	} {
+		t.Run(second.String(), func(t *testing.T) {
+			var entries []string
+			logger := funcr.New(func(_, entry string) { entries = append(entries, entry) }, funcr.Options{Verbosity: 5})
+			ctx := log.IntoContext(t.Context(), logger)
+			d := &DiscoveryFreshness{}
+			d.observeDisagreement(ctx, datastore.MembershipDisagreement{first: "absent from datastore"})
+			d.observeDisagreement(ctx, datastore.MembershipDisagreement{second: "absent from datastore"})
+			require.False(t, d.persistentDisagreement)
+			require.NotContains(t, strings.Join(entries, "\n"), "persists across successful samples")
+			require.Contains(t, strings.Join(entries, "\n"), second.String())
+			require.Contains(t, strings.Join(entries, "\n"), "absent from datastore")
+			d.observeDisagreement(ctx, datastore.MembershipDisagreement{second: "metadata differs"})
+			require.True(t, d.persistentDisagreement, "a repeated endpoint ID persists even if the mismatch reason changes")
+			d.observeDisagreement(ctx, datastore.MembershipDisagreement{first: "absent from API sample"})
+			require.False(t, d.persistentDisagreement, "a new mismatch must not retain the resolved endpoint's state")
+			require.Len(t, d.previousDisagreement, 1)
+		})
+	}
 }

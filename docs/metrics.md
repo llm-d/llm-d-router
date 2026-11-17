@@ -99,8 +99,9 @@ require that listener.
 ## Discovery membership diagnostics
 
 `llm_d_epp_discovery_membership_disagreement` is an alpha gauge without labels.
-It is 1 after at least two consecutive successful Kubernetes samples disagree
-with the watch-driven routing datastore, and resets to 0 on agreement.
+It is 1 when at least one endpoint ID differs from the watch-driven datastore
+in two consecutive successful Kubernetes samples. It resets to 0 when no
+endpoint ID remains mismatched across the latest two successful samples.
 It remains unchanged on failed samples. It is 0 when discovery verification is
 disabled. See [Kubernetes discovery freshness](operations.md#kubernetes-discovery-freshness)
 for configuration, request filtering, and diagnostic logs.

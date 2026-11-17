@@ -1657,3 +1657,24 @@ func TestDiscoveryNotifier_WorksAlongsideDirectUpsert(t *testing.T) {
 	assert.Len(t, eps, 1)
 	assert.Equal(t, "10.0.0.1", eps[0].GetMetadata().Address)
 }
+
+func TestVerifyMembershipReportsEveryDisagreeingEndpoint(t *testing.T) {
+	pool := &datalayer.EndpointPool{Name: "pool", Namespace: "default", TargetPorts: []int{8000}, Selector: labels.SelectorFromSet(labels.Set{"app": "model"})}
+	makePod := func(name string) *corev1.Pod {
+		return fwkk8s.MakePod(name).Namespace("default").Labels(map[string]string{"app": "model"}).ReadyCondition().ObjRef()
+	}
+	changed, withdrawn, added := makePod("changed"), makePod("withdrawn"), makePod("added")
+	ds := NewDatastore(t.Context(), &mockEndpointFactory{}).WithEndpointPool(pool)
+	require.NoError(t, ds.PodUpdateOrAddIfNotExist(t.Context(), changed))
+	require.NoError(t, ds.PodUpdateOrAddIfNotExist(t.Context(), withdrawn))
+	changed.Labels["version"] = "v2"
+	sampled, err := VerifyMembership(ds, pool, []corev1.Pod{*changed, *added})
+	require.Len(t, sampled, 2)
+	var mismatches MembershipDisagreement
+	require.ErrorAs(t, err, &mismatches)
+	require.Equal(t, MembershipDisagreement{
+		createEndpointNamespacedName(changed, 0):   "metadata differs",
+		createEndpointNamespacedName(withdrawn, 0): "absent from API sample",
+		createEndpointNamespacedName(added, 0):     "absent from datastore",
+	}, mismatches)
+}
