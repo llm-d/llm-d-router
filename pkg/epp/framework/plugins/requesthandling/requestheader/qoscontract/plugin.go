@@ -27,6 +27,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
@@ -91,9 +92,13 @@ type hold struct {
 	team        *teamState
 	servedClass string
 	reserved    float64
+	// prompt is the estimated prompt tokens, charged for a stream cut before its usage chunk.
+	prompt float64
 	// committed is true when the request was served within the contract and so holds a
 	// concurrency slot and a daily-budget charge.
 	committed bool
+	// errorStatus is set when the model server answered with a non-2xx status.
+	errorStatus atomic.Bool
 }
 
 // Plugin enforces per-team QoS contracts. See the package README.
@@ -241,7 +246,7 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	team.mu.Unlock()
 
 	contractDecisions.WithLabelValues(team.label, committed.Name, served.Name, decision, reason, p.mode()).Inc()
-	rec := &hold{team: team, servedClass: served.Name, reserved: cost, committed: withinContract}
+	rec := &hold{team: team, servedClass: served.Name, reserved: cost, prompt: float64(prompt), committed: withinContract}
 	// The hold is settled exactly once: by RequestAbandoned when the request leaves the director
 	// before dispatch, otherwise at end of stream, which the handler forces for every dispatched
 	// request, completed or not.
@@ -273,9 +278,10 @@ func setClass(request *scheduling.InferenceRequest, teamID string, class ClassCo
 	}
 }
 
-// ResponseHeader reports the served class and the team's remaining quota.
+// ResponseHeader records whether the model server answered with an error status, for
+// settlement, and in enforce-limits mode reports the served class and the team's remaining quota.
 func (p *Plugin) ResponseHeader(_ context.Context, request *scheduling.InferenceRequest, response *requesthandling.Response, _ *datalayer.EndpointMetadata) {
-	if p.reportOnly || request == nil || response == nil || response.Headers == nil {
+	if request == nil || response == nil || response.Headers == nil {
 		return
 	}
 	v, ok := p.holds.Load(request.RequestID)
@@ -283,6 +289,10 @@ func (p *Plugin) ResponseHeader(_ context.Context, request *scheduling.Inference
 		return
 	}
 	rec := v.(*hold)
+	rec.errorStatus.Store(isErrorStatus(response.Headers))
+	if p.reportOnly {
+		return
+	}
 	response.Headers[ClassHeader] = rec.servedClass
 	for k, val := range p.quotaHeaders(rec.team) {
 		response.Headers[k] = val
@@ -298,30 +308,52 @@ func (p *Plugin) RequestAbandoned(_ context.Context, request *scheduling.Inferen
 	p.finish(request.RequestID, nil)
 }
 
-// ResponseBody settles the reservation against the reported usage at end of stream.
+// ResponseBody settles the reservation at end of stream; see settledCost.
 func (p *Plugin) ResponseBody(_ context.Context, request *scheduling.InferenceRequest, response *requesthandling.Response, _ *datalayer.EndpointMetadata) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}
+	p.finish(request.RequestID, response)
+}
+
+// settledCost returns the weighted tokens a dispatched request is charged at end of stream:
+//   - reported usage is charged as reported, however the stream ended;
+//   - an error status from the model server with no usage is charged nothing;
+//   - a stream cut short (client disconnect, eviction, error) with no usage is charged the prompt
+//     estimate plus the streamed events as output tokens, or nothing when nothing was streamed;
+//   - a natural end with no usage, or a request whose response the EPP does not observe, keeps
+//     the reservation, the only estimate available.
+func (p *Plugin) settledCost(rec *hold, response *requesthandling.Response) float64 {
 	usage := response.Usage
-	p.finish(request.RequestID, &usage)
+	switch {
+	case usage.PromptTokens > 0 || usage.CompletionTokens > 0:
+		return float64(usage.PromptTokens) + p.outputWeight*float64(usage.CompletionTokens)
+	case rec.errorStatus.Load():
+		return 0
+	case response.TerminationCause == requesthandling.TerminationCauseClientDisconnect,
+		response.TerminationCause == requesthandling.TerminationCauseEvicted,
+		response.TerminationCause == requesthandling.TerminationCauseError:
+		if response.StreamedEvents > 0 {
+			return rec.prompt + p.outputWeight*float64(response.StreamedEvents)
+		}
+		return 0
+	default:
+		return rec.reserved
+	}
 }
 
 // finish settles a request exactly once. For a committed request it releases the concurrency slot
-// and settles the daily charge: a nil usage refunds the reservation in full, and a usage with no
-// token counts keeps the reservation.
-func (p *Plugin) finish(requestID string, usage *fwkrequest.Usage) {
+// and settles the daily charge. A nil response, for a request that was never dispatched, refunds
+// the reservation in full.
+func (p *Plugin) finish(requestID string, response *requesthandling.Response) {
 	v, ok := p.holds.LoadAndDelete(requestID)
 	if !ok {
 		return
 	}
 	rec := v.(*hold)
 	actual := 0.0
-	if usage != nil {
-		actual = rec.reserved
-		if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
-			actual = float64(usage.PromptTokens) + p.outputWeight*float64(usage.CompletionTokens)
-		}
+	if response != nil {
+		actual = p.settledCost(rec, response)
 	}
 	team := rec.team
 	if rec.committed {
@@ -386,6 +418,16 @@ func (p *Plugin) quotaHeaders(team *teamState) map[string]string {
 		headers[ConcurrencyRemainingHeader] = strconv.Itoa(max(0, team.cfg.MaxConcurrency-team.inflight))
 	}
 	return headers
+}
+
+// isErrorStatus reports whether the response headers carry a non-2xx HTTP status.
+func isErrorStatus(headers map[string]string) bool {
+	status := headers[":status"]
+	if status == "" {
+		status = headers["status"]
+	}
+	code, err := strconv.Atoi(status)
+	return err == nil && (code < 200 || code >= 300)
 }
 
 // dayNumber identifies the UTC day containing t.

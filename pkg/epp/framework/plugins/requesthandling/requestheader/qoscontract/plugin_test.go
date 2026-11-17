@@ -365,6 +365,59 @@ func TestResponseBody_UsageAboveReservationIsCharged(t *testing.T) {
 	_ = requireCode(t, p.RequestHeader(t.Context(), newRequest("team-d", 1, 1)), errcommon.ResourceExhausted)
 }
 
+// TestSettlementByTerminationCause verifies the charge for each way a dispatched request can
+// end. Each request reserves 100 + 2*100 = 300 weighted tokens.
+func TestSettlementByTerminationCause(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   string // response status; empty sends no response headers
+		cause    fwkrh.TerminationCause
+		prompt   int
+		output   int
+		events   int
+		want     float64
+		wantNote string
+	}{
+		{name: "natural with usage", status: "200", cause: fwkrh.TerminationCauseNatural, prompt: 100, output: 20, want: 140, wantNote: "the reported usage"},
+		{name: "natural without usage", status: "200", cause: fwkrh.TerminationCauseNatural, events: 50, want: 300, wantNote: "the reservation"},
+		{name: "upstream error status", status: "503", cause: fwkrh.TerminationCauseNatural, want: 0, wantNote: "nothing for an error that reports no usage"},
+		{name: "upstream error status with usage", status: "400", cause: fwkrh.TerminationCauseNatural, prompt: 100, want: 100, wantNote: "the reported usage"},
+		{name: "client disconnect mid-stream", status: "200", cause: fwkrh.TerminationCauseClientDisconnect, events: 10, want: 120, wantNote: "the prompt plus the streamed events"},
+		{name: "client disconnect before output", status: "200", cause: fwkrh.TerminationCauseClientDisconnect, want: 0, wantNote: "nothing when nothing was streamed"},
+		{name: "client disconnect with usage", status: "200", cause: fwkrh.TerminationCauseClientDisconnect, prompt: 100, output: 90, events: 10, want: 280, wantNote: "the reported usage"},
+		{name: "evicted before output", cause: fwkrh.TerminationCauseEvicted, want: 0, wantNote: "nothing when nothing was streamed"},
+		{name: "evicted mid-stream", status: "200", cause: fwkrh.TerminationCauseEvicted, events: 5, want: 110, wantNote: "the prompt plus the streamed events"},
+		{name: "error before output", cause: fwkrh.TerminationCauseError, want: 0, wantNote: "nothing when nothing was streamed"},
+		{name: "error mid-stream", status: "200", cause: fwkrh.TerminationCauseError, events: 5, want: 110, wantNote: "the prompt plus the streamed events"},
+		{name: "response not observed", cause: fwkrh.TerminationCauseNotObserved, want: 300, wantNote: "the reservation"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := newTestPlugin(t, nil)
+			req := newRequest("team-d", 100, 100)
+			require.NoError(t, p.RequestHeader(t.Context(), req))
+			if tc.status != "" {
+				p.ResponseHeader(t.Context(), req, &fwkrh.Response{Headers: map[string]string{":status": tc.status}}, nil)
+			}
+			resp := &fwkrh.Response{EndOfStream: true, TerminationCause: tc.cause, StreamedEvents: tc.events}
+			resp.Usage.PromptTokens = tc.prompt
+			resp.Usage.CompletionTokens = tc.output
+			p.ResponseBody(t.Context(), req, resp, nil)
+
+			inflight, daily := usage(p, "team-d")
+			assert.Equal(t, 0, inflight, "the slot is released")
+			assert.InDelta(t, tc.want, daily, 1e-9, "charged %s", tc.wantNote)
+		})
+	}
+}
+
+func TestIsErrorStatus(t *testing.T) {
+	for status, want := range map[string]bool{"200": false, "204": false, "400": true, "429": true, "503": true, "": false, "abc": false} {
+		assert.Equal(t, want, isErrorStatus(map[string]string{":status": status}), status)
+	}
+	assert.True(t, isErrorStatus(map[string]string{"status": "500"}), "the status header is read when :status is absent")
+}
+
 func TestRequestAbandonedRefundsInFull(t *testing.T) {
 	p, _ := newTestPlugin(t, nil)
 	req := newRequest("team-d", 100, 100)
