@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 )
 
 // Mapping holds specifications for the well-known metrics defined
@@ -207,6 +209,11 @@ func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
 	for _, cfg := range configs {
 		if cfg.AttributeKey == "" {
 			errs = append(errs, errors.New("customMetrics entry attributeKey cannot be empty"))
+			continue
+		}
+		if attrmetrics.IsReservedAttributeKey(cfg.AttributeKey) {
+			errs = append(errs, fmt.Errorf(
+				"customMetrics entry attributeKey %q uses a prefix reserved for scalar sample keys", cfg.AttributeKey))
 			continue
 		}
 		if _, ok := seenKeys[cfg.AttributeKey]; ok {
