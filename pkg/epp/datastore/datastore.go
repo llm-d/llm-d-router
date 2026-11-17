@@ -39,6 +39,7 @@ import (
 	apixv1 "github.com/llm-d/llm-d-router/apix/v1"
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -557,7 +558,7 @@ func extractActivePorts(pod *corev1.Pod, targetPorts []int) sets.Set[int] {
 // This ensures consistent naming between PodUpdateOrAddIfNotExist and podResyncAll.
 func createEndpointNamespacedName(pod *corev1.Pod, idx int) types.NamespacedName {
 	return types.NamespacedName{
-		Name:      pod.Name + "-rank-" + strconv.Itoa(idx),
+		Name:      routing.EndpointName(pod.Name, idx),
 		Namespace: pod.Namespace,
 	}
 }

@@ -152,7 +152,7 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			requestFieldRemoteDPRankOverride: true,
 			requestFieldRemoteHandshakePort:  s.config.MoRIIODecodeHandshakePort,
 			requestFieldTransferID:           transferID,
-			"tp_size":                        s.config.MoRIIOTPSize,
+			requestFieldTPSize:               s.config.MoRIIOTPSize,
 			"remote_dp_size":                 s.config.MoRIIODPSize,
 		}
 		// Wide-EP fan-out (prefill request, serial path): remote_hosts must be the
@@ -177,6 +177,21 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 			reqcommon.FieldRemoteBlockIDs:  nil,
 			reqcommon.FieldRemoteHost:      nil,
 			reqcommon.FieldRemotePort:      nil,
+		}
+	}
+
+	// Bidirectional KV transfer: replay the decode-side blocks of this
+	// conversation's previous turn so the prefill engine can read them instead of
+	// recomputing the history. The P2P source below stays on the request: the
+	// engine's MultiConnector takes the first connector that reports a hit and
+	// applies kv_recompute_threshold to the NIXL read itself.
+	reuse := s.newKVReuse(r, body, apiType)
+	replayed := false
+	if reuse != nil {
+		if cached := reuse.take(); cached != nil {
+			replayed = true
+			injectBidirectionalKVParams(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any), cached)
+			logger.V(logging.DEBUG).Info("replaying decode-side kv_transfer_params", "request_id", uuidStr)
 		}
 	}
 
@@ -217,12 +232,27 @@ func (s *Server) handleNIXLV2(w http.ResponseWriter, r *http.Request, prefillPod
 	// reset → 502) are common when the prefill pod's accept queue overflows
 	// under load. Retrying the same host avoids expensive local prefill on
 	// decode. Non-transient errors (500/501) fail immediately.
-	// Every attempt uses the same serialized body, so compare it once.
+	// A retry differs from the first attempt only in kv_transfer_params, which
+	// the comparison does not read, so compare once.
 	toolFields.compareValidatedDispatchedForSpan(pbody, prefillSpan)
 	var pw *bufferedResponseWriter
 	var prefillErr error
 retryLoop:
 	for attempt := 0; ; attempt++ {
+		if attempt > 0 && replayed {
+			// The failed attempt may have read and released the decode-side blocks.
+			dropBidirectionalKVParams(prefillRequest[reqcommon.FieldKVTransferParams].(map[string]any))
+			retryBody, err := json.Marshal(prefillRequest)
+			if err != nil {
+				prefillSpan.End()
+				if err := errorJSONInvalid(w, r, err); err != nil {
+					logger.Error(err, "failed to send error response to client")
+				}
+				return
+			}
+			pbody = retryBody
+			replayed = false
+		}
 		pw = &bufferedResponseWriter{}
 		preq.Body = io.NopCloser(bytes.NewReader(pbody))
 		preq.ContentLength = int64(len(pbody))
@@ -474,7 +504,12 @@ retryLoop:
 		trace.Info("sending request to decoder", logBodyBytesKey, len(dbody))
 	}
 	statusWriter, decodeStatus := captureResponseStatus(w)
-	decodeWriter, finalizeDecodeWriter := decodeResponseWriter(statusWriter, pCachedTokens, rewriteCachedTokens, streamingEnabled)
+	responseWriter := statusWriter
+	var capture *decodeCapture
+	if reuse != nil {
+		responseWriter, capture = newDecodeCapture(statusWriter)
+	}
+	decodeWriter, finalizeDecodeWriter := decodeResponseWriter(responseWriter, pCachedTokens, rewriteCachedTokens, streamingEnabled)
 	decodeReturned := false
 	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq, func() {
@@ -501,6 +536,8 @@ retryLoop:
 	if decodeStatus.failed() {
 		observeStageError(r.Context(), routing.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
+	} else if capture != nil && reuse.store(capture) {
+		logger.V(logging.DEBUG).Info("stored decode-side kv_transfer_params for the next turn", "request_id", uuidStr)
 	}
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())))
 
@@ -615,7 +652,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		requestFieldRemoteDPRankOverride: true,
 		requestFieldRemoteHandshakePort:  s.config.MoRIIODecodeHandshakePort,
 		requestFieldTransferID:           transferID,
-		"tp_size":                        s.config.MoRIIOTPSize,
+		requestFieldTPSize:               s.config.MoRIIOTPSize,
 		"remote_dp_size":                 s.config.MoRIIODPSize,
 	}
 	// Wide-EP fan-out (prefill request): remote_hosts must be the DECODE-side pod
@@ -673,12 +710,12 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		requestFieldRemoteDPRankOverride: true,
 		requestFieldRemoteHandshakePort:  s.config.MoRIIOPrefillHandshakePort,
 		requestFieldTransferID:           transferID,
-		"tp_size":                        s.config.MoRIIOTPSize,
+		requestFieldTPSize:               s.config.MoRIIOTPSize,
 		"remote_dp_size":                 dpLocal,
 		"is_request_leader":              true,
 		// Unlike serial dispatch, this path cannot read the ID from prefill's
 		// response. Supply the shared request ID required by vLLM's NIXL connector.
-		"remote_request_id": uuidStr,
+		requestFieldRemoteRequestID: uuidStr,
 	}
 	// Wide-EP fan-out (decode request): the opposite host list, the PREFILL-side
 	// pod IPs. A multi-pod deployment must set both host flags. Re-resolved per
