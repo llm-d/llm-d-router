@@ -40,7 +40,7 @@ var (
 	chargedTokens = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "qos_charged_tokens_total",
+			Name:      "qos_contract_charged_tokens_total",
 			Help:      metricsutil.HelpMsgWithStability("Weighted tokens consumed by a team, after refunds, by served class.", compbasemetrics.ALPHA),
 		},
 		[]string{"team", "served_class"},
@@ -49,7 +49,7 @@ var (
 	inflightRequests = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "qos_inflight_requests",
+			Name:      "qos_contract_inflight_requests",
 			Help:      metricsutil.HelpMsgWithStability("Requests per team counted against its concurrency commit, from the request header to completion.", compbasemetrics.ALPHA),
 		},
 		[]string{"team"},
