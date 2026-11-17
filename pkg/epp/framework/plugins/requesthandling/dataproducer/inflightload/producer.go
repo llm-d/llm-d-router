@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -108,10 +109,13 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, err
 	}
 
-	return &InFlightLoadProducer{
+	prod := &InFlightLoadProducer{
 		typedName:                 fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:            newConcurrencyTracker(),
 		tokenTracker:              newConcurrencyTracker(),
+		reservationTracker:        newConcurrencyTracker(),
+		reservationTokenTracker:   newConcurrencyTracker(),
+		reservationTouch:          &sync.Map{},
 		tokenEstimator:            NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens),
 		addEstimatedOutputTokens:  cfg.AddEstimatedOutputTokens,
 		dk:                        attrconcurrency.InFlightLoadDataKey.WithNonEmptyProducerName(name),
@@ -120,7 +124,10 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		uncachedRequestTokensSlot: datalayer.NewSlot[*attrconcurrency.UncachedRequestTokens](attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name)),
 		syncCrossReplicaState:     syncCrossReplicaState,
 		PluginState:               fwkplugin.NewPluginState(ctx),
-	}, nil
+	}
+	// Issue #1598: sweep reservations from requests that never dispatch.
+	go prod.sweepReservations(ctx, 10*time.Second)
+	return prod, nil
 }
 
 var (
@@ -138,7 +145,16 @@ type InFlightLoadProducer struct {
 	typedName                fwkplugin.TypedName
 	requestTracker           *concurrencyTracker
 	tokenTracker             *concurrencyTracker
-	tokenEstimator           TokenEstimator
+	// reservationTracker holds pick-time reservations (issue #1598): requests
+	// scheduled but not yet dispatched. Included in the InFlightLoad the
+	// scorers read, so concurrent scheduling cycles see each other's picks.
+	reservationTracker       *concurrencyTracker
+	// reservationTokenTracker holds the reserved uncached-token estimates.
+	reservationTokenTracker *concurrencyTracker
+	// reservationTouch records the last Reserve time per endpoint so the
+	// sweeper can drop reservations from requests that never dispatched.
+	reservationTouch *sync.Map // key: endpointID, value: time.Time
+	tokenEstimator   TokenEstimator
 	addEstimatedOutputTokens bool
 	PluginState              *fwkplugin.PluginState
 	dk                       fwkplugin.DataKey
@@ -368,8 +384,8 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		event.Endpoint.GetAttributes().Put(p.dk, &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
-					Tokens:   p.GetTokens(id),
-					Requests: p.GetRequests(id),
+					Tokens:   p.GetTokens(id) + p.reservationTokenTracker.get(id),
+					Requests: p.GetRequests(id) + p.reservationTracker.get(id),
 				}
 			},
 		})
@@ -467,6 +483,8 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		tokens := p.estimateRequestTokens(endpoint, request, inputTokens)
 
 		tokenCounter := p.tokenTracker.add(eid, tokens)
+		// Convert the pick-time reservation into the real in-flight counters.
+		p.releaseReservation(eid, tokens)
 
 		requestGauge := inflightRequests.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority)
 		tokenGauge := inflightTokens.WithLabelValues(name, namespace, p.typedName.Name, fairnessID, priority)
@@ -774,6 +792,64 @@ func (p *InFlightLoadProducer) GetTokens(eid string) int64 {
 	return p.tokenTracker.get(eid)
 }
 
+// Reserve implements fwksched.EndpointReserver: called by pickers at pick time
+// so concurrent scheduling cycles see the decision immediately (issue #1598).
+// The reservation is converted to the real counters at PreRequest and swept if
+// the request never dispatches.
+func (p *InFlightLoadProducer) Reserve(endpointID string, uncachedTokens int64) {
+	p.reservationTracker.inc(endpointID)
+	p.reservationTokenTracker.add(endpointID, uncachedTokens)
+	p.reservationTouch.Store(endpointID, time.Now())
+}
+
+// ReserveFromEndpoint implements fwksched.EndpointReserver: reserves ep for
+// the request being scheduled, reading the request's uncached-token estimate
+// that the Produce phase recorded on the endpoint.
+func (p *InFlightLoadProducer) ReserveFromEndpoint(ep fwksched.Endpoint) {
+	if ep == nil || ep.GetMetadata() == nil {
+		return
+	}
+	eid := ep.GetMetadata().ID.String()
+	var tokens int64
+	if v, ok := ep.Get(p.uncachedRequestTokensDk); ok {
+		if ut, ok2 := v.(*attrconcurrency.UncachedRequestTokens); ok2 && ut != nil {
+			tokens = ut.Tokens
+		}
+	}
+	p.Reserve(eid, tokens)
+}
+
+// releaseReservation converts one reservation into real in-flight counts
+// (called from PreRequest, right after the real increments).
+func (p *InFlightLoadProducer) releaseReservation(endpointID string, tokens int64) {
+	p.reservationTracker.decrementClamped(endpointID, 1)
+	p.reservationTokenTracker.decrementClamped(endpointID, tokens)
+}
+
+// sweepReservations drops reservations that have not been touched for longer
+// than ttl: they belong to requests that were picked but never dispatched
+// (rejected downstream, stream torn down). Runs until ctx is canceled.
+func (p *InFlightLoadProducer) sweepReservations(ctx context.Context, ttl time.Duration) {
+	ticker := time.NewTicker(ttl / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			p.reservationTouch.Range(func(key, value any) bool {
+				if t, ok := value.(time.Time); ok && now.Sub(t) > ttl {
+					eid := key.(string)
+					p.reservationTracker.delete(eid)
+					p.reservationTokenTracker.delete(eid)
+					p.reservationTouch.Delete(eid)
+				}
+				return true
+			})
+		}
+	}
+}
+
 func (p *InFlightLoadProducer) GetRequests(eid string) int64 {
 	return p.requestTracker.get(eid)
 }
@@ -868,6 +944,18 @@ func decrementClamped(counter *atomic.Int64, delta int64) {
 			return
 		}
 	}
+}
+
+// decrementClamped subtracts delta from the endpoint's counter with a floor at
+// zero, so releasing a reservation can never drive a counter negative.
+func (t *concurrencyTracker) decrementClamped(endpointID string, delta int64) {
+	t.mu.RLock()
+	counter, exists := t.counts[endpointID]
+	t.mu.RUnlock()
+	if !exists {
+		return
+	}
+	decrementClamped(counter, delta)
 }
 
 func (t *concurrencyTracker) delete(endpointID string) {

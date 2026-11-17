@@ -46,7 +46,7 @@ const (
 var _ fwksched.Picker = &MaxScorePicker{}
 
 // MaxScorePickerFactory defines the factory function for MaxScorePicker.
-func MaxScorePickerFactory(name string, rawParameters *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func MaxScorePickerFactory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 	parameters := picker.PickerParameters{MaxNumOfEndpoints: picker.DefaultMaxNumOfEndpoints}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&parameters); err != nil {
@@ -54,7 +54,26 @@ func MaxScorePickerFactory(name string, rawParameters *json.Decoder, _ fwkplugin
 		}
 	}
 
-	return NewMaxScorePicker(parameters.MaxNumOfEndpoints).WithName(name), nil
+	mp := NewMaxScorePicker(parameters.MaxNumOfEndpoints).WithName(name)
+	// Issue #1598: pickers reserve the selected endpoint at pick time through any
+	// registered EndpointReserver (the inflight-load-producer implements it), so
+	// concurrent scheduling cycles observe each pick immediately instead of all
+	// scoring against the same pre-pick snapshot (thundering herd).
+	if handle != nil {
+		mp.reserver = findReserver(handle)
+	}
+	return mp, nil
+}
+
+// findReserver returns the first registered plugin implementing
+// fwksched.EndpointReserver, or nil when none is configured.
+func findReserver(handle fwkplugin.Handle) fwksched.EndpointReserver {
+	for _, pl := range handle.GetAllPlugins() {
+		if r, ok := pl.(fwksched.EndpointReserver); ok {
+			return r
+		}
+	}
+	return nil
 }
 
 // NewMaxScorePicker initializes a new MaxScorePicker and returns its pointer.
@@ -73,11 +92,23 @@ func NewMaxScorePicker(maxNumOfEndpoints int) *MaxScorePicker {
 type MaxScorePicker struct {
 	typedName         fwkplugin.TypedName
 	maxNumOfEndpoints int // maximum number of endpoints to pick
+	// reserver, when non-nil, is notified of each pick so concurrent scheduling
+	// cycles see the decision immediately (issue #1598). May be nil when no
+	// EndpointReserver plugin is configured.
+	reserver fwksched.EndpointReserver
 }
 
 // WithName sets the picker's name
 func (p *MaxScorePicker) WithName(name string) *MaxScorePicker {
 	p.typedName.Name = name
+	return p
+}
+
+// WithReserver wires an EndpointReserver (e.g. the inflight-load-producer) so
+// the picker reserves its selection at pick time (issue #1598). Exported for
+// tests and for programmatic wiring outside the factory path.
+func (p *MaxScorePicker) WithReserver(r fwksched.EndpointReserver) *MaxScorePicker {
+	p.reserver = r
 	return p
 }
 
@@ -128,6 +159,15 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 	targetEndpoints := make([]fwksched.Endpoint, len(scoredEndpoints))
 	for i, scoredEndpoint := range scoredEndpoints {
 		targetEndpoints[i] = scoredEndpoint
+	}
+
+	// Issue #1598: reserve the primary target at pick time so the next
+	// concurrently-scheduled request sees this decision in its scoring input.
+	// The reserver reads the request's uncached-token estimate from the
+	// endpoint's Produce-phase attribute, so both the request count and the
+	// token load are reserved.
+	if p.reserver != nil && len(targetEndpoints) > 0 {
+		p.reserver.ReserveFromEndpoint(targetEndpoints[0])
 	}
 
 	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
