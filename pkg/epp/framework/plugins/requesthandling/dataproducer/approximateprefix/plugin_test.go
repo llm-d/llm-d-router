@@ -31,9 +31,11 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
@@ -196,6 +198,170 @@ func TestPreRequest(t *testing.T) {
 		assert.Empty(t, p.indexer().(*indexer).Get(allHashes[0][0]))
 		assert.NotEmpty(t, p.indexer().(*indexer).Get(allHashes[1][0]))
 		assert.NotEmpty(t, p.indexer().(*indexer).Get(allHashes[2][0]))
+	})
+}
+
+// dispatchPrompt runs Produce and PreRequest for tokenIDs against a decode
+// endpoint and a prefill endpoint, mirroring a P/D scheduling result, and
+// returns the request with its per-prompt block hashes.
+func dispatchPrompt(p *dataProducer, cfg config, decode, prefill fwksched.Endpoint, tokenIDs []uint32) (*fwksched.InferenceRequest, [][]blockHash) {
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "test-model1",
+		Body:        tokenizedBody(tokenIDs),
+	}
+	_ = p.Produce(context.Background(), req, []fwksched.Endpoint{decode, prefill})
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default":                         {TargetEndpoints: []fwksched.Endpoint{decode}},
+			experimentalDefaultPrefillProfile: {TargetEndpoints: []fwksched.Endpoint{prefill}},
+		},
+	}
+	_ = p.PreRequest(context.Background(), req, res)
+	return req, prefixhash.GetBlockHashes(context.Background(), req, cfg.BlockSizeTokens, defaultMaxPrefixBlocks)
+}
+
+// failedResponse is a response delivered in full that carries an error status.
+func failedResponse(requestID string) *fwkrh.Response {
+	return &fwkrh.Response{
+		RequestID:        requestID,
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+		Headers:          map[string]string{reqcommon.PseudoHeaderStatus: "503"},
+	}
+}
+
+func TestPreRequestFailedResponseRollback(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	cfg := config{
+		BlockSizeTokens:        1,
+		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	}
+	decode := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "decode", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	prefill := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "prefill", Namespace: "default"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	decodeID := ServerID(decode.GetMetadata().ID)
+	prefillID := ServerID(prefill.GetMetadata().ID)
+	candidates := []ServerID{decodeID, prefillID}
+
+	t.Run("error status removes the entries from both endpoints", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+		req, hashes := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
+		p.wg.Wait()
+
+		assert.Equal(t, []int{3, 3}, p.indexerInst.MatchLongestPrefix(hashes[0], candidates),
+			"both endpoints hold the prompt before the response")
+
+		p.ResponseBody(context.Background(), req, failedResponse(req.RequestID), nil)
+
+		assert.Equal(t, []int{0, 0}, p.indexerInst.MatchLongestPrefix(hashes[0], candidates),
+			"a request that failed leaves no cached prefix on either endpoint")
+		_, err := plugin.ReadPluginStateKey[*indexUpdateRecord](p.PluginState(), req.RequestID, indexUpdateStateKey)
+		assert.Error(t, err, "the index-update record is released at end of stream")
+	})
+
+	t.Run("stream terminated before its first chunk removes the entries", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+		req, hashes := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
+		p.wg.Wait()
+
+		p.ResponseBody(context.Background(), req, &fwkrh.Response{
+			RequestID:        req.RequestID,
+			StartOfStream:    true,
+			EndOfStream:      true,
+			TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+		}, nil)
+
+		assert.Equal(t, []int{0, 0}, p.indexerInst.MatchLongestPrefix(hashes[0], candidates),
+			"a stream torn down before its first chunk leaves no cached prefix")
+	})
+
+	t.Run("stream terminated after its first chunk keeps the entries", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+		req, hashes := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
+		p.wg.Wait()
+
+		// StartOfStream is false on the final call of a stream that already
+		// delivered a chunk; the model server ran prefill and keeps the blocks.
+		p.ResponseBody(context.Background(), req, &fwkrh.Response{
+			RequestID:        req.RequestID,
+			EndOfStream:      true,
+			TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+		}, nil)
+
+		assert.Equal(t, []int{3, 3}, p.indexerInst.MatchLongestPrefix(hashes[0], candidates),
+			"a client disconnect after the first chunk leaves the prefilled prefix indexed")
+	})
+
+	t.Run("rollback keeps blocks an earlier request contributed", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+		_, hashesA := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
+		p.wg.Wait()
+		reqB, hashesB := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 9})
+		p.wg.Wait()
+		// The prompts share their first two blocks, so request B's Add inserts
+		// only its third block on each endpoint.
+		assert.Equal(t, hashesA[0][0], hashesB[0][0])
+		assert.Equal(t, hashesA[0][1], hashesB[0][1])
+
+		p.ResponseBody(context.Background(), reqB, failedResponse(reqB.RequestID), nil)
+
+		assert.Equal(t, []int{3, 3}, p.indexerInst.MatchLongestPrefix(hashesA[0], candidates),
+			"the earlier request's full prefix stays indexed")
+		assert.Equal(t, []int{2, 2}, p.indexerInst.MatchLongestPrefix(hashesB[0], candidates),
+			"only the failed request's own block is removed")
+	})
+
+	t.Run("successful response keeps the entries", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+		req, hashes := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
+		p.wg.Wait()
+
+		p.ResponseBody(context.Background(), req, &fwkrh.Response{
+			RequestID:        req.RequestID,
+			EndOfStream:      true,
+			TerminationCause: fwkrh.TerminationCauseNatural,
+			Headers:          map[string]string{reqcommon.PseudoHeaderStatus: "200"},
+		}, nil)
+
+		assert.Equal(t, []int{3, 3}, p.indexerInst.MatchLongestPrefix(hashes[0], candidates),
+			"a successful response keeps the indexed prefix")
+	})
+
+	t.Run("rollback wins the race with the async add", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+		req, hashes := dispatchPrompt(p, cfg, decode, prefill, []uint32{7, 8})
+		// No wg.Wait: whether the queued add runs before the rollback or after
+		// it, the prompt must not stay indexed.
+		p.ResponseBody(context.Background(), req, failedResponse(req.RequestID), nil)
+		p.wg.Wait()
+
+		assert.Equal(t, []int{0, 0}, p.indexerInst.MatchLongestPrefix(hashes[0], candidates))
+	})
+
+	t.Run("a distinct prompt keeps its entries", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+		_, hashesA := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
+		reqB, _ := dispatchPrompt(p, cfg, decode, prefill, []uint32{9, 8, 7})
+		p.wg.Wait()
+
+		p.ResponseBody(context.Background(), reqB, failedResponse(reqB.RequestID), nil)
+
+		assert.Equal(t, []int{3, 3}, p.indexerInst.MatchLongestPrefix(hashesA[0], candidates),
+			"rolling back one prompt leaves a distinct prompt indexed")
+	})
+
+	t.Run("synced recent window drops the prompt", func(t *testing.T) {
+		p, _ := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandleWithSyncer())
+		req, _ := dispatchPrompt(p, cfg, decode, prefill, []uint32{1, 2, 3})
+		p.wg.Wait()
+		assert.NotEmpty(t, p.recent.snapshot(decodeID.String()))
+
+		p.ResponseBody(context.Background(), req, failedResponse(req.RequestID), nil)
+
+		assert.Empty(t, p.recent.snapshot(decodeID.String()), "a failed request stops being published to peers")
+		assert.Empty(t, p.recent.snapshot(prefillID.String()))
 	})
 }
 
@@ -1151,4 +1317,65 @@ func TestDumpStateEmpty(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(payload, &got))
 	assert.Equal(t, 0, got.TotalPods)
 	assert.Empty(t, got.Pods)
+}
+
+// TestPrefixPluginMultiModalPrefixMatch covers prompts rendered by vLLM, where
+// every same-size image is the same run of placeholder token IDs and only the
+// feature hash identifies the image. Adopted from #4089.
+func TestPrefixPluginMultiModalPrefixMatch(t *testing.T) {
+	disableMinBlockSizeClamp(t)
+	p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, config{
+		BlockSizeTokens:        4,
+		MaxPrefixBlocksToMatch: defaultMaxPrefixBlocks,
+		LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+	}, testHandle())
+	assert.NoError(t, err)
+
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, fwkdl.NewMetrics(), fwkdl.NewAttributes())
+	endpoints := []fwksched.Endpoint{endpoint}
+
+	// Three 4-token blocks: text in tokens 0-3, a 6-token image in tokens 4-9,
+	// and text in tokens 10-11.
+	const placeholder = 9
+	newReq := func(imageHash string) *fwksched.InferenceRequest {
+		return &fwksched.InferenceRequest{
+			RequestID:   uuid.NewString(),
+			TargetModel: "test-model",
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+					TokenIDs: []uint32{1, 2, 3, 4, placeholder, placeholder, placeholder, placeholder, placeholder, placeholder, 5, 6},
+					MultiModalFeatures: []fwkrequest.MultiModalFeature{
+						{Modality: reqcommon.ModalityImage, Hash: imageHash, Offset: 4, Length: 6},
+					},
+				}}},
+			},
+		}
+	}
+
+	req1 := newReq("image-a")
+	_ = p.Produce(context.Background(), req1, endpoints)
+	_ = p.PreRequest(context.Background(), req1, &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults:     map[string]*fwksched.ProfileRunResult{"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}}},
+	})
+	p.wg.Wait()
+
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType)
+	for _, tc := range []struct {
+		name        string
+		imageHash   string
+		wantMatched int
+	}{
+		{name: "same image matches every block", imageHash: "image-a", wantMatched: 3},
+		{name: "different image matches only the text before it", imageHash: "image-b", wantMatched: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = p.Produce(context.Background(), newReq(tc.imageHash), endpoints)
+			info, ok := endpoint.Get(key)
+			assert.True(t, ok)
+			prefixInfo := info.(*attrprefix.PrefixCacheMatchInfo)
+			assert.Equal(t, tc.wantMatched, prefixInfo.MatchBlocks())
+			assert.Equal(t, 3, prefixInfo.TotalBlocks())
+		})
+	}
 }

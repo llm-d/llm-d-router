@@ -138,8 +138,11 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	}
 	s.logger.Info("server TLS", "tls", s.config.SecureServing, "cert_path", s.config.CertPath)
 
-	// Setup graceful termination (not strictly needed for sidecars)
+	// Serve returns as soon as Shutdown starts, so startHTTP waits on
+	// shutdownDone to keep the process alive while in-flight requests finish.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		s.logger.Info("shutting down")
 
@@ -163,6 +166,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		}
 	}
 
+	<-shutdownDone
 	return nil
 }
 

@@ -1353,7 +1353,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 			name: "chat invalid tools type rejects only tools", path: reqcommon.PathChatCompletions,
 			body:             `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":"private_tool_value","tool_choice":"required","parallel_tool_calls":true}`,
 			wantErrorStatus:  envoyTypePb.StatusCode_BadRequest,
-			wantErrorMessage: "error extracting request body: invalid chat completions request: must have valid messages field",
+			wantErrorMessage: "error extracting request body: invalid chat completions request: tools: cannot unmarshal string into array",
 			wantSurface:      "chat_completions", wantChoice: "required",
 			wantFields: map[string]string{"tools": "rejected"},
 		},
@@ -1361,7 +1361,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 			name: "chat invalid message role does not reject tools", path: reqcommon.PathChatCompletions,
 			body:             `{"model":"m","messages":[{"role":123,"content":"hello"}],"tools":[],"tool_choice":"required"}`,
 			wantErrorStatus:  envoyTypePb.StatusCode_BadRequest,
-			wantErrorMessage: "error extracting request body: invalid chat completions request: must have valid messages field",
+			wantErrorMessage: "error extracting request body: invalid chat completions request: messages.0.role: cannot unmarshal number into string",
 			wantSurface:      "chat_completions", wantChoice: "required",
 		},
 		{
