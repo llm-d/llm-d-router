@@ -24,12 +24,12 @@ import (
 )
 
 const (
-	// ModeEnforceLimits applies contract decisions: it moves traffic outside a contract one class
-	// down, and rejects it in the lowest class.
+	// ModeEnforceLimits applies contract decisions: it serves each team at its class, moves traffic
+	// outside a contract one class down, and rejects it in the lowest class.
 	ModeEnforceLimits = "enforce-limits"
-	// ModeReportOnly serves each team at its committed class and records downgrades and rejections
-	// without applying them. It is the default, so a contract is observed against real traffic
-	// before it is enforced.
+	// ModeReportOnly records the decisions enforce-limits would apply without applying any of them:
+	// a request keeps its InferenceObjective priority and its fairness ID. It is the default, so a
+	// contract is observed against real traffic before it is enforced.
 	ModeReportOnly = "report-only"
 
 	defaultOutputTokenWeight = 2
