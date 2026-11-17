@@ -31,6 +31,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -154,10 +155,14 @@ func TestSGLangPrefillStreamCachedTokensPerIndex(t *testing.T) {
 	for _, index := range []uint32{0, 1, 7} {
 		_, ok := ps.CachedTokens(index)
 		require.False(t, ok, "index %d before record", index)
+		_, ok = ps.PromptTokens(index)
+		require.False(t, ok, "prompt tokens index %d before record", index)
 	}
 	ps.RecordCachedTokens(0, 10)
 	ps.RecordCachedTokens(7, 70)
 	ps.RecordCachedTokens(0, 11) // last value wins
+	ps.RecordPromptTokens(0, 100)
+	ps.RecordPromptTokens(7, 170)
 
 	got, ok := ps.CachedTokens(0)
 	require.True(t, ok)
@@ -166,6 +171,15 @@ func TestSGLangPrefillStreamCachedTokensPerIndex(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint32(70), got)
 	_, ok = ps.CachedTokens(1)
+	require.False(t, ok)
+
+	gotPrompt, ok := ps.PromptTokens(0)
+	require.True(t, ok)
+	require.Equal(t, uint32(100), gotPrompt)
+	gotPrompt, ok = ps.PromptTokens(7)
+	require.True(t, ok)
+	require.Equal(t, uint32(170), gotPrompt)
+	_, ok = ps.PromptTokens(1)
 	require.False(t, ok)
 }
 
@@ -203,26 +217,21 @@ func TestDecodeSGLangGRPC_ClassifiesTransportErrorsAsUpstreamTransport(t *testin
 
 	rec := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
-		RequestID:           "req-transport-1",
-		GRPCGeneratePayload: []byte{},
-		ResponseWriter:      rec,
+		RequestID:      "req-transport-1",
+		GRPC:           &pipeline.SGLangGRPCRequest{Payload: []byte{}},
+		ResponseWriter: rec,
 	}
 	execErr := step.Execute(context.Background(), reqCtx)
 	require.Error(t, execErr)
 	require.Equal(t, coordmetrics.ErrorCodeUpstreamTransport, coordmetrics.ClassifyErrorCode(execErr, pipeline.ClassifyOpts))
 
 	// Truncated mid-frame response before headers commit also classifies as upstream_transport.
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	truncSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	truncSrv := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(reqcommon.HeaderContentType, grpcframe.MediaType)
 		w.WriteHeader(http.StatusOK)
 		// Write an incomplete 5-byte gRPC header (2 bytes) then end stream.
 		_, _ = w.Write([]byte{0x00, 0x01})
 	}))
-	truncSrv.Config.Protocols = protocols
-	truncSrv.Start()
-	t.Cleanup(truncSrv.Close)
 
 	truncGW := gateway.New(config.GatewayConfig{Address: truncSrv.URL})
 	truncStep, err := NewDecodeStep(truncGW, map[string]any{"kv_connector": kv.SGLang})
@@ -230,9 +239,9 @@ func TestDecodeSGLangGRPC_ClassifiesTransportErrorsAsUpstreamTransport(t *testin
 
 	rec2 := httptest.NewRecorder()
 	reqCtx2 := &pipeline.RequestContext{
-		RequestID:           "req-transport-2",
-		GRPCGeneratePayload: []byte{},
-		ResponseWriter:      rec2,
+		RequestID:      "req-transport-2",
+		GRPC:           &pipeline.SGLangGRPCRequest{Payload: []byte{}},
+		ResponseWriter: rec2,
 	}
 	truncErr := truncStep.Execute(context.Background(), reqCtx2)
 	require.Error(t, truncErr)

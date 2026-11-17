@@ -111,11 +111,15 @@ type requestRoute struct {
 // log writes the request's summary line at the default level, so a request can
 // be found by its trace_id without raising the sidecar's verbosity. Stages that
 // did not run are left out.
-func (s *requestSummary) log(logger logr.Logger, route requestRoute, status *responseStatus, elapsed time.Duration) {
+// grpcStatus is the response grpc-status, or "" for a non-gRPC response.
+func (s *requestSummary) log(logger logr.Logger, route requestRoute, status *responseStatus, grpcStatus string, elapsed time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	keysAndValues := []any{"path", route.path, "status", status.statusCode, "duration", elapsed, "decoder", route.decoder}
+	if grpcStatus != "" {
+		keysAndValues = append(keysAndValues, "grpcStatus", grpcStatus)
+	}
 	if route.prefiller != "" {
 		keysAndValues = append(keysAndValues, "prefiller", route.prefiller)
 	}

@@ -43,6 +43,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
@@ -59,6 +60,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 func TestExtractTraceContext(t *testing.T) {
@@ -632,10 +634,52 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 				assert.Equal(t, v, gotSet[k])
 			}
 			// The context is unsampled, so client copies of the attribution handoff are removed too.
-			wantRemoved := slices.Concat(tc.wantRemoved, []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader})
+			wantRemoved := slices.Concat(tc.wantRemoved, clientControlHeaders, []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader})
 			assert.ElementsMatch(t, wantRemoved, mutation.GetRemoveHeaders())
 		})
 	}
+}
+
+// clientControlHeaders are the input control and output injection names,
+// aliases included, that generateHeaders leaves unset on an unsampled request.
+var clientControlHeaders = sets.List(request.InputControlHeaders.
+	Union(request.OutputInjectionHeaders).
+	Difference(sets.New(
+		metadata.DestinationEndpointKey,
+		tracing.FairnessIDHandoffHeader,
+		tracing.FairnessSourceHandoffHeader,
+	)))
+
+// Envoy keeps a client header unless the mutation removes it, so a client copy
+// of a control or injection name reaches the model server unless it is listed
+// in RemoveHeaders.
+func TestGenerateRequestHeaderResponse_RemovesClientControlHeaders(t *testing.T) {
+	t.Parallel()
+
+	headers := map[string]string{metadata.DestinationEndpointKey: "9.9.9.9:1"}
+	for _, h := range clientControlHeaders {
+		headers[h] = "client-value"
+	}
+	reqCtx := &RequestContext{
+		TargetEndpoint: "1.2.3.4:8080",
+		Request:        &Request{Headers: headers},
+		Response:       &Response{},
+	}
+
+	mutation := (&StreamingServer{}).generateRequestHeaderResponse(context.Background(), reqCtx).
+		GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+	gotSet := make(map[string]string)
+	for _, h := range mutation.GetSetHeaders() {
+		gotSet[h.Header.Key] = string(h.Header.RawValue)
+	}
+	for _, h := range clientControlHeaders {
+		assert.Contains(t, mutation.GetRemoveHeaders(), h)
+		assert.NotContains(t, gotSet, h)
+	}
+	// EPP replaces the client's destination, so the name is set and not removed.
+	assert.Equal(t, "1.2.3.4:8080", gotSet[metadata.DestinationEndpointKey])
+	assert.NotContains(t, mutation.GetRemoveHeaders(), metadata.DestinationEndpointKey)
 }
 
 func TestFallbackToRandomEndpoint(t *testing.T) {
@@ -1353,7 +1397,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 			name: "chat invalid tools type rejects only tools", path: reqcommon.PathChatCompletions,
 			body:             `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":"private_tool_value","tool_choice":"required","parallel_tool_calls":true}`,
 			wantErrorStatus:  envoyTypePb.StatusCode_BadRequest,
-			wantErrorMessage: "error extracting request body: invalid chat completions request: must have valid messages field",
+			wantErrorMessage: "error extracting request body: invalid chat completions request: tools: cannot unmarshal string into array",
 			wantSurface:      "chat_completions", wantChoice: "required",
 			wantFields: map[string]string{"tools": "rejected"},
 		},
@@ -1361,7 +1405,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 			name: "chat invalid message role does not reject tools", path: reqcommon.PathChatCompletions,
 			body:             `{"model":"m","messages":[{"role":123,"content":"hello"}],"tools":[],"tool_choice":"required"}`,
 			wantErrorStatus:  envoyTypePb.StatusCode_BadRequest,
-			wantErrorMessage: "error extracting request body: invalid chat completions request: must have valid messages field",
+			wantErrorMessage: "error extracting request body: invalid chat completions request: messages.0.role: cannot unmarshal number into string",
 			wantSurface:      "chat_completions", wantChoice: "required",
 		},
 		{
