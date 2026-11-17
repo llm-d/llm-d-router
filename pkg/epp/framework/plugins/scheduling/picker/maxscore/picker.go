@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -58,10 +59,12 @@ func MaxScorePickerFactory(name string, rawParameters *json.Decoder, handle fwkp
 	// Issue #1598: pickers reserve the selected endpoint at pick time through any
 	// registered EndpointReserver (the inflight-load-producer implements it), so
 	// concurrent scheduling cycles observe each pick immediately instead of all
-	// scoring against the same pre-pick snapshot (thundering herd).
-	if handle != nil {
-		mp.reserver = findReserver(handle)
-	}
+	// scoring against the same pre-pick snapshot (thundering herd). The handle is
+	// retained and the reserver resolved lazily at first pick: at factory time,
+	// plugins instantiated later in the config (e.g. the producer listed after
+	// this picker) are not registered yet, and resolving eagerly would silently
+	// leave the reservation path inactive.
+	mp.handle = handle
 	return mp, nil
 }
 
@@ -92,6 +95,12 @@ func NewMaxScorePicker(maxNumOfEndpoints int) *MaxScorePicker {
 type MaxScorePicker struct {
 	typedName         fwkplugin.TypedName
 	maxNumOfEndpoints int // maximum number of endpoints to pick
+	// handle is retained from the factory to resolve the reserver lazily at
+	// first pick (issue #1598): plugins listed after this picker in the config
+	// are not yet registered at factory time. Nil when constructed directly.
+	handle fwkplugin.Handle
+	// mu guards reserver for concurrent Pick calls.
+	mu sync.RWMutex
 	// reserver, when non-nil, is notified of each pick so concurrent scheduling
 	// cycles see the decision immediately (issue #1598). May be nil when no
 	// EndpointReserver plugin is configured.
@@ -108,8 +117,28 @@ func (p *MaxScorePicker) WithName(name string) *MaxScorePicker {
 // the picker reserves its selection at pick time (issue #1598). Exported for
 // tests and for programmatic wiring outside the factory path.
 func (p *MaxScorePicker) WithReserver(r fwksched.EndpointReserver) *MaxScorePicker {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.reserver = r
 	return p
+}
+
+// getReserver returns the configured EndpointReserver, resolving it lazily
+// through the plugin handle on first use (and retrying while nil, since plugins
+// may register after the first pick).
+func (p *MaxScorePicker) getReserver() fwksched.EndpointReserver {
+	p.mu.RLock()
+	r := p.reserver
+	p.mu.RUnlock()
+	if r != nil || p.handle == nil {
+		return r
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reserver == nil {
+		p.reserver = findReserver(p.handle)
+	}
+	return p.reserver
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
@@ -166,8 +195,8 @@ func (p *MaxScorePicker) Pick(ctx context.Context, scoredEndpoints []*fwksched.S
 	// The reserver reads the request's uncached-token estimate from the
 	// endpoint's Produce-phase attribute, so both the request count and the
 	// token load are reserved.
-	if p.reserver != nil && len(targetEndpoints) > 0 {
-		p.reserver.ReserveFromEndpoint(targetEndpoints[0])
+	if r := p.getReserver(); r != nil && len(targetEndpoints) > 0 {
+		r.ReserveFromEndpoint(targetEndpoints[0])
 	}
 
 	return &fwksched.ProfileRunResult{TargetEndpoints: targetEndpoints}
