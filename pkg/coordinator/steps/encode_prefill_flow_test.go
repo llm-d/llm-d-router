@@ -296,6 +296,8 @@ func TestEncodeToPrefill_DeduplicatesRepeatedHashes(t *testing.T) {
 	if _, ok := ecParams["same-hash"]; !ok {
 		t.Errorf("prefill EC transfer params missing same-hash: %v", ecParams)
 	}
+	t.Logf("encode fanout=%d, repeated-hash requests=%d, empty-hash requests=%d, prefill descriptors=%d",
+		reqCtx.EncodeFanout, requests["same-hash"], requests[""], len(ecParams))
 }
 
 // TestEncodeToPrefill_PartialECResponse verifies that when only some encoders
