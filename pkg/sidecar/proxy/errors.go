@@ -23,8 +23,6 @@ import (
 	"net/http"
 	"strings"
 
-	"google.golang.org/grpc/codes"
-
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
@@ -76,7 +74,7 @@ func errorInternalServerError(w http.ResponseWriter, r *http.Request, err error)
 // requests receive a trailers-only gRPC status response.
 func sendError(w http.ResponseWriter, r *http.Request, status int, msg string) error {
 	if isGRPCRequest(r) {
-		grpcframe.WriteError(w, httpStatusToGRPCCode(status), msg)
+		grpcframe.WriteError(w, grpcframe.LocalHTTPStatusToCode(status), msg)
 		return nil
 	}
 	path := ""
@@ -112,22 +110,4 @@ func isGRPCRequest(r *http.Request) bool {
 		return true
 	}
 	return isVLLMGRPCRequest(r)
-}
-
-// httpStatusToGRPCCode maps statuses emitted by sidecar-local sendError calls
-// to gRPC codes. Local 500 errors map to Internal rather than retryable
-// Unavailable, while upstream HTTP transport errors on gRPC legs are relayed directly.
-func httpStatusToGRPCCode(status int) codes.Code {
-	switch status {
-	case http.StatusBadRequest:
-		return codes.InvalidArgument
-	case http.StatusForbidden:
-		return codes.PermissionDenied
-	case http.StatusBadGateway, http.StatusServiceUnavailable:
-		return codes.Unavailable
-	case http.StatusGatewayTimeout:
-		return codes.DeadlineExceeded
-	default:
-		return codes.Internal
-	}
 }

@@ -410,6 +410,83 @@ func ReadUnaryRequest(r *http.Request, maxFrameBytes int64) ([]byte, codes.Code,
 	return frame, codes.OK, nil
 }
 
+// ReadErrorMessage returns a client-safe gRPC status message for an error
+// returned by ReadUnaryRequest, hiding internal network read details.
+func ReadErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, ErrCompressed):
+		return ErrCompressed.Error()
+	case errors.Is(err, ErrTooLarge):
+		return ErrTooLarge.Error()
+	case errors.Is(err, ErrMalformed):
+		return ErrMalformed.Error()
+	default:
+		return "failed to read request body"
+	}
+}
+
+// UpstreamHTTPStatusToCode maps an HTTP status returned by an upstream proxy or
+// gateway leg to a gRPC status code per the gRPC HTTP-to-gRPC specification
+// (for example, 404/405 -> Unimplemented and unmapped 5xx -> Unavailable).
+func UpstreamHTTPStatusToCode(status int) codes.Code {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		return codes.InvalidArgument
+	case http.StatusUnauthorized:
+		return codes.Unauthenticated
+	case http.StatusForbidden:
+		return codes.PermissionDenied
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		return codes.Unimplemented
+	case http.StatusRequestEntityTooLarge, http.StatusTooManyRequests:
+		return codes.ResourceExhausted
+	case http.StatusGatewayTimeout:
+		return codes.DeadlineExceeded
+	default:
+		return codes.Unavailable
+	}
+}
+
+// LocalHTTPStatusToCode maps an HTTP status produced by a local handler error
+// helper to a gRPC status code. Local 500 errors map to Internal rather than
+// retryable Unavailable, while local 502/503 proxy failures map to Unavailable.
+func LocalHTTPStatusToCode(status int) codes.Code {
+	switch status {
+	case http.StatusBadRequest:
+		return codes.InvalidArgument
+	case http.StatusForbidden:
+		return codes.PermissionDenied
+	case http.StatusBadGateway, http.StatusServiceUnavailable:
+		return codes.Unavailable
+	case http.StatusGatewayTimeout:
+		return codes.DeadlineExceeded
+	default:
+		return codes.Internal
+	}
+}
+
+// NewH2CAwareTransport wraps base so requests with a gRPC Content-Type use
+// unencrypted HTTP/2 (h2c) while standard HTTP requests keep base.
+func NewH2CAwareTransport(base *http.Transport) http.RoundTripper {
+	h2c := base.Clone()
+	h2cProtocols := new(http.Protocols)
+	h2cProtocols.SetUnencryptedHTTP2(true)
+	h2c.Protocols = h2cProtocols
+	return &h2cAwareTransport{http1: base, h2c: h2c}
+}
+
+type h2cAwareTransport struct {
+	http1 http.RoundTripper
+	h2c   http.RoundTripper
+}
+
+func (rt *h2cAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if IsContentType(req.Header.Get(reqcommon.HeaderContentType)) {
+		return rt.h2c.RoundTrip(req)
+	}
+	return rt.http1.RoundTrip(req)
+}
+
 // ParsePayload extracts the message payload from a single uncompressed gRPC frame.
 func ParsePayload(data []byte) ([]byte, error) {
 	msgLen, err := parseFrameHeader(data)
