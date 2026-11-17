@@ -1192,17 +1192,36 @@ func TestDetector_EndpointOverrides(t *testing.T) {
 
 	t.Run("hybrid saturation uses per-endpoint ratios", func(t *testing.T) {
 		t.Parallel()
-		reg := newLocalRegistry()
-		ctx := t.Context()
 		hybrid := *cfg
 		hybrid.mode = modeHybrid
-		d := newDetector("overrides-hybrid", hybrid, logr.Discard())
-		big := newFakeEndpoint(reg, "big")
-		big.GetMetadata().Labels = bigLabels
+		// Hybrid is the larger of the per-endpoint average and the aggregate ratio. With
+		// capacities 10 and 30 the two differ, and each case lets a different term win.
+		for _, tc := range []struct {
+			name       string
+			small, big int
+			want       float64
+		}{
+			// Average (1.0 + 0) / 2 = 0.5; aggregate 10 / 40 = 0.25.
+			{name: "small endpoint full", small: 10, big: 0, want: 0.5},
+			// Average (0 + 1.0) / 2 = 0.5; aggregate 30 / 40 = 0.75.
+			{name: "big endpoint full", small: 0, big: 30, want: 0.75},
+			// Average (0.5 + 0.5) / 2 = 0.5; aggregate 20 / 40 = 0.5.
+			{name: "both half full", small: 5, big: 15, want: 0.5},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				reg := newLocalRegistry()
+				ctx := t.Context()
+				d := newDetector("overrides-hybrid", hybrid, logr.Discard())
+				small := newFakeEndpoint(reg, "small")
+				big := newFakeEndpoint(reg, "big")
+				big.GetMetadata().Labels = bigLabels
 
-		driveLoad(ctx, reg, d, "big", 15)
-		// 15 / 30 for the single endpoint, and 15 / 30 in aggregate.
-		require.InDelta(t, 0.5, d.Saturation(ctx, []datalayer.Endpoint{big}), 1e-9)
+				driveLoad(ctx, reg, d, "small", tc.small)
+				driveLoad(ctx, reg, d, "big", tc.big)
+				require.InDelta(t, tc.want, d.Saturation(ctx, []datalayer.Endpoint{small, big}), 1e-9)
+			})
+		}
 	})
 
 	t.Run("filter applies the matched limit", func(t *testing.T) {

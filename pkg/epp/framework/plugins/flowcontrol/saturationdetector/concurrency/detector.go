@@ -101,6 +101,15 @@ func newDetector(name string, cfg config, logger logr.Logger) *detector {
 			"headroom", cfg.headroom,
 			"effectiveBurst", fmt.Sprintf("%.0f%%", cfg.headroom*100))
 	}
+	// A selector that matches no pod fails silently to the pool-level values, so the resolved
+	// selectors are logged for comparison against the pod labels.
+	for i, o := range cfg.endpointOverrides {
+		pluginLogger.Info("Endpoint override",
+			"index", i,
+			"selector", o.selector.String(),
+			"maxConcurrency", o.maxConcurrency,
+			"maxTokenConcurrency", o.maxTokenConcurrency)
+	}
 
 	return &detector{
 		config:                       cfg,
