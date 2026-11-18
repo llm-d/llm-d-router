@@ -30,6 +30,7 @@ import (
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
@@ -48,7 +49,13 @@ const (
 // excluded) with KV-event prefill completion on. The name isolates the
 // completion counter's label series per test.
 func newKVEventsProducer(t testing.TB, name string) *InFlightLoadProducer {
-	raw, err := json.Marshal(Config{PrefillCompletionFromKVEvents: true})
+	p, _ := newBoundProducer(t, name)
+	return p
+}
+
+// newBoundProducer builds a producer bound to a kv-events-source named "events".
+func newBoundProducer(t testing.TB, name string) (*InFlightLoadProducer, *srckvevents.Source) {
+	raw, err := json.Marshal(Config{KVEventsSourceRef: "events"})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -56,9 +63,47 @@ func newKVEventsProducer(t testing.TB, name string) *InFlightLoadProducer {
 	prefillCompletions.DeleteLabelValues(name, signalKVEvent)
 	prefillCompletions.DeleteLabelValues(name, signalFirstByte)
 	prefillPending.DeleteLabelValues(name)
-	p, err := InFlightLoadProducerFactory(name, json.NewDecoder(bytes.NewReader(raw)), testutils.NewTestHandle(ctx))
+	cfg := kvevents.DefaultConfig()
+	cfg.PodDiscoveryConfig.PodLabelSelector = ""
+	source, err := srckvevents.New(ctx, "events", cfg)
 	require.NoError(t, err)
-	return p.(*InFlightLoadProducer)
+	handle := testutils.NewTestHandle(ctx)
+	handle.AddPlugin("events", source)
+	p, err := InFlightLoadProducerFactory(name, json.NewDecoder(bytes.NewReader(raw)), handle)
+	require.NoError(t, err)
+	return p.(*InFlightLoadProducer), source
+}
+
+func TestKVEventsSourceRefBindsTheProducer(t *testing.T) {
+	p, source := newBoundProducer(t, "bound")
+	require.True(t, p.prefillFromKVEvents)
+	state, err := source.DumpState()
+	require.NoError(t, err)
+	require.Contains(t, string(state), `"consumers":["`+p.TypedName().String()+`"]`)
+}
+
+func TestKVEventsSourceRefFailsStartupWhenMisconfigured(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	handle := testutils.NewTestHandle(ctx)
+	handle.AddPlugin("other", &stubPlugin{name: "other"})
+	for name, tc := range map[string]struct{ ref, want string }{
+		"unknown plugin":    {"missing", "no plugin with the name 'missing'"},
+		"wrong plugin type": {"other", "not an instance of *kvevents.Source"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(Config{KVEventsSourceRef: tc.ref})
+			require.NoError(t, err)
+			_, err = InFlightLoadProducerFactory("misconfigured", json.NewDecoder(bytes.NewReader(raw)), handle)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+type stubPlugin struct{ name string }
+
+func (s *stubPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "stub", Name: s.name}
 }
 
 func newEventEndpoint(name, role, address string) *stubSchedulingEndpoint {

@@ -38,6 +38,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
@@ -73,19 +74,32 @@ type Config struct {
 	// synchronized across EPP replicas when a cross-replica syncer is configured.
 	// Unset defaults to true; set false to keep the load local to this replica.
 	SyncCrossReplicaState *bool `json:"syncCrossReplicaState,omitempty"`
-	// PrefillCompletionFromKVEvents stamps each request with a session id the
-	// engines echo on their KV events and releases the request's prefill load
-	// when the engine that decodes the request has stored the prompt's last
-	// full block, or a block beyond the prompt when the stamp is the request's
-	// own: the decode engine after pulling the blocks in disaggregated
-	// serving, the computing engine otherwise. The producer must be bound to a
-	// kv-events-source covering those engines. The first response byte remains
-	// the fallback release.
-	PrefillCompletionFromKVEvents bool `json:"prefillCompletionFromKVEvents,omitempty"`
+	// KVEventsSourceRef names the kv-events-source covering the engines that
+	// decode the requests. With it set, the producer stamps each request with
+	// a session id the engines echo on their KV events and releases the
+	// request's prefill load when the engine that decodes the request has
+	// stored the prompt's last full block, or a block beyond the prompt when
+	// the stamp is the request's own: the decode engine after pulling the
+	// blocks in disaggregated serving, the computing engine otherwise. The
+	// first response byte remains the fallback release.
+	KVEventsSourceRef string `json:"kvEventsSourceRef,omitempty" pluginRef:""`
 }
 
 func defaultConfig() Config {
 	return Config{AddEstimatedOutputTokens: false}
+}
+
+// ConfigParser decodes the producer parameters over their defaults. The
+// loader uses it to order the producer after the plugin kvEventsSourceRef
+// names.
+func ConfigParser(decoder *json.Decoder, _ fwkplugin.Handle) (any, error) {
+	cfg := defaultConfig()
+	if decoder != nil {
+		if err := decoder.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("failed to decode inflight-load-producer parameters: %w", err)
+		}
+	}
+	return cfg, nil
 }
 
 func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
@@ -97,10 +111,16 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		ctx = context.Background()
 	}
 
-	cfg := defaultConfig()
-	if decoder != nil {
-		if err := decoder.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("failed to decode inflight-load-producer parameters: %w", err)
+	parsed, err := ConfigParser(decoder, handle)
+	if err != nil {
+		return nil, err
+	}
+	cfg := parsed.(Config)
+
+	var source *srckvevents.Source
+	if cfg.KVEventsSourceRef != "" {
+		if source, err = fwkplugin.PluginByType[*srckvevents.Source](handle, cfg.KVEventsSourceRef); err != nil {
+			return nil, fmt.Errorf("inflight-load-producer kvEventsSourceRef: %w", err)
 		}
 	}
 
@@ -117,7 +137,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, err
 	}
 
-	return &InFlightLoadProducer{
+	p := &InFlightLoadProducer{
 		typedName:                 fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:            newConcurrencyTracker(),
 		tokenTracker:              newConcurrencyTracker(),
@@ -129,9 +149,15 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		uncachedRequestTokensSlot: datalayer.NewSlot[*attrconcurrency.UncachedRequestTokens](attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name)),
 		syncCrossReplicaState:     syncCrossReplicaState,
 		PluginState:               fwkplugin.NewPluginState(ctx),
-		prefillFromKVEvents:       cfg.PrefillCompletionFromKVEvents,
+		prefillFromKVEvents:       source != nil,
 		watch:                     newPrefillWatch(prefillPending.WithLabelValues(name)),
-	}, nil
+	}
+	if source != nil {
+		if err := source.AddConsumer(p.TypedName(), p); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
 }
 
 var (
@@ -611,7 +637,7 @@ func (p *InFlightLoadProducer) ResponseBody(
 	}
 
 	// The first response byte means the prefill worker has finished and handed
-	// off. It is the fallback completion signal; with PrefillCompletionFromKVEvents
+	// off. It is the fallback completion signal; with KVEventsSourceRef
 	// the engine's store events usually report completion before it.
 	if resp.StartOfStream {
 		p.onPrefillComplete(ctx, request.RequestID, result, signalFirstByte)
