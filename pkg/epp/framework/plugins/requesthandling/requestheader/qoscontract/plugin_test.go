@@ -302,6 +302,52 @@ func TestRequestHeader_OverDailyCommitDowngradesOneClass(t *testing.T) {
 	assert.Equal(t, 100, servedPriority(next), "the budget resets at the UTC day boundary")
 }
 
+// TestSettlementAcrossMidnight verifies that a reservation made before 00:00 UTC and settled
+// after it does not move the new day's budget. Each request reserves 100 + 2*100 = 300.
+func TestSettlementAcrossMidnight(t *testing.T) {
+	cases := []struct {
+		name       string
+		prompt     int
+		completion int
+	}{
+		{name: "refund", prompt: 100, completion: 20},   // settles at 140
+		{name: "overrun", prompt: 900, completion: 400}, // settles at 1700
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, clock := newTestPlugin(t, nil)
+			clock.t = time.Date(2026, 10, 22, 23, 59, 0, 0, time.UTC)
+			a := newRequest("team-d", 100, 100)
+			require.NoError(t, p.RequestHeader(t.Context(), a))
+
+			clock.t = clock.t.Add(2 * time.Minute) // 00:01, the next UTC day
+			b := newRequest("team-d", 100, 100)
+			require.NoError(t, p.RequestHeader(t.Context(), b))
+			_, daily := usage(p, "team-d")
+			require.InDelta(t, 300, daily, 1e-9, "the new day holds only b's reservation")
+
+			complete(p, a, tc.prompt, tc.completion)
+			inflight, daily := usage(p, "team-d")
+			assert.Equal(t, 1, inflight, "a's slot is released")
+			assert.InDelta(t, 300, daily, 1e-9, "a's settlement does not move the new day's budget")
+		})
+	}
+
+	t.Run("settled after midnight before the next request", func(t *testing.T) {
+		p, clock := newTestPlugin(t, nil)
+		clock.t = time.Date(2026, 10, 22, 23, 59, 0, 0, time.UTC)
+		a := newRequest("team-d", 100, 100)
+		require.NoError(t, p.RequestHeader(t.Context(), a))
+		clock.t = clock.t.Add(2 * time.Minute)
+		complete(p, a, 100, 20)
+
+		b := newRequest("team-d", 100, 100)
+		require.NoError(t, p.RequestHeader(t.Context(), b))
+		_, daily := usage(p, "team-d")
+		assert.InDelta(t, 300, daily, 1e-9, "the new day starts from zero")
+	})
+}
+
 func TestRequestHeader_LowestClassOverConcurrencyRejects(t *testing.T) {
 	p, _ := newTestPlugin(t, nil)
 	first := newRequest("team-b", 10, 10)
