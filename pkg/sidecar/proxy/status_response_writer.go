@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -177,9 +178,11 @@ func (s *responseStatus) failed() bool {
 //   - abort():  discard the buffered output and drop every subsequent write, so
 //     a failed prefill can never let decode emit a (possibly 200) response; the
 //     caller then writes the prefill error to the client directly.
+//   - flushTrailers(): copy post-WriteHeader trailers buffered before commit
+//     to dst. Call once after the decode goroutine exits.
 //
-// It is safe for concurrent use by the decode goroutine (Write/WriteHeader/
-// Flush) and the coordinating goroutine (commit/abort).
+// It is safe for concurrent use by the decode goroutine (Header/Write/
+// WriteHeader/Flush) and the coordinating goroutine (commit/abort).
 type deferredCommitWriter struct {
 	dst http.ResponseWriter
 
@@ -197,7 +200,12 @@ type deferredCommitWriter struct {
 	writeFailed bool
 	statusCode  int
 	header      http.Header
-	buffer      bytes.Buffer
+	// trailers stores headers written after WriteHeader or Write while buffering,
+	// such as HTTP/2 trailers copied by httputil.ReverseProxy. Keeping them out
+	// of header lets flushCommitLocked read header without racing with
+	// ReverseProxy trailer writes.
+	trailers http.Header
+	buffer   bytes.Buffer
 }
 
 func newDeferredCommitWriter() *deferredCommitWriter {
@@ -210,10 +218,17 @@ func (w *deferredCommitWriter) Header() http.Header {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// Once decode's headers have been relayed, hand back the real writer's
-	// header map. Until then (buffering, or committed but decode hasn't emitted
-	// its header yet) collect into our own map so we can relay it verbatim.
+	// header map. After WriteHeader or Write freezes initial headers, route
+	// later writes (trailers) to trailers so header stays immutable for
+	// flushCommitLocked.
 	if w.headerFlushed {
 		return w.dst.Header()
+	}
+	if w.wroteHeader {
+		if w.trailers == nil {
+			w.trailers = make(http.Header)
+		}
+		return w.trailers
 	}
 	return w.header
 }
@@ -222,6 +237,9 @@ func (w *deferredCommitWriter) WriteHeader(statusCode int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.aborted {
+		return
+	}
+	if statusCode >= http.StatusContinue && statusCode < http.StatusOK && statusCode != http.StatusSwitchingProtocols {
 		return
 	}
 	if !w.wroteHeader {
@@ -266,11 +284,12 @@ func (w *deferredCommitWriter) Write(b []byte) (int, error) {
 func (w *deferredCommitWriter) Flush() {
 	w.mu.Lock()
 	streaming := w.headerFlushed && !w.aborted
+	dst := w.dst
 	w.mu.Unlock()
 	if !streaming {
 		return
 	}
-	if f, ok := w.dst.(http.Flusher); ok {
+	if f, ok := dst.(http.Flusher); ok {
 		f.Flush()
 	}
 }
@@ -284,7 +303,7 @@ func (w *deferredCommitWriter) flushCommitLocked() {
 	}
 	dstHeader := w.dst.Header()
 	for key, values := range w.header {
-		dstHeader[key] = values
+		dstHeader[key] = slices.Clone(values)
 	}
 	status := w.statusCode
 	if status == 0 {
@@ -301,6 +320,22 @@ func (w *deferredCommitWriter) flushCommitLocked() {
 	if f, ok := w.dst.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// flushTrailers copies post-WriteHeader headers (such as HTTP/2 trailers) that
+// were buffered before commit into dst. Call only after the decode goroutine
+// exits so no concurrent Header() writes remain in flight.
+func (w *deferredCommitWriter) flushTrailers() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.headerFlushed || len(w.trailers) == 0 {
+		return
+	}
+	dstHeader := w.dst.Header()
+	for key, values := range w.trailers {
+		dstHeader[key] = append(slices.Clone(values), dstHeader[key]...)
+	}
+	clear(w.trailers)
 }
 
 // commit allows decode's response to reach dst, preserving decode's own
@@ -347,7 +382,7 @@ func (w *deferredCommitWriter) abort() {
 func (w *deferredCommitWriter) failed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if isHTTPError(w.statusCode) || w.writeFailed || grpcframe.HasErrorStatus(w.header) {
+	if isHTTPError(w.statusCode) || w.writeFailed || grpcframe.HasErrorStatus(w.header) || grpcframe.HasErrorStatus(w.trailers) {
 		return true
 	}
 	return w.headerFlushed && grpcframe.HasErrorStatus(w.dst.Header())
