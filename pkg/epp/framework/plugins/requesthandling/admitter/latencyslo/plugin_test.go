@@ -19,8 +19,11 @@ package latencyslo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
@@ -37,6 +40,7 @@ func makeLatencyAdmissionEndpoint(name string, kvCache float64, runningRequests 
 		&fwkdl.Metrics{
 			KVCacheUsagePercent: kvCache,
 			RunningRequestsSize: runningRequests,
+			UpdateTime:          time.Now(),
 		},
 		nil,
 	)
@@ -265,5 +269,45 @@ func TestAdmitNonFiniteSLOHeaders(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A never-scraped endpoint carries a zero-value metrics snapshot. Its zero KV
+// usage, zero running requests and the prediction made from them are not
+// observations, so they must not let a sheddable request through.
+func TestAdmitIgnoresNeverScrapedEndpoints(t *testing.T) {
+	raw, err := LatencyAdmissionFactory("latency-admitter", json.NewDecoder(strings.NewReader(`{}`)), nil)
+	if err != nil {
+		t.Fatalf("LatencyAdmissionFactory() error = %v", err)
+	}
+	plugin, ok := raw.(*LatencyAdmission)
+	if !ok {
+		t.Fatalf("LatencyAdmissionFactory() returned %T, want *LatencyAdmission", raw)
+	}
+
+	busy := makeLatencyAdmissionEndpoint("busy", 0.5, 5)
+	busy.Put(attrlatency.LatencyPredictionInfoDataKey,
+		attrlatency.NewLatencyPredictionInfo(false, false, -50, -10, 150, 40, 0))
+	// The predictor sees the same zero-value metrics, so its prediction for a
+	// never-scraped endpoint looks valid.
+	neverScraped := fwksched.NewEndpoint(
+		&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "never-scraped"}},
+		fwkdl.NewMetrics(),
+		nil,
+	)
+	neverScraped.Put(attrlatency.LatencyPredictionInfoDataKey,
+		attrlatency.NewLatencyPredictionInfo(true, true, 50, 10, 50, 20, 0))
+
+	err = plugin.Admit(context.Background(), makeSheddableRequest("100", "30"),
+		[]fwksched.Endpoint{busy, neverScraped})
+	var e errcommon.Error
+	if !errors.As(err, &e) || e.Code != errcommon.ResourceExhausted {
+		t.Fatalf("Admit() error = %v, want a ResourceExhausted shed: the never-scraped endpoint is no evidence", err)
+	}
+
+	// With no scraped endpoint at all there is nothing to judge load by, so admit.
+	if err := plugin.Admit(context.Background(), makeSheddableRequest("100", "30"),
+		[]fwksched.Endpoint{neverScraped}); err != nil {
+		t.Errorf("Admit() with only never-scraped endpoints error = %v, want admit", err)
 	}
 }

@@ -855,8 +855,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				if traceEnabled {
 					loggerTrace.Info("header", "key", header.Key, "value", envoy.GetHeaderValue(header))
 				}
-				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && envoy.GetHeaderValue(header) != "200" {
-					reqCtx.responseStatusCode = errcommon.ModelServerError
+				if header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus {
+					if code := errcommon.ModelServerStatusCode(envoy.GetHeaderValue(header)); code != "" {
+						reqCtx.responseStatusCode = code
+					}
 				} else if header.Key == reqcommon.HeaderContentType {
 					if !isEventStream(envoy.GetHeaderValue(header)) {
 						continue

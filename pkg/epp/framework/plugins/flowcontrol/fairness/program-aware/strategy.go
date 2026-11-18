@@ -22,8 +22,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 )
 
 // Strategy is the fairness scheduling policy. All methods must be safe for
@@ -35,6 +37,9 @@ type Strategy interface {
 	OnCompleted(metrics *ProgramMetrics, request *fwksched.InferenceRequest, response *fwkrh.Response)
 	EvictProgram(id string)
 	Collectors() []prometheus.Collector
+	// Consumes declares the request data the strategy reads, which the plugin
+	// reports as its own data dependencies.
+	Consumes() plugin.DataDependencies
 }
 
 type QueueInfo struct {
@@ -55,6 +60,7 @@ func newStrategy(cfg Config) (Strategy, error) {
 		return &turnPriorityStrategy{
 			timeWeight:        cfg.TurnPriorityTimeWeight,
 			inactivitySeconds: cfg.TurnPriorityInactivitySeconds,
+			sessionStateKey:   sessionstate.SessionStateDataKey.WithNonEmptyProducerName(cfg.SessionStateProducerName),
 		}, nil
 	default:
 		return nil, fmt.Errorf("unknown scoring strategy %q: only \"las\" and \"turn-priority\" are supported", cfg.Strategy)

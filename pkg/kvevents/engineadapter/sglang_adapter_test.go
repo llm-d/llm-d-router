@@ -261,6 +261,26 @@ func TestSGLangParseMessage_Valid(t *testing.T) {
 	assert.Equal(t, uint64(99), blockStored.ParentHash)
 }
 
+// TestSGLangParseMessage_ModelOnlyTopic tests a per-pod subscription whose
+// topic names the model alone.
+func TestSGLangParseMessage_ModelOnlyTopic(t *testing.T) {
+	payload, err := msgpack.Marshal([]any{
+		1234567890.0,
+		[]any{[]any{"BlockStored", []any{uint64(100)}, uint64(99), []uint32{1, 2, 3}, 16, nil, "GPU"}},
+		0,
+	})
+	require.NoError(t, err)
+
+	podID, modelName, _, err := NewSGLangAdapter().ParseMessage(&kvevents.RawMessage{
+		Topic:          "kv@llama-2-7b",
+		SourceEndpoint: "10.0.0.5:5556",
+		Payload:        payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "10.0.0.5:5556", podID)
+	assert.Equal(t, "llama-2-7b", modelName)
+}
+
 // TestSGLangParseMessage_InvalidPayload tests error handling for invalid msgpack data.
 func TestSGLangParseMessage_InvalidPayload(t *testing.T) {
 	adapter := NewSGLangAdapter()
