@@ -18,6 +18,7 @@ package tokenizer
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -223,15 +224,15 @@ func CacheSaltFromBody(body *fwkrequest.InferenceRequestBody) string {
 }
 
 // speechCacheSalt derives the prefix-cache salt for a speech request from its
-// conditioning, mirroring the engine's conditioning salt. The talker's prompt
-// token IDs are content-blind placeholders and the router's estimate carries
-// only the spoken text, so without a salt two requests differing only in
-// voice, language, or reference audio fingerprint identically while the
-// engine, which salts on the full conditioning, holds no shared prefix for
-// them. A client-supplied salt composes with the derived one, the way the
-// engine composes them. Server-side conditioning the request cannot carry,
-// such as a re-uploaded voice's creation time, stays outside the router's
-// fingerprint.
+// text and conditioning, mirroring the engine's conditioning salt. The engine
+// hashes the full input into that salt over placeholder token IDs, so requests
+// sharing a text prefix but differing in suffix share no prompt block.
+// Seeding the router's block hashes the same way keeps its fingerprint aligned
+// with the engine's cache; without the salt, requests differing only in voice,
+// language, or reference audio would fingerprint identically. A client-supplied
+// salt composes with the derived one, the way the engine composes them.
+// Server-side conditioning the request cannot carry, such as a re-uploaded
+// voice's creation time, stays outside the router's fingerprint.
 //
 // extra_params.use_random selects randomized conditioning: the engine salts
 // every such request freshly, so no two of them share a prefix cache entry
@@ -240,6 +241,17 @@ func CacheSaltFromBody(body *fwkrequest.InferenceRequestBody) string {
 // the engine's.
 func speechCacheSalt(tts *fwkrequest.TextToSpeechRequest) string {
 	d := xxhash.New()
+	var lenBuf [8]byte
+	writeString := func(s string) {
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(s)))
+		_, _ = d.Write(lenBuf[:])
+		_, _ = d.WriteString(s)
+	}
+	writeRaw := func(b []byte) {
+		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(b)))
+		_, _ = d.Write(lenBuf[:])
+		_, _ = d.Write(b)
+	}
 	for _, part := range []string{
 		tts.Input,
 		tts.Instructions,
@@ -248,19 +260,16 @@ func speechCacheSalt(tts *fwkrequest.TextToSpeechRequest) string {
 		tts.Language,
 		tts.TaskType,
 	} {
-		_, _ = d.WriteString(part)
-		_, _ = d.WriteString("\x00")
+		writeString(part)
 	}
-	for _, raw := range [][]byte{tts.RefAudio, tts.RefAudioCodes, tts.ExtraParams, tts.SpeakerEmbedding} {
-		_, _ = d.Write(raw)
-		_, _ = d.WriteString("\x00")
+	for _, raw := range [][]byte{tts.RefAudio, tts.RefAudio2, tts.RefAudioCodes, tts.ExtraParams, tts.SpeakerEmbedding} {
+		writeRaw(raw)
 	}
 	xVector := ""
 	if tts.XVectorOnlyMode != nil {
 		xVector = strconv.FormatBool(*tts.XVectorOnlyMode)
 	}
-	_, _ = d.WriteString(xVector)
-	_, _ = d.WriteString("\x00")
+	writeString(xVector)
 	derived := strconv.FormatUint(d.Sum64(), 16)
 	if extraParamsUseRandom(tts.ExtraParams) {
 		derived += ":" + uuid.NewString()

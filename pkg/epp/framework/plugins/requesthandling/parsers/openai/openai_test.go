@@ -935,7 +935,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-					"input":           "Hello from llm-d.",
+					"input":           json.RawMessage(`"Hello from llm-d."`),
 					"voice":           "default",
 					"ref_audio":       "data:audio/wav;base64,UklGRg==",
 					"ref_text":        "Hello.",
@@ -958,8 +958,8 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":        "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-					"input":        "Hello from llm-d.",
-					"instructions": "Speak in a cheerful, upbeat radio-host voice.",
+					"input":        json.RawMessage(`"Hello from llm-d."`),
+					"instructions": json.RawMessage(`"Speak in a cheerful, upbeat radio-host voice."`),
 				},
 			},
 		},
@@ -979,7 +979,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":  "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-					"input":  "Stream this response.",
+					"input":  json.RawMessage(`"Stream this response."`),
 					"voice":  "ryan",
 					"stream": true,
 				},
@@ -1002,7 +1002,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-					"input":           "Stream this response as SSE.",
+					"input":           json.RawMessage(`"Stream this response as SSE."`),
 					"stream":          false,
 					"stream_format":   "sse",
 					"response_format": "pcm",
@@ -1026,7 +1026,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-					"input":           "Stream this response as raw audio.",
+					"input":           json.RawMessage(`"Stream this response as raw audio."`),
 					"stream":          false,
 					"stream_format":   "audio",
 					"response_format": "wav",
@@ -1050,7 +1050,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-					"input":           "Stream this response.",
+					"input":           json.RawMessage(`"Stream this response."`),
 					"stream":          true,
 					"stream_format":   "audio",
 					"response_format": "pcm",
@@ -1069,7 +1069,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				TextToSpeech: &request.TextToSpeechRequest{},
 				Payload: request.PayloadMap{
 					"model": "test",
-					"input": "",
+					"input": json.RawMessage(`""`),
 				},
 			},
 		},
@@ -1213,7 +1213,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 				Payload: request.PayloadMap{
 					"model":    "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-					"input":    "Hello from llm-d.",
+					"input":    json.RawMessage(`"Hello from llm-d."`),
 					"ref_text": "This is the reference clip.",
 				},
 			},
@@ -3203,6 +3203,7 @@ func TestOpenAIParser_ParseRequestTextToSpeechConditioning(t *testing.T) {
 		"language": "en",
 		"task_type": "CustomVoice",
 		"ref_audio": "https://example.com/voice.wav",
+		"ref_audio_2": "https://example.com/second-voice.wav",
 		"x_vector_only_mode": false
 	}`
 	result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
@@ -3216,6 +3217,9 @@ func TestOpenAIParser_ParseRequestTextToSpeechConditioning(t *testing.T) {
 	}
 	if string(speech.RefAudio) != `"https://example.com/voice.wav"` {
 		t.Errorf("RefAudio = %s, want the raw field", speech.RefAudio)
+	}
+	if string(speech.RefAudio2) != `"https://example.com/second-voice.wav"` {
+		t.Errorf("RefAudio2 = %s, want the raw field", speech.RefAudio2)
 	}
 	if speech.XVectorOnlyMode == nil || *speech.XVectorOnlyMode {
 		t.Errorf("XVectorOnlyMode = %v, want false", speech.XVectorOnlyMode)
@@ -3260,6 +3264,28 @@ func TestOpenAIParser_ParseRequestTextToSpeechSpeakerAlias(t *testing.T) {
 	}
 }
 
+// The engine resolves the two fields by key presence: a present "voice",
+// including an explicit null, wins over "speaker".
+func TestOpenAIParser_ParseRequestTextToSpeechVoiceTakesPrecedence(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"input": "hello", "voice": "ryan", "speaker": "vivian"}`: "ryan",
+		`{"input": "hello", "voice": null, "speaker": "ryan"}`:     "",
+		`{"input": "hello", "voice": "", "speaker": "ryan"}`:       "",
+		`{"input": "hello", "speaker": "ryan"}`:                    "ryan",
+	} {
+		t.Run(body, func(t *testing.T) {
+			result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+				map[string]string{":path": "/v1/audio/speech"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Body.TextToSpeech.Voice != want {
+				t.Errorf("Voice = %q, want %q", result.Body.TextToSpeech.Voice, want)
+			}
+		})
+	}
+}
+
 // A number where a voice belongs is neither of the two shapes the engine
 // normalizes; the request is refused rather than forwarded for the engine to
 // reject with its own error.
@@ -3277,13 +3303,13 @@ func TestOpenAIParser_ParseRequestTextToSpeechInvalidVoice(t *testing.T) {
 // derived from it is a pure function of that body.
 func TestOpenAIParser_ParseRequestTextToSpeechNullFields(t *testing.T) {
 	withNull, err := NewOpenAIParser().ParseRequest(context.Background(),
-		[]byte(`{"input": "hello", "ref_audio": null, "speaker_embedding": null}`),
+		[]byte(`{"input": "hello", "ref_audio": null, "ref_audio_2": null, "speaker_embedding": null}`),
 		map[string]string{":path": "/v1/audio/speech"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withNull.Body.TextToSpeech.RefAudio != nil || withNull.Body.TextToSpeech.SpeakerEmbedding != nil {
-		t.Errorf("null fields = {%v %v}, want both nil", withNull.Body.TextToSpeech.RefAudio, withNull.Body.TextToSpeech.SpeakerEmbedding)
+	if withNull.Body.TextToSpeech.RefAudio != nil || withNull.Body.TextToSpeech.RefAudio2 != nil || withNull.Body.TextToSpeech.SpeakerEmbedding != nil {
+		t.Errorf("null fields = {%v %v %v}, want all nil", withNull.Body.TextToSpeech.RefAudio, withNull.Body.TextToSpeech.RefAudio2, withNull.Body.TextToSpeech.SpeakerEmbedding)
 	}
 	absent, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(`{"input": "hello"}`),
 		map[string]string{":path": "/v1/audio/speech"})

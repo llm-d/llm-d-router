@@ -555,6 +555,9 @@ type TextToSpeechRequest struct {
 	// RefAudio is the raw reference-audio field of a voice-cloning request,
 	// carried for fingerprinting only.
 	RefAudio json.RawMessage `json:"ref_audio,omitempty"`
+	// RefAudio2 is the raw second-speaker reference-audio field of a
+	// two-speaker request, carried for fingerprinting only.
+	RefAudio2 json.RawMessage `json:"ref_audio_2,omitempty"`
 	// RefAudioCodes is the raw pre-computed reference-codes field (fish omni),
 	// carried for fingerprinting only.
 	RefAudioCodes json.RawMessage `json:"ref_audio_codes,omitempty"`

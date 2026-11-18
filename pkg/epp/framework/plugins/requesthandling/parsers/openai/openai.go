@@ -206,9 +206,10 @@ var envelopeRawFields = map[string][]string{
 	chatCompletionsAPI: {reqcommon.FieldPrompt},
 	completionsAPI:     {reqcommon.FieldPrompt},
 	responsesAPI:       {reqcommon.FieldInput, reqcommon.FieldInstructions},
-	// ref_audio can be a large inline data URI; the object and array
-	// conditioning fields stay raw on their own shape.
-	audioSpeechAPI: {"ref_audio"},
+	// input and instructions are decoded once into the typed body; ref_audio_2
+	// can be a large inline data URI, and the object and array conditioning
+	// fields stay raw on their own shape.
+	audioSpeechAPI: {reqcommon.FieldInput, reqcommon.FieldInstructions, "ref_audio", "ref_audio_2"},
 }
 
 func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
@@ -465,6 +466,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 			Language         string          `json:"language,omitempty"`
 			TaskType         string          `json:"task_type,omitempty"`
 			RefAudio         json.RawMessage `json:"ref_audio,omitempty"`
+			RefAudio2        json.RawMessage `json:"ref_audio_2,omitempty"`
 			RefAudioCodes    json.RawMessage `json:"ref_audio_codes,omitempty"`
 			ExtraParams      json.RawMessage `json:"extra_params,omitempty"`
 			SpeakerEmbedding json.RawMessage `json:"speaker_embedding,omitempty"`
@@ -479,19 +481,21 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		// The engine treats an explicit JSON null and an absent field as the
 		// same None conditioning; keep the raw fields that way too.
 		refAudio := rawFieldOrNull(speechRequest.RefAudio)
+		refAudio2 := rawFieldOrNull(speechRequest.RefAudio2)
 		refAudioCodes := rawFieldOrNull(speechRequest.RefAudioCodes)
 		extraParams := rawFieldOrNull(speechRequest.ExtraParams)
 		speakerEmbedding := rawFieldOrNull(speechRequest.SpeakerEmbedding)
-		// The engine accepts "speaker" as an alias of "voice", and both as a
-		// string or an object carrying an id; one normalized string.
-		voice, err := voiceField(speechRequest.Voice)
+		// The engine resolves "voice" and "speaker" by key presence, so
+		// "speaker" applies only when "voice" is absent; an explicit null
+		// "voice" selects the default voice. Both are a string or an object
+		// carrying an id, normalized to one string.
+		rawVoice := speechRequest.Voice
+		if len(rawVoice) == 0 {
+			rawVoice = speechRequest.Speaker
+		}
+		voice, err := voiceField(rawVoice)
 		if err != nil {
 			return nil, err
-		}
-		if voice == "" {
-			if voice, err = voiceField(speechRequest.Speaker); err != nil {
-				return nil, err
-			}
 		}
 		return &request.InferenceRequestBody{
 			TextToSpeech: &request.TextToSpeechRequest{
@@ -503,6 +507,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 				Language:         speechRequest.Language,
 				TaskType:         speechRequest.TaskType,
 				RefAudio:         refAudio,
+				RefAudio2:        refAudio2,
 				RefAudioCodes:    refAudioCodes,
 				ExtraParams:      extraParams,
 				SpeakerEmbedding: speakerEmbedding,

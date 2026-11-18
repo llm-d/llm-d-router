@@ -1697,11 +1697,27 @@ func TestSpeechPrefixFingerprint_SeparatesConditioning(t *testing.T) {
 	clone.RefAudio = json.RawMessage(`"https://example.com/voice.wav"`)
 	assert.NotEqual(t, vivian, speechPrefixHashes(t, clone), "reference-audio conditioning must change the fingerprint")
 
+	secondSpeaker := base()
+	secondSpeaker.RefAudio2 = json.RawMessage(`"https://example.com/second-voice.wav"`)
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, secondSpeaker), "second-speaker reference-audio conditioning must change the fingerprint")
+
 	assert.Equal(t, vivian, speechPrefixHashes(t, base()), "the same conditioning must fingerprint stably")
 
 	salted := base()
 	salted.CacheSalt = "tenant-a"
 	assert.NotEqual(t, vivian, speechPrefixHashes(t, salted), "a client salt must compose into the fingerprint")
+}
+
+// The engine hashes the full input into its conditioning salt over placeholder
+// token IDs, so requests sharing a text prefix but differing in suffix share no
+// prompt block. The salt must separate them at block 0, not just at the block
+// where the suffixes diverge.
+func TestSpeechPrefixFingerprint_SharedTextPrefixDoesNotMatch(t *testing.T) {
+	prefix := strings.Repeat("welcome to customer support ", 8)
+	first := speechPrefixHashes(t, &fwkrequest.TextToSpeechRequest{Input: prefix + "alpha", Voice: "vivian"})
+	second := speechPrefixHashes(t, &fwkrequest.TextToSpeechRequest{Input: prefix + "bravo", Voice: "vivian"})
+	require.Greater(t, len(first[0]), 1)
+	assert.NotEqual(t, first[0][0], second[0][0], "a shared text prefix with a different suffix must not match block 0")
 }
 
 // The conditioning salt composes with a client-supplied one rather than
