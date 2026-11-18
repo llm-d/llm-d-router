@@ -89,6 +89,20 @@ var (
 		},
 		[]string{"plugin_name", "plugin_type", "cache_class"},
 	)
+
+	// Difference of engine cached_tokens minus MatchedTokens recorded at dispatch.
+	// Positive means the engine saw more cache than the classifier predicted.
+	matchedVsCachedDelta = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "cache_class_matched_vs_cached_tokens",
+			Help: metricsutil.HelpMsgWithStability(
+				"Response cached_tokens minus classifier MatchedTokens at dispatch.",
+				compbasemetrics.ALPHA),
+			Buckets: []float64{-8192, -4096, -2048, -1024, -512, -256, -128, -64, 0, 64, 128, 256, 512, 1024, 2048, 4096, 8192},
+		},
+		[]string{"plugin_name", "plugin_type"},
+	)
 )
 
 // registerMetrics publishes the collectors on the registerer EPP actually serves.
@@ -105,7 +119,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 		return errors.New("cache class metrics registerer is required")
 	}
 	for _, c := range []prometheus.Collector{
-		classifications, matchRatio, indexSize, turnedAwayTokens, turnedAwayRequests,
+		classifications, matchRatio, indexSize, turnedAwayTokens, turnedAwayRequests, matchedVsCachedDelta,
 	} {
 		if err := registerer.Register(c); err != nil {
 			var already prometheus.AlreadyRegisteredError
@@ -127,6 +141,7 @@ func initSeries(name, typ string) {
 		turnedAwayTokens.WithLabelValues(name, typ, class)
 	}
 	matchRatio.WithLabelValues(name, typ)
+	matchedVsCachedDelta.WithLabelValues(name, typ)
 	indexSize.WithLabelValues(name, typ).Set(0)
 }
 
@@ -150,4 +165,8 @@ func recordTurnedAway(tn fwkplugin.TypedName, hit bool, matchedTokens int) {
 
 func recordIndexSize(tn fwkplugin.TypedName, size int) {
 	indexSize.WithLabelValues(tn.Name, tn.Type).Set(float64(size))
+}
+
+func recordMatchedVsCached(tn fwkplugin.TypedName, matchedAtDispatch, cachedTokens int) {
+	matchedVsCachedDelta.WithLabelValues(tn.Name, tn.Type).Observe(float64(cachedTokens - matchedAtDispatch))
 }

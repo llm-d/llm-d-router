@@ -1,31 +1,35 @@
-# cache-class-router
+# cache-classifier
 
 **Stability:** Alpha  
-**Interfaces:** `requesthandling.RequestHeaderProcessor`, `requesthandling.PreRequest`  
-**Type:** `cache-class-router`
+**Interfaces:** `requesthandling.RequestHeaderProcessor`, `requesthandling.PreRequest`,
+`requesthandling.RequestAbandoned`, `requesthandling.ResponseBodyProcessor`  
+**Type:** `cache-classifier`
 
 Tokenizer-free prefix classification before admission. Attaches a `CacheClass` request
 attribute (hit/miss, match ratio, matched tokens, ready) for metrics and downstream
 consumers. Does not change customer priority, fairness identity, or flow-control dispatch.
 
+The admission-time index is **pool-wide on this EPP replica** and **separate from** the
+approximate/precise prefix indexes used for placement scoring.
+
 ## Behavior
 
 1. **`RequestHeader`** — byte-packs the prompt into pseudo-tokens, hashes leading blocks, and
-   looks them up in a pool-wide LRU index. Writes `CacheClass` and stages hashes in a pending
-   map keyed by request ID.
-2. **`PreRequest`** — on admit, claims the pending entry and indexes the hashes so later
-   requests with the same prefix can classify as hits.
-3. **Warmup** — until the index holds `warmupBlocks`, `Ready` is false so consumers can treat
-   the class as unclassified on a cold router.
-4. **Metrics** — classification counts, match-ratio histogram, index size, and turned-away
-   tokens for requests that never reach `PreRequest` (pending TTL sweep).
+   publishes `CacheClass` as a `DynamicRequestAttribute` so a request still in the FC queue
+   observes the current index on every read. Stages hashes until PreRequest or abandon.
+2. **`PreRequest`** — indexes hashes for admitted requests and records `MatchedTokens` at
+   dispatch for later accuracy comparison.
+3. **`RequestAbandoned`** — drops pending state when the request never reaches PreRequest
+   (flow-control rejection, admission deny, etc.) and counts turned-away metrics.
+4. **`ResponseBody`** — compares dispatch `MatchedTokens` with response `cached_tokens`.
+5. **Warmup** — until the index holds `warmupBlocks`, `Ready` is false.
 
 ## Config
 
 ```yaml
 plugins:
-  - name: cache-class
-    type: cache-class-router
+  - name: cache-classifier
+    type: cache-classifier
     parameters:
       hitMatchRatio: 0.3
       minMatchedTokens: 1024
@@ -37,15 +41,15 @@ plugins:
 |---|---|---|
 | `blockSizeTokens` | `64` | Pseudo-token block size |
 | `maxPrefixBlocks` | `256` | Cap blocks hashed per request |
-| `indexCapacity` | `100000` | LRU capacity |
+| `indexCapacity` | `100000` | LRU capacity on this replica |
 | `hitMatchRatio` | `0.3` | Match fraction for hit |
 | `minMatchedTokens` | `1024` | Floor below which ratio alone is not a hit |
 | `warmupBlocks` | `5000` | Index size before `Ready`; `0` disables |
 
 ## Limits
 
-- A hit means this EPP replica recently admitted a matching prefix. Entries do not expire with
-  endpoint lifetime, and another EPP replica has a different view.
-- The class is fixed at arrival for the life of the queued request.
-- Pair class labels with response `cached_tokens` to measure accuracy before using the signal
-  for capacity or sharing decisions.
+- A hit means this EPP replica recently admitted a matching prefix. Entries are not removed when
+  an endpoint leaves, and another EPP replica has a different view.
+- Reads use LRU `Peek` so classification does not refresh recent-ness; only admit (`Add`) does.
+- Pair `cache_class_matched_vs_cached_tokens` with production traffic before using the signal for
+  capacity or sharing decisions.

@@ -138,12 +138,11 @@ type TimeoutAwareProducer interface {
 	ProduceTimeout() time.Duration
 }
 
-// RequestAbandoned is an optional interface for DataProducer implementations that
-// keep per-request state between RequestHeader or Produce and PreRequest. The
-// Director calls it when a request leaves HandleRequest after RequestHeader
-// without reaching PreRequest, including a flow-control rejection, so the
-// producer can release that state immediately instead of waiting for the
-// staleness janitor.
+// RequestAbandoned is an optional interface for DataProducer or RequestHeaderProcessor
+// implementations that keep per-request state between RequestHeader or Produce and
+// PreRequest. The Director calls it when a request leaves HandleRequest after
+// RequestHeader without reaching PreRequest, including a flow-control rejection, so
+// the plugin can release that state immediately.
 type RequestAbandoned interface {
 	// RequestAbandoned releases any per-request state written by RequestHeader or
 	// Produce for the given request. It must be safe to call when no state exists.
