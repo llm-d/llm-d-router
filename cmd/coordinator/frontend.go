@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 
 	"golang.org/x/sync/errgroup"
 
@@ -33,32 +32,36 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/server"
 )
 
-func frontendOption(cfg config.ServerConfig) server.Option {
-	maxSize := cfg.MaxRequestBodySize
-	if maxSize == 0 {
-		maxSize = config.DefaultMaxRequestBodySize
+func withFrontendIngress(cfg config.ServerConfig) server.Option {
+	maxBodyMB := cfg.MaxRequestBodySize
+	if maxBodyMB == 0 {
+		maxBodyMB = config.DefaultMaxRequestBodySize
 	}
-	maxBytes := maxSize * config.BytesPerMB
-	api := frontendproxy.New(&url.URL{Scheme: "http", Host: "127.0.0.1:8000"}, maxBytes, false)
-	rpc := frontendproxy.New(&url.URL{Scheme: "http", Host: "127.0.0.1:50051"}, maxBytes, true)
+	maxBytes := maxBodyMB * config.BytesPerMB
+	httpProxy := frontendproxy.NewHTTP("127.0.0.1:8000", maxBytes)
+	grpcProxy := frontendproxy.NewGRPC("127.0.0.1:50051", maxBytes)
+	postRoutes := map[string]http.Handler{
+		reqcommon.PathChatCompletions: httpProxy,
+		reqcommon.PathCompletions:     httpProxy,
+		reqcommon.PathResponses:       httpProxy,
+		"/tokenize":                   httpProxy,
+		"/detokenize":                 httpProxy,
+
+		vllmpb.Inference_Generate_FullMethodName:       grpcProxy,
+		vllmpb.Inference_GenerateStream_FullMethodName: grpcProxy,
+	}
 	return server.WithIngress(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPost {
-				switch r.URL.Path {
-				case reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathResponses, "/tokenize", "/detokenize":
-					api.ServeHTTP(w, r)
-					return
-				case vllmpb.Inference_Generate_FullMethodName, vllmpb.Inference_GenerateStream_FullMethodName:
-					rpc.ServeHTTP(w, r)
-					return
-				}
+			if proxy := postRoutes[r.URL.Path]; r.Method == http.MethodPost && proxy != nil {
+				proxy.ServeHTTP(w, r)
+				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	})
 }
 
-func runWithFrontend(ctx context.Context, srv *server.Server, cfg config.ServerConfig, public, callbackListener net.Listener) error {
+func runWithFrontend(ctx context.Context, srv *server.Server, cfg config.ServerConfig, publicListener, callbackListener net.Listener) error {
 	if callbackListener == nil {
 		var err error
 		callbackListener, err = net.Listen("tcp", "127.0.0.1:8081")
@@ -68,7 +71,12 @@ func runWithFrontend(ctx context.Context, srv *server.Server, cfg config.ServerC
 	}
 	protocols := new(http.Protocols)
 	protocols.SetUnencryptedHTTP2(true)
-	callback := &http.Server{Handler: srv.GenerationHandler(), Protocols: protocols, ReadTimeout: cfg.ReadTimeout}
+	callback := &http.Server{
+		Handler:     srv.GenerationHandler(),
+		Protocols:   protocols,
+		ReadTimeout: cfg.ReadTimeout,
+	}
+
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		if err := callback.Serve(callbackListener); !errors.Is(err, http.ErrServerClosed) {
@@ -77,8 +85,8 @@ func runWithFrontend(ctx context.Context, srv *server.Server, cfg config.ServerC
 		return nil
 	})
 	group.Go(func() error {
-		err := run(groupCtx, srv, cfg, public)
-		// Public requests may call back while the public listener drains.
+		// Keep the callback available until public requests finish draining.
+		err := run(groupCtx, srv, cfg, publicListener)
 		return errors.Join(err, callback.Close())
 	})
 	return group.Wait()

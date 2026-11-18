@@ -14,60 +14,66 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package frontendproxy streams HTTP requests to the model frontend.
+// Package frontendproxy streams HTTP and gRPC requests to the model frontend.
 package frontendproxy
 
 import (
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 )
 
-// New returns a streaming handler with a limit on the incoming request body.
-func New(target *url.URL, maxBytes int64, grpc bool) http.Handler {
-	transport := &http.Transport{DisableCompression: true, IdleConnTimeout: 90 * time.Second}
-	if grpc {
-		transport.Protocols = new(http.Protocols)
-		transport.Protocols.SetUnencryptedHTTP2(true)
-		// Both inference RPCs carry one message with a five-byte gRPC frame header.
-		maxBytes += 5
-	}
-	tooLarge := func(w http.ResponseWriter) {
-		if grpc {
-			w.Header().Set("Content-Type", "application/grpc")
-			w.Header().Set("Grpc-Status", "8")
-			w.Header().Set("Grpc-Message", "request body too large")
-			w.WriteHeader(http.StatusOK)
-			return
-		}
+// NewHTTP forwards HTTP requests with bodies up to maxBytes.
+func NewHTTP(addr string, maxBytes int64) http.Handler {
+	return newProxy(addr, maxBytes, nil, func(w http.ResponseWriter) {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-	}
+	})
+}
+
+// NewGRPC forwards inference RPCs over cleartext HTTP/2.
+func NewGRPC(addr string, maxMessageBytes int64) http.Handler {
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	// Each inference request carries one length-prefixed message.
+	return newProxy(addr, maxMessageBytes+grpcframe.HeaderLen, protocols, func(w http.ResponseWriter) {
+		grpcframe.WriteError(w, codes.ResourceExhausted, "request body too large")
+	})
+}
+
+func newProxy(addr string, maxBytes int64, protocols *http.Protocols, rejectTooLarge func(http.ResponseWriter)) http.Handler {
+	target := &url.URL{Scheme: "http", Host: addr}
+	// The default flush policy streams SSE and preserves trailers-only gRPC errors.
 	proxy := httputil.ReverseProxy{
+		Transport: &http.Transport{
+			Protocols:          protocols,
+			DisableCompression: true,
+			IdleConnTimeout:    90 * time.Second,
+		},
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			r.Out.URL.RawQuery = r.In.URL.RawQuery
 		},
-		// ReverseProxy flushes SSE and unknown-length streams. An empty gRPC
-		// response carries its status in a single terminal HEADERS frame.
-		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			var sizeErr *http.MaxBytesError
-			if errors.As(err, &sizeErr) {
-				tooLarge(w)
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+				rejectTooLarge(w)
 				return
 			}
 			if r.Context().Err() == nil {
-				slog.ErrorContext(r.Context(), "frontend request failed", "error", err)
+				log.FromContext(r.Context()).Error(err, "frontend request failed")
 			}
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ContentLength > maxBytes {
-			tooLarge(w)
+			rejectTooLarge(w)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)

@@ -154,7 +154,7 @@ func main() {
 	}
 	opts := []server.Option{server.WithWorkerProtocol(cfg.Pipeline.WorkerProtocol)}
 	if cfg.Server.VLLMFrontend {
-		opts = append(opts, frontendOption(cfg.Server))
+		opts = append(opts, withFrontendIngress(cfg.Server))
 	}
 	srv, err := server.New(cfg.Server, p, gwClient, opts...)
 	if err != nil {

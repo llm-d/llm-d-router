@@ -17,7 +17,6 @@ limitations under the License.
 package frontendproxy
 
 import (
-	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,7 +34,7 @@ func TestGRPCTrailersOnly(t *testing.T) {
 	upstream := grpctest.StartGRPCServer(t, func(s *grpc.Server) {
 		healthpb.RegisterHealthServer(s, health.NewServer())
 	})
-	proxy := grpctest.NewH2CServer(t, New(&url.URL{Scheme: "http", Host: upstream}, 1024, true))
+	proxy := grpctest.NewH2CServer(t, NewGRPC(upstream, 1024))
 	client := healthpb.NewHealthClient(grpctest.Dial(t, proxy.Listener.Addr().String()))
 	_, err := client.Check(t.Context(), &healthpb.HealthCheckRequest{Service: "unknown"})
 	require.Equal(t, codes.NotFound, status.Code(err))
