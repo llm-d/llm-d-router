@@ -237,6 +237,28 @@ KVCR tier enables by default: KVCR then treats every block of the request as
 fetchable from the named source without reading the hashes. With
 `opportunistic_query: false` the hint is accepted and fetches nothing.
 
+For a source at `10.0.0.3` on data parallel rank 1 with `kvcrControlPort:
+17771`, the request's `kv_hints` (a `KVHintsEnvelope`, shown here as JSON with
+proto field names) is:
+
+```json
+{
+  "protocol_version": "0.1",
+  "message_id": "<new UUID per request>",
+  "actions": [
+    {
+      "action_id": "fetch-0",
+      "action_type": "kv.fetch",
+      "action_version": "1.0",
+      "payload": {
+        "source_control_endpoint": "tcp://10.0.0.3:17772",
+        "block_hashes": [0]
+      }
+    }
+  ]
+}
+```
+
 ```yaml
   - type: p2p-source-producer
     parameters:
