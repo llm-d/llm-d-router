@@ -4,9 +4,12 @@ The `session-state-producer` tracks history for identities published by the
 `agent-identity` request-header plugin and publishes per-request session state
 for flow-control and scheduling plugins through the request attribute store.
 
-The producer uses only the `agent-identity` attribute. `SessionIDDataKey` is a
-separate attribute produced by `session-id-producer` from one configured header
-or cookie for general session-affinity use.
+The producer reads the session identifier from the `agent-identity` attribute
+and scopes each session to the raw `x-llm-d-inference-fairness-id` header
+(`""` when absent), so tenants with the same session identifier keep separate
+state. `SessionIDDataKey` is a separate attribute produced by
+`session-id-producer` from one configured header or cookie for general
+session-affinity use.
 
 ## Configuration
 
@@ -39,6 +42,8 @@ meantime. Read it with `sessionstate.ReadSessionState`. `Produce` is a no-op.
 
 The `sessionstate.SessionState` value contains:
 
+- `Key`: `sessionstate.SessionKey{TenantID, SessionID}` identifying the tenant
+  and session.
 - `TurnsTaken`: requests of the session dispatched so far.
 - `Duration`: elapsed time from the first observation of the session to the
   observation of the current request.

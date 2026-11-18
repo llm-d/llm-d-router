@@ -130,7 +130,7 @@ func (p *Producer) RequestHeader(_ context.Context, request *fwksched.InferenceR
 	if !ok {
 		return nil
 	}
-	obs := p.registry.observe(identity, request.RequestID)
+	obs := p.registry.observe(SessionKey{TenantID: request.TenantID, SessionID: identity}, request.RequestID)
 	request.PutAttribute(p.dk, &fwksched.DynamicRequestAttribute{Get: func() any { return obs.state() }})
 	return nil
 }
@@ -157,7 +157,7 @@ func (p *Producer) PreRequest(_ context.Context, request *fwksched.InferenceRequ
 		return nil
 	}
 
-	p.registry.RecordDispatch(identity, request.RequestID)
+	p.registry.RecordDispatch(SessionKey{TenantID: request.TenantID, SessionID: identity}, request.RequestID)
 	return nil
 }
 
@@ -182,7 +182,7 @@ func (p *Producer) ResponseBody(
 		cachedTokens = int64(details.CachedTokens)
 	}
 	p.registry.RecordResponse(
-		identity,
+		SessionKey{TenantID: request.TenantID, SessionID: identity},
 		response.TerminationCause == fwkrh.TerminationCauseNatural,
 		TurnUsage{
 			InputTokens:  int64(response.Usage.PromptTokens),

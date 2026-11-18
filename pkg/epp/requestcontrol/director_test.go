@@ -2164,6 +2164,7 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if returnedReqCtx.SchedulingRequest != nil {
 					assert.Equal(t, reqCtx.Request.ID, returnedReqCtx.SchedulingRequest.RequestID,
 						"SchedulingRequest.RequestID should be the EPP request ID, not the x-request-id header")
+					assert.Equal(t, test.fairnessIDHeader, returnedReqCtx.SchedulingRequest.TenantID)
 				}
 
 				if test.wantReqCtx != nil {
@@ -3661,4 +3662,198 @@ func TestDirector_HandleResponseBody_LifecycleTimestamps(t *testing.T) {
 	assert.Equal(t, reqCtx.FirstTokenTimestamp(), resp.FirstTokenTimestamp)
 	assert.Equal(t, reqCtx.ResponseCompleteTimestamp(), resp.CompleteTimestamp)
 	assert.Equal(t, reqCtx.ModelServerStreaming(), resp.Streaming)
+}
+
+type tenantLifecycleObserver struct {
+	admitErr           error
+	seenAtAdmit        *string
+	seenAtPreRequest   *string
+	seenAtResponseBody *string
+	seenAtAbandoned    *string
+}
+
+func (o *tenantLifecycleObserver) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "tenant-lifecycle-observer", Name: "observer"}
+}
+
+func (o *tenantLifecycleObserver) Produces() map[fwkplugin.DataKey]any {
+	return nil
+}
+
+func (o *tenantLifecycleObserver) Produce(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) error {
+	return nil
+}
+
+func (o *tenantLifecycleObserver) Admit(_ context.Context, r *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
+	*o.seenAtAdmit = r.TenantID
+	return o.admitErr
+}
+
+func (o *tenantLifecycleObserver) PreRequest(_ context.Context, r *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
+	*o.seenAtPreRequest = r.TenantID
+	return nil
+}
+
+func (o *tenantLifecycleObserver) ResponseBody(_ context.Context, r *fwksched.InferenceRequest, _ *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
+	*o.seenAtResponseBody = r.TenantID
+}
+
+func (o *tenantLifecycleObserver) RequestAbandoned(_ context.Context, r *fwksched.InferenceRequest) {
+	*o.seenAtAbandoned = r.TenantID
+}
+
+func TestDirector_PreservesRawTenantID(t *testing.T) {
+	endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+		Address: "192.168.1.100",
+		Port:    "8000",
+		ID:      types.NamespacedName{Name: "pod1", Namespace: "default"},
+	}, nil, fwkdl.NewAttributes())
+	scheduleResult := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	}
+
+	tests := []struct {
+		name               string
+		fairnessHeader     string
+		composeFairnessIDs bool
+		agentID            string
+		derivedRoot        string
+		admitErr           error
+		wantTenantID       string
+		wantFairnessID     string
+	}{
+		{
+			name:               "raw tenant header with percent and separator survives composition",
+			fairnessHeader:     "a%20b/c",
+			composeFairnessIDs: true,
+			agentID:            "s1",
+			wantTenantID:       "a%20b/c",
+			wantFairnessID:     "a%2520b%2Fc/s1",
+		},
+		{
+			name:               "abandoned request preserves raw tenant header after composition",
+			fairnessHeader:     "a%20b/c",
+			composeFairnessIDs: true,
+			agentID:            "s1",
+			admitErr:           errors.New("denied"),
+			wantTenantID:       "a%20b/c",
+			wantFairnessID:     "a%2520b%2Fc/s1",
+		},
+		{
+			name:           "absent header stays empty when agent identity rewrites FairnessID",
+			agentID:        "s1",
+			wantTenantID:   "",
+			wantFairnessID: "s1",
+		},
+		{
+			name:           "absent header stays empty when FairnessID falls back to default-flow",
+			wantTenantID:   "",
+			wantFairnessID: reqcommon.DefaultFairnessID,
+		},
+		{
+			name:               "absent header stays empty when derived root composes onto default-tenant",
+			composeFairnessIDs: true,
+			derivedRoot:        "r1",
+			wantTenantID:       "",
+			wantFairnessID:     "default-tenant/r1",
+		},
+	}
+
+	body, err := json.Marshal(map[string]any{"model": "m", "prompt": "p"})
+	require.NoError(t, err)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, ctx := newSinglePodDirector(t, scheduleResult)
+
+			const unset = "<unset>"
+			seenAtRequestHeader := unset
+			seenAtAdmit := unset
+			seenAtPreRequest := unset
+			seenAtResponseBody := unset
+			seenAtAbandoned := unset
+
+			observer := &tenantLifecycleObserver{
+				admitErr:           tt.admitErr,
+				seenAtAdmit:        &seenAtAdmit,
+				seenAtPreRequest:   &seenAtPreRequest,
+				seenAtResponseBody: &seenAtResponseBody,
+				seenAtAbandoned:    &seenAtAbandoned,
+			}
+			datalayer.RegisterScopeSpecs([]fwkplugin.Plugin{observer})
+
+			cfg := NewConfig().
+				WithAdmissionPlugins(observer).
+				WithDataProducerPlugins(observer).
+				WithPreRequestPlugins(observer).
+				WithResponseStreamingPlugins(observer)
+			if tt.composeFairnessIDs {
+				cfg = cfg.WithComposeFairnessIDs(true)
+			}
+			switch {
+			case tt.derivedRoot != "":
+				cfg = cfg.WithRequestHeaderPlugins(&mockRequestHeaderPlugin{
+					name:           "agent-lineage",
+					attributeKey:   agentlineage.DerivedRootKey,
+					attributeValue: tt.derivedRoot,
+					modifyFn: func(r *fwksched.InferenceRequest) {
+						seenAtRequestHeader = r.TenantID
+					},
+				})
+			case tt.agentID != "":
+				cfg = cfg.WithRequestHeaderPlugins(&mockRequestHeaderPlugin{
+					name:           "agent-identity",
+					attributeKey:   agentidentity.AgentIdentityKey,
+					attributeValue: tt.agentID,
+					modifyFn: func(r *fwksched.InferenceRequest) {
+						seenAtRequestHeader = r.TenantID
+					},
+				})
+			default:
+				cfg = cfg.WithRequestHeaderPlugins(&mockRequestHeaderPlugin{
+					name:         "tenant-observer",
+					attributeKey: agentidentity.AgentIdentityKey,
+					modifyFn: func(r *fwksched.InferenceRequest) {
+						seenAtRequestHeader = r.TenantID
+					},
+				})
+			}
+			dir.requestControlPlugins = *cfg
+
+			headers := map[string]string{":path": "/v1/completions"}
+			if tt.fairnessHeader != "" {
+				headers[metadata.FlowFairnessIDKey] = tt.fairnessHeader
+			}
+			reqCtx := &handlers.RequestContext{
+				Request:  &handlers.Request{ID: "req-" + tt.name, Headers: headers, RawBody: body},
+				Response: &handlers.Response{},
+				Parser:   openai.NewOpenAIParser(),
+			}
+			parseResult, err := reqCtx.Parser.ParseRequest(ctx, body, headers)
+			require.NoError(t, err)
+
+			returned, err := dir.HandleRequest(ctx, reqCtx, parseResult.Body)
+			assert.Equal(t, tt.wantTenantID, seenAtRequestHeader)
+			assert.Equal(t, tt.wantTenantID, seenAtAdmit)
+			assert.Equal(t, tt.wantTenantID, returned.SchedulingRequest.TenantID)
+			assert.Equal(t, tt.wantFairnessID, returned.SchedulingRequest.FairnessID)
+
+			if tt.admitErr != nil {
+				require.Error(t, err)
+				assert.Equal(t, tt.wantTenantID, seenAtAbandoned)
+				assert.Equal(t, unset, seenAtPreRequest)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantTenantID, seenAtPreRequest)
+			assert.Equal(t, unset, seenAtAbandoned)
+
+			dir.HandleResponseBody(ctx, returned, true)
+			assert.Equal(t, tt.wantTenantID, seenAtResponseBody)
+		})
+	}
 }

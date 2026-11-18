@@ -30,10 +30,17 @@ const SessionStateProducerType = "session-state-producer"
 // attribute store. The default producer is the session-state-producer.
 var SessionStateDataKey = plugin.NewDataKey("SessionStateDataKey", SessionStateProducerType)
 
+// SessionKey scopes a session identifier to the tenant the request arrived under.
+type SessionKey struct {
+	TenantID  string
+	SessionID string
+}
+
 // SessionState is the session history visible to a request. The producer
 // publishes it from RequestHeader, so flow-control and scheduling plugins read
 // the latest counters and token totals while the request waits.
 type SessionState struct {
+	Key               SessionKey
 	TurnsTaken        int64
 	Duration          time.Duration
 	LastSeenAt        time.Time
