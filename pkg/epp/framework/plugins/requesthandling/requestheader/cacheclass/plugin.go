@@ -15,17 +15,8 @@ limitations under the License.
 */
 
 // Package cacheclass classifies a request as a prefix-cache hit or miss before admission
-// control runs, and exposes that class to flow control without changing the request priority.
-//
-// RequestHeader stamps a CacheClass attribute from a tokenizer-free prefix hash. Flow control
-// queues hits and misses as sibling flows at the same customer priority (see FlowID). When the
-// same plugin is configured as flowControl.dispatchGatePluginRef, Allow holds a ready miss
-// while pool saturation is at or above shedThreshold and still dispatches hits in that band.
-// Holding latches until saturation falls below releaseThreshold so brief dips do not reopen
-// the miss lane. missHold selects how the latch behaves: off disables hold; prefer picks
-// gate-eligible (hit) queues first and may fall back to the full band when none are waiting;
-// strict never dispatches a ready miss while latched. BandEnqueuePolicy may reserve band
-// queue slots for hits so held misses cannot fill shared maxRequests and starve hit enqueue.
+// control runs and attaches that class as a request attribute for metrics and downstream
+// consumers. It does not change priority, fairness identity, or flow-control dispatch.
 package cacheclass
 
 import (
@@ -33,14 +24,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -51,15 +40,6 @@ import (
 const (
 	// Type is the registered plugin type.
 	Type = "cache-class-router"
-
-	// MissHoldOff disables miss hold: the gate always allows dispatch.
-	MissHoldOff = "off"
-	// MissHoldPrefer holds ready misses at high saturation, prefers hits, and may dispatch a
-	// miss when no hit is waiting (work-conserving).
-	MissHoldPrefer = "prefer"
-	// MissHoldStrict holds ready misses at high saturation and never dispatches them until
-	// the latch releases, even if the hit lane is empty.
-	MissHoldStrict = "strict"
 
 	// A pseudo-token is 4 bytes (tokenizer.bytesPerToken), so 64 pseudo-tokens covers 256 bytes
 	// of prompt text -- coarse enough to keep the index small, fine enough that two requests
@@ -72,41 +52,20 @@ const (
 	defaultIndexCapacity = 100_000
 	// Fraction of the prompt that must be indexed for the request to count as a hit.
 	defaultHitMatchRatio = 0.3
-	// Saturation at or above which ready misses are held and hit siblings are preferred first.
-	// Early enough that cold cannot own most of the high-sat serving mix before prefer starts.
-	defaultShedThreshold = 0.80
-	// Saturation below which a latched miss hold releases. Brief dips between this value and
-	// shedThreshold keep holding so cold does not reopen on chatter.
-	defaultReleaseThreshold = 0.70
-	// Fraction of band maxRequests reserved for hits under missHold=strict when hitQueueShare
-	// is omitted. Prefer/off default to 0 (no reservation) unless hitQueueShare is set.
-	defaultStrictHitQueueShare = 0.25
-	// Cached pseudo-tokens a request must carry before its hit is worth protecting. A short
-	// prompt can be fully cached and still represent almost no committed prefill, so ratio
-	// alone would hand it the protected band ahead of a long request holding real investment.
+	// Cached pseudo-tokens a request must carry before its hit is worth labeling as such.
 	defaultMinMatchedTokens = 1024
-	// How long a classified request may stay unclaimed before it is treated as rejected.
-	// Requests that reach PreRequest claim their entry immediately; anything still pending
-	// after this was shed at admission.
 	// Age after which an unclaimed entry is treated as shed: attributed as turned-away and
 	// removed. Admitted requests claim their entry in PreRequest before this elapses.
 	defaultPendingTTL = 2 * time.Minute
 	// How often unclaimed entries are swept.
 	defaultSweepInterval = 30 * time.Second
 	// Indexed blocks required before a class is Ready. The index starts empty, so every
-	// request looks like a miss until admitted traffic fills it. Holding those misses would
-	// shed traffic only because the router just started.
+	// request looks like a miss until admitted traffic fills it.
 	defaultWarmupBlocks = 5000
-
-	// flowIDSuffixHit and flowIDSuffixMiss split one parent fairness ID into two sibling
-	// queues at the same priority. The unit separator keeps the suffix out of ordinary
-	// fairness IDs. ParentFlowID strips these to recover the parent ID for accounting.
-	flowIDSuffixHit  = "\x1fcacheclass:hit"
-	flowIDSuffixMiss = "\x1fcacheclass:miss"
 )
 
 // CacheClassKey carries the classification to any downstream plugin that wants it (scorers,
-// metrics, debugging) without re-deriving it.
+// metrics, capacity, sharing) without re-deriving it.
 var CacheClassKey = fwkplugin.NewDataKey("CacheClassKey", Type)
 
 // CacheClass is the verdict attached to the request.
@@ -119,10 +78,10 @@ type CacheClass struct {
 	MatchedBlocks int
 	TotalBlocks   int
 	// MatchedTokens is the cached prefix length in tokens -- the prefill investment this
-	// request would reuse, and would strand if it were shed.
+	// request would reuse.
 	MatchedTokens int
-	// Ready is false until the index has passed warmup. The dispatch gate ignores a class
-	// that is not Ready.
+	// Ready is false until the index has passed warmup. Downstream consumers that act on
+	// Hit should treat !Ready as unclassified.
 	Ready bool
 	// OriginalPriority is the customer tier observed at classification. The plugin does not
 	// rewrite it.
@@ -140,21 +99,8 @@ type Parameters struct {
 	// HitMatchRatio is the match fraction at or above which a request counts as a hit.
 	// Optional; must be in (0,1].
 	HitMatchRatio float64 `json:"hitMatchRatio,omitempty"`
-	// MissHold selects miss-hold behavior: off, prefer (default), or strict.
-	MissHold string `json:"missHold,omitempty"`
-	// ShedThreshold is the pool saturation at or above which a ready miss stays queued.
-	// Optional; must be in (0,1]. Ignored when missHold is off.
-	ShedThreshold *float64 `json:"shedThreshold,omitempty"`
-	// ReleaseThreshold is the pool saturation below which a latched miss hold releases.
-	// Optional; must be in (0, shedThreshold]. Defaults to min(0.70, shedThreshold).
-	ReleaseThreshold *float64 `json:"releaseThreshold,omitempty"`
-	// HitQueueShare is the fraction of band maxRequests reserved for hits and not-ready
-	// classes. Ready misses may only fill the remaining share. Optional; must be in [0,1).
-	// When omitted, strict defaults to 0.25 and prefer/off default to 0.
-	HitQueueShare *float64 `json:"hitQueueShare,omitempty"`
 	// MinMatchedTokens is the cached-token floor below which a request is treated as a miss
-	// regardless of its match ratio, so the protected band is reserved for requests carrying
-	// real prefill investment. Optional; 0 disables the floor.
+	// regardless of its match ratio. Optional; 0 disables the floor.
 	MinMatchedTokens *int `json:"minMatchedTokens,omitempty"`
 	// WarmupBlocks is how many blocks the index must hold before a class becomes Ready.
 	// Optional; 0 disables the guard.
@@ -169,54 +115,37 @@ type Plugin struct {
 	maxPrefixBlocks  int
 	hitMatchRatio    float64
 	minMatchedTokens int
-	missHold         string
-	shedThreshold    float64
-	releaseThreshold float64
-	hitQueueShare    float64
-	holdingMisses    atomic.Bool
 
 	warmupBlocks  int
 	pendingTTL    time.Duration
 	sweepInterval time.Duration
 
 	// index holds prefix block hashes believed resident somewhere in the pool. It is
-	// pool-wide rather than per-endpoint on purpose: admission decides whether to serve a
-	// request at all, not where to send it, so which endpoint holds the prefix is a routing
-	// question answered later by the prefix scorer.
+	// pool-wide rather than per-endpoint on purpose: classification answers whether a
+	// prefix was recently admitted, not which endpoint holds it.
 	index *lru.Cache[prefixhash.BlockHash, struct{}]
 
 	// pending carries each classified request from admission through to PreRequest, so the
-	// index is updated only for requests that were actually admitted and routed.
-	//
-	// Entries are also how shedding is observed. A rejected request never reaches PreRequest,
-	// so its entry is never claimed; the janitor sweeps those, attributing the cached tokens
-	// the pool declined to serve. Without the sweep this map would grow without bound under
-	// exactly the overload it exists to measure.
+	// index is updated only for requests that were actually admitted and routed. Unclaimed
+	// entries are swept after pendingTTL and counted as turned away for metrics.
 	pending sync.Map
 }
 
 var (
 	_ fwkrh.RequestHeaderProcessor = &Plugin{}
 	_ fwkrh.PreRequest             = &Plugin{}
-	_ fwkfc.DispatchGate           = &Plugin{}
-	_ fwkfc.DispatchPreference     = &Plugin{}
-	_ fwkfc.BandEnqueuePolicy      = &Plugin{}
 )
 
 // Factory builds the plugin from JSON configuration.
 func Factory(name string, raw *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	shedDefault := defaultShedThreshold
 	params := Parameters{
 		BlockSizeTokens: defaultBlockSizeTokens,
 		MaxPrefixBlocks: defaultMaxPrefixBlocks,
 		IndexCapacity:   defaultIndexCapacity,
 		HitMatchRatio:   defaultHitMatchRatio,
-		ShedThreshold:   &shedDefault,
 	}
 	minMatched := defaultMinMatchedTokens
 	warmup := defaultWarmupBlocks
-	shed := defaultShedThreshold
-	missHold := MissHoldPrefer
 	if raw != nil {
 		if err := raw.Decode(&params); err != nil {
 			return nil, fmt.Errorf("failed to parse parameters for '%s' plugin: %w", Type, err)
@@ -233,44 +162,6 @@ func Factory(name string, raw *json.Decoder, handle fwkplugin.Handle) (fwkplugin
 	}
 	if params.HitMatchRatio <= 0 || params.HitMatchRatio > 1 {
 		return nil, fmt.Errorf("plugin '%s': hitMatchRatio must be in (0,1], got %g", Type, params.HitMatchRatio)
-	}
-	if params.MissHold != "" {
-		switch params.MissHold {
-		case MissHoldOff, MissHoldPrefer, MissHoldStrict:
-			missHold = params.MissHold
-		default:
-			return nil, fmt.Errorf("plugin '%s': missHold must be %q, %q, or %q, got %q",
-				Type, MissHoldOff, MissHoldPrefer, MissHoldStrict, params.MissHold)
-		}
-	}
-	if params.ShedThreshold != nil {
-		if *params.ShedThreshold <= 0 || *params.ShedThreshold > 1 {
-			return nil, fmt.Errorf("plugin '%s': shedThreshold must be in (0,1], got %g", Type, *params.ShedThreshold)
-		}
-		shed = *params.ShedThreshold
-	}
-	release := defaultReleaseThreshold
-	if release > shed {
-		release = shed
-	}
-	if params.ReleaseThreshold != nil {
-		if *params.ReleaseThreshold <= 0 || *params.ReleaseThreshold > 1 {
-			return nil, fmt.Errorf("plugin '%s': releaseThreshold must be in (0,1], got %g", Type, *params.ReleaseThreshold)
-		}
-		if *params.ReleaseThreshold > shed {
-			return nil, fmt.Errorf("plugin '%s': releaseThreshold (%g) must be <= shedThreshold (%g)", Type, *params.ReleaseThreshold, shed)
-		}
-		release = *params.ReleaseThreshold
-	}
-	hitShare := 0.0
-	if missHold == MissHoldStrict {
-		hitShare = defaultStrictHitQueueShare
-	}
-	if params.HitQueueShare != nil {
-		if *params.HitQueueShare < 0 || *params.HitQueueShare >= 1 {
-			return nil, fmt.Errorf("plugin '%s': hitQueueShare must be in [0,1), got %g", Type, *params.HitQueueShare)
-		}
-		hitShare = *params.HitQueueShare
 	}
 	if params.MinMatchedTokens != nil {
 		if *params.MinMatchedTokens < 0 {
@@ -296,10 +187,6 @@ func Factory(name string, raw *json.Decoder, handle fwkplugin.Handle) (fwkplugin
 		maxPrefixBlocks:  params.MaxPrefixBlocks,
 		hitMatchRatio:    params.HitMatchRatio,
 		minMatchedTokens: minMatched,
-		missHold:         missHold,
-		shedThreshold:    shed,
-		releaseThreshold: release,
-		hitQueueShare:    hitShare,
 		warmupBlocks:     warmup,
 		pendingTTL:       defaultPendingTTL,
 		sweepInterval:    defaultSweepInterval,
@@ -327,22 +214,17 @@ func (p *Plugin) Produces() map[fwkplugin.DataKey]any {
 
 // RequestHeader classifies the request and attaches CacheClass. It does not change priority.
 //
-// It fails open on any problem deriving hashes and leaves the request without a class, so the
-// dispatch gate admits it.
+// It fails open on any problem deriving hashes and leaves the request without a class.
 func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error {
 	logger := log.FromContext(ctx)
 
 	perPrompt := p.blockHashes(ctx, request)
 	matched, total := p.lookupPrompts(perPrompt)
 	if total == 0 {
-		// Nothing hashable (empty prompt, pre-tokenized body we cannot byte-pack, parse
-		// failure). Leave the request exactly as it arrived.
 		return nil
 	}
 
 	ratio := float64(matched) / float64(total)
-	// A pseudo-token covers the same bytes as an average real token, so block count times
-	// block size is a usable cached-token figure for sizing the investment at stake.
 	matchedTokens := matched * p.blockSizeTokens
 	hit := ratio >= p.hitMatchRatio && matchedTokens >= p.minMatchedTokens
 	ready := p.warmupBlocks == 0 || p.index.Len() >= p.warmupBlocks
@@ -378,132 +260,9 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceR
 	return nil
 }
 
-// updateHoldLatch advances the miss-hold latch from the current saturation sample.
-func (p *Plugin) updateHoldLatch(saturation float64) bool {
-	holding := p.holdingMisses.Load()
-	switch {
-	case saturation >= p.shedThreshold:
-		p.holdingMisses.Store(true)
-		return true
-	case holding && saturation < p.releaseThreshold:
-		p.holdingMisses.Store(false)
-		return false
-	default:
-		return holding
-	}
-}
-
-// PreferEligibleFirst implements flowcontrol.DispatchPreference.
-// While missHold is prefer or strict and the latch is set, fairness picks among gate-eligible
-// queues first so waiting hits are chosen before held misses.
-func (p *Plugin) PreferEligibleFirst(saturation float64) bool {
-	if p.missHold == MissHoldOff {
-		return false
-	}
-	return p.updateHoldLatch(saturation)
-}
-
-// EmptyEligibleFallback implements flowcontrol.DispatchPreference.
-// prefer may dispatch from the full band when no hit is waiting; strict does not.
-func (p *Plugin) EmptyEligibleFallback(saturation float64) bool {
-	return p.missHold == MissHoldPrefer && p.updateHoldLatch(saturation)
-}
-
-// Allow implements flowcontrol.DispatchGate.
-// With missHold prefer or strict, a ready miss stays queued once saturation reaches
-// shedThreshold until it falls below releaseThreshold. Hits, classes that are not Ready, and
-// requests with no class dispatch. missHold off always allows.
-func (p *Plugin) Allow(_ context.Context, item fwkfc.QueueItemAccessor, saturation float64) bool {
-	if item == nil || p.missHold == MissHoldOff {
-		return true
-	}
-	if !p.updateHoldLatch(saturation) {
-		return true
-	}
-	class := classOfItem(item)
-	if class == nil || !class.Ready || class.Hit {
-		return true
-	}
-	return false
-}
-
-// EffectiveBandRequestCapacity implements flowcontrol.BandEnqueuePolicy.
-// Ready misses may only use the band slots not reserved by hitQueueShare, so held cold traffic
-// cannot exhaust shared maxRequests and block hit enqueue.
-func (p *Plugin) EffectiveBandRequestCapacity(item fwkfc.QueueItemAccessor, capacity uint64) uint64 {
-	if capacity == 0 || p.hitQueueShare <= 0 {
-		return capacity
-	}
-	class := classOfItem(item)
-	if class == nil || !class.Ready || class.Hit {
-		return capacity
-	}
-	reserved := uint64(float64(capacity) * p.hitQueueShare)
-	if reserved >= capacity {
-		return 0
-	}
-	return capacity - reserved
-}
-
-func classOfItem(item fwkfc.QueueItemAccessor) *CacheClass {
-	if item == nil {
-		return nil
-	}
-	req := item.OriginalRequest()
-	if req == nil || req.InferenceRequest() == nil {
-		return nil
-	}
-	class, ok := fwksched.ReadRequestAttribute[*CacheClass](req.InferenceRequest(), CacheClassKey)
-	if !ok {
-		return nil
-	}
-	return class
-}
-
-// FlowID returns the queue ID flow control should use. A Ready class splits hits and misses
-// into sibling queues at the same priority so a held miss does not block a hit.
-//
-// The returned ID is a queue key, not the parent fairness ID. Use ParentFlowID to recover the
-// tenant/model key used for service accounting.
-func FlowID(base string, class *CacheClass) string {
-	if class == nil || !class.Ready {
-		return base
-	}
-	if class.Hit {
-		return base + flowIDSuffixHit
-	}
-	return base + flowIDSuffixMiss
-}
-
-// ParentFlowID strips a cache-class sibling suffix from a queue ID, returning the parent
-// fairness ID. IDs without a known suffix are returned unchanged.
-func ParentFlowID(id string) string {
-	for _, suffix := range []string{flowIDSuffixHit, flowIDSuffixMiss} {
-		if len(id) > len(suffix) && id[len(id)-len(suffix):] == suffix {
-			return id[:len(id)-len(suffix)]
-		}
-	}
-	return id
-}
-
-// RewriteFlowID implements requestcontrol.FlowIDRewriter when this plugin is also the
-// configured DispatchGate. Admission uses it so hit and miss requests share a priority band
-// as sibling queues.
-func (p *Plugin) RewriteFlowID(base string, req *fwksched.InferenceRequest) string {
-	if req == nil {
-		return base
-	}
-	class, ok := fwksched.ReadRequestAttribute[*CacheClass](req, CacheClassKey)
-	if !ok {
-		return base
-	}
-	return FlowID(base, class)
-}
-
 // PreRequest records the request's prefix blocks as resident, now that it has actually been
 // admitted and routed. Indexing here rather than at classification time keeps the index a
-// record of what the pool was asked to serve, not of what it turned away -- otherwise a flood
-// of rejected cold traffic would index itself and be scored as warm on retry.
+// record of what the pool was asked to serve, not of what it turned away.
 func (p *Plugin) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
 	v, ok := p.pending.LoadAndDelete(request.RequestID)
 	if !ok {
@@ -521,16 +280,6 @@ func (p *Plugin) PreRequest(ctx context.Context, request *fwksched.InferenceRequ
 }
 
 // blockHashes derives content-stable prefix block hashes without a tokenizer round-trip.
-//
-// The estimate backend byte-packs the prompt into pseudo-tokens, which the shared prefixhash
-// helper then blocks and chains exactly as the approximate prefix producer does for real
-// tokens. Because this plugin matches those hashes only against its own index, built from the
-// same pseudo-tokens, the two agree by construction -- they never need to line up with the
-// engine's KV block hashes.
-//
-// The request is shallow-copied rather than mutated: request.Body.TokenizedRequest belongs to
-// the token-producer, and overwriting it here would corrupt the routing-grade prefix match
-// computed later.
 func (p *Plugin) blockHashes(ctx context.Context, request *fwksched.InferenceRequest) [][]prefixhash.BlockHash {
 	if request == nil || request.Body == nil {
 		return nil
@@ -553,8 +302,6 @@ func (p *Plugin) blockHashes(ctx context.Context, request *fwksched.InferenceReq
 }
 
 // lookupPrompts matches each prompt's prefix independently and sums matched/total blocks.
-// Concatenating prompts would stop at the first gap of the first prompt and ignore later
-// prompts that may be fully cached.
 func (p *Plugin) lookupPrompts(perPrompt [][]prefixhash.BlockHash) (matched, total int) {
 	for _, hashes := range perPrompt {
 		m, t := p.lookup(hashes)
@@ -566,7 +313,7 @@ func (p *Plugin) lookupPrompts(perPrompt [][]prefixhash.BlockHash) (matched, tot
 
 // lookup returns the length of the longest indexed prefix, in blocks, and the total block
 // count. It stops at the first gap: prefix caching is contiguous from the start of the
-// prompt, so a block cached after a miss is not reachable as a prefix.
+// prompt.
 func (p *Plugin) lookup(hashes []prefixhash.BlockHash) (matched, total int) {
 	for _, h := range hashes {
 		if _, ok := p.index.Get(h); !ok {
@@ -577,7 +324,6 @@ func (p *Plugin) lookup(hashes []prefixhash.BlockHash) (matched, total int) {
 	return matched, len(hashes)
 }
 
-// pendingEntry is a request that has been classified but whose fate is not yet known.
 type pendingEntry struct {
 	hashes        []prefixhash.BlockHash
 	matchedTokens int
@@ -585,7 +331,6 @@ type pendingEntry struct {
 	at            time.Time
 }
 
-// runJanitor sweeps unclaimed entries until the handle's context ends.
 func (p *Plugin) runJanitor(ctx context.Context) {
 	ticker := time.NewTicker(p.sweepInterval)
 	defer ticker.Stop()
@@ -600,11 +345,7 @@ func (p *Plugin) runJanitor(ctx context.Context) {
 }
 
 // sweep reclaims entries for requests that never reached PreRequest and attributes what they
-// were carrying.
-//
-// An entry older than pendingTTL is treated as shed at admission: admitted requests claim
-// their entry in PreRequest before this deadline. Recording the cached tokens those requests
-// would have reused turns the cost of blind shedding into a direct observation.
+// were carrying for metrics.
 func (p *Plugin) sweep(now time.Time) (swept int) {
 	p.pending.Range(func(k, v any) bool {
 		entry, ok := v.(*pendingEntry)

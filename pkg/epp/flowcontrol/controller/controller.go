@@ -103,7 +103,6 @@ type Deps struct {
 	EndpointCandidates  contracts.EndpointCandidates
 	UsageLimitPolicy    flowcontrol.UsageLimitPolicy
 	BandSelectionPolicy flowcontrol.BandSelectionPolicy
-	DispatchGate        flowcontrol.DispatchGate
 	Clock               clock.WithTicker
 	ProcessorFactory    processorFactory
 
@@ -142,7 +141,6 @@ func NewFlowController(
 		parentCtx:           ctx,
 	}
 
-	dispatchGate := deps.DispatchGate
 	if deps.ProcessorFactory == nil {
 		fc.processorFactory = func(
 			ctx context.Context,
@@ -159,7 +157,7 @@ func NewFlowController(
 			logger logr.Logger,
 			reclamation *internal.ReclamationController,
 		) processor {
-			proc := internal.NewProcessor(
+			return internal.NewProcessor(
 				ctx,
 				poolName,
 				registry,
@@ -175,8 +173,6 @@ func NewFlowController(
 				logger,
 				reclamation,
 			)
-			proc.SetDispatchGate(dispatchGate)
-			return proc
 		}
 	} else {
 		fc.processorFactory = deps.ProcessorFactory

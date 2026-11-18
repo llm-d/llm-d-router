@@ -73,7 +73,7 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 			name: "admitted by flow control after queueing",
 			setup: func(d *Director) {
 				d.admissionController = NewFlowControlAdmissionController(
-					&mockFlowController{outcome: fctypes.QueueOutcomeDispatched, delay: 5 * time.Millisecond}, "pool", poolWithEndpoint, nil)
+					&mockFlowController{outcome: fctypes.QueueOutcomeDispatched, delay: 5 * time.Millisecond}, "pool", poolWithEndpoint)
 			},
 			wantDecision: "admitted",
 			wantQueued:   true,
@@ -83,7 +83,7 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 			setup: func(d *Director) {
 				d.admissionController = NewFlowControlAdmissionController(
 					&mockFlowController{outcome: fctypes.QueueOutcomeEvictedTTL, err: fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrTTLExpired)},
-					"pool", poolWithEndpoint, nil)
+					"pool", poolWithEndpoint)
 			},
 			wantDecision: "rejected",
 			wantReason:   string(errcommon.RequestDroppedReasonTTLExpired),
@@ -111,7 +111,7 @@ func TestHandleRequestRecordsAdmissionDecision(t *testing.T) {
 			name: "admitter plugin denies after flow control admits",
 			setup: func(d *Director) {
 				d.admissionController = NewFlowControlAdmissionController(
-					&mockFlowController{outcome: fctypes.QueueOutcomeDispatched}, "pool", poolWithEndpoint, nil)
+					&mockFlowController{outcome: fctypes.QueueOutcomeDispatched}, "pool", poolWithEndpoint)
 				d.requestControlPlugins = *NewConfig().WithAdmissionPlugins(newMockAdmissionPlugin("deny", errors.New("latency objective cannot be met")))
 			},
 			wantDecision: "rejected",

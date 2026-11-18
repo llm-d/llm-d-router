@@ -77,7 +77,6 @@ type Processor struct {
 	endpointCandidates   contracts.EndpointCandidates
 	usageLimitPolicy     flowcontrol.UsageLimitPolicy
 	bandSelectionPolicy  flowcontrol.BandSelectionPolicy
-	dispatchGate         flowcontrol.DispatchGate
 	clock                clock.WithTicker
 	noEndpointRequestTTL time.Duration
 	cleanupSweepInterval time.Duration
@@ -167,11 +166,6 @@ func NewProcessor(
 	// otherwise, which keeps a request that arrives before that cycle on the saturation budget.
 	p.regime.Store(&regimeSample{})
 	return p
-}
-
-// SetDispatchGate installs an optional per-item dispatch filter. Nil admits every selected item.
-func (p *Processor) SetDispatchGate(gate flowcontrol.DispatchGate) {
-	p.dispatchGate = gate
 }
 
 // Submit attempts a non-blocking handoff of an item to the processor's internal enqueue channel.
@@ -343,7 +337,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 	// --- Capacity Check ---
 	// This check is safe because it is performed by the single-writer Run goroutine.
 	flowQueue := managedQ.FlowQueueAccessor()
-	ok, flowLimit, stats, err := p.hasCapacity(item, flowQueue, req.ByteSize())
+	ok, flowLimit, stats, err := p.hasCapacity(flowQueue, req.ByteSize())
 	if err != nil {
 		finalErr := fmt.Errorf("configuration error: failed to read capacity for priority %d: %v", key.Priority, err)
 		p.logger.Error(finalErr, "Rejecting request, capacity lookup failed", "flowKey", key, "requestID", req.ID())
@@ -397,7 +391,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 // flowLimit reports that the flow's own per-flow limit is the only limit refusing the item.
 // A non-nil error means the capacity could not be read (the priority band is not configured), not that capacity is
 // exhausted.
-func (p *Processor) hasCapacity(item flowcontrol.QueueItemAccessor, flowQueue flowcontrol.FlowQueueAccessor, itemByteSize uint64) (ok, flowLimit bool, snapshot contracts.CapacitySnapshot, err error) {
+func (p *Processor) hasCapacity(flowQueue flowcontrol.FlowQueueAccessor, itemByteSize uint64) (ok, flowLimit bool, snapshot contracts.CapacitySnapshot, err error) {
 	snapshot, err = p.registry.CapacitySnapshot(flowQueue.FlowKey().Priority)
 	if err != nil {
 		return false, false, snapshot, err
@@ -412,14 +406,8 @@ func (p *Processor) hasCapacity(item flowcontrol.QueueItemAccessor, flowQueue fl
 	if band.CapacityBytes > 0 && band.ByteSize+itemByteSize > band.CapacityBytes {
 		return false, false, snapshot, nil
 	}
-	bandReqCap := band.CapacityRequests
-	if bandReqCap > 0 {
-		if pol, ok := p.dispatchGate.(flowcontrol.BandEnqueuePolicy); ok {
-			bandReqCap = pol.EffectiveBandRequestCapacity(item, bandReqCap)
-		}
-		if band.Len+1 > bandReqCap {
-			return false, false, snapshot, nil
-		}
+	if band.CapacityRequests > 0 && band.Len+1 > band.CapacityRequests {
+		return false, false, snapshot, nil
 	}
 	// Read the flow's occupancy once: only Run adds items, but the cleanup sweep can remove finalized ones concurrently,
 	// and the reported reason must match this decision.
@@ -581,7 +569,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 			continue
 		}
 
-		item, err := p.selectForDispatch(ctx, originalBand, saturation)
+		item, err := p.selectItem(ctx, originalBand)
 		if err != nil {
 			p.logger.Error(err, "Failed to select item, skipping priority band for this cycle",
 				"priority", priority)
@@ -674,129 +662,6 @@ func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleave
 		}
 	}
 	return
-}
-
-// itemAllowed reports whether the dispatch gate lets this item leave the queue.
-// A nil gate admits every non-nil item.
-func (p *Processor) itemAllowed(ctx context.Context, item flowcontrol.QueueItemAccessor, saturation float64) bool {
-	if item == nil {
-		return false
-	}
-	if p.dispatchGate == nil {
-		return true
-	}
-	return p.dispatchGate.Allow(ctx, item, saturation)
-}
-
-// selectForDispatch chooses the next item in a band, applying the dispatch gate when configured.
-//
-// When the gate implements DispatchPreference and PreferEligibleFirst is true, fairness runs first
-// over only gate-eligible queues so preferred siblings are picked without a rejected miss-first
-// attempt. If that set is empty and EmptyEligibleFallback is true, fairness falls back to the
-// full band (work-conserving). If fallback is false, the cycle returns no item. Otherwise the
-// legacy path picks from the full band and applyDispatchGate filters or retries.
-func (p *Processor) selectForDispatch(
-	ctx context.Context,
-	band flowcontrol.PriorityBandAccessor,
-	saturation float64,
-) (flowcontrol.QueueItemAccessor, error) {
-	if pref, ok := p.dispatchGate.(flowcontrol.DispatchPreference); ok && pref.PreferEligibleFirst(saturation) {
-		filtered := p.gateEligibleBand(ctx, band, saturation)
-		item, err := p.selectItem(ctx, filtered)
-		if err != nil || item != nil {
-			return item, err
-		}
-		if !pref.EmptyEligibleFallback(saturation) {
-			return nil, nil
-		}
-		return p.selectItem(ctx, band)
-	}
-	item, err := p.selectItem(ctx, band)
-	if err != nil {
-		return nil, err
-	}
-	return p.applyDispatchGate(ctx, item, band, saturation)
-}
-
-// applyDispatchGate returns the fairness pick when the gate allows it. When the pick is held,
-// it re-runs fairness over only gate-eligible queues in the band. A nil fairness pick stays
-// nil: the gate must not invent work the fairness policy declined to select.
-func (p *Processor) applyDispatchGate(
-	ctx context.Context,
-	picked flowcontrol.QueueItemAccessor,
-	band flowcontrol.PriorityBandAccessor,
-	saturation float64,
-) (flowcontrol.QueueItemAccessor, error) {
-	if p.dispatchGate == nil || picked == nil {
-		return picked, nil
-	}
-	if p.itemAllowed(ctx, picked, saturation) {
-		return picked, nil
-	}
-	if band == nil {
-		return nil, nil
-	}
-	return p.selectItem(ctx, p.gateEligibleBand(ctx, band, saturation))
-}
-
-func (p *Processor) gateEligibleBand(
-	ctx context.Context,
-	band flowcontrol.PriorityBandAccessor,
-	saturation float64,
-) *gateEligibleBand {
-	return &gateEligibleBand{
-		base: band,
-		allow: func(item flowcontrol.QueueItemAccessor) bool {
-			return p.itemAllowed(ctx, item, saturation)
-		},
-	}
-}
-
-// gateEligibleBand exposes only queues whose current head the gate allows, so fairness can
-// pick among dispatchable sibling flows without scanning in registry order.
-type gateEligibleBand struct {
-	base  flowcontrol.PriorityBandAccessor
-	allow func(flowcontrol.QueueItemAccessor) bool
-}
-
-func (g *gateEligibleBand) Priority() int { return g.base.Priority() }
-func (g *gateEligibleBand) PolicyState() any {
-	return g.base.PolicyState()
-}
-
-func (g *gateEligibleBand) eligible(q flowcontrol.FlowQueueAccessor) bool {
-	if q == nil {
-		return false
-	}
-	head := q.Peek()
-	return head != nil && g.allow(head)
-}
-
-func (g *gateEligibleBand) FlowKeys() []flowcontrol.FlowKey {
-	var keys []flowcontrol.FlowKey
-	for _, key := range g.base.FlowKeys() {
-		if g.eligible(g.base.Queue(key.ID)) {
-			keys = append(keys, key)
-		}
-	}
-	return keys
-}
-
-func (g *gateEligibleBand) Queue(id string) flowcontrol.FlowQueueAccessor {
-	q := g.base.Queue(id)
-	if !g.eligible(q) {
-		return nil
-	}
-	return q
-}
-
-func (g *gateEligibleBand) IterateQueues(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
-	g.base.IterateQueues(func(queue flowcontrol.FlowQueueAccessor) bool {
-		if !g.eligible(queue) {
-			return true
-		}
-		return callback(queue)
-	})
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.

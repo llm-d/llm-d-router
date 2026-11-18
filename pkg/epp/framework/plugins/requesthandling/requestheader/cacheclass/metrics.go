@@ -28,10 +28,9 @@ import (
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// These are deliberately recorded at classification time rather than at dispatch. Pairing
-// admission_class_total with the flow-control outcome counters is what makes cache-blind
-// shedding directly visible: equal rejection rates across the two class labels is the symptom
-// this plugin exists to remove.
+// Recorded at classification time so class mix is visible independent of dispatch outcomes.
+// Pair with flow-control outcome counters and response cached_tokens to judge accuracy and
+// whether warm and cold are rejected at different rates.
 var (
 	classifications = prometheus.NewCounterVec(
 		prometheus.CounterOpts{

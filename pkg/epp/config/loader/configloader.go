@@ -205,8 +205,7 @@ func flowControlSettingsConfigured(fc *configapiv1.FlowControlConfig) bool {
 	return fc.MaxBytes != nil || fc.MaxRequests != nil || fc.DefaultRequestTTL != nil ||
 		fc.NoEndpointRequestTTL != nil || fc.DefaultPriorityBand != nil ||
 		fc.DefaultNegativePriorityBand != nil || len(fc.PriorityBands) > 0 ||
-		fc.UsageLimitPolicyPluginRef != "" || fc.BandSelectionPolicyPluginRef != "" ||
-		fc.DispatchGatePluginRef != ""
+		fc.UsageLimitPolicyPluginRef != "" || fc.BandSelectionPolicyPluginRef != ""
 }
 
 // decodeRawConfig decodes a configuration in any accepted apiVersion and returns

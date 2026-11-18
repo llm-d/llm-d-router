@@ -1209,7 +1209,6 @@ func (r *Runner) initAdmissionControl(
 		EndpointCandidates:  endpointCandidates,
 		UsageLimitPolicy:    eppConfig.FlowControlConfig.UsageLimitPolicy,
 		BandSelectionPolicy: eppConfig.FlowControlConfig.BandSelectionPolicy,
-		DispatchGate:        eppConfig.FlowControlConfig.DispatchGate,
 	}
 
 	var requestEvictor *fceviction.RequestEvictor
@@ -1230,12 +1229,8 @@ func (r *Runner) initAdmissionControl(
 	}
 
 	fc := fccontroller.NewFlowController(ctx, opts.PoolName, eppConfig.FlowControlConfig.Controller, deps)
-	var flowIDRewriter requestcontrol.FlowIDRewriter
-	if rewriter, ok := eppConfig.FlowControlConfig.DispatchGate.(requestcontrol.FlowIDRewriter); ok {
-		flowIDRewriter = rewriter
-	}
 	return endpointCandidates,
-		requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName, endpointCandidates, flowIDRewriter),
+		requestcontrol.NewFlowControlAdmissionController(fc, opts.PoolName, endpointCandidates),
 		registry,
 		requestEvictor
 }

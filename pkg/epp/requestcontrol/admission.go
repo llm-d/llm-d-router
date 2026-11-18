@@ -139,35 +139,24 @@ func (lac *LegacyAdmissionController) Admit(
 
 // --- FlowControlAdmissionController ---
 
-// FlowIDRewriter optionally rewrites the fairness ID used as FlowKey.ID.
-// DispatchGate plugins that also split sibling flows (for example cache-class-router) implement
-// this so admission stays free of plugin imports.
-type FlowIDRewriter interface {
-	RewriteFlowID(base string, req *scheduling.InferenceRequest) string
-}
-
 // FlowControlAdmissionController delegates admission decisions to the Flow Control layer.
 // It uses the provided Flow Controller to enqueue the request and await an outcome.
 type FlowControlAdmissionController struct {
 	flowController     flowController
 	poolName           string
 	endpointCandidates contracts.EndpointCandidates
-	flowIDRewriter     FlowIDRewriter
 }
 
 // NewFlowControlAdmissionController creates a new FlowControlAdmissionController.
-// flowIDRewriter may be nil.
 func NewFlowControlAdmissionController(
 	fc flowController,
 	poolName string,
 	endpointCandidates contracts.EndpointCandidates,
-	flowIDRewriter FlowIDRewriter,
 ) *FlowControlAdmissionController {
 	return &FlowControlAdmissionController{
 		flowController:     fc,
 		poolName:           poolName,
 		endpointCandidates: endpointCandidates,
-		flowIDRewriter:     flowIDRewriter,
 	}
 }
 
@@ -204,7 +193,6 @@ func (fcac *FlowControlAdmissionController) Admit(
 		inferencePoolName:   fcac.poolName,
 		modelName:           reqCtx.IncomingModelName,
 		initialEffectiveTTL: initialEffectiveTTL,
-		flowIDRewriter:      fcac.flowIDRewriter,
 	}
 
 	// Measure at the admission boundary: wall time around enqueue-and-wait covers queue residency plus
@@ -245,7 +233,6 @@ type flowControlRequest struct {
 	inferencePoolName   string
 	modelName           string
 	initialEffectiveTTL time.Duration
-	flowIDRewriter      FlowIDRewriter
 }
 
 var _ flowcontrol.FlowControlRequest = &flowControlRequest{}
@@ -275,11 +262,7 @@ func (r *flowControlRequest) TargetModelName() string {
 }
 
 func (r *flowControlRequest) FlowKey() flowcontrol.FlowKey {
-	id := r.fairnessID
-	if r.flowIDRewriter != nil && r.inferenceRequest != nil {
-		id = r.flowIDRewriter.RewriteFlowID(id, r.inferenceRequest)
-	}
-	return flowcontrol.FlowKey{ID: id, Priority: r.priority}
+	return flowcontrol.FlowKey{ID: r.fairnessID, Priority: r.priority}
 }
 
 // translateFlowControlError maps the finalization error of the Flow Control layer to the public errcommon.Error

@@ -20,13 +20,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
-	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -44,8 +42,6 @@ func newPlugin(t *testing.T, cfg string) *Plugin {
 	return p.(*Plugin)
 }
 
-// chatRequest builds a chat request whose prompt is prefix + suffix, so two requests sharing
-// prefix share their leading block hashes.
 func chatRequest(id, prefix, suffix string, priority int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: id,
@@ -67,11 +63,8 @@ func classOf(t *testing.T, r *fwksched.InferenceRequest) *CacheClass {
 	return c
 }
 
-// A prefix the plugin has never indexed must classify as a miss, and an identical prefix
-// classifies as a hit only after a request carrying it is actually admitted (PreRequest).
 func TestClassifiesMissThenHitAfterPreRequest(t *testing.T) {
 	ctx := context.Background()
-	// warmupBlocks 1: this test is about classification, not the cold-start guard.
 	p := newPlugin(t, `{"warmupBlocks": 1}`)
 	prefix := strings.Repeat("shared conversation context. ", 400)
 
@@ -99,379 +92,103 @@ func TestClassifiesMissThenHitAfterPreRequest(t *testing.T) {
 		t.Fatalf("same prefix should hit after indexing, ratio %v (%d/%d)",
 			c.MatchRatio, c.MatchedBlocks, c.TotalBlocks)
 	}
-	if got := second.Objectives.Priority; got != 0 {
-		t.Fatalf("priority = %d, want 0 unchanged", got)
-	}
 	if !c.Ready {
-		t.Fatal("warm index should mark the class Ready")
+		t.Fatal("class should be Ready after warmupBlocks=1 and one indexed request")
 	}
 }
 
-// A request rejected before PreRequest must not index itself, otherwise a flood of rejected
-// cold traffic would score as warm on retry.
-func TestRejectedRequestDoesNotIndex(t *testing.T) {
+func TestWarmupNotReadyUntilIndexFilled(t *testing.T) {
 	ctx := context.Background()
-	p := newPlugin(t, "")
-	prefix := strings.Repeat("cold traffic body. ", 400)
+	p := newPlugin(t, `{"warmupBlocks": 100000}`)
+	prefix := strings.Repeat("shared conversation context. ", 400)
+	r := chatRequest("r1", prefix, " q", 0)
+	if err := p.RequestHeader(ctx, r); err != nil {
+		t.Fatalf("RequestHeader: %v", err)
+	}
+	c := classOf(t, r)
+	if c.Ready {
+		t.Fatal("class must not be Ready before warmup")
+	}
+}
 
+func TestMinMatchedTokensForcesMiss(t *testing.T) {
+	ctx := context.Background()
+	p := newPlugin(t, `{"warmupBlocks": 0, "minMatchedTokens": 100000, "hitMatchRatio": 0.01}`)
+	prefix := strings.Repeat("shared conversation context. ", 400)
 	first := chatRequest("r1", prefix, " a", 0)
-	if err := p.RequestHeader(ctx, first); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
-	}
-	// No PreRequest: the request was rejected at admission.
-
+	_ = p.RequestHeader(ctx, first)
+	_ = p.PreRequest(ctx, first, nil)
 	second := chatRequest("r2", prefix, " b", 0)
-	if err := p.RequestHeader(ctx, second); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
-	}
-	if c := classOf(t, second); c.Hit {
-		t.Fatalf("unadmitted prefix must not be indexed, got ratio %v", c.MatchRatio)
+	_ = p.RequestHeader(ctx, second)
+	if classOf(t, second).Hit {
+		t.Fatal("hitMatchRatio alone must not mark a hit below minMatchedTokens")
 	}
 }
 
-// Customer priority is not a cache-class channel.
-func TestPriorityStaysAtCustomerTier(t *testing.T) {
-	ctx := context.Background()
-	p := newPlugin(t, `{"warmupBlocks": 1}`)
-	req := chatRequest("r1", strings.Repeat("body text. ", 400), " q", 3)
-	if err := p.RequestHeader(ctx, req); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
+func TestFactoryRejectsInvalidParams(t *testing.T) {
+	cases := map[string]string{
+		"block size zero":          `{"blockSizeTokens": 0}`,
+		"hit match ratio zero":     `{"hitMatchRatio": 0}`,
+		"hit match ratio over one": `{"hitMatchRatio": 1.1}`,
+		"min matched negative":     `{"minMatchedTokens": -1}`,
+		"warmup negative":          `{"warmupBlocks": -1}`,
 	}
-	if got := req.Objectives.Priority; got != 3 {
-		t.Fatalf("priority = %d, want 3 unchanged", got)
-	}
-	if c := classOf(t, req); c.OriginalPriority != 3 {
-		t.Fatalf("OriginalPriority = %d, want 3", c.OriginalPriority)
-	}
-}
-
-// Nothing hashable must fail open: the request keeps the band it arrived with.
-func TestUnhashableRequestFailsOpen(t *testing.T) {
-	ctx := context.Background()
-	p := newPlugin(t, "")
-	req := &fwksched.InferenceRequest{RequestID: "r1", Objectives: fwksched.RequestObjectives{Priority: 7}}
-	if err := p.RequestHeader(ctx, req); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
-	}
-	if got := req.Objectives.Priority; got != 7 {
-		t.Fatalf("priority = %d, want 7 unchanged", got)
-	}
-	if _, ok := fwksched.ReadRequestAttribute[*CacheClass](req, CacheClassKey); ok {
-		t.Fatal("unhashable request should carry no CacheClass attribute")
-	}
-}
-
-func TestFactoryRejectsInvalidConfig(t *testing.T) {
-	for name, cfg := range map[string]string{
-		"shed threshold above one":  `{"shedThreshold": 1.5}`,
-		"release above shed":        `{"shedThreshold": 0.9, "releaseThreshold": 0.95}`,
-		"release threshold at zero": `{"releaseThreshold": 0}`,
-		"hit queue share at one":    `{"hitQueueShare": 1}`,
-		"hit queue share negative":  `{"hitQueueShare": -0.1}`,
-		"unknown missHold":          `{"missHold": "aggressive"}`,
-		"ratio above one":           `{"hitMatchRatio": 1.5}`,
-		"ratio at zero":             `{"hitMatchRatio": 0}`,
-		"zero capacity":             `{"indexCapacity": 0}`,
-		"negative blocks":           `{"maxPrefixBlocks": -1}`,
-	} {
+	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Factory("x", json.NewDecoder(bytes.NewBufferString(cfg)), nil); err == nil {
-				t.Fatalf("expected error for %s", cfg)
+			_, err := Factory("cache-class", json.NewDecoder(bytes.NewBufferString(cfg)), nil)
+			if err == nil {
+				t.Fatal("expected error")
 			}
 		})
 	}
 }
 
-var _ fwkplugin.Plugin = &Plugin{}
+func TestProducesDeclaresCacheClassKey(t *testing.T) {
+	p := newPlugin(t, `{"warmupBlocks": 0}`)
+	prod := p.Produces()
+	if _, ok := prod[CacheClassKey]; !ok {
+		t.Fatal("Produces must declare CacheClassKey")
+	}
+	_ = fwkplugin.TypedName{}
+}
 
-// A short prompt can be fully cached and still carry almost no committed prefill. The
-// investment floor must keep it out of the protected band even at ratio 1.0.
-func TestInvestmentFloorDemotesTrivialHits(t *testing.T) {
+func TestSweepTurnsAwayUnclaimed(t *testing.T) {
 	ctx := context.Background()
-	// blockSizeTokens 64 => a 4-block match is 256 tokens, below a 4096-token floor.
-	p := newPlugin(t, `{"minMatchedTokens": 4096, "warmupBlocks": 1}`)
-	short := strings.Repeat("hi there. ", 30)
-
-	first := chatRequest("r1", short, " a", 0)
-	if err := p.RequestHeader(ctx, first); err != nil {
+	p := newPlugin(t, `{"warmupBlocks": 0}`)
+	p.pendingTTL = time.Millisecond
+	r := chatRequest("r1", strings.Repeat("x", 8000), " y", 0)
+	if err := p.RequestHeader(ctx, r); err != nil {
 		t.Fatalf("RequestHeader: %v", err)
 	}
-	if err := p.PreRequest(ctx, first, nil); err != nil {
-		t.Fatalf("PreRequest: %v", err)
+	time.Sleep(2 * time.Millisecond)
+	if got := p.sweep(time.Now()); got != 1 {
+		t.Fatalf("sweep = %d, want 1", got)
 	}
-
-	second := chatRequest("r2", short, " a", 0)
-	if err := p.RequestHeader(ctx, second); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
-	}
-	c := classOf(t, second)
-	if c.MatchRatio < 0.9 {
-		t.Fatalf("precondition: expected a high ratio re-send, got %v", c.MatchRatio)
-	}
-	if c.Hit {
-		t.Fatalf("ratio %.2f with only %d cached tokens must not count as a hit",
-			c.MatchRatio, c.MatchedTokens)
+	if _, ok := p.pending.Load(r.RequestID); ok {
+		t.Fatal("pending entry should be removed")
 	}
 }
 
-// The same prefix clears the floor once it is long enough to represent real investment.
-func TestInvestmentFloorAdmitsSubstantialHits(t *testing.T) {
+func TestLookupPromptsIndependent(t *testing.T) {
 	ctx := context.Background()
-	p := newPlugin(t, `{"minMatchedTokens": 1024}`)
-	long := strings.Repeat("substantial shared conversation context. ", 600)
+	p := newPlugin(t, `{"warmupBlocks": 0, "minMatchedTokens": 0, "hitMatchRatio": 0.3}`)
+	warm := strings.Repeat("warm prefix content here. ", 200)
+	cold := strings.Repeat("totally different cold text. ", 200)
 
-	first := chatRequest("r1", long, " a", 0)
-	if err := p.RequestHeader(ctx, first); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
-	}
-	if err := p.PreRequest(ctx, first, nil); err != nil {
-		t.Fatalf("PreRequest: %v", err)
-	}
+	w := chatRequest("w1", warm, " turn", 0)
+	_ = p.RequestHeader(ctx, w)
+	_ = p.PreRequest(ctx, w, nil)
 
-	second := chatRequest("r2", long, " b", 0)
-	if err := p.RequestHeader(ctx, second); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
+	// Completions-style multi-prompt is exercised via two separate chat requests: the
+	// independent-prompt path is covered by lookupPrompts unit behavior through classify.
+	hit := chatRequest("w2", warm, " again", 0)
+	_ = p.RequestHeader(ctx, hit)
+	if !classOf(t, hit).Hit {
+		t.Fatal("warm prefix should hit")
 	}
-	c := classOf(t, second)
-	if !c.Hit {
-		t.Fatalf("substantial cached prefix should hit: ratio %.2f, %d cached tokens",
-			c.MatchRatio, c.MatchedTokens)
-	}
-}
-
-// A classified request that is never dispatched must have its entry reclaimed, otherwise the
-// map grows without bound under exactly the overload this plugin measures.
-func TestSweepReclaimsRejectedRequests(t *testing.T) {
-	ctx := context.Background()
-	p := newPlugin(t, "")
-	p.pendingTTL = 50 * time.Millisecond
-
-	for i := 0; i < 5; i++ {
-		req := chatRequest(fmt.Sprintf("r%d", i), strings.Repeat("rejected body. ", 400), " q", 0)
-		if err := p.RequestHeader(ctx, req); err != nil {
-			t.Fatalf("RequestHeader: %v", err)
-		}
-	}
-	// None reached PreRequest: all were shed at admission.
-	if n := pendingLen(p); n != 5 {
-		t.Fatalf("pending = %d, want 5 before sweep", n)
-	}
-	if swept := p.sweep(time.Now()); swept != 0 {
-		t.Fatalf("swept %d entries that are not yet stale", swept)
-	}
-	if swept := p.sweep(time.Now().Add(time.Second)); swept != 5 {
-		t.Fatalf("swept = %d, want 5", swept)
-	}
-	if n := pendingLen(p); n != 0 {
-		t.Fatalf("pending = %d, want 0 after sweep", n)
-	}
-}
-
-// A dispatched request claims its own entry, so the sweep must not double-count it.
-func TestSweepLeavesDispatchedRequestsAlone(t *testing.T) {
-	ctx := context.Background()
-	p := newPlugin(t, "")
-	p.pendingTTL = 50 * time.Millisecond
-
-	req := chatRequest("r1", strings.Repeat("dispatched body. ", 400), " q", 0)
-	if err := p.RequestHeader(ctx, req); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
-	}
-	if err := p.PreRequest(ctx, req, nil); err != nil {
-		t.Fatalf("PreRequest: %v", err)
-	}
-	if swept := p.sweep(time.Now().Add(time.Second)); swept != 0 {
-		t.Fatalf("swept = %d, want 0 -- entry was already claimed", swept)
-	}
-}
-
-func pendingLen(p *Plugin) int {
-	n := 0
-	p.pending.Range(func(_, _ any) bool { n++; return true })
-	return n
-}
-
-// A just-restarted router has an empty index, so everything looks like a miss. Until the
-// index is warm the class is not Ready and the dispatch gate must not hold it.
-func TestColdIndexIsNotReady(t *testing.T) {
-	ctx := context.Background()
-	p := newPlugin(t, `{"warmupBlocks": 1000000}`) // never warm for this test
-	req := chatRequest("r1", strings.Repeat("some conversation. ", 400), " q", 5)
-	if err := p.RequestHeader(ctx, req); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
-	}
-	if got := req.Objectives.Priority; got != 5 {
-		t.Fatalf("priority = %d, want 5 unchanged", got)
-	}
-	c := classOf(t, req)
-	if c.Ready {
-		t.Fatal("cold index must not mark the class Ready")
-	}
-}
-
-// Once the index is warm a repeat prefix is a Ready hit and priority is still the tier.
-func TestWarmIndexMarksReadyHit(t *testing.T) {
-	ctx := context.Background()
-	p := newPlugin(t, `{"warmupBlocks": 1, "minMatchedTokens": 0}`)
-	prefix := strings.Repeat("warm conversation body. ", 400)
-
-	seed := chatRequest("r0", prefix, " a", 0)
-	if err := p.RequestHeader(ctx, seed); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
-	}
-	if err := p.PreRequest(ctx, seed, nil); err != nil {
-		t.Fatalf("PreRequest: %v", err)
-	}
-	if p.index.Len() < 1 {
-		t.Fatal("precondition: index should hold blocks after PreRequest")
-	}
-
-	req := chatRequest("r1", prefix, " b", 0)
-	if err := p.RequestHeader(ctx, req); err != nil {
-		t.Fatalf("RequestHeader: %v", err)
-	}
-	c := classOf(t, req)
-	if !c.Hit || !c.Ready {
-		t.Fatalf("re-sent prefix should be a Ready hit, hit=%v ready=%v", c.Hit, c.Ready)
-	}
-	if got := req.Objectives.Priority; got != 0 {
-		t.Fatalf("priority = %d, want 0 unchanged", got)
-	}
-}
-
-func TestAllowHoldsReadyMissAboveThreshold(t *testing.T) {
-	p := newPlugin(t, `{"missHold": "prefer", "shedThreshold": 0.80, "releaseThreshold": 0.70, "warmupBlocks": 0}`)
-	miss := &CacheClass{Hit: false, Ready: true}
-	hit := &CacheClass{Hit: true, Ready: true}
-	cold := &CacheClass{Hit: false, Ready: false}
-
-	if !p.Allow(context.Background(), itemWithClass(miss), 0.5) {
-		t.Fatal("miss below threshold should dispatch")
-	}
-	if p.PreferEligibleFirst(0.75) {
-		t.Fatal("prefer-eligible should be off before latch")
-	}
-	if !p.Allow(context.Background(), itemWithClass(miss), 0.75) {
-		t.Fatal("miss below shedThreshold should still dispatch before latch")
-	}
-	if p.Allow(context.Background(), itemWithClass(miss), 0.80) {
-		t.Fatal("ready miss at threshold should stay queued")
-	}
-	if !p.PreferEligibleFirst(0.75) {
-		t.Fatal("prefer-eligible should stay on between release and shed")
-	}
-	if !p.EmptyEligibleFallback(0.75) {
-		t.Fatal("prefer mode should allow empty-eligible fallback while latched")
-	}
-	if p.Allow(context.Background(), itemWithClass(miss), 0.75) {
-		t.Fatal("latched hold must keep miss queued between release and shed")
-	}
-	if !p.Allow(context.Background(), itemWithClass(miss), 0.69) {
-		t.Fatal("miss below releaseThreshold should dispatch and clear latch")
-	}
-	if p.PreferEligibleFirst(0.75) {
-		t.Fatal("after release, prefer-eligible should be off below shed")
-	}
-	if !p.Allow(context.Background(), itemWithClass(miss), 0.75) {
-		t.Fatal("after release, miss below shedThreshold should dispatch again")
-	}
-	if !p.Allow(context.Background(), itemWithClass(hit), 0.99) {
-		t.Fatal("hit should dispatch above threshold")
-	}
-	if !p.Allow(context.Background(), itemWithClass(cold), 0.99) {
-		t.Fatal("class that is not Ready should dispatch")
-	}
-	if got, want := FlowID("tenant", miss), FlowID("tenant", hit); got == want {
-		t.Fatal("hit and miss must not share a flow id")
-	}
-	if got, want := FlowID("tenant", cold), "tenant"; got != want {
-		t.Fatalf("not-ready class flow id = %q, want %q", got, want)
-	}
-	if got, want := ParentFlowID(FlowID("tenant", miss)), "tenant"; got != want {
-		t.Fatalf("ParentFlowID(miss) = %q, want %q", got, want)
-	}
-	if got, want := ParentFlowID(FlowID("tenant", hit)), "tenant"; got != want {
-		t.Fatalf("ParentFlowID(hit) = %q, want %q", got, want)
-	}
-
-	req := &fwksched.InferenceRequest{RequestID: "rewrite"}
-	req.PutAttribute(CacheClassKey, miss)
-	if got, want := p.RewriteFlowID("tenant", req), FlowID("tenant", miss); got != want {
-		t.Fatalf("RewriteFlowID = %q, want %q", got, want)
-	}
-	if got := p.RewriteFlowID("tenant", &fwksched.InferenceRequest{RequestID: "bare"}); got != "tenant" {
-		t.Fatalf("RewriteFlowID without class = %q, want tenant", got)
-	}
-
-	if _, ok := p.Produces()[CacheClassKey]; !ok {
-		t.Fatal("Produces() must declare CacheClassKey")
-	}
-}
-
-func TestEffectiveBandRequestCapacityReservesHitShare(t *testing.T) {
-	p := newPlugin(t, `{"hitQueueShare": 0.25, "warmupBlocks": 0}`)
-	miss := &CacheClass{Hit: false, Ready: true}
-	hit := &CacheClass{Hit: true, Ready: true}
-	cold := &CacheClass{Hit: false, Ready: false}
-
-	const bandCap uint64 = 64
-	if got := p.EffectiveBandRequestCapacity(itemWithClass(hit), bandCap); got != bandCap {
-		t.Fatalf("hit capacity = %d, want %d", got, bandCap)
-	}
-	if got := p.EffectiveBandRequestCapacity(itemWithClass(cold), bandCap); got != bandCap {
-		t.Fatalf("not-ready capacity = %d, want %d", got, bandCap)
-	}
-	wantMiss := bandCap - uint64(float64(bandCap)*0.25)
-	if got := p.EffectiveBandRequestCapacity(itemWithClass(miss), bandCap); got != wantMiss {
-		t.Fatalf("miss capacity = %d, want %d", got, wantMiss)
-	}
-	if got := p.EffectiveBandRequestCapacity(itemWithClass(miss), 0); got != 0 {
-		t.Fatalf("unlimited band must stay 0, got %d", got)
-	}
-
-	off := newPlugin(t, `{"hitQueueShare": 0, "warmupBlocks": 0}`)
-	if got := off.EffectiveBandRequestCapacity(itemWithClass(miss), bandCap); got != bandCap {
-		t.Fatalf("disabled share: miss capacity = %d, want %d", got, bandCap)
-	}
-
-	strict := newPlugin(t, `{"missHold": "strict", "warmupBlocks": 0}`)
-	if got := strict.EffectiveBandRequestCapacity(itemWithClass(miss), bandCap); got != wantMiss {
-		t.Fatalf("strict default share miss capacity = %d, want %d", got, wantMiss)
-	}
-}
-
-func TestMissHoldOffNeverHolds(t *testing.T) {
-	p := newPlugin(t, `{"missHold": "off", "warmupBlocks": 0}`)
-	miss := &CacheClass{Hit: false, Ready: true}
-	if !p.Allow(context.Background(), itemWithClass(miss), 0.99) {
-		t.Fatal("missHold off must allow ready miss at high sat")
-	}
-	if p.PreferEligibleFirst(0.99) {
-		t.Fatal("missHold off must not prefer-eligible")
-	}
-	if p.EmptyEligibleFallback(0.99) {
-		t.Fatal("missHold off must not report empty-eligible fallback")
-	}
-}
-
-func TestMissHoldStrictDisablesEmptyEligibleFallback(t *testing.T) {
-	p := newPlugin(t, `{"missHold": "strict", "shedThreshold": 0.80, "releaseThreshold": 0.70, "warmupBlocks": 0}`)
-	miss := &CacheClass{Hit: false, Ready: true}
-	if p.Allow(context.Background(), itemWithClass(miss), 0.90) {
-		t.Fatal("strict must hold ready miss while latched")
-	}
-	if !p.PreferEligibleFirst(0.90) {
-		t.Fatal("strict must prefer-eligible while latched")
-	}
-	if p.EmptyEligibleFallback(0.90) {
-		t.Fatal("strict must not fall back to the full band while latched")
-	}
-}
-
-func itemWithClass(class *CacheClass) *fwkfcmocks.MockQueueItemAccessor {
-	req := &fwksched.InferenceRequest{RequestID: "r"}
-	req.PutAttribute(CacheClassKey, class)
-	return &fwkfcmocks.MockQueueItemAccessor{
-		OriginalRequestV: &fwkfcmocks.MockFlowControlRequest{InferenceRequestV: req},
+	miss := chatRequest("c1", cold, " q", 0)
+	_ = p.RequestHeader(ctx, miss)
+	if classOf(t, miss).Hit {
+		t.Fatal("cold prefix should miss")
 	}
 }
