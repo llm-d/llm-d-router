@@ -46,9 +46,9 @@ When a discovery plugin is configured:
   datastore via `DiscoveryNotifier`.
 - Whether a Kubernetes API server and RBAC are needed depends on the plugin.
   `file-discovery` needs neither and the EPP starts no controller manager.
-  A plugin that watches Kubernetes objects, such as `endpointslice-discovery`,
-  declares a notification source; the EPP then starts a minimal controller
-  manager that hosts only the notification sources (see
+  A plugin registered as Kubernetes-backed, such as `endpointslice-discovery`,
+  runs under the EPP's regular controller manager, with the InferencePool,
+  InferenceObjective, InferenceModelRewrite and Pod reconcilers off (see
   [Kubernetes-backed discovery plugins](#kubernetes-backed-discovery-plugins)).
 - All scheduling, request control, and metrics collection behaviour is
   unchanged.
@@ -232,30 +232,43 @@ discovery (backwards compatible).
 ### Kubernetes-backed discovery plugins
 
 A discovery plugin that needs Kubernetes objects does not create its own
-client or watch. It implements `datalayer.Registrant` and registers a
-`k8s-notification-source` for the GVK it needs, optionally scoped with a
-namespace and label selector, plus a notification extractor:
+client or watch. Its type is registered with
+`plugin.RegisterKubernetesDiscovery` instead of `plugin.Register`, and it
+implements `datalayer.Registrant`, registering a `k8s-notification-source`
+for the GVK it needs, optionally scoped with a namespace and label selector,
+plus a notification extractor:
 
-1. After loading the config, the runner checks whether any notification source
-   is configured. If none is, the EPP runs without Kubernetes as before.
-2. Otherwise it builds a controller manager from the standard client config
-   (`--kubeconfig`, `$KUBECONFIG`, in-cluster). The manager runs no
-   reconcilers of its own, no leader election, metrics or health server; its
-   cache holds only the GVKs of the notification sources, restricted to each
-   scoped source's namespace and selector.
-3. The datalayer runtime binds each source to the manager and delivers
-   deep-copied events to the extractors. The plugin's extractor hands them to
-   the plugin's `Start` goroutine, which maps objects to endpoints and applies
-   them through `DiscoveryNotifier`.
-4. The ext-proc and health servers start once the plugin is ready and every
-   notification source has processed its initial list, so the datastore
-   reflects the existing objects before traffic is served.
+1. After loading the config, the runner looks up the type of the plugin that
+   `dataLayer.discovery.endpoints.pluginRef` names. If that type is marked
+   Kubernetes-backed, the EPP takes the Kubernetes path instead of the
+   cluster-free discovery path.
+2. The EPP builds its regular controller manager from the standard client
+   config (`--kubeconfig`, `$KUBECONFIG`, in-cluster), with the
+   `InferencePool`, `InferenceObjective`, `InferenceModelRewrite` and Pod
+   reconcilers off. No `InferencePool` or Pod is read, so `--pool-name` is
+   optional: it only names the pool in metrics and logs and the leader
+   election lease, and defaults to `epp`. `--endpoint-selector` and
+   `--objectives-file` are rejected.
+3. The manager cache holds each scoped source's GVK restricted to its
+   namespace and selector. The datalayer runtime binds each source to the
+   manager and delivers deep-copied events to the extractors. The plugin's
+   extractor hands them to the plugin's `Start` goroutine, which runs on every
+   replica as a manager runnable, maps objects to endpoints and applies them
+   through `DiscoveryNotifier`.
+4. Readiness waits until the plugin is ready and every notification source has
+   processed its initial list, so the datastore reflects the existing objects
+   before the EPP reports ready.
 
-If no Kubernetes client config is available, the EPP fails to start when the
-discovery plugin itself declares datalayer dependencies. Other notification
-sources stay inactive with a startup log, as before.
+Everything else the controller manager provides works as in the default
+Kubernetes mode: leader election (`--ha-enable-leader-election`), the
+authenticated and authorized metrics endpoint, graceful drain on shutdown and
+`k8s-peer-discovery`. Leader election, metrics authentication and peer
+discovery need the same RBAC as in the default mode (leases, token reviews,
+subject access reviews, pods). With leader election on, the notification
+sources run on the leader only, like the other leader-elected controllers;
+only the leader reports ready.
 
-`k8s-peer-discovery` follows the same pattern for EPP replicas.
+`k8s-peer-discovery` follows the same notification pattern for EPP replicas.
 
 ---
 
@@ -277,12 +290,12 @@ as EndpointSlices of a selector-less Service. For example:
 
 Unlike file discovery, this plugin needs an API server. It is a
 [Kubernetes-backed discovery plugin](#kubernetes-backed-discovery-plugins):
-the EPP's discovery controller manager watches the selected slices in `namespace`,
+the EPP's controller manager watches the selected slices in `namespace`,
 which needs `get`, `list` and `watch` on `discovery.k8s.io/endpointslices`
-there. The `InferencePool` reconcilers still do not run, so the features
-listed in
-[Kubernetes-only features that do not run in discovery plugin mode](#kubernetes-only-features-that-do-not-run-in-discovery-plugin-mode)
-are inactive. Parameters, readiness handling and RBAC are described in the
+there. No `InferencePool` is needed and the `InferencePool`,
+`InferenceObjective`, `InferenceModelRewrite` and Pod reconcilers do not run,
+so `InferenceObjective` priorities and `InferenceModelRewrite` rules are
+inactive. Parameters, readiness handling and RBAC are described in the
 [plugin README](../pkg/epp/framework/plugins/datalayer/discovery/endpointslice/README.md).
 
 ---
@@ -415,11 +428,12 @@ The plugin fails at startup (before `Start` returns an error) if:
 
 ### Kubernetes-only features that do not run in discovery plugin mode
 
-With any discovery plugin the EPP does not run the `InferencePool`
-controller manager, so features that depend on its reconcilers are inactive.
-This applies to Kubernetes-backed discovery plugins such as
-`endpointslice-discovery` too, whose discovery controller manager runs no
-reconcilers:
+With any discovery plugin the EPP runs no `InferencePool` reconciler, so
+features that depend on the `InferencePool` reconcilers are inactive. This
+applies to Kubernetes-backed discovery plugins such as
+`endpointslice-discovery` too: they run under the controller manager, but
+with these reconcilers off. `--objectives-file` is supported only with
+cluster-free discovery plugins such as `file-discovery`:
 
 - **`InferenceModelRewrite`** (model name rewriting for traffic split or
   canary). The reconciler is not started; `ds.ModelRewriteGet` returns nil
@@ -449,12 +463,12 @@ reconcilers:
     controller.
   - The file is not re-read; the file-discovery `watchFile` option does
     not apply to it.
-- **`k8s-notification-source` data layer plugin**, only when no Kubernetes
-  client config is available. With one, notification sources are bound to the
-  discovery controller manager described in
-  [Kubernetes-backed discovery plugins](#kubernetes-backed-discovery-plugins).
-  Without one, the plugin loads from config but produces no events; remove it
-  from `dataLayer.sources` in that case.
+- **`k8s-notification-source` data layer plugin**, with cluster-free discovery
+  plugins only. Without a controller manager the plugin loads from config but
+  produces no events; remove it from `dataLayer.sources` in that case. With a
+  [Kubernetes-backed discovery plugin](#kubernetes-backed-discovery-plugins)
+  notification sources are bound to the controller manager as in the default
+  Kubernetes mode.
 
 If you copy a Kubernetes EPP config into a discovery-plugin deployment, expect
 behavior tied to these features to differ. The runner emits a one-time log
@@ -752,6 +766,15 @@ Register the factory in the runner before calling `Run` (see
 
 ```go
 fwkplugin.Register(myplugin.PluginType, fwkplugin.StabilityAlpha, myplugin.Factory)
+```
+
+A plugin that watches Kubernetes objects through notification sources
+registers with `fwkplugin.RegisterKubernetesDiscovery` instead, so the EPP
+runs it under its controller manager (see
+[Kubernetes-backed discovery plugins](#kubernetes-backed-discovery-plugins)):
+
+```go
+fwkplugin.RegisterKubernetesDiscovery(myplugin.PluginType, fwkplugin.StabilityAlpha, myplugin.Factory)
 ```
 
 Then reference it in the EPP config:

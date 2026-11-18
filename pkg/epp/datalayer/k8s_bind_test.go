@@ -216,9 +216,6 @@ func TestNotificationCacheByObject(t *testing.T) {
 	sel := labels.SelectorFromSet(labels.Set{"kubernetes.io/service-name": "model-server"})
 
 	runtime := NewRuntime(time.Second)
-	if runtime.HasNotificationSources() {
-		t.Fatal("HasNotificationSources() before Configure = true")
-	}
 	newSource := func(name string, gvk schema.GroupVersionKind, opts ...sourcenotifications.K8sNotificationSourceOption) DataSourceConfig {
 		return DataSourceConfig{
 			Plugin:     sourcenotifications.NewK8sNotificationSource(sourcenotifications.NotificationSourceType, name, gvk, opts...),
@@ -231,9 +228,6 @@ func TestNotificationCacheByObject(t *testing.T) {
 		newSource("configmaps", cmGVK, sourcenotifications.WithLabelSelector(sel)),
 	}}, logr.Discard()); err != nil {
 		t.Fatalf("Configure: %v", err)
-	}
-	if !runtime.HasNotificationSources() {
-		t.Fatal("HasNotificationSources() after Configure = false")
 	}
 
 	got := map[schema.GroupVersionKind]cache.ByObject{}

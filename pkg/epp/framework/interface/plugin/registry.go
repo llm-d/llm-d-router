@@ -83,6 +83,25 @@ func RegisterDeprecated(pluginType string, stability StabilityLevel, factory Fac
 	RegistryMetadata[pluginType] = meta
 }
 
+// RegisterKubernetesDiscovery registers an endpoint discovery plugin whose
+// endpoints come from Kubernetes objects. The plugin must watch those objects
+// through datalayer notification sources it registers in RegisterDependencies,
+// rather than through a client of its own. When the plugin is the configured
+// discovery plugin, the EPP runs it under its Kubernetes controller manager,
+// which binds those sources, instead of the cluster-free discovery path.
+func RegisterKubernetesDiscovery(pluginType string, stability StabilityLevel, factory FactoryFunc) {
+	Register(pluginType, stability, factory)
+	meta := RegistryMetadata[pluginType]
+	meta.KubernetesDiscovery = true
+	RegistryMetadata[pluginType] = meta
+}
+
+// IsKubernetesDiscovery reports whether pluginType was registered with
+// RegisterKubernetesDiscovery. It returns false for unregistered types.
+func IsKubernetesDiscovery(pluginType string) bool {
+	return RegistryMetadata[pluginType].KubernetesDiscovery
+}
+
 // GetPluginStability looks up the stability level of a registered plugin type.
 // Returns StabilityStable by default for unregistered plugins.
 func GetPluginStability(pluginType string) StabilityLevel {

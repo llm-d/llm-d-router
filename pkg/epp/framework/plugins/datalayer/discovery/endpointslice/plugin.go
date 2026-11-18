@@ -43,7 +43,6 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/internal/debugdump"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
@@ -324,11 +323,31 @@ func sameEndpoint(a, b *fwkdl.EndpointMetadata) bool {
 		maps.Equal(a.Labels, b.Labels)
 }
 
-// DumpState reports the endpoint identities from the last reconcile, in the
-// format shared with the other discovery plugins.
+// maxDebugDumpEndpoints caps DumpState so the debug payload stays bounded.
+const maxDebugDumpEndpoints = 100
+
+// discoveryState is the snapshot returned by DumpState: endpoint identities
+// only, never addresses or labels.
+type discoveryState struct {
+	TotalEndpoints int      `json:"totalEndpoints"`
+	MaxEndpoints   int      `json:"maxEndpoints"`
+	Endpoints      []string `json:"endpoints"`
+}
+
+// DumpState reports the endpoint identities from the last reconcile.
 func (d *EndpointSliceDiscovery) DumpState() (json.RawMessage, error) {
 	d.mu.RLock()
-	names := debugdump.Names(d.endpoints)
+	names := make([]string, 0, len(d.endpoints))
+	for id := range d.endpoints {
+		names = append(names, id.String())
+	}
 	d.mu.RUnlock()
-	return debugdump.Marshal(names)
+
+	sort.Strings(names)
+	state := discoveryState{TotalEndpoints: len(names), MaxEndpoints: maxDebugDumpEndpoints}
+	if len(names) > maxDebugDumpEndpoints {
+		names = names[:maxDebugDumpEndpoints]
+	}
+	state.Endpoints = names
+	return json.Marshal(state)
 }

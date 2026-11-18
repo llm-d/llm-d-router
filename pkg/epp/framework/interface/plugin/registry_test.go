@@ -150,6 +150,24 @@ func TestRegisterDeprecated(t *testing.T) {
 	assert.Equal(t, StabilityBeta, meta.Stability)
 }
 
+func TestRegisterKubernetesDiscovery(t *testing.T) {
+	snapshotRegistries(t)
+
+	RegisterKubernetesDiscovery("k8s-discovery", StabilityAlpha, dummyFactory)
+	Register("cluster-free-discovery", StabilityBeta, dummyFactory)
+
+	_, ok := Registry["k8s-discovery"]
+	assert.True(t, ok, "factory should be registered")
+	assert.Equal(t, StabilityAlpha, GetPluginStability("k8s-discovery"))
+	assert.True(t, IsKubernetesDiscovery("k8s-discovery"))
+	assert.False(t, IsKubernetesDiscovery("cluster-free-discovery"))
+	assert.False(t, IsKubernetesDiscovery("unregistered-plugin"))
+
+	// A later plain Register replaces the metadata, clearing the mark.
+	Register("k8s-discovery", StabilityAlpha, dummyFactory)
+	assert.False(t, IsKubernetesDiscovery("k8s-discovery"))
+}
+
 func TestValidatePluginStability(t *testing.T) {
 	snapshotRegistries(t)
 

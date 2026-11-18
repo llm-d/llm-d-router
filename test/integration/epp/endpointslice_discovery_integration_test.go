@@ -18,9 +18,8 @@ package epp
 
 import (
 	"context"
-	"encoding/json"
-	"strings"
-	"sync"
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -30,43 +29,15 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
-	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/endpointslice"
-	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
+	eppRunner "github.com/llm-d/llm-d-router/cmd/epp/runner"
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
+	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
+	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
-
-// sliceRecorder is a goroutine-safe DiscoveryNotifier for assertions.
-type sliceRecorder struct {
-	mu        sync.Mutex
-	endpoints map[types.NamespacedName]*fwkdl.EndpointMetadata
-}
-
-func (r *sliceRecorder) Upsert(m *fwkdl.EndpointMetadata) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.endpoints[m.ID] = m
-}
-
-func (r *sliceRecorder) Delete(id types.NamespacedName) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.endpoints, id)
-}
-
-func (r *sliceRecorder) addresses() map[string]string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make(map[string]string, len(r.endpoints))
-	for id, m := range r.endpoints {
-		out[id.Name] = m.Address
-	}
-	return out
-}
 
 func modelSlice(name, namespace, service, hostname, addr string) *discoveryv1.EndpointSlice {
 	return &discoveryv1.EndpointSlice{
@@ -88,12 +59,23 @@ func modelSlice(name, namespace, service, hostname, addr string) *discoveryv1.En
 	}
 }
 
-// TestEndpointSliceDiscoveryThroughNotificationRuntime runs the
-// endpointslice-discovery plugin the way the discovery plugin path does: the
-// plugin registers a scoped EndpointSlice source, the runtime binds it to the
-// discovery-mode manager, and the plugin only maps slices to endpoints.
-func TestEndpointSliceDiscoveryThroughNotificationRuntime(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+// endpointAddresses returns the datastore endpoints as name -> address.
+func endpointAddresses(ds datastore.Datastore) map[string]string {
+	out := map[string]string{}
+	for _, ep := range ds.PodList(datastore.AllPodsPredicate) {
+		md := ep.GetMetadata()
+		out[md.ID.Name] = md.Address
+	}
+	return out
+}
+
+// TestEndpointSliceDiscoveryRunsUnderControllerManager starts the EPP the way
+// Run does when endpointslice-discovery is the configured discovery plugin:
+// the full controller manager, with no InferencePool, no --pool-name and no
+// Pod reconciler. The plugin's scoped EndpointSlice source is bound to that
+// manager and is the only source of endpoints.
+func TestEndpointSliceDiscoveryRunsUnderControllerManager(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	k8s := eppharness.K8sClient()
 
@@ -105,40 +87,72 @@ func TestEndpointSliceDiscoveryThroughNotificationRuntime(t *testing.T) {
 			_ = k8s.Delete(context.Background(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})
 		})
 	}
-	// Present before the watch starts: one selected slice, one of another
+	// Present before the manager starts: one selected slice, one of another
 	// Service in the namespace, and one with the selected labels in another
 	// namespace. Only the first is in scope.
 	require.NoError(t, k8s.Create(ctx, modelSlice("model-server-d0", namespace, "model-server", "d0", "2001:db8::20")))
 	require.NoError(t, k8s.Create(ctx, modelSlice("other-o0", namespace, "other", "o0", "2001:db8::99")))
 	require.NoError(t, k8s.Create(ctx, modelSlice("model-server-x0", otherNamespace, "model-server", "x0", "2001:db8::98")))
 
-	params, err := json.Marshal(map[string]string{
-		"namespace": namespace,
-		"selector":  discoveryv1.LabelServiceName + "=model-server",
-		"portName":  "http",
+	// A ready Pod in the pool namespace. The Pod reconciler would add it as an
+	// endpoint; with a Kubernetes-backed discovery plugin it must not run.
+	pod := fwkk8s.MakePod("stray-pod").Namespace(namespace).ReadyCondition().
+		Labels(map[string]string{"app": "model-server"}).IP("192.168.1.1").Complete().ObjRef()
+	podStatus := pod.Status
+	require.NoError(t, k8s.Create(ctx, pod))
+	pod.Status = podStatus
+	require.NoError(t, k8s.Status().Update(ctx, pod))
+
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - name: slices
+    type: endpointslice-discovery
+    parameters:
+      namespace: %s
+      selector: %s=model-server
+      portName: http
+  - name: random-picker
+    type: random-picker
+  - name: single-profile-handler
+    type: single-profile-handler
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: random-picker
+dataLayer:
+  injectDefaults: false
+  discovery:
+    endpoints:
+      pluginRef: slices
+`, namespace, discoveryv1.LabelServiceName)
+	opts := eppharness.DefaultEppServerOptions(t, namespace, configText)
+	opts.PoolName = "" // No InferencePool: the pool name defaults.
+
+	lis, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lis.Close() })
+
+	_, mgr, ds, err := eppRunner.NewTestRunnerSetup(ctx, eppharness.Config(), opts, nil, lis)
+	require.NoError(t, err)
+
+	mgrCtx, mgrCancel := context.WithCancel(ctx)
+	mgrDone := make(chan struct{})
+	go func() {
+		defer close(mgrDone)
+		_ = mgr.Start(mgrCtx)
+	}()
+	t.Cleanup(func() {
+		mgrCancel()
+		<-mgrDone
+		metrics.Reset()
 	})
-	require.NoError(t, err)
-	p, err := endpointslice.Factory("slices", json.NewDecoder(strings.NewReader(string(params))), nil)
-	require.NoError(t, err)
-	disc := p.(fwkdl.EndpointDiscovery)
 
-	rt := datalayer.NewRuntime(time.Second)
-	require.NoError(t, p.(fwkdl.Registrant).RegisterDependencies(rt))
-	require.NoError(t, rt.Configure(&datalayer.Config{}, eppharness.Logger()))
-	require.True(t, rt.HasNotificationSources())
-
-	mgr, err := runserver.NewDiscoveryControllerManager(eppharness.Config(), rt.NotificationCacheByObject())
-	require.NoError(t, err)
-	require.NoError(t, rt.BindNotificationSources(mgr))
-
-	recorder := &sliceRecorder{endpoints: map[types.NamespacedName]*fwkdl.EndpointMetadata{}}
-	go func() { _ = disc.Start(ctx, recorder) }()
-	go func() { _ = mgr.Start(ctx) }()
-
-	// Once the runtime reports the initial list processed, the datastore
-	// already holds the in-scope endpoint: the runner gates serving on this.
-	require.Eventually(t, func() bool { return rt.CheckReady() == nil }, 30*time.Second, 50*time.Millisecond)
-	require.Equal(t, map[string]string{"model-server.d0": "2001:db8::20"}, recorder.addresses())
+	require.Eventually(t, func() bool {
+		return endpointAddresses(ds)["model-server.d0"] == "2001:db8::20"
+	}, 30*time.Second, 50*time.Millisecond)
+	require.Never(t, func() bool { return len(endpointAddresses(ds)) != 1 }, 2*time.Second, 100*time.Millisecond,
+		"only the selected slice may supply endpoints, not the Pod or out-of-scope slices")
 
 	// The manager cache holds only the scoped slices.
 	list := &unstructured.UnstructuredList{}
@@ -149,17 +163,18 @@ func TestEndpointSliceDiscoveryThroughNotificationRuntime(t *testing.T) {
 	for _, item := range list.Items {
 		names = append(names, item.GetNamespace()+"/"+item.GetName())
 	}
+	sort.Strings(names)
 	require.Equal(t, []string{namespace + "/model-server-d0"}, names)
 
 	// Changes flow through the same path.
 	require.NoError(t, k8s.Create(ctx, modelSlice("model-server-d1", namespace, "model-server", "d1", "2001:db8::21")))
 	require.Eventually(t, func() bool {
-		return recorder.addresses()["model-server.d1"] == "2001:db8::21"
+		return endpointAddresses(ds)["model-server.d1"] == "2001:db8::21"
 	}, 10*time.Second, 50*time.Millisecond)
 
 	require.NoError(t, k8s.Delete(ctx, &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "model-server-d0", Namespace: namespace}}))
 	require.Eventually(t, func() bool {
-		_, ok := recorder.addresses()["model-server.d0"]
+		_, ok := endpointAddresses(ds)["model-server.d0"]
 		return !ok
 	}, 10*time.Second, 50*time.Millisecond)
 }

@@ -39,6 +39,13 @@ func TestNewControllerConfig(t *testing.T) {
 	if c.startCrdReconcilers {
 		t.Error("expected startCrdReconcilers to be false")
 	}
+	if c.skipPodReconciler {
+		t.Error("expected the Pod reconciler to be on by default")
+	}
+	c.DisablePodReconciler()
+	if !c.skipPodReconciler {
+		t.Error("expected DisablePodReconciler to turn the Pod reconciler off")
+	}
 }
 
 func TestPopulateWithDiscovery(t *testing.T) {

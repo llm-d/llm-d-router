@@ -33,7 +33,6 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/internal/debugdump"
 )
 
 // recordingNotifier captures Upsert and Delete calls for assertions.
@@ -572,18 +571,18 @@ func TestDumpState(t *testing.T) {
 	payload, err := f.DumpState()
 	require.NoError(t, err)
 
-	var state debugdump.State
+	var state discoveryState
 	require.NoError(t, json.Unmarshal(payload, &state))
 	assert.Equal(t, []string{"default/pod-a", "default/pod-b"}, state.Endpoints)
 	assert.Equal(t, 2, state.TotalEndpoints)
-	assert.Equal(t, debugdump.MaxEndpoints, state.MaxEndpoints)
+	assert.Equal(t, maxDebugDumpEndpoints, state.MaxEndpoints)
 	// The full set fits, so the dump is complete (TotalEndpoints does not exceed MaxEndpoints).
 	assert.LessOrEqual(t, state.TotalEndpoints, state.MaxEndpoints)
 }
 
 func TestDumpStateCaps(t *testing.T) {
-	eps := make(map[types.NamespacedName]struct{}, debugdump.MaxEndpoints+5)
-	for i := 0; i < debugdump.MaxEndpoints+5; i++ {
+	eps := make(map[types.NamespacedName]struct{}, maxDebugDumpEndpoints+5)
+	for i := 0; i < maxDebugDumpEndpoints+5; i++ {
 		eps[types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("pod-%03d", i)}] = struct{}{}
 	}
 	f := &FileDiscovery{endpoints: eps}
@@ -591,15 +590,15 @@ func TestDumpStateCaps(t *testing.T) {
 	payload, err := f.DumpState()
 	require.NoError(t, err)
 
-	var state debugdump.State
+	var state discoveryState
 	require.NoError(t, json.Unmarshal(payload, &state))
 	// The dump is partial: TotalEndpoints exceeds the returned count, capped at MaxEndpoints.
-	assert.Equal(t, debugdump.MaxEndpoints+5, state.TotalEndpoints)
+	assert.Equal(t, maxDebugDumpEndpoints+5, state.TotalEndpoints)
 	assert.Greater(t, state.TotalEndpoints, state.MaxEndpoints)
-	assert.Len(t, state.Endpoints, debugdump.MaxEndpoints)
-	// Sorted ascending, then capped, so the first debugdump.MaxEndpoints names are kept.
+	assert.Len(t, state.Endpoints, maxDebugDumpEndpoints)
+	// Sorted ascending, then capped, so the first maxDebugDumpEndpoints names are kept.
 	assert.Equal(t, "default/pod-000", state.Endpoints[0])
-	assert.Equal(t, fmt.Sprintf("default/pod-%03d", debugdump.MaxEndpoints-1), state.Endpoints[debugdump.MaxEndpoints-1])
+	assert.Equal(t, fmt.Sprintf("default/pod-%03d", maxDebugDumpEndpoints-1), state.Endpoints[maxDebugDumpEndpoints-1])
 }
 
 func TestDumpStateConcurrentWithLoad(t *testing.T) {
@@ -633,9 +632,9 @@ func TestDumpStateEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, json.Valid(payload))
 
-	var state debugdump.State
+	var state discoveryState
 	require.NoError(t, json.Unmarshal(payload, &state))
 	assert.Empty(t, state.Endpoints)
 	assert.Equal(t, 0, state.TotalEndpoints)
-	assert.Equal(t, debugdump.MaxEndpoints, state.MaxEndpoints)
+	assert.Equal(t, maxDebugDumpEndpoints, state.MaxEndpoints)
 }

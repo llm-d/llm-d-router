@@ -19,7 +19,7 @@ those slices.
 
 - **Watch.** The plugin owns no Kubernetes client. It registers a
   `k8s-notification-source` for EndpointSlices scoped to `namespace` and
-  `selector`; the EPP binds it to its discovery controller manager, whose cache holds
+  `selector`; the EPP binds it to its controller manager, whose cache holds
   only those slices (see
   [Kubernetes-backed discovery plugins](../../../../../../../docs/discovery.md#kubernetes-backed-discovery-plugins)).
 - **Reconcile.** The plugin's extractor hands every slice event to the
@@ -41,9 +41,9 @@ those slices.
   controller that writes the slices sets the keys EPP plugins read, for
   example `llm-d.ai/role` for the role filters and `llm-d.ai/engine-type` for
   the metrics extractor.
-- **Ready channel.** `Ready()` is closed when `Start` runs. The EPP
-  additionally waits until the notification source has processed its initial
-  list before serving, so the datastore holds the existing endpoints first.
+- **Ready channel.** `Ready()` is closed when `Start` runs. The EPP's
+  readiness additionally waits until the notification source has processed
+  its initial list, so the datastore holds the existing endpoints first.
 
 ## Inputs Consumed
 
@@ -65,14 +65,20 @@ type `endpointslice-discovery` in `plugins`.
 | `selector` | `string` | no | all slices | Label selector, for example `kubernetes.io/service-name=model-server`. |
 | `portName` | `string` | no | -- | Slice port to route to. When empty, a slice must declare exactly one port. |
 
-The EPP's discovery controller manager connects to the API server with the same
-client config as the Kubernetes discovery modes (`ctrl.GetConfig()`): the
-EPP's `--kubeconfig` flag, then `$KUBECONFIG`, then the in-cluster config.
+The plugin runs under the EPP's regular controller manager, with the
+`InferencePool`, `InferenceObjective`, `InferenceModelRewrite` and Pod
+reconcilers off, so no `InferencePool` is needed and `--pool-name` is
+optional (it defaults to `epp`). The manager connects to the API server with
+the same client config as the Kubernetes discovery modes (`ctrl.GetConfig()`):
+the EPP's `--kubeconfig` flag, then `$KUBECONFIG`, then the in-cluster config.
 
 ### RBAC
 
 The EPP ServiceAccount needs `get`, `list` and `watch` on
-`discovery.k8s.io/endpointslices` in `namespace`.
+`discovery.k8s.io/endpointslices` in `namespace`, plus what the enabled
+manager features need, as in the default Kubernetes mode: leases for leader
+election, token reviews and subject access reviews for metrics
+authentication.
 
 ### Examples
 

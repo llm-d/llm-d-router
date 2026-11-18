@@ -396,26 +396,11 @@ func (r *Runtime) findSourceByType(sourceType string, gvkFilter *schema.GroupVer
 // Start is called to enable the Runtime to start processing data collection. It wires
 // Kubernetes notifications into the manager and starts cross-replica syncing.
 func (r *Runtime) Start(ctx context.Context, mgr ctrl.Manager) error {
-	r.StartCrossReplicaSync(ctx)
-	return r.BindNotificationSources(mgr)
-}
-
-// HasNotificationSources reports whether Configure registered any
-// NotificationSource. Call it after Configure.
-func (r *Runtime) HasNotificationSources() bool {
-	return r.notification.Count() > 0
-}
-
-// BindNotificationSources binds every configured NotificationSource to mgr,
-// so the manager's cache watches each source's GVK and dispatches events to
-// its extractors. Start calls it in Kubernetes discovery mode; the discovery
-// plugin path calls it directly, because it starts cross-replica sync on its
-// own. CheckReady reports ready once every source has processed its initial
-// events.
-func (r *Runtime) BindNotificationSources(mgr ctrl.Manager) error {
 	r.notificationSyncMu.Lock()
 	r.notificationSyncs = nil
 	r.notificationSyncMu.Unlock()
+
+	r.StartCrossReplicaSync(ctx)
 
 	notificationSyncs := make([]*notificationInitialSync, 0, r.notification.Count())
 	err := r.notification.ForEach(func(srcName string, src fwkdl.NotificationSource) error {

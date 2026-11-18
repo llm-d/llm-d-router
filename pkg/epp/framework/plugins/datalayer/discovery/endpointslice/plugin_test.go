@@ -34,7 +34,6 @@ import (
 	"k8s.io/utils/ptr"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/internal/debugdump"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
@@ -402,7 +401,7 @@ func TestDumpStateOmitsAddresses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var st debugdump.State
+	var st discoveryState
 	if err := json.Unmarshal(raw, &st); err != nil {
 		t.Fatal(err)
 	}
