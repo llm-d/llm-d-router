@@ -134,6 +134,7 @@ func (s *EncodeStep) executeVLLMGRPC(ctx context.Context, reqCtx *pipeline.Reque
 	segs, err := vllmReq.Req.FrameSegments(vllmwire.LegOptions{
 		CapSingleToken: true,
 		Media:          vllmwire.MediaAll,
+		DropKVHints:    true,
 	})
 	if err != nil {
 		return fmt.Errorf("%s: build GenerateRequest: %w", EncodeStepName, err)

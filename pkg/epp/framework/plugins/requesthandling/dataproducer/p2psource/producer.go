@@ -695,10 +695,14 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		return nil
 	}
 	params := kvTransferParams(request.Body)
+	decodeLeg := false
 	if p.transport == TransportKVCR {
 		params = vllmKVTransferParams(request.Body)
+		// The coordinator's NIXL and shared-storage decode legs carry
+		// do_remote_prefill rather than remote_prefiller.
+		decodeLeg = params[reqcommon.FieldDoRemotePrefill] == true
 	}
-	if _, ok := params[reqcommon.FieldRemotePrefiller]; ok {
+	if _, ok := params[reqcommon.FieldRemotePrefiller]; ok || decodeLeg {
 		outcome = "decode-request"
 		return nil
 	}

@@ -962,6 +962,7 @@ func (s *Server) fanoutVLLMEncoder(
 			CapSingleToken:   true,
 			Media:            vllmwire.MediaAll,
 			ECTransferParams: ecParams,
+			DropKVHints:      true,
 		})
 		if err != nil {
 			return fmt.Errorf("build raw media encoder frame: %w", err)

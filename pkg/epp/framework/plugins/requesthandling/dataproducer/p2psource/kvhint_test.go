@@ -244,25 +244,41 @@ func TestPreRequest_KVCR_ControlPortAddsRankIndex(t *testing.T) {
 	assert.Equal(t, net.JoinHostPort("10.0.0.2", "7779"), req.Headers[routing.KVCachePrefillHeader])
 }
 
-// A decode request that pulls the prompt from a prefill pod gets no hint.
+// A decode request that pulls the prompt from a prefill pod gets no hint: the
+// sidecar and coordinator offloading legs carry remote_prefiller, and the
+// coordinator NIXL and shared-storage legs carry do_remote_prefill.
 func TestPreRequest_KVCR_DecodeRequest_NoHint(t *testing.T) {
-	ctx := utils.NewTestContext(t)
-	p := kvcrProducer()
-	params, err := structpb.NewStruct(reqcommon.RemotePrefillerParams("kv-1", "10.0.0.9", 7777))
-	require.NoError(t, err)
-	frame, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
-		Model:  "m",
-		Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
-		Kv:     &vllmpb.KVCacheParameters{KvTransferParams: params},
-	})
-	require.NoError(t, err)
-	req := grpcRequest(p, "req-decode", vllmpb.Inference_GenerateStream_FullMethodName, frame, kvcrPeer())
+	for _, tc := range []struct {
+		name    string
+		params  map[string]any
+		outcome string
+	}{
+		{name: "remote_prefiller", params: reqcommon.RemotePrefillerParams("kv-1", "10.0.0.9", 7777), outcome: "decode-request"},
+		{name: "do_remote_prefill", params: map[string]any{reqcommon.FieldDoRemotePrefill: true, reqcommon.FieldDoRemoteDecode: false}, outcome: "decode-request"},
+		{name: "do_remote_prefill false", params: map[string]any{reqcommon.FieldDoRemotePrefill: false}, outcome: "pulled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			p := kvcrProducer()
+			params, err := structpb.NewStruct(tc.params)
+			require.NoError(t, err)
+			frame, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+				Model:  "m",
+				Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+				Kv:     &vllmpb.KVCacheParameters{KvTransferParams: params},
+			})
+			require.NoError(t, err)
+			req := grpcRequest(p, "req-decode", vllmpb.Inference_GenerateStream_FullMethodName, frame, kvcrPeer())
 
-	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 0))))
+			require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 0))))
 
-	assert.False(t, req.Body.Mutated)
-	assert.Equal(t, fwkrequest.PayloadBytes(frame), req.Body.Payload)
-	assert.Equal(t, "decode-request", decisionOutcome(t, p, req))
+			assert.Equal(t, tc.outcome, decisionOutcome(t, p, req))
+			if tc.outcome == "decode-request" {
+				assert.False(t, req.Body.Mutated)
+				assert.Equal(t, fwkrequest.PayloadBytes(frame), req.Body.Payload)
+			}
+		})
+	}
 }
 
 // The reusable prefix floor is published only for a request that can carry

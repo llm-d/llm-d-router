@@ -360,7 +360,9 @@ func TestVLLMGRPC_MediaStrippingAcrossAllPipelineTopologies(t *testing.T) {
 		// Decode after prefill receives MediaNone.
 		require.Empty(t, decodeReq.GetMedia())
 
-		// kv_hints go to prefill only: decode receives the prompt's KV from prefill.
+		// kv_hints go to prefill only: an encoder holds no prompt KV, and
+		// decode receives the prompt's KV from prefill.
+		require.Nil(t, encodeReq.GetKvHints())
 		require.Equal(t, "hint-1", prefillReq.GetKvHints().GetMessageId())
 		require.Nil(t, decodeReq.GetKvHints())
 	})

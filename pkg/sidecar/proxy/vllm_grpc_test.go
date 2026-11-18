@@ -1034,6 +1034,7 @@ func TestVLLMGRPCECDisaggregationConnectors(t *testing.T) {
 				Prompt:    &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: promptIDs}},
 				Stopping:  &vllmpb.StoppingCriteria{MaxNewTokens: 40, MinNewTokens: 5},
 				Media:     media,
+				KvHints:   &vllmpb.KVHintsEnvelope{ProtocolVersion: "0.1", MessageId: "hint-ec"},
 			})
 			require.NoError(t, err)
 			frames, err := collectStreamResponses(t, st)
@@ -1070,14 +1071,28 @@ func TestVLLMGRPCECDisaggregationConnectors(t *testing.T) {
 				assert.Equal(t, []byte("img-bytes-1"), e0Calls[0].Request.GetMedia()[1].GetRawBytes())
 			}
 
+			// An encoder holds no prompt KV, so no encoder leg carries kv_hints.
+			for _, c := range append(e0Calls, e1Calls...) {
+				assert.Nil(t, c.Request.GetKvHints())
+			}
+
 			dCalls := decodeSrv.Calls()
 			require.Len(t, dCalls, 1)
 			assert.True(t, dCalls[0].Stream)
+
+			// kv_hints reach the pod that computes the prompt: prefill when it
+			// runs, otherwise decode.
+			if tc.withPrefill {
+				assert.Nil(t, dCalls[0].Request.GetKvHints())
+			} else {
+				assert.Equal(t, "hint-ec", dCalls[0].Request.GetKvHints().GetMessageId())
+			}
 
 			if tc.withPrefill {
 				pCalls := prefillSrv.Calls()
 				require.Len(t, pCalls, 1)
 				assert.False(t, pCalls[0].Stream)
+				assert.Equal(t, "hint-ec", pCalls[0].Request.GetKvHints().GetMessageId())
 				if tc.ecConnector != constants.ECExampleConnector {
 					require.NotNil(t, pCalls[0].Request.GetKv().GetEcTransferParams())
 					assert.NotEmpty(t, pCalls[0].Request.GetKv().GetEcTransferParams().AsMap())

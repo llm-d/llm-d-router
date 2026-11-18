@@ -57,9 +57,10 @@ type LegOptions struct {
 	KVTransferParams map[string]any
 	// ECTransferParams sets kv.ec_transfer_params when non-empty.
 	ECTransferParams map[string]any
-	// DropKVHints omits kv_hints. Set it on a decode leg that follows a
-	// prefill leg: the hints name a KV source for the pod that computes the
-	// prompt, and the decode pod receives the prompt's KV from the prefill pod.
+	// DropKVHints omits kv_hints. Set it on encode legs and on a decode leg
+	// that follows a prefill leg: the hints name a KV source for the pod that
+	// computes the prompt. An encoder holds no prompt KV, and the decode pod
+	// receives the prompt's KV from the prefill pod.
 	DropKVHints bool
 }
 
