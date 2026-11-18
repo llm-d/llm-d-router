@@ -134,15 +134,15 @@ func registerMetrics(registerer prometheus.Registerer) error {
 
 // initSeries materializes the label combinations so each series reports zero before any
 // traffic, rather than being absent.
-func initSeries(name, typ string) {
+func initSeries(name, pluginType string) {
 	for _, class := range []string{"hit", "miss"} {
-		classifications.WithLabelValues(name, typ, class)
-		turnedAwayRequests.WithLabelValues(name, typ, class)
-		turnedAwayTokens.WithLabelValues(name, typ, class)
+		classifications.WithLabelValues(name, pluginType, class)
+		turnedAwayRequests.WithLabelValues(name, pluginType, class)
+		turnedAwayTokens.WithLabelValues(name, pluginType, class)
 	}
-	matchRatio.WithLabelValues(name, typ)
-	matchedVsCachedDelta.WithLabelValues(name, typ)
-	indexSize.WithLabelValues(name, typ).Set(0)
+	matchRatio.WithLabelValues(name, pluginType)
+	matchedVsCachedDelta.WithLabelValues(name, pluginType)
+	indexSize.WithLabelValues(name, pluginType).Set(0)
 }
 
 func recordClassification(tn fwkplugin.TypedName, hit bool, ratio float64) {
