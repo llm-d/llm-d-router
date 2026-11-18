@@ -1724,6 +1724,17 @@ func TestSpeechPrefixFingerprint_SharedTextPrefixDoesNotMatch(t *testing.T) {
 	assert.NotEqual(t, first[0][0], second[0][0], "a shared text prefix with a different suffix must not match block 0")
 }
 
+// A decoded JSON string can contain a literal NUL; length-prefixing each field
+// keeps a value from shifting into the next field.
+func TestSpeechCacheSalt_EmbeddedNULDoesNotCollide(t *testing.T) {
+	first := &fwkrequest.TextToSpeechRequest{Input: "a\x00b", Instructions: "c"}
+	second := &fwkrequest.TextToSpeechRequest{Input: "a", Instructions: "b\x00c"}
+	assert.NotEqual(t,
+		CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: first}),
+		CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: second}),
+		"a NUL inside a field must not merge it with the next field")
+}
+
 // The conditioning salt composes with a client-supplied one rather than
 // replacing it, mirroring the engine's composition.
 func TestSpeechCacheSalt_ComposesClientSalt(t *testing.T) {

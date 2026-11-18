@@ -199,7 +199,9 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrequest.InferenceRe
 
 // CacheSaltFromBody returns the cache salt from whichever protocol is populated.
 // The protocol switch lives here so producers populate TokenizedRequest.CacheSalt
-// from one place and consumers read only that field.
+// from one place and consumers read only that field. A speech request with
+// extra_params.use_random carries a fresh random component, so the result must be
+// derived once per request and stored.
 func CacheSaltFromBody(body *fwkrequest.InferenceRequestBody) string {
 	switch {
 	case body.Conversations != nil:

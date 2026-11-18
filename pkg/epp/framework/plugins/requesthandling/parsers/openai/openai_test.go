@@ -3230,34 +3230,38 @@ func TestOpenAIParser_ParseRequestTextToSpeechConditioning(t *testing.T) {
 }
 
 // The engine accepts "speaker" as an alias of "voice", and both as a string
-// or an object carrying an id; every form fills the same normalized field.
+// or an object carrying an id; every form fills the same normalized field. A
+// null or empty id is the default voice, while a missing id is refused.
 func TestOpenAIParser_ParseRequestTextToSpeechSpeakerAlias(t *testing.T) {
 	for name, field := range map[string]string{"voice": "voice", "speaker": "speaker"} {
-		for form, value := range map[string]string{
-			"string":       `"ryan"`,
-			"object":       `{"id": "ryan"}`,
-			"null":         `null`,
-			"object no id": `{}`,
+		for form, tc := range map[string]struct {
+			value string
+			want  string
+			bad   bool
+		}{
+			"string":          {value: `"ryan"`, want: "ryan"},
+			"object":          {value: `{"id": "ryan"}`, want: "ryan"},
+			"null":            {value: `null`},
+			"object null id":  {value: `{"id": null}`},
+			"object empty id": {value: `{"id": ""}`},
+			"object no id":    {value: `{}`, bad: true},
+			"number":          {value: `5`, bad: true},
 		} {
 			t.Run(name+"/"+form, func(t *testing.T) {
-				body := `{"input": "hello", "` + field + `": ` + value + `}`
+				body := `{"input": "hello", "` + field + `": ` + tc.value + `}`
 				result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
 					map[string]string{":path": "/v1/audio/speech"})
-				if form == "object no id" {
+				if tc.bad {
 					if err == nil {
-						t.Error("ParseRequest accepted a voice object without an id")
+						t.Errorf("ParseRequest accepted %s", tc.value)
 					}
 					return
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := "ryan"
-				if form == "null" {
-					want = ""
-				}
-				if result.Body.TextToSpeech.Voice != want {
-					t.Errorf("Voice = %q, want %q", result.Body.TextToSpeech.Voice, want)
+				if result.Body.TextToSpeech.Voice != tc.want {
+					t.Errorf("Voice = %q, want %q", result.Body.TextToSpeech.Voice, tc.want)
 				}
 			})
 		}

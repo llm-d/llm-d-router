@@ -894,7 +894,8 @@ func rawFieldOrNull(raw json.RawMessage) json.RawMessage {
 
 // voiceField returns the voice a voice or speaker field carries: the string
 // itself, or the object form's id, the two shapes the engine normalizes to one
-// voice name. Empty input is an absent field.
+// voice name. An object's id may be null, which the engine treats as absent.
+// Empty input is an absent field.
 func voiceField(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return "", nil
@@ -903,16 +904,21 @@ func voiceField(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s, nil
 	}
-	var obj struct {
-		ID string `json:"id"`
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return "", errors.New("invalid text to speech request: voice must be a string or an object with an id")
 	}
-	if err := json.Unmarshal(raw, &obj); err == nil {
-		if obj.ID == "" {
-			return "", errors.New("invalid text to speech request: a voice object must have an id")
-		}
-		return obj.ID, nil
+	id, ok := obj["id"]
+	if !ok {
+		return "", errors.New("invalid text to speech request: a voice object must have an id")
 	}
-	return "", errors.New("invalid text to speech request: voice must be a string or an object with an id")
+	if string(id) == "null" {
+		return "", nil
+	}
+	if err := json.Unmarshal(id, &s); err != nil {
+		return "", errors.New("invalid text to speech request: a voice object's id must be a string")
+	}
+	return s, nil
 }
 
 // toInt coerces a JSON-decoded number-ish value into an int. JSON numbers
