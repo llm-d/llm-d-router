@@ -32,11 +32,24 @@ Bindings close when endpoint discovery starts.
 
 `ProcessEvents` receives the serving endpoint, model, wire sequence, and decoded
 batch. Wire `AllBlocksCleared` events remain in the batch. `Reset` invalidates
-observations after lost continuity, malformed payloads, subscriber attachment, or
-endpoint removal. `EventSource.Retired` identifies endpoint removal. Consumers
-that retain logical lineage should mark it incomplete on reset and resolve current
-residency separately. A failing consumer is reset independently; other consumers
-continue receiving events.
+observations after an engine restart, a failed replay, a rebuild from a snapshot
+or a full replay, subscriber attachment, or endpoint removal. A socket reconnect
+keeps consumer state, and the first frame after it recovers missed events through
+replay or a snapshot. With neither recovery port configured, a dropped frame or an
+undecodable message keeps consumer state and the missed events stay missed.
+`EventSource.Retired` identifies endpoint removal. Consumers that retain logical
+lineage should mark it incomplete on reset and resolve current residency
+separately.
+
+A consumer that returns an error or panics is reset for that endpoint and the
+other consumers keep their state for that batch. The source then rebuilds the
+endpoint from its snapshot or replay buffer, which resets every consumer of that
+endpoint and delivers the rebuilt state to all of them. Rebuilds for one endpoint
+are at least 30 seconds apart. With neither recovery port configured, the reset
+consumer rebuilds from live events alone.
+
+`socketPort` must be positive. The source's state dump lists the endpoints with
+an active subscriber and the bound consumers.
 
 The precise producer requires `externalEvents: true` to bind to this source. Its
 own endpoint subscription hook is then inactive. Other consumers implement the

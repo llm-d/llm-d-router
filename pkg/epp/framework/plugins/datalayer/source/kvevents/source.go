@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -56,6 +57,7 @@ type Source struct {
 var (
 	_ fwkdl.EndpointSource  = &Source{}
 	_ fwkdl.ExtractorBinder = &Source{}
+	_ plugin.StateDumper    = &Source{}
 	_ events.EventConsumer  = &Source{}
 )
 
@@ -72,6 +74,9 @@ func Factory(name string, parameters *json.Decoder, handle plugin.Handle) (plugi
 func New(ctx context.Context, name string, cfg *events.Config) (*Source, error) {
 	if cfg == nil || !cfg.DiscoverPods || cfg.PodDiscoveryConfig == nil || cfg.ZMQEndpoint != "" {
 		return nil, errors.New("kv-events-source requires per-endpoint pod discovery without a global zmqEndpoint")
+	}
+	if cfg.PodDiscoveryConfig.SocketPort <= 0 {
+		return nil, fmt.Errorf("kv-events-source socketPort must be positive, got %d", cfg.PodDiscoveryConfig.SocketPort)
 	}
 	selector, err := labels.Parse(cfg.PodDiscoveryConfig.PodLabelSelector)
 	if err != nil {
@@ -112,10 +117,47 @@ func (s *Source) AppendExtractor(p plugin.Plugin) error {
 	return nil
 }
 
+// maxDumpSubscribers bounds the DumpState payload on large deployments.
+const maxDumpSubscribers = 100
+
+type sourceState struct {
+	Subscribers      []string `json:"subscribers"`
+	TotalSubscribers int      `json:"totalSubscribers"`
+	MaxSubscribers   int      `json:"maxSubscribers"`
+	Consumers        []string `json:"consumers"`
+}
+
+// DumpState reports the endpoints with an active subscriber, sorted and
+// capped, and the bound consumers.
+func (s *Source) DumpState() (json.RawMessage, error) {
+	ids, _ := s.subscribers.GetActiveSubscribers()
+	sort.Strings(ids)
+	total := len(ids)
+	if total > maxDumpSubscribers {
+		ids = ids[:maxDumpSubscribers]
+	}
+	s.mu.RLock()
+	consumers := make([]string, 0, len(s.extractors))
+	for _, ext := range s.extractors {
+		consumers = append(consumers, ext.TypedName().String())
+	}
+	s.mu.RUnlock()
+	return json.Marshal(sourceState{
+		Subscribers: ids, TotalSubscribers: total, MaxSubscribers: maxDumpSubscribers, Consumers: consumers,
+	})
+}
+
 func (s *Source) NotifyEndpoint(ctx context.Context, event fwkdl.EndpointEvent) (*fwkdl.EndpointEvent, error) {
-	s.mu.Lock()
-	s.started = true
-	s.mu.Unlock()
+	// Consumers run under the read lock, so only the first event takes the
+	// write lock.
+	s.mu.RLock()
+	started := s.started
+	s.mu.RUnlock()
+	if !started {
+		s.mu.Lock()
+		s.started = true
+		s.mu.Unlock()
+	}
 	meta := event.Endpoint.GetMetadata()
 	if meta == nil || meta.ID.Name == "" {
 		return nil, nil //nolint:nilnil // EndpointSource uses nil to suppress lifecycle dispatch.
@@ -154,6 +196,9 @@ func (s *Source) ProcessEvents(ctx context.Context, source events.EventSource, b
 			if resetErr := invoke(func() error { return ext.Reset(ctx, source) }); resetErr != nil {
 				log.FromContext(ctx).Error(resetErr, "KV event consumer reset failed", "extractor", ext.TypedName(), "endpoint", source.Endpoint)
 			}
+			// The stream is continuous, so the subscriber sees no gap; the
+			// reset consumer gets its state back from a rebuild of the endpoint.
+			s.subscribers.RequestResync(source.Endpoint)
 		}
 	}
 	return nil

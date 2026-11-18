@@ -36,8 +36,10 @@ type EventConsumer interface {
 	// AllBlocksCleared events.
 	ProcessEvents(ctx context.Context, source EventSource, batch EventBatch) error
 	// Reset invalidates observations from the endpoint's stream. The pool
-	// calls it on a sequence gap without replay, a failed replay, a
-	// reconnect, subscriber attachment, and endpoint removal.
+	// calls it on a publisher restart, a failed replay, before a rebuild
+	// from a snapshot or a full replay, on subscriber attachment, and on
+	// endpoint removal. A dropped frame or an undecodable message without
+	// replay or snapshot recovery does not reset.
 	Reset(ctx context.Context, source EventSource) error
 }
 

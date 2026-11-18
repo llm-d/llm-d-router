@@ -147,6 +147,20 @@ func (sm *SubscriberManager) RemoveSubscriber(ctx context.Context, podIdentifier
 	return true
 }
 
+// RequestResync asks the subscribers of a serving endpoint to reset its
+// consumers and load the publisher's state again from its snapshot or replay
+// buffer. A subscriber with neither endpoint has no state to load and keeps
+// its stream as is.
+func (sm *SubscriberManager) RequestResync(sourceEndpoint string) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	for _, entry := range sm.subscribers {
+		if entry.sourceEndpoint == sourceEndpoint && (entry.replayEndpoint != "" || entry.snapshotEndpoint != "") {
+			entry.subscriber.resync.Store(true)
+		}
+	}
+}
+
 // retireSubscriber stops a subscriber without waiting for its socket goroutine.
 // A source reset is only safe when no other subscriber still represents the
 // same serving endpoint.

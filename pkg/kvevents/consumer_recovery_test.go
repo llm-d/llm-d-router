@@ -16,6 +16,7 @@ package kvevents_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,4 +124,56 @@ func TestDecodedConsumersRecoverAndEvictTogether(t *testing.T) {
 			require.Eventually(t, func() bool { return resident(300, false) }, time.Second, time.Millisecond)
 		})
 	}
+}
+
+type countingConsumer struct{ resets atomic.Int32 }
+
+func (c *countingConsumer) ProcessEvents(context.Context, kvevents.EventSource, kvevents.EventBatch) error {
+	return nil
+}
+
+func (c *countingConsumer) Reset(context.Context, kvevents.EventSource) error {
+	c.resets.Add(1)
+	return nil
+}
+
+func TestResyncRequestReloadsSnapshotOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	consumer := &countingConsumer{}
+	transport, err := kvevents.NewConsumerPool(kvevents.DefaultConfig(), engineadapter.NewVLLMAdapter(), consumer)
+	require.NoError(t, err)
+	transport.Start(ctx)
+	defer transport.Shutdown(ctx)
+	pub := zmq4.NewPub(ctx)
+	endpoint := listenEphemeral(t, pub)
+	defer pub.Close()
+	server, snapshotEndpoint := startSnapshotServer(t, ctx)
+	manager := kvevents.NewSubscriberManager(transport)
+	defer manager.Shutdown(ctx)
+	require.NoError(t, manager.EnsureSubscriber(ctx, "pod", "10.0.0.1:8000", endpoint, "", snapshotEndpoint, "kv@", true))
+	h := &replayHarness{ctx: ctx, pub: pub, topic: []byte("kv@wire:8000@model")}
+	var seq uint64
+	send := func() {
+		seq++
+		server.set(int64(seq)) //nolint:gosec // test sequence
+		h.send(t, seq, buildEventBatchPayload(t))
+	}
+	require.Eventually(t, func() bool { send(); return server.requests.Load() == 1 }, 5*time.Second, 20*time.Millisecond)
+	// Attachment and the snapshot load each reset the consumer.
+	require.Eventually(t, func() bool { return consumer.resets.Load() == 2 }, 5*time.Second, 20*time.Millisecond)
+
+	manager.RequestResync("10.0.0.1:8000")
+	require.Eventually(t, func() bool { send(); return server.requests.Load() == 2 }, 5*time.Second, 20*time.Millisecond)
+	// The resync resets the consumer before the rebuild and again when the snapshot loads.
+	require.Eventually(t, func() bool { return consumer.resets.Load() == 4 }, 5*time.Second, 20*time.Millisecond)
+
+	// A request inside the cooldown waits.
+	manager.RequestResync("10.0.0.1:8000")
+	for range 5 {
+		send()
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.Equal(t, int32(2), server.requests.Load())
+	require.Equal(t, int32(4), consumer.resets.Load())
 }

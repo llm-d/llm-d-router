@@ -78,15 +78,59 @@ func TestConsumerSubscriberInvalidatesWithoutReplay(t *testing.T) {
 	require.False(t, z.acceptLiveWithoutReplay("topic", 5))
 	assert.Zero(t, p.queues[0].Len())
 	require.True(t, z.acceptLiveWithoutReplay("topic", 7))
+	assert.Zero(t, p.queues[0].Len(), "a dropped frame keeps the consumer's state")
 	require.True(t, z.acceptLiveWithoutReplay("topic", 1))
-	assert.Equal(t, 2, p.queues[0].Len())
-	for range 2 {
-		msg, shutdown := p.queues[0].Get()
-		require.False(t, shutdown)
-		assert.True(t, msg.reset)
-		assert.Equal(t, "serving:8000", msg.SourceEndpoint)
-		p.queues[0].Done(msg)
-	}
+	require.Equal(t, 1, p.queues[0].Len(), "an engine restart resets the consumer")
+	msg, shutdown := p.queues[0].Get()
+	require.False(t, shutdown)
+	assert.True(t, msg.reset)
+	assert.Equal(t, "serving:8000", msg.SourceEndpoint)
+	p.queues[0].Done(msg)
+}
+
+type undecodableAdapter struct{ sourceEndpointAdapter }
+
+func (a *undecodableAdapter) ParseMessage(*RawMessage) (string, string, EventBatch, error) {
+	return "", "", EventBatch{}, errors.New("malformed payload")
+}
+
+func TestConsumerPoolKeepsStateOnDecodeFailure(t *testing.T) {
+	c := &recordingConsumer{}
+	p, err := NewConsumerPool(DefaultConfig(), &undecodableAdapter{}, c)
+	require.NoError(t, err)
+	t.Cleanup(func() { p.Shutdown(t.Context()) })
+	p.processRawMessage(t.Context(), &RawMessage{Payload: []byte{1}, SourceEndpoint: "serving:8000"})
+	assert.Empty(t, c.operations)
+}
+
+func TestConsumerSubscriberReconnectKeepsReplayState(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Concurrency = 1
+	p, err := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
+	require.NoError(t, err)
+	t.Cleanup(func() { p.Shutdown(t.Context()) })
+	// The endpoint has no transport, so every connection attempt returns at once.
+	z := newZMQSubscriber(p, "pod", "serving:8000", "unreachable", "", "", "", true)
+	failed := time.Now()
+	z.lastSeq, z.hasLastSeq = 7, true
+	z.lastLiveSeq, z.hasLastLiveSeq = 7, true
+	z.lastReplayFailure = failed
+	z.publisherID = []byte{1}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		z.Start(ctx)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+	assert.Zero(t, p.queues[0].Len(), "a reconnect keeps the consumer's state")
+	assert.Equal(t, uint64(7), z.lastSeq)
+	assert.True(t, z.hasLastSeq)
+	assert.True(t, z.hasLastLiveSeq)
+	assert.Equal(t, failed, z.lastReplayFailure, "a reconnect keeps the replay cooldown")
+	assert.Equal(t, []byte{1}, z.publisherID)
 }
 
 func TestConsumerSubscriberDetachDrainsBeforeReset(t *testing.T) {

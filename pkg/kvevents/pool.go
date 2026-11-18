@@ -491,13 +491,6 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		logger.Error(err, "Failed to parse message")
-		if p.consumer != nil {
-			source := msg.SourceEndpoint
-			if source == "" {
-				source = p.adapter.ShardingKey(msg)
-			}
-			p.clearPod(ctx, source, false)
-		}
 		return
 	}
 

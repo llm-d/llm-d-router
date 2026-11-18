@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	zmq4 "github.com/go-zeromq/zmq4"
@@ -71,6 +72,11 @@ type zmqSubscriber struct {
 	// publisherID identifies the engine process behind the live stream; it
 	// changes only when the engine restarts.
 	publisherID []byte
+
+	// resync is set when a consumer dropped its state for this endpoint while
+	// the stream stayed continuous, so only a rebuild restores that state.
+	resync     atomic.Bool
+	lastResync time.Time
 }
 
 // newZMQSubscriber creates a new ZMQ subscriber.
@@ -132,13 +138,6 @@ func (z *zmqSubscriber) Start(ctx context.Context) {
 			// We run the subscriber in a separate function to handle socket
 			// setup/teardown and connection retries cleanly.
 			z.runSubscriber(ctx)
-			if z.pool.consumer != nil && z.sourceEndpoint != "" {
-				z.resetForSource("")
-				z.lastSeq, z.lastLiveSeq = 0, 0
-				z.hasLastSeq, z.hasLastLiveSeq = false, false
-				z.lastReplayFailure = time.Time{}
-				z.publisherID = nil
-			}
 			// wait before retrying, unless the context has been canceled.
 			select {
 			case <-time.After(retryInterval):
@@ -247,9 +246,9 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		replayAttempted := false
-		if restarted {
-			logger.Info("Detected publisher restart, rebuilding index",
-				"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
+		if restarted || z.takeResync() {
+			logger.Info("Rebuilding index after publisher restart or consumer resync request",
+				"restarted", restarted, "lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
 				"endpoint", z.endpoint)
 			z.resetForSource(topic)
 			z.lastSeq = 0
@@ -326,7 +325,9 @@ func (z *zmqSubscriber) acceptLiveWithoutReplay(topic string, seq uint64) bool {
 		if seq == z.lastLiveSeq {
 			return false
 		}
-		if seq != z.lastLiveSeq+1 {
+		// A backwards sequence is an engine restart with an empty cache. A
+		// forward gap is a dropped frame and keeps the consumer's state.
+		if seq < z.lastLiveSeq {
 			z.resetForSource(topic)
 		}
 	}
@@ -403,6 +404,19 @@ func (z *zmqSubscriber) retire(resetSource bool) {
 			retire:         true,
 		})
 	}
+}
+
+// takeResync reports whether a requested resync runs on this frame. Requests
+// wait out the replay cooldown, so a consumer that keeps failing rebuilds the
+// endpoint at most once per cooldown.
+func (z *zmqSubscriber) takeResync() bool {
+	if !z.resync.Load() || !z.canAttemptReplay() ||
+		(!z.lastResync.IsZero() && time.Since(z.lastResync) < replayCooldown) {
+		return false
+	}
+	z.resync.Store(false)
+	z.lastResync = time.Now()
+	return true
 }
 
 func (z *zmqSubscriber) canAttemptReplay() bool {
