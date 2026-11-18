@@ -67,7 +67,12 @@ type Responder struct {
 	typedName fwkplugin.TypedName
 }
 
-func Factory(name string, _ *json.Decoder, _ fwkplugin.Handle) (fwkplugin.Plugin, error) {
+func Factory(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
+	if handle != nil {
+		if err := registerMetrics(handle.Metrics()); err != nil {
+			return nil, err
+		}
+	}
 	return New().WithName(name), nil
 }
 
@@ -121,6 +126,7 @@ func (p *Responder) RegisterDependencies(r fwkdl.Registrar) error {
 // if every endpoint has reported.
 func (p *Responder) Screen(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) []fwksched.Endpoint {
 	if request == nil || request.TargetModel == "" {
+		recordDecision(p.typedName.Name, "", outcomeNotApplicable)
 		return endpoints
 	}
 
@@ -147,6 +153,7 @@ func (p *Responder) Screen(ctx context.Context, request *fwksched.InferenceReque
 		"plugin", p.typedName, "model", request.TargetModel)
 	switch {
 	case len(serving) > 0 && adapterListed:
+		recordDecision(p.typedName.Name, request.TargetModel, outcomeAdapter)
 		if len(unlisted) > 0 {
 			logger.Info("Returning LoRA adapter request candidates only from endpoints that list the adapter. "+
 				"Endpoints whose model list is not collected yet are skipped.",
@@ -155,14 +162,17 @@ func (p *Responder) Screen(ctx context.Context, request *fwksched.InferenceReque
 		}
 		return serving
 	case len(serving) > 0:
+		recordDecision(p.typedName.Name, request.TargetModel, outcomeBase)
 		return append(serving, unlisted...)
 	case len(unlisted) > 0:
+		recordDecision(p.typedName.Name, request.TargetModel, outcomeUnreported)
 		logger.Info("No endpoint lists the requested model. "+
 			"Returning only endpoints whose model list is not collected yet.",
 			"endpointsUsed", len(unlisted),
 			"endpointsTotal", len(endpoints))
 		return unlisted
 	default:
+		recordDecision(p.typedName.Name, request.TargetModel, outcomeNotFound)
 		logger.Info("No endpoint lists the requested model. "+
 			"Returning all endpoints because the model lists may be incomplete.",
 			"endpointsTotal", len(endpoints))
