@@ -324,6 +324,80 @@ func TestGenerateHeaders_ForwardsTraceContextWhenTracingDisabled(t *testing.T) {
 	assert.Equal(t, "vendor=abc", got["tracestate"])
 }
 
+// Envoy keeps a client header unless the mutation removes it, so a trace header
+// the propagator does not re-inject must be removed.
+func TestGenerateRequestHeaderResponse_RemovesUninjectedTraceHeaders(t *testing.T) {
+	const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0c9902b7-01"
+
+	tests := []struct {
+		name    string
+		client  map[string]string
+		wantSet map[string]string
+	}{
+		{
+			name:    "valid headers are set from the propagator",
+			client:  map[string]string{"traceparent": traceparent, "tracestate": "vendor=abc", "baggage": "k=v"},
+			wantSet: map[string]string{"traceparent": traceparent, "tracestate": "vendor=abc", "baggage": "k=v"},
+		},
+		{
+			name:   "tracestate without traceparent",
+			client: map[string]string{"tracestate": "vendor=abc"},
+		},
+		{
+			name:    "malformed tracestate",
+			client:  map[string]string{"traceparent": traceparent, "tracestate": "vendor"},
+			wantSet: map[string]string{"traceparent": traceparent},
+		},
+		{
+			name:    "malformed baggage",
+			client:  map[string]string{"traceparent": traceparent, "baggage": "=;;=bad"},
+			wantSet: map[string]string{"traceparent": traceparent},
+		},
+		{
+			name:   "invalid traceparent",
+			client: map[string]string{"traceparent": "garbage", "tracestate": "vendor=abc"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			useTracerProvider(t, noop.NewTracerProvider())
+			tracing.InitTextMapPropagator()
+
+			clientHeaders := make([]*configPb.HeaderValue, 0, len(tc.client))
+			for k, v := range tc.client {
+				clientHeaders = append(clientHeaders, &configPb.HeaderValue{Key: k, RawValue: []byte(v)})
+			}
+			ctx := extractTraceContext(context.Background(), &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: clientHeaders}},
+			})
+			ctx, span := tracing.Tracer("test").Start(ctx, "request", trace.WithSpanKind(trace.SpanKindServer))
+			defer span.End()
+
+			reqCtx := &RequestContext{
+				TargetEndpoint: "1.2.3.4:8080",
+				Request:        &Request{Headers: tc.client},
+				Response:       &Response{},
+			}
+			mutation := (&StreamingServer{}).generateRequestHeaderResponse(ctx, reqCtx).
+				GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+			gotSet := make(map[string]string)
+			for _, h := range mutation.GetSetHeaders() {
+				gotSet[strings.ToLower(h.Header.Key)] = string(h.Header.RawValue)
+			}
+			for _, name := range []string{"traceparent", "tracestate", "baggage"} {
+				if want, ok := tc.wantSet[name]; ok {
+					assert.Equal(t, want, gotSet[name], name)
+					assert.NotContains(t, mutation.GetRemoveHeaders(), name)
+					continue
+				}
+				assert.NotContains(t, gotSet, name)
+				assert.Contains(t, mutation.GetRemoveHeaders(), name)
+			}
+		})
+	}
+}
+
 func TestGenerateHeaders_Sanitization(t *testing.T) {
 	server := &StreamingServer{}
 	reqCtx := &RequestContext{
@@ -633,8 +707,11 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 			for k, v := range tc.wantSet {
 				assert.Equal(t, v, gotSet[k])
 			}
-			// The context is unsampled, so client copies of the attribution handoff are removed too.
-			wantRemoved := slices.Concat(tc.wantRemoved, clientControlHeaders, []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader})
+			// The context carries no trace, so client copies of the attribution
+			// handoff and the trace headers are removed too.
+			wantRemoved := slices.Concat(tc.wantRemoved, clientControlHeaders,
+				[]string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader},
+				sets.List(request.TracePropagationHeaders))
 			assert.ElementsMatch(t, wantRemoved, mutation.GetRemoveHeaders())
 		})
 	}
