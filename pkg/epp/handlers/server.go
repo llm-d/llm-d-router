@@ -247,7 +247,8 @@ type Request struct {
 	RawBody  []byte // This field will be updated when request body is modified (e.g. model mutation in requestBody)
 	Metadata map[string]any
 
-	// clientHeaderNames are the Headers keys copied from the client request.
+	// clientHeaderNames are the Headers keys copied from the client request,
+	// except pseudo-headers and host, which Envoy never lets ext_proc remove.
 	clientHeaderNames []string
 }
 type Response struct {

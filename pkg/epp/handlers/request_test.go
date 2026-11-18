@@ -765,9 +765,7 @@ func TestGenerateRequestHeaderResponse_RemovesDeletedClientHeaders(t *testing.T)
 	t.Parallel()
 
 	// The context is unsampled and no plugin set a routing header.
-	baseRemoved := slices.Concat(clientControlHeaders,
-		sets.List(request.ScreeningHeaders.Union(request.InternalRoutingHeaders)),
-		[]string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader})
+	baseRemoved := sets.List(eppOwnedHeaders.Difference(sets.New(metadata.DestinationEndpointKey)))
 
 	tests := []struct {
 		name        string
@@ -784,10 +782,15 @@ func TestGenerateRequestHeaderResponse_RemovesDeletedClientHeaders(t *testing.T)
 			wantRemoved: slices.Concat(baseRemoved, []string{"x-llm-d-lane"}),
 		},
 		{
-			// EPP-owned headers follow their own rules and are never re-set
-			// from the map.
-			name:        "a deleted EPP-owned header is not listed twice",
-			deleted:     []string{routing.EndpointPinHeader},
+			// EPP sets the destination; only the system-owned guard keeps
+			// content-length out.
+			name:        "deleted system-owned headers are not added to remove_headers",
+			deleted:     []string{metadata.DestinationEndpointKey, "content-length"},
+			wantRemoved: baseRemoved,
+		},
+		{
+			name:        "a deleted pseudo-header or host is not removed",
+			deleted:     []string{":authority", "host"},
 			wantRemoved: baseRemoved,
 		},
 	}
@@ -804,7 +807,10 @@ func TestGenerateRequestHeaderResponse_RemovesDeletedClientHeaders(t *testing.T)
 					Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
 						{Key: "X-LLM-D-Lane", Value: "client-chosen-lane"},
 						{Key: "x-keep", Value: "kept"},
-						{Key: routing.EndpointPinHeader, Value: "10.0.0.1:8000"},
+						{Key: metadata.DestinationEndpointKey, Value: "9.9.9.9:1"},
+						{Key: "content-length", Value: "42"},
+						{Key: ":authority", Value: "gw.example.com"},
+						{Key: "host", Value: "gw.example.com"},
 					}},
 				},
 			}
@@ -822,8 +828,11 @@ func TestGenerateRequestHeaderResponse_RemovesDeletedClientHeaders(t *testing.T)
 				gotSet[h.Header.Key] = string(h.Header.RawValue)
 			}
 			assert.Equal(t, "kept", gotSet["x-keep"])
+			assert.Equal(t, "1.2.3.4:8080", gotSet[metadata.DestinationEndpointKey])
 			for _, h := range tc.deleted {
-				assert.NotContains(t, gotSet, h)
+				if h != metadata.DestinationEndpointKey {
+					assert.NotContains(t, gotSet, h)
+				}
 			}
 			assert.ElementsMatch(t, tc.wantRemoved, mutation.GetRemoveHeaders())
 		})

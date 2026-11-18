@@ -77,12 +77,14 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 		return nil
 	}
 
-	for _, header := range req.RequestHeaders.Headers.Headers {
+	headers := req.RequestHeaders.Headers.Headers
+	reqCtx.Request.clientHeaderNames = make([]string, 0, len(headers))
+	for _, header := range headers {
 		key := strings.ToLower(header.Key)
 		if request.InternalRoutingHeaders.Has(key) {
 			continue
 		}
-		if _, seen := reqCtx.Request.Headers[key]; !seen {
+		if _, seen := reqCtx.Request.Headers[key]; !seen && !strings.HasPrefix(key, ":") && key != "host" {
 			reqCtx.Request.clientHeaderNames = append(reqCtx.Request.clientHeaderNames, key)
 		}
 		reqCtx.Request.Headers[key] = envoy.GetHeaderValue(header)
@@ -248,7 +250,7 @@ func unsetRoutingHeaders(req *Request, setHeaders []*configPb.HeaderValueOption)
 	}
 	remove := eppOwnedHeaders.Difference(set)
 	for _, key := range req.clientHeaderNames {
-		if _, ok := req.Headers[key]; !ok && !request.IsSystemOwnedHeader(key) {
+		if _, ok := req.Headers[key]; !ok && !set.Has(key) && !request.IsSystemOwnedHeader(key) {
 			remove.Insert(key)
 		}
 	}

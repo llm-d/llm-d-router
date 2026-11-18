@@ -46,7 +46,8 @@ type InferenceRequest struct {
 	// Headers is a map of the request headers. Edits made before the request is
 	// forwarded apply to it, except to EPP-owned headers: a header set in the
 	// map is forwarded with its value, and a client header deleted from the map
-	// is removed.
+	// is removed. Envoy never removes a pseudo-header or host, so deleting one
+	// forwards the client's value.
 	Headers map[string]string
 	// Request Objective
 	Objectives RequestObjectives
