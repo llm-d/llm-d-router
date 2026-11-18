@@ -34,7 +34,7 @@ upstream. No-op otherwise.
 | `indexerConfig` | object | `kvcache.NewDefaultConfig()` | `kvcache.Indexer` config. |
 | `kvEventsConfig` | object | `kvevents.DefaultConfig()` | KV-events pool config. |
 | `kvEventsSourceRef` | string | _(none)_ | Name of a `kv-events-source` whose decoded batches this producer indexes. The producer then opens no subscribers of its own, and `kvEventsConfig` is rejected. |
-| `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions. |
+| `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions, covering only whole engine blocks of the block size the endpoint reports in its metrics. An endpoint that reports none gets every router block. |
 | `speculativeTTL` | duration | `2s` | TTL for speculative entries. |
 
 Set `kvEventsConfig.engineType` to `sglang` for SGLang KV-events. It defaults
