@@ -79,6 +79,7 @@ func TestNewPoolRejectsNonLocalGlobalSocket(t *testing.T) {
 		{endpoint: "inproc://kv-events", wantErr: false},
 		{endpoint: "tcp://0.0.0.0:5557", wantErr: true},
 		{endpoint: "tcp://*:5557", wantErr: true},
+		{endpoint: "tcp://:5557", wantErr: true},
 		{endpoint: "tcp://[::]:5557", wantErr: true},
 		{endpoint: "tcp://10.0.0.5:5557", wantErr: true},
 		{endpoint: "tcp://epp.ns.svc:5557", wantErr: true},
