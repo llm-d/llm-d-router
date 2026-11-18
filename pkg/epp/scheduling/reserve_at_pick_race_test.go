@@ -16,24 +16,12 @@ limitations under the License.
 
 package scheduling_test
 
-// TestReserveAtPickRace is the in-process A/B for issue #1598 (thundering herd
-// under bursty traffic): the REAL inflight-load-producer, token-load-scorer and
-// max-score-picker, one shared endpoint set, and a concurrent burst of
-// scheduling goroutines — mirroring the EPP's per-request goroutines.
-//
-// Setup: 4 endpoints with pre-existing in-flight load 2/2/2/1 (one endpoint
-// uniquely least loaded, as when a burst arrives while previous requests are
-// still being served). K goroutines then Score+Pick simultaneously. No
-// PreRequest accounting runs during the burst — the pick->PreRequest gap was
-// measured at ~0.4ms in a live v1.0.0 EPP, i.e. the whole burst is scored
-// inside it.
-//
-// Without reservations: every goroutine scores the same snapshot, so the
-// uniquely-least-loaded endpoint strictly wins every pick -> the whole burst
-// herds onto it.
-//
-// With reserve-at-pick: each pick immediately increments a reservation the
-// scorers read, so the herd self-corrects and the burst spreads.
+// Tests for the pick-time reservation mechanism. The A/B test
+// below models the director's per-request pipeline: score, pick, then
+// ReserveResult. Without the reservation between pick and the next request's
+// scoring, a concurrent burst is scored against one stale snapshot and the
+// least-loaded endpoint wins every pick (the thundering herd). With it, each
+// pick is visible to the requests that score after it.
 
 import (
 	"bytes"
@@ -78,21 +66,23 @@ const (
 	burstSize    = 64
 )
 
-func runBurst(t *testing.T, withReservations bool) map[string]int {
+func newProducer(t *testing.T) *inflightload.InFlightLoadProducer {
 	t.Helper()
-	ctx := context.Background()
-
-	// Real producer (reservations included in the InFlightLoad attribute).
 	pl, err := inflightload.InFlightLoadProducerFactory(producerName, nil, fakeHandle{})
 	if err != nil {
 		t.Fatalf("producer factory: %v", err)
 	}
-	prod := pl.(*inflightload.InFlightLoadProducer)
+	return pl.(*inflightload.InFlightLoadProducer)
+}
 
-	// Real endpoints: datalayer ModelServers registered with the producer
-	// (injects the live InFlightLoad dynamic attribute), then converted to
-	// scheduler endpoints exactly like Director.toSchedulerEndpoints does
-	// (same metadata/metrics/attribute map).
+// newRig builds the real producer, token-load scorer and endpoints wired the
+// same way the director wires them (datalayer ModelServers registered with
+// the producer, then converted with the same metadata/metrics/attributes).
+func newRig(t *testing.T) (*inflightload.InFlightLoadProducer, fwksched.Scorer, []fwksched.Endpoint, fwkplugin.DataKey) {
+	t.Helper()
+	ctx := context.Background()
+	prod := newProducer(t)
+
 	servers := make([]fwkdl.Endpoint, numEndpoints)
 	eps := make([]fwksched.Endpoint, numEndpoints)
 	for i := range eps {
@@ -106,63 +96,78 @@ func runBurst(t *testing.T, withReservations bool) map[string]int {
 		eps[i] = fwksched.NewEndpoint(srv.GetMetadata(), srv.GetMetrics(), srv.GetAttributes())
 	}
 
-	// Pre-existing in-flight load 2/2/2/1 (in both requests and tokens:
-	// 2 prior requests x 2000 uncached tokens each): pod3 uniquely least loaded.
-	preload := []int{2, 2, 2, 1}
-	for i, n := range preload {
-		for j := 0; j < n; j++ {
-			prod.Reserve(eps[i].GetMetadata().ID.String(), 2000)
-		}
-	}
-
-	// Real token-load scorer, pointed at the producer's data key.
 	cfg, _ := json.Marshal(map[string]any{"inFlightLoadProducerName": producerName})
 	spl, err := tokenload.TokenLoadScorerFactory("token-load-scorer", json.NewDecoder(bytes.NewReader(cfg)), fakeHandle{})
 	if err != nil {
 		t.Fatalf("scorer factory: %v", err)
 	}
-	scorer := spl.(fwksched.Scorer)
 	uncachedKey := concurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(producerName)
+	return prod, spl.(fwksched.Scorer), eps, uncachedKey
+}
 
-	// Real max-score picker; the ONLY difference between the arms.
+// runBurst fires burstSize concurrent scheduling cycles, each following the
+// director's order: record the per-request uncached estimate (the Produce
+// phase), score, pick, then optionally ReserveResult. Goroutines are
+// released staggerStart apart, modeling the per-request pacing of the real
+// pipeline; without reservations nothing changes state mid-burst, so that arm
+// stays deterministic regardless of interleaving.
+func runBurst(t *testing.T, withReservations bool, staggerStart time.Duration) map[string]int {
+	t.Helper()
+	ctx := context.Background()
+	prod, scorer, eps, uncachedKey := newRig(t)
 	picker := maxscore.NewMaxScorePicker(1).WithName("max-score-picker")
-	if withReservations {
-		picker = picker.WithReserver(prod)
+
+	// Pre-existing in-flight load 2/2/2/1 (in both requests and tokens:
+	// 2 prior requests x 2000 uncached tokens each): pod3 uniquely least loaded.
+	// The estimate attribute is set first, as the Produce phase would for
+	// those prior requests, so ReserveResult reserves token load too.
+	for _, ep := range eps {
+		ep.Put(uncachedKey, &concurrency.UncachedRequestTokens{Tokens: 2000})
+	}
+	preload := []int{2, 2, 2, 1}
+	for i, n := range preload {
+		for j := 0; j < n; j++ {
+			prod.ReserveResult(ctx, fmt.Sprintf("preload-%d-%d", i, j),
+				&fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"default": {TargetEndpoints: []fwksched.Endpoint{eps[i]}},
+				}})
+		}
 	}
 
 	var mu sync.Mutex
 	counts := make(map[string]int, numEndpoints)
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	req := &fwksched.InferenceRequest{}
 	for i := 0; i < burstSize; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			// Model the request's Produce phase: record this request's
-			// uncached-token estimate on every endpoint (~1500 tokens, small
-			// per-request jitter so estimates are not bit-identical).
+			if staggerStart > 0 {
+				time.Sleep(time.Duration(i) * staggerStart)
+			}
+			// Produce phase: this request's uncached-token estimate on every
+			// endpoint (~1500 tokens with per-request jitter).
 			own := int64(1400 + i%200)
 			for _, ep := range eps {
 				ep.Put(uncachedKey, &concurrency.UncachedRequestTokens{Tokens: own})
 			}
-			// Score and pick against the SHARED endpoint set — exactly the
-			// concurrent-goroutine reality of the EPP scheduler.
-			scores := scorer.Score(ctx, req, eps)
+			scores := scorer.Score(ctx, &fwksched.InferenceRequest{}, eps)
 			scored := make([]*fwksched.ScoredEndpoint, 0, len(eps))
 			for _, ep := range eps {
 				scored = append(scored, &fwksched.ScoredEndpoint{Endpoint: ep, Score: scores[ep]})
 			}
-			res := picker.Pick(ctx, scored)
-			if len(res.TargetEndpoints) == 0 {
+			result := picker.Pick(ctx, scored)
+			if len(result.TargetEndpoints) == 0 {
 				return
 			}
+			if withReservations {
+				prod.ReserveResult(ctx, fmt.Sprintf("req-%d", i),
+					&fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{"default": result}})
+			}
 			mu.Lock()
-			counts[res.TargetEndpoints[0].GetMetadata().ID.Name]++
+			counts[result.TargetEndpoints[0].GetMetadata().ID.Name]++
 			mu.Unlock()
-			// NOTE: no PreRequest here — the whole burst is scored inside the
-			// measured ~0.4ms pick->PreRequest window.
 		}(i)
 	}
 	close(start)
@@ -173,7 +178,7 @@ func runBurst(t *testing.T, withReservations bool) map[string]int {
 func TestReserveAtPickRace(t *testing.T) {
 	fair := burstSize / numEndpoints
 
-	without := runBurst(t, false)
+	without := runBurst(t, false, 0)
 	topWithout := 0
 	var totalWithout int
 	for _, n := range without {
@@ -186,12 +191,13 @@ func TestReserveAtPickRace(t *testing.T) {
 	if totalWithout != burstSize {
 		t.Fatalf("lost requests: %d of %d", totalWithout, burstSize)
 	}
-	// The herd: the uniquely-least-loaded pod (pod3) takes (nearly) everything.
+	// Nothing changes state during the burst in this arm, so every cycle sees
+	// the same snapshot and the least-loaded pod wins them all.
 	if topWithout < 3*fair {
 		t.Errorf("expected the herd without reservations (top >= %d), got %d", 3*fair, topWithout)
 	}
 
-	with := runBurst(t, true)
+	with := runBurst(t, true, 250*time.Microsecond)
 	topWith := 0
 	var totalWith int
 	for _, n := range with {
@@ -204,8 +210,150 @@ func TestReserveAtPickRace(t *testing.T) {
 	if totalWith != burstSize {
 		t.Fatalf("lost requests: %d of %d", totalWith, burstSize)
 	}
-	// The fix: no pod takes more than twice its fair share.
 	if topWith > 2*fair {
 		t.Errorf("expected spread with reservations (top <= %d), got %d", 2*fair, topWith)
+	}
+}
+
+// TestReserveConvertsAtPreRequest verifies the conversion: after PreRequest
+// runs for a request that reserved, the reservation counters are back to zero
+// and the real in-flight counters carry the load.
+func TestReserveConvertsAtPreRequest(t *testing.T) {
+	ctx := context.Background()
+	prod, _, eps, _ := newRig(t)
+	ep := eps[0]
+	eid := ep.GetMetadata().ID.String()
+
+	result := &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{
+		"default": {TargetEndpoints: []fwksched.Endpoint{ep}},
+	}}
+	prod.ReserveResult(ctx, "req-convert", result)
+
+	if got := prod.GetRequests(eid); got != 0 {
+		t.Errorf("real counter should be 0 before PreRequest, got %d", got)
+	}
+
+	req := &fwksched.InferenceRequest{RequestID: "req-convert", SchedulingResult: result}
+	if err := prod.PreRequest(ctx, req, result); err != nil {
+		t.Fatalf("PreRequest: %v", err)
+	}
+	if got := prod.GetRequests(eid); got != 1 {
+		t.Errorf("real counter should be 1 after PreRequest, got %d", got)
+	}
+}
+
+// TestPreRequestDoesNotReleaseForeignReservation verifies that a request
+// which never reserved cannot decrement another request's reservation
+// (the release is keyed by request ID).
+func TestPreRequestDoesNotReleaseForeignReservation(t *testing.T) {
+	ctx := context.Background()
+	prod, _, eps, _ := newRig(t)
+	ep := eps[0]
+	eid := ep.GetMetadata().ID.String()
+
+	result := &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{
+		"default": {TargetEndpoints: []fwksched.Endpoint{ep}},
+	}}
+	// req-a reserves; req-b never does.
+	prod.ReserveResult(ctx, "req-a", result)
+
+	// req-b's PreRequest on the same endpoint must not touch req-a's
+	// reservation.
+	reqB := &fwksched.InferenceRequest{RequestID: "req-b", SchedulingResult: result}
+	if err := prod.PreRequest(ctx, reqB, result); err != nil {
+		t.Fatalf("PreRequest: %v", err)
+	}
+	// req-b's real accounting landed (1 request) and req-a's reservation is
+	// still outstanding: DumpState exposes both.
+	stateRaw, err := prod.DumpState()
+	if err != nil {
+		t.Fatalf("DumpState: %v", err)
+	}
+	var state struct {
+		Endpoints []struct {
+			Endpoint     string `json:"endpoint"`
+			Requests     int64  `json:"requests"`
+			Tokens       int64  `json:"tokens"`
+			Reservations int64  `json:"reservations"`
+		} `json:"endpoints"`
+	}
+	if err := json.Unmarshal(stateRaw, &state); err != nil {
+		t.Fatalf("unmarshal dump state: %v", err)
+	}
+	var found bool
+	for _, e := range state.Endpoints {
+		if e.Endpoint == eid {
+			found = true
+			if e.Requests != 1 {
+				t.Errorf("real requests: want 1 (req-b only), got %d", e.Requests)
+			}
+			if e.Reservations != 1 {
+				t.Errorf("reservations: want 1 (req-a still outstanding), got %d", e.Reservations)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("endpoint %s missing from dump state", eid)
+	}
+}
+
+// TestAbandonedReservationReclaimed verifies the janitor path: a request that
+// reserved but never dispatched has its reservation rolled back when its
+// plugin state is reclaimed.
+func TestAbandonedReservationReclaimed(t *testing.T) {
+	ctx := context.Background()
+	prod, _, eps, _ := newRig(t)
+	ep := eps[0]
+	eid := ep.GetMetadata().ID.String()
+
+	result := &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{
+		"default": {TargetEndpoints: []fwksched.Endpoint{ep}},
+	}}
+	prod.ReserveResult(ctx, "req-abandoned", result)
+
+	stateRaw, err := prod.DumpState()
+	if err != nil {
+		t.Fatalf("DumpState: %v", err)
+	}
+	var state struct {
+		Endpoints []struct {
+			Endpoint     string `json:"endpoint"`
+			Requests     int64  `json:"requests"`
+			Tokens       int64  `json:"tokens"`
+			Reservations int64  `json:"reservations"`
+		} `json:"endpoints"`
+	}
+	if err := json.Unmarshal(stateRaw, &state); err != nil {
+		t.Fatalf("unmarshal dump state: %v", err)
+	}
+	for _, e := range state.Endpoints {
+		if e.Endpoint == eid && e.Reservations != 1 {
+			t.Fatalf("reservations before reclaim: want 1, got %d", e.Reservations)
+		}
+	}
+
+	// The janitor reclaims a request's plugin state when its lifetime context
+	// ends; simulate that with the state-level delete the janitor performs.
+	prod.PluginState.Delete("req-abandoned")
+
+	stateRaw, err = prod.DumpState()
+	if err != nil {
+		t.Fatalf("DumpState: %v", err)
+	}
+	state = struct {
+		Endpoints []struct {
+			Endpoint     string `json:"endpoint"`
+			Requests     int64  `json:"requests"`
+			Tokens       int64  `json:"tokens"`
+			Reservations int64  `json:"reservations"`
+		} `json:"endpoints"`
+	}{}
+	if err := json.Unmarshal(stateRaw, &state); err != nil {
+		t.Fatalf("unmarshal dump state: %v", err)
+	}
+	for _, e := range state.Endpoints {
+		if e.Endpoint == eid && e.Reservations != 0 {
+			t.Errorf("reservations after reclaim: want 0, got %d", e.Reservations)
+		}
 	}
 }

@@ -427,6 +427,13 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	reqCtx.SchedulingRequest.SchedulingResult = result
 
+	// Reserve the picked endpoints at scheduling time: concurrent
+	// scheduling cycles must observe this request's decisions immediately,
+	// not only after the PreRequest accounting lands. The reservation is
+	// request-scoped: PreRequest converts it into the real counters, and the
+	// plugin-state janitor reclaims it if this request never dispatches.
+	d.reservePickedEndpoints(ctx, reqCtx.SchedulingRequest, result)
+
 	// Prepare Request (Populates RequestContext and call PreRequest plugins)
 	// Insert target endpoint to instruct Envoy to route requests to the specified target pod and attach the port number.
 	// Invoke PreRequest registered plugins.
@@ -677,6 +684,19 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 // Must be called before the Director serves traffic.
 func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 	d.requestEvictor = re
+}
+
+// reservePickedEndpoints asks the first configured EndpointReserver (the
+// inflight-load-producer implements it) to reserve the primary target of
+// every profile in the scheduling result. The plugin slice is in config
+// order, so the choice is deterministic.
+func (d *Director) reservePickedEndpoints(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
+	for _, plugin := range d.requestControlPlugins.dataProducerPlugins {
+		if r, ok := plugin.(fwksched.EndpointReserver); ok {
+			r.ReserveResult(ctx, request.RequestID, result)
+			return
+		}
+	}
 }
 
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
