@@ -272,6 +272,18 @@ To check a configuration before deploying it, add `--validate-config`. The EPP t
  any server, so it runs anywhere the EPP binary does, such as a laptop or a CI job. It checks the
  configuration only, not whether the services that plugins connect to are reachable.
 
+Pass the same flags as the real start, since validation checks them as well. A configuration
+ without a discovery plugin runs in Kubernetes mode, which needs `--pool-name` or
+ `--endpoint-selector` and rejects `--objectives-file`:
+
+```bash
+epp --validate-config --config-file epp-config.yaml --pool-name my-pool
+```
+
+Without `--pool-name` or `--endpoint-selector` this exits with code 1 and
+ `either pool-name or endpoint-selector must be set`, as a real start would. With file discovery,
+ `--objectives-file` is loaded and checked too.
+
 Feature gates can also be set with the `--feature-gates` command line argument, which takes a 
  comma-separated list of kubelet-style `name=bool` entries; a bare name enables the gate. These
  entries are applied after the configuration's own `featureGates` list, so they override it.
