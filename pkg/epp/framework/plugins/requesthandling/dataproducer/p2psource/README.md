@@ -237,25 +237,58 @@ KVCR tier enables by default: KVCR then treats every block of the request as
 fetchable from the named source without reading the hashes. With
 `opportunistic_query: false` the hint is accepted and fetches nothing.
 
-For a source at `10.0.0.3` on data parallel rank 1 with `kvcrControlPort:
-17771`, the request's `kv_hints` (a `KVHintsEnvelope`, shown here as JSON with
-proto field names) is:
+The hint is field `kv_hints` of the `GenerateRequest` body. The client sends the
+request without it, and the plugin adds it. For a source at `10.0.0.3` on data
+parallel rank 1 with `kvcrControlPort: 17771`, a `GenerateStream` request
+reaches vLLM as follows (shown as JSON with proto field names; `Generate` takes
+the same message):
 
 ```json
 {
-  "protocol_version": "0.1",
-  "message_id": "<new UUID per request>",
-  "actions": [
-    {
-      "action_id": "fetch-0",
-      "action_type": "kv.fetch",
-      "action_version": "1.0",
-      "payload": {
-        "source_control_endpoint": "tcp://10.0.0.3:17772",
-        "block_hashes": [0]
+  "request_id": "req-1",
+  "model": "Qwen/Qwen3-8B",
+  "text": "Summarize the policy document below.\n\n<document text>",
+  "stopping": {"max_new_tokens": 128},
+  "kv_hints": {
+    "protocol_version": "0.1",
+    "message_id": "<new UUID per request>",
+    "actions": [
+      {
+        "action_id": "fetch-0",
+        "action_type": "kv.fetch",
+        "action_version": "1.0",
+        "payload": {
+          "source_control_endpoint": "tcp://10.0.0.3:17772",
+          "block_hashes": [0]
+        }
       }
-    }
-  ]
+    ]
+  }
+}
+```
+
+`opportunistic_query` is a setting of the vLLM `kvcr` secondary tier, not part
+of the hint. To set it explicitly, add it to the tier in `--kv-transfer-config`:
+
+```json
+{
+  "kv_connector": "OffloadingConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "spec_name": "TieringOffloadingSpec",
+    "cpu_bytes_to_use": 8000000000,
+    "self_describing_kv_events": true,
+    "secondary_tiers": [
+      {
+        "type": "kvcr",
+        "router_capabilities": ["router_hint"],
+        "control_host": "0.0.0.0",
+        "control_ports": [17771],
+        "control_advertise_host": "<pod IP>",
+        "opportunistic_query": true
+      }
+    ]
+  }
 }
 ```
 
