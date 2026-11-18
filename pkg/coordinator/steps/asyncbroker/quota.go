@@ -46,12 +46,15 @@ type asyncQuotaClassifier struct {
 	logger logr.Logger
 }
 
-// quotaCallGuardTTL outlasts the retries of one script call. Under the
-// go-redis defaults the last retry runs at most about 53s after the first
-// attempt: the first attempt's 5s read timeout, then three retries of up to
-// 16s each (pool wait, dial and write timeouts). A read_timeout above about
-// 14s or a larger max_retries in the Redis URL can push the retries past
-// this TTL.
+// quotaCallTimeout bounds one script call, retries included. go-redis checks
+// the context before it hands an attempt a connection, so no retry starts
+// after this deadline.
+const quotaCallTimeout = 30 * time.Second
+
+// quotaCallGuardTTL outlasts the retries of one script call. The last attempt
+// starts within quotaCallTimeout of the first. The remaining 90s cover that
+// attempt's connection handshake and write, unless the Redis URL raises
+// read_timeout or write_timeout past them.
 const quotaCallGuardTTL = 2 * time.Minute
 
 // quotaCallGuardKey marks that the call holding token has changed the counter
@@ -107,7 +110,9 @@ func (q *asyncQuotaClassifier) classify(ctx context.Context, tenant string) (asy
 
 	key := fmt.Sprintf("%s%s:%s", q.cfg.Prefix, q.cfg.Attribute, tenant)
 	keys := []string{key, quotaCallGuardKey(key, uuid.NewString())}
-	res, err := quotaAcquireScript.Run(ctx, q.rdb, keys, limit, q.cfg.WindowSeconds, quotaCallGuardTTL.Milliseconds()).Result()
+	callCtx, cancel := context.WithTimeout(ctx, quotaCallTimeout)
+	defer cancel()
+	res, err := quotaAcquireScript.Run(callCtx, q.rdb, keys, limit, q.cfg.WindowSeconds, quotaCallGuardTTL.Milliseconds()).Result()
 	if err != nil {
 		return asyncClassificationReserved, nil, fmt.Errorf("quota check failed (failing open): %w", err)
 	}
@@ -121,7 +126,9 @@ func (q *asyncQuotaClassifier) classify(ctx context.Context, tenant string) (asy
 		// elevated until its window TTL, skewing the tenant toward overflow,
 		// so it must leave a trail.
 		keys := []string{key, quotaCallGuardKey(key, uuid.NewString())}
-		if err := quotaReleaseScript.Run(context.Background(), q.rdb, keys, q.cfg.WindowSeconds, quotaCallGuardTTL.Milliseconds()).Err(); err != nil {
+		callCtx, cancel := context.WithTimeout(context.Background(), quotaCallTimeout)
+		defer cancel()
+		if err := quotaReleaseScript.Run(callCtx, q.rdb, keys, q.cfg.WindowSeconds, quotaCallGuardTTL.Milliseconds()).Err(); err != nil {
 			q.logger.Error(err, "quota release failed, counter stays elevated until the window ttl", "tenant", tenant)
 		}
 	}

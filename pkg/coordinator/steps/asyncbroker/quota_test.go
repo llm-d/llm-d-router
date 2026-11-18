@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-logr/logr"
@@ -137,6 +138,48 @@ func TestAsyncQuotaReleaseRetryAfterLostReplyReturnsOneSlot(t *testing.T) {
 	release1()
 	require.False(t, armed.Load(), "the release reply was dropped")
 	requireQuotaCount(t, mr, "1", "the other holder keeps its slot")
+}
+
+// scriptDeadlineHook records the time left before the context deadline of
+// each script call, or -1 when the call has no deadline.
+type scriptDeadlineHook struct {
+	remaining []time.Duration
+}
+
+func (h *scriptDeadlineHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *scriptDeadlineHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *scriptDeadlineHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if strings.HasPrefix(cmd.Name(), "eval") {
+			remaining := time.Duration(-1)
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining = time.Until(deadline)
+			}
+			h.remaining = append(h.remaining, remaining)
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func TestAsyncQuotaScriptCallsHaveADeadline(t *testing.T) {
+	q, _, _ := newLosingReplyClassifier(t, 2)
+	hook := &scriptDeadlineHook{}
+	q.rdb.AddHook(hook)
+
+	_, release, err := q.classify(t.Context(), "team-a")
+	require.NoError(t, err)
+	require.NotNil(t, release)
+	release()
+
+	require.Len(t, hook.remaining, 2, "one acquire and one release")
+	for _, remaining := range hook.remaining {
+		require.Positive(t, remaining, "the script call has a deadline")
+		require.LessOrEqual(t, remaining, quotaCallTimeout)
+	}
 }
 
 func TestAsyncQuotaCallGuardsExpire(t *testing.T) {
