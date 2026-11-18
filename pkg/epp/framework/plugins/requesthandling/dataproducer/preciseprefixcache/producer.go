@@ -127,13 +127,6 @@ type Producer struct {
 	sharedEvents *kvevents.Pool
 }
 
-// eventSource is the kv-events-source contract a producer binds to when
-// kvEventsSourceRef is set.
-type eventSource interface {
-	plugin.Plugin
-	AddConsumer(owner plugin.TypedName, consumer kvevents.EventConsumer) error
-}
-
 // ConfigParser decodes the plugin parameters over their defaults. The loader
 // uses it to order this producer after the plugin kvEventsSourceRef names.
 func ConfigParser(rawParameters *json.Decoder, _ plugin.Handle) (any, error) {
@@ -187,10 +180,10 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 	}
 	parameters := parsed.(PluginConfig)
 
-	var source eventSource
+	var source *srckvevents.Source
 	if parameters.KVEventsSourceRef != "" {
-		if source, err = sharedEventSource(handle, parameters.KVEventsSourceRef); err != nil {
-			return nil, fmt.Errorf("failed to create %s plugin: %w", PluginType, err)
+		if source, err = plugin.PluginByType[*srckvevents.Source](handle, parameters.KVEventsSourceRef); err != nil {
+			return nil, fmt.Errorf("failed to create %s plugin: kvEventsSourceRef: %w", PluginType, err)
 		}
 	}
 
@@ -204,19 +197,6 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		}
 	}
 	return p, nil
-}
-
-// sharedEventSource resolves kvEventsSourceRef to a configured kv-events-source.
-func sharedEventSource(handle plugin.Handle, ref string) (eventSource, error) {
-	p := handle.Plugin(ref)
-	if p == nil {
-		return nil, fmt.Errorf("kvEventsSourceRef %q names no configured plugin", ref)
-	}
-	source, ok := p.(eventSource)
-	if !ok {
-		return nil, fmt.Errorf("kvEventsSourceRef %q names a %s plugin; a %s is required", ref, p.TypedName().Type, srckvevents.PluginType)
-	}
-	return source, nil
 }
 
 // New constructs a precise-prefix-cache-producer. The instance name becomes
