@@ -916,7 +916,7 @@ upstream gRPC methods regardless of `worker_protocol`.
 
 ### Pod-local vLLM frontend
 
-The public listener forwards chat, completions, Responses, tokenize and detokenize requests over HTTP, and both native vLLM inference RPCs over gRPC. The Rust frontend handles tokenization and response formatting. It sends token IDs to the coordinator on loopback port 8081 for scheduling through the gateway.
+The public listener forwards chat completions, completions and Responses requests over HTTP, and both native vLLM inference RPCs over gRPC. The Rust frontend handles tokenization and response formatting. It sends token IDs to the coordinator on loopback port 8081 for scheduling through the gateway.
 
 For one aggregated vLLM worker, set `server.vllm_frontend: true` in the mounted coordinator config, use the `decode` step and configure the gateway with the `vllminference-parser` EPP plugin and a gRPC worker endpoint. Apply the [frontend sidecar patch](../test/e2e/artifacts/coordinator/patch-vllm-frontend.yaml) to the existing coordinator Deployment. Use a frontend image with a gRPC generation backend. Its model, revision and context limit must match the worker.
 

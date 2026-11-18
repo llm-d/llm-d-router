@@ -44,8 +44,6 @@ func withFrontendIngress(cfg config.ServerConfig) server.Option {
 		reqcommon.PathChatCompletions: httpProxy,
 		reqcommon.PathCompletions:     httpProxy,
 		reqcommon.PathResponses:       httpProxy,
-		"/tokenize":                   httpProxy,
-		"/detokenize":                 httpProxy,
 
 		vllmpb.Inference_Generate_FullMethodName:       grpcProxy,
 		vllmpb.Inference_GenerateStream_FullMethodName: grpcProxy,
