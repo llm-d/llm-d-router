@@ -28,6 +28,11 @@ import (
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 )
 
+// errUnsupportedBody reports a body a backend cannot read, such as the
+// passthrough parser's raw payload. It has no prompt to tokenize, so the
+// plugin produces no TokenizedRequest and returns no error.
+var errUnsupportedBody = errors.New("unsupported request body type")
+
 // tokenInputProducer turns a request body into a TokenizedRequest. Backends vary
 // in fidelity (render vs estimate); callers never branch on which produced it.
 type tokenInputProducer interface {
@@ -183,7 +188,7 @@ func (b renderBackend) produce(ctx context.Context, body *fwkrequest.InferenceRe
 			MultiModalFeatures: convertMMFeaturesToUpstream(mmFeatures),
 		}}}, nil
 	default:
-		return nil, errors.New("unsupported request body type, skipping tokenization")
+		return nil, errUnsupportedBody
 	}
 }
 
