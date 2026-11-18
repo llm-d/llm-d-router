@@ -106,6 +106,12 @@ func TestValidateKubernetesDiscoveryPluginFlags(t *testing.T) {
 	opts.EndpointSelector = nil
 	opts.ObjectivesFile = "/etc/epp/objectives.yaml"
 	require.ErrorContains(t, validateKubernetesDiscoveryPluginFlags(opts), "objectives-file requires file discovery")
+
+	opts = runserver.NewOptions()
+	opts.EnableLeaderElection = true
+	require.ErrorContains(t, validateKubernetesDiscoveryPluginFlags(opts), "pool-name must be set with ha-enable-leader-election")
+	opts.PoolName = "glm"
+	require.NoError(t, validateKubernetesDiscoveryPluginFlags(opts))
 }
 
 func TestDiscoveryPoolGKNN(t *testing.T) {

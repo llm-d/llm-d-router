@@ -246,9 +246,10 @@ plus a notification extractor:
 2. The EPP builds its regular controller manager from the standard client
    config (`--kubeconfig`, `$KUBECONFIG`, in-cluster), with the
    `InferencePool`, `InferenceObjective`, `InferenceModelRewrite` and Pod
-   reconcilers off. No `InferencePool` or Pod is read, so `--pool-name` is
-   optional: it only names the pool in metrics and logs and the leader
-   election lease, and defaults to `epp`. `--endpoint-selector` and
+   reconcilers off. No `InferencePool` or Pod is read, so `--pool-name` only
+   names the pool in metrics and logs and the leader election lease. It
+   defaults to `epp`, but is required with `--ha-enable-leader-election`, so
+   that each EPP deployment gets its own lease. `--endpoint-selector` and
    `--objectives-file` are rejected.
 3. The manager cache holds each scoped source's GVK restricted to its
    namespace and selector. The datalayer runtime binds each source to the

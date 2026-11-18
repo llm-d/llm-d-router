@@ -68,7 +68,8 @@ type `endpointslice-discovery` in `plugins`.
 The plugin runs under the EPP's regular controller manager, with the
 `InferencePool`, `InferenceObjective`, `InferenceModelRewrite` and Pod
 reconcilers off, so no `InferencePool` is needed and `--pool-name` is
-optional (it defaults to `epp`). The manager connects to the API server with
+optional (it defaults to `epp`; with `--ha-enable-leader-election` it is
+required, because it names the leader election lease). The manager connects to the API server with
 the same client config as the Kubernetes discovery modes (`ctrl.GetConfig()`):
 the EPP's `--kubeconfig` flag, then `$KUBECONFIG`, then the in-cluster config.
 

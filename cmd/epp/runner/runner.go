@@ -1165,14 +1165,20 @@ func validateKubernetesDiscoveryFlags(opts *runserver.Options) error {
 
 // validateKubernetesDiscoveryPluginFlags checks the flags when a discovery
 // plugin registered with RegisterKubernetesDiscovery supplies the endpoints.
-// pool-name is optional: no InferencePool is read, the name only labels the
-// pool and its leader election lease.
+// No InferencePool is read, so pool-name only names the pool and its leader
+// election lease. It is optional unless leader election is enabled: the lease
+// is named after the pool, and two EPP deployments in one namespace left on
+// the default name would share one lease.
 func validateKubernetesDiscoveryPluginFlags(opts *runserver.Options) error {
 	if opts.EndpointSelector != nil {
 		return errors.New("endpoint-selector cannot be set when a discovery plugin supplies the endpoints")
 	}
 	if opts.ObjectivesFile != "" {
 		return errors.New("objectives-file requires file discovery")
+	}
+	if opts.EnableLeaderElection && opts.PoolName == "" {
+		return errors.New("pool-name must be set with ha-enable-leader-election when a discovery plugin supplies the endpoints: " +
+			"it names the leader election lease, which must be unique per EPP deployment")
 	}
 	return nil
 }
