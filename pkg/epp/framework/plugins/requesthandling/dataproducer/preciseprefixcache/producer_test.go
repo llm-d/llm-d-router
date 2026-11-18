@@ -1387,6 +1387,29 @@ func TestPluginFactory_RejectsNonPositiveKVEventsConcurrency(t *testing.T) {
 	}
 }
 
+// Strict decoding rejects a non-loopback global ZMQ socket unless the config
+// sets kvEventsConfig.allowUntrustedPublishers.
+func TestPluginFactory_GlobalZMQEndpointGuard(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+	handle := plugin.NewEppHandle(ctx, nil)
+
+	_, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(
+		`{"kvEventsConfig":{"zmqEndpoint":"tcp://0.0.0.0:5557"}}`,
+	)), handle)
+	require.ErrorContains(t, err, "allowUntrustedPublishers")
+
+	result, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(
+		`{"kvEventsConfig":{"zmqEndpoint":"tcp://0.0.0.0:0","allowUntrustedPublishers":true}}`,
+	)), handle)
+	require.NoError(t, err)
+	p := result.(*Producer)
+	defer p.subscribersManager.Shutdown(ctx)
+
+	require.Equal(t, "tcp://0.0.0.0:0", p.kvEventsConfig.ZMQEndpoint)
+	require.True(t, p.kvEventsConfig.AllowUntrustedPublishers)
+}
+
 // Key built from string literals so an upstream rename trips the test.
 func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 	p := &Producer{

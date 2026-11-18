@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -142,8 +143,16 @@ func blockStoredEventDigestible(ev *BlockStoredEvent, canonicalBlockSize int) (b
 
 // Config holds the configuration for the event processing pool.
 type Config struct {
-	// ZMQEndpoint is the ZMQ address to connect to (e.g., "tcp://indexer:5557").
+	// ZMQEndpoint binds one SUB socket that every engine publishes to (e.g.,
+	// "tcp://127.0.0.1:5557"). The socket cannot tell publishers apart, so the
+	// pod identity comes from the topic and any peer that reaches the socket
+	// can publish events under any pod's identity. Binding a non-loopback
+	// address therefore requires AllowUntrustedPublishers. Per-pod
+	// subscriptions (DiscoverPods) attribute events to the dialed pod instead.
 	ZMQEndpoint string `json:"zmqEndpoint,omitempty"`
+	// AllowUntrustedPublishers lets ZMQEndpoint bind a non-loopback address.
+	// Set it only when network policy limits who can reach the socket.
+	AllowUntrustedPublishers bool `json:"allowUntrustedPublishers,omitempty"`
 	// TopicFilter is the ZMQ subscription filter (e.g., "kv@").
 	TopicFilter string `json:"topicFilter"`
 	// Concurrency is the number of parallel workers to run.
@@ -216,6 +225,28 @@ func DefaultConfig() *Config {
 	}
 }
 
+// isLocalZMQEndpoint reports whether a bound ZMQ endpoint is reachable only
+// from the local host: an ipc or inproc transport, or a tcp bind on a loopback
+// address. Wildcards (*, 0.0.0.0, ::) and every other address are not local.
+func isLocalZMQEndpoint(endpoint string) bool {
+	if strings.HasPrefix(endpoint, "ipc://") || strings.HasPrefix(endpoint, "inproc://") {
+		return true
+	}
+	hostPort, ok := strings.CutPrefix(endpoint, "tcp://")
+	if !ok {
+		return false
+	}
+	host, _, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // Pool is a sharded worker pool that processes events from ZMQ subscribers.
 // It ensures that events for the same PodIdentifier are processed in order.
 // Pool keeps transient event-stream state while durable key mappings are
@@ -260,6 +291,11 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 	}
 	if cfg.Concurrency <= 0 {
 		return nil, fmt.Errorf("kvEventsConfig.concurrency must be positive, got %d", cfg.Concurrency)
+	}
+	if cfg.ZMQEndpoint != "" && !cfg.AllowUntrustedPublishers && !isLocalZMQEndpoint(cfg.ZMQEndpoint) {
+		return nil, fmt.Errorf("kvEventsConfig.zmqEndpoint %q binds a non-loopback address, so any network peer can publish "+
+			"KV events under any pod's identity; drop zmqEndpoint and have each engine bind its own PUB socket, "+
+			"which the EPP subscribes to by default, or set kvEventsConfig.allowUntrustedPublishers", cfg.ZMQEndpoint)
 	}
 
 	p := &Pool{
