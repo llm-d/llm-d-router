@@ -21,7 +21,7 @@ Hybrid mode is the exception: rather than one aggregate fraction, it evaluates e
 
 **Heterogeneous Deployments:** In requests and tokens mode the detector calculates saturation globally as a single aggregate fraction, an aggregate queueing model. Aggregate Pool Capacity is the sum of each endpoint's capacity, so a pool that mixes hardware classes (e.g., H100 and L4 nodes) can give each class its own `maxConcurrency` and `maxTokenConcurrency` through `endpointOverrides`, matched on pod labels. With one capacity for every endpoint, the aggregate fraction is biased toward the state of the larger nodes. Contrast this with the Utilization Detector, which evaluates saturation as an unweighted average of individual endpoint scores.
 
-Each evaluation records the aggregate capacity in the `flow_control_detector_capacity` gauge, labeled by the detector name, the pipeline stage and the unit (`requests` or `tokens`), so consumers of `flow_control_pool_saturation` can read the denominator instead of mirroring the configuration.
+Each evaluation records the aggregate capacity in the `flow_control_detector_capacity` gauge, labeled by the detector name, the pipeline stage and the unit, so consumers of `flow_control_pool_saturation` can read the denominator instead of mirroring the configuration. Only the unit(s) the mode evaluates are exported: `requests` in requests mode, `tokens` in tokens mode, both in hybrid mode.
 
 ### Role in Scheduling (The Traffic Shaper)
 The detector implements the `Filter` interface to protect individual endpoints. It removes endpoints from candidate lists if their local inflight count exceeds the safety limit:

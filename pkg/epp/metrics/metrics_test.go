@@ -1251,8 +1251,10 @@ func TestFlowControlDetectorSaturationMetric(t *testing.T) {
 func TestFlowControlDetectorCapacityMetric(t *testing.T) {
 	Reset()
 
-	RecordFlowControlDetectorCapacity("concurrency", "prefill", 40, 4000)
-	RecordFlowControlDetectorCapacity("concurrency", "decode", 90, 9000)
+	RecordFlowControlDetectorCapacity("concurrency", "prefill", "requests", 40)
+	RecordFlowControlDetectorCapacity("concurrency", "prefill", "tokens", 4000)
+	RecordFlowControlDetectorCapacity("concurrency", "decode", "requests", 90)
+	RecordFlowControlDetectorCapacity("concurrency", "decode", "tokens", 9000)
 
 	val, err := testutil.GetGaugeMetricValue(llmdFlowControlDetectorCapacity.WithLabelValues("concurrency", "prefill", "requests"))
 	require.NoError(t, err)

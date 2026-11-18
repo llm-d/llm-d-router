@@ -1112,6 +1112,11 @@ func TestDetector_EndpointOverrides(t *testing.T) {
 				wantErr: "maxConcurrency must be strictly positive",
 			},
 			{
+				name:    "non-positive token limit",
+				params:  `{"endpointOverrides":[{"matchLabels":{"gpu":"big"},"maxTokenConcurrency":0}]}`,
+				wantErr: "maxTokenConcurrency must be strictly positive",
+			},
+			{
 				name:    "invalid expression operator",
 				params:  `{"endpointOverrides":[{"matchExpressions":[{"key":"gpu","operator":"Near","values":["big"]}],"maxConcurrency":30}]}`,
 				wantErr: "invalid selector",
@@ -1224,6 +1229,29 @@ func TestDetector_EndpointOverrides(t *testing.T) {
 		}
 	})
 
+	t.Run("hybrid saturation includes the aggregate token ratio", func(t *testing.T) {
+		t.Parallel()
+		reg := newLocalRegistry()
+		ctx := t.Context()
+		hybrid := *cfg
+		hybrid.mode = modeHybrid
+		d := newDetector("overrides-hybrid-tokens", hybrid, logr.Discard())
+		small := newFakeEndpoint(reg, "small")
+		big := newFakeEndpoint(reg, "big")
+		big.GetMetadata().Labels = bigLabels
+
+		// Three requests of 400 input tokens load 1000 tokens each: the big endpoint is
+		// full on tokens (3000 / 3000) and nearly idle on requests (3 / 30). The
+		// per-endpoint average is (0 + 1.0) / 2 = 0.5, the aggregate request ratio is
+		// 3 / 40, and the aggregate token ratio is 3000 / 4000.
+		reqs := make([]*fwksched.InferenceRequest, 3)
+		for i := range reqs {
+			reqs[i] = makeTokenRequest(fmt.Sprintf("t-%d", i), 400)
+		}
+		driveTokenLoad(ctx, reg, d, "big", reqs)
+		require.InDelta(t, 0.75, d.Saturation(ctx, []datalayer.Endpoint{small, big}), 1e-9)
+	})
+
 	t.Run("filter applies the matched limit", func(t *testing.T) {
 		t.Parallel()
 		reg := newLocalRegistry()
@@ -1288,10 +1316,18 @@ func TestDetector_EndpointOverrides(t *testing.T) {
 
 		d.Saturation(flowcontrol.WithSaturationStage(t.Context(), flowcontrol.SaturationStageDecode), []datalayer.Endpoint{small, big})
 		require.Equal(t, 40.0, capacityGaugeValue(t, detectorName, flowcontrol.SaturationStageDecode, "requests"))
-		require.Equal(t, 4000.0, capacityGaugeValue(t, detectorName, flowcontrol.SaturationStageDecode, "tokens"))
+		require.Equal(t, -1.0, capacityGaugeValue(t, detectorName, flowcontrol.SaturationStageDecode, "tokens"),
+			"requests mode does not export the token unit")
 
 		d.Saturation(t.Context(), nil)
 		require.Equal(t, 0.0, capacityGaugeValue(t, detectorName, "", "requests"), "an empty pool reports zero capacity")
+
+		hybrid := *cfg
+		hybrid.mode = modeHybrid
+		hd := newDetector(detectorName+"-hybrid", hybrid, logr.Discard())
+		hd.Saturation(flowcontrol.WithSaturationStage(t.Context(), flowcontrol.SaturationStageDecode), []datalayer.Endpoint{small, big})
+		require.Equal(t, 40.0, capacityGaugeValue(t, detectorName+"-hybrid", flowcontrol.SaturationStageDecode, "requests"))
+		require.Equal(t, 4000.0, capacityGaugeValue(t, detectorName+"-hybrid", flowcontrol.SaturationStageDecode, "tokens"))
 	})
 }
 

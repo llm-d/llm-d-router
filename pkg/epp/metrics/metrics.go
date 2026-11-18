@@ -627,11 +627,10 @@ func DeleteFlowControlDetectorSaturationStage(stage string) {
 	llmdFlowControlDetectorSaturation.DeletePartialMatch(prometheus.Labels{"stage": stage})
 }
 
-// RecordFlowControlDetectorCapacity records the aggregate request and token capacity of the
+// RecordFlowControlDetectorCapacity records the aggregate capacity, in the given unit, of the
 // endpoints a concurrency detector evaluated for a pipeline stage.
-func RecordFlowControlDetectorCapacity(detector, stage string, requests, tokens int64) {
-	llmdFlowControlDetectorCapacity.WithLabelValues(detector, stage, "requests").Set(float64(requests))
-	llmdFlowControlDetectorCapacity.WithLabelValues(detector, stage, "tokens").Set(float64(tokens))
+func RecordFlowControlDetectorCapacity(detector, stage, unit string, capacity int64) {
+	llmdFlowControlDetectorCapacity.WithLabelValues(detector, stage, unit).Set(float64(capacity))
 }
 
 // DeleteFlowControlDetectorCapacityStage removes the per-detector capacity series of every

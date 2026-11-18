@@ -212,7 +212,7 @@ func (d *detector) getIncomingTokens(m datalayer.AttributeMap) int64 {
 func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
 	stage := flowcontrol.SaturationStageFromContext(ctx)
 	if len(endpoints) == 0 {
-		metrics.RecordFlowControlDetectorCapacity(d.typedName.Name, stage, 0, 0)
+		d.recordCapacity(stage, 0, 0)
 		return 1.0
 	}
 
@@ -242,7 +242,7 @@ func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoin
 			ratio(load.Tokens, tokCap),
 		)
 	}
-	metrics.RecordFlowControlDetectorCapacity(d.typedName.Name, stage, reqCapacity, tokCapacity)
+	d.recordCapacity(stage, reqCapacity, tokCapacity)
 	pendingDispatches := d.pendingDispatches.Load()
 
 	switch d.config.mode {
@@ -252,12 +252,25 @@ func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoin
 		if endpointCount == 0 {
 			return 1.0
 		}
+		// The aggregate ratios cover endpoints whose capacity exceeds the average: with
+		// uniform capacities neither exceeds the per-endpoint average.
 		return max(
 			hybridSatSum/float64(endpointCount),
 			ratio(reqInflight+pendingDispatches, reqCapacity),
+			ratio(tokInflight, tokCapacity),
 		)
 	default:
 		return ratio(reqInflight+pendingDispatches, reqCapacity)
+	}
+}
+
+// recordCapacity exports the aggregate capacity in the unit(s) the configured mode evaluates.
+func (d *detector) recordCapacity(stage string, reqCapacity, tokCapacity int64) {
+	if d.config.mode != modeTokens {
+		metrics.RecordFlowControlDetectorCapacity(d.typedName.Name, stage, "requests", reqCapacity)
+	}
+	if d.config.mode != modeRequests {
+		metrics.RecordFlowControlDetectorCapacity(d.typedName.Name, stage, "tokens", tokCapacity)
 	}
 }
 
