@@ -70,7 +70,7 @@ func runWithFrontend(ctx context.Context, srv *server.Server, cfg config.ServerC
 	protocols := new(http.Protocols)
 	protocols.SetUnencryptedHTTP2(true)
 	callback := &http.Server{
-		Handler:     srv.GenerationHandler(),
+		Handler:     srv.VLLMGenerationHandler(),
 		Protocols:   protocols,
 		ReadTimeout: cfg.ReadTimeout,
 	}

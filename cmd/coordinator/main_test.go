@@ -33,6 +33,8 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
@@ -383,8 +385,8 @@ func TestRun_DrainTimeout_ServesWithConnectionCloseThenShutsDown(t *testing.T) {
 		_ = resp.Body.Close()
 		return resp.StatusCode, resp.Close
 	}
-	status, _ := get("/healthz")
-	require.Equal(t, http.StatusOK, status)
+	healthCode, _ := get("/healthz")
+	require.Equal(t, http.StatusOK, healthCode)
 
 	client := vllmpb.NewInferenceClient(grpctest.Dial(t, callback.Addr().String()))
 
@@ -392,13 +394,15 @@ func TestRun_DrainTimeout_ServesWithConnectionCloseThenShutsDown(t *testing.T) {
 	cancel()
 	time.Sleep(50 * time.Millisecond)
 
-	status, closeConn := get("/readyz")
-	require.Equal(t, http.StatusServiceUnavailable, status)
+	readyCode, closeConn := get("/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, readyCode)
 	require.True(t, closeConn, "draining response must carry Connection: close")
 
-	// Requests accepted before drain can still call back into the real generation handler.
-	_, err = client.Generate(t.Context(), &vllmpb.GenerateRequest{Sampling: &vllmpb.RandomSampling{NumSequences: 2}})
-	require.ErrorContains(t, err, "num_sequences > 1 is not supported")
+	// An unsupported sequence count lets the callback answer without a worker.
+	stream, err := client.GenerateStream(t.Context(), &vllmpb.GenerateRequest{Sampling: &vllmpb.RandomSampling{NumSequences: 2}})
+	require.NoError(t, err)
+	_, err = stream.Recv()
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
 
 	fresh, err := http.Get("http://" + listenAddr + "/healthz")
 	require.NoError(t, err, "listener must stay open during the drain window")

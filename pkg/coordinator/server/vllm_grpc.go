@@ -40,6 +40,17 @@ import (
 
 var errNumSequencesUnsupported = errors.New("num_sequences > 1 is not supported")
 
+// VLLMGenerationHandler serves pod-local vLLM callbacks through the coordinator pipeline.
+func (s *Server) VLLMGenerationHandler() http.Handler {
+	mux := http.NewServeMux()
+	generate := func(w http.ResponseWriter, r *http.Request) {
+		s.serveGRPC(w, r, scanVLLMGenerate)
+	}
+	mux.HandleFunc("POST "+vllmpb.Inference_Generate_FullMethodName, generate)
+	mux.HandleFunc("POST "+vllmpb.Inference_GenerateStream_FullMethodName, generate)
+	return otelHandler(mux)
+}
+
 func scanVLLMGenerate(r *http.Request, payload []byte) (grpcScanResult, error) {
 	genReq, err := vllmwire.ScanGenerateRequest(payload)
 	if err != nil {
@@ -1494,13 +1505,4 @@ func decodeOptionalUint32Field(m map[string]any, field string) (uint32, bool, er
 		return 0, false, fmt.Errorf("%s must be a non-negative uint32 integer", field)
 	}
 	return uint32(i64), true, nil //#nosec G115 -- guarded by [0, MaxUint32] above
-}
-
-// GenerationHandler serves the pod-local vLLM callbacks through the coordinator pipeline.
-func (s *Server) GenerationHandler() http.Handler {
-	mux := http.NewServeMux()
-	generate := func(w http.ResponseWriter, r *http.Request) { s.serveGRPC(w, r, scanVLLMGenerate) }
-	mux.HandleFunc("POST "+vllmpb.Inference_Generate_FullMethodName, generate)
-	mux.HandleFunc("POST "+vllmpb.Inference_GenerateStream_FullMethodName, generate)
-	return otelHandler(mux)
 }
