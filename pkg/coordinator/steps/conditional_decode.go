@@ -74,8 +74,11 @@ func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName
 func (s *ConditionalDecodeStep) enableForceStream(budget *forceStreamBudget) { s.budget = budget }
 
 func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.IsSGLangGRPC() {
+	switch g := reqCtx.GRPC.(type) {
+	case *pipeline.SGLangGRPCRequest:
 		return nil
+	case *pipeline.VLLMGRPCRequest:
+		return s.executeVLLMGRPC(ctx, reqCtx, g)
 	}
 	logger := log.FromContext(ctx).WithName(ConditionalDecodeStepName)
 

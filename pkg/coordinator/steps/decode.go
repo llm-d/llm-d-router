@@ -27,6 +27,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 
+	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/ec"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/connectors/kv"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	coordmetrics "github.com/llm-d/llm-d-router/pkg/coordinator/metrics"
@@ -42,6 +43,7 @@ func init() {
 type DecodeStep struct {
 	gwClient          *gateway.Client
 	kv                kv.Connector
+	ec                ec.Connector
 	promptTokenParity string
 	forwardTokenIDs   bool
 	// budget is set when the pipeline enables force-streaming.
@@ -62,6 +64,10 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
+	ecConn, err := buildECConnector(params)
+	if err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
 	parity, err := parsePromptTokenParity(params)
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
@@ -70,7 +76,7 @@ func NewDecodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	return &DecodeStep{gwClient: gwClient, kv: kvConn, promptTokenParity: parity, forwardTokenIDs: forwardTokenIDs}, nil
+	return &DecodeStep{gwClient: gwClient, kv: kvConn, ec: ecConn, promptTokenParity: parity, forwardTokenIDs: forwardTokenIDs}, nil
 }
 
 func (s *DecodeStep) Name() string { return DecodeStepName }
@@ -78,8 +84,11 @@ func (s *DecodeStep) Name() string { return DecodeStepName }
 func (s *DecodeStep) enableForceStream(budget *forceStreamBudget) { s.budget = budget }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	if reqCtx.IsSGLangGRPC() {
-		return s.executeSGLangGRPC(ctx, reqCtx)
+	switch g := reqCtx.GRPC.(type) {
+	case *pipeline.SGLangGRPCRequest:
+		return s.executeSGLangGRPC(ctx, reqCtx, g)
+	case *pipeline.VLLMGRPCRequest:
+		return s.executeVLLMGRPC(ctx, reqCtx, g)
 	}
 	logger := log.FromContext(ctx).WithName(DecodeStepName)
 

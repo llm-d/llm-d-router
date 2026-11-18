@@ -2095,9 +2095,9 @@ func TestEncodeStep_SkipsSGLangGRPCGenerate(t *testing.T) {
 		t.Fatal(err)
 	}
 	reqCtx := &pipeline.RequestContext{
-		RequestID:           "req-grpc",
-		GRPCGeneratePayload: []byte{},
-		TokenIDs:            []int{1, 32000, 2},
+		RequestID: "req-grpc",
+		GRPC:      &pipeline.SGLangGRPCRequest{Payload: []byte{}},
+		TokenIDs:  []int{1, 32000, 2},
 		MultimodalEntries: []pipeline.MultimodalEntry{
 			{Modality: reqcommon.ModalityImage, Hash: "hash-a", KwargsData: "dGVuc29yLWE=", Placeholder: pipeline.PlaceholderRange{Offset: 1, Length: 1}},
 		},
