@@ -26,6 +26,7 @@ import (
 
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -204,3 +205,5 @@ func (s *LASStrategy) EvictProgram(id string) {
 func (s *LASStrategy) Collectors() []prometheus.Collector {
 	return []prometheus.Collector{attainedServiceTokens}
 }
+
+func (s *LASStrategy) Consumes() plugin.DataDependencies { return plugin.DataDependencies{} }

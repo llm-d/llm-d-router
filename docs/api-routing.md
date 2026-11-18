@@ -42,11 +42,11 @@ itself.
 
 When the sidecar reads a request body and refuses it, it answers with a
 vLLM-style JSON 400, including on `/v1/messages`. On
-`/sglang.api.v1.SglangService/Generate`, the sidecar answers errors with gRPC
-status trailers. The coordinator answers in the
-error envelope of the request's API: Anthropic's for `/v1/messages`, gRPC status
-trailers for `/sglang.api.v1.SglangService/Generate`, and OpenAI's for the other
-HTTP paths.
+`/sglang.api.v1.SglangService/Generate`, `/vllm.Inference/Generate`, and
+`/vllm.Inference/GenerateStream`, the sidecar answers errors with gRPC status
+trailers. The coordinator answers in the error envelope of the request's API. It
+returns Anthropic errors for `/v1/messages`, gRPC status trailers for gRPC
+routes, and OpenAI errors for the other HTTP paths.
 
 ## Path forms
 
@@ -54,8 +54,9 @@ Paths are case-sensitive. The coordinator runs before EPP and the sidecar runs
 after it, so they accept different forms of the six inference API paths:
 `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`,
 `/inference/v1/generate` and `/generate`. Both components also serve the gRPC
-path `/sglang.api.v1.SglangService/Generate` (on the sidecar, when
-`--kv-connector=sglang`).
+paths `/sglang.api.v1.SglangService/Generate` (on the sidecar, when
+`--kv-connector=sglang`), `/vllm.Inference/Generate`, and
+`/vllm.Inference/GenerateStream`.
 
 The coordinator cleans the path of a POST request with Go's `path.Clean`. When
 the result is an inference API path it serves, the request is routed, checked
@@ -96,13 +97,15 @@ table.
 |---|---|---|---|---|
 | POST | `/v1/chat/completions` | served | served | forwards |
 | POST | `/v1/completions` | served | served | forwards |
-| POST | `/inference/v1/generate` | served | served | no route |
+| POST | `/inference/v1/generate` | served | served [5] | no route |
 | POST | `/v1/responses` | served | served | forwards a stateless request |
 | POST | `/v1/messages` | served | served | forwards |
 | POST | `/generate` | served | passthrough [1] | no route |
 | POST | `/sglang.api.v1.SglangService/Generate` | served when `--kv-connector=sglang`, otherwise passthrough | served | no route |
 | POST | `/sglang.api.v1.SglangService/{other}` | passthrough | passthrough | no route |
-| not POST | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, `/sglang.api.v1.SglangService/Generate` | passthrough [3] | 405 | terminates `GET /v1/responses` (WebSocket) |
+| POST | `/vllm.Inference/Generate`, `/vllm.Inference/GenerateStream` | served | served | no route |
+| POST | `/vllm.Inference/{other}`, `/vllm.Control/{any}` | passthrough | passthrough | no route |
+| not POST | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, `/sglang.api.v1.SglangService/Generate`, `/vllm.Inference/Generate`, `/vllm.Inference/GenerateStream` | passthrough [3] | 405 | terminates `GET /v1/responses` (WebSocket) |
 | not POST | `/generate` | passthrough [3] | passthrough [3] | no route |
 | POST | `/v1/messages/count_tokens` | passthrough | passthrough | forwards |
 | POST | `/v1/conversations` | passthrough | passthrough | forwards |
@@ -132,3 +135,6 @@ table.
    serves `PUT /generate`.
 4. When EPP runs the `models-responder` plugin, it answers `GET /v1/models`
    with the pool's model list, and the request does not reach a pod.
+5. When `pipeline.worker_protocol` is `grpc`, the coordinator translates HTTP
+   `POST /inference/v1/generate` requests and responses to `vllm.Inference` gRPC
+   calls. The default `http` protocol forwards HTTP JSON to workers.

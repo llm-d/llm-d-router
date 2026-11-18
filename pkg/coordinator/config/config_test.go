@@ -60,6 +60,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"gateway.max_idle_conns_per_host", cfg.Gateway.MaxIdleConnsPerHost, 100},
 		{"gateway.idle_conn_timeout", cfg.Gateway.IdleConnTimeout, 90 * time.Second},
 		{"gateway.timeout", cfg.Gateway.Timeout, 60 * time.Second},
+		{"pipeline.worker_protocol", cfg.Pipeline.WorkerProtocol, "http"},
 		{"pipeline.use_openai_format", cfg.Pipeline.UseOpenAIFormat, true},
 	}
 	for _, c := range checks {
@@ -128,6 +129,12 @@ func TestLoadEnvOverride(t *testing.T) {
 			envKey: "COORDINATOR_PIPELINE_USE_OPENAI_FORMAT",
 			envVal: "false",
 			check:  func(c *Config) (any, any) { return c.Pipeline.UseOpenAIFormat, false },
+		},
+		{
+			name:   "worker protocol",
+			envKey: "COORDINATOR_PIPELINE_WORKER_PROTOCOL",
+			envVal: "grpc",
+			check:  func(c *Config) (any, any) { return c.Pipeline.WorkerProtocol, "grpc" },
 		},
 		{
 			name:   "metrics certificate path",

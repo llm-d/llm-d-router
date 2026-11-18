@@ -17,6 +17,7 @@ limitations under the License.
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -30,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
@@ -61,10 +63,13 @@ func (p *p2pPeer) String() string {
 // nil when the dispatcher left the body unread. raw is body in its JSON wire
 // form, for callers that need bytes rather than the parsed map.
 type p2pRouting struct {
-	prefill *p2pPeer
-	source  *kvSource
-	body    map[string]any
-	raw     []byte
+	prefill   *p2pPeer
+	source    *kvSource
+	body      map[string]any
+	raw       []byte
+	grpcReq   *vllmwire.Request
+	ecParams  map[string]any
+	encodeRan bool
 }
 
 // kvSource is a validated kv_transfer_params.remote_kv_source block: the peer
@@ -189,8 +194,79 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 // recomputes the prompt locally, which is the work disaggregation exists to
 // avoid. Sequencing the requests also matches the NIXL connector, which forwards to
 // the prefiller and waits for it to return before dispatching decode.
+// sequentialPDLeg adapts one wire format (JSON or vLLM gRPC) to sequential P/D.
+type sequentialPDLeg interface {
+	report(ctx context.Context)
+	runPrefill(ctx context.Context, prefillHandler http.Handler, pw *bufferedResponseWriter, r *http.Request, prefillSpan trace.Span) error
+	completePrefill(ctx context.Context, w http.ResponseWriter, r *http.Request, pw *bufferedResponseWriter, prefillErr error, prefillSpan trace.Span) bool
+	serveDecode(ctx context.Context, decodeWriter http.ResponseWriter, r *http.Request, decodeSpan trace.Span)
+}
+
+type httpSequentialPDLeg struct {
+	s           *Server
+	prefillBody []byte
+	decodeBody  []byte
+	toolFields  *toolCallingRequest
+}
+
+func (l *httpSequentialPDLeg) report(ctx context.Context) {
+	l.toolFields.report(ctx)
+}
+
+func (l *httpSequentialPDLeg) runPrefill(prefillCtx context.Context, prefillHandler http.Handler, pw *bufferedResponseWriter, r *http.Request, prefillSpan trace.Span) error {
+	l.toolFields.compareDispatchedForSpan(l.prefillBody, prefillSpan)
+	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, l.prefillBody))
+	return nil
+}
+
+func (l *httpSequentialPDLeg) completePrefill(_ context.Context, w http.ResponseWriter, r *http.Request, pw *bufferedResponseWriter, _ error, prefillSpan trace.Span) bool {
+	logger := log.FromContext(r.Context())
+	prefillFailed := isHTTPError(pw.statusCode)
+	if prefillFailed {
+		observeStageError(r.Context(), routing.StagePrefill)
+		prefillSpan.SetStatus(codes.Error, "prefill request failed")
+	}
+	prefillSpan.End()
+	logger.V(logging.DEBUG).Info("PD Multi Tier prefill request completed", "status", pw.statusCode)
+	if !prefillFailed {
+		return true
+	}
+	// Return the prefill error verbatim; decode is never dispatched, so it
+	// cannot fetch KV that was never stored.
+	for key, values := range pw.Header() {
+		for _, v := range values {
+			w.Header().Add(key, v)
+		}
+	}
+	status := pw.statusCode
+	if status < http.StatusContinue {
+		// The prefiller never wrote a status (transport failure before the
+		// proxy's error handler ran). WriteHeader panics below 100.
+		status = http.StatusBadGateway
+	}
+	w.WriteHeader(status)
+	if _, writeErr := w.Write(pw.bodyBytes()); writeErr != nil {
+		logger.Error(writeErr, "failed to send prefill error to client")
+	}
+	return false
+}
+
+func (l *httpSequentialPDLeg) serveDecode(decodeCtx context.Context, decodeWriter http.ResponseWriter, r *http.Request, decodeSpan trace.Span) {
+	l.toolFields.compareDispatchedForSpan(l.decodeBody, decodeSpan)
+	l.s.decoderProxy.ServeHTTP(decodeWriter, cloneRequestWithBody(decodeCtx, r, l.decodeBody))
+}
+
 func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Request, prefillBody, decodeBody []byte, prefillHost string, toolFields *toolCallingRequest) {
-	defer toolFields.report(r.Context())
+	s.runSequentialPD(w, r, prefillHost, constants.KVConnectorOffloading, &httpSequentialPDLeg{
+		s:           s,
+		prefillBody: prefillBody,
+		decodeBody:  decodeBody,
+		toolFields:  toolFields,
+	})
+}
+
+func (s *Server) runSequentialPD(w http.ResponseWriter, r *http.Request, prefillHost, connector string, leg sequentialPDLeg) {
+	defer leg.report(r.Context())
 	logger := log.FromContext(r.Context())
 	tracer := tracing.Tracer(tracerScope)
 	ctx := r.Context()
@@ -204,63 +280,34 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// ---------- Prefill request: store KV, response discarded ----------
 	prefillCtx, prefillSpan := tracer.Start(ctx, "prefill",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyPrefillTarget(prefillHost),
-		semconv.LLMDPDProxyConnector(constants.KVConnectorOffloading),
+		semconv.LLMDPDProxyConnector(connector),
 		semconv.LLMDPDProxyPrefillAsync(false),
 	)
 	prefillStart := time.Now()
 
 	pw := &bufferedResponseWriter{}
-	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
-	prefillHandler.ServeHTTP(pw, cloneRequestWithBody(prefillCtx, r, prefillBody))
+	prefillErr := leg.runPrefill(prefillCtx, prefillHandler, pw, r, prefillSpan)
 	prefillDuration := time.Since(prefillStart)
 	observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
-
-	prefillFailed := isHTTPError(pw.statusCode)
 	prefillSpan.SetAttributes(
 		semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
-	if prefillFailed {
-		observeStageError(r.Context(), routing.StagePrefill)
-		prefillSpan.SetStatus(codes.Error, "prefill request failed")
-	}
-	prefillSpan.End()
-	logger.V(logging.DEBUG).Info("PD Multi Tier prefill request completed", "status", pw.statusCode)
-
-	if prefillFailed {
-		// Return the prefill error verbatim; decode is never dispatched, so it
-		// cannot fetch KV that was never stored.
-		for key, values := range pw.Header() {
-			for _, v := range values {
-				w.Header().Add(key, v)
-			}
-		}
-		status := pw.statusCode
-		if status < http.StatusContinue {
-			// The prefiller never wrote a status (transport failure before the
-			// proxy's error handler ran). WriteHeader panics below 100.
-			status = http.StatusBadGateway
-		}
-		w.WriteHeader(status)
-		if _, writeErr := w.Write(pw.bodyBytes()); writeErr != nil {
-			logger.Error(writeErr, "failed to send prefill error to client")
-		}
+	if !leg.completePrefill(prefillCtx, w, r, pw, prefillErr, prefillSpan) {
 		return
 	}
 
-	// ---------- Decode request: pulls the stored KV and streams the response ----------
 	decodeCtx, decodeSpan := tracer.Start(ctx, "decode",
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer decodeSpan.End()
 	decodeSpan.SetAttributes(
-		semconv.LLMDPDProxyConnector(constants.KVConnectorOffloading),
+		semconv.LLMDPDProxyConnector(connector),
 		semconv.LLMDPDProxyDecodeConcurrentWithPrefill(false),
 	)
 	decodeStart := time.Now()
@@ -268,8 +315,7 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	decodeWriter, decodeStatus := captureResponseStatus(w)
 	decodeReturned := false
 	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
-	toolFields.compareDispatchedForSpan(decodeBody, decodeSpan)
-	s.decoderProxy.ServeHTTP(decodeWriter, cloneRequestWithBody(decodeCtx, r, decodeBody))
+	leg.serveDecode(decodeCtx, decodeWriter, r, decodeSpan)
 	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
@@ -278,26 +324,11 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		observeStageError(r.Context(), routing.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
-	decodeSpan.SetAttributes(
-		semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())),
-		semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host),
-	)
-
-	// End-to-end P/D timing. True TTFT captures time from gateway request start
-	// to decode start; prefill duration is tracked in the prefill span.
-	var totalDuration, trueTTFT time.Duration
-	if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
-		if requestStart, ok := requestStartValue.(time.Time); ok {
-			totalDuration = time.Since(requestStart)
-			trueTTFT = decodeStart.Sub(requestStart)
-		}
+	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())))
+	if s.config.DecoderURL != nil {
+		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
 	}
-	decodeSpan.SetAttributes(
-		semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
-		semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
-		semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),
-		semconv.LLMDPDProxyConcurrentPD(false),
-	)
+	recordSequentialPDTimingAttrs(ctx, decodeSpan, prefillStart, prefillDuration, decodeStart, decodeDuration)
 }
 
 // p2pPullAvailable reports whether this deployment can pull cached prefix over
@@ -381,25 +412,31 @@ func (s *Server) kvSourceFromBody(logger logr.Logger, clientIP string, requestDa
 	} else if cleaned, err := json.Marshal(rawParams); err == nil {
 		requestData[reqcommon.FieldKVTransferParams] = json.RawMessage(cleaned)
 	}
-
 	var block map[string]any
 	if err := json.Unmarshal(sourceRaw, &block); err != nil {
 		logger.Info("ignoring malformed remote_kv_source in request body", "value", string(sourceRaw))
 		return nil, true
 	}
+	return s.validateKVSourceBlock(logger, clientIP, block), true
+}
+
+// validateKVSourceBlock returns the source when block is a well formed
+// remote_kv_source that names an allowed peer, or nil.
+func (s *Server) validateKVSourceBlock(logger logr.Logger, clientIP string, raw any) *kvSource {
+	block, _ := raw.(map[string]any)
 	kvRequestID, _ := block[reqcommon.FieldKVRequestID].(string)
 	host, _ := block[reqcommon.FieldRemoteHost].(string)
 	port, portOK := toWholeInt(block[reqcommon.FieldRemotePort])
 	switch {
 	case kvRequestID == "" || host == "" || !portOK || !routing.IsTCPPort(port):
-		logger.Info("ignoring malformed remote_kv_source in request body", "value", string(sourceRaw))
-		return nil, true
+		logger.Info("ignoring malformed remote_kv_source in request body", "value", raw)
+		return nil
 	case !s.allowlistValidator.IsAllowedHost(host):
 		logger.Info("SSRF protection: KV cache source not in allowlist, ignoring",
 			"target", host, "clientIP", clientIP)
-		return nil, true
+		return nil
 	}
-	return &kvSource{kvRequestID: kvRequestID, p2pPeer: p2pPeer{host: host, port: port}}, true
+	return &kvSource{kvRequestID: kvRequestID, p2pPeer: p2pPeer{host: host, port: port}}
 }
 
 // parsePrefillP2P returns the prefill pod's P2P tier address carried by
@@ -423,6 +460,10 @@ func parsePrefillP2P(logger logr.Logger, value string) *p2pPeer {
 // them. The sidecar owns the field, so client-supplied keys are dropped. It
 // routes through dispatchDecode so chunked decode still applies.
 func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, p2p p2pRouting) {
+	if isVLLMGRPCRequest(r) {
+		s.decodeWithP2PSourceVLLMGRPC(w, r, p2p)
+		return
+	}
 	logger := log.FromContext(r.Context())
 	raw, requestData, ok := s.requestBody(r, w, p2p)
 	if !ok {
