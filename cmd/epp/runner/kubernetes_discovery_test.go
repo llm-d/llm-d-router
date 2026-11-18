@@ -18,6 +18,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -175,4 +177,54 @@ func TestDiscoveryReadiness(t *testing.T) {
 	require.ErrorContains(t, checker.CheckReady(), "test-discovery")
 	close(d.ready)
 	require.NoError(t, checker.CheckReady())
+}
+
+// TestSetupRejectsKubernetesDiscoveryWithoutNotificationSource fails startup
+// when a plugin registered with RegisterKubernetesDiscovery registers no
+// notification source, instead of never becoming ready.
+func TestSetupRejectsKubernetesDiscoveryWithoutNotificationSource(t *testing.T) {
+	const pluginType = "test-k8s-discovery-without-source"
+	fwkplugin.RegisterKubernetesDiscovery(pluginType, fwkplugin.StabilityAlpha,
+		func(string, *json.Decoder, fwkplugin.Handle) (fwkplugin.Plugin, error) {
+			return &readyDiscovery{ready: make(chan struct{})}, nil
+		})
+	t.Cleanup(func() {
+		delete(fwkplugin.Registry, pluginType)
+		delete(fwkplugin.RegistryMetadata, pluginType)
+	})
+
+	opts := runserver.NewOptions()
+	opts.PoolNamespace = "models"
+	opts.ConfigText = `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - name: disc
+    type: ` + pluginType + `
+  - name: random-picker
+    type: random-picker
+  - name: single-profile-handler
+    type: single-profile-handler
+  - name: metrics-source
+    type: metrics-data-source
+  - name: metrics-extractor
+    type: core-metrics-extractor
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: random-picker
+dataLayer:
+  injectDefaults: false
+  sources:
+    - pluginRef: metrics-source
+      extractors:
+        - pluginRef: metrics-extractor
+  discovery:
+    endpoints:
+      pluginRef: disc
+`
+	r := NewRunner()
+	// The check fails setup before the manager is created, so the rest config
+	// is never dialed.
+	_, _, err := r.setup(t.Context(), t.Context(), &rest.Config{Host: "https://127.0.0.1:1"}, opts, nil)
+	require.ErrorContains(t, err, "registers no notification source")
 }

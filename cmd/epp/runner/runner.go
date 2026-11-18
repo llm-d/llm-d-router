@@ -524,6 +524,12 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		setupLog.Error(err, "failed to configure data layer")
 		return nil, nil, err
 	}
+	if disc != nil && !r.dlRuntime.HasNotificationExtractor(disc.TypedName()) {
+		err := fmt.Errorf("discovery plugin %s is registered as Kubernetes-backed but registers no notification source; "+
+			"it must implement datalayer.Registrant and register a k8s-notification-source extractor", disc.TypedName())
+		setupLog.Error(err, "Invalid discovery plugin")
+		return nil, nil, err
+	}
 
 	// --- Setup Metrics Server ---
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)

@@ -209,6 +209,48 @@ func TestNotificationDispatchRecoversPanickingExtractor(t *testing.T) {
 	}
 }
 
+func TestHasNotificationExtractor(t *testing.T) {
+	sliceGVK := schema.GroupVersionKind{Group: "discovery.k8s.io", Version: "v1", Kind: "EndpointSlice"}
+	watcher := fwkplugin.TypedName{Type: "watcher", Name: "watcher"}
+	skipped := fwkplugin.TypedName{Type: "skipped", Name: "skipped"}
+
+	runtime := NewRuntime(time.Second)
+	if err := runtime.Register(fwkdl.PendingRegistration{
+		Owner:      watcher,
+		SourceType: sourcenotifications.NotificationSourceType,
+		Extractor:  extractormocks.NewNotificationExtractor("watcher-extractor").WithGVK(sliceGVK),
+		DefaultSource: sourcenotifications.NewK8sNotificationSource(
+			sourcenotifications.NotificationSourceType, "watcher/slices", sliceGVK),
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	// No default source and none configured: skipped with a warning.
+	if err := runtime.Register(fwkdl.PendingRegistration{
+		Owner:      skipped,
+		SourceType: "no-such-source",
+		Extractor:  extractormocks.NewNotificationExtractor("skipped-extractor").WithGVK(sliceGVK),
+		IfMissing:  fwkdl.Warn,
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if runtime.HasNotificationExtractor(watcher) {
+		t.Fatal("HasNotificationExtractor() before Configure = true")
+	}
+	if err := runtime.Configure(&Config{}, logr.Discard()); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	if !runtime.HasNotificationExtractor(watcher) {
+		t.Error("HasNotificationExtractor(watcher) = false, want true")
+	}
+	if runtime.HasNotificationExtractor(skipped) {
+		t.Error("HasNotificationExtractor(skipped) = true, want false")
+	}
+	if runtime.HasNotificationExtractor(fwkplugin.TypedName{Type: "other", Name: "other"}) {
+		t.Error("HasNotificationExtractor(unregistered) = true, want false")
+	}
+}
+
 func TestNotificationCacheByObject(t *testing.T) {
 	podGVK := schema.GroupVersionKind{Version: "v1", Kind: "Pod"}
 	sliceGVK := schema.GroupVersionKind{Group: "discovery.k8s.io", Version: "v1", Kind: "EndpointSlice"}

@@ -241,7 +241,8 @@ plus a notification extractor:
 1. After loading the config, the runner looks up the type of the plugin that
    `dataLayer.discovery.endpoints.pluginRef` names. If that type is marked
    Kubernetes-backed, the EPP takes the Kubernetes path instead of the
-   cluster-free discovery path.
+   cluster-free discovery path. Startup fails if the plugin registers no
+   extractor on a notification source, since it would never receive events.
 2. The EPP builds its regular controller manager from the standard client
    config (`--kubeconfig`, `$KUBECONFIG`, in-cluster), with the
    `InferencePool`, `InferenceObjective`, `InferenceModelRewrite` and Pod
