@@ -3636,11 +3636,12 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 
 			if tt.wantErrCode == "" {
 				require.NoError(t, err)
-				wantStatus := envoyTypePb.StatusCode_Empty
+				wantStatus, wantReason := envoyTypePb.StatusCode_Empty, ""
 				if tt.wantAnswer {
-					wantStatus = envoyTypePb.StatusCode_NoContent
+					wantStatus, wantReason = envoyTypePb.StatusCode_NoContent, handlers.AnswerReasonCacheMiss
 				}
 				assert.Equal(t, wantStatus, reqCtx.AnswerStatus)
+				assert.Equal(t, wantReason, reqCtx.AnswerReason)
 				return
 			}
 			var e errcommon.Error

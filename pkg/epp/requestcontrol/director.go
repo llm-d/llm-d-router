@@ -670,6 +670,7 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 		if decision == fwkrh.ConditionalDecodeMiss {
 			// An answered request is not forwarded, so it is not tracked for eviction.
 			reqCtx.AnswerStatus = envoyTypePb.StatusCode_NoContent
+			reqCtx.AnswerReason = handlers.AnswerReasonCacheMiss
 			return reqCtx, nil
 		}
 	}

@@ -168,17 +168,19 @@ func TestProcessRecordsRequestOutcome(t *testing.T) {
 	}
 }
 
-// answeringDirector picks a pod and then answers the caller with status answer. It records
-// the cause of the end-of-stream cleanup.
+// answeringDirector picks a pod and then answers the caller with status answer and, when
+// set, reason. It records the cause of the end-of-stream cleanup.
 type answeringDirector struct {
 	mockDirector
 	answer envoyTypePb.StatusCode
+	reason string
 	causes []fwkrh.TerminationCause
 }
 
 func (d *answeringDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	reqCtx.TargetPod = &fwkdl.EndpointMetadata{Address: "10.0.3.7", Port: "8000"}
 	reqCtx.AnswerStatus = d.answer
+	reqCtx.AnswerReason = d.reason
 	return reqCtx, nil
 }
 
@@ -189,8 +191,8 @@ func (d *answeringDirector) HandleResponseBody(_ context.Context, reqCtx *Reques
 	return reqCtx
 }
 
-// An answer reaches the caller with its status and no headers or body. It ends as deferred,
-// with no error count, no Error span status and no error log line, and the picked pod's
+// An answer reaches the caller with its status and no headers or body. It ends as deferred
+// with the answer's reason, with no error count, no Error span status and no error log line, and the picked pod's
 // per-request state is released with the answered cause. An answer lost to a cancelled stream
 // ends as cancelled, and an answer that cannot be sent is a failure.
 func TestProcessAnswersWithoutForwarding(t *testing.T) {
@@ -207,12 +209,29 @@ func TestProcessAnswersWithoutForwarding(t *testing.T) {
 		wantCause      fwkrh.TerminationCause
 	}{
 		{
-			name:           "answer",
+			name:           "answer with a reason",
+			director:       &answeringDirector{answer: envoyTypePb.StatusCode_NoContent, reason: AnswerReasonCacheMiss},
+			wantOutcome:    [2]string{"deferred", "cache_miss"},
+			wantSpanStatus: otelcodes.Unset,
+			wantInfoLogs:   1,
+			wantCause:      fwkrh.TerminationCauseAnswered,
+		},
+		{
+			name:           "answer without a reason",
 			director:       &answeringDirector{answer: envoyTypePb.StatusCode_NoContent},
 			wantOutcome:    [2]string{"deferred", ""},
 			wantSpanStatus: otelcodes.Unset,
 			wantInfoLogs:   1,
 			wantCause:      fwkrh.TerminationCauseAnswered,
+		},
+		{
+			name:           "the reason of an answer lost to a cancelled stream is not recorded",
+			director:       &answeringDirector{answer: envoyTypePb.StatusCode_NoContent, reason: AnswerReasonCacheMiss},
+			sendErr:        errors.New("stream closed"),
+			cancelOnSend:   true,
+			wantOutcome:    [2]string{"cancelled", ""},
+			wantSpanStatus: otelcodes.Unset,
+			wantCause:      fwkrh.TerminationCauseClientDisconnect,
 		},
 		{
 			name:           "answer lost to a cancelled stream",

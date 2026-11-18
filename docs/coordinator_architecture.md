@@ -411,7 +411,7 @@ and sends them on the later phases, as it does for encode and prefill responses.
 
 The 204 is answered router-side by the `prefix-based-pd-decider` plugin's conditional-decode
 gate when configured. The router does not count it as an error: the request ends with
-`outcome="deferred"` in `llm_d_epp_request_outcome_total`, stays out of
+`outcome="deferred"`, `reason="cache_miss"` in `llm_d_epp_request_outcome_total`, stays out of
 `llm_d_epp_request_error_total`, and its span status is not set to Error.
 
 When no gate plugin is configured, the router returns `412 Precondition Failed` for any

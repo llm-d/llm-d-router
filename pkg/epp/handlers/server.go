@@ -150,6 +150,9 @@ type RequestContext struct {
 	// AnswerStatus, when set after HandleRequest, is the status of a bodiless
 	// immediate response sent to the caller in place of forwarding the request.
 	AnswerStatus envoyTypePb.StatusCode
+	// AnswerReason says why the EPP answers. It is the reason label of the
+	// deferred outcome on llm_d_epp_request_outcome_total.
+	AnswerReason string
 	// answered reports that the AnswerStatus response reached Envoy.
 	answered bool
 
@@ -452,6 +455,10 @@ const (
 	outcomeDeferred  = "deferred"
 )
 
+// AnswerReasonCacheMiss is the AnswerReason of a conditional-decode request
+// that no decode worker can serve from its KV cache.
+const AnswerReasonCacheMiss = "cache_miss"
+
 // requestOutcome reports how a request ended. ok is false when the EPP did not
 // see the ending: no body was received, or the route skipped response processing.
 // A request dropped before dispatch carries a rejected-* reason header, so its
@@ -476,7 +483,7 @@ func requestOutcome(reqCtx *RequestContext, err, ctxErr error) (outcome, reason 
 	case reqCtx.responseStatusCode != "":
 		return outcomeFailed, reqCtx.responseStatusCode, true
 	case reqCtx.answered:
-		return outcomeDeferred, "", true
+		return outcomeDeferred, reqCtx.AnswerReason, true
 	case reqCtx.responseComplete:
 		if reqCtx.TerminationCause == fwkrh.TerminationCauseError {
 			return outcomeFailed, errcommon.ModelServerError, true
@@ -862,7 +869,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 						return sendErr
 					}
 					reqCtx.answered = true
-					logger.V(logutil.DEFAULT).Info("Answered request without forwarding", "status", reqCtx.AnswerStatus)
+					logger.V(logutil.DEFAULT).Info("Answered request without forwarding", "status", reqCtx.AnswerStatus, "reason", reqCtx.AnswerReason)
 					return nil
 				}
 
