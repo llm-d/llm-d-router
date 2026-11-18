@@ -24,9 +24,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -216,6 +218,79 @@ func TestDataProducerPluginsWithTimeout_ScopesBeforeLaunch(t *testing.T) {
 	<-plugin.started
 	close(plugin.release)
 	<-plugin.done
+}
+
+// lateHeaderPlugin reads a header after the timeout path has returned and
+// reports the value on observed, so the test goroutine makes every assertion.
+type lateHeaderPlugin struct {
+	header   string
+	started  chan struct{}
+	release  chan struct{}
+	observed chan string
+}
+
+func (p *lateHeaderPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "mock", Name: "late-header"}
+}
+
+func (p *lateHeaderPlugin) Produce(_ context.Context, request *fwksched.InferenceRequest, _ []fwksched.Endpoint) error {
+	close(p.started)
+	<-p.release
+	p.observed <- request.Headers[p.header]
+	return nil
+}
+
+func (p *lateHeaderPlugin) Produces() map[fwkplugin.DataKey]any { return nil }
+
+func TestScopeProducers_ClonesHeadersPerInvocation(t *testing.T) {
+	request := &fwksched.InferenceRequest{Headers: map[string]string{"x-client": "v"}}
+	plugins := []fwkrh.DataProducer{
+		&executorMockDataProducerPlugin{name: "p1"},
+		&executorMockDataProducerPlugin{name: "p2"},
+	}
+
+	invocations := scopeProducers(context.Background(), fwkrh.DataProducerExtensionPoint, plugins, request, nil)
+	require.Len(t, invocations, 2)
+
+	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, "10.0.0.1:5555")
+	invocations[0].request.Headers["x-producer"] = "p1"
+
+	assert.Equal(t, map[string]string{"x-client": "v", "x-producer": "p1"}, invocations[0].request.Headers)
+	assert.Equal(t, map[string]string{"x-client": "v"}, invocations[1].request.Headers)
+	assert.NotContains(t, request.Headers, "x-producer")
+	assert.Equal(t, "10.0.0.1:5555", request.Headers[routing.KVCacheSourceHeader])
+}
+
+// A producer abandoned by the timeout path reads Headers while PreRequest
+// writes routing headers through its own scoped copy; -race reports the
+// overlap when the two share one map.
+func TestDataProducerPluginsWithTimeout_LateHeaderReadIsIsolated(t *testing.T) {
+	request := &fwksched.InferenceRequest{Headers: map[string]string{"x-client": "v"}}
+	plugin := &lateHeaderPlugin{
+		header:   routing.KVCacheSourceHeader,
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		observed: make(chan string, 1),
+	}
+
+	err := dataProducerPluginsWithTimeout(
+		context.Background(),
+		fwkrh.DataProducerExtensionPoint,
+		20*time.Millisecond,
+		[]fwkrh.DataProducer{plugin},
+		request,
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DataProducer execution timed out")
+	<-plugin.started
+
+	preRequest, _ := datalayer.ScopeRequest(logr.Discard(), fwkrh.PreRequestExtensionPoint, plugin, request)
+	close(plugin.release)
+	routing.SetRoutingHeader(preRequest.Headers, routing.KVCacheSourceHeader, "10.0.0.1:5555")
+
+	assert.Empty(t, <-plugin.observed)
+	assert.Equal(t, "10.0.0.1:5555", request.Headers[routing.KVCacheSourceHeader])
 }
 
 func TestDataProducerPluginsWithTimeout(t *testing.T) {
