@@ -277,7 +277,7 @@ as EndpointSlices of a selector-less Service. For example:
 
 Unlike file discovery, this plugin needs an API server. It is a
 [Kubernetes-backed discovery plugin](#kubernetes-backed-discovery-plugins):
-the EPP's notification manager watches the selected slices in `namespace`,
+the EPP's discovery controller manager watches the selected slices in `namespace`,
 which needs `get`, `list` and `watch` on `discovery.k8s.io/endpointslices`
 there. The `InferencePool` reconcilers still do not run, so the features
 listed in
@@ -418,7 +418,7 @@ The plugin fails at startup (before `Start` returns an error) if:
 With any discovery plugin the EPP does not run the `InferencePool`
 controller manager, so features that depend on its reconcilers are inactive.
 This applies to Kubernetes-backed discovery plugins such as
-`endpointslice-discovery` too, whose notification manager runs no
+`endpointslice-discovery` too, whose discovery controller manager runs no
 reconcilers:
 
 - **`InferenceModelRewrite`** (model name rewriting for traffic split or
@@ -451,7 +451,7 @@ reconcilers:
     not apply to it.
 - **`k8s-notification-source` data layer plugin**, only when no Kubernetes
   client config is available. With one, notification sources are bound to the
-  notification manager described in
+  discovery controller manager described in
   [Kubernetes-backed discovery plugins](#kubernetes-backed-discovery-plugins).
   Without one, the plugin loads from config but produces no events; remove it
   from `dataLayer.sources` in that case.

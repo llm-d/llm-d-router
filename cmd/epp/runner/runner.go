@@ -1341,7 +1341,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		return fmt.Errorf("failed to configure datalayer: %w", err)
 	}
 
-	notifyMgr, hasNotifyMgr, err := r.newNotificationManager(disc)
+	discoveryMgr, hasDiscoveryMgr, err := r.newDiscoveryControllerManager(disc)
 	if err != nil {
 		setupLog.Error(err, "Failed to set up notification sources")
 		return err
@@ -1397,7 +1397,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	isLeader.Store(true)
 
 	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
-	if hasNotifyMgr {
+	if hasDiscoveryMgr {
 		readinessCheckers = append(readinessCheckers, r.dlRuntime)
 	}
 	healthSrv := grpc.NewServer()
@@ -1416,8 +1416,8 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	})
 
 	g := newRunnableGroup()
-	if hasNotifyMgr {
-		g.Add("notification-manager", notifyMgr.Start)
+	if hasDiscoveryMgr {
+		g.Add("discovery-controller-manager", discoveryMgr.Start)
 	}
 	g.Add("discovery", func(ctx context.Context) error {
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
@@ -1432,13 +1432,13 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// EndpointDiscovery.Ready contract. With notification sources they also
 	// wait until every source has processed its initial Kubernetes events.
 	g.Add("epp-server", func(ctx context.Context) error {
-		if err := r.waitDiscoveryReady(ctx, disc, hasNotifyMgr); err != nil {
+		if err := r.waitDiscoveryReady(ctx, disc, hasDiscoveryMgr); err != nil {
 			return err
 		}
 		return serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(ctx)
 	})
 	g.Add("health", func(ctx context.Context) error {
-		if err := r.waitDiscoveryReady(ctx, disc, hasNotifyMgr); err != nil {
+		if err := r.waitDiscoveryReady(ctx, disc, hasDiscoveryMgr); err != nil {
 			return err
 		}
 		if r.healthListener != nil {
@@ -1458,7 +1458,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	return err
 }
 
-// newNotificationManager builds the controller manager that hosts the
+// newDiscoveryControllerManager builds the controller manager that hosts the
 // configured notification sources in discovery plugin mode and binds them to
 // it. ok is false when no manager is needed: no notification source is
 // configured, so
@@ -1466,7 +1466,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 // declares datalayer dependencies (for example an EndpointSlice watch)
 // requires a Kubernetes client config; for other notification sources a
 // missing config leaves them inactive, as before.
-func (r *Runner) newNotificationManager(disc fwkdl.EndpointDiscovery) (mgr ctrl.Manager, ok bool, err error) {
+func (r *Runner) newDiscoveryControllerManager(disc fwkdl.EndpointDiscovery) (mgr ctrl.Manager, ok bool, err error) {
 	if !r.dlRuntime.HasNotificationSources() {
 		return nil, false, nil
 	}
@@ -1480,14 +1480,14 @@ func (r *Runner) newNotificationManager(disc fwkdl.EndpointDiscovery) (mgr ctrl.
 			"error", err.Error())
 		return nil, false, nil
 	}
-	mgr, err = runserver.NewNotificationManager(cfg, r.dlRuntime.NotificationCacheByObject())
+	mgr, err = runserver.NewDiscoveryControllerManager(cfg, r.dlRuntime.NotificationCacheByObject())
 	if err != nil {
 		return nil, false, err
 	}
 	if err := r.dlRuntime.BindNotificationSources(mgr); err != nil {
 		return nil, false, fmt.Errorf("failed to bind notification sources: %w", err)
 	}
-	setupLog.Info("Notification sources bound to a dedicated controller manager")
+	setupLog.Info("Notification sources bound to the discovery controller manager")
 	return mgr, true, nil
 }
 

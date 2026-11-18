@@ -19,7 +19,7 @@ those slices.
 
 - **Watch.** The plugin owns no Kubernetes client. It registers a
   `k8s-notification-source` for EndpointSlices scoped to `namespace` and
-  `selector`; the EPP binds it to its notification manager, whose cache holds
+  `selector`; the EPP binds it to its discovery controller manager, whose cache holds
   only those slices (see
   [Kubernetes-backed discovery plugins](../../../../../../../docs/discovery.md#kubernetes-backed-discovery-plugins)).
 - **Reconcile.** The plugin's extractor hands every slice event to the
@@ -65,7 +65,7 @@ type `endpointslice-discovery` in `plugins`.
 | `selector` | `string` | no | all slices | Label selector, for example `kubernetes.io/service-name=model-server`. |
 | `portName` | `string` | no | -- | Slice port to route to. When empty, a slice must declare exactly one port. |
 
-The EPP's notification manager connects to the API server with the same
+The EPP's discovery controller manager connects to the API server with the same
 client config as the Kubernetes discovery modes (`ctrl.GetConfig()`): the
 EPP's `--kubeconfig` flag, then `$KUBECONFIG`, then the in-cluster config.
 

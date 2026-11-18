@@ -127,7 +127,7 @@ func TestEndpointSliceDiscoveryThroughNotificationRuntime(t *testing.T) {
 	require.NoError(t, rt.Configure(&datalayer.Config{}, eppharness.Logger()))
 	require.True(t, rt.HasNotificationSources())
 
-	mgr, err := runserver.NewNotificationManager(eppharness.Config(), rt.NotificationCacheByObject())
+	mgr, err := runserver.NewDiscoveryControllerManager(eppharness.Config(), rt.NotificationCacheByObject())
 	require.NoError(t, err)
 	require.NoError(t, rt.BindNotificationSources(mgr))
 
