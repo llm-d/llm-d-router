@@ -46,6 +46,7 @@ import (
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/kvcache"
 )
 
 const (
@@ -90,6 +91,10 @@ const (
 	// PeakPrefillThroughput, reading InFlightLoad (produced by the
 	// in-flight-load-producer).
 	TTFTSourcePrefillThroughput TTFTSource = "prefillThroughput"
+	// TTFTSourcePrefillSteps estimates TTFT from the PrefillSteps profile of an
+	// engine that prefills in steps, reading InFlightLoad and
+	// UncachedRequestTokens (produced by the in-flight-load-producer).
+	TTFTSourcePrefillSteps TTFTSource = "prefillSteps"
 )
 
 const (
@@ -122,9 +127,12 @@ type Config struct {
 
 	// TTFTSource selects where the load gate reads per-endpoint TTFT from.
 	// TTFTSourcePrefillThroughput (default) estimates it from in-flight tokens and
-	// PeakPrefillThroughput; TTFTSourceLatencyPredictor reads predicted TTFT from
-	// the latency predictor.
+	// PeakPrefillThroughput; TTFTSourcePrefillSteps estimates it from PrefillSteps;
+	// TTFTSourceLatencyPredictor reads predicted TTFT from the latency predictor.
 	TTFTSource TTFTSource `json:"ttftSource,omitempty"`
+
+	// PrefillSteps is the engine profile used when TTFTSource is prefillSteps.
+	PrefillSteps *PrefillSteps `json:"prefillSteps,omitempty"`
 
 	// PeakPrefillThroughput is the peak prefill throughput in tokens/sec, used to
 	// estimate TTFT from in-flight tokens when TTFTSource is prefillThroughput:
@@ -246,8 +254,12 @@ func (c *Config) validate() error {
 	}
 	switch c.TTFTSource {
 	case TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput:
+	case TTFTSourcePrefillSteps:
+		if err := c.PrefillSteps.validate(); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("ttftSource must be %q or %q, got %q", TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput, c.TTFTSource)
+		return fmt.Errorf("ttftSource must be %q, %q or %q, got %q", TTFTSourceLatencyPredictor, TTFTSourcePrefillThroughput, TTFTSourcePrefillSteps, c.TTFTSource)
 	}
 	switch c.TTFTEstimate {
 	case TTFTEstimateBackLog, TTFTEstimateFull:
@@ -260,7 +272,7 @@ func (c *Config) validate() error {
 	if c.QueueWaitKVCacheThreshold < 0 || c.QueueWaitKVCacheThreshold > 1.0 {
 		return fmt.Errorf("queueWaitKVCacheThreshold must be in [0, 1], got %f", c.QueueWaitKVCacheThreshold)
 	}
-	if !c.usesLatencyPredictor() && c.MaxTTFTPenaltyMs > 0 && c.PeakPrefillThroughput == 0 {
+	if c.TTFTSource == TTFTSourcePrefillThroughput && c.MaxTTFTPenaltyMs > 0 && c.PeakPrefillThroughput == 0 {
 		return errors.New("peakPrefillThroughput must be > 0 when ttftSource is prefillThroughput")
 	}
 	return nil
@@ -273,8 +285,14 @@ func (c *Config) usesLatencyPredictor() bool {
 	return c.TTFTSource == TTFTSourceLatencyPredictor
 }
 
+func (c *Config) usesPrefillSteps() bool {
+	return c.TTFTSource == TTFTSourcePrefillSteps
+}
+
+// usesFullEstimate reports whether the estimate counts the request's own
+// uncached tokens. The step estimate always does.
 func (c *Config) usesFullEstimate() bool {
-	return c.TTFTEstimate == TTFTEstimateFull
+	return c.TTFTEstimate == TTFTEstimateFull || c.usesPrefillSteps()
 }
 
 func (p *Plugin) TypedName() fwkplugin.TypedName {
@@ -461,8 +479,8 @@ func (p *Plugin) bestTTFT(endpoints []fwksched.Endpoint) (float64, bool) {
 }
 
 // endpointTTFT returns the predicted TTFT (ms) for an endpoint, either from the
-// latency predictor or estimated from in-flight tokens and peak prefill
-// throughput. Endpoints missing the required attribute contribute no signal:
+// latency predictor or estimated from in-flight load with peak prefill
+// throughput or the step profile. Endpoints missing the required attribute contribute no signal:
 // the function returns false and the endpoint is excluded from the bestTTFT calculation.
 func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	if p.config.usesLatencyPredictor() {
@@ -483,7 +501,21 @@ func (p *Plugin) endpointTTFT(ep fwksched.Endpoint) (float64, bool) {
 	if !ok {
 		return 0, false
 	}
-	queued := p.queuedRequests(ep, load)
+	var queued int64
+	if p.config.TTFTEstimate == TTFTEstimateFull {
+		queued = p.queuedRequests(ep, load)
+	}
+	if p.config.usesPrefillSteps() {
+		steps := p.config.PrefillSteps
+		cached, outsideGPU := p.cachedRequestTokens(ep)
+		var restoreMs float64
+		if outsideGPU > 0 {
+			restoreMs = steps.RestoreMs
+		}
+		// The queued requests are charged their wait instead of a request's share of a step.
+		pending := max(load.PendingRequests-queued, 0)
+		return steps.ttftMs(pending, uncachedTokens, cached, restoreMs) + queueWaitMs(load, queued), true
+	}
 	tokens := float64(load.Tokens)
 	if queued > 0 && load.PendingRequests > 0 {
 		// The queued requests' prefill comes after their wait, which the queue
@@ -522,14 +554,14 @@ func (p *Plugin) queuedRequests(ep fwksched.Endpoint, load *attrconcurrency.InFl
 	return queued
 }
 
-// saveTTFTEstimates stores the throughput-based TTFT estimate of every candidate
+// saveTTFTEstimates stores the estimated TTFT of every candidate
 // endpoint for the request, so that ResponseBody can record the served
 // endpoint's estimate next to the measured TTFT. The estimates are kept while
 // ctx is alive, so a request still waiting for its first chunk after the
 // PluginState staleness threshold is recorded too.
 func (p *Plugin) saveTTFTEstimates(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) {
 	if p.pluginState == nil || request == nil || request.RequestID == "" || p.config.usesLatencyPredictor() ||
-		p.config.PeakPrefillThroughput <= 0 {
+		(p.config.TTFTSource == TTFTSourcePrefillThroughput && p.config.PeakPrefillThroughput <= 0) {
 		return
 	}
 	byEndpoint := make(map[string]time.Duration, len(endpoints))
@@ -579,6 +611,27 @@ func (p *Plugin) inFlightLoad(ep fwksched.Endpoint) (*attrconcurrency.InFlightLo
 		}
 	}
 	return nil, false
+}
+
+// cachedRequestTokens returns the number of the request's prompt tokens the
+// endpoint holds in its cache, and how many of those it holds outside GPU
+// memory. Both are 0 when the endpoint has no prefix match info, and the
+// second is 0 when the producer supplies no tier data.
+func (p *Plugin) cachedRequestTokens(ep fwksched.Endpoint) (cached, outsideGPU int64) {
+	raw, ok := ep.Get(p.prefixMatchDataKey)
+	if !ok {
+		return 0, 0
+	}
+	info, ok := raw.(*attrprefix.PrefixCacheMatchInfo)
+	if !ok || info == nil {
+		return 0, 0
+	}
+	blockSize := int64(info.BlockSizeTokens())
+	cached = int64(info.CachedBlockCount()) * blockSize
+	if byTier := info.CachedBlocksByTier(); byTier != nil {
+		outsideGPU = max(cached-int64(byTier[kvcache.GPUTier])*blockSize, 0)
+	}
+	return cached, outsideGPU
 }
 
 // uncachedRequestTokens returns the number of tokens from the current request
