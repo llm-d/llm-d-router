@@ -92,19 +92,11 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	probeHeaders := map[string]string{routing.PreferHeader: routing.PreferIfAvailable}
 	var cacheMiss bool
 	onProbeResponse := func(resp *http.Response) error {
-		switch {
-		case resp.StatusCode == http.StatusPreconditionFailed:
+		if err := deferOnPreconditionFailed(reqCtx, resp); err != nil {
 			cacheMiss = true
-			reqCtx.CaptureResponseHeaders(resp.Header)
-			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
-			return errCacheMiss
-		case resp.StatusCode >= http.StatusBadRequest:
-			// Worker error (any 4xx/5xx except 412): the response is still
-			// streamed to the client, but the outcome is not a served hit.
-			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultError)
-		default:
-			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultServed)
+			return err
 		}
+		coordmetrics.IncConditionalDecodeProbes(probeResult(resp.StatusCode))
 		return nil
 	}
 
@@ -125,12 +117,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 				headers:  probeHeaders,
 				onResponse: func(resp *http.Response) error {
 					forcedStatus = resp.StatusCode
-					if resp.StatusCode == http.StatusPreconditionFailed {
-						reqCtx.CaptureResponseHeaders(resp.Header)
-						coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
-						return errCacheMiss
-					}
-					return nil
+					return deferOnPreconditionFailed(reqCtx, resp)
 				},
 			}
 			result, _, err := tryForceStream(ctx, logger, s.gwClient, s.budget, leg, reqCtx, body, shape, parity)
@@ -184,11 +171,34 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	return pipeline.ErrPipelineDone
 }
 
+// deferOnPreconditionFailed returns errCacheMiss when the worker defers the
+// probe with HTTP 412, after capturing the response headers the later steps
+// forward and recording the deferred result. It returns nil for any other
+// status.
+func deferOnPreconditionFailed(reqCtx *pipeline.RequestContext, resp *http.Response) error {
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		return nil
+	}
+	reqCtx.CaptureResponseHeaders(resp.Header)
+	coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
+	return errCacheMiss
+}
+
+// probeResult is the probe result for a status other than 412: a worker error
+// for any other 4xx/5xx, whose response still reaches the client, and served
+// otherwise.
+func probeResult(status int) string {
+	if status >= http.StatusBadRequest {
+		return coordmetrics.ProbeResultError
+	}
+	return coordmetrics.ProbeResultServed
+}
+
 // forcedProbeResult is the probe result of a forced attempt that ended the
-// request, given the status the worker answered (0 when none arrived). It is the
-// worker's answer, as the pass-through records it, except that an error frame
-// streamed after the 200 is the worker error it reports. A client that left
-// before the worker answered records none.
+// request, given the status the worker answered (0 when none arrived). It is
+// probeResult of that status, except that an error frame streamed after the 200
+// is the worker error it reports. A client that left before the worker answered
+// records none.
 func forcedProbeResult(status int, err error) string {
 	var upstream *pipeline.UpstreamError
 	var streamed *pipeline.UpstreamStreamedError
@@ -200,7 +210,7 @@ func forcedProbeResult(status int, err error) string {
 	case errors.As(err, &streamed):
 		return coordmetrics.ProbeResultError
 	default:
-		return coordmetrics.ProbeResultServed
+		return probeResult(status)
 	}
 }
 

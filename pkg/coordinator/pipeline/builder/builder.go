@@ -103,10 +103,14 @@ func Build(cfg *config.Config, gwClient *gateway.Client) (*pipeline.Pipeline, er
 
 		pipelineSteps = append(pipelineSteps, step)
 	}
+	// The sizes are validated with force_stream off too, so a mistyped size fails
+	// config load rather than when the flag is turned on.
+	var forceStreamSteps []pipeline.Step
 	if cfg.Pipeline.ForceStream {
-		if err := steps.EnableForceStream(pipelineSteps, cfg.Pipeline.ForceStreamBufferSize, cfg.Pipeline.ForceStreamMaxRequestSize); err != nil {
-			return nil, fmt.Errorf("pipeline: %w", err)
-		}
+		forceStreamSteps = pipelineSteps
+	}
+	if err := steps.EnableForceStream(forceStreamSteps, cfg.Pipeline.ForceStreamBufferSize, cfg.Pipeline.ForceStreamMaxRequestSize); err != nil {
+		return nil, fmt.Errorf("pipeline: %w", err)
 	}
 	return pipeline.NewWithForwardResponseHeaders(pipelineSteps, cfg.Pipeline.ForwardResponseHeaders)
 }

@@ -779,10 +779,13 @@ gateway:              # outbound client to the Inference Gateway
   idle_conn_timeout: 90s
   timeout: 60s
 
-pipeline:             # connector defaults + ordered steps
+pipeline:             # connector defaults, force-stream settings + ordered steps
   kv_connector: kv-shared-storage
   ec_connector: ec-shared-storage
   use_openai_format: true
+  force_stream: false                   # decode and conditional-decode; see coordinator.yaml
+  force_stream_buffer_size: 1GiB
+  force_stream_max_request_size: 256KiB
   steps:
     - type: <step-type>
       params: { ... }

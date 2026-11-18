@@ -178,16 +178,16 @@ func loadYAML(t *testing.T, body string) *config.Config {
 
 // TestBuildForceStreamFromPipelineConfig loads the pipeline-level force-stream
 // settings and builds a pipeline whose steps share them; a size that fails
-// validation fails Build.
+// validation fails Build, with force_stream on or off.
 func TestBuildForceStreamFromPipelineConfig(t *testing.T) {
 	const pipelineYAML = "pipeline:\n" +
-		"  force_stream: true\n" +
+		"  force_stream: %t\n" +
 		"  force_stream_buffer_size: %s\n" +
 		"  steps:\n" +
 		"    - type: " + steps.ConditionalDecodeStepName + "\n" +
 		"    - type: " + steps.DecodeStepName + "\n"
 
-	cfg := loadYAML(t, fmt.Sprintf(pipelineYAML, "512MiB"))
+	cfg := loadYAML(t, fmt.Sprintf(pipelineYAML, true, "512MiB"))
 	if !cfg.Pipeline.ForceStream || cfg.Pipeline.ForceStreamBufferSize != "512MiB" {
 		t.Fatalf("pipeline force-stream settings not loaded: %+v", cfg.Pipeline)
 	}
@@ -195,9 +195,11 @@ func TestBuildForceStreamFromPipelineConfig(t *testing.T) {
 		t.Fatalf("Build() unexpected error: %v", err)
 	}
 
-	cfg = loadYAML(t, fmt.Sprintf(pipelineYAML, "1KiB"))
-	if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err == nil {
-		t.Fatal("Build() expected an error for a buffer below the reply-envelope overhead")
+	for _, forceStream := range []bool{true, false} {
+		cfg = loadYAML(t, fmt.Sprintf(pipelineYAML, forceStream, "1KiB"))
+		if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err == nil {
+			t.Fatalf("Build() expected an error for a buffer below the reply-envelope overhead (force_stream: %t)", forceStream)
+		}
 	}
 }
 

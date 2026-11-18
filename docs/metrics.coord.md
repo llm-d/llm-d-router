@@ -147,7 +147,7 @@ Recorded by every step that calls out: render to the renderer service, replace-m
     *   `error`: Any other 4xx/5xx status. The step returns an `UpstreamStreamedError` carrying that status, and the request is classified as `upstream_4xx` or `upstream_5xx`.
     *   `transport_error`: No response arrived (connection refused, timeout, TCP reset). The step returns an upstream error with no status code, and the request is classified as `upstream_transport`.
 *   A probe the client abandons before the worker answers records no result.
-*   A force-streamed probe records the same result for the worker's answer. When it falls back, only the re-sent probe is counted, so each request records one result.
+*   A force-streamed probe records the same result for the worker's answer, except that an error frame streamed after the 200 counts as `error`. The pass-through counts `served` when the response headers arrive, before any frame. When a forced probe falls back, only the re-sent probe is counted, so each request records one result.
 *   **Note:** Not redundant with `execution_path_total` since a deferred probe does not indicate whether the subsequent path was `prefill-decode` or `encode-prefill-decode`.
 
 #### `prompt_token_mismatch_total` (Counter)

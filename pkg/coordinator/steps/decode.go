@@ -115,7 +115,7 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 				// so the fallback drops it and the decode pod recomputes the prompt; the
 				// reply is slower but correct.
 				if sent && !kvHandoffReplaySafe(s.kv) {
-					logger.Info("force-stream failed and its KV block handoff is spent; decode will recompute the prompt", "result", result)
+					logger.V(logutil.DEFAULT).Info("force-stream failed and its KV block handoff is spent; decode will recompute the prompt", "result", result)
 					// The rendered IDs do not depend on the handoff, so they stay.
 					if kvParams, _ := reqCtx.Body[reqcommon.FieldKVTransferParams].(map[string]any); kvParams != nil {
 						if ids, ok := kvParams[reqcommon.FieldPromptTokenIDs]; ok {

@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 
@@ -43,6 +44,10 @@ var condForcedFrames = []string{
 	`{"id":"c","model":"llama-3","choices":[{"index":0,"delta":{"role":"assistant","content":"cached"}}]}`,
 	`{"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 }
+
+// condLossyFrame carries a field the reassembler drops, so a forced attempt
+// that streams it falls back.
+const condLossyFrame = `{"id":"c","choices":[{"index":0,"delta":{"reasoning":"think"}}]}`
 
 // condCall records one request the conditional-decode upstream received.
 type condCall struct {
@@ -143,6 +148,16 @@ func condForceStreamTotal(t *testing.T, reg *prometheus.Registry) float64 {
 	return counterValue(t, reg, forceStreamTotalMetric, map[string]string{"step": ConditionalDecodeStepName})
 }
 
+// requireCondReleased asserts conditional-decode reserved under its own step
+// label and released all of it: a release under another label, or a leaked
+// reservation, leaves a nonzero series.
+func requireCondReleased(t *testing.T, reg *prometheus.Registry) {
+	t.Helper()
+	byStep, err := forceStreamGaugeByStep(reg)
+	require.NoError(t, err)
+	require.Equal(t, map[string]float64{ConditionalDecodeStepName: 0}, byStep)
+}
+
 // A non-streaming request the worker serves is force-streamed: the probe goes out
 // streaming with the cache-probe headers and the client gets one JSON reply.
 func TestConditionalDecodeForceStream_ServedIsForced(t *testing.T) {
@@ -169,7 +184,7 @@ func TestConditionalDecodeForceStream_ServedIsForced(t *testing.T) {
 	require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultServed), 1e-9)
 	require.InDelta(t, 1.0, counterValue(t, reg, "llm_d_coordinator_upstream_request_total", map[string]string{"upstream": coordmetrics.UpstreamConditionalDecode}), 1e-9)
-	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
+	requireCondReleased(t, reg)
 }
 
 // A 412 to the forced probe writes nothing and continues the pipeline. The
@@ -189,14 +204,13 @@ func TestConditionalDecodeForceStream_DeferredProbe(t *testing.T) {
 	require.NotContains(t, reqCtx.Body, "stream_options")
 	require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultDeferred), 1e-9)
 	require.InDelta(t, 0.0, condForceStreamTotal(t, reg), 1e-9)
-	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
+	requireCondReleased(t, reg)
 }
 
 // A stream carrying a field the reassembler drops falls back to the probe
 // pass-through, which re-sends the client's non-streaming body.
 func TestConditionalDecodeForceStream_LossyFrameFallsBackToProbe(t *testing.T) {
-	lossy := `{"id":"c","choices":[{"index":0,"delta":{"reasoning":"think"}}]}`
-	server, calls := condUpstream(t, sseReply(lossy), jsonReply("passthrough"))
+	server, calls := condUpstream(t, sseReply(condLossyFrame), jsonReply("passthrough"))
 	step, reg := newForcedConditionalStep(t, server.URL, nil)
 	recorder := httptest.NewRecorder()
 
@@ -210,14 +224,13 @@ func TestConditionalDecodeForceStream_LossyFrameFallsBackToProbe(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), "passthrough")
 	require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackLossyFrame), 1e-9)
 	require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultServed), 1e-9)
-	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9)
+	requireCondReleased(t, reg)
 }
 
 // A fallback whose re-sent probe is deferred leaves the request to decode, so
 // conditional-decode records no force-stream outcome for it.
 func TestConditionalDecodeForceStream_FallbackThenDeferredRecordsNoOutcome(t *testing.T) {
-	lossy := `{"id":"c","choices":[{"index":0,"delta":{"reasoning":"think"}}]}`
-	server, calls := condUpstream(t, sseReply(lossy), deferProbe)
+	server, calls := condUpstream(t, sseReply(condLossyFrame), deferProbe)
 	step, reg := newForcedConditionalStep(t, server.URL, nil)
 	recorder := httptest.NewRecorder()
 
@@ -233,10 +246,9 @@ func TestConditionalDecodeForceStream_FallbackThenDeferredRecordsNoOutcome(t *te
 // A client that leaves before the worker answers a fallback's re-sent probe
 // records no force-stream outcome.
 func TestConditionalDecodeForceStream_FallbackThenCancelRecordsNoOutcome(t *testing.T) {
-	lossy := `{"id":"c","choices":[{"index":0,"delta":{"reasoning":"think"}}]}`
 	ctx, cancel := context.WithCancel(context.Background())
 	release := make(chan struct{})
-	server, calls := condUpstream(t, sseReply(lossy), func(http.ResponseWriter, *http.Request) {
+	server, calls := condUpstream(t, sseReply(condLossyFrame), func(http.ResponseWriter, *http.Request) {
 		cancel()
 		<-release
 	})
@@ -308,6 +320,38 @@ func TestConditionalDecodeForceStream_LossyRequestDeclines(t *testing.T) {
 	})
 }
 
+// A forced probe that cannot reserve from the shared budget, here held by a
+// decode reservation, takes the probe pass-through.
+func TestConditionalDecodeForceStream_FallbackBudget(t *testing.T) {
+	server, calls := condUpstream(t, jsonReply("passthrough"))
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	cond, err := NewConditionalDecodeStep(gwClient, nil)
+	require.NoError(t, err)
+	decode, err := NewDecodeStep(gwClient, map[string]any{})
+	require.NoError(t, err)
+	require.NoError(t, EnableForceStream([]pipeline.Step{cond, decode}, "1MiB", ""))
+	budget := decode.(*DecodeStep).budget
+	require.True(t, budget.tryReserve(DecodeStepName, budget.max), "decode holds the whole shared budget")
+	defer budget.release(DecodeStepName, budget.max)
+	recorder := httptest.NewRecorder()
+
+	require.ErrorIs(t, cond.Execute(context.Background(), condForcedRequest(recorder)), pipeline.ErrPipelineDone)
+
+	require.Len(t, *calls, 1)
+	require.Equal(t, false, (*calls)[0].body["stream"], "the pass-through sends the client's body")
+	require.Equal(t, routing.PreferIfAvailable, (*calls)[0].prefer)
+	require.Contains(t, recorder.Body.String(), "passthrough")
+	require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackBudget), 1e-9)
+	require.InDelta(t, 1.0, condForceStreamTotal(t, reg), 1e-9)
+	require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultServed), 1e-9)
+	byStep, err := forceStreamGaugeByStep(reg)
+	require.NoError(t, err)
+	require.Equal(t, map[string]float64{DecodeStepName: float64(budget.max)}, byStep, "conditional-decode reserved nothing")
+}
+
 // A worker error on the forced probe is forwarded and attributed to
 // conditional-decode, both on the error and on the probe counter.
 func TestConditionalDecodeForceStream_UpstreamError(t *testing.T) {
@@ -327,6 +371,7 @@ func TestConditionalDecodeForceStream_UpstreamError(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), "boom")
 	require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorUpstream), 1e-9)
 	require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultError), 1e-9)
+	requireCondReleased(t, reg)
 }
 
 // An error frame streamed after the 200 is a worker error too.
@@ -342,6 +387,7 @@ func TestConditionalDecodeForceStream_MidStreamErrorFrame(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 	require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorUpstream), 1e-9)
 	require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultError), 1e-9)
+	requireCondReleased(t, reg)
 }
 
 func TestConditionalDecodeForceStream_TransportError(t *testing.T) {
@@ -358,6 +404,7 @@ func TestConditionalDecodeForceStream_TransportError(t *testing.T) {
 	require.Zero(t, recorder.Body.Len(), "nothing is written, so the server answers a clean 502")
 	require.InDelta(t, 1.0, condForceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorTransport), 1e-9)
 	require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultTransportError), 1e-9)
+	requireCondReleased(t, reg)
 }
 
 func TestConditionalDecodeForceStream_ClientCancel(t *testing.T) {
@@ -376,6 +423,7 @@ func TestConditionalDecodeForceStream_ClientCancel(t *testing.T) {
 	for _, result := range []string{coordmetrics.ProbeResultServed, coordmetrics.ProbeResultDeferred, coordmetrics.ProbeResultError, coordmetrics.ProbeResultTransportError} {
 		require.InDelta(t, 0.0, probeCount(t, reg, result), 1e-9, "no probe result for %q", result)
 	}
+	requireCondReleased(t, reg)
 }
 
 // A client that asked for a stream keeps the probe pass-through.
@@ -411,32 +459,48 @@ func TestConditionalDecodeForceStream_PromptTokenParity(t *testing.T) {
 }
 
 // One client request deferred by conditional-decode and forced by decode
-// records exactly one force-stream outcome, under decode.
+// records exactly one force-stream outcome, under decode, including when the
+// forced probe first falls back and its re-sent probe is deferred.
 func TestConditionalDecodeForceStream_PipelineCountsOnce(t *testing.T) {
-	server, calls := condUpstream(t, deferProbe, sseReply(condForcedFrames...))
-	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
-	reg := prometheus.NewRegistry()
-	require.NoError(t, coordmetrics.Register(reg))
-	coordmetrics.Reset()
-	cond, err := NewConditionalDecodeStep(gwClient, nil)
-	require.NoError(t, err)
-	decode, err := NewDecodeStep(gwClient, map[string]any{})
-	require.NoError(t, err)
-	stepList := []pipeline.Step{cond, decode}
-	require.NoError(t, EnableForceStream(stepList, "1GiB", "1GiB"))
+	for _, tc := range []struct {
+		name   string
+		probes []http.HandlerFunc
+	}{
+		{name: "deferred", probes: []http.HandlerFunc{deferProbe}},
+		{name: "fallback then deferred", probes: []http.HandlerFunc{sseReply(condLossyFrame), deferProbe}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, calls := condUpstream(t, append(slices.Clone(tc.probes), sseReply(condForcedFrames...))...)
+			gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+			reg := prometheus.NewRegistry()
+			require.NoError(t, coordmetrics.Register(reg))
+			coordmetrics.Reset()
+			cond, err := NewConditionalDecodeStep(gwClient, nil)
+			require.NoError(t, err)
+			decode, err := NewDecodeStep(gwClient, map[string]any{})
+			require.NoError(t, err)
+			stepList := []pipeline.Step{cond, decode}
+			require.NoError(t, EnableForceStream(stepList, "1GiB", "1GiB"))
 
-	recorder := httptest.NewRecorder()
-	reqCtx := condForcedRequest(recorder)
-	reqCtx.KVTransferParams = map[string]any{}
-	require.NoError(t, pipeline.New(stepList).Execute(context.Background(), reqCtx))
+			recorder := httptest.NewRecorder()
+			reqCtx := condForcedRequest(recorder)
+			reqCtx.KVTransferParams = map[string]any{}
+			require.NoError(t, pipeline.New(stepList).Execute(context.Background(), reqCtx))
 
-	require.Len(t, *calls, 2)
-	require.Equal(t, routing.PreferIfAvailable, (*calls)[0].prefer)
-	require.Empty(t, (*calls)[1].prefer)
-	require.Contains(t, recorder.Body.String(), "cached")
-	require.InDelta(t, 1.0, counterValue(t, reg, forceStreamTotalMetric, map[string]string{"step": DecodeStepName, "result": coordmetrics.ForceStreamResultForced}), 1e-9)
-	require.InDelta(t, 1.0, counterValue(t, reg, forceStreamTotalMetric, nil), 1e-9, "one client request, one outcome")
-	require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultDeferred), 1e-9)
+			require.Len(t, *calls, len(tc.probes)+1)
+			for _, probe := range (*calls)[:len(tc.probes)] {
+				require.Equal(t, routing.PreferIfAvailable, probe.prefer)
+			}
+			decodeCall := (*calls)[len(tc.probes)]
+			require.Empty(t, decodeCall.prefer)
+			require.Equal(t, true, decodeCall.body["stream"])
+			require.Contains(t, recorder.Body.String(), "cached")
+			require.InDelta(t, 1.0, counterValue(t, reg, forceStreamTotalMetric, map[string]string{"step": DecodeStepName, "result": coordmetrics.ForceStreamResultForced}), 1e-9)
+			require.InDelta(t, 1.0, counterValue(t, reg, forceStreamTotalMetric, nil), 1e-9, "one client request, one outcome")
+			require.InDelta(t, 1.0, probeCount(t, reg, coordmetrics.ProbeResultDeferred), 1e-9)
+			require.InDelta(t, 0.0, probeCount(t, reg, coordmetrics.ProbeResultServed), 1e-9)
+		})
+	}
 }
 
 // Each step reserves a forced request under its own step label, releases it
@@ -512,6 +576,7 @@ func TestEnableForceStream(t *testing.T) {
 	require.Equal(t, int64(256<<10), shared.perRequestMax)
 
 	require.Error(t, EnableForceStream([]pipeline.Step{decode}, "1KiB", ""))
+	require.Error(t, EnableForceStream(nil, "1KiB", ""), "the sizes are validated with no step to enable")
 }
 
 // The force-stream keys are pipeline settings; a step that sets them fails

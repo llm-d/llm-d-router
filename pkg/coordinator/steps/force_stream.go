@@ -174,7 +174,7 @@ var (
 // supports it (decode and conditional-decode), sharing one budget built from the
 // pipeline's force_stream_buffer_size and force_stream_max_request_size. An
 // empty size takes its default. A size that fails validation is an error, so a
-// mistyped budget fails config load.
+// mistyped budget fails config load; with no steps it only validates the sizes.
 func EnableForceStream(steps []pipeline.Step, bufferSize, maxRequestSize string) error {
 	budget, err := parseForceStreamBudget(bufferSize, maxRequestSize)
 	if err != nil {
