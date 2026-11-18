@@ -602,10 +602,13 @@ request token metrics come from the model server's response, so a request that f
 usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
 two pairs.
 
-The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-storage`, `sglang`,
-`mooncake`, and `offloading` connectors return the decoder's usage unchanged, so for a disaggregated
-request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
-describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.
+The `prefill` attribution matches the `nixlv2` and `offloading` KV connectors when the prefill
+response carries a usage block; without one, the decode pod's count is returned. Under
+`offloading`, a decode pod that fails to pull the prefill blocks and recomputes the prompt still
+reports the prefill pod's count. The `shared-storage`, `sglang`, and `mooncake` connectors return the decoder's
+usage unchanged, so for a disaggregated request `llm_d_epp_request_cached_tokens` carries the decode
+pod's count while the prediction describes the prefill pod. Under those connectors the gap between
+the ratios is not index accuracy.
 
 The two maxima are scoped differently from each other for a disaggregated request.
 `llm_d_epp_prefix_best_predicted_cached_tokens` covers the `prefill` profile's scored candidates,
