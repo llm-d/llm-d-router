@@ -113,6 +113,19 @@ router:
               {{- $isPriorityRouting := eq (include "llm-d-router.priorityRouting.enabled" .) "true" -}}
               {{- $fallback := eq (include "llm-d-router.proxy.failOpenFallback.enabled" .) "true" -}}
               {{- $tracing := .Values.router.proxy.tracing | default dict -}}
+              {{- $accessLogFormat := dict
+                "start_time" "%START_TIME%"
+                "method" "%REQ(:METHOD)%"
+                "status" "%RESPONSE_CODE%"
+                "flags" "%RESPONSE_FLAGS%"
+                "details" "%RESPONSE_CODE_DETAILS%"
+                "termination" "%CONNECTION_TERMINATION_DETAILS%"
+                "duration_ms" "%DURATION%"
+                "bytes_sent" "%BYTES_SENT%"
+                "cluster" "%UPSTREAM_CLUSTER%"
+                "upstream" "%UPSTREAM_HOST%"
+                "upstream_failure" "%UPSTREAM_TRANSPORT_FAILURE_REASON%"
+              -}}
               admin:
                 address:
                   socket_address:
@@ -183,8 +196,8 @@ router:
                           "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
                           path: /dev/stdout
                           log_format:
-                            text_format_source:
-                              inline_string: "{\"start_time\":\"%START_TIME%\",\"method\":\"%REQ(:METHOD)%\",...}\n"
+                            json_format:
+                              {{- $accessLogFormat | toYaml | nindent 16 }}
                     filter_chains:
                       - name: vllm
                         filters:
@@ -311,8 +324,8 @@ router:
                                     "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
                                     path: /dev/stdout
                                     log_format:
-                                      text_format_source:
-                                        inline_string: "{\"start_time\":\"%START_TIME%\",\"method\":\"%REQ(:METHOD)%\",...}\n"
+                                      json_format:
+                                        {{- $accessLogFormat | toYaml | nindent 26 }}
                 clusters:
                   - name: prometheus_stats
                     type: STATIC
