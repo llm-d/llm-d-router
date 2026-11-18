@@ -31,6 +31,8 @@ Until settlement, output is charged at its cap, not at a running estimate, becau
 
 Input tokens are estimated as request bytes / 4, because tokenization runs after flow control. The bytes include the JSON structure, so the estimate runs high for a short prompt with large request fields (tool definitions, many stop sequences) and low for multi-byte UTF-8 text. The daily charge is corrected at settlement; the `maxPromptTokens` check uses the estimate. `maxOutput` is the request's output cap, else the team's `maxOutputTokens`, else `defaultOutputReservation`.
 
+`maxOutputTokens` binds only a request that sets an output cap (`max_tokens`, or `max_completion_tokens` for chat completions and `max_output_tokens` for the Responses API). A request without one is not checked against it: it is served at the team's class, reserves `maxOutputTokens`, and can generate past it. Settlement charges the output it actually generated to the daily budget. To make the limit bind for every request, set a default cap upstream, for example at the gateway.
+
 ### Why a RequestHeader Plugin
 
 The plugin is not an `Admitter` and does not replace flow-control admission. Both run later in the director: flow control queues and dispatches the request in the band its priority selects, and `Admitter` plugins run after flow control has dispatched it. The contract decision has to come first:
@@ -94,7 +96,7 @@ plugins:
 | `teams[].class` | required | Class the team's committed traffic is served at. |
 | `teams[].maxConcurrency` | `0` | Committed concurrent requests, queued or running. `0` is unlimited. |
 | `teams[].maxPromptTokens` | `0` | Estimated prompt tokens above which a request moves one class down. `0` is unlimited. |
-| `teams[].maxOutputTokens` | `0` | Output cap above which a request moves one class down, and the default reservation. `0` is unlimited. |
+| `teams[].maxOutputTokens` | `0` | Output cap above which a request moves one class down, and the default reservation. A request without an output cap is not checked against it. `0` is unlimited. |
 | `teams[].dailyTokens` | `0` | Committed weighted-token budget per UTC day. `0` is unlimited. |
 
 Configure a flow-control priority band for each class priority, or rely on dynamic band provisioning from the default band templates.
