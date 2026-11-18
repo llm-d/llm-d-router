@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 // Package agentlineage provides a RequestHeaderProcessor plugin that derives
-// the program root of a request from agent-lineage headers and stores it as a
-// request attribute for the Director's fairness-key composition.
+// the program root and resolved priority band of a request from agent-lineage
+// headers and stores both as request attributes for the Director.
 package agentlineage
 
 import (
@@ -43,12 +43,14 @@ import (
 // is an acceptable source.
 var DerivedRootKey = plugin.NewDataKey("derived-root", "")
 
-// ResolvedBandKey is the request-attribute key under which this plugin
-// publishes the request's resolved priority band: the seeded objective
-// priority, or the parent's band for a parented child without an explicit
-// objective, or the minimum of the two when the request opts down
-// explicitly. The Director applies it once, before admission — bands
-// resolve once and queued requests never migrate.
+// ResolvedBandKey is the request-attribute key under which a plugin publishes
+// the request's resolved priority band: the seeded objective priority, a
+// parent's band for a parented child without an explicit objective, or the
+// minimum of the two when the request opts down explicitly. The Director
+// applies it once, before admission — bands resolve once and queued requests
+// never migrate.
+// The key carries no producer name: any plugin able to resolve a band is an
+// acceptable source.
 var ResolvedBandKey = plugin.NewDataKey("resolved-band", "")
 
 const (
@@ -112,10 +114,11 @@ type Parameters struct {
 	AdditionalSessionHeaders []string `json:"additionalSessionHeaders,omitempty"`
 	// AdditionalParentHeaders is prepended to the built-in parent list.
 	AdditionalParentHeaders []string `json:"additionalParentHeaders,omitempty"`
-	// MaxParentEntries bounds the per-replica parent map; the
-	// least-recently-used entry is evicted when the bound is reached.
+	// MaxParentEntries bounds the per-replica node map; at the bound an
+	// expired node is reclaimed first, then the oldest standalone node is
+	// evicted.
 	MaxParentEntries int `json:"maxParentEntries,omitempty"`
-	// ParentEntryTTLSeconds is how long a parent link survives unused.
+	// ParentEntryTTLSeconds is how long a node survives unused.
 	ParentEntryTTLSeconds float64 `json:"parentEntryTtlSeconds,omitempty"`
 }
 
@@ -170,6 +173,7 @@ func PluginFactory(name string, rawParameters *json.Decoder, _ plugin.Handle) (p
 		parentEntryTTL:   ttl,
 		now:              time.Now,
 		nodes:            map[lineageKey]nodeRecord{},
+		childCounts:      map[lineageKey]int{},
 	}, nil
 }
 
@@ -197,8 +201,8 @@ var (
 	_ plugin.ProducerPlugin        = &Plugin{}
 )
 
-// Plugin derives the program root of a request from agent-lineage headers
-// and stores it as a request attribute.
+// Plugin derives the program root and resolved priority band of a request from
+// agent-lineage headers and stores them as request attributes.
 type Plugin struct {
 	typedName plugin.TypedName
 
@@ -212,6 +216,10 @@ type Plugin struct {
 
 	mu    sync.Mutex
 	nodes map[lineageKey]nodeRecord
+	// childCounts counts the live child nodes recorded under each parent key,
+	// including parents that are not currently in nodes. An entry is removed
+	// when its last child is removed, so the map is bounded by nodes.
+	childCounts map[lineageKey]int
 }
 
 func (p *Plugin) TypedName() plugin.TypedName {
@@ -242,7 +250,7 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	seeded := request.Objectives.Priority
 	objective, _ := metadata.GetLowerCaseHeaderValue(request.Headers, metadata.ObjectiveKey)
 	explicit := strings.TrimSpace(objective) != ""
-	root, band := p.resolveRoot(request.FairnessID, session, parent, seeded, explicit)
+	root, band := p.resolve(request.FairnessID, session, parent, seeded, explicit)
 	request.PutAttribute(DerivedRootKey, root)
 	if band != seeded {
 		// Published only when lineage changed the band: the Director
@@ -281,40 +289,53 @@ func codexTurnMetadataSession(value string) string {
 	return strings.TrimSpace(payload.SessionID)
 }
 
-// resolveRoot records the session's node and returns the root reached by
-// walking recorded links from the request's session, or from its parent when
-// the request carries no session, together with the request's resolved band.
+// resolve records the session's node and returns the root reached by walking
+// recorded links from the request's session, or from its parent when the
+// request carries no session, together with the request's resolved band.
 // One critical section covers resolution, record, and walk, so a concurrent
 // request cannot evict or rewrite state between them.
 //
-// The band follows the design's resolution table: a parented child whose
-// parent has a live node inherits the parent's band, an explicit objective
-// opts to min(explicit, parent band) — never above the parent — and every
-// other request keeps its seeded band. A declared workload kind is not a
-// band input.
-func (p *Plugin) resolveRoot(tenant, session, parent string, seeded int, explicit bool) (string, int) {
-	now := p.now()
+// A live link is authoritative for a session's lineage: the recorded parent,
+// not a conflicting re-declaration, supplies both the band and the walk. A
+// root with a live child is authoritative too, so a later parent declaration
+// cannot splice it into another program. A standalone node accepts a later
+// parent. A self-link carries no lineage and is cleared before resolution.
+//
+// The band follows the design's resolution table: under a stamped tenant (a
+// non-empty tenant scope) a parented child whose parent has a live node
+// inherits the parent's band; an explicit objective opts to
+// min(explicit, parent band) in every population; an unstamped child takes
+// min(seeded, parent band) because the untrusted-priority ceiling is not
+// enforced yet; every other request keeps its seeded band. A declared
+// workload kind is not a band input.
+func (p *Plugin) resolve(tenant, session, parent string, seeded int, explicit bool) (string, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// While a live linked node exists it is authoritative for the session's
-	// lineage: the recorded parent, not a conflicting re-declaration,
-	// supplies both the band and the walk. A parentless node has no link to
-	// conflict with, so a later parent declaration is accepted.
-	if record, ok := p.nodes[lineageKey{tenant: tenant, session: session}]; ok && now.Sub(record.updatedAt) <= p.parentEntryTTL && record.parent != "" {
-		parent = record.parent
+	now := p.now()
+	if session != "" && parent == session {
+		parent = ""
+	}
+	if session != "" {
+		if _, record, ok := p.liveNodeLocked(tenant, session, now); ok && (record.parent != "" || p.hasChildLocked(tenant, session)) {
+			parent = record.parent
+		}
 	}
 	band := seeded
 	if parent != "" {
-		if record, ok := p.nodes[lineageKey{tenant: tenant, session: parent}]; ok && now.Sub(record.updatedAt) <= p.parentEntryTTL {
-			if explicit {
+		if key, record, ok := p.liveNodeLocked(tenant, parent, now); ok {
+			record.updatedAt = now
+			p.nodes[key] = record
+			if explicit || tenant == "" {
 				band = min(seeded, record.band)
 			} else {
 				band = record.band
 			}
 		}
 	}
-	p.recordNodeLocked(tenant, session, parent, band, now)
+	if session != "" {
+		p.recordNodeLocked(tenant, session, parent, band, now)
+	}
 	start := session
 	if start == "" {
 		start = parent
@@ -323,56 +344,139 @@ func (p *Plugin) resolveRoot(tenant, session, parent string, seeded int, explici
 }
 
 // recordNodeLocked stores the session's node under the tenant scope: its
-// parent link and its resolved band. A node naming itself as parent is
-// stored parentless: the self-link carries no lineage. A session's parent is
-// fixed when the child is spawned, so a live link keeps its first parent —
-// a declaration naming a different parent is ignored until the node expires,
-// which keeps a caller sharing the default tenant from splicing a live
-// session onto another program or cycling a root. The band always refreshes
-// to the latest resolution. At the bound a node is evicted, but never for a
-// key already in the map: harnesses resend both headers every turn, and
-// overwriting an existing key does not grow the map. A parentless node is
-// not recorded at the bound at all, and eviction prefers parentless nodes:
-// a link carries lineage a bare band does not, so one-off sessions die
-// before live links. The eviction scan is O(len(nodes)), kept small by the
-// bound.
+// parent link and its resolved band. resolve has already cleared a self-link
+// and applied an authoritative recorded parent, so this only refreshes the
+// band, keeps the live-child counts consistent, and evicts at the bound. An
+// expired node is removed before insertion. At the bound a node is evicted,
+// but never for a key already in the map: harnesses resend both headers every
+// turn, and overwriting an existing key does not grow the map.
 func (p *Plugin) recordNodeLocked(tenant, session, parent string, band int, now time.Time) {
-	if parent == session {
-		parent = ""
-	}
 	key := lineageKey{tenant: tenant, session: session}
 	if record, ok := p.nodes[key]; ok {
-		if now.Sub(record.updatedAt) <= p.parentEntryTTL && record.parent != "" && record.parent != parent {
-			p.nodes[key] = nodeRecord{parent: record.parent, band: band, updatedAt: now}
+		if now.Sub(record.updatedAt) <= p.parentEntryTTL {
+			if record.parent != parent {
+				p.removeChildLocked(tenant, record.parent)
+				p.addChildLocked(tenant, parent)
+			}
+			record.parent = parent
+			record.band = band
+			record.updatedAt = now
+			p.nodes[key] = record
 			return
 		}
-	} else if parent == "" && len(p.nodes) >= p.maxParentEntries {
-		return
-	} else if len(p.nodes) >= p.maxParentEntries {
-		if evictKey, ok := lruKey(p.nodes, true); ok {
-			delete(p.nodes, evictKey)
-		} else if evictKey, ok := lruKey(p.nodes, false); ok {
-			delete(p.nodes, evictKey)
+		p.deleteNodeLocked(key, record)
+	}
+	if len(p.nodes) >= p.maxParentEntries {
+		if !p.evictLocked(tenant, parent, now) {
+			return
 		}
 	}
 	p.nodes[key] = nodeRecord{parent: parent, band: band, updatedAt: now}
+	p.addChildLocked(tenant, parent)
 }
 
-// lruKey returns the least recently updated node in the map, considering
-// only parentless nodes when parentlessOnly is set.
-func lruKey(nodes map[lineageKey]nodeRecord, parentlessOnly bool) (lineageKey, bool) {
-	var oldestKey lineageKey
-	var oldest time.Time
-	first := true
-	for k, record := range nodes {
-		if parentlessOnly && record.parent != "" {
+// evictLocked removes one node to make room for an arrival whose parent is
+// parent. It prefers an expired node, then the oldest standalone node (no
+// parent and no live child), then the oldest leaf link, and finally the oldest
+// root with a live child. A parentless arrival is rejected when every slot is
+// live and linked or has a child. The arriving parent is never evicted. The
+// scan is O(len(nodes)), kept small by the bound.
+func (p *Plugin) evictLocked(tenant, parent string, now time.Time) bool {
+	protected := lineageKey{tenant: tenant, session: parent}
+	var expiredKey, standaloneKey, leafKey, rootKey lineageKey
+	var expiredAt, standaloneAt, leafAt, rootAt time.Time
+	haveExpired, haveStandalone, haveLeaf, haveRoot := false, false, false, false
+	for key, record := range p.nodes {
+		if parent != "" && key == protected {
 			continue
 		}
-		if first || record.updatedAt.Before(oldest) {
-			oldestKey, oldest, first = k, record.updatedAt, false
+		if now.Sub(record.updatedAt) > p.parentEntryTTL {
+			if !haveExpired || record.updatedAt.Before(expiredAt) {
+				expiredKey, expiredAt, haveExpired = key, record.updatedAt, true
+			}
+			continue
+		}
+		if record.parent == "" && !p.hasChildLocked(key.tenant, key.session) {
+			if !haveStandalone || record.updatedAt.Before(standaloneAt) {
+				standaloneKey, standaloneAt, haveStandalone = key, record.updatedAt, true
+			}
+			continue
+		}
+		if record.parent != "" {
+			if !haveLeaf || record.updatedAt.Before(leafAt) {
+				leafKey, leafAt, haveLeaf = key, record.updatedAt, true
+			}
+			continue
+		}
+		if !haveRoot || record.updatedAt.Before(rootAt) {
+			rootKey, rootAt, haveRoot = key, record.updatedAt, true
 		}
 	}
-	return oldestKey, !first
+	switch {
+	case haveExpired:
+		p.deleteNodeLocked(expiredKey, p.nodes[expiredKey])
+	case haveStandalone:
+		p.deleteNodeLocked(standaloneKey, p.nodes[standaloneKey])
+	case parent == "":
+		return false
+	case haveLeaf:
+		p.deleteNodeLocked(leafKey, p.nodes[leafKey])
+	case haveRoot:
+		p.deleteNodeLocked(rootKey, p.nodes[rootKey])
+	default:
+		return false
+	}
+	return true
+}
+
+// hasChildLocked reports whether a live child node is recorded under the
+// parent's key.
+func (p *Plugin) hasChildLocked(tenant, session string) bool {
+	return p.childCounts[lineageKey{tenant: tenant, session: session}] > 0
+}
+
+func (p *Plugin) addChildLocked(tenant, parent string) {
+	if parent == "" {
+		return
+	}
+	if p.childCounts == nil {
+		p.childCounts = map[lineageKey]int{}
+	}
+	p.childCounts[lineageKey{tenant: tenant, session: parent}]++
+}
+
+func (p *Plugin) removeChildLocked(tenant, parent string) {
+	if parent == "" {
+		return
+	}
+	key := lineageKey{tenant: tenant, session: parent}
+	if count := p.childCounts[key]; count > 1 {
+		p.childCounts[key] = count - 1
+	} else {
+		delete(p.childCounts, key)
+	}
+}
+
+// deleteNodeLocked removes a node and detaches it from its parent's live-child
+// count. The node's own child count is left in place while its children remain.
+func (p *Plugin) deleteNodeLocked(key lineageKey, record nodeRecord) {
+	delete(p.nodes, key)
+	p.removeChildLocked(key.tenant, record.parent)
+}
+
+// liveNodeLocked returns the node for session when it exists and has not
+// expired, deleting an expired node. It does not refresh the node.
+func (p *Plugin) liveNodeLocked(tenant, session string, now time.Time) (lineageKey, nodeRecord, bool) {
+	key := lineageKey{tenant: tenant, session: session}
+	record, ok := p.nodes[key]
+	if !ok {
+		return key, nodeRecord{}, false
+	}
+	if now.Sub(record.updatedAt) > p.parentEntryTTL {
+		p.deleteNodeLocked(key, record)
+		return key, nodeRecord{}, false
+	}
+	return key, record, true
 }
 
 // walkToRootLocked follows recorded parent links from start to the first
@@ -390,17 +494,13 @@ func (p *Plugin) walkToRootLocked(tenant, start string, now time.Time) string {
 		if hops >= maxWalkHops {
 			return current
 		}
-		key := lineageKey{tenant: tenant, session: current}
-		record, ok := p.nodes[key]
+		key, record, ok := p.liveNodeLocked(tenant, current, now)
 		if !ok {
 			return current
 		}
-		if now.Sub(record.updatedAt) > p.parentEntryTTL {
-			delete(p.nodes, key)
-			return current
-		}
 		if record.parent == "" {
-			p.nodes[key] = nodeRecord{parent: record.parent, band: record.band, updatedAt: now}
+			record.updatedAt = now
+			p.nodes[key] = record
 			return current
 		}
 		if visited == nil {
@@ -410,7 +510,8 @@ func (p *Plugin) walkToRootLocked(tenant, start string, now time.Time) string {
 			return current
 		}
 		visited[record.parent] = true
-		p.nodes[key] = nodeRecord{parent: record.parent, band: record.band, updatedAt: now}
+		record.updatedAt = now
+		p.nodes[key] = record
 		current = record.parent
 	}
 }

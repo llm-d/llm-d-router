@@ -249,6 +249,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	span.SetAttributes(
 		attribute.String("target_model", reqCtx.TargetModelName),
+		attribute.Int("request_prio", priority),
 	)
 
 	fairnessID, _ := metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.FlowFairnessIDKey)
@@ -264,7 +265,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		RequestSizeBytes: reqCtx.RequestSize,
 	}
 
-	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
+	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "seededPriority", infObjective.Spec.Priority)
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
@@ -337,16 +338,16 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	tracing.AttributeRequest(ctx, span)
 	metrics.RecordFairnessIDResolution(d.poolName, reqCtx.SchedulingRequest.FairnessID, source)
 
-	// The agent-lineage plugin resolves a parented child's band from its
-	// parent's recorded band. Applying it here, before admission, is the one
-	// place a request's band is set: bands resolve once and queued requests
-	// never migrate across them.
+	// A plugin may publish a resolved band: the seeded objective priority, a
+	// parent's band, or the minimum of the two. Applying it here, before
+	// admission, finalizes the request's band: bands resolve once and queued
+	// requests never migrate across them.
 	if resolvedBand, ok := fwksched.ReadRequestAttribute[int](reqCtx.SchedulingRequest, agentlineage.ResolvedBandKey); ok {
 		priority = resolvedBand
 		reqCtx.Priority = resolvedBand
 		reqCtx.SchedulingRequest.Objectives.Priority = resolvedBand
+		span.SetAttributes(attribute.Int("request_prio", priority))
 	}
-	span.SetAttributes(attribute.Int("request_prio", priority))
 
 	admitting = true
 	// Admit may block until flow control admits the request.

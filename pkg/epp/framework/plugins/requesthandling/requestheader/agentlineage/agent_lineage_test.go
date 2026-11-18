@@ -602,43 +602,58 @@ func TestRequestHeader_BandResolution(t *testing.T) {
 	p := newPlugin(t, "")
 
 	// The root arrives at priority 5 and records its band.
-	wantBand(t, p, "", "R", 5, false, nil, 5)
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 
 	// A parented child without an explicit objective inherits the parent's band.
-	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
 
 	// An explicit objective opts below the parent.
-	wantBand(t, p, "", "S2", 3, true, map[string]string{ParentSessionHeader: "R"}, 3)
+	wantBand(t, p, "tenant-a", "S2", 3, true, map[string]string{ParentSessionHeader: "R"}, 3)
 
 	// An explicit objective never runs above the parent.
-	wantBand(t, p, "", "S3", 7, true, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S3", 7, true, map[string]string{ParentSessionHeader: "R"}, 5)
 
 	// A declared kind is not a band input: a background child of an
 	// interactive parent keeps the parent's band.
-	wantBand(t, p, "", "S4", 0, false, map[string]string{
+	wantBand(t, p, "tenant-a", "S4", 0, false, map[string]string{
 		ParentSessionHeader: "R",
 		"x-workload-kind":   "background",
 	}, 5)
 
 	// A stray child whose parent never arrived falls back to its own band.
-	wantBand(t, p, "", "S9", 2, false, map[string]string{ParentSessionHeader: "UNKNOWN"}, 2)
+	wantBand(t, p, "tenant-a", "S9", 2, false, map[string]string{ParentSessionHeader: "UNKNOWN"}, 2)
 
 	// A parentless request keeps its own band.
-	wantBand(t, p, "", "chat", 1, false, nil, 1)
+	wantBand(t, p, "tenant-a", "chat", 1, false, nil, 1)
 
 	// A conflicting re-declaration keeps the recorded parent's band.
-	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "EVIL"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "EVIL"}, 5)
 
 	// An objective sent under the deprecated alias still counts as explicit:
 	// min(seeded, parent band) instead of full inheritance.
-	wantBand(t, p, "", "S6", 3, false, map[string]string{
+	wantBand(t, p, "tenant-a", "S6", 3, false, map[string]string{
 		ParentSessionHeader:      "R",
 		metadata.OldObjectiveKey: "batch",
 	}, 3)
 
 	// A child of a sheddable-band parent inherits the sheddable band.
+	wantBand(t, p, "tenant-a", "P2", -1, false, nil, -1)
+	wantBand(t, p, "tenant-a", "S5", 0, false, map[string]string{ParentSessionHeader: "P2"}, -1)
+}
+
+// TestRequestHeader_BandUnstampedDoesNotRaise pins that an unstamped request
+// never inherits a higher band: the untrusted-priority ceiling is not enforced
+// yet, so only the downward clamp is safe outside a stamped tenant.
+func TestRequestHeader_BandUnstampedDoesNotRaise(t *testing.T) {
+	p := newPlugin(t, "")
+
+	wantBand(t, p, "", "R", 5, false, nil, 5)
+	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 0)
+	wantBand(t, p, "", "S2", 7, false, map[string]string{ParentSessionHeader: "R"}, 5)
+
+	// The clamp still lowers an unstamped child below its parent.
 	wantBand(t, p, "", "P2", -1, false, nil, -1)
-	wantBand(t, p, "", "S5", 0, false, map[string]string{ParentSessionHeader: "P2"}, -1)
+	wantBand(t, p, "", "S3", 0, false, map[string]string{ParentSessionHeader: "P2"}, -1)
 }
 
 // TestRequestHeader_BandRootStaysAliveThroughChildWalks pins that child
@@ -650,11 +665,11 @@ func TestRequestHeader_BandRootStaysAliveThroughChildWalks(t *testing.T) {
 	now, advance := newClock()
 	p.now = now
 
-	wantBand(t, p, "", "R", 5, false, nil, 5) // the root arrives once, at t0
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5) // the root arrives once, at t0
 	advance(5 * time.Second)
-	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
 	advance(6 * time.Second) // 11s since the root's own arrival
-	wantBand(t, p, "", "S2", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
 }
 
 // TestRequestHeader_EvictionPrefersParentless pins that eviction at the
@@ -675,17 +690,162 @@ func TestRequestHeader_EvictionPrefersParentless(t *testing.T) {
 	wantRoot(t, p, "", map[string]string{OpenCodeSessionHeader: "S1"}, "R")
 }
 
+// TestRequestHeader_SessionlessRequestsDoNotShareNode pins that a request
+// with a parent but no session is never recorded under the empty session key:
+// two unrelated session-less arrivals must not chain to each other.
+func TestRequestHeader_SessionlessRequestsDoNotShareNode(t *testing.T) {
+	p := newPlugin(t, "")
+
+	wantRoot(t, p, "", map[string]string{ParentSessionHeader: "P1"}, "P1")
+	wantRoot(t, p, "", map[string]string{ParentSessionHeader: "P2"}, "P2")
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.nodes[lineageKey{tenant: "", session: ""}]; ok {
+		t.Fatal("session-less request recorded a node under the empty session key")
+	}
+}
+
+// TestRequestHeader_MapBoundReclaimsExpired pins that an insert at the bound
+// reclaims an expired node before dropping a new root, so a completed
+// one-off session cannot starve lineage for the rest of the replica's life.
+func TestRequestHeader_MapBoundReclaimsExpired(t *testing.T) {
+	p := newPlugin(t, `{"maxParentEntries": 4, "parentEntryTtlSeconds": 10}`)
+	now, advance := newClock()
+	p.now = now
+
+	for _, session := range []string{"A", "B", "C", "D"} {
+		wantBand(t, p, "tenant-a", session, 0, false, nil, 0)
+	}
+	advance(time.Hour)
+
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantRoot(t, p, "tenant-a", map[string]string{OpenCodeSessionHeader: "S1"}, "R")
+}
+
+// TestRequestHeader_EvictionKeepsActiveRoot pins that eviction at the bound
+// never displaces the arriving request's parent: an active root with children
+// outlives the oldest leaf link.
+func TestRequestHeader_EvictionKeepsActiveRoot(t *testing.T) {
+	p := newPlugin(t, `{"maxParentEntries": 3}`)
+	now, advance := newClock()
+	p.now = now
+
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+	advance(time.Second)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	advance(time.Second)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	advance(time.Second)
+	// Bound reached: evict the oldest child, never the parent R.
+	wantBand(t, p, "tenant-a", "S3", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+	wantBand(t, p, "tenant-a", "S3", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+}
+
+// TestRequestHeader_RootWithChildrenCannotBeSpliced pins that a root a live
+// child resolved against keeps its parentless record: a later declaration
+// naming another parent cannot move the tree into that parent's band.
+func TestRequestHeader_RootWithChildrenCannotBeSpliced(t *testing.T) {
+	p := newPlugin(t, "")
+
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "LOW", -1, false, nil, -1)
+
+	wantRoot(t, p, "tenant-a", map[string]string{OpenCodeSessionHeader: "R", ParentSessionHeader: "LOW"}, "R")
+	wantBand(t, p, "tenant-a", "R", 5, false, map[string]string{ParentSessionHeader: "LOW"}, 5)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+}
+
+// TestRequestHeader_DroppedChildDoesNotProtectParent pins that a child that
+// cannot be recorded at the bound does not leave its parent looking as though
+// it has a live child, which would reject every later root.
+func TestRequestHeader_DroppedChildDoesNotProtectParent(t *testing.T) {
+	p := newPlugin(t, `{"maxParentEntries": 1}`)
+
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+	// The child cannot take a slot, but its request still inherits R's band.
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+
+	// R is still standalone, so a later root can replace it.
+	wantBand(t, p, "tenant-a", "R2", 7, false, nil, 7)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "R2"}, 7)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.hasChildLocked("tenant-a", "R") {
+		t.Fatal("a child that was never recorded still marks R as having a live child")
+	}
+}
+
+// TestRequestHeader_ChildCountDropsWithExpiredChild pins that an expired
+// child stops protecting its parent once it is removed.
+func TestRequestHeader_ChildCountDropsWithExpiredChild(t *testing.T) {
+	p := newPlugin(t, `{"maxParentEntries": 2, "parentEntryTtlSeconds": 10}`)
+	now, advance := newClock()
+	p.now = now
+
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+	advance(time.Second)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	advance(9 * time.Second)
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5) // keep R live while S1 ages out
+	advance(2 * time.Second)
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+
+	// The parentless insert reclaims S1, which must remove its child count.
+	wantBand(t, p, "tenant-a", "R2", 0, false, nil, 0)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if count := p.childCounts[lineageKey{tenant: "tenant-a", session: "R"}]; count != 0 {
+		t.Fatalf("child count for R = %d after the child expired, want 0", count)
+	}
+}
+
+// TestPlugin_EvictPrefersLeafLinkOverRootWithChild pins the fallback order:
+// with no expired or standalone node, a leaf link goes before a root that has
+// a live child.
+func TestPlugin_EvictPrefersLeafLinkOverRootWithChild(t *testing.T) {
+	p := newPlugin(t, `{"maxParentEntries": 3}`)
+	now := time.Unix(1000, 0)
+	rootKey := lineageKey{tenant: "tenant-a", session: "R"}
+	leafKey := lineageKey{tenant: "tenant-a", session: "S1"}
+
+	p.mu.Lock()
+	p.nodes[rootKey] = nodeRecord{parent: "", band: 5, updatedAt: now.Add(-2 * time.Minute)}
+	p.nodes[leafKey] = nodeRecord{parent: "R", band: 5, updatedAt: now.Add(-time.Minute)}
+	p.childCounts[rootKey] = 1
+	evicted := p.evictLocked("tenant-a", "P", now)
+	_, rootExists := p.nodes[rootKey]
+	_, leafExists := p.nodes[leafKey]
+	p.mu.Unlock()
+
+	if !evicted {
+		t.Fatal("evictLocked found no victim")
+	}
+	if !rootExists {
+		t.Fatal("evictLocked displaced a root with a live child before a leaf link")
+	}
+	if leafExists {
+		t.Fatal("evictLocked kept the leaf link")
+	}
+}
+
 // TestRequestHeader_BandChainInheritance pins that chains inherit through
 // resolved bands: the grandchild receives the band its parent resolved, not
 // the seed its parent arrived with.
 func TestRequestHeader_BandChainInheritance(t *testing.T) {
 	p := newPlugin(t, "")
 
-	wantBand(t, p, "", "R", 5, false, nil, 5)
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 	// S1 seeds at 0 and resolves to 5 by inheritance.
-	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
 	// SS1 names S1 and inherits S1's resolved band, not its 0 seed.
-	wantBand(t, p, "", "SS1", 0, false, map[string]string{ParentSessionHeader: "S1"}, 5)
+	wantBand(t, p, "tenant-a", "SS1", 0, false, map[string]string{ParentSessionHeader: "S1"}, 5)
 }
 
 // TestRequestHeader_BandExpiry pins that a child falls back to its own band
@@ -695,9 +855,9 @@ func TestRequestHeader_BandExpiry(t *testing.T) {
 	now, advance := newClock()
 	p.now = now
 
-	wantBand(t, p, "", "R", 5, false, nil, 5)
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
 	advance(11 * time.Second)
-	wantBand(t, p, "", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 0)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 0)
 }
 
 // TestRequestHeader_BandTenantScoping pins that a parent's band never leaks
