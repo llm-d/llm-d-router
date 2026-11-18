@@ -38,7 +38,6 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
-	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -538,9 +537,9 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			return err
 		}
 		request.PutAttribute(p.attrKey(), &best)
-		// A request that cannot carry a kv.fetch hint recomputes the prefix,
-		// so no reusable floor is published for it.
-		if best.hasTierData && (p.transport != TransportKVCR || isVLLMGenerate(fwkrequest.GetRequestPath(request.Headers))) {
+		// A request that gets no kv.fetch hint does not reuse the source's
+		// prefix, so no reusable floor is published for it.
+		if best.hasTierData && (p.transport != TransportKVCR || kvcrSkipOutcome(request) == "") {
 			reusableTokens := best.cachedTokens - p.minCachedTokenDelta + 1
 			if reusableTokens > 0 {
 				if err := ctx.Err(); err != nil {
@@ -695,14 +694,12 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		return nil
 	}
 	params := kvTransferParams(request.Body)
-	decodeLeg := false
 	if p.transport == TransportKVCR {
-		params = vllmKVTransferParams(request.Body)
-		// The coordinator's NIXL and shared-storage decode legs carry
-		// do_remote_prefill rather than remote_prefiller.
-		decodeLeg = params[reqcommon.FieldDoRemotePrefill] == true
-	}
-	if _, ok := params[reqcommon.FieldRemotePrefiller]; ok || decodeLeg {
+		if skip := kvcrSkipOutcome(request); skip != "" {
+			outcome = skip
+			return nil
+		}
+	} else if _, ok := params[reqcommon.FieldRemotePrefiller]; ok {
 		outcome = "decode-request"
 		return nil
 	}
@@ -745,12 +742,8 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 }
 
 // writeKVFetchHint writes best as a KVCR kv.fetch hint on a vllm.Inference
-// request and returns the decision outcome. Other requests cannot carry the
-// hint.
+// request that kvcrSkipOutcome accepted and returns the decision outcome.
 func (p *Producer) writeKVFetchHint(ctx context.Context, request *scheduling.InferenceRequest, best *bestMatchPeer) string {
-	if !isVLLMGenerate(fwkrequest.GetRequestPath(request.Headers)) {
-		return "unsupported-request"
-	}
 	endpoint := kvcrControlEndpoint(best.address, best.p2pPort)
 	ok, err := setKVFetchHint(request.Body, endpoint)
 	if err != nil {

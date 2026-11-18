@@ -244,66 +244,59 @@ func TestPreRequest_KVCR_ControlPortAddsRankIndex(t *testing.T) {
 	assert.Equal(t, net.JoinHostPort("10.0.0.2", "7779"), req.Headers[routing.KVCachePrefillHeader])
 }
 
-// A decode request that pulls the prompt from a prefill pod gets no hint: the
-// sidecar and coordinator offloading legs carry remote_prefiller, and the
-// coordinator NIXL and shared-storage legs carry do_remote_prefill.
-func TestPreRequest_KVCR_DecodeRequest_NoHint(t *testing.T) {
+// A request gets the reusable prefix floor in Produce exactly when PreRequest
+// can give it a hint. A decode leg receives the prompt's KV from a prefill pod
+// (remote_prefiller on the offloading connector, do_remote_prefill on the
+// coordinator's NIXL and shared-storage connectors), a request that bypasses
+// the prefix cache does not load fetched blocks, and only vllm.Inference
+// requests can carry the hint.
+func TestKVCR_FloorAndHintSkipTheSameRequests(t *testing.T) {
+	stream := vllmpb.Inference_GenerateStream_FullMethodName
 	for _, tc := range []struct {
 		name    string
-		params  map[string]any
+		path    string
+		kv      map[string]any
+		bypass  bool
 		outcome string
 	}{
-		{name: "remote_prefiller", params: reqcommon.RemotePrefillerParams("kv-1", "10.0.0.9", 7777), outcome: "decode-request"},
-		{name: "do_remote_prefill", params: map[string]any{reqcommon.FieldDoRemotePrefill: true, reqcommon.FieldDoRemoteDecode: false}, outcome: "decode-request"},
-		{name: "do_remote_prefill false", params: map[string]any{reqcommon.FieldDoRemotePrefill: false}, outcome: "pulled"},
+		{name: "generate", path: stream, outcome: "pulled"},
+		{name: "remote_prefiller", path: stream, kv: reqcommon.RemotePrefillerParams("kv-1", "10.0.0.9", 7777), outcome: "decode-request"},
+		{name: "do_remote_prefill", path: stream, kv: map[string]any{reqcommon.FieldDoRemotePrefill: true, reqcommon.FieldDoRemoteDecode: false}, outcome: "decode-request"},
+		{name: "do_remote_prefill false", path: stream, kv: map[string]any{reqcommon.FieldDoRemotePrefill: false}, outcome: "pulled"},
+		{name: "bypass_prefix_cache", path: stream, bypass: true, outcome: "cache-bypassed"},
+		{name: "openai", path: "/v1/completions", outcome: "unsupported-request"},
+		{name: "sglang", path: apiv1.SglangService_Generate_FullMethodName, outcome: "unsupported-request"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := utils.NewTestContext(t)
 			p := kvcrProducer()
-			params, err := structpb.NewStruct(tc.params)
-			require.NoError(t, err)
+			kv := &vllmpb.KVCacheParameters{BypassPrefixCache: tc.bypass}
+			if tc.kv != nil {
+				params, err := structpb.NewStruct(tc.kv)
+				require.NoError(t, err)
+				kv.KvTransferParams = params
+			}
 			frame, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
 				Model:  "m",
 				Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
-				Kv:     &vllmpb.KVCacheParameters{KvTransferParams: params},
+				Kv:     kv,
 			})
 			require.NoError(t, err)
-			req := grpcRequest(p, "req-decode", vllmpb.Inference_GenerateStream_FullMethodName, frame, kvcrPeer())
+			req := grpcRequest(p, "req-"+tc.name, tc.path, frame, nil)
+
+			source := tierEndpointWithLoad(p, "pod-src", "10.0.0.2", 4, 0)
+			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{source}))
+			_, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+			require.True(t, ok, "the source is stashed either way")
+			_, floor := readReusablePrefixTokens(req, "test")
+			assert.Equal(t, tc.outcome == "pulled", floor, "floor published")
 
 			require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 0))))
-
 			assert.Equal(t, tc.outcome, decisionOutcome(t, p, req))
-			if tc.outcome == "decode-request" {
+			if tc.outcome != "pulled" {
 				assert.False(t, req.Body.Mutated)
 				assert.Equal(t, fwkrequest.PayloadBytes(frame), req.Body.Payload)
 			}
-		})
-	}
-}
-
-// The reusable prefix floor is published only for a request that can carry
-// the hint.
-func TestProduce_KVCR_FloorOnlyForHintableRequests(t *testing.T) {
-	for _, tc := range []struct {
-		path      string
-		wantFloor bool
-	}{
-		{path: vllmpb.Inference_GenerateStream_FullMethodName, wantFloor: true},
-		{path: "/v1/completions"},
-		{path: apiv1.SglangService_Generate_FullMethodName},
-	} {
-		t.Run(tc.path, func(t *testing.T) {
-			ctx := utils.NewTestContext(t)
-			p := kvcrProducer()
-			source := tierEndpointWithLoad(p, "pod-src", "10.0.0.2", 4, 0)
-			req := grpcRequest(p, "req-floor", tc.path, generateFrame(t), nil)
-
-			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{source}))
-
-			_, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
-			assert.True(t, ok, "the source is stashed either way")
-			_, ok = readReusablePrefixTokens(req, "test")
-			assert.Equal(t, tc.wantFloor, ok)
 		})
 	}
 }

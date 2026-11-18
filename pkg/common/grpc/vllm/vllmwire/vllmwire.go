@@ -278,6 +278,9 @@ func countTokenIDs(body []byte) int {
 	return n
 }
 
+// BypassPrefixCache returns kv.bypass_prefix_cache.
+func (r *Request) BypassPrefixCache() bool { return r.bypassPrefixCache }
+
 // CacheSalt returns kv.cache_salt and whether the client set it. The slice
 // aliases the payload.
 func (r *Request) CacheSalt() ([]byte, bool) { return r.cacheSalt, r.hasCacheSalt }

@@ -29,7 +29,9 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/protoscan"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
 // KV hint protocol values KVCR accepts for a kv.fetch action.
@@ -62,30 +64,43 @@ func isVLLMGenerate(path string) bool {
 	return path == vllmpb.Inference_Generate_FullMethodName || path == vllmpb.Inference_GenerateStream_FullMethodName
 }
 
-// vllmKVTransferParams returns kv.kv_transfer_params of a vllm.Inference
-// GenerateRequest frame body, or nil when the body is not a frame or carries
-// none.
-func vllmKVTransferParams(body *fwkrequest.InferenceRequestBody) map[string]any {
-	if body == nil {
-		return nil
+// kvcrSkipOutcome returns the decision outcome of a request that gets no
+// kv.fetch hint, or "" when the request can use one. A request other than a
+// vllm.Inference Generate call cannot carry the hint, a request that bypasses
+// the prefix cache does not load the fetched blocks, and a decode leg receives
+// the prompt's KV from a prefill pod: remote_prefiller on the offloading
+// connector, do_remote_prefill on the coordinator's NIXL and shared-storage
+// connectors. A body that is not a frame is left to setKVFetchHint.
+func kvcrSkipOutcome(request *scheduling.InferenceRequest) string {
+	if !isVLLMGenerate(fwkrequest.GetRequestPath(request.Headers)) {
+		return "unsupported-request"
 	}
-	frame, ok := body.Payload.(fwkrequest.PayloadBytes)
+	if request.Body == nil {
+		return ""
+	}
+	frame, ok := request.Body.Payload.(fwkrequest.PayloadBytes)
 	if !ok {
-		return nil
+		return ""
 	}
 	payload, err := grpcframe.ParsePayload(frame)
 	if err != nil {
-		return nil
+		return ""
 	}
 	req, err := vllmwire.ScanGenerateRequest(payload)
 	if err != nil {
-		return nil
+		return ""
+	}
+	if req.BypassPrefixCache() {
+		return "cache-bypassed"
 	}
 	params, _, err := req.ClientKVTransferParams()
 	if err != nil {
-		return nil
+		return ""
 	}
-	return params
+	if _, ok := params[reqcommon.FieldRemotePrefiller]; ok || params[reqcommon.FieldDoRemotePrefill] == true {
+		return "decode-request"
+	}
+	return ""
 }
 
 // kvcrControlEndpoint is the KVCR control endpoint a destination dials to
