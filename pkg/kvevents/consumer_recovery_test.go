@@ -88,10 +88,10 @@ func TestDecodedConsumersRecoverAndEvictTogether(t *testing.T) {
 			manager := kvevents.NewSubscriberManager(transport)
 			defer manager.Shutdown(ctx)
 			require.NoError(t, manager.EnsureSubscriber(ctx, "pod", "10.0.0.1:8000", endpoint, replayEndpoint, snapshotEndpoint, "kv@", true))
-			h := &replayHarness{ctx: ctx, pub: pub, topic: []byte("kv@wire:8000@model")}
+			h := &replayHarness{ctx: ctx, pub: pub, topic: []byte("kv@wire:8000@TestModel")}
 			resident := func(hash uint64, want bool) bool {
 				for _, index := range indexes {
-					key, err := index.GetRequestKey(ctx, kvblock.BlockHash(hash))
+					key, err := index.GetRequestKey(ctx, kvevents.ModelEngineKey("TestModel", hash))
 					if err != nil {
 						if !want {
 							continue

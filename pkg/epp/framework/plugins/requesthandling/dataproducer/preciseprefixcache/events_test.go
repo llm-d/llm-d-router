@@ -58,8 +58,12 @@ func TestExternalEventsRequireExplicitConfiguration(t *testing.T) {
 		stored := &kvevents.BlockStoredEvent{BlockHashes: []uint64{123}, Tokens: make([]uint32, 64), BlockSize: 64}
 		require.NoError(t, consumer.ProcessEvents(ctx, source, kvevents.EventBatch{Events: []kvevents.GenericEvent{stored}}))
 		index := p.kvCacheIndexer.KVBlockIndex()
-		key, err := index.GetRequestKey(ctx, kvblock.BlockHash(123))
+		tokens, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 		require.NoError(t, err)
+		keys, err := tokens.TokensToKVBlockKeys(kvblock.EmptyBlockHash, stored.Tokens, source.ModelName, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, keys)
+		key := keys[0]
 		hits, err := index.Lookup(ctx, []kvblock.BlockHash{key}, nil)
 		require.NoError(t, err)
 		require.Len(t, hits[key], 1)
