@@ -53,6 +53,7 @@ var (
 		ID:      types.NamespacedName{Name: name, Namespace: namespace},
 		Address: podip,
 		Labels:  labels,
+		ZMQPort: 6001,
 	}
 )
 
@@ -76,6 +77,7 @@ func TestEndpointMetadataEqual(t *testing.T) {
 		MetricsHost: "10.0.0.1:9000",
 		Labels:      map[string]string{"app": "vllm"},
 		RankIndex:   1,
+		ZMQPort:     6001,
 	}
 
 	assert.True(t, base.Equal(base.Clone()))
@@ -138,7 +140,7 @@ func TestEndpointMetadataEqual(t *testing.T) {
 		{
 			name: "zmq port",
 			mutate: func(meta *EndpointMetadata) {
-				meta.ZMQPort = 6001
+				meta.ZMQPort = 7002
 			},
 		},
 	}
