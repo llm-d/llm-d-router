@@ -1481,6 +1481,24 @@ func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
 	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
 }
 
+func TestNewWindowIndexDefaultsToPrefixIndexSize(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	idxCfg.KVBlockIndexConfig.InMemoryConfig.Size = 1000
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.IndexSlidingWindowGroups = true
+
+	p, err := New(ctx, "window-index", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, idxCfg.KVBlockIndexConfig.InMemoryConfig, p.kvEventsConfig.WindowIndexConfig)
+}
+
 type fakeSubscriberManager struct {
 	ids             []string
 	sourceEndpoints []string
