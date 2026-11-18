@@ -25,6 +25,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -398,6 +399,15 @@ func TestConditionalDecodeStep_CacheHit_Streaming(t *testing.T) {
 	}
 	if !strings.Contains(body, "[DONE]") {
 		t.Fatalf("expected [DONE] event, got: %s", body)
+	}
+}
+
+// forEachMissStatus runs test once for each status the step handles as a cache
+// miss.
+func forEachMissStatus(t *testing.T, test func(t *testing.T, status int)) {
+	t.Helper()
+	for _, status := range []int{http.StatusNoContent, http.StatusPreconditionFailed} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) { test(t, status) })
 	}
 }
 
