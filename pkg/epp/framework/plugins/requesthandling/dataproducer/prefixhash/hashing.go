@@ -114,6 +114,7 @@ func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, b
 	}
 	count := min((len(tokens)-1)/blockSizeTokens+1, maxPrefixBlocks)
 	blockHashes := make([]BlockHash, 0, count)
+	media := mmFeatureCursor{remaining: mmFeatures}
 
 	// The block encoding below reads the features in slice order, and the
 	// same media must hash stably regardless of which parser produced the
@@ -124,7 +125,9 @@ func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, b
 		slices.SortStableFunc(sorted, func(a, b fwkrequest.MultiModalFeature) int {
 			return a.Offset - b.Offset
 		})
-		mmFeatures = sorted
+		media.remaining = sorted
+		// Active entries overwrite only consumed entries in the owned copy.
+		media.active = sorted[:0]
 	}
 
 	// Different models should have different hashes even with the same body.
@@ -143,7 +146,11 @@ func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, b
 		block := HashBlock{Tokens: tokens[i*blockSizeTokens : min((i+1)*blockSizeTokens, len(tokens))]}
 		PutBlockHash(buf[:8], BlockHash(block.Hash()))
 		PutBlockHash(buf[8:], prevBlockHash)
-		if extra := mmBlockExtra(mmFeatures, i, blockSizeTokens, len(tokens)); len(extra) > 0 {
+		features := mmFeatures
+		if len(mmFeatures) > 1 {
+			features = media.overlapping(i*blockSizeTokens, min((i+1)*blockSizeTokens, len(tokens)))
+		}
+		if extra := mmBlockExtra(features, i, blockSizeTokens, len(tokens)); len(extra) > 0 {
 			var d xxhash.Digest
 			d.Reset()
 			_, _ = d.Write(buf[:])
@@ -156,6 +163,32 @@ func computeBlockHashes(request *scheduling.InferenceRequest, tokens []uint32, b
 	}
 
 	return blockHashes
+}
+
+// mmFeatureCursor retains spanning features while advancing through the
+// position-sorted input. Completed spans are removed even when an earlier
+// feature continues across later blocks.
+type mmFeatureCursor struct {
+	remaining []fwkrequest.MultiModalFeature
+	active    []fwkrequest.MultiModalFeature
+}
+
+func (c *mmFeatureCursor) overlapping(blockStart, blockEnd int) []fwkrequest.MultiModalFeature {
+	active := c.active[:0]
+	for _, f := range c.active {
+		if f.Offset+f.Length > blockStart {
+			active = append(active, f)
+		}
+	}
+	for len(c.remaining) > 0 && c.remaining[0].Offset < blockEnd {
+		f := c.remaining[0]
+		c.remaining = c.remaining[1:]
+		if f.Length > 0 && f.Offset+f.Length > blockStart {
+			active = append(active, f)
+		}
+	}
+	c.active = active
+	return active
 }
 
 // mmBlockExtra encodes the multimodal features overlapping block index i as
