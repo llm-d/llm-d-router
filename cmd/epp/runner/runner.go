@@ -73,6 +73,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/p2p"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/redis"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
@@ -727,6 +728,7 @@ func (r *Runner) registerInTreePlugins() {
 	// cross-replica syncers
 	// Alpha
 	fwkplugin.Register(redis.RedisSyncerType, fwkplugin.StabilityAlpha, redis.RedisSyncerFactory)
+	fwkplugin.Register(p2p.P2PSyncerType, fwkplugin.StabilityAlpha, p2p.P2PSyncerFactory)
 
 	// data layer DCGM source/extractor
 	// Alpha
@@ -1124,12 +1126,18 @@ func (r *Runner) resolveDiscovery(rawConfig *configapiv1.EndpointPickerConfig) (
 // setupPeerDiscovery runs the PeerDiscovery plugin referenced by
 // rawConfig.DataLayer.Discovery.Peers, when set, as a manager runnable on
 // every replica. Discovered peers land in a store handed to the configured
-// cross-replica syncer when it consumes them. The plugin is expected to have
-// been instantiated and registered in r.PluginHandle by
+// cross-replica syncer when it consumes them. A syncer that consumes them
+// fails setup without it, since it would never exchange state. The plugin is
+// expected to have been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo.
 func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.EndpointPickerConfig, poolNamespace string) error {
 	dl := rawConfig.DataLayer
 	if dl == nil || dl.Discovery == nil || dl.Discovery.Peers == nil {
+		syncer := r.PluginHandle.CrossReplicaSyncer()
+		if _, ok := syncer.(fwkdl.PeerConsumer); ok {
+			return fmt.Errorf("peerDiscovery: cross-replica syncer %q consumes the peer set, but dataLayer.discovery.peers is not configured",
+				syncer.TypedName().Name)
+		}
 		return nil
 	}
 
