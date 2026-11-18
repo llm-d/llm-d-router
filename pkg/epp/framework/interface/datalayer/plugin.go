@@ -66,6 +66,13 @@ type NotificationExtractor interface {
 	GVK() schema.GroupVersionKind
 }
 
+// ExtractorBinder validates and owns a source's extractors when their input
+// differs from the lifecycle events delivered to that source.
+// Bindings are established before endpoint discovery starts.
+type ExtractorBinder interface {
+	AppendExtractor(ext plugin.Plugin) error
+}
+
 // PollingDispatcher is the framework's contract for polling sources. The
 // source owns its extractors and runs them with typed input each tick.
 //
@@ -80,7 +87,7 @@ type NotificationExtractor interface {
 type PollingDispatcher interface {
 	plugin.Plugin
 	Dispatch(ctx context.Context, ep Endpoint) error
-	AppendExtractor(ext plugin.Plugin) error
+	ExtractorBinder
 	Interval() time.Duration
 }
 

@@ -55,6 +55,8 @@ const PluginType = "precise-prefix-cache-producer"
 
 // PluginConfig configures the precise-prefix-cache-producer.
 type PluginConfig struct {
+	// ExternalEvents consumes decoded batches from a configured kv-events-source.
+	ExternalEvents       bool                          `json:"externalEvents"`
 	TokenProcessorConfig *kvblock.TokenProcessorConfig `json:"tokenProcessorConfig"`
 	IndexerConfig        *kvcache.Config               `json:"indexerConfig"`
 	KVEventsConfig       *kvevents.Config              `json:"kvEventsConfig"`
@@ -115,7 +117,8 @@ type Producer struct {
 
 	// Plugin-lifetime, not request-scoped: SubscriberManager binds each
 	// subscriber's goroutine to the ctx passed at registration.
-	subscriberCtx context.Context
+	subscriberCtx  context.Context
+	externalEvents *kvevents.Pool
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
@@ -146,6 +149,9 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		return nil, fmt.Errorf("failed to create %s plugin: %w", PluginType, err)
 	}
 
+	if parameters.ExternalEvents {
+		return &externalEventsProducer{Producer: p}, nil
+	}
 	return p, nil
 }
 
@@ -192,10 +198,12 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
 	}
 	indexer.SetCacheFormats(pool.CacheFormats())
-	pool.Start(ctx)
+	if !config.ExternalEvents {
+		pool.Start(ctx)
+	}
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)
-	if config.KVEventsConfig.ZMQEndpoint != "" {
+	if config.KVEventsConfig.ZMQEndpoint != "" && !config.ExternalEvents {
 		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
 			config.KVEventsConfig.ZMQEndpoint, "", "", config.KVEventsConfig.TopicFilter, false); err != nil {
 			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
@@ -209,7 +217,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 
 	prefixmetrics.Register()
 
-	return &Producer{
+	producer := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: name},
 		kvCacheIndexer:     indexer,
 		subscribersManager: subscribersManager,
@@ -223,7 +231,12 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		speculativeEnabled: config.SpeculativeIndexing,
 		blockSizeTokens:    tokenProcessor.BlockSize(),
 		subscriberCtx:      ctx,
-	}, nil
+	}
+	if config.ExternalEvents {
+		producer.externalEvents = pool
+		go func() { <-ctx.Done(); pool.Shutdown(ctx) }()
+	}
+	return producer, nil
 }
 
 // TypedName returns the plugin's registered type and name.

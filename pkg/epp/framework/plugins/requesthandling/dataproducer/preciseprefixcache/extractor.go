@@ -35,7 +35,7 @@ var _ fwkdl.EndpointExtractor = &Producer{}
 // enabled. Deleted endpoints and endpoints that stop matching lose their
 // subscriber and cached index entries.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
-	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
+	if p.externalEvents != nil || !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
 	}
 	meta := event.Endpoint.GetMetadata()
