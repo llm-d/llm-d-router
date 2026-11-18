@@ -23,20 +23,21 @@ import (
 )
 
 // EndpointReserver is implemented by data producers that track per-endpoint
-// in-flight load. The director calls ReserveResult as soon as scheduling
-// completes, so that concurrently-scheduled requests observe each pick
-// immediately instead of waiting for the post-dispatch (PreRequest)
-// accounting to land. Without reservations, a burst of requests scheduled
-// in parallel is scored against the same pre-pick snapshot and converges on
-// the same endpoint (the thundering herd).
+// in-flight load. The scheduler calls ReserveProfileResult immediately after
+// a profile's picker has selected an endpoint, so that concurrently-scheduled
+// requests observe each pick instead of waiting for the post-dispatch
+// (PreRequest) accounting to land. Without reservations, a burst of requests
+// scheduled in parallel is scored against the same pre-pick snapshot and
+// converges on the same endpoint (the thundering herd).
 //
 // Reservations are request-scoped: each is converted into the real in-flight
-// counters when the request is dispatched (PreRequest) and reclaimed by the
-// plugin-state janitor when a request is abandoned after scheduling.
+// counters when the request is dispatched (PreRequest) and released through
+// RequestAbandoned when the request is not forwarded, with the staleness
+// janitor as a fallback.
 type EndpointReserver interface {
-	// ReserveResult reserves the primary target of every profile in result
-	// on behalf of the request identified by requestID. ctx must be the
-	// request's lifetime context so the reservation is reclaimed if the
+	// ReserveProfileResult reserves the primary target of profileName's run
+	// result on behalf of the request identified by requestID. ctx must be
+	// the request's lifetime context so the reservation is reclaimed if the
 	// request never dispatches.
-	ReserveResult(ctx context.Context, requestID string, result *fwksched.SchedulingResult)
+	ReserveProfileResult(ctx context.Context, requestID, profileName string, result *fwksched.ProfileRunResult)
 }

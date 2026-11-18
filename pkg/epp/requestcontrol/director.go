@@ -427,13 +427,6 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	reqCtx.SchedulingRequest.SchedulingResult = result
 
-	// Reserve the picked endpoints at scheduling time: concurrent
-	// scheduling cycles must observe this request's decisions immediately,
-	// not only after the PreRequest accounting lands. The reservation is
-	// request-scoped: PreRequest converts it into the real counters, and the
-	// plugin-state janitor reclaims it if this request never dispatches.
-	d.reservePickedEndpoints(ctx, reqCtx.SchedulingRequest, result)
-
 	// Prepare Request (Populates RequestContext and call PreRequest plugins)
 	// Insert target endpoint to instruct Envoy to route requests to the specified target pod and attach the port number.
 	// Invoke PreRequest registered plugins.
@@ -684,31 +677,6 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 // Must be called before the Director serves traffic.
 func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 	d.requestEvictor = re
-}
-
-// reservePickedEndpoints asks every configured EndpointReserver (each
-// inflight-load-producer implements it) to reserve the primary target of
-// every profile in the scheduling result, so scorers and detectors reading
-// any producer's load see the picks. The producer list is ordered by the
-// data-dependency DAG and then by name. Note: a producer configured for the
-// request-handling phase moves to requestHandlingDataProducers and is not
-// consulted here.
-func (d *Director) reservePickedEndpoints(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
-	for _, r := range findEndpointReservers(d.requestControlPlugins.dataProducerPlugins) {
-		r.ReserveResult(ctx, request.RequestID, result)
-	}
-}
-
-// findEndpointReservers returns the EndpointReserver implementations among
-// the scheduling-phase data producers, in list order.
-func findEndpointReservers(producers []fwkrh.DataProducer) []fwkrh.EndpointReserver {
-	var reservers []fwkrh.EndpointReserver
-	for _, plugin := range producers {
-		if r, ok := plugin.(fwkrh.EndpointReserver); ok {
-			reservers = append(reservers, r)
-		}
-	}
-	return reservers
 }
 
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {

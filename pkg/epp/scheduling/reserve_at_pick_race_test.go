@@ -127,10 +127,8 @@ func runBurst(t *testing.T, withReservations bool, staggerStart time.Duration) m
 	preload := []int{2, 2, 2, 1}
 	for i, n := range preload {
 		for j := 0; j < n; j++ {
-			prod.ReserveResult(ctx, fmt.Sprintf("preload-%d-%d", i, j),
-				&fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{
-					"default": {TargetEndpoints: []fwksched.Endpoint{eps[i]}},
-				}})
+			prod.ReserveProfileResult(ctx, fmt.Sprintf("preload-%d-%d", i, j), "default",
+				&fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{eps[i]}})
 		}
 	}
 
@@ -162,8 +160,7 @@ func runBurst(t *testing.T, withReservations bool, staggerStart time.Duration) m
 				return
 			}
 			if withReservations {
-				prod.ReserveResult(ctx, fmt.Sprintf("req-%d", i),
-					&fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{"default": result}})
+				prod.ReserveProfileResult(ctx, fmt.Sprintf("req-%d", i), "default", result)
 			}
 			mu.Lock()
 			counts[result.TargetEndpoints[0].GetMetadata().ID.Name]++
@@ -175,7 +172,7 @@ func runBurst(t *testing.T, withReservations bool, staggerStart time.Duration) m
 	return counts
 }
 
-func TestReserveAtPickRace(t *testing.T) {
+func TestReservationSpreadsPacedBurst(t *testing.T) {
 	fair := burstSize / numEndpoints
 
 	// Both arms use the same pacing: goroutines released staggerStart apart,
@@ -254,17 +251,15 @@ func TestReserveConvertsAtPreRequest(t *testing.T) {
 	ep := eps[0]
 	eid := ep.GetMetadata().ID.String()
 
-	result := &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{
-		"default": {TargetEndpoints: []fwksched.Endpoint{ep}},
-	}}
-	prod.ReserveResult(ctx, "req-convert", result)
+	result := &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{ep}}
+	prod.ReserveProfileResult(ctx, "req-convert", "default", result)
 
 	if got := prod.GetRequests(eid); got != 0 {
 		t.Errorf("real counter should be 0 before PreRequest, got %d", got)
 	}
 
-	req := &fwksched.InferenceRequest{RequestID: "req-convert", SchedulingResult: result}
-	if err := prod.PreRequest(ctx, req, result); err != nil {
+	req := &fwksched.InferenceRequest{RequestID: "req-convert", SchedulingResult: &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{"default": result}}}
+	if err := prod.PreRequest(ctx, req, req.SchedulingResult); err != nil {
 		t.Fatalf("PreRequest: %v", err)
 	}
 	if got := prod.GetRequests(eid); got != 1 {
@@ -281,16 +276,14 @@ func TestPreRequestDoesNotReleaseForeignReservation(t *testing.T) {
 	ep := eps[0]
 	eid := ep.GetMetadata().ID.String()
 
-	result := &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{
-		"default": {TargetEndpoints: []fwksched.Endpoint{ep}},
-	}}
+	result := &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{ep}}
 	// req-a reserves; req-b never does.
-	prod.ReserveResult(ctx, "req-a", result)
+	prod.ReserveProfileResult(ctx, "req-a", "default", result)
 
 	// req-b's PreRequest on the same endpoint must not touch req-a's
 	// reservation.
-	reqB := &fwksched.InferenceRequest{RequestID: "req-b", SchedulingResult: result}
-	if err := prod.PreRequest(ctx, reqB, result); err != nil {
+	reqB := &fwksched.InferenceRequest{RequestID: "req-b", SchedulingResult: &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{"default": result}}}
+	if err := prod.PreRequest(ctx, reqB, reqB.SchedulingResult); err != nil {
 		t.Fatalf("PreRequest: %v", err)
 	}
 	// req-b's real accounting landed (1 request) and req-a's reservation is
@@ -322,10 +315,8 @@ func TestAbandonedReservationReclaimed(t *testing.T) {
 	ep := eps[0]
 	eid := ep.GetMetadata().ID.String()
 
-	result := &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{
-		"default": {TargetEndpoints: []fwksched.Endpoint{ep}},
-	}}
-	prod.ReserveResult(ctx, "req-abandoned", result)
+	result := &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{ep}}
+	prod.ReserveProfileResult(ctx, "req-abandoned", "default", result)
 
 	state := dumpReservations(t, prod)
 	for _, e := range state.Endpoints {
@@ -342,6 +333,47 @@ func TestAbandonedReservationReclaimed(t *testing.T) {
 	for _, e := range state.Endpoints {
 		if e.Endpoint == eid && e.Reservations != 0 {
 			t.Errorf("reservations after reclaim: want 0, got %d", e.Reservations)
+		}
+	}
+}
+
+// TestAbandonAfterPreRequestRollsBackBothCounters covers the case where
+// prepareRequest fails partway: the producer's PreRequest has already
+// converted the reservation into real counters, and RequestAbandoned must
+// roll those back too, because the request is never forwarded.
+func TestAbandonAfterPreRequestRollsBackBothCounters(t *testing.T) {
+	ctx := context.Background()
+	prod, _, eps, _ := newRig(t)
+	ep := eps[0]
+	eid := ep.GetMetadata().ID.String()
+
+	result := &fwksched.ProfileRunResult{TargetEndpoints: []fwksched.Endpoint{ep}}
+	prod.ReserveProfileResult(ctx, "req-flaky", "default", result)
+
+	req := &fwksched.InferenceRequest{RequestID: "req-flaky", SchedulingResult: &fwksched.SchedulingResult{ProfileResults: map[string]*fwksched.ProfileRunResult{"default": result}}}
+	if err := prod.PreRequest(ctx, req, req.SchedulingResult); err != nil {
+		t.Fatalf("PreRequest: %v", err)
+	}
+	// Conversion happened: real counter up, reservation gone.
+	state := dumpReservations(t, prod)
+	for _, e := range state.Endpoints {
+		if e.Endpoint == eid {
+			if e.Requests != 1 || e.Reservations != 0 {
+				t.Fatalf("after PreRequest: want requests=1 reservations=0, got %d/%d", e.Requests, e.Reservations)
+			}
+		}
+	}
+
+	// The request is abandoned after PreRequest ran.
+	prod.RequestAbandoned(ctx, req)
+
+	// Both the real counter and any leftover state are rolled back.
+	state = dumpReservations(t, prod)
+	for _, e := range state.Endpoints {
+		if e.Endpoint == eid {
+			if e.Requests != 0 || e.Reservations != 0 {
+				t.Errorf("after abandon: want requests=0 reservations=0, got %d/%d", e.Requests, e.Reservations)
+			}
 		}
 	}
 }

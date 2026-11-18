@@ -127,6 +127,13 @@ func (c *Config) WithResponseStreamingPlugins(plugins ...fwkrh.ResponseBodyProce
 	return c
 }
 
+// SchedulingDataProducers returns the DataProducer plugins that run in the
+// scheduling phase, ordered by the data-dependency DAG and then by name.
+// The scheduler consults these for EndpointReserver implementations.
+func (c *Config) SchedulingDataProducers() []fwkrh.DataProducer {
+	return c.dataProducerPlugins
+}
+
 // WithDataProducerPlugins sets the given plugins as the DataProducer plugins
 // that run in fwkrh.DataProducerPhaseScheduling.
 func (c *Config) WithDataProducerPlugins(plugins ...fwkrh.DataProducer) *Config {

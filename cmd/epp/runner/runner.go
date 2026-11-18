@@ -539,7 +539,8 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
-	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
+	scheduler := scheduling.NewSchedulerWithConfig(
+		r.schedulerConfig.WithReservers(endpointReservers(r.requestControlConfig)))
 
 	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
 		setupLog.Error(err, "Plugin stability validation failed")
@@ -1345,7 +1346,8 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)
 
-	scheduler := scheduling.NewSchedulerWithConfig(r.schedulerConfig)
+	scheduler := scheduling.NewSchedulerWithConfig(
+		r.schedulerConfig.WithReservers(endpointReservers(r.requestControlConfig)))
 
 	// Per-request priority comes from --objectives-file; a request whose
 	// objective is not loaded gets Director.defaultPriority.
@@ -1496,4 +1498,17 @@ func toRawMap(cfg *configapiv1.EndpointPickerConfig) map[string]any {
 		}
 	}
 	return rawMap
+}
+
+// endpointReservers returns the EndpointReserver implementations among the
+// scheduling-phase data producers, so the scheduler can reserve picked
+// endpoints for each request.
+func endpointReservers(cfg *requestcontrol.Config) []fwkrh.EndpointReserver {
+	var reservers []fwkrh.EndpointReserver
+	for _, plugin := range cfg.SchedulingDataProducers() {
+		if r, ok := plugin.(fwkrh.EndpointReserver); ok {
+			reservers = append(reservers, r)
+		}
+	}
+	return reservers
 }

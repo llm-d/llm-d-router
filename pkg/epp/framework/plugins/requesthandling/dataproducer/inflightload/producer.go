@@ -843,50 +843,44 @@ func (e *reservationEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
 	}
 }
 
-// ReserveResult implements fwksched.EndpointReserver: the director calls it
-// as soon as scheduling completes, so concurrent scheduling cycles see this
-// request's picks immediately. Each profile's primary target is
-// reserved under the request's plugin state and converted to the real
-// in-flight counters at PreRequest; an abandoned request's reservations are
-// reclaimed by the janitor through the liveness binding on ctx.
-func (p *InFlightLoadProducer) ReserveResult(ctx context.Context, requestID string, result *fwksched.SchedulingResult) {
+// ReserveProfileResult implements fwkrh.EndpointReserver: the scheduler
+// calls it immediately after a profile's picker has selected an endpoint,
+// so concurrent scheduling cycles see this request's pick immediately. The
+// primary target is reserved under the request's plugin state and converted
+// to the real in-flight counters at PreRequest; an abandoned request's
+// reservations are released by RequestAbandoned (janitor as fallback).
+func (p *InFlightLoadProducer) ReserveProfileResult(ctx context.Context, requestID, profileName string, result *fwksched.ProfileRunResult) {
 	if result == nil || requestID == "" || p.PluginState == nil {
 		return
 	}
-	reserved := false
-	for profileName, profileResult := range result.ProfileResults {
-		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
-			continue
-		}
-		endpoint := profileResult.TargetEndpoints[0]
-		if endpoint == nil || endpoint.GetMetadata() == nil {
-			continue
-		}
-		eid := endpoint.GetMetadata().ID.String()
-
-		// The request's uncached-token estimate for this endpoint was
-		// recorded by the Produce phase; reserve that much token load.
-		var tokens int64
-		if v, ok := endpoint.Get(p.uncachedRequestTokensDk); ok {
-			if ut, ok2 := v.(*attrconcurrency.UncachedRequestTokens); ok2 && ut != nil {
-				tokens = ut.Tokens
-			}
-		}
-
-		requestCtr := p.reservationTracker.inc(eid)
-		tokenCtr := p.reservationTokenTracker.add(eid, tokens)
-
-		entry := &reservationEntry{requestCtr: requestCtr, tokenCtr: tokenCtr}
-		entry.requests.Store(1)
-		entry.tokens.Store(tokens)
-		p.PluginState.Write(requestID, fwkplugin.StateKey(reservationKey(eid, profileName)), entry)
-		reserved = true
+	if len(result.TargetEndpoints) == 0 {
+		return
 	}
+	endpoint := result.TargetEndpoints[0]
+	if endpoint == nil || endpoint.GetMetadata() == nil {
+		return
+	}
+	eid := endpoint.GetMetadata().ID.String()
+
+	// The request's uncached-token estimate for this endpoint was recorded
+	// by the Produce phase; reserve that much token load.
+	var tokens int64
+	if v, ok := endpoint.Get(p.uncachedRequestTokensDk); ok {
+		if ut, ok2 := v.(*attrconcurrency.UncachedRequestTokens); ok2 && ut != nil {
+			tokens = ut.Tokens
+		}
+	}
+
+	requestCtr := p.reservationTracker.inc(eid)
+	tokenCtr := p.reservationTokenTracker.add(eid, tokens)
+
+	entry := &reservationEntry{requestCtr: requestCtr, tokenCtr: tokenCtr}
+	entry.requests.Store(1)
+	entry.tokens.Store(tokens)
+	p.PluginState.Write(requestID, fwkplugin.StateKey(reservationKey(eid, profileName)), entry)
 	// Bind the request's lifetime so the janitor reclaims reservations from
 	// requests that were scheduled but never dispatched.
-	if reserved {
-		p.PluginState.BindLiveness(ctx, requestID)
-	}
+	p.PluginState.BindLiveness(ctx, requestID)
 }
 
 // reservationKey namespaces a pick-time reservation under the request's
@@ -895,12 +889,20 @@ func reservationKey(endpointID, profileName string) string {
 	return endpointID + "|" + profileName + "|reserved"
 }
 
-// RequestAbandoned implements fwkrh.RequestAbandoned: the director calls it on
-// every path that exits after scheduling but before PreRequest (including
-// flow-control rejection), releasing the request's pick-time reservations
-// immediately instead of waiting for the staleness janitor. At this point no
-// addedTokens entries exist yet (those are written at PreRequest), so deleting
-// the request's state rolls back exactly its reservations.
+// RequestAbandoned implements fwkrh.RequestAbandoned: the director calls it
+// when a request leaves HandleRequest without being forwarded, releasing the
+// request's plugin state immediately instead of waiting for the staleness
+// janitor. Two cases arise:
+//
+//   - The request exits before PreRequest: only pick-time reservation
+//     entries exist, and deleting them rolls back the reservations.
+//   - prepareRequest fails partway: runPreRequestPlugins does not stop at
+//     the first error, so this producer's PreRequest may already have
+//     converted the reservation into real in-flight counters. Deleting the
+//     request's state then rolls those back too, which is correct: the
+//     request is never forwarded. (Before RequestAbandoned existed, these
+//     counters stayed elevated until the request's context ended and the
+//     janitor reaped the entries.)
 func (p *InFlightLoadProducer) RequestAbandoned(_ context.Context, request *fwksched.InferenceRequest) {
 	if request == nil || request.RequestID == "" || p.PluginState == nil {
 		return

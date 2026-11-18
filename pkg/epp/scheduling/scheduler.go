@@ -33,6 +33,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -50,12 +51,19 @@ func NewSchedulerWithConfig(config *SchedulerConfig) *Scheduler {
 	return &Scheduler{
 		profileHandler: config.profileHandler,
 		profiles:       config.profiles,
+		reservers:      config.reservers,
 	}
 }
 
 type Scheduler struct {
 	profileHandler fwksched.ProfileHandler
 	profiles       map[string]fwksched.SchedulerProfile
+	// reservers, when non-empty, are consulted after each successful profile
+	// run to reserve the picked endpoint for the request (thundering-herd
+	// prevention). Reserve happens before ProcessResults and before the
+	// scheduler's own completion logging, so concurrent scheduling cycles
+	// observe the pick as early as possible.
+	reservers []fwkrh.EndpointReserver
 }
 
 // Schedule finds the target pod based on metrics and the requested lora adapter.
@@ -116,6 +124,14 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 				}
 				profileRunErrors[name] = fmt.Errorf("profile %q: %w", name, err)
 			} else {
+				// Reserve the picked endpoint immediately: the request and
+				// this profile's result are both in scope here, and this is
+				// the earliest point after the pick where the reservation can
+				// be recorded. Later work (ProcessResults, logging) must not
+				// delay its visibility to concurrently-scheduled requests.
+				for _, r := range s.reservers {
+					r.ReserveProfileResult(ctx, request.RequestID, name, profileRunResult)
+				}
 				if verboseEnabled {
 					loggerVerbose.Info("Completed running scheduler profile successfully", "profile", name)
 				}
