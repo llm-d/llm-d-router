@@ -69,6 +69,9 @@ type zmqSubscriber struct {
 	lastLiveSeq       uint64
 	hasLastLiveSeq    bool
 	lastReplayFailure time.Time
+	// liveOnly is true while live events are indexed without a snapshot or
+	// replay base after a failed load. Only setLiveOnly writes it.
+	liveOnly bool
 	// publisherID identifies the engine process behind the live stream; it
 	// changes only when the engine restarts.
 	publisherID []byte
@@ -136,6 +139,8 @@ func batchPublisherID(payload []byte) []byte {
 // This loop will run until the provided context is canceled.
 func (z *zmqSubscriber) Start(ctx context.Context) {
 	logger := log.FromContext(ctx).WithName("zmq-subscriber")
+	// A subscriber that stops leaves the live-only count.
+	defer z.setLiveOnly(false)
 
 	for {
 		select {
@@ -205,14 +210,6 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 
 	debugLogger := logger.V(logging.DEBUG)
 	for {
-		// Report the state the previous message left before waiting for the next.
-		if z.replayEndpoint != "" || z.snapshotEndpoint != "" {
-			liveOnly := 0.0
-			if !z.hasLastSeq {
-				liveOnly = 1
-			}
-			metrics.LiveOnly.WithLabelValues(z.podIdentifier).Set(liveOnly)
-		}
 		msg, err := sub.Recv()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -316,6 +313,7 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			if !rebuilt {
 				// Without a base the pod is indexed from live events alone,
 				// as it is with neither endpoint set.
+				z.setLiveOnly(true)
 				z.addTask(ctx, topic, seq, payload)
 				continue
 			}
@@ -332,6 +330,9 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		z.addTask(ctx, topic, seq, payload)
 		z.lastSeq = seq
 		z.hasLastSeq = true
+		// Every event is indexed from here on, also after a restart at
+		// sequence 0 whose rebuild failed.
+		z.setLiveOnly(false)
 	}
 }
 
@@ -473,6 +474,19 @@ func (z *zmqSubscriber) invalidateReplay(topic string) {
 	z.hasLastSeq = false
 }
 
+// setLiveOnly moves LiveOnlySubscribers when liveOnly changes.
+func (z *zmqSubscriber) setLiveOnly(liveOnly bool) {
+	if z.liveOnly == liveOnly {
+		return
+	}
+	z.liveOnly = liveOnly
+	if liveOnly {
+		metrics.LiveOnlySubscribers.Inc()
+	} else {
+		metrics.LiveOnlySubscribers.Dec()
+	}
+}
+
 // rebuild loads the publisher's current state from its snapshot, and falls
 // back to replaying its buffered events from the start.
 func (z *zmqSubscriber) rebuild(ctx context.Context, topic string) bool {
@@ -486,7 +500,7 @@ func (z *zmqSubscriber) rebuild(ctx context.Context, topic string) bool {
 // its cache state up to a sequence cut, and resumes the stream after the cut.
 // A failure starts the replay cooldown.
 func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool {
-	logger := log.FromContext(ctx).WithName("zmq-snapshot")
+	logger := log.FromContext(ctx).WithName("zmq-snapshot").WithValues("podIdentifier", z.podIdentifier)
 	started := time.Now()
 	cut, publisherID, batches, err := z.fetchSnapshot(ctx)
 	if err == nil && z.publisherID != nil && !bytes.Equal(publisherID, z.publisherID) {
@@ -526,6 +540,7 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 	if cut >= 0 {
 		z.lastSeq, z.hasLastSeq = uint64(cut), true
 	}
+	z.setLiveOnly(false)
 	metrics.SnapshotLoadDuration.Observe(time.Since(started).Seconds())
 	logger.Info("Snapshot loaded", "cut", cut, "batches", len(batches),
 		"duration", time.Since(started), "snapshotEndpoint", z.snapshotEndpoint)
@@ -567,7 +582,7 @@ func (z *zmqSubscriber) fetchSnapshot(ctx context.Context) (int64, []byte, [][]b
 
 // requestReplay requests buffered events starting from startSeq.
 func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool {
-	logger := log.FromContext(ctx).WithName("zmq-replay")
+	logger := log.FromContext(ctx).WithName("zmq-replay").WithValues("podIdentifier", z.podIdentifier)
 	debugLogger := logger.V(logging.DEBUG)
 
 	replayCtx, cancel := context.WithTimeout(ctx, replayTimeout)
@@ -707,6 +722,10 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				return false
 			}
 			z.lastReplayFailure = time.Time{}
+			if !z.resyncing {
+				// A resync rebuilds only the consumers that requested it.
+				z.setLiveOnly(false)
+			}
 			logger.Info("Replay complete", "replayed", replayed,
 				"attempts", attempt, "startSeq", startSeq,
 				"replayEndpoint", z.replayEndpoint)

@@ -153,14 +153,15 @@ var (
 		Help: metricsutil.HelpMsgWithStability(
 			"Total number of ZMQ subscriber errors", compbasemetrics.ALPHA),
 	}, []string{podIdentifierLabel, "operation"})
-	// LiveOnly reports, per pod with a snapshot or replay endpoint, whether the
-	// pod has no snapshot or replay base and is indexed from live events only.
-	LiveOnly = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Subsystem: routerSubsystem, Name: "kv_cache_events_live_only",
+	// LiveOnlySubscribers counts subscribers indexing live events without a
+	// snapshot or replay base after a load failed, from the first such event
+	// until the subscriber follows a complete event sequence again or is removed.
+	LiveOnlySubscribers = prometheus.NewGauge(prometheus.GaugeOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_events_live_only_subscribers",
 		Help: metricsutil.HelpMsgWithStability(
-			"1 while the pod is indexed from live events only, without a snapshot or replay base",
+			"Number of ZMQ subscribers indexing from live events only after a failed snapshot or replay load",
 			compbasemetrics.ALPHA),
-	}, []string{podIdentifierLabel})
+	})
 	// SnapshotLoadDuration observes successful snapshot loads, from the request
 	// until the snapshot's batches are queued for indexing.
 	SnapshotLoadDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -194,7 +195,7 @@ func Collectors() []prometheus.Collector {
 		DedupRemovedHashesSuppressed, DedupRemovedHashesForwarded,
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived, ZMQErrors,
-		LiveOnly, SnapshotLoadDuration,
+		LiveOnlySubscribers, SnapshotLoadDuration,
 		PoolQueueDepth, PoolCapacity,
 	}
 }
@@ -207,7 +208,6 @@ func CleanupSubscriber(podIdentifier string) {
 	SubscriberReconnections.DeleteLabelValues(podIdentifier)
 	MessagesReceived.DeleteLabelValues(podIdentifier)
 	ZMQErrors.DeletePartialMatch(prometheus.Labels{podIdentifierLabel: podIdentifier})
-	LiveOnly.DeleteLabelValues(podIdentifier)
 }
 
 var registerMetricsOnce = sync.Once{}
