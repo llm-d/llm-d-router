@@ -34,7 +34,7 @@ upstream. No-op otherwise.
 | `indexerConfig` | object | `kvcache.NewDefaultConfig()` | `kvcache.Indexer` config. |
 | `kvEventsConfig` | object | `kvevents.DefaultConfig()` | KV-events pool config. |
 | `kvEventsSourceRef` | string | _(none)_ | Name of a `kv-events-source` whose decoded batches this producer indexes. The producer then opens no subscribers of its own, and `kvEventsConfig` is rejected. |
-| `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions. |
+| `speculativeIndexing` | bool | `false` | Seed predicted entries on routing decisions, covering only whole engine blocks of the block size the endpoint reports in its metrics. An endpoint that reports none gets every router block. |
 | `speculativeTTL` | duration | `2s` | TTL for speculative entries. |
 | `seedDecodeWhenDisaggregated` | bool | `false` | Also seed a disaggregated request's speculative entries on its decode endpoint. By default only the prefill endpoint is seeded: the decode endpoint holds no KV until the P/D transfer lands, so a same-prefix request inside the TTL would see a full hit there, `prefix-based-pd-decider` would skip prefill, and the decode endpoint would recompute the whole prompt. Decode-side affinity for those requests comes from confirmed KV events. |
 
