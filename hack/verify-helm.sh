@@ -1333,3 +1333,19 @@ for c in "sidecar:${envoy_default_output}" "service:${proxy_service_render_outpu
     exit 1
   fi
 done
+
+echo "Verifying Envoy ext_proc message_timeout and GKE GCPBackendPolicy timeoutSec overrides..."
+envoy_timeout_output="${TEMP_DIR}/llm-d-router-standalone-envoy-timeout-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.proxy.extProcMessageTimeout=2400s > "${envoy_timeout_output}" || exit 1
+if ! grep -q -- 'message_timeout: 2400s$' "${envoy_timeout_output}"; then
+  echo "Standalone Envoy override did not render message_timeout: 2400s"
+  exit 1
+fi
+for pb in false true; do
+  gke_timeout_output="${TEMP_DIR}/llm-d-router-gateway-gke-timeout-${pb}.yaml"
+  ${HELM} template gke-timeout ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set provider.name=gke --set provider.gke.preferredBackends.enabled=${pb} --set provider.gke.backendTimeoutSec=2400 --set router.modelServers.matchLabels.app=llm-instance-gateway > "${gke_timeout_output}" || exit 1
+  if "${YQ}" -N 'select(.kind == "GCPBackendPolicy") | .spec.default.timeoutSec' "${gke_timeout_output}" | grep -qv '^2400$'; then
+    echo "GCPBackendPolicy timeoutSec override missed policies (preferredBackends=${pb})"
+    exit 1
+  fi
+done
