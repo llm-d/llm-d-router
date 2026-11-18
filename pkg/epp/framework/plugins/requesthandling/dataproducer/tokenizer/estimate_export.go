@@ -18,6 +18,7 @@ package tokenizer
 
 import (
 	"context"
+	"errors"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 )
@@ -36,7 +37,7 @@ import (
 // The returned TokenizedRequest is freshly allocated and never aliases body.
 func EstimatePromptTokens(ctx context.Context, body *fwkrequest.InferenceRequestBody) (*fwkrequest.TokenizedRequest, error) {
 	if body == nil {
-		return nil, nil
+		return nil, errors.New("nil request body")
 	}
 	b := estimateBackend{img: newImageEstimator(nil), vid: newVideoEstimator(nil)}
 	tp, err := b.produce(ctx, body)

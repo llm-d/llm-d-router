@@ -42,7 +42,7 @@ func newPlugin(t *testing.T, cfg string) *Plugin {
 	return p.(*Plugin)
 }
 
-func chatRequest(id, prefix, suffix string, priority int) *fwksched.InferenceRequest {
+func chatRequest(id, prefix, suffix string) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: id,
 		Body: &fwkrequest.InferenceRequestBody{
@@ -50,7 +50,6 @@ func chatRequest(id, prefix, suffix string, priority int) *fwksched.InferenceReq
 				Messages: []fwkrequest.Message{{Role: "user", Content: fwkrequest.Content{Raw: prefix + suffix}}},
 			},
 		},
-		Objectives: fwksched.RequestObjectives{Priority: priority},
 	}
 }
 
@@ -78,7 +77,7 @@ func TestClassifiesMissThenHitAfterPreRequest(t *testing.T) {
 	p := newPlugin(t, `{"warmupBlocks": 1}`)
 	prefix := strings.Repeat("shared conversation context. ", 400)
 
-	first := chatRequest("r1", prefix, " question one", 0)
+	first := chatRequest("r1", prefix, " question one")
 	if err := p.RequestHeader(ctx, first); err != nil {
 		t.Fatalf("RequestHeader: %v", err)
 	}
@@ -93,7 +92,7 @@ func TestClassifiesMissThenHitAfterPreRequest(t *testing.T) {
 		t.Fatalf("PreRequest: %v", err)
 	}
 
-	second := chatRequest("r2", prefix, " question two", 0)
+	second := chatRequest("r2", prefix, " question two")
 	if err := p.RequestHeader(ctx, second); err != nil {
 		t.Fatalf("RequestHeader: %v", err)
 	}
@@ -112,7 +111,7 @@ func TestDynamicAttributeSeesIndexUpdatesWhileQueued(t *testing.T) {
 	p := newPlugin(t, `{"warmupBlocks": 0, "minMatchedTokens": 0, "hitMatchRatio": 0.3}`)
 	prefix := strings.Repeat("shared conversation context. ", 400)
 
-	queued := chatRequest("queued", prefix, " waiting", 0)
+	queued := chatRequest("queued", prefix, " waiting")
 	if err := p.RequestHeader(ctx, queued); err != nil {
 		t.Fatalf("RequestHeader: %v", err)
 	}
@@ -120,7 +119,7 @@ func TestDynamicAttributeSeesIndexUpdatesWhileQueued(t *testing.T) {
 		t.Fatal("queued request should start as miss")
 	}
 
-	admitted := chatRequest("admitted", prefix, " done", 0)
+	admitted := chatRequest("admitted", prefix, " done")
 	_ = p.RequestHeader(ctx, admitted)
 	_ = p.PreRequest(ctx, admitted, nil)
 
@@ -132,7 +131,7 @@ func TestDynamicAttributeSeesIndexUpdatesWhileQueued(t *testing.T) {
 func TestRequestAbandonedClearsPending(t *testing.T) {
 	ctx := context.Background()
 	p := newPlugin(t, `{"warmupBlocks": 0}`)
-	r := chatRequest("r1", strings.Repeat("x", 8000), " y", 0)
+	r := chatRequest("r1", strings.Repeat("x", 8000), " y")
 	if err := p.RequestHeader(ctx, r); err != nil {
 		t.Fatalf("RequestHeader: %v", err)
 	}
@@ -155,15 +154,15 @@ func TestLookupDoesNotRefreshLRUOrder(t *testing.T) {
 	a := strings.Repeat("aaaaaaaaaaaaaaaa ", 200)
 	b := strings.Repeat("bbbbbbbbbbbbbbbb ", 200)
 
-	ra := chatRequest("a", a, "1", 0)
+	ra := chatRequest("a", a, "1")
 	_ = p.RequestHeader(ctx, ra)
 	_ = p.PreRequest(ctx, ra, nil)
-	rb := chatRequest("b", b, "1", 0)
+	rb := chatRequest("b", b, "1")
 	_ = p.RequestHeader(ctx, rb)
 	_ = p.PreRequest(ctx, rb, nil)
 
 	keysBefore := p.index.Keys()
-	rc := chatRequest("c", a, "2", 0)
+	rc := chatRequest("c", a, "2")
 	_ = p.RequestHeader(ctx, rc)
 	keysAfter := p.index.Keys()
 	if len(keysBefore) != len(keysAfter) {
@@ -179,7 +178,7 @@ func TestLookupDoesNotRefreshLRUOrder(t *testing.T) {
 func TestPreRequestRecordsZeroMatchedTokensBeforeSelfInsert(t *testing.T) {
 	ctx := context.Background()
 	p := newPlugin(t, `{"warmupBlocks": 0}`)
-	r := chatRequest("cold", strings.Repeat("unique cold prefix content. ", 400), " q", 0)
+	r := chatRequest("cold", strings.Repeat("unique cold prefix content. ", 400), " q")
 	_ = p.RequestHeader(ctx, r)
 	_ = p.PreRequest(ctx, r, nil)
 	v, ok := p.dispatchedMatchedTokens.Load(r.RequestID)
@@ -196,7 +195,7 @@ func TestResponseBodyRecordsMatchedVsCached(t *testing.T) {
 	ctx := context.Background()
 	p := newPlugin(t, `{"warmupBlocks": 0}`)
 	prefix := strings.Repeat("shared conversation context. ", 400)
-	r := chatRequest("r1", prefix, " q", 0)
+	r := chatRequest("r1", prefix, " q")
 	_ = p.RequestHeader(ctx, r)
 	_ = p.PreRequest(ctx, r, nil)
 	if _, ok := p.dispatchedMatchedTokens.Load(r.RequestID); !ok {
@@ -216,7 +215,7 @@ func TestResponseBodyRecordsMatchedVsCached(t *testing.T) {
 func TestResponseBodySkipsWhenCachedUsageAbsent(t *testing.T) {
 	ctx := context.Background()
 	p := newPlugin(t, `{"warmupBlocks": 0}`)
-	r := chatRequest("r1", strings.Repeat("shared conversation context. ", 400), " q", 0)
+	r := chatRequest("r1", strings.Repeat("shared conversation context. ", 400), " q")
 	_ = p.RequestHeader(ctx, r)
 	_ = p.PreRequest(ctx, r, nil)
 	p.ResponseBody(ctx, r, &fwkrh.Response{EndOfStream: true}, nil)
@@ -230,11 +229,11 @@ func TestMatchedTokensCapsPartialFinalBlock(t *testing.T) {
 	// Length not divisible by block size so the final block is partial.
 	prefix := strings.Repeat("a", 961*4)
 	p := newPlugin(t, `{"warmupBlocks": 0, "blockSizeTokens": 64, "minMatchedTokens": 0, "hitMatchRatio": 0.01}`)
-	seed := chatRequest("seed", prefix, "", 0)
+	seed := chatRequest("seed", prefix, "")
 	_ = p.RequestHeader(ctx, seed)
 	_ = p.PreRequest(ctx, seed, nil)
 
-	r := chatRequest("hit", prefix, "", 0)
+	r := chatRequest("hit", prefix, "")
 	_ = p.RequestHeader(ctx, r)
 	c := classOf(t, r)
 	uncapped := c.MatchedBlocks * 64
@@ -253,7 +252,7 @@ func TestWarmupNotReadyUntilIndexFilled(t *testing.T) {
 	ctx := context.Background()
 	p := newPlugin(t, `{"warmupBlocks": 100000}`)
 	prefix := strings.Repeat("shared conversation context. ", 400)
-	r := chatRequest("r1", prefix, " q", 0)
+	r := chatRequest("r1", prefix, " q")
 	if err := p.RequestHeader(ctx, r); err != nil {
 		t.Fatalf("RequestHeader: %v", err)
 	}
