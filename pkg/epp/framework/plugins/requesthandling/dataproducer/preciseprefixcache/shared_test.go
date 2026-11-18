@@ -64,8 +64,7 @@ func TestKVEventsSourceRefBindsTheIndex(t *testing.T) {
 
 	ctx := handle.Context()
 	require.NoError(t, p.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: newEndpoint("pod", "127.0.0.1")}))
-	subscribers, _ := p.subscribersManager.GetActiveSubscribers()
-	require.Empty(t, subscribers, "a producer bound to a source opens no subscribers of its own")
+	require.Nil(t, p.subscribersManager, "a producer bound to a source opens no subscribers of its own")
 
 	eventSource := kvevents.EventSource{Endpoint: "127.0.0.1:8080", ModelName: "model"}
 	stored := &kvevents.BlockStoredEvent{BlockHashes: []uint64{123}, Tokens: make([]uint32, 64), BlockSize: 64}

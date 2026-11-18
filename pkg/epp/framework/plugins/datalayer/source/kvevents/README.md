@@ -46,8 +46,10 @@ separately.
 
 A consumer that returns an error or panics is logged and reset for that endpoint,
 and the other consumers keep their state for that batch. The source then rebuilds
-the endpoint from its snapshot or replay buffer, which resets every consumer of that
-endpoint and delivers the rebuilt state to all of them. Rebuilds for one endpoint
+the endpoint from its snapshot or replay buffer for the failed consumers only: they
+are reset again when the rebuilt state arrives, receive it, and skip the live batches
+it covers. The other consumers keep their state and the live stream. A failed
+rebuild leaves the other consumers alone and is retried. Rebuilds for one endpoint
 are at least 30 seconds apart. With neither recovery port configured, the reset
 consumer rebuilds from live events alone.
 

@@ -112,7 +112,7 @@ func coveredEngineKeys(ev *BlockStoredEvent, engineKeys []kvblock.BlockHash,
 	return engineKeys[:min(covered, len(engineKeys))]
 }
 
-func blockStoredEventDigestible(ev *BlockStoredEvent, canonicalBlockSize int) (bool, string) {
+func blockStoredEventDigestible(ev *BlockStoredEvent, specKind KVCacheSpecKind, canonicalBlockSize int) (bool, string) {
 	if ev.LookaheadToken != nil {
 		if ev.BlockSize <= 0 {
 			return false, "invalid_block_size"
@@ -132,7 +132,7 @@ func blockStoredEventDigestible(ev *BlockStoredEvent, canonicalBlockSize int) (b
 			return false, "non_dense_block_span"
 		}
 	}
-	if !isPrefixIndexableSpecKind(ev.KVCacheSpecKind) {
+	if !isPrefixIndexableSpecKind(specKind) {
 		return false, "unsupported_cache_kind"
 	}
 	if len(ev.Tokens) > 0 && len(ev.Tokens) < canonicalBlockSize {
@@ -460,6 +460,13 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		if podID == "" {
 			podID = p.adapter.ShardingKey(msg)
 		}
+		if p.consumer != nil {
+			source := EventSource{Endpoint: podID, Sequence: msg.Sequence, Retired: msg.retire, Resync: msg.resync}
+			if err := p.consumer.Reset(ctx, source); err != nil {
+				logger.Error(err, "Failed to reset KV event consumer", "endpoint", podID)
+			}
+			return
+		}
 		p.clearPod(ctx, podID, msg.retire)
 		return
 	}
@@ -505,7 +512,7 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	}
 
 	if p.consumer != nil {
-		source := EventSource{Endpoint: podID, ModelName: modelName, Sequence: msg.Sequence}
+		source := EventSource{Endpoint: podID, ModelName: modelName, Sequence: msg.Sequence, Resync: msg.resync}
 		if err := p.consumer.ProcessEvents(ctx, source, batch); err != nil {
 			logger.Error(err, "Failed to consume KV events", "endpoint", podID)
 			p.clearPod(ctx, podID, false)
@@ -686,9 +693,8 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 	for _, genericEvent := range batch.Events {
 		switch ev := genericEvent.(type) {
 		case *BlockStoredEvent:
-			// Metadata inference must not change the batch seen by other consumers.
-			stored := *ev
-			ev = &stored
+			// The batch is shared with other consumers, so the inferred kind stays local.
+			specKind := ev.KVCacheSpecKind
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
 
 			// Scope for reference-counting this store against duplicate removes.
@@ -709,41 +715,41 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			// Create PodEntry for this specific event's device tier.
 			podEntries := []kvblock.PodEntry{{PodIdentifier: podIdentifier, DeviceTier: deviceTier}}
-			hasExplicitKind := ev.KVCacheSpecKind != ""
+			hasExplicitKind := specKind != ""
 			if ev.GroupIdx != nil {
 				g := kvblock.GroupID(*ev.GroupIdx)
-				if ev.KVCacheSpecKind == "" {
+				if specKind == "" {
 					if meta, found := p.groupCatalog.Get(podIdentifier, g); found {
-						ev.KVCacheSpecKind = KVCacheSpecKind(meta.Kind)
+						specKind = KVCacheSpecKind(meta.Kind)
 					}
 				}
 				podEntries[0].HasGroup = true
 				podEntries[0].GroupIdx = g
 			}
 
-			digestible, reason := blockStoredEventDigestible(ev, p.tokenProcessor.BlockSize())
-			if ev.GroupIdx != nil && len(ev.Tokens) > 0 && ev.KVCacheSpecKind != "" &&
+			digestible, reason := blockStoredEventDigestible(ev, specKind, p.tokenProcessor.BlockSize())
+			if ev.GroupIdx != nil && len(ev.Tokens) > 0 && specKind != "" &&
 				(digestible || reason == "unsupported_cache_kind") {
 				g := kvblock.GroupID(*ev.GroupIdx)
 				// A dense engine stream can use a different block size than the
 				// router. Prefer its larger geometry over auxiliary streams.
 				if meta, found := p.groupCatalog.Get(podIdentifier, g); found &&
-					meta.Kind == string(ev.KVCacheSpecKind) && meta.BlockSize > ev.BlockSize {
+					meta.Kind == string(specKind) && meta.BlockSize > ev.BlockSize {
 					digestible, reason = false, "conflicting_block_size"
 				} else if hasExplicitKind {
 					p.groupCatalog.Learn(podIdentifier, g, kvblock.GroupMetadata{
-						Kind:              string(ev.KVCacheSpecKind),
+						Kind:              string(specKind),
 						BlockSize:         ev.BlockSize,
 						SlidingWindowSize: ev.KVCacheSpecSlidingWindowSize,
 					})
 				}
 			}
 			if !digestible {
-				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(specKind), reason).Inc()
 				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
 					"podIdentifier", podIdentifier,
 					"groupIdx", ev.GroupIdx,
-					"cacheKind", ev.KVCacheSpecKind,
+					"cacheKind", specKind,
 					"reason", reason,
 					"numTokens", len(ev.Tokens),
 					"numBlockHashes", len(ev.BlockHashes),
@@ -753,11 +759,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			if ev.LoraID != nil && (ev.LoraName == nil || *ev.LoraName == "") {
 				const reason = "unresolved_lora_adapter"
-				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+				metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(specKind), reason).Inc()
 				log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
 					"podIdentifier", podIdentifier,
 					"groupIdx", ev.GroupIdx,
-					"cacheKind", ev.KVCacheSpecKind,
+					"cacheKind", specKind,
 					"loraID", *ev.LoraID,
 					"reason", reason,
 					"numTokens", len(ev.Tokens),
@@ -781,11 +787,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					// unmapped and a child naming one as parent cannot resolve it.
 					if subCanonicalStore(ev, p.tokenProcessor.BlockSize()) {
 						const reason = "unresolved_sub_canonical_parent"
-						metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+						metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(specKind), reason).Inc()
 						log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
 							"podIdentifier", podIdentifier,
 							"groupIdx", ev.GroupIdx,
-							"cacheKind", ev.KVCacheSpecKind,
+							"cacheKind", specKind,
 							"reason", reason,
 							"parentHash", ev.ParentHash,
 							"parentEngineKey", parentEngineKey,
@@ -799,7 +805,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"parentEngineKey", parentEngineKey,
 						"effectiveModelName", effectiveModelName,
 						"groupIdx", ev.GroupIdx,
-						"cacheKind", ev.KVCacheSpecKind,
+						"cacheKind", specKind,
 						"numTokens", len(ev.Tokens),
 						"numBlockHashes", len(ev.BlockHashes),
 						"blockSize", ev.BlockSize)

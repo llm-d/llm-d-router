@@ -126,13 +126,26 @@ func TestDecodedConsumersRecoverAndEvictTogether(t *testing.T) {
 	}
 }
 
-type countingConsumer struct{ resets atomic.Int32 }
+type countingConsumer struct {
+	batches, resets, resyncResets, resyncBatches atomic.Int32
+	resyncThrough                                atomic.Uint64
+}
 
-func (c *countingConsumer) ProcessEvents(context.Context, kvevents.EventSource, kvevents.EventBatch) error {
+func (c *countingConsumer) ProcessEvents(_ context.Context, source kvevents.EventSource, _ kvevents.EventBatch) error {
+	if source.Resync {
+		c.resyncBatches.Add(1)
+		return nil
+	}
+	c.batches.Add(1)
 	return nil
 }
 
-func (c *countingConsumer) Reset(context.Context, kvevents.EventSource) error {
+func (c *countingConsumer) Reset(_ context.Context, source kvevents.EventSource) error {
+	if source.Resync {
+		c.resyncResets.Add(1)
+		c.resyncThrough.Store(source.Sequence)
+		return nil
+	}
 	c.resets.Add(1)
 	return nil
 }
@@ -156,17 +169,23 @@ func TestResyncRequestReloadsSnapshotOnce(t *testing.T) {
 	var seq uint64
 	send := func() {
 		seq++
-		server.set(int64(seq)) //nolint:gosec // test sequence
+		server.set(int64(seq), buildEventBatchPayload(t)) //nolint:gosec // test sequence
 		h.send(t, seq, buildEventBatchPayload(t))
 	}
 	require.Eventually(t, func() bool { send(); return server.requests.Load() == 1 }, 5*time.Second, 20*time.Millisecond)
 	// Attachment and the snapshot load each reset the consumer.
 	require.Eventually(t, func() bool { return consumer.resets.Load() == 2 }, 5*time.Second, 20*time.Millisecond)
 
+	requested := seq
 	manager.RequestResync("10.0.0.1:8000")
 	require.Eventually(t, func() bool { send(); return server.requests.Load() == 2 }, 5*time.Second, 20*time.Millisecond)
-	// The resync resets the consumer before the rebuild and again when the snapshot loads.
-	require.Eventually(t, func() bool { return consumer.resets.Load() == 4 }, 5*time.Second, 20*time.Millisecond)
+	// The resync resets only the consumers that requested it, once, and
+	// marks the snapshot's batches for them.
+	require.Eventually(t, func() bool { return consumer.resyncBatches.Load() == 1 }, 5*time.Second, 20*time.Millisecond)
+	require.Equal(t, int32(1), consumer.resyncResets.Load())
+	require.Equal(t, int32(2), consumer.resets.Load())
+	through := consumer.resyncThrough.Load()
+	require.True(t, through > requested && through <= seq, "the rebuild covers the snapshot cut, got %d", through)
 
 	// A request inside the cooldown waits.
 	manager.RequestResync("10.0.0.1:8000")
@@ -175,5 +194,118 @@ func TestResyncRequestReloadsSnapshotOnce(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	require.Equal(t, int32(2), server.requests.Load())
-	require.Equal(t, int32(4), consumer.resets.Load())
+	require.Equal(t, int32(1), consumer.resyncResets.Load())
+}
+
+func TestFailedResyncKeepsEndpointState(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	consumer := &countingConsumer{}
+	transport, err := kvevents.NewConsumerPool(kvevents.DefaultConfig(), engineadapter.NewVLLMAdapter(), consumer)
+	require.NoError(t, err)
+	transport.Start(ctx)
+	defer transport.Shutdown(ctx)
+	pub := zmq4.NewPub(ctx)
+	endpoint := listenEphemeral(t, pub)
+	defer pub.Close()
+	buffer, replayEndpoint := startReplayBuffer(t, ctx)
+	buffer.set(replayMessage{seq: 1, payload: buildEventBatchPayload(t)})
+	manager := kvevents.NewSubscriberManager(transport)
+	defer manager.Shutdown(ctx)
+	require.NoError(t, manager.EnsureSubscriber(ctx, "pod", "10.0.0.1:8000", endpoint, replayEndpoint, "", "kv@", true))
+	h := &replayHarness{ctx: ctx, pub: pub, topic: []byte("kv@wire:8000@model")}
+	require.Eventually(t, func() bool { return consumer.resets.Load() == 1 }, 5*time.Second, 20*time.Millisecond)
+	seq := uint64(1)
+	require.Eventually(t, func() bool {
+		seq++
+		buffer.set(replayMessage{seq: 1, payload: buildEventBatchPayload(t)}, replayMessage{seq: seq, payload: buildEventBatchPayload(t)})
+		h.send(t, seq, buildEventBatchPayload(t))
+		return buffer.requests.Load() >= 1
+	}, 5*time.Second, 20*time.Millisecond)
+
+	buffer.fail.Store(true)
+	before := consumer.resets.Load()
+	manager.RequestResync("10.0.0.1:8000")
+	for range 5 {
+		seq++
+		h.send(t, seq, buildEventBatchPayload(t))
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.GreaterOrEqual(t, buffer.requests.Load(), int32(2), "the resync requested a replay")
+	require.Equal(t, before, consumer.resets.Load(), "a failed resync resets no consumer")
+	require.Zero(t, consumer.resyncResets.Load(), "no rebuild data arrived, so nothing is reset")
+}
+
+func TestResyncReplayReachesOnlyResyncedConsumers(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	consumer := &countingConsumer{}
+	transport, err := kvevents.NewConsumerPool(kvevents.DefaultConfig(), engineadapter.NewVLLMAdapter(), consumer)
+	require.NoError(t, err)
+	transport.Start(ctx)
+	defer transport.Shutdown(ctx)
+	pub := zmq4.NewPub(ctx)
+	endpoint := listenEphemeral(t, pub)
+	defer pub.Close()
+	buffer, replayEndpoint := startReplayBuffer(t, ctx)
+	var history []replayMessage
+	publish := func(seq uint64) {
+		history = append(history, replayMessage{seq: seq, payload: buildEventBatchPayload(t)})
+		buffer.set(history...)
+	}
+	publish(1)
+	manager := kvevents.NewSubscriberManager(transport)
+	defer manager.Shutdown(ctx)
+	require.NoError(t, manager.EnsureSubscriber(ctx, "pod", "10.0.0.1:8000", endpoint, replayEndpoint, "", "kv@", true))
+	h := &replayHarness{ctx: ctx, pub: pub, topic: []byte("kv@wire:8000@model")}
+	require.Eventually(t, func() bool { return buffer.requests.Load() == 1 }, 5*time.Second, 20*time.Millisecond)
+	seq := uint64(1)
+	send := func() {
+		seq++
+		publish(seq)
+		h.send(t, seq, buildEventBatchPayload(t))
+	}
+	for range 3 {
+		send()
+		time.Sleep(20 * time.Millisecond)
+	}
+	resets := consumer.resets.Load()
+
+	manager.RequestResync("10.0.0.1:8000")
+	require.Eventually(t, func() bool { send(); return buffer.requests.Load() == 2 }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return consumer.resyncResets.Load() == 1 }, 5*time.Second, 20*time.Millisecond)
+	through := consumer.resyncThrough.Load()
+	require.Positive(t, through)
+	require.Eventually(t, func() bool { return consumer.resyncBatches.Load() == int32(through) }, //nolint:gosec // test sequence
+		5*time.Second, 20*time.Millisecond, "replayed batches up to the stream position reach only the resynced consumers")
+	require.Equal(t, resets, consumer.resets.Load(), "the resync leaves the other consumers' state alone")
+}
+
+func TestConsumerReceivesBatchZeroAfterRestartWithoutReplay(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	consumer := &countingConsumer{}
+	transport, err := kvevents.NewConsumerPool(kvevents.DefaultConfig(), engineadapter.NewVLLMAdapter(), consumer)
+	require.NoError(t, err)
+	transport.Start(ctx)
+	defer transport.Shutdown(ctx)
+	pub := zmq4.NewPub(ctx)
+	endpoint := listenEphemeral(t, pub)
+	defer pub.Close()
+	manager := kvevents.NewSubscriberManager(transport)
+	defer manager.Shutdown(ctx)
+	require.NoError(t, manager.EnsureSubscriber(ctx, "pod", "10.0.0.1:8000", endpoint, "", "", "kv@", true))
+	h := &replayHarness{ctx: ctx, pub: pub, topic: []byte("kv@wire:8000@model")}
+	require.Eventually(t, func() bool {
+		h.send(t, 0, buildEventBatchPayload(t))
+		return consumer.batches.Load() > 0
+	}, 5*time.Second, 20*time.Millisecond)
+	// Let batches sent while the subscriber connected drain.
+	time.Sleep(200 * time.Millisecond)
+	batches := consumer.batches.Load()
+
+	// The engine restarted after publishing one batch, so its next batch is 0 again.
+	h.send(t, 0, buildEventBatchPayload(t))
+	require.Eventually(t, func() bool { return consumer.batches.Load() == batches+1 },
+		time.Second, time.Millisecond, "the consumer receives the restarted engine's batch 0")
 }

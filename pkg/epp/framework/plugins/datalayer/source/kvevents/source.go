@@ -56,6 +56,21 @@ type Source struct {
 	mu          sync.RWMutex
 	started     bool
 	consumers   []consumer
+	// resyncMu guards resyncs. Each endpoint's entry is read and written by
+	// the pool worker that owns the endpoint.
+	resyncMu sync.Mutex
+	resyncs  map[string]*resyncState
+}
+
+// resyncState tracks the consumers of one endpoint that dropped their state
+// on a continuous stream.
+type resyncState struct {
+	// pending consumers failed and wait for the next resync.
+	pending map[int]bool
+	// targets receive the running resync's rebuilt batches and skip shared
+	// batches up to through, which the rebuild covers.
+	targets map[int]bool
+	through uint64
 }
 
 var (
@@ -204,10 +219,24 @@ func (s *Source) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 		socket(cfg.SocketPort), replay, snapshot, s.config.TopicFilter, true)
 }
 
+// ProcessEvents delivers a batch to every consumer. A resync batch reaches
+// only the consumers being resynced, which skip shared batches the rebuild
+// covers.
 func (s *Source) ProcessEvents(ctx context.Context, source events.EventSource, batch events.EventBatch) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, c := range s.consumers {
+	state := s.resyncState(source.Endpoint, false)
+	var targets map[int]bool
+	if state != nil {
+		if !source.Resync && source.Sequence > state.through {
+			state.targets = map[int]bool{}
+		}
+		targets = state.targets
+	}
+	for i, c := range s.consumers {
+		if source.Resync != targets[i] {
+			continue
+		}
 		if err := invoke(func() error { return c.ProcessEvents(ctx, source, batch) }); err != nil {
 			log.FromContext(ctx).Error(err, "KV event consumer failed", "consumer", c.owner, "endpoint", source.Endpoint)
 			if resetErr := invoke(func() error { return c.Reset(ctx, source) }); resetErr != nil {
@@ -215,22 +244,59 @@ func (s *Source) ProcessEvents(ctx context.Context, source events.EventSource, b
 			}
 			// The stream is continuous, so the subscriber sees no gap; the
 			// reset consumer gets its state back from a rebuild of the endpoint.
+			s.resyncState(source.Endpoint, true).pending[i] = true
 			s.subscribers.RequestResync(source.Endpoint)
 		}
 	}
 	return nil
 }
 
+// Reset resets every consumer of the endpoint. A resync reset resets the
+// consumers that requested the resync and starts delivering the rebuild to
+// them.
 func (s *Source) Reset(ctx context.Context, source events.EventSource) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	var targets map[int]bool
+	if source.Resync {
+		state := s.resyncState(source.Endpoint, true)
+		for i := range state.pending {
+			state.targets[i] = true
+		}
+		state.pending = map[int]bool{}
+		state.through = source.Sequence
+		targets = state.targets
+	} else {
+		s.resyncMu.Lock()
+		delete(s.resyncs, source.Endpoint)
+		s.resyncMu.Unlock()
+	}
 	var errs []error
-	for _, c := range s.consumers {
+	for i, c := range s.consumers {
+		if source.Resync && !targets[i] {
+			continue
+		}
 		if err := invoke(func() error { return c.Reset(ctx, source) }); err != nil {
 			errs = append(errs, fmt.Errorf("reset %s: %w", c.owner, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// resyncState returns the endpoint's resync state, creating it when create
+// is set.
+func (s *Source) resyncState(endpoint string, create bool) *resyncState {
+	s.resyncMu.Lock()
+	defer s.resyncMu.Unlock()
+	state := s.resyncs[endpoint]
+	if state == nil && create {
+		if s.resyncs == nil {
+			s.resyncs = map[string]*resyncState{}
+		}
+		state = &resyncState{pending: map[int]bool{}, targets: map[int]bool{}}
+		s.resyncs[endpoint] = state
+	}
+	return state
 }
 
 func invoke(fn func() error) (err error) {

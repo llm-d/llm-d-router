@@ -77,6 +77,14 @@ type zmqSubscriber struct {
 	// the stream stayed continuous, so only a rebuild restores that state.
 	resync     atomic.Bool
 	lastResync time.Time
+	// While resyncing, rebuilt batches up to resyncThrough reach only the
+	// consumers that requested the resync; the others already hold them.
+	// resyncOpen stays set until those consumers hold the state up to
+	// resyncThrough.
+	resyncing         bool
+	resyncOpen        bool
+	resyncResetQueued bool
+	resyncThrough     uint64
 }
 
 // newZMQSubscriber creates a new ZMQ subscriber.
@@ -215,12 +223,6 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		if z.replayEndpoint == "" && z.snapshotEndpoint == "" {
-			if z.pool.consumer != nil && z.sourceEndpoint != "" {
-				if z.acceptLiveWithoutReplay(topic, seq) {
-					z.addTask(ctx, topic, seq, payload)
-				}
-				continue
-			}
 			// A per-endpoint subscriber reads a single publisher, so a backwards
 			// sequence means the engine restarted with an empty cache. The bound
 			// global socket interleaves many publishers, so its sequences move
@@ -246,9 +248,9 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 		}
 
 		replayAttempted := false
-		if restarted || z.takeResync() {
-			logger.Info("Rebuilding index after publisher restart or consumer resync request",
-				"restarted", restarted, "lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
+		if restarted {
+			logger.Info("Detected publisher restart, rebuilding index",
+				"lastLiveSeq", z.lastLiveSeq, "currentSeq", seq,
 				"endpoint", z.endpoint)
 			z.resetForSource(topic)
 			z.lastSeq = 0
@@ -257,6 +259,11 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 			z.lastReplayFailure = time.Time{}
 			replayAttempted = true
 			z.rebuild(ctx, topic)
+		} else if z.takeResync() {
+			logger.Info("Rebuilding endpoint state for consumers that requested a resync",
+				"lastSeq", z.lastSeq, "lastLiveSeq", z.lastLiveSeq, "endpoint", z.endpoint)
+			replayAttempted = true
+			z.resyncConsumers(ctx, topic)
 		}
 
 		if z.hasLastLiveSeq && seq == z.lastLiveSeq {
@@ -320,21 +327,6 @@ func (z *zmqSubscriber) runSubscriber(ctx context.Context) {
 	}
 }
 
-func (z *zmqSubscriber) acceptLiveWithoutReplay(topic string, seq uint64) bool {
-	if z.hasLastLiveSeq {
-		if seq == z.lastLiveSeq {
-			return false
-		}
-		// A backwards sequence is an engine restart with an empty cache. A
-		// forward gap is a dropped frame and keeps the consumer's state.
-		if seq < z.lastLiveSeq {
-			z.resetForSource(topic)
-		}
-	}
-	z.lastLiveSeq, z.hasLastLiveSeq = seq, true
-	return true
-}
-
 // addTask hands a received message to the pool, carrying the receive span's
 // identity so processing rejoins this trace across the worker queue. The span
 // starts after Recv returns so it measures handoff work rather than the idle
@@ -364,6 +356,7 @@ func (z *zmqSubscriber) addTask(ctx context.Context, topic string, seq uint64, p
 		Sequence:       seq,
 		Payload:        payload,
 		SourceEndpoint: z.sourceEndpoint,
+		resync:         z.resyncing && z.resyncOpen,
 	}
 	// carried is bound inside the branch on purpose. Taking &sc directly makes
 	// sc escape, so it heap-allocates on every message including the ones the
@@ -384,8 +377,43 @@ func (z *zmqSubscriber) enqueue(msg *RawMessage) {
 	z.pool.AddTask(msg)
 }
 
+// resetForSource resets every consumer of the endpoint. A pending resync is
+// dropped: the reset consumers rebuild with the others.
 func (z *zmqSubscriber) resetForSource(topic string) {
+	z.resync.Store(false)
 	z.enqueue(&RawMessage{Topic: topic, SourceEndpoint: z.sourceEndpoint, reset: true})
+}
+
+// resyncConsumers rebuilds the endpoint for the consumers that requested a
+// resync. The stream is continuous, so the other consumers and the sequence
+// position stay as they are. A failed rebuild requests another resync, which
+// waits out the cooldown.
+func (z *zmqSubscriber) resyncConsumers(ctx context.Context, topic string) {
+	through := z.lastLiveSeq
+	if z.hasLastSeq {
+		through = z.lastSeq
+	}
+	z.resyncing, z.resyncOpen, z.resyncResetQueued, z.resyncThrough = true, true, false, through
+	defer func() { z.resyncing = false }()
+	if z.rebuild(ctx, topic) || !z.resyncOpen {
+		return
+	}
+	if z.resyncResetQueued {
+		// The resynced consumers hold a partial rebuild.
+		z.resyncResetQueued = false
+		z.queueResyncReset(topic, through)
+	}
+	z.resync.Store(true)
+}
+
+// queueResyncReset resets the consumers that requested a resync once, before
+// the first rebuilt batch. through is the last sequence the rebuild covers.
+func (z *zmqSubscriber) queueResyncReset(topic string, through uint64) {
+	if z.resyncResetQueued {
+		return
+	}
+	z.resyncResetQueued = true
+	z.enqueue(&RawMessage{Topic: topic, Sequence: through, SourceEndpoint: z.sourceEndpoint, reset: true, resync: true})
 }
 
 // retire prevents any later messages from this subscriber from being queued.
@@ -424,10 +452,15 @@ func (z *zmqSubscriber) canAttemptReplay() bool {
 }
 
 func (z *zmqSubscriber) invalidateReplay(topic string) {
+	z.lastReplayFailure = time.Now()
+	if z.resyncing {
+		// The other consumers hold a contiguous stream; resyncConsumers
+		// handles the consumers being rebuilt.
+		return
+	}
 	z.resetForSource(topic)
 	z.lastSeq = 0
 	z.hasLastSeq = false
-	z.lastReplayFailure = time.Now()
 }
 
 // rebuild loads the publisher's current state from its snapshot, and falls
@@ -449,11 +482,27 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 	if err == nil && z.publisherID != nil && !bytes.Equal(publisherID, z.publisherID) {
 		err = fmt.Errorf("snapshot from publisher %x while the live stream is from %x", publisherID, z.publisherID)
 	}
+	if err == nil && z.resyncing && cut < int64(z.resyncThrough) { //nolint:gosec // wire sequences fit int64
+		err = fmt.Errorf("snapshot cut %d is behind the stream at %d", cut, z.resyncThrough)
+	}
 	if err != nil {
 		z.lastReplayFailure = time.Now()
 		metrics.ZMQErrors.WithLabelValues(z.podIdentifier, "snapshot").Inc()
 		logger.Error(err, "Failed to load snapshot", "snapshotEndpoint", z.snapshotEndpoint)
 		return false
+	}
+	z.lastReplayFailure = time.Time{}
+	if z.resyncing {
+		// The resynced consumers skip live batches up to the cut, which the
+		// snapshot covers.
+		z.queueResyncReset(topic, uint64(cut)) //nolint:gosec // cut is at least resyncThrough
+		for _, batch := range batches {
+			z.addTask(ctx, topic, 0, batch)
+		}
+		z.resyncOpen = false
+		logger.Info("Snapshot loaded for resync", "cut", cut, "batches", len(batches),
+			"duration", time.Since(started), "snapshotEndpoint", z.snapshotEndpoint)
+		return true
 	}
 	// The snapshot replaces events indexed while no snapshot was available.
 	z.resetForSource(topic)
@@ -466,7 +515,6 @@ func (z *zmqSubscriber) requestSnapshot(ctx context.Context, topic string) bool 
 	if cut >= 0 {
 		z.lastSeq, z.hasLastSeq = uint64(cut), true
 	}
-	z.lastReplayFailure = time.Time{}
 	logger.Info("Snapshot loaded", "cut", cut, "batches", len(batches),
 		"duration", time.Since(started), "snapshotEndpoint", z.snapshotEndpoint)
 	return true
@@ -608,9 +656,17 @@ func (z *zmqSubscriber) requestReplay(ctx context.Context, startSeq uint64) bool
 				break
 			}
 
-			z.addTask(ctx, topic, seq, payload)
-			z.lastSeq = seq
-			z.hasLastSeq = true
+			if z.resyncing && seq > z.resyncThrough {
+				z.resyncOpen = false
+			}
+			if z.resyncing && z.resyncOpen {
+				z.queueResyncReset(topic, z.resyncThrough)
+				z.addTask(ctx, topic, seq, payload)
+			} else {
+				z.addTask(ctx, topic, seq, payload)
+				z.lastSeq = seq
+				z.hasLastSeq = true
+			}
 			replayed++
 			attemptReplayed++
 			expectedSeq++

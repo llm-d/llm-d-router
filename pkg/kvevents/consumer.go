@@ -16,7 +16,12 @@ limitations under the License.
 
 package kvevents
 
-import "context"
+import (
+	"context"
+
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
+)
 
 // EventSource identifies a decoded batch's serving endpoint and wire sequence.
 type EventSource struct {
@@ -25,6 +30,10 @@ type EventSource struct {
 	Sequence  uint64
 	// Retired is set on Reset when the endpoint is removed.
 	Retired bool
+	// Resync marks a reset or batch that rebuilds the endpoint for the
+	// consumers that requested a resync. On a Resync reset, Sequence is the
+	// last wire sequence the rebuild covers.
+	Resync bool
 }
 
 // EventConsumer receives decoded events in place of the pool's token-keyed
@@ -52,6 +61,19 @@ func NewConsumerPool(cfg *Config, adapter EngineAdapter, consumer EventConsumer)
 	}
 	p.consumer = consumer
 	return p, nil
+}
+
+// NewIndexConsumer returns a Pool that indexes the decoded batches a
+// subscribing pool hands it. It has no queues and no workers of its own.
+func NewIndexConsumer(index kvblock.Index, tokenProcessor kvblock.TokenProcessor) *Pool {
+	metrics.Register()
+	return &Pool{
+		index:          index,
+		tokenProcessor: tokenProcessor,
+		groupCatalog:   kvblock.NewGroupCatalog(),
+		cacheFormats:   kvblock.NewCacheFormatCatalog(),
+		dedup:          newEventDedupFilter(),
+	}
 }
 
 // ProcessEvents indexes a decoded batch using this pool's token processor.

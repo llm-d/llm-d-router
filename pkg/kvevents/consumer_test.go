@@ -66,28 +66,6 @@ func TestConsumerPoolOrderedEventsAndReset(t *testing.T) {
 	assert.Equal(t, []string{"batch", "reset:serving:8000"}, c.operations[3:])
 }
 
-func TestConsumerSubscriberInvalidatesWithoutReplay(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Concurrency = 1
-	p, err := NewConsumerPool(cfg, &sourceEndpointAdapter{}, &recordingConsumer{})
-	require.NoError(t, err)
-	t.Cleanup(func() { p.Shutdown(t.Context()) })
-	z := newZMQSubscriber(p, "pod", "serving:8000", "", "", "", "", true)
-	require.True(t, z.acceptLiveWithoutReplay("topic", 4))
-	require.True(t, z.acceptLiveWithoutReplay("topic", 5))
-	require.False(t, z.acceptLiveWithoutReplay("topic", 5))
-	assert.Zero(t, p.queues[0].Len())
-	require.True(t, z.acceptLiveWithoutReplay("topic", 7))
-	assert.Zero(t, p.queues[0].Len(), "a dropped frame keeps the consumer's state")
-	require.True(t, z.acceptLiveWithoutReplay("topic", 1))
-	require.Equal(t, 1, p.queues[0].Len(), "an engine restart resets the consumer")
-	msg, shutdown := p.queues[0].Get()
-	require.False(t, shutdown)
-	assert.True(t, msg.reset)
-	assert.Equal(t, "serving:8000", msg.SourceEndpoint)
-	p.queues[0].Done(msg)
-}
-
 type undecodableAdapter struct{ sourceEndpointAdapter }
 
 func (a *undecodableAdapter) ParseMessage(*RawMessage) (string, string, EventBatch, error) {

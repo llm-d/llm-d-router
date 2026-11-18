@@ -233,29 +233,34 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	}
 	go indexer.Run(ctx)
 
-	adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
-	}
-	pool, err := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
-	}
-	indexer.SetCacheFormats(pool.CacheFormats())
 	shared := config.KVEventsSourceRef != ""
-	if !shared {
+	var sharedEvents *kvevents.Pool
+	var subscribersManager *kvevents.SubscriberManager
+	if shared {
+		sharedEvents = kvevents.NewIndexConsumer(indexer.KVBlockIndex(), tokenProcessor)
+		indexer.SetCacheFormats(sharedEvents.CacheFormats())
+	} else {
+		adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
+		}
+		pool, err := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
+		}
+		indexer.SetCacheFormats(pool.CacheFormats())
 		pool.Start(ctx)
-	}
 
-	subscribersManager := kvevents.NewSubscriberManager(pool)
-	if config.KVEventsConfig.ZMQEndpoint != "" && !shared {
-		log.FromContext(ctx).Info("kvEventsConfig.zmqEndpoint is deprecated: the bound socket takes the pod identity from the topic; "+
-			"drop zmqEndpoint and have each engine bind its own PUB socket, which the EPP subscribes to by default",
-			"zmqEndpoint", config.KVEventsConfig.ZMQEndpoint,
-			"allowUntrustedPublishers", config.KVEventsConfig.AllowUntrustedPublishers)
-		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
-			config.KVEventsConfig.ZMQEndpoint, "", "", config.KVEventsConfig.TopicFilter, false); err != nil {
-			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
+		subscribersManager = kvevents.NewSubscriberManager(pool)
+		if config.KVEventsConfig.ZMQEndpoint != "" {
+			log.FromContext(ctx).Info("kvEventsConfig.zmqEndpoint is deprecated: the bound socket takes the pod identity from the topic; "+
+				"drop zmqEndpoint and have each engine bind its own PUB socket, which the EPP subscribes to by default",
+				"zmqEndpoint", config.KVEventsConfig.ZMQEndpoint,
+				"allowUntrustedPublishers", config.KVEventsConfig.AllowUntrustedPublishers)
+			if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
+				config.KVEventsConfig.ZMQEndpoint, "", "", config.KVEventsConfig.TopicFilter, false); err != nil {
+				return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
+			}
 		}
 	}
 
@@ -269,7 +274,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	producer := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: name},
 		kvCacheIndexer:     indexer,
-		subscribersManager: subscribersManager,
+		sharedEvents:       sharedEvents,
 		kvEventsConfig:     config.KVEventsConfig,
 		podSelector:        podSelector,
 		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
@@ -281,9 +286,8 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		blockSizeTokens:    tokenProcessor.BlockSize(),
 		subscriberCtx:      ctx,
 	}
-	if shared {
-		producer.sharedEvents = pool
-		go func() { <-ctx.Done(); pool.Shutdown(ctx) }()
+	if subscribersManager != nil {
+		producer.subscribersManager = subscribersManager
 	}
 	return producer, nil
 }
