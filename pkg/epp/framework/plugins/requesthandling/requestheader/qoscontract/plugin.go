@@ -97,6 +97,8 @@ type hold struct {
 	// committed is true when the request was served within the contract and so holds a
 	// concurrency slot and a daily-budget charge.
 	committed bool
+	// day is the UTC day whose budget the reservation was charged to.
+	day int
 	// errorStatus is set when the model server answered with a non-2xx status.
 	errorStatus atomic.Bool
 }
@@ -214,6 +216,7 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	if day := dayNumber(now); day != team.dailyDay {
 		team.dailyDay, team.dailyUsed = day, 0
 	}
+	budgetDay := team.dailyDay
 	overDaily := team.cfg.DailyTokens > 0 && team.dailyUsed+cost > team.cfg.DailyTokens
 	overConcurrency := team.cfg.MaxConcurrency > 0 && team.inflight >= team.cfg.MaxConcurrency
 	served, decision, withinContract := committed, decisionWithinContract, !overSize && !overDaily && !overConcurrency
@@ -246,7 +249,7 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	team.mu.Unlock()
 
 	contractDecisions.WithLabelValues(team.label, committed.Name, served.Name, decision, reason, p.mode()).Inc()
-	rec := &hold{team: team, servedClass: served.Name, reserved: cost, prompt: float64(prompt), committed: withinContract}
+	rec := &hold{team: team, servedClass: served.Name, reserved: cost, prompt: float64(prompt), committed: withinContract, day: budgetDay}
 	// The hold is settled exactly once: by RequestAbandoned when the request leaves the director
 	// before dispatch, otherwise at end of stream, which the handler forces for every dispatched
 	// request, completed or not.
@@ -343,7 +346,7 @@ func (p *Plugin) settledCost(rec *hold, response *requesthandling.Response) floa
 }
 
 // finish settles a request exactly once. For a committed request it releases the concurrency slot
-// and settles the daily charge. A nil response, for a request that was never dispatched, refunds
+// and, when the reservation was made on the current UTC day, settles the daily charge. A nil response, for a request that was never dispatched, refunds
 // the reservation in full.
 func (p *Plugin) finish(requestID string, response *requesthandling.Response) {
 	v, ok := p.holds.LoadAndDelete(requestID)
@@ -359,7 +362,11 @@ func (p *Plugin) finish(requestID string, response *requesthandling.Response) {
 	if rec.committed {
 		team.mu.Lock()
 		team.inflight--
-		team.dailyUsed = math.Max(0, team.dailyUsed-(rec.reserved-actual))
+		// A reservation from an earlier UTC day was charged to that day's budget, which has been
+		// reset since: its refund or overrun must not move today's budget.
+		if team.dailyDay == rec.day {
+			team.dailyUsed = math.Max(0, team.dailyUsed-(rec.reserved-actual))
+		}
 		inflightRequests.WithLabelValues(team.label).Set(float64(team.inflight))
 		team.mu.Unlock()
 	}
