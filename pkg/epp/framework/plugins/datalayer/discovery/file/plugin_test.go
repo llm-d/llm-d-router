@@ -271,18 +271,41 @@ endpoints:
 	assert.ErrorContains(t, err, "invalid rankIndex")
 }
 
-func TestStart_InvalidZMQPort(t *testing.T) {
-	for _, zmqPort := range []string{"-1", "65536"} {
-		t.Run(zmqPort, func(t *testing.T) {
+func TestStart_ZMQPort(t *testing.T) {
+	tests := []struct {
+		name     string
+		zmqPort  string // YAML line; empty means the field is omitted
+		wantErr  bool
+		wantPort int
+	}{
+		{name: "unset keeps default", zmqPort: "", wantPort: 0},
+		{name: "zero is rejected", zmqPort: "zmqPort: 0", wantErr: true},
+		{name: "negative is rejected", zmqPort: "zmqPort: -1", wantErr: true},
+		{name: "above range is rejected", zmqPort: "zmqPort: 65536", wantErr: true},
+		{name: "lower bound", zmqPort: "zmqPort: 1", wantPort: 1},
+		{name: "upper bound", zmqPort: "zmqPort: 65535", wantPort: 65535},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			path := writeTemp(t, `
 endpoints:
   - name: ep1
     address: "10.0.0.1"
     port: "8000"
-    zmqPort: `+zmqPort+`
+    `+tc.zmqPort+`
 `)
-			err := newFD(path, false).Start(context.Background(), &recordingNotifier{})
-			assert.ErrorContains(t, err, "invalid zmqPort")
+			// A cancelled context makes a successful Start return right after the load.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			n := &recordingNotifier{}
+			err := newFD(path, false).Start(ctx, n)
+			if tc.wantErr {
+				assert.ErrorContains(t, err, "invalid zmqPort")
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, n.upserted, 1)
+			assert.Equal(t, tc.wantPort, n.upserted[0].ZMQPort)
 		})
 	}
 }
