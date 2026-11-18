@@ -121,17 +121,40 @@ func (p *crossReplicaPublisher) run(ctx context.Context) {
 }
 
 func (p *crossReplicaPublisher) publishAll(ctx context.Context) {
+	// Nothing to publish means nothing to time. The ticker runs from
+	// StartCrossReplicaSync regardless of registrations, so observing an empty
+	// snapshot would add a zero-length sample for every startup window and
+	// drained pool.
+	snapshot := p.endpointSnapshot()
+	if len(snapshot) == 0 {
+		return
+	}
 	start := time.Now()
 	defer func() { metrics.RecordCrossReplicaPublishCycle(time.Since(start)) }()
-	snapshot := p.endpointSnapshot()
 	if syncer, ok := p.syncer.(fwkdl.CrossReplicaBatchSyncer); ok {
 		p.publishBatch(ctx, syncer, snapshot)
 		return
 	}
+	succeeded := make(map[string]struct{}, len(p.contributors))
+	failed := make(map[string]struct{}, len(p.contributors))
 	for _, endpointID := range snapshot {
 		dispatchCtx, cancel := context.WithTimeout(ctx, p.publishTimeout)
-		p.publish(dispatchCtx, endpointID)
+		for stateKey, landed := range p.publish(dispatchCtx, endpointID) {
+			if landed {
+				succeeded[stateKey] = struct{}{}
+				continue
+			}
+			failed[stateKey] = struct{}{}
+		}
 		cancel()
+	}
+	// The last-success gauge describes the cycle, not one endpoint's push: a
+	// cycle where one endpoint landed and another did not has not succeeded.
+	for stateKey := range succeeded {
+		if _, ok := failed[stateKey]; ok {
+			continue
+		}
+		metrics.RecordCrossReplicaPublishSuccess(stateKey, time.Now())
 	}
 }
 
@@ -153,13 +176,15 @@ func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.C
 	}
 	logger := log.FromContext(ctx)
 	var wg sync.WaitGroup
-	for _, spec := range specs {
+	cycleFailed := make([]bool, len(specs))
+	for i, spec := range specs {
 		wg.Go(func() {
 			failures := syncer.SetBatch(ctx, spec, endpointIDs, p.publishTimeout)
 			recordCrossReplicaPublish(string(spec.StateKey), len(endpointIDs), len(failures))
 			if len(failures) == 0 {
 				return
 			}
+			cycleFailed[i] = true
 			p.publishFailureLog.Do(func() {
 				for endpointID, err := range failures {
 					logger.Error(err, "cross-replica batch publish failed", "key", spec.StateKey, "endpoint", endpointID, "failedEndpoints", len(failures))
@@ -169,6 +194,12 @@ func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.C
 		})
 	}
 	wg.Wait()
+	for i, spec := range specs {
+		if cycleFailed[i] {
+			continue
+		}
+		metrics.RecordCrossReplicaPublishSuccess(string(spec.StateKey), time.Now())
+	}
 	p.reconcileRemoved(ctx, syncer, specs, snapshot)
 }
 
@@ -298,9 +329,13 @@ func (p *crossReplicaPublisher) delete(ctx context.Context, key types.Namespaced
 	return true, errors.Join(errs...)
 }
 
-func (p *crossReplicaPublisher) publish(ctx context.Context, key types.NamespacedName) {
+func (p *crossReplicaPublisher) publish(ctx context.Context, key types.NamespacedName) map[string]bool {
 	endpointID := key.String()
 	logger := log.FromContext(ctx).WithValues("endpoint", endpointID)
+	var mu sync.Mutex
+	// One entry per state key pushed for this endpoint, reporting whether the
+	// push landed. Keys skipped because the endpoint left are absent.
+	landed := make(map[string]bool, len(p.contributors))
 	var wg sync.WaitGroup
 	for _, c := range p.contributors {
 		spec := c.CrossReplicaState()
@@ -309,27 +344,30 @@ func (p *crossReplicaPublisher) publish(ctx context.Context, key types.Namespace
 			if !pushed {
 				return
 			}
+			stateKey := string(spec.StateKey)
+			failures := 0
 			if err != nil {
-				recordCrossReplicaPublish(string(spec.StateKey), 1, 1)
+				failures = 1
 				p.publishFailureLog.Do(func() {
 					logger.Error(err, "cross-replica publish failed", "key", spec.StateKey)
 				})
-				return
 			}
-			recordCrossReplicaPublish(string(spec.StateKey), 1, 0)
+			recordCrossReplicaPublish(stateKey, 1, failures)
+			mu.Lock()
+			landed[stateKey] = err == nil
+			mu.Unlock()
 		})
 	}
 	wg.Wait()
+	return landed
 }
 
 // recordCrossReplicaPublish counts one state key's push of n endpoints, of which
-// failures did not land, and moves the last-success timestamp only when every
-// one of them landed.
+// failures did not land. It does not move the last-success timestamp: that
+// describes a whole cycle and is recorded by the caller once every endpoint in
+// the cycle landed.
 func recordCrossReplicaPublish(stateKey string, endpoints, failures int) {
 	successes := endpoints - failures
 	metrics.RecordCrossReplicaPublish(stateKey, metrics.CrossReplicaPublishOutcomeSuccess, successes)
 	metrics.RecordCrossReplicaPublish(stateKey, metrics.CrossReplicaPublishOutcomeError, failures)
-	if failures == 0 && successes > 0 {
-		metrics.RecordCrossReplicaPublishSuccess(stateKey, time.Now())
-	}
 }

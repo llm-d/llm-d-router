@@ -88,10 +88,52 @@ func TestCrossReplicaPublisher_CountsPerEndpointPublishes(t *testing.T) {
 
 	assert.Equal(t, float64(1), publishCounter(t, metrics.CrossReplicaPublishOutcomeSuccess))
 	assert.Equal(t, float64(0), publishCounter(t, metrics.CrossReplicaPublishOutcomeError))
+}
 
+func TestCrossReplicaPublisher_RecordsLastSuccessPerSuccessfulCycle(t *testing.T) {
+	resetPublishMetrics(t)
+	syncer := &fakeSyncer{}
+	pub := testCrossReplicaPublisher(syncer, fakeContributor{key: publishMetricTestKey})
+	require.True(t, pub.registerEndpoint(types.NamespacedName{Namespace: "ns", Name: "ep-a"}))
+	require.True(t, pub.registerEndpoint(types.NamespacedName{Namespace: "ns", Name: "ep-b"}))
+
+	pub.publishAll(context.Background())
+
+	assert.Equal(t, float64(2), publishCounter(t, metrics.CrossReplicaPublishOutcomeSuccess))
+	assert.Equal(t, float64(0), publishCounter(t, metrics.CrossReplicaPublishOutcomeError))
 	stamp, ok := lastSuccess(t)
-	require.True(t, ok, "a fully successful publish records its time")
+	require.True(t, ok, "a cycle where every endpoint landed records its time")
 	assert.InDelta(t, float64(time.Now().Unix()), stamp, 60)
+	assert.Equal(t, uint64(1), cycleSamples(t), "one publishAll observes one cycle")
+}
+
+func TestCrossReplicaPublisher_DoesNotMoveLastSuccessOnPartialCycle(t *testing.T) {
+	resetPublishMetrics(t)
+	syncer := &fakeSyncer{setErrOn: map[string]error{"ns/ep-b": assert.AnError}}
+	pub := testCrossReplicaPublisher(syncer, fakeContributor{key: publishMetricTestKey})
+	require.True(t, pub.registerEndpoint(types.NamespacedName{Namespace: "ns", Name: "ep-a"}))
+	require.True(t, pub.registerEndpoint(types.NamespacedName{Namespace: "ns", Name: "ep-b"}))
+
+	pub.publishAll(context.Background())
+
+	assert.Equal(t, float64(1), publishCounter(t, metrics.CrossReplicaPublishOutcomeSuccess))
+	assert.Equal(t, float64(1), publishCounter(t, metrics.CrossReplicaPublishOutcomeError))
+
+	_, ok := lastSuccess(t)
+	assert.False(t, ok, "one endpoint landing and another failing has not succeeded as a cycle")
+}
+
+func TestCrossReplicaPublisher_EmptySnapshotObservesNoCycle(t *testing.T) {
+	resetPublishMetrics(t)
+	syncer := &fakeSyncer{}
+	pub := testCrossReplicaPublisher(syncer, fakeContributor{key: publishMetricTestKey})
+
+	pub.publishAll(context.Background())
+
+	assert.Empty(t, syncer.sets)
+	assert.Equal(t, uint64(0), cycleSamples(t), "an empty snapshot has no cycle duration to record")
+	_, ok := lastSuccess(t)
+	assert.False(t, ok)
 }
 
 func TestCrossReplicaPublisher_CountsFailedPublishes(t *testing.T) {

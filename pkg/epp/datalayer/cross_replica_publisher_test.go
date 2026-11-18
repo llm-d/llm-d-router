@@ -58,6 +58,9 @@ type fakeSyncer struct {
 	getOK    bool
 	getErr   error
 	setErr   error
+	// setErrOn fails only the named endpoint, so a test can land one push and
+	// fail another inside the same cycle.
+	setErrOn map[string]error
 }
 
 func (s *fakeSyncer) TypedName() fwkplugin.TypedName {
@@ -69,6 +72,9 @@ func (s *fakeSyncer) Set(_ context.Context, spec fwkdl.CrossReplicaSpec, endpoin
 	defer s.mu.Unlock()
 	if s.setErr != nil {
 		return s.setErr
+	}
+	if err, ok := s.setErrOn[endpointID]; ok {
+		return err
 	}
 	s.sets = append(s.sets, setCall{
 		key:        spec.StateKey,
