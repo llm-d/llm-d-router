@@ -176,6 +176,22 @@ func TestLookupDoesNotRefreshLRUOrder(t *testing.T) {
 	}
 }
 
+func TestPreRequestRecordsZeroMatchedTokensBeforeSelfInsert(t *testing.T) {
+	ctx := context.Background()
+	p := newPlugin(t, `{"warmupBlocks": 0}`)
+	r := chatRequest("cold", strings.Repeat("unique cold prefix content. ", 400), " q", 0)
+	_ = p.RequestHeader(ctx, r)
+	_ = p.PreRequest(ctx, r, nil)
+	v, ok := p.dispatchedMatchedTokens.Load(r.RequestID)
+	if !ok {
+		t.Fatal("expected dispatch matched tokens")
+	}
+	matched, ok := v.(int)
+	if !ok || matched != 0 {
+		t.Fatalf("first cold dispatch MatchedTokens = %v, want 0 (predict before self-insert)", v)
+	}
+}
+
 func TestResponseBodyRecordsMatchedVsCached(t *testing.T) {
 	ctx := context.Background()
 	p := newPlugin(t, `{"warmupBlocks": 0}`)
@@ -194,6 +210,42 @@ func TestResponseBodyRecordsMatchedVsCached(t *testing.T) {
 	}, nil)
 	if _, ok := p.dispatchedMatchedTokens.Load(r.RequestID); ok {
 		t.Fatal("dispatch matched tokens should be cleared after response")
+	}
+}
+
+func TestResponseBodySkipsWhenCachedUsageAbsent(t *testing.T) {
+	ctx := context.Background()
+	p := newPlugin(t, `{"warmupBlocks": 0}`)
+	r := chatRequest("r1", strings.Repeat("shared conversation context. ", 400), " q", 0)
+	_ = p.RequestHeader(ctx, r)
+	_ = p.PreRequest(ctx, r, nil)
+	p.ResponseBody(ctx, r, &fwkrh.Response{EndOfStream: true}, nil)
+	if _, ok := p.dispatchedMatchedTokens.Load(r.RequestID); ok {
+		t.Fatal("dispatch state should still be deleted when usage details are absent")
+	}
+}
+
+func TestMatchedTokensCapsPartialFinalBlock(t *testing.T) {
+	ctx := context.Background()
+	// Length not divisible by block size so the final block is partial.
+	prefix := strings.Repeat("a", 961*4)
+	p := newPlugin(t, `{"warmupBlocks": 0, "blockSizeTokens": 64, "minMatchedTokens": 0, "hitMatchRatio": 0.01}`)
+	seed := chatRequest("seed", prefix, "", 0)
+	_ = p.RequestHeader(ctx, seed)
+	_ = p.PreRequest(ctx, seed, nil)
+
+	r := chatRequest("hit", prefix, "", 0)
+	_ = p.RequestHeader(ctx, r)
+	c := classOf(t, r)
+	uncapped := c.MatchedBlocks * 64
+	if c.MatchedBlocks < 2 {
+		t.Fatalf("expected multiple blocks, got %d", c.MatchedBlocks)
+	}
+	if c.MatchedTokens >= uncapped {
+		t.Fatalf("MatchedTokens = %d, want < %d (cap partial final block)", c.MatchedTokens, uncapped)
+	}
+	if c.MatchedTokens <= (c.MatchedBlocks-1)*64 {
+		t.Fatalf("MatchedTokens = %d, want above full preceding blocks", c.MatchedTokens)
 	}
 }
 

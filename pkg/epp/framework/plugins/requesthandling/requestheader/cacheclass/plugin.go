@@ -199,7 +199,7 @@ func (p *Plugin) Produces() map[fwkplugin.DataKey]any {
 func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error {
 	logger := log.FromContext(ctx)
 
-	perPrompt := p.blockHashes(ctx, request)
+	perPrompt, promptTokens := p.blockHashes(ctx, request)
 	totalBlocks := 0
 	for _, hs := range perPrompt {
 		totalBlocks += len(hs)
@@ -210,15 +210,17 @@ func (p *Plugin) RequestHeader(ctx context.Context, request *fwksched.InferenceR
 
 	original := request.Objectives.Priority
 	prompts := perPrompt
+	lengths := promptTokens
 	request.PutAttribute(CacheClassKey, &fwksched.DynamicRequestAttribute{
 		Get: func() any {
-			return p.classFromPrompts(prompts, original)
+			return p.classFromPrompts(prompts, lengths, original)
 		},
 	})
 
-	initial := p.classFromPrompts(prompts, original)
+	initial := p.classFromPrompts(prompts, lengths, original)
 	p.pending.Store(request.RequestID, &pendingEntry{
 		perPrompt:     prompts,
+		promptTokens:  lengths,
 		matchedTokens: initial.MatchedTokens,
 		hit:           initial.Hit,
 	})
@@ -248,7 +250,7 @@ func (p *Plugin) RequestAbandoned(_ context.Context, request *fwksched.Inference
 	recordTurnedAway(p.typedName, entry.hit, entry.matchedTokens)
 }
 
-// PreRequest indexes admitted prefix blocks and records MatchedTokens at dispatch.
+// PreRequest records the dispatch-time prediction, then indexes admitted hashes.
 func (p *Plugin) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
 	v, ok := p.pending.LoadAndDelete(request.RequestID)
 	if !ok {
@@ -258,13 +260,15 @@ func (p *Plugin) PreRequest(ctx context.Context, request *fwksched.InferenceRequ
 	if !ok {
 		return nil
 	}
+	// Predict against the index as it stood for this request; adding first would
+	// make a cold request look like a full match against its own hashes.
+	class := p.classFromPrompts(entry.perPrompt, entry.promptTokens, request.Objectives.Priority)
+	p.dispatchedMatchedTokens.Store(request.RequestID, class.MatchedTokens)
 	for _, hs := range entry.perPrompt {
 		for _, h := range hs {
 			p.index.Add(h, struct{}{})
 		}
 	}
-	class := p.classFromPrompts(entry.perPrompt, request.Objectives.Priority)
-	p.dispatchedMatchedTokens.Store(request.RequestID, class.MatchedTokens)
 	recordIndexSize(p.typedName, p.index.Len())
 	return nil
 }
@@ -287,20 +291,19 @@ func (p *Plugin) ResponseBody(
 	if !ok {
 		return
 	}
-	cached := 0
-	if response.Usage.PromptTokenDetails != nil {
-		cached = response.Usage.PromptTokenDetails.CachedTokens
+	// Streams without usage details are not a zero-cache observation.
+	if response.Usage.PromptTokenDetails == nil {
+		return
 	}
-	recordMatchedVsCached(p.typedName, matched, cached)
+	recordMatchedVsCached(p.typedName, matched, response.Usage.PromptTokenDetails.CachedTokens)
 }
 
-func (p *Plugin) classFromPrompts(perPrompt [][]prefixhash.BlockHash, originalPriority int) *CacheClass {
-	matched, total := p.lookupPrompts(perPrompt)
+func (p *Plugin) classFromPrompts(perPrompt [][]prefixhash.BlockHash, promptTokens []int, originalPriority int) *CacheClass {
+	matched, total, matchedTokens := p.lookupPrompts(perPrompt, promptTokens)
 	if total == 0 {
 		return &CacheClass{OriginalPriority: originalPriority}
 	}
 	ratio := float64(matched) / float64(total)
-	matchedTokens := matched * p.blockSizeTokens
 	hit := ratio >= p.hitMatchRatio && matchedTokens >= p.minMatchedTokens
 	ready := p.warmupBlocks == 0 || p.index.Len() >= p.warmupBlocks
 	return &CacheClass{
@@ -314,9 +317,9 @@ func (p *Plugin) classFromPrompts(perPrompt [][]prefixhash.BlockHash, originalPr
 	}
 }
 
-func (p *Plugin) blockHashes(ctx context.Context, request *fwksched.InferenceRequest) [][]prefixhash.BlockHash {
+func (p *Plugin) blockHashes(ctx context.Context, request *fwksched.InferenceRequest) ([][]prefixhash.BlockHash, []int) {
 	if request == nil || request.Body == nil {
-		return nil
+		return nil, nil
 	}
 	est, err := tokenizer.EstimatePromptTokens(ctx, request.Body)
 	if err != nil || est == nil || est.TokenCount() == 0 {
@@ -324,7 +327,7 @@ func (p *Plugin) blockHashes(ctx context.Context, request *fwksched.InferenceReq
 			log.FromContext(ctx).V(logutil.DEBUG).Info("Cache classification skipped, estimate failed",
 				"requestID", request.RequestID, "err", err)
 		}
-		return nil
+		return nil, nil
 	}
 
 	shadowBody := *request.Body
@@ -332,16 +335,21 @@ func (p *Plugin) blockHashes(ctx context.Context, request *fwksched.InferenceReq
 	shadow := *request
 	shadow.Body = &shadowBody
 
-	return prefixhash.GetBlockHashes(ctx, &shadow, p.blockSizeTokens, p.maxPrefixBlocks)
+	return prefixhash.GetBlockHashesWithPromptTokens(ctx, &shadow, p.blockSizeTokens, p.maxPrefixBlocks)
 }
 
-func (p *Plugin) lookupPrompts(perPrompt [][]prefixhash.BlockHash) (matched, total int) {
-	for _, hashes := range perPrompt {
+func (p *Plugin) lookupPrompts(perPrompt [][]prefixhash.BlockHash, promptTokens []int) (matched, total, matchedTokens int) {
+	for i, hashes := range perPrompt {
 		m, t := p.lookup(hashes)
 		matched += m
 		total += t
+		tokens := m * p.blockSizeTokens
+		if i < len(promptTokens) && promptTokens[i] < tokens {
+			tokens = promptTokens[i]
+		}
+		matchedTokens += tokens
 	}
-	return matched, total
+	return matched, total, matchedTokens
 }
 
 // lookup returns the longest indexed prefix length without refreshing LRU recent-ness.
@@ -357,6 +365,7 @@ func (p *Plugin) lookup(hashes []prefixhash.BlockHash) (matched, total int) {
 
 type pendingEntry struct {
 	perPrompt     [][]prefixhash.BlockHash
+	promptTokens  []int
 	matchedTokens int
 	hit           bool
 }
