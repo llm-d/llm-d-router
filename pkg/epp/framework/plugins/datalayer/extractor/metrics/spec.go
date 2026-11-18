@@ -249,6 +249,29 @@ func (spec *Spec) maxValue(families sourcemetrics.PrometheusMetricMap, labelName
 	return value, ok
 }
 
+// hasPositiveValue reports whether a series matching Spec has a value above
+// zero. A family that is absent or has no matching series has none. ok is
+// false when a matching series is NaN or infinite.
+func (spec *Spec) hasPositiveValue(families sourcemetrics.PrometheusMetricMap) (detected, ok bool) {
+	family, err := extractFamily(spec, families)
+	if err != nil {
+		return false, true
+	}
+	for _, metric := range family.GetMetric() {
+		if !spec.labelsMatch(metric.GetLabel()) {
+			continue
+		}
+		v := extractValue(metric)
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return false, false
+		}
+		if v > 0 {
+			detected = true
+		}
+	}
+	return detected, true
+}
+
 // labelValue returns the value of the named label on metric.
 func labelValue(metric *dto.Metric, name string) (string, bool) {
 	for _, label := range metric.GetLabel() {

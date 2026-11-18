@@ -244,6 +244,26 @@ func TestCacheTotalTokensKeepsLastValue(t *testing.T) {
 	assert.False(t, ep.GetMetrics().KvCacheOffloadDetected, "offload detection follows the scrape")
 }
 
+// TestOffloadDetectionUnusableSeriesKeepsLastValue checks that a scrape where
+// one matching series of the detection metric is NaN or infinite leaves the
+// offload signal of the previous scrape in place.
+func TestOffloadDetectionUnusableSeriesKeepsLastValue(t *testing.T) {
+	const counterFamily = "# TYPE vllm:kv_offload_total_bytes_total counter\n"
+	const load = `vllm:kv_offload_total_bytes_total{engine="0",model_name="m",transfer_type="CPU_to_GPU"} 0.0` + "\n"
+	const store = `vllm:kv_offload_total_bytes_total{engine="0",model_name="m",transfer_type="GPU_to_CPU"} `
+	for _, unusable := range []string{"NaN", "+Inf", "-Inf"} {
+		t.Run(unusable, func(t *testing.T) {
+			ep, err := scrapeText(t, "vllm", vllmSchedulingExposition+counterFamily+load+store+"3.3554432e+07\n", nil)
+			require.NoError(t, err)
+			require.True(t, ep.GetMetrics().KvCacheOffloadDetected)
+
+			_, err = scrapeText(t, "vllm", vllmSchedulingExposition+counterFamily+load+store+unusable+"\n", ep)
+			require.NoError(t, err)
+			assert.True(t, ep.GetMetrics().KvCacheOffloadDetected)
+		})
+	}
+}
+
 func TestMappingCacheTotalTokensLabelRequiresSpec(t *testing.T) {
 	_, err := NewMappingFromConfig(MappingConfig{CacheTotalTokensLabel: "cpu_kv_cache_size_tokens"})
 	require.Error(t, err)

@@ -182,6 +182,9 @@ parameters:
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
       cacheInfoSpec: "vllm:cache_config_info"
+      cacheTotalTokensSpec: "vllm:kv_offload_config_info"
+      cacheTotalTokensLabelName: "cpu_kv_cache_size_tokens"
+      cacheOffloadDetectionSpec: "vllm:kv_offload_total_bytes_total"
       # Per-tier offloading specs
       customMetrics:
         - attributeKey: "tiering_chunk_hits_fs"
@@ -219,6 +222,9 @@ parameters:
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
       cacheInfoSpec: "vllm:cache_config_info"
+      cacheTotalTokensSpec: "vllm:kv_offload_config_info"
+      cacheTotalTokensLabelName: "cpu_kv_cache_size_tokens"
+      cacheOffloadDetectionSpec: "vllm:kv_offload_total_bytes_total"
       customMetrics:
         - attributeKey: "cpu_offload_usage"
           metricSpec: "vllm:kv_offload_cpu_cache_usage_perc"

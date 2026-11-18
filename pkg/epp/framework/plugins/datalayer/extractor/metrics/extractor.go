@@ -240,8 +240,7 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	if spec := mapping.CacheOffloadDetection; spec != nil {
 		// A positive value rather than the family's presence: vLLM registers its
 		// transfer counters at zero on startup, before the capacity label exists.
-		_, detected := spec.maxValue(families, "")
-		if detected != clone.KvCacheOffloadDetected {
+		if detected, ok := spec.hasPositiveValue(families); ok && detected != clone.KvCacheOffloadDetected {
 			clone.KvCacheOffloadDetected = detected
 			updated = true
 		}
