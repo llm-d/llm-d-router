@@ -252,8 +252,9 @@ func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoin
 		if endpointCount == 0 {
 			return 1.0
 		}
-		// The aggregate ratios cover endpoints whose capacity exceeds the average: with
-		// uniform capacities neither exceeds the per-endpoint average.
+		// The aggregate ratios cover endpoints whose capacity exceeds the average, and the
+		// request ratio also counts pending dispatches. With uniform capacities the token
+		// ratio never exceeds the per-endpoint average.
 		return max(
 			hybridSatSum/float64(endpointCount),
 			ratio(reqInflight+pendingDispatches, reqCapacity),
