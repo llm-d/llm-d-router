@@ -162,8 +162,8 @@ func (d *detector) ReleaseDispatch(requestID string) bool {
 // getIncomingTokens returns the uncached tokens the current request would add to the endpoint.
 func (d *detector) getIncomingTokens(m datalayer.AttributeMap) int64 {
 	if val, ok := m.Get(d.uncachedRequestTokensDataKey); ok {
-		if tokens, ok := val.(*attrconcurrency.UncachedRequestTokens); ok && tokens.Tokens > 0 {
-			return tokens.Tokens
+		if tokens, ok := val.(*attrconcurrency.UncachedRequestTokens); ok && tokens.Tokens.Total() > 0 {
+			return tokens.Tokens.Total()
 		}
 	}
 	return 0
