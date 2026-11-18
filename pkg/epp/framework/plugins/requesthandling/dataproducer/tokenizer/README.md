@@ -195,6 +195,10 @@ EPP contract does not establish parity for them.
 | `vllm.clientCertPath`      | –                       | Client certificate for mTLS with the render endpoint; requires `clientKeyPath`. |
 | `vllm.clientKeyPath`       | –                       | Client private key for mTLS; requires `clientCertPath`.                      |
 | `vllm.insecureSkipVerify`  | `false`                 | Skip server certificate verification when using `https://`; `caCertPath` is ignored when set. |
+| `vllm.circuitBreaker`      | unset                   | Alpha. Skip rendering after consecutive render timeouts; see [Render circuit breaker](#render-circuit-breaker). |
+| `vllm.circuitBreaker.consecutiveTimeouts` | `5`      | Consecutive timed-out render calls that open the circuit.                    |
+| `vllm.circuitBreaker.openDuration` | `10s`           | Open duration each time the circuit opens from closed.                       |
+| `vllm.circuitBreaker.maxOpenDuration` | `2m`         | Cap on the open duration, which doubles on each failed probe.                |
 
 The `estimate` backend tunes multimodal image placeholder estimation (empty uses
 the defaults below):
@@ -275,6 +279,47 @@ Per-request errors are returned to the Director, which logs and continues;
 downstream scorers fall back to their own paths. A missing selected render
 endpoint, render error, or empty token result does not publish token IDs.
 Neither Messages mode falls back to the other mode or to estimation.
+
+### Render circuit breaker
+
+A render endpoint that receives more requests than it can render queues them
+until every request waits for the full render budget: `vllm.timeout` for
+completions and the larger of `vllm.timeout` and `vllm.mmTimeout` (30 seconds
+by default) for Chat, Messages, and Responses. Each of those requests then
+routes without token IDs.
+
+Set `vllm.circuitBreaker: {}` to skip rendering instead of waiting. Each
+render path (completions, Chat, Messages, and Responses) has its own breaker
+per plugin instance, because the paths have different render budgets. A
+breaker counts render calls after the retry on an alternate discovered
+endpoint:
+
+- `consecutiveTimeouts` timed-out render calls in a row open the circuit. A
+  successful render call resets the count. Other failures and caller
+  cancellations neither count nor reset it, because they return without
+  waiting for the budget.
+- While the circuit is open, `Produce` skips rendering and returns without
+  token IDs and without an error, so producers that require the tokenized
+  prompt still run and take their no-token path.
+- After the open duration, one request renders with its normal budget while
+  the others keep skipping. A timeout opens the circuit again with twice the
+  open duration, up to `maxOpenDuration`. Any other outcome closes it, and the
+  next trip opens it for `openDuration` again. The probe is a real request
+  because it carries the client's `Authorization` header.
+- A render call admitted before the last state change, such as one in flight
+  when the circuit opened, does not change the circuit when it completes.
+
+Warmup and render-mode discovery probes bypass the breaker. The breaker bounds
+the latency that an overloaded render endpoint adds; it does not add render
+capacity. While it is open, those requests are scored without token IDs.
+
+```yaml
+vllm:
+  circuitBreaker:
+    consecutiveTimeouts: 5
+    openDuration: 10s
+    maxOpenDuration: 2m
+```
 
 ## Deployment
 
@@ -462,8 +507,9 @@ render latency, including multimodal processing. Without an attempt timeout,
 a slow endpoint can consume the request budget and leave no time for a retry.
 
 With no eligible discovered endpoints, rendering returns an error. Render
-failures do not remove URLs from subsequent requests; there is no render
-circuit breaker. Retry exclusions preserve round-robin cursor progression
+failures do not remove URLs from subsequent requests. The
+[render circuit breaker](#render-circuit-breaker) acts on the renderer as a
+whole, not on individual URLs. Retry exclusions preserve round-robin cursor progression
 across the eligible endpoint list.
 
 Each named token producer maintains its own endpoint set and balancing state.

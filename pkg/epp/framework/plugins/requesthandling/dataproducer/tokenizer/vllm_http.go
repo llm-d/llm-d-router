@@ -183,6 +183,10 @@ type vllmConfig struct {
 	// server certificate. Use for self-signed certificates in development
 	// or when the cluster manages its own PKI.
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
+	// CircuitBreaker skips rendering after consecutive render timeouts, so
+	// requests route without tokens instead of waiting for the render budget.
+	// Unset disables it.
+	CircuitBreaker *circuitBreakerConfig `json:"circuitBreaker,omitempty"`
 }
 
 // vllmHTTPRenderer implements the tokenizer interface by calling vLLM's
@@ -201,6 +205,9 @@ type vllmHTTPRenderer struct {
 	// failuresSinceLog counts failures since the last failure log line,
 	// including the one being logged.
 	failuresSinceLog atomic.Int64
+	// breakers holds one circuit breaker per render path and is nil unless
+	// circuitBreaker is configured.
+	breakers map[string]*renderCircuitBreaker
 }
 
 func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
@@ -244,6 +251,12 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 	if err != nil {
 		return nil, err
 	}
+	var breakers map[string]*renderCircuitBreaker
+	if cfg.CircuitBreaker != nil {
+		if breakers, err = newRenderCircuitBreakers(cfg.CircuitBreaker); err != nil {
+			return nil, err
+		}
+	}
 	return &vllmHTTPRenderer{
 		client: &http.Client{Transport: otelhttp.NewTransport(&renderTraceTransport{base: transport}, otelhttp.WithSpanNameFormatter(
 			// Name the outbound span after the render route instead of the
@@ -259,6 +272,7 @@ func newVLLMHTTPRenderer(cfg *vllmConfig) (*vllmHTTPRenderer, error) {
 		prefillOnly:    cfg.PrefillOnly,
 		omitMMKwargs:   cfg.OmitMMKwargs,
 		failureLog:     rate.Sometimes{Interval: renderFailureLogInterval},
+		breakers:       breakers,
 	}, nil
 }
 
@@ -461,6 +475,15 @@ func (r *vllmHTTPRenderer) postJSON(ctx context.Context, path string, body fwkre
 				}
 			}
 		}
+	}
+
+	// Probes for warmup and render-mode discovery bypass the circuit breaker.
+	if b := r.breakers[path]; b != nil && ctx.Value(unobservedRenderCtxKey{}) == nil {
+		allowed, generation := r.admitRender(ctx, path, b)
+		if !allowed {
+			return errRenderCircuitOpen
+		}
+		defer func() { r.recordRender(ctx, path, b, generation, err) }()
 	}
 
 	start := time.Now()
