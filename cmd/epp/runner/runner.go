@@ -187,6 +187,9 @@ import (
 
 var (
 	setupLog = ctrl.Log.WithName("setup")
+
+	// errSchedulerConfigMissing reports a configuration that sets no scheduler.
+	errSchedulerConfigMissing = errors.New("scheduler config must be set either by config api or through code")
 )
 
 // NewRunner initializes a new EPP Runner and returns its pointer.
@@ -1050,9 +1053,6 @@ func extractDeploymentName(podName string) (string, error) {
 	}
 	return "", fmt.Errorf("failed to parse deployment name from pod name %s", podName)
 }
-
-// errSchedulerConfigMissing reports a configuration that sets no scheduler.
-var errSchedulerConfigMissing = errors.New("scheduler config must be set either by config api or through code")
 
 // validateKubernetesDiscoveryFlags checks the flags the Kubernetes discovery path
 // needs: an InferencePool name or an endpoint selector, but not both.
