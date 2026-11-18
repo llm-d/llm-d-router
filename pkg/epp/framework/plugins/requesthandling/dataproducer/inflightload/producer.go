@@ -990,18 +990,6 @@ func decrementClamped(counter *atomic.Int64, delta int64) {
 	}
 }
 
-// decrementClamped subtracts delta from the endpoint's counter with a floor at
-// zero, so releasing a reservation can never drive a counter negative.
-func (t *concurrencyTracker) decrementClamped(endpointID string, delta int64) {
-	t.mu.RLock()
-	counter, exists := t.counts[endpointID]
-	t.mu.RUnlock()
-	if !exists {
-		return
-	}
-	decrementClamped(counter, delta)
-}
-
 func (t *concurrencyTracker) delete(endpointID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
