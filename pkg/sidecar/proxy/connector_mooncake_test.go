@@ -18,16 +18,22 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
+	"github.com/stretchr/testify/require"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -276,3 +282,140 @@ var _ = Describe("Mooncake Connector", func() {
 		<-testInfo.stoppedCh
 	})
 })
+
+// mooncakeEngineMapTest wires a Mooncake sidecar to a prefill backend, a decode
+// backend reached through the production decoder proxy, and a bootstrap server
+// whose engine_id changes on its second query, the observable effect of a
+// prefill container restarting in place.
+type mooncakeEngineMapTest struct {
+	proxy       *Server
+	prefillHost string
+
+	bootstrapQueries atomic.Int32
+	// prefillStatusCode and decodeStatusCode are returned by every request to
+	// that stage once set; 0 means 200.
+	prefillStatusCode atomic.Int32
+	decodeStatusCode  atomic.Int32
+	// decodeHold keeps the decode backend in flight until the prefill leg
+	// cancels the decode request, so a failed prefill is relayed to the client
+	// by the decoder proxy instead of racing a 200 from the decode backend.
+	decodeHold atomic.Bool
+
+	decodeMu      sync.Mutex
+	decodeEngines []string // remote_engine_id carried by each decode request, in order
+}
+
+func newMooncakeEngineMapTest(t *testing.T) *mooncakeEngineMapTest {
+	t.Helper()
+	fx := &mooncakeEngineMapTest{}
+
+	bootstrap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		engineID := "engine-v1"
+		if fx.bootstrapQueries.Add(1) > 1 {
+			engineID = "engine-v2"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"0": {"engine_id": %q}}`, engineID)
+	}))
+	t.Cleanup(bootstrap.Close)
+	bootstrapURL, err := url.Parse(bootstrap.URL)
+	require.NoError(t, err)
+	bootstrapPort, err := strconv.Atoi(bootstrapURL.Port())
+	require.NoError(t, err)
+
+	prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if code := int(fx.prefillStatusCode.Load()); code != 0 {
+			w.WriteHeader(code)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(prefill.Close)
+	prefillURL, err := url.Parse(prefill.URL)
+	require.NoError(t, err)
+	fx.prefillHost = prefillURL.Host
+
+	decode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			KVTransferParams struct {
+				RemoteEngineID string `json:"remote_engine_id"`
+			} `json:"kv_transfer_params"`
+		}
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		fx.decodeMu.Lock()
+		fx.decodeEngines = append(fx.decodeEngines, body.KVTransferParams.RemoteEngineID)
+		fx.decodeMu.Unlock()
+
+		if fx.decodeHold.Load() {
+			// The prefill failure cancels this request; the decoder proxy
+			// relays the prefill status to the client.
+			<-r.Context().Done()
+			return
+		}
+		if code := int(fx.decodeStatusCode.Load()); code != 0 {
+			w.WriteHeader(code)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(decode.Close)
+	decodeURL, err := url.Parse(decode.URL)
+	require.NoError(t, err)
+
+	fx.proxy = NewProxy(Config{Port: "0", DecoderURL: decodeURL, KVConnector: constants.KVConnectorMooncake, MooncakeBootstrapPort: bootstrapPort})
+	fx.proxy.decoderProxy = fx.proxy.createDecoderProxyHandler(decodeURL, false)
+
+	return fx
+}
+
+// send runs one chat completions request through the Mooncake handler and
+// returns the status the client receives.
+func (fx *mooncakeEngineMapTest) send(t *testing.T) int {
+	t.Helper()
+	r := withContextLogger(fx.proxy, httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, strings.NewReader(chatCompletionsRequestBody)))
+	rec := httptest.NewRecorder()
+	fx.proxy.handleMooncake(rec, r, fx.prefillHost, reqcommon.APITypeChatCompletions)
+	return rec.Code
+}
+
+// decodeEngineIDs returns the remote_engine_id named by each decode request so far.
+func (fx *mooncakeEngineMapTest) decodeEngineIDs() []string {
+	fx.decodeMu.Lock()
+	defer fx.decodeMu.Unlock()
+	return append([]string(nil), fx.decodeEngines...)
+}
+
+// A failed request must drop the cached engine map: vLLM mints a new engine_id
+// at every start, so the next request has to re-query the bootstrap server and
+// name the current engine.
+func TestMooncakeEngineMapDroppedAfterFailedRequest(t *testing.T) {
+	fx := newMooncakeEngineMapTest(t)
+
+	require.Equal(t, http.StatusOK, fx.send(t))
+
+	fx.decodeStatusCode.Store(http.StatusBadGateway)
+	require.Equal(t, http.StatusBadGateway, fx.send(t))
+	fx.decodeStatusCode.Store(http.StatusOK)
+
+	require.Equal(t, http.StatusOK, fx.send(t))
+	require.Equal(t, []string{"engine-v1", "engine-v1", "engine-v2"}, fx.decodeEngineIDs())
+	require.Equal(t, int32(2), fx.bootstrapQueries.Load(), "the request after the failure must re-query the bootstrap server")
+}
+
+// A prefill failure the client observes also invalidates the cached engine
+// map: the decoder proxy relays the prefill status onto the response writer
+// handleMooncake wraps.
+func TestMooncakeEngineMapDroppedAfterPrefillError(t *testing.T) {
+	fx := newMooncakeEngineMapTest(t)
+
+	require.Equal(t, http.StatusOK, fx.send(t))
+
+	fx.prefillStatusCode.Store(http.StatusServiceUnavailable)
+	fx.decodeHold.Store(true)
+	require.Equal(t, http.StatusServiceUnavailable, fx.send(t))
+
+	_, ok := fx.proxy.mooncakeEngineIDs.Get(fx.prefillHost)
+	require.False(t, ok, "the observed prefill failure did not drop the cached engine map")
+}
