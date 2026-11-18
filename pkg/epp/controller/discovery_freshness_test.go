@@ -27,6 +27,7 @@ import (
 
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -414,6 +415,70 @@ func TestDiscoveryFreshnessSharesVerificationAndIsolatesWaiterCancellation(t *te
 		require.NoError(t, <-results)
 	}
 	require.Equal(t, int32(2), lists.Load(), "the initial and shared on-demand sample are the only API Pod lists")
+}
+
+func TestDiscoveryFreshnessRequestWaitDoesNotShortenSharedVerification(t *testing.T) {
+	for _, demandFirst := range []bool{true, false} {
+		name := "periodic first"
+		if demandFirst {
+			name = "on demand first"
+		}
+		t.Run(name, func(t *testing.T) {
+			var lists atomic.Int32
+			started := make(chan context.Context, 1)
+			release := make(chan struct{})
+			f := newLabelRefreshFixture(t, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if lists.Add(1) > 1 {
+					started <- ctx
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return c.List(ctx, list, opts...)
+			}})
+			candidates := f.changeLabels(t)
+			previous := f.checker.validated.Load()
+			requestDone := make(chan error, 1)
+			request := func() {
+				go func() { _, err := f.checker.FilterCandidates(f.ctx, candidates); requestDone <- err }()
+			}
+			var periodic <-chan singleflight.Result
+			if demandFirst {
+				request()
+			} else {
+				periodic = f.checker.refreshShared(f.ctx)
+			}
+			var readCtx context.Context
+			select {
+			case readCtx = <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("shared verification did not start")
+			}
+			if demandFirst {
+				periodic = f.checker.refreshShared(f.ctx)
+			} else {
+				request()
+			}
+			select {
+			case err := <-requestDone:
+				require.ErrorContains(t, err, "context deadline exceeded")
+			case <-time.After(2 * time.Second):
+				t.Fatal("request exceeded its independent wait budget")
+			}
+			require.NoError(t, readCtx.Err(), "request timeout must leave the shared API read running")
+			require.Same(t, previous, f.checker.validated.Load(), "an unfinished read must not renew validation")
+			close(release)
+			result := <-periodic
+			require.NoError(t, result.Err)
+			require.True(t, result.Shared)
+			require.Equal(t, int32(2), lists.Load())
+			eligible, err := f.checker.FilterCandidates(f.ctx, candidates)
+			require.NoError(t, err, "the completed shared read must validate the changed candidate")
+			require.Equal(t, candidates, eligible)
+		})
+	}
 }
 
 func TestDiscoveryFreshnessOnDemandVerificationRemainsFailClosed(t *testing.T) {

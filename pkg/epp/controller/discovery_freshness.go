@@ -87,7 +87,7 @@ func (d *DiscoveryFreshness) Start(ctx context.Context) error {
 	defer func() {
 		d.running.Store(false)
 		// Join a demand refresh before clearing the final validated state.
-		<-d.refreshShared(ctx, d.threshold/3)
+		<-d.refreshShared(ctx)
 		d.validated.Store(nil)
 	}()
 	ready := false
@@ -95,7 +95,7 @@ func (d *DiscoveryFreshness) Start(ctx context.Context) error {
 		// At most 0.4 thresholds between starts plus a one-third-threshold read
 		// leaves time to renew the previous snapshot before it expires.
 		timer := d.clock.NewTimer(wait.Jitter(d.threshold/3, 0.2))
-		result := <-d.refreshShared(ctx, d.threshold/3)
+		result := <-d.refreshShared(ctx)
 		if result.Err != nil && ctx.Err() == nil {
 			log.FromContext(ctx).V(logutil.DEBUG).Info("Unable to sample Kubernetes discovery membership", "error", result.Err)
 		}
@@ -115,9 +115,9 @@ func (d *DiscoveryFreshness) Start(ctx context.Context) error {
 }
 
 // refreshShared serializes sampling without holding request-path state locks.
-func (d *DiscoveryFreshness) refreshShared(ctx context.Context, timeout time.Duration) <-chan singleflight.Result {
+func (d *DiscoveryFreshness) refreshShared(ctx context.Context) <-chan singleflight.Result {
 	return d.refreshes.DoChan("membership", func() (any, error) {
-		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+		attemptCtx, cancel := context.WithTimeout(ctx, d.threshold/3)
 		defer cancel()
 		if err := d.refreshLimiter.Wait(attemptCtx); err != nil {
 			return nil, err
@@ -218,7 +218,7 @@ func (d *DiscoveryFreshness) FilterCandidates(ctx context.Context, candidates []
 		if waitCtx.Err() != nil {
 			break
 		}
-		result := d.refreshShared(d.runCtx, budget)
+		result := d.refreshShared(d.runCtx)
 		select {
 		case <-waitCtx.Done():
 			return nil, errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: waitCtx.Err().Error()}
