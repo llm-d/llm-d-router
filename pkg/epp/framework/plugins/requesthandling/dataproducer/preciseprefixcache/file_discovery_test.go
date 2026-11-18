@@ -156,11 +156,12 @@ func TestProducer_FileDiscoveryRemovedEntryStopsSubscriber(t *testing.T) {
 	ids, _ := p.subscribersManager.GetActiveSubscribers()
 	require.Len(t, ids, 2)
 
-	writeEndpoints(t, path, `endpoints:
+	// Ready() closes before the watcher is registered, so a single write can
+	// land before watcher.Add and be missed. Rewrite on each poll (idempotent).
+	require.Eventually(t, func() bool {
+		writeEndpoints(t, path, `endpoints:
 - {name: vllm-0, address: 10.0.0.1, port: "8000"}
 `)
-
-	require.Eventually(t, func() bool {
 		ids, endpoints := p.subscribersManager.GetActiveSubscribers()
 		return len(ids) == 1 && ids[0] == "default/vllm-0" && endpoints[0] == "tcp://10.0.0.1:5557"
 	}, 5*time.Second, 20*time.Millisecond)
