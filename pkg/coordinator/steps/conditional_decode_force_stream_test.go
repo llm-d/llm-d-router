@@ -557,6 +557,41 @@ func TestForceStream_MetricsCarryStepLabel(t *testing.T) {
 	}
 }
 
+// A decline is recorded once the worker answers the pass-through, even when
+// copying the reply to the client then fails and the proxy aborts the handler.
+func TestForceStream_DeclineRecordedWhenPassThroughAborts(t *testing.T) {
+	for _, tc := range []struct {
+		step  string
+		build func(t *testing.T, serverURL string) (pipeline.Step, *prometheus.Registry)
+	}{
+		{
+			step: DecodeStepName,
+			build: func(t *testing.T, serverURL string) (pipeline.Step, *prometheus.Registry) {
+				return newForceStreamStep(t, serverURL, "1GiB")
+			},
+		},
+		{
+			step: ConditionalDecodeStepName,
+			build: func(t *testing.T, serverURL string) (pipeline.Step, *prometheus.Registry) {
+				return newForcedConditionalStep(t, serverURL, nil)
+			},
+		},
+	} {
+		t.Run(tc.step, func(t *testing.T) {
+			server, _ := condUpstream(t, jsonReply("tools"))
+			step, reg := tc.build(t, server.URL)
+			reqCtx := condForcedRequest(&brokenPipeWriter{header: http.Header{}})
+			reqCtx.KVTransferParams = map[string]any{}
+			reqCtx.Body["tools"] = []any{map[string]any{"type": "function"}}
+			// As under a real server, so the proxy aborts on the failed copy.
+			ctx := context.WithValue(context.Background(), http.ServerContextKey, &http.Server{})
+
+			require.PanicsWithValue(t, http.ErrAbortHandler, func() { _ = step.Execute(ctx, reqCtx) })
+			require.InDelta(t, 1.0, counterValue(t, reg, forceStreamTotalMetric, map[string]string{"step": tc.step, "result": coordmetrics.ForceStreamResultFallbackUnsupported}), 1e-9)
+		})
+	}
+}
+
 // EnableForceStream hands one budget to every step that force-streams, and
 // rejects a size that fails validation.
 func TestEnableForceStream(t *testing.T) {

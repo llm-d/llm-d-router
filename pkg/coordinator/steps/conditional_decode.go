@@ -94,21 +94,24 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 
 	probeHeaders := map[string]string{routing.PreferHeader: routing.PreferIfAvailable}
 	var cacheMiss bool
+	var forceStreamResult string
 	onProbeResponse := func(resp *http.Response) error {
 		if err := deferOnPreconditionFailed(reqCtx, resp); err != nil {
 			cacheMiss = true
 			return err
 		}
 		coordmetrics.IncConditionalDecodeProbes(probeResult(resp.StatusCode))
+		if forceStreamResult != "" {
+			coordmetrics.IncForceStreamTotal(reqCtx.Model, ConditionalDecodeStepName, forceStreamResult)
+		}
 		return nil
 	}
 
 	// A non-streaming request the worker serves is force-streamed as decode
 	// would serve it. A decline or a fallback re-sends body through the probe
 	// below; the probe body names no KV handoff, so the re-send is safe. Its
-	// outcome is recorded only when the probe is not deferred: a deferred
-	// request is decode's to record.
-	var forceStreamResult string
+	// outcome is recorded when the worker answers the probe without deferring it:
+	// a deferred request is decode's to record.
 	if s.budget != nil && !reqCtx.Stream {
 		if shape, ok := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); ok {
 			// The probe result of a forced attempt is recorded once its outcome is
@@ -159,9 +162,6 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	if cacheMiss {
 		logger.V(logutil.DEFAULT).Info("probe deferred (412), continuing pipeline")
 		return nil
-	}
-	if forceStreamResult != "" && out.Cancelled == nil {
-		coordmetrics.IncForceStreamTotal(reqCtx.Model, ConditionalDecodeStepName, forceStreamResult)
 	}
 	if out.TransportErr != nil {
 		coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultTransportError)

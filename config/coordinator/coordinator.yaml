@@ -198,11 +198,13 @@ pipeline:
   # Setting these keys under decode or conditional-decode params fails
   # config load. The two sizes below are validated with force_stream off
   # too, so an invalid size fails config load either way.
+  # env: COORDINATOR_PIPELINE_FORCE_STREAM
   # force_stream: true
 
   # force_stream_buffer_size caps the wire bytes concurrent forced requests
   # may reserve at once (human-readable, default 1GiB). Peak heap runs
   # higher, so this is not an RSS cap.
+  # env: COORDINATOR_PIPELINE_FORCE_STREAM_BUFFER_SIZE
   # force_stream_buffer_size: 1GiB
 
   # force_stream_max_request_size caps the bytes one forced request may
@@ -211,6 +213,7 @@ pipeline:
   # overhead, or no output could be buffered; a smaller value fails config
   # load. A Responses request also reserves its own body size from the
   # buffer, outside this cap, since its reply echoes the request fields.
+  # env: COORDINATOR_PIPELINE_FORCE_STREAM_MAX_REQUEST_SIZE
   # force_stream_max_request_size: 256KiB
 
   steps:

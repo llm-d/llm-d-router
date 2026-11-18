@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/go-logr/logr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -148,18 +149,23 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
+	// A decline or fallback outcome is recorded when the worker answers the
+	// pass-through, so a client that left before then records none.
+	var onResponse func(*http.Response) error
+	if forceStreamResult != "" {
+		onResponse = func(*http.Response) error {
+			coordmetrics.IncForceStreamTotal(reqCtx.Model, DecodeStepName, forceStreamResult)
+			return nil
+		}
+	}
+
 	writer, finalize := parityResponseWriter(reqCtx, parity, injectedUsage)
-	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamDecode, nil)
+	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamDecode, onResponse)
 	if err := finalize(); err != nil {
 		// The buffered tail could not be forwarded, so the client holds a
 		// truncated response. Nothing can be written to say so: the status and
 		// the body before the tail are already on the wire.
 		logger.Error(err, "flushing the rewritten usage block failed: client received a partial response")
-	}
-	// As on conditional-decode, a client that left before the worker answered
-	// the pass-through records no outcome.
-	if forceStreamResult != "" && out.Cancelled == nil {
-		coordmetrics.IncForceStreamTotal(reqCtx.Model, DecodeStepName, forceStreamResult)
 	}
 	return out.streamedError(DecodeStepName)
 }

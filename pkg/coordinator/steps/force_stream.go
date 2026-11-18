@@ -433,8 +433,8 @@ func executeForceStream(ctx context.Context, logger logr.Logger, gwClient *gatew
 	resp, err := gwClient.Post(ctx, reqCtx.OriginalPath, bodyBytes, headers)
 	call.Done()
 	if err != nil {
-		// A round trip that failed because the client left is the cancellation,
-		// not a transport fault, so it records no outcome.
+		// A round trip that failed because the client left is a cancellation, so
+		// it records no outcome.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			logger.V(logutil.VERBOSE).Info("force-stream: client cancelled", "error", err)
 			return fmt.Errorf("%s: %w", leg.step, ctxErr)
