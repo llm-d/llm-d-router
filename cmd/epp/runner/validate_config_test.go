@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 
 	runserver "github.com/llm-d/llm-d-router/pkg/epp/server"
@@ -60,7 +61,7 @@ func TestValidateConfig(t *testing.T) {
 	invalidObjectivesFile := filepath.Join(t.TempDir(), "objectives.yaml")
 	require.NoError(t, os.WriteFile(invalidObjectivesFile, []byte("objectives:\n- priority: 10\n"), 0o600))
 
-	fileDiscoveryConfig := replaceOnce(t, validateConfigBase, "plugins:\n- type: approx-prefix-cache-producer",
+	fileDiscoveryConfig := editBase(t, "plugins:\n- type: approx-prefix-cache-producer",
 		"plugins:\n- name: file-disc\n  type: file-discovery\n  parameters:\n    path: "+endpointsFile+
 			"\n- type: approx-prefix-cache-producer") + `dataLayer:
   discovery:
@@ -86,13 +87,13 @@ func TestValidateConfig(t *testing.T) {
 		},
 		{
 			name:       "unregistered plugin type",
-			configText: replaceOnce(t, validateConfigBase, "type: max-score-picker", "type: max-score-pickr"),
+			configText: editBase(t, "type: max-score-picker", "type: max-score-pickr"),
 			poolName:   "epp",
 			wantErr:    "plugin type 'max-score-pickr' is not registered",
 		},
 		{
 			name:       "profile references an undefined plugin",
-			configText: replaceOnce(t, validateConfigBase, "pluginRef: decode-filter", "pluginRef: no-such-plugin"),
+			configText: editBase(t, "pluginRef: decode-filter", "pluginRef: no-such-plugin"),
 			poolName:   "epp",
 			wantErr:    "no-such-plugin",
 		},
@@ -147,9 +148,55 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
-// replaceOnce replaces old in s, which must occur exactly once.
-func replaceOnce(t *testing.T, s, old, replacement string) string {
+// TestRunValidateConfig drives --validate-config through Run, which main turns
+// into the exit code: a nil error exits 0 and any error exits 1.
+func TestRunValidateConfig(t *testing.T) {
+	tests := []struct {
+		name       string
+		configText string
+		args       []string
+		wantErr    string
+	}{
+		{
+			name:       "valid config",
+			configText: validateConfigBase,
+			args:       []string{"--pool-name=epp"},
+		},
+		{
+			name:       "invalid config",
+			configText: editBase(t, "type: max-score-picker", "type: max-score-pickr"),
+			args:       []string{"--pool-name=epp"},
+			wantErr:    "plugin type 'max-score-pickr' is not registered",
+		},
+		{
+			name:       "kubernetes mode without pool-name or endpoint-selector",
+			configText: validateConfigBase,
+			wantErr:    "either pool-name or endpoint-selector must be set",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Run parses os.Args into the global pflag.CommandLine, so each case
+			// gets its own arguments and a fresh flag set.
+			origArgs, origFlags := os.Args, pflag.CommandLine
+			t.Cleanup(func() { os.Args, pflag.CommandLine = origArgs, origFlags })
+			os.Args = append([]string{"epp", "--validate-config", "--tracing=false", "--config-text=" + tc.configText}, tc.args...)
+			pflag.CommandLine = pflag.NewFlagSet("epp", pflag.ContinueOnError)
+
+			err := NewRunner().Run(context.Background())
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+// editBase replaces old in validateConfigBase, which must contain it exactly once.
+func editBase(t *testing.T, old, replacement string) string {
 	t.Helper()
-	require.Equal(t, 1, strings.Count(s, old), "%q must occur exactly once", old)
-	return strings.Replace(s, old, replacement, 1)
+	require.Equal(t, 1, strings.Count(validateConfigBase, old), "%q must occur exactly once", old)
+	return strings.Replace(validateConfigBase, old, replacement, 1)
 }
