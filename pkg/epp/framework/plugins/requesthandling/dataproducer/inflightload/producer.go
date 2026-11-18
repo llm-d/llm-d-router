@@ -108,7 +108,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, err
 	}
 
-	prod := &InFlightLoadProducer{
+	return &InFlightLoadProducer{
 		typedName:                 fwkplugin.TypedName{Type: InFlightLoadProducerType, Name: name},
 		requestTracker:            newConcurrencyTracker(),
 		tokenTracker:              newConcurrencyTracker(),
@@ -122,11 +122,12 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		uncachedRequestTokensSlot: datalayer.NewSlot[*attrconcurrency.UncachedRequestTokens](attrconcurrency.UncachedRequestTokensDataKey.WithNonEmptyProducerName(name)),
 		syncCrossReplicaState:     syncCrossReplicaState,
 		PluginState:               fwkplugin.NewPluginState(ctx),
-	}
-	return prod, nil
+	}, nil
 }
 
 var (
+	_ fwkrh.EndpointReserver            = &InFlightLoadProducer{}
+	_ fwkrh.RequestAbandoned            = &InFlightLoadProducer{}
 	_ fwkrh.PreRequest                  = &InFlightLoadProducer{}
 	_ fwkrh.ResponseBodyProcessor       = &InFlightLoadProducer{}
 	_ fwkrh.DataProducer                = &InFlightLoadProducer{}
@@ -892,6 +893,19 @@ func (p *InFlightLoadProducer) ReserveResult(ctx context.Context, requestID stri
 // plugin state, per endpoint and profile.
 func reservationKey(endpointID, profileName string) string {
 	return endpointID + "|" + profileName + "|reserved"
+}
+
+// RequestAbandoned implements fwkrh.RequestAbandoned: the director calls it on
+// every path that exits after scheduling but before PreRequest (including
+// flow-control rejection), releasing the request's pick-time reservations
+// immediately instead of waiting for the staleness janitor. At this point no
+// addedTokens entries exist yet (those are written at PreRequest), so deleting
+// the request's state rolls back exactly its reservations.
+func (p *InFlightLoadProducer) RequestAbandoned(_ context.Context, request *fwksched.InferenceRequest) {
+	if request == nil || request.RequestID == "" || p.PluginState == nil {
+		return
+	}
+	p.PluginState.Delete(request.RequestID)
 }
 
 func (p *InFlightLoadProducer) GetRequests(eid string) int64 {

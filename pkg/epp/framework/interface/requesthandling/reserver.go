@@ -14,9 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package scheduling
+package requesthandling
 
-import "context"
+import (
+	"context"
+
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+)
 
 // EndpointReserver is implemented by data producers that track per-endpoint
 // in-flight load. The director calls ReserveResult as soon as scheduling
@@ -34,5 +38,5 @@ type EndpointReserver interface {
 	// on behalf of the request identified by requestID. ctx must be the
 	// request's lifetime context so the reservation is reclaimed if the
 	// request never dispatches.
-	ReserveResult(ctx context.Context, requestID string, result *SchedulingResult)
+	ReserveResult(ctx context.Context, requestID string, result *fwksched.SchedulingResult)
 }

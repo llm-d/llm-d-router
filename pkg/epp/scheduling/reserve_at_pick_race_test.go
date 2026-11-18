@@ -178,7 +178,13 @@ func runBurst(t *testing.T, withReservations bool, staggerStart time.Duration) m
 func TestReserveAtPickRace(t *testing.T) {
 	fair := burstSize / numEndpoints
 
-	without := runBurst(t, false, 0)
+	// Both arms use the same pacing: goroutines released staggerStart apart,
+	// modeling the per-request pacing of the real scheduling pipeline (a
+	// truly simultaneous release makes the "with" arm depend on goroutine
+	// interleaving and flake on many-core hosts). Under paced arrivals the
+	// claim under test is exact: without reservations every cycle sees the
+	// same snapshot; with them, each pick is visible to the cycles after it.
+	without := runBurst(t, false, 250*time.Microsecond)
 	topWithout := 0
 	var totalWithout int
 	for _, n := range without {
@@ -213,6 +219,30 @@ func TestReserveAtPickRace(t *testing.T) {
 	if topWith > 2*fair {
 		t.Errorf("expected spread with reservations (top <= %d), got %d", 2*fair, topWith)
 	}
+}
+
+type dumpState struct {
+	Endpoints []struct {
+		Endpoint     string `json:"endpoint"`
+		Requests     int64  `json:"requests"`
+		Tokens       int64  `json:"tokens"`
+		Reservations int64  `json:"reservations"`
+	} `json:"endpoints"`
+}
+
+// dumpReservations returns per-endpoint request, token and reservation counts
+// from the producer's debug dump.
+func dumpReservations(t *testing.T, prod *inflightload.InFlightLoadProducer) dumpState {
+	t.Helper()
+	raw, err := prod.DumpState()
+	if err != nil {
+		t.Fatalf("DumpState: %v", err)
+	}
+	var state dumpState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("unmarshal dump state: %v", err)
+	}
+	return state
 }
 
 // TestReserveConvertsAtPreRequest verifies the conversion: after PreRequest
@@ -265,21 +295,7 @@ func TestPreRequestDoesNotReleaseForeignReservation(t *testing.T) {
 	}
 	// req-b's real accounting landed (1 request) and req-a's reservation is
 	// still outstanding: DumpState exposes both.
-	stateRaw, err := prod.DumpState()
-	if err != nil {
-		t.Fatalf("DumpState: %v", err)
-	}
-	var state struct {
-		Endpoints []struct {
-			Endpoint     string `json:"endpoint"`
-			Requests     int64  `json:"requests"`
-			Tokens       int64  `json:"tokens"`
-			Reservations int64  `json:"reservations"`
-		} `json:"endpoints"`
-	}
-	if err := json.Unmarshal(stateRaw, &state); err != nil {
-		t.Fatalf("unmarshal dump state: %v", err)
-	}
+	state := dumpReservations(t, prod)
 	var found bool
 	for _, e := range state.Endpoints {
 		if e.Endpoint == eid {
@@ -311,46 +327,18 @@ func TestAbandonedReservationReclaimed(t *testing.T) {
 	}}
 	prod.ReserveResult(ctx, "req-abandoned", result)
 
-	stateRaw, err := prod.DumpState()
-	if err != nil {
-		t.Fatalf("DumpState: %v", err)
-	}
-	var state struct {
-		Endpoints []struct {
-			Endpoint     string `json:"endpoint"`
-			Requests     int64  `json:"requests"`
-			Tokens       int64  `json:"tokens"`
-			Reservations int64  `json:"reservations"`
-		} `json:"endpoints"`
-	}
-	if err := json.Unmarshal(stateRaw, &state); err != nil {
-		t.Fatalf("unmarshal dump state: %v", err)
-	}
+	state := dumpReservations(t, prod)
 	for _, e := range state.Endpoints {
 		if e.Endpoint == eid && e.Reservations != 1 {
 			t.Fatalf("reservations before reclaim: want 1, got %d", e.Reservations)
 		}
 	}
 
-	// The janitor reclaims a request's plugin state when its lifetime context
-	// ends; simulate that with the state-level delete the janitor performs.
-	prod.PluginState.Delete("req-abandoned")
+	// The director calls RequestAbandoned on every path that exits after
+	// scheduling but before PreRequest.
+	prod.RequestAbandoned(ctx, &fwksched.InferenceRequest{RequestID: "req-abandoned"})
 
-	stateRaw, err = prod.DumpState()
-	if err != nil {
-		t.Fatalf("DumpState: %v", err)
-	}
-	state = struct {
-		Endpoints []struct {
-			Endpoint     string `json:"endpoint"`
-			Requests     int64  `json:"requests"`
-			Tokens       int64  `json:"tokens"`
-			Reservations int64  `json:"reservations"`
-		} `json:"endpoints"`
-	}{}
-	if err := json.Unmarshal(stateRaw, &state); err != nil {
-		t.Fatalf("unmarshal dump state: %v", err)
-	}
+	state = dumpReservations(t, prod)
 	for _, e := range state.Endpoints {
 		if e.Endpoint == eid && e.Reservations != 0 {
 			t.Errorf("reservations after reclaim: want 0, got %d", e.Reservations)

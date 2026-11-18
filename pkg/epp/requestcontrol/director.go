@@ -686,17 +686,29 @@ func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 	d.requestEvictor = re
 }
 
-// reservePickedEndpoints asks the first configured EndpointReserver (the
+// reservePickedEndpoints asks every configured EndpointReserver (each
 // inflight-load-producer implements it) to reserve the primary target of
-// every profile in the scheduling result. The plugin slice is in config
-// order, so the choice is deterministic.
+// every profile in the scheduling result, so scorers and detectors reading
+// any producer's load see the picks. The producer list is ordered by the
+// data-dependency DAG and then by name. Note: a producer configured for the
+// request-handling phase moves to requestHandlingDataProducers and is not
+// consulted here.
 func (d *Director) reservePickedEndpoints(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) {
-	for _, plugin := range d.requestControlPlugins.dataProducerPlugins {
-		if r, ok := plugin.(fwksched.EndpointReserver); ok {
-			r.ReserveResult(ctx, request.RequestID, result)
-			return
+	for _, r := range findEndpointReservers(d.requestControlPlugins.dataProducerPlugins) {
+		r.ReserveResult(ctx, request.RequestID, result)
+	}
+}
+
+// findEndpointReservers returns the EndpointReserver implementations among
+// the scheduling-phase data producers, in list order.
+func findEndpointReservers(producers []fwkrh.DataProducer) []fwkrh.EndpointReserver {
+	var reservers []fwkrh.EndpointReserver
+	for _, plugin := range producers {
+		if r, ok := plugin.(fwkrh.EndpointReserver); ok {
+			reservers = append(reservers, r)
 		}
 	}
+	return reservers
 }
 
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
