@@ -467,6 +467,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 			TaskType         string          `json:"task_type,omitempty"`
 			RefAudio         json.RawMessage `json:"ref_audio,omitempty"`
 			RefAudio2        json.RawMessage `json:"ref_audio_2,omitempty"`
+			References       json.RawMessage `json:"references,omitempty"`
 			RefAudioCodes    json.RawMessage `json:"ref_audio_codes,omitempty"`
 			ExtraParams      json.RawMessage `json:"extra_params,omitempty"`
 			SpeakerEmbedding json.RawMessage `json:"speaker_embedding,omitempty"`
@@ -482,6 +483,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 		// same None conditioning; keep the raw fields that way too.
 		refAudio := rawFieldOrNull(speechRequest.RefAudio)
 		refAudio2 := rawFieldOrNull(speechRequest.RefAudio2)
+		references := rawFieldOrNull(speechRequest.References)
 		refAudioCodes := rawFieldOrNull(speechRequest.RefAudioCodes)
 		extraParams := rawFieldOrNull(speechRequest.ExtraParams)
 		speakerEmbedding := rawFieldOrNull(speechRequest.SpeakerEmbedding)
@@ -508,6 +510,7 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 				TaskType:         speechRequest.TaskType,
 				RefAudio:         refAudio,
 				RefAudio2:        refAudio2,
+				References:       references,
 				RefAudioCodes:    refAudioCodes,
 				ExtraParams:      extraParams,
 				SpeakerEmbedding: speakerEmbedding,

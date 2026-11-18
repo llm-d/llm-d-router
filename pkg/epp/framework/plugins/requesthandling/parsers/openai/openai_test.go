@@ -3264,6 +3264,21 @@ func TestOpenAIParser_ParseRequestTextToSpeechSpeakerAlias(t *testing.T) {
 	}
 }
 
+// The engine normalizes a Higgs Audio v3 references array into ref_audio and
+// ref_text, so the parser carries it for the fingerprint.
+func TestOpenAIParser_ParseRequestTextToSpeechReferences(t *testing.T) {
+	body := `{"input": "hello", "references": [{"audio_path": "https://example.com/voice.wav", "text": "hello there"}]}`
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(body),
+		map[string]string{":path": "/v1/audio/speech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"audio_path": "https://example.com/voice.wav", "text": "hello there"}]`
+	if string(result.Body.TextToSpeech.References) != want {
+		t.Errorf("References = %s, want %s", result.Body.TextToSpeech.References, want)
+	}
+}
+
 // The engine resolves the two fields by key presence: a present "voice",
 // including an explicit null, wins over "speaker".
 func TestOpenAIParser_ParseRequestTextToSpeechVoiceTakesPrecedence(t *testing.T) {
@@ -3303,13 +3318,13 @@ func TestOpenAIParser_ParseRequestTextToSpeechInvalidVoice(t *testing.T) {
 // derived from it is a pure function of that body.
 func TestOpenAIParser_ParseRequestTextToSpeechNullFields(t *testing.T) {
 	withNull, err := NewOpenAIParser().ParseRequest(context.Background(),
-		[]byte(`{"input": "hello", "ref_audio": null, "ref_audio_2": null, "speaker_embedding": null}`),
+		[]byte(`{"input": "hello", "ref_audio": null, "ref_audio_2": null, "references": null, "speaker_embedding": null}`),
 		map[string]string{":path": "/v1/audio/speech"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withNull.Body.TextToSpeech.RefAudio != nil || withNull.Body.TextToSpeech.RefAudio2 != nil || withNull.Body.TextToSpeech.SpeakerEmbedding != nil {
-		t.Errorf("null fields = {%v %v %v}, want all nil", withNull.Body.TextToSpeech.RefAudio, withNull.Body.TextToSpeech.RefAudio2, withNull.Body.TextToSpeech.SpeakerEmbedding)
+	if withNull.Body.TextToSpeech.RefAudio != nil || withNull.Body.TextToSpeech.RefAudio2 != nil || withNull.Body.TextToSpeech.References != nil || withNull.Body.TextToSpeech.SpeakerEmbedding != nil {
+		t.Errorf("null fields = {%v %v %v %v}, want all nil", withNull.Body.TextToSpeech.RefAudio, withNull.Body.TextToSpeech.RefAudio2, withNull.Body.TextToSpeech.References, withNull.Body.TextToSpeech.SpeakerEmbedding)
 	}
 	absent, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(`{"input": "hello"}`),
 		map[string]string{":path": "/v1/audio/speech"})

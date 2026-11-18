@@ -1701,6 +1701,10 @@ func TestSpeechPrefixFingerprint_SeparatesConditioning(t *testing.T) {
 	secondSpeaker.RefAudio2 = json.RawMessage(`"https://example.com/second-voice.wav"`)
 	assert.NotEqual(t, vivian, speechPrefixHashes(t, secondSpeaker), "second-speaker reference-audio conditioning must change the fingerprint")
 
+	references := base()
+	references.References = json.RawMessage(`[{"audio_path": "https://example.com/voice.wav", "text": "hello there"}]`)
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, references), "the references alias must change the fingerprint")
+
 	assert.Equal(t, vivian, speechPrefixHashes(t, base()), "the same conditioning must fingerprint stably")
 
 	salted := base()

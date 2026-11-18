@@ -558,6 +558,9 @@ type TextToSpeechRequest struct {
 	// RefAudio2 is the raw second-speaker reference-audio field of a
 	// two-speaker request, carried for fingerprinting only.
 	RefAudio2 json.RawMessage `json:"ref_audio_2,omitempty"`
+	// References is the raw Higgs Audio v3 reference array, which the engine
+	// normalizes into ref_audio and ref_text, carried for fingerprinting only.
+	References json.RawMessage `json:"references,omitempty"`
 	// RefAudioCodes is the raw pre-computed reference-codes field (fish omni),
 	// carried for fingerprinting only.
 	RefAudioCodes json.RawMessage `json:"ref_audio_codes,omitempty"`

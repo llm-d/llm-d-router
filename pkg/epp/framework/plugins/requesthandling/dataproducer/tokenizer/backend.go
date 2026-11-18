@@ -262,7 +262,7 @@ func speechCacheSalt(tts *fwkrequest.TextToSpeechRequest) string {
 	} {
 		writeString(part)
 	}
-	for _, raw := range [][]byte{tts.RefAudio, tts.RefAudio2, tts.RefAudioCodes, tts.ExtraParams, tts.SpeakerEmbedding} {
+	for _, raw := range [][]byte{tts.RefAudio, tts.RefAudio2, tts.References, tts.RefAudioCodes, tts.ExtraParams, tts.SpeakerEmbedding} {
 		writeRaw(raw)
 	}
 	xVector := ""
