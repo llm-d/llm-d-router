@@ -165,6 +165,24 @@ func TestResponseBodyRecordsTTFTEstimate(t *testing.T) {
 	assert.Equal(t, uint64(1), histogramCount(t, estimatedTTFT), "the latency predictor source records nothing")
 }
 
+// The step source records its estimate without a peak prefill throughput: read,
+// one step and the handoff on an idle endpoint holding the whole prompt.
+func TestResponseBodyRecordsPrefillStepsEstimate(t *testing.T) {
+	resetMetrics()
+	t.Cleanup(resetMetrics)
+
+	p := newTestPlugin(stepsConfig())
+	p.pluginState = fwkplugin.NewPluginState(t.Context())
+	endpoints := []fwksched.Endpoint{makeStepEndpoint("warm", 100, 0, 0), makeStepEndpoint("idle", 0, 0, 0)}
+
+	request := &fwksched.InferenceRequest{RequestID: "steps", TargetModel: testTargetModel}
+	p.Filter(context.Background(), request, endpoints)
+	p.ResponseBody(context.Background(), request, &fwkrh.Response{StartOfStream: true}, endpoints[0].GetMetadata())
+
+	assert.Equal(t, uint64(1), histogramCount(t, estimatedTTFT))
+	assert.InDelta(t, (50+345+500)/1000.0, histogramSum(t, estimatedTTFT), 1e-9)
+}
+
 // The target model comes from the client, so the TTFT histograms bound it: a
 // name that is not valid UTF-8 folds into the overflow series instead of
 // panicking, and a flood of made-up names folds into one overflow series.
