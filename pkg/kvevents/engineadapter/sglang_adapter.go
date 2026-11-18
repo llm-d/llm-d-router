@@ -61,6 +61,10 @@ func NewSGLangAdapter() *SGLangAdapter {
 	return &SGLangAdapter{}
 }
 
+func init() {
+	Register(EngineTypeSGLang, func() kvevents.EngineAdapter { return NewSGLangAdapter() })
+}
+
 // ShardingKey extracts the pod-id segment from a SGLang raw message topic.
 // Expected topic format: "kv@<pod-id>@<model-name>" (same as vLLM).
 func (s *SGLangAdapter) ShardingKey(msg *kvevents.RawMessage) string {

@@ -43,6 +43,10 @@ func NewVLLMAdapter() *VLLMAdapter {
 	return &VLLMAdapter{}
 }
 
+func init() {
+	Register(EngineTypeVLLM, func() kvevents.EngineAdapter { return NewVLLMAdapter() })
+}
+
 // ShardingKey extracts the pod ID from a vLLM message topic.
 func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 	podID, _ := parseTopic(msg.Topic)
