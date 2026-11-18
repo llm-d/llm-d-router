@@ -21,7 +21,7 @@ spec:
         - "--kv-cache-size=1024"
         - "--block-size=16"
         - "--data-parallel-size=${VLLM_DATA_PARALLEL_SIZE}"
-        - "--zmq-endpoint=tcp://${EPP_NAME}.${NAMESPACE}.svc.cluster.local:5557"
+        - "--zmq-endpoint=tcp://*:5557"
         - "--render-url=${VLLM_RENDER_URL}"
         - "${VLLM_EXTRA_ARGS_D}"
         ports:
