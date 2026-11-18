@@ -133,6 +133,11 @@ func (p *Parameters) validate() error {
 		if _, dup := teams[t.ID]; dup {
 			return fmt.Errorf("teams[%d]: duplicate team %q", i, t.ID)
 		}
+		// The team label of an unlisted team is the defaultTeam ID, so a listed team with that ID
+		// would share its metric series.
+		if t.ID == p.DefaultTeam.ID {
+			return fmt.Errorf("teams[%d]: id %q is the defaultTeam id", i, t.ID)
+		}
 		teams[t.ID] = struct{}{}
 		if err := validateTeam(t, classes); err != nil {
 			return fmt.Errorf("teams[%d] %q: %w", i, t.ID, err)

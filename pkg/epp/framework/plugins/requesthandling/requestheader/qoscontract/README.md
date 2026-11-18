@@ -92,7 +92,7 @@ plugins:
 | `defaultOutputReservation` | `1000` | Output tokens reserved when neither the request nor the team sets a cap. |
 | `classes` | required | Service classes, highest first. Each maps to a flow-control priority band. |
 | `defaultTeam` | required | Contract for unlisted teams. All unlisted teams share its limits. |
-| `teams[].id` | required | Team ID, matched against `teamHeader`. |
+| `teams[].id` | required | Team ID, matched against `teamHeader`. Must differ from the `defaultTeam` ID. |
 | `teams[].class` | required | Class the team's committed traffic is served at. |
 | `teams[].maxConcurrency` | `0` | Committed concurrent requests, queued or running. `0` is unlimited. |
 | `teams[].maxPromptTokens` | `0` | Estimated prompt tokens above which a request moves one class down. `0` is unlimited. |
@@ -116,7 +116,7 @@ Configure a flow-control priority band for each class priority, or rely on dynam
 | `llm_d_epp_qos_contract_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens consumed after refunds, including downgraded traffic. A rejected request, and in report-only mode a would-be rejection, is not counted. Showback. |
 | `llm_d_epp_qos_contract_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
 
-The `team` label shares the fairness ID cardinality bound.
+The `team` label takes only the team IDs in the configuration and the `defaultTeam` ID, so the configuration bounds its cardinality.
 
 The metrics are served on the EPP `/metrics` endpoint with the other EPP metrics; see [Router pod / EPP](../../../../../../../docs/metrics.md#router-pod--epp) for the port and scrape authentication.
 

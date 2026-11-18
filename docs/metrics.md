@@ -890,7 +890,7 @@ Control alone does not emit them. `program_id` is the request's fairness ID and 
 ### QoS contract
 
 These metrics are owned by the `qos-contract` RequestHeader plugin and are registered only when
-it is configured. The `team` label shares the fairness ID cardinality bound. The plugin defaults to
+it is configured. The `team` label takes only the team IDs in the configuration and the `defaultTeam` ID, so the configuration bounds its cardinality. The plugin defaults to
 `mode="report-only"`, where downgrades and rejections are recorded but not applied and each request
 keeps its InferenceObjective priority.
 

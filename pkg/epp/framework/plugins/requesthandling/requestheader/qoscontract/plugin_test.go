@@ -144,17 +144,19 @@ func TestFactory(t *testing.T) {
 
 func TestFactory_InvalidConfig(t *testing.T) {
 	cases := map[string]string{
-		"no classes":           `{"defaultTeam":{"class":"x"}}`,
-		"unknown default":      `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"b"}}`,
-		"non-decreasing":       `{"classes":[{"name":"a","priority":1},{"name":"b","priority":1}],"defaultTeam":{"class":"a"}}`,
-		"duplicate class":      `{"classes":[{"name":"a","priority":2},{"name":"a","priority":1}],"defaultTeam":{"class":"a"}}`,
-		"bad mode":             `{"mode":"dry","classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"}}`,
-		"zero output weight":   `{"outputTokenWeight":0,"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"}}`,
-		"negative limit":       `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxConcurrency":-1}]}`,
-		"duplicate team":       `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a"},{"id":"t","class":"a"}]}`,
-		"team without id":      `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"class":"a"}]}`,
-		"unknown field strict": `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"bogus":1}`,
-		"removed rate commit":  `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","commitTokensPerMinute":1000}]}`,
+		"no classes":                `{"defaultTeam":{"class":"x"}}`,
+		"unknown default":           `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"b"}}`,
+		"non-decreasing":            `{"classes":[{"name":"a","priority":1},{"name":"b","priority":1}],"defaultTeam":{"class":"a"}}`,
+		"duplicate class":           `{"classes":[{"name":"a","priority":2},{"name":"a","priority":1}],"defaultTeam":{"class":"a"}}`,
+		"bad mode":                  `{"mode":"dry","classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"}}`,
+		"zero output weight":        `{"outputTokenWeight":0,"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"}}`,
+		"negative limit":            `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","maxConcurrency":-1}]}`,
+		"duplicate team":            `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a"},{"id":"t","class":"a"}]}`,
+		"team without id":           `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"class":"a"}]}`,
+		"unknown field strict":      `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"bogus":1}`,
+		"removed rate commit":       `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"t","class":"a","commitTokensPerMinute":1000}]}`,
+		"team named default":        `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"class":"a"},"teams":[{"id":"default","class":"a"}]}`,
+		"team named as defaultTeam": `{"classes":[{"name":"a","priority":1}],"defaultTeam":{"id":"anon","class":"a"},"teams":[{"id":"anon","class":"a"}]}`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
