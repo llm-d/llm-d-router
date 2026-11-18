@@ -421,7 +421,7 @@ func ReadErrorMessage(err error) string {
 	case errors.Is(err, ErrMalformed):
 		return ErrMalformed.Error()
 	default:
-		return "failed to read request body"
+		return reqcommon.ReadRequestBodyErrorMessage
 	}
 }
 
