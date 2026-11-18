@@ -113,7 +113,7 @@ Configure a flow-control priority band for each class priority, or rely on dynam
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `llm_d_epp_qos_contract_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | Decisions: `within_contract`, `downgraded`, `rejected_concurrency`, `rejected_size`, `rejected_daily`, and the limit that caused each downgrade or rejection. |
-| `llm_d_epp_qos_contract_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens consumed after refunds, including downgraded traffic. Showback. |
+| `llm_d_epp_qos_contract_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens consumed after refunds, including downgraded traffic. A rejected request, and in report-only mode a would-be rejection, is not counted. Showback. |
 | `llm_d_epp_qos_contract_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
 
 The `team` label shares the fairness ID cardinality bound.
@@ -156,4 +156,4 @@ sum by (team) (increase(llm_d_epp_qos_contract_decisions_total{mode="report-only
 To size the commits before setting `mode: enforce-limits`, compare per-replica demand with them, since each replica holds its own commits:
 
 - Concurrency: `llm_d_epp_qos_contract_inflight_requests` counts only requests within the contract, so it never exceeds `maxConcurrency`. Decisions with `reason="concurrency"` mean demand is above it. A request also over a size limit or the daily budget reports that reason instead, so the count is a lower bound.
-- Daily budget: decisions with `reason="daily"` mean the budget ran out. To see by how much, compare `max by (team) (increase(llm_d_epp_qos_contract_charged_tokens_total[1d]))` with `dailyTokens`. The charged tokens include downgraded traffic, so they measure the team's total demand rather than what fit in the budget. The budget resets at 00:00 UTC, so a rolling `[1d]` window only approximates one budget day.
+- Daily budget: decisions with `reason="daily"` mean the budget ran out. To see by how much, compare `max by (team) (increase(llm_d_epp_qos_contract_charged_tokens_total[1d]))` with `dailyTokens`. The charged tokens include downgraded traffic, so for a team above the lowest class they measure its total demand rather than what fit in the budget. They do not include rejected requests, or in report-only mode would-be rejections, which are served without a hold. For a team in the lowest class the counter therefore levels off near `dailyTokens` and understates demand; the `rejected_daily` decisions count the requests above it. The budget resets at 00:00 UTC, so a rolling `[1d]` window only approximates one budget day.
