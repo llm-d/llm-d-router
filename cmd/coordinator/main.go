@@ -188,7 +188,7 @@ func main() {
 	}
 
 	if cfg.Server.VLLMFrontend {
-		err = runWithFrontend(ctx, srv, cfg.Server, nil)
+		err = runWithFrontend(ctx, srv, cfg.Server, nil, nil)
 	} else {
 		err = run(ctx, srv, cfg.Server, nil)
 	}

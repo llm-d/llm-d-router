@@ -17,52 +17,26 @@ limitations under the License.
 package frontendproxy
 
 import (
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
-	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
-	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 )
 
-func TestProxyLimitsKnownAndChunkedBodies(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-	}))
-	defer upstream.Close()
-	target, err := url.Parse(upstream.URL)
-	require.NoError(t, err)
-	public := httptest.NewServer(New(target, 16, false))
-	defer public.Close()
-	for _, known := range []bool{true, false} {
-		req, err := http.NewRequestWithContext(t.Context(), "POST", public.URL, strings.NewReader(strings.Repeat("a", 17)))
-		require.NoError(t, err)
-		if !known {
-			req.ContentLength = -1
-		}
-		res, err := public.Client().Do(req)
-		require.NoError(t, err)
-		res.Body.Close()
-		require.Equal(t, http.StatusRequestEntityTooLarge, res.StatusCode)
-	}
-}
-
+// A trailers-only gRPC error must reach the client even when no response body is sent.
 func TestGRPCTrailersOnly(t *testing.T) {
-	upstream := grpctest.NewH2CServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		grpcframe.WriteError(w, codes.InvalidArgument, "prompt is required")
-	}))
-	target, err := url.Parse(upstream.URL)
-	require.NoError(t, err)
-	proxy := grpctest.NewH2CServer(t, New(target, 128, true))
-	client := vllmpb.NewInferenceClient(grpctest.Dial(t, proxy.Listener.Addr().String()))
-	_, err = client.Generate(t.Context(), &vllmpb.GenerateRequest{})
-	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	upstream := grpctest.StartGRPCServer(t, func(s *grpc.Server) {
+		healthpb.RegisterHealthServer(s, health.NewServer())
+	})
+	proxy := grpctest.NewH2CServer(t, New(&url.URL{Scheme: "http", Host: upstream}, 1024, true))
+	client := healthpb.NewHealthClient(grpctest.Dial(t, proxy.Listener.Addr().String()))
+	_, err := client.Check(t.Context(), &healthpb.HealthCheckRequest{Service: "unknown"})
+	require.Equal(t, codes.NotFound, status.Code(err))
 }

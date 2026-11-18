@@ -35,6 +35,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -42,13 +44,13 @@ import (
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
-func newTestServer(t *testing.T, listenAddr string, opts ...server.Option) *server.Server {
+func newTestServer(t *testing.T, listenAddr string) *server.Server {
 	t.Helper()
 	srv, err := server.New(config.ServerConfig{
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-	}, pipeline.New(nil), gateway.NewWithTransport(nil, "http://gateway-stub.invalid"), opts...)
+	}, pipeline.New(nil), gateway.NewWithTransport(nil, "http://gateway-stub.invalid"))
 	require.NoError(t, err)
 	return srv
 }
@@ -362,7 +364,9 @@ func TestRun_DrainTimeout_ServesWithConnectionCloseThenShutsDown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, srv, cfg, lis) }()
+	callback, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	go func() { done <- runWithFrontend(ctx, srv, cfg, lis, callback) }()
 	waitForHealthz(t, listenAddr, 2*time.Second)
 
 	// An idle keep-alive connection opened before SIGTERM.
@@ -382,6 +386,8 @@ func TestRun_DrainTimeout_ServesWithConnectionCloseThenShutsDown(t *testing.T) {
 	status, _ := get("/healthz")
 	require.Equal(t, http.StatusOK, status)
 
+	client := vllmpb.NewInferenceClient(grpctest.Dial(t, callback.Addr().String()))
+
 	start := time.Now()
 	cancel()
 	time.Sleep(50 * time.Millisecond)
@@ -389,6 +395,10 @@ func TestRun_DrainTimeout_ServesWithConnectionCloseThenShutsDown(t *testing.T) {
 	status, closeConn := get("/readyz")
 	require.Equal(t, http.StatusServiceUnavailable, status)
 	require.True(t, closeConn, "draining response must carry Connection: close")
+
+	// Requests accepted before drain can still call back into the real generation handler.
+	_, err = client.Generate(t.Context(), &vllmpb.GenerateRequest{Sampling: &vllmpb.RandomSampling{NumSequences: 2}})
+	require.ErrorContains(t, err, "num_sequences > 1 is not supported")
 
 	fresh, err := http.Get("http://" + listenAddr + "/healthz")
 	require.NoError(t, err, "listener must stay open during the drain window")

@@ -78,6 +78,7 @@ absorb further processing modes as they are added.
   - [Connector selection](#connector-selection)
   - [Should the coordinator use the tokens-in format?](#should-the-coordinator-use-the-tokens-in-format)
   - [Worker protocol for `/inference/v1/generate`](#worker-protocol-for-inferencev1generate)
+  - [Pod-local vLLM frontend](#pod-local-vllm-frontend)
   - [The built-in steps](#the-built-in-steps)
   - [Adding a step to the pipeline](#adding-a-step-to-the-pipeline)
 - [References](#references)
@@ -912,6 +913,12 @@ token sequences, `logprobs`, `top_logprobs`, `truncate_prompt_tokens`, and
 coordinator still requires a `render` step when `use_openai_format` is `false`, because
 OpenAI text routes continue to call HTTP workers. Native gRPC routes always call
 upstream gRPC methods regardless of `worker_protocol`.
+
+### Pod-local vLLM frontend
+
+The public listener forwards chat, completions, Responses, tokenize and detokenize requests over HTTP, and both native vLLM inference RPCs over gRPC. The Rust frontend handles tokenization and response formatting. It sends token IDs to the coordinator on loopback port 8081 for scheduling through the gateway.
+
+For one aggregated vLLM worker, set `server.vllm_frontend: true` in the mounted coordinator config, use the `decode` step and configure the gateway with the `vllminference-parser` EPP plugin and a gRPC worker endpoint. Apply the [frontend sidecar patch](../test/e2e/artifacts/coordinator/patch-vllm-frontend.yaml) to the existing coordinator Deployment. Use a frontend image with a gRPC generation backend. Its model, revision and context limit must match the worker.
 
 ### The built-in steps
 

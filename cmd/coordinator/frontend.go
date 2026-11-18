@@ -41,10 +41,6 @@ func frontendOption(cfg config.ServerConfig) server.Option {
 	maxBytes := maxSize * config.BytesPerMB
 	api := frontendproxy.New(&url.URL{Scheme: "http", Host: "127.0.0.1:8000"}, maxBytes, false)
 	rpc := frontendproxy.New(&url.URL{Scheme: "http", Host: "127.0.0.1:50051"}, maxBytes, true)
-	return publicFrontend(api, rpc)
-}
-
-func publicFrontend(api, rpc http.Handler) server.Option {
 	return server.WithIngress(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost {
@@ -62,10 +58,10 @@ func publicFrontend(api, rpc http.Handler) server.Option {
 	})
 }
 
-func runWithFrontend(ctx context.Context, srv *server.Server, cfg config.ServerConfig, lis net.Listener) error {
-	if lis == nil {
+func runWithFrontend(ctx context.Context, srv *server.Server, cfg config.ServerConfig, public, callbackListener net.Listener) error {
+	if callbackListener == nil {
 		var err error
-		lis, err = net.Listen("tcp", "127.0.0.1:8081")
+		callbackListener, err = net.Listen("tcp", "127.0.0.1:8081")
 		if err != nil {
 			return fmt.Errorf("generation listener: %w", err)
 		}
@@ -75,13 +71,13 @@ func runWithFrontend(ctx context.Context, srv *server.Server, cfg config.ServerC
 	callback := &http.Server{Handler: srv.GenerationHandler(), Protocols: protocols, ReadTimeout: cfg.ReadTimeout}
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		if err := callback.Serve(lis); !errors.Is(err, http.ErrServerClosed) {
+		if err := callback.Serve(callbackListener); !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("generation listener: %w", err)
 		}
 		return nil
 	})
 	group.Go(func() error {
-		err := run(groupCtx, srv, cfg, nil)
+		err := run(groupCtx, srv, cfg, public)
 		// Public requests may call back while the public listener drains.
 		return errors.Join(err, callback.Close())
 	})
