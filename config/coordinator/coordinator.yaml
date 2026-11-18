@@ -39,6 +39,10 @@ server:
   # listen_addr is the address:port the coordinator binds to.
   listen_addr: ":8080"
 
+  # vllm_frontend forwards public inference requests to the pod-local vLLM frontend.
+  # env: COORDINATOR_SERVER_VLLM_FRONTEND
+  # vllm_frontend: false
+
   # metrics_port is the port for the Prometheus /metrics endpoint. Default 9090.
   # Non-positive disables the endpoint entirely. The --metrics-port CLI flag
   # overrides this.

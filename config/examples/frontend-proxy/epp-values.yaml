@@ -1,0 +1,33 @@
+router:
+  inferencePool:
+    failureMode: FailClosed
+  modelServers:
+    type: vllm
+    protocol: grpc
+    matchLabels:
+      app: generation-worker
+    targetPorts:
+    - number: 50051
+  epp:
+    pluginsConfig:
+      apiVersion: llm-d.ai/v1
+      kind: EndpointPickerConfig
+      plugins:
+      - type: metrics-data-source
+        parameters:
+          port: 8000
+      - type: vllminference-parser
+      - type: approx-prefix-cache-producer
+      - type: prefix-cache-scorer
+      - type: max-score-picker
+      requestHandler:
+        parsers:
+        - pluginRef: vllminference-parser
+      schedulingProfiles:
+      - name: default
+        plugins:
+        - pluginRef: prefix-cache-scorer
+        - pluginRef: max-score-picker
+httpRoute:
+  create: true
+  inferenceGatewayName: inference-gateway

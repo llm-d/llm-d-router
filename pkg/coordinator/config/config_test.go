@@ -47,6 +47,7 @@ func TestLoadDefaults(t *testing.T) {
 		want any
 	}{
 		{"log_level", cfg.LogLevel, 2},
+		{"server.vllm_frontend", cfg.Server.VLLMFrontend, false},
 		{"server.listen_addr", cfg.Server.ListenAddr, ":8080"},
 		{"server.metrics_port", cfg.Server.MetricsPort, 9090},
 		{"server.metrics_cert_dir", cfg.Server.MetricsCertDir, ""},

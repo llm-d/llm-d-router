@@ -1,0 +1,10 @@
+server:
+  vllm_frontend: true
+  listen_addr: ":8080"
+  secure_serving: false
+gateway:
+  address: http://inference-gateway:80
+pipeline:
+  worker_protocol: grpc
+  steps:
+  - type: decode

@@ -42,13 +42,13 @@ import (
 	fwknet "github.com/llm-d/llm-d-router/test/framework/net"
 )
 
-func newTestServer(t *testing.T, listenAddr string) *server.Server {
+func newTestServer(t *testing.T, listenAddr string, opts ...server.Option) *server.Server {
 	t.Helper()
 	srv, err := server.New(config.ServerConfig{
 		ListenAddr:      listenAddr,
 		ShutdownTimeout: time.Second,
 		ReadTimeout:     time.Second,
-	}, pipeline.New(nil), gateway.NewWithTransport(nil, "http://gateway-stub.invalid"))
+	}, pipeline.New(nil), gateway.NewWithTransport(nil, "http://gateway-stub.invalid"), opts...)
 	require.NoError(t, err)
 	return srv
 }
