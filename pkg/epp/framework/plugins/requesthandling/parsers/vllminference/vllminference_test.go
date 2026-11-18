@@ -197,6 +197,66 @@ func TestVllmInferenceParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "a single modality with a preprocessed item before a raw uuid item drops MMPlaceholders to nil",
+			path: vllmpb.Inference_Generate_FullMethodName,
+			req: &vllmpb.GenerateRequest{
+				Prompt: &vllmpb.GenerateRequest_Text{Text: "describe media"},
+				Media: []*vllmpb.MediaItem{
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Source: &vllmpb.MediaItem_Features{
+							Features: &vllmpb.PreprocessedMediaFeatures{Identifier: "img-hash-1", Offset: 2, Length: 3},
+						},
+					},
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Uuid:     "raw-second",
+						Source:   &vllmpb.MediaItem_Url{Url: "https://example.com/b.png"},
+					},
+				},
+			},
+			wantGenerate: &fwkrequest.GenerateRequest{
+				Text: "describe media",
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{
+						string(reqcommon.ModalityImage): {"img-hash-1", "raw-second"},
+					},
+				},
+			},
+		},
+		{
+			name: "a preprocessed modality before a raw uuid modality keeps the preprocessed modality placeholders",
+			path: vllmpb.Inference_Generate_FullMethodName,
+			req: &vllmpb.GenerateRequest{
+				Prompt: &vllmpb.GenerateRequest_Text{Text: "describe media"},
+				Media: []*vllmpb.MediaItem{
+					{
+						Modality: vllmpb.Modality_MODALITY_AUDIO,
+						Source: &vllmpb.MediaItem_Features{
+							Features: &vllmpb.PreprocessedMediaFeatures{Identifier: "audio-hash", Offset: 1, Length: 2},
+						},
+					},
+					{
+						Modality: vllmpb.Modality_MODALITY_IMAGE,
+						Uuid:     "raw-img",
+						Source:   &vllmpb.MediaItem_Url{Url: "https://example.com/a.png"},
+					},
+				},
+			},
+			wantGenerate: &fwkrequest.GenerateRequest{
+				Text: "describe media",
+				Features: &tokenization.MultiModalFeatures{
+					MMHashes: map[string][]string{
+						string(reqcommon.ModalityAudio): {"audio-hash"},
+						string(reqcommon.ModalityImage): {"raw-img"},
+					},
+					MMPlaceholders: map[string][]kvblock.PlaceholderRange{
+						string(reqcommon.ModalityAudio): {{Offset: 1, Length: 2}},
+					},
+				},
+			},
+		},
+		{
 			name: "raw media items with uuid populate MMHashes without placeholder ranges while skipping unnamed raw media",
 			path: vllmpb.Inference_Generate_FullMethodName,
 			req: &vllmpb.GenerateRequest{

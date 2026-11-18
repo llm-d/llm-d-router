@@ -214,7 +214,6 @@ func extractMMFeatures(req *vllmwire.Request) (*tokenization.MultiModalFeatures,
 	}
 	var hashes map[string][]string
 	var placeholders map[string][]kvblock.PlaceholderRange
-	var unaligned map[string]bool // modalities with a hashed item that has no range
 	for i := range items {
 		item := &items[i]
 		if !item.HasFeatures {
@@ -227,11 +226,9 @@ func extractMMFeatures(req *vllmwire.Request) (*tokenization.MultiModalFeatures,
 			}
 			if hashes == nil {
 				hashes = make(map[string][]string, 1)
-				unaligned = make(map[string]bool, 1)
 			}
 			key := string(mod)
 			hashes[key] = append(hashes[key], item.UUID)
-			unaligned[key] = true
 			continue
 		}
 		mod, err := modalityName(item.Modality)
@@ -267,8 +264,10 @@ func extractMMFeatures(req *vllmwire.Request) (*tokenization.MultiModalFeatures,
 	if len(hashes) == 0 {
 		return nil, nil //nolint:nilnil
 	}
-	for key := range unaligned {
-		delete(placeholders, key)
+	for key, ranges := range placeholders {
+		if len(ranges) != len(hashes[key]) {
+			delete(placeholders, key)
+		}
 	}
 	if len(placeholders) == 0 {
 		placeholders = nil
