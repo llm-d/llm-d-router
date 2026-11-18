@@ -33,10 +33,30 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	events "github.com/llm-d/llm-d-router/pkg/kvevents"
 )
 
-type recordingExtractor struct {
+type recordingRegistrar struct{ registrations []fwkdl.PendingRegistration }
+
+func (r *recordingRegistrar) Register(p fwkdl.PendingRegistration) error {
+	r.registrations = append(r.registrations, p)
+	return nil
+}
+
+func TestSourceRegistersForEndpointEvents(t *testing.T) {
+	s := &Source{typedName: plugin.TypedName{Type: PluginType, Name: "events"}}
+	r := &recordingRegistrar{}
+	require.NoError(t, s.RegisterDependencies(r))
+	require.Len(t, r.registrations, 1)
+	registration := r.registrations[0]
+	require.Equal(t, s.typedName, registration.Owner)
+	require.Equal(t, sourcenotifications.EndpointNotificationSourceType, registration.SourceType)
+	require.Same(t, s, registration.Extractor)
+	require.NotNil(t, registration.DefaultSource)
+}
+
+type recordingConsumer struct {
 	name       string
 	mu         sync.Mutex
 	operations []string
@@ -45,10 +65,10 @@ type recordingExtractor struct {
 	panics     bool
 }
 
-func (r *recordingExtractor) TypedName() plugin.TypedName {
+func (r *recordingConsumer) TypedName() plugin.TypedName {
 	return plugin.TypedName{Type: r.name, Name: r.name}
 }
-func (r *recordingExtractor) ProcessEvents(_ context.Context, source events.EventSource, _ events.EventBatch) error {
+func (r *recordingConsumer) ProcessEvents(_ context.Context, source events.EventSource, _ events.EventBatch) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.operations = append(r.operations, "batch:"+source.Endpoint)
@@ -58,13 +78,13 @@ func (r *recordingExtractor) ProcessEvents(_ context.Context, source events.Even
 	}
 	return r.err
 }
-func (r *recordingExtractor) Reset(_ context.Context, source events.EventSource) error {
+func (r *recordingConsumer) Reset(_ context.Context, source events.EventSource) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.operations = append(r.operations, "reset:"+source.Endpoint)
 	return nil
 }
-func (r *recordingExtractor) lastSequence() uint64 {
+func (r *recordingConsumer) lastSequence() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.sequences) == 0 {
@@ -76,9 +96,9 @@ func (r *recordingExtractor) lastSequence() uint64 {
 func TestSourceIsolatesConsumerFailures(t *testing.T) {
 	for _, panics := range []bool{false, true} {
 		t.Run(strconv.FormatBool(panics), func(t *testing.T) {
-			bad := &recordingExtractor{name: "bad", err: errors.New("failed"), panics: panics}
-			good := &recordingExtractor{name: "good"}
-			s := &Source{extractors: []extractor{bad, good}, subscribers: events.NewSubscriberManager(nil)}
+			bad := &recordingConsumer{name: "bad", err: errors.New("failed"), panics: panics}
+			good := &recordingConsumer{name: "good"}
+			s := &Source{consumers: []consumer{{owner: bad.TypedName(), EventConsumer: bad}, {owner: good.TypedName(), EventConsumer: good}}, subscribers: events.NewSubscriberManager(nil)}
 			source := events.EventSource{Endpoint: "engine:8000", Sequence: 2}
 			require.NoError(t, s.ProcessEvents(t.Context(), source, events.EventBatch{}))
 			require.Equal(t, []string{"batch:engine:8000", "reset:engine:8000"}, bad.operations)
@@ -104,19 +124,18 @@ func TestSourceSharesOneSubscriber(t *testing.T) {
 	cfg.PodDiscoveryConfig.SocketPort = socketPort
 	s, err := New(ctx, "events", cfg)
 	require.NoError(t, err)
-	a, b := &recordingExtractor{name: "cache"}, &recordingExtractor{name: "sessions"}
-	require.NoError(t, s.AppendExtractor(a))
-	require.NoError(t, s.AppendExtractor(b))
+	a, b := &recordingConsumer{name: "cache"}, &recordingConsumer{name: "sessions"}
+	require.NoError(t, s.AddConsumer(a.TypedName(), a))
+	require.NoError(t, s.AddConsumer(b.TypedName(), b))
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "engine"}, Address: "127.0.0.1", Port: "8000"}, nil)
 	event := fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}
 	for range 2 {
-		out, err := s.NotifyEndpoint(ctx, event)
-		require.NoError(t, err)
-		require.Nil(t, out)
+		require.NoError(t, s.Extract(ctx, event))
 	}
 	pods, _ := s.subscribers.GetActiveSubscribers()
 	require.Len(t, pods, 1)
-	require.ErrorContains(t, s.AppendExtractor(&recordingExtractor{name: "late"}), "before endpoint discovery")
+	late := &recordingConsumer{name: "late"}
+	require.ErrorContains(t, s.AddConsumer(late.TypedName(), late), "after endpoint discovery started")
 	payload, err := msgpack.Marshal([]any{1.0, []any{[]any{string(events.EventTypeAllBlocksCleared)}}, nil})
 	require.NoError(t, err)
 	var seq uint64
@@ -127,7 +146,7 @@ func TestSourceSharesOneSubscriber(t *testing.T) {
 		require.NoError(t, pub.Send(zmq4.NewMsgFrom([]byte("kv@wire:8000@model"), frame, payload)))
 		return a.lastSequence() > 0 && a.lastSequence() == b.lastSequence()
 	}, 5*time.Second, 20*time.Millisecond)
-	_, err = s.NotifyEndpoint(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: ep})
+	err = s.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: ep})
 	require.NoError(t, err)
 	pods, _ = s.subscribers.GetActiveSubscribers()
 	require.Empty(t, pods)
@@ -149,11 +168,11 @@ func TestNewRejectsNonPositiveSocketPort(t *testing.T) {
 	}
 }
 
-func TestNotifyEndpointDoesNotWaitForConsumers(t *testing.T) {
+func TestExtractDoesNotWaitForConsumers(t *testing.T) {
 	s := &Source{subscribers: events.NewSubscriberManager(nil)}
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{}, nil)
 	event := fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}
-	_, err := s.NotifyEndpoint(t.Context(), event)
+	err := s.Extract(t.Context(), event)
 	require.NoError(t, err)
 	// A consumer processing a batch holds the read lock.
 	s.mu.RLock()
@@ -161,7 +180,7 @@ func TestNotifyEndpointDoesNotWaitForConsumers(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = s.NotifyEndpoint(t.Context(), event)
+		_ = s.Extract(t.Context(), event)
 	}()
 	select {
 	case <-done:
@@ -177,10 +196,11 @@ func TestSourceDumpsSubscribersAndConsumers(t *testing.T) {
 	cfg.PodDiscoveryConfig.PodLabelSelector = ""
 	s, err := New(ctx, "events", cfg)
 	require.NoError(t, err)
-	require.NoError(t, s.AppendExtractor(&recordingExtractor{name: "cache"}))
+	cache := &recordingConsumer{name: "cache"}
+	require.NoError(t, s.AddConsumer(cache.TypedName(), cache))
 	for _, name := range []string{"engine-b", "engine-a"} {
 		ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: name}, Address: "127.0.0.1", Port: "8000"}, nil)
-		_, err := s.NotifyEndpoint(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep})
+		err := s.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep})
 		require.NoError(t, err)
 	}
 	raw, err := s.DumpState()
@@ -231,11 +251,11 @@ func TestSourceResyncsEndpointAfterConsumerFailure(t *testing.T) {
 
 	s, err := New(ctx, "events", cfg)
 	require.NoError(t, err)
-	bad, good := &recordingExtractor{name: "bad"}, &recordingExtractor{name: "good"}
-	require.NoError(t, s.AppendExtractor(bad))
-	require.NoError(t, s.AppendExtractor(good))
+	bad, good := &recordingConsumer{name: "bad"}, &recordingConsumer{name: "good"}
+	require.NoError(t, s.AddConsumer(bad.TypedName(), bad))
+	require.NoError(t, s.AddConsumer(good.TypedName(), good))
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Name: "engine"}, Address: "127.0.0.1", Port: "8000"}, nil)
-	_, err = s.NotifyEndpoint(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep})
+	err = s.Extract(ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep})
 	require.NoError(t, err)
 
 	payload, err := msgpack.Marshal([]any{1.0, []any{[]any{string(events.EventTypeAllBlocksCleared)}}, nil})

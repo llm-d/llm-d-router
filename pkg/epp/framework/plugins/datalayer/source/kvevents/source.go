@@ -29,19 +29,23 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 	events "github.com/llm-d/llm-d-router/pkg/kvevents"
 	"github.com/llm-d/llm-d-router/pkg/kvevents/engineadapter"
 )
 
 const PluginType = "kv-events-source"
 
-type extractor interface {
-	plugin.Plugin
+// consumer is a bound EventConsumer and the plugin that bound it.
+type consumer struct {
+	owner plugin.TypedName
 	events.EventConsumer
 }
 
-// Source shares one ordered, decoded event stream among its bound consumers.
+// Source shares one ordered, decoded event stream among the consumers that
+// plugins bind to it. It follows endpoint lifecycle events as an extractor of
+// the endpoint-notification-source and opens one subscriber per matching
+// endpoint.
 type Source struct {
 	typedName   plugin.TypedName
 	ctx         context.Context
@@ -51,14 +55,14 @@ type Source struct {
 	subscribers *events.SubscriberManager
 	mu          sync.RWMutex
 	started     bool
-	extractors  []extractor
+	consumers   []consumer
 }
 
 var (
-	_ fwkdl.EndpointSource  = &Source{}
-	_ fwkdl.ExtractorBinder = &Source{}
-	_ plugin.StateDumper    = &Source{}
-	_ events.EventConsumer  = &Source{}
+	_ fwkdl.EndpointExtractor = &Source{}
+	_ fwkdl.Registrant        = &Source{}
+	_ plugin.StateDumper      = &Source{}
+	_ events.EventConsumer    = &Source{}
 )
 
 func Factory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
@@ -103,17 +107,30 @@ func New(ctx context.Context, name string, cfg *events.Config) (*Source, error) 
 
 func (s *Source) TypedName() plugin.TypedName { return s.typedName }
 
-func (s *Source) AppendExtractor(p plugin.Plugin) error {
-	ext, ok := p.(extractor)
-	if !ok {
-		return fmt.Errorf("extractor %s must implement kvevents.EventConsumer", p.TypedName())
+// RegisterDependencies subscribes the source to endpoint lifecycle events.
+func (s *Source) RegisterDependencies(r fwkdl.Registrar) error {
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      s.typedName,
+		SourceType: sourcenotifications.EndpointNotificationSourceType,
+		Extractor:  s,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(
+			sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+	})
+}
+
+// AddConsumer delivers every endpoint's decoded stream to c. Consumers bind
+// before endpoint discovery starts; owner names the binding plugin in errors
+// and in the state dump.
+func (s *Source) AddConsumer(owner plugin.TypedName, c events.EventConsumer) error {
+	if c == nil {
+		return fmt.Errorf("%s bound a nil KV event consumer", owner)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.started {
-		return errors.New("KV event extractors must be bound before endpoint discovery")
+		return fmt.Errorf("%s bound a KV event consumer after endpoint discovery started", owner)
 	}
-	s.extractors = append(s.extractors, ext)
+	s.consumers = append(s.consumers, consumer{owner: owner, EventConsumer: c})
 	return nil
 }
 
@@ -128,7 +145,7 @@ type sourceState struct {
 }
 
 // DumpState reports the endpoints with an active subscriber, sorted and
-// capped, and the bound consumers.
+// capped, and the plugins with a bound consumer.
 func (s *Source) DumpState() (json.RawMessage, error) {
 	ids, _ := s.subscribers.GetActiveSubscribers()
 	sort.Strings(ids)
@@ -137,9 +154,9 @@ func (s *Source) DumpState() (json.RawMessage, error) {
 		ids = ids[:maxDumpSubscribers]
 	}
 	s.mu.RLock()
-	consumers := make([]string, 0, len(s.extractors))
-	for _, ext := range s.extractors {
-		consumers = append(consumers, ext.TypedName().String())
+	consumers := make([]string, 0, len(s.consumers))
+	for _, c := range s.consumers {
+		consumers = append(consumers, c.owner.String())
 	}
 	s.mu.RUnlock()
 	return json.Marshal(sourceState{
@@ -147,7 +164,9 @@ func (s *Source) DumpState() (json.RawMessage, error) {
 	})
 }
 
-func (s *Source) NotifyEndpoint(ctx context.Context, event fwkdl.EndpointEvent) (*fwkdl.EndpointEvent, error) {
+// Extract opens a subscriber for an endpoint that matches the selector and
+// removes it when the endpoint is deleted or stops matching.
+func (s *Source) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
 	// Consumers run under the read lock, so only the first event takes the
 	// write lock.
 	s.mu.RLock()
@@ -160,15 +179,15 @@ func (s *Source) NotifyEndpoint(ctx context.Context, event fwkdl.EndpointEvent) 
 	}
 	meta := event.Endpoint.GetMetadata()
 	if meta == nil || meta.ID.Name == "" {
-		return nil, nil //nolint:nilnil // EndpointSource uses nil to suppress lifecycle dispatch.
+		return nil
 	}
 	key := meta.ID.String()
 	if event.Type == fwkdl.EventDelete || !s.selector.Matches(labels.Set(meta.Labels)) {
 		s.subscribers.RemoveSubscriber(ctx, key)
-		return nil, nil //nolint:nilnil // EndpointSource uses nil to suppress lifecycle dispatch.
+		return nil
 	}
 	if meta.Address == "" {
-		return nil, nil //nolint:nilnil // EndpointSource uses nil to suppress lifecycle dispatch.
+		return nil
 	}
 	cfg := s.config.PodDiscoveryConfig
 	socket := func(port int) string {
@@ -181,20 +200,18 @@ func (s *Source) NotifyEndpoint(ctx context.Context, event fwkdl.EndpointEvent) 
 	if cfg.SnapshotSocketPort > 0 {
 		snapshot = socket(cfg.SnapshotSocketPort)
 	}
-	err := s.subscribers.EnsureSubscriber(s.ctx, key, fmt.Sprintf("%s:%s", meta.Address, meta.Port),
+	return s.subscribers.EnsureSubscriber(s.ctx, key, fmt.Sprintf("%s:%s", meta.Address, meta.Port),
 		socket(cfg.SocketPort), replay, snapshot, s.config.TopicFilter, true)
-	return nil, err
 }
 
 func (s *Source) ProcessEvents(ctx context.Context, source events.EventSource, batch events.EventBatch) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, ext := range s.extractors {
-		if err := invoke(func() error { return ext.ProcessEvents(ctx, source, batch) }); err != nil {
-			metrics.RecordDataLayerExtractError(PluginType, ext.TypedName().Type)
-			log.FromContext(ctx).Error(err, "KV event consumer failed", "extractor", ext.TypedName(), "endpoint", source.Endpoint)
-			if resetErr := invoke(func() error { return ext.Reset(ctx, source) }); resetErr != nil {
-				log.FromContext(ctx).Error(resetErr, "KV event consumer reset failed", "extractor", ext.TypedName(), "endpoint", source.Endpoint)
+	for _, c := range s.consumers {
+		if err := invoke(func() error { return c.ProcessEvents(ctx, source, batch) }); err != nil {
+			log.FromContext(ctx).Error(err, "KV event consumer failed", "consumer", c.owner, "endpoint", source.Endpoint)
+			if resetErr := invoke(func() error { return c.Reset(ctx, source) }); resetErr != nil {
+				log.FromContext(ctx).Error(resetErr, "KV event consumer reset failed", "consumer", c.owner, "endpoint", source.Endpoint)
 			}
 			// The stream is continuous, so the subscriber sees no gap; the
 			// reset consumer gets its state back from a rebuild of the endpoint.
@@ -208,9 +225,9 @@ func (s *Source) Reset(ctx context.Context, source events.EventSource) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var errs []error
-	for _, ext := range s.extractors {
-		if err := invoke(func() error { return ext.Reset(ctx, source) }); err != nil {
-			errs = append(errs, fmt.Errorf("reset %s: %w", ext.TypedName(), err))
+	for _, c := range s.consumers {
+		if err := invoke(func() error { return c.Reset(ctx, source) }); err != nil {
+			errs = append(errs, fmt.Errorf("reset %s: %w", c.owner, err))
 		}
 	}
 	return errors.Join(errs...)
