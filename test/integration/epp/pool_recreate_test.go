@@ -167,6 +167,8 @@ func TestPoolRecreateKeepsRewritesAndObjectives(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return errors.IsNotFound(directClient.Get(ctx, poolKey, &v1.InferencePool{})) && !ds.PoolHasSynced()
 	}, 15*time.Second, 50*time.Millisecond, "pool deletion did not clear the datastore pool")
+	require.True(t, rewriteLoaded(), "rewrite missing from the datastore after pool deletion")
+	require.True(t, objectiveLoaded(), "objective missing from the datastore after pool deletion")
 
 	createPool()
 	require.Eventually(t, ds.PoolHasSynced, 15*time.Second, 50*time.Millisecond, "recreated pool was not synced")

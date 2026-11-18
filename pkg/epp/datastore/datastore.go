@@ -163,7 +163,7 @@ func (ds *datastore) Clear() {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 	ds.pool = nil
-	// Objectives and rewrites stay: their reconcilers own them, and a recreated pool does not requeue them.
+	// Objectives and rewrites stay: their reconcilers own their lifecycle.
 	// stop all pods go routines before clearing the pods map.
 	ds.pods.Range(func(_, v any) bool {
 		ds.epf.ReleaseEndpoint(v.(fwkdl.Endpoint))
