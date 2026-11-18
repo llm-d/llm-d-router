@@ -151,6 +151,19 @@ func (pl *PredictedLatency) updateRequestContextWithPredictions(predictedLatency
 	predictedLatencyCtx.predictionsForScheduling = predMap
 }
 
+// withoutNeverScrapedEndpoints drops predictions for endpoints whose metrics
+// were never scraped. Such a prediction is computed from zero-value metrics,
+// so the endpoint is treated as having no prediction.
+func withoutNeverScrapedEndpoints(predictions []endpointPredictionResult) []endpointPredictionResult {
+	scraped := make([]endpointPredictionResult, 0, len(predictions))
+	for _, pred := range predictions {
+		if pred.Endpoint != nil && pred.Endpoint.GetMetrics().Updated() {
+			scraped = append(scraped, pred)
+		}
+	}
+	return scraped
+}
+
 func (pl *PredictedLatency) validatePrediction(
 	pred *latencypredictor.PredictionResponse,
 	predictedLatencyCtx *predictedLatencyCtx,

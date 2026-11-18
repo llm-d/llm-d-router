@@ -83,6 +83,7 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 
 	predictions, err := pl.generatePredictions(ctx, predictedLatencyCtx, endpoints)
 	if err == nil {
+		predictions = withoutNeverScrapedEndpoints(predictions)
 		pl.updateRequestContextWithPredictions(predictedLatencyCtx, predictions)
 
 		// Store predictions in endpoint attributes

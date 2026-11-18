@@ -284,3 +284,31 @@ func TestProduce_PredictionFailureObservability(t *testing.T) {
 		assert.Len(t, errorLogs, 1)
 	})
 }
+
+// TestProduce_SkipsPredictionsForNeverScrapedEndpoints verifies that Produce
+// neither publishes nor stores a prediction for an endpoint whose metrics were
+// never scraped, since that prediction was computed from zero-value metrics.
+func TestProduce_SkipsPredictionsForNeverScrapedEndpoints(t *testing.T) {
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, DefaultConfig, &mockPredictor{
+		predictions: map[string]*latencypredictor.PredictionResponse{
+			"0.5": {TTFT: 200, TPOT: 20},
+			"0.0": {TTFT: 50, TPOT: 5},
+		},
+	})
+
+	scraped := createTestEndpoint("pod-scraped", 0.5, 0, 0)
+	neverScraped := createNeverScrapedTestEndpoint("pod-never-scraped")
+	request := createTestInferenceRequest("never-scraped-test", 100, 0)
+
+	require.NoError(t, pl.Produce(context.Background(), request, []fwksched.Endpoint{scraped, neverScraped}))
+
+	_, ok := scraped.Get(pl.latencyPredictionInfoDataKey)
+	assert.True(t, ok, "a scraped endpoint should get a prediction")
+	_, ok = neverScraped.Get(pl.latencyPredictionInfoDataKey)
+	assert.False(t, ok, "a never-scraped endpoint should not get a prediction")
+
+	plCtx, err := pl.getPredictedLatencyContextForRequest(request)
+	require.NoError(t, err)
+	assert.Contains(t, plCtx.predictionsForScheduling, "pod-scraped")
+	assert.NotContains(t, plCtx.predictionsForScheduling, "pod-never-scraped")
+}
