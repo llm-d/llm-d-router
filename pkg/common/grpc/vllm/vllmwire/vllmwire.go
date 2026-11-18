@@ -60,6 +60,7 @@ var (
 	reqPriority  = protoscan.FieldNum(&vllmpb.GenerateRequest{}, "priority")
 	reqMedia     = protoscan.FieldNum(&vllmpb.GenerateRequest{}, "media")
 	reqLoraName  = protoscan.FieldNum(&vllmpb.GenerateRequest{}, "lora_name")
+	reqKVHints   = protoscan.FieldNum(&vllmpb.GenerateRequest{}, "kv_hints")
 
 	tokenIDsIDs = protoscan.FieldNum(&vllmpb.TokenIds{}, "ids")
 
@@ -169,9 +170,11 @@ type Request struct {
 	clientKVMore      [][]byte
 	hadClientTransfer bool
 
-	// base holds every top-level field except request_id, stopping, kv, and
-	// media. FrameSegments forwards these spans without a copy.
+	// base holds every top-level field except request_id, stopping, kv,
+	// kv_hints, and media. FrameSegments forwards these spans without a copy.
 	base spanList
+	// kvHints holds one full field (tag, length, body) per kv_hints occurrence.
+	kvHints spanList
 	// media holds one full field (tag, length, body) per media item.
 	media spanList
 	// mediaBodies, when set by SetMediaBodies, replaces the media item
@@ -375,6 +378,12 @@ func ScanGenerateRequest(payload []byte) (Request, error) {
 			if err := req.scanKV(value); err != nil {
 				return Request{}, err
 			}
+		case reqKVHints:
+			if wt != protowire.BytesType {
+				return Request{}, ErrMalformed
+			}
+			carve = true
+			req.kvHints.add(field)
 		case reqMedia:
 			if wt != protowire.BytesType {
 				return Request{}, ErrMalformed

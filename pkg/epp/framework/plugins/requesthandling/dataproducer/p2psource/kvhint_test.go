@@ -26,11 +26,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -102,7 +104,7 @@ func decisionOutcome(t *testing.T, p *Producer, req *scheduling.InferenceRequest
 
 // assertFetchHint checks that the forwarded request carries exactly one
 // kv.fetch action naming endpoint, that its block hash survives vLLM's gRPC
-// Struct conversion as an integer, and that no P2P tier output was written.
+// Struct conversion as an integer, and that no P2P source header was written.
 func assertFetchHint(t *testing.T, req *scheduling.InferenceRequest, endpoint string) {
 	t.Helper()
 	assert.True(t, req.Body.Mutated)
@@ -131,7 +133,6 @@ func assertFetchHint(t *testing.T, req *scheduling.InferenceRequest, endpoint st
 	assert.Less(t, h, float64(1<<53), "vLLM's gRPC server converts only numbers below 2^53 to ints")
 
 	assert.NotContains(t, req.Headers, routing.KVCacheSourceHeader)
-	assert.NotContains(t, req.Headers, routing.KVCachePrefillHeader)
 }
 
 func TestPluginFactory_Transport(t *testing.T) {
@@ -201,12 +202,14 @@ func TestPreRequest_KVCR_ReplacesClientHints(t *testing.T) {
 	assert.NotEqual(t, "client", forwardedRequest(t, req).GetKvHints().GetMessageId())
 }
 
-// The unary Generate path carries hints the same way, including when the
-// parser was given the path without its leading slash.
+// The unary Generate path carries hints the same way, including every path
+// form the vllminference parser accepts.
 func TestPreRequest_KVCR_GeneratePaths(t *testing.T) {
 	for _, path := range []string{
 		vllmpb.Inference_Generate_FullMethodName,
 		strings.TrimPrefix(vllmpb.Inference_Generate_FullMethodName, "/"),
+		vllmpb.Inference_Generate_FullMethodName + "/",
+		" " + vllmpb.Inference_GenerateStream_FullMethodName + "/ ",
 	} {
 		t.Run(path, func(t *testing.T) {
 			ctx := utils.NewTestContext(t)
@@ -218,8 +221,9 @@ func TestPreRequest_KVCR_GeneratePaths(t *testing.T) {
 	}
 }
 
-// The control port is kvcrControlPort plus the source's data parallel rank,
-// and a prefill target gets no P2P tier header in kvcr mode.
+// The control port is kvcrControlPort plus the source's data parallel rank.
+// A prefill target still gets its P2P tier header: the offloading P/D
+// connector builds the decode request from it.
 func TestPreRequest_KVCR_ControlPortAddsRankIndex(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 	p := kvcrProducer()
@@ -237,6 +241,55 @@ func TestPreRequest_KVCR_ControlPortAddsRankIndex(t *testing.T) {
 	require.NoError(t, p.PreRequest(ctx, req, prefillOnly(prefill)))
 
 	assertFetchHint(t, req, "tcp://10.0.0.3:17772")
+	assert.Equal(t, net.JoinHostPort("10.0.0.2", "7779"), req.Headers[routing.KVCachePrefillHeader])
+}
+
+// A decode request that pulls the prompt from a prefill pod gets no hint.
+func TestPreRequest_KVCR_DecodeRequest_NoHint(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := kvcrProducer()
+	params, err := structpb.NewStruct(reqcommon.RemotePrefillerParams("kv-1", "10.0.0.9", 7777))
+	require.NoError(t, err)
+	frame, err := grpcframe.MarshalProto(&vllmpb.GenerateRequest{
+		Model:  "m",
+		Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+		Kv:     &vllmpb.KVCacheParameters{KvTransferParams: params},
+	})
+	require.NoError(t, err)
+	req := grpcRequest(p, "req-decode", vllmpb.Inference_GenerateStream_FullMethodName, frame, kvcrPeer())
+
+	require.NoError(t, p.PreRequest(ctx, req, decodeOnly(endpoint(p, "pod-a", "10.0.0.1", 0))))
+
+	assert.False(t, req.Body.Mutated)
+	assert.Equal(t, fwkrequest.PayloadBytes(frame), req.Body.Payload)
+	assert.Equal(t, "decode-request", decisionOutcome(t, p, req))
+}
+
+// The reusable prefix floor is published only for a request that can carry
+// the hint.
+func TestProduce_KVCR_FloorOnlyForHintableRequests(t *testing.T) {
+	for _, tc := range []struct {
+		path      string
+		wantFloor bool
+	}{
+		{path: vllmpb.Inference_GenerateStream_FullMethodName, wantFloor: true},
+		{path: "/v1/completions"},
+		{path: apiv1.SglangService_Generate_FullMethodName},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			ctx := utils.NewTestContext(t)
+			p := kvcrProducer()
+			source := tierEndpointWithLoad(p, "pod-src", "10.0.0.2", 4, 0)
+			req := grpcRequest(p, "req-floor", tc.path, generateFrame(t), nil)
+
+			require.NoError(t, p.Produce(ctx, req, []scheduling.Endpoint{source}))
+
+			_, ok := scheduling.ReadRequestAttribute[*bestMatchPeer](req, p.attrKey())
+			assert.True(t, ok, "the source is stashed either way")
+			_, ok = readReusablePrefixTokens(req, "test")
+			assert.Equal(t, tc.wantFloor, ok)
+		})
+	}
 }
 
 func TestPreRequest_KVCR_BelowFloor_NoHint(t *testing.T) {

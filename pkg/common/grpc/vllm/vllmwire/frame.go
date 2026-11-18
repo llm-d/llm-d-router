@@ -57,6 +57,10 @@ type LegOptions struct {
 	KVTransferParams map[string]any
 	// ECTransferParams sets kv.ec_transfer_params when non-empty.
 	ECTransferParams map[string]any
+	// DropKVHints omits kv_hints. Set it on a decode leg that follows a
+	// prefill leg: the hints name a KV source for the pod that computes the
+	// prompt, and the decode pod receives the prompt's KV from the prefill pod.
+	DropKVHints bool
 }
 
 // legPlan holds the sizes FrameSegments computes before it allocates.
@@ -64,6 +68,7 @@ type legPlan struct {
 	requestIDLen int // encoded override field, 0 when the client's field is reused
 	stopBodyLen  int
 	emitStop     bool
+	kvHintsLen   int
 	kvBodyLen    int
 	kvStructLen  int
 	ecStructLen  int
@@ -80,6 +85,10 @@ func (r *Request) plan(opts LegOptions) (legPlan, error) {
 
 	if opts.RequestID != "" {
 		p.requestIDLen = protowire.SizeTag(reqRequestID) + protowire.SizeBytes(len(opts.RequestID))
+	}
+
+	if !opts.DropKVHints {
+		p.kvHintsLen = r.kvHints.bytes
 	}
 
 	p.stopBodyLen, p.emitStop = r.stoppingBodySize(opts.CapSingleToken)
@@ -120,7 +129,7 @@ func (r *Request) plan(opts LegOptions) (legPlan, error) {
 	if ridLen == 0 {
 		ridLen = len(r.requestIDField)
 	}
-	p.payloadLen = ridLen + r.base.bytes + p.mediaLen + p.tailLen
+	p.payloadLen = ridLen + r.base.bytes + p.kvHintsLen + p.mediaLen + p.tailLen
 	if p.payloadLen > grpcframe.MaxPayloadLen {
 		return legPlan{}, fmt.Errorf("vllmwire: GenerateRequest: %w", grpcframe.ErrTooLarge)
 	}
@@ -174,10 +183,13 @@ func (r *Request) FrameSegments(opts LegOptions) ([][]byte, error) {
 		return nil, err
 	}
 
-	// header, request_id, base spans, media, tail. The segments of the
-	// scratch buffer are capped at their length so a caller append cannot
+	// header, request_id, base spans, kv_hints, media, tail. The segments of
+	// the scratch buffer are capped at their length so a caller append cannot
 	// write into the next one.
 	segCap := 3 + r.base.count
+	if !opts.DropKVHints {
+		segCap += r.kvHints.count
+	}
 	if p.mediaCopy {
 		segCap++
 	} else {
@@ -197,6 +209,11 @@ func (r *Request) FrameSegments(opts LegOptions) ([][]byte, error) {
 
 	for i := 0; i < r.base.count; i++ {
 		segs = append(segs, r.base.at(i))
+	}
+	if !opts.DropKVHints {
+		for i := 0; i < r.kvHints.count; i++ {
+			segs = append(segs, r.kvHints.at(i))
+		}
 	}
 
 	switch {
@@ -339,7 +356,7 @@ type EncoderSubFrameOptions struct {
 // EncoderSubFrame builds a standalone unary GenerateRequest frame for one
 // media item. EC disaggregation fans out one such request per item. The
 // frame keeps every client field except request_id, prompt, media,
-// stopping, and kv. It sets stopping.max_new_tokens to 1 and keeps the
+// stopping, kv, and kv_hints. It sets stopping.max_new_tokens to 1 and keeps the
 // sanitized client kv fields (cache_salt, bypass_prefix_cache).
 func (r *Request) EncoderSubFrame(opts EncoderSubFrameOptions) ([]byte, error) {
 	keptLen := 0

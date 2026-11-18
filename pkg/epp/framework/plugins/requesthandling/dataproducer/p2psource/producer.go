@@ -538,7 +538,9 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			return err
 		}
 		request.PutAttribute(p.attrKey(), &best)
-		if best.hasTierData {
+		// A request that cannot carry a kv.fetch hint recomputes the prefix,
+		// so no reusable floor is published for it.
+		if best.hasTierData && (p.transport != TransportKVCR || isVLLMGenerate(fwkrequest.GetRequestPath(request.Headers))) {
 			reusableTokens := best.cachedTokens - p.minCachedTokenDelta + 1
 			if reusableTokens > 0 {
 				if err := ctx.Err(); err != nil {
@@ -643,7 +645,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	if prefillPicked {
 		computing = pr
 		// The prefill P2P tier header serves the sidecar's offloading connector.
-		if md := pr.TargetEndpoints[0].GetMetadata(); md != nil && p.transport == TransportOffloading {
+		if md := pr.TargetEndpoints[0].GetMetadata(); md != nil {
 			p2pPort, ok := p.p2pPort(md)
 			if !ok {
 				outcome = "prefill-port-invalid"
@@ -693,6 +695,9 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		return nil
 	}
 	params := kvTransferParams(request.Body)
+	if p.transport == TransportKVCR {
+		params = vllmKVTransferParams(request.Body)
+	}
 	if _, ok := params[reqcommon.FieldRemotePrefiller]; ok {
 		outcome = "decode-request"
 		return nil

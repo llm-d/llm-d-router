@@ -665,6 +665,7 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 					},
 					Priority: 5,
 					LoraName: "adapter-v1",
+					KvHints:  &vllmpb.KVHintsEnvelope{ProtocolVersion: "0.1", MessageId: "hint-1"},
 				}
 				if tc.promptIsText {
 					req.Prompt = &vllmpb.GenerateRequest_Text{Text: "Hello from EPP-Text-Text"}
@@ -753,6 +754,11 @@ func TestVLLMGRPCPDConnectorsUnaryAndStream(t *testing.T) {
 						assert.Equal(t, []uint32{1, 100, 200, 300}, legReq.GetTokenIds().GetIds())
 					}
 				}
+
+				// kv_hints name a KV source for the prefill pod; the decode pod
+				// receives the prompt's KV from prefill.
+				assert.Equal(t, "hint-1", pReq.GetKvHints().GetMessageId())
+				assert.Nil(t, dReq.GetKvHints())
 
 				tc.verifyLegs(t, pCalls[0], dCalls[0], prefillAddr)
 			})

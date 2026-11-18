@@ -219,9 +219,16 @@ floor and the metrics are unchanged. In `PreRequest`, a kept source is written
 into `GenerateRequest.kv_hints` of a `vllm.Inference` Generate or
 GenerateStream request as one `kv.fetch` action whose
 `source_control_endpoint` is `tcp://<source address>:<kvcrControlPort + rank>`,
-replacing any `kv_hints` the request carries. No body field or header for the P2P tier is written, including
-`x-llm-d-kv-cache-prefill-p2p-host-port`. Other requests, such as OpenAI HTTP,
-get no hint and record the `unsupported-request` outcome.
+replacing any `kv_hints` the request carries. The source's P2P body field and
+header are not written. Other requests, such as OpenAI HTTP, get no hint,
+publish no reusable prefix floor, and record the `unsupported-request` outcome.
+
+On a disaggregated request, the hint names a source for the prefill pod.
+`x-llm-d-kv-cache-prefill-p2p-host-port` is written as with `offloading`,
+because the `offloading` P/D connector of the sidecar and the coordinator
+reads it. The sidecar and the coordinator drop `kv_hints` from the decode leg,
+and a decode request that carries `kv_transfer_params.remote_prefiller` gets
+no hint.
 
 `kv.fetch` requires a non-empty `block_hashes` list. The plugin sends one
 placeholder value and relies on KVCR's `opportunistic_query`, which vLLM's

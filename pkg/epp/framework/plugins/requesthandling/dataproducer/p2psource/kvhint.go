@@ -25,8 +25,10 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/protoscan"
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/vllmwire"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 )
 
@@ -53,11 +55,37 @@ const (
 var kvHintsFieldNumber = (&vllmpb.GenerateRequest{}).ProtoReflect().Descriptor().Fields().ByName("kv_hints").Number()
 
 // isVLLMGenerate reports whether path is the vllm.Inference Generate or
-// GenerateStream method, with or without its leading slash, as the
-// vllminference parser accepts it.
+// GenerateStream method, with or without its leading or trailing slash, as
+// the vllminference parser accepts it.
 func isVLLMGenerate(path string) bool {
-	path = "/" + strings.TrimPrefix(path, "/")
+	path = "/" + strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(path), "/"), "/")
 	return path == vllmpb.Inference_Generate_FullMethodName || path == vllmpb.Inference_GenerateStream_FullMethodName
+}
+
+// vllmKVTransferParams returns kv.kv_transfer_params of a vllm.Inference
+// GenerateRequest frame body, or nil when the body is not a frame or carries
+// none.
+func vllmKVTransferParams(body *fwkrequest.InferenceRequestBody) map[string]any {
+	if body == nil {
+		return nil
+	}
+	frame, ok := body.Payload.(fwkrequest.PayloadBytes)
+	if !ok {
+		return nil
+	}
+	payload, err := grpcframe.ParsePayload(frame)
+	if err != nil {
+		return nil
+	}
+	req, err := vllmwire.ScanGenerateRequest(payload)
+	if err != nil {
+		return nil
+	}
+	params, _, err := req.ClientKVTransferParams()
+	if err != nil {
+		return nil
+	}
+	return params
 }
 
 // kvcrControlEndpoint is the KVCR control endpoint a destination dials to
