@@ -1142,28 +1142,9 @@ func (r *Runner) resolveDiscovery(rawConfig *configapiv1.EndpointPickerConfig) (
 // expected to have been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo.
 func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.EndpointPickerConfig, poolNamespace string) error {
-	dl := rawConfig.DataLayer
-	if dl == nil || dl.Discovery == nil || dl.Discovery.Peers == nil {
-		syncer := r.PluginHandle.CrossReplicaSyncer()
-		if _, ok := syncer.(fwkdl.PeerConsumer); ok {
-			return fmt.Errorf("peerDiscovery: cross-replica syncer %q consumes the peer set, but dataLayer.discovery.peers is not configured",
-				syncer.TypedName().Name)
-		}
-		return nil
-	}
-
-	ref := dl.Discovery.Peers.PluginRef
-	p := r.PluginHandle.Plugin(ref)
-	if p == nil {
-		return fmt.Errorf("peerDiscovery: no plugin found with name %q", ref)
-	}
-	disc, ok := p.(fwkdl.PeerDiscovery)
-	if !ok {
-		return fmt.Errorf("peerDiscovery: plugin %q does not implement PeerDiscovery", ref)
-	}
-	if k8sPeers, ok := p.(*k8speer.Plugin); ok && k8sPeers.Namespace() != poolNamespace {
-		return fmt.Errorf("peerDiscovery: plugin %q namespace %q must match pool namespace %q: the EPP Pod cache only covers the pool namespace, so peer Pods would never be seen",
-			ref, k8sPeers.Namespace(), poolNamespace)
+	disc, err := r.resolvePeerDiscovery(rawConfig, poolNamespace)
+	if err != nil || disc == nil {
+		return err
 	}
 
 	peerStore := statesync.NewMemoryPeerStore()
@@ -1172,6 +1153,38 @@ func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.End
 	return mgr.Add(runnable.NoLeaderElection(manager.RunnableFunc(func(ctx context.Context) error {
 		return disc.Start(ctx, notifier)
 	})))
+}
+
+// resolvePeerDiscovery returns the PeerDiscovery plugin referenced by
+// rawConfig.DataLayer.Discovery.Peers, or nil when no peer discovery is
+// configured. It fails when peers are not configured but the cross-replica
+// syncer consumes them, or when the reference names no plugin, a plugin that
+// is not a PeerDiscovery, or a k8s-peer-discovery plugin outside poolNamespace.
+func (r *Runner) resolvePeerDiscovery(rawConfig *configapiv1.EndpointPickerConfig, poolNamespace string) (fwkdl.PeerDiscovery, error) {
+	dl := rawConfig.DataLayer
+	if dl == nil || dl.Discovery == nil || dl.Discovery.Peers == nil {
+		syncer := r.PluginHandle.CrossReplicaSyncer()
+		if _, ok := syncer.(fwkdl.PeerConsumer); ok {
+			return nil, fmt.Errorf("peerDiscovery: cross-replica syncer %q consumes the peer set, but dataLayer.discovery.peers is not configured",
+				syncer.TypedName().Name)
+		}
+		return nil, nil //nolint:nilnil // no peer discovery configured is not an error
+	}
+
+	ref := dl.Discovery.Peers.PluginRef
+	p := r.PluginHandle.Plugin(ref)
+	if p == nil {
+		return nil, fmt.Errorf("peerDiscovery: no plugin found with name %q", ref)
+	}
+	disc, ok := p.(fwkdl.PeerDiscovery)
+	if !ok {
+		return nil, fmt.Errorf("peerDiscovery: plugin %q does not implement PeerDiscovery", ref)
+	}
+	if k8sPeers, ok := p.(*k8speer.Plugin); ok && k8sPeers.Namespace() != poolNamespace {
+		return nil, fmt.Errorf("peerDiscovery: plugin %q namespace %q must match pool namespace %q: the EPP Pod cache only covers the pool namespace, so peer Pods would never be seen",
+			ref, k8sPeers.Namespace(), poolNamespace)
+	}
+	return disc, nil
 }
 
 // connectPeerStore hands the peer set to the configured cross-replica syncer
@@ -1289,9 +1302,9 @@ func buildRequestEvictor() (*fceviction.RequestEvictor, error) {
 // validateConfig runs the configuration checks of a real start against an
 // empty datastore: the discovery flags of Kubernetes mode, the objectives
 // file of file-discovery mode, plugin instantiation and the config checks of
-// phase two, the discovery plugin, plugin stability, and the data layer
-// configuration. It needs no Kubernetes cluster and starts no server or data
-// source.
+// phase two, the discovery plugin of file-discovery mode, the peer discovery
+// of Kubernetes mode, plugin stability, and the data layer configuration. It
+// needs no Kubernetes cluster and starts no server or data source.
 func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, rawConfig *configapiv1.EndpointPickerConfig) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1317,6 +1330,8 @@ func (r *Runner) validateConfig(ctx context.Context, opts *runserver.Options, ra
 		if _, err := r.resolveDiscovery(rawConfig); err != nil {
 			return fmt.Errorf("failed to resolve discovery plugin: %w", err)
 		}
+	} else if _, err := r.resolvePeerDiscovery(rawConfig, resolvePoolNamespace(opts.PoolNamespace)); err != nil {
+		return err
 	}
 	if err := fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins); err != nil {
 		return err

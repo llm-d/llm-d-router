@@ -51,6 +51,10 @@ schedulingProfiles:
 `
 
 func TestValidateConfig(t *testing.T) {
+	// k8s-peer-discovery rejects a namespace that differs from NAMESPACE.
+	t.Setenv("NAMESPACE", "")
+	require.NoError(t, os.Unsetenv("NAMESPACE"))
+
 	endpointsFile := filepath.Join(t.TempDir(), "endpoints.yaml")
 	require.NoError(t, os.WriteFile(endpointsFile, []byte(`endpoints:
 - name: e0
@@ -69,10 +73,20 @@ func TestValidateConfig(t *testing.T) {
       pluginRef: file-disc
 `
 
+	peersConfig := func(ref string) string {
+		return editBase(t, "plugins:\n- type: approx-prefix-cache-producer",
+			"plugins:\n- name: peers\n  type: k8s-peer-discovery\n  parameters:\n    selector: app=epp\n    port: \"9002\"\n    namespace: peer-ns"+
+				"\n- type: approx-prefix-cache-producer") + `dataLayer:
+  discovery:
+    peers:
+      pluginRef: ` + ref + "\n"
+	}
+
 	tests := []struct {
 		name           string
 		configText     string
 		poolName       string
+		poolNamespace  string
 		objectivesFile string
 		wantErr        string
 	}{
@@ -121,6 +135,25 @@ func TestValidateConfig(t *testing.T) {
 			objectivesFile: filepath.Join(t.TempDir(), "missing.yaml"),
 			wantErr:        "missing.yaml",
 		},
+		{
+			name:       "peer discovery references an undefined plugin",
+			configText: peersConfig("no-such-peers"),
+			poolName:   "epp",
+			wantErr:    `peerDiscovery: no plugin found with name "no-such-peers"`,
+		},
+		{
+			name:       "peer discovery references a plugin that is not a PeerDiscovery",
+			configText: peersConfig("decode-filter"),
+			poolName:   "epp",
+			wantErr:    `peerDiscovery: plugin "decode-filter" does not implement PeerDiscovery`,
+		},
+		{
+			name:          "peer discovery namespace differs from the pool namespace",
+			configText:    peersConfig("peers"),
+			poolName:      "epp",
+			poolNamespace: "pool-ns",
+			wantErr:       `namespace "peer-ns" must match pool namespace "pool-ns"`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -131,6 +164,7 @@ func TestValidateConfig(t *testing.T) {
 			opts := runserver.NewOptions()
 			opts.ConfigText = tc.configText
 			opts.PoolName = tc.poolName
+			opts.PoolNamespace = tc.poolNamespace
 			opts.ObjectivesFile = tc.objectivesFile
 			opts.ValidateConfig = true
 
