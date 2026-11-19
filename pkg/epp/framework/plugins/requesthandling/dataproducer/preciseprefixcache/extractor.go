@@ -82,22 +82,15 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 
 // ensureSubscriber idempotently installs a KV-events subscriber for the given
 // endpoint, dialing SocketPort + RankIndex to match standard inference-engine port offsetting
-// (one ZMQ PUB socket per DP rank on the same pod IP).
+// (one ZMQ PUB socket per DP rank on the same pod IP), or the endpoint's
+// ZMQPort when discovery sets one. A ZMQPort endpoint receives live events
+// only, without replay or snapshot.
 func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
 	if meta == nil || meta.Address == "" {
 		return nil
 	}
 	endpointKey := meta.ID.String()
-	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
-	zmqEndpoint := "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(port))
-	replayEndpoint := ""
-	if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {
-		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
-	}
-	snapshotEndpoint := ""
-	if snapshotPort := p.kvEventsConfig.PodDiscoveryConfig.SnapshotSocketPort; snapshotPort > 0 {
-		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+meta.GetRankIndex()))
-	}
+	zmqEndpoint, replayEndpoint, snapshotEndpoint := p.subscriberEndpoints(meta)
 	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
 
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
@@ -112,4 +105,24 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	logger.V(logging.DEBUG).Info("Ensured KV-events subscriber",
 		"endpoint", endpointKey, "zmq", zmqEndpoint, "replay", replayEndpoint, "snapshot", snapshotEndpoint)
 	return nil
+}
+
+// subscriberEndpoints returns the endpoint's KV-events, replay and snapshot
+// socket addresses; an empty replay or snapshot address disables that path.
+// An endpoint with ZMQPort gets no replay or snapshot address: those ports
+// follow the configured port plus RankIndex and can belong to another engine
+// on the same address.
+func (p *Producer) subscriberEndpoints(meta *fwkdl.EndpointMetadata) (zmqEndpoint, replayEndpoint, snapshotEndpoint string) {
+	if meta.ZMQPort > 0 {
+		return "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(meta.ZMQPort)), "", ""
+	}
+	cfg := p.kvEventsConfig.PodDiscoveryConfig
+	zmqEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(cfg.SocketPort+meta.GetRankIndex()))
+	if replayPort := cfg.EffectiveReplayPort(); replayPort > 0 {
+		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
+	}
+	if snapshotPort := cfg.SnapshotSocketPort; snapshotPort > 0 {
+		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+meta.GetRankIndex()))
+	}
+	return zmqEndpoint, replayEndpoint, snapshotEndpoint
 }
