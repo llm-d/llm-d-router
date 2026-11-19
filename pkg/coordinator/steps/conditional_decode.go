@@ -87,9 +87,9 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 		return err
 	}
 
-	// A served hit is the KV-reuse case the parity check exists for; body is a
-	// clone, so an injected include_usage does not reach the decode step on a
-	// miss. On a 412 nothing is written, so the writer stays idle.
+	// A served probe is checked as decode's reply is; body is a clone, so an
+	// injected include_usage does not reach the decode step after a 412. On a
+	// 412 nothing is written, so the writer stays idle.
 	parity, injectedUsage := setupParity(ConditionalDecodeStepName, s.promptTokenParity, logger, reqCtx, body)
 
 	probeHeaders := map[string]string{routing.PreferHeader: routing.PreferIfAvailable}

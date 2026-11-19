@@ -17,13 +17,21 @@ limitations under the License.
 package builder
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
+	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/steps/asyncbroker"
 )
@@ -215,6 +223,68 @@ func TestBuildForceStreamFromPipelineConfig(t *testing.T) {
 		if _, err := Build(cfg, gateway.New(config.GatewayConfig{})); err == nil {
 			t.Fatalf("Build() expected an error for a buffer below the reply-envelope overhead (force_stream: %t)", forceStream)
 		}
+	}
+}
+
+// TestBuildForceStreamsRequest runs one non-streaming request through the
+// pipeline Build returns with pipeline.force_stream set: the step that serves it
+// sends the request upstream as a stream, and the client gets one JSON reply.
+func TestBuildForceStreamsRequest(t *testing.T) {
+	for _, stepTypes := range [][]string{
+		{steps.DecodeStepName},
+		{steps.ConditionalDecodeStepName, steps.DecodeStepName},
+	} {
+		t.Run(strings.Join(stepTypes, ","), func(t *testing.T) {
+			var (
+				mu      sync.Mutex
+				streams []any
+			)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				mu.Lock()
+				streams = append(streams, body["stream"])
+				mu.Unlock()
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, `data: {"id":"c","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`+"\n\n"+
+					"data: [DONE]\n\n")
+			}))
+			defer server.Close()
+
+			body := "pipeline:\n  force_stream: true\n  steps:\n    - type: " + strings.Join(stepTypes, "\n    - type: ") + "\n"
+			p, err := Build(loadYAML(t, body), gateway.New(config.GatewayConfig{Address: server.URL}))
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+
+			recorder := httptest.NewRecorder()
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-built",
+				OriginalPath:     reqcommon.PathChatCompletions,
+				Model:            "llama-3",
+				KVTransferParams: map[string]any{},
+				Body: map[string]any{
+					"model": "llama-3", "stream": false, "max_tokens": 16,
+					"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+				},
+				ResponseWriter: recorder,
+			}
+			if err := p.Execute(context.Background(), reqCtx); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(streams) != 1 || streams[0] != true {
+				t.Fatalf("upstream stream fields = %v, want one request with stream: true", streams)
+			}
+			if got := recorder.Header().Get("Content-Type"); got != reqcommon.ContentTypeJSON {
+				t.Fatalf("Content-Type = %q, want %q", got, reqcommon.ContentTypeJSON)
+			}
+			if !strings.Contains(recorder.Body.String(), `"content":"ok"`) {
+				t.Fatalf("reply %q does not carry the reassembled content", recorder.Body.String())
+			}
+		})
 	}
 }
 
