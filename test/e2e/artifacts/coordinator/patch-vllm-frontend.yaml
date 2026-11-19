@@ -5,10 +5,12 @@ metadata:
 spec:
   template:
     spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
       initContainers:
       - name: vllm-frontend
         restartPolicy: Always
-        image: grpc-generation-frontend:local
+        image: quay.io/sageac/vllm-rust-frontend@sha256:5732c51ad79829b4670d84de7dcfdbd35c056847d74c56e77f351bde4c74b524
         args:
         - --grpc-port=50051
         - --generation-url=http://127.0.0.1:8081
