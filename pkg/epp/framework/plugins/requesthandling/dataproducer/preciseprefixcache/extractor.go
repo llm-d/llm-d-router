@@ -36,10 +36,11 @@ var (
 )
 
 // RegisterDependencies requests endpoint events for per-pod subscriptions.
-// A global zmqEndpoint can leave discoverPods enabled but needs no such events.
+// A global zmqEndpoint can leave discoverPods enabled but needs no such events,
+// and a bound kv-events-source follows the endpoints itself.
 func (p *Producer) RegisterDependencies(r fwkdl.Registrar) error {
 	kc := p.kvEventsConfig
-	if !kc.DiscoverPods || kc.PodDiscoveryConfig == nil || kc.ZMQEndpoint != "" {
+	if p.sharedEvents != nil || !kc.DiscoverPods || kc.PodDiscoveryConfig == nil || kc.ZMQEndpoint != "" {
 		return nil
 	}
 	return r.Register(fwkdl.PendingRegistration{
