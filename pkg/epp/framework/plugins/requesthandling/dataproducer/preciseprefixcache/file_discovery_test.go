@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,11 +38,13 @@ import (
 // extractNotifier forwards file-discovery notifications to the producer the
 // way the datastore runtime does.
 type extractNotifier struct {
-	ctx context.Context
-	p   *Producer
+	ctx  context.Context
+	p    *Producer
+	seen *sync.Map // endpoint ID string -> last upserted *fwkdl.EndpointMetadata
 }
 
 func (n extractNotifier) Upsert(meta *fwkdl.EndpointMetadata) {
+	n.seen.Store(meta.ID.String(), meta)
 	_ = n.p.Extract(n.ctx, fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: fwkdl.NewEndpoint(meta, nil)})
 }
 
@@ -50,7 +53,8 @@ func (n extractNotifier) Delete(id k8stypes.NamespacedName) {
 }
 
 // startFileDiscovery runs the real file-discovery plugin against path, feeding p.
-func startFileDiscovery(t *testing.T, p *Producer, path string, watch bool) {
+// It returns the endpoint metadata discovery upserted, keyed by endpoint ID.
+func startFileDiscovery(t *testing.T, p *Producer, path string, watch bool) *sync.Map {
 	t.Helper()
 	params := fmt.Sprintf(`{"path": %q, "watchFile": %t}`, path, watch)
 	plug, err := file.Factory("fd", json.NewDecoder(strings.NewReader(params)), nil)
@@ -59,9 +63,10 @@ func startFileDiscovery(t *testing.T, p *Producer, path string, watch bool) {
 
 	ctx, cancel := context.WithCancel(discardCtx(t))
 	done := make(chan struct{})
+	seen := &sync.Map{}
 	go func() {
 		defer close(done)
-		_ = fd.Start(ctx, extractNotifier{ctx: ctx, p: p})
+		_ = fd.Start(ctx, extractNotifier{ctx: ctx, p: p, seen: seen})
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -76,6 +81,7 @@ func startFileDiscovery(t *testing.T, p *Producer, path string, watch bool) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("file-discovery not ready")
 	}
+	return seen
 }
 
 func writeEndpoints(t *testing.T, path, body string) {
@@ -140,6 +146,69 @@ func TestProducer_FileDiscoveryEndpointsDriveSubscribers(t *testing.T) {
 			ids, endpoints := p.subscribersManager.GetActiveSubscribers()
 			assert.ElementsMatch(t, tc.wantIDs, ids)
 			assert.ElementsMatch(t, tc.wantEndpoints, endpoints)
+		})
+	}
+}
+
+func TestProducer_FileDiscoveryReplayAndSnapshotEndpoints(t *testing.T) {
+	type endpoints struct{ replay, snapshot string }
+	tests := []struct {
+		name string
+		yaml string
+		want map[string]endpoints
+	}{
+		{
+			name: "entries sharing an address with distinct zmqPort run live-only",
+			yaml: `endpoints:
+- {name: vllm-0, address: 10.0.0.1, port: "8000", zmqPort: 6001}
+- {name: vllm-1, address: 10.0.0.1, port: "8001", zmqPort: 6002}
+`,
+			want: map[string]endpoints{
+				"default/vllm-0": {},
+				"default/vllm-1": {},
+			},
+		},
+		{
+			name: "entries without zmqPort offset replay and snapshot ports by rankIndex",
+			yaml: `endpoints:
+- {name: vllm-0, address: 10.0.0.1, port: "8000", rankIndex: 0}
+- {name: vllm-1, address: 10.0.0.1, port: "8001", rankIndex: 1}
+`,
+			want: map[string]endpoints{
+				"default/vllm-0": {replay: "tcp://10.0.0.1:5600", snapshot: "tcp://10.0.0.1:5700"},
+				"default/vllm-1": {replay: "tcp://10.0.0.1:5601", snapshot: "tcp://10.0.0.1:5701"},
+			},
+		},
+		{
+			name: "zmqPort entry runs live-only while a rank entry keeps replay and snapshot",
+			yaml: `endpoints:
+- {name: vllm-0, address: 10.0.0.1, port: "8000", zmqPort: 6001, rankIndex: 1}
+- {name: vllm-1, address: 10.0.0.1, port: "8001", rankIndex: 1}
+`,
+			want: map[string]endpoints{
+				"default/vllm-0": {},
+				"default/vllm-1": {replay: "tcp://10.0.0.1:5601", snapshot: "tcp://10.0.0.1:5701"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newExtractorProducer(t, true)
+			p.kvEventsConfig.PodDiscoveryConfig.ReplaySocketPort = 5600
+			p.kvEventsConfig.PodDiscoveryConfig.SnapshotSocketPort = 5700
+			path := filepath.Join(t.TempDir(), "endpoints.yaml")
+			writeEndpoints(t, path, tc.yaml)
+			seen := startFileDiscovery(t, p, path, false)
+
+			ids, _ := p.subscribersManager.GetActiveSubscribers()
+			require.Len(t, ids, len(tc.want))
+			for id, want := range tc.want {
+				v, ok := seen.Load(id)
+				require.True(t, ok, "endpoint %s not discovered", id)
+				_, replay, snapshot := p.subscriberEndpoints(v.(*fwkdl.EndpointMetadata))
+				assert.Equal(t, want, endpoints{replay: replay, snapshot: snapshot}, id)
+			}
 		})
 	}
 }

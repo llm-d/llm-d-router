@@ -332,8 +332,9 @@ dataLayer:
 
 The producer dials `tcp://<address>:<socketPort + rankIndex>`. An entry whose
 socket is on another port sets `zmqPort`, which is used as the exact port.
-`replaySocketPort` and `snapshotSocketPort` still use the configured port plus
-`rankIndex`. `podLabelSelector` filters endpoints by their `labels`.
+`replaySocketPort` and `snapshotSocketPort` use the configured port plus
+`rankIndex`, so a `zmqPort` entry runs without replay and snapshot and indexes
+live events only. `podLabelSelector` filters endpoints by their `labels`.
 
 ```yaml
 endpoints:
