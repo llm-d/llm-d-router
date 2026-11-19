@@ -615,7 +615,7 @@ true
 {{/*
 Whether Envoy health-checks EPP's gRPC health port, which reports NOT_SERVING while EPP drains, instead
 of the ext_proc port. ext_proc endpoints resolve to EPP pods (loopback, per-pod or headless DNS) everywhere
-except the single-EPP ClusterIP Service, which exposes only the ext_proc port.
+except the ClusterIP Service in service mode (single-EPP or leader-elected), which exposes only the ext_proc port.
 */}}
 {{- define "llm-d-router.proxy.eppHealthPortCheck" -}}
 {{- if and (include "llm-d-router.epp.healthCheckingRequired" .) (or (eq (include "llm-d-router.priorityRouting.enabled" .) "true") (ne (include "llm-d-router.proxyMode" .) "service") (include "llm-d-router.proxy.discoveryServiceName" .)) -}}

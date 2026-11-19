@@ -1010,7 +1010,8 @@ func (r *Runner) setupMetricsCollection(opts *runserver.Options) datalayer.Endpo
 // newHealthGRPCServer builds the gRPC health server. draining may be nil (graceful
 // drain disabled); when non-nil and set, non-liveness checks report NOT_SERVING.
 func newHealthGRPCServer(logger logr.Logger, ds datastore.Datastore, isLeader, draining *atomic.Bool, leaderElectionEnabled bool, supporters []appProtocolSupporter, readinessCheckers []fwkplugin.ReadinessChecker) *grpc.Server {
-	srv := grpc.NewServer()
+	// Envoy health-checks over the ext_proc cluster's connection, so it sends that cluster's keepalive pings here too.
+	srv := grpc.NewServer(runserver.KeepaliveEnforcementPolicy())
 	healthPb.RegisterHealthServer(srv, &healthServer{
 		logger:                logger,
 		datastore:             ds,

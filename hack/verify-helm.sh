@@ -1134,8 +1134,16 @@ while IFS='|' read -r hc_case hc_flags hc_count hc_port hc_tls hc_drain; do
     echo "EPP health port case ${hc_case}: plaintext health check transport socket match missing with EPP TLS on"
     exit 1
   fi
+  if [[ "${hc_tls}" == present ]] && grep -q -- 'tls_options:' "${hc_render_output}"; then
+    echo "EPP health port case ${hc_case}: health check tls_options rendered for the plaintext health port"
+    exit 1
+  fi
   if [[ "${hc_tls}" == absent ]] && grep -q -- 'transport_socket_match_criteria' "${hc_render_output}"; then
     echo "EPP health port case ${hc_case}: transport_socket_match_criteria rendered with EPP TLS off"
+    exit 1
+  fi
+  if [[ "${hc_case}" == service-clusterip ]] && ! grep -A1 -- 'tls_options:' "${hc_render_output}" | grep -q -- 'alpn_protocols: \["h2"\]'; then
+    echo "EPP health port case ${hc_case}: health check tls_options missing with EPP TLS on"
     exit 1
   fi
   hc_drain_found=$(grep -c -- '--drain-timeout=' "${hc_render_output}" || true)
