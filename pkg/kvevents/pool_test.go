@@ -1017,6 +1017,33 @@ func TestRealignExtraFeatures(t *testing.T) {
 	})
 }
 
+func TestDropOffsetsUnlessDense(t *testing.T) {
+	cases := []struct {
+		name      string
+		blockSize int
+		numTokens int
+		keep      bool
+	}{
+		{"one entry per page", 8, 16, true},
+		{"null page skipped", 8, 24, false},
+		{"undeclared block size", 0, 16, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			features, err := kvblock.ParseRawExtraKeys([][]any{{[]any{"img", int64(4)}}, nil}, "")
+			require.NoError(t, err)
+			ev := &BlockStoredEvent{BlockSize: tc.blockSize, Tokens: makeTokens(tc.numTokens)}
+			dropOffsetsUnlessDense(ev, features)
+			if tc.keep {
+				assert.Equal(t, []int{4}, features[0].MMOffsets)
+			} else {
+				assert.Nil(t, features[0].MMOffsets)
+			}
+			assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, features[0].MMHashes)
+		})
+	}
+}
+
 // TestCanonicalWritePath_ExtraKeysOneToMany verifies that events with ExtraKeys
 // are correctly processed in the 1:many path (engine BS > canonical BS).
 func TestCanonicalWritePath_ExtraKeysOneToMany(t *testing.T) {

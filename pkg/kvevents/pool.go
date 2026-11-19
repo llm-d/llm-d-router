@@ -621,6 +621,19 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 	return canonical
 }
 
+// dropOffsetsUnlessDense clears the MM offsets unless ev declares its block size and has one entry per page.
+// vLLM skips null pages in extra_keys but not in token_ids, so a sparse event's entries are not pages.
+func dropOffsetsUnlessDense(ev *BlockStoredEvent, features []*kvblock.BlockExtraFeatures) {
+	if ev.BlockSize > 0 && len(features)*ev.BlockSize == len(ev.Tokens) {
+		return
+	}
+	for _, f := range features {
+		if f != nil {
+			f.MMOffsets = nil
+		}
+	}
+}
+
 // subBlockFeatures returns the features of engine block ef that apply to its tokens [start, start+size).
 // Without usable event offsets every item is kept, since the block doesn't say where an item lies.
 func subBlockFeatures(ef *kvblock.BlockExtraFeatures, start, size, engineBlockSize int) *kvblock.BlockExtraFeatures {
@@ -858,6 +871,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 						"podIdentifier", podIdentifier)
 					continue
 				}
+				dropOffsetsUnlessDense(ev, extraFeatures)
 			}
 
 			// Realign extraFeatures from engine-block granularity to canonical-block
