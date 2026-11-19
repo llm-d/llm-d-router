@@ -18,7 +18,6 @@ package inflightload
 
 import (
 	"context"
-	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -29,6 +28,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 )
 
@@ -228,12 +228,7 @@ func sessionStamp(request *fwksched.InferenceRequest) (stamp string, own, ok boo
 			return value, false, true
 		}
 	}
-	switch xargs := payload[extraArgsField].(type) {
-	case map[string]any:
-		if s, found := xargs[sessionIDField].(string); found && s != "" {
-			return s, false, true
-		}
-	case fwkrequest.PayloadMap:
+	if xargs, found := parserutil.ObjectField(payload, extraArgsField); found {
 		if s, found := xargs[sessionIDField].(string); found && s != "" {
 			return s, false, true
 		}
@@ -246,13 +241,14 @@ func sessionStamp(request *fwksched.InferenceRequest) (stamp string, own, ok boo
 }
 
 // eventEndpoint is the endpoint identity under which the KV events source
-// delivers an engine's events.
+// delivers an engine's events: address and port joined with a colon and no
+// brackets, as the source names them.
 func eventEndpoint(endpoint fwksched.Endpoint) string {
 	meta := endpoint.GetMetadata()
 	if meta.Address == "" {
 		return ""
 	}
-	return net.JoinHostPort(meta.Address, meta.Port)
+	return meta.Address + ":" + meta.Port
 }
 
 // watchPrefill registers the dispatched request for completion from KV
@@ -338,7 +334,7 @@ func (p *InFlightLoadProducer) Reset(ctx context.Context, source kvevents.EventS
 func (p *InFlightLoadProducer) onPrefillComplete(ctx context.Context, requestID string,
 	result *fwksched.SchedulingResult, signal string,
 ) {
-	if p.watch.remove(requestID) {
+	if p.prefillFromKVEvents && p.watch.remove(requestID) {
 		prefillCompletions.WithLabelValues(p.typedName.Name, signal).Inc()
 		log.FromContext(ctx).V(logutil.DEBUG).Info("Prefill complete", "requestID", requestID, "signal", signal)
 	}

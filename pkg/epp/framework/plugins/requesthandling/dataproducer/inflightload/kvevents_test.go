@@ -32,6 +32,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
+	parserutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/kvevents"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
@@ -277,6 +278,52 @@ func TestSessionStampPrecedence(t *testing.T) {
 	none.Headers = nil
 	_, _, ok = sessionStamp(none)
 	require.False(t, ok, "no header map to stamp")
+}
+
+func TestSessionStampReadsEnvelopeXargs(t *testing.T) {
+	t.Parallel()
+	payload, err := parserutil.UnmarshalEnvelope([]byte(`{"model":"m","vllm_xargs":{"session_id":"from-xargs"}}`))
+	require.NoError(t, err)
+	req := newStampedRequest("req-e", seq(0, 64))
+	req.Body.Payload = fwkrequest.PayloadMap(payload)
+	stamp, own, ok := sessionStamp(req)
+	require.True(t, ok)
+	require.False(t, own)
+	require.Equal(t, "from-xargs", stamp)
+	require.Empty(t, req.Headers[sessionIDHeader], "the client's vllm_xargs session id is left in place")
+}
+
+func TestKVEventPrefillCompletion_NilBodyIsNotWatched(t *testing.T) {
+	t.Parallel()
+	const name = "kv-nil-body"
+	producer := newKVEventsProducer(t, name)
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+
+	req := newStampedRequest("req-nb", seq(0, 200))
+	req.Body = nil
+	require.NoError(t, producer.PreRequest(context.Background(), req, pdResult(prefill, decode)))
+	require.Empty(t, req.Headers[sessionIDHeader], "a request without prompt tokens is not stamped")
+	require.Equal(t, int64(1), producer.requestTracker.get(fullEndpointName("prefill-0")))
+	require.Equal(t, float64(0), pendingWatch(name))
+}
+
+func TestKVEventPrefillCompletion_IPv6Endpoint(t *testing.T) {
+	t.Parallel()
+	const name = "kv-ipv6"
+	producer := newKVEventsProducer(t, name)
+	ctx := context.Background()
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, "fd00::1")
+	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, "fd00::2")
+	prefillID := fullEndpointName("prefill-0")
+
+	prompt := seq(0, 200)
+	require.NoError(t, producer.PreRequest(ctx, newStampedRequest("req-v6", prompt), pdResult(prefill, decode)))
+	// kv-events-source names an engine's events "<address>:<port>" without brackets.
+	source := kvevents.EventSource{Endpoint: "fd00::2:8000"}
+	require.NoError(t, producer.ProcessEvents(ctx, source, storeBatch("req-v6", prompt[128:192])))
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+	require.Equal(t, float64(1), completions(name, signalKVEvent))
 }
 
 func TestKVEventPrefillCompletion_SharedClientSessionKeepsEveryRequest(t *testing.T) {

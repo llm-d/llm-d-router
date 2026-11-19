@@ -494,7 +494,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	var stamp string
 	var ownStamp bool
 	var targets map[string]fwksched.Endpoint
-	if p.prefillFromKVEvents {
+	if p.prefillFromKVEvents && request.Body != nil && request.Body.TokenizedRequest != nil {
 		if stamp, ownStamp, _ = sessionStamp(request); stamp != "" {
 			targets = make(map[string]fwksched.Endpoint, len(result.ProfileResults))
 		}
