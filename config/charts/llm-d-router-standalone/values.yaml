@@ -199,6 +199,7 @@ router:
                           "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
                           path: /dev/stdout
                           log_format:
+                            omit_empty_values: true
                             json_format:
                               {{- $accessLogFormat | toYaml | nindent 16 }}
                     filter_chains:
@@ -327,6 +328,7 @@ router:
                                     "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
                                     path: /dev/stdout
                                     log_format:
+                                      omit_empty_values: true
                                       json_format:
                                         {{- $accessLogFormat | toYaml | nindent 26 }}
                 clusters:
