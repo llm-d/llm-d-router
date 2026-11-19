@@ -76,6 +76,41 @@ func TestParseRawExtraKeys_BareStringIdentifiers(t *testing.T) {
 	assert.Equal(t, "hash_C", result[4].MMHashes[1].Hash)
 }
 
+func TestParseRawExtraKeys_RelOffsets(t *testing.T) {
+	t.Run("tuples carry one offset per item", func(t *testing.T) {
+		raw := [][]any{
+			{[]any{"hash_A", int64(4)}, "salt"},
+			{[]any{"hash_A", int64(-1)}},
+			nil,
+		}
+		result, err := kvblock.ParseRawExtraKeys(raw, "")
+		require.NoError(t, err)
+		require.Len(t, result, 3)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "hash_A"}}, result[0].MMHashes)
+		assert.Equal(t, []int{4}, result[0].RelOffsets)
+		assert.Equal(t, "salt", result[0].CacheSalt)
+		require.NotNil(t, result[1])
+		assert.Equal(t, []int{-1}, result[1].RelOffsets)
+		assert.Nil(t, result[2])
+	})
+
+	t.Run("bare identifiers carry no offsets", func(t *testing.T) {
+		result, err := kvblock.ParseRawExtraKeys([][]any{{"hash_A"}, {"hash_A"}}, "")
+		require.NoError(t, err)
+		assert.Nil(t, result[0].RelOffsets)
+		assert.Nil(t, result[1].RelOffsets)
+	})
+
+	t.Run("a tuple without an offset drops the block's offsets", func(t *testing.T) {
+		result, err := kvblock.ParseRawExtraKeys([][]any{{[]any{"hash_A"}, []any{"hash_B", int64(2)}}}, "")
+		require.NoError(t, err)
+		require.NotNil(t, result[0])
+		assert.Len(t, result[0].MMHashes, 2)
+		assert.Nil(t, result[0].RelOffsets, "one offsetless item must drop the whole block's offsets")
+	})
+}
+
 func TestParseRawExtraKeys_LegacyTuples(t *testing.T) {
 	// Legacy format: [hash, offset] tuples.
 	raw := [][]any{

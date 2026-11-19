@@ -543,73 +543,275 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 
 // realignExtraFeatures converts per-engine-block extra features to per-canonical-block
 // granularity so that len(result) matches the canonical chunk count expected by
-// TokensToKVBlockKeys.
+// TokensToKVBlockKeys. engineBlockSize is the event's declared block size; 0
+// or a size that does not page the token range exactly makes the entries'
+// positions untrustworthy.
 //
-// For 1:many (engine BS > canonical BS): each engine block's features are replicated
-// to all its constituent canonical sub-blocks.
+// Precise placement requires the declared block size, one feature entry per
+// engine page, and per-item offsets. Everything else — missing or derived
+// sizes, sparse events (vLLM v0.19.0 omits null pages from extra_keys), bare
+// identifiers, incomplete or out-of-range offsets — keeps the entry-ratio
+// proportional mapping (proportionalRealignFeatures).
+//
+// For 1:many (engine BS > canonical BS) with precise placement: each item's
+// hash goes on the canonical sub-blocks its token span overlaps, mirroring
+// the request side's ComputeBlockExtraFeatures, and the cache salt goes to
+// sub-block 0 only, where the request side's setCacheSalt puts it.
 // For many:1 (engine BS < canonical BS): features from the engine blocks whose tokens
 // fall in a canonical block are merged into it, and engine blocks past the last full
 // canonical block are dropped. The cache salt goes to the canonical block holding
 // its engine block.
 //
-// When all entries are nil (text-only prompts), this simply produces a nil-filled
-// slice of the correct length.
-func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonicalBlockSize, numTokens int) []*kvblock.BlockExtraFeatures {
+// The result never carries the event-side RelOffsets or FirstContinuation
+// metadata. When all entries are nil (text-only prompts), this simply produces
+// a nil-filled slice of the correct length.
+func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonicalBlockSize, numTokens, engineBlockSize int) []*kvblock.BlockExtraFeatures {
 	engineBlockCount := len(engineFeatures)
 	canonicalBlockCount := numTokens / canonicalBlockSize
 	if canonicalBlockCount == 0 {
 		return nil
 	}
-	if engineBlockCount == 0 || engineBlockCount == canonicalBlockCount {
+	if engineBlockCount == 0 {
 		return engineFeatures
 	}
+	// Entries are page-aligned only when the declared size pages the token
+	// range exactly. A derived size divides evenly yet can still be wrong
+	// (a short last page), and vLLM v0.19.0 omits null pages, so a missing
+	// entry shifts every later index.
+	alignable := engineBlockSize > 0 && len(engineFeatures) == 1+(numTokens-1)/engineBlockSize
+	if !alignable {
+		return proportionalRealignFeatures(engineFeatures, canonicalBlockSize, numTokens)
+	}
 
-	canonical := make([]*kvblock.BlockExtraFeatures, canonicalBlockCount)
+	if engineBlockSize == canonicalBlockSize {
+		// Entries beyond the full canonical blocks belong to a partial
+		// trailing engine page, for which no canonical key is derived.
+		return stripEventMetadata(engineFeatures[:canonicalBlockCount])
+	}
+
+	if engineBlockSize > canonicalBlockSize {
+		canonical := make([]*kvblock.BlockExtraFeatures, canonicalBlockCount)
+		// 1:many
+		if hasPerItemOffsets(engineFeatures) {
+			spans, ok := mmSpansFromEngineBlocks(engineFeatures, engineBlockSize)
+			if ok {
+				for i := range canonicalBlockCount {
+					blockStart := i * canonicalBlockSize
+					blockEnd := blockStart + canonicalBlockSize
+					var hashes []kvblock.MMHash
+					for _, s := range spans {
+						if s.start >= blockEnd {
+							break // spans are sorted by start
+						}
+						if s.end > blockStart {
+							hashes = append(hashes, kvblock.MMHash{Hash: s.hash})
+						}
+					}
+					if len(hashes) > 0 {
+						canonical[i] = &kvblock.BlockExtraFeatures{MMHashes: hashes}
+					}
+				}
+				if ef0 := engineFeatures[0]; ef0 != nil && ef0.CacheSalt != "" {
+					if canonical[0] == nil {
+						canonical[0] = &kvblock.BlockExtraFeatures{}
+					}
+					canonical[0].CacheSalt = ef0.CacheSalt
+				}
+				return canonical
+			}
+		}
+		// 1:many without usable offsets -> entry-ratio proportional mapping.
+		return proportionalRealignFeatures(engineFeatures, canonicalBlockSize, numTokens)
+	}
+
+	// many:1 -> merge each engine page into the canonical block holding its tokens.
+	return mergeEngineFeatures(engineFeatures, canonicalBlockSize, canonicalBlockCount, engineBlockSize)
+}
+
+// hasPerItemOffsets reports whether every engine block carrying multimodal
+// hashes also carries one RelOffsets entry per hash.
+func hasPerItemOffsets(engineFeatures []*kvblock.BlockExtraFeatures) bool {
+	for _, ef := range engineFeatures {
+		if ef == nil {
+			continue
+		}
+		if len(ef.MMHashes) > 0 && len(ef.RelOffsets) != len(ef.MMHashes) {
+			return false
+		}
+	}
+	return true
+}
+
+// stripEventMetadata drops the event-only RelOffsets and FirstContinuation
+// fields, which the canonical hash does not consume.
+func stripEventMetadata(features []*kvblock.BlockExtraFeatures) []*kvblock.BlockExtraFeatures {
+	out := make([]*kvblock.BlockExtraFeatures, len(features))
+	for i, f := range features {
+		if f == nil {
+			continue
+		}
+		cp := *f
+		cp.RelOffsets = nil
+		cp.FirstContinuation = 0
+		out[i] = &cp
+	}
+	return out
+}
+
+// proportionalRealignFeatures maps engine entries onto canonical blocks by
+// entry-count ratio, with the engine block size approximated as numTokens
+// divided by the entry count. It is the fallback for events whose entries
+// cannot be trusted as pages: missing or derived block sizes and sparse
+// events (vLLM v0.19.0 omits null pages from extra_keys). In the replication
+// direction (fewer entries than canonical blocks) the salt stays on sub-block
+// 0 only and empty copies are dropped. Event-side metadata is stripped.
+func proportionalRealignFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonicalBlockSize, numTokens int) []*kvblock.BlockExtraFeatures {
+	engineBlockCount := len(engineFeatures)
+	canonicalBlockCount := numTokens / canonicalBlockSize
+	if engineBlockCount == canonicalBlockCount {
+		return stripEventMetadata(engineFeatures)
+	}
 
 	if engineBlockCount < canonicalBlockCount {
-		// 1:many -> replicate each engine feature to its canonical sub-blocks
+		canonical := make([]*kvblock.BlockExtraFeatures, canonicalBlockCount)
 		for i := range canonicalBlockCount {
 			engineIdx := i * engineBlockCount / canonicalBlockCount
-			canonical[i] = engineFeatures[engineIdx]
+			if ef := engineFeatures[engineIdx]; ef != nil {
+				cp := *ef
+				cp.RelOffsets = nil
+				cp.FirstContinuation = 0
+				if i > 0 {
+					cp.CacheSalt = ""
+				}
+				if len(cp.MMHashes) == 0 && cp.CacheSalt == "" {
+					continue // a salt-only engine block yields nothing beyond sub-block 0
+				}
+				canonical[i] = &cp
+			}
 		}
-	} else {
-		// many:1 -> merge each engine block into the canonical block holding its tokens.
-		engineBlockSize := numTokens / engineBlockCount
-		var prev *kvblock.BlockExtraFeatures // engine block i-1, if in the same canonical block
-		for i, ef := range engineFeatures {
-			canonicalIdx := i * engineBlockSize / canonicalBlockSize
-			if canonicalIdx >= canonicalBlockCount {
-				break
+		return canonical
+	}
+
+	return mergeEngineFeatures(engineFeatures, canonicalBlockSize, canonicalBlockCount, numTokens/engineBlockCount)
+}
+
+// mergeEngineFeatures merges each engine entry into the canonical block
+// holding its tokens at the given engine block size.
+func mergeEngineFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonicalBlockSize, canonicalBlockCount, engineBlockSize int) []*kvblock.BlockExtraFeatures {
+	canonical := make([]*kvblock.BlockExtraFeatures, canonicalBlockCount)
+	var prev *kvblock.BlockExtraFeatures // engine block i-1, if in the same canonical block
+	for i, ef := range engineFeatures {
+		canonicalIdx := i * engineBlockSize / canonicalBlockSize
+		if canonicalIdx >= canonicalBlockCount {
+			break
+		}
+		if (i-1)*engineBlockSize/canonicalBlockSize != canonicalIdx {
+			prev = nil
+		}
+		if ef != nil {
+			if canonical[canonicalIdx] == nil {
+				canonical[canonicalIdx] = &kvblock.BlockExtraFeatures{}
 			}
-			if (i-1)*engineBlockSize/canonicalBlockSize != canonicalIdx {
-				prev = nil
+			hashes := ef.MMHashes
+			// An MM item spanning several engine blocks is tagged on each of them,
+			// while ComputeBlockExtraFeatures lists it once per canonical block.
+			// Placeholders don't overlap, so only the item ending engine block i-1
+			// can continue into block i, where it is the first entry. Block i-1 is
+			// searched whole because, with bare identifiers, block 0 ends with the
+			// cache salt, if any.
+			// The event offset, when present, tells a continuation from a new copy.
+			if prev != nil && len(hashes) > 0 && ef.FirstContinuation != kvblock.MMContinuationNew &&
+				slices.Contains(prev.MMHashes, hashes[0]) {
+				hashes = hashes[1:]
 			}
-			if ef != nil {
-				if canonical[canonicalIdx] == nil {
-					canonical[canonicalIdx] = &kvblock.BlockExtraFeatures{}
-				}
-				hashes := ef.MMHashes
-				// An MM item spanning several engine blocks is tagged on each of them,
-				// while ComputeBlockExtraFeatures lists it once per canonical block.
-				// Placeholders don't overlap, so only the item ending engine block i-1
-				// can continue into block i, where it is the first entry. Block i-1 is
-				// searched whole because, with bare identifiers, block 0 ends with the
-				// cache salt, if any.
-				// The event offset, when present, tells a continuation from a new copy.
-				if prev != nil && len(hashes) > 0 && ef.FirstContinuation != kvblock.MMContinuationNew &&
-					slices.Contains(prev.MMHashes, hashes[0]) {
-					hashes = hashes[1:]
-				}
-				canonical[canonicalIdx].MMHashes = append(canonical[canonicalIdx].MMHashes, hashes...)
-				if ef.CacheSalt != "" {
-					canonical[canonicalIdx].CacheSalt = ef.CacheSalt
-				}
+			canonical[canonicalIdx].MMHashes = append(canonical[canonicalIdx].MMHashes, hashes...)
+			if ef.CacheSalt != "" {
+				canonical[canonicalIdx].CacheSalt = ef.CacheSalt
 			}
-			prev = ef
+		}
+		prev = ef
+	}
+	return canonical
+}
+
+// mmSpan is one multimodal item's reconstructed token span [start, end).
+type mmSpan struct {
+	hash  string
+	start int
+	end   int
+}
+
+// mmSpansFromEngineBlocks reconstructs each multimodal item's token span from
+// per-engine-block features with per-item offsets, in start order. It reports
+// false when an offset falls outside its engine block, in which case the spans
+// cannot be trusted.
+//
+// Entries within a block are position-ordered and placeholders do not overlap,
+// so an entry with a non-negative offset starts a new item at that position and
+// every still-open item ends at or before it; an entry with a negative offset
+// continues the most recently opened item with the same hash through this
+// block. An item therefore ends at the earlier of the next item's start and the
+// end of the last engine block listing it; the latter can overshoot the true
+// end by the trailing text, since tuples carry no item length.
+func mmSpansFromEngineBlocks(engineFeatures []*kvblock.BlockExtraFeatures, engineBlockSize int) ([]mmSpan, bool) {
+	type instance struct {
+		span      mmSpan
+		lastBlock int
+	}
+
+	var (
+		items      []*instance
+		open       []*instance
+		openByHash = map[string][]*instance{}
+	)
+	// closeAll ends every open item at the earlier of end and the end of its
+	// last listing engine block.
+	closeAll := func(end int) {
+		for _, it := range open {
+			it.span.end = min(end, (it.lastBlock+1)*engineBlockSize)
+		}
+		open, openByHash = nil, map[string][]*instance{}
+	}
+
+	for j, ef := range engineFeatures {
+		if ef == nil {
+			continue
+		}
+		for k, h := range ef.MMHashes {
+			rel := ef.RelOffsets[k]
+			if rel >= engineBlockSize {
+				return nil, false
+			}
+			if rel < 0 {
+				// Continuation of the latest open item with this hash.
+				if byHash := openByHash[h.Hash]; len(byHash) > 0 {
+					byHash[len(byHash)-1].lastBlock = j
+					continue
+				}
+				// Orphan continuation: the item's start block is not in this
+				// event. Best effort, starting at this block's start.
+			}
+			// A new item starts here; placeholders do not overlap, so every
+			// open item ends at or before this position.
+			start := j*engineBlockSize + max(rel, 0)
+			closeAll(start)
+			it := &instance{span: mmSpan{hash: h.Hash, start: start, end: -1}, lastBlock: j}
+			items = append(items, it)
+			open = append(open, it)
+			openByHash[h.Hash] = append(openByHash[h.Hash], it)
 		}
 	}
 
-	return canonical
+	numTokens := len(engineFeatures) * engineBlockSize
+	for _, it := range open {
+		it.span.end = min(numTokens, (it.lastBlock+1)*engineBlockSize)
+	}
+
+	spans := make([]mmSpan, len(items))
+	for i, it := range items {
+		spans[i] = it.span
+	}
+	return spans, true
 }
 
 // handleDeviceTierUpdate handles offloading/location-only events (e.g., DeviceTier=CPU
@@ -807,15 +1009,16 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 
 			// Realign extraFeatures from engine-block granularity to canonical-block
 			// granularity. ParseRawExtraKeys returns one entry per engine block, but
-			// TokensToKVBlockKeys expects one entry per canonical block.
+			// TokensToKVBlockKeys expects one entry per canonical block; equal
+			// entry counts do not imply equal block sizes. Always route through
+			// realignExtraFeatures, which also strips the event-side metadata.
 			if extraFeatures != nil && ev.LookaheadToken == nil {
-				canonicalBlockCount := len(ev.Tokens) / p.tokenProcessor.BlockSize()
-				if canonicalBlockCount == 0 {
+				if len(ev.Tokens)/p.tokenProcessor.BlockSize() == 0 {
 					// Tokens don't fill a complete canonical block; no realignment needed
 					// since TokensToKVBlockKeys will produce zero keys anyway.
 					extraFeatures = nil
-				} else if len(extraFeatures) != canonicalBlockCount {
-					extraFeatures = realignExtraFeatures(extraFeatures, p.tokenProcessor.BlockSize(), len(ev.Tokens))
+				} else {
+					extraFeatures = realignExtraFeatures(extraFeatures, p.tokenProcessor.BlockSize(), len(ev.Tokens), ev.BlockSize)
 				}
 			}
 

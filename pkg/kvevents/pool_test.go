@@ -731,14 +731,14 @@ func TestCanonicalEviction_UnknownEngineKey(t *testing.T) {
 func TestRealignExtraFeatures(t *testing.T) {
 	t.Run("1:1 passthrough", func(t *testing.T) {
 		features := []*kvblock.BlockExtraFeatures{nil, nil, nil, nil}
-		result := realignExtraFeatures(features, 16, 64)
+		result := realignExtraFeatures(features, 16, 64, 16)
 		assert.Equal(t, features, result)
 	})
 
 	t.Run("1:many replication (all nil, text-only)", func(t *testing.T) {
 		// 2 engine blocks → 8 canonical blocks (ratio 4)
 		features := []*kvblock.BlockExtraFeatures{nil, nil}
-		result := realignExtraFeatures(features, 16, 128)
+		result := realignExtraFeatures(features, 16, 128, 64)
 		require.Len(t, result, 8)
 		for _, f := range result {
 			assert.Nil(t, f)
@@ -749,7 +749,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 		// 2 engine blocks → 4 canonical blocks (ratio 2)
 		feat0 := &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{{Hash: "img0"}}}
 		features := []*kvblock.BlockExtraFeatures{feat0, nil}
-		result := realignExtraFeatures(features, 16, 64)
+		result := realignExtraFeatures(features, 16, 64, 32)
 		require.Len(t, result, 4)
 		// Engine block 0 → canonical blocks 0, 1
 		assert.Equal(t, feat0, result[0])
@@ -759,10 +759,319 @@ func TestRealignExtraFeatures(t *testing.T) {
 		assert.Nil(t, result[3])
 	})
 
+	t.Run("1:many with offsets places an item on the sub-blocks it spans", func(t *testing.T) {
+		// Engine BS 8, canonical BS 4. One engine block: four text tokens, then
+		// image-A. The item spans only the second canonical sub-block (issue #4342).
+		engine, err := kvblock.ParseRawExtraKeys([][]any{{[]any{"image-A", int64(4)}}}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 8, 8)
+		require.Len(t, result, 2)
+		assert.Nil(t, result[0], "text-only sub-block must stay featureless")
+		require.NotNil(t, result[1])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "image-A"}}, result[1].MMHashes)
+	})
+
+	t.Run("1:many with offsets spans the whole engine block", func(t *testing.T) {
+		engine, err := kvblock.ParseRawExtraKeys([][]any{{[]any{"img", int64(0)}}}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 8, 8)
+		require.Len(t, result, 2)
+		for i, r := range result {
+			require.NotNil(t, r, "sub-block %d", i)
+			assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, r.MMHashes, "sub-block %d", i)
+		}
+	})
+
+	t.Run("1:many with offsets continues an item across engine blocks", func(t *testing.T) {
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			{[]any{"img", int64(2)}},
+			{[]any{"img", int64(-1)}},
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 16, 8)
+		require.Len(t, result, 4)
+		for i, r := range result {
+			require.NotNil(t, r, "sub-block %d", i)
+		}
+		// The request side agrees for an item spanning [2, 16).
+		want := kvblock.ComputeBlockExtraFeatures(
+			map[string][]string{"image": {"img"}},
+			map[string][]kvblock.PlaceholderRange{"image": {{Offset: 2, Length: 14}}},
+			4, 16)
+		assert.Equal(t, want, result)
+	})
+
+	t.Run("1:many with offsets splits two items in one engine block", func(t *testing.T) {
+		// Engine BS 8, canonical BS 4: img1 occupies tokens [0,5), img2 [5,8).
+		engine, err := kvblock.ParseRawExtraKeys([][]any{{[]any{"img1", int64(0)}, []any{"img2", int64(5)}}}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 8, 8)
+		require.Len(t, result, 2)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img1"}}, result[0].MMHashes)
+		require.NotNil(t, result[1])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img1"}, {Hash: "img2"}}, result[1].MMHashes)
+	})
+
+	t.Run("1:many with offsets keeps the salt on sub-block 0", func(t *testing.T) {
+		engine, err := kvblock.ParseRawExtraKeys([][]any{{[]any{"img", int64(4)}, "salt"}}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 8, 8)
+		require.Len(t, result, 2)
+		require.NotNil(t, result[0])
+		assert.Equal(t, "salt", result[0].CacheSalt)
+		assert.Nil(t, result[0].MMHashes, "img starts at token 4; sub-block 0 is text")
+		require.NotNil(t, result[1])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, result[1].MMHashes)
+		assert.Empty(t, result[1].CacheSalt)
+	})
+
+	t.Run("1:many with offsets matches the request-side keys", func(t *testing.T) {
+		// Issue #4342: engine BS 8, canonical BS 4; one engine block with four
+		// text tokens then image-A. Event-derived and request-derived block
+		// keys must agree.
+		tokens := []uint32{10, 11, 12, 13, 999, 999, 999, 999}
+		engine, err := kvblock.ParseRawExtraKeys([][]any{{[]any{"image-A", int64(4)}}}, "")
+		require.NoError(t, err)
+		actual := realignExtraFeatures(engine, 4, len(tokens), 8)
+		expected := kvblock.ComputeBlockExtraFeatures(
+			map[string][]string{"image": {"image-A"}},
+			map[string][]kvblock.PlaceholderRange{"image": {{Offset: 4, Length: 4}}},
+			4, len(tokens))
+		processor, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 4})
+		require.NoError(t, err)
+		want, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "repro", expected)
+		require.NoError(t, err)
+		got, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "repro", actual)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
+	t.Run("1:many with offsets ends an item at its last engine block", func(t *testing.T) {
+		// Engine BS 8, canonical BS 4. image-A is last listed in engine block 0;
+		// the empty engine block 1 and image-B's block must not carry A.
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			{[]any{"image-A", int64(4)}},
+			nil,
+			{[]any{"image-B", int64(4)}},
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 24, 8)
+		require.Len(t, result, 6)
+		assert.Nil(t, result[0], "text before image-A")
+		require.NotNil(t, result[1], "image-A's sub-block")
+		assert.Equal(t, []kvblock.MMHash{{Hash: "image-A"}}, result[1].MMHashes)
+		assert.Nil(t, result[2], "engine block 1 is text")
+		assert.Nil(t, result[3], "engine block 1 is text")
+		assert.Nil(t, result[4], "text before image-B")
+		require.NotNil(t, result[5], "image-B's sub-block")
+		assert.Equal(t, []kvblock.MMHash{{Hash: "image-B"}}, result[5].MMHashes)
+	})
+
+	t.Run("1:many fallback without offsets keeps the salt on sub-block 0", func(t *testing.T) {
+		// Block 0's tuple carries an offset; block 1's does not, so the whole
+		// event falls back to replication. The separately identified salt must
+		// stay on sub-block 0 only.
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			{[]any{"img", int64(0)}, "salt"},
+			{[]any{"img"}},
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 16, 8)
+		require.Len(t, result, 4)
+		for i, r := range result {
+			require.NotNil(t, r, "sub-block %d", i)
+			assert.Empty(t, r.RelOffsets, "canonical output carries no event metadata")
+			if i == 0 {
+				assert.Equal(t, "salt", r.CacheSalt)
+			} else {
+				assert.Empty(t, r.CacheSalt, "sub-block %d must not repeat the salt", i)
+			}
+		}
+	})
+
+	t.Run("1:many with an out-of-range offset falls back to replication", func(t *testing.T) {
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			{[]any{"bad", int64(1) << 40}},
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 8, 8)
+		require.Len(t, result, 2)
+		for i, r := range result {
+			require.NotNil(t, r, "sub-block %d", i)
+			assert.Equal(t, []kvblock.MMHash{{Hash: "bad"}}, r.MMHashes, "sub-block %d", i)
+		}
+	})
+
+	t.Run("1:many proportional fallback keeps the block-count mapping", func(t *testing.T) {
+		// Engine BS 8, canonical BS 6, 16 tokens: canonical block [6,12) spans
+		// both engine blocks. The proportional mapping takes engine block 1,
+		// preserving the pre-existing replication behavior.
+		b := &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{{Hash: "B"}}}
+		features := []*kvblock.BlockExtraFeatures{nil, b}
+		result := realignExtraFeatures(features, 6, 16, 8)
+		require.Len(t, result, 2)
+		assert.Nil(t, result[0])
+		require.NotNil(t, result[1])
+		assert.Equal(t, b.MMHashes, result[1].MMHashes)
+	})
+
+	t.Run("1:many sparse events keep the proportional mapping", func(t *testing.T) {
+		// vLLM v0.19 omits null pages: 32 tokens, engine BS 8, the first
+		// physical page absent, so three entries cover four pages. Positions
+		// are untrustworthy; every sub-block takes the proportional engine
+		// entry (indices 0,0,0,1,1,1,2,2).
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			{[]any{"img", int64(0)}},
+			{[]any{"img", int64(-1)}},
+			{[]any{"img", int64(-1)}},
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 32, 8)
+		require.Len(t, result, 8)
+		for i, r := range result {
+			require.NotNil(t, r, "sub-block %d", i)
+			assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, r.MMHashes, "sub-block %d", i)
+		}
+	})
+
+	t.Run("1:many derived size with remainder keeps the proportional mapping", func(t *testing.T) {
+		// 15 tokens, 2 engine entries, no declared block size: the derived
+		// size (7) is a guess, so precise placement must not run.
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			{[]any{"img", int64(0)}},
+			nil,
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 15, 0)
+		require.Len(t, result, 3)
+		img := []kvblock.MMHash{{Hash: "img"}}
+		assert.Equal(t, img, result[0].MMHashes)
+		assert.Equal(t, img, result[1].MMHashes)
+		assert.Nil(t, result[2])
+	})
+
+	t.Run("derived size that divides evenly still keeps the proportional mapping", func(t *testing.T) {
+		// 14 tokens, 2 engine entries, true engine BS 8 with a short last
+		// page: the derived size (7) divides evenly and covers both pages,
+		// yet it is wrong. Precise placement must not run.
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			nil,
+			{[]any{"img", int64(0)}},
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 14, 0)
+		require.Len(t, result, 3)
+		assert.Nil(t, result[0])
+		assert.Nil(t, result[1])
+		require.NotNil(t, result[2])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, result[2].MMHashes)
+	})
+
+	t.Run("sparse equal-size events keep the entry-ratio mapping", func(t *testing.T) {
+		// Engine and canonical BS both 8, 32 tokens, first physical page
+		// omitted (3 entries for 4 pages). Counts differ (3 vs 4), so the
+		// entries replicate proportionally: sub-blocks 2 and 3 take engine
+		// entries 1 and 2.
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			nil,
+			{[]any{"img", int64(0)}},
+			{[]any{"img", int64(-1)}},
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 8, 32, 8)
+		require.Len(t, result, 4)
+		assert.Nil(t, result[0])
+		assert.Nil(t, result[1])
+		require.NotNil(t, result[2])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, result[2].MMHashes)
+		require.NotNil(t, result[3])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, result[3].MMHashes)
+	})
+
+	t.Run("sparse many:1 events merge by entry ratio", func(t *testing.T) {
+		// True engine BS 4, canonical BS 8, 32 tokens, pages omitted (5 of 8
+		// entries). The entry-ratio merge derives block size 32/5 = 6 and
+		// places the last entry's item on canonical block 3; merging by the
+		// declared size 4 would misplace it on block 2.
+		features := []*kvblock.BlockExtraFeatures{
+			nil, nil, nil, nil,
+			{MMHashes: []kvblock.MMHash{{Hash: "img"}}},
+		}
+		result := realignExtraFeatures(features, 8, 32, 4)
+		require.Len(t, result, 4)
+		assert.Nil(t, result[0])
+		assert.Nil(t, result[1])
+		assert.Nil(t, result[2])
+		require.NotNil(t, result[3])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, result[3].MMHashes)
+	})
+
+	t.Run("equal sizes with a partial trailing page truncate to full blocks", func(t *testing.T) {
+		// Engine and canonical BS both 8, 12 tokens: one full page plus a
+		// partial one, each carrying a different item. Only the full page
+		// gets a canonical key, so the partial page's entry must not reach
+		// the token processor.
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			{[]any{"img-full", int64(0)}},
+			{[]any{"img-tail", int64(-1)}},
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 8, 12, 8)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img-full"}}, result[0].MMHashes)
+	})
+
+	t.Run("more entries than tokens does not panic", func(t *testing.T) {
+		// 2 tokens, 4 entries, no declared block size: the derived size is 0.
+		features := []*kvblock.BlockExtraFeatures{
+			nil, nil, nil, {MMHashes: []kvblock.MMHash{{Hash: "img"}}},
+		}
+		result := realignExtraFeatures(features, 1, 2, 0)
+		require.Len(t, result, 2)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, result[0].MMHashes)
+		assert.Nil(t, result[1])
+	})
+
+	t.Run("1:1 strips event metadata", func(t *testing.T) {
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{{Hash: "img"}}, RelOffsets: []int{4}, FirstContinuation: kvblock.MMContinuationNew},
+		}
+		result := realignExtraFeatures(features, 8, 8, 8)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, result[0].MMHashes)
+		assert.Nil(t, result[0].RelOffsets)
+		assert.Zero(t, result[0].FirstContinuation)
+	})
+
+	t.Run("1:many fallback drops a salt-only block beyond sub-block 0", func(t *testing.T) {
+		// Engine block 0 carries only the salt; block 1 has an offsetless
+		// item, so the event falls back to replication. Beyond sub-block 0
+		// the cleared salt must not leave an empty structure.
+		engine, err := kvblock.ParseRawExtraKeys([][]any{
+			{"salt"},
+			{[]any{"img"}},
+		}, "")
+		require.NoError(t, err)
+		result := realignExtraFeatures(engine, 4, 16, 8)
+		require.Len(t, result, 4)
+		require.NotNil(t, result[0])
+		assert.Equal(t, "salt", result[0].CacheSalt)
+		assert.Nil(t, result[0].MMHashes)
+		assert.Nil(t, result[1], "cleared salt must not leave an empty structure")
+		for _, i := range []int{2, 3} {
+			require.NotNil(t, result[i], "sub-block %d", i)
+			assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, result[i].MMHashes, "sub-block %d", i)
+		}
+	})
+
 	t.Run("many:1 merge (all nil, text-only)", func(t *testing.T) {
 		// 8 engine blocks → 2 canonical blocks (ratio 4)
 		features := make([]*kvblock.BlockExtraFeatures, 8)
-		result := realignExtraFeatures(features, 64, 128)
+		result := realignExtraFeatures(features, 64, 128, 16)
 		require.Len(t, result, 2)
 		for _, f := range result {
 			assert.Nil(t, f)
@@ -778,7 +1087,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 			nil,
 			{MMHashes: []kvblock.MMHash{{Hash: "c"}}},
 		}
-		result := realignExtraFeatures(features, 64, 128)
+		result := realignExtraFeatures(features, 64, 128, 32)
 		require.Len(t, result, 2)
 		// Canonical 0 should merge features from engine blocks 0 and 1
 		require.NotNil(t, result[0])
@@ -802,7 +1111,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 			{MMHashes: []kvblock.MMHash{img, vid}},
 			{MMHashes: []kvblock.MMHash{vid}},
 		}
-		result := realignExtraFeatures(features, 64, 64)
+		result := realignExtraFeatures(features, 64, 64, 16)
 		require.Len(t, result, 1)
 		require.NotNil(t, result[0])
 		assert.Equal(t, []kvblock.MMHash{img, vid}, result[0].MMHashes)
@@ -854,7 +1163,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 				mmPlaceholders := map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}
 				engine := kvblock.ComputeBlockExtraFeatures(mmHashes, mmPlaceholders, 16, tc.numTokens)
 				want := kvblock.ComputeBlockExtraFeatures(mmHashes, mmPlaceholders, 64, tc.numTokens)
-				assert.Equal(t, want, realignExtraFeatures(engine, 64, tc.numTokens))
+				assert.Equal(t, want, realignExtraFeatures(engine, 64, tc.numTokens, 16))
 			})
 		}
 	})
@@ -870,7 +1179,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 			{MMHashes: []kvblock.MMHash{img}},
 			nil,
 		}
-		result := realignExtraFeatures(features, 64, 64)
+		result := realignExtraFeatures(features, 64, 64, 16)
 		require.Len(t, result, 1)
 		require.NotNil(t, result[0])
 		assert.Equal(t, []kvblock.MMHash{img, salt}, result[0].MMHashes)
@@ -885,7 +1194,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 			{MMHashes: []kvblock.MMHash{img}, FirstContinuation: kvblock.MMContinuationContinues},
 			nil,
 		}
-		result := realignExtraFeatures(features, 64, 64)
+		result := realignExtraFeatures(features, 64, 64, 16)
 		require.Len(t, result, 1)
 		require.NotNil(t, result[0])
 		assert.Equal(t, []kvblock.MMHash{img}, result[0].MMHashes)
@@ -918,7 +1227,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				engine, err := kvblock.ParseRawExtraKeys(tc.raw, "")
 				require.NoError(t, err)
-				got := realignExtraFeatures(engine, 32, 32)
+				got := realignExtraFeatures(engine, 32, 32, 16)
 				want := kvblock.ComputeBlockExtraFeatures(map[string][]string{"image": tc.hashes},
 					map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}, 32, 32)
 				assert.Equal(t, want, got)
@@ -932,13 +1241,55 @@ func TestRealignExtraFeatures(t *testing.T) {
 		features := []*kvblock.BlockExtraFeatures{
 			{MMHashes: []kvblock.MMHash{{Hash: "img0"}}},
 		}
-		result := realignExtraFeatures(features, 64, 16)
+		result := realignExtraFeatures(features, 64, 16, 16)
 		assert.Empty(t, result)
 	})
 }
 
 // TestCanonicalWritePath_ExtraKeysOneToMany verifies that events with ExtraKeys
 // are correctly processed in the 1:many path (engine BS > canonical BS).
+func TestCanonicalWritePath_ExtraKeysEqualSizePartialTrailingPage(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 8) // canonical BS = 8, same as the engine
+
+	// 12 tokens, 2 engine entries: one full page plus a partial one. Only the
+	// full page gets a canonical key; the extra entry for the partial page
+	// must not make the token processor reject the whole event.
+	tokens := makeTokens(12)
+	engineKeys := makeEngineKeys(2, 300)
+
+	batch := &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: engineKeys,
+				Tokens:      tokens,
+				ParentHash:  0,
+				BlockSize:   8,
+				ExtraKeys: [][]any{
+					{[]any{"img-full", int64(0)}},
+					{[]any{"img-tail", int64(-1)}},
+				},
+			},
+		},
+	}
+	pool.processEventBatch(ctx, batch, "pod-partial", "test-model")
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, tokens, "test-model",
+		kvblock.ComputeBlockExtraFeatures(
+			map[string][]string{"image": {"img-full"}},
+			map[string][]kvblock.PlaceholderRange{"image": {{Offset: 0, Length: 8}}},
+			8, 8))
+	require.NoError(t, err)
+	require.Len(t, canonicalKeys, 1)
+
+	result, err := idx.Lookup(ctx, []kvblock.BlockHash{canonicalKeys[0]}, nil)
+	require.NoError(t, err)
+	pods := result[canonicalKeys[0]]
+	require.Len(t, pods, 1, "the full page's canonical key must be stored")
+	assert.Equal(t, "pod-partial", pods[0].PodIdentifier)
+}
+
 func TestCanonicalWritePath_ExtraKeysOneToMany(t *testing.T) {
 	ctx := logging.NewTestLoggerIntoContext(context.Background())
 	pool, idx, tp := newTestPool(t, 16) // canonical BS = 16

@@ -17,6 +17,7 @@ limitations under the License.
 package kvblock
 
 import (
+	"math"
 	"sort"
 )
 
@@ -31,6 +32,12 @@ type MMHash struct {
 // A nil *BlockExtraFeatures means pure text (no taint).
 type BlockExtraFeatures struct {
 	MMHashes []MMHash
+	// RelOffsets, when non-nil, aligns with MMHashes and carries each item's
+	// block-relative start offset from vLLM v0.19.0+ event tuples: >= 0 is the
+	// offset within the block, < 0 marks an item continuing from a previous
+	// block. Bare-identifier events (vLLM <= v0.18.x) leave it nil. It is
+	// event-side metadata and is not part of the block hash.
+	RelOffsets []int
 	// FirstContinuation classifies MMHashes[0] from its event offset.
 	// It is not part of the block hash.
 	FirstContinuation MMContinuation
@@ -64,8 +71,9 @@ type PlaceholderRange struct {
 // either:
 //   - a bare string identifier (vLLM <= v0.18.x: mm_feature.identifier), or
 //   - a 2-element [string, int] tuple (vLLM v0.19.0+: identifier and
-//     block-relative offset). Only the first entry's offset is kept, as
-//     FirstContinuation.
+//     block-relative offset). The first entry's offset is kept as
+//     FirstContinuation; every entry's offset is kept in RelOffsets when the
+//     block carries one per item.
 //
 // When any entry of the event is a tuple, a bare string is the cache salt and
 // is kept as CacheSalt.
@@ -87,6 +95,8 @@ func ParseRawExtraKeys(raw [][]any, loraName string) ([]*BlockExtraFeatures, err
 		}
 
 		features := &BlockExtraFeatures{}
+		var offsets []int
+		offsetsComplete := true
 		for _, entry := range blockKeys {
 			switch v := entry.(type) {
 			case string:
@@ -104,6 +114,11 @@ func ParseRawExtraKeys(raw [][]any, loraName string) ([]*BlockExtraFeatures, err
 							features.FirstContinuation = continuationFromOffset(v[1])
 						}
 						features.MMHashes = append(features.MMHashes, MMHash{Hash: hash})
+						if off, ok := tupleOffset(v); ok {
+							offsets = append(offsets, off)
+						} else {
+							offsetsComplete = false
+						}
 					}
 				}
 			default:
@@ -112,6 +127,9 @@ func ParseRawExtraKeys(raw [][]any, loraName string) ([]*BlockExtraFeatures, err
 			}
 		}
 
+		if tupleLayout && offsetsComplete && len(offsets) == len(features.MMHashes) {
+			features.RelOffsets = offsets
+		}
 		if len(features.MMHashes) > 0 || features.CacheSalt != "" {
 			result[blockIdx] = features
 		}
@@ -132,6 +150,19 @@ func hasTupleEntry(raw [][]any) bool {
 }
 
 func continuationFromOffset(v any) MMContinuation {
+	off, ok := entryOffset(v)
+	if !ok {
+		return MMContinuationUnknown
+	}
+	if off < 0 {
+		return MMContinuationContinues
+	}
+	return MMContinuationNew
+}
+
+// entryOffset extracts the numeric tuple offset carried by an mm extra-keys
+// entry, clamped to math.MaxInt32, reporting whether v holds an integer at all.
+func entryOffset(v any) (int, bool) {
 	var off int64
 	switch n := v.(type) {
 	case int:
@@ -144,15 +175,37 @@ func continuationFromOffset(v any) MMContinuation {
 		off = int64(n)
 	case int64:
 		off = n
-	case uint8, uint16, uint32, uint64:
-		return MMContinuationNew
+	case uint8:
+		off = int64(n)
+	case uint16:
+		off = int64(n)
+	case uint32:
+		off = int64(n)
+	case uint64:
+		if n > math.MaxInt32 {
+			off = math.MaxInt32
+		} else {
+			off = int64(n)
+		}
 	default:
-		return MMContinuationUnknown
+		return 0, false
 	}
-	if off < 0 {
-		return MMContinuationContinues
+	if off > math.MaxInt32 {
+		off = math.MaxInt32
 	}
-	return MMContinuationNew
+	if off < math.MinInt32 {
+		off = math.MinInt32
+	}
+	return int(off), true //#nosec G115 -- clamped to int32 range above
+}
+
+// tupleOffset returns the offset element of a [identifier, offset] tuple,
+// reporting whether the tuple carries a usable integer offset.
+func tupleOffset(tuple []any) (int, bool) {
+	if len(tuple) < 2 {
+		return 0, false
+	}
+	return entryOffset(tuple[1])
 }
 
 // mmItem flattens one multimodal placeholder with its content hash for sorting.
