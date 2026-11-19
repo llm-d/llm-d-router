@@ -101,6 +101,15 @@ func subCanonicalStore(ev *BlockStoredEvent, canonicalBlockSize int) bool {
 	return size > 0 && size < canonicalBlockSize
 }
 
+// anchorableStore reports whether ev's engine blocks are smaller than the
+// canonical block, divide it evenly and carry their tokens, so that each one
+// has a position on the canonical hash chain.
+func anchorableStore(ev *BlockStoredEvent, canonicalBlockSize int) bool {
+	size := engineBlockSize(ev)
+	return ev.LookaheadToken == nil && subCanonicalStore(ev, canonicalBlockSize) &&
+		canonicalBlockSize%size == 0 && len(ev.Tokens) > 0 && len(ev.Tokens) == size*len(ev.BlockHashes)
+}
+
 // coveredEngineKeys drops the engine keys of a sub-canonical store that start
 // past its last full canonical block. Index.Add maps engine keys to request
 // keys by their count ratio, which matches token positions only once those
@@ -274,6 +283,9 @@ type Pool struct {
 	// tier, KV-cache group, DP rank) and a store must be counted only after
 	// Index.Add succeeds — both of which only the Pool observes.
 	dedup *eventDedupFilter
+	// anchors lets a sub-canonical store chain from a parent that ends mid
+	// canonical block.
+	anchors *partialBlockAnchors
 	// tracer is resolved once: tracing.Tracer rebuilds its instrumentation
 	// options on every call, which is not free on the per-message event path.
 	// Nil when Config.Tracing is unset, which is what startSpan tests to skip
@@ -334,6 +346,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		groupCatalog:    kvblock.NewGroupCatalog(),
 		cacheFormats:    kvblock.NewCacheFormatCatalog(),
 		dedup:           newEventDedupFilter(),
+		anchors:         newPartialBlockAnchors(),
 		tracer:          newEventTracer(cfg.Tracing),
 		replayLimiter:   semaphore.NewWeighted(int64(maxConcurrentReplays)),
 		snapshotTimeout: snapshotTimeout,
@@ -608,6 +621,7 @@ func (p *Pool) clearPod(ctx context.Context, podIdentifier string, retire bool) 
 			"podIdentifier", podIdentifier)
 	}
 	p.dedup.clear(podIdentifier)
+	p.anchors.clear(podIdentifier)
 	if retire {
 		p.groupCatalog.Clear(podIdentifier)
 		p.cacheFormats.Clear(podIdentifier)
@@ -809,6 +823,106 @@ func observeProcessingLag(timestamp float64) {
 	metrics.EventsProcessingLag.Observe(lag)
 }
 
+// anchoredStore indexes a store whose engine blocks are smaller than the
+// canonical block and divide it evenly. The parent may end mid canonical block:
+// the tokens since the last canonical boundary are prepended to the event's
+// tokens, so the request keys stay aligned with the keys a request produces.
+// Every engine block of the event is recorded as an anchor for later stores.
+func (p *Pool) anchoredStore(
+	ctx context.Context, ev *BlockStoredEvent, engineKeys []kvblock.BlockHash,
+	podEntries []kvblock.PodEntry, scope blockScope, modelSeed uint64, modelName string,
+) {
+	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
+	podIdentifier := scope.podIdentifier
+	canonical := p.tokenProcessor.BlockSize()
+	size := engineBlockSize(ev)
+
+	var features []*kvblock.BlockExtraFeatures
+	if ev.ExtraKeys != nil {
+		var loraName string
+		if ev.LoraName != nil {
+			loraName = *ev.LoraName
+		}
+		var err error
+		features, err = kvblock.ParseRawExtraKeys(ev.ExtraKeys, loraName)
+		if err != nil {
+			debugLogger.Error(err, "Failed to parse extra keys", "podIdentifier", podIdentifier)
+			return
+		}
+		features = trimFeatures(features)
+	}
+
+	var head residual
+	tokens := ev.Tokens
+	if ev.ParentHash != 0 {
+		parent, found := p.anchors.lookup(podIdentifier, namespacedEngineKey(modelSeed, ev.ParentHash))
+		if !found || parent.node.blockSize != size {
+			const reason = "unresolved_sub_canonical_parent"
+			metrics.KVEventStoresSkipped.WithLabelValues(cacheKindLabel(ev.KVCacheSpecKind), reason).Inc()
+			log.FromContext(ctx).V(logging.TRACE).Info("Skipping KV cache store event",
+				"podIdentifier", podIdentifier,
+				"groupIdx", ev.GroupIdx,
+				"cacheKind", ev.KVCacheSpecKind,
+				"reason", reason,
+				"parentHash", ev.ParentHash,
+				"numTokens", len(ev.Tokens),
+				"numBlockHashes", len(ev.BlockHashes),
+				"blockSize", ev.BlockSize)
+			return
+		}
+		head = parent.resume(canonical)
+		if len(head.tokens) > 0 {
+			tokens = slices.Concat(head.tokens, ev.Tokens)
+		}
+	}
+
+	var extraFeatures []*kvblock.BlockExtraFeatures
+	if engineFeatures := joinFeatures(head.features, len(head.engineKeys), features, len(engineKeys)); engineFeatures != nil {
+		extraFeatures = realignExtraFeatures(engineFeatures, canonical, len(tokens))
+	}
+	requestKeys, err := p.tokenProcessor.TokensToKVBlockKeys(head.key, tokens, modelName, extraFeatures)
+	if err != nil {
+		debugLogger.Error(err, "Failed to generate request keys",
+			"podIdentifier", podIdentifier, "effectiveModelName", modelName)
+		return
+	}
+
+	if len(requestKeys) > 0 {
+		// The request key holding the residual takes fewer of the event's
+		// engine keys than the rest, so it is added on its own. Index.Add maps
+		// the remaining engine keys by their count ratio.
+		headKeys := 0
+		rest := requestKeys
+		if len(head.tokens) > 0 {
+			headKeys = (canonical - len(head.tokens)) / size
+			if err := p.index.Add(ctx, engineKeys[:headKeys], requestKeys[:1], podEntries); err != nil {
+				debugLogger.Error(err, "Failed to add event to index",
+					"podIdentifier", podIdentifier, "event", ev)
+				return
+			}
+			rest = requestKeys[1:]
+		}
+		if len(rest) > 0 {
+			covered := engineKeys[headKeys : headKeys+len(rest)*canonical/size]
+			if err := p.index.Add(ctx, covered, rest, podEntries); err != nil {
+				debugLogger.Error(err, "Failed to add event to index",
+					"podIdentifier", podIdentifier, "event", ev)
+				return
+			}
+		}
+		p.cacheFormats.Learn(podIdentifier, kvblock.CacheFormat{BlockSize: canonical})
+	}
+	p.anchors.record(podIdentifier, &anchorNode{
+		tokens:     ev.Tokens,
+		blockSize:  size,
+		engineKeys: engineKeys,
+		features:   features,
+		head:       head,
+		keys:       requestKeys,
+	}, canonical)
+	p.dedup.trackStore(scope, ev.BlockHashes)
+}
+
 // processEventBatch processes a batch of events using type switches.
 func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIdentifier, modelName string) {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
@@ -904,6 +1018,11 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			engineKeys := make([]kvblock.BlockHash, len(ev.BlockHashes))
 			for i, hash := range ev.BlockHashes {
 				engineKeys[i] = namespacedEngineKey(modelSeed, hash)
+			}
+
+			if anchorableStore(ev, p.tokenProcessor.BlockSize()) {
+				p.anchoredStore(ctx, ev, engineKeys, podEntries, storeScope, modelSeed, effectiveModelName)
+				continue
 			}
 
 			parentRequestKey := kvblock.EmptyBlockHash
@@ -1022,6 +1141,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			if len(requestKeys) == 0 {
 				if p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
 					p.dedup.trackStore(storeScope, ev.BlockHashes)
+					p.anchors.retain(podIdentifier, engineKeys)
 				}
 				continue
 			}
@@ -1075,7 +1195,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				groupIdx:         groupIdxOrNoGroup(ev.GroupIdx),
 				dataParallelRank: noDataParallelRank,
 			}
-			hashesToEvict := p.dedup.filterRemove(removeScope, ev.BlockHashes)
+			hashesToEvict, untracked := p.dedup.filterRemove(removeScope, ev.BlockHashes)
+			dependents := p.anchors.remove(podIdentifier, modelSeed, ev.BlockHashes, untracked, hashesToEvict,
+				p.tokenProcessor.BlockSize())
 
 			// Observe how many constituent block hashes were forwarded vs.
 			// suppressed (these count block hashes, not BlockRemoved events).
@@ -1101,6 +1223,14 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			if err := p.index.Evict(ctx, kvblock.EngineKey, engineKeys, podEntries); err != nil {
 				debugLogger.Error(err, "Failed to evict engine keys from index",
 					"podIdentifier", podIdentifier, "keyCount", len(engineKeys))
+			}
+			// Request keys completed over a removed engine block by a later
+			// store are not mapped from that block's engine key.
+			if len(dependents) > 0 {
+				if err := p.index.Evict(ctx, kvblock.RequestKey, dependents, podEntries); err != nil {
+					debugLogger.Error(err, "Failed to evict dependent request keys from index",
+						"podIdentifier", podIdentifier, "keyCount", len(dependents))
+				}
 			}
 
 		case *AllBlocksClearedEvent:

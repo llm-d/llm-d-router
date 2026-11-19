@@ -114,7 +114,7 @@ func BenchmarkEventDedupFilterChurn(b *testing.B) {
 			removed[j] = dedupBenchHash(uint64(next - numEntries + j))
 		}
 		f.trackStore(scope, stored)
-		if got := f.filterRemove(scope, removed); len(got) != dedupBenchBatch {
+		if got, _ := f.filterRemove(scope, removed); len(got) != dedupBenchBatch {
 			b.Fatalf("forwarded %d of %d removes", len(got), dedupBenchBatch)
 		}
 		next += dedupBenchBatch
