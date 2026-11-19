@@ -54,6 +54,7 @@ func TestResolveConfig(t *testing.T) {
 		"zero window":              func(c *Config) { c.WindowSize = 0 },
 		"maxRequests above window": func(c *Config) { c.MaxRequests = c.WindowSize + 1 },
 		"zero minRequests":         func(c *Config) { c.MinRequests = 0 },
+		"minRequests above max":    func(c *Config) { c.MinRequests = c.MaxRequests + 1 },
 		"bucket history below two": func(c *Config) { c.BucketHistorySize = 1 },
 		"percentiles inverted":     func(c *Config) { c.LowPercentile, c.TypicalPercentile = 50, 25 },
 		"unparsable duration":      func(c *Config) { c.IntervalDuration = "soon" },

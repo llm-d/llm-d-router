@@ -126,7 +126,7 @@ lifecycle handled by the router.
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests processed after successful parsing and scheduling. |
-| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. A model server response with a 5xx status is counted with `error_code="ModelServerError"`, and one with a 4xx status with `error_code="ModelServerClientError"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_outcome_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `outcome`, `reason` | Requests by how they ended. See [Request outcomes](#request-outcomes). |
 | `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | End-to-end request latency on response completion. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Request body size. |
@@ -240,15 +240,15 @@ whose body reached the EPP and whose ending the EPP observes.
 
 | `outcome` | Meaning | `reason` |
 |---|---|---|
-| `completed` | The model server answered with status 200 and the response finished. | empty |
+| `completed` | The model server answered with a status below 400 and the response finished. | empty |
 | `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated` or `rejected-flow-limit`. |
 | `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
 | `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
 | `deferred` | The EPP answered 204 without forwarding the request. The conditional-decode gate does this on a cache miss. Not counted in `llm_d_epp_request_error_total`. | Why the EPP answered: `cache_miss` for the conditional-decode gate. |
-| `failed` | Any other error, before or after dispatch, including a response status other than 200 or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
+| `failed` | Any other error, before or after dispatch, including a 4xx or 5xx response status or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
 
 When more than one applies, `evicted` wins over the error that ends the stream, and an error or a
-non-200 status wins over `cancelled`, unless the error only says the client left while queued.
+4xx or 5xx status wins over `cancelled`, unless the error only says the client left while queued.
 
 Routes that skip response processing, such as `/render`, are not counted because the EPP stops
 observing them once they are routed. `llm_d_epp_request_total` still counts them, but it does not
@@ -603,10 +603,13 @@ request token metrics come from the model server's response, so a request that f
 usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
 two pairs.
 
-The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-storage`, `sglang`,
-`mooncake`, and `offloading` connectors return the decoder's usage unchanged, so for a disaggregated
-request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
-describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.
+The `prefill` attribution matches the `nixlv2` and `offloading` KV connectors when the prefill
+response carries a usage block; without one, the decode pod's count is returned. Under
+`offloading`, a decode pod that fails to pull the prefill blocks and recomputes the prompt still
+reports the prefill pod's count. The `shared-storage`, `sglang`, and `mooncake` connectors return the decoder's
+usage unchanged, so for a disaggregated request `llm_d_epp_request_cached_tokens` carries the decode
+pod's count while the prediction describes the prefill pod. Under those connectors the gap between
+the ratios is not index accuracy.
 
 The two maxima are scoped differently from each other for a disaggregated request.
 `llm_d_epp_prefix_best_predicted_cached_tokens` covers the `prefill` profile's scored candidates,
@@ -1200,7 +1203,7 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_index_lookup_requests_total` | Counter | - | Index lookups performed. |
 | `llm_d_epp_kv_cache_index_lookup_hits_total` | Counter | - | Contiguous prefix blocks matched by the best pod per lookup. |
 | `llm_d_epp_kv_cache_index_max_pod_hit_count_total` | Counter | - | Longest contiguous per-pod prefix chain observed per lookup. |
-| `llm_d_epp_kv_cache_index_lookup_latency_seconds` | Histogram | - | Index lookup latency. |
+| `llm_d_epp_kv_cache_index_lookup_latency_seconds` | Histogram | - | Index lookup latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_kv_cache_events_dedup_removed_hashes_suppressed_total` | Counter | - | Deduplicated removal hashes suppressed. |
 | `llm_d_epp_kv_cache_events_dedup_removed_hashes_forwarded_total` | Counter | - | Deduplicated removal hashes forwarded. |
 | `llm_d_epp_kv_cache_events_stores_skipped_total` | Counter | `cache_kind`, `reason` | KV store events skipped before prefix indexing. |

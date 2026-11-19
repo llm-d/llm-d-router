@@ -32,9 +32,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	otelcodes "go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -82,6 +86,8 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
 		prefill       bool
+		connector     string
+		prefillWaits  bool
 		decodeStatus  int
 		wantStatus    string
 		wantPath      string
@@ -113,6 +119,17 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 			wantStages:   []string{"prefillDuration", "decodeDuration"},
 			wantFailed:   "decode",
 		},
+		{
+			name:         "concurrent decode fails while prefill runs",
+			prefill:      true,
+			connector:    constants.KVConnectorSGLang,
+			prefillWaits: true,
+			decodeStatus: http.StatusInternalServerError,
+			wantStatus:   "500",
+			wantPath:     "prefill-decode",
+			wantStages:   []string{"prefillDuration", "decodeDuration"},
+			wantFailed:   "decode",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -123,7 +140,13 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 				logged = append(logged, prefix+" "+args)
 			}, funcr.Options{Verbosity: 0})
 
-			prefill := httptest.NewServer(statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`))
+			prefill := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.prefillWaits {
+					_, _ = io.Copy(io.Discard, r.Body)
+					<-r.Context().Done() // until the sidecar cancels prefill
+				}
+				statusHandler(http.StatusOK, `{"kv_transfer_params":{}}`).ServeHTTP(w, r)
+			}))
 			defer prefill.Close()
 			decoder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = io.Copy(io.Discard, r.Body)
@@ -135,7 +158,11 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 			prefillURL, err := url.Parse(prefill.URL)
 			require.NoError(t, err)
 
-			s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: constants.KVConnectorNIXLV2})
+			connector := constants.KVConnectorNIXLV2
+			if tt.connector != "" {
+				connector = tt.connector
+			}
+			s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: connector})
 			s.logger = logger
 			s.allowlistValidator = &AllowlistValidator{}
 			sidecar := httptest.NewServer(otelhttp.NewHandler(s.createRoutes(), "sidecar-http"))
@@ -189,6 +216,63 @@ func TestRequestFinishedLineAtDefaultLevel(t *testing.T) {
 			if tt.wantFailed != "" {
 				assert.Contains(t, line, `"failedStage"="`+tt.wantFailed+`"`)
 			}
+			assert.NotContains(t, line, `"grpcStatus"=`, "a JSON response has no grpc-status")
 		})
 	}
+}
+
+// A gRPC error is an HTTP 200 with a grpc-status, so the summary line and the
+// request span must report the grpc-status to show the failure.
+func TestRequestFinishedLineReportsGRPCStatus(t *testing.T) {
+	spans := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans))
+	prevProvider := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevProvider)
+		_ = provider.Shutdown(context.Background())
+	})
+
+	var mu sync.Mutex
+	var logged []string
+	logger := funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, prefix+" "+args)
+	}, funcr.Options{Verbosity: 0})
+
+	decoderURL, err := url.Parse("http://127.0.0.1:1")
+	require.NoError(t, err)
+	s := NewProxy(Config{Port: "8000", DecoderURL: decoderURL, KVConnector: constants.KVConnectorSGLang})
+	s.logger = logger
+	s.allowlistValidator = &AllowlistValidator{}
+
+	// A compressed frame is rejected with Unimplemented before any upstream call.
+	req := httptest.NewRequest(http.MethodPost, sglangapiv1.SglangService_Generate_FullMethodName, strings.NewReader("\x01\x00\x00\x00\x00"))
+	req.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+	req.Header.Set(routing.PrefillEndpointHeader, "127.0.0.1:9000")
+	rec := httptest.NewRecorder()
+	s.createRoutes().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "12", rec.Header().Get(grpcframe.HeaderStatus))
+
+	mu.Lock()
+	var line string
+	for _, l := range logged {
+		if strings.Contains(l, `"msg"="request finished"`) {
+			line = l
+		}
+	}
+	mu.Unlock()
+	assert.Contains(t, line, `"status"=200`)
+	assert.Contains(t, line, `"grpcStatus"="12"`)
+
+	var found bool
+	for _, span := range spans.Ended() {
+		if span.Name() == "forward_request" {
+			found = true
+			assert.Equal(t, otelcodes.Error, span.Status().Code)
+		}
+	}
+	assert.True(t, found, "forward_request span not recorded")
 }

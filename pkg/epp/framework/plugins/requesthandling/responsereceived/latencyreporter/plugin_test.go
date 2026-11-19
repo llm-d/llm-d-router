@@ -167,6 +167,20 @@ func TestOutcomeAndPath(t *testing.T) {
 			wantOutcome: outcomeFailed,
 		},
 		{
+			name:        "client error is failed",
+			spec:        reqSpec{prompt: 100, status: "404"},
+			bucket:      "le1024",
+			path:        pathLocal,
+			wantOutcome: outcomeFailed,
+		},
+		{
+			name:        "2xx other than 200 is completed",
+			spec:        reqSpec{prompt: 100, status: "202"},
+			bucket:      "le1024",
+			path:        pathLocal,
+			wantOutcome: outcomeCompleted,
+		},
+		{
 			name:        "client disconnect is cancelled",
 			spec:        reqSpec{prompt: 100, cause: fwkrh.TerminationCauseClientDisconnect},
 			bucket:      "le1024",
@@ -174,7 +188,7 @@ func TestOutcomeAndPath(t *testing.T) {
 			wantOutcome: outcomeCancelled,
 		},
 		{
-			name:        "non-200 status wins over a disconnect",
+			name:        "error status wins over a disconnect",
 			spec:        reqSpec{prompt: 100, status: "500", cause: fwkrh.TerminationCauseClientDisconnect},
 			bucket:      "le1024",
 			path:        pathLocal,

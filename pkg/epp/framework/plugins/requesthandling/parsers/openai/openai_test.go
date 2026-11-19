@@ -1743,18 +1743,55 @@ func TestOpenAIParser_ParseRequestPreservesJSONError(t *testing.T) {
 func TestOpenAIParser_RequestFieldErrors(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
+		path      string
 		body      string
 		wantField string
+		wantErr   string
 	}{
-		{name: "tools type", body: `{"messages":[{"role":"user","content":"hello"}],"tools":{}}`, wantField: "tools"},
-		{name: "message role type", body: `{"messages":[{"role":123}],"tools":[]}`, wantField: "messages"},
-		{name: "missing messages", body: `{"tools":[]}`},
-		{name: "malformed JSON", body: `{"tools":[`},
+		{
+			name: "tools type", body: `{"messages":[{"role":"user","content":"hello"}],"tools":{}}`, wantField: "tools",
+			wantErr: "invalid chat completions request: tools: cannot unmarshal object into array",
+		},
+		{
+			name: "message role type", body: `{"messages":[{"role":123}],"tools":[]}`, wantField: "messages",
+			wantErr: "invalid chat completions request: messages.0.role: cannot unmarshal number into string",
+		},
+		{
+			name: "bool field from number", body: `{"messages":[{"role":"user","content":"hi"}],"add_generation_prompt":1}`, wantField: "add_generation_prompt",
+			wantErr: "invalid chat completions request: add_generation_prompt: cannot unmarshal number into bool",
+		},
+		{
+			name: "bool field from string", body: `{"messages":[{"role":"user","content":"hi"}],"continue_final_message":"false"}`, wantField: "continue_final_message",
+			wantErr: "invalid chat completions request: continue_final_message: cannot unmarshal string into bool",
+		},
+		{
+			name: "object field from array", body: `{"messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":[]}`, wantField: "chat_template_kwargs",
+			wantErr: "invalid chat completions request: chat_template_kwargs: cannot unmarshal array into object",
+		},
+		{
+			name: "responses number out of range", path: reqcommon.PathResponses,
+			body:      `{"input":"hi","tools":[{"type":"function","parameters":{"type":"object","maximum":1e400}}]}`,
+			wantField: "tools",
+			wantErr:   "invalid responses request: tools.0.parameters.maximum: cannot unmarshal number 1e400 into float64",
+		},
+		{
+			name: "completions string field from number", path: reqcommon.PathCompletions, body: `{"prompt":"hi","cache_salt":1}`, wantField: "cache_salt",
+			wantErr: "invalid completions request: cache_salt: cannot unmarshal number into string",
+		},
+		{name: "missing messages", body: `{"tools":[]}`, wantErr: "invalid chat completions request: must have valid messages field"},
+		{name: "malformed JSON", body: `{"tools":[`, wantErr: "unexpected end of JSON input"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": reqcommon.PathChatCompletions})
+			path := tt.path
+			if path == "" {
+				path = reqcommon.PathChatCompletions
+			}
+			_, err := NewOpenAIParser().ParseRequest(context.Background(), []byte(tt.body), map[string]string{":path": path})
 			if err == nil {
 				t.Fatal("expected parser failure")
+			}
+			if got, want := err.Error(), "error extracting request body: "+tt.wantErr; got != want {
+				t.Fatalf("error = %q, want %q", got, want)
 			}
 			var fieldErr *fwkrh.RequestFieldError
 			if got := errors.As(err, &fieldErr); got != (tt.wantField != "") {
@@ -2078,6 +2115,47 @@ func TestOpenAIParser_ParseResponse(t *testing.T) {
 				Usage: nil,
 			},
 		},
+		{
+			// response_format text: plain text carries no usage, and parsing
+			// it as JSON would only log an error per response.
+			name: "Plain-text transcription response",
+			body: []byte(" Hello there.\n"),
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "text/plain",
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "SRT transcription response",
+			body: []byte("1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"),
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "application/x-subrip",
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "VTT transcription response",
+			body: []byte("WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n"),
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "text/vtt",
+			},
+			want:    nil,
+			wantErr: false,
+		},
+		{
+			name: "JSON transcription response with duration usage",
+			body: []byte(`{"text":" you","usage":{"type":"duration","seconds":1}}`),
+			headers: map[string]string{
+				reqcommon.HeaderContentType: "application/json",
+			},
+			// The duration usage shape carries no token fields, so usage
+			// parses to zero values rather than nil.
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2320,6 +2398,8 @@ func TestOpenAIParser_Claims(t *testing.T) {
 			videosAPI,
 			videosSyncAPI,
 			audioSpeechAPI,
+			audioTranscriptionsAPI,
+			audioTranslationsAPI,
 			request.DecisionsPathSuffix,
 			audioGenerateAPI,
 		},
@@ -2886,6 +2966,136 @@ func TestOpenAIParser_ImagesEditsNoImagePart(t *testing.T) {
 	}
 	if image := result.Body.Images.Image; image.SizeBytes != 0 || image.Head != nil || image.Hash != 0 {
 		t.Errorf("Image = %+v, want the zero value", image)
+	}
+}
+
+func TestOpenAIParser_ParseRequestTranscriptions(t *testing.T) {
+	media := string([]byte{0, 1, 255, '\r', '\n', '-', '-', 137})
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "file", value: media, filename: "audio.mp3", mediaType: "audio/mpeg"},
+		videoFormPart{name: "model", value: "whisper-large-v3"},
+		videoFormPart{name: "language", value: "en"},
+		videoFormPart{name: "prompt", value: "previous segment text"},
+		videoFormPart{name: "response_format", value: "verbose_json"},
+		videoFormPart{name: "stream", value: "true"},
+		videoFormPart{name: "model", value: "uploaded bytes", filename: "model.txt", mediaType: "text/plain"},
+	)
+	for _, path := range []string{"/v1/audio/transcriptions", "/v1/audio/translations"} {
+		t.Run(path, func(t *testing.T) {
+			result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+				map[string]string{":path": path, reqcommon.HeaderContentType: ct})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Body.Model != "whisper-large-v3" {
+				t.Errorf("Model = %q, want whisper-large-v3", result.Body.Model)
+			}
+			if !result.Body.Stream {
+				t.Error("Stream = false, want true")
+			}
+			audio := result.Body.Transcriptions.Audio
+			if result.Body.Transcriptions.Prompt != "previous segment text" {
+				t.Errorf("Prompt = %q, want the conditioning text", result.Body.Transcriptions.Prompt)
+			}
+			if audio.SizeBytes != int64(len(media)) || string(audio.Head) != media {
+				t.Errorf("Audio = {SizeBytes:%d HeadLen:%d}, want the file part of %d bytes", audio.SizeBytes, len(audio.Head), len(media))
+			}
+			if audio.Hash != xxhash.Sum64([]byte(media)) {
+				t.Error("Audio.Hash does not cover the file part's full stream")
+			}
+			if audio.ContentType != "audio/mpeg" {
+				t.Errorf("Audio.ContentType = %q, want audio/mpeg", audio.ContentType)
+			}
+			raw, ok := result.Body.Payload.(request.RawPayload)
+			if !ok {
+				t.Fatalf("Payload = %T, want RawPayload", result.Body.Payload)
+			}
+			if !bytes.Equal(raw, body) {
+				t.Error("forwarded multipart body differs from the received body")
+			}
+			if result.SkipResponseProcessing {
+				t.Error("transcriptions response processing was skipped")
+			}
+		})
+	}
+}
+
+func TestOpenAIParser_ParseRequestTranscriptionsFileOnly(t *testing.T) {
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "file", value: "audio", filename: "a.wav", mediaType: "audio/wav"})
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Body.Model != "" || result.Body.Stream {
+		t.Errorf("body = {Model:%q Stream:%v}, want zero values", result.Body.Model, result.Body.Stream)
+	}
+	audio := result.Body.Transcriptions.Audio
+	if audio.SizeBytes != 5 || string(audio.Head) != "audio" || audio.ContentType != "audio/wav" {
+		t.Errorf("Audio = {SizeBytes:%d Head:%q ContentType:%q}, want the captured file part", audio.SizeBytes, audio.Head, audio.ContentType)
+	}
+}
+
+// A file part larger than the head bound retains only its leading bytes, while
+// the size and hash cover the full stream.
+func TestOpenAIParser_ParseRequestTranscriptionsHeadBound(t *testing.T) {
+	content := strings.Repeat("a", request.UploadedMediaHeadBytes+4096)
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "file", value: content, filename: "a.wav", mediaType: "audio/wav"})
+	result, err := NewOpenAIParser().ParseRequest(context.Background(), body,
+		map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := result.Body.Transcriptions.Audio
+	if audio.SizeBytes != int64(len(content)) {
+		t.Errorf("SizeBytes = %d, want %d", audio.SizeBytes, len(content))
+	}
+	if len(audio.Head) != request.UploadedMediaHeadBytes {
+		t.Errorf("len(Head) = %d, want %d", len(audio.Head), request.UploadedMediaHeadBytes)
+	}
+	if audio.Hash != xxhash.Sum64String(content) {
+		t.Error("Hash does not cover the full file part")
+	}
+}
+
+// A form truncated inside the file part -- not just inside the trailing
+// boundary -- must fail in the file reader rather than pass with a short
+// capture.
+func TestOpenAIParser_ParseRequestTranscriptionsTruncatedFilePart(t *testing.T) {
+	content := strings.Repeat("a", 8192)
+	body, ct := buildVideoForm(t,
+		videoFormPart{name: "file", value: content, filename: "a.wav", mediaType: "audio/wav"},
+		videoFormPart{name: "model", value: "whisper-large-v3"})
+	// Cut inside the file part, past the part header and well before the
+	// closing boundary.
+	cut := len(body) - 200
+	if _, err := NewOpenAIParser().ParseRequest(context.Background(), body[:cut],
+		map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct}); err == nil {
+		t.Error("ParseRequest accepted a form truncated inside the file part")
+	}
+}
+
+func TestOpenAIParser_ParseRequestTranscriptionsInvalidForms(t *testing.T) {
+	parser := NewOpenAIParser()
+	headersFor := func(ct string) map[string]string {
+		return map[string]string{":path": "/v1/audio/transcriptions", reqcommon.HeaderContentType: ct}
+	}
+	body, ct := buildVideoForm(t, videoFormPart{name: "model", value: "whisper-large-v3"})
+	invalidStream, invalidCT := buildVideoForm(t,
+		videoFormPart{name: "model", value: "whisper-large-v3"},
+		videoFormPart{name: "stream", value: "yes"})
+	if _, err := parser.ParseRequest(context.Background(), invalidStream, headersFor(invalidCT)); err == nil {
+		t.Error("ParseRequest accepted an invalid stream field")
+	}
+	for _, badCT := range []string{"application/json", "multipart/form-data"} {
+		if _, err := parser.ParseRequest(context.Background(), body, headersFor(badCT)); err == nil {
+			t.Errorf("ParseRequest accepted content-type %q", badCT)
+		}
+	}
+	if _, err := parser.ParseRequest(context.Background(), body[:len(body)-20], headersFor(ct)); err == nil {
+		t.Error("ParseRequest accepted a truncated form")
 	}
 }
 

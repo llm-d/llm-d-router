@@ -17,7 +17,6 @@ limitations under the License.
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,7 +30,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -192,6 +190,27 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		ParseDuration:    parseDuration,
 	}
 
+	if apiType == reqcommon.APITypeVLLMGenerate && s.workerProtocol == config.WorkerProtocolGRPC {
+		converted, convErr := prepareVLLMGenerateFromHTTP(parsed, requestID)
+		if convErr != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+			rejectInference(serverLog, cw, apiType, http.StatusBadRequest, convErr.Error())
+			return
+		}
+		if converted.droppedTransferParams {
+			clientKVTransferParams = true
+		}
+		reqCtx.GRPC = &pipeline.VLLMGRPCRequest{
+			Req: converted.req,
+			HTTP: &pipeline.HTTPGenerateReply{
+				IncludeUsage:    converted.includeUsage,
+				ReturnTokenIDs:  converted.returnTokenIDs,
+				OutputMode:      converted.outputMode,
+				ClientRequestID: converted.clientRequestID,
+			},
+		}
+	}
+
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
 	ctx = tracing.LoggerWithSpanContext(ctx, trace.SpanFromContext(ctx))
@@ -231,6 +250,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 // inferenceRoute maps an inbound path onto the bounded route label used by
 // orchestration_overhead_seconds.
 func inferenceRoute(path string) string {
+	if gr, ok := lookupGRPCRoute(path); ok {
+		return gr.route
+	}
 	switch path {
 	case reqcommon.PathChatCompletions:
 		return coordmetrics.RouteChatCompletions
@@ -240,7 +262,7 @@ func inferenceRoute(path string) string {
 		return coordmetrics.RouteResponses
 	case reqcommon.PathMessages:
 		return coordmetrics.RouteMessages
-	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate, sglangapiv1.SglangService_Generate_FullMethodName:
+	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate:
 		return coordmetrics.RouteGenerate
 	default:
 		return coordmetrics.RouteUnknown
@@ -248,12 +270,9 @@ func inferenceRoute(path string) string {
 }
 
 // inspectedRequestFields lists the top-level request fields the handler and
-// the pipeline steps read as Go values. decodeRequestBody decodes only these;
-// every other field stays a json.RawMessage so its bytes are forwarded
-// unchanged. encoding/json sorts map keys at every depth on Marshal, which
-// would reorder free-form content such as tools[].function.parameters that
-// chat templates render into the prompt verbatim. The steps that read messages
-// or input decode them on use (promptItems).
+// the pipeline steps read as Go values; see reqcommon.DecodeRequestBody for why
+// every other field stays raw. The steps that read messages or input decode
+// them on use (promptItems).
 var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldModel:          {},
 	reqcommon.FieldStream:         {},
@@ -265,26 +284,7 @@ var inspectedRequestFields = map[string]struct{}{
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, err
-	}
-	if fields == nil {
-		return nil, errors.New("request body is not a JSON object")
-	}
-	parsed := make(map[string]any, len(fields))
-	for k, v := range fields {
-		if _, ok := inspectedRequestFields[k]; !ok {
-			parsed[k] = v
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		parsed[k] = decoded
-	}
-	return parsed, nil
+	return reqcommon.DecodeRequestBody(raw, inspectedRequestFields)
 }
 
 // classifyPipelineError maps a pipeline error to a client-facing status and

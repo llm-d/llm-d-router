@@ -501,7 +501,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	}
 
 	tp, err := p.backend.produce(ctx, request.Body)
-	if err != nil {
+	if err != nil && !errors.Is(err, errUnsupportedBody) {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
