@@ -103,7 +103,7 @@ func (i *indexer) podCacheFor(pod server) *podCache {
 func (i *indexer) warnOffloadCapacityUnknown(pod ServerID, capacityBlocks int) {
 	i.logger.V(logutil.DEFAULT).Info("WARNING: the model server offloads KV cache but does not report the offload tier's capacity; "+
 		"the prefix index covers the HBM tier only, so prefix matches on this pod are under-reported. "+
-		"Disable autoTune and set lruCapacityPerServer to the offload-extended capacity, "+
+		"Set capacityTiers to [cpu] and lruCapacityPerServer to the offload-extended capacity, "+
 		"or run a model server version that reports it.",
 		"pod", pod, "capacityBlocks", capacityBlocks)
 }
