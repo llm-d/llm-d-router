@@ -63,11 +63,30 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
   `inFlightTokens / peakPrefillThroughput * 1000` (ms) when `ttftSource` is
   `prefillThroughput` (default); when `ttftEstimate` is `backlog` the numerator
   is `inFlightTokens`, and when `ttftEstimate` is `full` it becomes
-  `inFlightTokens + uncachedRequestTokens`. The TTFT comes
-  from the latency predictor when `ttftSource` is `latencyPredictor`
+  `inFlightTokens + uncachedRequestTokens`. With `full`, the estimate also adds
+  `queued / completionsPerSecond * 1000`, the time a new request waits to be admitted.
+  `queued` is the EPP's in-flight requests beyond `maxNumSeqs` (when `maxNumSeqs > 0`),
+  or, when KV cache usage is at or above `queueWaitKVCacheThreshold`, the model
+  server's `waitingQueueSize` if that is larger. `maxNumSeqs` must match the model
+  server's `--max-num-seqs`. The queued requests' own prefill follows their wait, so
+  their share of `inFlightTokens` is left out, taken as `queued` of the requests whose
+  tokens are still counted. `completionsPerSecond` counts requests routed by the EPP
+  that finished, failed or were cancelled on the endpoint, over the last 30 s, or over
+  the last 120 s when the 30 s window holds fewer than 5; a rate of 0 is taken as one
+  completion in 30 s. The KV-bound wait is approximate: it assumes that each completion
+  admits one waiting request, which holds for slots. Under KV pressure, freed blocks go
+  first to running requests' decode growth, shared prefix blocks stay referenced, a long
+  request at the head of the queue can need several completions, and preemptions put
+  running requests back in the queue, so the real wait is usually longer. At the start
+  of a burst, when few requests have completed, the rate lags and the queue wait can be
+  overestimated, even with the 120 s window. With the queue wait, `maxTTFTPenaltyMs` acts as a budget for
+  queueing on the sticky endpoint: its queue grows until its wait exceeds the other
+  endpoints' by about that much, then requests spill over. The TTFT comes from the latency predictor when
+  `ttftSource` is `latencyPredictor`, and from the [step profile](#step-profile) when
+  `ttftSource` is `prefillSteps`
 - If either the sticky or non-sticky set has no endpoint with the TTFT source attribute
   (`LatencyPredictionInfo` or `InFlightLoad`, plus `UncachedRequestTokens` when
-  `ttftEstimate` is `full`), the TTFT load gate is skipped and all
+  `ttftEstimate` is `full` or `ttftSource` is `prefillSteps`), the TTFT load gate is skipped and all
   endpoints are kept; the `missing_signal` outcome is recorded. If no endpoints have
   `PrefixCacheMatchInfo`, all prefix scores default to 0 and no endpoints pass the affinity
   threshold, so all are kept (no-op)
@@ -119,10 +138,13 @@ documents the strategy and its calibration.
 | `affinityThreshold` | `float64` | No | `0.80` | Prefix cache score threshold for stickiness |
 | `explorationProbability` | `float64` | No | `0` | Probability of skipping the gate |
 | `maxTTFTPenaltyMs` | `float64` | No | `18000` | Max TTFT penalty (ms) before breaking stickiness. 0 = always stick |
-| `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput` or `latencyPredictor` |
+| `ttftSource` | `string` | No | `prefillThroughput` | TTFT source for the load gate: `prefillThroughput`, `prefillSteps` or `latencyPredictor` |
 | `peakPrefillThroughput` | `float64` | No | `15928` | Peak prefill throughput (tokens/sec), used to estimate TTFT when `ttftSource` is `prefillThroughput` |
 | `p2pSourceProducerName` | `string` | No | (empty) | Name of the `p2p-source-producer` whose decision is paired with this filter's outcome per request; empty disables the pairing |
-| `ttftEstimate` | `string` | No | `backlog` | TTFT estimation method with `prefillThroughput` source: `backlog` or `full` |
+| `ttftEstimate` | `string` | No | `backlog` | TTFT estimation method with `prefillThroughput` or `prefillSteps` source: `backlog` or `full` |
+| `maxNumSeqs` | `int` | No | `0` | Model server's running-request limit (vLLM `max_num_seqs`); with `ttftEstimate: full`, a value > 0 adds the slot queue wait to the estimate |
+| `queueWaitKVCacheThreshold` | `float64` | No | `0.95` | KV cache usage in [0, 1] at or above which waiting requests wait for KV cache; with `ttftEstimate: full`, a value > 0 adds their wait to the estimate |
+| `prefillSteps` | `object` | With `ttftSource: prefillSteps` | (none) | Engine profile for the step estimate; see [Step profile](#step-profile) |
 
 The `peakPrefillThroughput` default of `15928` tokens/sec is calibrated for Qwen 32B on
 2x H100 80GB (TP=2) with vLLM 0.19, measured as the prefill throughput of a single
@@ -138,11 +160,93 @@ contains that extra prefill. A `backlog`-tuned `maxTTFTPenaltyMs` under `full` m
 stickiness later than intended. With `full`, set `maxTTFTPenaltyMs` lower than a
 `backlog`-tuned value.
 
+## Step profile
+
+A throughput in tokens per second describes an engine whose prefill time grows in
+proportion to the prompt. An engine that prefills in steps behaves differently: a step
+takes about the same time whether it computes a few tokens or its whole token budget,
+so a short request costs a full step, and every request in flight adds to the next
+one's wait whatever its length. `ttftSource: prefillSteps` estimates TTFT from a profile of
+such an engine:
+
+| Parameter | Type | Required | Description |
+| ----------- | ------ | ---------- | ------------- |
+| `tokensPerStep` | `int` | Yes | New prompt tokens one step computes (vLLM `--max-num-batched-tokens`) |
+| `requestsPerStep` | `int` | Yes | Requests one step works on at a time (vLLM `--max-num-seqs`) |
+| `stepMs` | `float64` | Yes | Time of one step |
+| `requestMs` | `float64` | No | Time each pending request on the endpoint adds to the request. 0 (default) uses `stepMs` |
+| `readMicrosecondsPerToken` | `float64` | No | Time per prompt token, cached or not, to render and tokenize the prompt on the way to its first step |
+| `restoreMs` | `float64` | No | Time to bring a cached prefix from outside GPU memory back into it, paid once per request |
+| `handoffMs` | `float64` | No | Time from the step that computed a request's last prompt token to its first response byte |
+
+For each endpoint, with `requests` the requests on it that have not returned a first
+token (`InFlightLoad.PendingRequests`), less `queued` with `ttftEstimate: full`,
+`tokens` the prompt tokens of the request being scheduled that the endpoint computes
+(`UncachedRequestTokens`), `cached` its cached tokens on the endpoint, and `restore`
+equal to `restoreMs` when the endpoint holds part of the request's cached prefix
+outside GPU memory (0 otherwise, and when the prefix producer reports no tiers):
+
+```
+own     = max(ceil(tokens / tokensPerStep), 1)
+own     = ceil(tokens * min(requests + 1, requestsPerStep) / tokensPerStep)  if own > 1
+TTFT_ms = readMicrosecondsPerToken * (cached + tokens) / 1000 + restore
+          + requests * requestMs + own * stepMs + handoffMs
+```
+
+With `ttftEstimate: full`, the estimate also adds `queued / completionsPerSecond * 1000`,
+the queue wait described above. The queued requests are charged that wait in place of
+`requestMs`.
+
+Every pending request costs `requestMs`, and the tokens the request computes cost
+their steps. The engine works on up to `requestsPerStep` requests in one step,
+so a pending request costs less than a step. A prompt longer than one step shares
+each of its steps with the pending requests, up to `requestsPerStep` requests in
+all. The read and the handoff are the same on every endpoint, so the load gate's
+decision rests on the pending requests, the steps and the restore. The estimate always
+counts the request's own tokens, with either `ttftEstimate`. A request
+decoding on an aggregated engine is not pending, so it adds no `requestMs`. With
+`addEstimatedOutputTokens` on the `in-flight-load-producer`, a request stays pending until
+its end of stream, so it does.
+
+`tokensPerStep` and `requestsPerStep` are engine flags. `stepMs`, `requestMs`,
+`readMicrosecondsPerToken` and `handoffMs` are measured through the router, from the
+time between dispatch and the first streamed token:
+
+- `stepMs`: the difference between prompts of 2 and 1 times `tokensPerStep` uncached
+  tokens on an idle engine.
+- `requestMs`: under open-loop traffic of short new tails on cached prompts, the
+  increase of the median time per pending request when the request was scheduled.
+- `readMicrosecondsPerToken`: send a long prompt, then the same prompt with a short new
+  tail, and a short prompt with the same tail. The difference between the two tails,
+  divided by the long prompt's length.
+- `handoffMs`: a short prompt's time minus `stepMs`, under light traffic. A short
+  request on an engine that has been idle for seconds returns about 150 ms sooner.
+
+`restoreMs` is measured on an idle engine from its own counters, with prompts of random
+token ids and `max_tokens: 1`: send a long prompt, send other prompts until the engine
+has moved it out of GPU memory, then send it again with a short new tail. The queue plus
+prefill time of that request minus the same request served from GPU memory.
+
+Profiled values hold for one model, accelerator and engine build.
+
+## Metrics
+
+- `llm_d_epp_prefix_cache_affinity_filter_decisions_total` (`plugin_name`, `outcome`): one
+  count per filter run, by decision outcome.
+- `llm_d_epp_prefix_cache_affinity_filter_estimated_ttft_seconds` and
+  `llm_d_epp_prefix_cache_affinity_filter_actual_ttft_seconds` (`plugin_name`, `plugin_type`,
+  `target_model_name`): with
+  `ttftSource` `prefillThroughput` or `prefillSteps`, at a request's first response chunk, the TTFT the filter
+  estimated for the endpoint that served it and the time from the filter's run to that chunk.
+  `target_model_name` shares the EPP model label cap and folds to `other` once it is full.
+  Requests served by an endpoint the filter did not see, such as a decode endpoint when the
+  filter runs in the prefill profile, are not recorded.
+
 ## Dependencies
 
 - Reads `PrefixCacheMatchInfo` from endpoint attributes (from `prefix-cache-scorer`)
-- Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` (from `in-flight-load-producer`)
-- Reads `UncachedRequestTokens` for the TTFT load gate when `ttftEstimate` is `full` (from `in-flight-load-producer`)
+- Reads `InFlightLoad` for the TTFT load gate when `ttftSource` is `prefillThroughput` or `prefillSteps`, and with `ttftEstimate: full` the endpoint's `WaitingQueueSize` and `KVCacheUsagePercent` metrics (from `in-flight-load-producer` and the metrics extractor)
+- Reads `UncachedRequestTokens` for the TTFT load gate when `ttftEstimate` is `full` or `ttftSource` is `prefillSteps` (from `in-flight-load-producer`)
 - Reads `LatencyPredictionInfo` for the TTFT load gate when `ttftSource` is `latencyPredictor` (from `predicted-latency-producer`)
 - Reads `P2PSourceDecision` in `PreRequest` when `p2pSourceProducerName` is set (from `p2p-source-producer`; optional)
 
