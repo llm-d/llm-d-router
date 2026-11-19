@@ -273,14 +273,14 @@ func TestVLLMGRPC_PrefillDecodeAllKVConnectors(t *testing.T) {
 			unaryResp, err := client.Generate(mdCtx, clientReq, grpc.Header(&respHeader))
 			require.NoError(t, err)
 			require.Equal(t, uint32(36), unaryResp.GetOutputs().GetFinishInfo().GetNumCachedTokens())
-			require.Equal(t, []uint32{102}, unaryResp.GetOutputs().GetTokenIds())
+			require.Equal(t, []uint32{101, 102}, unaryResp.GetOutputs().GetTokenIds())
 			require.Equal(t, []string{"decode-pod-7"}, respHeader.Get("x-worker-pod"))
 			require.Empty(t, respHeader.Get(reqcommon.PeerTopologyHeaderKey), "internal topology header must be stripped")
 
 			mu.Lock()
 			require.Equal(t, []string{"prefill", "decode"}, stageOrder)
 			require.Equal(t, vllmpb.Inference_Generate_FullMethodName, prefillPath)
-			require.Equal(t, vllmpb.Inference_Generate_FullMethodName, decodePath)
+			require.Equal(t, vllmpb.Inference_GenerateStream_FullMethodName, decodePath)
 
 			// Prefill overrides stopping (max_new_tokens=1, min_new_tokens=0), preserves
 			// cache_salt & bypass_prefix_cache, and strips client transfer params.
@@ -815,7 +815,7 @@ func TestVLLMGRPC_DecodeOnlyTLSAndControlPassthrough(t *testing.T) {
 		Kv:     &vllmpb.KVCacheParameters{CacheSalt: "s1", KvTransferParams: evilKV},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "unary:tls-check", unaryResp.GetOutputs().GetText())
+	require.Equal(t, "tok1:tls-check", unaryResp.GetOutputs().GetText())
 
 	stubInf.mu.Lock()
 	require.Nil(t, stubInf.lastReq.GetKv().GetKvTransferParams(), "decode-only must strip client kv_transfer_params and not inject new ones")
