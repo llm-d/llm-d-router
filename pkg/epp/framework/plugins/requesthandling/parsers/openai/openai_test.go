@@ -2567,6 +2567,12 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			want:    ptr.To(int64(64)),
 		},
 		{
+			name:    "completions max_tokens written as a decimal float",
+			headers: map[string]string{":path": "/v1/completions"},
+			body:    map[string]any{"model": "m", "prompt": "p", "max_tokens": json.Number("1000.0")},
+			want:    ptr.To(int64(1000)),
+		},
+		{
 			name:    "completions absent",
 			headers: map[string]string{":path": "/v1/completions"},
 			body:    map[string]any{"model": "m", "prompt": "p"},
