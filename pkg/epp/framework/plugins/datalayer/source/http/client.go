@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -55,14 +56,29 @@ const (
 	// and updating might take some time). This allows maintaining up to two idle connections
 	// per endpoint (defined as scheme://host:port).
 	maxIdleConnsPerHost = 2
+	// Dial and TLS handshake get their own bounds, mirroring net/http's
+	// DefaultTransport values instead of the zero defaults. Callers may still
+	// see an earlier request-deadline error: the client's overall `timeout`
+	// (equal to the handshake bound and started first) and the poll
+	// dispatcher's per-poll context both bound a scrape below the dial bound.
+	// ExpectContinueTimeout governs the wait between written headers and a
+	// request body, which bodyless GET scrapes never hit.
+	dialTimeout           = 30 * time.Second
+	dialKeepAlive         = 30 * time.Second
+	tlsHandshakeTimeout   = 10 * time.Second
+	expectContinueTimeout = 1 * time.Second
 )
 
 var (
+	baseDialer = &net.Dialer{Timeout: dialTimeout, KeepAlive: dialKeepAlive}
+
 	baseTransport = &http.Transport{
-		MaxIdleConns:        maxIdleConnections,
-		MaxIdleConnsPerHost: maxIdleConnsPerHost,
-		IdleConnTimeout:     maxIdleTime,
-		// TODO: set additional timeouts, transport options, etc.
+		MaxIdleConns:          maxIdleConnections,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		IdleConnTimeout:       maxIdleTime,
+		DialContext:           baseDialer.DialContext,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ExpectContinueTimeout: expectContinueTimeout,
 	}
 )
 

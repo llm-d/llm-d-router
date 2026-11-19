@@ -20,8 +20,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -369,4 +372,67 @@ func (o *orderedStub) Extract(ctx context.Context, in fwkdl.PollInput[int]) erro
 	*o.log = append(*o.log, o.name)
 	o.mu.Unlock()
 	return o.stub.Extract(ctx, in)
+}
+
+// The scrape transport bounds dial and TLS handshake with net/http's
+// DefaultTransport values, while its connection-pool options intentionally
+// differ. Callers may still see an earlier request-deadline error (the client
+// timeout, the poll dispatcher's per-poll context). The dialer wiring is
+// verified behaviorally: a sentinel error installed in the shared baseDialer's
+// Control hook must surface from a scrape through both the plain-http
+// transport and its https clone.
+func TestTransportPhaseTimeouts(t *testing.T) {
+	parser := func(io.Reader) (int, error) { return 0, nil }
+	deflt := http.DefaultTransport.(*http.Transport)
+	// 30s/30s are net/http's DefaultTransport dialer values, which its
+	// package-private dialer does not expose for comparison.
+	assert.Equal(t, 30*time.Second, baseDialer.Timeout)
+	assert.Equal(t, 30*time.Second, baseDialer.KeepAlive)
+	assertTransport := func(t *testing.T, transport *http.Transport) {
+		t.Helper()
+		assert.NotNil(t, transport.DialContext, "the bounded dialer must be wired")
+		assert.Equal(t, deflt.TLSHandshakeTimeout, transport.TLSHandshakeTimeout)
+		assert.Equal(t, deflt.ExpectContinueTimeout, transport.ExpectContinueTimeout)
+		assert.Equal(t, maxIdleTime, transport.IdleConnTimeout)
+	}
+
+	sentinel := errors.New("sentinel dial error")
+	baseDialer.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
+		return sentinel
+	}
+	defer func() { baseDialer.ControlContext = nil }()
+
+	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	// Each scheme scrapes its own server, so the https clone is exercised
+	// through its real TLS dial path rather than a plain-http target.
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	tlsServer := httptest.NewTLSServer(handler)
+	defer tlsServer.Close()
+
+	for _, tc := range []struct {
+		scheme string
+		url    string
+	}{
+		{scheme: "http", url: server.URL},
+		{scheme: "https", url: tlsServer.URL},
+	} {
+		t.Run(tc.scheme, func(t *testing.T) {
+			s, err := NewHTTPDataSource(tc.scheme, "/metrics", TLSOptions{SkipVerify: true}, "test", "test", parser)
+			require.NoError(t, err)
+			cl, ok := s.client.(*client)
+			require.True(t, ok, "client must be the concrete scrape client")
+			transport, ok := cl.Transport.(*http.Transport)
+			require.True(t, ok, "client transport must be an *http.Transport")
+			assertTransport(t, transport)
+
+			u, err := url.Parse(tc.url)
+			require.NoError(t, err)
+			endpoint := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{MetricsHost: u.Host}, fwkdl.NewMetrics())
+			// The scrape must dial through the shared baseDialer, so the
+			// sentinel error must surface instead of a successful scrape.
+			_, err = s.Poll(context.Background(), endpoint)
+			require.ErrorIs(t, err, sentinel, "scrapes must dial through baseDialer")
+		})
+	}
 }
