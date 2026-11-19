@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -71,8 +72,16 @@ func (c Config) validate() error {
 	if c.EvictionTTLSeconds < 0 {
 		return fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", c.EvictionTTLSeconds)
 	}
+	if c.EvictionTTLSeconds > 0 {
+		if err := validateDurationSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
+			return err
+		}
+	}
 	if c.EvictionSweepSeconds <= 0 {
 		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
+	}
+	if err := validateDurationSeconds("evictionSweepSeconds", c.EvictionSweepSeconds); err != nil {
+		return err
 	}
 	if c.LASWeightService < 0 {
 		return fmt.Errorf("lasWeightService must be >= 0, got %v", c.LASWeightService)
@@ -88,6 +97,21 @@ func (c Config) validate() error {
 	}
 	if c.TurnPriorityInactivitySeconds < 0 {
 		return fmt.Errorf("turnPriorityInactivitySeconds must be >= 0, got %v", c.TurnPriorityInactivitySeconds)
+	}
+	return nil
+}
+
+// validateDurationSeconds rejects a positive number of seconds that does not
+// convert to a positive time.Duration. The eviction ticker panics on a
+// non-positive interval.
+func validateDurationSeconds(field string, seconds float64) error {
+	// float64(math.MaxInt64) rounds up to 2^63, the first value outside int64.
+	nanos := seconds * float64(time.Second)
+	if nanos >= float64(math.MaxInt64) {
+		return fmt.Errorf("%s %v exceeds the representable duration", field, seconds)
+	}
+	if time.Duration(nanos) <= 0 {
+		return fmt.Errorf("%s %v is too small to represent as a duration", field, seconds)
 	}
 	return nil
 }
