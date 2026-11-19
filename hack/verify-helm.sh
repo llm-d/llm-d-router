@@ -369,7 +369,13 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
       echo "Validation failed: standalone Envoy model-server clusters missing http2_protocol_options for test: ${key}"
       exit 1
     fi
-    if ! grep -q "appProtocol: kubernetes.io/h2c" "${epp_yaml}"; then
+    if ! awk '
+      /^---/ { svc=0; ms=0 }
+      /^kind: Service$/ { svc=1 }
+      svc && /^  name: .*-model-servers$/ { ms=1 }
+      ms && /appProtocol: kubernetes\.io\/h2c/ { found=1 }
+      END { exit !found }
+    ' "${epp_yaml}"; then
       echo "Validation failed: standalone fallback Service missing h2c appProtocol for test: ${key}"
       exit 1
     fi
