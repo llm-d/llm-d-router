@@ -467,7 +467,7 @@ func TestHealthServer_StandbyLogging(t *testing.T) {
 
 // Envoy health-checks on a reused connection and sends keepalive pings every 15s with no
 // active stream, so the server must accept pings that frequent without sending GOAWAY.
-func TestHealthServerKeepsIdleConnectionPingingEvery10s(t *testing.T) {
+func TestHealthServerKeepsIdleConnectionAtEnvoyKeepaliveInterval(t *testing.T) {
 	t.Parallel()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -480,10 +480,10 @@ func TestHealthServerKeepsIdleConnectionPingingEvery10s(t *testing.T) {
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
-	// 10s is the minimum client keepalive time grpc-go allows.
+	// Envoy's interval; a 10s client interval would sit on the server's 10s MinTime and could strike.
 	conn, err := grpc.NewClient(lis.Addr().String(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 10 * time.Second, Timeout: 3 * time.Second, PermitWithoutStream: true}))
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 15 * time.Second, Timeout: 3 * time.Second, PermitWithoutStream: true}))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -498,12 +498,12 @@ func TestHealthServerKeepsIdleConnectionPingingEvery10s(t *testing.T) {
 		t.Fatalf("connection state after Check = %v, want Ready", state)
 	}
 
-	// With the default enforcement policy the server sends GOAWAY after the third ping (about 30s).
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	// With the default enforcement policy the server sends GOAWAY after the third ping (about 45s).
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 70*time.Second)
 	defer waitCancel()
 	start := time.Now()
 	if conn.WaitForStateChange(waitCtx, connectivity.Ready) {
-		t.Fatalf("idle connection left Ready after %v (state %v): server rejected 10s keepalive pings with GOAWAY too_many_pings",
+		t.Fatalf("idle connection left Ready after %v (state %v): server rejected 15s keepalive pings with GOAWAY too_many_pings",
 			time.Since(start).Round(time.Second), conn.GetState())
 	}
 }
