@@ -140,6 +140,77 @@ func TestSourceResyncReachesOnlyTheFailedConsumer(t *testing.T) {
 	require.Equal(t, "reset:engine:8000", good.operations[len(good.operations)-1])
 }
 
+func TestSourceResyncRecovery(t *testing.T) {
+	ctx := t.Context()
+	at := func(seq uint64, resync bool) events.EventSource {
+		return events.EventSource{Endpoint: "engine:8000", Sequence: seq, Resync: resync}
+	}
+	// setup returns a source whose first consumer failed on sequence 2 and
+	// waits for a resync.
+	setup := func(t *testing.T) (*Source, *recordingConsumer, *recordingConsumer) {
+		bad := &recordingConsumer{name: "bad", err: errors.New("failed")}
+		other := &recordingConsumer{name: "other"}
+		s := &Source{consumers: []consumer{{owner: bad.TypedName(), EventConsumer: bad}, {owner: other.TypedName(), EventConsumer: other}}, subscribers: events.NewSubscriberManager(nil)}
+		require.NoError(t, s.ProcessEvents(ctx, at(2, false), events.EventBatch{}))
+		bad.err = nil
+		bad.operations, other.operations, bad.sequences, other.sequences = nil, nil, nil, nil
+		return s, bad, other
+	}
+	batch, reset := "batch:engine:8000", "reset:engine:8000"
+
+	t.Run("an aborted partial resync rebuilds on the next resync", func(t *testing.T) {
+		s, bad, other := setup(t)
+		require.NoError(t, s.Reset(ctx, at(4, true)))
+		require.NoError(t, s.ProcessEvents(ctx, at(1, true), events.EventBatch{}))
+		aborted := at(0, true)
+		aborted.ResyncAborted = true
+		require.NoError(t, s.Reset(ctx, aborted))
+		require.Equal(t, []string{reset, batch, reset}, bad.operations, "the abort drops the partial rebuild")
+		require.NoError(t, s.ProcessEvents(ctx, at(5, false), events.EventBatch{}))
+
+		require.NoError(t, s.Reset(ctx, at(5, true)))
+		require.NoError(t, s.ProcessEvents(ctx, at(1, true), events.EventBatch{}))
+		require.Equal(t, []string{reset, batch, reset, batch, reset, batch}, bad.operations)
+		require.Equal(t, []string{batch}, other.operations)
+	})
+
+	t.Run("a second resync leaves a recovered consumer alone", func(t *testing.T) {
+		s, bad, other := setup(t)
+		// The rebuild covers the stream up to sequence 6.
+		require.NoError(t, s.Reset(ctx, at(6, true)))
+		require.NoError(t, s.ProcessEvents(ctx, at(0, true), events.EventBatch{}))
+		other.err = errors.New("failed")
+		require.NoError(t, s.ProcessEvents(ctx, at(5, false), events.EventBatch{}))
+		other.err = nil
+		bad.operations, bad.sequences = nil, nil
+
+		require.NoError(t, s.Reset(ctx, at(8, true)))
+		require.NoError(t, s.ProcessEvents(ctx, at(0, true), events.EventBatch{}))
+		require.Empty(t, bad.operations, "the recovered consumer is neither reset nor rebuilt again")
+		for _, seq := range []uint64{6, 7, 8, 9} {
+			require.NoError(t, s.ProcessEvents(ctx, at(seq, false), events.EventBatch{}))
+		}
+		require.Equal(t, []uint64{7, 8, 9}, bad.sequences, "each consumer skips up to its own rebuild")
+		require.Equal(t, []uint64{5, 0, 9}, other.sequences)
+	})
+
+	t.Run("a consumer that fails during a resync waits for the next one", func(t *testing.T) {
+		s, bad, _ := setup(t)
+		require.NoError(t, s.Reset(ctx, at(4, true)))
+		bad.err = errors.New("failed")
+		require.NoError(t, s.ProcessEvents(ctx, at(1, true), events.EventBatch{}))
+		bad.err = nil
+		require.NoError(t, s.ProcessEvents(ctx, at(2, true), events.EventBatch{}))
+		require.Equal(t, []string{reset, batch, reset}, bad.operations, "later rebuilt batches skip the failed consumer")
+		require.NoError(t, s.ProcessEvents(ctx, at(3, false), events.EventBatch{}))
+		require.Equal(t, []uint64{1, 3}, bad.sequences, "the failed consumer follows the shared stream until the next resync")
+
+		require.NoError(t, s.Reset(ctx, at(5, true)))
+		require.NoError(t, s.ProcessEvents(ctx, at(1, true), events.EventBatch{}))
+		require.Equal(t, []string{reset, batch, reset, batch, reset, batch}, bad.operations)
+	})
+}
+
 func TestSourceSharesOneSubscriber(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

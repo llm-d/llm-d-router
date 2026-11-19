@@ -34,6 +34,10 @@ type EventSource struct {
 	// consumers that requested a resync. On a Resync reset, Sequence is the
 	// last wire sequence the rebuild covers.
 	Resync bool
+	// ResyncAborted is set on a Resync reset when the rebuild failed after
+	// delivering part of its batches. The consumers that received them drop
+	// the partial state and wait for the next resync.
+	ResyncAborted bool
 }
 
 // EventConsumer receives decoded events in place of the pool's token-keyed

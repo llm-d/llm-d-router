@@ -67,10 +67,28 @@ type Source struct {
 type resyncState struct {
 	// pending consumers failed and wait for the next resync.
 	pending map[int]bool
-	// targets receive the running resync's rebuilt batches and skip shared
-	// batches up to through, which the rebuild covers.
-	targets map[int]bool
-	through uint64
+	// active consumers receive the running resync's rebuilt batches.
+	active map[int]bool
+	// skipThrough is the last shared sequence each resynced consumer's
+	// rebuild covers.
+	skipThrough map[int]uint64
+}
+
+// delivers reports whether consumer i receives the batch from source.
+func (r *resyncState) delivers(i int, source events.EventSource) bool {
+	if r == nil {
+		return !source.Resync
+	}
+	if source.Resync {
+		return r.active[i]
+	}
+	if through, ok := r.skipThrough[i]; ok {
+		if source.Sequence <= through {
+			return false
+		}
+		delete(r.skipThrough, i)
+	}
+	return true
 }
 
 var (
@@ -226,15 +244,8 @@ func (s *Source) ProcessEvents(ctx context.Context, source events.EventSource, b
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	state := s.resyncState(source.Endpoint, false)
-	var targets map[int]bool
-	if state != nil {
-		if !source.Resync && source.Sequence > state.through {
-			state.targets = map[int]bool{}
-		}
-		targets = state.targets
-	}
 	for i, c := range s.consumers {
-		if source.Resync != targets[i] {
+		if !state.delivers(i, source) {
 			continue
 		}
 		if err := invoke(func() error { return c.ProcessEvents(ctx, source, batch) }); err != nil {
@@ -244,7 +255,11 @@ func (s *Source) ProcessEvents(ctx context.Context, source events.EventSource, b
 			}
 			// The stream is continuous, so the subscriber sees no gap; the
 			// reset consumer gets its state back from a rebuild of the endpoint.
-			s.resyncState(source.Endpoint, true).pending[i] = true
+			// It leaves a running resync, whose earlier batches it dropped.
+			state = s.resyncState(source.Endpoint, true)
+			delete(state.active, i)
+			delete(state.skipThrough, i)
+			state.pending[i] = true
 			s.subscribers.RequestResync(source.Endpoint)
 		}
 	}
@@ -253,19 +268,27 @@ func (s *Source) ProcessEvents(ctx context.Context, source events.EventSource, b
 
 // Reset resets every consumer of the endpoint. A resync reset resets the
 // consumers that requested the resync and starts delivering the rebuild to
-// them.
+// them. An aborted resync resets the consumers that hold its partial rebuild
+// and returns them to pending.
 func (s *Source) Reset(ctx context.Context, source events.EventSource) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var targets map[int]bool
 	if source.Resync {
 		state := s.resyncState(source.Endpoint, true)
-		for i := range state.pending {
-			state.targets[i] = true
+		if source.ResyncAborted {
+			targets, state.active = state.active, map[int]bool{}
+		} else {
+			targets, state.active, state.pending = state.pending, state.pending, map[int]bool{}
 		}
-		state.pending = map[int]bool{}
-		state.through = source.Sequence
-		targets = state.targets
+		for i := range targets {
+			if source.ResyncAborted {
+				state.pending[i] = true
+				delete(state.skipThrough, i)
+			} else {
+				state.skipThrough[i] = source.Sequence
+			}
+		}
 	} else {
 		s.resyncMu.Lock()
 		delete(s.resyncs, source.Endpoint)
@@ -293,7 +316,7 @@ func (s *Source) resyncState(endpoint string, create bool) *resyncState {
 		if s.resyncs == nil {
 			s.resyncs = map[string]*resyncState{}
 		}
-		state = &resyncState{pending: map[int]bool{}, targets: map[int]bool{}}
+		state = &resyncState{pending: map[int]bool{}, active: map[int]bool{}, skipThrough: map[int]uint64{}}
 		s.resyncs[endpoint] = state
 	}
 	return state

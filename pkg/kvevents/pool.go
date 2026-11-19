@@ -461,7 +461,10 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 			podID = p.adapter.ShardingKey(msg)
 		}
 		if p.consumer != nil {
-			source := EventSource{Endpoint: podID, Sequence: msg.Sequence, Retired: msg.retire, Resync: msg.resync}
+			source := EventSource{
+				Endpoint: podID, Sequence: msg.Sequence, Retired: msg.retire,
+				Resync: msg.resync, ResyncAborted: msg.resyncAbort,
+			}
 			if err := p.consumer.Reset(ctx, source); err != nil {
 				logger.Error(err, "Failed to reset KV event consumer", "endpoint", podID)
 			}

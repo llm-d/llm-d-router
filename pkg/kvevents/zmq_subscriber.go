@@ -400,8 +400,10 @@ func (z *zmqSubscriber) resyncConsumers(ctx context.Context, topic string) {
 	}
 	if z.resyncResetQueued {
 		// The resynced consumers hold a partial rebuild.
-		z.resyncResetQueued = false
-		z.queueResyncReset(topic, through)
+		z.enqueue(&RawMessage{
+			Topic: topic, SourceEndpoint: z.sourceEndpoint,
+			reset: true, resync: true, resyncAbort: true,
+		})
 	}
 	z.resync.Store(true)
 }
