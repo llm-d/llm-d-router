@@ -17,6 +17,7 @@ limitations under the License.
 package preciseprefixcache
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,7 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
 	rhplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixmetrics"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/tokenizer"
@@ -55,6 +57,10 @@ const PluginType = "precise-prefix-cache-producer"
 
 // PluginConfig configures the precise-prefix-cache-producer.
 type PluginConfig struct {
+	// KVEventsSourceRef names the kv-events-source whose decoded batches this
+	// producer indexes in place of its own subscriptions. kvEventsConfig is
+	// rejected alongside it: the source owns the transport.
+	KVEventsSourceRef    string                        `json:"kvEventsSourceRef,omitempty" pluginRef:""`
 	TokenProcessorConfig *kvblock.TokenProcessorConfig `json:"tokenProcessorConfig"`
 	IndexerConfig        *kvcache.Config               `json:"indexerConfig"`
 	KVEventsConfig       *kvevents.Config              `json:"kvEventsConfig"`
@@ -116,11 +122,14 @@ type Producer struct {
 	// Plugin-lifetime, not request-scoped: SubscriberManager binds each
 	// subscriber's goroutine to the ctx passed at registration.
 	subscriberCtx context.Context
+	// sharedEvents is the index consumer bound to the kv-events-source named
+	// by kvEventsSourceRef; nil when the producer subscribes on its own.
+	sharedEvents *kvevents.Pool
 }
 
-// PluginFactory parses the raw plugin configuration and returns a configured
-// Producer.
-func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+// ConfigParser decodes the plugin parameters over their defaults. The loader
+// uses it to order this producer after the plugin kvEventsSourceRef names.
+func ConfigParser(rawParameters *json.Decoder, _ plugin.Handle) (any, error) {
 	indexerConfig, err := kvcache.NewDefaultConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize indexer config: %w", err)
@@ -130,22 +139,63 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		IndexerConfig:  indexerConfig,
 		KVEventsConfig: kvevents.DefaultConfig(),
 	}
-
-	if rawParameters != nil {
-		if err := rawParameters.Decode(&parameters); err != nil {
-			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PluginType, err)
-		}
+	if rawParameters == nil {
+		return parameters, nil
 	}
 
+	var raw json.RawMessage
+	if err := rawParameters.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("failed to parse %s plugin config: %w", PluginType, err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&parameters); err != nil {
+		return nil, fmt.Errorf("failed to parse %s plugin config: %w", PluginType, err)
+	}
 	if parameters.IndexerConfig == nil {
 		return nil, errors.New("indexerConfig is required")
+	}
+	if parameters.KVEventsSourceRef != "" {
+		var fields struct {
+			KVEventsConfig json.RawMessage `json:"kvEventsConfig"`
+		}
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return nil, fmt.Errorf("failed to parse %s plugin config: %w", PluginType, err)
+		}
+		if len(fields.KVEventsConfig) > 0 {
+			return nil, fmt.Errorf("kvEventsConfig and kvEventsSourceRef are mutually exclusive: %s %q owns the subscriptions",
+				srckvevents.PluginType, parameters.KVEventsSourceRef)
+		}
+	}
+	return parameters, nil
+}
+
+// PluginFactory parses the raw plugin configuration and returns a configured
+// Producer. With kvEventsSourceRef the producer's index consumes the named
+// source's decoded batches and opens no subscribers of its own.
+func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
+	parsed, err := ConfigParser(rawParameters, handle)
+	if err != nil {
+		return nil, err
+	}
+	parameters := parsed.(PluginConfig)
+
+	var source *srckvevents.Source
+	if parameters.KVEventsSourceRef != "" {
+		if source, err = plugin.PluginByType[*srckvevents.Source](handle, parameters.KVEventsSourceRef); err != nil {
+			return nil, fmt.Errorf("failed to create %s plugin: kvEventsSourceRef: %w", PluginType, err)
+		}
 	}
 
 	p, err := New(handle.Context(), name, parameters)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create %s plugin: %w", PluginType, err)
 	}
-
+	if source != nil {
+		if err := source.AddConsumer(p.TypedName(), p.sharedEvents); err != nil {
+			return nil, fmt.Errorf("failed to create %s plugin: %w", PluginType, err)
+		}
+	}
 	return p, nil
 }
 
@@ -183,26 +233,34 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 	}
 	go indexer.Run(ctx)
 
-	adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
-	}
-	pool, err := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
-	}
-	indexer.SetCacheFormats(pool.CacheFormats())
-	pool.Start(ctx)
+	shared := config.KVEventsSourceRef != ""
+	var sharedEvents *kvevents.Pool
+	var subscribersManager *kvevents.SubscriberManager
+	if shared {
+		sharedEvents = kvevents.NewIndexConsumer(indexer.KVBlockIndex(), tokenProcessor)
+		indexer.SetCacheFormats(sharedEvents.CacheFormats())
+	} else {
+		adapter, err := engineadapter.NewAdapter(config.KVEventsConfig.EngineType)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create KV-events engine adapter: %w", err)
+		}
+		pool, err := kvevents.NewPool(config.KVEventsConfig, indexer.KVBlockIndex(), tokenProcessor, adapter)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create KV-events pool: %w", err)
+		}
+		indexer.SetCacheFormats(pool.CacheFormats())
+		pool.Start(ctx)
 
-	subscribersManager := kvevents.NewSubscriberManager(pool)
-	if config.KVEventsConfig.ZMQEndpoint != "" {
-		log.FromContext(ctx).Info("kvEventsConfig.zmqEndpoint is deprecated: the bound socket takes the pod identity from the topic; "+
-			"drop zmqEndpoint and have each engine bind its own PUB socket, which the EPP subscribes to by default",
-			"zmqEndpoint", config.KVEventsConfig.ZMQEndpoint,
-			"allowUntrustedPublishers", config.KVEventsConfig.AllowUntrustedPublishers)
-		if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
-			config.KVEventsConfig.ZMQEndpoint, "", "", config.KVEventsConfig.TopicFilter, false); err != nil {
-			return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
+		subscribersManager = kvevents.NewSubscriberManager(pool)
+		if config.KVEventsConfig.ZMQEndpoint != "" {
+			log.FromContext(ctx).Info("kvEventsConfig.zmqEndpoint is deprecated: the bound socket takes the pod identity from the topic; "+
+				"drop zmqEndpoint and have each engine bind its own PUB socket, which the EPP subscribes to by default",
+				"zmqEndpoint", config.KVEventsConfig.ZMQEndpoint,
+				"allowUntrustedPublishers", config.KVEventsConfig.AllowUntrustedPublishers)
+			if err := subscribersManager.EnsureSubscriber(ctx, "local-subscriber", "",
+				config.KVEventsConfig.ZMQEndpoint, "", "", config.KVEventsConfig.TopicFilter, false); err != nil {
+				return nil, fmt.Errorf("failed to create local subscriber for global socket mode: %w", err)
+			}
 		}
 	}
 
@@ -213,10 +271,10 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 
 	prefixmetrics.Register()
 
-	return &Producer{
+	producer := &Producer{
 		typedName:          plugin.TypedName{Type: PluginType, Name: name},
 		kvCacheIndexer:     indexer,
-		subscribersManager: subscribersManager,
+		sharedEvents:       sharedEvents,
 		kvEventsConfig:     config.KVEventsConfig,
 		podSelector:        podSelector,
 		dk:                 attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(name),
@@ -227,7 +285,11 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		speculativeEnabled: config.SpeculativeIndexing,
 		blockSizeTokens:    tokenProcessor.BlockSize(),
 		subscriberCtx:      ctx,
-	}, nil
+	}
+	if subscribersManager != nil {
+		producer.subscribersManager = subscribersManager
+	}
+	return producer, nil
 }
 
 // TypedName returns the plugin's registered type and name.

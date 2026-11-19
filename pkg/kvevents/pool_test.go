@@ -155,7 +155,7 @@ func TestBigramStoreValidationAndFormatLifecycle(t *testing.T) {
 			Tokens: []uint32{11, 22}, LookaheadToken: &lookahead,
 			BlockSize: tc.blockSize, BlockHashes: tc.hashes,
 		}
-		ok, reason := blockStoredEventDigestible(event, 1)
+		ok, reason := blockStoredEventDigestible(event, event.KVCacheSpecKind, 1)
 		require.Equal(t, tc.wantReason == "", ok)
 		require.Equal(t, tc.wantReason, reason)
 	}
