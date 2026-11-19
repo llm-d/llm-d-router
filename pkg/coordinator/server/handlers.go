@@ -17,7 +17,6 @@ limitations under the License.
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,7 +30,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -141,19 +139,11 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	if m, ok := parsed["model"].(string); ok && m != "" {
 		model = m
 	}
-	if v, present := parsed[reqcommon.FieldStream]; present {
-		b, isBool := v.(bool)
-		if !isBool {
-			// A non-bool stream is re-marshalled into the worker body unchanged,
-			// and a worker that coerces it to true would stream while the
-			// coordinator ran the request as non-streaming (write deadline kept,
-			// whole-document usage rewrite). Reject it like the other field
-			// parse failures.
-			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
-			rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "stream must be a boolean")
-			return
-		}
-		stream = b
+	stream, err = reqcommon.StreamRequested(parsed)
+	if err != nil {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, err.Error())
+		return
 	}
 	if model != inflightModel {
 		coordmetrics.DecRequestRunning(inflightModel)
@@ -200,6 +190,27 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		ParseDuration:    parseDuration,
 	}
 
+	if apiType == reqcommon.APITypeVLLMGenerate && s.workerProtocol == config.WorkerProtocolGRPC {
+		converted, convErr := prepareVLLMGenerateFromHTTP(parsed, requestID)
+		if convErr != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+			rejectInference(serverLog, cw, apiType, http.StatusBadRequest, convErr.Error())
+			return
+		}
+		if converted.droppedTransferParams {
+			clientKVTransferParams = true
+		}
+		reqCtx.GRPC = &pipeline.VLLMGRPCRequest{
+			Req: converted.req,
+			HTTP: &pipeline.HTTPGenerateReply{
+				IncludeUsage:    converted.includeUsage,
+				ReturnTokenIDs:  converted.returnTokenIDs,
+				OutputMode:      converted.outputMode,
+				ClientRequestID: converted.clientRequestID,
+			},
+		}
+	}
+
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
 	ctx = tracing.LoggerWithSpanContext(ctx, trace.SpanFromContext(ctx))
@@ -215,16 +226,6 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)
-
-	if stream {
-		// A streaming completion can outlast the server WriteTimeout, which
-		// would cut the response mid-stream with a TCP reset and no app-layer
-		// error. Clear the write deadline for streaming only; non-streaming
-		// requests keep it as a slow-client guard.
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-			logger.V(logutil.DEFAULT).Info("could not clear write deadline for streaming response", "error", err)
-		}
-	}
 
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		if pipeline.IsClientCancellation(ctx, err) {
@@ -249,6 +250,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 // inferenceRoute maps an inbound path onto the bounded route label used by
 // orchestration_overhead_seconds.
 func inferenceRoute(path string) string {
+	if gr, ok := lookupGRPCRoute(path); ok {
+		return gr.route
+	}
 	switch path {
 	case reqcommon.PathChatCompletions:
 		return coordmetrics.RouteChatCompletions
@@ -258,7 +262,7 @@ func inferenceRoute(path string) string {
 		return coordmetrics.RouteResponses
 	case reqcommon.PathMessages:
 		return coordmetrics.RouteMessages
-	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate, sglangapiv1.SglangService_Generate_FullMethodName:
+	case reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate:
 		return coordmetrics.RouteGenerate
 	default:
 		return coordmetrics.RouteUnknown
@@ -266,12 +270,9 @@ func inferenceRoute(path string) string {
 }
 
 // inspectedRequestFields lists the top-level request fields the handler and
-// the pipeline steps read as Go values. decodeRequestBody decodes only these;
-// every other field stays a json.RawMessage so its bytes are forwarded
-// unchanged. encoding/json sorts map keys at every depth on Marshal, which
-// would reorder free-form content such as tools[].function.parameters that
-// chat templates render into the prompt verbatim. The steps that read messages
-// or input decode them on use (promptItems).
+// the pipeline steps read as Go values; see reqcommon.DecodeRequestBody for why
+// every other field stays raw. The steps that read messages or input decode
+// them on use (promptItems).
 var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldModel:          {},
 	reqcommon.FieldStream:         {},
@@ -283,26 +284,7 @@ var inspectedRequestFields = map[string]struct{}{
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, err
-	}
-	if fields == nil {
-		return nil, errors.New("request body is not a JSON object")
-	}
-	parsed := make(map[string]any, len(fields))
-	for k, v := range fields {
-		if _, ok := inspectedRequestFields[k]; !ok {
-			parsed[k] = v
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		parsed[k] = decoded
-	}
-	return parsed, nil
+	return reqcommon.DecodeRequestBody(raw, inspectedRequestFields)
 }
 
 // classifyPipelineError maps a pipeline error to a client-facing status and
@@ -324,6 +306,15 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if s.draining.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("draining"))
+		return
+	}
+	s.handleHealth(w, r)
 }
 
 // rejectInference answers a rejected inference request with the error envelope

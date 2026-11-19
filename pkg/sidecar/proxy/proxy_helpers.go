@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -138,8 +139,11 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	}
 	s.logger.Info("server TLS", "tls", s.config.SecureServing, "cert_path", s.config.CertPath)
 
-	// Setup graceful termination (not strictly needed for sidecars)
+	// Serve returns as soon as Shutdown starts, so startHTTP waits on
+	// shutdownDone to keep the process alive while in-flight requests finish.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		s.logger.Info("shutting down")
 
@@ -163,6 +167,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		}
 	}
 
+	<-shutdownDone
 	return nil
 }
 
@@ -184,6 +189,10 @@ func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureS
 		case errors.As(context.Cause(r.Context()), &prefillErr):
 			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
 				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			if isVLLMGRPCRequest(r) {
+				s.relayVLLMPrefillFailure(res, r, prefillErr.response, vllmPrefillOutcome{relayError: true})
+				break
+			}
 			// A key with http.TrailerPrefix is sent as a trailer whether it is
 			// set before or after WriteHeader, so a buffered gRPC status relays
 			// as the HTTP/2 trailer the backend sent.
@@ -223,13 +232,13 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 }
 
 // inspectedRequestFields lists the top-level request fields the sidecar reads
-// as Go values. decodeRequestBody decodes only these; every other field stays
-// a json.RawMessage so its bytes are forwarded unchanged. encoding/json sorts
-// map keys at every depth on Marshal, which would reorder free-form content
-// such as tools[].function.parameters that chat templates render into the
-// prompt verbatim.
+// as Go values; see reqcommon.DecodeRequestBody for why every other field stays
+// raw.
 var inspectedRequestFields = map[string]struct{}{
-	reqcommon.FieldKVTransferParams:     {},
+	// kv_transfer_params is deliberately NOT decoded as Go values: the only
+	// reader, clientPromptTokenIDs, handles the raw json.RawMessage form, and
+	// decoding it would materialize a long prompt_token_ids array (one boxed
+	// value per token) only to serialize it right back.
 	reqcommon.FieldECTransferParams:     {},
 	reqcommon.FieldMaxTokens:            {},
 	reqcommon.FieldMaxCompletionTokens:  {},
@@ -268,26 +277,7 @@ func requestMessages(req map[string]any) ([]json.RawMessage, error) {
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, err
-	}
-	if fields == nil {
-		return nil, errors.New("request body is not a JSON object")
-	}
-	parsed := make(map[string]any, len(fields))
-	for k, v := range fields {
-		if _, ok := inspectedRequestFields[k]; !ok {
-			parsed[k] = v
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		parsed[k] = decoded
-	}
-	return parsed, nil
+	return reqcommon.DecodeRequestBody(raw, inspectedRequestFields)
 }
 
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
@@ -295,6 +285,13 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
 		logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+			logger.Error(writeErr, "failed to send error response to client")
+		}
+		return nil, nil, false
+	}
+	if _, err := reqcommon.StreamRequested(parsed); err != nil {
+		logger.V(logging.DEBUG).Info("invalid request body", "error", err)
 		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
 			logger.Error(writeErr, "failed to send error response to client")
 		}
@@ -367,11 +364,12 @@ func WriteAll(w io.Writer, b []byte) {
 // segment, so the two can classify such a request differently. The redirect
 // brings the client back through EPP with the clean path, as ServeMux does for
 // repeated slashes and dot segments. Only POST is served on these paths, so
-// other methods pass through.
-func redirectEncodedInferencePath(next http.Handler) http.Handler {
+// other methods pass through. grpcPaths lists the gRPC method paths that the
+// sidecar serves as inference routes.
+func redirectEncodedInferencePath(next http.Handler, grpcPaths ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.RawPath != "" {
-			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c {
+			if c := path.Clean(r.URL.Path); reqcommon.DetectAPIType(c).Path() == c || slices.Contains(grpcPaths, c) {
 				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
 				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
 				return

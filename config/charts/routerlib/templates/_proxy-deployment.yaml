@@ -1,8 +1,7 @@
 {{- define "llm-d-epp.proxy-deployment" -}}
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
 {{- $proxyType := include "llm-d-router.proxyType" . | trim -}}
-{{- $proxyConfigMap := index $proxy "configMap" | default dict -}}
-{{- $proxyConfigMapName := index $proxyConfigMap "name" | default "" -}}
+{{- $proxyConfigMapName := include "llm-d-router.proxyConfigMapName" . -}}
 {{- if and $proxy.enabled (eq (include "llm-d-router.proxyMode" .) "service") -}}
 apiVersion: apps/v1
 kind: Deployment

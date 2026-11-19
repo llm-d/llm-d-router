@@ -31,7 +31,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 const (
@@ -111,7 +111,9 @@ func (s *Server) runConcurrentPD(
 
 	// Aggregate before starting the worker so reporting does not wait for prefill.
 	toolFields.compareDispatchedForSpan(prefillBody, prefillSpan)
+	prefillDone := make(chan struct{})
 	go func() {
+		defer close(prefillDone)
 		defer cancelPrefill()
 		defer prefillSpan.End()
 		defer func() {
@@ -120,19 +122,21 @@ func (s *Server) runConcurrentPD(
 			}
 		}()
 		pw := &bufferedResponseWriter{}
-		prefillHandler.ServeHTTP(pw, prefillReq)
+		prefillErr := servePrefill(prefillHandler, pw, prefillReq)
 		prefillDuration := time.Since(prefillStart)
 		prefillSpan.SetAttributes(
 			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
 			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 		)
 		// A prefill the sidecar cancelled is not a prefill error.
-		if (isHTTPError(pw.statusCode) || grpcframe.HasErrorStatus(pw.headers)) && prefillCtx.Err() == nil {
-			observeStageError(r.Context(), metrics.StagePrefill)
-			prefillSpan.SetStatus(codes.Error, "prefill request failed")
-			cancelDecode(&prefillFailedError{response: pw})
+		if prefillCtx.Err() == nil {
+			if failed, relay := s.concurrentPrefillFailed(prefillReq, pw, prefillErr); failed {
+				observeStageError(r.Context(), routing.StagePrefill)
+				prefillSpan.SetStatus(codes.Error, "prefill request failed")
+				cancelDecode(&prefillFailedError{response: relay})
+			}
 		}
-		observeStageDuration(r.Context(), metrics.StagePrefill, prefillDuration)
+		observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
 		log.FromContext(prefillCtx).V(logging.DEBUG).Info("concurrent-dispatch prefill request completed", "connector", connector, "status", pw.statusCode)
 	}()
 
@@ -156,13 +160,12 @@ func (s *Server) runConcurrentPD(
 	decodeReturned := false
 	defer recordDecodeAbort(r.Context(), &decodeReturned, decodeStart)
 	defer func() {
-		if prefillCtx.Err() != nil {
-			return
-		}
-		// The request is over once decode has failed; a prefill still running
-		// would compute KV nobody consumes.
-		if !decodeReturned || decodeFailed() {
+		if prefillCtx.Err() != nil || !decodeReturned || decodeFailed() {
+			// The request is over once decode has failed; a prefill still running
+			// would compute KV nobody consumes. Wait for prefill to stop, so the
+			// request's summary line includes the prefill stage.
 			cancelPrefill()
+			<-prefillDone
 			return
 		}
 		// Prefill has no deadline of its own; one that never responds would
@@ -180,9 +183,9 @@ func (s *Server) runConcurrentPD(
 	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
-	observeStageDuration(r.Context(), metrics.StageDecode, decodeDuration)
+	observeStageDuration(r.Context(), routing.StageDecode, decodeDuration)
 	if decodeFailed() {
-		observeStageError(r.Context(), metrics.StageDecode)
+		observeStageError(r.Context(), routing.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
 	decodeSpan.SetAttributes(
@@ -218,6 +221,54 @@ type prefillFailedError struct {
 	response *bufferedResponseWriter
 }
 
+func (s *Server) concurrentPrefillFailed(prefillReq *http.Request, pw *bufferedResponseWriter, prefillErr error) (bool, *bufferedResponseWriter) {
+	if isHTTPError(pw.statusCode) || grpcframe.HasErrorStatus(pw.headers) {
+		return true, pw
+	}
+	if !isVLLMGRPCRequest(prefillReq) {
+		return false, nil
+	}
+	if _, err := extractVLLMPrefillFinishInfo(pw, prefillErr); err != nil {
+		log.FromContext(prefillReq.Context()).Error(err, "concurrent-dispatch gRPC prefill stream incomplete")
+		synth := &bufferedResponseWriter{}
+		_ = errorBadGateway(synth, prefillReq)
+		return true, synth
+	}
+	return false, nil
+}
+
+// recordSequentialPDTimingAttrs records end-to-end sequential P/D timing
+// attributes on decodeSpan. True TTFT measures gateway request start to decode
+// start, including scheduling, prefill, and coordination overhead.
+func recordSequentialPDTimingAttrs(
+	ctx context.Context,
+	decodeSpan trace.Span,
+	prefillStart time.Time,
+	prefillDuration time.Duration,
+	decodeStart time.Time,
+	decodeDuration time.Duration,
+) {
+	if !decodeSpan.SpanContext().IsValid() {
+		return
+	}
+	var totalDuration, trueTTFT time.Duration
+	if requestStartValue := ctx.Value(requestStartTimeKey); requestStartValue != nil {
+		if requestStart, ok := requestStartValue.(time.Time); ok {
+			totalDuration = time.Since(requestStart)
+			trueTTFT = decodeStart.Sub(requestStart)
+		}
+	}
+	coordinatorOverhead := decodeStart.Sub(prefillStart.Add(prefillDuration))
+	decodeSpan.SetAttributes(
+		semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
+		semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
+		semconv.LLMDPDProxyPrefillDurationMsSummary(float64(prefillDuration.Milliseconds())),
+		semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),
+		semconv.LLMDPDProxyCoordinatorOverheadMs(float64(coordinatorOverhead.Milliseconds())),
+		semconv.LLMDPDProxyConcurrentPD(false),
+	)
+}
+
 func (e *prefillFailedError) Error() string {
 	if grpcframe.HasErrorStatus(e.response.headers) {
 		code, _ := grpcframe.Status(e.response.headers)
@@ -233,7 +284,7 @@ func (e *prefillFailedError) Error() string {
 // dispatch. Deferred without recover, so the panic still propagates.
 func recordDecodeAbort(ctx context.Context, returned *bool, start time.Time) {
 	if !*returned {
-		observeStageDuration(ctx, metrics.StageDecode, time.Since(start))
-		observeStageError(ctx, metrics.StageDecode)
+		observeStageDuration(ctx, routing.StageDecode, time.Since(start))
+		observeStageError(ctx, routing.StageDecode)
 	}
 }

@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -35,6 +36,33 @@ func TestBoundedLabel(t *testing.T) {
 	require.Equal(t, "a", b.Bound("a"), "already-admitted value still returns itself after cap")
 	require.Equal(t, OverflowValue, b.Bound("d"), "further unseen values keep collapsing")
 	require.Equal(t, "", b.Bound(""), "empty value passes through without consuming a slot")
+}
+
+// Request headers can carry bytes that are not valid UTF-8, and Prometheus
+// panics on such a label value. Oversized values must not be retained for the
+// process lifetime either. Both fold to the overflow value without consuming a
+// cap slot.
+func TestBoundedLabelRejectsInvalidAndOversizedValues(t *testing.T) {
+	b := NewBoundedLabel(2)
+
+	invalid := "model\xff"
+	oversized := strings.Repeat("m", MaxLabelValueLength+1)
+	atLimit := strings.Repeat("m", MaxLabelValueLength)
+
+	got, overflow := b.BoundWithOverflow(invalid)
+	require.Equal(t, OverflowValue, got, "non-UTF-8 value folds to overflow")
+	require.True(t, overflow)
+
+	got, overflow = b.BoundWithOverflow(oversized)
+	require.Equal(t, OverflowValue, got, "value longer than MaxLabelValueLength folds to overflow")
+	require.True(t, overflow)
+
+	require.Equal(t, atLimit, b.Bound(atLimit), "value at MaxLabelValueLength is admitted")
+	require.Equal(t, "a", b.Bound("a"), "rejected values did not consume a cap slot")
+	require.Equal(t, OverflowValue, b.Bound("c"), "cap is now full")
+
+	b.Pin(invalid)
+	require.Equal(t, OverflowValue, b.Bound(invalid), "pinning does not admit a non-UTF-8 value")
 }
 
 // Pinned names model operator-configured values (for example EPP's

@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -281,6 +282,38 @@ func TestSessionAffinity_ResponseHeader(t *testing.T) {
 
 			if diff := cmp.Diff(test.wantHeaders, test.initialResponse.Headers); diff != "" {
 				t.Errorf("Unexpected output (-want +got): %v", diff)
+			}
+		})
+	}
+}
+
+func TestSessionAffinity_FactoryProfileName(t *testing.T) {
+	tests := []struct {
+		name      string
+		profiles  sets.Set[string]
+		params    string
+		expectErr bool
+	}{
+		{name: "defined profile", profiles: sets.New("prefill", "decode"), params: `{"profileName":"prefill"}`},
+		{name: "defined profile with session_id", profiles: sets.New("prefill", "decode"), params: `{"strategy":"session_id","profileName":"prefill"}`},
+		{name: "undefined profile rejected", profiles: sets.New("prefill", "decode"), params: `{"profileName":"prefil"}`, expectErr: true},
+		{name: "undefined profile with session_id rejected", profiles: sets.New("prefill", "decode"), params: `{"strategy":"session_id","profileName":"prefil"}`, expectErr: true},
+		{name: "profileName omitted", profiles: sets.New("prefill", "decode"), params: `{}`},
+		{name: "profiles unknown to the handle", params: `{"profileName":"prefil"}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handle := utils.NewTestHandleWithSchedulingProfiles(utils.NewTestContext(t), test.profiles)
+			_, err := sessionaffinity.Factory("test", plugin.StrictDecoder(json.RawMessage(test.params)), handle)
+			if test.expectErr {
+				if err == nil || !strings.Contains(err.Error(), "scheduling profile 'prefil' is not defined") {
+					t.Fatalf("expected undefined profile error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

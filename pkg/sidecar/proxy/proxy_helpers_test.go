@@ -114,6 +114,52 @@ var _ = Describe("readJSONBody", func() {
 		Expect(w.Code).To(Equal(http.StatusOK))
 	})
 
+	DescribeTable("rejects a non-boolean stream with an OpenAI-shaped 400",
+		func(stream string) {
+			w := httptest.NewRecorder()
+
+			raw, parsed, ok := proxy.readJSONBody(postBody(`{"model":"m","stream":`+stream+`}`), w)
+
+			Expect(ok).To(BeFalse())
+			Expect(raw).To(BeNil())
+			Expect(parsed).To(BeNil())
+			Expect(w.Code).To(Equal(http.StatusBadRequest))
+			Expect(expectErrorEnvelope(w.Body.Bytes())).To(Equal("stream must be a boolean"))
+		},
+		Entry("string true", `"true"`),
+		Entry("string false", `"false"`),
+		Entry("number", `1`),
+		Entry("object", `{}`),
+		Entry("array", `[]`),
+	)
+
+	It("accepts a null stream without changing the body", func() {
+		w := httptest.NewRecorder()
+		body := `{"model":"m","stream":null}`
+
+		raw, parsed, ok := proxy.readJSONBody(postBody(body), w)
+
+		Expect(ok).To(BeTrue())
+		Expect(string(raw)).To(Equal(body))
+		Expect(parsed).To(HaveKeyWithValue(reqcommon.FieldStream, BeNil()))
+		Expect(w.Code).To(Equal(http.StatusOK))
+	})
+
+	DescribeTable("preserves a boolean stream",
+		func(body string, stream bool) {
+			w := httptest.NewRecorder()
+
+			raw, parsed, ok := proxy.readJSONBody(postBody(body), w)
+
+			Expect(ok).To(BeTrue())
+			Expect(string(raw)).To(Equal(body))
+			Expect(parsed).To(HaveKeyWithValue(reqcommon.FieldStream, stream))
+			Expect(w.Code).To(Equal(http.StatusOK))
+		},
+		Entry("true", `{"model":"m","stream":true}`, true),
+		Entry("false", `{"model":"m","stream":false}`, false),
+	)
+
 	It("answers a null body with an OpenAI-shaped 400", func() {
 		w := httptest.NewRecorder()
 
@@ -198,6 +244,9 @@ var _ = Describe("readJSONBody", func() {
 		Entry("read failure", func() *http.Request {
 			return httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, errReader{})
 		}, "read failed"),
+		Entry("non-boolean stream", func() *http.Request {
+			return postBody(`{"stream":"true"}`)
+		}, "stream must be a boolean"),
 	)
 
 	It("does not log the refusal reason below debug level", func() {

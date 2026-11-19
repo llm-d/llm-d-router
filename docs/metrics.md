@@ -110,6 +110,7 @@ identity, or their composition `<tenant>/<session>` when `requestHandler.compose
 enabled and a request carries both, has a cap that defaults to 1000 distinct values. Configure it with
 `--fairness-id-metric-label-limit`; setting it to 0 collapses every `fairness_id` to `other`. Caps
 apply over the lifetime of the process. Once a cap is reached, new values are reported as `other`.
+A value longer than 256 bytes, or one that is not valid UTF-8, is always reported as `other`.
 `default-flow`, the ID given to requests that have none, keeps its own label unless the limit is 0.
 These bounds apply whether or not the `flowControl` feature gate is enabled. When Flow Control is
 enabled, its series for a `fairness_id` are removed when the corresponding flow is garbage collected.
@@ -125,7 +126,7 @@ lifecycle handled by the router.
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests processed after successful parsing and scheduling. |
-| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. A model server response with a 5xx status is counted with `error_code="ModelServerError"`, and one with a 4xx status with `error_code="ModelServerClientError"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_outcome_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `outcome`, `reason` | Requests by how they ended. See [Request outcomes](#request-outcomes). |
 | `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | End-to-end request latency on response completion. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Request body size. |
@@ -166,6 +167,18 @@ Messages streaming events. Input tokens include uncached and cached prompt token
 `request_cached_tokens` records the cache-read subset reported by the model server.
 Interrupted streams contribute no completed-request token observations. The running-request
 gauge releases each request when it completes or its ext_proc stream closes.
+
+`llm_d_epp_request_input_tokens`, `llm_d_epp_request_output_tokens`,
+`llm_d_epp_request_cached_tokens`, `llm_d_epp_request_ntpot_seconds`,
+`llm_d_epp_request_streaming_tpot_seconds` and the `latency-reporter` plugin's
+`llm_d_epp_latency_tpot_seconds` take their token counts from the `usage` block of the response.
+vLLM includes `usage` in a chat completions or completions stream only when the request sets
+`stream_options.include_usage` or the server runs with `--enable-force-include-usage`. A stream
+without it adds no observation to these metrics, but `llm_d_epp_request_total` and
+`llm_d_epp_request_ttft_seconds` still count it. Run vLLM with `--enable-force-include-usage`
+when these metrics must cover every stream. Clients then receive `usage` in every chat
+completions and completions stream, including a final chunk with an empty `choices` list.
+Messages and Responses streams carry `usage` without either setting.
 
 Per-surface p95 latency uses the histogram buckets:
 
@@ -227,14 +240,14 @@ whose body reached the EPP and whose ending the EPP observes.
 
 | `outcome` | Meaning | `reason` |
 |---|---|---|
-| `completed` | The model server answered with status 200 and the response finished. | empty |
+| `completed` | The model server answered with a status below 400 and the response finished. | empty |
 | `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated` or `rejected-flow-limit`. |
 | `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
 | `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
-| `failed` | Any other error, before or after dispatch, including a response status other than 200 or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
+| `failed` | Any other error, before or after dispatch, including a 4xx or 5xx response status or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
 
 When more than one applies, `evicted` wins over the error that ends the stream, and an error or a
-non-200 status wins over `cancelled`, unless the error only says the client left while queued.
+4xx or 5xx status wins over `cancelled`, unless the error only says the client left while queued.
 
 Routes that skip response processing, such as `/render`, are not counted because the EPP stops
 observing them once they are routed. `llm_d_epp_request_total` still counts them, but it does not
@@ -270,6 +283,9 @@ sum by (fairness_id) (rate(llm_d_epp_request_output_tokens_sum[5m]))
 sum by (fairness_id, outcome) (rate(llm_d_epp_request_outcome_total[5m]))
 ```
 
+The recording rule `llm_d:epp_request_running:ratio` (see
+[Fairness ID resolution](#fairness-id-resolution)) records the share per pool.
+
 #### Exemplars
 
 Metrics whose notes say they carry a trace exemplar attach the request's trace context
@@ -281,13 +297,18 @@ in the error rate, can be opened as the trace behind it.
 | `trace_id` | The request's trace is sampled. |
 | `span_id` | The observing component's tracing is on. With it off, only `trace_id` is attached. |
 
+On the P/D sidecar's stage durations, `span_id` names the sidecar's `forward_request` span,
+the parent of its `prefill` and `decode` spans, since not every connector opens a span per
+stage. A Mooncake or SGLang prefill that finishes after `forward_request` has ended carries
+only `trace_id`.
+
 Two things are needed to see them:
 
 - **Prometheus must store exemplars.** They are dropped unless it runs with
   `--enable-feature=exemplar-storage`.
 - **The scrape must use OpenMetrics.** Exemplars have no representation in the classic
-  text format. Prometheus requests OpenMetrics by default, so its scrapes of the EPP
-  switch to OpenMetrics with no scrape config change. No series is renamed, since every
+  text format. Prometheus requests OpenMetrics by default, so its scrapes switch to
+  OpenMetrics with no scrape config change. No series is renamed, since every
   counter already ends in `_total`. On Prometheus 2.x, whole-number histogram bounds are
   ingested as `le="1.0"` rather than `le="1"` (Prometheus 3 normalizes both to `1.0`),
   which only matters to queries matching `le` exactly. Scrapers that do not ask for
@@ -449,14 +470,43 @@ decisions.
 | `llm_d_epp_info` | Gauge | `commit`, `build_ref` | Build info. |
 | `llm_d_epp_model_rewrite_decisions_total` | Counter | `model_rewrite_name`, `model_name`, `target_model` | Model-rewrite decisions. |
 
-### Data layer errors
+### Data layer
 
-These metrics are owned by the EPP data-layer runtime.
+These metrics are owned by the EPP data-layer runtime. `source_type` is the data-source plugin
+type; no endpoint, pod or plugin-instance labels are emitted.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Data-source poll failures. |
+| `llm_d_epp_datalayer_polls_total` | Counter | `source_type`, `outcome` | Polls the collector ran, by outcome. `outcome` is `success`, `error` or `timeout`. |
+| `llm_d_epp_datalayer_poll_duration_seconds` | Histogram | `source_type` | Wall-clock time of each `Dispatch` call, from the call to its return. The histogram uses cumulative buckets with finite upper bounds from 0.5 ms to 2.5 s. The per-poll deadline is 1 s. |
+| `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Polls whose `Dispatch` returned an error. |
 | `llm_d_epp_datalayer_extract_errors_total` | Counter | `source_type`, `extractor_type` | Extractor failures. |
+
+A poll is one `Dispatch` call on a polling source for one endpoint. Ticks a source skips because
+of its configured interval are not polls and are not counted. A poll interrupted by collector
+shutdown (the parent context is cancelled) is dropped from `polls_total` and
+`poll_duration_seconds` and leaves `poll_errors_total` and the endpoint's `PollStatus` untouched.
+
+`outcome` is decided after `Dispatch` returns:
+
+- `timeout`: the per-poll deadline expired, whatever `Dispatch` returned. A source that returns
+  nil after its context expired (for example, a source that stops running extractors once the
+  context is done) counts here.
+- `error`: the deadline did not expire and `Dispatch` returned a non-nil error, including a
+  `context.Canceled` the source produced itself.
+- `success`: the deadline did not expire and `Dispatch` returned nil. Extractors run inside
+  `Dispatch` may still have failed; those failures are in `extract_errors_total`.
+
+`poll_errors_total` and `PollStatus` follow the returned error alone: a `timeout` with a nil
+return increments `polls_total` but not `poll_errors_total`, and does not start a failure run.
+`poll_errors_total` is therefore not `error` plus `timeout` in general. For poll-level failures
+(the source could not produce data, or ran past its deadline) alert on
+`polls_total{outcome!="success"}`. A poll whose extractors failed still counts as `success`,
+because `Dispatch` returned nil; those refresh failures are visible only in `extract_errors_total`.
+
+All three `outcome` series and the duration histogram are created at zero when a collector
+starts for a source type, so a first `error` or `timeout` after a healthy run is a 0 to 1
+increment that `rate()` and `increase()` can see, not a series that first appears at `1`.
 
 ### Endpoint health
 
@@ -495,6 +545,7 @@ match data but is not instrumented here. Requests that reach no endpoint are not
 | `llm_d_epp_prefix_best_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the endpoints the scheduler selected from. |
 | `llm_d_epp_prefix_best_available_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the request's candidate endpoints before filtering. |
 | `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Prompt tokens the predictions were measured against. |
+| `llm_d_epp_prefix_gpu_miss_tokens_total` | Counter | `plugin_name`, `plugin_type`, `endpoint_role`, `reason` | Prompt tokens the chosen endpoint does not hold in GPU memory, by where the index holds them. Precise prefix-cache producer only. |
 | `llm_d_epp_prefix_mm_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Multimodal prompt tokens predicted to hit the chosen endpoint's prefix cache. |
 | `llm_d_epp_prefix_mm_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Multimodal prompt tokens the multimodal prediction was measured against. |
 
@@ -547,6 +598,17 @@ filter may be right to reduce when it is shedding load away from a saturated end
 prefix. A profile that reports no scored candidates leaves only the chosen endpoint to go on, so both
 maxima fall back to the prediction for it and the ratios read as 1.
 
+`llm_d_epp_prefix_gpu_miss_tokens_total` splits the prompt tokens the chosen endpoint lacks in GPU
+memory by where the index holds them, so the reasons of a request sum to its prompt minus its GPU
+hit. `filtered` tokens were in the GPU memory of an endpoint a filter removed, and `not_picked` tokens
+were in the GPU memory of an endpoint that reached the picker and was not chosen. These two are
+placement. `lower_tier` tokens were in no endpoint's GPU memory and in a lower tier of the chosen
+endpoint, which is eviction the engine restores from. `peer_lower_tier` tokens were only in a lower
+tier of another endpoint, and `uncached` tokens were confirmed nowhere, which covers the new part of
+a prompt and prefixes every tier has evicted. Read `filtered` only for a producer whose index covers
+one role, because a decode pod holding the prefix in a shared index counts as removed by the role
+filter.
+
 Comparing these ratios is what the prediction metrics are for, subject to the limits below.
 
 The request cohorts differ. A prediction is recorded before the request is forwarded, while the
@@ -554,10 +616,13 @@ request token metrics come from the model server's response, so a request that f
 usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
 two pairs.
 
-The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-storage`, `sglang`,
-`mooncake`, and `offloading` connectors return the decoder's usage unchanged, so for a disaggregated
-request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
-describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.
+The `prefill` attribution matches the `nixlv2` and `offloading` KV connectors when the prefill
+response carries a usage block; without one, the decode pod's count is returned. Under
+`offloading`, a decode pod that fails to pull the prefill blocks and recomputes the prompt still
+reports the prefill pod's count. The `shared-storage`, `sglang`, and `mooncake` connectors return the decoder's
+usage unchanged, so for a disaggregated request `llm_d_epp_request_cached_tokens` carries the decode
+pod's count while the prediction describes the prefill pod. Under those connectors the gap between
+the ratios is not index accuracy.
 
 The two maxima are scoped differently from each other for a disaggregated request.
 `llm_d_epp_prefix_best_predicted_cached_tokens` covers the `prefill` profile's scored candidates,
@@ -585,6 +650,8 @@ reaches its `PreRequest` records one decision.
 |---|---|---|---|
 | `llm_d_epp_p2p_source_decisions_total` | Counter | `plugin_name`, `endpoint_role`, `outcome` | One per request, with the outcome the producer's `p2p decision` log line names. |
 | `llm_d_epp_p2p_source_predicted_pulled_tokens` | Histogram | `plugin_name`, `endpoint_role` | Prompt tokens the selected source holds beyond the endpoint computing the prefix, per request sent to pull. |
+| `llm_d_epp_p2p_source_unpulled_tokens` | Histogram | `plugin_name`, `endpoint_role`, `outcome` | The same gap, per `declined` or `below-floor` request whose source holds more than the computing endpoint. |
+| `llm_d_epp_p2p_source_request_ttft_seconds` | Histogram | `plugin_name`, `endpoint_role`, `outcome`, `cost_margin` | Time from request receipt to the first response byte, per streaming request whose stream ends naturally (an HTTP error status delivered in full included), with `ttftByDecision`. |
 
 A request records the first outcome in this table that applies to it.
 
@@ -616,6 +683,14 @@ promotion job from its P2P tier (`tier=~".*:p2p"`) in `vllm:kv_offload_tiering_p
 labelled `result="success"` or `result="failure"`. As with the prefix prediction, the cohorts differ:
 a pull that fails or falls back to local prefill is counted on the router side only.
 
+`cost_margin` buckets the cost model's gain minus cost: `-inf..-1s`, `-1s..-250ms`, `-250ms..0`,
+`0..250ms`, `250ms..1s`, `1s..+inf`, and `none` for a decision the cost model did not price. A
+positive margin is the cost model approving a pull; `outcome` records whether the pull was requested,
+and an `unparsed-body` decision keeps its margin. The margin also depends on the load of the source
+and computing endpoints, so requests in one bucket can differ in cached-token gap, load and prompt
+length. TTFT by margin is diagnostic and does not measure the benefit of a pull.
+`outcome="pulled"` is the router's request, which the engine may still compute locally.
+
 ### Prefix-cache affinity filter and P2P
 
 A `prefix-cache-affinity-filter` with `p2pSourceProducerName` set emits this counter, labelled by the
@@ -643,7 +718,7 @@ requests. The startup warmup probe is not observed.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. |
+| `llm_d_epp_token_producer_render_duration_seconds` | Histogram | `plugin_type`, `plugin_name`, `backend`, `result` | Duration of one render call, including a retry on an alternate endpoint. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_token_producer_render_failures_total` | Counter | `plugin_type`, `plugin_name`, `backend`, `reason` | Failed render calls. |
 
 `backend` is `vllm`. `result` is `success`, `timeout`, `canceled` or `error`. A `canceled` call is
@@ -715,17 +790,18 @@ included. Requests that fail earlier, such as a body that cannot be parsed, are 
 pool metrics. Flow Control metrics leave `inference_pool` empty when the EPP runs without
 `--pool-name`, so the two do not join in that case.
 
-The current header name is read first. If it is present, even with an empty value, the deprecated
-name is ignored, and an empty value falls back to agent identity or `default-flow`. A gateway in
-front of the EPP should set the fairness ID itself and overwrite any client-supplied value under
-both header names.
+The current header name is read first. An empty value is skipped, so an empty current name falls back
+to the deprecated name, and a request with no non-empty value under either name falls back to agent
+identity or `default-flow`. A gateway in front of the EPP should set the fairness ID itself and
+overwrite any client-supplied value under both header names.
 
 When `requestHandler.composeFairnessIDs` is enabled, a request carrying both the header and an
 agent identity is recorded under the composed `<tenant>/<session>` ID with `source="header"`. The
 tenant part is percent-encoded (`%` to `%25`, `/` to `%2F`), so the first segment is always the
 whole tenant. On such a pool, `llm_d:epp_named_fairness_ids:count5m` counts distinct composed IDs,
-which are sessions rather than tenants, and `llm_d:epp_agent_sessions:count5m` does not count
-tenant-stamped sessions because those requests resolve with `source="header"`.
+which are sessions rather than tenants, `llm_d:epp_request_running:ratio` splits a tenant's share
+across its sessions, and `llm_d:epp_agent_sessions:count5m` does not count tenant-stamped sessions
+because those requests resolve with `source="header"`.
 
 The `fairness_id` label uses the shared cap described in [Metrics catalog](#metrics-catalog).
 Scheduling and Flow Control always use the original ID; only the label is folded. Per replica:
@@ -748,17 +824,25 @@ sum by (inference_pool, source) (rate(llm_d_epp_fairness_id_overflow_total[5m]))
 ```
 
 [`rules/fairness-id-rules.yaml`](rules/fairness-id-rules.yaml) has recording rules that count
-distinct fairness IDs per pool, deduplicated across EPP replicas:
+distinct fairness IDs per pool, deduplicated across EPP replicas, and record each ID's share of
+in-flight requests:
 
 | Rule | Value |
 |---|---|
 | `llm_d:epp_named_fairness_ids:count5m` | Header IDs, including composed `<tenant>/<session>` IDs, that sent at least one request in the last 5 minutes. `default-flow` and `other` are excluded. |
 | `llm_d:epp_named_fairness_ids:incomplete5m` | 1 when header IDs were folded in the same window, so the count is a lower bound; otherwise 0. |
 | `llm_d:epp_agent_sessions:count5m` | Agent identity or derived-root IDs that sent at least one request in the last 5 minutes. A lower bound once `llm_d_epp_fairness_id_overflow_total{source=~"agent_identity\|derived_root"}` increases. With `requestHandler.composeFairnessIDs` enabled, tenant-stamped sessions resolve with `source="header"` and are not counted here. |
+| `llm_d:epp_request_running:ratio` | Each fairness ID's share of `llm_d_epp_request_running` (dispatched, unfinished requests) per pool, summed across EPP replicas before dividing. `other` and `default-flow` count in the total, so the values in a pool sum to 1, and an ID's share is a lower bound while `other` is above 0. Queued requests are not included. While the pool is busy, an ID a replica has served reports 0 when nothing is in flight; an idle pool has no sample. |
 
 The rules group by `namespace` and `inference_pool`, so the scrape must attach a `namespace`
-label. Change `5m` for a different window. An ID is missed when all of its requests went to a
-replica that was removed before Prometheus scraped it. To check the rules after editing them, run
+label. Request metrics carry no pool label, so the ratio rule takes `inference_pool` from
+`llm_d_epp_fairness_id_overflow_total` on the same `namespace`, `job`, `pod`, and `instance`, using
+the newest pool when one target reports two within the lookback window. The ratio rule omits any
+replica that does not export that counter. Duplicate scrapes of one EPP pod count its running
+requests twice in the pool sum. All four rules aggregate by `namespace` and
+`inference_pool` without a cluster label, so each Prometheus must evaluate one cluster. Change `5m`
+for a different window. An ID is missed when all of its requests went to a replica that was removed
+before Prometheus scraped it. To check the rules after editing them, run
 `promtool test rules hack/testdata/fairness-id-rules-test.yaml`.
 
 ### Program-aware fairness
@@ -1132,7 +1216,7 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_index_lookup_requests_total` | Counter | - | Index lookups performed. |
 | `llm_d_epp_kv_cache_index_lookup_hits_total` | Counter | - | Contiguous prefix blocks matched by the best pod per lookup. |
 | `llm_d_epp_kv_cache_index_max_pod_hit_count_total` | Counter | - | Longest contiguous per-pod prefix chain observed per lookup. |
-| `llm_d_epp_kv_cache_index_lookup_latency_seconds` | Histogram | - | Index lookup latency. |
+| `llm_d_epp_kv_cache_index_lookup_latency_seconds` | Histogram | - | Index lookup latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_kv_cache_events_dedup_removed_hashes_suppressed_total` | Counter | - | Deduplicated removal hashes suppressed. |
 | `llm_d_epp_kv_cache_events_dedup_removed_hashes_forwarded_total` | Counter | - | Deduplicated removal hashes forwarded. |
 | `llm_d_epp_kv_cache_events_stores_skipped_total` | Counter | `cache_kind`, `reason` | KV store events skipped before prefix indexing. |
@@ -1151,11 +1235,12 @@ enablement and TLS.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
+| `llm_d_disagg_sidecar_info` | Gauge | `commit`, `build_ref` | Build info. Always `1`. |
 | `llm_d_disagg_sidecar_requests_total` | Counter | `api_type` | Requests on the intercepted inference API paths. `api_type` is `chat_completions`, `completions`, `messages`, `responses`, `vllm_generate`, or `sglang_generate`. |
 | `llm_d_disagg_sidecar_disagg_requests_total` | Counter | `disagg_type` | Requests routed through disaggregation. `disagg_type` is `prefill-decode`, `encode-decode`, or `encode-prefill-decode`. |
-| `llm_d_disagg_sidecar_encode_duration_seconds` | Histogram | - | Encode stage latency. |
-| `llm_d_disagg_sidecar_prefill_duration_seconds` | Histogram | - | Prefill stage latency. |
-| `llm_d_disagg_sidecar_decode_duration_seconds` | Histogram | - | Decode stage latency. Not sampled when prefill returns an error status, since decode is then not run or its output is discarded. |
+| `llm_d_disagg_sidecar_encode_duration_seconds` | Histogram | - | Encode stage latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_disagg_sidecar_prefill_duration_seconds` | Histogram | - | Prefill stage latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_disagg_sidecar_decode_duration_seconds` | Histogram | - | Decode stage latency. Not sampled when prefill returns an error status, since decode is then not run or its output is discarded. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_disagg_sidecar_request_errors_total` | Counter | `stage` | Stage errors. `stage` is `encode`, `prefill`, or `decode`. |
 | `llm_d_disagg_sidecar_tool_calling_field_status_total` | Counter | `component`, `direction`, `field`, `status` | Observed request-field outcomes, once per field and client request. |
 

@@ -70,6 +70,8 @@ func TestWebpDimensions(t *testing.T) {
 		width, height int
 	}{
 		{"extended", "VP8X", 4033, 2047},
+		{"extended-max-16bit-product", "VP8X", 65535, 65536},
+		{"extended-max-width-within-32bit", "VP8X", 1 << 24, 255},
 		{"lossy", "VP8 ", 1920, 1080},
 		{"lossless", "VP8L", 750, 500},
 		{"lossless-one-pixel", "VP8L", 1, 1},
@@ -102,9 +104,12 @@ func TestWebpDimensionsRejects(t *testing.T) {
 			copy(h[8:12], "WAVE")
 			return h
 		}(),
-		"unknown-chunk":      unknownChunk,
-		"bad-vp8-start-code": badVP8,
-		"bad-vp8l-signature": badVP8L,
+		"unknown-chunk":                  unknownChunk,
+		"bad-vp8-start-code":             badVP8,
+		"bad-vp8l-signature":             badVP8L,
+		"vp8x-product-overflow-boundary": webpHeader("VP8X", 65536, 65536),
+		"vp8x-max-width-overflow":        webpHeader("VP8X", 1<<24, 256),
+		"vp8x-max-canvas-overflow":       webpHeader("VP8X", 1<<24, 1<<24),
 	} {
 		t.Run(name, func(t *testing.T) {
 			w, h, ok := webpDimensions(hdr)
@@ -145,6 +150,16 @@ func TestWebpDimensionsFromBase64Payload(t *testing.T) {
 	est := imageEstimator{} // dynamic mode, all defaults
 	assert.Equal(t, 2048*2048/imageTokenFactor, est.placeholderCount("data:image/webp;base64,"+raw),
 		"a webp payload must estimate at its real size, not the 640x360 default")
+
+	// A VP8X header whose canvas product overflows 32 bits is rejected and
+	// falls back to the default resolution instead of inflating the estimate.
+	overflow := base64.StdEncoding.EncodeToString(webpHeader("VP8X", 1<<24, 1<<24))
+	ow, oh, ook := imageDimensionsFromBase64Payload(overflow)
+	assert.False(t, ook)
+	assert.Zero(t, ow)
+	assert.Zero(t, oh)
+	assert.Equal(t, defaultImageWidth*defaultImageHeight/imageTokenFactor,
+		est.placeholderCount("data:image/webp;base64,"+overflow))
 
 	// Registered formats keep their decoder path untouched.
 	pw, ph, pok := imageDimensionsFromBase64Payload(pngBase64Raw)

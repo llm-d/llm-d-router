@@ -37,7 +37,7 @@ import (
 func loadOverrideInput() (Config, []fwksched.Endpoint) {
 	return Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourcePrefillThroughput,
 			PeakPrefillThroughput: 1000, P2PSourceProducerName: "p2p"},
-		[]fwksched.Endpoint{makeEndpoint("a", 90, 10, 500), makeEndpoint("b", 10, 10, 50)}
+		[]fwksched.Endpoint{makeEndpoint("a", 90, 10, 500, -1), makeEndpoint("b", 10, 10, 50, -1)}
 }
 
 func newTestPairedPlugin(config Config) *pairedPlugin {
@@ -168,7 +168,7 @@ func TestPairedInstancesKeepTheirOwnOutcome(t *testing.T) {
 	_, overloaded := loadOverrideInput()
 	prefill.(fwksched.Filter).Filter(context.Background(), request, overloaded)
 	decode.(fwksched.Filter).Filter(context.Background(), request,
-		[]fwksched.Endpoint{makeEndpoint("c", 90, 10, 50), makeEndpoint("d", 10, 10, 50)})
+		[]fwksched.Endpoint{makeEndpoint("c", 90, 10, 50, -1), makeEndpoint("d", 10, 10, 50, -1)})
 	publishP2PDecision(request, "pulled", "prefill")
 	for _, p := range []fwkplugin.Plugin{prefill, decode} {
 		require.NoError(t, p.(fwkrh.PreRequest).PreRequest(context.Background(), request, nil))

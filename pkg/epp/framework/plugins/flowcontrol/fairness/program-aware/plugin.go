@@ -50,6 +50,7 @@ type Config struct {
 
 	TurnPriorityTimeWeight        float64 `json:"turnPriorityTimeWeight,omitempty"`
 	TurnPriorityInactivitySeconds float64 `json:"turnPriorityInactivitySeconds,omitempty"`
+	SessionStateProducerName      string  `json:"sessionStateProducerName,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -97,6 +98,7 @@ var (
 	_ fwkrh.ResponseBodyProcessor = &ProgramAwarePlugin{}
 	_ plugin.StateDumper          = &ProgramAwarePlugin{}
 	_ plugin.ProducerPlugin       = &ProgramAwarePlugin{}
+	_ plugin.ConsumerPlugin       = &ProgramAwarePlugin{}
 )
 
 func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
@@ -147,6 +149,11 @@ func (p *ProgramAwarePlugin) TypedName() plugin.TypedName {
 // plugin's own PreRequest to read back.
 func (p *ProgramAwarePlugin) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{enqueueTimeAttributeKey: time.Time{}}
+}
+
+// Consumes declares the request data the configured strategy reads.
+func (p *ProgramAwarePlugin) Consumes() plugin.DataDependencies {
+	return p.getStrategy().Consumes()
 }
 
 // fairnessDumpState is the sanitized snapshot returned by DumpState. Program IDs

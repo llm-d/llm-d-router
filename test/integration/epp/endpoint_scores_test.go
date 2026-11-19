@@ -32,6 +32,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 // TestEndpointScoresMetadata verifies the opt-in request-path dynamic metadata contract: with
@@ -39,11 +40,11 @@ import (
 // struct mapping every endpoint the scheduler scored to its score, including candidates the picker
 // did not select, while the endpoint key itself is unchanged.
 func TestEndpointScoresMetadata(t *testing.T) {
-	h := NewTestHarness(t.Context(), t, WithStandardMode(), WithEmitEndpointScores()).WithBaseResources()
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithEmitEndpointScores()).WithBaseResources()
 
 	// Both pods stay strictly below the utilization-detector limits (queue < 5, KV < 0.8)
 	// so the default filter drops neither and the scheduler scores both.
-	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget), P(1, 4, 0.5, modelMyModelTarget)}
+	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget), eppharness.P(1, 4, 0.5, modelMyModelTarget)}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel).WaitForMetricsDelivery()
 
 	envoyLb := requestHeaderEnvoyLbMetadata(t, h)
@@ -70,9 +71,9 @@ func TestEndpointScoresMetadata(t *testing.T) {
 // TestEndpointScoresMetadataOffByDefault verifies that without --emit-endpoint-scores the
 // request-path dynamic metadata carries only the destination endpoint key.
 func TestEndpointScoresMetadataOffByDefault(t *testing.T) {
-	h := NewTestHarness(t.Context(), t, WithStandardMode()).WithBaseResources()
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode()).WithBaseResources()
 
-	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget), P(1, 5, 0.5, modelMyModelTarget)}
+	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget), eppharness.P(1, 5, 0.5, modelMyModelTarget)}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 
 	envoyLb := requestHeaderEnvoyLbMetadata(t, h)
@@ -112,8 +113,8 @@ dataLayer:
   sources:
     - pluginRef: mock-metrics-source
 `
-	h := NewTestHarness(t.Context(), t, WithStandardMode(), WithConfigText(configText), WithEmitEndpointScores()).WithBaseResources()
-	pods := []PodState{P(0, 0, 0.1, modelMyModelTarget), P(1, 0, 0.1, modelMyModelTarget)}
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText), eppharness.WithEmitEndpointScores()).WithBaseResources()
+	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget), eppharness.P(1, 0, 0.1, modelMyModelTarget)}
 	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
 
 	sendSpeech := func(t *testing.T, requestID, salt string) (string, map[string]*structpb.Value) {
@@ -200,12 +201,136 @@ dataLayer:
 	}
 }
 
+// TestMultiModalGenerateEndpointScores sends pre-rendered prompts that differ
+// only in the image. vLLM renders every same-size image as the same run of
+// placeholder token IDs, so the image's identity is only in mm_hashes; an
+// endpoint that served one image must not score as a full prefix hit for
+// another.
+func TestMultiModalGenerateEndpointScores(t *testing.T) {
+	configText := `
+apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: vllmhttp-parser
+  - type: token-producer
+    parameters:
+      backend: estimate
+  - type: approx-prefix-cache-producer
+    parameters:
+      autoTune: false
+      blockSizeTokens: 64
+  - type: prefix-cache-scorer
+  - type: max-score-picker
+  - type: mock-metrics-source
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: prefix-cache-scorer
+      - pluginRef: max-score-picker
+requestHandler:
+  parsers:
+    - pluginRef: vllmhttp-parser
+dataLayer:
+  injectDefaults: false
+  sources:
+    - pluginRef: mock-metrics-source
+`
+	h := eppharness.NewTestHarness(t.Context(), t, eppharness.WithStandardMode(), eppharness.WithConfigText(configText), eppharness.WithEmitEndpointScores()).WithBaseResources()
+	pods := []eppharness.PodState{eppharness.P(0, 0, 0.1, modelMyModelTarget), eppharness.P(1, 0, 0.1, modelMyModelTarget)}
+	h.WithPods(pods).WaitForSync(len(pods), modelMyModel)
+
+	// 100 text tokens, a 256-token image, 20 text tokens: six 64-token blocks,
+	// the image starting in block 1.
+	const placeholder = 7
+	tokenIDs := make([]int, 0, 100+256+20)
+	for i := range 100 {
+		tokenIDs = append(tokenIDs, 1000+i)
+	}
+	for range 256 {
+		tokenIDs = append(tokenIDs, placeholder)
+	}
+	for i := range 20 {
+		tokenIDs = append(tokenIDs, 2000+i)
+	}
+
+	sendGenerate := func(t *testing.T, requestID, imageHash string) (string, map[string]*structpb.Value) {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{
+			"model":     modelMyModel,
+			"token_ids": tokenIDs,
+			"features": map[string]any{
+				"mm_hashes":       map[string][]string{"image": {imageHash}},
+				"mm_placeholders": map[string][]map[string]int{"image": {{"offset": 100, "length": 256}}},
+			},
+		})
+		require.NoError(t, err)
+		requests := fwkepp.ReqRaw(map[string]string{
+			":path":                      reqcommon.PathVLLMGenerate,
+			metadata.ObjectiveKey:        modelMyModel,
+			metadata.ModelNameRewriteKey: modelMyModelTarget,
+			reqcommon.RequestIDHeaderKey: requestID,
+		}, string(raw))
+		requests = append(requests, ReqResponseOnly(
+			map[string]string{"content-type": "application/json", ":status": "200"}, `{}`,
+		)...)
+
+		client, err := extProcPb.NewExternalProcessorClient(h.GRPCConn()).Process(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = client.CloseSend() }()
+		responses, err := fwkepp.StreamedRequest(t, client, requests, 4)
+		require.NoError(t, err)
+		require.Len(t, responses, 4)
+
+		envoyLb := responses[0].DynamicMetadata.GetFields()[metadata.DestinationEndpointNamespace].GetStructValue()
+		require.NotNil(t, envoyLb)
+		endpoint := envoyLb.Fields[metadata.DestinationEndpointKey].GetStringValue()
+		require.NotEmpty(t, endpoint)
+		scores := envoyLb.Fields[metadata.DestinationEndpointScoresKey].GetStructValue()
+		require.NotNil(t, scores)
+		require.Len(t, scores.Fields, len(pods))
+		return endpoint, scores.Fields
+	}
+
+	cachedEndpoint, coldScores := sendGenerate(t, "warmup", "image-a")
+	for _, score := range coldScores {
+		require.Zero(t, score.GetNumberValue())
+	}
+
+	// PreRequest updates the prefix index asynchronously.
+	dumper, ok := h.Runner.PluginHandle.Plugin(approximateprefix.ApproxPrefixCachePluginType).(plugin.StateDumper)
+	require.True(t, ok)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		raw, err := dumper.DumpState()
+		require.NoError(c, err)
+		var state struct {
+			TotalPods int `json:"totalPods"`
+		}
+		require.NoError(c, json.Unmarshal(raw, &state))
+		require.Equal(c, 1, state.TotalPods)
+	}, 5*time.Second, 10*time.Millisecond)
+
+	for _, tc := range []struct {
+		name      string
+		imageHash string
+		wantScore float64
+	}{
+		{name: "same-image", imageHash: "image-a", wantScore: 1},
+		{name: "different-image", imageHash: "image-b", wantScore: 1.0 / 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, scores := sendGenerate(t, tc.name, tc.imageHash)
+			require.Contains(t, scores, cachedEndpoint)
+			assert.InDelta(t, tc.wantScore, scores[cachedEndpoint].GetNumberValue(), 1e-9)
+		})
+	}
+}
+
 // requestHeaderEnvoyLbMetadata drives one LLM request through the EPP and returns the envoy.lb
 // dynamic metadata struct attached to the request-headers ext_proc response.
-func requestHeaderEnvoyLbMetadata(t *testing.T, h *TestHarness) *structpb.Struct {
+func requestHeaderEnvoyLbMetadata(t *testing.T, h *eppharness.TestHarness) *structpb.Struct {
 	t.Helper()
 
-	requests := fwkepp.ReqLLM(Logger(), "hello", modelMyModel, modelMyModelTarget)
+	requests := fwkepp.ReqLLM(eppharness.Logger(), "hello", modelMyModel, modelMyModelTarget)
 
 	// RequestHeaders + RequestBody -> request header response and request body response.
 	responses, err := fwkepp.StreamedRequest(t, h.Client, requests, 2)

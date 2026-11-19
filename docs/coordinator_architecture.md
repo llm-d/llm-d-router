@@ -77,6 +77,7 @@ absorb further processing modes as they are added.
   - [Environment overrides](#environment-overrides)
   - [Connector selection](#connector-selection)
   - [Should the coordinator use the tokens-in format?](#should-the-coordinator-use-the-tokens-in-format)
+  - [Worker protocol for `/inference/v1/generate`](#worker-protocol-for-inferencev1generate)
   - [The built-in steps](#the-built-in-steps)
   - [Adding a step to the pipeline](#adding-a-step-to-the-pipeline)
 - [References](#references)
@@ -222,7 +223,7 @@ completions prompt is already a token array). See
 
 | Component | Path | Responsibility |
 | :---- | :---- | :---- |
-| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, and `/sglang.api.v1.SglangService/Generate`, builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
+| Entry server | [pkg/coordinator/server/](../pkg/coordinator/server/) | chi server, TLS unless `secure_serving` is false. Accepts `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/inference/v1/generate`, `/sglang.api.v1.SglangService/Generate`, `/vllm.Inference/Generate`, and `/vllm.Inference/GenerateStream`. It builds the `RequestContext`, runs the pipeline, exposes `/healthz` and `/readyz`, and passes any other path through to the gateway. |
 | Pipeline | [pkg/coordinator/pipeline/](../pkg/coordinator/pipeline/) | The `Step` abstraction, the ordered executor, the step registry, and the `RequestContext`. |
 | Steps | [pkg/coordinator/steps/](../pkg/coordinator/steps/) | The built-in steps. Each registers itself with the pipeline registry in an `init()` function. |
 | Gateway client | [pkg/coordinator/gateway/](../pkg/coordinator/gateway/) | HTTP client with a keep-alive pool to the configured Inference Gateway, path/format helpers, and the `x-llm-d-epp-profile` header constants. |
@@ -406,8 +407,9 @@ decode serve this directly" question. The step sends the decode request with the
   the 412 as a cache miss, swallows it, and continues the pipeline to encode, prefill,
   and decode.
 
-The 412 response may carry scheduling or cache-locality hints in headers or body; these
-are not yet consumed by the coordinator.
+The coordinator captures the 412 response headers listed in `forward_response_headers`
+and sends them on the later phases, as it does for encode and prefill responses. Hints in
+the 412 body are not consumed.
 
 The 412 is enforced router-side by the `prefix-based-pd-decider` plugin's conditional-decode
 gate when configured. When no gate plugin is configured, the router still returns 412 by
@@ -427,6 +429,15 @@ On `POST /sglang.api.v1.SglangService/Generate`, `conditional-decode` does nothi
 the pipeline continues to the next step. A pipeline that includes the step for HTTP
 requests therefore runs `prefill` and `decode` on every gRPC Generate request. The
 `render`, `replace-media-urls`, `encode`, and `async-broker` steps also do nothing on this path.
+
+On `POST /vllm.Inference/Generate` and `POST /vllm.Inference/GenerateStream`, the
+coordinator runs `conditional-decode`, `encode`, `prefill`, and `decode` in sequence
+over HTTP/2 gRPC. On `conditional-decode`, the coordinator sends `Prefer: if-available`
+to decode and treats HTTP `412` or gRPC `FAILED_PRECONDITION` as a cache miss. On a
+miss, the pipeline continues through `encode`, `prefill`, and `decode`. The `encode`
+step runs only when the request carries `media` items. The `render`,
+`replace-media-urls`, and `async-broker` steps do nothing on native `vllm.Inference`
+gRPC paths.
 
 ### KV and EC transfer protocols
 
@@ -509,6 +520,19 @@ embeddings from encode pods to the prefill pod:
 
 The KV and EC selections are independent. The exact request and response bodies for each
 phase and format are in [communication.md](communication.md).
+
+On `vllm.Inference` gRPC legs, the coordinator supports `kv-nixl`, `kv-shared-storage`,
+`kv-offloading`, `ec-nixl`, and `ec-shared-storage`. Wire helpers in
+[pkg/common/grpc/vllm/vllmwire](../pkg/common/grpc/vllm/vllmwire) drop client
+`kv_transfer_params` and `ec_transfer_params` and preserve `cache_salt` and
+`bypass_prefix_cache`. The coordinator sends full `media` items (`MediaAll`) on `encode`
+and on `prefill` when `encode` does not run. It sends metadata-only `media` items
+(`MediaMetadataOnly`) on `prefill` after `encode` and strips all `media` items
+(`MediaNone`) on `decode` after `prefill` and on `conditional-decode` probes. Both
+`encode` and `prefill` call unary `Generate` with `max_new_tokens=1` and
+`min_new_tokens=0` and read transfer descriptors from `FinishInfo`. When prefill reports
+cached tokens, the coordinator overwrites `FinishInfo.num_cached_tokens` on the terminal
+decode frame.
 
 ### Cross-phase metadata
 
@@ -771,7 +795,6 @@ log_level: 2          # 1=warn 2=info 3=verbose 4=debug 5=trace; CLI -v override
 server:               # inbound listener; TLS unless secure_serving is false
   listen_addr: ":8080"
   read_timeout: 30s
-  write_timeout: 120s
 
 gateway:              # outbound client to the Inference Gateway
   address: "http://inference-gateway:80"
@@ -783,6 +806,7 @@ pipeline:             # connector defaults + ordered steps
   kv_connector: kv-shared-storage
   ec_connector: ec-shared-storage
   use_openai_format: true
+  worker_protocol: http
   steps:
     - type: <step-type>
       params: { ... }
@@ -876,6 +900,19 @@ length (the number of image placeholder tokens) grows with resolution in both fo
 The `ec_transfer_params` shape and `size_bytes` are identical between the two formats;
 only the request carrier differs.
 
+### Worker protocol for `/inference/v1/generate`
+
+`pipeline.worker_protocol` selects how the coordinator sends HTTP
+`POST /inference/v1/generate` requests to workers. The default value `http` forwards
+JSON requests to `/inference/v1/generate` on workers. When you set `worker_protocol` to
+`grpc`, the coordinator translates HTTP `/inference/v1/generate` JSON and SSE streams
+to `vllm.Inference` gRPC calls. It maps guided decoding, `logit_bias`, `bad_words`
+token sequences, `logprobs`, `top_logprobs`, `truncate_prompt_tokens`, and
+`allowed_token_ids`, and rejects unknown `sampling_params` keys with HTTP `400`. The
+coordinator still requires a `render` step when `use_openai_format` is `false`, because
+OpenAI text routes continue to call HTTP workers. Native gRPC routes always call
+upstream gRPC methods regardless of `worker_protocol`.
+
 ### The built-in steps
 
 | `type` | Purpose | Key params |
@@ -883,10 +920,10 @@ only the request carrier differs.
 | `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` on the listener. Full doc: [coordinator_async_broker.md](coordinator_async_broker.md). | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
 | `replace-media-urls` | Download `image_url`, `audio_url`, and `video_url` references (chat completions) or `input_image` references (Responses) and accept inline `input_audio`, inline each as a base64 `data:` URI, seed one `MultimodalEntries` item per part tagged with its modality. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries`, `max_download_size`, `max_image_download_size`, `max_audio_download_size`, `max_video_download_size`, `allowed_image_content_types`, `allowed_audio_content_types`, `allowed_video_content_types`, `allow_private_networks`, `allowed_domains` |
 | `render` | Tokenize via the render service; populate `TokenIDs` and each entry's hash/placeholder/kwargs from the per-modality `mm_hashes` / `mm_placeholders` / `kwargs_data` maps. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens`, `mm_payload` |
-| `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. A served hit runs the same prompt-token parity check as `decode`. | `prompt_token_parity` |
+| `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. A served hit runs the same prompt-token parity check as `decode`. Optionally sends the rendered token IDs, as on `decode` (`forward_prompt_token_ids`). | `prompt_token_parity`, `forward_prompt_token_ids` |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
 | `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
-| `decode` | Stream the final completion to the client. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). | `kv_connector`, `prompt_token_parity` |
+| `decode` | Stream the final completion to the client. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). Optionally sends the rendered token IDs in `kv_transfer_params.prompt_token_ids` so the worker skips tokenization (`forward_prompt_token_ids`). | `kv_connector`, `prompt_token_parity`, `forward_prompt_token_ids` |
 
 Parameter semantics and defaults are documented inline in
 [config/coordinator/coordinator.yaml](../config/coordinator/coordinator.yaml). The wire formats each step

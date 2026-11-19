@@ -1,0 +1,153 @@
+# Standalone agentgateway manifest for the coordinator e-p-d-pool e2e test,
+# applied instead of the Envoy manifests when E2E_GATEWAY=agentgateway. It uses
+# the static-config pattern of the llm-d-router-standalone chart
+# (llm-d-router.proxy.agentgatewayConfig): no controller, no Gateway API CRDs.
+#
+# Routes requests carrying an x-llm-d-epp-profile header (encode | prefill | decode) to
+# the single EPP via inferenceRouting; the EPP picks the scheduling profile
+# named by that header value and an endpoint, and agentgateway forwards the
+# request to that endpoint (destinationMode: passthrough). agentgateway speaks
+# plaintext gRPC to the EPP, so the suite starts the EPP with
+# --secure-serving=false.
+#
+# A request without an x-llm-d-epp-profile header is the external client request: it
+# matches the default route and is forwarded to the coordinator over TLS
+# without verification (the coordinator serves a self-signed cert).
+#
+# Placeholders ${NAMESPACE}, ${EPP_NAME} and ${ENVOY_NODE_PORT} are substituted by the suite before
+# apply. The Service keeps the port and per-process NodePort of the Envoy Service in
+# shared-envoy-resources.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentgateway
+  labels:
+    app: agentgateway
+data:
+  config.yaml: |
+    config:
+      readinessAddr: "0.0.0.0:15021"
+    binds:
+    - port: 8081
+      listeners:
+      - name: default
+        protocol: HTTP
+        routes:
+        - name: epp-phase
+          matches:
+          - path:
+              pathPrefix: /
+            headers:
+            - name: x-llm-d-epp-profile
+              value:
+                regex: ".+"
+          backends:
+          - service:
+              name: "${NAMESPACE}/coordinator-e2e-pool"
+              port: 8000
+            policies:
+              inferenceRouting:
+                endpointPicker:
+                  host: "${EPP_NAME}.${NAMESPACE}.svc.cluster.local:9002"
+                destinationMode: passthrough
+        - name: coordinator
+          matches:
+          - path:
+              pathPrefix: /
+          # Mirrors the Envoy coordinator route (retry_on connect-failure, 3
+          # retries, 5s connect timeout) to ride out a transient connect failure
+          # to the coordinator ClusterIP. Measured on agentgateway v1.5.0:
+          # attempts counts retries (attempts: 3 = 1 try + 3 retries), and a
+          # failed upstream connect is retried whatever codes says. codes is
+          # required, so it is set to 599, which no upstream returns: a 503 the
+          # coordinator actually returns is not retried, so a request that
+          # reached it is not re-sent.
+          policies:
+            retry:
+              attempts: 3
+              codes: [599]
+          backends:
+          - host: "llm-d-coordinator.${NAMESPACE}.svc.cluster.local:8080"
+            policies:
+              backendTLS:
+                insecure: true
+              tcp:
+                connectTimeout: 5s
+    services:
+    - name: coordinator-e2e-pool
+      namespace: "${NAMESPACE}"
+      hostname: coordinator-e2e-pool
+      vips: []
+      ports:
+        8000: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentgateway
+  labels:
+    app: agentgateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentgateway
+  template:
+    metadata:
+      labels:
+        app: agentgateway
+    spec:
+      containers:
+        - name: agentgateway
+          image: cr.agentgateway.dev/agentgateway:v1.5.0
+          args:
+            - "-f"
+            - "/config/config.yaml"
+          ports:
+            - containerPort: 8081
+              name: http-8081
+          readinessProbe:
+            failureThreshold: 1
+            httpGet:
+              path: /healthz/ready
+              port: 15021
+              scheme: HTTP
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          # Same as the chart's agentgateway preset: keeps the readiness probe's
+          # failureThreshold of 1 from being the only gate on a cold node.
+          startupProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /healthz/ready
+              port: 15021
+              scheme: HTTP
+            periodSeconds: 1
+            successThreshold: 1
+            timeoutSeconds: 2
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: agentgateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: agentgateway
+  name: agentgateway
+spec:
+  ports:
+    - name: http-8081
+      port: 8081
+      protocol: TCP
+      targetPort: 8081
+      nodePort: ${ENVOY_NODE_PORT}
+  selector:
+    app: agentgateway
+  type: NodePort

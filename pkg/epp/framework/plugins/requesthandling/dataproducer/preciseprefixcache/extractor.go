@@ -27,9 +27,29 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
-var _ fwkdl.EndpointExtractor = &Producer{}
+var (
+	_ fwkdl.EndpointExtractor = &Producer{}
+	_ fwkdl.Registrant        = &Producer{}
+)
+
+// RegisterDependencies requests endpoint events for per-pod subscriptions.
+// A global zmqEndpoint can leave discoverPods enabled but needs no such events.
+func (p *Producer) RegisterDependencies(r fwkdl.Registrar) error {
+	kc := p.kvEventsConfig
+	if !kc.DiscoverPods || kc.PodDiscoveryConfig == nil || kc.ZMQEndpoint != "" {
+		return nil
+	}
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      p.TypedName(),
+		SourceType: sourcenotifications.EndpointNotificationSourceType,
+		Extractor:  p,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(
+			sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+	})
+}
 
 // Extract subscribes matching endpoints to per-pod KV events when discovery is
 // enabled. Deleted endpoints and endpoints that stop matching lose their

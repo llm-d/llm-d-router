@@ -50,6 +50,52 @@ var predictedPulledTokens = prometheus.NewHistogramVec(
 	[]string{"plugin_name", "endpoint_role"},
 )
 
+var unpulledTokens = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "p2p_source_unpulled_tokens",
+		Help: metricsutil.HelpMsgWithStability(
+			"Prompt tokens the selected source holds beyond the endpoint computing the prefix, per request the producer did not send to pull, by outcome (declined, below-floor).",
+			compbasemetrics.ALPHA),
+		Buckets: metricsutil.TokenCountBuckets,
+	},
+	[]string{"plugin_name", "endpoint_role", "outcome"},
+)
+
+var requestTTFT = prometheus.NewHistogramVec(
+	prometheus.HistogramOpts{
+		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+		Name:      "p2p_source_request_ttft_seconds",
+		Help: metricsutil.HelpMsgWithStability(
+			"Time from request receipt to the first response byte of a streaming response that ends naturally, by the producer's decision and, for a cost-model decision, its gain-minus-cost margin bucket. Recorded with ttftByDecision.",
+			compbasemetrics.ALPHA),
+		Buckets: metricsutil.GeneralLatencyBuckets,
+	},
+	[]string{"plugin_name", "endpoint_role", "outcome", "cost_margin"},
+)
+
+// costMarginNone labels a decision the cost model did not price.
+const costMarginNone = "none"
+
+// costMarginBucket buckets a cost-model decision's gain minus cost, in
+// milliseconds. A positive margin is the cost model approving a pull.
+func costMarginBucket(marginMs float64) string {
+	switch {
+	case marginMs < -1000:
+		return "-inf..-1s"
+	case marginMs < -250:
+		return "-1s..-250ms"
+	case marginMs <= 0:
+		return "-250ms..0"
+	case marginMs < 250:
+		return "0..250ms"
+	case marginMs < 1000:
+		return "250ms..1s"
+	default:
+		return "1s..+inf"
+	}
+}
+
 // registerMetrics registers the producer collectors on the given registerer. A
 // nil registerer is a no-op, so the producer runs without metrics when the
 // handle supplies no recorder. Repeated registration of the same collector is
@@ -58,7 +104,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return nil
 	}
-	for _, collector := range []prometheus.Collector{sourceDecisions, predictedPulledTokens} {
+	for _, collector := range []prometheus.Collector{sourceDecisions, predictedPulledTokens, unpulledTokens, requestTTFT} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
 			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == collector {
@@ -78,8 +124,18 @@ func recordPredictedPulledTokens(pluginName, role string, tokens int) {
 	predictedPulledTokens.WithLabelValues(pluginName, role).Observe(float64(tokens))
 }
 
+func recordUnpulledTokens(pluginName, role, outcome string, tokens int) {
+	unpulledTokens.WithLabelValues(pluginName, role, outcome).Observe(float64(tokens))
+}
+
+func recordRequestTTFT(pluginName string, decision *decisionState, seconds float64) {
+	requestTTFT.WithLabelValues(pluginName, decision.role, decision.outcome, decision.costMargin).Observe(seconds)
+}
+
 // resetMetrics clears the collectors between tests.
 func resetMetrics() {
 	sourceDecisions.Reset()
 	predictedPulledTokens.Reset()
+	unpulledTokens.Reset()
+	requestTTFT.Reset()
 }

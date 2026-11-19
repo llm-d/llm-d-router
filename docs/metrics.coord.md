@@ -80,6 +80,12 @@ Names below omit the subsystem prefix, which is `llm_d_coordinator_` throughout,
 ALPHA stage. Each family states the label set its metrics share; a metric that carries an extra label
 says so in its own row.
 
+### Build info
+
+| Name | Type | Notes |
+|---|---|---|
+| `info` | Gauge | Build info. Labels `commit` and `build_ref`; always `1`. |
+
 ### Request family
 
 Label set `{model_name}` (the request's model).

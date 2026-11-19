@@ -125,6 +125,33 @@ from the EPP selector so the proxy and EPP pods are never co-selected.
 llm-d-router-proxy: {{ include "llm-d-router.proxyName" . }}
 {{- end -}}
 
+{{/*
+Effective name of the proxy ConfigMap. A user-supplied
+router.proxy.configMap.name wins; otherwise the name is release-scoped so two
+releases can share a namespace. Both the ConfigMap and the volume that mounts
+it must use this helper.
+*/}}
+{{- define "llm-d-router.proxyConfigMapName" -}}
+{{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
+{{- $configMap := index $proxy "configMap" | default dict -}}
+{{- $name := index $configMap "name" | default "" -}}
+{{- if empty $name -}}
+{{- $base := .Release.Name | default "default-pool" | lower | trim | trunc 40 -}}
+{{- $name = printf "%s-%s" $base (include "llm-d-router.proxyType" .) -}}
+{{- end -}}
+{{- $name -}}
+{{- end -}}
+
+{{/*
+Effective name of the metrics reader token Secret. A user-supplied
+router.monitoring.prometheus.auth.secretName wins; otherwise the name is
+release-scoped so two releases can share a namespace. Both the Secret and the
+ServiceMonitor that reads it must use this helper.
+*/}}
+{{- define "llm-d-router.metricsReaderSecretName" -}}
+{{- .Values.router.monitoring.prometheus.auth.secretName | default (printf "%s-metrics-reader-secret" .Release.Name) -}}
+{{- end -}}
+
 {{/* Headless Service for active-active Envoy endpoint discovery. */}}
 {{- define "llm-d-router.proxy.discoveryServiceName" -}}
 {{- $proxy := .Values.router.proxy | default dict -}}

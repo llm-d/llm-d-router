@@ -551,7 +551,7 @@ func renderOnlyBudget(path string, payload []byte) ([]byte, error) {
 		var thinking struct {
 			Type string `json:"type"`
 		}
-		if json.Unmarshal(envelope["thinking"], &thinking) == nil && thinking.Type == "enabled" {
+		if json.Unmarshal(envelope["thinking"], &thinking) == nil && thinking.Type == reqcommon.ThinkingTypeEnabled {
 			delete(envelope, "thinking")
 		}
 	}

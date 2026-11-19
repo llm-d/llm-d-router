@@ -659,6 +659,43 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   fi
 done
 
+echo "Verifying metrics reader token Secret names..."
+render_metrics_reader_secret() {
+  local chart="$1" release="$2"
+  shift 2
+  local output="${TEMP_DIR}/${chart}-metrics-reader-secret.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template "${release}" "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace metrics-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    --set router.monitoring.prometheus.enabled=true "${args[@]}" "$@" > "${output}"; then
+    echo "Metrics reader Secret rendering failed for ${chart}: ${release} $*"
+    exit 1
+  fi
+  local credentials_name
+  metrics_reader_secret=$("${YQ}" -N 'select(.kind == "Secret" and .type == "kubernetes.io/service-account-token") | .metadata.name' "${output}")
+  credentials_name=$("${YQ}" -N 'select(.kind == "ServiceMonitor") | .spec.endpoints[].authorization.credentials.name' "${output}")
+  if [ -z "${metrics_reader_secret}" ] || [ "${credentials_name}" != "${metrics_reader_secret}" ]; then
+    echo "${chart}: ServiceMonitor credentials '${credentials_name}' must name the token Secret '${metrics_reader_secret}' for ${release}; flags: $*"
+    exit 1
+  fi
+}
+
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  render_metrics_reader_secret "${chart}" alpha
+  if [ "${metrics_reader_secret}" != "alpha-metrics-reader-secret" ]; then
+    echo "${chart}: expected token Secret alpha-metrics-reader-secret, got ${metrics_reader_secret}"
+    exit 1
+  fi
+  render_metrics_reader_secret "${chart}" alpha --set router.monitoring.prometheus.auth.secretName=custom-reader
+  if [ "${metrics_reader_secret}" != "custom-reader" ]; then
+    echo "${chart}: expected the secretName override custom-reader, got ${metrics_reader_secret}"
+    exit 1
+  fi
+done
+
 echo "Running llm-d-router-standalone negative validation tests..."
 missing_endpoint_selector_command="${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.inferencePool.create=false --set router.modelServers.type=vllm --set 'router.modelServers.targetPorts[0].number=8000' >/dev/null"
 echo "Executing: ${missing_endpoint_selector_command}"
@@ -879,6 +916,28 @@ for proxy_type in envoy agentgateway; do
     done
   done
 done
+
+echo "Verifying the agentgateway sidecar mounts the release-scoped proxy ConfigMap..."
+agentgateway_sidecar_render_output="${TEMP_DIR}/agentgateway-sidecar-proxy-config.yaml"
+if ! "${HELM}" template agentgateway-scoped "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+  --set router.proxy.mode=sidecar \
+  --set router.proxy.proxyType=agentgateway \
+  --set router.modelServers.matchLabels.app=llm-instance-gateway \
+  --set router.inferencePool.create=false \
+  --set 'router.modelServers.targetPorts[0].number=8000' > "${agentgateway_sidecar_render_output}"; then
+  echo "Agentgateway sidecar rendering failed"
+  exit 1
+fi
+rendered_agentgateway_config_map=$("${YQ}" -N 'select(.kind == "ConfigMap" and .metadata.name == "agentgateway-scoped-agentgateway") | .metadata.name' "${agentgateway_sidecar_render_output}")
+if [ "${rendered_agentgateway_config_map}" != "agentgateway-scoped-agentgateway" ]; then
+  echo "Agentgateway sidecar did not render the release-scoped proxy ConfigMap"
+  exit 1
+fi
+mounted_agentgateway_config_map=$("${YQ}" -N 'select(.kind == "Deployment" and (.metadata.name | test("-epp$"))) | .spec.template.spec.volumes[] | select(.name == "agentgateway-config-template") | .configMap.name' "${agentgateway_sidecar_render_output}")
+if [ "${mounted_agentgateway_config_map}" != "agentgateway-scoped-agentgateway" ]; then
+  echo "Agentgateway sidecar mounts ConfigMap ${mounted_agentgateway_config_map}, want agentgateway-scoped-agentgateway"
+  exit 1
+fi
 
 echo "Verifying llm-d-router-standalone agentgateway renders plaintext EPP and custom listener ports..."
 agentgateway_render_output="${TEMP_DIR}/llm-d-router-standalone-agentgateway-render.yaml"
@@ -1260,6 +1319,17 @@ for c in "sidecar:${envoy_default_output}:--concurrency:8:1" "sidecar-cpuset:${e
   if arg_rendered "${file}" "${flag}" "${value}"; then got=1; else got=0; fi
   if [ "${got}" != "${want}" ]; then
     echo "Proxy args for ${name}: ${flag} ${value} rendered=${got}, want ${want}"
+    exit 1
+  fi
+done
+
+echo "Verifying llm-d-router-standalone Envoy ext_proc HTTP/2 keepalive..."
+# #4203: without PING keepalive a killed EPP hangs in-flight streamed responses until message_timeout.
+for c in "sidecar:${envoy_default_output}" "service:${proxy_service_render_output}"; do
+  IFS=: read -r name file <<< "${c}"
+  got=$(${YQ} 'select(.kind == "ConfigMap" and (.data | has("envoy.yaml"))) | .data."envoy.yaml"' "${file}" | ${YQ} '.static_resources.clusters[] | select(.name == "ext_proc") | .typed_extension_protocol_options."envoy.extensions.upstreams.http.v3.HttpProtocolOptions".explicit_http_config.http2_protocol_options.connection_keepalive | (.interval // "null") + ":" + (.timeout // "null")')
+  if [ "${got}" != "15s:3s" ]; then
+    echo "Envoy ext_proc connection_keepalive for ${name}: got ${got}, want 15s:3s"
     exit 1
   fi
 done

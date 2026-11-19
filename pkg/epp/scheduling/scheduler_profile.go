@@ -388,7 +388,7 @@ func (p *SchedulerProfile) runPickerPlugin(ctx context.Context, request *fwksche
 		verbose.Info("Running picker plugin", "plugin", typedName)
 	}
 	if debugEnabled {
-		debug.Info("Candidate pods for picking", "endpoints-weighted-score", scoredEndpoints)
+		debug.Info("Candidate pods for picking", "endpoints-weighted-score", fwksched.EndpointScores(scoredEndpoints))
 	}
 
 	ctx, span := tracing.Tracer(TracerScope).Start(ctx, semconv.LLMDEPPSpanPickEndpoints,

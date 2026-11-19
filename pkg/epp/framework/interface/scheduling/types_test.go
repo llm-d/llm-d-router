@@ -195,6 +195,15 @@ func TestScoredEndpointComparer(t *testing.T) {
 	assert.False(t, ScoredEndpointComparer(ScoredEndpoint{Endpoint: a, Score: 1}, ScoredEndpoint{Endpoint: other, Score: 1}))
 }
 
+func TestEndpointScores(t *testing.T) {
+	scored := []*ScoredEndpoint{
+		{Endpoint: NewEndpoint(newTestMetadata("pod1"), newTestMetrics(), nil), Score: 2},
+		{Endpoint: NewEndpoint(newTestMetadata("pod2"), newTestMetrics(), nil), Score: 0.5},
+	}
+
+	assert.Equal(t, map[string]float64{"ns/pod1": 2, "ns/pod2": 0.5}, EndpointScores(scored).MarshalLog())
+}
+
 func TestProfileRunResult_FirstEndpoint(t *testing.T) {
 	first := NewEndpoint(newTestMetadata("first"), newTestMetrics(), nil)
 	second := NewEndpoint(newTestMetadata("second"), newTestMetrics(), nil)

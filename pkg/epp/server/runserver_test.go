@@ -18,7 +18,16 @@ limitations under the License.
 package server_test
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -50,6 +59,24 @@ func TestRunnable(t *testing.T) {
 	}
 }
 
+// writeCAFile writes a self-signed CA certificate to a temp file and returns its path.
+func writeCAFile(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "ca.crt")
+	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+	return path
+}
+
 // stubDatastore and stubBands are non-nil placeholders: the factory only stores these
 // dependencies, so an embedded nil interface is enough to make the field observably set.
 type stubDatastore struct{ datastore.Datastore }
@@ -71,8 +98,9 @@ func TestNewExtProcServerRunnerPopulatesEveryField(t *testing.T) {
 	opts.SecureServing, opts.HealthChecking, opts.EnableCertReload = true, true, true
 	opts.EnableGRPCStreamMetrics, opts.EmitEndpointScores, opts.EnableToolCallingTelemetry = true, true, true
 	opts.TLSMinVersion, opts.TLSCipherSuites = "VersionTLS13", []string{"TLS_AES_128_GCM_SHA256"}
+	opts.ClientCAFile = writeCAFile(t)
 	opts.RefreshPrometheusMetricsInterval, opts.MetricsStalenessThreshold = 7*time.Second, 11*time.Second
-	require.NoError(t, opts.Complete()) // parses the TLS strings into the unexported fields
+	require.NoError(t, opts.Complete()) // parses the TLS strings and the client CA into the unexported fields
 	// Set after Complete(): the *Str flags are empty, so Complete() leaves these alone.
 	opts.GRPCMaxRecvMsgSize, opts.GRPCMaxSendMsgSize, opts.MaxRequestBodySize = 4<<20, 5<<20, 6<<20
 

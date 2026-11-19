@@ -410,6 +410,12 @@ func TestPredictedLatencyFactory(t *testing.T) {
 			expectErr:  false,
 		},
 		{
+			name:       "contextTTL as a duration string",
+			pluginName: "context-ttl",
+			jsonParams: `{"contextTTL": "30s"}`,
+			expectErr:  false,
+		},
+		{
 			name:       "invalid sloBufferFactor <= 0",
 			pluginName: "bad-buffer",
 			jsonParams: `{"sloBufferFactor": 0}`,
@@ -434,6 +440,29 @@ func TestPredictedLatencyFactory(t *testing.T) {
 	}
 }
 
+func TestPredictedLatencyFactoryContextTTL(t *testing.T) {
+	tests := []struct {
+		name       string
+		jsonParams string
+		want       time.Duration
+	}{
+		{name: "duration string", jsonParams: `{"contextTTL": "90s"}`, want: 90 * time.Second},
+		{name: "integer nanoseconds", jsonParams: `{"contextTTL": 300000000000}`, want: 5 * time.Minute},
+		{name: "omitted keeps the default", jsonParams: `{}`, want: 5 * time.Minute},
+		{name: "null keeps the default", jsonParams: `{"contextTTL": null}`, want: 5 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handle := testutils.NewTestHandle(context.Background())
+			plugin, err := PredictedLatencyFactory("context-ttl", fwkplugin.StrictDecoder(json.RawMessage(tt.jsonParams)), handle)
+			assert.NoError(t, err)
+			if assert.IsType(t, &PredictedLatency{}, plugin) {
+				assert.Equal(t, tt.want, plugin.(*PredictedLatency).config.ContextTTL.Duration)
+			}
+		})
+	}
+}
+
 func TestPredictedLatencyFactoryInvalidJSON(t *testing.T) {
 	invalidTests := []struct {
 		name       string
@@ -446,6 +475,10 @@ func TestPredictedLatencyFactoryInvalidJSON(t *testing.T) {
 		{
 			name:       "samplingMean as string",
 			jsonParams: `{"samplingMean": "100"}`,
+		},
+		{
+			name:       "contextTTL as an unparsable string",
+			jsonParams: `{"contextTTL": "5 minutes"}`,
 		},
 		{
 			name:       "maxSampledTokens as float",
@@ -467,7 +500,7 @@ func TestPredictedLatencyFactoryInvalidJSON(t *testing.T) {
 
 func TestSloContextStoreEviction(t *testing.T) {
 	config := DefaultConfig
-	config.ContextTTL = 100 * time.Millisecond
+	config.ContextTTL.Duration = 100 * time.Millisecond
 	pl := NewPredictedLatency(LatencyDataProviderPluginType, config, nil)
 
 	requestID := "test-req-id"

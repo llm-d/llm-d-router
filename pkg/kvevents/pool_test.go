@@ -58,6 +58,49 @@ func newTestPool(t *testing.T, blockSize int) (
 	return pool, idx, tp
 }
 
+// A bound global socket takes the pod identity from the topic, so NewPool
+// refuses to bind it where other hosts can reach it unless the config opts in.
+func TestNewPoolRejectsNonLocalGlobalSocket(t *testing.T) {
+	idx, err := kvblock.NewInMemoryIndex(kvblock.DefaultInMemoryIndexConfig())
+	require.NoError(t, err)
+	tp, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{BlockSizeTokens: 16, HashSeed: "test"})
+	require.NoError(t, err)
+
+	tests := []struct {
+		endpoint string
+		allow    bool
+		wantErr  bool
+	}{
+		{endpoint: "", wantErr: false},
+		{endpoint: "tcp://127.0.0.1:5557", wantErr: false},
+		{endpoint: "tcp://localhost:5557", wantErr: false},
+		{endpoint: "tcp://[::1]:5557", wantErr: false},
+		{endpoint: "ipc:///tmp/kv-events", wantErr: false},
+		{endpoint: "inproc://kv-events", wantErr: false},
+		{endpoint: "tcp://0.0.0.0:5557", wantErr: true},
+		{endpoint: "tcp://*:5557", wantErr: true},
+		{endpoint: "tcp://:5557", wantErr: true},
+		{endpoint: "tcp://[::]:5557", wantErr: true},
+		{endpoint: "tcp://10.0.0.5:5557", wantErr: true},
+		{endpoint: "tcp://epp.ns.svc:5557", wantErr: true},
+		{endpoint: "tcp://5557", wantErr: true},
+		{endpoint: "tcp://0.0.0.0:5557", allow: true, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s allow=%t", tt.endpoint, tt.allow), func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.ZMQEndpoint = tt.endpoint
+			cfg.AllowUntrustedPublishers = tt.allow
+			_, err := NewPool(cfg, idx, tp, nil)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "allowUntrustedPublishers")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 type recordingIndex struct {
 	kvblock.Index
 	getRequestKeyCalls int
@@ -817,7 +860,7 @@ func TestRealignExtraFeatures(t *testing.T) {
 	})
 
 	t.Run("many:1 merge keeps the cache salt after the item", func(t *testing.T) {
-		// vLLM appends cache_salt to block 0's extra keys, after its MM hashes,
+		// With bare identifiers, the cache salt stays in block 0's MMHashes, after its items,
 		// so the item continuing into block 1 is not block 0's last entry.
 		img := kvblock.MMHash{Hash: "img"}
 		salt := kvblock.MMHash{Hash: "salt"}
@@ -831,6 +874,22 @@ func TestRealignExtraFeatures(t *testing.T) {
 		require.Len(t, result, 1)
 		require.NotNil(t, result[0])
 		assert.Equal(t, []kvblock.MMHash{img, salt}, result[0].MMHashes)
+	})
+
+	t.Run("many:1 merge keeps the cache salt apart from later engine blocks' items", func(t *testing.T) {
+		// With the item starting in engine block 1, block 0 holds only the salt.
+		img := kvblock.MMHash{Hash: "img"}
+		features := []*kvblock.BlockExtraFeatures{
+			{CacheSalt: "salt"},
+			{MMHashes: []kvblock.MMHash{img}, FirstContinuation: kvblock.MMContinuationNew},
+			{MMHashes: []kvblock.MMHash{img}, FirstContinuation: kvblock.MMContinuationContinues},
+			nil,
+		}
+		result := realignExtraFeatures(features, 64, 64)
+		require.Len(t, result, 1)
+		require.NotNil(t, result[0])
+		assert.Equal(t, []kvblock.MMHash{img}, result[0].MMHashes)
+		assert.Equal(t, "salt", result[0].CacheSalt)
 	})
 
 	t.Run("many:1 merge uses the event offset for repeated items", func(t *testing.T) {
@@ -2476,6 +2535,83 @@ func TestProcessEventBatch_SameEngineHashesAcrossModels(t *testing.T) {
 			}
 			_, err = idx.GetRequestKey(ctx, ModelEngineKey(fp8.model, childHash))
 			require.NoError(t, err, "%s mapping must survive the %s eviction", fp8.model, bf16.model)
+		})
+	}
+}
+
+// TestBlockStoredEvent_SaltedMMExtraKeysMatchRequestKeys feeds a salted
+// BlockStored event in vLLM v0.19's extra-keys layout, with engine blocks
+// smaller than the router's, and checks that the request keys, built with the
+// salt on block 0 as setCacheSalt sets it, resolve to the pod.
+func TestBlockStoredEvent_SaltedMMExtraKeysMatchRequestKeys(t *testing.T) {
+	const (
+		engineBlockSize = 16
+		routerBlockSize = 64
+		numTokens       = 64
+		salt            = "salt-1"
+		img             = "img-1"
+		adapter         = "adapter-1"
+	)
+	lora := adapter
+	for _, tt := range []struct {
+		name        string
+		placeholder *kvblock.PlaceholderRange
+		loraName    *string
+		extraKeys   [][]any // per engine block: (identifier, block-relative offset), salt last in block 0
+	}{
+		{
+			name:      "no items",
+			extraKeys: [][]any{{salt}, nil, nil, nil},
+		},
+		{
+			name:        "image in engine block 0",
+			placeholder: &kvblock.PlaceholderRange{Offset: 4, Length: 20},
+			extraKeys:   [][]any{{[]any{img, 4}, salt}, {[]any{img, -12}}, nil, nil},
+		},
+		{
+			name:        "image starting in engine block 1",
+			placeholder: &kvblock.PlaceholderRange{Offset: 20, Length: 20},
+			extraKeys:   [][]any{{salt}, {[]any{img, 4}}, {[]any{img, -12}}, nil},
+		},
+		{
+			name:        "LoRA adapter, image starting in engine block 1",
+			placeholder: &kvblock.PlaceholderRange{Offset: 20, Length: 20},
+			loraName:    &lora,
+			extraKeys:   [][]any{{adapter, salt}, {adapter, []any{img, 4}}, {adapter, []any{img, -12}}, {adapter}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			pool, idx, tp := newTestPool(t, routerBlockSize)
+			tokens := makeTokens(numTokens)
+
+			pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+				BlockHashes: makeEngineKeys(numTokens/engineBlockSize, 500),
+				Tokens:      tokens,
+				LoraName:    tt.loraName,
+				ExtraKeys:   tt.extraKeys,
+			}}}, "pod-a", "test-model")
+
+			requestExtras := []*kvblock.BlockExtraFeatures{{}}
+			if tt.placeholder != nil {
+				requestExtras = kvblock.ComputeBlockExtraFeatures(
+					map[string][]string{"image": {img}},
+					map[string][]kvblock.PlaceholderRange{"image": {*tt.placeholder}},
+					routerBlockSize, numTokens)
+			}
+			requestExtras[0].CacheSalt = salt
+			requestModel := "test-model"
+			if tt.loraName != nil {
+				requestModel = *tt.loraName
+			}
+
+			requestKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, requestModel, requestExtras)
+			require.NoError(t, err)
+			require.Len(t, requestKeys, 1)
+			result, err := idx.Lookup(ctx, requestKeys, nil)
+			require.NoError(t, err)
+			require.Len(t, result[requestKeys[0]], 1, "salted request key not indexed for pod-a")
+			assert.Equal(t, "pod-a", result[requestKeys[0]][0].PodIdentifier)
 		})
 	}
 }

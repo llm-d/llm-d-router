@@ -157,7 +157,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ $proxy.configMap.name }}
+  name: {{ include "llm-d-router.proxyConfigMapName" . }}
   namespace: {{ .Release.Namespace }}
 data:
   {{- include "llm-d-router.proxyConfigMapData" . | nindent 2 }}

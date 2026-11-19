@@ -411,7 +411,7 @@ func TestProduce_RenderStatusErrorPrivacy(t *testing.T) {
 				}))
 				defer srv.Close()
 				renderer := newHTTPRenderer(t, srv)
-				renderer.pluginName = t.Name()
+				renderer.pluginName = fmt.Sprintf("%s-%d", t.Name(), renderTestRuns.Add(1))
 				p := newTestPlugin(renderer)
 				request := chatRequest()
 				if api == reqcommon.APITypeMessages {
@@ -496,7 +496,7 @@ func TestProduce_RenderDecodeErrorPrivacy(t *testing.T) {
 			}))
 			defer srv.Close()
 			renderer := newHTTPRenderer(t, srv)
-			renderer.pluginName = t.Name()
+			renderer.pluginName = fmt.Sprintf("%s-%d", t.Name(), renderTestRuns.Add(1))
 			request := chatRequest()
 			if api == reqcommon.APITypeMessages {
 				request.Body.ChatCompletions = nil

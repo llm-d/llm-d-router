@@ -29,6 +29,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	fwkepp "github.com/llm-d/llm-d-router/test/framework/epp"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 // agentLineageConfigTemplate enables the agent-lineage plugin on the shared
@@ -80,7 +81,7 @@ type lineageRequest struct {
 // order. A request is admitted when the router forwards it, so a returned ID
 // for every request also asserts identical admission across the header
 // shapes.
-func runLineageRequests(t *testing.T, h *TestHarness, reqs []lineageRequest) (ids, sources []string) {
+func runLineageRequests(t *testing.T, h *eppharness.TestHarness, reqs []lineageRequest) (ids, sources []string) {
 	t.Helper()
 
 	bodyMap := map[string]any{
@@ -170,11 +171,11 @@ func TestAgentLineage_ComposedEquivalence(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	h := NewTestHarness(ctx, t, WithTracing(), WithStandardMode(), WithConfigText(agentLineageConfigTemplate(true))).WithBaseResources()
-	h.WithPods([]PodState{
-		P(0, 3, 0.2),
-		P(1, 0, 0.1),
-		P(2, 10, 0.2),
+	h := eppharness.NewTestHarness(ctx, t, eppharness.WithTracing(), eppharness.WithStandardMode(), eppharness.WithConfigText(agentLineageConfigTemplate(true))).WithBaseResources()
+	h.WithPods([]eppharness.PodState{
+		eppharness.P(0, 3, 0.2),
+		eppharness.P(1, 0, 0.1),
+		eppharness.P(2, 10, 0.2),
 	}).WaitForSync(3, modelMyModel).WaitForReadyPodsMetric(3)
 
 	ids, sources := runLineageRequests(t, h, append(append([]lineageRequest{}, stamped...), unstamped...))
@@ -228,11 +229,11 @@ func TestAgentLineage_CompositionDisabled(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	h := NewTestHarness(ctx, t, WithTracing(), WithStandardMode(), WithConfigText(agentLineageConfigTemplate(false))).WithBaseResources()
-	h.WithPods([]PodState{
-		P(0, 3, 0.2),
-		P(1, 0, 0.1),
-		P(2, 10, 0.2),
+	h := eppharness.NewTestHarness(ctx, t, eppharness.WithTracing(), eppharness.WithStandardMode(), eppharness.WithConfigText(agentLineageConfigTemplate(false))).WithBaseResources()
+	h.WithPods([]eppharness.PodState{
+		eppharness.P(0, 3, 0.2),
+		eppharness.P(1, 0, 0.1),
+		eppharness.P(2, 10, 0.2),
 	}).WaitForSync(3, modelMyModel).WaitForReadyPodsMetric(3)
 
 	ids, sources := runLineageRequests(t, h, reqs)

@@ -29,7 +29,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // fanoutEncoderCollect fans out per-image encoder requests and merges
@@ -107,6 +107,10 @@ func (s *Server) fanoutEncoderCollect(
 // response's ec_transfer_params into the prefill request body, and hands
 // off to the configured P/D connector.
 func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, p2p p2pRouting, apiType reqcommon.APIType) {
+	if isVLLMGRPCRequest(r) {
+		s.handleECNIXLVLLMGRPC(w, r, prefillEndPoint, encodeEndPoints, p2p)
+		return
+	}
 	logger := log.FromContext(r.Context())
 	logger.V(logging.DEBUG).Info("running EC-NIXL protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
@@ -132,7 +136,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		encodeStart := time.Now()
 		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID, apiType)
 		if err != nil {
-			observeStageError(r.Context(), metrics.StageEncode)
+			observeStageError(r.Context(), routing.StageEncode)
 			logger.Error(jsonErrorForLog(err), "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(w, r); err != nil {
 				logger.Error(err, "failed to send error response to client")
@@ -142,7 +146,7 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		// total == 0 means there was no multimodal input to encode, so no
 		// encoder was invoked and the duration is not sampled.
 		if total > 0 {
-			observeStageDuration(r.Context(), metrics.StageEncode, time.Since(encodeStart))
+			observeStageDuration(r.Context(), routing.StageEncode, time.Since(encodeStart))
 			// All-missing degrades silently to primer-mode; warn so the
 			// operator sees the regression.
 			if contributed == 0 {

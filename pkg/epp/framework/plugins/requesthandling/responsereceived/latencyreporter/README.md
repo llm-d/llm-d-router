@@ -1,7 +1,7 @@
 # Latency Reporter
 
 **Type:** `latency-reporter`
-**Interfaces:** `requesthandling.ResponseHeaderProcessor`, `requesthandling.ResponseBodyProcessor`
+**Interfaces:** `requesthandling.ResponseHeaderProcessor`, `requesthandling.ResponseBodyProcessor`, `plugin.ConsumerPlugin`
 **Stability:** Alpha
 
 Records each dispatched request's outcome, time to first token (TTFT) and time per output token (TPOT), labeled by served priority, prompt-length bucket and prefill/decode path.
@@ -13,9 +13,9 @@ The plugin holds no latency targets. It records what happened; thresholds and at
 At end of stream the plugin records:
 
 - **Outcome**, mirroring the values and precedence of `llm_d_epp_request_outcome_total`. The plugin classifies from the response status and how the stream ended, and sees only dispatched requests, so its counts are not expected to match that counter's:
-  - `completed` is a 200 status with a natural end of stream.
+  - `completed` is a status below 400 with a natural end of stream.
   - `evicted` is a stream the EPP terminated to reclaim capacity. It wins over any status.
-  - `failed` is a non-200 status, or a stream that ended with an error. A non-200 status wins over a disconnect.
+  - `failed` is a 4xx or 5xx status, or a stream that ended with an error. A 4xx or 5xx status wins over a disconnect.
   - `cancelled` is a stream torn down before the response finished, usually a client disconnect.
 - **TTFT**: request receipt at the EPP to the first response byte, for completed requests. It includes Flow Control queue wait, prefill, KV transfer and the first decode step.
 - **TPOT**: the per-request mean, `(complete - first token) / (output tokens - 1)`. It is recorded for completed streamed responses with at least two output tokens.

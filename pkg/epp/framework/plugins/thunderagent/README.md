@@ -43,31 +43,31 @@ a configured fallback.
 When a pod leaves the pool, the plugin drops it from the ledger; its sessions
 keep their footprint and move to the pod that serves their next turn.
 
-Gate: a pod's room is `utilThreshold * capacity` minus its working set.
+Gate: a pod's room is `usableCapacityRatio * capacity` minus its working set.
 Turns of admitted sessions always dispatch. A paused session's next turn
 waits until its own pod has room again (strict origin affinity: a session
 never moves, so its warm prefix is never abandoned; the exceptions are its
 pod leaving the pool or being filtered out of the scheduling candidates).
 This differs from the original ThunderAgent, which restores a paused session
-onto any pod with room; here a paused session waits for its own pod, at most
-until `headWaitStarvationMs`. A new session is admitted onto a pod with room,
+onto any pod with room; here a paused session waits for its own pod for up to
+`forceAdmitTimeout`. A new session is admitted onto a pod with room,
 and holds until one fits it.
 Among the sessions that fit, admitted goes before paused before new; a
 session that fits no pod does not block the others, so smaller sessions can
-take room a larger paused one waits for. Any head waiting past
-`headWaitStarvationMs` is force-admitted. A picked session's room is
+take room a larger paused one waits for. Any queue's first request waiting past
+`forceAdmitTimeout` is force-admitted. A picked session's room is
 reserved until its request reaches the pod.
 
 Idle sessions give up their room on demand, when a session is picked,
 longest idle first. A paused or new session that does not fit, and an
 admitted session's turn that pushes its pod over the ceiling, may take the
-room of sessions idle past `idleLeaseSeconds`; a session that just finished a
+room of sessions idle past `idleGracePeriod`; a session that just finished a
 turn keeps its room, so the pod can stay over the ceiling until one passes
-the lease. A new session prefers a pod it fits without pausing anyone. A
+`idleGracePeriod`. A new session prefers a pod it fits without pausing anyone. A
 session that gives up its room is paused: it stops counting against the pod and its next turn must fit
 again. Sessions with a turn queued are never paused. Pausing happens only
-when a session is picked; the background sweep only drops sessions idle past
-`evictionTtlSeconds`.
+when a session is picked; an internal background sweep runs every `10s` and
+drops sessions idle past `2 * max(forceAdmitTimeout, 5m)`.
 
 ## Scorer
 
@@ -85,17 +85,18 @@ both in one profile.
 
 ## Configuration
 
-See `test/e2e/artifacts/config/thunderagent-config.yaml` for the full pipeline. All
+See `test/e2e/artifacts/config/thunderagent-config.yaml` for a sample
+configuration. The config loader registers the plugin under its type name
+`thunder-agent` when `name` is omitted, and synthesizes the default scheduling
+profile, `max-score-picker`, and `single-profile-handler` automatically. All
 parameters:
 
 | Field | Default | Description |
 |---|---|---|
-| `capacityTokens` | `4194304` | Per-pod KV capacity in tokens when `cache_config_info` is not scraped. |
-| `utilThreshold` | `1.0` | Fit ceiling as a fraction of capacity (1.0 = 100%). |
-| `idleLeaseSeconds` | `30` | How long an idle session keeps its room against paused and new sessions. Set it to about a typical tool-call duration: shorter pauses sessions about to return, longer holds admissions behind long tool calls. |
-| `headWaitStarvationMs` | `30000` | Forced-admission backstop; 0 disables it. Keep it below the priority band's request TTL (flow control default 60 s), or the request is shed before it is force-admitted. |
-| `evictionTtlSeconds` | `3600` | Idle session state retention; must exceed `headWaitStarvationMs`. |
-| `evictionSweepSeconds` | `10` | How often the background sweep drops idle sessions. |
+| `fallbackCapacityTokens` | `4194304` | Per-pod KV capacity in tokens when `cache_config_info` is not scraped. Must be `> 0`. |
+| `usableCapacityRatio` | `1.0` | Share of each pod's KV capacity available to sessions, in `(0, 1]`. |
+| `idleGracePeriod` | `"30s"` | How long an idle session keeps its room against paused and new sessions (`"0s"` reclaims idle sessions immediately). Set it to about a typical tool-call duration: shorter pauses sessions about to return, longer holds admissions behind long tool calls. |
+| `forceAdmitTimeout` | `"5m"` | Maximum queue wait before a request is admitted even when no pod has room (`"0s"` disables forced admission). Flow control's `defaultRequestTTL` defaults to `60s`, so set `defaultRequestTTL` above `forceAdmitTimeout` or to `"0s"` to avoid shedding held requests before forced admission. |
 
 ## Observability
 
@@ -118,7 +119,7 @@ dumps or logs.
   plugin with a general load scorer to place it.
 - There is no explicit end-of-session signal: a finished session stays in
   the working set as an idle session until another session's turn reclaims
-  its room or the idle TTL drops it, so the working set gauge overestimates
+  its room or the retention TTL drops it, so the working set gauge overestimates
   by recently ended sessions. An end-of-session marker is a candidate
   follow-up once clients can send one reliably.
 - Prefill/decode disaggregation is not supported: every pod the flow
