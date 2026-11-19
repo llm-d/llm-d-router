@@ -14,7 +14,7 @@
   - [Available plugins](#available-plugins)
 - [Metric Scraping and the Data Layer](#metric-scraping-and-the-data-layer)
 - [Disaggregated Encode/Prefill/Decode (E/P/D)](#disaggregated-encodeprefilldecode-epd)
-- [InferencePool & InferenceModel Design](#inferencepool--inferencemodel-design)
+- [InferencePool, InferenceObjective & InferenceModelRewrite Design](#inferencepool-inferenceobjective--inferencemodelrewrite-design)
   - [Current Assumptions](#current-assumptions)
 - [References](#references)
 
@@ -27,7 +27,7 @@
 
 The design enables:
 
-- Support for **multiple base models** within a shared cluster (see [InferencePool & InferenceModel Design](#inferencepool--inferencemodel-design))
+- Support for **multiple base models** within a shared cluster (see [InferencePool, InferenceObjective & InferenceModelRewrite Design](#inferencepool-inferenceobjective--inferencemodelrewrite-design))
 - Efficient routing based on **KV cache locality**, **session affinity**, **load**, and
 **model metadata**
 - Disaggregated **Prefill/Decode (P/D)** execution
@@ -423,7 +423,7 @@ Enable chunked decode via the pd-sidecar flag:
 
 ---
 
-## InferencePool & InferenceModel Design
+## InferencePool, InferenceObjective & InferenceModelRewrite Design
 
 ### Current Assumptions
 
@@ -433,8 +433,9 @@ Enable chunked decode via the pd-sidecar flag:
   Multiple models are supported via multiple `InferencePools`.
 
 > [!NOTE]
-> The `InferenceModel` CRD is in the process of being significantly changed in IGW.
-> Once finalized, these changes would be reflected in llm-d as well.
+> The llm-d Router repository defines `InferenceObjective` in `apix/v1` and
+> `InferenceModelRewrite` in `apix/v1alpha2`. The [Gateway API Inference Extension (GIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
+> defines the `InferencePool` API.
 
 ---
 
