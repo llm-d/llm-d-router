@@ -31,6 +31,7 @@ import (
 	otelcodes "go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"google.golang.org/grpc/codes"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -191,7 +192,8 @@ func (d *answeringDirector) HandleResponseBody(_ context.Context, reqCtx *Reques
 	return reqCtx
 }
 
-// An answer reaches the caller with its status and no headers or body. It ends as deferred
+// An answer reaches the caller with its status, the FAILED_PRECONDITION gRPC status and no
+// headers or body. It ends as deferred
 // with the answer's reason, with no error count, no Error span status and no error log line, and the picked pod's
 // per-request state is released with the answered cause. An answer lost to a cancelled stream
 // ends as cancelled, and an answer that cannot be sent is a failure.
@@ -291,6 +293,7 @@ func TestProcessAnswersWithoutForwarding(t *testing.T) {
 			require.Len(t, srv.sentResponses, 1)
 			immediate := srv.sentResponses[0].GetImmediateResponse()
 			require.Equal(t, envoyTypePb.StatusCode_NoContent, immediate.GetStatus().GetCode())
+			require.Equal(t, uint32(codes.FailedPrecondition), immediate.GetGrpcStatus().GetStatus())
 			require.Empty(t, immediate.GetBody())
 			require.Empty(t, immediate.GetHeaders().GetSetHeaders())
 

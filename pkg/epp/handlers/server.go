@@ -861,6 +861,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					// deferred cleanup releases per-request plugin state on return, with
 					// TerminationCauseAnswered. request_total does not count the answer.
 					resp := envoy.BuildImmediateResponse(reqCtx.AnswerStatus, nil, nil)
+					// Envoy applies grpc_status to a gRPC request only. Without it Envoy
+					// derives UNKNOWN from the HTTP status, which a gRPC caller reads as a
+					// failure.
+					resp.GetImmediateResponse().GrpcStatus = &extProcPb.GrpcStatus{Status: uint32(codes.FailedPrecondition)}
 					if sendErr := sendImmediateResponse(ctx, srv, logger, resp); sendErr != nil {
 						// A cancelled stream ends as cancelled, so it is not a request error.
 						if !errors.Is(sendErr, context.Canceled) {
