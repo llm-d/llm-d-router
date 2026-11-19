@@ -481,6 +481,24 @@ func TestConvertMMFeaturesNil(t *testing.T) {
 	assert.Nil(t, r)
 }
 
+func TestConvertMMFeaturesExcludesHashlessFeatures(t *testing.T) {
+	// A missing hash carries no content identity; hashing it would make
+	// prompts with different media collide on those blocks (issue #4155).
+	// Such features stay in MultiModalFeatures for media detection and token
+	// accounting, but never reach the cache-key maps.
+	features := []fwkrequest.MultiModalFeature{
+		{Modality: reqcommon.ModalityImage, Hash: "h1", Offset: 1, Length: 2},
+		{Modality: reqcommon.ModalityImage, Hash: "", Offset: 5, Length: 3},
+		{Modality: reqcommon.ModalityImage, Hash: "h2", Offset: 10, Length: 3},
+	}
+	hashes, ranges := ConvertMMFeaturesFromUpstream(features)
+	assert.Equal(t, []string{"h1", "h2"}, hashes["image"])
+	assert.Equal(t,
+		[]kvblock.PlaceholderRange{{Offset: 1, Length: 2}, {Offset: 10, Length: 3}},
+		ranges["image"],
+		"the hashless span must not shift later items' pairing")
+}
+
 func TestProduces_PublishesBackendAttribute(t *testing.T) {
 	ctx := context.Background()
 

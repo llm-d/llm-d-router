@@ -471,3 +471,35 @@ func TestGetBlockHashes_FeaturePastPartialFinalBlockIgnored(t *testing.T) {
 			"a feature at offset %d spans no tokens and must not change any block hash", offset)
 	}
 }
+
+// A feature without a hash carries no content identity: encoding it would
+// contribute only position bytes and make prompts with different media collide
+// on the blocks it spans (issue #4155). Hashless features stay in the list for
+// media detection, so the block encoding must equal the one computed without
+// them, block by block.
+func TestGetBlockHashes_HashlessFeaturesEncodeAsFeatureless(t *testing.T) {
+	tokens := []uint32{1, 2, 3, 4, 5, 5, 5, 5, 6, 7, 7, 7, 8}
+	hashes := func(features []fwkrequest.MultiModalFeature) [][]BlockHash {
+		return GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+			TargetModel: "m",
+			Body: &fwkrequest.InferenceRequestBody{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{TokenIDs: tokens, MultiModalFeatures: features}},
+				},
+			},
+		}, 4, testMaxPrefixBlocks)
+	}
+	hashless := fwkrequest.MultiModalFeature{Modality: "image", Hash: "", Offset: 4, Length: 8}
+	first := fwkrequest.MultiModalFeature{Modality: "image", Hash: "left-media", Offset: 0, Length: 2}
+	last := fwkrequest.MultiModalFeature{Modality: "image", Hash: "right-media", Offset: 8, Length: 4}
+
+	t.Run("all features hashless", func(t *testing.T) {
+		assert.Equal(t, hashes(nil), hashes([]fwkrequest.MultiModalFeature{hashless}))
+	})
+
+	t.Run("hashless feature between hashed ones", func(t *testing.T) {
+		assert.Equal(t,
+			hashes([]fwkrequest.MultiModalFeature{first, last}),
+			hashes([]fwkrequest.MultiModalFeature{first, hashless, last}))
+	})
+}
