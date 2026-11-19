@@ -232,7 +232,8 @@ func (s *StreamingServer) generateHeaders(ctx context.Context, reqCtx *RequestCo
 var eppOwnedHeaders = request.InputControlHeaders.
 	Union(request.ScreeningHeaders).
 	Union(request.OutputInjectionHeaders).
-	Union(request.InternalRoutingHeaders)
+	Union(request.InternalRoutingHeaders).
+	Union(request.TracePropagationHeaders)
 
 // unsetRoutingHeaders lists the EPP-owned headers that setHeaders does not
 // carry. Envoy forwards a client header unless the mutation removes it.

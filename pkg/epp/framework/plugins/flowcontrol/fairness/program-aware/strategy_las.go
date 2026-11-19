@@ -190,6 +190,11 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	completionTokens := int64(response.Usage.CompletionTokens)
 	if completionTokens <= 0 && response.StreamedEvents > 0 {
 		completionTokens = int64(response.StreamedEvents)
+		// The token producer runs after flow control, so the plugin cannot declare
+		// TokenizedPrompt as a dependency. At end of stream the body carries its count when one ran.
+		if promptTokens <= 0 && request.Body != nil {
+			promptTokens = int64(request.Body.TokenizedRequest.TokenCount())
+		}
 	}
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	id := programIDFor(request)
