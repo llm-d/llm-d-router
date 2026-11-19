@@ -633,13 +633,14 @@ var (
 	)
 
 	// LlmdCrossReplicaLastPublishTimestamp records when a state key last
-	// published at least one endpoint, so time() minus it is how old this
-	// replica's shared state can be for its peers.
+	// completed a clean publish cycle (every attempted endpoint published), so
+	// time() minus it bounds how old this replica's shared state can be for
+	// its peers.
 	LlmdCrossReplicaLastPublishTimestamp = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
 			Name:      "cross_replica_last_publish_timestamp_seconds",
-			Help:      metricsutil.HelpMsgWithStability("Unix time of the last successful cross-replica state publish per state key.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Unix time of the last cross-replica publish cycle in which every attempted endpoint published, per state key.", compbasemetrics.ALPHA),
 		},
 		[]string{"state_key"},
 	)

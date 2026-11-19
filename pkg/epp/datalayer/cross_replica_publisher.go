@@ -124,21 +124,36 @@ func (p *crossReplicaPublisher) run(ctx context.Context) {
 }
 
 func (p *crossReplicaPublisher) publishAll(ctx context.Context) {
-	start := time.Now()
-	defer func() { metrics.RecordCrossReplicaPublishCycle(time.Since(start)) }()
 	snapshot := p.endpointSnapshot()
+	// A cycle with no registered endpoints makes no syncer calls; timing it
+	// would add a sub-microsecond sample every interval and skew the quantiles.
+	if len(snapshot) == 0 {
+		return
+	}
+	start := time.Now()
+	cycle := newPublishCycle()
+	defer func() {
+		// A cycle cut short by shutdown says nothing about the syncer: its
+		// unattempted endpoints would read as failures and its duration as
+		// an outlier.
+		if ctx.Err() != nil {
+			return
+		}
+		metrics.RecordCrossReplicaPublishCycle(time.Since(start))
+		cycle.record(time.Now())
+	}()
 	if syncer, ok := p.syncer.(fwkdl.CrossReplicaBatchSyncer); ok {
-		p.publishBatch(ctx, syncer, snapshot)
+		p.publishBatch(ctx, syncer, snapshot, cycle)
 		return
 	}
 	for _, endpointID := range snapshot {
 		dispatchCtx, cancel := context.WithTimeout(ctx, p.publishTimeout)
-		p.publish(dispatchCtx, endpointID)
+		p.publish(dispatchCtx, endpointID, cycle)
 		cancel()
 	}
 }
 
-func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.CrossReplicaBatchSyncer, snapshot []types.NamespacedName) {
+func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.CrossReplicaBatchSyncer, snapshot []types.NamespacedName, cycle *publishCycle) {
 	specs := make([]fwkdl.CrossReplicaSpec, 0, len(p.contributors))
 	for _, c := range p.contributors {
 		specs = append(specs, c.CrossReplicaState())
@@ -159,7 +174,7 @@ func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.C
 	for _, spec := range specs {
 		wg.Go(func() {
 			failures := syncer.SetBatch(ctx, spec, endpointIDs, p.publishTimeout)
-			recordPublishes(spec, len(endpointIDs), len(failures))
+			cycle.addBatch(spec.StateKey, len(endpointIDs), failures)
 			if len(failures) == 0 {
 				return
 			}
@@ -172,7 +187,7 @@ func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.C
 		})
 	}
 	wg.Wait()
-	p.reconcileRemoved(ctx, syncer, specs, snapshot)
+	p.reconcileRemoved(ctx, syncer, specs, snapshot, cycle)
 }
 
 // reconcileRemoved deletes shared state left by endpoints removed while the
@@ -181,7 +196,7 @@ func (p *crossReplicaPublisher) publishBatch(ctx context.Context, syncer fwkdl.C
 // Endpoints re-registered during the cleanup lost that field again, so they
 // are published once more; a republish that lands after a later delete is the
 // same resurrected-field case and is bounded the same way.
-func (p *crossReplicaPublisher) reconcileRemoved(ctx context.Context, syncer fwkdl.CrossReplicaBatchSyncer, specs []fwkdl.CrossReplicaSpec, snapshot []types.NamespacedName) {
+func (p *crossReplicaPublisher) reconcileRemoved(ctx context.Context, syncer fwkdl.CrossReplicaBatchSyncer, specs []fwkdl.CrossReplicaSpec, snapshot []types.NamespacedName, cycle *publishCycle) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -224,7 +239,7 @@ func (p *crossReplicaPublisher) reconcileRemoved(ctx context.Context, syncer fwk
 	for _, spec := range specs {
 		wg.Go(func() {
 			failures := syncer.SetBatch(ctx, spec, revived, p.publishTimeout)
-			recordPublishes(spec, len(revived), len(failures))
+			cycle.addBatch(spec.StateKey, len(revived), failures)
 			for endpointID, err := range failures {
 				p.publishFailureLog.Do(func() {
 					logger.Error(err, "cross-replica batch republish failed", "key", spec.StateKey, "endpoint", endpointID)
@@ -268,14 +283,19 @@ func (p *crossReplicaPublisher) handleEndpointEvent(ctx context.Context, event f
 	})
 }
 
-func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplicaSpec, key types.NamespacedName) error {
+// set publishes one endpoint's value for spec. published is false when the
+// endpoint was deleted after publishAll took its snapshot and the syncer was
+// not called.
+func (p *crossReplicaPublisher) set(ctx context.Context, spec fwkdl.CrossReplicaSpec, key types.NamespacedName) (published bool, err error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	// The endpoint may have been deleted after publishAll took its snapshot.
 	if !p.endpoints.Has(key) {
-		return nil
+		return false, nil
 	}
-	return p.syncer.Set(ctx, spec, key.String())
+	if err := p.syncer.Set(ctx, spec, key.String()); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (p *crossReplicaPublisher) get(ctx context.Context, spec fwkdl.CrossReplicaSpec, endpointID string) (any, bool, error) {
@@ -303,29 +323,122 @@ func (p *crossReplicaPublisher) delete(ctx context.Context, key types.Namespaced
 	return true, errors.Join(errs...)
 }
 
-func (p *crossReplicaPublisher) publish(ctx context.Context, key types.NamespacedName) {
+// publish writes one endpoint's value for every contributor and reports each
+// outcome to cycle. cycle may be nil when the caller is not timing a cycle.
+func (p *crossReplicaPublisher) publish(ctx context.Context, key types.NamespacedName, cycle *publishCycle) {
 	endpointID := key.String()
 	logger := log.FromContext(ctx).WithValues("endpoint", endpointID)
 	var wg sync.WaitGroup
 	for _, c := range p.contributors {
 		spec := c.CrossReplicaState()
 		wg.Go(func() {
-			if err := p.set(ctx, spec, key); err != nil {
-				recordPublishes(spec, 1, 1)
+			published, err := p.set(ctx, spec, key)
+			if err != nil {
+				cycle.addFailure(spec.StateKey, err, errors.Is(ctx.Err(), context.DeadlineExceeded))
 				p.publishFailureLog.Do(func() {
 					logger.Error(err, "cross-replica publish failed", "key", spec.StateKey)
 				})
 				return
 			}
-			recordPublishes(spec, 1, 0)
+			// An endpoint removed after the snapshot was skipped, not
+			// attempted: it is not reported, so it can neither count as a
+			// success nor make the cycle look clean.
+			if published {
+				cycle.addSuccess(spec.StateKey)
+			}
 		})
 	}
 	wg.Wait()
 }
 
-// recordPublishes counts the endpoints one state key attempted and how many of
-// them the syncer failed. The failure log is rate limited, so these counters
-// are the only complete record of a syncer outage.
-func recordPublishes(spec fwkdl.CrossReplicaSpec, attempted, failed int) {
-	metrics.RecordCrossReplicaPublishes(string(spec.StateKey), attempted-failed, failed, time.Now())
+// publishCycle collects, per state key, how many endpoints one publish cycle
+// attempted and how each failed one failed. Every publish path only reports
+// facts to it; record turns them into metrics once, at the end of the cycle,
+// so what counts as a successful cycle is decided in one place. An endpoint
+// skipped because it was removed during the cycle is never reported, so it
+// can neither count as a success nor make the cycle look clean. All methods
+// are safe for concurrent use and are no-ops on a nil cycle.
+type publishCycle struct {
+	mu      sync.Mutex
+	results map[fwkdl.StateKey]*publishResult
+}
+
+type publishResult struct {
+	attempted, errored, timedOut int
+}
+
+func newPublishCycle() *publishCycle {
+	return &publishCycle{results: make(map[fwkdl.StateKey]*publishResult)}
+}
+
+// addSuccess reports one endpoint the syncer accepted.
+func (c *publishCycle) addSuccess(stateKey fwkdl.StateKey) {
+	c.update(stateKey, func(r *publishResult) { r.attempted++ })
+}
+
+// addFailure reports one endpoint the syncer did not accept. deadlineExpired
+// is whether the publish deadline had expired; it takes precedence over err,
+// as an error returned after the deadline is a symptom of it.
+func (c *publishCycle) addFailure(stateKey fwkdl.StateKey, err error, deadlineExpired bool) {
+	c.update(stateKey, func(r *publishResult) {
+		r.attempted++
+		r.count(err, deadlineExpired)
+	})
+}
+
+// addBatch reports one SetBatch call: attempted endpoints and the failure of
+// each endpoint that was not published.
+func (c *publishCycle) addBatch(stateKey fwkdl.StateKey, attempted int, failures map[string]error) {
+	if attempted == 0 {
+		return
+	}
+	c.update(stateKey, func(r *publishResult) {
+		r.attempted += attempted
+		for _, err := range failures {
+			r.count(err, false)
+		}
+	})
+}
+
+func (c *publishCycle) update(stateKey fwkdl.StateKey, f func(*publishResult)) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r, ok := c.results[stateKey]
+	if !ok {
+		r = &publishResult{}
+		c.results[stateKey] = r
+	}
+	f(r)
+}
+
+func (r *publishResult) count(err error, deadlineExpired bool) {
+	if deadlineExpired || isTimeout(err) {
+		r.timedOut++
+		return
+	}
+	r.errored++
+}
+
+// record emits one cycle's outcome per state key. The failure log is rate
+// limited, so these counters are the only complete record of a syncer outage.
+func (c *publishCycle) record(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for stateKey, r := range c.results {
+		succeeded := r.attempted - r.errored - r.timedOut
+		metrics.RecordCrossReplicaCycleOutcome(string(stateKey), succeeded, r.errored, r.timedOut, now)
+	}
+}
+
+// isTimeout reports whether err is an expired deadline, either a context
+// deadline or a network timeout from the syncer's client.
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
 }

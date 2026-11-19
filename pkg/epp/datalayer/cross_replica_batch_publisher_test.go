@@ -122,7 +122,7 @@ func TestCrossReplicaPublisher_BatchFiltersDeletedSnapshot(t *testing.T) {
 	removed, err := pub.delete(context.Background(), gone)
 	require.NoError(t, err)
 	require.True(t, removed)
-	pub.publishBatch(context.Background(), syncer, snapshot)
+	pub.publishBatch(context.Background(), syncer, snapshot, nil)
 	require.Equal(t, []string{"ns/ep-kept"}, got)
 	require.Empty(t, syncer.sets)
 }

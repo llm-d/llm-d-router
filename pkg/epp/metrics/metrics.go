@@ -768,28 +768,47 @@ func RecordDataLayerPoll(sourceType, outcome string, duration time.Duration) {
 const (
 	// CrossReplicaPublishOutcomeSuccess: the syncer accepted the endpoint's value.
 	CrossReplicaPublishOutcomeSuccess = "success"
-	// CrossReplicaPublishOutcomeError: the syncer returned an error for the
-	// endpoint, including an endpoint left unattempted when the cycle ended.
+	// CrossReplicaPublishOutcomeError: the syncer returned an error other than
+	// an expired deadline for the endpoint.
 	CrossReplicaPublishOutcomeError = "error"
+	// CrossReplicaPublishOutcomeTimeout: the publish deadline expired before
+	// the syncer accepted the endpoint's value, including an endpoint left
+	// unattempted because the deadline ran out. A slow syncer shows here; a
+	// syncer that refuses writes shows under error.
+	CrossReplicaPublishOutcomeTimeout = "timeout"
 )
 
-// InitCrossReplicaPublishMetrics creates both outcome series for a state key at
+// InitCrossReplicaPublishMetrics creates every outcome series for a state key at
 // zero, so the first failed publish is an increment on an existing series that
-// rate() and increase() can see. Safe to call repeatedly.
+// rate() and increase() can see, and exposes the cycle-duration histogram with
+// zero observations. It does not create the last-publish timestamp series:
+// before the first successful publish that series must be absent, not 0.
+// Safe to call repeatedly.
 func InitCrossReplicaPublishMetrics(stateKey string) {
-	LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, CrossReplicaPublishOutcomeSuccess)
-	LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, CrossReplicaPublishOutcomeError)
+	for _, outcome := range []string{CrossReplicaPublishOutcomeSuccess, CrossReplicaPublishOutcomeError, CrossReplicaPublishOutcomeTimeout} {
+		LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, outcome)
+	}
+	LlmdCrossReplicaPublishCycleDuration.WithLabelValues()
 }
 
-// RecordCrossReplicaPublishes counts the endpoints one state key published and
-// failed to publish, and stamps the last-publish time when any succeeded.
-func RecordCrossReplicaPublishes(stateKey string, succeeded, failed int, now time.Time) {
-	if succeeded > 0 {
-		LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, CrossReplicaPublishOutcomeSuccess).Add(float64(succeeded))
-		LlmdCrossReplicaLastPublishTimestamp.WithLabelValues(stateKey).Set(float64(now.UnixNano()) / float64(time.Second))
+// RecordCrossReplicaCycleOutcome records one publish cycle for a state key: it
+// counts the endpoints published, failed with an error, and timed out, and
+// stamps the last-publish time only when the cycle was clean, that is, it
+// published at least one endpoint and none errored or timed out. A partial
+// failure therefore stops the clock just like an outage, so a staleness alert
+// also catches an endpoint that never publishes.
+func RecordCrossReplicaCycleOutcome(stateKey string, succeeded, errored, timedOut int, now time.Time) {
+	for outcome, n := range map[string]int{
+		CrossReplicaPublishOutcomeSuccess: succeeded,
+		CrossReplicaPublishOutcomeError:   errored,
+		CrossReplicaPublishOutcomeTimeout: timedOut,
+	} {
+		if n > 0 {
+			LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, outcome).Add(float64(n))
+		}
 	}
-	if failed > 0 {
-		LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, CrossReplicaPublishOutcomeError).Add(float64(failed))
+	if succeeded > 0 && errored == 0 && timedOut == 0 {
+		LlmdCrossReplicaLastPublishTimestamp.WithLabelValues(stateKey).Set(float64(now.UnixNano()) / float64(time.Second))
 	}
 }
 
