@@ -18,7 +18,9 @@ limitations under the License.
 package frontendproxy
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -31,27 +33,31 @@ import (
 )
 
 // NewHTTP forwards HTTP requests with bodies up to maxBytes.
-func NewHTTP(addr string, maxBytes int64) http.Handler {
-	return newProxy(addr, maxBytes, nil, func(w http.ResponseWriter) {
+func NewHTTP(socketPath string, maxBytes int64) http.Handler {
+	return newProxy(socketPath, maxBytes, nil, func(w http.ResponseWriter) {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 	})
 }
 
 // NewGRPC forwards inference RPCs over cleartext HTTP/2.
-func NewGRPC(addr string, maxMessageBytes int64) http.Handler {
+func NewGRPC(socketPath string, maxMessageBytes int64) http.Handler {
 	protocols := new(http.Protocols)
 	protocols.SetUnencryptedHTTP2(true)
 	// Each inference request carries one length-prefixed message.
-	return newProxy(addr, maxMessageBytes+grpcframe.HeaderLen, protocols, func(w http.ResponseWriter) {
+	return newProxy(socketPath, maxMessageBytes+grpcframe.HeaderLen, protocols, func(w http.ResponseWriter) {
 		grpcframe.WriteError(w, codes.ResourceExhausted, "request body too large")
 	})
 }
 
-func newProxy(addr string, maxBytes int64, protocols *http.Protocols, rejectTooLarge func(http.ResponseWriter)) http.Handler {
-	target := &url.URL{Scheme: "http", Host: addr}
+func newProxy(socketPath string, maxBytes int64, protocols *http.Protocols, rejectTooLarge func(http.ResponseWriter)) http.Handler {
+	target := &url.URL{Scheme: "http", Host: "localhost"}
+	var dialer net.Dialer
 	// The default flush policy streams SSE and preserves trailers-only gRPC errors.
 	proxy := httputil.ReverseProxy{
 		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "unix", socketPath)
+			},
 			Protocols:          protocols,
 			DisableCompression: true,
 			IdleConnTimeout:    90 * time.Second,

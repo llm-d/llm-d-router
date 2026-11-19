@@ -17,6 +17,7 @@ limitations under the License.
 package frontendproxy
 
 import (
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -31,11 +32,15 @@ import (
 
 // A trailers-only gRPC error must reach the client even when no response body is sent.
 func TestGRPCTrailersOnly(t *testing.T) {
-	upstream := grpctest.StartGRPCServer(t, func(s *grpc.Server) {
-		healthpb.RegisterHealthServer(s, health.NewServer())
-	})
-	proxy := grpctest.NewH2CServer(t, NewGRPC(upstream, 1024))
+	t.Chdir(t.TempDir()) // Keep the Unix socket path short on macOS.
+	ln, err := net.Listen("unix", "frontend.sock")
+	require.NoError(t, err)
+	s := grpc.NewServer()
+	healthpb.RegisterHealthServer(s, health.NewServer())
+	go func() { _ = s.Serve(ln) }()
+	t.Cleanup(s.Stop)
+	proxy := grpctest.NewH2CServer(t, NewGRPC(ln.Addr().String(), 1024))
 	client := healthpb.NewHealthClient(grpctest.Dial(t, proxy.Listener.Addr().String()))
-	_, err := client.Check(t.Context(), &healthpb.HealthCheckRequest{Service: "unknown"})
+	_, err = client.Check(t.Context(), &healthpb.HealthCheckRequest{Service: "unknown"})
 	require.Equal(t, codes.NotFound, status.Code(err))
 }

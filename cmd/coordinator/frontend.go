@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 
 	"golang.org/x/sync/errgroup"
 
@@ -38,8 +39,8 @@ func withFrontendIngress(cfg config.ServerConfig) server.Option {
 		maxBodyMB = config.DefaultMaxRequestBodySize
 	}
 	maxBytes := maxBodyMB * config.BytesPerMB
-	httpProxy := frontendproxy.NewHTTP("127.0.0.1:8000", maxBytes)
-	grpcProxy := frontendproxy.NewGRPC("127.0.0.1:50051", maxBytes)
+	httpProxy := frontendproxy.NewHTTP("/run/llm-d/frontend-http.sock", maxBytes)
+	grpcProxy := frontendproxy.NewGRPC("/run/llm-d/frontend-grpc.sock", maxBytes)
 	postRoutes := map[string]http.Handler{
 		reqcommon.PathChatCompletions: httpProxy,
 		reqcommon.PathCompletions:     httpProxy,
@@ -59,10 +60,33 @@ func withFrontendIngress(cfg config.ServerConfig) server.Option {
 	})
 }
 
+func listenGenerationSocket(path string) (net.Listener, error) {
+	// The Pod volume retains the socket after an unclean container exit.
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil && info.Mode()&os.ModeSocket != 0:
+		if err := os.Remove(path); err != nil {
+			return nil, err
+		}
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return nil, err
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	// The frontend connects using the Pod's shared volume group.
+	if err := os.Chmod(path, 0o660); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
+	return ln, nil
+}
+
 func runWithFrontend(ctx context.Context, srv *server.Server, cfg config.ServerConfig, publicListener, callbackListener net.Listener) error {
 	if callbackListener == nil {
 		var err error
-		callbackListener, err = net.Listen("tcp", "127.0.0.1:8081")
+		callbackListener, err = listenGenerationSocket("/run/llm-d/generation.sock")
 		if err != nil {
 			return fmt.Errorf("generation listener: %w", err)
 		}
