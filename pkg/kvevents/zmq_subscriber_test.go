@@ -1073,6 +1073,34 @@ func TestZMQSubscriber_SnapshotMetrics(t *testing.T) {
 	require.True(t, h.subManager.RemoveSubscriber(h.ctx, t.Name()))
 	require.Eventually(t, func() bool { return liveOnly() == baseline },
 		5*time.Second, 50*time.Millisecond, "a removed live-only subscriber must leave the count")
+
+	// With a replay buffer, the snapshot and the replay both fail on join.
+	h, _ = newSnapshotReplayHarness(t, []replayMessage{}, -2)
+	h.buffer.fail.Store(true)
+	h.send(t, 5, buildDistinctBlockStoredPayload(t, 100))
+	require.Eventually(t, func() bool { return h.indexed(100) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a subscriber whose snapshot and replay failed must be counted as live-only")
+
+	// The engine restarted and its replay buffer serves the stream; the frame is inside the replay.
+	h.buffer.fail.Store(false)
+	h.buffer.set(replayMessage{seq: 0, payload: buildDistinctBlockStoredPayload(t, 200)})
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 999))
+	require.Eventually(t, func() bool { return h.indexed(200) && liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a completed replay must leave the live-only count")
+	assert.False(t, h.indexed(999), "a frame at or before the replayed sequence is already indexed")
+
+	// A failed gap replay starts the cooldown, so the next frame is indexed live.
+	h.buffer.fail.Store(true)
+	h.send(t, 2, buildEventBatchPayload(t))
+	h.send(t, 3, buildDistinctBlockStoredPayload(t, 300))
+	require.Eventually(t, func() bool { return h.indexed(300) && liveOnly() == baseline+1 },
+		5*time.Second, 50*time.Millisecond, "a failed gap replay must count the subscriber as live-only again")
+
+	// A restart from sequence 0 whose rebuild fails still indexes a complete stream.
+	h.send(t, 0, buildDistinctBlockStoredPayload(t, 500))
+	require.Eventually(t, func() bool { return h.indexed(500) && liveOnly() == baseline },
+		5*time.Second, 50*time.Millisecond, "a restart from sequence 0 must leave the live-only count")
+	assert.Equal(t, before+1, loads())
 }
 
 func TestZMQSubscriber_SnapshotPreferredOverReplay(t *testing.T) {
