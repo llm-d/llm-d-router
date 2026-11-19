@@ -250,20 +250,25 @@ func (p *OpenAIParser) RewritePriority(ctx fwkrh.PriorityRewriteContext, payload
 	return parsers.RewritePriority(ctx, payload, priority)
 }
 
-// maxOutputTokensForAPI normalizes the per-API output-token cap field into a
-// single value, applying each API's field name and precedence. Endpoints with no
-// output-token concept (conversations, embeddings) return nil.
+// maxOutputTokensForAPI reads the output-token cap through the shared per-API
+// field table. Endpoints with no output-token concept (conversations,
+// embeddings) return nil.
 func maxOutputTokensForAPI(apiType string, bodyMap map[string]any) *int64 {
+	var limitAPI reqcommon.APIType
 	switch apiType {
 	case chatCompletionsAPI:
-		return request.MaxOutputTokensFromPayload(bodyMap, "max_completion_tokens", "max_tokens")
+		limitAPI = reqcommon.APITypeChatCompletions
 	case completionsAPI:
-		return request.MaxOutputTokensFromPayload(bodyMap, "max_tokens")
+		limitAPI = reqcommon.APITypeCompletions
 	case responsesAPI:
-		return request.MaxOutputTokensFromPayload(bodyMap, "max_output_tokens")
+		limitAPI = reqcommon.APITypeResponses
 	default:
 		return nil
 	}
+	if n, ok := reqcommon.OutputTokenLimit(bodyMap, limitAPI); ok {
+		return ptr.To(int64(n))
+	}
+	return nil
 }
 
 // ParseResponse extracts usage metadata from JSON, SSE, and binary audio and video responses.
@@ -644,9 +649,9 @@ func readUploadedMedia(part *multipart.Part) (request.UploadedMedia, error) {
 }
 
 // parseImagesEditsRequest parses a multipart/form-data /v1/images/edits request.
-// The uploaded image part is the image-to-image conditioning input, so it is
-// captured as UploadedMedia for input-cost estimation; the original body is
-// forwarded unchanged.
+// Each uploaded image part, under the "image" or "image[]" form name, is an
+// image-to-image conditioning input, so it is captured as UploadedMedia for
+// input-cost estimation; the original body is forwarded unchanged.
 func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	images := &request.ImagesGenerationsRequest{}
 	extractedBody := &request.InferenceRequestBody{
@@ -684,9 +689,9 @@ func parseImagesEditsRequest(body []byte, headers map[string]string) (*fwkrh.Par
 		}
 		return nil
 	}, func(name string) bool {
-		return name == "image"
+		return name == "image" || name == "image[]"
 	}, func(_ string, media request.UploadedMedia) error {
-		images.Image = media
+		images.InputImages = append(images.InputImages, media)
 		return nil
 	})
 	if err != nil {

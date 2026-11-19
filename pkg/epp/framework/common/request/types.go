@@ -200,43 +200,6 @@ func (b *InferenceRequestBody) ResponsePhaseView() *InferenceRequestBody {
 	}
 }
 
-// MaxOutputTokensFromPayload returns the client-requested output-token cap read
-// from a decoded JSON request body. The keys are tried in order and the first one
-// holding a valid value wins, so callers express per-API precedence (e.g. chat
-// completions: max_completion_tokens then the legacy max_tokens). JSON numbers
-// may decode as float64 or json.Number; both are accepted. A present key whose
-// value is the wrong type, negative, or non-integral is treated as absent and the
-// next key is tried. An explicit non-negative whole number (including 0) is
-// returned; if no key holds a valid value the result is nil ("no cap").
-func MaxOutputTokensFromPayload(m PayloadMap, keys ...string) *int64 {
-	for _, k := range keys {
-		v, ok := m[k]
-		if !ok {
-			continue
-		}
-		var f float64
-		switch n := v.(type) {
-		case float64:
-			f = n
-		case json.Number:
-			parsed, err := n.Float64()
-			if err != nil {
-				continue
-			}
-			f = parsed
-		default:
-			continue
-		}
-		// Skip negative or non-integral values as malformed and try the next key.
-		if f < 0 || f != math.Trunc(f) {
-			continue
-		}
-		out := int64(f)
-		return &out
-	}
-	return nil
-}
-
 // BytesPerToken is the average number of request bytes per prompt token, used
 // to estimate token counts without a tokenizer. The tokenizer's estimate
 // backend packs this many bytes into each pseudo-token, so its counts agree
@@ -679,10 +642,10 @@ type ImagesGenerationsRequest struct {
 	// NegativePrompt describes what to avoid in the generated image(s) and is
 	// encoded alongside Prompt for classifier-free guidance.
 	NegativePrompt string `json:"negative_prompt,omitempty"`
-	// Image is the uploaded file part of an images-edits request, the
-	// image-to-image conditioning input. Its zero value means the request
+	// InputImages are the uploaded image parts of an images-edits request, the
+	// image-to-image conditioning inputs, in form order. Empty means the request
 	// carried no image part (images-generations requests never do).
-	Image UploadedMedia `json:"-"`
+	InputImages []UploadedMedia `json:"-"`
 }
 
 func (i *ImagesGenerationsRequest) String() string {

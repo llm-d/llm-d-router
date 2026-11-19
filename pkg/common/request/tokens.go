@@ -160,19 +160,19 @@ func OutputChoiceCount(body map[string]any, apiType APIType) int {
 func NonNegativeInt(v any) (int, error) {
 	switch n := v.(type) {
 	case float64:
-		// float64 cannot represent MaxInt exactly (on 64-bit it rounds up to 2^63),
-		// and converting a value at or past that bound to int is platform-defined,
-		// so the bound is the first float64 past MaxInt.
-		if n < 0 || n != math.Trunc(n) || n >= float64(1<<(strconv.IntSize-1)) {
-			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
-		}
-		return int(n), nil
+		return nonNegativeFloatToInt(n, v)
 	case json.Number:
-		i, err := n.Int64()
+		// Int64 reads an integer literal exactly, but JSON also writes integers
+		// as 100.0 or 1e3, which ParseInt rejects and a float64 decode would
+		// accept; the fallback keeps the two branches reading the same values.
+		if i, err := n.Int64(); err == nil {
+			return nonNegativeInt64(i)
+		}
+		f, err := n.Float64()
 		if err != nil {
 			return 0, err
 		}
-		return nonNegativeInt64(i)
+		return nonNegativeFloatToInt(f, v)
 	case int:
 		return nonNegativeInt64(int64(n))
 	case int64:
@@ -187,6 +187,16 @@ func nonNegativeInt64(i int64) (int, error) {
 		return 0, fmt.Errorf("expected non-negative integer, got %d", i)
 	}
 	return int(i), nil
+}
+
+func nonNegativeFloatToInt(f float64, v any) (int, error) {
+	// float64 cannot represent MaxInt exactly (on 64-bit it rounds up to 2^63),
+	// and converting a value at or past that bound to int is platform-defined,
+	// so the bound is the first float64 past MaxInt.
+	if f < 0 || f != math.Trunc(f) || f >= float64(1<<(strconv.IntSize-1)) {
+		return 0, fmt.Errorf("expected non-negative integer, got %v", v)
+	}
+	return int(f), nil
 }
 
 // StreamRequested reports the client's stream flag. A null stream is unset.

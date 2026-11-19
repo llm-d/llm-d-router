@@ -477,6 +477,39 @@ func TestOutputTokenLimit(t *testing.T) {
 			want:    77,
 			wantOK:  true,
 		},
+		{
+			name:    "json.Number decimal form is read",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": json.Number("64.0")},
+			want:    64,
+			wantOK:  true,
+		},
+		{
+			name:    "wrong type has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": "64"},
+			wantOK:  false,
+		},
+		{
+			name:    "out-of-range value has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": float64(1e300)},
+			wantOK:  false,
+		},
+		{
+			name:    "falls back when the primary field is negative",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_completion_tokens": float64(-1), "max_tokens": float64(50)},
+			want:    50,
+			wantOK:  true,
+		},
+		{
+			name:    "falls back when the primary field is the wrong type",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_completion_tokens": "bad", "max_tokens": float64(50)},
+			want:    50,
+			wantOK:  true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -568,6 +601,8 @@ func TestNonNegativeInt(t *testing.T) {
 		{"float64", float64(3), 3, true},
 		{"zero", float64(0), 0, true},
 		{"json.Number", json.Number("7"), 7, true},
+		{"json.Number decimal point", json.Number("100.0"), 100, true},
+		{"json.Number exponent", json.Number("1e3"), 1000, true},
 		{"int", 5, 5, true},
 		{"int64", int64(9), 9, true},
 		{"negative float64", float64(-1), 0, false},

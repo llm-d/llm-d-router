@@ -92,6 +92,14 @@ func TestProducer_RegisterDependencies(t *testing.T) {
 		require.NoError(t, p.RegisterDependencies(r))
 		assert.Empty(t, r.registrations)
 	})
+
+	t.Run("a bound kv-events-source registers nothing", func(t *testing.T) {
+		p, _ := newRegistrationProducer(true, "")
+		p.sharedEvents = &kvevents.Pool{}
+		r := &recordingRegistrar{}
+		require.NoError(t, p.RegisterDependencies(r))
+		assert.Empty(t, r.registrations)
+	})
 }
 
 func TestProducer_RuntimeSubscribesPodsThroughRegistration(t *testing.T) {
