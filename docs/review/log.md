@@ -1,5 +1,9 @@
 # Update Log
 
+## 2026-11-11
+
+* **Update**: Route `pkg/epp/framework/plugins/requesthandling/forwardtokens/**`, introduced by #3706, to the external wire and runtime review rules in [review_a_pull_request.md](playbooks/review_a_pull_request.md).
+
 ## 2026-11-05
 
 * **Update**: Mined maintainer review threads and issues for pull requests `#3512` to `#3744` with comments through `2026-10-30T14:00:00Z` (59 pull requests, 85 review threads, 35 issues). Added 3 Stage-1 rules (router-built P/D `kv_transfer_params`, bounded metric labels and series cleanup, no locks held across network calls), refined the SSE chunk-boundary usage rule, the client header passthrough rule (`Accept-Encoding`), and the ingress stripping rule (every client entry point), dropped the constant-location sentence already covered by [AGENTS.md](../../AGENTS.md), routed `pkg/*/metrics/**` and observability packages to [unencoded_runtime_hazards.md](rules/unencoded_runtime_hazards.md), and recorded `corpus.mined_through_pr` `3534` (below the lowest pull request still open on `2026-10-30`, `#3535`) in [`provenance.json`](provenance.json).

@@ -183,6 +183,9 @@ type Director struct {
 	// poolName is the inference_pool label on per-request metrics. It must match the name the
 	// runner passes to metrics.InitFairnessIDResolutionMetrics.
 	poolName string
+
+	endpointSelectionCheck  func(...*fwkdl.EndpointMetadata) error
+	endpointCandidateFilter func(context.Context, []fwksched.Endpoint) ([]fwksched.Endpoint, error)
 }
 
 // getInferenceObjective fetches the inferenceObjective from the datastore otherwise creates a new one based on reqCtx.
@@ -208,6 +211,9 @@ func (d *Director) getInferenceObjective(ctx context.Context, reqCtx *handlers.R
 // HandleRequest orchestrates the request lifecycle.
 // It always returns the requestContext even in the error case, as the request context is used in error handling.
 func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) (_ *handlers.RequestContext, err error) {
+	if err := d.CheckEndpointSelection(); err != nil {
+		return reqCtx, err
+	}
 	tracer := tracing.Tracer("llm-d-router/pkg/epp/requestcontrol")
 	ctx, span := tracer.Start(ctx, "request_orchestration", trace.WithSpanKind(trace.SpanKindServer))
 	// An error while admitting (admission controller, candidate lookup, screeners, Admitter plugins)
@@ -368,7 +374,10 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}
 	}
 
-	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
+	snapshotOfCandidatePods, err := d.filterEndpointCandidates(ctx, d.toSchedulerEndpoints(endpointCandidates))
+	if err != nil {
+		return reqCtx, err
+	}
 	// A producer whose RequestHandling run fails leaves its keys missing for the
 	// Scheduling phase too, so producers requiring them are skipped there.
 	missingKeys := map[string]struct{}{}
@@ -390,6 +399,11 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
 		// Don't fail the request if DataProducer plugins fail.
 		logger.Error(err, "failed to prepare per request data")
+	}
+
+	snapshotOfCandidatePods, err = d.filterEndpointCandidates(ctx, snapshotOfCandidatePods)
+	if err != nil {
+		return reqCtx, err
 	}
 
 	// Run admit request plugins
@@ -679,6 +693,26 @@ func (d *Director) SetRequestEvictor(re *eviction.RequestEvictor) {
 	d.requestEvictor = re
 }
 
+// SetEndpointSelectionCheck installs a check before the director serves traffic.
+func (d *Director) SetEndpointSelectionCheck(check func(...*fwkdl.EndpointMetadata) error) {
+	d.endpointSelectionCheck = check
+}
+
+// SetEndpointCandidateFilter installs discovery filtering before traffic is served.
+func (d *Director) SetEndpointCandidateFilter(filter func(context.Context, []fwksched.Endpoint) ([]fwksched.Endpoint, error)) {
+	d.endpointCandidateFilter = filter
+}
+
+// CheckEndpointSelection checks whether discovery permits selecting an endpoint.
+func (d *Director) CheckEndpointSelection(endpoints ...*fwkdl.EndpointMetadata) error {
+	if d.endpointSelectionCheck != nil {
+		if err := d.endpointSelectionCheck(endpoints...); err != nil {
+			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: err.Error()}
+		}
+	}
+	return nil
+}
+
 func (d *Director) toSchedulerEndpoints(endpoints []fwkdl.Endpoint) []fwksched.Endpoint {
 	result := make([]fwksched.Endpoint, len(endpoints))
 	for i, endpoint := range endpoints {
@@ -799,7 +833,7 @@ func (d *Director) loadOrCreateResponseBodyQueue(ctx context.Context, reqCtx *ha
 }
 
 func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
-	pods := d.datastore.PodList(datastore.AllPodsPredicate)
+	pods := d.filteredFallbackEndpoints(datastore.AllPodsPredicate)
 	if len(pods) == 0 {
 		return nil
 	}
@@ -812,12 +846,27 @@ func (d *Director) GetRandomEndpoint() *fwkdl.EndpointMetadata {
 // session, for requests routed without a scheduling profile. A nil metadata
 // with a non-empty pool means no endpoint is decode-capable.
 func (d *Director) GetRandomDecodeEndpoint() *fwkdl.EndpointMetadata {
-	pods := d.datastore.PodList(decodeCapableEndpoint)
+	pods := d.filteredFallbackEndpoints(decodeCapableEndpoint)
 	if len(pods) == 0 {
 		return nil
 	}
 	number := rand.Intn(len(pods)) //#nosec G404 -- load spreading across pods, not security-sensitive
 	return pods[number].GetMetadata()
+}
+
+func (d *Director) filterEndpointCandidates(ctx context.Context, candidates []fwksched.Endpoint) ([]fwksched.Endpoint, error) {
+	if d.endpointCandidateFilter != nil {
+		return d.endpointCandidateFilter(ctx, candidates)
+	}
+	return candidates, nil
+}
+
+func (d *Director) filteredFallbackEndpoints(predicate func(fwkdl.Endpoint) bool) []fwksched.Endpoint {
+	candidates, err := d.filterEndpointCandidates(context.Background(), d.toSchedulerEndpoints(d.datastore.PodList(predicate)))
+	if err != nil {
+		return nil
+	}
+	return candidates
 }
 
 // decodeCapableEndpoint follows the bylabel role filters: an endpoint without
