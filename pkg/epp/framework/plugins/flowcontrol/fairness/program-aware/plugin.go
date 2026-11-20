@@ -25,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -111,18 +113,22 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
-	strategy, err := newStrategy(cfg)
+	if name == "" {
+		name = ProgramAwarePluginType
+	}
+	strategy, err := newStrategy(cfg, name)
 	if err != nil {
 		return nil, fmt.Errorf("%s plugin %q: %w", ProgramAwarePluginType, name, err)
 	}
-	p := &ProgramAwarePlugin{name: name, strategy: strategy}
+	fairnessIndex, avgWaitTimeMs := newCollectors(name)
+	p := &ProgramAwarePlugin{name: name, strategy: strategy, fairnessIndex: fairnessIndex, avgWaitTimeMs: avgWaitTimeMs}
 	if handle != nil {
 		if reg := handle.Metrics(); reg != nil {
-			for _, c := range GetCollectors() {
-				reg.MustRegister(c)
-			}
-			for _, c := range strategy.Collectors() {
-				reg.MustRegister(c)
+			collectors := append([]prometheus.Collector{fairnessIndex, avgWaitTimeMs}, strategy.Collectors()...)
+			for _, c := range collectors {
+				if err := reg.Register(c); err != nil {
+					return nil, fmt.Errorf("%s plugin %q: registering metrics: %w", ProgramAwarePluginType, name, err)
+				}
 			}
 		}
 		if cfg.EvictionTTLSeconds > 0 {
@@ -135,8 +141,10 @@ func ProgramAwarePluginFactory(name string, parameters *json.Decoder, handle plu
 }
 
 type ProgramAwarePlugin struct {
-	name     string
-	strategy Strategy
+	name          string
+	strategy      Strategy
+	fairnessIndex prometheus.Gauge
+	avgWaitTimeMs *prometheus.GaugeVec
 
 	programMetrics sync.Map // key: program ID (string), value: *ProgramMetrics
 }
@@ -199,7 +207,7 @@ func (p *ProgramAwarePlugin) DumpState() (json.RawMessage, error) {
 // instances constructed in tests.
 func (p *ProgramAwarePlugin) getStrategy() Strategy {
 	if p.strategy == nil {
-		s, _ := newStrategy(DefaultConfig())
+		s, _ := newStrategy(DefaultConfig(), p.name)
 		return s
 	}
 	return p.strategy
@@ -266,7 +274,9 @@ func (p *ProgramAwarePlugin) Pick(_ context.Context, band flowcontrol.PriorityBa
 		}
 	}
 
-	fairnessIndex.Set(p.computeFairnessIndex())
+	if p.fairnessIndex != nil {
+		p.fairnessIndex.Set(p.computeFairnessIndex())
+	}
 	return best, nil
 }
 
@@ -279,7 +289,7 @@ func (p *ProgramAwarePlugin) PreRequest(_ context.Context, request *fwksched.Inf
 
 	enqueueTime, _ := fwksched.ReadRequestAttribute[time.Time](request, enqueueTimeAttributeKey)
 	metrics.RecordDispatched(enqueueTime)
-	setProgramGauge(avgWaitTimeMs, id, metrics.AverageWaitTime())
+	setProgramGauge(p.avgWaitTimeMs, id, metrics.AverageWaitTime())
 
 	p.getStrategy().OnPreRequest(metrics, request)
 	return nil
@@ -336,7 +346,9 @@ func (p *ProgramAwarePlugin) evictKey(key any) {
 	p.programMetrics.Delete(key)
 	if id, ok := key.(string); ok {
 		p.getStrategy().EvictProgram(id)
-		DeleteSharedSeries(id)
+		if p.avgWaitTimeMs != nil {
+			p.avgWaitTimeMs.DeleteLabelValues(id)
+		}
 	}
 }
 

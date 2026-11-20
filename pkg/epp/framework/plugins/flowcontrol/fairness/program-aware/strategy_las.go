@@ -83,21 +83,25 @@ func (s *lasState) AddService(cost float64, now time.Time, halfLifeSeconds float
 	return s.attainedService
 }
 
-var attainedServiceTokens = prometheus.NewGaugeVec(
-	prometheus.GaugeOpts{
-		Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-		Name:      "program_aware_attained_service_tokens",
-		Help:      metricsutil.HelpMsgWithStability("Time-decayed attained service (weighted tokens consumed) per program.", compbasemetrics.ALPHA),
-	},
-	[]string{"program_id"},
-)
+func newAttainedServiceCollector(name string) *prometheus.GaugeVec {
+	return prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem:   eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:        "program_aware_attained_service_tokens",
+			Help:        metricsutil.HelpMsgWithStability("Time-decayed attained service (weighted tokens consumed) per program.", compbasemetrics.ALPHA),
+			ConstLabels: prometheus.Labels{"policy": name},
+		},
+		[]string{"program_id"},
+	)
+}
 
 var _ Strategy = &LASStrategy{}
 
 type LASStrategy struct {
-	weightService   float64
-	weightHeadWait  float64
-	halfLifeSeconds float64
+	weightService         float64
+	weightHeadWait        float64
+	halfLifeSeconds       float64
+	attainedServiceTokens *prometheus.GaugeVec
 
 	state sync.Map // key: program ID (string), value: *lasState
 }
@@ -199,16 +203,18 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	id := programIDFor(request)
 	service := s.getOrCreateState(id).AddService(cost, time.Now(), s.halfLifeSeconds)
-	setProgramGauge(attainedServiceTokens, id, service)
+	setProgramGauge(s.attainedServiceTokens, id, service)
 }
 
 func (s *LASStrategy) EvictProgram(id string) {
 	s.state.Delete(id)
-	attainedServiceTokens.DeleteLabelValues(id)
+	if s.attainedServiceTokens != nil {
+		s.attainedServiceTokens.DeleteLabelValues(id)
+	}
 }
 
 func (s *LASStrategy) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{attainedServiceTokens}
+	return []prometheus.Collector{s.attainedServiceTokens}
 }
 
 func (s *LASStrategy) Consumes() plugin.DataDependencies { return plugin.DataDependencies{} }
