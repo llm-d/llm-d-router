@@ -27,15 +27,36 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
 )
 
-var _ fwkdl.EndpointExtractor = &Producer{}
+var (
+	_ fwkdl.EndpointExtractor = &Producer{}
+	_ fwkdl.Registrant        = &Producer{}
+)
+
+// RegisterDependencies requests endpoint events for per-pod subscriptions.
+// A global zmqEndpoint can leave discoverPods enabled but needs no such events,
+// and a bound kv-events-source follows the endpoints itself.
+func (p *Producer) RegisterDependencies(r fwkdl.Registrar) error {
+	kc := p.kvEventsConfig
+	if p.sharedEvents != nil || !kc.DiscoverPods || kc.PodDiscoveryConfig == nil || kc.ZMQEndpoint != "" {
+		return nil
+	}
+	return r.Register(fwkdl.PendingRegistration{
+		Owner:      p.TypedName(),
+		SourceType: sourcenotifications.EndpointNotificationSourceType,
+		Extractor:  p,
+		DefaultSource: sourcenotifications.NewEndpointDataSource(
+			sourcenotifications.EndpointNotificationSourceType, sourcenotifications.EndpointNotificationSourceType),
+	})
+}
 
 // Extract subscribes matching endpoints to per-pod KV events when discovery is
 // enabled. Deleted endpoints and endpoints that stop matching lose their
 // subscriber and cached index entries.
 func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error {
-	if !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
+	if p.sharedEvents != nil || !p.kvEventsConfig.DiscoverPods || p.kvEventsConfig.PodDiscoveryConfig == nil {
 		return nil
 	}
 	meta := event.Endpoint.GetMetadata()
@@ -62,19 +83,19 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 
 // ensureSubscriber idempotently installs a KV-events subscriber for the given
 // endpoint, dialing SocketPort + RankIndex to match standard inference-engine port offsetting
-// (one ZMQ PUB socket per DP rank on the same pod IP). With GrpcBasePort set,
-// the rank's GetServerInfo server is asked for its global DP rank and the
-// dial port becomes SocketPort + that rank, so engines whose DP-rank
-// numbering restarts per node reach the right publisher; a rank reporting
-// no KV-event source gets no subscriber.
+// (one ZMQ PUB socket per DP rank on the same pod IP), the endpoint's ZMQPort
+// when discovery sets one, or SocketPort + the global DP rank reported by the
+// engine's GetServerInfo server when GrpcBasePort is set. A ZMQPort endpoint
+// receives live events only, without replay or snapshot; a rank reporting no
+// KV-event source gets no subscriber.
 func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
 	if meta == nil || meta.Address == "" {
 		return nil
 	}
 	endpointKey := meta.ID.String()
 	logger := log.FromContext(ctx).WithName(p.typedName.String())
-	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
-	if grpcBase := p.kvEventsConfig.PodDiscoveryConfig.GrpcBasePort; grpcBase > 0 {
+	zmqEndpoint, replayEndpoint, snapshotEndpoint := p.subscriberEndpoints(meta)
+	if meta.ZMQPort == 0 && p.kvEventsConfig.PodDiscoveryConfig.GrpcBasePort > 0 {
 		dpRank, publishes, err := p.queryRankServer(ctx, meta)
 		switch {
 		case err != nil:
@@ -84,17 +105,9 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 				"endpoint", endpointKey, "dpRank", dpRank)
 			return nil
 		default:
-			port = p.kvEventsConfig.PodDiscoveryConfig.SocketPort + int(dpRank)
+			zmqEndpoint = "tcp://" + net.JoinHostPort(meta.Address,
+				strconv.Itoa(p.kvEventsConfig.PodDiscoveryConfig.SocketPort+int(dpRank)))
 		}
-	}
-	zmqEndpoint := "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(port))
-	replayEndpoint := ""
-	if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {
-		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
-	}
-	snapshotEndpoint := ""
-	if snapshotPort := p.kvEventsConfig.PodDiscoveryConfig.SnapshotSocketPort; snapshotPort > 0 {
-		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+meta.GetRankIndex()))
 	}
 	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
 
@@ -109,4 +122,24 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	logger.V(logging.DEBUG).Info("Ensured KV-events subscriber",
 		"endpoint", endpointKey, "zmq", zmqEndpoint, "replay", replayEndpoint, "snapshot", snapshotEndpoint)
 	return nil
+}
+
+// subscriberEndpoints returns the endpoint's KV-events, replay and snapshot
+// socket addresses; an empty replay or snapshot address disables that path.
+// An endpoint with ZMQPort gets no replay or snapshot address: those ports
+// follow the configured port plus RankIndex and can belong to another engine
+// on the same address.
+func (p *Producer) subscriberEndpoints(meta *fwkdl.EndpointMetadata) (zmqEndpoint, replayEndpoint, snapshotEndpoint string) {
+	if meta.ZMQPort > 0 {
+		return "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(meta.ZMQPort)), "", ""
+	}
+	cfg := p.kvEventsConfig.PodDiscoveryConfig
+	zmqEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(cfg.SocketPort+meta.GetRankIndex()))
+	if replayPort := cfg.EffectiveReplayPort(); replayPort > 0 {
+		replayEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(replayPort+meta.GetRankIndex()))
+	}
+	if snapshotPort := cfg.SnapshotSocketPort; snapshotPort > 0 {
+		snapshotEndpoint = "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(snapshotPort+meta.GetRankIndex()))
+	}
+	return zmqEndpoint, replayEndpoint, snapshotEndpoint
 }

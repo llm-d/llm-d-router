@@ -264,6 +264,7 @@ test_cases_llm_d_router_standalone["agentgateway"]="--set router.proxy.proxyType
 test_cases_llm_d_router_standalone["proxy-service"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.replicas=3"
 test_cases_llm_d_router_standalone["proxy-service-scheduling"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.nodeSelector.pool=router --set router.proxy.nodeSelector.pool=router --set-json router.proxy.tolerations=[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}] --set-json router.proxy.affinity={\"podAntiAffinity\":{\"preferredDuringSchedulingIgnoredDuringExecution\":[{\"weight\":100,\"podAffinityTerm\":{\"topologyKey\":\"kubernetes.io/hostname\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}}]}}"
 test_cases_llm_d_router_standalone["proxy-service-pod-settings"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.podAnnotations.team=router --set router.proxy.podSecurityContext.runAsUser=65532"
+test_cases_llm_d_router_standalone["proxy-service-rollout"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.minReadySeconds=30 --set router.proxy.minReadySeconds=10 --set router.proxy.deploymentStrategy.type=RollingUpdate --set router.proxy.deploymentStrategy.rollingUpdate.maxUnavailable=0 --set router.proxy.deploymentStrategy.rollingUpdate.maxSurge=1"
 test_cases_llm_d_router_standalone["pod-placement"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.epp.priorityClassName=router-critical --set router.proxy.priorityClassName=router-critical --set router.epp.podLabels.team=router --set router.proxy.podLabels.team=router --set-json router.epp.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-standalone\":\"release-name-epp\"}}}] --set-json router.proxy.topologySpreadConstraints=[{\"maxSkew\":1,\"topologyKey\":\"topology.kubernetes.io/zone\",\"whenUnsatisfiable\":\"ScheduleAnyway\",\"labelSelector\":{\"matchLabels\":{\"llm-d-router-proxy\":\"release-name-proxy\"}}}]"
 test_cases_llm_d_router_standalone["pod-placement-statefulset"]="--set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.podLabels.team=router"
 test_cases_llm_d_router_standalone["proxy-service-kubernetes-1.30"]="--kube-version 1.30.0 --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service"
@@ -366,6 +367,26 @@ for key in "${!test_cases_llm_d_router_standalone[@]}"; do
     epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
     if ! grep -q "team: router" "${epp_yaml}" || ! grep -q "runAsUser: 65532" "${epp_yaml}"; then
       echo "Validation failed: proxy podAnnotations or podSecurityContext not rendered for test: ${key}"
+      exit 1
+    fi
+  fi
+  if [ "${key}" == "proxy-service-rollout" ]; then
+    epp_yaml="${output_dir}/llm-d-router-standalone/templates/epp.yaml"
+    # Select each Deployment and assert its own rollout settings: the combined
+    # YAML would pass with the EPP and proxy values swapped between them.
+    epp_min_ready="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-epp") | .spec.minReadySeconds' "${epp_yaml}")"
+    proxy_min_ready="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.minReadySeconds' "${epp_yaml}")"
+    proxy_max_surge="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.strategy.rollingUpdate.maxSurge' "${epp_yaml}")"
+    proxy_max_unavailable="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-proxy") | .spec.strategy.rollingUpdate.maxUnavailable' "${epp_yaml}")"
+    if [ "${epp_min_ready}" != "30" ] || [ "${proxy_min_ready}" != "10" ] || [ "${proxy_max_surge}" != "1" ] || [ "${proxy_max_unavailable}" != "0" ]; then
+      echo "Validation failed: rollout settings not rendered on their own Deployments for test: ${key} (epp minReadySeconds=${epp_min_ready}, proxy minReadySeconds=${proxy_min_ready}, proxy rollingUpdate ${proxy_max_surge}/${proxy_max_unavailable})"
+      exit 1
+    fi
+    # The strategy override must reach the proxy Deployment only; the EPP
+    # Deployment keeps its own default (Recreate with a single replica).
+    epp_strategy_type="$("${YQ}" 'select(.kind == "Deployment" and .metadata.name == "release-name-epp") | .spec.strategy.type' "${epp_yaml}")"
+    if [ "${epp_strategy_type}" != "Recreate" ]; then
+      echo "Validation failed: proxy deploymentStrategy leaked into the EPP Deployment for test: ${key} (strategy=${epp_strategy_type})"
       exit 1
     fi
   fi
@@ -655,6 +676,43 @@ for chart in llm-d-router-gateway llm-d-router-standalone; do
   render_cluster_rbac_name "${chart}" tiered-prefix-cache "${shared_prefix}-sglang"
   if [ "${cluster_rbac_name}" == "${first_name}" ]; then
     echo "${chart}: namespaces sharing their first 40 characters got the same ClusterRole name ${first_name}"
+    exit 1
+  fi
+done
+
+echo "Verifying metrics reader token Secret names..."
+render_metrics_reader_secret() {
+  local chart="$1" release="$2"
+  shift 2
+  local output="${TEMP_DIR}/${chart}-metrics-reader-secret.yaml"
+  local args=()
+  if [ "${chart}" == "llm-d-router-standalone" ]; then
+    args+=(--set router.inferencePool.create=false)
+  fi
+  if ! "${HELM}" template "${release}" "${SCRIPT_ROOT}/config/charts/${chart}" \
+    --namespace metrics-test --set router.modelServers.matchLabels.app=llm-instance-gateway \
+    --set router.monitoring.prometheus.enabled=true "${args[@]}" "$@" > "${output}"; then
+    echo "Metrics reader Secret rendering failed for ${chart}: ${release} $*"
+    exit 1
+  fi
+  local credentials_name
+  metrics_reader_secret=$("${YQ}" -N 'select(.kind == "Secret" and .type == "kubernetes.io/service-account-token") | .metadata.name' "${output}")
+  credentials_name=$("${YQ}" -N 'select(.kind == "ServiceMonitor") | .spec.endpoints[].authorization.credentials.name' "${output}")
+  if [ -z "${metrics_reader_secret}" ] || [ "${credentials_name}" != "${metrics_reader_secret}" ]; then
+    echo "${chart}: ServiceMonitor credentials '${credentials_name}' must name the token Secret '${metrics_reader_secret}' for ${release}; flags: $*"
+    exit 1
+  fi
+}
+
+for chart in llm-d-router-gateway llm-d-router-standalone; do
+  render_metrics_reader_secret "${chart}" alpha
+  if [ "${metrics_reader_secret}" != "alpha-metrics-reader-secret" ]; then
+    echo "${chart}: expected token Secret alpha-metrics-reader-secret, got ${metrics_reader_secret}"
+    exit 1
+  fi
+  render_metrics_reader_secret "${chart}" alpha --set router.monitoring.prometheus.auth.secretName=custom-reader
+  if [ "${metrics_reader_secret}" != "custom-reader" ]; then
+    echo "${chart}: expected the secretName override custom-reader, got ${metrics_reader_secret}"
     exit 1
   fi
 done
@@ -1069,6 +1127,64 @@ for proxy_setting in router.proxy.enabled=false router.proxy.proxyType=agentgate
   fi
 done
 
+echo "Verifying Envoy health-checks the EPP gRPC health port only where ext_proc resolves to EPP pods..."
+# name | extra helm flags | health_check_config count | health port | plaintext health transport_socket_match_criteria | EPP --drain-timeout value or absent
+while IFS='|' read -r hc_case hc_flags hc_count hc_port hc_tls hc_drain; do
+  hc_render_output="${TEMP_DIR}/envoy-epp-health-port-${hc_case}.yaml"
+  read -r -a hc_flag_args <<<"${hc_flags}"
+  if ! "${HELM}" template hc "${SCRIPT_ROOT}/config/charts/llm-d-router-standalone" \
+    --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false \
+    "${hc_flag_args[@]}" > "${hc_render_output}"; then
+    echo "Envoy Helm render failed for EPP health port case ${hc_case}"
+    exit 1
+  fi
+  hc_found=$(grep -c -- 'health_check_config:' "${hc_render_output}" || true)
+  if [[ "${hc_found}" != "${hc_count}" ]]; then
+    echo "EPP health port case ${hc_case}: expected ${hc_count} ext_proc health_check_config, got ${hc_found}"
+    exit 1
+  fi
+  if [[ "${hc_count}" != 0 ]]; then
+    hc_port_found=$(grep -A1 -- 'health_check_config:' "${hc_render_output}" | grep -c -- "port_value: ${hc_port}" || true)
+    if [[ "${hc_port_found}" != "${hc_count}" ]]; then
+      echo "EPP health port case ${hc_case}: expected ${hc_count} health_check_config on port ${hc_port}, got ${hc_port_found}"
+      exit 1
+    fi
+  fi
+  if [[ "${hc_tls}" == present ]] && ! { grep -A1 -- 'transport_socket_match_criteria:' "${hc_render_output}" | grep -q -- 'health: plaintext' \
+    && grep -A6 -- 'name: plaintext-health' "${hc_render_output}" | grep -q -- 'envoy.transport_sockets.raw_buffer'; }; then
+    echo "EPP health port case ${hc_case}: plaintext health check transport socket match missing with EPP TLS on"
+    exit 1
+  fi
+  if [[ "${hc_tls}" == present ]] && grep -q -- 'tls_options:' "${hc_render_output}"; then
+    echo "EPP health port case ${hc_case}: health check tls_options rendered for the plaintext health port"
+    exit 1
+  fi
+  if [[ "${hc_tls}" == absent ]] && grep -q -- 'transport_socket_match_criteria' "${hc_render_output}"; then
+    echo "EPP health port case ${hc_case}: transport_socket_match_criteria rendered with EPP TLS off"
+    exit 1
+  fi
+  if [[ "${hc_case}" == service-clusterip ]] && ! grep -A1 -- 'tls_options:' "${hc_render_output}" | grep -q -- 'alpn_protocols: \["h2"\]'; then
+    echo "EPP health port case ${hc_case}: health check tls_options missing with EPP TLS on"
+    exit 1
+  fi
+  hc_drain_found=$(grep -c -- '--drain-timeout=' "${hc_render_output}" || true)
+  if [[ "${hc_drain}" == absent && "${hc_drain_found}" != 0 ]]; then
+    echo "EPP health port case ${hc_case}: expected no EPP --drain-timeout arg, got ${hc_drain_found}"
+    exit 1
+  fi
+  if [[ "${hc_drain}" != absent ]] && { [[ "${hc_drain_found}" != 1 ]] || ! grep -q -- "--drain-timeout=${hc_drain}\"" "${hc_render_output}"; }; then
+    echo "EPP health port case ${hc_case}: expected one EPP --drain-timeout=${hc_drain} arg, got ${hc_drain_found} --drain-timeout args"
+    exit 1
+  fi
+done <<'EOF_HC_CASES'
+sidecar|--set router.proxy.mode=sidecar|1|9003|present|45s
+service-priority|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true|2|9003|present|45s
+service-discovery|--set router.proxy.mode=service --set router.epp.replicas=2 --set router.epp.haMode=all-active|1|9003|present|45s
+service-clusterip|--set router.proxy.mode=service|0|9003|absent|absent
+service-priority-plaintext|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.grpcHealthPort=9100 --set-string router.epp.flags.secure-serving=false|2|9100|absent|45s
+service-priority-drain-override|--set router.proxy.mode=service --set router.proxy.priorityRouting.enabled=true --set router.epp.flags.drain-timeout=60s|2|9003|present|60s
+EOF_HC_CASES
+
 echo "Verifying llm-d-router-standalone fail-open fallback follows router.proxy.failOpen and targetPorts..."
 fail_closed_render_output="${TEMP_DIR}/llm-d-router-standalone-proxy-fail-closed-render.yaml"
 ${HELM} template proxy-svc ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --namespace proxy-ns --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.inferencePool.create=false --set router.proxy.mode=service --set router.proxy.failOpen=false > "${fail_closed_render_output}"
@@ -1285,3 +1401,52 @@ for c in "sidecar:${envoy_default_output}:--concurrency:8:1" "sidecar-cpuset:${e
     exit 1
   fi
 done
+
+echo "Verifying llm-d-router-standalone Envoy ext_proc HTTP/2 keepalive..."
+# #4203: without PING keepalive a killed EPP hangs in-flight streamed responses until message_timeout.
+for c in "sidecar:${envoy_default_output}" "service:${proxy_service_render_output}"; do
+  IFS=: read -r name file <<< "${c}"
+  got=$(${YQ} 'select(.kind == "ConfigMap" and (.data | has("envoy.yaml"))) | .data."envoy.yaml"' "${file}" | ${YQ} '.static_resources.clusters[] | select(.name == "ext_proc") | .typed_extension_protocol_options."envoy.extensions.upstreams.http.v3.HttpProtocolOptions".explicit_http_config.http2_protocol_options.connection_keepalive | (.interval // "null") + ":" + (.timeout // "null")')
+  if [ "${got}" != "15s:3s" ]; then
+    echo "Envoy ext_proc connection_keepalive for ${name}: got ${got}, want 15s:3s"
+    exit 1
+  fi
+done
+
+echo "Verifying Envoy ext_proc message_timeout and GKE GCPBackendPolicy timeoutSec overrides..."
+envoy_timeout_output="${TEMP_DIR}/llm-d-router-standalone-envoy-timeout-render.yaml"
+${HELM} template ${SCRIPT_ROOT}/config/charts/llm-d-router-standalone --set router.modelServers.matchLabels.app=llm-instance-gateway --set router.proxy.extProcMessageTimeout=2400s > "${envoy_timeout_output}" || exit 1
+if ! grep -q -- 'message_timeout: 2400s$' "${envoy_timeout_output}"; then
+  echo "Standalone Envoy override did not render message_timeout: 2400s"
+  exit 1
+fi
+for pb in false true; do
+  gke_timeout_output="${TEMP_DIR}/llm-d-router-gateway-gke-timeout-${pb}.yaml"
+  ${HELM} template gke-timeout ${SCRIPT_ROOT}/config/charts/llm-d-router-gateway --set provider.name=gke --set provider.gke.preferredBackends.enabled=${pb} --set provider.gke.backendTimeoutSec=2400 --set router.modelServers.matchLabels.app=llm-instance-gateway > "${gke_timeout_output}" || exit 1
+  if "${YQ}" -N 'select(.kind == "GCPBackendPolicy") | .spec.default.timeoutSec' "${gke_timeout_output}" | grep -qv '^2400$'; then
+    echo "GCPBackendPolicy timeoutSec override missed policies (preferredBackends=${pb})"
+    exit 1
+  fi
+done
+
+echo "Verifying standalone Envoy access log formats..."
+if ! "${YQ}" -e '
+  select(.kind == "ConfigMap" and (.data | has("envoy.yaml")))
+  | .data."envoy.yaml" | from_yaml
+  | .static_resources.listeners[] | select(.name == "vllm")
+  | .access_log[0].typed_config.log_format as $listener
+  | (.filter_chains[].filters[] | select(.name == "envoy.filters.network.http_connection_manager")
+     | .typed_config.access_log[0].typed_config.log_format) as $http
+  | ($listener.json_format | sort_keys(..) | to_json) as $fields_json
+  | select(
+      $listener.omit_empty_values == true and $http.omit_empty_values == true
+      and $fields_json == ($http.json_format | sort_keys(..) | to_json)
+      and ($fields_json | contains("...") | not)
+      and $listener.json_format.status == "%RESPONSE_CODE%"
+      and $listener.json_format.details == "%RESPONSE_CODE_DETAILS%"
+      and $listener.json_format.cluster == "%UPSTREAM_CLUSTER%"
+    )
+' "${envoy_default_output}" >/dev/null; then
+  echo "Expected matching Envoy JSON access log fields and omit_empty_values on both logs" >&2
+  exit 1
+fi

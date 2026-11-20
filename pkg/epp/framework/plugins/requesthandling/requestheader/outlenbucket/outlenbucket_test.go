@@ -761,6 +761,14 @@ func TestHasResponsesTools(t *testing.T) {
 	require.False(t, hasResponsesTools(123))
 }
 
+func TestEstimateOutlenIgnoresTTS(t *testing.T) {
+	body := &fwkrequest.InferenceRequestBody{
+		TextToSpeech:    &fwkrequest.TextToSpeechRequest{Input: "hello"},
+		MaxOutputTokens: ptr.To(int64(100)),
+	}
+	require.Equal(t, Unknown, EstimateOutlen(body))
+}
+
 func TestResponsesThinking(t *testing.T) {
 	require.Equal(t, true, *responsesThinking(map[string]any{"effort": "high"}))
 	require.Equal(t, true, *responsesThinking(map[string]any{"effort": "medium"}))

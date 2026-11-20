@@ -130,6 +130,11 @@ func (p *LatencyAdmission) Admit(ctx context.Context, request *fwksched.Inferenc
 
 	for _, endpoint := range endpoints {
 		metrics := endpoint.GetMetrics()
+		// A never-scraped endpoint has only zero-value metrics, and any prediction
+		// for it was computed from them, so it is no evidence either way.
+		if !metrics.Updated() {
+			continue
+		}
 
 		// Cold pod: KV cache < 2% — predictions may be unreliable, don't reject.
 		if metrics.KVCacheUsagePercent < 0.02 {

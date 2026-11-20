@@ -47,10 +47,13 @@ type podCache struct {
 	// capacityFromMetrics records whether the LRU's capacity came from the
 	// endpoint's metrics; see resizeIfNeeded.
 	capacityFromMetrics bool
+	// warnedOffload records that the offload undercount warning was logged for
+	// this pod; see Add.
+	warnedOffload bool
 	// Pad to one 64-byte cache line. Without it podCache lands in the 48-byte
 	// size class, where caches straddle cache lines and concurrent RLocks on
 	// neighboring pods contend: about 15% slower matching in BenchmarkParallel.
-	_ [64 - unsafe.Sizeof(sync.RWMutex{}) - unsafe.Sizeof((*hashLRU)(nil)) - unsafe.Sizeof(false)]byte
+	_ [64 - unsafe.Sizeof(sync.RWMutex{}) - unsafe.Sizeof((*hashLRU)(nil)) - 2*unsafe.Sizeof(false)]byte
 }
 
 // newIndexer initializes an indexer with size limits and starts cache size reporting.
@@ -94,6 +97,17 @@ func (i *indexer) podCacheFor(pod server) *podCache {
 	return pc
 }
 
+// warnOffloadCapacityUnknown logs that a pod's index covers the HBM tier only
+// while the engine offloads KV cache, so the undercount is visible to the
+// operator.
+func (i *indexer) warnOffloadCapacityUnknown(pod ServerID, capacityBlocks int) {
+	i.logger.V(logutil.DEFAULT).Info("WARNING: the model server offloads KV cache but does not report the offload tier's capacity; "+
+		"the prefix index covers the HBM tier only, so prefix matches on this pod are under-reported. "+
+		"Set capacityTiers to [cpu] and lruCapacityPerServer to the offload-extended capacity, "+
+		"or run a model server version that reports it.",
+		"pod", pod, "capacityBlocks", capacityBlocks)
+}
+
 // resizeIfNeeded applies pod's capacity to pc, whose lock the caller must
 // hold. The capacity fixed on a pod's first Add can be stale: the first
 // request may arrive before the first metrics scrape, and some engines report
@@ -123,16 +137,50 @@ func (i *indexer) resizeIfNeeded(pc *podCache, pod server) {
 // prompt that remain cached form a contiguous run from block 0, which is what
 // the galloping search in MatchLongestPrefix requires.
 //
+// It returns the hashes this call newly inserted. Hashes already present are
+// refreshed and not returned, so a rollback that removes only the returned
+// hashes keeps entries an earlier Add contributed.
+//
 // If RemovePod runs between looking up the pod's cache and inserting, the
 // insert lands in the removed cache and is discarded with it, as if Add had
 // completed before RemovePod.
-func (i *indexer) Add(hashes []blockHash, pod server) {
+func (i *indexer) Add(hashes []blockHash, pod server) []blockHash {
 	pc := i.podCacheFor(pod)
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	i.resizeIfNeeded(pc, pod)
+	// Checked on every Add rather than when the index is sized: the endpoint
+	// can start reporting the undercount after sizing, with the size unchanged.
+	if pod.OffloadCapacityUnknown && !pc.warnedOffload {
+		pc.warnedOffload = true
+		i.warnOffloadCapacityUnknown(pod.ServerID, pc.lru.Cap())
+	}
+	var inserted []blockHash
 	for idx := len(hashes) - 1; idx >= 0; idx-- {
-		pc.lru.Add(hashes[idx])
+		if pc.lru.Add(hashes[idx]) {
+			inserted = append(inserted, hashes[idx])
+		}
+	}
+	return inserted
+}
+
+// Remove deletes hashes from pod's LRU. A hash another prompt also added is
+// deleted with it: the LRU holds no reference counts, so removal errs toward
+// dropping an entry a pod still holds. The cost of that error is a lost
+// affinity match, which re-prefills, never a match for a prefix no pod holds.
+// A caller undoing an Add passes the hashes Add returned, which limits the
+// loss to blocks no earlier Add contributed.
+func (i *indexer) Remove(hashes []blockHash, pod ServerID) {
+	i.mu.RLock()
+	pc := i.pods[pod]
+	i.mu.RUnlock()
+	if pc == nil {
+		return
+	}
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	for _, hash := range hashes {
+		pc.lru.Remove(hash)
 	}
 }
 

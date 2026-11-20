@@ -73,6 +73,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/p2p"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/redis"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
@@ -83,6 +84,7 @@ import (
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
 	exttopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/topology"
 	srcdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/dcgm"
+	srckvevents "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/kvevents"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
 	srcmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/models"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
@@ -727,6 +729,7 @@ func (r *Runner) registerInTreePlugins() {
 	// cross-replica syncers
 	// Alpha
 	fwkplugin.Register(redis.RedisSyncerType, fwkplugin.StabilityAlpha, redis.RedisSyncerFactory)
+	fwkplugin.Register(p2p.P2PSyncerType, fwkplugin.StabilityAlpha, p2p.P2PSyncerFactory)
 
 	// data layer DCGM source/extractor
 	// Alpha
@@ -753,7 +756,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(nohitlru.NoHitLRUType, fwkplugin.StabilityBeta, nohitlru.Factory)
 	fwkplugin.Register(activerequest.ActiveRequestType, fwkplugin.StabilityBeta, activerequest.Factory)
 	fwkplugin.Register(mmcacheaffinity.Type, fwkplugin.StabilityBeta, mmcacheaffinity.Factory)
-	fwkplugin.Register(preciseproducer.PluginType, fwkplugin.StabilityBeta, preciseproducer.PluginFactory)
+	fwkplugin.RegisterWithPluginDependencies(preciseproducer.PluginType, fwkplugin.StabilityBeta, preciseproducer.PluginFactory, preciseproducer.ConfigParser)
 	// Alpha
 	fwkplugin.Register(headerprofile.HeaderProfileHandlerType, fwkplugin.StabilityAlpha, headerprofile.HeaderProfileHandlerFactory)
 	fwkplugin.Register(endpointattribute.EndpointAttributeScorerType, fwkplugin.StabilityAlpha, endpointattribute.EndpointAttributeScorerFactory)
@@ -794,6 +797,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(reqdataprodprefix.ApproxPrefixCachePluginType, fwkplugin.StabilityBeta, reqdataprodprefix.ApproxPrefixCacheFactory, attrprefix.PrefixCacheMatchInfoDataKey)
 	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, fwkplugin.StabilityBeta, inflightload.InFlightLoadProducerFactory, attrconcurrency.InFlightLoadDataKey)
 	fwkplugin.RegisterAsDefaultProducer(inflightload.InFlightLoadProducerType, fwkplugin.StabilityBeta, inflightload.InFlightLoadProducerFactory, attrconcurrency.UncachedRequestTokensDataKey)
+	fwkplugin.RegisterWithPluginDependencies(inflightload.InFlightLoadProducerType, fwkplugin.StabilityBeta, inflightload.InFlightLoadProducerFactory, inflightload.ConfigParser)
 	fwkplugin.RegisterAsDefaultProducer(latencyproducer.LatencyDataProviderPluginType, fwkplugin.StabilityBeta, latencyproducer.PredictedLatencyFactory, attrlatency.LatencyPredictionInfoDataKey)
 	fwkplugin.RegisterAsDefaultProducer(mmproducer.ProducerType, fwkplugin.StabilityBeta, mmproducer.Factory, mmproducer.ProducedKey)
 	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, fwkplugin.StabilityBeta, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
@@ -832,6 +836,7 @@ func (r *Runner) registerInTreePlugins() {
 	// Beta
 	fwkplugin.Register(sourcenotifications.NotificationSourceType, fwkplugin.StabilityBeta, sourcenotifications.NotificationSourceFactory)
 	fwkplugin.Register(sourcenotifications.EndpointNotificationSourceType, fwkplugin.StabilityBeta, sourcenotifications.EndpointSourceFactory)
+	fwkplugin.Register(srckvevents.PluginType, fwkplugin.StabilityAlpha, srckvevents.Factory)
 
 	// register request control plugins
 	// Beta
@@ -1008,7 +1013,8 @@ func (r *Runner) setupMetricsCollection(opts *runserver.Options) datalayer.Endpo
 // newHealthGRPCServer builds the gRPC health server. draining may be nil (graceful
 // drain disabled); when non-nil and set, non-liveness checks report NOT_SERVING.
 func newHealthGRPCServer(logger logr.Logger, ds datastore.Datastore, isLeader, draining *atomic.Bool, leaderElectionEnabled bool, supporters []appProtocolSupporter, readinessCheckers []fwkplugin.ReadinessChecker) *grpc.Server {
-	srv := grpc.NewServer()
+	// Envoy health-checks over the ext_proc cluster's connection, so it sends that cluster's keepalive pings here too.
+	srv := grpc.NewServer(runserver.KeepaliveEnforcementPolicy())
 	healthPb.RegisterHealthServer(srv, &healthServer{
 		logger:                logger,
 		datastore:             ds,
@@ -1124,12 +1130,18 @@ func (r *Runner) resolveDiscovery(rawConfig *configapiv1.EndpointPickerConfig) (
 // setupPeerDiscovery runs the PeerDiscovery plugin referenced by
 // rawConfig.DataLayer.Discovery.Peers, when set, as a manager runnable on
 // every replica. Discovered peers land in a store handed to the configured
-// cross-replica syncer when it consumes them. The plugin is expected to have
-// been instantiated and registered in r.PluginHandle by
+// cross-replica syncer when it consumes them. A syncer that consumes them
+// fails setup without it, since it would never exchange state. The plugin is
+// expected to have been instantiated and registered in r.PluginHandle by
 // parseConfigurationPhaseTwo.
 func (r *Runner) setupPeerDiscovery(mgr ctrl.Manager, rawConfig *configapiv1.EndpointPickerConfig, poolNamespace string) error {
 	dl := rawConfig.DataLayer
 	if dl == nil || dl.Discovery == nil || dl.Discovery.Peers == nil {
+		syncer := r.PluginHandle.CrossReplicaSyncer()
+		if _, ok := syncer.(fwkdl.PeerConsumer); ok {
+			return fmt.Errorf("peerDiscovery: cross-replica syncer %q consumes the peer set, but dataLayer.discovery.peers is not configured",
+				syncer.TypedName().Name)
+		}
 		return nil
 	}
 

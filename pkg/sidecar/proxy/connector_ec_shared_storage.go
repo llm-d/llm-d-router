@@ -46,6 +46,10 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 
 // handleECSharedStorage handles an Encoder-Prefiller-Decoder disaggregation request
 func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, p2p p2pRouting, apiType reqcommon.APIType) {
+	if isVLLMGRPCRequest(r) {
+		s.handleECSharedStorageVLLMGRPC(w, r, prefillEndPoint, encodeEndPoints, p2p)
+		return
+	}
 	logger := log.FromContext(r.Context())
 	logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 

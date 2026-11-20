@@ -46,6 +46,8 @@ const (
 	HeaderMessage = "grpc-message"
 	// HeaderStatusDetailsBin names the base64-encoded google.rpc.Status trailer.
 	HeaderStatusDetailsBin = "grpc-status-details-bin"
+	// HeaderEncoding names the gRPC message compression header.
+	HeaderEncoding = "grpc-encoding"
 	// StatusOK is the wire representation of codes.OK ("0").
 	StatusOK = "0"
 	// MaxPayloadLen is the largest payload a frame can carry: the 4-byte length
@@ -382,6 +384,30 @@ func malformedOrReadError(err error) error {
 		return ErrMalformed
 	}
 	return fmt.Errorf("read gRPC request body: %w", err)
+}
+
+// ReadUnaryRequest checks r's grpc-encoding header, reads one uncompressed
+// gRPC request frame of at most maxFrameBytes bytes (header included), and
+// closes r.Body. On error it returns the gRPC status code the ingress handler
+// should answer with: Unimplemented for compressed requests, ResourceExhausted
+// for oversized frames, and InvalidArgument for malformed or unreadable bodies.
+func ReadUnaryRequest(r *http.Request, maxFrameBytes int64) ([]byte, codes.Code, error) {
+	defer func() { _ = r.Body.Close() }()
+	if enc := strings.TrimSpace(r.Header.Get(HeaderEncoding)); enc != "" && !strings.EqualFold(enc, "identity") {
+		return nil, codes.Unimplemented, ErrCompressed
+	}
+	frame, err := ReadMessage(r.Body, maxFrameBytes)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrTooLarge):
+			return nil, codes.ResourceExhausted, err
+		case errors.Is(err, ErrCompressed):
+			return nil, codes.Unimplemented, err
+		default:
+			return nil, codes.InvalidArgument, err
+		}
+	}
+	return frame, codes.OK, nil
 }
 
 // ParsePayload extracts the message payload from a single uncompressed gRPC frame.

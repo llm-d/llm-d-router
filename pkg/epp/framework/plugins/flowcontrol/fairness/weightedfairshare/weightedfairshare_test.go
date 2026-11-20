@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -185,6 +186,61 @@ func TestResponseBody_StreamedEventsFallback(t *testing.T) {
 			assert.InDelta(t, tc.want, virtualService(p, "alpha"), 1e-9)
 		})
 	}
+}
+
+// tokenizedBody is a request body whose token producer counted n prompt tokens.
+func tokenizedBody(n int) *fwkrequest.InferenceRequestBody {
+	return &fwkrequest.InferenceRequestBody{
+		TokenizedRequest: fwkrequest.NewTokenizedRequest([][]uint32{make([]uint32, n)}),
+	}
+}
+
+// A stream without usage is charged its prompt from the token producer's count.
+func TestResponseBody_TokenizedPromptFallback(t *testing.T) {
+	for name, tc := range map[string]struct {
+		params                        string
+		prompt, events, tokenizedSize int
+		want                          float64
+	}{
+		"missing usage":                    {"", 0, 35, 100, 170},
+		"reported prompt takes precedence": {"", 100, 25, 80, 150},
+		"no streamed events":               {"", 0, 0, 100, 0},
+		"no token producer":                {"", 0, 35, 0, 70},
+		"configured costs and weight": {
+			`{"costPerRequest":10,"costPerInputToken":0.5,"costPerOutputToken":3,"flowWeights":{"alpha":2}}`,
+			0, 20, 100, 60,
+		},
+		"input cost disabled": {`{"costPerInputToken":0,"costPerOutputToken":1}`, 0, 35, 100, 35},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newPolicy(t, tc.params)
+			req := &fwksched.InferenceRequest{FairnessID: "alpha"}
+			if tc.tokenizedSize > 0 {
+				req.Body = tokenizedBody(tc.tokenizedSize)
+			}
+			resp := &fwkrh.Response{EndOfStream: true, StreamedEvents: tc.events}
+			resp.Usage.PromptTokens = tc.prompt
+
+			p.ResponseBody(context.Background(), req, resp, nil)
+			assert.InDelta(t, tc.want, virtualService(p, "alpha"), 1e-9)
+		})
+	}
+}
+
+// A flow whose streams report no usage pays the same as one that reports it, given the same
+// prompt and output sizes, so leaving out stream_options.include_usage does not raise its share.
+func TestResponseBody_MissingUsageChargedLikeReportedUsage(t *testing.T) {
+	const promptTokens, completionTokens, requests = 290, 20, 5
+	p := newPolicy(t, "")
+	for range requests {
+		complete(p, "honest", 0, promptTokens, completionTokens)
+
+		req := &fwksched.InferenceRequest{FairnessID: "no-usage", Body: tokenizedBody(promptTokens)}
+		p.ResponseBody(context.Background(), req, &fwkrh.Response{EndOfStream: true, StreamedEvents: completionTokens}, nil)
+	}
+
+	assert.InDelta(t, float64(requests*(promptTokens+2*completionTokens)), virtualService(p, "honest"), 1e-9)
+	assert.InDelta(t, virtualService(p, "honest"), virtualService(p, "no-usage"), 1e-9)
 }
 
 // Weights come from flowWeights by fairness ID, unlisted IDs take defaultFlowWeight, and

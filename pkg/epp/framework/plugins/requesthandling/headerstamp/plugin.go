@@ -139,7 +139,7 @@ type Handler struct {
 func (h *Handler) TypedName() fwkplugin.TypedName { return h.typedName }
 
 // Consumes declares every stamped attribute as optional: an endpoint without
-// the attribute is skipped per stamp rather than failing the request.
+// the attribute does not fail the request.
 func (h *Handler) Consumes() fwkplugin.DataDependencies {
 	optional := make(map[fwkplugin.DataKey]any, len(h.rules))
 	for _, r := range h.rules {
@@ -149,8 +149,9 @@ func (h *Handler) Consumes() fwkplugin.DataDependencies {
 }
 
 // PreRequest stamps each configured header from the primary profile's
-// selected endpoint. It no-ops when the profile did not run, no endpoint was
-// selected, or the endpoint lacks a stamp's attribute.
+// selected endpoint. It no-ops when the profile did not run or no endpoint was
+// selected. An endpoint without a stamp's attribute deletes a set stamp's
+// header, pseudo-headers excepted, and leaves a prepend stamp's header unchanged.
 func (h *Handler) PreRequest(_ context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
 	if request == nil || schedulingResult == nil {
 		return nil
@@ -166,6 +167,9 @@ func (h *Handler) PreRequest(_ context.Context, request *fwksched.InferenceReque
 	for _, r := range h.rules {
 		v, ok := attrstring.ReadValue(endpoint, r.dataKey)
 		if !ok || v == "" {
+			if r.mode == modeSet && !strings.HasPrefix(r.headerName, ":") {
+				delete(request.Headers, r.headerName)
+			}
 			continue
 		}
 		switch r.mode {

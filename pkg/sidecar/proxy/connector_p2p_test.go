@@ -482,3 +482,162 @@ var _ = Describe("P2P prefill address header", func() {
 		expectRejected("10.0.0.7")
 	})
 })
+
+var _ = Describe("P2P Connector cached token usage", func() {
+	const prefillUsage7 = `{"id":"cmpl-prefill","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}}}`
+	const decodeUsage49 = `{"id":"chatcmpl-test","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":49}}}`
+
+	var testInfo *sidecarTestInfo
+
+	BeforeEach(func() {
+		testInfo = sidecarConnectionTestSetup(constants.KVConnectorOffloading)
+	})
+
+	startProxy := func() string {
+		proxyBaseAddr := testInfo.startProxy()
+		DeferCleanup(func() {
+			testInfo.cancelFn()
+			<-testInfo.stoppedCh
+		})
+		return proxyBaseAddr
+	}
+
+	send := func(body string) (string, http.Header) {
+		proxyBaseAddr := startProxy()
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		addPrefillRouting(req, testInfo.prefillBackend.URL[len("http://"):])
+
+		resp, err := http.DefaultClient.Do(req)
+		Expect(err).ToNot(HaveOccurred())
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(resp.StatusCode).To(Equal(http.StatusOK), string(b))
+		return string(b), resp.Header
+	}
+
+	cachedTokens := func(body string) any {
+		var response map[string]any
+		Expect(json.Unmarshal([]byte(body), &response)).To(Succeed())
+		usage, ok := response["usage"].(map[string]any)
+		Expect(ok).To(BeTrue(), body)
+		details, ok := usage["prompt_tokens_details"].(map[string]any)
+		Expect(ok).To(BeTrue(), body)
+		return details["cached_tokens"]
+	}
+
+	It("reports the prefill cached tokens in a JSON decode response", func() {
+		testInfo.prefillHandler.RawResponse = prefillUsage7
+		testInfo.decodeHandler.RawResponse = decodeUsage49
+
+		body, _ := send(chatCompletionsRequestBodyWithMaxCompletionCap)
+
+		Expect(cachedTokens(body)).To(BeNumerically("==", 7))
+	})
+
+	It("reports the prefill cached tokens in a streamed decode response", func() {
+		testInfo.prefillHandler.RawResponse = prefillUsage7
+		testInfo.decodeHandler.RawResponseType = eventStreamContentType
+		testInfo.decodeHandler.RawResponse = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65,\"prompt_tokens_details\":{\"cached_tokens\":49}}}\n\ndata: [DONE]\n"
+
+		body, _ := send(`{"model":"Qwen/Qwen2-0.5B","messages":[{"role":"user","content":"Hello"}],"max_tokens":50,"stream":true,"stream_options":{"include_usage":true}}`)
+
+		Expect(body).To(ContainSubstring(`"content":"hello"`))
+		Expect(body).To(ContainSubstring(`"cached_tokens":7`))
+		Expect(body).ToNot(ContainSubstring(`"cached_tokens":49`))
+		Expect(body).To(ContainSubstring("data: [DONE]"))
+	})
+
+	It("reports a measured zero when the prefill usage has no cached tokens", func() {
+		testInfo.prefillHandler.RawResponse = `{"id":"cmpl-prefill","object":"chat.completion","choices":[],"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":null}}`
+		testInfo.decodeHandler.RawResponse = decodeUsage49
+
+		body, _ := send(chatCompletionsRequestBodyWithMaxCompletionCap)
+
+		Expect(cachedTokens(body)).To(BeNumerically("==", 0))
+	})
+
+	It("streams the decode chunks as they arrive while rewriting the usage", func() {
+		testInfo.prefillHandler.RawResponse = prefillUsage7
+		const firstEvent = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
+		// The decode backend holds the rest of its stream until the test releases
+		// it, so a writer that buffers the stream cannot deliver the first event.
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseStream := func() { releaseOnce.Do(func() { close(release) }) }
+		testInfo.decodeBackend.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", eventStreamContentType)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(firstEvent))
+			w.(http.Flusher).Flush()
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":64,\"completion_tokens\":1,\"total_tokens\":65,\"prompt_tokens_details\":{\"cached_tokens\":49}}}\n\ndata: [DONE]\n\n"))
+		})
+		proxyBaseAddr := startProxy()
+		// Cleanups run in reverse order, so the stream is released before the
+		// proxy shutdown waits for the request to finish.
+		DeferCleanup(releaseStream)
+		body := `{"model":"Qwen/Qwen2-0.5B","messages":[{"role":"user","content":"Hello"}],"max_tokens":50,"stream":true,"stream_options":{"include_usage":true}}`
+		req, err := http.NewRequest(http.MethodPost, proxyBaseAddr+reqcommon.PathChatCompletions, bytes.NewReader([]byte(body)))
+		Expect(err).ToNot(HaveOccurred())
+		addPrefillRouting(req, testInfo.prefillBackend.URL[len("http://"):])
+
+		type firstRead struct {
+			resp  *http.Response
+			first []byte
+			err   error
+		}
+		read := make(chan firstRead, 1)
+		go func() {
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				read <- firstRead{err: err}
+				return
+			}
+			first := make([]byte, len(firstEvent))
+			_, err = io.ReadFull(resp.Body, first)
+			read <- firstRead{resp: resp, first: first, err: err}
+		}()
+		var got firstRead
+		select {
+		case got = <-read:
+		case <-time.After(2 * time.Second):
+			Fail("the first decode event did not reach the client while decode was still running")
+		}
+		Expect(got.err).ToNot(HaveOccurred())
+		defer got.resp.Body.Close()
+		Expect(string(got.first)).To(Equal(firstEvent))
+		releaseStream()
+		rest, err := io.ReadAll(got.resp.Body)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(string(rest)).To(ContainSubstring(`"cached_tokens":7`))
+		Expect(string(rest)).ToNot(ContainSubstring(`"cached_tokens":49`))
+	})
+
+	It("keeps the decode cached tokens when the prefill response does not parse", func() {
+		// 1e400 overflows float64 after usage is decoded, so the map holds usage.
+		testInfo.prefillBackend.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":64,"completion_tokens":1,"total_tokens":65,"prompt_tokens_details":{"cached_tokens":7}},"x":1e400}`))
+		})
+		testInfo.decodeHandler.RawResponse = decodeUsage49
+
+		body, _ := send(chatCompletionsRequestBodyWithMaxCompletionCap)
+
+		Expect(cachedTokens(body)).To(BeNumerically("==", 49))
+	})
+
+	It("keeps the decode cached tokens when the prefill response has no usage", func() {
+		testInfo.prefillHandler.RawResponse = `{"id":"cmpl-prefill","object":"chat.completion","choices":[]}`
+		testInfo.decodeHandler.RawResponse = decodeUsage49
+
+		body, _ := send(chatCompletionsRequestBodyWithMaxCompletionCap)
+
+		Expect(cachedTokens(body)).To(BeNumerically("==", 49))
+	})
+})

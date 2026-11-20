@@ -261,6 +261,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 | `router.epp.crossReplica.redis.coordinationTTL` | Request-level coordination value expiration; minimum `1ms`. | `180s` |
 | `router.epp.crossReplica.redis.passwordSecretRef` | Existing Secret reference with `name` and `key`, exposed through the plugin's `passwordEnv`. | `{}` |
 | `router.epp.deploymentStrategy` | Overrides the EPP Deployment's `spec.strategy`. Defaults to `RollingUpdate` with `maxUnavailable: 0` and `maxSurge: 1` for `haMode: all-active`, cross-replica sync, or autoscaling; otherwise `{type: Recreate}`. See [Multi-replica EPP and Helm `--wait`](#multi-replica-epp-and-helm---wait). | Mode-dependent |
+| `router.epp.minReadySeconds` | `spec.minReadySeconds` for the EPP Deployment: how long a newly Ready pod must stay Ready before it counts as available, which also paces rollouts. Unset leaves the Kubernetes default of `0`. Must be a whole number from `0` to `599`: the Deployment's `progressDeadlineSeconds` (the Kubernetes default of `600`; the chart does not set it) has to exceed it, so the render fails on other values. | `null` |
 | `router.epp.autoscaling.enabled` | Enable Horizontal Pod Autoscaler (HPA v2) for the EPP Deployment. Requires active-active mode (`router.epp.flags.ha-enable-leader-election` must not be `true`). See [Horizontal Pod Autoscaling (HPA)](../../docs/operations.md#horizontal-pod-autoscaling-hpa). | `false` |
 | `router.epp.autoscaling.minReplicas` | Minimum number of EPP replicas for the HPA. | `1` |
 | `router.epp.autoscaling.maxReplicas` | Maximum number of EPP replicas for the HPA. Must be greater than or equal to `minReplicas`. | `5` |
@@ -724,6 +725,7 @@ Configures routing policies, target Gateway interfaces, and priority objectives 
 | `provider.name` | Name of Gateway implementation. Options: `[none, gke, istio]`. | `none` |
 | `provider.istio.destinationRule.host` | Custom host value for Istio DestinationRule. | `""` |
 | `provider.istio.destinationRule.trafficPolicy.connectionPool` | Connection pool settings for Istio DestinationRule. | `{}` |
+| `provider.gke.backendTimeoutSec` | `timeoutSec` of the `GCPBackendPolicy`. Raise it above the longest time EPP can hold a request in its flow-control queue. | `300` |
 | `provider.gke.preferredBackends.enabled` | Enable Preferred Backends high availability routing for GKE. | `false` |
 | `provider.gke.preferredBackends.preferredReplicas` | Replica count for primary active pod ordinals pinned to PREFERRED tier. | `1` |
 | `provider.gke.preferredBackends.defaultReplicas` | Replica count for standby backup pod ordinals pinned to DEFAULT tier. | `1` |
@@ -771,6 +773,8 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.mode` | Proxy deployment mode. `sidecar` runs the proxy in the EPP pod; `service` runs it as its own horizontally scalable Deployment and Service reaching EPP over the EPP Service. | `sidecar` |
 | `router.proxy.replicas` | Replica count for the proxy Deployment when `mode=service`. Ignored when `router.proxy.autoscaling.enabled` is `true`. | `2` |
 | `router.proxy.terminationGracePeriodSeconds` | Grace period (seconds) before SIGKILL on the proxy pod. Applies in service mode only: in sidecar mode the proxy shares the EPP pod, so `router.epp.terminationGracePeriodSeconds` controls the grace period for both containers. Gives Envoy's 60s draining window time to complete and allows in-flight connections to drain. | `70` |
+| `router.proxy.deploymentStrategy` | Overrides the proxy Deployment's `spec.strategy` when `mode=service`. Unset leaves the Kubernetes default (`RollingUpdate` with 25% `maxUnavailable`, which can drop serving proxies before their replacements are Ready). Ignored in sidecar mode, where `router.epp.deploymentStrategy` governs the shared pod. | `null` |
+| `router.proxy.minReadySeconds` | `spec.minReadySeconds` for the proxy Deployment when `mode=service`, same semantics and `0`-`599` range as `router.epp.minReadySeconds`. Ignored in sidecar mode. | `null` |
 | `router.proxy.nodeSelector` | Node selector for the proxy Deployment when `mode=service`. In sidecar mode the proxy shares the EPP pod. | `{}` |
 | `router.proxy.affinity` | Affinity rules for the proxy Deployment when `mode=service`. | `{}` |
 | `router.proxy.tolerations` | Tolerations for the proxy Deployment when `mode=service`. | `[]` |
@@ -789,6 +793,7 @@ Configures EPP to run with a proxy (Envoy proxy or Agentgateway proxy) that inte
 | `router.proxy.autoscaling.behavior` | Scaling behavior policies for proxy HPA scale-up and scale-down. | `{}` |
 | `router.proxy.autoscaling.metrics` | Custom HPA v2 metrics override for the proxy; replaces auto-generated CPU and memory metrics. Target percentage fields remain range-validated if defined. | `[]` |
 | `router.proxy.failOpen` | Whether the proxy passes traffic through (fail-open) when EPP is unreachable. Requests EPP did not schedule are load-balanced across the model servers through a headless Service (`<release>-epp-model-servers`) selecting `router.modelServers.matchLabels` on the first `router.modelServers.targetPorts` entry, without endpoint picking. Applies to `proxyType=envoy` only; Agentgateway exposes no fail-open setting and rejects requests (fails closed) when EPP is unreachable. | `true` |
+| `router.proxy.extProcMessageTimeout` | Envoy `ext_proc` `message_timeout`: how long Envoy waits for each EPP response. Raise it above the longest time EPP can hold a request in its flow-control queue. Applies to `proxyType=envoy` only. | `1000s` |
 | `router.proxy.tracing.enabled` | Enable OpenTelemetry tracing in Envoy. Envoy creates a span per request on the main listener and propagates the trace context on the ext_proc gRPC stream to EPP, so EPP spans (`router.tracing.enabled`) join the request trace. Applies to `proxyType=envoy` only. | `false` |
 | `router.proxy.tracing.collectorEndpoint` | OTLP gRPC collector endpoint (`host:port`, scheme optional, port defaults to `4317`) for Envoy spans. Falls back to `router.tracing.otelExporterEndpoint` when empty. | `""` |
 | `router.proxy.tracing.serviceName` | `service.name` reported on Envoy spans. | `envoy-proxy` |

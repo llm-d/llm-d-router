@@ -63,6 +63,8 @@ const (
 	APITypeSGLangGenerate
 	// APITypeMessages is the Anthropic Messages API (/v1/messages).
 	APITypeMessages
+	// APITypeAudioSpeech is vLLM-Omni's audio speech API (/v1/audio/speech).
+	APITypeAudioSpeech
 
 	// Keep apiTypeCount last so classifiers cover every API type.
 	apiTypeCount
@@ -83,6 +85,8 @@ func (a APIType) String() string {
 		return "sglang_generate"
 	case APITypeMessages:
 		return "messages"
+	case APITypeAudioSpeech:
+		return "audio_speech"
 	default:
 		return fmt.Sprintf("APIType(%d)", int(a))
 	}
@@ -117,6 +121,8 @@ func (a APIType) Path() string {
 		return PathSGLangGenerate
 	case APITypeMessages:
 		return PathMessages
+	case APITypeAudioSpeech:
+		return PathAudioSpeech
 	default:
 		return PathChatCompletions
 	}
@@ -135,6 +141,8 @@ func DetectAPIType(path string) APIType {
 		return APITypeResponses
 	case strings.Contains(path, PathMessages):
 		return APITypeMessages
+	case strings.Contains(path, PathAudioSpeech):
+		return APITypeAudioSpeech
 	case strings.Contains(path, PathVLLMGenerate):
 		return APITypeVLLMGenerate
 	case strings.Contains(path, PathSGLangGenerate):
@@ -185,6 +193,7 @@ var (
 	chatCompletionTokenLimitFields = []string{FieldMaxCompletionTokens, FieldMaxTokens}
 	maxTokensOnlyTokenLimitFields  = []string{FieldMaxTokens}
 	responsesTokenLimitFields      = []string{FieldMaxOutputTokens}
+	audioSpeechTokenLimitFields    = []string{FieldMaxNewTokens}
 )
 
 // tokenLimitFields returns the output token cap field names the API uses.
@@ -193,6 +202,8 @@ func (a APIType) tokenLimitFields() []string {
 	switch a {
 	case APITypeResponses:
 		return responsesTokenLimitFields
+	case APITypeAudioSpeech:
+		return audioSpeechTokenLimitFields
 	case APITypeCompletions, APITypeVLLMGenerate, APITypeMessages:
 		return maxTokensOnlyTokenLimitFields
 	default:

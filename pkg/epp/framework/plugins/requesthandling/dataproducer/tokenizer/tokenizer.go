@@ -501,7 +501,7 @@ func (p *Plugin) Produce(ctx context.Context, request *scheduling.InferenceReque
 	}
 
 	tp, err := p.backend.produce(ctx, request.Body)
-	if err != nil {
+	if err != nil && !errors.Is(err, errUnsupportedBody) {
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
@@ -558,6 +558,9 @@ func convertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) []fwkrequ
 
 // ConvertMMFeaturesFromUpstream regroups the flat list of multimodal features
 // back into the kv-cache map-shape expected by kvblock.ComputeBlockExtraFeatures.
+// Features without a hash are excluded: hashing an empty identity contributes
+// only position bytes, so prompts with different media would collide on those
+// blocks (issue #4155). Their spans revert to the featureless block hash.
 func ConvertMMFeaturesFromUpstream(features []fwkrequest.MultiModalFeature) (map[string][]string, map[string][]kvblock.PlaceholderRange) {
 	if len(features) == 0 {
 		return nil, nil
@@ -565,6 +568,9 @@ func ConvertMMFeaturesFromUpstream(features []fwkrequest.MultiModalFeature) (map
 	hashes := make(map[string][]string)
 	ranges := make(map[string][]kvblock.PlaceholderRange)
 	for _, f := range features {
+		if f.Hash == "" {
+			continue
+		}
 		k := string(f.Modality)
 		hashes[k] = append(hashes[k], f.Hash)
 		ranges[k] = append(ranges[k], kvblock.PlaceholderRange{

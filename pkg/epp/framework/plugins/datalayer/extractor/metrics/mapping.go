@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 )
 
 // Mapping holds specifications for the well-known metrics defined
@@ -42,21 +44,34 @@ type Mapping struct {
 	// config as separate gauge values rather than labels on an info metric.
 	CacheBlockSize *Spec
 	CacheNumBlocks *Spec
-	CustomMetrics  []CustomMetric
+	// CacheTotalTokens reads the KV cache capacity in tokens of the engine's
+	// offload-extended cache. Optional: a scrape without the metric is not an
+	// error and leaves the endpoint's KvCacheMaxTokenCapacity unchanged. When
+	// CacheTotalTokensLabel is set, the value is read from that label of the
+	// matching series instead of the gauge value.
+	CacheTotalTokens      *Spec
+	CacheTotalTokensLabel string
+	// CacheOffloadDetection is a metric whose value above zero reports that the
+	// engine has offloaded KV cache to another tier. Optional.
+	CacheOffloadDetection *Spec
+	CustomMetrics         []CustomMetric
 }
 
 // MappingConfig holds configuration used to build a Mapping.
 type MappingConfig struct {
-	Queue               string
-	Running             string
-	KVUsage             string
-	Lora                string
-	CacheInfo           string
-	CacheBlockSizeLabel string
-	CacheNumBlocksLabel string
-	CacheBlockSize      string
-	CacheNumBlocks      string
-	CustomMetrics       []CustomMetric
+	Queue                 string
+	Running               string
+	KVUsage               string
+	Lora                  string
+	CacheInfo             string
+	CacheBlockSizeLabel   string
+	CacheNumBlocksLabel   string
+	CacheBlockSize        string
+	CacheNumBlocks        string
+	CacheTotalTokens      string
+	CacheTotalTokensLabel string
+	CacheOffloadDetection string
+	CustomMetrics         []CustomMetric
 }
 
 type metricAggregation string
@@ -180,6 +195,17 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 	if err != nil {
 		errs = append(errs, err)
 	}
+	cacheTotalTokensSpec, err := parseStringToSpec(cfg.CacheTotalTokens)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if cacheTotalTokensSpec == nil && cfg.CacheTotalTokensLabel != "" {
+		errs = append(errs, errors.New("cacheTotalTokensLabelName requires cacheTotalTokensSpec"))
+	}
+	cacheOffloadDetectionSpec, err := parseStringToSpec(cfg.CacheOffloadDetection)
+	if err != nil {
+		errs = append(errs, err)
+	}
 	customMetrics, customErrs := parseCustomMetrics(cfg.CustomMetrics)
 	errs = append(errs, customErrs...)
 
@@ -187,16 +213,19 @@ func NewMappingFromConfig(cfg MappingConfig) (*Mapping, error) {
 		return nil, errors.Join(errs...)
 	}
 	return &Mapping{
-		TotalQueuedRequests:  queueSpec,
-		TotalRunningRequests: runningSpec,
-		KVCacheUtilization:   kvusageSpec,
-		LoraRequestInfo:      loraSpec,
-		CacheInfo:            cacheInfoSpec,
-		CacheBlockSizeLabel:  cfg.CacheBlockSizeLabel,
-		CacheNumBlocksLabel:  cfg.CacheNumBlocksLabel,
-		CacheBlockSize:       cacheBlockSizeSpec,
-		CacheNumBlocks:       cacheNumBlocksSpec,
-		CustomMetrics:        customMetrics,
+		TotalQueuedRequests:   queueSpec,
+		TotalRunningRequests:  runningSpec,
+		KVCacheUtilization:    kvusageSpec,
+		LoraRequestInfo:       loraSpec,
+		CacheInfo:             cacheInfoSpec,
+		CacheBlockSizeLabel:   cfg.CacheBlockSizeLabel,
+		CacheNumBlocksLabel:   cfg.CacheNumBlocksLabel,
+		CacheBlockSize:        cacheBlockSizeSpec,
+		CacheNumBlocks:        cacheNumBlocksSpec,
+		CacheTotalTokens:      cacheTotalTokensSpec,
+		CacheTotalTokensLabel: cfg.CacheTotalTokensLabel,
+		CacheOffloadDetection: cacheOffloadDetectionSpec,
+		CustomMetrics:         customMetrics,
 	}, nil
 }
 
@@ -207,6 +236,11 @@ func parseCustomMetrics(configs []CustomMetric) ([]CustomMetric, []error) {
 	for _, cfg := range configs {
 		if cfg.AttributeKey == "" {
 			errs = append(errs, errors.New("customMetrics entry attributeKey cannot be empty"))
+			continue
+		}
+		if attrmetrics.IsReservedAttributeKey(cfg.AttributeKey) {
+			errs = append(errs, fmt.Errorf(
+				"customMetrics entry attributeKey %q uses a prefix reserved for scalar sample keys", cfg.AttributeKey))
 			continue
 		}
 		if _, ok := seenKeys[cfg.AttributeKey]; ok {

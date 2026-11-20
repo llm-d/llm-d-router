@@ -246,6 +246,10 @@ type Request struct {
 	Headers  map[string]string
 	RawBody  []byte // This field will be updated when request body is modified (e.g. model mutation in requestBody)
 	Metadata map[string]any
+
+	// clientHeaderNames are the Headers keys copied from the client request,
+	// except pseudo-headers and host, which Envoy never lets ext_proc remove.
+	clientHeaderNames []string
 }
 type Response struct {
 	Headers         map[string]string
@@ -855,8 +859,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				if traceEnabled {
 					loggerTrace.Info("header", "key", header.Key, "value", envoy.GetHeaderValue(header))
 				}
-				if (header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus) && envoy.GetHeaderValue(header) != "200" {
-					reqCtx.responseStatusCode = errcommon.ModelServerError
+				if header.Key == reqcommon.PseudoHeaderStatus || header.Key == reqcommon.HeaderStatus {
+					if code := errcommon.ModelServerStatusCode(envoy.GetHeaderValue(header)); code != "" {
+						reqCtx.responseStatusCode = code
+					}
 				} else if header.Key == reqcommon.HeaderContentType {
 					if !isEventStream(envoy.GetHeaderValue(header)) {
 						continue
