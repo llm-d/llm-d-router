@@ -66,15 +66,20 @@ const (
 	ttsFramesPerSpokenByte = 1.0
 	ttsMaxFrames           = 4096
 
-	// Image output is diffusion work: steps x output pixels x images. The
-	// defaults match the common Qwen-Image deployment; a request that sets
-	// size, num_inference_steps, or n uses its own values.
+	// Image output is diffusion work: steps x output pixels x images, in
+	// megapixel-steps. The defaults match the common Qwen-Image deployment.
+	// A deployment whose model defaults differ (for example a 4-step
+	// FLUX-schnell) must set size, num_inference_steps, and n explicitly until
+	// these defaults are configurable per pool.
 	imageDefaultInferenceSteps int64 = 50
 	imageDefaultPixels         int64 = 1024 * 1024
 	imageMaxInferenceSteps     int64 = 200
 	imageMaxImages             int64 = 10
-	imageMaxPixels             int64 = 4096 * 4096
-	imageWorkScale                   = 1_000_000.0
+	// imageMaxPixels bounds oversized requests and keeps the pixel product
+	// inside int64. Raise it if a deployment serves larger outputs.
+	imageMaxPixels int64 = 4096 * 4096
+	// imageWorkScale is one work unit: 1e6 pixel-steps.
+	imageWorkScale = 1_000_000.0
 )
 
 // SimpleTokenEstimator reads input tokens from the tokenized prompt and maps the
