@@ -75,6 +75,7 @@ import (
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/p2p"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/redis"
+	discoveryendpointslice "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/endpointslice"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/attribute"
@@ -877,6 +878,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(discoveryfile.MultiClusterPluginType, fwkplugin.StabilityAlpha, discoveryfile.MultiClusterFactory)
 	// Alpha
 	fwkplugin.Register(k8speer.PluginType, fwkplugin.StabilityAlpha, k8speer.Factory)
+	fwkplugin.Register(discoveryendpointslice.PluginType, fwkplugin.StabilityAlpha, discoveryendpointslice.Factory)
 
 	// register request header processor plugins
 	// Alpha
@@ -1385,10 +1387,10 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 			"namespace", runserver.DefaultPoolNamespace)
 	}
 
-	// File mode runs without a controller manager, so several Kubernetes-only
-	// features are inactive: the InferenceModelRewrite and InferenceObjective
-	// reconcilers never start, and any "k8s-notification-source" plugin cannot
-	// bind without a controller manager. Cross-replica syncing remains active.
+	// Discovery plugin mode runs without the InferencePool controller manager,
+	// so the InferenceModelRewrite and InferenceObjective reconcilers never
+	// start. Notification sources still run when configured: they get a
+	// manager of their own below. Cross-replica syncing remains active.
 	// Surface this once at startup so operators porting a K8s config see why
 	// related behavior differs.
 	//
@@ -1398,8 +1400,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	// EndpointPickerConfig.flowControl are honored and applied via the FlowControl
 	// layer when the feature gate is enabled.
 	setupLog.Info("file-discovery mode: Kubernetes-only features are inactive " +
-		"(InferenceModelRewrite, InferenceObjective reconciler, and any " +
-		"k8s-notification-source data layer plugins); see docs/discovery.md")
+		"(InferenceModelRewrite, InferenceObjective reconciler); see docs/discovery.md")
 
 	eppConfig, err := r.parseConfigurationPhaseTwo(r.servingCtx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
@@ -1420,6 +1421,12 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 
 	if err := r.dlRuntime.Configure(eppConfig.DataConfig, setupLog); err != nil {
 		return fmt.Errorf("failed to configure datalayer: %w", err)
+	}
+
+	discoveryMgr, hasDiscoveryMgr, err := r.newDiscoveryControllerManager(disc)
+	if err != nil {
+		setupLog.Error(err, "Failed to set up notification sources")
+		return err
 	}
 
 	if r.schedulerConfig == nil {
@@ -1471,6 +1478,10 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	isLeader := &atomic.Bool{}
 	isLeader.Store(true)
 
+	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
+	if hasDiscoveryMgr {
+		readinessCheckers = append(readinessCheckers, r.dlRuntime)
+	}
 	healthSrv := grpc.NewServer()
 	parsers := r.parserRegistry.Parsers()
 	ps := make([]appProtocolSupporter, len(parsers))
@@ -1483,10 +1494,13 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		isLeader:              isLeader,
 		leaderElectionEnabled: false,
 		supporters:            ps,
-		readinessCheckers:     pluginReadinessCheckers(r.PluginHandle.GetAllPlugins()),
+		readinessCheckers:     readinessCheckers,
 	})
 
 	g := newRunnableGroup()
+	if hasDiscoveryMgr {
+		g.Add("discovery-controller-manager", discoveryMgr.Start)
+	}
 	g.Add("discovery", func(ctx context.Context) error {
 		return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
 	})
@@ -1497,20 +1511,17 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	})
 	// epp-server and health wait for the discovery plugin's initial sync before
 	// going live, so requests and probes never observe an empty datastore. See
-	// EndpointDiscovery.Ready contract.
+	// EndpointDiscovery.Ready contract. With notification sources they also
+	// wait until every source has processed its initial Kubernetes events.
 	g.Add("epp-server", func(ctx context.Context) error {
-		select {
-		case <-disc.Ready():
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := r.waitDiscoveryReady(ctx, disc, hasDiscoveryMgr); err != nil {
+			return err
 		}
 		return serverRunner.AsRunnable(ctrl.Log.WithName("ext-proc")).Start(ctx)
 	})
 	g.Add("health", func(ctx context.Context) error {
-		select {
-		case <-disc.Ready():
-		case <-ctx.Done():
-			return ctx.Err()
+		if err := r.waitDiscoveryReady(ctx, disc, hasDiscoveryMgr); err != nil {
+			return err
 		}
 		if r.healthListener != nil {
 			return runnable.NoLeaderElection(runnable.GRPCServerOnListener("health", healthSrv, r.healthListener)).Start(ctx)
@@ -1527,6 +1538,67 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 		setupLog.Error(err, "EPP stopped")
 	}
 	return err
+}
+
+// newDiscoveryControllerManager builds the controller manager that hosts the
+// configured notification sources in discovery plugin mode and binds them to
+// it. ok is false when no manager is needed: no notification source is
+// configured, so
+// file-discovery keeps running without Kubernetes. A discovery plugin that
+// declares datalayer dependencies (for example an EndpointSlice watch)
+// requires a Kubernetes client config; for other notification sources a
+// missing config leaves them inactive, as before.
+func (r *Runner) newDiscoveryControllerManager(disc fwkdl.EndpointDiscovery) (mgr ctrl.Manager, ok bool, err error) {
+	if !r.dlRuntime.HasNotificationSources() {
+		return nil, false, nil
+	}
+	cfg, err := ctrl.GetConfig()
+	if err != nil {
+		if _, isRegistrant := disc.(fwkdl.Registrant); isRegistrant {
+			return nil, false, fmt.Errorf("discovery plugin %s watches Kubernetes objects, but no Kubernetes client config is available: %w",
+				disc.TypedName(), err)
+		}
+		setupLog.Info("No Kubernetes client config: k8s-notification-source data layer plugins are inactive",
+			"error", err.Error())
+		return nil, false, nil
+	}
+	mgr, err = runserver.NewDiscoveryControllerManager(cfg, r.dlRuntime.NotificationCacheByObject())
+	if err != nil {
+		return nil, false, err
+	}
+	if err := r.dlRuntime.BindNotificationSources(mgr); err != nil {
+		return nil, false, fmt.Errorf("failed to bind notification sources: %w", err)
+	}
+	setupLog.Info("Notification sources bound to the discovery controller manager")
+	return mgr, true, nil
+}
+
+// notificationSyncPollInterval is how often waitDiscoveryReady re-checks the
+// notification sources' initial sync.
+const notificationSyncPollInterval = 100 * time.Millisecond
+
+// waitDiscoveryReady blocks until the discovery plugin is ready and, when
+// withNotifications is set, every notification source has processed its
+// initial events, so the datastore reflects the watched objects.
+func (r *Runner) waitDiscoveryReady(ctx context.Context, disc fwkdl.EndpointDiscovery, withNotifications bool) error {
+	select {
+	case <-disc.Ready():
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if !withNotifications {
+		return nil
+	}
+	ticker := time.NewTicker(notificationSyncPollInterval)
+	defer ticker.Stop()
+	for r.dlRuntime.CheckReady() != nil {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 // metricsShutdownTimeout bounds graceful shutdown of the metrics server so a
