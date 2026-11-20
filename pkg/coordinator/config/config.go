@@ -86,12 +86,13 @@ func ValidateWorkerProtocol(protocol string) error {
 }
 
 type PipelineConfig struct {
-	KVConnector            string       `mapstructure:"kv_connector"`
-	ECConnector            string       `mapstructure:"ec_connector"`
-	WorkerProtocol         string       `mapstructure:"worker_protocol"`
-	UseOpenAIFormat        bool         `mapstructure:"use_openai_format"`
-	ForwardResponseHeaders []string     `mapstructure:"forward_response_headers"`
-	Steps                  []StepConfig `mapstructure:"steps"`
+	KVConnector            string         `mapstructure:"kv_connector"`
+	KVConnectorParams      map[string]any `mapstructure:"kv_connector_params"`
+	ECConnector            string         `mapstructure:"ec_connector"`
+	WorkerProtocol         string         `mapstructure:"worker_protocol"`
+	UseOpenAIFormat        bool           `mapstructure:"use_openai_format"`
+	ForwardResponseHeaders []string       `mapstructure:"forward_response_headers"`
+	Steps                  []StepConfig   `mapstructure:"steps"`
 }
 
 type StepConfig struct {

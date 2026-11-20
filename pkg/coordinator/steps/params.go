@@ -28,8 +28,9 @@ import (
 
 // Parameter key constants for step configuration maps.
 const (
-	ParamKVConnector = "kv_connector"
-	ParamECConnector = "ec_connector"
+	ParamKVConnector       = "kv_connector"
+	ParamKVConnectorParams = "kv_connector_params"
+	ParamECConnector       = "ec_connector"
 	// ParamForceStream opts the decode step into force-streaming: a
 	// non-streaming client request is sent upstream with stream enabled, and
 	// the streamed response is reassembled into one non-streaming reply.
@@ -67,7 +68,11 @@ func buildKVConnector(params map[string]any) (kv.Connector, error) {
 	if err != nil {
 		return nil, err
 	}
-	return kv.Build(name)
+	kvParams, err := paramMap(params, ParamKVConnectorParams)
+	if err != nil {
+		return nil, err
+	}
+	return kv.Build(name, kvParams)
 }
 
 func buildECConnector(params map[string]any) (ec.Connector, error) {
@@ -149,6 +154,17 @@ func paramString(params map[string]any, key string) (string, error) {
 	default:
 		return "", fmt.Errorf("%s: expected string, got %T", key, v)
 	}
+}
+
+// paramMap reads a map step parameter. A missing key returns nil; a key present
+// with a non-map value is a configuration error.
+func paramMap(params map[string]any, key string) (map[string]any, error) {
+	v := params[key]
+	m, ok := v.(map[string]any)
+	if !ok && v != nil {
+		return nil, fmt.Errorf("%s: expected a map, got %T", key, v)
+	}
+	return m, nil
 }
 
 // paramBool reads a boolean step parameter. A missing key returns ok=false so
