@@ -55,7 +55,7 @@ A `kv.fetch` hint flows like this:
 
 `kv.prefetch` copies blocks to another node before a request needs them. `kv.move` does the same, and the source then drops its copy. The router chooses the blocks. Its call lists 64-bit block hashes. These are the block hashes in vLLM's KV events.
 
-1. The router calls the source daemon directly, with the block hashes and the destination daemon.
+1. The router sends the hint straight to the source daemon. The hint lists the block hashes and names the destination daemon.
 2. The source daemon maps each hash to the keys in its pool. It skips hashes it does not hold.
 3. It offers those keys to the destination daemon. The destination pulls them into its pool over TCP or RDMA.
 4. A later request on the destination finds the blocks in its local pool. It needs no hint.
@@ -79,7 +79,7 @@ A later request does not wait for a prefetch:
 
 The router calls the daemon directly because vLLM's hints are per request. A prefetch sent as a hint would have to ride on an inference request to the source. Background moves would then depend on foreground traffic. The direct call needs no vLLM change. Blocks that land in a pool reach vLLM through the existing stored events.
 
-The direct call is the `peer_push` message on the daemon's peer port. A shared token guards it, and it is off unless the daemon has a token. A prefetch can also still arrive as a vLLM hint through the source engine. Pinning and retention hints will use the direct call too. Two pieces of work remain:
+The direct call carries the same hint a request would. It is vLLM's KV hint envelope, with a `kv.prefetch` or `kv.move` action. The router builds one message and chooses how to deliver it: on a request, or straight to the daemon's peer port. The direct call also names the model, because no request is there to supply it. A shared token guards the call, and it is off unless the daemon has a token. Pinning and retention hints will use the direct call too. Two pieces of work remain:
 
 - The rest of the peer port needs authentication. It is plain TCP today. Any host that reaches it can pull blocks, or tell a daemon to pull blocks from another one.
 - The router needs a plugin that decides what to prefetch and when. It can already build a daemon's endpoint from the pod's address when the daemon is a sidecar. A DaemonSet deployment needs a way to map an engine to its node's daemon.
