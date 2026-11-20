@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr/funcr"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,6 +42,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/profilehandler/disagg"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -870,6 +872,52 @@ func TestPreRequest_PrefillProfileNameFromResult(t *testing.T) {
 	require.NoError(t, p.PreRequest(ctx, req, result))
 	assertNoSource(t, req)
 	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
+}
+
+// The scheduling result here comes from the real disagg profile handler, so a renamed
+// prefill profile reaches the request through the handler that runs it rather than
+// through a hand-built result.
+func TestPreRequest_PrefillProfileNameFromDisaggHandler(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	p := New("test", Config{MinCachedTokenDelta: 1})
+
+	handle := plugin.NewEppHandle(ctx, nil, plugin.WithMetricsRecorder(prometheus.NewRegistry()))
+	decider, err := disagg.AlwaysDisaggPDDeciderPluginFactory("pd-decider", nil, handle)
+	require.NoError(t, err)
+	handle.AddPlugin("pd-decider", decider)
+	raw, err := disagg.HandlerFactory("disagg", plugin.StrictDecoder(json.RawMessage(
+		`{"deciders":{"prefill":"pd-decider"},"profiles":{"prefill":"prefill-h200"}}`)), handle)
+	require.NoError(t, err)
+	handler := raw.(scheduling.ProfileHandler)
+
+	decode := endpoint(p, "pod-a", "10.0.0.1", 0)
+	prefill := endpoint(p, "pod-b", "10.0.0.2", 3)
+	request := &scheduling.InferenceRequest{RequestID: "req-disagg-profile"}
+	profiles := map[string]scheduling.SchedulerProfile{"decode": stubProfile{}, "prefill-h200": stubProfile{}}
+	results := map[string]*scheduling.ProfileRunResult{}
+	for picked := handler.Pick(ctx, request, profiles, results); len(picked) > 0; picked = handler.Pick(ctx, request, profiles, results) {
+		for name := range picked {
+			ep := decode
+			if name == "prefill-h200" {
+				ep = prefill
+			}
+			results[name] = &scheduling.ProfileRunResult{TargetEndpoints: []scheduling.Endpoint{ep}}
+		}
+	}
+	result, err := handler.ProcessResults(ctx, request, results)
+	require.NoError(t, err)
+	require.Equal(t, "prefill-h200", result.PrefillProfileName)
+
+	req := preRequest(p, request.RequestID, peer("10.0.0.2", 48))
+	require.NoError(t, p.PreRequest(ctx, req, result))
+	assertNoSource(t, req)
+	assertPrefillHeader(t, req, "10.0.0.2", defaultP2PConnectorPort)
+}
+
+type stubProfile struct{}
+
+func (stubProfile) Run(context.Context, *scheduling.InferenceRequest, []scheduling.Endpoint) (*scheduling.ProfileRunResult, error) {
+	return &scheduling.ProfileRunResult{}, nil
 }
 
 // A prefillProfileName that matches no profile result sets no prefill header,
