@@ -142,21 +142,18 @@ func (lac *LegacyAdmissionController) Admit(
 // FlowControlAdmissionController delegates admission decisions to the Flow Control layer.
 // It uses the provided Flow Controller to enqueue the request and await an outcome.
 type FlowControlAdmissionController struct {
-	flowController     flowController
-	poolName           string
-	endpointCandidates contracts.EndpointCandidates
+	flowController flowController
+	poolName       string
 }
 
 // NewFlowControlAdmissionController creates a new FlowControlAdmissionController.
 func NewFlowControlAdmissionController(
 	fc flowController,
 	poolName string,
-	endpointCandidates contracts.EndpointCandidates,
 ) *FlowControlAdmissionController {
 	return &FlowControlAdmissionController{
-		flowController:     fc,
-		poolName:           poolName,
-		endpointCandidates: endpointCandidates,
+		flowController: fc,
+		poolName:       poolName,
 	}
 }
 
@@ -208,10 +205,7 @@ func (fcac *FlowControlAdmissionController) Admit(
 	}
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
-	// Pool emptiness (nil metadata = whole pool) is a live probe, so it is passed lazily and runs only when the
-	// mapping consults it: a TTL expiry whose regime is not already established by ErrNoEndpoints.
-	poolEmpty := func() bool { return len(fcac.endpointCandidates.Locate(ctx, nil)) == 0 }
-	return translateFlowControlError(err, poolEmpty)
+	return translateFlowControlError(err)
 }
 
 // ReleaseDispatchReservation forwards completion of the post-admission accounting window when
@@ -271,10 +265,10 @@ func (r *flowControlRequest) FlowKey() flowcontrol.FlowKey {
 // with the same cause (e.g. a TTL expiry while buffered vs. while queued) therefore agree by construction.
 //
 // Error codes encode availability: ResourceExhausted (429) means capacity exists but is contended (backpressure),
-// ServiceUnavailable (503) means no serving capacity exists right now. A queue-wait TTL expiry is therefore 429
-// when the pool has endpoints and 503 when it does not; poolEmpty is the live probe deciding that split, invoked
-// only when the TTL case is reached.
-func translateFlowControlError(err error, poolEmpty func() bool) error {
+// ServiceUnavailable (503) means no serving capacity exists right now. With the processor's expiry sweep as the
+// sole enforcer of queue-wait budgets, an empty-pool expiry always carries ErrNoEndpoints (503), so ErrTTLExpired
+// maps to 429 unconditionally.
+func translateFlowControlError(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -295,9 +289,6 @@ func translateFlowControlError(err error, poolEmpty func() bool) error {
 	case errors.Is(err, types.ErrQueueAtCapacity):
 		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonSaturated)}}
 	case errors.Is(err, types.ErrTTLExpired):
-		if poolEmpty() {
-			return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "request timed out in queue and no endpoints are available: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)}}
-		}
 		return errcommon.Error{Code: errcommon.ResourceExhausted, Msg: "request timed out in queue: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)}}
 	case errors.Is(err, types.ErrContextCancelled):
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "client disconnected: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)}}

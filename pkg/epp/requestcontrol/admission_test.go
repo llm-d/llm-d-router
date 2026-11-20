@@ -82,7 +82,7 @@ func (m *mockFlowController) ReleaseDispatchReservation(requestID string) {
 func TestFlowControlAdmissionController_ReleaseDispatchReservation(t *testing.T) {
 	t.Parallel()
 	fc := &mockFlowController{}
-	ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+	ac := NewFlowControlAdmissionController(fc, "pool")
 
 	ac.ReleaseDispatchReservation("request-1")
 
@@ -256,7 +256,7 @@ func TestFlowControlAdmissionController_RequestTTL(t *testing.T) {
 				Request:           &handlers.Request{Headers: headers, Metadata: map[string]any{}},
 			}
 			fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched}
-			controller := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+			controller := NewFlowControlAdmissionController(fc, "pool")
 
 			err := controller.Admit(ctx, reqCtx, 0)
 
@@ -336,18 +336,16 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			priority:        0,
 			fcOutcome:       fctypes.QueueOutcomeEvictedTTL,
 			fcErr:           fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrTTLExpired),
-			locatorPods:     []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil)},
 			expectErr:       true,
 			expectErrCode:   errcommon.ResourceExhausted,
 			expectErrSubstr: "request timed out in queue",
 			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)},
 		},
 		{
-			name:            "fc_evict_ttl_empty_pool",
+			name:            "fc_evict_no_endpoints",
 			priority:        0,
-			fcOutcome:       fctypes.QueueOutcomeEvictedTTL,
-			fcErr:           fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrTTLExpired),
-			locatorPods:     []fwkdl.Endpoint{},
+			fcOutcome:       fctypes.QueueOutcomeEvictedNoEndpoints,
+			fcErr:           fmt.Errorf("%w: %w: %w", fctypes.ErrEvicted, fctypes.ErrTTLExpired, fctypes.ErrNoEndpoints),
 			expectErr:       true,
 			expectErrCode:   errcommon.ServiceUnavailable,
 			expectErrSubstr: "request timed out in queue and no endpoints are available",
@@ -378,22 +376,10 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			priority:        0,
 			fcOutcome:       fctypes.QueueOutcomeRejectedOther,
 			fcErr:           fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrTTLExpired),
-			locatorPods:     []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil)},
 			expectErr:       true,
 			expectErrCode:   errcommon.ResourceExhausted,
 			expectErrSubstr: "request timed out in queue",
 			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonTTLExpired)},
-		},
-		{
-			name:            "fc_reject_other_preadmission_ttl_empty_pool",
-			priority:        0,
-			fcOutcome:       fctypes.QueueOutcomeRejectedOther,
-			fcErr:           fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrTTLExpired),
-			locatorPods:     []fwkdl.Endpoint{},
-			expectErr:       true,
-			expectErrCode:   errcommon.ServiceUnavailable,
-			expectErrSubstr: "request timed out in queue and no endpoints are available",
-			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
 		},
 		{
 			name:            "fc_evict_other",
@@ -427,7 +413,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 				},
 			}
 			fc := &mockFlowController{outcome: tc.fcOutcome, err: tc.fcErr}
-			ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{Candidates: tc.locatorPods})
+			ac := NewFlowControlAdmissionController(fc, "pool")
 
 			err := ac.Admit(ctx, reqCtx, tc.priority)
 
@@ -463,7 +449,7 @@ func TestFlowControlAdmissionController_StampsQueueDuration(t *testing.T) {
 		t.Parallel()
 		reqCtx := newReqCtx()
 		fc := &mockFlowController{outcome: fctypes.QueueOutcomeDispatched, delay: 5 * time.Millisecond}
-		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+		ac := NewFlowControlAdmissionController(fc, "pool")
 
 		require.NoError(t, ac.Admit(ctx, reqCtx, 0))
 		assert.True(t, reqCtx.FlowControlAdmitted)
@@ -478,7 +464,7 @@ func TestFlowControlAdmissionController_StampsQueueDuration(t *testing.T) {
 			err:     fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrQueueAtCapacity),
 			delay:   5 * time.Millisecond,
 		}
-		ac := NewFlowControlAdmissionController(fc, "pool", &mocks.MockEndpointCandidates{})
+		ac := NewFlowControlAdmissionController(fc, "pool")
 
 		require.Error(t, ac.Admit(ctx, reqCtx, 0))
 		assert.False(t, reqCtx.FlowControlAdmitted)
@@ -530,20 +516,13 @@ func TestTranslateFlowControlError(t *testing.T) {
 			wantReason: string(errcommon.RequestDroppedReasonNoEndpoints),
 		},
 		{
-			name:       "TTL expiry with endpoints returns 429",
+			name:       "TTL expiry returns 429",
 			err:        fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrTTLExpired),
 			wantCode:   errcommon.ResourceExhausted,
 			wantReason: string(errcommon.RequestDroppedReasonTTLExpired),
 		},
 		{
-			name:         "TTL expiry with empty pool returns 503",
-			err:          fmt.Errorf("%w: %w", fctypes.ErrEvicted, fctypes.ErrTTLExpired),
-			ttlPoolEmpty: true,
-			wantCode:     errcommon.ServiceUnavailable,
-			wantReason:   string(errcommon.RequestDroppedReasonNoEndpoints),
-		},
-		{
-			// The regime is carried by the error itself, so the mapping must not depend on a pool probe.
+			// The regime is carried by the error itself, so the mapping does not depend on a pool probe.
 			name:       "no-endpoint budget expiry returns 503",
 			err:        fmt.Errorf("%w: %w: %w", fctypes.ErrEvicted, fctypes.ErrTTLExpired, fctypes.ErrNoEndpoints),
 			wantCode:   errcommon.ServiceUnavailable,
@@ -574,13 +553,6 @@ func TestTranslateFlowControlError(t *testing.T) {
 			wantReason: string(errcommon.RequestDroppedReasonTTLExpired),
 		},
 		{
-			name:         "pre-admission TTL rejection with empty pool maps like TTL eviction",
-			err:          fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrTTLExpired),
-			ttlPoolEmpty: true,
-			wantCode:     errcommon.ServiceUnavailable,
-			wantReason:   string(errcommon.RequestDroppedReasonNoEndpoints),
-		},
-		{
 			name:       "pre-admission cancellation rejection maps like cancellation eviction",
 			err:        fmt.Errorf("%w: %w", fctypes.ErrRejected, fctypes.ErrContextCancelled),
 			wantCode:   errcommon.ServiceUnavailable,
@@ -609,7 +581,7 @@ func TestTranslateFlowControlError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := translateFlowControlError(tt.err, func() bool { return tt.ttlPoolEmpty })
+			result := translateFlowControlError(tt.err)
 			if tt.wantNil {
 				require.NoError(t, result)
 				return
