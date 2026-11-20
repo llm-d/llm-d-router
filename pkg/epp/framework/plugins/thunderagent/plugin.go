@@ -73,6 +73,7 @@ type ThunderAgent struct {
 	fallbackCapacityTokens float64
 	usableCapacityRatio    float64
 	forceAdmitTimeout      time.Duration
+	resumeOnOtherPod       bool
 
 	mgr     *sessionManager
 	metrics *thunderMetrics
@@ -124,6 +125,7 @@ func newThunderAgent(name string, cfg Config) *ThunderAgent {
 		fallbackCapacityTokens: float64(cfg.FallbackCapacityTokens),
 		usableCapacityRatio:    cfg.UsableCapacityRatio,
 		forceAdmitTimeout:      cfg.ForceAdmitTimeout.Duration,
+		resumeOnOtherPod:       cfg.ResumeOnOtherPod,
 		mgr:                    mgr,
 		metrics:                newThunderMetrics(mgr),
 	}

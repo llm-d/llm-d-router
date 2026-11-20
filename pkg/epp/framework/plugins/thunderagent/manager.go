@@ -44,7 +44,8 @@ const (
 	// turns always dispatch.
 	classAdmitted sessionClass = iota
 	// classPaused gave its room to another session's turn: its next turn
-	// must fit its own pod again, but it outranks never-admitted sessions.
+	// must fit its own pod again, or another pod with resumeOnOtherPod, but
+	// it outranks never-admitted sessions.
 	classPaused
 	// classNew is not admitted to any pod: it never dispatched, or its pod
 	// left the pool. Admitted only when a pod has room.

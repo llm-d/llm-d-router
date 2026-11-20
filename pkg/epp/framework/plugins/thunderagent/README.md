@@ -44,13 +44,18 @@ When a pod leaves the pool, the plugin drops it from the ledger; its sessions
 keep their footprint and move to the pod that serves their next turn.
 
 Gate: a pod's room is `usableCapacityRatio * capacity` minus its working set.
-Turns of admitted sessions always dispatch. A paused session's next turn
+Turns of admitted sessions always dispatch. By default, a paused session's next turn
 waits until its own pod has room again (strict origin affinity: a session
 never moves, so its warm prefix is never abandoned; the exceptions are its
 pod leaving the pool or being filtered out of the scheduling candidates).
 This differs from the original ThunderAgent, which restores a paused session
 onto any pod with room; here a paused session waits for its own pod for up to
-`forceAdmitTimeout`. A new session is admitted onto a pod with room,
+`forceAdmitTimeout`. With `resumeOnOtherPod`, a paused session that does not
+fit its own pod, even after reclaiming idle sessions there, is placed like a
+new session on another pod with room, which recomputes its history; a session
+that fits no pod still waits for its own. The move lands only when this
+plugin's scorer decides the pick, since a scorer that outweighs it can send
+the turn back to the old pod. A new session is admitted onto a pod with room,
 and holds until one fits it.
 Among the sessions that fit, admitted goes before paused before new; a
 session that fits no pod does not block the others, so smaller sessions can
@@ -97,6 +102,7 @@ parameters:
 | `usableCapacityRatio` | `1.0` | Share of each pod's KV capacity available to sessions, in `(0, 1]`. |
 | `idleGracePeriod` | `"30s"` | How long an idle session keeps its room against paused and new sessions (`"0s"` reclaims idle sessions immediately). Set it to about a typical tool-call duration: shorter pauses sessions about to return, longer holds admissions behind long tool calls. |
 | `forceAdmitTimeout` | `"5m"` | Maximum queue wait before a request is admitted even when no pod has room (`"0s"` disables forced admission). Flow control's `defaultRequestTTL` defaults to `60s`, so set `defaultRequestTTL` above `forceAdmitTimeout` or to `"0s"` to avoid shedding held requests before forced admission. |
+| `resumeOnOtherPod` | `false` | When a paused session's own pod has no room, even after reclaiming idle sessions, resume it on another pod with room. The new pod recomputes the session's history. |
 
 ## Observability
 
