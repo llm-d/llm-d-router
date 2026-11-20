@@ -197,6 +197,28 @@ func TestEndpointTTFT_PrefillStepsMixedTierPrefix(t *testing.T) {
 	assert.InDelta(t, 500+1000+2*345+500, ttft, 1e-9)
 }
 
+// Speculative index entries count toward the cached prefix but not as
+// offloaded blocks, so an endpoint whose confirmed blocks are all in GPU
+// memory pays no restore.
+func TestEndpointTTFT_PrefillStepsSpeculativePrefix(t *testing.T) {
+	cfg := stepsConfig()
+	steps := *testSteps
+	steps.RestoreMs = 1000
+	cfg.PrefillSteps = &steps
+	p := newTestPlugin(cfg)
+
+	ep := makeStepEndpoint("warm", 75, 0, 0)
+	ep.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(75, 100, 1000).
+		WithCachedBlockCount(90).
+		WithConfirmedCachedBlockCount(40).
+		WithCachedBlocksByTier(map[string]int{kvcache.GPUTier: 40, attrprefix.SpeculativeTierKey: 50}))
+	ep.Put(attrconcurrency.UncachedRequestTokensDataKey, &attrconcurrency.UncachedRequestTokens{Tokens: 10000})
+
+	ttft, ok := p.endpointTTFT(ep)
+	assert.True(t, ok)
+	assert.InDelta(t, 500+2*345+500, ttft, 1e-9)
+}
+
 // Without tier data the prefix producer reports no blocks outside GPU memory,
 // so the endpoint pays no restore: read, one step and the handoff.
 func TestEndpointTTFT_PrefillStepsRestoresNothingWithoutTiers(t *testing.T) {

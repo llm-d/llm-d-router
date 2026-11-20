@@ -183,8 +183,9 @@ For each endpoint, with `requests` the requests on it that have not returned a f
 token (`InFlightLoad.PendingRequests`), less `queued` with `ttftEstimate: full`,
 `tokens` the prompt tokens of the request being scheduled that the endpoint computes
 (`UncachedRequestTokens`), `cached` its cached tokens on the endpoint, and `restore`
-equal to `restoreMs` when the endpoint holds part of the request's cached prefix
-outside GPU memory (0 otherwise, and when the prefix producer reports no tiers):
+equal to `restoreMs` when the endpoint holds part of the request's confirmed cached
+prefix outside GPU memory (0 otherwise, and when the prefix producer reports no tiers).
+Speculative index entries count as GPU-resident:
 
 ```
 own     = max(ceil(tokens / tokensPerStep), 1)
