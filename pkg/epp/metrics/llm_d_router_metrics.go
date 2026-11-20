@@ -30,8 +30,6 @@ const (
 )
 
 var (
-	// llmdEndpointLabels replaces the deprecated endpointLabels that used "pod_name".
-	llmdEndpointLabels                   = []string{"endpoint_name", "namespace", "port"}
 	modelLabelsWithFairnessPriority      = append(append([]string{}, modelLabels...), "fairness_id", "priority")
 	requestLabelsWithAPISurface          = append(append([]string{}, modelLabelsWithFairnessPriority...), "api_surface")
 	requestLabelsWithAPISurfaceStreaming = append(append([]string{}, requestLabelsWithAPISurface...), "streaming")
@@ -251,46 +249,6 @@ var (
 
 // --- llm-d Scheduling Metrics ---
 var (
-	llmdSchedulerE2ELatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "scheduler_e2e_duration_seconds",
-			Help:      metricsutil.HelpMsgWithStability("End-to-end scheduling latency distribution in seconds.", compbasemetrics.ALPHA),
-			Buckets: []float64{
-				0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1,
-			},
-		},
-		[]string{},
-	)
-
-	llmdSchedulerAttemptsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "scheduler_attempts_total",
-			Help:      metricsutil.HelpMsgWithStability("Total number of scheduling attempts.", compbasemetrics.ALPHA),
-		},
-		append([]string{"status", "target_model_name"}, llmdEndpointLabels...),
-	)
-
-	llmdSchedulerFilterEliminatedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "scheduler_filter_eliminated_total",
-			Help: metricsutil.HelpMsgWithStability("Total number of candidate endpoints removed by scheduling filters, "+
-				"by scheduler profile, plugin type and plugin name.", compbasemetrics.ALPHA),
-		},
-		[]string{"profile", "plugin_type", "plugin_name"},
-	)
-
-	llmdSchedulerFailuresTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Subsystem: LLMDRouterEndpointPickerSubsystem,
-			Name:      "scheduler_failures_total",
-			Help:      metricsutil.HelpMsgWithStability("Total number of failed scheduling attempts, by reason.", compbasemetrics.ALPHA),
-		},
-		[]string{"reason"},
-	)
-
 	llmdPluginProcessingLatencies = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
