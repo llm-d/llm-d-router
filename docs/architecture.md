@@ -425,6 +425,11 @@ Enable chunked decode via the pd-sidecar flag:
 
 ## InferencePool, InferenceObjective & InferenceModelRewrite Design
 
+An `InferenceObjective` sets per-request scheduling goals such as priority
+within a pool.
+An `InferenceModelRewrite` tells the EPP how to rewrite a request's model name,
+with weighted targets for A/B tests and canary rollouts.
+
 ### Current Assumptions
 
 - Single `InferencePool` and single `EPP` due to Envoy limitations
@@ -434,8 +439,8 @@ Enable chunked decode via the pd-sidecar flag:
 
 > [!NOTE]
 > The llm-d Router repository defines `InferenceObjective` in `apix/v1` and
-> `InferenceModelRewrite` in `apix/v1alpha2`. The [Gateway API Inference Extension (GIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
-> defines the `InferencePool` API.
+> `InferenceModelRewrite` in `apix/v1alpha2`.
+> The Gateway API Inference Extension (GIE) defines the `InferencePool` API.
 
 ---
 
