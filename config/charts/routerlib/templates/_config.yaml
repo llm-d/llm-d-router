@@ -22,6 +22,8 @@
       {{- $parsers = append $parsers "vllmgrpc-parser" }}
     {{- else if .Values.router.epp.parsers }}
       {{- $parsers = .Values.router.epp.parsers }}
+    {{- else if and (eq (lower $modelServerType) "sglang") (eq (lower $modelServerProtocol) "grpc") }}
+      {{- $parsers = list "sglanggrpc-parser" "passthrough-parser" }}
     {{- else if eq (lower $modelServerType) "triton" }}
       {{- $parsers = append $parsers "passthrough-parser" }}
     {{- end }}

@@ -249,7 +249,7 @@ kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
 
 | **Parameter Name** | **Description** | **Default** |
 | :--- | :--- | :--- |
-| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
+| `router.epp.parsers` | List of request parser types for EPP. Options: `[openai-parser, anthropic-parser, vllmgrpc-parser, vllmhttp-parser, sglanggrpc-parser, sglanghttp-parser, systemone-parser, passthrough-parser]`. Empty for auto-selection. | `[]` |
 | `router.epp.replicas` | Number of EPP replicas. Set > 1 to enable multi-replica EPP. Ignored when `router.epp.autoscaling.enabled` is `true`. | `1` |
 | `router.epp.haMode` | `leader-elected` or `all-active`. Empty preserves automatic election for fixed replicas > 1, except when cross-replica sync is enabled. Explicit modes must agree with the leader-election flag and cannot be combined with priority routing or GKE preferred backends. | `""` |
 | `router.epp.crossReplica.enabled` | Configure the Alpha Redis syncer, select all-active mode, and allow experimental plugins. | `false` |
