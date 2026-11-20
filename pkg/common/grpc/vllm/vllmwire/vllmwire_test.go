@@ -199,7 +199,7 @@ func TestScanGenerateRequestAccessors(t *testing.T) {
 	salt, ok := req.CacheSalt()
 	require.True(t, ok)
 	require.Equal(t, "tenant-salt-1", string(salt))
-	require.True(t, req.bypassPrefixCache)
+	require.True(t, req.BypassPrefixCache())
 	maxTok, ok := req.MaxNewTokens()
 	require.True(t, ok)
 	require.Equal(t, uint32(128), maxTok)
@@ -225,6 +225,7 @@ func TestScanGenerateRequestAccessors(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, PromptText, textReq.Prompt)
 	require.Equal(t, "hello", string(textReq.Text()))
+	require.False(t, textReq.BypassPrefixCache())
 	require.Zero(t, textReq.tokenCount())
 	ids, err = textReq.TokenIDs()
 	require.NoError(t, err)
@@ -726,6 +727,64 @@ func TestFrameSegmentsMediaOverride(t *testing.T) {
 	framed, err = scanned.Frame(LegOptions{})
 	require.NoError(t, err)
 	requireProtoEqual(t, cleanSample(t), decodeRequestFrame(t, framed))
+}
+
+func TestFrameSegmentsKVHints(t *testing.T) {
+	hinted := sampleGenerateRequest(t)
+	hinted.KvHints = &vllmpb.KVHintsEnvelope{
+		ProtocolVersion: "0.1",
+		MessageId:       "msg-1",
+		Actions: []*vllmpb.KVHintAction{{
+			ActionId:   "fetch-0",
+			ActionType: "kv.fetch",
+			Payload:    mustStruct(t, map[string]any{"source_control_endpoint": "tcp://10.0.0.2:17771"}),
+		}},
+	}
+	// A second kv_hints occurrence merges into the first, so both must
+	// travel or be dropped together.
+	second, err := proto.Marshal(&vllmpb.KVHintsEnvelope{MessageId: "msg-2"})
+	require.NoError(t, err)
+	payload := mustMarshal(t, hinted)
+	payload = protowire.AppendBytes(protowire.AppendTag(payload, reqKVHints, protowire.BytesType), second)
+
+	scanned, err := ScanGenerateRequest(payload)
+	require.NoError(t, err)
+
+	wantKept := proto.Clone(hinted).(*vllmpb.GenerateRequest)
+	wantKept.KvHints.MessageId = "msg-2"
+	wantKept.Kv.KvTransferParams = nil
+	wantKept.Kv.EcTransferParams = nil
+	segs, err := scanned.FrameSegments(LegOptions{})
+	require.NoError(t, err)
+	requireProtoEqual(t, wantKept, decodeRequestFrame(t, concat(segs...)))
+
+	wantDropped := proto.Clone(wantKept).(*vllmpb.GenerateRequest)
+	wantDropped.KvHints = nil
+	wantDropped.Media = nil
+	for _, opts := range []LegOptions{
+		{Media: MediaNone, DropKVHints: true},
+		{Media: MediaNone, DropKVHints: true, RequestID: "decode-id", KVTransferParams: map[string]any{"k": "v"}},
+	} {
+		segs, err := scanned.FrameSegments(opts)
+		require.NoError(t, err)
+		got := decodeRequestFrame(t, concat(segs...))
+		require.Nil(t, got.KvHints, "%+v", opts)
+		if opts.RequestID == "" {
+			requireProtoEqual(t, wantDropped, got)
+		}
+		framed, err := scanned.Frame(opts)
+		require.NoError(t, err)
+		require.Equal(t, concat(segs...), framed)
+	}
+
+	items, err := scanned.MediaItems()
+	require.NoError(t, err)
+	frame, err := scanned.EncoderSubFrame(EncoderSubFrameOptions{Item: items[0]})
+	require.NoError(t, err)
+	require.Nil(t, decodeRequestFrame(t, frame).KvHints)
+
+	_, err = ScanGenerateRequest(protowire.AppendVarint(protowire.AppendTag(nil, reqKVHints, protowire.VarintType), 1))
+	require.ErrorIs(t, err, ErrMalformed)
 }
 
 func TestFrameSegmentsAllocations(t *testing.T) {

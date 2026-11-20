@@ -238,6 +238,7 @@ func TestVLLMGRPC_MediaStrippingAcrossAllPipelineTopologies(t *testing.T) {
 		return scanTestVLLMRequest(t, &vllmpb.GenerateRequest{
 			Prompt:   &vllmpb.GenerateRequest_TokenIds{TokenIds: &vllmpb.TokenIds{Ids: []uint32{1, 32000, 32000, 2}}},
 			Stopping: &vllmpb.StoppingCriteria{MaxNewTokens: 16},
+			KvHints:  &vllmpb.KVHintsEnvelope{ProtocolVersion: "0.1", MessageId: "hint-1"},
 			Media: []*vllmpb.MediaItem{
 				{
 					Modality: vllmpb.Modality_MODALITY_IMAGE,
@@ -358,6 +359,12 @@ func TestVLLMGRPC_MediaStrippingAcrossAllPipelineTopologies(t *testing.T) {
 
 		// Decode after prefill receives MediaNone.
 		require.Empty(t, decodeReq.GetMedia())
+
+		// kv_hints go to prefill only: an encoder holds no prompt KV, and
+		// decode receives the prompt's KV from prefill.
+		require.Nil(t, encodeReq.GetKvHints())
+		require.Equal(t, "hint-1", prefillReq.GetKvHints().GetMessageId())
+		require.Nil(t, decodeReq.GetKvHints())
 	})
 
 	t.Run("prefill -> decode without encode sends full media to prefill and none to decode", func(t *testing.T) {

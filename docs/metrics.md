@@ -691,10 +691,12 @@ A request records the first outcome in this table that applies to it.
 | `no-endpoint` | No computing endpoint is available, or the selected endpoint has no metadata. |
 | `self` | The best-cached endpoint is one of the endpoints selected to compute the prefix. |
 | `below-floor` | The source holds fewer than `minCachedTokenDelta` tokens beyond the computing endpoint. |
-| `decode-request` | The body already pulls from a prefill pod (`kv_transfer_params.remote_prefiller`). |
+| `unsupported-request` | With `transport: kvcr`, the request is not a `vllm.Inference` Generate or GenerateStream call, so it cannot carry a `kv.fetch` hint. |
+| `cache-bypassed` | With `transport: kvcr`, the request sets `kv.bypass_prefix_cache`, so vLLM does not load fetched blocks. |
+| `decode-request` | The body already pulls from a prefill pod: `kv_transfer_params.remote_prefiller`, or with `transport: kvcr` also `do_remote_prefill: true`. |
 | `declined` | The cost model priced the pull at or above the prefill time it saves. |
 | `unparsed-body` | The body was kept as raw bytes and cannot carry the source. |
-| `pulled` | The request carries `kv_transfer_params.remote_kv_source` and the source header. |
+| `pulled` | The request carries `kv_transfer_params.remote_kv_source` and the source header, or with `transport: kvcr` a `kv.fetch` hint in `kv_hints`. |
 
 `endpoint_role` follows the prefix cache prediction metrics: `prefill` for a request with a target in
 the profile named `prefill`, `decode` otherwise when the primary profile has a target, and empty when
