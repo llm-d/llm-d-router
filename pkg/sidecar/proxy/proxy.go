@@ -617,7 +617,8 @@ func (s *Server) createRoutes() http.Handler {
 	}
 	// DetectAPIType owns the HTTP path-to-API mapping; deriving it here keeps
 	// the HTTP routes from drifting away from it.
-	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
+	httpPaths := []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate}
+	for _, path := range httpPaths {
 		registerInferenceRoute(path, reqcommon.DetectAPIType(path))
 	}
 	grpcPaths := make([]string, 0, len(grpcMethodRoutes)+1)
@@ -637,7 +638,7 @@ func (s *Server) createRoutes() http.Handler {
 
 	mux.Handle("/", s.decoderProxy)
 
-	return redirectEncodedInferencePath(mux, grpcPaths...)
+	return redirectEncodedInferencePath(mux, httpPaths, grpcPaths)
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.

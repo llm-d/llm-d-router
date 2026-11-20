@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"testing"
 
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
@@ -601,3 +602,32 @@ var _ = Describe("decodeRequestBody", func() {
 		Expect(err).To(HaveOccurred())
 	})
 })
+
+func TestRedirectEncodedInferencePathUsesServedPaths(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := redirectEncodedInferencePath(next,
+		[]string{reqcommon.PathChatCompletions},
+		[]string{reqcommon.PathSGLangGenerate})
+
+	tests := []struct {
+		name     string
+		target   string
+		wantCode int
+	}{
+		{name: "served http path redirects", target: "/v1/%63hat/completions", wantCode: http.StatusTemporaryRedirect},
+		{name: "served grpc path redirects", target: "/%67enerate", wantCode: http.StatusTemporaryRedirect},
+		{name: "unserved audio path passes through", target: "/v1/audio/%73peech", wantCode: http.StatusNoContent},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tt.target, nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tt.wantCode {
+				t.Errorf("status = %d, want %d", rr.Code, tt.wantCode)
+			}
+		})
+	}
+}
