@@ -217,7 +217,8 @@ func recordRequestPredictedTPOT(ctx context.Context, pluginName, pluginType, mod
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", predictedTPOT)
 		return false
 	}
-	llmdRequestPredictedTPOT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(predictedTPOT)
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		llmdRequestPredictedTPOT.WithLabelValues(pluginName, pluginType, modelName, targetModelName), predictedTPOT)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typePredictedTPOT).Set(predictedTPOT)
 	return true
 }
@@ -228,7 +229,8 @@ func recordRequestTPOTPredictionDuration(ctx context.Context, pluginName, plugin
 			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
 		return false
 	}
-	llmdRequestTPOTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(duration)
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		llmdRequestTPOTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName), duration)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOTPredictionDuration).Set(duration)
 	return true
 }
@@ -268,7 +270,8 @@ func recordRequestPredictedTTFT(ctx context.Context, pluginName, pluginType, mod
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", predictedTTFT)
 		return false
 	}
-	llmdRequestPredictedTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(predictedTTFT)
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		llmdRequestPredictedTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName), predictedTTFT)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typePredictedTTFT).Set(predictedTTFT)
 	return true
 }
@@ -279,7 +282,8 @@ func recordRequestTTFTPredictionDuration(ctx context.Context, pluginName, plugin
 			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
 		return false
 	}
-	llmdRequestTTFTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(duration)
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		llmdRequestTTFTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName), duration)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFTPredictionDuration).Set(duration)
 	return true
 }
