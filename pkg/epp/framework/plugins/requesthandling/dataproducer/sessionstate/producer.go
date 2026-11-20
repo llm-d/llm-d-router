@@ -22,9 +22,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"time"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -51,29 +51,11 @@ func (p Parameters) validate() error {
 		return fmt.Errorf("evictionTtlSeconds must be >= 0, got %v", p.EvictionTTLSeconds)
 	}
 	if p.EvictionTTLSeconds > 0 {
-		if err := validateDurationSeconds("evictionTtlSeconds", p.EvictionTTLSeconds); err != nil {
+		if err := duration.ValidateSeconds("evictionTtlSeconds", p.EvictionTTLSeconds); err != nil {
 			return err
 		}
 	}
-	if p.EvictionSweepSeconds <= 0 {
-		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", p.EvictionSweepSeconds)
-	}
-	return validateDurationSeconds("evictionSweepSeconds", p.EvictionSweepSeconds)
-}
-
-// validateDurationSeconds rejects a positive number of seconds that does not
-// convert to a positive time.Duration. The eviction ticker panics on a
-// non-positive interval.
-func validateDurationSeconds(field string, seconds float64) error {
-	// float64(math.MaxInt64) rounds up to 2^63, the first value outside int64.
-	nanos := seconds * float64(time.Second)
-	if nanos >= float64(math.MaxInt64) {
-		return fmt.Errorf("%s %v exceeds the representable duration", field, seconds)
-	}
-	if time.Duration(nanos) <= 0 {
-		return fmt.Errorf("%s %v is too small to represent as a duration", field, seconds)
-	}
-	return nil
+	return duration.ValidateSeconds("evictionSweepSeconds", p.EvictionSweepSeconds)
 }
 
 var (

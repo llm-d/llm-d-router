@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"reflect"
 	"strings"
 	"sync"
@@ -29,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -95,28 +95,10 @@ func (c *SessionIDConfig) Validate() error {
 	if err := ValidateSources(c.Sources); err != nil {
 		return err
 	}
-	if err := validateSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
+	if err := duration.ValidateSeconds("evictionTtlSeconds", c.EvictionTTLSeconds); err != nil {
 		return err
 	}
-	return validateSeconds("evictionSweepSeconds", c.EvictionSweepSeconds)
-}
-
-// validateSeconds rejects a value that does not convert to a positive
-// time.Duration. The sweep ticker panics on a non-positive interval, and a
-// zero TTL never expires a binding.
-func validateSeconds(field string, seconds float64) error {
-	if seconds <= 0 {
-		return fmt.Errorf("%s must be > 0, got %v", field, seconds)
-	}
-	// float64(math.MaxInt64) rounds up to 2^63, the first value outside int64.
-	nanos := seconds * float64(time.Second)
-	if nanos >= float64(math.MaxInt64) {
-		return fmt.Errorf("%s %v exceeds the representable duration", field, seconds)
-	}
-	if time.Duration(nanos) <= 0 {
-		return fmt.Errorf("%s %v is too small to represent as a duration", field, seconds)
-	}
-	return nil
+	return duration.ValidateSeconds("evictionSweepSeconds", c.EvictionSweepSeconds)
 }
 
 // ValidateSources rejects a source that does not set exactly one of Header or
