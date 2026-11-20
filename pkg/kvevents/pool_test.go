@@ -456,21 +456,25 @@ func TestCanonicalWritePath_ManyToOne(t *testing.T) {
 		assert.Equal(t, "pod-a", result[ck][0].PodIdentifier)
 	}
 
-	// Verify engine keys are resolvable via the Index
-	// Engine keys 0-3 should resolve to canonical[0], 4-7 to canonical[1]
+	// Only the engine keys that end a canonical block name one: 3 resolves to
+	// canonical[0], 7 to canonical[1]; 0-2 and 4-6 end inside one.
 	for i, ek := range engineKeys {
 		reqKey, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", ek))
-		require.NoError(t, err, "engine key %d should be in index", ek)
-		expectedCanonical := canonicalKeys[i/4]
-		assert.Equal(t, expectedCanonical, reqKey,
+		if i%4 != 3 {
+			assert.Error(t, err, "engine key %d ends inside canonical key %d", i, i/4)
+			continue
+		}
+		require.NoError(t, err, "engine key %d ends canonical key %d", i, i/4)
+		assert.Equal(t, canonicalKeys[i/4], reqKey,
 			"engine key %d should resolve to canonical key %d", i, i/4)
 	}
 }
 
 // TestCanonicalWritePath_ManyToOneTrailingBlock covers a many:1 store that ends
 // mid canonical block: 9 engine blocks of 16 tokens against 64-token canonical
-// blocks. Each engine key maps to the canonical key holding its tokens, and the
-// trailing engine key maps to none.
+// blocks. Only an engine block that ends a canonical block names it; the
+// trailing engine block starts past the last covered canonical block and names
+// none.
 func TestCanonicalWritePath_ManyToOneTrailingBlock(t *testing.T) {
 	tokens := makeTokens(144)
 	engineKeys := makeEngineKeys(9, 100)
@@ -494,8 +498,12 @@ func TestCanonicalWritePath_ManyToOneTrailingBlock(t *testing.T) {
 		_, idx, canonicalKeys := store(t)
 		for i, ek := range engineKeys[:8] {
 			reqKey, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", ek))
-			require.NoError(t, err, "engine key %d", ek)
-			assert.Equal(t, canonicalKeys[i/4], reqKey, "engine key %d should resolve to canonical key %d", ek, i/4)
+			if i%4 != 3 {
+				assert.Error(t, err, "engine key %d ends inside canonical key %d", i, i/4)
+				continue
+			}
+			require.NoError(t, err, "engine key %d ends canonical key %d", i, i/4)
+			assert.Equal(t, canonicalKeys[i/4], reqKey, "engine key %d should resolve to canonical key %d", i, i/4)
 		}
 		_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", trailing))
 		assert.Error(t, err, "the trailing engine key holds no full canonical block")
@@ -530,6 +538,156 @@ func TestCanonicalWritePath_ManyToOneTrailingBlock(t *testing.T) {
 		assert.Equal(t, 1.0, counterValue(t, skipped)-before)
 		_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[0]))
 		assert.Error(t, err, "a child chained on the wrong canonical key is not indexed")
+	})
+}
+
+// TestCanonicalWritePath_InteriorParentBlock covers the parent case a many:1
+// store leaves open: an engine block that ends inside a canonical block names
+// no request key of its own, so a child chained on it cannot be keyed.
+func TestCanonicalWritePath_InteriorParentBlock(t *testing.T) {
+	// 8 engine blocks of 16 tokens against 64-token canonical blocks: blocks 3
+	// and 7 end a canonical block, the rest end inside one.
+	store := func(t *testing.T) (*Pool, kvblock.Index, []kvblock.BlockHash) {
+		t.Helper()
+		ctx := logging.NewTestLoggerIntoContext(context.Background())
+		pool, idx, tp := newTestPool(t, 64)
+		tokens := makeTokens(128)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: makeEngineKeys(8, 100), Tokens: tokens, BlockSize: 16},
+		}}, "pod-a", "test-model")
+		canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+		require.NoError(t, err)
+		require.Len(t, canonicalKeys, 2)
+		return pool, idx, canonicalKeys
+	}
+
+	t.Run("an interior engine block names no request key", func(t *testing.T) {
+		ctx := context.Background()
+		_, idx, canonicalKeys := store(t)
+		for _, i := range []int{0, 1, 2, 4, 5, 6} {
+			_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 100+uint64(i)))
+			assert.Error(t, err, "engine block %d ends inside canonical block %d", i, i/4)
+		}
+		for _, i := range []int{3, 7} {
+			rk, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 100+uint64(i)))
+			require.NoError(t, err, "engine block %d ends canonical block %d", i, i/4)
+			assert.Equal(t, canonicalKeys[i/4], rk)
+		}
+	})
+
+	t.Run("a child of an interior block is skipped", func(t *testing.T) {
+		ctx := logging.NewTestLoggerIntoContext(context.Background())
+		pool, idx, _ := store(t)
+		skipped := metrics.KVEventStoresSkipped.WithLabelValues(
+			cacheKindLabel(""), "unresolved_sub_canonical_parent")
+		before := counterValue(t, skipped)
+
+		// Engine block 2 ends at token 48, inside canonical block 0.
+		childKeys := makeEngineKeys(4, 200)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: childKeys, Tokens: makeTokens(112)[48:],
+				ParentHash: 102, BlockSize: 16,
+			},
+		}}, "pod-a", "test-model")
+
+		assert.Equal(t, 1.0, counterValue(t, skipped)-before)
+		_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[0]))
+		assert.Error(t, err, "a child chained inside a canonical block is not indexed")
+	})
+
+	t.Run("another pod's recompute leaves the boundary block alone", func(t *testing.T) {
+		ctx := logging.NewTestLoggerIntoContext(context.Background())
+		pool, idx, canonicalKeys := store(t)
+		// pod-b holds the same blocks, so canonical block 0 is shared.
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: makeEngineKeys(8, 100), Tokens: makeTokens(128), BlockSize: 16},
+		}}, "pod-b", "test-model")
+
+		// pod-a drops its tail block; pod-b still holds canonical block 0.
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockRemovedEvent{BlockHashes: []uint64{107}},
+		}}, "pod-a", "test-model")
+
+		// pod-a recomputes from token 48 over its own cached blocks.
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: makeEngineKeys(5, 103), Tokens: makeTokens(128)[48:],
+				ParentHash: 102, BlockSize: 16,
+			},
+		}}, "pod-a", "test-model")
+
+		// pod-b continues from block 103, which ends canonical block 0.
+		childKeys := makeEngineKeys(4, 400)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: childKeys, Tokens: makeTokens(128)[64:],
+				ParentHash: 103, BlockSize: 16,
+			},
+		}}, "pod-b", "test-model")
+
+		// Block 103 ends canonical block 0 and keeps naming it.
+		rk, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 103))
+		require.NoError(t, err, "block 103 ends canonical block 0")
+		assert.Equal(t, canonicalKeys[0], rk)
+
+		// The child's own canonical block is 1: the closing engine block names it.
+		rk, err = idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[3]))
+		require.NoError(t, err, "block 403 ends canonical block 1")
+		assert.Equal(t, canonicalKeys[1], rk, "pod-b's block belongs to canonical block 1")
+	})
+}
+
+// TestCanonicalWritePath_NonDividingInteriorParentBlock covers a sub-canonical
+// store whose block size does not divide the canonical block: 8 engine blocks
+// of 24 tokens against 64-token canonical blocks, so block 7 ends a canonical
+// block (token 192) while blocks 2 and 5 end at tokens 72 and 144, inside
+// canonical blocks 1 and 2.
+func TestCanonicalWritePath_NonDividingInteriorParentBlock(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+
+	store := func(t *testing.T) (*Pool, kvblock.Index, []kvblock.BlockHash, []uint32) {
+		t.Helper()
+		pool, idx, tp := newTestPool(t, 64)
+		tokens := makeTokens(192)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: makeEngineKeys(8, 100), Tokens: tokens, BlockSize: 24},
+		}}, "pod-a", "test-model")
+		canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+		require.NoError(t, err)
+		require.Len(t, canonicalKeys, 3)
+		return pool, idx, canonicalKeys, tokens
+	}
+
+	t.Run("only the block that ends the canonical chain names one", func(t *testing.T) {
+		_, idx, canonicalKeys, _ := store(t)
+		for i := 0; i < 7; i++ {
+			_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 100+uint64(i)))
+			assert.Error(t, err, "engine block %d ends inside a canonical block", i)
+		}
+		rk, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", 107))
+		require.NoError(t, err, "engine block 7 ends at token 192")
+		assert.Equal(t, canonicalKeys[2], rk)
+	})
+
+	t.Run("a child of block 2 is skipped", func(t *testing.T) {
+		pool, idx, _, tokens := store(t)
+		skipped := metrics.KVEventStoresSkipped.WithLabelValues(
+			cacheKindLabel(""), "unresolved_sub_canonical_parent")
+		before := counterValue(t, skipped)
+
+		// Engine block 2 ends at token 72, inside canonical block 1.
+		childKeys := makeEngineKeys(5, 200)
+		pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: childKeys, Tokens: tokens[72:],
+				ParentHash: 102, BlockSize: 24,
+			},
+		}}, "pod-a", "test-model")
+
+		assert.Equal(t, 1.0, counterValue(t, skipped)-before)
+		_, err := idx.GetRequestKey(ctx, ModelEngineKey("test-model", childKeys[0]))
+		assert.Error(t, err, "a child chained inside a canonical block is not indexed")
 	})
 }
 

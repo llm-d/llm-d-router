@@ -44,10 +44,33 @@ func TestEngineToRequestMapping_ManyToOne(t *testing.T) {
 	mappings := engineToRequestMapping(engineKeys, requestKeys)
 
 	require.Len(t, mappings, 4)
-	for _, ek := range engineKeys {
+	// Only the last engine key ends the canonical block; the others end inside it.
+	for _, ek := range engineKeys[:3] {
 		rks, ok := mappings[ek]
 		require.True(t, ok, "engine key %d should be present", ek)
-		assert.Equal(t, []BlockHash{9000}, rks, "each engine key should map to the single request key")
+		assert.Equal(t, []BlockHash{9000, EmptyBlockHash}, rks,
+			"engine key %d ends inside the canonical block", ek)
+	}
+	assert.Equal(t, []BlockHash{9000}, mappings[engineKeys[3]])
+}
+
+func TestEngineToRequestMapping_NonDividing(t *testing.T) {
+	// 8 engine blocks of 24 tokens over 3 canonical blocks of 64: only block 7
+	// ends a canonical block at token 192. Blocks 2 and 5 end at tokens 72 and
+	// 144, inside canonical blocks 1 and 2.
+	engineKeys := []BlockHash{10, 11, 12, 13, 14, 15, 16, 17}
+	requestKeys := []BlockHash{9000, 9001, 9002}
+
+	mappings := engineToRequestMapping(engineKeys, requestKeys)
+
+	require.Len(t, mappings, 8)
+	want := [][]BlockHash{
+		{9000, EmptyBlockHash}, {9000, EmptyBlockHash}, {9000, EmptyBlockHash},
+		{9001, EmptyBlockHash}, {9001, EmptyBlockHash}, {9001, EmptyBlockHash},
+		{9002, EmptyBlockHash}, {9002},
+	}
+	for i, ek := range engineKeys {
+		assert.Equal(t, want[i], mappings[ek], "engine block %d", i)
 	}
 }
 
