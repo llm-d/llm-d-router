@@ -47,6 +47,19 @@ func TestProgramMetrics_RecordDispatched_WithEnqueueTime_UpdatesWaitMean(t *test
 	assert.Equal(t, int64(2), m.InFlight())
 }
 
+func TestFairnessAggregates_IndexStaysInUnitInterval(t *testing.T) {
+	// Accumulated rounding error in churned programs can drive sumSq negative.
+	a := &fairnessAggregates{sum: 0, sumSq: -7.45e-9, n: 2}
+	assert.Equal(t, 1.0, a.index(), "negative sumSq with no live waits is perfect fairness")
+
+	// Overshoot from accumulated error must not report above 1.
+	a = &fairnessAggregates{sum: 10, sumSq: 0.5, n: 2}
+	assert.Equal(t, 1.0, a.index())
+
+	a = &fairnessAggregates{sum: 1, sumSq: 1, n: 2}
+	assert.Equal(t, 0.5, a.index())
+}
+
 func TestProgramMetrics_RecordDispatched_ZeroEnqueueTime_SkipsWaitUpdate(t *testing.T) {
 	m := &ProgramMetrics{}
 	m.RecordDispatched(time.Time{})
