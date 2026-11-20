@@ -56,25 +56,20 @@ const (
 	// and updating might take some time). This allows maintaining up to two idle connections
 	// per endpoint (defined as scheme://host:port).
 	maxIdleConnsPerHost = 2
-	// Keep dial and TLS handshake timeouts below the overall client timeout so
-	// a scrape can fail early if a pod is unreachable or stalls during TLS.
-	// Leave TCP keepalive at the net.Dialer default.
+	// net/http can continue establishing a connection after Dispatch cancels its poll.
 	dialTimeout         = 5 * time.Second
 	tlsHandshakeTimeout = 5 * time.Second
-	// Bodyless scrape GETs never wait for a 100 Continue response.
-	expectContinueTimeout = 1 * time.Second
 )
 
 var (
 	baseDialer = &net.Dialer{Timeout: dialTimeout}
 
 	baseTransport = &http.Transport{
-		MaxIdleConns:          maxIdleConnections,
-		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
-		IdleConnTimeout:       maxIdleTime,
-		DialContext:           baseDialer.DialContext,
-		TLSHandshakeTimeout:   tlsHandshakeTimeout,
-		ExpectContinueTimeout: expectContinueTimeout,
+		MaxIdleConns:        maxIdleConnections,
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		IdleConnTimeout:     maxIdleTime,
+		DialContext:         baseDialer.DialContext,
+		TLSHandshakeTimeout: tlsHandshakeTimeout,
 	}
 )
 

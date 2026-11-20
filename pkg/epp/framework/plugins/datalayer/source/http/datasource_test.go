@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -382,7 +383,6 @@ func TestTransportPhaseTimeouts(t *testing.T) {
 		t.Helper()
 		assert.NotNil(t, transport.DialContext, "the bounded dialer must be wired")
 		assert.Equal(t, 5*time.Second, transport.TLSHandshakeTimeout)
-		assert.Equal(t, time.Second, transport.ExpectContinueTimeout)
 		assert.Equal(t, maxIdleTime, transport.IdleConnTimeout)
 	}
 
@@ -428,4 +428,31 @@ func TestTransportPhaseTimeouts(t *testing.T) {
 			require.ErrorIs(t, err, sentinel, "scrapes must dial through baseDialer")
 		})
 	}
+}
+
+func TestDispatchClosesStalledTLSHandshake(t *testing.T) {
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer listener.Close()
+	// The peer accepts the ClientHello but never sends a ServerHello.
+	deadline := time.Now().Add(tlsHandshakeTimeout + 3*time.Second)
+	require.NoError(t, listener.SetDeadline(deadline))
+	source, err := NewHTTPDataSource("https", "/metrics", TLSOptions{SkipVerify: true}, "test", "stalled",
+		func(io.Reader) (int, error) { return 0, nil })
+	require.NoError(t, err)
+	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{MetricsHost: listener.Addr().String()}, fwkdl.NewMetrics())
+	done := make(chan error, 1)
+	go func() { done <- source.Dispatch(t.Context(), ep) }()
+
+	conn, err := listener.AcceptTCP()
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.SetReadDeadline(deadline))
+	var hello [1]byte
+	_, err = io.ReadFull(conn, hello[:])
+	require.NoError(t, err)
+	require.ErrorIs(t, <-done, context.DeadlineExceeded)
+	// Dispatch has returned. Only the transport's handshake deadline bounds the pending connection.
+	_, err = io.Copy(io.Discard, conn)
+	require.NoError(t, err, "expected EOF from the client before the peer read deadline")
 }
