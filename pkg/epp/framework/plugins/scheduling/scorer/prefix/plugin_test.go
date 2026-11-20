@@ -145,6 +145,89 @@ func TestPrefixPluginScoreMixedMissingMatchInfo(t *testing.T) {
 	assert.Equal(t, 2, logValue(sink.infos[0], "count"), "count covers only endpoints missing match info")
 }
 
+// Zero total blocks (prompt shorter than one block, or not tokenized) is an
+// expected state, so it produces one debug record per scoring call.
+func TestPrefixPluginScoreAggregatesZeroTotalBlocks(t *testing.T) {
+	producerName := "precise-prefix-cache-producer"
+	key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(producerName)
+
+	tests := []struct {
+		name       string
+		infos      []*attrprefix.PrefixCacheMatchInfo // nil entry: no match info
+		wantScores []float64
+		wantZero   int
+		wantInfos  int
+	}{
+		{
+			name:       "all endpoints have zero total blocks",
+			infos:      []*attrprefix.PrefixCacheMatchInfo{attrprefix.NewPrefixCacheMatchInfo(0, 0, 1), attrprefix.NewPrefixCacheMatchInfo(0, 0, 1), attrprefix.NewPrefixCacheMatchInfo(0, 0, 1)},
+			wantScores: []float64{0, 0, 0},
+			wantZero:   3,
+			wantInfos:  1,
+		},
+		{
+			name:       "zero total blocks next to a scored endpoint",
+			infos:      []*attrprefix.PrefixCacheMatchInfo{attrprefix.NewPrefixCacheMatchInfo(5, 10, 1), attrprefix.NewPrefixCacheMatchInfo(0, 0, 1)},
+			wantScores: []float64{0.5, 0},
+			wantZero:   1,
+			wantInfos:  1,
+		},
+		{
+			name:       "zero total blocks and missing match info are counted apart",
+			infos:      []*attrprefix.PrefixCacheMatchInfo{nil, attrprefix.NewPrefixCacheMatchInfo(0, 0, 1), attrprefix.NewPrefixCacheMatchInfo(0, 0, 1)},
+			wantScores: []float64{0, 0, 0},
+			wantZero:   2,
+			wantInfos:  2,
+		},
+		{
+			name:       "no record when every endpoint has blocks",
+			infos:      []*attrprefix.PrefixCacheMatchInfo{attrprefix.NewPrefixCacheMatchInfo(2, 10, 1)},
+			wantScores: []float64{0.2},
+			wantZero:   0,
+			wantInfos:  0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := New(context.Background(), PrefixCacheScorerPluginType, producerName)
+			require.NoError(t, err)
+
+			endpoints := make([]fwksched.Endpoint, len(tt.infos))
+			for i, info := range tt.infos {
+				endpoints[i] = fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+					ID: k8stypes.NamespacedName{Name: "pod" + string(rune('1'+i))},
+				}, fwkdl.NewMetrics(), nil)
+				if info != nil {
+					endpoints[i].Put(key, info)
+				}
+			}
+
+			sink := &captureLogSink{}
+			ctx := log.IntoContext(t.Context(), logr.New(sink))
+			scores := p.Score(ctx, nil, endpoints)
+
+			for i, endpoint := range endpoints {
+				assert.InDelta(t, tt.wantScores[i], scores[endpoint], 0.0001, "endpoint %d", i)
+			}
+			assert.Empty(t, sink.errors, "zero total blocks is not an error")
+			require.Len(t, sink.infos, tt.wantInfos)
+			var zeroRecords []capturedLogCall
+			for _, call := range sink.infos {
+				if strings.Contains(call.msg, "totalBlocks") {
+					zeroRecords = append(zeroRecords, call)
+				}
+			}
+			if tt.wantZero == 0 {
+				assert.Empty(t, zeroRecords)
+				return
+			}
+			require.Len(t, zeroRecords, 1, "one aggregate record per scoring call")
+			assert.Equal(t, logging.DEBUG, zeroRecords[0].level)
+			assert.Equal(t, tt.wantZero, logValue(zeroRecords[0], "count"))
+		})
+	}
+}
+
 func TestPrefixPluginScoreWithWeights(t *testing.T) {
 	producerName := "approx-prefix-cache-producer"
 	// matchLengthWeight = 0.5, matchLengthScaleTokens = 100
