@@ -81,7 +81,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 
 	// A served hit is the KV-reuse case the parity check exists for; body is a
 	// clone, so an injected include_usage does not reach the decode step on a
-	// miss. On a 412 nothing is written, so the writer stays idle.
+	// miss. On a miss nothing is written, so the writer stays idle.
 	parity, injectedUsage := setupParity(ConditionalDecodeStepName, s.promptTokenParity, logger, reqCtx, body)
 
 	logger.V(logutil.DEFAULT).Info("sending request", "path", reqCtx.OriginalPath)
@@ -95,13 +95,13 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	var cacheMiss bool
 	out := serveDecode(logger, s.gwClient.Transport(), writer, proxyReq, coordmetrics.UpstreamConditionalDecode, func(resp *http.Response) error {
 		switch {
-		case resp.StatusCode == http.StatusPreconditionFailed:
+		case isCacheMiss(resp.StatusCode):
 			cacheMiss = true
 			reqCtx.CaptureResponseHeaders(resp.Header)
 			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultDeferred)
 			return errCacheMiss
 		case resp.StatusCode >= http.StatusBadRequest:
-			// Worker error (any 4xx/5xx except 412): the response is still
+			// Worker error (any other 4xx/5xx): the response is still
 			// streamed to the client, but the outcome is not a served hit.
 			coordmetrics.IncConditionalDecodeProbes(coordmetrics.ProbeResultError)
 		default:
@@ -115,7 +115,7 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	}
 
 	if cacheMiss {
-		logger.V(logutil.DEFAULT).Info("cache miss (412), continuing pipeline")
+		logger.V(logutil.DEFAULT).Info("cache miss, continuing pipeline", "status", out.Status)
 		return nil
 	}
 	if out.TransportErr != nil {
@@ -129,6 +129,13 @@ func (s *ConditionalDecodeStep) Execute(ctx context.Context, reqCtx *pipeline.Re
 	// apply to it; the client's stream value is forwarded verbatim.
 	logger.V(logutil.DEFAULT).Info("cache hit, response forwarded")
 	return pipeline.ErrPipelineDone
+}
+
+// isCacheMiss reports whether status is EPP's answer that no decode worker can
+// serve the probe from its KV cache: 412, or 204 from an EPP that answers a
+// miss without an error status.
+func isCacheMiss(status int) bool {
+	return status == http.StatusNoContent || status == http.StatusPreconditionFailed
 }
 
 func (s *ConditionalDecodeStep) prepareBody(reqCtx *pipeline.RequestContext) (map[string]any, error) {

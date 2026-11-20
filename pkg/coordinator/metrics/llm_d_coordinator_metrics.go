@@ -173,7 +173,7 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "conditional_decode_probes_total",
-			Help:      metricsutil.HelpMsgWithStability("Total number of conditional-decode probes by the worker's answer: served inline (2xx/3xx), deferred (HTTP 412) to the full pipeline, error (any other 4xx/5xx), or transport_error (no response received).", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total number of conditional-decode probes by the answer: served inline (2xx/3xx except 204), deferred (HTTP 204 or 412) to the full pipeline, error (any other 4xx/5xx), or transport_error (no response received).", compbasemetrics.ALPHA),
 		},
 		[]string{"result"},
 	)

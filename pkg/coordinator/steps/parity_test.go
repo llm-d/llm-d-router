@@ -92,7 +92,7 @@ func TestInjectIncludeUsage_LeavesMalformedStreamOptionsAlone(t *testing.T) {
 
 // stream_options can be the client's own decoded object, shared with
 // reqCtx.Body through conditional-decode's shallow clone. The injection must
-// build a copy, or a 412 would hand the decode step include_usage=true and
+// build a copy, or a miss would hand the decode step include_usage=true and
 // the client a usage frame it never asked for.
 func TestInjectIncludeUsage_CopiesClientStreamOptions(t *testing.T) {
 	client := map[string]any{"include_obfuscation": false}
