@@ -168,24 +168,15 @@ func (p *Predictor) predictBayesianRidge(req PredictionRequest, mr *MetricsRespo
 	}
 	c := mr.Coefficients
 
-	// Linear combination for TTFT; encoder-cache coefficients are absent from
-	// models trained without multimodal features and contribute 0 in that case.
-	ttft := c.TTFTIntercept +
-		c.TTFTCoeffs["kv_cache_percentage"]*req.KVCachePercentage +
-		c.TTFTCoeffs["input_token_length"]*float64(req.InputTokenLength) +
-		c.TTFTCoeffs["num_request_waiting"]*float64(req.NumRequestWaiting) +
-		c.TTFTCoeffs["num_request_running"]*float64(req.NumRequestRunning) +
-		c.TTFTCoeffs["prefix_cache_score"]*req.PrefixCacheScore +
-		c.TTFTCoeffs["encoder_input_size"]*float64(req.EncoderInputSize) +
-		c.TTFTCoeffs["encoder_matched_size"]*float64(req.EncoderMatchedSize)
-
-	// Linear combination for TPOT (remains unchanged - no prefix cache effect)
-	tpot := c.TPOTIntercept +
-		c.TPOTCoeffs["kv_cache_percentage"]*req.KVCachePercentage +
-		c.TPOTCoeffs["input_token_length"]*float64(req.InputTokenLength) +
-		c.TPOTCoeffs["num_request_waiting"]*float64(req.NumRequestWaiting) +
-		c.TPOTCoeffs["num_request_running"]*float64(req.NumRequestRunning) +
-		c.TPOTCoeffs["num_tokens_generated"]*float64(req.NumTokensGenerated)
+	features := facadeFeatures(req, req.Features)
+	ttft, err := ridgePrediction(c.TTFTIntercept, c.TTFTCoeffs, features, ridgeTTFTFields)
+	if err != nil {
+		return nil, err
+	}
+	tpot, err := ridgePrediction(c.TPOTIntercept, c.TPOTCoeffs, features, ridgeTPOTFields)
+	if err != nil {
+		return nil, err
+	}
 
 	return &PredictionResponse{
 		TTFT:          ttft,
@@ -236,33 +227,9 @@ func (p *Predictor) predictHTTP(ctx context.Context, req PredictionRequest) (*Pr
 }
 
 // ValidatePredictionRequest validates that a prediction request has all required fields
-// with valid values, including the new prefix_cache_score field.
+// with values allowed by the shared schema.
 func (p *Predictor) ValidatePredictionRequest(req PredictionRequest) error {
-	if req.KVCachePercentage < 0.0 || req.KVCachePercentage > 1.0 {
-		return fmt.Errorf("kv_cache_percentage must be between 0.0 and 1.0, got %f", req.KVCachePercentage)
-	}
-	if req.InputTokenLength < 0 {
-		return fmt.Errorf("input_token_length must be non-negative, got %d", req.InputTokenLength)
-	}
-	if req.NumRequestWaiting < 0 {
-		return fmt.Errorf("num_request_waiting must be non-negative, got %d", req.NumRequestWaiting)
-	}
-	if req.NumRequestRunning < 0 {
-		return fmt.Errorf("num_request_running must be non-negative, got %d", req.NumRequestRunning)
-	}
-	if req.NumTokensGenerated < 0 {
-		return fmt.Errorf("num_tokens_generated must be non-negative, got %d", req.NumTokensGenerated)
-	}
-	if req.PrefixCacheScore < 0.0 || req.PrefixCacheScore > 1.0 {
-		return fmt.Errorf("prefix_cache_score must be between 0.0 and 1.0, got %f", req.PrefixCacheScore)
-	}
-	if req.EncoderInputSize < 0 {
-		return fmt.Errorf("encoder_input_size must be non-negative, got %d", req.EncoderInputSize)
-	}
-	if req.EncoderMatchedSize < 0 || req.EncoderMatchedSize > req.EncoderInputSize {
-		return fmt.Errorf("encoder_matched_size must be between 0 and encoder_input_size (%d), got %d", req.EncoderInputSize, req.EncoderMatchedSize)
-	}
-	return nil
+	return validateFeatures(facadeFeatures(req, req.Features))
 }
 
 // NewPredictionRequest is a helper function to create a new PredictionRequest with proper validation.
@@ -273,6 +240,7 @@ func NewPredictionRequest(
 	numRequestRunning int,
 	numTokensGenerated int,
 	prefixCacheScore float64,
+	options ...PredictionRequestOption,
 ) (PredictionRequest, error) {
 	req := PredictionRequest{
 		KVCachePercentage:  kvCachePercentage,
@@ -281,6 +249,12 @@ func NewPredictionRequest(
 		NumRequestRunning:  numRequestRunning,
 		NumTokensGenerated: numTokensGenerated,
 		PrefixCacheScore:   prefixCacheScore,
+	}
+
+	for _, option := range options {
+		if err := option(&req); err != nil {
+			return PredictionRequest{}, err
+		}
 	}
 
 	// Create a temporary predictor for validation (could be optimized)

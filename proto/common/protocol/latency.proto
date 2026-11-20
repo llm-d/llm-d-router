@@ -1,0 +1,158 @@
+// Copyright 2026 The llm-d Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package llmd.latency.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/predictedlatency/latencypredictorclient/protocol";
+
+// Model orders apply to raw inputs; engineered columns have their own transforms.
+message FieldRules {
+  bool required = 1;
+  optional double minimum = 2;
+  optional double maximum = 3;
+  optional string default_json = 4;
+  bool nullable = 5;
+  int32 ttft_order = 6;
+  int32 tpot_order = 7;
+  string feature_group = 8;
+  string model_column = 9;
+  int32 ridge_ttft_order = 10;
+  int32 ridge_tpot_order = 11;
+  bool go_validate = 12;
+  bool api_hidden = 13;
+  bool default_now = 14;
+}
+
+extend google.protobuf.FieldOptions {
+  FieldRules field_rules = 51000;
+}
+
+// Field presence distinguishes an unavailable signal from an observed zero.
+message Features {
+  optional double kv_cache_percentage = 1 [(field_rules) = {
+    required: true minimum: 0 maximum: 1 go_validate: true
+    ttft_order: 10 tpot_order: 10 ridge_ttft_order: 1 ridge_tpot_order: 1
+  }];
+  optional int64 input_token_length = 2 [(field_rules) = {
+    required: true minimum: 0 go_validate: true
+    ttft_order: 20 tpot_order: 20 ridge_ttft_order: 2 ridge_tpot_order: 2
+  }];
+  optional int64 num_request_waiting = 3 [(field_rules) = {
+    required: true minimum: 0 go_validate: true
+    ttft_order: 30 tpot_order: 30 ridge_ttft_order: 3 ridge_tpot_order: 3
+  }];
+  optional int64 num_request_running = 4 [(field_rules) = {
+    required: true minimum: 0 go_validate: true
+    ttft_order: 40 tpot_order: 40 ridge_ttft_order: 4 ridge_tpot_order: 4
+  }];
+  optional int64 num_tokens_generated = 5 [(field_rules) = {
+    required: true minimum: 0 go_validate: true tpot_order: 70 ridge_tpot_order: 5
+  }];
+  optional double prefix_cache_score = 6 [(field_rules) = {
+    required: true minimum: 0 maximum: 1 go_validate: true ttft_order: 90 ridge_ttft_order: 5
+  }];
+  optional int64 encoder_input_size = 7 [(field_rules) = {
+    minimum: 0 go_validate: true ttft_order: 80 feature_group: "encoder" ridge_ttft_order: 6
+  }];
+  optional int64 encoder_matched_size = 8 [(field_rules) = {
+    minimum: 0 go_validate: true ttft_order: 70 feature_group: "encoder" ridge_ttft_order: 7
+  }];
+  optional string pod_type = 9 [(field_rules) = {
+    nullable: true ttft_order: 120 tpot_order: 80 model_column: "pod_type_cat"
+  }];
+  optional int64 prefill_tokens_in_flight = 10 [(field_rules) = {
+    minimum: 0 ttft_order: 50 tpot_order: 50 feature_group: "tokens_in_flight"
+  }];
+  optional int64 decode_tokens_in_flight = 11 [(field_rules) = {
+    minimum: 0 ttft_order: 60 tpot_order: 60 feature_group: "tokens_in_flight"
+  }];
+}
+
+// The HTTP codec flattens features into the existing request JSON object.
+message PredictionRequest {
+  Features features = 1;
+}
+
+message TrainingEntry {
+  Features features = 1;
+  optional double actual_ttft_ms = 2 [(field_rules) = {required: true minimum: 0}];
+  optional double actual_tpot_ms = 3 [(field_rules) = {required: true minimum: 0}];
+  optional double predicted_ttft_ms = 4 [(field_rules) = {minimum: 0 api_hidden: true}];
+  optional double predicted_tpot_ms = 5 [(field_rules) = {minimum: 0 api_hidden: true}];
+  google.protobuf.Timestamp timestamp = 6 [(field_rules) = {default_now: true}];
+}
+
+message BulkPredictionRequest {
+  repeated PredictionRequest requests = 1;
+}
+
+message BulkTrainingRequest {
+  repeated TrainingEntry entries = 1;
+}
+
+// Coefficients are expressed in the original feature units, after descaling.
+message ModelCoefficients {
+  optional double ttft_intercept = 1;
+  map<string, double> ttft_coefficients = 2;
+  optional double tpot_intercept = 3;
+  map<string, double> tpot_coefficients = 4;
+}
+
+// Tree payloads retain the model library's JSON representation.
+message XGBoostTrees {
+  google.protobuf.ListValue ttft_trees = 1;
+  google.protobuf.ListValue tpot_trees = 2;
+}
+
+message BucketCount {
+  optional string model = 1;
+  optional int32 queue_bucket = 2;
+  optional int32 cache_bucket = 3;
+  optional int32 prefix_bucket = 4;
+  optional int64 count = 5;
+}
+
+message BucketCounts {
+  repeated BucketCount buckets = 1;
+}
+
+message ModelInfo {
+  optional string model_type = 1;
+  optional string objective_type = 2;
+  map<string, bool> model_status = 3;
+  optional double quantile = 4;
+}
+
+// This is the parsed representation of the Prometheus metrics response.
+message MetricsResponse {
+  optional string model_type = 1;
+  ModelCoefficients coefficients = 2;
+  XGBoostTrees xgboost_trees = 3;
+  BucketCounts bucket_counts = 4;
+  optional string raw_metrics = 5;
+}
+
+message ModelExportMetadata {
+  optional string model_type = 1;
+  optional double quantile_alpha = 2;
+  google.protobuf.Timestamp exported_at = 3;
+  optional int64 ttft_samples = 4;
+  optional int64 tpot_samples = 5;
+}

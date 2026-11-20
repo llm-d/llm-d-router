@@ -26,7 +26,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -48,46 +47,19 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 	logger := log.FromContext(ctx)
 	predictions := make([]endpointPredictionResult, 0, len(candidateEndpoints))
 
-	// Prepare inputs for bulk prediction
-	metricsStates := make([]*fwkdl.Metrics, len(candidateEndpoints))
-	targetEndpointsMetadatas := make([]*fwkdl.EndpointMetadata, len(candidateEndpoints))
-	inputTokenLengths := make([]int, len(candidateEndpoints))
-	generatedTokenCounts := make([]int, len(candidateEndpoints))
-	prefixCacheScores := make([]float64, len(candidateEndpoints))
-	prefillTokensInFlights := make([]int64, len(candidateEndpoints))
-	numRequestRunnings := make([]int, len(candidateEndpoints))
-	encoderInputSizes := make([]int, len(candidateEndpoints))
-	encoderMatchedSizes := make([]int, len(candidateEndpoints))
-
+	requests := make([]latencypredictor.PredictionRequest, len(candidateEndpoints))
 	for i, endpoint := range candidateEndpoints {
-		logger.V(logutil.TRACE).Info("Candidate pod for scheduling", "endpoint", endpoint.GetMetadata().String(), "metrics", endpoint.GetMetrics().String())
-
-		// Get prefix cache score for the pod
-		prefixCacheScore := predictedLatencyCtx.prefixCacheScoresForEndpoints[endpoint.GetMetadata().ID.Name]
-
-		logger.V(logutil.DEBUG).Info("Prefix cache score for pod", "pod", endpoint.GetMetadata().String(), "prefixCacheScore", prefixCacheScore)
-
-		metricsStates[i] = endpoint.GetMetrics()
-		targetEndpointsMetadatas[i] = endpoint.GetMetadata()
-		inputTokenLengths[i] = predictedLatencyCtx.inputTokenCount
-		generatedTokenCounts[i] = 1
-		prefixCacheScores[i] = prefixCacheScore
-		encoderInputSizes[i] = predictedLatencyCtx.encoderInputSize
-		encoderMatchedSizes[i] = predictedLatencyCtx.encoderMatchedSizeForEndpoints[endpoint.GetMetadata().ID.Name]
-
-		// Reuse the in-flight load captured for this endpoint earlier in Produce,
-		// so the prediction features are identical to the dispatch-time training
-		// features and neither depends on PreRequest hook ordering.
-		snapshot, ok := predictedLatencyCtx.inFlightLoadForEndpoints[endpoint.GetMetadata().ID.String()]
-		if !ok {
-			snapshot = pl.readInFlightLoad(endpoint)
+		if endpoint.GetMetadata() == nil || endpoint.GetMetrics() == nil {
+			return nil, fmt.Errorf("endpoint %d has no metadata or metrics", i)
 		}
-		prefillTokensInFlights[i] = snapshot.tokens
-		numRequestRunnings[i] = snapshot.requests
+		snapshot := predictedLatencyCtx.endpointFeatures[endpoint.GetMetadata().ID.String()]
+		if snapshot == nil {
+			snapshot = pl.captureEndpointFeatures(endpoint)
+		}
+		features := composeFeatures(predictedLatencyCtx, endpoint.GetMetrics(), snapshot, predictionFeatures)
+		requests[i] = latencypredictor.PredictionFromFeatures(features)
 	}
-
-	// Bulk predict
-	bulkPredictions, err := bulkPredictWithMetrics(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, metricsStates, pl.config.EndpointRoleLabel, targetEndpointsMetadatas, inputTokenLengths, generatedTokenCounts, prefixCacheScores, prefillTokensInFlights, numRequestRunnings, encoderInputSizes, encoderMatchedSizes)
+	bulkPredictions, err := bulkPredict(ctx, pl.typedName.Name, pl.typedName.Type, predictedLatencyCtx, pl.latencypredictor, requests)
 	if err != nil {
 		logger.V(logutil.DEBUG).Info("Bulk prediction failed", "error", err)
 		return nil, err
@@ -101,7 +73,7 @@ func (pl *PredictedLatency) generatePredictions(ctx context.Context, predictedLa
 		prediction := bulkPredictions[i]
 		predResult := endpointPredictionResult{Endpoint: endpoint}
 
-		predResult.PrefixCacheScore = prefixCacheScores[i]
+		predResult.PrefixCacheScore = requests[i].PrefixCacheScore
 		predResult.TTFT = prediction.TTFT
 		predResult.TPOT = prediction.TPOT
 
