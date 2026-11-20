@@ -225,9 +225,16 @@ func NewFlowController(
 	if cr := deps.CrossReplica; cr.Syncer != nil {
 		publisher := crossreplica.NewPublisher(cr.Syncer, fc.flowRegistry, poolName,
 			cr.SyncInterval, cr.PublishTimeout, fc.clock)
+		consumer, readsPeers := fc.usageLimitPolicy.(flowcontrol.PeerDemandConsumer)
+		if readsPeers {
+			consumer.SetPeerDemand(publisher.PeerDemand())
+		}
 		fc.logger.V(logutil.DEFAULT).Info("Starting the cross-replica band demand publisher.",
-			"syncer", cr.Syncer.TypedName(), "scope", poolName)
+			"syncer", cr.Syncer.TypedName(), "scope", poolName, "peerDemandConsumer", readsPeers)
 		go publisher.Run(fc.parentCtx)
+	} else if _, ok := fc.usageLimitPolicy.(flowcontrol.PeerDemandConsumer); ok {
+		fc.logger.Info("The usage limit policy reads peer demand, but flowControl.crossReplica is not set; "+
+			"it acts on local state alone.", "policy", fc.usageLimitPolicy.TypedName())
 	}
 
 	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")

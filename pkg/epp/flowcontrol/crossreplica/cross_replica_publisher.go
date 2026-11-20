@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
 const (
@@ -52,6 +53,12 @@ type Publisher struct {
 	publishTimeout time.Duration
 	clock          clock.WithTicker
 	failureLog     rate.Sometimes
+
+	// bandSource, registry and scope build the peer demand view on request.
+	bandSource *crossReplicaSource
+	registry   bandOccupancy
+	scope      string
+	view       *peerDemandView
 }
 
 // NewPublisher returns a publisher of the queued work per priority band. Values are
@@ -63,8 +70,19 @@ func NewPublisher(
 	interval, publishTimeout time.Duration,
 	clk clock.WithTicker,
 ) *Publisher {
-	return newPublisher(syncer, []*crossReplicaSource{newPriorityBandDemandSource(registry, scope)},
-		interval, publishTimeout, clk)
+	source := newPriorityBandDemandSource(registry, scope)
+	p := newPublisher(syncer, []*crossReplicaSource{source}, interval, publishTimeout, clk)
+	p.bandSource, p.registry, p.scope = source, registry, scope
+	return p
+}
+
+// PeerDemand returns a view of the requests queued per priority band on peer replicas, refreshed after each
+// publish. Call it before Run.
+func (p *Publisher) PeerDemand() flowcontrol.PeerDemand {
+	if p.view == nil {
+		p.view = newPeerDemandView(p.syncer, p.bandSource, p.registry, p.scope, p.interval, p.clock)
+	}
+	return p.view
 }
 
 func newPublisher(
@@ -105,6 +123,11 @@ func (p *Publisher) Run(ctx context.Context) {
 			return
 		case <-ticker.C():
 			p.publishAll(ctx)
+			if p.view != nil {
+				if err := p.view.refresh(ctx); err != nil {
+					p.failureLog.Do(func() { logger.Error(err, "cross-replica peer demand read failed") })
+				}
+			}
 		}
 	}
 }
