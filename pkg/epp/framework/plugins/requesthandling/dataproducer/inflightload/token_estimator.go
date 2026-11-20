@@ -19,6 +19,8 @@ package inflightload
 
 import (
 	"math"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -31,9 +33,10 @@ import (
 type TokenEstimator interface {
 	// EstimateInput returns the estimated input token count for the request.
 	EstimateInput(request *fwksched.InferenceRequest) int64
-	// EstimateOutputFromRequest returns the estimated output token count for a
-	// request from the output-length bucket published by the outlen-bucket plugin, bounded by
-	// the client-requested cap and the estimator's operator cap.
+	// EstimateOutputFromRequest returns the estimated output work for a
+	// request: diffusion work for images, otherwise the output-length bucket
+	// published by the outlen-bucket plugin, bounded by the client-requested
+	// cap and the estimator's operator cap.
 	EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64
 	// ObserveOutput records the completion tokens a finished request produced.
 	ObserveOutput(bucket outlenbucket.Bucket, completionTokens int64)
@@ -62,11 +65,27 @@ const (
 	// keeps non-ASCII text proportional to its speech duration.
 	ttsFramesPerSpokenByte = 1.0
 	ttsMaxFrames           = 4096
+
+	// Image output is diffusion work: steps x output pixels x images, in
+	// megapixel-steps. The defaults match the common Qwen-Image deployment.
+	// A deployment whose model defaults differ (for example a 4-step
+	// FLUX-schnell) must set size, num_inference_steps, and n explicitly until
+	// these defaults are configurable per pool.
+	imageDefaultInferenceSteps int64 = 50
+	imageDefaultPixels         int64 = 1024 * 1024
+	imageMaxInferenceSteps     int64 = 200
+	imageMaxImages             int64 = 10
+	// imageMaxPixels bounds oversized requests and keeps the pixel product
+	// inside int64. Raise it if a deployment serves larger outputs.
+	imageMaxPixels int64 = 4096 * 4096
+	// imageWorkScale is one work unit: 1e6 pixel-steps.
+	imageWorkScale = 1_000_000.0
 )
 
 // SimpleTokenEstimator reads input tokens from the tokenized prompt and maps the
-// output-length bucket published by the outlen-bucket plugin to an output-token estimate,
-// bounded by the client-requested cap and an optional operator cap.
+// output-length bucket published by the outlen-bucket plugin, or the request's
+// diffusion work for images, to an output estimate, bounded by the client-requested
+// cap and an optional operator cap.
 type SimpleTokenEstimator struct {
 	// MaxEstimatedOutputTokens optionally caps the estimated output tokens
 	// regardless of the client-requested cap. nil means no cap.
@@ -122,6 +141,12 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 		return e.clampOutput(ttsOutputFrames(tts, request.Body.MaxOutputTokens), request.Body.MaxOutputTokens)
 	}
 
+	// Image output is diffusion work, not a text output length. Its unit is
+	// megapixel-steps, so the text-token operator cap does not apply.
+	if images := request.Body.Images; images != nil {
+		return imageOutputWork(images)
+	}
+
 	// An absent attribute reads as the zero value (Unknown) and is handled by the
 	// switch default; there is no separate fallback path.
 	bucket, _ := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey)
@@ -166,6 +191,50 @@ func ttsOutputFrames(tts *fwkrequest.TextToSpeechRequest, clientCap *int64) int6
 	}
 	expected = min(expected, ttsMaxFrames)
 	return max(expected, 1)
+}
+
+// imageOutputWork estimates the diffusion work an image request will perform:
+// num_inference_steps x output pixels x image count. One work unit is one
+// megapixel-step, so a 1024x1024, 50-step, single-image request is about 53.
+func imageOutputWork(images *fwkrequest.ImagesGenerationsRequest) int64 {
+	steps := imageDefaultInferenceSteps
+	if images.NumInferenceSteps != nil && *images.NumInferenceSteps > 0 {
+		steps = min(*images.NumInferenceSteps, imageMaxInferenceSteps)
+	}
+	n := int64(1)
+	if images.N != nil && *images.N > 0 {
+		n = min(*images.N, imageMaxImages)
+	}
+	pixels := imageDefaultPixels
+	if width, height := parseImageSize(images.Size); width > 0 && height > 0 {
+		w, h := int64(width), int64(height)
+		// Divide before multiplying so an oversized dimension cannot overflow.
+		if w > imageMaxPixels/h {
+			pixels = imageMaxPixels
+		} else {
+			pixels = w * h
+		}
+	}
+	work := int64(math.Ceil(float64(steps*n*pixels) / imageWorkScale))
+	return max(work, 1)
+}
+
+// parseImageSize splits a "WIDTHxHEIGHT" size, returning zeros when it is empty
+// or malformed so the caller falls back to the default.
+func parseImageSize(size string) (int, int) {
+	width, height, ok := strings.Cut(strings.ToLower(strings.TrimSpace(size)), "x")
+	if !ok {
+		return 0, 0
+	}
+	w, err := strconv.Atoi(strings.TrimSpace(width))
+	if err != nil || w <= 0 {
+		return 0, 0
+	}
+	h, err := strconv.Atoi(strings.TrimSpace(height))
+	if err != nil || h <= 0 {
+		return 0, 0
+	}
+	return w, h
 }
 
 // clampOutput bounds est by the client-requested cap and the operator cap.
