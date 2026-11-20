@@ -210,10 +210,10 @@ func TestConsumesMergesTheGuardDependencies(t *testing.T) {
 	agentKey := fwkplugin.NewDataKey("agent-identity", "")
 	tenantKey := fwkplugin.NewDataKey("tenant", "")
 	loadKey := attrconcurrency.InFlightLoadDataKey
-	screener.overflowGuard = &fakeGuard{deps: fwkplugin.DataDependencies{
+	screener.overflowGuards = []resolvedOverflowGuard{{role: DefaultOverflowRole, filter: &fakeGuard{deps: fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{agentKey: "guard-required", loadKey: attrconcurrency.InFlightLoad{}},
 		Optional: map[fwkplugin.DataKey]any{tenantKey: "guard-optional", loadKey: "shadowed"},
-	}}
+	}}}}
 
 	deps := screener.Consumes()
 	if got := deps.Required[agentKey]; got != "guard-required" {

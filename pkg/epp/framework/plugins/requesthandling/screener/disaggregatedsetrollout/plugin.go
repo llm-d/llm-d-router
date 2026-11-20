@@ -60,7 +60,7 @@ type Screener struct {
 	revisionDecisionStateKey fwkdl.StateKey
 	handle                   fwkplugin.Handle
 	localRevisionDecisions   *fwkplugin.PluginState
-	overflowGuard            fwksched.Filter
+	overflowGuards           []resolvedOverflowGuard
 
 	// prefixCache, prefixMatchDataKey, and selections are set only when
 	// affinity.prefixCache is configured.
@@ -94,8 +94,7 @@ var (
 	_ fwkdl.NotificationExtractor   = (*podNotificationHandler)(nil)
 )
 
-// ConfigParser decodes the parameters for the config loader, which reads the
-// overflow guard's pluginRef to create the guard before the Screener.
+// ConfigParser decodes the plugin parameters for the factory.
 func ConfigParser(parameters *json.Decoder, _ fwkplugin.Handle) (any, error) {
 	config := &Config{}
 	if parameters == nil {
@@ -105,6 +104,25 @@ func ConfigParser(parameters *json.Decoder, _ fwkplugin.Handle) (any, error) {
 		return nil, fmt.Errorf("decode disaggregatedset-rollout-screener parameters: %w", err)
 	}
 	return config, nil
+}
+
+type overflowDependencies struct {
+	References []string `pluginRef:""`
+}
+
+// DependencyParser projects guard references for plugin initialization ordering.
+func DependencyParser(parameters *json.Decoder, handle fwkplugin.Handle) (any, error) {
+	parsed, err := ConfigParser(parameters, handle)
+	if err != nil {
+		return nil, err
+	}
+	deps := &overflowDependencies{}
+	if gating := parsed.(*Config).RevisionGating; gating != nil && gating.Overflow != nil {
+		for _, guard := range gating.Overflow.guards() {
+			deps.References = append(deps.References, guard.GuardPluginName)
+		}
+	}
+	return deps, nil
 }
 
 // Factory creates a disaggregatedset-rollout-screener from normal plugin parameters.
@@ -170,7 +188,7 @@ func (c *Screener) TypedName() fwkplugin.TypedName { return c.typedName }
 // prefix affinity is enabled, requires PrefixCacheMatchInfo when
 // affinity.prefixCache is set, so the prefix cache producer and the tokenizer
 // it needs run during request handling, before this Screener, and declares
-// what the overflow guard consumes.
+// what the overflow guards consume.
 func (c *Screener) Consumes() fwkplugin.DataDependencies {
 	deps := fwkplugin.DataDependencies{}
 	if c.config.RevisionGating.affinityMode() == AffinityModePrefix {
@@ -179,9 +197,13 @@ func (c *Screener) Consumes() fwkplugin.DataDependencies {
 			deps.Required = map[fwkplugin.DataKey]any{c.prefixMatchDataKey: attrprefix.PrefixCacheMatchInfo{}}
 		}
 	}
-	// The overflow guard runs inside Screen, on the endpoints scoped to this
-	// declaration, so it reads through what the Screener declares.
-	if guard, ok := c.overflowGuard.(fwkplugin.ConsumerPlugin); ok {
+	// Overflow guards run inside Screen, on the endpoints scoped to this
+	// declaration, so they read through what the Screener declares.
+	for _, overflowGuard := range c.overflowGuards {
+		guard, ok := overflowGuard.filter.(fwkplugin.ConsumerPlugin)
+		if !ok {
+			continue
+		}
 		guardDeps := guard.Consumes()
 		for key, witness := range guardDeps.Required {
 			if deps.Required == nil {
