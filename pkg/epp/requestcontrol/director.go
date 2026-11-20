@@ -285,6 +285,13 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.runRequestHeaderProcessors(ctx, reqCtx.SchedulingRequest); err != nil {
 		return reqCtx, err
 	}
+	// A RequestHeaderProcessor may reassign the priority (e.g. a QoS class downgrade); admission,
+	// metrics and the body priority rewrite all follow the reassigned value.
+	if p := reqCtx.SchedulingRequest.Objectives.Priority; p != priority {
+		priority = p
+		reqCtx.Priority = p
+		span.SetAttributes(attribute.Int("request_prio", p))
+	}
 	// Derive the FairnessID from the fairness-ID header (tenant identity) and
 	// the derived-root or agent-identity attribute (program/session identity).
 	// The derived root, published by the agent-lineage plugin, is the session
@@ -889,6 +896,10 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 		if err := plugin.RequestHeader(ctx, scopedRequest); err != nil {
 			return err
 		}
+		// The scoped request is a shallow copy; carry back the fields a RequestHeaderProcessor may
+		// reassign (e.g. a QoS class downgrade sets the priority and fairness ID).
+		request.Objectives = scopedRequest.Objectives
+		request.FairnessID = scopedRequest.FairnessID
 		metrics.RecordPluginProcessingLatency(fwkrh.RequestHeaderExtensionPoint, name.Type, name.Name, time.Since(before))
 		if err := violations.Write(); err != nil {
 			return errcommon.Error{Code: errcommon.Internal, Msg: fmt.Errorf("RequestHeader %q failed: %w", name.String(), err).Error()}
