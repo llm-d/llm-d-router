@@ -262,6 +262,8 @@ func maxOutputTokensForAPI(apiType string, bodyMap map[string]any) *int64 {
 		limitAPI = reqcommon.APITypeCompletions
 	case responsesAPI:
 		limitAPI = reqcommon.APITypeResponses
+	case audioSpeechAPI:
+		limitAPI = reqcommon.APITypeAudioSpeech
 	default:
 		return nil
 	}

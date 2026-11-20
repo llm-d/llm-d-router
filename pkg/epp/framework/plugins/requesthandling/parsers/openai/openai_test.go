@@ -924,6 +924,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"voice":           "default",
 				"ref_audio":       "data:audio/wav;base64,UklGRg==",
 				"ref_text":        "Hello.",
+				"max_new_tokens":  128,
 				"response_format": "wav",
 			},
 			want: &request.InferenceRequestBody{
@@ -931,12 +932,14 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 					Input:   "Hello from llm-d.",
 					RefText: "Hello.",
 				},
+				MaxOutputTokens: ptr.To(int64(128)),
 				Payload: request.PayloadMap{
 					"model":           "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
 					"input":           "Hello from llm-d.",
 					"voice":           "default",
 					"ref_audio":       "data:audio/wav;base64,UklGRg==",
 					"ref_text":        "Hello.",
+					"max_new_tokens":  json.Number("128"),
 					"response_format": "wav",
 				},
 			},
