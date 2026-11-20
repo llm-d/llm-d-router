@@ -18,6 +18,8 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -63,6 +65,23 @@ func (s *Server) runConcurrentPD(
 	toolFields *toolCallingRequest,
 ) {
 	defer toolFields.report(r.Context())
+	var requestMode struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(decodeBody, &requestMode)
+	// Hold streaming decode output until prefill's outcome is known.
+	// The writer's commit/abort methods serialize concurrent decode writes.
+	var deferred *deferredCommitWriter
+	clientWriter := w
+	if requestMode.Stream {
+		deferred = newDeferredCommitWriter()
+		clientWriter = deferred
+	}
+	type prefillOutcome struct {
+		response *bufferedResponseWriter
+		failed   bool
+	}
+	prefillResult := make(chan prefillOutcome, 1)
 	tracer := tracing.Tracer(tracerScope)
 	ctx, cancelDecode := context.WithCancelCause(r.Context())
 	defer cancelDecode(nil)
@@ -133,7 +152,16 @@ func (s *Server) runConcurrentPD(
 			if failed, relay := s.concurrentPrefillFailed(prefillReq, pw, prefillErr); failed {
 				observeStageError(r.Context(), routing.StagePrefill)
 				prefillSpan.SetStatus(codes.Error, "prefill request failed")
+				if deferred != nil {
+					deferred.abort()
+				}
 				cancelDecode(&prefillFailedError{response: relay})
+				if deferred != nil {
+					prefillResult <- prefillOutcome{response: relay, failed: true}
+				}
+			} else if deferred != nil {
+				deferred.commit(w)
+				prefillResult <- prefillOutcome{response: pw}
 			}
 		}
 		observeStageDuration(r.Context(), routing.StagePrefill, prefillDuration)
@@ -153,7 +181,7 @@ func (s *Server) runConcurrentPD(
 	decodeStart := time.Now()
 
 	decodeReq = decodeReq.WithContext(dCtx)
-	decodeWriter, decodeStatus := captureResponseStatus(w)
+	decodeWriter, decodeStatus := captureResponseStatus(clientWriter)
 	decodeFailed := func() bool {
 		return decodeStatus.failed() || grpcframe.HasErrorStatus(decodeWriter.Header())
 	}
@@ -179,8 +207,56 @@ func (s *Server) runConcurrentPD(
 		context.AfterFunc(prefillCtx, func() { graceTimer.Stop() })
 	}()
 	toolFields.compareDispatchedForSpan(decodeBody, decodeSpan)
-	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	if deferred != nil {
+		// ReverseProxy may panic with ErrAbortHandler if prefill cancels
+		// after decode emitted buffered 200 headers. The prefill response
+		// is still relayable because those headers have not reached the client.
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					var prefillFailure *prefillFailedError
+					if rec != http.ErrAbortHandler || !errors.As(context.Cause(ctx), &prefillFailure) {
+						panic(rec)
+					}
+				}
+			}()
+			s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+		}()
+	} else {
+		s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	}
 	decodeReturned = true
+	if deferred != nil {
+		// Decode can finish before prefill, including an immediate
+		// backend error. Never commit a successful decode early.
+		if decodeStatus.statusCode >= http.StatusBadRequest && deferred.commit(w) {
+			cancelPrefill()
+		} else {
+			select {
+			case result := <-prefillResult:
+				if result.failed {
+					// The decode response has been discarded; write the prefill
+					// error directly to the original (unwrapped) client writer.
+					pw := result.response
+					for key, values := range pw.headers {
+						w.Header()[key] = append([]string(nil), values...)
+					}
+					status := pw.statusCode
+					if status == 0 {
+						status = http.StatusBadGateway
+					}
+					w.WriteHeader(status)
+					_, _ = w.Write(pw.bodyBytes())
+				}
+			case <-r.Context().Done():
+				deferred.abort()
+			case <-time.After(concurrentPrefillGrace):
+				deferred.abort()
+				cancelPrefill()
+				http.Error(w, "prefill did not complete before stream commit deadline", http.StatusGatewayTimeout)
+			}
+		}
+	}
 
 	decodeDuration := time.Since(decodeStart)
 	observeStageDuration(r.Context(), routing.StageDecode, decodeDuration)
