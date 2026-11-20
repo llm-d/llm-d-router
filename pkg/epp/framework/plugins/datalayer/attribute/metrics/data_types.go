@@ -29,6 +29,10 @@ const (
 	// MetricsExtractorType is the plugin type for the core metrics extractor,
 	// which publishes the custom scalar metric attributes.
 	MetricsExtractorType = "core-metrics-extractor"
+
+	// VLLMOmniStageWaitingRequestsKey holds the total waiting requests across
+	// all stages of a vLLM-Omni pipeline.
+	VLLMOmniStageWaitingRequestsKey = "stage_waiting_requests"
 )
 
 // ScalarMetricValue is a numeric endpoint attribute extracted from a configured scalar metric.
