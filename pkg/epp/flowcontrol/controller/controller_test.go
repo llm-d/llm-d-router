@@ -49,6 +49,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -1386,4 +1387,49 @@ func queueDurationHistogram(t *testing.T, flowID string) *dto.Histogram {
 	}
 	require.FailNow(t, "no queue duration series recorded", "fairness_id %q", flowID)
 	return nil
+}
+
+// setRecordingSyncer reports each published state key and ID. Only TypedName and Set are implemented.
+type setRecordingSyncer struct {
+	datalayer.CrossReplicaSyncer
+	sets chan string
+}
+
+func (s *setRecordingSyncer) TypedName() plugin.TypedName {
+	return plugin.TypedName{Type: "set-recording-syncer", Name: "set-recording-syncer"}
+}
+
+func (s *setRecordingSyncer) Set(_ context.Context, spec datalayer.CrossReplicaSpec, id string) error {
+	select {
+	case s.sets <- string(spec.StateKey) + ":" + id:
+	default:
+	}
+	return nil
+}
+
+func TestNewFlowController_PublishesBandDemandWithCrossReplicaSyncer(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	registry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{
+		AllOrderedPriorityLevelsFunc: func() []int { return []int{5} },
+	}}
+	syncer := &setRecordingSyncer{sets: make(chan string, 1)}
+	NewFlowController(ctx, "test-pool", &Config{DefaultRequestTTL: time.Minute}, Deps{
+		Registry:            registry,
+		SaturationDetector:  &mockSaturationDetector{},
+		EndpointCandidates:  &mocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		ProcessorFactory:    (&mockProcessorFactory{processor: &mockProcessor{}}).new,
+		CrossReplica:        CrossReplicaConfig{Syncer: syncer, SyncInterval: time.Millisecond},
+	})
+
+	select {
+	case key := <-syncer.sets:
+		assert.Equal(t, "flowcontrol-priorityband-demand:test-pool:5", key)
+	case <-time.After(time.Second):
+		t.Fatal("band demand was not published")
+	}
 }

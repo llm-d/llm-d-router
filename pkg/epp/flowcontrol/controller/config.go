@@ -22,6 +22,7 @@ import (
 	"time"
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
 const (
@@ -107,6 +108,18 @@ type Config struct {
 	// API configuration.
 	// Optional: Defaults to `defaultEvictionConfirmationTimeout` (10s).
 	EvictionConfirmationTimeout time.Duration
+}
+
+// CrossReplicaConfig configures publication of this replica's queued work per priority band to
+// other EPP replicas.
+type CrossReplicaConfig struct {
+	// Syncer is the cross-replica syncer. Nil disables publication.
+	Syncer fwkdl.CrossReplicaSyncer
+	// SyncInterval is the publish cadence. Non-positive selects the default (200ms).
+	SyncInterval time.Duration
+	// PublishTimeout bounds one band publish, or one batch chunk when the syncer supports batching.
+	// Non-positive selects the default (1s).
+	PublishTimeout time.Duration
 }
 
 func (c *Config) String() string {
