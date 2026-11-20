@@ -111,12 +111,12 @@ var _ = Describe("NIXL Connector with P2P pull", func() {
 	prefillSourceBody := func(prefillHostPort string, port int) (string, map[string]string) {
 		source := map[string]any{
 			reqcommon.FieldKVRequestID: "k2-from-epp",
-			reqcommon.FieldRemoteHost:  extractHost(prefillHostPort),
+			reqcommon.FieldRemoteHost:  routing.ExtractHost(prefillHostPort),
 			reqcommon.FieldRemotePort:  port,
 		}
 		return sourceBody(source, nil), map[string]string{
 			routing.PrefillEndpointHeader: prefillHostPort,
-			routing.KVCacheSourceHeader:   net.JoinHostPort(extractHost(prefillHostPort), strconv.Itoa(port)),
+			routing.KVCacheSourceHeader:   net.JoinHostPort(routing.ExtractHost(prefillHostPort), strconv.Itoa(port)),
 			routing.KVCachePrefillHeader:  prefillP2PHostPort(prefillHostPort),
 		}
 	}

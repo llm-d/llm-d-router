@@ -145,6 +145,22 @@ func StripScheme(endpoint string) string {
 	return u.Host
 }
 
+// ExtractHost returns the host portion of a host:port endpoint string,
+// stripping a leading http:// or https:// scheme when present. When
+// hostWithPort has no port, the scheme-stripped input is returned as-is.
+func ExtractHost(hostWithPort string) string {
+	if after, ok := strings.CutPrefix(hostWithPort, "http://"); ok {
+		hostWithPort = after
+	} else if after, ok := strings.CutPrefix(hostWithPort, "https://"); ok {
+		hostWithPort = after
+	}
+	host, _, err := net.SplitHostPort(hostWithPort)
+	if err != nil {
+		return hostWithPort
+	}
+	return host
+}
+
 // HasPreference reports whether the request headers carry the given Prefer
 // token.
 //

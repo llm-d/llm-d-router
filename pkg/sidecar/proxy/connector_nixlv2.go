@@ -965,7 +965,7 @@ func (s *Server) prepareNIXLV2SerialDecodeKVParams(
 	decodeDPRank, usedReturned := resolveDecodeDPRank(pKVTransferParams, uuidStr, s.config.MoRIIODPSize)
 	if pkv, ok := pKVTransferParams.(map[string]any); ok {
 		if !usedReturned && s.config.MoRIIODPSizeLocal > 0 && s.config.MoRIIODPSize > s.config.MoRIIODPSizeLocal {
-			prefillHost := s.resolver().resolveOne(ctx, extractHost(prefillPodHostPort))
+			prefillHost := s.resolver().resolveOne(ctx, routing.ExtractHost(prefillPodHostPort))
 			podIndex := slices.Index(s.currentRemoteHosts(ctx), prefillHost)
 			if podIndex < 0 {
 				return "", fmt.Errorf("cannot determine prefill pod index for %q", prefillHost)

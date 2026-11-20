@@ -636,7 +636,7 @@ func TestPDToolCallingStageSpans(t *testing.T) {
 					case "nixl", "parallel":
 						s.handleNIXLV2(rw, r, prefillURL.Host, p2pRouting{}, api)
 					case "p2p":
-						s.handleP2P(rw, r, prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: extractHost(prefillURL.Host), port: p2pConnectorPort}}, api)
+						s.handleP2P(rw, r, prefillURL.Host, p2pRouting{prefill: &p2pPeer{host: routing.ExtractHost(prefillURL.Host), port: p2pConnectorPort}}, api)
 					case "mooncake":
 						s.mooncakeEngineIDs.Add(prefillURL.Host, map[string]string{"0": "engine"})
 						s.handleMooncake(rw, r, prefillURL.Host, api)
