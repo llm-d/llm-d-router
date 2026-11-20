@@ -63,6 +63,7 @@ The framework resolves a DAG from each plugin's `Produces` and `Consumes` declar
 
 ## Related documentation
 
+- [Model inference health](modelhealth/README.md)
 - [Approximate Prefix Cache Producer](approximateprefix/README.md)
 - [Precise Prefix Cache Producer](preciseprefixcache/README.md)
 - [Burst Prefix Cache Producer](burstprefix/README.md)

@@ -739,12 +739,13 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	startOfStream := !reqCtx.ResponseBodyStarted
 	reqCtx.ResponseBodyStarted = true
 	response := &fwkrh.Response{
-		RequestID:      reqCtx.Request.ID,
-		Headers:        reqCtx.Response.Headers,
-		StartOfStream:  startOfStream,
-		EndOfStream:    endOfStream,
-		Usage:          reqCtx.Usage,
-		StreamedEvents: reqCtx.StreamedEvents,
+		RequestID:         reqCtx.Request.ID,
+		Headers:           reqCtx.Response.Headers,
+		StartOfStream:     startOfStream,
+		EndOfStream:       endOfStream,
+		Usage:             reqCtx.Usage,
+		StreamedEvents:    reqCtx.StreamedEvents,
+		InferenceActivity: reqCtx.InferenceActivity,
 	}
 
 	if endOfStream {

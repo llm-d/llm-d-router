@@ -23,14 +23,14 @@ import (
 	"time"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
 const (
 	ModelsExtractorType = "models-data-extractor"
 )
 
-var ModelsAttributeKey = plugin.NewDataKey("/v1/models", ModelsExtractorType)
+var ModelsAttributeKey = fwkplugin.NewDataKey("/v1/models", ModelsExtractorType)
 
 // ModelDataCollection contains model data reported by model-server endpoints.
 type ModelDataCollection []ModelData
@@ -97,4 +97,30 @@ func (m ModelDataCollection) String() string {
 		parts[i] = p.String()
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+// InferenceHealthProducerType identifies the producer of inference-health results.
+const InferenceHealthProducerType = "model-inference-health"
+
+// InferenceHealthDataKey carries the latest inference check for the discovered base model.
+var InferenceHealthDataKey = fwkplugin.NewDataKey("InferenceHealth", InferenceHealthProducerType)
+
+// InferenceHealth is a check result, not a routing eligibility decision.
+// Up is meaningful only when Known is true. Failed checks do not identify the faulty component.
+type InferenceHealth struct {
+	Model         string
+	Known         bool
+	Up            bool
+	Reason        string
+	ObservedAt    time.Time
+	LastSuccessAt time.Time
+}
+
+// Clone returns an independent result.
+func (s *InferenceHealth) Clone() fwkdl.Cloneable {
+	if s == nil {
+		return nil
+	}
+	cp := *s
+	return &cp
 }

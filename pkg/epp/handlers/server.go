@@ -146,8 +146,10 @@ type StreamingServer struct {
 // Exported fields are read and written by the request-control layers (director and
 // admission control). Unexported fields are private to this package.
 type RequestContext struct {
-	TargetPod      *fwkdl.EndpointMetadata
-	TargetEndpoint string
+	responseActivityTracker fwkrh.ResponseActivityTracker
+	InferenceActivity       *fwkrh.InferenceActivity
+	TargetPod               *fwkdl.EndpointMetadata
+	TargetEndpoint          string
 	// TargetEndpointScores maps endpoint address to the scheduler's score for it, covering
 	// every endpoint the primary profile scored rather than only those in TargetEndpoint.
 	// Nil when the primary profile ran no scorers.
