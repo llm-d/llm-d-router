@@ -28,6 +28,7 @@ llm-d Router. Go service that routes inference requests to model-serving pods vi
 
 ## Code review
 
+- Review against the conventions of the pull request's base branch at review time, not of the commit the pull request branched from. Run `git fetch origin <base>` first, then read this file, [review_a_pull_request.md](docs/review/playbooks/review_a_pull_request.md), and the routed rule files from the base tip (`git show origin/<base>:<path>`). A checked-out pull request branch can carry a stale copy of all three. Read the pull request's own copy only when the pull request changes `docs/review/` or this file.
 - Check every constant the change adds: grep its value across the repository and report any that already exists under another name for the same contract, any that declares a shared contract's value locally rather than importing it, and any declared away from its only reader.
 - Execute a two-pass additive review per [review_a_pull_request.md](docs/review/playbooks/review_a_pull_request.md):
   - **Pass 1 (Code and full-repo search first):** Inspect the diff, read modified files in full, and search the repository (`rg`/`grep` callers, sibling implementations, `pkg/common/`, `config/charts/`, tests, and docs) to catch logic bugs, edge cases, concurrency races, and contract mismatches directly from source code. Record all verified Pass-1 code findings before opening any Stage-1 rule file.
