@@ -887,6 +887,19 @@ Control alone does not emit them. `program_id` is the request's fairness ID and 
 | `llm_d_epp_program_aware_avg_wait_time_milliseconds` | Gauge | `program_id` | Mean wait time. |
 | `llm_d_epp_program_aware_attained_service_tokens` | Gauge | `program_id` | Attained service. |
 
+### QoS contract
+
+These metrics are owned by the `qos-contract` RequestHeader plugin and are registered only when
+it is configured. The `team` label takes only the team IDs in the configuration and the `defaultTeam` ID, so the configuration bounds its cardinality. The plugin defaults to
+`mode="report-only"`, where downgrades and rejections are recorded but not applied and each request
+keeps its InferenceObjective priority.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_qos_contract_decisions_total` | Counter | `team`, `class`, `served_class`, `decision`, `reason`, `mode` | `decision` is `within_contract`, `downgraded`, `rejected_concurrency`, `rejected_size` or `rejected_daily`. `reason` is the limit a downgraded or rejected request exceeded (`size`, `daily` or `concurrency`) and is empty within the contract. `served_class` is empty for rejections. |
+| `llm_d_epp_qos_contract_charged_tokens_total` | Counter | `team`, `served_class` | Weighted tokens charged after refunds. |
+| `llm_d_epp_qos_contract_inflight_requests` | Gauge | `team` | Requests counted against the concurrency commit. |
+
 ### Latency by prompt bucket and path
 
 These metrics are owned by the `latency-reporter` response plugin and are registered only when it
