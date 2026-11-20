@@ -490,6 +490,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 
 	// --- Setup Metrics Server ---
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
+	setupLog.Info("fairness_id metric label cap", "limit", opts.FairnessIDMetricLabelLimit, "pinnedFairnessIDs", metricsutil.PinnedFairnessIDCount())
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.RegisterWithOptions(metricsRegisterOptions(rawConfig), r.customCollectors...)
 	metrics.InitFairnessIDResolutionMetrics(gknn.Name)
@@ -1457,6 +1458,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
+	setupLog.Info("fairness_id metric label cap", "limit", opts.FairnessIDMetricLabelLimit, "pinnedFairnessIDs", metricsutil.PinnedFairnessIDCount())
 	r.customCollectors = append(r.customCollectors, collectors.NewInferencePoolMetricsCollector(ds))
 	metrics.RegisterWithOptions(metricsRegisterOptions(rawConfig), r.customCollectors...)
 	metrics.InitFairnessIDResolutionMetrics(poolName)
