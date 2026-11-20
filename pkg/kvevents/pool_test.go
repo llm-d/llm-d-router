@@ -926,6 +926,86 @@ func TestRealignExtraFeatures(t *testing.T) {
 		}
 	})
 
+	t.Run("1:many split uses the event offsets", func(t *testing.T) {
+		// Engine BS 16, canonical BS 4: each item must land only on the sub-blocks it overlaps.
+		cases := []struct {
+			name         string
+			raw          [][]any
+			hashes       []string
+			placeholders []kvblock.PlaceholderRange
+			salt         string
+		}{
+			{
+				name:         "image starts mid engine block",
+				raw:          [][]any{{[]any{"img", int64(4)}}, nil},
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 4, Length: 12}},
+			},
+			{
+				name:         "image spans both engine blocks",
+				raw:          [][]any{{[]any{"img", int64(10)}}, {[]any{"img", int64(-6)}}},
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 10, Length: 22}},
+			},
+			{
+				name:         "two images back to back in one engine block",
+				raw:          [][]any{{[]any{"a", int64(0)}, []any{"b", int64(6)}}, nil},
+				hashes:       []string{"a", "b"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 0, Length: 6}, {Offset: 6, Length: 10}},
+			},
+			{
+				name:         "cache salt stays on the first sub-block",
+				raw:          [][]any{{[]any{"img", int64(4)}, "salt"}, nil},
+				hashes:       []string{"img"},
+				placeholders: []kvblock.PlaceholderRange{{Offset: 4, Length: 12}},
+				salt:         "salt",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				engine, err := kvblock.ParseRawExtraKeys(tc.raw, "")
+				require.NoError(t, err)
+				want := kvblock.ComputeBlockExtraFeatures(map[string][]string{"image": tc.hashes},
+					map[string][]kvblock.PlaceholderRange{"image": tc.placeholders}, 4, 32)
+				if tc.salt != "" {
+					if want[0] == nil {
+						want[0] = &kvblock.BlockExtraFeatures{}
+					}
+					want[0].CacheSalt = tc.salt
+				}
+				assert.Equal(t, want, realignExtraFeatures(engine, 4, 32))
+			})
+		}
+	})
+
+	t.Run("1:many split replicates without usable offsets", func(t *testing.T) {
+		img := kvblock.MMHash{Hash: "img"}
+		vid := kvblock.MMHash{Hash: "vid"}
+		cases := []struct {
+			name string
+			feat *kvblock.BlockExtraFeatures
+		}{
+			// vLLM <= v0.18 sends no offsets, so an item's position in the engine block is unknown.
+			{"bare identifiers", &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img}}},
+			{"offset past the block end", &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img}, MMOffsets: []int{16}}},
+			{"offsets out of order", &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img, vid}, MMOffsets: []int{8, 2}}},
+			{"negative offset after the first", &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{img, vid}, MMOffsets: []int{2, -1}}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				result := realignExtraFeatures([]*kvblock.BlockExtraFeatures{tc.feat}, 4, 16)
+				assert.Equal(t, []*kvblock.BlockExtraFeatures{tc.feat, tc.feat, tc.feat, tc.feat}, result)
+			})
+		}
+	})
+
+	t.Run("1:many split replicates when the canonical BS does not divide the engine BS", func(t *testing.T) {
+		// Engine BS 6, canonical BS 4: sub-block 1 straddles both engine blocks.
+		feat := &kvblock.BlockExtraFeatures{MMHashes: []kvblock.MMHash{{Hash: "img"}}, MMOffsets: []int{4}}
+		result := realignExtraFeatures([]*kvblock.BlockExtraFeatures{feat, nil}, 4, 12)
+		assert.Equal(t, []*kvblock.BlockExtraFeatures{feat, feat, nil}, result)
+	})
+
 	t.Run("zero canonical blocks (engine BS < canonical BS)", func(t *testing.T) {
 		// 1 engine block → 0 canonical blocks: tokens < canonical block size.
 		// realignExtraFeatures returns an empty slice instead of panicking.
@@ -935,6 +1015,33 @@ func TestRealignExtraFeatures(t *testing.T) {
 		result := realignExtraFeatures(features, 64, 16)
 		assert.Empty(t, result)
 	})
+}
+
+func TestDropOffsetsUnlessDense(t *testing.T) {
+	cases := []struct {
+		name      string
+		blockSize int
+		numTokens int
+		keep      bool
+	}{
+		{"one entry per page", 8, 16, true},
+		{"null page skipped", 8, 24, false},
+		{"undeclared block size", 0, 16, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			features, err := kvblock.ParseRawExtraKeys([][]any{{[]any{"img", int64(4)}}, nil}, "")
+			require.NoError(t, err)
+			ev := &BlockStoredEvent{BlockSize: tc.blockSize, Tokens: makeTokens(tc.numTokens)}
+			dropOffsetsUnlessDense(ev, features)
+			if tc.keep {
+				assert.Equal(t, []int{4}, features[0].MMOffsets)
+			} else {
+				assert.Nil(t, features[0].MMOffsets)
+			}
+			assert.Equal(t, []kvblock.MMHash{{Hash: "img"}}, features[0].MMHashes)
+		})
+	}
 }
 
 // TestCanonicalWritePath_ExtraKeysOneToMany verifies that events with ExtraKeys
