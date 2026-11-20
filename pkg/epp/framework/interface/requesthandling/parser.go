@@ -49,6 +49,7 @@ type Parser interface {
 	// where 'endOfStream' is set to true only for the final chunk.
 	// For non-streaming responses, this method is invoked exactly once with the full
 	// buffered response body and 'endOfStream' set to true.
+	// For a request whose ParseResult set OpaqueResponse, see ParseResult.OpaqueResponse.
 	ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*ParsedResponse, error)
 
 	// Claims returns the paths and protocols claimed by this parser.
@@ -118,6 +119,11 @@ type ParseResult struct {
 	// This allows fallback or non-standard requests to be routed using the configured
 	// policies without paying the overhead of response-phase interception.
 	SkipResponseProcessing bool
+	// OpaqueResponse reports that the parser neither reads nor rewrites the response body.
+	// The EPP then forwards each response body chunk unchanged as it arrives instead of buffering the body,
+	// and calls ParseResponse once, at the end of the response, with an empty body.
+	// A response the EPP already streams, such as text/event-stream, is handled as a stream.
+	OpaqueResponse bool
 }
 
 type ParsedResponse struct {
