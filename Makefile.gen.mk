@@ -6,7 +6,7 @@ GATEWAY_API_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-
 # Pinned vllm-project/vllm ref (tag or commit SHA) for upstream vLLM .proto schemas (rust/proto).
 VLLM_REF ?= 2fb5111bbac7a2e31c0c19c1eb0aa01df5ecb664
 # Pinned sgl-project/sglang ref (tag or commit SHA) for SGLang .proto schemas.
-SGLANG_REF ?= 93a936d007ada66544cb5ac855de540a596c2ca4
+SGLANG_REF ?= cfe0fc54ba15181c48dbaa9d4861f3bd99c11a16
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
