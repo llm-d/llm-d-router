@@ -46,6 +46,24 @@ var (
 		},
 		[]string{"endpoint_name", "namespace", "producer_name", "fairness_id", "priority"},
 	)
+
+	prefillCompletions = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "inflight_prefill_completions_total",
+			Help:      metricsutil.HelpMsgWithStability("Prefill completions that released in-flight load, by the signal that reported them: kv_event (the engine stored the prompt's last full block) or first_byte (first response byte).", compbasemetrics.ALPHA),
+		},
+		[]string{"producer_name", "signal"},
+	)
+
+	prefillPending = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "inflight_prefill_pending",
+			Help:      metricsutil.HelpMsgWithStability("Dispatched requests whose prefill completion is awaited from KV events; a request leaves at its completion signal or when its in-flight entries are evicted.", compbasemetrics.ALPHA),
+		},
+		[]string{"producer_name"},
+	)
 )
 
 // registerMetrics registers the producer-owned metrics with the plugin's metrics
@@ -56,7 +74,7 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	if registerer == nil {
 		return errors.New("inflight load metrics registerer is required")
 	}
-	for _, collector := range []prometheus.Collector{inflightRequests, inflightTokens} {
+	for _, collector := range []prometheus.Collector{inflightRequests, inflightTokens, prefillCompletions, prefillPending} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
 			if errors.As(err, &alreadyRegistered) && alreadyRegistered.ExistingCollector == collector {

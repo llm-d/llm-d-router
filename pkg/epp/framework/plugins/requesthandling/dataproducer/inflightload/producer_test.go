@@ -1206,7 +1206,7 @@ func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		producer.releaseTokensEarly(res.ProfileResults["default"].TargetEndpoints[0], req, "default")
+		producer.releaseTokensEarly(res.ProfileResults["default"].TargetEndpoints[0], req.RequestID, "default")
 	}()
 	go func() {
 		defer wg.Done()
