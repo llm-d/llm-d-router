@@ -375,7 +375,12 @@ func TestBuiltinVLLMOmniEngine(t *testing.T) {
 	if metrics.KVCacheUsagePercent != 0 {
 		t.Errorf("KVCacheUsagePercent = %v, want 0", metrics.KVCacheUsagePercent)
 	}
-	assertScalarMetric(t, ep, attrmetrics.VLLMOmniStageWaitingRequestsKey, 5.0)
+	waiting, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.VLLMOmniStageWaitingRequestsDataKey)
+	if !ok {
+		t.Error("expected the summed stage waiting attribute to be set")
+	} else if float64(waiting) != 5.0 {
+		t.Errorf("summed stage waiting = %v, want 5", waiting)
+	}
 }
 
 func TestExtractorReadsEveryEngineOfDataParallelPod(t *testing.T) {

@@ -32,7 +32,7 @@ const (
 
 	// VLLMOmniStageWaitingRequestsKey holds the total waiting requests across
 	// all stages of a vLLM-Omni pipeline.
-	VLLMOmniStageWaitingRequestsKey = "stage_waiting_requests"
+	VLLMOmniStageWaitingRequestsKey = "vllm_omni_stage_waiting_requests"
 )
 
 // ScalarMetricValue is a numeric endpoint attribute extracted from a configured scalar metric.
@@ -49,6 +49,10 @@ func (v ScalarMetricValue) Clone() fwkdl.Cloneable {
 func ScalarMetricDataKey(attributeKey string) plugin.DataKey {
 	return plugin.NewDataKey(attributeKey, MetricsExtractorType)
 }
+
+// VLLMOmniStageWaitingRequestsDataKey reads the summed per-stage waiting count
+// extracted for a vLLM-Omni endpoint.
+var VLLMOmniStageWaitingRequestsDataKey = ScalarMetricDataKey(VLLMOmniStageWaitingRequestsKey)
 
 const (
 	scalarSampleKeyPrefix       = "ScalarSample:"
