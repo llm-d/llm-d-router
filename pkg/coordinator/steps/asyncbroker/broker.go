@@ -313,7 +313,7 @@ func (s *Step) serveQueued(ctx context.Context, reqCtx *pipeline.RequestContext,
 	}
 	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamAsyncBroker)
 	err = s.sub.SubmitRequest(ctx, msg)
-	call.Done()
+	call.Done(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			// go-redis retries the enqueue after a failed reply read, and the

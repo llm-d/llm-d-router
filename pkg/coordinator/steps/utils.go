@@ -92,7 +92,7 @@ func postToGateway(ctx context.Context, logger logr.Logger, gwClient *gateway.Cl
 
 	call := coordmetrics.StartUpstreamCall(req.upstream)
 	resp, err := gwClient.Post(ctx, req.path, req.body, req.headers)
-	call.Done()
+	call.Done(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%s: request: %w", req.step, err)
 	}

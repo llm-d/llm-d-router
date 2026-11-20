@@ -30,6 +30,8 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -201,7 +203,7 @@ func TestTimedRoundTripper_ExcludesStreamingBody(t *testing.T) {
 	var recorded time.Duration
 	rt := &timedRoundTripper{
 		inner:  http.DefaultTransport,
-		record: func(d time.Duration) { recorded = d },
+		record: func(_ context.Context, d time.Duration) { recorded = d },
 	}
 	logger := funcr.New(func(_, _ string) {}, funcr.Options{})
 	proxy, _ := newDecodeProxy(logger, rt, nil)
@@ -222,7 +224,7 @@ func TestTimedRoundTripper_RecordsOnTransportError(t *testing.T) {
 	called := false
 	rt := &timedRoundTripper{
 		inner:  roundTripperFunc(func(_ *http.Request) (*http.Response, error) { return nil, http.ErrHandlerTimeout }),
-		record: func(_ time.Duration) { called = true },
+		record: func(_ context.Context, _ time.Duration) { called = true },
 	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.invalid/", nil)
 	require.NoError(t, err)
@@ -232,6 +234,37 @@ func TestTimedRoundTripper_RecordsOnTransportError(t *testing.T) {
 	}
 	require.Error(t, err)
 	require.True(t, called, "record must fire on transport error to match gwClient.Post semantics")
+}
+
+// The decode step's span reaches the upstream duration through the outgoing
+// request's context, so the recorder must receive that span after the reverse
+// proxy clones the request.
+func TestTimedRoundTripper_RecordsWithStepSpan(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	stepCtx, span := provider.Tracer("decode-proxy-test").Start(context.Background(), "decode")
+	defer span.End()
+
+	var recordedSpanID trace.SpanID
+	rt := &timedRoundTripper{
+		inner: http.DefaultTransport,
+		record: func(ctx context.Context, _ time.Duration) {
+			recordedSpanID = trace.SpanFromContext(ctx).SpanContext().SpanID()
+		},
+	}
+	logger := funcr.New(func(_, _ string) {}, funcr.Options{})
+	proxy, _ := newDecodeProxy(logger, rt, nil)
+
+	req, err := http.NewRequestWithContext(stepCtx, http.MethodGet, upstream.URL, nil)
+	require.NoError(t, err)
+	proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+	require.Equal(t, span.SpanContext().SpanID(), recordedSpanID)
 }
 
 func TestNewDecodeProxy_TransportErrorsUseOpenAIEnvelope(t *testing.T) {

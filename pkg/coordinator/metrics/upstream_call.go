@@ -16,7 +16,10 @@ limitations under the License.
 
 package metrics
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // UpstreamCall packages the "count + start + record" triplet that every step
 // wraps around a synchronous outbound call. StartUpstreamCall increments
@@ -42,6 +45,6 @@ func StartUpstreamCall(upstream string) UpstreamCall {
 // the zero value it does not crash but records a very large positive
 // duration (time.Since clamps at math.MaxInt64, ~292 years) that lands in
 // the histogram's +Inf bucket. Always pair Done with StartUpstreamCall.
-func (c UpstreamCall) Done() {
-	RecordUpstreamRequestDuration(c.upstream, time.Since(c.start))
+func (c UpstreamCall) Done(ctx context.Context) {
+	RecordUpstreamRequestDuration(ctx, c.upstream, time.Since(c.start))
 }

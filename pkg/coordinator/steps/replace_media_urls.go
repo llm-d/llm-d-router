@@ -466,7 +466,7 @@ func (s *ReplaceMediaURLsStep) download(ctx context.Context, rawURL string, moda
 	// a hostname check alone would miss.
 	// codeql[go/request-forgery]
 	resp, err := s.client.Do(req)
-	call.Done()
+	call.Done(ctx)
 	if err != nil {
 		return nil, "", err
 	}
