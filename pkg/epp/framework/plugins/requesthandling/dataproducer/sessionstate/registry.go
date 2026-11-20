@@ -60,7 +60,7 @@ func (o observation) state() SessionState {
 // Its zero value is ready for use.
 type SessionStateRegistry struct {
 	mu       sync.Mutex
-	sessions map[string]*sessionRecord
+	sessions map[SessionKey]*sessionRecord
 	// pending maps the ID of a request observed at RequestHeader to its
 	// session record until the request is dispatched or abandoned.
 	pending map[string]*sessionRecord
@@ -70,12 +70,12 @@ type SessionStateRegistry struct {
 // request's view of it. A non-empty requestID marks the request as pending,
 // which keeps the session from being evicted until RecordDispatch or
 // ReleasePending is called with the same ID.
-func (r *SessionStateRegistry) observe(identity, requestID string) observation {
+func (r *SessionStateRegistry) observe(key SessionKey, requestID string) observation {
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	record := r.getOrCreate(identity, now)
+	record := r.getOrCreate(key, now)
 	if requestID != "" {
 		// A request ID observed twice moves to the newer record, so each
 		// record counts exactly the pending entries that point to it.
@@ -94,19 +94,19 @@ func (r *SessionStateRegistry) observe(identity, requestID string) observation {
 
 // GetState returns the state observed before the current request and marks the
 // session as seen at the current time.
-func (r *SessionStateRegistry) GetState(identity string) SessionState {
-	return r.observe(identity, "").state()
+func (r *SessionStateRegistry) GetState(key SessionKey) SessionState {
+	return r.observe(key, "").state()
 }
 
 // RecordDispatch records one request dispatched for the session and ends the
 // pending state of requestID, if any.
-func (r *SessionStateRegistry) RecordDispatch(identity, requestID string) {
+func (r *SessionStateRegistry) RecordDispatch(key SessionKey, requestID string) {
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.releasePendingLocked(requestID)
-	record := r.getOrCreate(identity, now)
+	record := r.getOrCreate(key, now)
 	record.state.TurnsTaken++
 	record.state.InFlightRequests++
 	record.publishLocked()
@@ -121,12 +121,12 @@ type TurnUsage struct {
 
 // RecordResponse records the end of a dispatched request's response lifecycle.
 // Only naturally completed responses contribute completion and token totals.
-func (r *SessionStateRegistry) RecordResponse(identity string, naturallyCompleted bool, usage TurnUsage) {
+func (r *SessionStateRegistry) RecordResponse(key SessionKey, naturallyCompleted bool, usage TurnUsage) {
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	record, exists := r.sessions[identity]
+	record, exists := r.sessions[key]
 	if !exists || record.state.InFlightRequests == 0 {
 		return
 	}
@@ -169,7 +169,7 @@ func (r *SessionStateRegistry) EvictIdle(now time.Time, ttl time.Duration) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for identity, record := range r.sessions {
+	for key, record := range r.sessions {
 		if record.state.InFlightRequests > 0 || record.pendingRequests > 0 {
 			continue
 		}
@@ -178,25 +178,26 @@ func (r *SessionStateRegistry) EvictIdle(now time.Time, ttl time.Duration) {
 			lastActive = record.state.LastResponseAt
 		}
 		if now.Sub(lastActive) > ttl {
-			delete(r.sessions, identity)
+			delete(r.sessions, key)
 		}
 	}
 }
 
-func (r *SessionStateRegistry) getOrCreate(identity string, now time.Time) *sessionRecord {
+func (r *SessionStateRegistry) getOrCreate(key SessionKey, now time.Time) *sessionRecord {
 	if r.sessions == nil {
-		r.sessions = make(map[string]*sessionRecord)
+		r.sessions = make(map[SessionKey]*sessionRecord)
 	}
-	if record, exists := r.sessions[identity]; exists {
+	if record, exists := r.sessions[key]; exists {
 		return record
 	}
 	record := &sessionRecord{
 		state: SessionState{
+			Key:        key,
 			LastSeenAt: now,
 		},
 		firstSeenAt: now,
 	}
 	record.publishLocked()
-	r.sessions[identity] = record
+	r.sessions[key] = record
 	return record
 }

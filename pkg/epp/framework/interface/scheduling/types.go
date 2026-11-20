@@ -51,6 +51,8 @@ type InferenceRequest struct {
 	Headers map[string]string
 	// Request Objective
 	Objectives RequestObjectives
+	// TenantID is the raw fairness-ID header value captured when the request is assembled, or "" when absent.
+	TenantID string
 	// FairnessID is the identity used by the flow control system to group requests into fairness queues.
 	FairnessID string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.

@@ -239,6 +239,7 @@ func TestRequestHeaderAndPreRequestTrackSessionHistory(t *testing.T) {
 	afterFirst := time.Now()
 	state, ok := ReadSessionState(first)
 	require.True(t, ok)
+	assert.Equal(t, SessionKey{SessionID: "session-a"}, state.Key)
 	assert.Equal(t, int64(0), state.TurnsTaken)
 	assert.Zero(t, state.Duration)
 	assert.False(t, state.LastSeenAt.Before(beforeFirst))
@@ -451,6 +452,7 @@ func TestPendingRequestKeepsSessionFromEviction(t *testing.T) {
 			t.Parallel()
 
 			producer := newTestProducer(t)
+			key := SessionKey{SessionID: "session-a"}
 			request := requestWithAgentIdentity("session-a")
 			request.RequestID = "queued"
 			require.NoError(t, producer.RequestHeader(context.Background(), request))
@@ -458,17 +460,110 @@ func TestPendingRequestKeepsSessionFromEviction(t *testing.T) {
 			// The request waits in a flow-control queue for longer than the TTL.
 			ttl := time.Hour
 			start := time.Now().Add(-2 * ttl)
-			setRegistrySessionTimes(t, &producer.registry, "session-a", start, start)
+			setRegistrySessionTimes(t, &producer.registry, key, start, start)
 			producer.registry.EvictIdle(time.Now(), ttl)
 			require.Equal(t, 1, registrySessionCount(&producer.registry), "a session with a pending request must remain")
 
 			test.finish(producer, request)
-			setRegistrySessionTimes(t, &producer.registry, "session-a", start, start)
-			setRegistryLastResponseAt(t, &producer.registry, "session-a", start)
+			setRegistrySessionTimes(t, &producer.registry, key, start, start)
+			setRegistryLastResponseAt(t, &producer.registry, key, start)
 			producer.registry.EvictIdle(time.Now(), ttl)
 			assert.Zero(t, registrySessionCount(&producer.registry), "the session is evictable once the request leaves")
 		})
 	}
+}
+
+func TestTenantsWithSameSessionIDAreIsolated(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	producer := newTestProducer(t)
+
+	t1First := requestWithAgentIdentity("s")
+	t1First.TenantID = "t1"
+	require.NoError(t, producer.RequestHeader(ctx, t1First))
+	require.NoError(t, producer.PreRequest(ctx, t1First, resultWithProfiles(1)))
+	producer.ResponseBody(ctx, t1First, finalResponse(fwkrh.TerminationCauseNatural, 42, 11), nil)
+
+	time.Sleep(time.Millisecond)
+	t1Second := requestWithAgentIdentity("s")
+	t1Second.TenantID = "t1"
+	require.NoError(t, producer.RequestHeader(ctx, t1Second))
+	require.NoError(t, producer.PreRequest(ctx, t1Second, resultWithProfiles(1)))
+
+	time.Sleep(time.Millisecond)
+	beforeT2 := time.Now()
+	t2Req := requestWithAgentIdentity("s")
+	t2Req.TenantID = "t2"
+	require.NoError(t, producer.RequestHeader(ctx, t2Req))
+	stateT2, ok := ReadSessionState(t2Req)
+	require.True(t, ok)
+	assert.Equal(t, SessionKey{TenantID: "t2", SessionID: "s"}, stateT2.Key)
+	assert.Zero(t, stateT2.TurnsTaken)
+	assert.Zero(t, stateT2.Duration)
+	assert.False(t, stateT2.LastSeenAt.Before(beforeT2))
+	assert.True(t, stateT2.LastResponseAt.IsZero())
+	assert.Zero(t, stateT2.InFlightRequests)
+	assert.Zero(t, stateT2.TotalInputTokens)
+
+	time.Sleep(time.Millisecond)
+	beforeNoTenant := time.Now()
+	noTenantReq := requestWithAgentIdentity("s")
+	require.NoError(t, producer.RequestHeader(ctx, noTenantReq))
+	stateNoTenant, ok := ReadSessionState(noTenantReq)
+	require.True(t, ok)
+	assert.Equal(t, SessionKey{TenantID: "", SessionID: "s"}, stateNoTenant.Key)
+	assert.Zero(t, stateNoTenant.TurnsTaken)
+	assert.Zero(t, stateNoTenant.Duration)
+	assert.False(t, stateNoTenant.LastSeenAt.Before(beforeNoTenant))
+	assert.True(t, stateNoTenant.LastResponseAt.IsZero())
+	assert.Zero(t, stateNoTenant.InFlightRequests)
+	assert.Zero(t, stateNoTenant.TotalInputTokens)
+
+	t1Third := requestWithAgentIdentity("s")
+	t1Third.TenantID = "t1"
+	require.NoError(t, producer.RequestHeader(ctx, t1Third))
+	stateT1, ok := ReadSessionState(t1Third)
+	require.True(t, ok)
+	assert.Equal(t, SessionKey{TenantID: "t1", SessionID: "s"}, stateT1.Key)
+	assert.Equal(t, int64(2), stateT1.TurnsTaken)
+	assert.Greater(t, stateT1.Duration, time.Duration(0))
+	assert.True(t, stateT1.LastSeenAt.Before(beforeT2))
+	assert.False(t, stateT1.LastResponseAt.IsZero())
+	assert.Equal(t, int64(1), stateT1.InFlightRequests)
+	assert.Equal(t, int64(42), stateT1.TotalInputTokens)
+	assert.Equal(t, int64(11), stateT1.TotalOutputTokens)
+}
+
+func TestTenantIDSurvivesFairnessIDRewrite(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	producer := newTestProducer(t)
+
+	first := requestWithAgentIdentity("s")
+	first.RequestID = "req-1"
+	first.TenantID = "t1/eu"
+	first.FairnessID = "t1/eu"
+	require.NoError(t, producer.RequestHeader(ctx, first))
+
+	first.FairnessID = "t1%2Feu/s"
+	require.NoError(t, producer.PreRequest(ctx, first, resultWithProfiles(1)))
+	producer.ResponseBody(ctx, first, finalResponse(fwkrh.TerminationCauseNatural, 25, 10), nil)
+
+	second := requestWithAgentIdentity("s")
+	second.TenantID = "t1/eu"
+	second.FairnessID = "t1/eu"
+	require.NoError(t, producer.RequestHeader(ctx, second))
+	state, ok := ReadSessionState(second)
+	require.True(t, ok)
+	assert.Equal(t, SessionKey{TenantID: "t1/eu", SessionID: "s"}, state.Key)
+	assert.Equal(t, int64(1), state.TurnsTaken)
+	assert.Zero(t, state.InFlightRequests)
+	assert.Equal(t, int64(1), state.CompletedRequests)
+	assert.Equal(t, int64(25), state.TotalInputTokens)
+	assert.Equal(t, int64(10), state.TotalOutputTokens)
+	assert.Equal(t, 1, registrySessionCount(&producer.registry))
 }
 
 type sessionStateFairnessConsumer struct {
