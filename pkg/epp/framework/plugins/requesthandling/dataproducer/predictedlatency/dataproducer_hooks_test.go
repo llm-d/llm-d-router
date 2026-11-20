@@ -289,18 +289,21 @@ func TestProduce_PredictionFailureObservability(t *testing.T) {
 // neither publishes nor stores a prediction for an endpoint whose metrics were
 // never scraped, since that prediction was computed from zero-value metrics.
 func TestProduce_SkipsPredictionsForNeverScrapedEndpoints(t *testing.T) {
-	pl := NewPredictedLatency(LatencyDataProviderPluginType, DefaultConfig, &mockPredictor{
+	predictor := &mockPredictor{
 		predictions: map[string]*latencypredictor.PredictionResponse{
 			"0.5": {TTFT: 200, TPOT: 20},
 			"0.0": {TTFT: 50, TPOT: 5},
 		},
-	})
+	}
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, DefaultConfig, predictor)
 
 	scraped := createTestEndpoint("pod-scraped", 0.5, 0, 0)
 	neverScraped := createNeverScrapedTestEndpoint("pod-never-scraped")
 	request := createTestInferenceRequest("never-scraped-test", 100, 0)
 
 	require.NoError(t, pl.Produce(context.Background(), request, []fwksched.Endpoint{scraped, neverScraped}))
+	require.Len(t, predictor.capturedBulkStrictRequests, 1, "the predictor should be called only for the scraped endpoint")
+	assert.InDelta(t, 0.5, predictor.capturedBulkStrictRequests[0].KVCachePercentage, 1e-9)
 
 	_, ok := scraped.Get(pl.latencyPredictionInfoDataKey)
 	assert.True(t, ok, "a scraped endpoint should get a prediction")
@@ -311,4 +314,26 @@ func TestProduce_SkipsPredictionsForNeverScrapedEndpoints(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, plCtx.predictionsForScheduling, "pod-scraped")
 	assert.NotContains(t, plCtx.predictionsForScheduling, "pod-never-scraped")
+}
+
+// TestProduce_SkipsPredictorWhenNoEndpointIsScraped verifies that Produce does
+// not call the predictor when no candidate endpoint has scraped metrics, and
+// still stores the request context with no predictions.
+func TestProduce_SkipsPredictorWhenNoEndpointIsScraped(t *testing.T) {
+	predictor := &mockPredictor{}
+	pl := NewPredictedLatency(LatencyDataProviderPluginType, DefaultConfig, predictor)
+
+	endpoints := []fwksched.Endpoint{
+		createNeverScrapedTestEndpoint("pod-a"),
+		createNeverScrapedTestEndpoint("pod-b"),
+	}
+	request := createTestInferenceRequest("all-never-scraped-test", 100, 0)
+
+	require.NoError(t, pl.Produce(context.Background(), request, endpoints))
+
+	assert.Nil(t, predictor.capturedBulkStrictRequests, "the predictor should not be called")
+
+	plCtx, err := pl.getPredictedLatencyContextForRequest(request)
+	require.NoError(t, err)
+	assert.Empty(t, plCtx.predictionsForScheduling)
 }
