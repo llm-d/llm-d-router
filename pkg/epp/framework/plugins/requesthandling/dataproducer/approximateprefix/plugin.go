@@ -709,7 +709,7 @@ func (p *dataProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 		AttributeKey: p.syncHashDK,
 		SyncDisabled: !p.syncCrossReplicaState,
 		Read: func(endpointID string) datalayer.Cloneable {
-			return &attrprefix.PrefixHashSet{Prompts: promptsToUint64(p.recent.snapshot(endpointID))}
+			return p.recent.sequenced(endpointID)
 		},
 		Aggregate: func(values []any) any {
 			// Each input is already capped by the publishing replica's
