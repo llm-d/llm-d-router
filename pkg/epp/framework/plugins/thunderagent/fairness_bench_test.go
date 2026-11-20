@@ -20,8 +20,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
 
@@ -29,25 +29,26 @@ import (
 // head belongs to an admitted session, the common case.
 func BenchmarkPickAdmittedHeads(b *testing.B) {
 	const pods, sessions, queues = 32, 2000, 64
-	a := newTestAgent(testConfig())
-	now := time.Now()
-	a.mgr.mu.Lock()
-	for i := range sessions {
-		ep := a.mgr.ensureEndpointLocked(fmt.Sprintf("default/pod-%d", i%pods), 1e9, now)
-		s := a.mgr.bindLocked(fmt.Sprintf("s%d", i), ep)
-		s.committedTokens, s.turnCount, s.lastResponseAt = 1000, 1, now
+	l := newTestLedger(testConfig())
+
+	eps := make([]fwkdl.Endpoint, pods)
+	for i := range pods {
+		eps[i] = l.pod(fmt.Sprintf("pod-%d", i), 16, 62500000)
 	}
-	a.mgr.mu.Unlock()
+	for i := range sessions {
+		l.seed(fmt.Sprintf("s%d", i), fmt.Sprintf("pod-%d", i%pods), 1000)
+	}
+	l.prime(eps...)
 
 	qs := make([]fwkfc.FlowQueueAccessor, queues)
 	for i := range queues {
-		qs[i] = makeQueue(fmt.Sprintf("s%d", i), now, 400)
+		qs[i] = l.makeQueue(fmt.Sprintf("s%d", i), l.now(), 400)
 	}
 	band := bandOf(qs...)
 	ctx := context.Background()
 
 	for b.Loop() {
-		if _, err := a.Pick(ctx, band); err != nil {
+		if _, err := l.agent.Pick(ctx, band); err != nil {
 			b.Fatal(err)
 		}
 	}

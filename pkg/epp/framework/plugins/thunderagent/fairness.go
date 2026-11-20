@@ -25,14 +25,16 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/sessionstate"
 )
 
 // holdWaitFloor separates admission holds from normal dispatch latency in
 // the delayed dispatch metric.
 const holdWaitFloor = time.Second
 
-// NewState satisfies the FairnessPolicy contract; Pick reads the shared
-// sessionManager instead of per-band state.
+// NewState satisfies the FairnessPolicy contract; Pick reads the shared plugin
+// policy state instead of per-band state.
 func (a *ThunderAgent) NewState(_ context.Context) any { return nil }
 
 // candidate is one dispatchable queue head under consideration.
@@ -45,7 +47,9 @@ type candidate struct {
 	tokens   float64
 	wait     time.Duration
 	starving bool
-	fitPod   *endpointState
+	state    sessionstate.SessionState
+	boundPod *endpointView
+	fitPod   *endpointView
 }
 
 // Pick is the admission gate for thunder agent.
@@ -79,10 +83,11 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 	if band == nil {
 		return nil, nil //nolint:nilnil
 	}
-	now := time.Now()
+	now := a.clock.Now()
 
 	var candidates []*candidate
 	queued := map[string]bool{}
+	candStates := map[string]sessionstate.SessionState{}
 	band.IterateQueues(func(queue fwkfc.FlowQueueAccessor) bool {
 		if queue == nil || queue.Len() == 0 {
 			return true
@@ -91,10 +96,14 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		if head == nil {
 			return true
 		}
-		id := headSessionID(head)
+		ir := headRequest(head)
+		id := sessionID(ir)
 		wait := now.Sub(head.EnqueueTime())
 		if id != "" {
 			queued[id] = true
+			if s, ok := sessionstate.ReadSessionState(ir); ok {
+				candStates[id] = s
+			}
 		}
 		candidates = append(candidates, &candidate{
 			queue:     queue,
@@ -110,21 +119,29 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		return nil, nil //nolint:nilnil
 	}
 
-	m := a.mgr
-	m.mu.Lock()
-	var rooms, spare map[*endpointState]float64
-	if a.needsFitCheckLocked(candidates) {
-		rooms = make(map[*endpointState]float64, len(m.endpoints))
-		spare = make(map[*endpointState]float64, len(m.endpoints))
-		for _, p := range m.endpoints {
-			rooms[p] = a.roomLocked(p, now)
-			spare[p] = m.reclaimableTokensLocked(p, now, queued)
+	a.mu.Lock()
+	pool := a.readPoolLocked(now, candStates)
+	needFit := false
+	for _, c := range candidates {
+		a.classifyLocked(c, pool, candStates)
+		if c.class != classAdmitted {
+			needFit = true
+		}
+	}
+
+	var rooms, spare map[*endpointView]float64
+	if needFit && len(pool.pods) > 0 {
+		rooms = make(map[*endpointView]float64, len(pool.pods))
+		spare = make(map[*endpointView]float64, len(pool.pods))
+		for _, pv := range pool.pods {
+			rooms[pv] = a.roomLocked(pv)
+			spare[pv] = a.reclaimableTokensLocked(pv, now, queued)
 		}
 	}
 
 	var best *candidate
 	for _, c := range candidates {
-		if !a.sizeAndFitLocked(c, rooms, spare) {
+		if !a.fitsLocked(c, rooms, spare) {
 			continue
 		}
 		if best == nil || betterThan(c, best) {
@@ -132,11 +149,15 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		}
 	}
 	paused := 0
+	resumed := false
 	if best != nil {
-		paused = a.admitLocked(best, now, queued)
+		paused, resumed = a.admitLocked(best, now, queued)
 	}
-	m.mu.Unlock()
+	a.mu.Unlock()
 
+	if resumed {
+		a.metrics.resumes.Inc()
+	}
 	if paused > 0 {
 		a.metrics.pauses.Add(float64(paused))
 		log.FromContext(ctx).V(logutil.DEBUG).Info("Paused idle sessions to make room", "sessionClass", best.class.String(), "pausedSessions", paused)
@@ -154,56 +175,66 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 	return best.queue, nil
 }
 
-// needsFitCheckLocked reports whether any candidate is a paused or new
-// session, the only classes that must fit a pod before they dispatch. When
-// none is, Pick skips computing pod room.
-func (a *ThunderAgent) needsFitCheckLocked(candidates []*candidate) bool {
-	for _, c := range candidates {
-		if c.id == "" {
-			continue
-		}
-		if s := a.mgr.sessions[c.id]; s == nil || s.class() != classAdmitted {
-			return true
-		}
-	}
-	return false
-}
-
 // roomLocked is the pod's ceiling minus its working set.
-func (a *ThunderAgent) roomLocked(p *endpointState, now time.Time) float64 {
-	return p.capacity*a.usableCapacityRatio - p.occupancy(now)
+func (a *ThunderAgent) roomLocked(pv *endpointView) float64 {
+	return pv.capacity*a.usableCapacityRatio - pv.load
 }
 
-// sizeAndFitLocked classifies and sizes a candidate and, for a paused or new
-// session, finds the pod it fits once reclaimable idle sessions give up
-// their room. Returns false when the candidate must hold.
-func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpointState]float64) bool {
-	s := a.mgr.sessions[c.id]
-	var committed, inflight float64
-	switch {
-	case c.id == "":
+// classifyLocked sets c's admission class, bound pod, and projected token
+// footprint using live endpoint bindings first and request-header state second.
+func (a *ThunderAgent) classifyLocked(c *candidate, pool *poolView, candStates map[string]sessionstate.SessionState) {
+	if c.id == "" {
 		// Anonymous traffic is not tracked and passes through.
 		c.class = classAdmitted
-		return true
-	case s == nil:
-		c.class = classNew
-	default:
-		c.class = s.class()
-		committed = float64(s.committedTokens)
-		inflight = float64(s.inflightTokens)
+		return
 	}
 
-	// The new turn resends the whole history, so its estimate is the
-	// session's size from now on; committed tokens are the floor. PreRequest
-	// adds the estimate to the turns already in flight.
-	c.tokens = max(committed, inflight+float64(max(estimateTokens(c.sizeBytes), 1)))
+	state, ok := pool.bound[c.id]
+	if !ok {
+		state, ok = candStates[c.id]
+	}
+	c.state = state
+
+	var pod *endpointView
+	if ok && state.Endpoint != "" {
+		pod = pool.pods[state.Endpoint]
+	}
+	c.boundPod = pod
+
+	l := a.local[c.id]
+	switch {
+	case !ok || state.TurnsTaken == 0 || pod == nil:
+		c.class = classNew
+		// A paused session whose pod left the pool re-enters as new rather than
+		// counting a resume against a dead binding.
+		if l != nil && l.paused {
+			l.paused = false
+			l.pausedAtTurns = 0
+		}
+	case l.pausedLive(state):
+		c.class = classPaused
+	default:
+		c.class = classAdmitted
+	}
+
+	var committed, inflight int64
+	if ok {
+		committed = state.ContextTokens
+		inflight = state.InFlightTokens
+	}
+	c.tokens = max(float64(committed), float64(inflight+sessionstate.EstimatePromptTokens(c.sizeBytes)))
+}
+
+// fitsLocked reports whether c may dispatch under the current pod room, or
+// skips the check for admitted sessions or when no pool data is available.
+func (a *ThunderAgent) fitsLocked(c *candidate, rooms, spare map[*endpointView]float64) bool {
 	if c.class == classAdmitted || len(rooms) == 0 {
 		return true
 	}
 	switch c.class {
 	case classPaused:
-		if rooms[s.endpoint]+spare[s.endpoint] >= a.fitTokens(s.endpoint, c.tokens) {
-			c.fitPod = s.endpoint
+		if rooms[c.boundPod]+spare[c.boundPod] >= a.fitTokens(c.boundPod, c.tokens) {
+			c.fitPod = c.boundPod
 		}
 	case classNew:
 		c.fitPod = a.newSessionPod(c.tokens, rooms, spare)
@@ -215,19 +246,19 @@ func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpoint
 // pod's ceiling. A session larger than the ceiling (it grew there through
 // turns that skip the fit check) then fits once every other session on the
 // pod is paused or reclaimable, instead of never.
-func (a *ThunderAgent) fitTokens(p *endpointState, tokens float64) float64 {
-	return min(tokens, p.capacity*a.usableCapacityRatio)
+func (a *ThunderAgent) fitTokens(pv *endpointView, tokens float64) float64 {
+	return min(tokens, pv.capacity*a.usableCapacityRatio)
 }
 
 // newSessionPod picks the pod for a new session: among pods it fits once
 // reclaimable idle sessions give up their room, the one with the most free
 // room. If any pod fits it without pausing anyone, that pod has the most
 // free room, so no one is paused.
-func (a *ThunderAgent) newSessionPod(tokens float64, rooms, spare map[*endpointState]float64) *endpointState {
-	var best *endpointState
-	for p, room := range rooms {
-		if room+spare[p] >= a.fitTokens(p, tokens) && (best == nil || room > rooms[best]) {
-			best = p
+func (a *ThunderAgent) newSessionPod(tokens float64, rooms, spare map[*endpointView]float64) *endpointView {
+	var best *endpointView
+	for pv, room := range rooms {
+		if room+spare[pv] >= a.fitTokens(pv, tokens) && (best == nil || room > rooms[best]) {
+			best = pv
 		}
 	}
 	return best
@@ -238,32 +269,64 @@ func (a *ThunderAgent) newSessionPod(tokens float64, rooms, spare map[*endpointS
 // PreRequest charges it. The reservation keeps the next cycles from admitting
 // into the same room twice, and keeps a dispatched admitted session, no
 // longer queued and not yet in flight, from looking idle and being reclaimed.
-// Returns how many sessions it paused.
-func (a *ThunderAgent) admitLocked(best *candidate, now time.Time, queued map[string]bool) int {
-	m := a.mgr
-	s := m.sessions[best.id]
-	paused := 0
-	switch {
-	case best.class == classAdmitted:
-		if s == nil {
-			return 0 // anonymous traffic
-		}
-		// Its current size is already counted; only the turn's growth is new.
-		paused = m.reclaimLocked(s.endpoint, now, queued, a.roomLocked(s.endpoint, now), max(best.tokens-s.size(), 0))
-	case best.fitPod != nil:
-		paused = m.reclaimLocked(best.fitPod, now, queued, a.roomLocked(best.fitPod, now), a.fitTokens(best.fitPod, best.tokens))
-		s = m.bindLocked(best.id, best.fitPod)
-	case s == nil:
-		// A force-admitted new session that fits no pod: the scheduler
-		// places it and PreRequest binds it.
-		return 0
-	case s.endpoint != nil:
-		// A force-admitted session that fits no pod returns to its own pod.
-		paused = m.reclaimLocked(s.endpoint, now, queued, a.roomLocked(s.endpoint, now), a.fitTokens(s.endpoint, best.tokens))
+// Returns how many sessions it paused and whether a paused session resumed.
+func (a *ThunderAgent) admitLocked(best *candidate, now time.Time, queued map[string]bool) (int, bool) {
+	if best.id == "" {
+		return 0, false
 	}
-	s.reservedTokens = best.tokens
-	s.reservedUntil = now.Add(reservationTTL)
-	return paused
+
+	var targetPod *endpointView
+	var need float64
+	resumed := false
+
+	switch best.class {
+	case classAdmitted:
+		if best.boundPod == nil {
+			return 0, false
+		}
+		targetPod = best.boundPod
+		cur := a.footprintLocked(best.state, a.local[best.id], now)
+		// Its current size is already counted; only the turn's growth is new.
+		need = max(best.tokens-cur, 0)
+	case classPaused:
+		targetPod = best.fitPod
+		if targetPod == nil {
+			// A force-admitted paused session that fits no pod returns to its own pod.
+			targetPod = best.boundPod
+		}
+		if targetPod == nil {
+			return 0, false
+		}
+		need = a.fitTokens(targetPod, best.tokens)
+		resumed = true
+	case classNew:
+		if best.fitPod == nil {
+			// A force-admitted new session that fits no pod: the scheduler
+			// places it and session-state-producer binds it.
+			return 0, false
+		}
+		targetPod = best.fitPod
+		need = a.fitTokens(targetPod, best.tokens)
+	}
+
+	paused := a.reclaimLocked(targetPod, now, queued, need)
+
+	l := a.ensureLocalLocked(best.id)
+	if resumed {
+		l.paused = false
+		l.pausedAtTurns = 0
+	}
+	prevReserved := 0.0
+	if l.reservationLive(best.state, now) && l.reservedEndpoint == targetPod.id {
+		prevReserved = l.reservedTokens
+	}
+	l.reservedEndpoint = targetPod.id
+	l.reservedTokens = max(best.tokens, prevReserved)
+	l.reservedUntil = now.Add(reservationTTL)
+	l.reservedAtTurns = best.state.TurnsTaken
+	l.reservedUnbound = best.boundPod == nil
+
+	return paused, resumed
 }
 
 // betterThan reports whether a outranks b:
@@ -285,15 +348,12 @@ func betterThan(a, b *candidate) bool {
 	return a.wait > b.wait
 }
 
-// headSessionID returns the session of a queue head, read the same way as in
-// PreRequest, or "" for anonymous traffic. A queue is named by the fairness
-// ID, which can group several sessions.
-func headSessionID(head fwkfc.QueueItemAccessor) string {
+func headRequest(head fwkfc.QueueItemAccessor) *fwksched.InferenceRequest {
 	req := head.OriginalRequest()
 	if req == nil {
-		return ""
+		return nil
 	}
-	return sessionID(req.InferenceRequest())
+	return req.InferenceRequest()
 }
 
 // headSizeBytes returns the request body size of a queue head, from the
