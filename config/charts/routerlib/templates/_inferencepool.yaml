@@ -13,9 +13,10 @@ spec:
   - number: {{ .number }}
   {{- end }}
   {{- if $modelServers.protocol }}
-  {{- if eq $modelServers.protocol "grpc" }}
+  {{- $modelServerProtocol := lower $modelServers.protocol }}
+  {{- if eq $modelServerProtocol "grpc" }}
   appProtocol: "kubernetes.io/h2c"
-  {{- else if eq $modelServers.protocol "http" }}
+  {{- else if eq $modelServerProtocol "http" }}
   appProtocol: "http"
   {{- end }}
   {{- end }}
