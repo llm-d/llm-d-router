@@ -24,37 +24,36 @@ import (
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-var (
+func newCollectors(name string) (fairnessIndex prometheus.Gauge, avgWaitTimeMs *prometheus.GaugeVec) {
+	labels := prometheus.Labels{"policy": name}
 	fairnessIndex = prometheus.NewGauge(
 		prometheus.GaugeOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "program_aware_jains_fairness_index",
-			Help:      metricsutil.HelpMsgWithStability("Jain's fairness index over average wait time across active programs.", compbasemetrics.ALPHA),
+			Subsystem:   eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:        "program_aware_jains_fairness_index",
+			Help:        metricsutil.HelpMsgWithStability("Jain's fairness index over average wait time across active programs.", compbasemetrics.ALPHA),
+			ConstLabels: labels,
 		},
 	)
 
 	avgWaitTimeMs = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "program_aware_avg_wait_time_milliseconds",
-			Help:      metricsutil.HelpMsgWithStability("Cumulative mean of flow-control queue wait time per program in milliseconds.", compbasemetrics.ALPHA),
+			Subsystem:   eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:        "program_aware_avg_wait_time_milliseconds",
+			Help:        metricsutil.HelpMsgWithStability("Cumulative mean of flow-control queue wait time per program in milliseconds.", compbasemetrics.ALPHA),
+			ConstLabels: labels,
 		},
 		[]string{"program_id"},
 	)
-)
-
-func GetCollectors() []prometheus.Collector {
-	return []prometheus.Collector{fairnessIndex, avgWaitTimeMs}
+	return fairnessIndex, avgWaitTimeMs
 }
 
 // setProgramGauge sets a per-program gauge under the shared fairness-ID label cap. Programs past
 // the cap are skipped: one overflow series would only hold whichever program wrote last.
 func setProgramGauge(vec *prometheus.GaugeVec, id string, v float64) {
+	if vec == nil {
+		return
+	}
 	if label, overflow := metricsutil.BoundFairnessIDWithOverflow(id); !overflow {
 		vec.WithLabelValues(label).Set(v)
 	}
-}
-
-func DeleteSharedSeries(id string) {
-	avgWaitTimeMs.DeleteLabelValues(id)
 }
