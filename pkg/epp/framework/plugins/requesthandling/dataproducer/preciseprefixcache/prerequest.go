@@ -426,13 +426,31 @@ func (p *Producer) PreRequest(ctx context.Context,
 			continue
 		}
 		podID := fmt.Sprintf("%s:%s", md.Address, md.Port)
-		prompts := state.perFormatKeys[p.kvCacheIndexer.CacheFormat(podID)]
-		for _, promptKeys := range prompts {
-			if len(promptKeys) > 0 {
-				perPodKeys[podID] = prompts
-				podIDs = append(podIDs, podID)
-				break
+		format := p.kvCacheIndexer.CacheFormat(podID)
+		engineBlockSize := 0
+		if metrics := target.GetMetrics(); metrics != nil {
+			engineBlockSize = metrics.CacheBlockSize
+		}
+		var prompts [][]kvblock.BlockHash
+		kept, dropped := 0, 0
+		for _, promptKeys := range state.perFormatKeys[format] {
+			n := engineReusableKeys(len(promptKeys), format.BlockSize, engineBlockSize)
+			kept += n
+			dropped += len(promptKeys) - n
+			if n > 0 {
+				prompts = append(prompts, promptKeys[:n])
 			}
+		}
+		logger.V(logging.TRACE).Info("Speculative keys within whole engine blocks",
+			"requestID", request.RequestID,
+			"pod", podID,
+			"blockSize", format.BlockSize,
+			"engineBlockSize", engineBlockSize,
+			"keptKeys", kept,
+			"droppedKeys", dropped)
+		if len(prompts) > 0 {
+			perPodKeys[podID] = prompts
+			podIDs = append(podIDs, podID)
 		}
 	}
 	if len(perPodKeys) == 0 {
@@ -449,9 +467,6 @@ func (p *Producer) PreRequest(ctx context.Context,
 		pod := kvblock.PodEntry{PodIdentifier: podID, Speculative: true}
 		// Insert per-prompt keys separately to preserve correct block adjacency.
 		for _, promptKeys := range perPodKeys[podID] {
-			if len(promptKeys) == 0 {
-				continue
-			}
 			if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{pod}); err != nil {
 				logger.Error(err, "Failed to add speculative entries to index", "pod", podID)
 			}
@@ -463,6 +478,18 @@ func (p *Producer) PreRequest(ctx context.Context,
 		"pods", len(perPodKeys),
 		"ttl", p.speculativeTTL)
 	return nil
+}
+
+// engineReusableKeys returns how many of numKeys leading blocks of blockSize
+// tokens fall within whole engine blocks of engineBlockSize tokens. The engine
+// reuses only whole blocks, so an entry past the last one credits tokens the
+// engine recomputes. An engineBlockSize of 0, from an endpoint that reports no
+// block size, keeps every key.
+func engineReusableKeys(numKeys, blockSize, engineBlockSize int) int {
+	if engineBlockSize <= 0 {
+		return numKeys
+	}
+	return numKeys * blockSize / engineBlockSize * engineBlockSize / blockSize
 }
 
 // RequestAbandoned releases the per-request state when the request is abandoned
