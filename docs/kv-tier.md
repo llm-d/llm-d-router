@@ -77,9 +77,18 @@ A later request does not wait for a prefetch:
 - The router can also add a `kv.fetch` hint to the later request. Blocks already delivered are skipped, and the rest are pulled.
 - vLLM's tier interface has a `RETRY` lookup result for blocks still in transfer. It would let the request wait. The tier does not use it yet.
 
-The router calls the daemon directly because vLLM's hints are per request. A prefetch sent as a hint would have to ride on an inference request to the source. Background moves would then depend on foreground traffic. The direct call needs no vLLM change. Blocks that land in a pool reach vLLM through the existing stored events.
+The router sends a prefetch or move straight to the source daemon's peer port. It does not attach it to an inference request.
 
-The direct call carries the same hint a request would. It is vLLM's KV hint envelope, with a `kv.prefetch` or `kv.move` action. The router builds one message and chooses how to deliver it: on a request, or straight to the daemon's peer port. The direct call also names the model, because no request is there to supply it. A shared token guards the call, and it is off unless the daemon has a token. Pinning and retention hints will use the direct call too. Two pieces of work remain:
+- The message is vLLM's KV hint envelope with a `kv.prefetch` or `kv.move` action. It is the same hint a request could carry.
+- The message also names the model. A request would normally supply that.
+- A shared token guards the call. The call is off unless the daemon has a token.
+- vLLM needs no change. Blocks that land in a pool reach vLLM through the existing stored events.
+
+The router sends it directly because a hint on a request needs a request. A prefetch that rode on requests to the source could only move when the source had traffic.
+
+Pinning and retention hints will be sent the same way.
+
+Two pieces of work remain:
 
 - The rest of the peer port needs authentication. It is plain TCP today. Any host that reaches it can pull blocks, or tell a daemon to pull blocks from another one.
 - The router needs a plugin that decides what to prefetch and when. It can already build a daemon's endpoint from the pod's address when the daemon is a sidecar. A DaemonSet deployment needs a way to map an engine to its node's daemon.
