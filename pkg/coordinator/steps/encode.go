@@ -102,11 +102,6 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return nil
 	}
 
-	reqCtx.EncodeFanout = len(reqCtx.MultimodalEntries)
-
-	results := make([]map[string]any, len(reqCtx.MultimodalEntries))
-	responseHeaders := make([]http.Header, len(reqCtx.MultimodalEntries))
-
 	format := resolveFormat(s.useOpenAIFormat, reqCtx.OriginalPath)
 	var partsByMod map[reqcommon.Modality][]mediaPart
 	if format != reqcommon.APITypeVLLMGenerate || reqCtx.MMPayload != "" {
@@ -138,13 +133,30 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		bodies[i] = body
 	}
 
+	// A repeated non-empty hash needs one encoder response; empty hashes are independent.
+	requestIndices := make([]int, 0, len(reqCtx.MultimodalEntries))
+	seenHashes := make(map[string]struct{}, len(reqCtx.MultimodalEntries))
+	for i, entry := range reqCtx.MultimodalEntries {
+		if entry.Hash != "" {
+			if _, seen := seenHashes[entry.Hash]; seen {
+				continue
+			}
+			seenHashes[entry.Hash] = struct{}{}
+		}
+		requestIndices = append(requestIndices, i)
+	}
+
+	reqCtx.EncodeFanout = len(requestIndices)
+	results := make([]map[string]any, len(requestIndices))
+	responseHeaders := make([]http.Header, len(requestIndices))
+
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxParallel)
-	for i := range reqCtx.MultimodalEntries {
+	for resultIndex, entryIndex := range requestIndices {
 		g.Go(func() error {
-			result, headers, err := s.executeOne(gCtx, logger, reqCtx, i, bodies[i], format)
-			results[i] = result
-			responseHeaders[i] = headers
+			result, headers, err := s.executeOne(gCtx, logger, reqCtx, entryIndex, bodies[entryIndex], format)
+			results[resultIndex] = result
+			responseHeaders[resultIndex] = headers
 			return err
 		})
 	}
