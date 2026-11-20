@@ -42,6 +42,10 @@ const (
 	// finishReasonLength is the finish reason when max_tokens was reached.
 	finishReasonLength = "length"
 
+	// maxDecodeChunks bounds a request whose chunks consume tokens without
+	// extending the text, which an unset max_tokens would otherwise never stop.
+	maxDecodeChunks = 1024
+
 	requestFieldStructuredOutputs = "structured_outputs"
 	responseFormatText            = "text"
 )
@@ -202,13 +206,6 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		messages = messages[:len(messages)-1]
 	}
 
-	if streamingEnabled {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Transfer-Encoding", "chunked")
-	}
-
 	var (
 		totalTokens          int
 		chunkIndex           int
@@ -333,6 +330,26 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 			return
 		}
 
+		// Thinking text is outside message.content, so a later chunk would
+		// continue an empty assistant message and restart the thinking. The
+		// prefilled KV was consumed by the first chunk, so the decoder serves the
+		// prompt from its prefix cache or recomputes it.
+		if chunkIndex == 0 && choiceHasReasoning(firstChoice(chunkResponse)) {
+			logger.V(logging.DEBUG).Info("chunked decode: reasoning in first chunk, using regular decode")
+			decodeReq := maps.Clone(body)
+			delete(decodeReq, reqcommon.FieldKVTransferParams)
+			decodeBody, err := json.Marshal(decodeReq)
+			if err != nil {
+				if err := errorJSONInvalid(w, r, err); err != nil {
+					logger.Error(err, "failed to send error response to client")
+				}
+				return
+			}
+			compareChunk(decodeBody)
+			s.decoderProxy.ServeHTTP(w, cloneRequestWithBody(ctx, r, decodeBody))
+			return
+		}
+
 		lastResponse = chunkResponse
 		chunkTokens := countTokensInResponse(chunkResponse)
 		totalTokens += chunkTokens
@@ -352,9 +369,18 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		// Guard against infinite loop: if the chunk produced no tokens and no
 		// text there is nothing to continue from.
 		empty := chunkTokens == 0 && chunkText == ""
+		capped := chunkIndex == maxDecodeChunks
 
 		if streamingEnabled {
-			last := terminal || empty || remainingTokens(originalMaxTokens, totalTokens) == 0
+			// Set once the first chunk has not fallen back to regular decode,
+			// whose response brings its own headers.
+			if chunkIndex == 1 {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("Transfer-Encoding", "chunked")
+			}
+			last := terminal || empty || capped || remainingTokens(originalMaxTokens, totalTokens) == 0
 			if err := emitSSEChunk(w, chunkResponse, last); err != nil {
 				logger.Error(err, "failed to write SSE chunk to client")
 				return
@@ -373,6 +399,11 @@ func (s *Server) runChunkedDecodeFromMap(w http.ResponseWriter, r *http.Request,
 		if empty {
 			logger.Info("chunked decode: empty chunk with no tokens, stopping to avoid infinite loop",
 				"chunk", chunkIndex)
+			break
+		}
+
+		if capped {
+			logger.Info("chunked decode: chunk limit reached, stopping", "chunks", chunkIndex, "totalTokens", totalTokens)
 			break
 		}
 
@@ -562,6 +593,17 @@ func extractChoiceText(choice map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// choiceHasReasoning reports whether a choice's message carries reasoning text.
+func choiceHasReasoning(choice map[string]any) bool {
+	msg, _ := choice[reqcommon.FieldMessage].(map[string]any)
+	for _, field := range []string{reqcommon.FieldReasoning, reqcommon.FieldReasoningContent} {
+		if text, _ := msg[field].(string); text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // toWholeInt is toInt for whole numbers: a float64 with a fraction is
