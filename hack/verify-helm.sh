@@ -1370,3 +1370,25 @@ for pb in false true; do
     exit 1
   fi
 done
+
+echo "Verifying standalone Envoy access log formats..."
+if ! "${YQ}" -e '
+  select(.kind == "ConfigMap" and (.data | has("envoy.yaml")))
+  | .data."envoy.yaml" | from_yaml
+  | .static_resources.listeners[] | select(.name == "vllm")
+  | .access_log[0].typed_config.log_format as $listener
+  | (.filter_chains[].filters[] | select(.name == "envoy.filters.network.http_connection_manager")
+     | .typed_config.access_log[0].typed_config.log_format) as $http
+  | ($listener.json_format | sort_keys(..) | to_json) as $fields_json
+  | select(
+      $listener.omit_empty_values == true and $http.omit_empty_values == true
+      and $fields_json == ($http.json_format | sort_keys(..) | to_json)
+      and ($fields_json | contains("...") | not)
+      and $listener.json_format.status == "%RESPONSE_CODE%"
+      and $listener.json_format.details == "%RESPONSE_CODE_DETAILS%"
+      and $listener.json_format.cluster == "%UPSTREAM_CLUSTER%"
+    )
+' "${envoy_default_output}" >/dev/null; then
+  echo "Expected matching Envoy JSON access log fields and omit_empty_values on both logs" >&2
+  exit 1
+fi
