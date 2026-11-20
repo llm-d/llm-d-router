@@ -1064,6 +1064,12 @@ func (d *Director) releaseProducerState(ctx context.Context, request *fwksched.I
 			}
 		}
 	}
+	// RequestHeader processors may also hold pending state until PreRequest.
+	for _, p := range d.requestControlPlugins.requestHeaderPlugins {
+		if abandoner, ok := p.(fwkrh.RequestAbandoned); ok {
+			abandoner.RequestAbandoned(ctx, request)
+		}
+	}
 }
 
 // scopeResponseStreamingPlugins confines each ResponseStreaming plugin to its
