@@ -108,6 +108,7 @@ type options struct {
 	portOverride   int
 	useNodeAddress bool
 	interval       time.Duration
+	proxyURL       *url.URL
 	onExtractor    func(fwkplugin.Plugin)
 }
 
@@ -130,6 +131,31 @@ func WithUseNodeAddress() Option {
 // every base tick (the default).
 func WithInterval(d time.Duration) Option {
 	return func(o *options) { o.interval = d }
+}
+
+// WithProxyURL sends the source's requests through the HTTP proxy at proxyURL
+// instead of dialing the endpoint. The request still names the endpoint, so a
+// proxy such as a sidecar that adds mTLS can forward it. Other sources keep
+// dialing directly.
+func WithProxyURL(proxyURL *url.URL) Option {
+	return func(o *options) { o.proxyURL = proxyURL }
+}
+
+// ParseProxyURLOption parses a proxy URL from plugin parameters and returns a
+// WithProxyURL Option. An empty string returns a no-op Option so callers can
+// always append the result.
+func ParseProxyURLOption(raw string) (Option, error) {
+	if raw == "" {
+		return func(*options) {}, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL %q: %w", raw, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("invalid proxy URL %q: must be http:// or https:// with a host", raw)
+	}
+	return WithProxyURL(u), nil
 }
 
 // WithExtractorObserver calls fn with each extractor bound to the source, so a source can
@@ -192,14 +218,20 @@ func NewHTTPDataSource[T any](scheme, path string, tlsOpts TLSOptions,
 			},
 		},
 	}
-	if scheme == "https" {
-		tlsCfg, err := tlsClientConfig(tlsOpts)
-		if err != nil {
-			return nil, err
+	if scheme == "https" || cfg.proxyURL != nil {
+		// baseTransport is shared by every source; a source that changes it gets a copy.
+		transport := baseTransport.Clone()
+		if scheme == "https" {
+			tlsCfg, err := tlsClientConfig(tlsOpts)
+			if err != nil {
+				return nil, err
+			}
+			transport.TLSClientConfig = tlsCfg
 		}
-		httpsTransport := baseTransport.Clone()
-		httpsTransport.TLSClientConfig = tlsCfg
-		cl.Transport = httpsTransport
+		if cfg.proxyURL != nil {
+			transport.Proxy = http.ProxyURL(cfg.proxyURL)
+		}
+		cl.Transport = transport
 	}
 	return &HTTPDataSource[T]{
 		typedName:      fwkplugin.TypedName{Type: pluginType, Name: pluginName},
