@@ -336,6 +336,12 @@ func TestCapSingleToken(t *testing.T) {
 			want:    map[string]any{"model": "m", "max_tokens": 100, "max_output_tokens": 1, "stream": false, "store": false},
 		},
 		{
+			name:    "audio speech caps max_new_tokens",
+			apiType: APITypeAudioSpeech,
+			body:    map[string]any{"model": "m", "max_new_tokens": 800, "stream": true},
+			want:    map[string]any{"model": "m", "max_new_tokens": 1, "stream": false},
+		},
+		{
 			name:    "generate preserves other sampling_params entries",
 			apiType: APITypeVLLMGenerate,
 			body: map[string]any{
@@ -404,6 +410,13 @@ func TestOutputTokenLimit(t *testing.T) {
 			apiType: APITypeResponses,
 			body:    map[string]any{"max_output_tokens": float64(800)},
 			want:    800,
+			wantOK:  true,
+		},
+		{
+			name:    "audio speech reads max_new_tokens",
+			apiType: APITypeAudioSpeech,
+			body:    map[string]any{"max_new_tokens": float64(128)},
+			want:    128,
 			wantOK:  true,
 		},
 		{

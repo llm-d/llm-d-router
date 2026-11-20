@@ -26,6 +26,22 @@ router:
     # draining window time to complete and allows in-flight connections to drain.
     terminationGracePeriodSeconds: 70
 
+    # Rollout settings for the proxy Deployment when mode=service. deploymentStrategy
+    # overrides spec.strategy (unset = the Kubernetes default of RollingUpdate with 25%
+    # maxUnavailable, which can drop serving proxies before their replacements are
+    # Ready); minReadySeconds is how long a new pod must stay Ready before it counts
+    # as available, and must be a whole number from 0 to 599: the Deployment's
+    # progressDeadlineSeconds (the Kubernetes default of 600) has to exceed it,
+    # and the API server rejects anything else, so the render fails fast on
+    # out-of-range values. Both ignored in sidecar mode (router.epp.
+    # deploymentStrategy and router.epp.minReadySeconds govern the shared pod).
+    # deploymentStrategy:
+    #   type: RollingUpdate
+    #   rollingUpdate:
+    #     maxUnavailable: 0
+    #     maxSurge: 1
+    # minReadySeconds: 10
+
     # Pod scheduling for the proxy Deployment when mode=service. In sidecar mode
     # the proxy shares the EPP pod and follows router.epp.nodeSelector, affinity and tolerations.
     nodeSelector: {}
@@ -129,6 +145,8 @@ router:
                 "upstream" "%UPSTREAM_HOST%"
                 "upstream_failure" "%UPSTREAM_TRANSPORT_FAILURE_REASON%"
               -}}
+              {{- $eppHealthPortCheck := eq (include "llm-d-router.proxy.eppHealthPortCheck" .) "true" -}}
+              {{- $eppHealthPort := .Values.router.epp.grpcHealthPort | default 9003 -}}
               admin:
                 address:
                   socket_address:
@@ -199,6 +217,7 @@ router:
                           "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
                           path: /dev/stdout
                           log_format:
+                            omit_empty_values: true
                             json_format:
                               {{- $accessLogFormat | toYaml | nindent 16 }}
                     filter_chains:
@@ -327,6 +346,7 @@ router:
                                     "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
                                     path: /dev/stdout
                                     log_format:
+                                      omit_empty_values: true
                                       json_format:
                                         {{- $accessLogFormat | toYaml | nindent 26 }}
                 clusters:
@@ -351,6 +371,13 @@ router:
                         - max_connections: 40000
                           max_pending_requests: 40000
                           max_requests: 40000
+                    {{- if eq (lower ((.Values.router.modelServers | default dict).protocol | default "http")) "grpc" }}
+                    typed_extension_protocol_options:
+                      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+                        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+                        explicit_http_config:
+                          http2_protocol_options: {}
+                    {{- end }}
                     original_dst_lb_config:
                       use_http_header: true
                       http_header_name: x-gateway-destination-endpoint
@@ -366,6 +393,13 @@ router:
                         - max_connections: 40000
                           max_pending_requests: 40000
                           max_requests: 40000
+                    {{- if eq (lower ((.Values.router.modelServers | default dict).protocol | default "http")) "grpc" }}
+                    typed_extension_protocol_options:
+                      envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+                        "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+                        explicit_http_config:
+                          http2_protocol_options: {}
+                    {{- end }}
                     outlier_detection:
                       split_external_local_origin_errors: true
                       consecutive_local_origin_failure: 5
@@ -460,7 +494,21 @@ router:
                         reuse_connection: true
                         grpc_health_check:
                           service_name: "envoy.service.ext_proc.v3.ExternalProcessor"
+                        {{- if not $eppHealthPortCheck }}
               {{ include "llm-d-router.proxy.envoyExtProcTLSOptions" . | indent 10 }}
+                        {{- else if eq (include "llm-d-router.proxy.eppSecureServing" .) "true" }}
+                        # EPP's gRPC health port is plaintext even when ext_proc serves TLS.
+                        transport_socket_match_criteria:
+                          health: plaintext
+                    transport_socket_matches:
+                      - name: plaintext-health
+                        match:
+                          health: plaintext
+                        transport_socket:
+                          name: envoy.transport_sockets.raw_buffer
+                          typed_config:
+                            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+                        {{- end }}
               {{ include "llm-d-router.proxy.envoyExtProcTransportSocket" . | indent 6 }}
                     typed_extension_protocol_options:
                       envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -500,6 +548,10 @@ router:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) (int $i) (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
+                                {{- if $eppHealthPortCheck }}
+                                health_check_config:
+                                  port_value: {{ $eppHealthPort }}
+                                {{- end }}
                               load_balancing_weight: 1
                             {{- end }}
                         - locality:
@@ -515,6 +567,10 @@ router:
                                   socket_address:
                                     address: {{ printf "%s-%d.%s-headless.%s.svc.%s" (include "llm-d-router.name" $) $ord (include "llm-d-router.name" $) $.Release.Namespace ($.Values.router.clusterDomain | default "cluster.local") }}
                                     port_value: 9002
+                                {{- if $eppHealthPortCheck }}
+                                health_check_config:
+                                  port_value: {{ $eppHealthPort }}
+                                {{- end }}
                               load_balancing_weight: 1
                             {{- end }}
                         {{- else }}
@@ -526,6 +582,10 @@ router:
                                   socket_address:
                                     address: {{ include "llm-d-router.proxy.extProcHost" . }}
                                     port_value: 9002
+                                {{- if $eppHealthPortCheck }}
+                                health_check_config:
+                                  port_value: {{ $eppHealthPort }}
+                                {{- end }}
                               load_balancing_weight: 1
                         {{- end }}
         name: envoy-proxy
