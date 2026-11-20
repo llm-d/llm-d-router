@@ -188,6 +188,7 @@ func recordRequestTPOT(ctx context.Context, pluginName, pluginType, modelName, t
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot)
 		return false
 	}
+	modelName, targetModelName = eppmetrics.BoundModels(modelName, targetModelName)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOT).Set(tpot)
 	return true
 }
@@ -198,6 +199,7 @@ func recordRequestTPOTWithSLO(ctx context.Context, pluginName, pluginType, model
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot)
 		return false
 	}
+	modelName, targetModelName = eppmetrics.BoundModels(modelName, targetModelName)
 
 	if tpot > sloThreshold {
 		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOTSLOViolation).Set(1)
@@ -217,6 +219,7 @@ func recordRequestPredictedTPOT(ctx context.Context, pluginName, pluginType, mod
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", predictedTPOT)
 		return false
 	}
+	modelName, targetModelName = eppmetrics.BoundModels(modelName, targetModelName)
 	metricsutil.ObserveWithTraceExemplar(ctx,
 		llmdRequestPredictedTPOT.WithLabelValues(pluginName, pluginType, modelName, targetModelName), predictedTPOT)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typePredictedTPOT).Set(predictedTPOT)
@@ -229,6 +232,7 @@ func recordRequestTPOTPredictionDuration(ctx context.Context, pluginName, plugin
 			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
 		return false
 	}
+	modelName, targetModelName = eppmetrics.BoundModels(modelName, targetModelName)
 	metricsutil.ObserveWithTraceExemplar(ctx,
 		llmdRequestTPOTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName), duration)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOTPredictionDuration).Set(duration)
@@ -241,6 +245,7 @@ func recordRequestTTFT(ctx context.Context, pluginName, pluginType, modelName, t
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
 		return false
 	}
+	modelName, targetModelName = eppmetrics.BoundModels(modelName, targetModelName)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFT).Set(ttft)
 	return true
 }
@@ -251,6 +256,7 @@ func recordRequestTTFTWithSLO(ctx context.Context, pluginName, pluginType, model
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
 		return false
 	}
+	modelName, targetModelName = eppmetrics.BoundModels(modelName, targetModelName)
 
 	if ttft > sloThreshold {
 		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFTSLOViolation).Set(1)
@@ -270,6 +276,7 @@ func recordRequestPredictedTTFT(ctx context.Context, pluginName, pluginType, mod
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", predictedTTFT)
 		return false
 	}
+	modelName, targetModelName = eppmetrics.BoundModels(modelName, targetModelName)
 	metricsutil.ObserveWithTraceExemplar(ctx,
 		llmdRequestPredictedTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName), predictedTTFT)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typePredictedTTFT).Set(predictedTTFT)
@@ -282,6 +289,7 @@ func recordRequestTTFTPredictionDuration(ctx context.Context, pluginName, plugin
 			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
 		return false
 	}
+	modelName, targetModelName = eppmetrics.BoundModels(modelName, targetModelName)
 	metricsutil.ObserveWithTraceExemplar(ctx,
 		llmdRequestTTFTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName), duration)
 	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFTPredictionDuration).Set(duration)
