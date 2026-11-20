@@ -1086,6 +1086,16 @@ func (d *Director) scopeResponseStreamingPlugins(ctx context.Context, request *f
 func (d *Director) runResponseBodyPlugins(ctx context.Context, requests []*fwksched.InferenceRequest, response *fwkrh.Response, targetEndpoint *fwkdl.EndpointMetadata) {
 	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
 	for i, plugin := range d.requestControlPlugins.responseStreamingPlugins {
+		// scopeResponseStreamingPlugins yields no request for a response whose request was
+		// never scheduled: a request without a body is routed from its headers alone, so
+		// HandleRequest never runs and no SchedulingRequest is built, while its response
+		// still arrives here. The plugins are written against a scheduled request, and one
+		// that dereferences it takes the process down, so such a response runs none of them.
+		// Skipping one plugin does not reorder the rest: they are visited in the order the
+		// data dependencies put them in.
+		if requests[i] == nil {
+			continue
+		}
 		// This loop runs per response chunk, so it caches TypedName and guards
 		// the log calls: passing arguments to a disabled logger still boxes them
 		// into a heap-allocated slice.
