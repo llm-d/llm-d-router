@@ -44,6 +44,7 @@ import (
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection/crossbandfairness"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -1294,6 +1295,54 @@ func TestProcessor(t *testing.T) {
 						"an unwritten order buffer should dispatch the highest priority band")
 					assert.Nil(t, low.FinalState(), "the lower band should not be reached")
 				})
+
+				// The policy tests in the plugin package drive a reimplementation of this dispatch loop.
+				// Running the real policy against the real processor is what catches the two drifting apart.
+				t.Run("should converge on weighted shares with the cross-band fairness policy",
+					func(t *testing.T) {
+						t.Parallel()
+						h := newTestHarness(t, testCleanupTick)
+
+						// Linear weights by ordinal position are 3, 2 and 1, so the schedule repeats every
+						// six opportunities and splits them 3:2:1.
+						keys := []flowcontrol.FlowKey{
+							{ID: "flow-high", Priority: 100},
+							{ID: "flow-mid", Priority: 50},
+							{ID: "flow-low", Priority: 10},
+						}
+						const (
+							queuedPerBand = 40
+							cycles        = 60
+						)
+						queues := make([]*mocks.MockManagedQueue, len(keys))
+						for i, key := range keys {
+							queues[i] = h.addQueue(key)
+							for n := range queuedPerBand {
+								item := h.newTestItem(fmt.Sprintf("item-%d-%d", key.Priority, n), key, testTTL)
+								require.NoError(t, queues[i].Add(item))
+							}
+						}
+
+						// Saturated, and the default usage limit policy holds every ceiling at 1.0, so the
+						// bands compete ungated.
+						h.saturationDetector.SaturationFunc = func(_ context.Context, _ []fwkdl.Endpoint) float64 {
+							return 0.9
+						}
+						policy, err := crossbandfairness.PolicyFactory("wfq",
+							plugin.StrictDecoder([]byte(`{"activationThreshold": 0.8}`)), nil)
+						require.NoError(t, err)
+						h.processor.bandSelectionPolicy = policy.(flowcontrol.BandSelectionPolicy)
+
+						for range cycles {
+							require.True(t, h.processor.dispatchCycle(context.Background()),
+								"every cycle has work to dispatch")
+						}
+
+						// Strict order would give the highest band all 60.
+						assert.Equal(t, 30, queuedPerBand-queues[0].Len(), "priority 100 should take 3/6")
+						assert.Equal(t, 20, queuedPerBand-queues[1].Len(), "priority 50 should take 2/6")
+						assert.Equal(t, 10, queuedPerBand-queues[2].Len(), "priority 10 should take 1/6")
+					})
 			})
 		})
 
