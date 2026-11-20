@@ -494,6 +494,49 @@ All three `outcome` series and the duration histogram are created at zero when a
 starts for a source type, so a first `error` or `timeout` after a healthy run is a 0 to 1
 increment that `rate()` and `increase()` can see, not a series that first appears at `1`.
 
+### Cross-replica state sync
+
+These metrics are emitted only when a cross-replica syncer is configured and at least one
+plugin shares state through it. They describe what this replica publishes to its peers.
+`state_key` is the key a plugin shares state under (for example the in-flight load of one
+`inflight-load-producer` instance); no endpoint or pod labels are emitted.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_cross_replica_publishes_total` | Counter | `state_key`, `outcome` | Endpoint values handed to the syncer, by outcome. `outcome` is `success`, `error` (the syncer refused the write), or `timeout` (the publish deadline expired, including endpoints left unattempted). One publish cycle adds one count per attempted endpoint and state key; an endpoint removed during the cycle is not attempted. |
+| `llm_d_epp_cross_replica_last_publish_timestamp_seconds` | Gauge | `state_key` | Unix time of the last clean publish cycle: at least one endpoint published and none failed. A cycle with any failure leaves it unchanged. Absent until the first clean cycle. |
+| `llm_d_epp_cross_replica_publish_cycle_duration_seconds` | Histogram | none | Wall-clock time of one publish cycle over every registered endpoint. Buckets run from 0.5 ms to 2.5 s. |
+
+The publish failure log is rate limited to one line every 30 seconds, so during a syncer outage
+these counters are the complete record. Every `outcome` series is created at zero when the
+publisher starts. A cycle cut short by shutdown is not recorded.
+
+Peers keep using the last value this replica published until the syncer's `stateTTL` expires
+it, so the age of the last clean cycle bounds how stale this replica's load can look to them.
+Because one failing endpoint stops the clock, this also catches an endpoint that never
+publishes while the others do:
+
+```promql
+time() - llm_d_epp_cross_replica_last_publish_timestamp_seconds
+```
+
+To alert on a syncer that is failing for this replica (`timeout` points at a slow syncer,
+`error` at one refusing writes):
+
+```promql
+sum by (pod, state_key) (rate(llm_d_epp_cross_replica_publishes_total{outcome=~"error|timeout"}[5m])) > 0
+```
+
+A publish cycle that takes longer than `crossReplicaSyncInterval` delays the next one, so
+peers see older state than the interval suggests. Compare the cycle duration with the interval:
+
+```promql
+histogram_quantile(0.99, sum by (le) (rate(llm_d_epp_cross_replica_publish_cycle_duration_seconds_bucket[5m])))
+```
+
+These metrics cover the publish side only. How old the peer values a replica reads are depends
+on the syncer and is not reported.
+
 ### Endpoint health
 
 These metrics belong to `endpoint-health-filter`. They are registered when the filter is configured
@@ -873,10 +916,10 @@ only when that plugin is configured and records the related prediction, observat
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_inference_request_metric` | Gauge | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | Observed request metric. |
-| `llm_d_epp_request_predicted_ttft_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time to first token. |
-| `llm_d_epp_request_ttft_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TTFT prediction. |
-| `llm_d_epp_request_predicted_tpot_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time per output token. |
-| `llm_d_epp_request_tpot_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TPOT prediction. |
+| `llm_d_epp_request_predicted_ttft_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time to first token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_ttft_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TTFT prediction. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_predicted_tpot_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time per output token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_tpot_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TPOT prediction. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_slo_violation_total` | Counter | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | SLO violations. |
 | `llm_d_epp_request_prediction_failures_total` | Counter | `plugin_name`, `plugin_type`, `reason` | Failed latency prediction attempts (`request_error`, `nil_response`, `length_mismatch`, `predictor_unavailable`). |
 
@@ -1213,6 +1256,8 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_events_subscriber_reconnections_total` | Counter | `pod_identifier` | ZMQ subscriber reconnection attempts. |
 | `llm_d_epp_kv_cache_events_messages_received_total` | Counter | `pod_identifier` | Messages received from ZMQ subscribers. |
 | `llm_d_epp_kv_cache_events_zmq_errors_total` | Counter | `pod_identifier`, `operation` | ZMQ subscriber errors. |
+| `llm_d_epp_kv_cache_events_live_only_subscribers` | Gauge | - | ZMQ subscribers indexing from live events only after a failed snapshot or replay load, until they follow a complete event sequence again or are removed. The failed load is logged with the pod identifier. |
+| `llm_d_epp_kv_cache_events_snapshot_load_duration_seconds` | Histogram | - | Successful snapshot loads, from the request until the batches are queued for indexing. Failed and unavailable snapshots are counted in `llm_d_epp_kv_cache_events_zmq_errors_total` with `operation="snapshot"`. |
 | `llm_d_epp_kv_cache_events_pool_queue_depth` | Gauge | - | Messages queued across event-pool workers. |
 | `llm_d_epp_kv_cache_events_pool_capacity` | Gauge | - | Event-pool worker capacity. |
 

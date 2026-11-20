@@ -761,6 +761,26 @@ func TestInFlightLoadProducer_EndOfStreamObservesOutput(t *testing.T) {
 	require.Equal(t, int64(300), producer.tokenEstimator.EstimateOutputFromRequest(req))
 }
 
+func TestInFlightLoadProducer_TTSCompletionDoesNotTrainTextEstimate(t *testing.T) {
+	producer := newTestProducer(t)
+	req := &fwksched.InferenceRequest{
+		RequestID: "req-tts",
+		Body: &fwkrequest.InferenceRequestBody{
+			TextToSpeech: &fwkrequest.TextToSpeechRequest{Input: "hello"},
+		},
+		SchedulingResult: &fwksched.SchedulingResult{},
+	}
+
+	producer.ResponseBody(context.Background(), req, &fwkrh.Response{
+		EndOfStream:      true,
+		TerminationCause: fwkrh.TerminationCauseNatural,
+		Usage:            fwkrequest.Usage{CompletionTokens: 50},
+	}, nil)
+
+	textReq := makeTokenRequest("req-text", 4)
+	require.Equal(t, UnknownOutputTokens, producer.tokenEstimator.EstimateOutputFromRequest(textReq))
+}
+
 // makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
 // which is what the estimator reads to derive the input token count. No outlen-bucket
 // attribute is set, so the estimator reads the request as UNKNOWN (the zero value) --
@@ -1206,7 +1226,7 @@ func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		producer.releaseTokensEarly(res.ProfileResults["default"].TargetEndpoints[0], req, "default")
+		producer.releaseTokensEarly(res.ProfileResults["default"].TargetEndpoints[0], req.RequestID, "default")
 	}()
 	go func() {
 		defer wg.Done()

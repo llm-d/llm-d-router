@@ -72,6 +72,7 @@ const (
 	FieldMaxTokens            = "max_tokens"
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
+	FieldMaxNewTokens         = "max_new_tokens"    // Used by vLLM-Omni audio/speech
 	FieldMinTokens            = "min_tokens"
 	FieldPrompt               = "prompt"
 	FieldStream               = "stream"
