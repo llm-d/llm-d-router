@@ -112,7 +112,7 @@ Engines share blocks only when their bytes are interchangeable. The namespace co
 
 - The pool evicts by LRU. It is the only policy today (`--policy lru`).
 - The policy sits behind an interface. Future hint actions, such as pinning a shared prefix or setting retention priority, can change eviction without touching the rest of the daemon.
-- Pinned blocks are never evicted. Neither are blocks still being written.
+- A block is never evicted while an engine is copying it in or out.
 - A store that finds no evictable slot gets no slot.
 - Every stored or removed block becomes an event. Each engine connected in that namespace receives it, in the order the pool changed.
 - The vLLM shim turns these into vLLM KV events (`BlockStored`, `BlockRemoved`, medium `CPU`). llm-d's prefix indexer already consumes those, so the router learns of evictions with no new channel.
