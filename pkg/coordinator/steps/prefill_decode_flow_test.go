@@ -653,23 +653,29 @@ func TestResponseHeaders_FlowFromConditionalDecodeMiss(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		probeRevision string
+		forceStream   bool
 	}{
 		{name: "412 carries the revision", probeRevision: "revision-b"},
 		{name: "412 without the revision", probeRevision: ""},
+		{name: "forced 412 carries the revision", probeRevision: "revision-b", forceStream: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runConditionalDecodeMissHeaderFlow(t, tc.probeRevision)
+			runConditionalDecodeMissHeaderFlow(t, tc.probeRevision, tc.forceStream)
 		})
 	}
 }
 
-func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string) {
+func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string, forceStream bool) {
 	t.Helper()
 	var prefillHeaders, decodeHeaders http.Header
+	var probeStream any
 
 	gwServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Header.Get(routing.PreferHeader) == routing.PreferIfAvailable:
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			probeStream = body["stream"]
 			if probeRevision != "" {
 				w.Header().Set("X-LLM-D-Disagg-Revision", probeRevision)
 			}
@@ -681,6 +687,10 @@ func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string) {
 
 		case r.Header.Get(reqcommon.EPPProfileHeaderKey) == gateway.PhaseDecode:
 			decodeHeaders = r.Header.Clone()
+			if forceStream {
+				sseReply(condForcedFrames...)(w, r)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"choices": []map[string]any{
 					{"message": map[string]any{"role": "assistant", "content": "done"}},
@@ -706,6 +716,11 @@ func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string) {
 	if err != nil {
 		t.Fatalf("build decode step: %v", err)
 	}
+	if forceStream {
+		if err := EnableForceStream([]pipeline.Step{conditionalDecodeStep, prefillStep, decodeStep}, "", ""); err != nil {
+			t.Fatalf("enable force-stream: %v", err)
+		}
+	}
 
 	reqCtx := &pipeline.RequestContext{
 		RequestID:    "test-conditional-decode-header-flow",
@@ -727,6 +742,9 @@ func runConditionalDecodeMissHeaderFlow(t *testing.T, probeRevision string) {
 		t.Fatalf("pipeline failed: %v", err)
 	}
 
+	if forceStream && probeStream != true {
+		t.Fatalf("probe stream = %v, want the forced probe", probeStream)
+	}
 	if got := prefillHeaders.Get("X-LLM-D-Disagg-Revision"); got != probeRevision {
 		t.Errorf("prefill revision header = %q, want %q", got, probeRevision)
 	}
