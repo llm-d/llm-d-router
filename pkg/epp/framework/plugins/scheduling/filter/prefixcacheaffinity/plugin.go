@@ -629,7 +629,7 @@ func (p *Plugin) cachedRequestTokens(ep fwksched.Endpoint) (cached, outsideGPU i
 	blockSize := int64(info.BlockSizeTokens())
 	cached = int64(info.CachedBlockCount()) * blockSize
 	if byTier := info.CachedBlocksByTier(); byTier != nil {
-		outsideGPU = max(cached-int64(byTier[kvcache.GPUTier])*blockSize, 0)
+		outsideGPU = max(int64(info.ConfirmedCachedBlockCount()-byTier[kvcache.GPUTier])*blockSize, 0)
 	}
 	return cached, outsideGPU
 }
