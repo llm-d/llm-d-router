@@ -57,7 +57,9 @@ request. Do not add it to a scheduling profile.
 ## Limitations
 
 - A pin names an HTTP endpoint. With several data-parallel ranks behind one
-  SGLang port, SGLang chooses the rank inside that endpoint.
+  SGLang port, the pin keeps the first candidate at that address and port. A
+  P/D request decodes on that endpoint's declared rank. Otherwise SGLang picks
+  the rank.
 - EPP cannot tell a trusted pin from a client pin. The coordinator drops a
   client's `x-llm-d-pin-host-port` on its pipeline and passthrough paths. A
   caller that reaches EPP without the coordinator can pin a request to any
