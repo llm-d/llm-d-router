@@ -182,13 +182,39 @@ func classifyPredictionError(err error) string {
 	}
 }
 
+// boundModelName caps the model_name and target_model_name labels. With no
+// InferenceModelRewrite rule, both are the model from the request body, so they
+// share the EPP model label cap. Tests swap it for a small limiter so they don't
+// fill the shared cap other tests in the binary depend on.
+var boundModelName = eppmetrics.BoundModelNameWithOverflow
+
+// boundModels bounds both model labels and reports whether either one folded to
+// the overflow value.
+func boundModels(modelName, targetModelName string) (string, string, bool) {
+	modelLabel, modelOverflow := boundModelName(modelName)
+	targetLabel, targetOverflow := boundModelName(targetModelName)
+	return modelLabel, targetLabel, modelOverflow || targetOverflow
+}
+
+// setInferenceGauge writes a set-value gauge, skipping it when either model label
+// overflowed: counters and histograms can fold into one overflow series, but a
+// gauge there would only hold the last overflowed request's value, and a fast
+// request from one model would reset another model's SLO violation flag.
+func setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, metricType string, overflow bool, v float64) {
+	if overflow {
+		return
+	}
+	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel, metricType).Set(v)
+}
+
 func recordRequestTPOT(ctx context.Context, pluginName, pluginType, modelName, targetModelName string, tpot float64) bool {
 	if tpot < 0 {
 		log.FromContext(ctx).V(logutil.DEFAULT).Error(nil, "TPOT value must be non-negative",
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot)
 		return false
 	}
-	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOT).Set(tpot)
+	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
+	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTPOT, overflow, tpot)
 	return true
 }
 
@@ -198,14 +224,15 @@ func recordRequestTPOTWithSLO(ctx context.Context, pluginName, pluginType, model
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot)
 		return false
 	}
+	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
 
 	if tpot > sloThreshold {
-		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOTSLOViolation).Set(1)
-		llmdSloViolationCounter.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOT).Inc()
+		setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTPOTSLOViolation, overflow, 1)
+		llmdSloViolationCounter.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel, typeTPOT).Inc()
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("TPOT SLO violation detected",
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", tpot, "threshold", sloThreshold)
 	} else {
-		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOTSLOViolation).Set(0)
+		setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTPOTSLOViolation, overflow, 0)
 	}
 
 	return true
@@ -217,8 +244,9 @@ func recordRequestPredictedTPOT(ctx context.Context, pluginName, pluginType, mod
 			"modelName", modelName, "targetModelName", targetModelName, "tpot", predictedTPOT)
 		return false
 	}
-	llmdRequestPredictedTPOT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(predictedTPOT)
-	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typePredictedTPOT).Set(predictedTPOT)
+	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
+	llmdRequestPredictedTPOT.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel).Observe(predictedTPOT)
+	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typePredictedTPOT, overflow, predictedTPOT)
 	return true
 }
 
@@ -228,8 +256,9 @@ func recordRequestTPOTPredictionDuration(ctx context.Context, pluginName, plugin
 			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
 		return false
 	}
-	llmdRequestTPOTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(duration)
-	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTPOTPredictionDuration).Set(duration)
+	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
+	llmdRequestTPOTPredictionDuration.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel).Observe(duration)
+	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTPOTPredictionDuration, overflow, duration)
 	return true
 }
 
@@ -239,7 +268,8 @@ func recordRequestTTFT(ctx context.Context, pluginName, pluginType, modelName, t
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
 		return false
 	}
-	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFT).Set(ttft)
+	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
+	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTTFT, overflow, ttft)
 	return true
 }
 
@@ -249,14 +279,15 @@ func recordRequestTTFTWithSLO(ctx context.Context, pluginName, pluginType, model
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft)
 		return false
 	}
+	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
 
 	if ttft > sloThreshold {
-		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFTSLOViolation).Set(1)
-		llmdSloViolationCounter.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFT).Inc()
+		setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTTFTSLOViolation, overflow, 1)
+		llmdSloViolationCounter.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel, typeTTFT).Inc()
 		log.FromContext(ctx).V(logutil.DEFAULT).Info("TTFT SLO violation detected",
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", ttft, "threshold", sloThreshold)
 	} else {
-		llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFTSLOViolation).Set(0)
+		setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTTFTSLOViolation, overflow, 0)
 	}
 
 	return true
@@ -268,8 +299,9 @@ func recordRequestPredictedTTFT(ctx context.Context, pluginName, pluginType, mod
 			"modelName", modelName, "targetModelName", targetModelName, "ttft", predictedTTFT)
 		return false
 	}
-	llmdRequestPredictedTTFT.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(predictedTTFT)
-	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typePredictedTTFT).Set(predictedTTFT)
+	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
+	llmdRequestPredictedTTFT.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel).Observe(predictedTTFT)
+	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typePredictedTTFT, overflow, predictedTTFT)
 	return true
 }
 
@@ -279,7 +311,8 @@ func recordRequestTTFTPredictionDuration(ctx context.Context, pluginName, plugin
 			"modelName", modelName, "targetModelName", targetModelName, "duration", duration)
 		return false
 	}
-	llmdRequestTTFTPredictionDuration.WithLabelValues(pluginName, pluginType, modelName, targetModelName).Observe(duration)
-	llmdInferenceGauges.WithLabelValues(pluginName, pluginType, modelName, targetModelName, typeTTFTPredictionDuration).Set(duration)
+	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
+	llmdRequestTTFTPredictionDuration.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel).Observe(duration)
+	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTTFTPredictionDuration, overflow, duration)
 	return true
 }

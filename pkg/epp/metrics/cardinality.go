@@ -60,6 +60,13 @@ func BoundModelName(modelName string) string {
 	return modelLabelLimiter.Bound(modelName)
 }
 
+// BoundModelNameWithOverflow is BoundModelName that also reports whether the name
+// folded to OverflowValue. Set-value gauges skip overflowed names, since one shared
+// overflow series would only hold whichever request wrote last.
+func BoundModelNameWithOverflow(modelName string) (string, bool) {
+	return modelLabelLimiter.BoundWithOverflow(modelName)
+}
+
 // boundModels caps the model-name labels shared by request metrics.
 func boundModels(modelName, targetModelName string) (string, string) {
 	return modelLabelLimiter.Bound(modelName), modelLabelLimiter.Bound(targetModelName)
