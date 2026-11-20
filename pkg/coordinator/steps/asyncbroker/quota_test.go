@@ -64,8 +64,8 @@ type failOnErrorSink struct {
 	t *testing.T
 }
 
-func (s failOnErrorSink) Init(_ logr.RuntimeInfo) {}
-func (s failOnErrorSink) Enabled(_ int) bool      { return false }
+func (s failOnErrorSink) Init(_ logr.RuntimeInfo)        {}
+func (s failOnErrorSink) Enabled(_ int) bool             { return false }
 func (s failOnErrorSink) Info(_ int, _ string, _ ...any) {}
 func (s failOnErrorSink) Error(err error, msg string, _ ...any) {
 	s.t.Errorf("unexpected error log %q: %v", msg, err)
