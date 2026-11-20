@@ -376,24 +376,24 @@ func (p *Plugin) recordNodeLocked(tenant, session, parent string, band int, now 
 }
 
 // evictLocked removes one node to make room for an arrival whose parent is
-// parent. It prefers an expired node, then the oldest standalone node (no
-// parent and no live child), then the oldest leaf link, and finally the oldest
-// root with a live child. A parentless arrival is rejected when every slot is
-// live and linked or has a child. The arriving parent is never evicted. The
-// scan is O(len(nodes)), kept small by the bound.
+// parent. The scan deletes every expired node it passes. If no slot is free it
+// prefers the oldest standalone node (no parent and no live child), then the
+// oldest leaf link (a linked node with no live child), and finally the oldest
+// node with a live child, whether a root or an interior node. A parentless
+// arrival is rejected when every slot is live and linked or has a child. The
+// arriving parent is never evicted. The scan is O(len(nodes)), kept small by
+// the bound.
 func (p *Plugin) evictLocked(tenant, parent string, now time.Time) bool {
 	protected := lineageKey{tenant: tenant, session: parent}
-	var expiredKey, standaloneKey, leafKey, rootKey lineageKey
-	var expiredAt, standaloneAt, leafAt, rootAt time.Time
-	haveExpired, haveStandalone, haveLeaf, haveRoot := false, false, false, false
+	var standaloneKey, leafKey, hasChildKey lineageKey
+	var standaloneAt, leafAt, hasChildAt time.Time
+	haveStandalone, haveLeaf, haveHasChild := false, false, false
 	for key, record := range p.nodes {
 		if parent != "" && key == protected {
 			continue
 		}
 		if now.Sub(record.updatedAt) > p.parentEntryTTL {
-			if !haveExpired || record.updatedAt.Before(expiredAt) {
-				expiredKey, expiredAt, haveExpired = key, record.updatedAt, true
-			}
+			p.deleteNodeLocked(key, record)
 			continue
 		}
 		if record.parent == "" && !p.hasChildLocked(key.tenant, key.session) {
@@ -402,27 +402,28 @@ func (p *Plugin) evictLocked(tenant, parent string, now time.Time) bool {
 			}
 			continue
 		}
-		if record.parent != "" {
+		if record.parent != "" && !p.hasChildLocked(key.tenant, key.session) {
 			if !haveLeaf || record.updatedAt.Before(leafAt) {
 				leafKey, leafAt, haveLeaf = key, record.updatedAt, true
 			}
 			continue
 		}
-		if !haveRoot || record.updatedAt.Before(rootAt) {
-			rootKey, rootAt, haveRoot = key, record.updatedAt, true
+		if !haveHasChild || record.updatedAt.Before(hasChildAt) {
+			hasChildKey, hasChildAt, haveHasChild = key, record.updatedAt, true
 		}
 	}
+	if len(p.nodes) < p.maxParentEntries {
+		return true
+	}
 	switch {
-	case haveExpired:
-		p.deleteNodeLocked(expiredKey, p.nodes[expiredKey])
 	case haveStandalone:
 		p.deleteNodeLocked(standaloneKey, p.nodes[standaloneKey])
 	case parent == "":
 		return false
 	case haveLeaf:
 		p.deleteNodeLocked(leafKey, p.nodes[leafKey])
-	case haveRoot:
-		p.deleteNodeLocked(rootKey, p.nodes[rootKey])
+	case haveHasChild:
+		p.deleteNodeLocked(hasChildKey, p.nodes[hasChildKey])
 	default:
 		return false
 	}

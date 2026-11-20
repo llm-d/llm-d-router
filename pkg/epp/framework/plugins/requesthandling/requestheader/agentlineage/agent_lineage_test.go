@@ -810,7 +810,7 @@ func TestRequestHeader_ChildCountDropsWithExpiredChild(t *testing.T) {
 // with no expired or standalone node, a leaf link goes before a root that has
 // a live child.
 func TestPlugin_EvictPrefersLeafLinkOverRootWithChild(t *testing.T) {
-	p := newPlugin(t, `{"maxParentEntries": 3}`)
+	p := newPlugin(t, `{"maxParentEntries": 2}`)
 	now := time.Unix(1000, 0)
 	rootKey := lineageKey{tenant: "tenant-a", session: "R"}
 	leafKey := lineageKey{tenant: "tenant-a", session: "S1"}
@@ -833,6 +833,29 @@ func TestPlugin_EvictPrefersLeafLinkOverRootWithChild(t *testing.T) {
 	if leafExists {
 		t.Fatal("evictLocked kept the leaf link")
 	}
+}
+
+// TestRequestHeader_EvictionKeepsInteriorNodes pins that a linked node with a
+// live child is not evicted as a leaf: cutting the chain would root its
+// descendants at the evicted ID.
+func TestRequestHeader_EvictionKeepsInteriorNodes(t *testing.T) {
+	p := newPlugin(t, `{"maxParentEntries": 4}`)
+	now, advance := newClock()
+	p.now = now
+
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+	advance(time.Second)
+	wantBand(t, p, "tenant-a", "S1", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	advance(time.Second)
+	wantBand(t, p, "tenant-a", "S2", 0, false, map[string]string{ParentSessionHeader: "S1"}, 5)
+	advance(time.Second)
+	wantBand(t, p, "tenant-a", "L", 0, false, map[string]string{ParentSessionHeader: "R"}, 5)
+	advance(time.Second)
+	// The new child evicts L, not the interior S1.
+	wantBand(t, p, "tenant-a", "S3", 0, false, map[string]string{ParentSessionHeader: "S2"}, 5)
+
+	wantBand(t, p, "tenant-a", "S2", 0, false, nil, 5)
+	wantRoot(t, p, "tenant-a", map[string]string{OpenCodeSessionHeader: "S2"}, "R")
 }
 
 // TestRequestHeader_BandChainInheritance pins that chains inherit through
@@ -869,10 +892,15 @@ func TestRequestHeader_BandTenantScoping(t *testing.T) {
 	wantBand(t, p, "tenant-b", "S1", 2, false, map[string]string{ParentSessionHeader: "R"}, 2)
 }
 
-// TestRequestHeader_BandWithoutSession pins that a request carrying no
-// session publishes no resolved band: the Director keeps its own priority.
+// TestRequestHeader_BandWithoutSession pins the two session-less shapes: a
+// request with only a parent inherits from that parent under a fairness
+// header, while a request with neither lineage header publishes no band.
 func TestRequestHeader_BandWithoutSession(t *testing.T) {
 	p := newPlugin(t, "")
+
+	wantBand(t, p, "tenant-a", "R", 5, false, nil, 5)
+	wantBand(t, p, "tenant-a", "", 3, false, map[string]string{ParentSessionHeader: "R"}, 5)
+
 	req := &scheduling.InferenceRequest{
 		Headers:    map[string]string{"x-unrelated": "v"},
 		Objectives: scheduling.RequestObjectives{Priority: 3},
@@ -881,7 +909,7 @@ func TestRequestHeader_BandWithoutSession(t *testing.T) {
 		t.Fatalf("RequestHeader: %v", err)
 	}
 	if _, ok := scheduling.ReadRequestAttribute[int](req, ResolvedBandKey); ok {
-		t.Fatal("resolved-band attribute found for a session-less request, want absent")
+		t.Fatal("resolved-band attribute found for a request with no lineage headers, want absent")
 	}
 }
 
