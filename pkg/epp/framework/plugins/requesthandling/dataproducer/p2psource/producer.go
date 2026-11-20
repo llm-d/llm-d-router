@@ -89,6 +89,12 @@ type Config struct {
 	// pull saves against the transfer and the waits a pull pays on busy pods,
 	// after the MinCachedTokenDelta floor. Nil keeps the fixed-delta decision.
 	CostModel *CostModelConfig `json:"costModel,omitempty"`
+	// TrackInFlightPulls, when true, counts the pulls this producer has
+	// directed at each source endpoint and not yet released, and the prompt
+	// tokens they pull, and exports them as the llm_d_epp_p2p_inflight_pulls
+	// and llm_d_epp_p2p_inflight_pull_tokens gauges. Source selection does
+	// not read them.
+	TrackInFlightPulls bool `json:"trackInFlightPulls,omitempty"`
 	// TTFTByDecision records the TTFT of each streaming request whose stream
 	// ends naturally in p2p_source_request_ttft_seconds, labelled with this
 	// producer's decision.
@@ -265,13 +271,17 @@ type Producer struct {
 	p2pConnectorPort            int
 	attrKeyValue                plugin.DataKey
 	costModel                   *CostModelConfig
+	// pulls is nil unless TrackInFlightPulls is set.
+	pulls *pullTracker
 	// pluginState carries each request's decision to ResponseBody. Nil
 	// unless ttftByDecision is set.
 	pluginState *plugin.PluginState
 }
 
 // PluginFactory parses the raw plugin configuration and returns a configured
-// Producer, wrapped to record TTFT by decision when ttftByDecision is set.
+// Producer, wrapped with the response hooks its options need: the in-flight
+// pull release hooks when TrackInFlightPulls is set, and TTFT recording by
+// decision when ttftByDecision is set.
 func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handle) (plugin.Plugin, error) {
 	cfg := Config{MinCachedTokenDelta: defaultMinCachedTokenDelta, P2PConnectorPort: defaultP2PConnectorPort}
 	if rawParameters != nil {
@@ -296,19 +306,36 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 		}
 	}
 	p := New(name, cfg)
-	if !cfg.TTFTByDecision {
-		return p, nil
+	if cfg.TrackInFlightPulls {
+		if handle == nil {
+			return nil, fmt.Errorf("%s: trackInFlightPulls requires a plugin handle", PluginType)
+		}
+		if err := registerPullMetrics(handle.Metrics()); err != nil {
+			return nil, fmt.Errorf("%s: %w", PluginType, err)
+		}
 	}
 	ctx := context.Background()
 	if handle != nil && handle.Context() != nil {
 		ctx = handle.Context()
 	}
-	p.pluginState = plugin.NewPluginState(ctx)
-	return &ttftRecorder{Producer: p}, nil
+	var ttft *ttftRecorder
+	if cfg.TTFTByDecision {
+		p.pluginState = plugin.NewPluginState(ctx)
+		ttft = &ttftRecorder{Producer: p}
+	}
+	if !cfg.TrackInFlightPulls {
+		if ttft != nil {
+			return ttft, nil
+		}
+		return p, nil
+	}
+	p.pulls = newPullTracker(ctx, name)
+	return &trackingProducer{Producer: p, ttft: ttft}, nil
 }
 
 // New constructs a p2p-source-producer bound to the configured
-// PrefixCacheMatchInfo producer name.
+// PrefixCacheMatchInfo producer name. TrackInFlightPulls needs the plugin
+// handle, so only PluginFactory applies it.
 func New(name string, cfg Config) *Producer {
 	prefillProfile := cfg.PrefillProfileName
 	if prefillProfile == "" {
@@ -370,6 +397,7 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 // endpoint; address and p2pPort are what a pull dials. cachedTokens is the
 // chosen peer's own count, which may be one block below the pool maximum.
 type bestMatchPeer struct {
+	id           fwkdl.ID
 	hostPort     string
 	address      string
 	p2pPort      int
@@ -489,6 +517,7 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 			}
 			md := candidates[chosen].ep.GetMetadata()
 			best = bestMatchPeer{
+				id:           md.ID,
 				hostPort:     net.JoinHostPort(md.Address, md.Port),
 				address:      md.Address,
 				p2pPort:      candidates[chosen].p2pPort,
@@ -688,6 +717,9 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	routing.SetRoutingHeader(request.Headers, routing.KVCacheSourceHeader, net.JoinHostPort(best.address, strconv.Itoa(best.p2pPort)))
 	if logDecision {
 		kv = append(kv, "p2pPort", best.p2pPort)
+	}
+	if p.pulls != nil {
+		p.pulls.acquire(ctx, request.RequestID, best.id, delta)
 	}
 	return nil
 }
