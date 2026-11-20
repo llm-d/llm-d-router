@@ -769,6 +769,13 @@ func TestEstimateOutlenIgnoresTTS(t *testing.T) {
 	require.Equal(t, Unknown, EstimateOutlen(body))
 }
 
+func TestEstimateOutlenIgnoresImages(t *testing.T) {
+	body := &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "a red apple"},
+	}
+	require.Equal(t, Unknown, EstimateOutlen(body))
+}
+
 func TestResponsesThinking(t *testing.T) {
 	require.Equal(t, true, *responsesThinking(map[string]any{"effort": "high"}))
 	require.Equal(t, true, *responsesThinking(map[string]any{"effort": "medium"}))

@@ -103,6 +103,10 @@ func EstimateOutlen(body *fwkrequest.InferenceRequestBody) Bucket {
 	if body.TextToSpeech != nil {
 		return Unknown
 	}
+	// Image output is diffusion work, not a text output length.
+	if body.Images != nil {
+		return Unknown
+	}
 
 	var enableThinking *bool
 	var thinkingBudget *int64
