@@ -419,18 +419,33 @@ func TestScoreEndpointWithoutPredictionDoesNotOutscorePredicted(t *testing.T) {
 }
 
 func TestScoreEndpointWithoutPredictionDoesNotOutscoreNegative(t *testing.T) {
-	scorer := NewPlugin(noExploreConfig())
+	tests := []struct {
+		name                       string
+		ttftHeadroom, tpotHeadroom float64
+	}{
+		{name: "tpot only negative", ttftHeadroom: 10, tpotHeadroom: -8},
+		{name: "ttft only negative", ttftHeadroom: -10, tpotHeadroom: 8},
+		{name: "both negative", ttftHeadroom: -10, tpotHeadroom: -8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scorer := NewPlugin(noExploreConfig())
 
-	epTPOTNeg := makeLatencyScorerEndpoint("tpot-neg", 0.3, 0, 5)
-	epNoPred := makeLatencyScorerEndpoint("no-prediction", 0.3, 0, 5)
+			epNeg := makeLatencyScorerEndpoint("negative", 0.3, 0, 5)
+			epNoPred := makeLatencyScorerEndpoint("no-prediction", 0.3, 0, 5)
 
-	setLatencyPrediction(epTPOTNeg, true, false, 10, -8, 90, 38) // only TPOT negative
-	// epNoPred has no LatencyPredictionInfo attribute.
+			// One dispatched request skips the idle preference, so scoring reaches deficit bucketing.
+			epNeg.Put(attrlatency.LatencyPredictionInfoDataKey,
+				attrlatency.NewLatencyPredictionInfo(tt.ttftHeadroom >= 0, tt.tpotHeadroom >= 0,
+					tt.ttftHeadroom, tt.tpotHeadroom, 90, 38, 1))
+			// epNoPred has no LatencyPredictionInfo attribute.
 
-	scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{epTPOTNeg, epNoPred})
+			scores := scorer.Score(context.Background(), nil, []fwksched.Endpoint{epNeg, epNoPred})
 
-	if scores[epNoPred] != 0 || scores[epTPOTNeg] == 0 {
-		t.Errorf("endpoint without a prediction should score below an endpoint with a known deficit: tpot-neg=%f no-prediction=%f",
-			scores[epTPOTNeg], scores[epNoPred])
+			if scores[epNoPred] != 0 || scores[epNeg] == 0 {
+				t.Errorf("endpoint without a prediction should score below an endpoint with a known deficit: negative=%f no-prediction=%f",
+					scores[epNeg], scores[epNoPred])
+			}
+		})
 	}
 }
