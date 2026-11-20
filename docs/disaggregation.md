@@ -487,6 +487,8 @@ Requests carrying `Prefer: if-available` (used by the coordinator's speculative 
 
 Deployments that do not declare any conditional-decode gate plugin still reject `Prefer: if-available` requests: the director rejects unclaimed conditional-decode requests with 412 by default so a missing gate plugin surfaces as the coordinator's cache-miss fallback rather than a silent forward.
 
+Envoy answers a gRPC request with HTTP 200 and a gRPC status. A `Prefer: if-available` gRPC request that the router rejects gets the status `FAILED_PRECONDITION` in place of the HTTP 412.
+
 A minimal coordinator-topology configuration:
 
 ```yaml
