@@ -53,7 +53,7 @@ A `kv.fetch` hint flows like this:
 
 ### Prefetch and move: push a prefix ahead of the request
 
-`kv.prefetch` copies blocks to another node before a request needs them. `kv.move` does the same, and the source then drops its copy. The router chooses the blocks. Its call lists 64-bit block hashes. It knows them from vLLM's KV events, through llm-d's prefix indexer.
+`kv.prefetch` copies blocks to another node before a request needs them. `kv.move` does the same, and the source then drops its copy. The router chooses the blocks. Its call lists 64-bit block hashes. These are the block hashes in vLLM's KV events.
 
 1. The router calls the source daemon directly, with the block hashes and the destination daemon.
 2. The source daemon maps each hash to the keys in its pool. It skips hashes it does not hold.
@@ -62,10 +62,11 @@ A `kv.fetch` hint flows like this:
 
 ![kv.prefetch and kv.move: the source pushes ahead of the request](images/kv-tier-prefetch.png)
 
-Prefetch and move have three limits:
+Prefetch and move have four limits:
 
 - Only blocks in the source daemon's pool can move. vLLM stores blocks to its tiers as soon as they are computed, so finished prefixes usually get there.
 - The hashes must be exact. `kv.fetch` can fall back to the whole request. Prefetch cannot.
+- The router's prefix index does not keep these hashes today. It stores a key that mixes each hash with the model name, and that key cannot be turned back into the hash. Before a router can send a prefetch, the index must keep the raw hash for each block, or the daemon must accept the index's key.
 - No router sends prefetches yet. llm-d's router sends only `kv.fetch` ([#4303](https://github.com/llm-d/llm-d-router/pull/4303)). Deciding what to prefetch, and when, is new router work.
 
 A later request does not wait for a prefetch:
@@ -80,8 +81,8 @@ The router calls the daemon directly because vLLM's hints are per request. A pre
 
 The direct call is the `peer_push` message on the daemon's peer port. A shared token guards it, and it is off unless the daemon has a token. A prefetch can also still arrive as a vLLM hint through the source engine. Pinning and retention hints will use the direct call too. Two pieces of work remain:
 
-- The rest of the peer port needs authentication. It is plain TCP today, and any host that reaches it can pull blocks.
-- The router needs each daemon's endpoint, and a plugin that decides what to prefetch and when.
+- The rest of the peer port needs authentication. It is plain TCP today. Any host that reaches it can pull blocks, or tell a daemon to pull blocks from another one.
+- The router needs a plugin that decides what to prefetch and when. It can already build a daemon's endpoint from the pod's address when the daemon is a sidecar. A DaemonSet deployment needs a way to map an engine to its node's daemon.
 
 ### Memory
 
@@ -117,6 +118,14 @@ Engines share blocks only when their bytes are interchangeable. The namespace co
 - The vLLM shim turns these into vLLM KV events (`BlockStored`, `BlockRemoved`, medium `CPU`). llm-d's prefix indexer already consumes those, so the router learns of evictions with no new channel.
 - A shim that loses its daemon reports all its blocks as removed.
 - The TPU shim does not report KV events to vLLM yet.
+
+The router can lose sight of blocks that are still in a pool:
+
+- When a shim reconnects, it announces the pool's blocks again. Those events carry hashes and no tokens.
+- The router's index accepts such an event only if it already knows the hash from an earlier event that carried tokens.
+- After the router's index restarts, it has no such record, and it drops these events. An engine restart also clears that engine's entries in the index. The blocks are then indexed again only where the record still exists.
+- The node still serves those blocks to requests that land on it. The router cannot route or send hints for them until the prefixes are computed again.
+- Rebuilding the index needs a replay of events that carry tokens. That is not designed yet.
 
 ## How it fits with KVCR, TPU Sync and Mooncake
 
@@ -226,7 +235,7 @@ Two Qwen3-8B engines ran on one node and shared one daemon. Engine B served pref
 
 ### Prefetch
 
-This test ran on the Qwen3-32B TCP pair. It read a prompt's block hashes from A's KV events, as a router would. It then sent a `kv.prefetch` hint naming B. A later request to B found the blocks in B's pool.
+This test ran on the Qwen3-32B TCP pair. It read a prompt's block hashes straight from A's KV events, not from the router's index. It then sent a `kv.prefetch` hint naming B. A later request to B found the blocks in B's pool.
 
 | Prompt | Prefetch lands after | Later request on B | Same prefix by `kv.fetch` | Recompute |
 | --- | --- | --- | --- | --- |
@@ -261,6 +270,7 @@ Other risks:
 - **The TPU shim depends on tpu-inference internals** (`offload_manager`, `cpu_backend`, `chunk_pool`). An upgrade can break it. This is one more reason to move the TPU data path onto TPU Sync.
 - **RDMA failure handling is tested against a fake NIXL agent,** not real NIC failures. The logic is covered. Real completion and failure behavior is not.
 - **Some numbers come from an earlier revision.** The Qwen3-8B, TPU and KVCR numbers were measured before later fixes. The Qwen3-32B ones were measured on the code in the branches below.
+- **The router's index is not ready for this tier.** It does not keep the raw block hashes that prefetch and move need. After it restarts, it cannot rediscover blocks that are already in a pool. The Design section describes both.
 - **Hint names need agreement.** New actions should be agreed with the vLLM hint RFC authors before release. Routers then do not need two vocabularies.
 - **A restarted daemon is unavailable for about 14 s.** It creates its 32 GiB pool only when the first engine connects, and touching every page takes that long. Stores in that window are lost. Starting the daemon with `--slot-bytes` creates the pool at startup. The deployment examples should set it.
 
