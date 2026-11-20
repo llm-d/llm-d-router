@@ -19,9 +19,13 @@ package registry
 
 import (
 	"fmt"
+	"math/rand/v2"
+	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -438,6 +442,219 @@ func TestRegistry_IterateQueues_StaleDrainDoesNotHideReincarnatedQueue(t *testin
 	})
 	assert.Contains(t, visited, key.ID,
 		"a non-empty registered queue must remain visible to IterateQueues after a stale drain of its predecessor")
+}
+
+// TestRegistry_LongestQueue checks the fair-admission length index and each flow's LastAdded against a model through
+// random Add, Remove, Cleanup and Drain calls, sequential and concurrent on different queues, and through flow
+// deletion. Bands without fair admission have neither.
+func TestRegistry_LongestQueue(t *testing.T) {
+	t.Parallel()
+	cfg, err := NewConfig(newTestPriorityBandPolicyDefaults(),
+		WithPriorityBand(&PriorityBandConfig{Priority: highPriority, FairAdmission: true}),
+		WithPriorityBand(&PriorityBandConfig{Priority: lowPriority}),
+	)
+	require.NoError(t, err)
+	h := &testHarness{t: t, registry: NewFlowRegistry(cfg, logr.Discard())}
+	val, _ := h.registry.priorityBands.Load(highPriority)
+	band := val.(*priorityBand)
+	queues := make([]*managedQueue, 4)
+	// models[i] holds the items of queues[i] in Add order.
+	models := make([][]flowcontrol.QueueItemAccessor, len(queues))
+	for i := range queues {
+		key := flowcontrol.FlowKey{ID: fmt.Sprintf("flow-%d", i), Priority: highPriority}
+		h.synchronizeFlow(key)
+		queues[i] = band.queues[key.ID]
+	}
+	require.True(t, h.registry.LongestQueue(highPriority) == nil, "an empty band has no longest queue")
+
+	// mutate applies one random call to queues[i] and reports whether it was a Cleanup that removed items.
+	mutate := func(rng *rand.Rand, i int) bool {
+		mq, drop := queues[i], func(item flowcontrol.QueueItemAccessor) {
+			models[i] = slices.DeleteFunc(models[i], func(x flowcontrol.QueueItemAccessor) bool { return x == item })
+		}
+		switch op := rng.IntN(10); {
+		case op < 6:
+			item := mocks.NewMockQueueItemAccessor(1, "req", mq.key)
+			_ = mq.Add(item)
+			models[i] = append(models[i], item)
+		case op < 8:
+			// Any queued item, not only the oldest: ordering policies such as EDF dispatch out of Add order, which
+			// leaves removed items between queued ones in added.
+			if n := len(models[i]); n > 0 {
+				item := models[i][rng.IntN(n)]
+				_, _ = mq.Remove(item.Handle())
+				drop(item)
+			}
+		case op < 9:
+			removed := mq.Cleanup(func(flowcontrol.QueueItemAccessor) bool { return rng.IntN(2) == 0 })
+			for _, item := range removed {
+				drop(item)
+			}
+			return len(removed) > 0
+		default:
+			mq.Drain()
+			models[i] = nil
+		}
+		return false
+	}
+	requireQueues := func(step int) {
+		t.Helper()
+		requireLenIndexConsistent(t, band)
+		longest := 0
+		for i, mq := range queues {
+			longest = max(longest, mq.Len())
+			var want flowcontrol.QueueItemAccessor
+			if n := len(models[i]); n > 0 {
+				want = models[i][n-1]
+			}
+			require.True(t, want == h.registry.LastAdded(mq.key), "step %d: LastAdded of %s must be its last-added queued item", step, mq.key)
+			fq := mq.queue.(*fairQueue)
+			require.LessOrEqual(t, len(fq.added), 2*mq.Len(), "step %d: removed items must not accumulate", step)
+			if n := len(fq.added); n > 0 {
+				require.False(t, isRemoved(fq.added[0]) || isRemoved(fq.added[n-1]),
+					"step %d: removals must drop removed items from both ends of added", step)
+			}
+		}
+		got := h.registry.LongestQueue(highPriority)
+		if longest == 0 {
+			require.True(t, got == nil, "step %d: an empty band has no longest queue", step)
+			return
+		}
+		require.NotNil(t, got, "step %d", step)
+		require.Equal(t, longest, got.FlowQueueAccessor().Len(), "step %d: LongestQueue must hold the most items", step)
+	}
+
+	rng := rand.New(rand.NewPCG(1, 2))
+	for step := range 2000 {
+		i := rng.IntN(len(queues))
+		cleaned := mutate(rng, i)
+		requireQueues(step)
+		if cleaned {
+			require.False(t, slices.ContainsFunc(queues[i].queue.(*fairQueue).added, isRemoved),
+				"step %d: a Cleanup that removes items must drop every removed item from added", step)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := range queues {
+		wg.Go(func() {
+			rng := rand.New(rand.NewPCG(uint64(i), 3))
+			for range 500 {
+				mutate(rng, i)
+			}
+		})
+	}
+	wg.Wait()
+	requireQueues(-1)
+
+	for i, mq := range queues {
+		_ = mq.Add(mocks.NewMockQueueItemAccessor(1, "req", mq.key))
+		h.registry.mu.Lock()
+		h.registry.deleteFlow(mq.key)
+		h.registry.mu.Unlock()
+		models[i] = nil
+		requireQueues(-2)
+	}
+
+	low := flowcontrol.FlowKey{ID: "low", Priority: lowPriority}
+	h.synchronizeFlow(low)
+	h.addItem(low, 1)
+	require.Nil(t, h.registry.LastAdded(low), "a queue outside a fair-admission band does not track Add order")
+	require.Nil(t, h.registry.LastAdded(flowcontrol.FlowKey{ID: "absent", Priority: highPriority}), "a flow without a queue has no last-added item")
+	require.True(t, h.registry.LongestQueue(lowPriority) == nil, "a band without fair admission has no index")
+	require.True(t, h.registry.LongestQueue(nonExistentPriority) == nil)
+}
+
+// TestRegistry_FairQueueReleasesRemovedItems checks that a queue in a fair-admission band does not keep removed
+// requests reachable: none removed from either end or from an emptied queue, and of those removed from between queued
+// requests, no more than the queue holds.
+func TestRegistry_FairQueueReleasesRemovedItems(t *testing.T) {
+	t.Parallel()
+	cfg, err := NewConfig(newTestPriorityBandPolicyDefaults(),
+		WithPriorityBand(&PriorityBandConfig{Priority: highPriority, FairAdmission: true}))
+	require.NoError(t, err)
+	h := &testHarness{t: t, registry: NewFlowRegistry(cfg, logr.Discard())}
+	key := flowcontrol.FlowKey{ID: "flow", Priority: highPriority}
+	h.synchronizeFlow(key)
+	mq, err := h.registry.ManagedQueue(key)
+	require.NoError(t, err)
+
+	var queued []*mocks.MockQueueItemAccessor
+	var removed []weak.Pointer[mocks.MockQueueItemAccessor]
+	add := func() {
+		item := mocks.NewMockQueueItemAccessor(1, "req", key)
+		require.NoError(t, mq.Add(item))
+		queued = append(queued, item)
+	}
+	remove := func(i int) {
+		_, err := mq.Remove(queued[i].Handle())
+		require.NoError(t, err)
+		removed = append(removed, weak.Make(queued[i]))
+		queued = slices.Delete(queued, i, i+1)
+	}
+	reachable := func() int {
+		runtime.GC()
+		n := 0
+		for _, p := range removed {
+			if p.Value() != nil {
+				n++
+			}
+		}
+		// Only a live queue can keep its removed requests reachable.
+		runtime.KeepAlive(mq)
+		return n
+	}
+
+	for range 10 {
+		add()
+	}
+	remove(0)
+	remove(len(queued) - 1)
+	require.Zero(t, reachable(), "requests removed from either end must not stay reachable")
+
+	// Out-of-order dispatch, as under EDF ordering, removes requests from between queued ones.
+	for step := range 30 {
+		add()
+		remove(1)
+		require.LessOrEqual(t, reachable(), len(queued),
+			"step %d: requests removed from between queued ones must not outnumber the queued requests", step)
+	}
+
+	for len(queued) > 0 {
+		remove(len(queued) / 2)
+	}
+	require.Zero(t, reachable(), "an emptied queue must not keep removed requests reachable")
+}
+
+// requireLenIndexConsistent checks that every non-empty queue of band sits once in the bucket for its length, that
+// the back links match, and that max names the highest non-empty bucket.
+func requireLenIndexConsistent(t *testing.T, band *priorityBand) {
+	t.Helper()
+	x := band.lenIndex
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	indexed := map[*managedQueue]bool{}
+	highest := 0
+	for n, head := range x.buckets {
+		var prev *fairQueue
+		for q := head; q != nil; q = q.indexNext {
+			require.True(t, q.indexPrev == prev, "queue %s has a stale back link", q.mq.key)
+			require.Equal(t, n, q.indexLen, "queue %s", q.mq.key)
+			require.Equal(t, n, q.Len(), "queue %s is in the bucket of another length", q.mq.key)
+			require.False(t, indexed[q.mq], "queue %s is indexed twice", q.mq.key)
+			indexed[q.mq] = true
+			prev, highest = q, n
+		}
+	}
+	require.Equal(t, highest, x.max, "max must name the highest non-empty bucket")
+	nonEmpty := 0
+	for _, mq := range band.queues {
+		if mq.Len() > 0 {
+			nonEmpty++
+			require.True(t, indexed[mq], "non-empty queue %s is missing from the index", mq.key)
+		}
+	}
+	require.Len(t, indexed, nonEmpty, "the index must hold only registered non-empty queues")
 }
 
 // --- Lifecycle and State Management Tests ---

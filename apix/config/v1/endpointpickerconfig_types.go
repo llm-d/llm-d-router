@@ -697,6 +697,18 @@ type PriorityBandConfig struct {
 	MaxRequestsPerFlow *resource.Quantity `json:"maxRequestsPerFlow,omitempty"`
 
 	// +optional
+	// FairAdmission lets a request that finds this band's request-count limit reached, while the pool has endpoints,
+	// take a slot from the band's longest other flow when that flow holds at least two more queued requests than the
+	// arriving request's flow. That flow's last-added queued request receives 429 with reason `rejected-fair-admission`.
+	// Byte limits, global limits and per-flow limits still reject the arriving request. Before evicting, the band drops
+	// the victim flow's cancelled and expired queued requests, at most once per flow per cleanup sweep, so between
+	// sweeps an eviction can fall on a live request while stale ones still hold slots. Defaults to false.
+	// Fair admission trusts the fairness ID: the gateway must set a non-empty `x-llm-d-inference-fairness-id` on every
+	// request, overwriting any client-sent value. With client-chosen IDs a client can evict other flows' queued
+	// requests, so the loader rejects fairAdmission together with requestHandler.composeFairnessIDs.
+	FairAdmission bool `json:"fairAdmission,omitempty"`
+
+	// +optional
 	// DefaultRequestTTL replaces the global DefaultRequestTTL for this priority band: the queue-wait bound
 	// while the candidate pool has endpoints. NoEndpointRequestTTL is not band-scoped and still governs
 	// queue wait while the pool is empty. If omitted, the global DefaultRequestTTL is used; "0s" disables
@@ -732,6 +744,10 @@ func (pbc PriorityBandConfig) String() string {
 
 	if pbc.MaxRequestsPerFlow != nil {
 		parts = append(parts, fmt.Sprintf("MaxRequestsPerFlow: %d", pbc.MaxRequestsPerFlow.Value()))
+	}
+
+	if pbc.FairAdmission {
+		parts = append(parts, "FairAdmission: true")
 	}
 
 	if pbc.DefaultRequestTTL != nil {
