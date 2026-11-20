@@ -57,6 +57,7 @@ func TestCollectorsIncludesAllMetrics(t *testing.T) {
 		{"SubscriberActive", SubscriberActive},
 		{"SubscriberReconnections", SubscriberReconnections},
 		{"MessagesReceived", MessagesReceived},
+		{"TopicPodMismatches", TopicPodMismatches},
 		{"ZMQErrors", ZMQErrors},
 		{"PoolQueueDepth", PoolQueueDepth},
 		{"PoolCapacity", PoolCapacity},
@@ -76,7 +77,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 	kvevents := []prometheus.Collector{
 		KVEventStoresSkipped, KVEventRemovalsSkipped,
 		SubscriberActive, SubscriberReconnections, MessagesReceived,
-		ZMQErrors, PoolQueueDepth, PoolCapacity,
+		TopicPodMismatches, ZMQErrors, PoolQueueDepth, PoolCapacity,
 	}
 	for _, c := range kvevents {
 		reg.MustRegister(c)
@@ -86,6 +87,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 	SubscriberActive.Set(1)
 	SubscriberReconnections.WithLabelValues("pod-a").Inc()
 	MessagesReceived.WithLabelValues("pod-a").Inc()
+	TopicPodMismatches.Inc()
 	ZMQErrors.WithLabelValues("pod-a", "recv").Inc()
 	KVEventStoresSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
 	KVEventRemovalsSkipped.WithLabelValues("sliding_window", "unsupported_cache_kind").Inc()
@@ -106,6 +108,7 @@ func TestKVEventsMetricNames(t *testing.T) {
 		"llm_d_epp_kv_cache_events_active_subscribers",
 		"llm_d_epp_kv_cache_events_subscriber_reconnections_total",
 		"llm_d_epp_kv_cache_events_messages_received_total",
+		"llm_d_epp_kv_cache_events_topic_pod_mismatches_total",
 		"llm_d_epp_kv_cache_events_zmq_errors_total",
 		"llm_d_epp_kv_cache_events_stores_skipped_total",
 		"llm_d_epp_kv_cache_events_removals_skipped_total",

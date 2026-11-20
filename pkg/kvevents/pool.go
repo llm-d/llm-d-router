@@ -505,6 +505,15 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 	}
 
 	if msg.SourceEndpoint != "" {
+		if !topicNamesSource(podID, msg.SourceEndpoint) {
+			metrics.TopicPodMismatches.Inc()
+			if tracingActive {
+				span.SetStatus(codes.Error, "topic names another pod")
+			}
+			logger.V(logging.DEBUG).Info("Dropping KV events whose topic names another pod",
+				"topic", msg.Topic, "sourceEndpoint", msg.SourceEndpoint)
+			return
+		}
 		podID = msg.SourceEndpoint
 	}
 	if tracingActive {
@@ -523,6 +532,50 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 		return
 	}
 	p.processEventBatch(ctx, &batch, podID, modelName)
+}
+
+// topicNamesSource reports whether the pod an adapter parsed from a topic can be
+// the host a per-pod subscriber dialed. Only addresses are compared: a topic
+// that names no pod, or names the pod by name (kv@vllm-0@<model>), keeps the
+// dialed endpoint. Ports are ignored because an engine's data-parallel ranks
+// share one topic while each rank is dialed on its own port. An unbracketed
+// IPv6 topic may or may not end in a port (fd00::1:2 is that address, or
+// fd00::1 on port 2), so it matches when either reading is the dialed host.
+func topicNamesSource(topicPod, sourceEndpoint string) bool {
+	sourceIP := hostIP(sourceEndpoint)
+	if sourceIP == nil {
+		return true
+	}
+	namesIP := false
+	for _, s := range []string{topicPod, endpointHost(topicPod)} {
+		if ip := net.ParseIP(s); ip != nil {
+			if ip.Equal(sourceIP) {
+				return true
+			}
+			namesIP = true
+		}
+	}
+	return !namesIP
+}
+
+// hostIP returns the IP address s names, with or without a port, or nil when s
+// is empty or a name.
+func hostIP(s string) net.IP {
+	if ip := net.ParseIP(endpointHost(s)); ip != nil {
+		return ip
+	}
+	return net.ParseIP(s)
+}
+
+// endpointHost returns endpoint without its ":<port>" suffix. Endpoints are
+// built as "<address>:<port>", which leaves an IPv6 address unbracketed, so the
+// port is what follows the last colon.
+func endpointHost(endpoint string) string {
+	i := strings.LastIndexByte(endpoint, ':')
+	if i < 0 {
+		return endpoint
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(endpoint[:i], "["), "]")
 }
 
 // decode spans the adapter's payload decode. It wraps the call rather than the

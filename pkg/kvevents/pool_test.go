@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -382,6 +383,79 @@ func TestProcessRawMessage_FallsBackToTopicEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result[keys[0]], 1)
 	assert.Equal(t, "10.0.0.1:8000", result[keys[0]][0].PodIdentifier)
+}
+
+// topicPodAdapter returns the pod and model of a "kv@<pod>@<model>" topic and
+// stores one block, keyed by the payload's first byte, per message.
+type topicPodAdapter struct{}
+
+func (topicPodAdapter) ParseMessage(msg *RawMessage) (string, string, EventBatch, error) {
+	parts := strings.SplitN(msg.Topic, "@", 3)
+	return parts[1], parts[2], EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes: []uint64{uint64(msg.Payload[0])},
+				Tokens:      makeTokens(16),
+			},
+		},
+	}, nil
+}
+
+func (topicPodAdapter) ShardingKey(*RawMessage) string {
+	return ""
+}
+
+func TestProcessRawMessage_DropsTopicNamingAnotherPod(t *testing.T) {
+	for _, tc := range []struct {
+		name, topicPod, source, wantPod string
+	}{
+		{"same endpoint", "10.0.0.1:8000", "10.0.0.1:8000", "10.0.0.1:8000"},
+		{"data-parallel rank on its own port", "10.0.0.1:8000", "10.0.0.1:8003", "10.0.0.1:8003"},
+		{"host without port", "10.0.0.1", "10.0.0.1:8000", "10.0.0.1:8000"},
+		{"no pod", "", "10.0.0.1:8000", "10.0.0.1:8000"},
+		{"IPv6 rank on its own port", "fd00::1:8000", "fd00::1:8001", "fd00::1:8001"},
+		{"IPv6 host without port", "fd00::1", "fd00::1:8000", "fd00::1:8000"},
+		{"IPv6 host without port ending in groups", "fd00::1:2", "fd00::1:2:8000", "fd00::1:2:8000"},
+		{"bracketed IPv6", "[fd00::1]:8000", "fd00::1:8000", "fd00::1:8000"},
+		{"IPv6 written another way", "fd00:0:0::1:8000", "fd00::1:8000", "fd00::1:8000"},
+		{"pod name", "vllm-0", "10.0.0.1:8000", "10.0.0.1:8000"},
+		{"pod name with port", "vllm-0:8000", "10.0.0.1:8000", "10.0.0.1:8000"},
+		{"dialed by name", "10.0.0.2:8000", "vllm-0.vllm:8000", "vllm-0.vllm:8000"},
+		{"bound socket", "10.0.0.2:8000", "", "10.0.0.2:8000"},
+		{"another pod", "10.0.0.2:8000", "10.0.0.1:8000", ""},
+		{"another pod without port", "10.0.0.2", "10.0.0.1:8000", ""},
+		{"another IPv6 pod", "fd00::2:8000", "fd00::1:8000", ""},
+		{"another IPv6 host without port", "fd00::2", "fd00::1:8000", ""},
+		{"another IPv6 host without port ending in groups", "fd00::2:3", "fd00::1:2:8000", ""},
+		{"bracketed IPv6 of another pod", "[fd00::2]:8000", "fd00::1:8000", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			pool, idx, tokenProcessor := newTestPool(t, 16)
+			pool.adapter = topicPodAdapter{}
+			dropped := counterValue(t, metrics.TopicPodMismatches)
+
+			pool.processRawMessage(ctx, &RawMessage{
+				Topic:          "kv@" + tc.topicPod + "@test-model",
+				Payload:        []byte{1},
+				SourceEndpoint: tc.source,
+			})
+
+			keys, err := tokenProcessor.TokensToKVBlockKeys(
+				kvblock.EmptyBlockHash, makeTokens(16), "test-model", nil)
+			require.NoError(t, err)
+			result, err := idx.Lookup(ctx, keys, nil)
+			require.NoError(t, err)
+			if tc.wantPod == "" {
+				assert.Empty(t, result[keys[0]])
+				assert.Equal(t, dropped+1, counterValue(t, metrics.TopicPodMismatches))
+				return
+			}
+			require.Len(t, result[keys[0]], 1)
+			assert.Equal(t, tc.wantPod, result[keys[0]][0].PodIdentifier)
+			assert.Equal(t, dropped, counterValue(t, metrics.TopicPodMismatches))
+		})
+	}
 }
 
 // TestCanonicalWritePath_FallbackLegacy verifies that when BlockSize equals
