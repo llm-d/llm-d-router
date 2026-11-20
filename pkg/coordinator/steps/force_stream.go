@@ -328,7 +328,7 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 
 	call := coordmetrics.StartUpstreamCall(coordmetrics.UpstreamDecode)
 	resp, err := s.gwClient.Post(ctx, reqCtx.OriginalPath, bodyBytes, headers)
-	call.Done()
+	call.Done(ctx)
 	if err != nil {
 		// No response headers arrived, so nothing is on the wire; a plain error
 		// lets the server answer a clean 502.

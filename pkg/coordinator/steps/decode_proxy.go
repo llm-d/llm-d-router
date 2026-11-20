@@ -237,13 +237,13 @@ func (w *proxyErrorLogWriter) Write(p []byte) (int, error) {
 // into the same histogram.
 type timedRoundTripper struct {
 	inner  http.RoundTripper
-	record func(time.Duration)
+	record func(context.Context, time.Duration)
 }
 
 func (t *timedRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	start := time.Now()
 	resp, err := t.inner.RoundTrip(r)
-	t.record(time.Since(start))
+	t.record(r.Context(), time.Since(start))
 	return resp, err
 }
 
@@ -258,8 +258,8 @@ func instrumentedTransport(base http.RoundTripper, upstream string) http.RoundTr
 	coordmetrics.IncUpstreamRequestTotal(upstream)
 	return &timedRoundTripper{
 		inner: base,
-		record: func(d time.Duration) {
-			coordmetrics.RecordUpstreamRequestDuration(upstream, d)
+		record: func(ctx context.Context, d time.Duration) {
+			coordmetrics.RecordUpstreamRequestDuration(ctx, upstream, d)
 		},
 	}
 }

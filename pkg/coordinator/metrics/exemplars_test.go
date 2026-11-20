@@ -29,7 +29,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/metrics/metricstest"
 )
 
-const stepDurationMetric = LLMDRouterCoordinatorSubsystem + "_step_duration_seconds"
+const (
+	stepDurationMetric     = LLMDRouterCoordinatorSubsystem + "_step_duration_seconds"
+	upstreamDurationMetric = LLMDRouterCoordinatorSubsystem + "_upstream_request_duration_seconds"
+)
 
 // recordingSpan returns a context with a real SDK span, like the one the
 // pipeline starts per step.
@@ -93,4 +96,47 @@ func TestRecordStepDurationWithoutSpanStillObserves(t *testing.T) {
 
 	require.Empty(t, metricstest.HistogramExemplarLabels(t, reg, stepDurationMetric, map[string]string{"step": "render"}))
 	require.Equal(t, uint64(1), metricstest.HistogramCount(t, reg, stepDurationMetric, map[string]string{"step": "render"}))
+}
+
+// An upstream call made inside a step's span records the call duration with
+// that span's trace and span ID, so a slow call links to the step that made it.
+func TestUpstreamCallDoneAttachesTraceExemplar(t *testing.T) {
+	reg := metricstest.NewRegistry(t, Register, Reset)
+
+	ctx, span := recordingSpan(t)
+	defer span.End()
+	StartUpstreamCall(UpstreamDecode).Done(ctx)
+
+	exemplars := metricstest.HistogramExemplarLabels(t, reg, upstreamDurationMetric, map[string]string{"upstream": UpstreamDecode})
+	require.Len(t, exemplars, 1, "a sampled call must attach exactly one exemplar")
+
+	spanCtx := span.SpanContext()
+	require.Equal(t, map[string]string{
+		metricsutil.ExemplarTraceIDLabel: spanCtx.TraceID().String(),
+		metricsutil.ExemplarSpanIDLabel:  spanCtx.SpanID().String(),
+	}, exemplars[0])
+}
+
+// An unsampled trace was never exported, so the call duration is observed
+// without an exemplar.
+func TestUpstreamCallDoneSkipsExemplarForUnsampledSpan(t *testing.T) {
+	reg := metricstest.NewRegistry(t, Register, Reset)
+
+	StartUpstreamCall(UpstreamDecode).Done(unsampledSpanContext(t))
+
+	labels := map[string]string{"upstream": UpstreamDecode}
+	require.Empty(t, metricstest.HistogramExemplarLabels(t, reg, upstreamDurationMetric, labels))
+	require.Equal(t, uint64(1), metricstest.HistogramCount(t, reg, upstreamDurationMetric, labels),
+		"the duration must be observed whether or not the trace is sampled")
+}
+
+// A call made outside any trace still lands in the histogram.
+func TestUpstreamCallDoneWithoutSpanStillObserves(t *testing.T) {
+	reg := metricstest.NewRegistry(t, Register, Reset)
+
+	StartUpstreamCall(UpstreamDecode).Done(context.Background())
+
+	labels := map[string]string{"upstream": UpstreamDecode}
+	require.Empty(t, metricstest.HistogramExemplarLabels(t, reg, upstreamDurationMetric, labels))
+	require.Equal(t, uint64(1), metricstest.HistogramCount(t, reg, upstreamDurationMetric, labels))
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -36,7 +37,7 @@ func TestUpstreamCall_StartIncrementsCounter(t *testing.T) {
 func TestUpstreamCall_DoneObservesDuration(t *testing.T) {
 	Reset()
 	call := StartUpstreamCall(UpstreamRender)
-	call.Done()
+	call.Done(context.Background())
 
 	obs, err := upstreamRequestDuration.GetMetricWithLabelValues(UpstreamRender)
 	require.NoError(t, err)
@@ -49,7 +50,7 @@ func TestUpstreamCall_DoneObservesDuration(t *testing.T) {
 func TestUpstreamCall_RepeatedUseCompounds(t *testing.T) {
 	Reset()
 	for i := 0; i < 3; i++ {
-		StartUpstreamCall(UpstreamRender).Done()
+		StartUpstreamCall(UpstreamRender).Done(context.Background())
 	}
 	require.InDelta(t, 3.0,
 		promtestutil.ToFloat64(upstreamRequestTotal.WithLabelValues(UpstreamRender)),
