@@ -55,10 +55,10 @@ type candidate struct {
 // resumeOnOtherPod, another pod. A new session dispatches
 // only when some pod has room, and is then reserved onto that pod.
 //
-// Unlike the original ThunderAgent, which restores a paused session onto any
-// pod with room, by default a paused session waits for its own pod, so its
-// warm prefix is kept. The wait is bounded by forceAdmitTimeout. A paused
-// session moved with resumeOnOtherPod recomputes its history on the new pod.
+// By default, a paused session waits for its own pod (up to forceAdmitTimeout)
+// to keep its warm prefix. The original ThunderAgent instead restores paused
+// sessions onto any pod with room. With resumeOnOtherPod, a moved session
+// recomputes its history on the new pod.
 //
 // The sessions allowed to dispatch are ranked by betterThan.
 // A session that fits no pod does not block the others, so smaller sessions
@@ -207,10 +207,10 @@ func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpoint
 		} else if a.resumeOnOtherPod && !now.Before(s.reservedUntil) {
 			// A live reservation is an earlier turn of this session picked
 			// but not yet charged; moving now would drop it.
-			c.fitPod = a.newSessionPod(c.tokens, rooms, spare)
+			c.fitPod = a.findFitPod(c.tokens, rooms, spare)
 		}
 	case classNew:
-		c.fitPod = a.newSessionPod(c.tokens, rooms, spare)
+		c.fitPod = a.findFitPod(c.tokens, rooms, spare)
 	}
 	return c.fitPod != nil || c.starving
 }
@@ -223,12 +223,9 @@ func (a *ThunderAgent) fitTokens(p *endpointState, tokens float64) float64 {
 	return min(tokens, p.capacity*a.usableCapacityRatio)
 }
 
-// newSessionPod picks the pod for a new session, or for a paused session
-// leaving its own pod: among pods it fits once
-// reclaimable idle sessions give up their room, the one with the most free
-// room. If any pod fits it without pausing anyone, that pod has the most
-// free room, so no one is paused.
-func (a *ThunderAgent) newSessionPod(tokens float64, rooms, spare map[*endpointState]float64) *endpointState {
+// findFitPod returns the fitting pod with the most free room, so idle
+// sessions are paused only when needed.
+func (a *ThunderAgent) findFitPod(tokens float64, rooms, spare map[*endpointState]float64) *endpointState {
 	var best *endpointState
 	for p, room := range rooms {
 		if room+spare[p] >= a.fitTokens(p, tokens) && (best == nil || room > rooms[best]) {

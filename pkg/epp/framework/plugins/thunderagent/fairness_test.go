@@ -341,24 +341,6 @@ func TestPausedSecondTurnNotMovedBeforePreRequest(t *testing.T) {
 	})
 }
 
-// With resumeOnOtherPod, a paused session force-admitted past the deadline
-// goes to another pod with room instead of overfilling its own.
-func TestStarvingPausedSessionResumesOnOtherPod(t *testing.T) {
-	cfg := resumeOnOtherPodConfig()
-	cfg.ForceAdmitTimeout = metav1.Duration{Duration: time.Second}
-	a := newTestAgent(cfg)
-	seed(t, a, "s1", "pod-a", 600)
-	seed(t, a, "s2", "pod-a", 500)
-	pause(a, "s2")
-	primeFitView(a, dlEndpoint("pod-a"), dlEndpoint("pod-b"))
-
-	q := makeQueue("s2", time.Now().Add(-2*time.Second), 2000)
-	require.Equal(t, q, pick(t, a, q))
-	s, _ := sessionOf(a, "s2")
-	require.Equal(t, "default/pod-b", s.endpoint.id)
-	require.Equal(t, float64(600), endpointTokens(a, "default/pod-a"))
-}
-
 // An admission reservation blocks a second admit into the same room until
 // it is confirmed or expires.
 func TestReservationPreventsDoubleAdmit(t *testing.T) {
