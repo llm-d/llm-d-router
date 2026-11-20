@@ -374,33 +374,26 @@ func (o *orderedStub) Extract(ctx context.Context, in fwkdl.PollInput[int]) erro
 	return o.stub.Extract(ctx, in)
 }
 
-// The scrape transport bounds dial and TLS handshake with net/http's
-// DefaultTransport values, while its connection-pool options intentionally
-// differ. Callers may still see an earlier request-deadline error (the client
-// timeout, the poll dispatcher's per-poll context). The dialer wiring is
-// verified behaviorally: a sentinel error installed in the shared baseDialer's
-// Control hook must surface from a scrape through both the plain-http
-// transport and its https clone.
 func TestTransportPhaseTimeouts(t *testing.T) {
 	parser := func(io.Reader) (int, error) { return 0, nil }
-	deflt := http.DefaultTransport.(*http.Transport)
-	// 30s/30s are net/http's DefaultTransport dialer values, which its
-	// package-private dialer does not expose for comparison.
-	assert.Equal(t, 30*time.Second, baseDialer.Timeout)
-	assert.Equal(t, 30*time.Second, baseDialer.KeepAlive)
+	assert.Equal(t, 5*time.Second, baseDialer.Timeout)
+	assert.Zero(t, baseDialer.KeepAlive)
 	assertTransport := func(t *testing.T, transport *http.Transport) {
 		t.Helper()
 		assert.NotNil(t, transport.DialContext, "the bounded dialer must be wired")
-		assert.Equal(t, deflt.TLSHandshakeTimeout, transport.TLSHandshakeTimeout)
-		assert.Equal(t, deflt.ExpectContinueTimeout, transport.ExpectContinueTimeout)
+		assert.Equal(t, 5*time.Second, transport.TLSHandshakeTimeout)
+		assert.Equal(t, time.Second, transport.ExpectContinueTimeout)
 		assert.Equal(t, maxIdleTime, transport.IdleConnTimeout)
 	}
 
 	sentinel := errors.New("sentinel dial error")
+	// Tests that mutate the shared baseDialer must run without t.Parallel()
+	// and restore each field they change.
+	originalControlContext := baseDialer.ControlContext
 	baseDialer.ControlContext = func(ctx context.Context, network, address string, c syscall.RawConn) error {
 		return sentinel
 	}
-	defer func() { baseDialer.ControlContext = nil }()
+	t.Cleanup(func() { baseDialer.ControlContext = originalControlContext })
 
 	handler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	// Each scheme scrapes its own server, so the https clone is exercised
