@@ -22,6 +22,31 @@ on:
         required: false
         type: string
         default: ''
+      registry:
+        required: false
+        type: string
+        description: Registry namespace to push to (ghcr.io/llm-d for production, quay.io/llm-d for PR staging).
+        default: 'ghcr.io/llm-d'
+      pr-number:
+        required: false
+        type: string
+        description: Pull request number. Set only for PR staging builds, which version charts as <base>-pr.<n>.
+        default: ''
+      pr-sha:
+        required: false
+        type: string
+        description: Short SHA of the pull request head. Set only for PR staging builds.
+        default: ''
+      commit-sha:
+        required: false
+        type: string
+        description: Commit SHA embedded in the images and used for the per-commit tag. Defaults to the workflow's SHA; PR builds pass the pull request head SHA.
+        default: ''
+      chart-version-base:
+        required: false
+        type: string
+        description: Latest release tag, used as the version base for PR staging charts.
+        default: ''
       epp-additional-tags:
         required: false
         type: string
@@ -34,6 +59,14 @@ on:
         required: false
         type: string
         default: ''
+
+  secrets:
+    QUAY_USER:
+      required: false
+      description: Quay robot account user, used when registry is quay.io/llm-d.
+    QUAY_TOKEN:
+      required: false
+      description: Quay robot account token, used when registry is quay.io/llm-d.
 
 permissions:
   contents: read
@@ -59,7 +92,7 @@ jobs:
           docker-file: Dockerfile.epp
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.epp-image-name }}
-          registry: ghcr.io/llm-d
+          registry: ${{ inputs.registry }}
           push: 'false'
           buildx-outputs: type=docker,dest=/tmp/epp-image.tar
 
@@ -77,17 +110,19 @@ jobs:
           docker-file: Dockerfile.epp
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.epp-image-name }}
-          registry: ghcr.io/llm-d
-          github-token: ${{ github.token }}
+          registry: ${{ inputs.registry }}
+          registry-username: ${{ inputs.registry == 'quay.io/llm-d' && secrets.QUAY_USER || github.actor }}
+          registry-password: ${{ inputs.registry == 'quay.io/llm-d' && secrets.QUAY_TOKEN || github.token }}
           prerelease: ${{ inputs.prerelease }}
-          commit-sha: ${{ github.sha }}
+          commit-sha: ${{ inputs.commit-sha || github.sha }}
           push: 'true'
           additional-tags: ${{ inputs.epp-additional-tags }}
 
       - name: Attest EPP image provenance
+        if: inputs.registry == 'ghcr.io/llm-d'
         uses: actions/attest@v4
         with:
-          subject-name: ghcr.io/llm-d/${{ inputs.epp-image-name }}
+          subject-name: ${{ inputs.registry }}/${{ inputs.epp-image-name }}
           subject-digest: ${{ steps.push-epp.outputs.digest }}
           push-to-registry: true
 
@@ -109,7 +144,7 @@ jobs:
           docker-file: Dockerfile.sidecar
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.sidecar-image-name }}
-          registry: ghcr.io/llm-d
+          registry: ${{ inputs.registry }}
           push: 'false'
           buildx-outputs: type=docker,dest=/tmp/sidecar-image.tar
 
@@ -125,17 +160,19 @@ jobs:
           docker-file: Dockerfile.sidecar
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.sidecar-image-name }}
-          registry: ghcr.io/llm-d
-          github-token: ${{ github.token }}
+          registry: ${{ inputs.registry }}
+          registry-username: ${{ inputs.registry == 'quay.io/llm-d' && secrets.QUAY_USER || github.actor }}
+          registry-password: ${{ inputs.registry == 'quay.io/llm-d' && secrets.QUAY_TOKEN || github.token }}
           prerelease: ${{ inputs.prerelease }}
-          commit-sha: ${{ github.sha }}
+          commit-sha: ${{ inputs.commit-sha || github.sha }}
           push: 'true'
           additional-tags: ${{ inputs.sidecar-additional-tags }}
 
       - name: Attest sidecar image provenance
+        if: inputs.registry == 'ghcr.io/llm-d'
         uses: actions/attest@v4
         with:
-          subject-name: ghcr.io/llm-d/${{ inputs.sidecar-image-name }}
+          subject-name: ${{ inputs.registry }}/${{ inputs.sidecar-image-name }}
           subject-digest: ${{ steps.push-sidecar.outputs.digest }}
           push-to-registry: true
 
@@ -157,7 +194,7 @@ jobs:
           docker-file: Dockerfile.coordinator
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.coordinator-image-name }}
-          registry: ghcr.io/llm-d
+          registry: ${{ inputs.registry }}
           push: 'false'
           buildx-outputs: type=docker,dest=/tmp/coordinator-image.tar
 
@@ -173,17 +210,19 @@ jobs:
           docker-file: Dockerfile.coordinator
           tag: ${{ inputs.tag }}
           image-name: ${{ inputs.coordinator-image-name }}
-          registry: ghcr.io/llm-d
-          github-token: ${{ github.token }}
+          registry: ${{ inputs.registry }}
+          registry-username: ${{ inputs.registry == 'quay.io/llm-d' && secrets.QUAY_USER || github.actor }}
+          registry-password: ${{ inputs.registry == 'quay.io/llm-d' && secrets.QUAY_TOKEN || github.token }}
           prerelease: ${{ inputs.prerelease }}
-          commit-sha: ${{ github.sha }}
+          commit-sha: ${{ inputs.commit-sha || github.sha }}
           push: 'true'
           additional-tags: ${{ inputs.coordinator-additional-tags }}
 
       - name: Attest coordinator image provenance
+        if: inputs.registry == 'ghcr.io/llm-d'
         uses: actions/attest@v4
         with:
-          subject-name: ghcr.io/llm-d/${{ inputs.coordinator-image-name }}
+          subject-name: ${{ inputs.registry }}/${{ inputs.coordinator-image-name }}
           subject-digest: ${{ steps.push-coordinator.outputs.digest }}
           push-to-registry: true
 
@@ -192,6 +231,7 @@ jobs:
   # of never firing again.
   # Not needed for push-helm-charts because the builder is unrelated to chart publishing.
   build-builder:
+    if: inputs.registry == 'ghcr.io/llm-d'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -289,27 +329,37 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v7
 
-      - name: Log in to GHCR
+      - name: Log in to registry
         uses: docker/login-action@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          registry: ${{ inputs.registry == 'quay.io/llm-d' && 'quay.io' || 'ghcr.io' }}
+          username: ${{ inputs.registry == 'quay.io/llm-d' && secrets.QUAY_USER || github.actor }}
+          password: ${{ inputs.registry == 'quay.io/llm-d' && secrets.QUAY_TOKEN || github.token }}
 
       - name: Build and Push Standalone Chart
         uses: ./.github/actions/helm-build-and-push
+        env:
+          IMAGE_REGISTRY: ${{ inputs.registry }}
         with:
           chart_name: llm-d-router-standalone
           extra_tag: ${{ inputs.tag }}
           chart_suffix: ${{ inputs.chart-suffix }}
           epp_image_repository: ${{ inputs.epp-image-name }}
+          pr_number: ${{ inputs.pr-number }}
+          pr_sha: ${{ inputs.pr-sha }}
+          chart_version_base: ${{ inputs.chart-version-base }}
 
       - name: Build and Push Gateway Chart
         uses: ./.github/actions/helm-build-and-push
+        env:
+          IMAGE_REGISTRY: ${{ inputs.registry }}
         with:
           chart_name: llm-d-router-gateway
           extra_tag: ${{ inputs.tag }}
           chart_suffix: ${{ inputs.chart-suffix }}
           epp_image_repository: ${{ inputs.epp-image-name }}
+          pr_number: ${{ inputs.pr-number }}
+          pr_sha: ${{ inputs.pr-sha }}
+          chart_version_base: ${{ inputs.chart-version-base }}
 
 
