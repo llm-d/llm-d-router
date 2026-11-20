@@ -18,6 +18,7 @@ package preciseprefixcache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -42,7 +43,7 @@ func readServerInfo(ctx context.Context, client apiv1.SglangServiceClient) (dpRa
 	}
 	di := resp.GetDeploymentInfo()
 	if di == nil || di.DpRank == nil {
-		return 0, false, fmt.Errorf("server info without deployment dp rank")
+		return 0, false, errors.New("server info without deployment dp rank")
 	}
 	for _, src := range di.GetKvEventSources() {
 		if src.GetDpRank() == di.GetDpRank() {
