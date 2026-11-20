@@ -244,7 +244,7 @@ Two Qwen3-8B engines ran on one node and shared one daemon. Engine B served pref
 
 ### Prefetch
 
-This test ran on the Qwen3-32B TCP pair. It read a prompt's block hashes straight from A's KV events, not from the router's index. It then sent a `kv.prefetch` hint naming B. A later request to B found the blocks in B's pool.
+This test ran on the Qwen3-32B TCP pair. It read a prompt's block hashes straight from A's KV events, not from the router's index. It then sent a `kv.prefetch` hint naming B. In the first run, the hint rode on a small inference request to A's engine. A later request to B found the blocks in B's pool.
 
 | Prompt | Prefetch lands after | Later request on B | Same prefix by `kv.fetch` | Recompute |
 | --- | --- | --- | --- | --- |
@@ -253,7 +253,7 @@ This test ran on the Qwen3-32B TCP pair. It read a prompt's block hashes straigh
 
 The 30k transfer ran at about 145 Gbit/s. A request that arrived before the prefetch landed got no partial hit and recomputed.
 
-The direct call gave the same result with no request to the source engine. The call returned in 4 ms. The later request on B took 0.21 to 0.26 s at 11.6k tokens and 0.39 to 0.43 s at 30k tokens.
+A second run sent the same hint straight to A's daemon, with no request to A's engine. It gave the same result. The call returned in 4 ms, against 27 ms for the request that carried the hint in the first run. The later request on B took 0.21 to 0.26 s at 11.6k tokens and 0.39 to 0.43 s at 30k tokens.
 
 ### Failures
 
