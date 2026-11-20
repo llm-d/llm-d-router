@@ -20,6 +20,7 @@ package notifications
 import (
 	"context"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -29,6 +30,8 @@ import (
 var (
 	_ fwkdl.DataSource         = (*K8sNotificationSource)(nil)
 	_ fwkdl.NotificationSource = (*K8sNotificationSource)(nil)
+
+	_ fwkdl.ScopedNotificationSource = (*K8sNotificationSource)(nil)
 )
 
 // K8sNotificationSource watches a single GVK and dispatches events to
@@ -36,15 +39,35 @@ var (
 type K8sNotificationSource struct {
 	typedName fwkplugin.TypedName
 	gvk       schema.GroupVersionKind
+	namespace string
+	selector  labels.Selector
 }
 
-// NewK8sNotificationSource returns a new notification source for the given GVK.
+// K8sNotificationSourceOption configures a K8sNotificationSource.
+type K8sNotificationSourceOption func(*K8sNotificationSource)
+
+// WithNamespace restricts the watch to one namespace.
+func WithNamespace(namespace string) K8sNotificationSourceOption {
+	return func(s *K8sNotificationSource) { s.namespace = namespace }
+}
+
+// WithLabelSelector restricts the watch to objects matching selector.
+func WithLabelSelector(selector labels.Selector) K8sNotificationSourceOption {
+	return func(s *K8sNotificationSource) { s.selector = selector }
+}
+
+// NewK8sNotificationSource returns a new notification source for the given
+// GVK. Without options it watches every object of the GVK.
 func NewK8sNotificationSource(pluginType, pluginName string,
-	gvk schema.GroupVersionKind) *K8sNotificationSource {
-	return &K8sNotificationSource{
+	gvk schema.GroupVersionKind, opts ...K8sNotificationSourceOption) *K8sNotificationSource {
+	s := &K8sNotificationSource{
 		typedName: fwkplugin.TypedName{Type: pluginType, Name: pluginName},
 		gvk:       gvk,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // TypedName returns the plugin type and name.
@@ -55,6 +78,16 @@ func (s *K8sNotificationSource) TypedName() fwkplugin.TypedName {
 // GVK returns the GroupVersionKind this source watches.
 func (s *K8sNotificationSource) GVK() schema.GroupVersionKind {
 	return s.gvk
+}
+
+// Namespace returns the watched namespace, or empty for all namespaces.
+func (s *K8sNotificationSource) Namespace() string {
+	return s.namespace
+}
+
+// LabelSelector returns the selector objects must match, or nil for all.
+func (s *K8sNotificationSource) LabelSelector() labels.Selector {
+	return s.selector
 }
 
 // Notify passes the event through for Runtime to dispatch to extractors.

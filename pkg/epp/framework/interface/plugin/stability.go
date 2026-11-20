@@ -36,4 +36,10 @@ type PluginMetadata struct {
 	DeprecatedIn       string
 	ScheduledRemovalIn string
 	ReplacementType    string
+	// KubernetesDiscovery marks an endpoint discovery plugin whose endpoints
+	// come from Kubernetes objects it watches through datalayer notification
+	// sources. When such a plugin is the configured discovery plugin, the EPP
+	// runs it under its Kubernetes controller manager instead of the
+	// cluster-free discovery path. See RegisterKubernetesDiscovery.
+	KubernetesDiscovery bool
 }

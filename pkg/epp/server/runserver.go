@@ -209,6 +209,9 @@ func (r *ExtProcServerRunner) SetupWithManager(mgr ctrl.Manager) error {
 		}
 	}
 
+	if r.ControllerCfg.skipPodReconciler {
+		return nil
+	}
 	if err := (&controller.PodReconciler{
 		Datastore:       r.Datastore,
 		Reader:          mgr.GetClient(),

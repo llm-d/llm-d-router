@@ -40,6 +40,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -75,6 +78,7 @@ import (
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/p2p"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/cross_plugin/redis"
+	discoveryendpointslice "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/endpointslice"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/k8speer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/attribute"
@@ -303,6 +307,8 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// If the config specifies a discovery plugin, take the file discovery path which
 	// does not require a Kubernetes cluster. Otherwise fall through to the K8s path.
+	// A discovery plugin registered with RegisterKubernetesDiscovery also takes
+	// the K8s path: it watches Kubernetes objects through the controller manager.
 	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
 	if err != nil {
 		setupLog.Error(err, "Failed to parse configuration")
@@ -317,10 +323,15 @@ func (r *Runner) Run(ctx context.Context) error {
 		return nil
 	}
 	dlCfg := rawConfig.DataLayer
-	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil {
+	kubernetesDiscovery := kubernetesDiscoveryPlugin(rawConfig)
+	if dlCfg != nil && dlCfg.Discovery != nil && dlCfg.Discovery.Endpoints != nil && !kubernetesDiscovery {
 		return r.runWithFileDiscovery(ctx, opts, rawConfig)
 	}
-	if err := validateKubernetesDiscoveryFlags(opts); err != nil {
+	validateFlags := validateKubernetesDiscoveryFlags
+	if kubernetesDiscovery {
+		validateFlags = validateKubernetesDiscoveryPluginFlags
+	}
+	if err := validateFlags(opts); err != nil {
 		setupLog.Error(err, "Failed to validate flags")
 		return err
 	}
@@ -461,25 +472,46 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	setupLog.Info("Raw config after phase one", "config", toRawMap(rawConfig))
 
 	epf := r.setupMetricsCollection(opts)
-	gknn, err := extractGKNN(opts.PoolName, opts.PoolGroup, opts.PoolNamespace, opts.EndpointSelector)
-	if err != nil {
-		setupLog.Error(err, "Failed to extract GKNN")
-		return nil, nil, err
+	// kubernetesDiscovery is set when a discovery plugin registered with
+	// RegisterKubernetesDiscovery supplies the endpoints. The manager then
+	// runs without InferencePool, InferenceObjective, InferenceModelRewrite and
+	// Pod reconcilers, and binds the plugin's notification sources instead.
+	kubernetesDiscovery := kubernetesDiscoveryPlugin(rawConfig)
+	var gknn *common.GKNN
+	if kubernetesDiscovery {
+		gknn = discoveryPoolGKNN(opts)
+	} else {
+		gknn, err = extractGKNN(opts.PoolName, opts.PoolGroup, opts.PoolNamespace, opts.EndpointSelector)
+		if err != nil {
+			setupLog.Error(err, "Failed to extract GKNN")
+			return nil, nil, err
+		}
 	}
 
-	startCrdReconcilers := opts.EndpointSelector == nil // If endpointSelector is nil, it means it's not in the standalone mode. Then we should start the inferencePool and other CRD Reconciler.
+	// If endpointSelector is nil, it means it's not in the standalone mode. Then we should start the inferencePool and other CRD Reconciler.
+	startCrdReconcilers := opts.EndpointSelector == nil && !kubernetesDiscovery
 	controllerCfg := runserver.NewControllerConfig(startCrdReconcilers)
+	if kubernetesDiscovery {
+		controllerCfg.DisablePodReconciler()
+	}
 	controllerCfg.PopulateNonLeaderDatastore = r.featureGates[runserver.HAPopulateNonLeaderDatastoreFeatureGate]
 	if err := controllerCfg.PopulateControllerConfig(cfg); err != nil {
 		setupLog.Error(err, "Failed to populate controller config")
 		return nil, nil, err
 	}
 
-	ds, err := setupDatastore(servingCtx, epf, startCrdReconcilers,
-		gknn.Namespace, gknn.Name, opts.EndpointSelector, opts.EndpointTargetPorts)
-	if err != nil {
-		setupLog.Error(err, "Failed to setup datastore")
-		return nil, nil, err
+	var ds datastore.Datastore
+	if kubernetesDiscovery {
+		// No InferencePool exists; the pool only names the endpoints the
+		// discovery plugin reports.
+		ds = datastore.NewDatastore(servingCtx, epf).WithEndpointPool(datalayer.NewEndpointPool(gknn.Namespace, gknn.Name))
+	} else {
+		ds, err = setupDatastore(servingCtx, epf, startCrdReconcilers,
+			gknn.Namespace, gknn.Name, opts.EndpointSelector, opts.EndpointTargetPorts)
+		if err != nil {
+			setupLog.Error(err, "Failed to setup datastore")
+			return nil, nil, err
+		}
 	}
 	eppConfig, err := r.parseConfigurationPhaseTwo(servingCtx, rawConfig, ds, opts.RefreshMetricsInterval)
 	if err != nil {
@@ -487,6 +519,30 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		return nil, nil, err
 	}
 	setupLog.Info("EPP config after phase two", "config", eppConfig)
+
+	var disc fwkdl.EndpointDiscovery
+	if kubernetesDiscovery {
+		if disc, err = r.resolveDiscovery(rawConfig); err != nil {
+			setupLog.Error(err, "Failed to resolve discovery plugin")
+			return nil, nil, err
+		}
+		setupLog.Info("Kubernetes-backed discovery plugin supplies the endpoints; "+
+			"InferencePool, InferenceObjective, InferenceModelRewrite and Pod reconcilers are off",
+			"discoveryPlugin", disc.TypedName(), "pool", gknn.Name, "namespace", gknn.Namespace)
+	}
+
+	// Configure the data layer before the manager exists, so the manager's
+	// cache can be scoped to the objects the notification sources watch.
+	if err := r.dlRuntime.Configure(eppConfig.DataConfig, setupLog); err != nil {
+		setupLog.Error(err, "failed to configure data layer")
+		return nil, nil, err
+	}
+	if disc != nil && !r.dlRuntime.HasNotificationExtractor(disc.TypedName()) {
+		err := fmt.Errorf("discovery plugin %s is registered as Kubernetes-backed but registers no notification source; "+
+			"it must implement datalayer.Registrant and register a k8s-notification-source extractor", disc.TypedName())
+		setupLog.Error(err, "Invalid discovery plugin")
+		return nil, nil, err
+	}
 
 	// --- Setup Metrics Server ---
 	metricsutil.SetFairnessIDLabelLimit(opts.FairnessIDMetricLabelLimit)
@@ -509,7 +565,8 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	isLeader.Store(false)
 	r.isLeader = isLeader
 
-	overrides := append([]func(*ctrl.Options){opts.LeaderElectionOverride()}, managerOverrides...)
+	overrides := append([]func(*ctrl.Options){opts.LeaderElectionOverride(),
+		notificationCacheOverride(r.dlRuntime.NotificationCacheByObject())}, managerOverrides...)
 	mgr, err := runserver.NewDefaultManager(controllerCfg, *gknn, cfg, metricsServerOptions, opts.EnableLeaderElection, overrides...)
 	if err != nil {
 		setupLog.Error(err, "Failed to create controller manager")
@@ -559,7 +616,7 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		return nil, nil, err
 	}
 
-	if err := r.configureAndStartDatalayer(servingCtx, eppConfig.DataConfig, mgr); err != nil {
+	if err := r.dlRuntime.Start(servingCtx, mgr); err != nil {
 		setupLog.Error(err, "failed to initialize data layer")
 		return nil, nil, err
 	}
@@ -588,6 +645,16 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 		setupLog.Error(err, "Failed to setup peer discovery")
 		return nil, nil, err
 	}
+	if disc != nil {
+		// Every replica runs discovery, so a replica's datastore is populated
+		// whether or not it holds the leader lease.
+		if err := mgr.Add(runnable.NoLeaderElection(manager.RunnableFunc(func(ctx context.Context) error {
+			return disc.Start(ctx, fwkdl.NewDiscoveryNotifier(ds))
+		}))); err != nil {
+			setupLog.Error(err, "Failed to add discovery plugin to the manager")
+			return nil, nil, err
+		}
+	}
 
 	// --- Add Runnables to Manager ---
 	// Register health server.
@@ -608,6 +675,9 @@ func (r *Runner) setup(ctx, servingCtx context.Context, cfg *rest.Config, opts *
 	r.healthGRPCPort = opts.GRPCHealthPort
 	readinessCheckers := pluginReadinessCheckers(r.PluginHandle.GetAllPlugins())
 	readinessCheckers = append(readinessCheckers, r.dlRuntime)
+	if disc != nil {
+		readinessCheckers = append(readinessCheckers, discoveryReadiness{disc})
+	}
 	r.healthGRPCServer = newHealthGRPCServer(ctrl.Log.WithName("health"), ds, isLeader, r.draining, opts.EnableLeaderElection, supporters, readinessCheckers)
 	return mgr, ds, nil
 }
@@ -877,6 +947,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(discoveryfile.MultiClusterPluginType, fwkplugin.StabilityAlpha, discoveryfile.MultiClusterFactory)
 	// Alpha
 	fwkplugin.Register(k8speer.PluginType, fwkplugin.StabilityAlpha, k8speer.Factory)
+	fwkplugin.RegisterKubernetesDiscovery(discoveryendpointslice.PluginType, fwkplugin.StabilityAlpha, discoveryendpointslice.Factory)
 
 	// register request header processor plugins
 	// Alpha
@@ -1008,12 +1079,48 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 	return cfg, nil
 }
 
-func (r *Runner) configureAndStartDatalayer(ctx context.Context, cfg *datalayer.Config, mgr ctrl.Manager) error {
-	if err := r.dlRuntime.Configure(cfg, setupLog); err != nil {
-		return err
+// notificationCacheOverride returns a manager option override that adds the
+// cache scopes of scoped notification sources (see
+// datalayer.Runtime.NotificationCacheByObject). A GVK the manager already
+// scopes, such as Pods in the pool namespace, keeps the manager's scope.
+func notificationCacheOverride(byObject map[client.Object]cache.ByObject) func(*ctrl.Options) {
+	return func(o *ctrl.Options) {
+		if len(byObject) == 0 {
+			return
+		}
+		if o.Cache.ByObject == nil {
+			o.Cache.ByObject = make(map[client.Object]cache.ByObject, len(byObject))
+		}
+		scoped := make(map[schema.GroupVersionKind]bool, len(o.Cache.ByObject))
+		for obj := range o.Cache.ByObject {
+			if gvk, err := apiutil.GVKForObject(obj, o.Scheme); err == nil {
+				scoped[gvk] = true
+			}
+		}
+		for obj, scope := range byObject {
+			gvk := obj.GetObjectKind().GroupVersionKind()
+			if scoped[gvk] {
+				setupLog.Info("Notification source scope ignored: the manager already scopes this kind", "gvk", gvk.String())
+				continue
+			}
+			o.Cache.ByObject[obj] = scope
+		}
 	}
+}
 
-	return r.dlRuntime.Start(ctx, mgr)
+// discoveryReadiness reports a discovery plugin ready once its Ready channel
+// is closed, so health checks follow the EndpointDiscovery.Ready contract.
+type discoveryReadiness struct {
+	fwkdl.EndpointDiscovery
+}
+
+func (d discoveryReadiness) CheckReady() error {
+	select {
+	case <-d.Ready():
+		return nil
+	default:
+		return fmt.Errorf("discovery plugin %s is not ready", d.TypedName())
+	}
 }
 
 func (r *Runner) setupMetricsCollection(opts *runserver.Options) datalayer.EndpointFactory {
@@ -1071,6 +1178,69 @@ func validateKubernetesDiscoveryFlags(opts *runserver.Options) error {
 		return errors.New("objectives-file requires file discovery")
 	}
 	return nil
+}
+
+// validateKubernetesDiscoveryPluginFlags checks the flags when a discovery
+// plugin registered with RegisterKubernetesDiscovery supplies the endpoints.
+// No InferencePool is read, so pool-name only names the pool and its leader
+// election lease. It is optional unless leader election is enabled: the lease
+// is named after the pool, and two EPP deployments in one namespace left on
+// the default name would share one lease.
+func validateKubernetesDiscoveryPluginFlags(opts *runserver.Options) error {
+	if opts.EndpointSelector != nil {
+		return errors.New("endpoint-selector cannot be set when a discovery plugin supplies the endpoints")
+	}
+	if opts.ObjectivesFile != "" {
+		return errors.New("objectives-file requires file discovery")
+	}
+	if opts.EnableLeaderElection && opts.PoolName == "" {
+		return errors.New("pool-name must be set with ha-enable-leader-election when a discovery plugin supplies the endpoints: " +
+			"it names the leader election lease, which must be unique per EPP deployment")
+	}
+	return nil
+}
+
+// kubernetesDiscoveryPlugin reports whether the endpoint discovery plugin
+// referenced by dataLayer.discovery.endpoints.pluginRef has a type registered
+// with RegisterKubernetesDiscovery. It reads the raw config, so it can choose
+// the run path before any plugin is instantiated.
+func kubernetesDiscoveryPlugin(rawConfig *configapiv1.EndpointPickerConfig) bool {
+	if rawConfig == nil {
+		return false
+	}
+	dl := rawConfig.DataLayer
+	if dl == nil || dl.Discovery == nil || dl.Discovery.Endpoints == nil {
+		return false
+	}
+	ref := dl.Discovery.Endpoints.PluginRef
+	for _, p := range rawConfig.Plugins {
+		name := p.Name
+		if name == "" {
+			name = p.Type
+		}
+		if name == ref {
+			return fwkplugin.IsKubernetesDiscovery(p.Type)
+		}
+	}
+	return false
+}
+
+// defaultDiscoveryPoolName names the endpoint pool when a discovery plugin
+// supplies the endpoints and --pool-name is not set.
+const defaultDiscoveryPoolName = "epp"
+
+// discoveryPoolGKNN names the endpoint pool when a Kubernetes-backed discovery
+// plugin supplies the endpoints. No InferencePool exists, so GroupKind is
+// empty and the name, --pool-name or "epp", labels metrics and logs and names
+// the leader election lease.
+func discoveryPoolGKNN(opts *runserver.Options) *common.GKNN {
+	name := opts.PoolName
+	if name == "" {
+		name = defaultDiscoveryPoolName
+	}
+	return &common.GKNN{
+		NamespacedName: types.NamespacedName{Namespace: resolvePoolNamespace(opts.PoolNamespace), Name: name},
+	}
 }
 
 func extractGKNN(poolName, poolGroup, poolNamespace string, endpointSelector labels.Selector) (*common.GKNN, error) {
@@ -1362,7 +1532,7 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	namespace := resolvePoolNamespace(opts.PoolNamespace)
 	poolName := opts.PoolName
 	if poolName == "" {
-		poolName = "epp"
+		poolName = defaultDiscoveryPoolName
 	}
 	pool := datalayer.NewEndpointPool(namespace, poolName)
 	ds := datastore.NewDatastore(r.servingCtx, epf).WithEndpointPool(pool)
