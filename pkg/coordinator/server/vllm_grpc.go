@@ -40,6 +40,17 @@ import (
 
 var errNumSequencesUnsupported = errors.New("num_sequences > 1 is not supported")
 
+// VLLMGenerationHandler serves pod-local vLLM callbacks through the coordinator pipeline.
+func (s *Server) VLLMGenerationHandler() http.Handler {
+	mux := http.NewServeMux()
+	generate := func(w http.ResponseWriter, r *http.Request) {
+		s.serveGRPC(w, r, scanVLLMGenerate)
+	}
+	mux.HandleFunc("POST "+vllmpb.Inference_Generate_FullMethodName, generate)
+	mux.HandleFunc("POST "+vllmpb.Inference_GenerateStream_FullMethodName, generate)
+	return otelHandler(mux)
+}
+
 func scanVLLMGenerate(r *http.Request, payload []byte) (grpcScanResult, error) {
 	genReq, err := vllmwire.ScanGenerateRequest(payload)
 	if err != nil {

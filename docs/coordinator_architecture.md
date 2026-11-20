@@ -78,6 +78,7 @@ absorb further processing modes as they are added.
   - [Connector selection](#connector-selection)
   - [Should the coordinator use the tokens-in format?](#should-the-coordinator-use-the-tokens-in-format)
   - [Worker protocol for `/inference/v1/generate`](#worker-protocol-for-inferencev1generate)
+  - [Pod-local vLLM frontend](#pod-local-vllm-frontend)
   - [The built-in steps](#the-built-in-steps)
   - [Adding a step to the pipeline](#adding-a-step-to-the-pipeline)
 - [References](#references)
@@ -912,6 +913,22 @@ token sequences, `logprobs`, `top_logprobs`, `truncate_prompt_tokens`, and
 coordinator still requires a `render` step when `use_openai_format` is `false`, because
 OpenAI text routes continue to call HTTP workers. Native gRPC routes always call
 upstream gRPC methods regardless of `worker_protocol`.
+
+### Pod-local vLLM frontend
+
+The two containers share Unix sockets on a Pod-local `emptyDir`. The public listener forwards chat completions, completions and Responses requests over HTTP, and both native vLLM inference RPCs over gRPC. The Rust frontend handles tokenization and response formatting. It sends token IDs to the coordinator over gRPC on `/run/llm-d/generation.sock` for scheduling through the gateway.
+
+The example configures the frontend to forward `x-request-id` and `x-llm-d-inference-fairness-id` as generation RPC metadata. The coordinator uses these values for worker requests.
+
+For one aggregated vLLM worker, set `server.vllm_frontend: true` in the mounted coordinator config, use the `decode` step and configure the gateway with the `vllminference-parser` EPP plugin and a gRPC worker endpoint. Apply the [frontend sidecar patch](../test/e2e/artifacts/coordinator/patch-vllm-frontend.yaml) with a coordinator image that uses the same socket paths. The model, revision and context limit must match the worker.
+
+The example pins a Linux image for AMD64 and ARM64 that adds a gRPC generation adapter to the [vLLM Rust frontend image](https://github.com/vllm-project/vllm/pull/68707). The adapter uses the [vLLM server builder](https://github.com/vllm-project/vllm/pull/64729). Its Dockerfile, adapter source, metadata patch and Cargo lockfile are packaged under `/usr/share/doc/grpc-generation-frontend/`.
+
+```sh
+kubectl patch deployment llm-d-coordinator --type=strategic \
+  --patch-file test/e2e/artifacts/coordinator/patch-vllm-frontend.yaml
+kubectl rollout status deployment/llm-d-coordinator
+```
 
 ### The built-in steps
 

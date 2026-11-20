@@ -33,8 +33,12 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpctest"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/gateway"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
@@ -362,7 +366,9 @@ func TestRun_DrainTimeout_ServesWithConnectionCloseThenShutsDown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, srv, cfg, lis) }()
+	callback, err := fwknet.ReserveListener()
+	require.NoError(t, err)
+	go func() { done <- runWithFrontend(ctx, srv, cfg, lis, callback) }()
 	waitForHealthz(t, listenAddr, 2*time.Second)
 
 	// An idle keep-alive connection opened before SIGTERM.
@@ -379,16 +385,24 @@ func TestRun_DrainTimeout_ServesWithConnectionCloseThenShutsDown(t *testing.T) {
 		_ = resp.Body.Close()
 		return resp.StatusCode, resp.Close
 	}
-	status, _ := get("/healthz")
-	require.Equal(t, http.StatusOK, status)
+	healthCode, _ := get("/healthz")
+	require.Equal(t, http.StatusOK, healthCode)
+
+	client := vllmpb.NewInferenceClient(grpctest.Dial(t, callback.Addr().String()))
 
 	start := time.Now()
 	cancel()
 	time.Sleep(50 * time.Millisecond)
 
-	status, closeConn := get("/readyz")
-	require.Equal(t, http.StatusServiceUnavailable, status)
+	readyCode, closeConn := get("/readyz")
+	require.Equal(t, http.StatusServiceUnavailable, readyCode)
 	require.True(t, closeConn, "draining response must carry Connection: close")
+
+	// An unsupported sequence count lets the callback answer without a worker.
+	stream, err := client.GenerateStream(t.Context(), &vllmpb.GenerateRequest{Sampling: &vllmpb.RandomSampling{NumSequences: 2}})
+	require.NoError(t, err)
+	_, err = stream.Recv()
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
 
 	fresh, err := http.Get("http://" + listenAddr + "/healthz")
 	require.NoError(t, err, "listener must stay open during the drain window")

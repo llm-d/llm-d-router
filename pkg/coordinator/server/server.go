@@ -193,7 +193,13 @@ func WithWorkerProtocol(protocol string) Option {
 	}
 }
 
+// WithIngress installs a public ingress handler after path canonicalization.
+func WithIngress(wrap func(http.Handler) http.Handler) Option {
+	return func(s *Server) { s.ingress = wrap }
+}
+
 type Server struct {
+	ingress            func(http.Handler) http.Handler
 	httpServer         *http.Server
 	pipeline           *pipeline.Pipeline
 	workerProtocol     string
@@ -260,6 +266,9 @@ func New(cfg config.ServerConfig, p *pipeline.Pipeline, gwClient *gateway.Client
 	r.Use(logRequestResponse)
 	// After logRequestResponse, so the log keeps the path the client sent.
 	r.Use(canonicalizeInferencePath(r))
+	if s.ingress != nil {
+		r.Use(s.ingress)
+	}
 
 	r.Post(reqcommon.PathChatCompletions, s.handleInference)
 	r.Post(reqcommon.PathCompletions, s.handleInference)
