@@ -239,25 +239,29 @@ func ComputeBlockExtraFeatures(
 
 	numBlocks := numTokens / blockSize
 	result := make([]*BlockExtraFeatures, numBlocks)
+	remaining := items
+	// Active items overwrite only consumed entries in the owned sorted slice.
+	active := items[:0]
 
 	for blockIdx := 0; blockIdx < numBlocks; blockIdx++ {
 		blockStart := blockIdx * blockSize
 		blockEnd := blockStart + blockSize
 
+		for len(remaining) > 0 && remaining[0].start < blockEnd {
+			active = append(active, remaining[0])
+			remaining = remaining[1:]
+		}
+
 		var hashes []MMHash
-		for _, item := range items {
-			// Placeholder ends before this block — skip.
+		retained := active[:0]
+		for _, item := range active {
 			if item.end <= blockStart {
 				continue
 			}
-			// Placeholder starts at or after block end — no more overlaps for this block
-			// (items are sorted).
-			if item.start >= blockEnd {
-				break
-			}
-			// Overlap: emit identifier for this MM item.
+			retained = append(retained, item)
 			hashes = append(hashes, MMHash{Hash: item.hash})
 		}
+		active = retained
 
 		if len(hashes) > 0 {
 			result[blockIdx] = &BlockExtraFeatures{MMHashes: hashes}
