@@ -17,6 +17,7 @@ limitations under the License.
 package tokenizer
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -28,11 +29,14 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -897,4 +901,80 @@ func TestVLLMHTTPRenderer_RustStandaloneRenderer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, [][]uint32{{101, 2054, 2003, 1037, 3231, 102}}, compTokens)
 	assert.Nil(t, offsets)
+}
+
+// keepAliveClosingServer answers the first render request on each connection
+// and keeps the connection open. It reads a second request on that connection
+// and closes it without answering, as a server does when its keep-alive
+// timeout fires while the client reuses the connection.
+func keepAliveClosingServer(t *testing.T) (url string, conns *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	conns = &atomic.Int32{}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var open []net.Conn
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		for _, c := range open {
+			_ = c.Close()
+		}
+		mu.Unlock()
+		wg.Wait()
+	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conns.Add(1)
+			mu.Lock()
+			open = append(open, conn)
+			mu.Unlock()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer conn.Close()
+				reader := bufio.NewReader(conn)
+				for i := 0; ; i++ {
+					req, err := http.ReadRequest(reader)
+					if err != nil {
+						return
+					}
+					_, _ = io.Copy(io.Discard, req.Body)
+					if i > 0 {
+						return
+					}
+					body := `[{"token_ids":[1,2,3]}]`
+					_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+				}
+			}()
+		}
+	}()
+	return "http://" + ln.Addr().String(), conns
+}
+
+func TestVLLMHTTPRenderer_ResendsWhenServerClosesReusedConnection(t *testing.T) {
+	url, conns := keepAliveClosingServer(t)
+	r, err := newVLLMHTTPRenderer(&vllmConfig{URL: url})
+	require.NoError(t, err)
+
+	for i := range 2 {
+		allTokenIDs, _, err := r.Render(context.Background(), fwkrequest.PayloadMap{"prompt": "hello"})
+		require.NoError(t, err, "request %d", i+1)
+		assert.Equal(t, [][]uint32{{1, 2, 3}}, allTokenIDs)
+	}
+	assert.Equal(t, int32(2), conns.Load(), "the second request is resent on a new connection")
+}
+
+func TestNewRenderTransport_IdleTimeoutBelowVLLMKeepAlive(t *testing.T) {
+	transport, err := newRenderTransport(&vllmConfig{})
+	require.NoError(t, err)
+	assert.Positive(t, transport.IdleConnTimeout)
+	assert.Less(t, transport.IdleConnTimeout, 5*time.Second)
 }
