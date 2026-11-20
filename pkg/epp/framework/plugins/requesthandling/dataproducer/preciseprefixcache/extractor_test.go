@@ -34,6 +34,8 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 )
 
 // Avoid a -race ding from subscriber goroutines writing through a t-bound
@@ -257,6 +259,94 @@ func TestProducer_EnsureSubscriber_IPv6BracketsEndpoint(t *testing.T) {
 
 	assert.Equal(t, []string{"tcp://[fd00::1]:5557"}, subscribers.endpoints)
 	assert.Equal(t, []string{"fd00::1:8080"}, subscribers.sourceEndpoints)
+}
+
+// GrpcBasePort set: the dial port follows the rank's reported global DP rank,
+// not the rank index.
+func TestProducer_EnsureSubscriber_DerivesZMQPortFromReportedRank(t *testing.T) {
+	grpcPort := startFakeServerInfoPort(t, serverInfoResponse(2,
+		&apiv1.KvEventSource{DpRank: 2, Endpoint: "tcp://127.0.0.1:5558"}))
+
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+	cfg.PodDiscoveryConfig.GrpcBasePort = grpcPort
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      context.Background(),
+	}
+
+	require.NoError(t, p.ensureSubscriber(discardCtx(t), &fwkdl.EndpointMetadata{
+		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-0"},
+		Address:   "127.0.0.1",
+		Port:      "30000",
+		RankIndex: 0,
+	}))
+
+	assert.Equal(t, []string{"ns/pod-a-rank-0"}, subscribers.ids)
+	assert.Equal(t, []string{"tcp://127.0.0.1:5559"}, subscribers.endpoints,
+		"rank index 0 must dial SocketPort + reported dpRank (5557+2)")
+	assert.Equal(t, []string{"127.0.0.1:30000"}, subscribers.sourceEndpoints)
+}
+
+// GetServerInfo unreachable: the rank-index port is used.
+func TestProducer_EnsureSubscriber_ServerInfoFailureUsesRankIndexPort(t *testing.T) {
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+	cfg.PodDiscoveryConfig.GrpcBasePort = closedPort(t)
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      context.Background(),
+	}
+
+	require.NoError(t, p.ensureSubscriber(discardCtx(t), &fwkdl.EndpointMetadata{
+		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-1"},
+		Address:   "127.0.0.1",
+		Port:      "30001",
+		RankIndex: 1,
+	}))
+
+	assert.Equal(t, []string{"tcp://127.0.0.1:5558"}, subscribers.endpoints,
+		"failed query must fall back to SocketPort + RankIndex (5557+1)")
+}
+
+// A rank whose GetServerInfo reports no KV-event source gets no subscriber.
+func TestProducer_EnsureSubscriber_RankWithoutSourceGetsNoSubscriber(t *testing.T) {
+	grpcPort := startFakeServerInfoPort(t, serverInfoResponse(3))
+
+	cfg := kvevents.DefaultConfig()
+	cfg.DiscoverPods = true
+	cfg.PodDiscoveryConfig = kvevents.DefaultPodReconcilerConfig()
+	cfg.PodDiscoveryConfig.SocketPort = 5557
+	cfg.PodDiscoveryConfig.GrpcBasePort = grpcPort
+
+	subscribers := &fakeSubscriberManager{}
+	p := &Producer{
+		typedName:          plugin.TypedName{Type: PluginType, Name: PluginType},
+		subscribersManager: subscribers,
+		kvEventsConfig:     cfg,
+		subscriberCtx:      context.Background(),
+	}
+
+	require.NoError(t, p.ensureSubscriber(discardCtx(t), &fwkdl.EndpointMetadata{
+		ID:        k8stypes.NamespacedName{Namespace: "ns", Name: "pod-a-rank-0"},
+		Address:   "127.0.0.1",
+		Port:      "30000",
+		RankIndex: 0,
+	}))
+
+	assert.Empty(t, subscribers.ids)
 }
 
 // RankIndex=0 must dial the base SocketPort unchanged.
