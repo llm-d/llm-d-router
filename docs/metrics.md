@@ -1334,6 +1334,66 @@ served on the sidecar `/metrics` endpoint; see [P/D sidecar](#pd-sidecar) for en
 | `moriio_dns_ip_changed_total` | Counter | - | Re-resolutions where the peer resolved to a different IP than the cached value (peer pod likely restarted at a new IP). |
 | `moriio_dns_lookup_failures_total` | Counter | - | Failed peer DNS lookups on the request path; the resolver then serves the last-known-good IP (or, on cold start, the raw spec). |
 
+## OpenTelemetry GenAI metrics
+
+[`genai-metrics.yaml`](../config/observability/otel-collector/genai-metrics.yaml) is an
+OpenTelemetry Collector configuration that scrapes EPP `/metrics` and exports the request metrics a
+second time under the
+[GenAI client inference metric names](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/client-inference.md#metrics).
+The `llm_d_epp_*` metrics pass through unchanged, and the EPP emits no GenAI metric names itself.
+The GenAI conventions have Development stability, so names and attributes can change in a later
+convention release.
+
+The EPP is reported as a client of the model server it routes to. Each value is what a caller of
+the router observes, flow-control queueing and scheduling included. A model server that follows the
+conventions reports `gen_ai.server.*` metrics, which keeps the two layers under different names. The
+`service.name` resource attribute is `llm-d-router`, the scrape job name.
+
+| GenAI metric | Type | Source | Measurement |
+|---|---|---|---|
+| `gen_ai.client.inference.duration` | Histogram, `s` | `llm_d_epp_request_duration_seconds` | Request received by the EPP until the last response body chunk. |
+| `gen_ai.client.inference.time_to_first_chunk` | Histogram, `s` | `llm_d_epp_request_ttft_seconds{streaming="true"}` | Request received until the first non-empty response body chunk. Streaming responses only. |
+| `gen_ai.client.inference.time_per_output_chunk` | Histogram, `s` | `llm_d_epp_request_streaming_itl_seconds` | Time between consecutive response body chunks of a stream. One chunk can carry several SSE events, and one event several tokens. |
+| `gen_ai.client.inference.operation.input_tokens` | Histogram, `{token}` | `llm_d_epp_request_input_tokens` | Prompt tokens per request from the response `usage`, cached tokens included. |
+| `gen_ai.client.inference.operation.output_tokens` | Histogram, `{token}` | `llm_d_epp_request_output_tokens` | Completion tokens per request from the response `usage`. |
+| `gen_ai.client.inference.usage.input_tokens` | Counter, `{token}` | Sum of `llm_d_epp_request_input_tokens` | |
+| `gen_ai.client.inference.usage.output_tokens` | Counter, `{token}` | Sum of `llm_d_epp_request_output_tokens` | |
+| `gen_ai.client.inference.usage.cache_read.input_tokens` | Counter, `{token}` | Sum of `llm_d_epp_request_cached_tokens` | Prompt tokens the model server reported as read from its cache. |
+
+| Attribute | Value |
+|---|---|
+| `gen_ai.operation.name` | `chat` for the `chat_completions`, `responses`, and `messages` API surfaces; `text_completion` for `completions`, `vllm_generate`, and `sglang_generate`. Requests with `api_surface="unknown"` are not exported. |
+| `gen_ai.provider.name` | The Collector's `GEN_AI_PROVIDER_NAME` environment variable, default `vllm`. Set it to the engine that serves the pool. |
+| `gen_ai.request.model` | `model_name`, the model in the request body. |
+| `gen_ai.response.model` | `target_model_name`, the model sent to the model server after any InferenceModelRewrite. |
+| `gen_ai.token.modality` | `unknown`, on the usage counters only. The EPP does not split token counts by modality. |
+
+`fairness_id` and `priority` are summed away; the per-tenant view stays on the `llm_d_epp_*`
+series. The mapping differs from the conventions in these points:
+
+- The histograms keep the EPP bucket edges instead of the conventions' advisory boundaries, because
+  a Collector cannot re-bucket a histogram. `metrics.requestITLBuckets` sets the
+  `time_per_output_chunk` edges; see [Streaming latency buckets](#streaming-latency-buckets).
+- `error.type` is not set. A model server error response is counted in
+  `gen_ai.client.inference.duration` without it. Interrupted requests and requests the EPP rejects
+  before dispatch are not recorded.
+- A response without `usage` adds no token observation, where the conventions record `0`.
+- `server.address` and `server.port` are not set on data points. The Prometheus receiver sets them
+  as resource attributes holding the scrape target, which is the EPP.
+
+The configuration needs the Collector contrib distribution, v0.146.0 or later, for its `transform`
+and `filter` processors. It exports over OTLP gRPC to `OTLP_ENDPOINT`, with TLS unless
+`OTLP_INSECURE` is `true`. It discovers Services named `<release>-epp` through EndpointSlices and
+scrapes their `http-metrics` port with the Collector's ServiceAccount token.
+That ServiceAccount needs `list` and `watch` on Services, Pods, and EndpointSlices, and `get` on
+the `/metrics` non-resource URL while metric authentication is enabled; see
+[Router pod / EPP](#router-pod--epp). A later `--config` file overrides the same keys in an earlier
+one and replaces lists, so a second file can supply a different scrape target or exporter:
+
+```bash
+otelcol-contrib --config=genai-metrics.yaml --config=overrides.yaml
+```
+
 ## Deprecated series
 
 The legacy series listed here have been deprecated. Prefer the current `llm_d_epp_*` names in new
