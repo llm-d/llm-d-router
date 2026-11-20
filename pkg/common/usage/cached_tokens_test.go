@@ -275,6 +275,36 @@ func TestResponseWriter_BuffersJSONSplitAcrossWrites(t *testing.T) {
 	}
 }
 
+func TestResponseWriter_CachedTokensFnAppliesOnceKnown(t *testing.T) {
+	const body = `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":49}}}`
+	known, count := false, 0
+	fn := func() (int, bool) { return count, known }
+
+	for _, tc := range []struct {
+		name  string
+		known bool
+		count int
+		want  string
+	}{
+		{"unknown leaves the block unchanged", false, 0, body},
+		{"known count is applied", true, 7, `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":7}}}`},
+		{"known zero is applied", true, 0, `{"usage":{"prompt_tokens":64,"prompt_tokens_details":{"cached_tokens":0}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			known, count = tc.known, tc.count
+			recorder := httptest.NewRecorder()
+			writer, finalize := NewResponseWriter(recorder, Options{CachedTokensFn: fn}, false)
+			writeChunk(t, writer, body)
+			if err := finalize(); err != nil {
+				t.Fatal(err)
+			}
+			if got := recorder.Body.String(); got != tc.want {
+				t.Errorf("body = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResponseWriter_FlushesIncompleteJSONUnchanged(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	writer, finalize := NewCachedTokensResponseWriter(recorder, 7, false)

@@ -118,7 +118,7 @@ func TestConcurrentPDCancellation(t *testing.T) {
 			body := []byte(`{"input_ids":[1]}`)
 			req := httptest.NewRequest(http.MethodPost, reqcommon.PathSGLangGenerate, bytes.NewReader(body)).WithContext(ctx)
 			before := snapshotStageMetrics(t)
-			s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
+			s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
 			require.NotErrorIs(t, ctx.Err(), context.DeadlineExceeded, "decode must not wait for the client deadline")
 
 			// net/http cancels the request context after the handler returns.
@@ -190,7 +190,7 @@ func TestRunConcurrentPDRelaysPrefillError(t *testing.T) {
 			body := []byte(`{"input_ids":[1]}`)
 			req := httptest.NewRequest(http.MethodPost, reqcommon.PathSGLangGenerate, bytes.NewReader(body)).WithContext(ctx)
 			rec := httptest.NewRecorder()
-			s.runConcurrentPD(rec, req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
+			s.runConcurrentPD(rec, req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil)
 
 			require.NoError(t, ctx.Err(), "decode must be cancelled before the client deadline")
 			assert.Equal(t, tt.status, rec.Code)
@@ -253,7 +253,7 @@ func runConcurrentPDAgainst(ctx context.Context, t *testing.T, prefill *heldPref
 	before := snapshotStageMetrics(t)
 	func() {
 		defer func() { require.Equal(t, wantPanic, recover()) }()
-		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefill.host(), constants.KVConnectorMooncake, nil, nil)
+		s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefill.host(), constants.KVConnectorMooncake, nil)
 	}()
 
 	prefill.requireCancelled(t)
