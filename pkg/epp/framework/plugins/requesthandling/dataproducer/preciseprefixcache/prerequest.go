@@ -416,10 +416,14 @@ func (p *Producer) PreRequest(ctx context.Context,
 	index := p.kvCacheIndexer.KVBlockIndex()
 	targets := []scheduling.Endpoint{targetEndpoint}
 	if prefill := schedulingResult.ProfileResults[experimentalPrefillProfile].FirstEndpoint(); prefill != nil {
-		targets = append(targets, prefill)
+		if p.seedDecode {
+			targets = append(targets, prefill)
+		} else {
+			targets = []scheduling.Endpoint{prefill}
+		}
 	}
 	perPodKeys := make(map[string][][]kvblock.BlockHash, len(targets))
-	var podIDs []string // seeding order: primary, then prefill
+	var podIDs []string // seeding order follows targets
 	for _, target := range targets {
 		md := target.GetMetadata()
 		if md == nil {

@@ -72,6 +72,11 @@ type PluginConfig struct {
 	// eviction. Go duration string; defaults to defaultSpeculativeTTL when
 	// empty.
 	SpeculativeTTL string `json:"speculativeTTL"`
+	// SeedDecodeWhenDisaggregated also seeds a disaggregated request's decode
+	// endpoint. Off by default: the decoder holds no KV until the P/D transfer
+	// lands, so a same-prefix request inside the TTL would see a full hit there
+	// and be sent decode-only.
+	SeedDecodeWhenDisaggregated bool `json:"seedDecodeWhenDisaggregated,omitempty"`
 }
 
 var (
@@ -116,6 +121,7 @@ type Producer struct {
 	speculativeLeases  *speculativeLeases
 	speculativeTTL     time.Duration
 	speculativeEnabled bool
+	seedDecode         bool
 
 	blockSizeTokens int
 
@@ -283,6 +289,7 @@ func New(ctx context.Context, name string, config PluginConfig) (*Producer, erro
 		speculativeLeases:  speculativeLeases,
 		speculativeTTL:     speculativeTTL,
 		speculativeEnabled: config.SpeculativeIndexing,
+		seedDecode:         config.SeedDecodeWhenDisaggregated,
 		blockSizeTokens:    tokenProcessor.BlockSize(),
 		subscriberCtx:      ctx,
 	}
