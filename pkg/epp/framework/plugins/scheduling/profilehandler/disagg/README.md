@@ -10,6 +10,9 @@ Plugins for disaggregated inference scheduling: a profile handler that selects t
   - [PrefixBasedPDDecider](#prefixbasedpddecider)
   - [AlwaysDisaggPDDecider](#alwaysdisaggpddecider)
   - [AlwaysDisaggMultimodalDecider](#alwaysdisaggmultimodaldecider)
+  - [KVCompatPDDecider](#kvcompatpddecider)
+- [Filter Plugins](#filter-plugins)
+  - [KVCompatFilter](#kvcompatfilter)
 
 ---
 
@@ -187,6 +190,115 @@ Inspects the chat completions message content blocks for `image_url`, `video_url
 ##### Parameters
 
 None.
+
+---
+
+### KVCompatPDDecider
+
+**Type:** `kv-compat-pd-decider` (Alpha)
+
+Declines P/D disaggregation when no prefill endpoint can exchange KV with the selected decode endpoint, and otherwise returns the answer of another decider.
+
+#### What it does
+
+Two vLLM instances exchange KV over NIXL only when their handshake compatibility hash matches. The hash covers the vLLM version, model, dtypes, KV cache layout and attention backend, so two GPU generations can differ even with the same model. When the hashes differ, the decode instance rejects every transfer from that prefill instance and the request fails.
+
+Each endpoint carries a compatibility key in a label (`llm-d.ai/kv-compat-key` by default), set by whatever deploys or labels the model servers. Endpoints with equal keys can exchange KV. A decode endpoint also accepts a prefill key that is listed in `approvedPairs`, or for which it carries the label `<acceptLabelPrefix><prefillKey>=true`.
+
+1. If no endpoint in the pool carries a key, ask the wrapped decider.
+2. If the decode endpoint has no key, return false.
+3. If a prefill-capable endpoint exists whose key the decode endpoint accepts, ask the wrapped decider.
+4. Otherwise return false, so the request is served decode-only.
+
+#### How It Works
+
+The decider keeps a count of prefill-capable endpoints per key, updated from endpoint lifecycle events, so a decision reads a few map entries and does not scan the pool. Use it together with `kv-compat-filter` in the prefill profile, so the prefill profile picks one of the compatible endpoints.
+
+##### Failed requests
+
+A key can be wrong, or two endpoints with equal keys can still fail to exchange KV. The decider records the outcome of every disaggregated request against its pair: the prefill key and the decode endpoint, or the prefill endpoint itself when it has no key. A request counts as failed when its response status is in `failureCodes`, when its stream ends with an error, or when it ends normally after reading the prompt without generating a token. After `failureThreshold` consecutive failed requests the pair is excluded for `exclusionDuration`: the decider and the filter treat it as incompatible, so requests for that decode endpoint use another prefill endpoint or run decode-only. A successful request resets the count. Responses that arrive during an exclusion do not extend it.
+
+When a cross-replica syncer is configured, each replica publishes its exclusions per decode endpoint and reads the union of all replicas' exclusions, so an exclusion observed by one replica applies on every replica after the next sync. Without a syncer, each replica excludes pairs from its own requests only.
+
+#### Inputs consumed
+
+- Endpoint labels: `llm-d.ai/role`, the key label and the accept labels, from endpoint lifecycle events and from the decode endpoint.
+- Whatever the wrapped decider consumes.
+
+#### Configuration
+
+##### Parameters
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `decider` | `string` | Yes | | Name of the prefill decider asked when a compatible prefill endpoint exists. |
+| `keyLabel` | `string` | No | `llm-d.ai/kv-compat-key` | Endpoint label holding the compatibility key. |
+| `acceptLabelPrefix` | `string` | No | `accept.kv-compat.llm-d.ai/` | Prefix of the decode endpoint labels that accept another prefill key. `-` disables these labels. |
+| `approvedPairs` | `[]string` | No | | `prefillKey->decodeKey` pairs that may exchange KV although their keys differ, in that direction only. |
+| `failureThreshold` | `int` | No | `3` | Consecutive failed disaggregated requests that exclude a pair. `0` disables exclusion. |
+| `exclusionDuration` | `duration` | No | `5m` | How long an excluded pair stays excluded. |
+| `failureCodes` | `[]int` | No | `[500, 502, 503]` | Response statuses counted as a failed request. Each must be a 4xx or 5xx status. |
+| `prefillProfile` | `string` | No | `prefill` | Scheduling profile that picks the prefill endpoint. |
+
+##### Example
+```yaml
+plugins:
+  - type: prefix-based-pd-decider
+    parameters:
+      nonCachedTokens: 512
+  - type: kv-compat-pd-decider
+    parameters:
+      decider: prefix-based-pd-decider
+  - type: kv-compat-filter
+    parameters:
+      decider: kv-compat-pd-decider
+  - type: disagg-profile-handler
+    parameters:
+      deciders:
+        prefill: kv-compat-pd-decider
+schedulingProfiles:
+  - name: prefill
+    plugins:
+      - pluginRef: prefill-filter
+      - pluginRef: kv-compat-filter
+      - pluginRef: max-score-picker
+  - name: decode
+    plugins:
+      - pluginRef: decode-filter
+      - pluginRef: max-score-picker
+```
+
+#### Limitations
+
+- The key is only as accurate as the settings it is computed from. An endpoint labelled with the wrong key can still be paired with an incompatible one.
+- Once any endpoint carries a key, an endpoint without one is never paired.
+- Declined requests are counted in `llm_d_epp_kv_compat_prefill_declined_total`, and exclusions in `llm_d_epp_kv_compat_pair_exclusions_total`.
+- A failure is counted against the pair even when its cause lies elsewhere, such as a request that fails on any path. A one-off failure does not exclude a pair, since exclusion needs `failureThreshold` consecutive failures.
+
+---
+
+## Filter Plugins
+
+### KVCompatFilter
+
+**Type:** `kv-compat-filter` (Alpha)
+
+Keeps the prefill candidates that can exchange KV with the decode endpoint picked earlier in the cycle, using the rule of a `kv-compat-pd-decider`.
+
+#### What it does
+
+Reads the decode endpoint that `disagg-profile-handler` publishes before it runs the prefill profile, and keeps the candidates whose key the decode endpoint accepts and whose pair with it is not excluded. When no decode endpoint was published, or no endpoint carries a key and no pair is excluded, it keeps every candidate. It never keeps an incompatible candidate, so an empty result means no candidate can take the KV.
+
+#### Inputs consumed
+
+- The decode endpoint published by `disagg-profile-handler` (optional).
+- Labels of the candidate and decode endpoints.
+
+#### Configuration
+
+##### Parameters
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `decider` | `string` | Yes | | Name of the `kv-compat-pd-decider` whose rule the filter applies. |
 
 ---
 

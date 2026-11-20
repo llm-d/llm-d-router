@@ -38,6 +38,32 @@ var (
 		},
 		[]string{"plugin_name", "plugin_type", "model_name", "decision_type"},
 	)
+
+	// LlmdKVCompatDeclinedCount records remote prefill declined by kv-compat-pd-decider because no
+	// prefill endpoint can exchange KV with the decode endpoint.
+	LlmdKVCompatDeclinedCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "kv_compat_prefill_declined_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Total number of requests served decode-only because no prefill endpoint could exchange KV with the decode endpoint",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_name"},
+	)
+
+	// LlmdKVCompatExclusionCount records prefill/decode pairs excluded by kv-compat-pd-decider
+	// after consecutive failed requests.
+	LlmdKVCompatExclusionCount = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "kv_compat_pair_exclusions_total",
+			Help: metricsutil.HelpMsgWithStability(
+				"Total number of prefill/decode pairs excluded after consecutive failed disaggregated requests",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"plugin_name"},
+	)
 )
 
 func registerMetrics(registerer prometheus.Registerer) error {
@@ -46,6 +72,8 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	}
 	for _, collector := range []prometheus.Collector{
 		LlmdDisaggDecisionCount,
+		LlmdKVCompatDeclinedCount,
+		LlmdKVCompatExclusionCount,
 	} {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -88,4 +116,14 @@ func DisaggDecisionType(encodeUsed, prefillUsed bool) string {
 	default:
 		return metricsutil.DisaggPathDecodeOnly
 	}
+}
+
+// recordKVCompatDeclined increments the counter of remote prefill declined for KV compatibility.
+func recordKVCompatDeclined(pluginName string) {
+	LlmdKVCompatDeclinedCount.WithLabelValues(pluginName).Inc()
+}
+
+// recordKVCompatExclusion increments the counter of excluded prefill/decode pairs.
+func recordKVCompatExclusion(pluginName string) {
+	LlmdKVCompatExclusionCount.WithLabelValues(pluginName).Inc()
 }
