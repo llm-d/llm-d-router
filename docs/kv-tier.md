@@ -78,9 +78,9 @@ A later request does not wait for a prefetch:
 
 The router calls the daemon directly because vLLM's hints are per request. A prefetch sent as a hint would have to ride on an inference request to the source. Background moves would then depend on foreground traffic. The direct call needs no vLLM change. Blocks that land in a pool reach vLLM through the existing stored events.
 
-The branches do not have the direct call yet. Today a prefetch arrives as a vLLM hint through the source engine. The direct call is the next change. Pinning and retention hints will use it too. It needs two other pieces of work:
+The direct call is the `peer_push` message on the daemon's peer port. A shared token guards it, and it is off unless the daemon has a token. A prefetch can also still arrive as a vLLM hint through the source engine. Pinning and retention hints will use the direct call too. Two pieces of work remain:
 
-- The daemon's peer port needs authentication first. It is plain TCP today, and any host that reaches it can already pull blocks.
+- The rest of the peer port needs authentication. It is plain TCP today, and any host that reaches it can pull blocks.
 - The router needs each daemon's endpoint, and a plugin that decides what to prefetch and when.
 
 ### Memory
@@ -235,6 +235,8 @@ This test ran on the Qwen3-32B TCP pair. It read a prompt's block hashes from A'
 
 The 30k transfer ran at about 145 Gbit/s. A request that arrived before the prefetch landed got no partial hit and recomputed.
 
+The direct call gave the same result with no request to the source engine. The call returned in 4 ms. The later request on B took 0.21 to 0.26 s at 11.6k tokens and 0.39 to 0.43 s at 30k tokens.
+
 ### Failures
 
 - **Killing the source daemon during a run of pulls caused no errors.** The request in flight recomputed. Both engines stayed up.
@@ -270,7 +272,7 @@ The code targets [llm-d-router](https://github.com/llm-d/llm-d-router):
 - its packages in `pkg/kvtier`
 - the engine shims in `kv_connectors/llmd_kv_tiering`
 
-It is split into four stacked branches on a fork. Each branch is one commit that passes `make lint` and its tests. No PR is open yet. Each will open after the one before it is reviewed.
+It is split into five stacked branches on a fork. Each branch is one commit that passes `make lint` and its tests. No PR is open yet. Each will open after the one before it is reviewed.
 
 | # | Branch | Contents |
 | --- | --- | --- |
@@ -278,10 +280,11 @@ It is split into four stacked branches on a fork. Each branch is one commit that
 | 2 | [`kvtier-2-hints`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-2-hints) | Router hints, peer transfer over TCP |
 | 3 | [`kvtier-3-tpu`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-3-tpu) | TPU shim: a reference path and a place to try new hints |
 | 4 | [`kvtier-4-rdma`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-4-rdma) | RDMA through a NIXL helper. It pushes into the pool, or into vLLM's CPU tier on GPU. |
+| 5 | [`kvtier-5-direct-prefetch`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-5-direct-prefetch) | Direct router-to-daemon call for prefetch and move, guarded by a token |
 
 Next steps:
 
 - [ ] Resolve the TPU Sync questions above. Then build the TPU adapter onto TPU Sync, or keep the shim for hints TPU Sync cannot run.
 - [ ] Agree names for new hint actions with the vLLM hint RFC authors.
-- [ ] Add authentication to the daemon's peer port, then a direct router-to-daemon call for prefetch and move.
+- [ ] Add authentication to the rest of the daemon's peer port. Add a router plugin that sends prefetch and move through the direct call.
 - [ ] Compare against Mooncake Store on larger clusters and under load from many sessions.
