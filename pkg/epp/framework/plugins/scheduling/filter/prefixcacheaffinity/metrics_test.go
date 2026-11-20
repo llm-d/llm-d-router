@@ -86,6 +86,12 @@ func TestFilterRecordsDecisionOutcome(t *testing.T) {
 			outcome: outcomeLoadOverride,
 		},
 		{
+			name:    "bounded load override",
+			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor, MaxSpillEndpoints: 1},
+			input:   []fwksched.Endpoint{makeEndpoint("a", 90, 500, 0, -1), makeEndpoint("b", 10, 50, 0, -1), makeEndpoint("c", 10, 60, 0, -1)},
+			outcome: outcomeLoadOverride,
+		},
+		{
 			name:    "missing signal returns all endpoints",
 			config:  Config{AffinityThreshold: 0.80, MaxTTFTPenaltyMs: 100, TTFTSource: TTFTSourceLatencyPredictor},
 			input:   []fwksched.Endpoint{makeEndpoint("a", 90, -1, 0, -1), makeEndpoint("b", 10, 50, 0, -1)},
