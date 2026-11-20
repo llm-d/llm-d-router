@@ -316,9 +316,9 @@ FlowControl:
 - When the saturation detector implements the scheduling filter interface, as `utilization-detector`
   does, it is also appended as a filter to every scheduling profile that does not list it, whether or
   not the `flowControl` feature gate is enabled. With default parameters, `utilization-detector`
-  removes endpoints whose metrics are missing or older than 200ms, whose waiting queue is 5 or more,
-  or whose KV cache utilization is 0.8 or more. When that would remove every endpoint, it keeps them
-  all.
+  removes endpoints whose metrics are missing or older than 200ms, whose waiting queue, less the
+  requests whose KV transfer is in progress, is 5 or more, or whose KV cache utilization is 0.8 or
+  more. When that would remove every endpoint, it keeps them all.
 
 DataLayer:
 - `metrics-data-source` and `core-metrics-extractor` are injected and wired together. Skipped when
