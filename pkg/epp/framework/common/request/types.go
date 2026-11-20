@@ -372,6 +372,8 @@ func (p *Prompt) UnmarshalJSON(data []byte) error {
 	}
 
 	switch v := raw.(type) {
+	case nil:
+		return nil
 	case string:
 		p.Raw = v
 		return nil

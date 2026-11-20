@@ -553,14 +553,18 @@ func extractRequestBody(apiType string, rawBody []byte) (*request.InferenceReque
 
 	case completionsAPI:
 		validationErr := errors.New("invalid completions request: must have prompt field")
-		var completions request.CompletionsRequest
+		var completions struct {
+			request.CompletionsRequest
+			// vLLM accepts prompt_embeds in place of prompt.
+			PromptEmbeds jsonPresent `json:"prompt_embeds"`
+		}
 		if err := json.Unmarshal(rawBody, &completions); err != nil {
 			return nil, requestBodyDecodeError(err, "completions", validationErr)
 		}
-		if completions.Prompt.IsEmpty() {
+		if completions.Prompt.IsEmpty() && !bool(completions.PromptEmbeds) {
 			return nil, validationErr
 		}
-		return &request.InferenceRequestBody{Completions: &completions}, nil
+		return &request.InferenceRequestBody{Completions: &completions.CompletionsRequest}, nil
 
 	case embeddingsAPI:
 		validationErr := errors.New("invalid embeddings request: must have input field")
@@ -809,6 +813,14 @@ func parseVideosRequest(body []byte, headers map[string]string) (*fwkrh.ParseRes
 		return nil, errors.New("invalid videos request: must have prompt field")
 	}
 	return &fwkrh.ParseResult{Body: extractedBody, SkipResponseProcessing: false}, nil
+}
+
+// jsonPresent records whether a field holds a non-null value without copying it.
+type jsonPresent bool
+
+func (p *jsonPresent) UnmarshalJSON(data []byte) error {
+	*p = jsonPresent(!bytes.Equal(data, []byte("null")))
+	return nil
 }
 
 // parseTranscriptionsRequest parses a multipart/form-data /v1/audio/transcriptions
