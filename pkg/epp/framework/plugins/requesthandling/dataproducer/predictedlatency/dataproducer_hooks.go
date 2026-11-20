@@ -81,7 +81,13 @@ func (pl *PredictedLatency) Produce(ctx context.Context, request *fwksched.Infer
 		return nil
 	}
 
-	predictions, err := pl.generatePredictions(ctx, predictedLatencyCtx, endpoints)
+	// Never-scraped endpoints are not sent to the predictor. When none is
+	// scraped, the predictor is not called and no prediction is stored.
+	var predictions []endpointPredictionResult
+	var err error
+	if scrapedEndpoints := scrapedEndpointsOnly(endpoints); len(scrapedEndpoints) > 0 {
+		predictions, err = pl.generatePredictions(ctx, predictedLatencyCtx, scrapedEndpoints)
+	}
 	if err == nil {
 		pl.updateRequestContextWithPredictions(predictedLatencyCtx, predictions)
 
