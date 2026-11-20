@@ -136,10 +136,10 @@ func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.Infer
 		return e.clampOutput(ttsOutputFrames(tts, request.Body.MaxOutputTokens), request.Body.MaxOutputTokens)
 	}
 
-	// Image output is diffusion work, not a text output length. Estimate it
-	// from the request's size, step count, and image count.
+	// Image output is diffusion work, not a text output length. Its unit is
+	// megapixel-steps, so the text-token operator cap does not apply.
 	if images := request.Body.Images; images != nil {
-		return e.clampOutput(imageOutputWork(images), nil)
+		return imageOutputWork(images)
 	}
 
 	// An absent attribute reads as the zero value (Unknown) and is handled by the
@@ -202,7 +202,13 @@ func imageOutputWork(images *fwkrequest.ImagesGenerationsRequest) int64 {
 	}
 	pixels := imageDefaultPixels
 	if width, height := parseImageSize(images.Size); width > 0 && height > 0 {
-		pixels = min(int64(width)*int64(height), imageMaxPixels)
+		w, h := int64(width), int64(height)
+		// Divide before multiplying so an oversized dimension cannot overflow.
+		if w > imageMaxPixels/h {
+			pixels = imageMaxPixels
+		} else {
+			pixels = w * h
+		}
 	}
 	work := int64(math.Ceil(float64(steps*n*pixels) / imageWorkScale))
 	return max(work, 1)
