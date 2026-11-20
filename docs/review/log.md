@@ -1,5 +1,9 @@
 # Update Log
 
+## 2026-11-09
+
+* **Update**: Mined maintainer review threads and issues through `2026-11-09` (351 pull requests in window, 864 review threads, 60 issues). Refined Stage-1 rules for router-built P/D transfer parameters (omitting approximate token IDs from legacy translations lacking parity, excluding echo, return-prompt-text, and multimodal requests; #3608, #3706, #3741), Anthropic streaming usage folding (#3803, #4030), and bounded metric labels across pod autoscaling (#3694). Routed `pkg/epp/framework/plugins/requesthandling/forwardtokens/**` in the diff-path routing table, updated open question `sub_agent_wire_identity` with consensus on decoupling logical lineage from physical thread tracking (#3939, #4021), and advanced watermark in [`provenance.json`](provenance.json) (`mined_through_issue` to `4111`, `mined_through_date` to `2026-11-09`).
+
 ## 2026-11-05
 
 * **Update**: Mined maintainer review threads and issues for pull requests `#3512` to `#3744` with comments through `2026-10-30T14:00:00Z` (59 pull requests, 85 review threads, 35 issues). Added 3 Stage-1 rules (router-built P/D `kv_transfer_params`, bounded metric labels and series cleanup, no locks held across network calls), refined the SSE chunk-boundary usage rule, the client header passthrough rule (`Accept-Encoding`), and the ingress stripping rule (every client entry point), dropped the constant-location sentence already covered by [AGENTS.md](../../AGENTS.md), routed `pkg/*/metrics/**` and observability packages to [unencoded_runtime_hazards.md](rules/unencoded_runtime_hazards.md), and recorded `corpus.mined_through_pr` `3534` (below the lowest pull request still open on `2026-10-30`, `#3535`) in [`provenance.json`](provenance.json).

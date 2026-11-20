@@ -1,14 +1,14 @@
 {
   "corpus": {
     "window_start": "2026-04-26",
-    "window_end": "2026-10-30",
-    "pull_requests": 1868,
-    "maintainer_pr_items": 6909,
-    "issues": 1125,
-    "maintainer_issue_items": 1641,
+    "window_end": "2026-11-09",
+    "pull_requests": 2219,
+    "maintainer_pr_items": 7773,
+    "issues": 1185,
+    "maintainer_issue_items": 1701,
     "mined_through_pr": 3534,
-    "mined_through_issue": 3744,
-    "mined_through_date": "2026-10-30"
+    "mined_through_issue": 4111,
+    "mined_through_date": "2026-11-09"
   },
   "sections": {
     "external_wire_and_engine_contracts": {
@@ -44,25 +44,25 @@
         "pkg/common/usage/**"
       ],
       "consequence": "Ignoring Anthropic cache token fields undercounts prompt tokens, and injecting include_usage alongside continuous_usage_stats duplicates or corrupts streaming usage.",
-      "observed_prs": 63,
+      "observed_prs": 16,
       "examples": [
         {
           "id": "issue-848",
           "url": "https://github.com/llm-d/llm-d-router/issues/848",
-          "author": "human:elevran",
-          "last_modified": "2026-04-20T09:27:44Z"
+          "author": "human:kaushikmitr",
+          "last_modified": "2026-06-25T14:15:32Z"
         },
         {
-          "id": "pr-932-r3178050269",
-          "url": "https://github.com/llm-d/llm-d-router/pull/932#discussion_r3178050269",
-          "author": "human:ahg-g",
-          "last_modified": "2026-05-03T11:37:43Z"
+          "id": "pr-3803-rev-5722725807",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3803#pullrequestreview-5722725807",
+          "author": "human:blacksoxx",
+          "last_modified": "2026-10-31T12:34:58Z"
         },
         {
-          "id": "pr-2391-r3798712574",
-          "url": "https://github.com/llm-d/llm-d-router/pull/2391#discussion_r3798712574",
-          "author": "human:sagearc",
-          "last_modified": "2026-08-17T20:51:12Z"
+          "id": "pr-4030-rev-5814088976",
+          "url": "https://github.com/llm-d/llm-d-router/pull/4030#pullrequestreview-5814088976",
+          "author": "human:blacksoxx",
+          "last_modified": "2026-11-07T17:47:55Z"
         }
       ]
     },
@@ -696,19 +696,13 @@
     },
     "external_wire_and_engine_contracts#router-built-pd-transfer-params": {
       "applies_to": [
-        "pkg/sidecar/proxy/**",
-        "pkg/coordinator/connectors/**",
-        "pkg/coordinator/steps/**"
+        "pkg/coordinator/steps/**",
+        "pkg/epp/framework/plugins/requesthandling/forwardtokens/**",
+        "pkg/sidecar/proxy/**"
       ],
-      "consequence": "Router-built decode params that omit a key the engine connector reads unconditionally, or carry another engine's keys, crash the decode engine or break its KV transfer, and forwarded encoder ec_transfer_params trigger connector errors on decode workers.",
-      "observed_prs": 2,
+      "consequence": "Engines crash or reject decode legs when required transfer keys are missing, cross-engine parameters collide, encoder transfer params reach decoders, or approximate token IDs from legacy translations are forwarded without parity.",
+      "observed_prs": 7,
       "examples": [
-        {
-          "id": "issue-3607",
-          "url": "https://github.com/llm-d/llm-d-router/issues/3607",
-          "author": "human:xintin",
-          "last_modified": "2026-10-25T07:34:00Z"
-        },
         {
           "id": "pr-3608-rev-5627567379",
           "url": "https://github.com/llm-d/llm-d-router/pull/3608#pullrequestreview-5627567379",
@@ -716,10 +710,16 @@
           "last_modified": "2026-10-23T11:25:51Z"
         },
         {
-          "id": "pr-3732-rev-5701261477",
-          "url": "https://github.com/llm-d/llm-d-router/pull/3732#pullrequestreview-5701261477",
-          "author": "human:liu-cong",
-          "last_modified": "2026-10-29T16:26:49Z"
+          "id": "pr-3706-r4436608664",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3706#discussion_r4436608664",
+          "author": "human:ahg-g",
+          "last_modified": "2026-11-02T06:53:57Z"
+        },
+        {
+          "id": "pr-3741-r4503756290",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3741#discussion_r4503756290",
+          "author": "human:ahg-g",
+          "last_modified": "2026-11-08T16:59:28Z"
         }
       ]
     },
@@ -731,25 +731,25 @@
         "pkg/epp/flowcontrol/**"
       ],
       "consequence": "Caller-controlled label values, series never deleted after endpoint or flow removal, and unbounded configurable buckets grow Prometheus series without limit and freeze stale values in aggregates.",
-      "observed_prs": 4,
+      "observed_prs": 8,
       "examples": [
         {
-          "id": "issue-2106",
-          "url": "https://github.com/llm-d/llm-d-router/issues/2106",
-          "author": "human:LukeAVanDrie",
-          "last_modified": "2026-07-21T21:48:37Z"
+          "id": "issue-1188",
+          "url": "https://github.com/llm-d/llm-d-router/issues/1188",
+          "author": "human:kaushikmitr",
+          "last_modified": "2026-07-18T22:10:45Z"
         },
         {
-          "id": "issue-2529",
-          "url": "https://github.com/llm-d/llm-d-router/issues/2529",
-          "author": "human:asm582",
-          "last_modified": "2026-08-27T14:29:33Z"
+          "id": "pr-3269-r4358607142",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3269#discussion_r4358607142",
+          "author": "human:ahg-g",
+          "last_modified": "2026-10-18T19:22:11Z"
         },
         {
-          "id": "pr-3539-r4347141065",
-          "url": "https://github.com/llm-d/llm-d-router/pull/3539#discussion_r4347141065",
-          "author": "human:elevran",
-          "last_modified": "2026-10-22T10:54:41Z"
+          "id": "pr-3694-r4395951470",
+          "url": "https://github.com/llm-d/llm-d-router/pull/3694#discussion_r4395951470",
+          "author": "human:liu-cong",
+          "last_modified": "2026-10-28T01:15:35Z"
         }
       ]
     },
