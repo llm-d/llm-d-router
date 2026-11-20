@@ -140,6 +140,9 @@ func TestEstimateOutputFromRequest_Images(t *testing.T) {
 		{name: "steps are capped", size: "1024x1024", steps: ptr.To(int64(1000)), want: 210},
 		{name: "images are capped", size: "1024x1024", steps: ptr.To(int64(50)), n: ptr.To(int64(100)), want: 525},
 		{name: "pixels are capped", size: "8192x8192", steps: ptr.To(int64(50)), want: 839},
+		{name: "oversized dimension does not overflow", size: "9223372036854775807x2", steps: ptr.To(int64(50)), want: 839},
+		{name: "uppercase and whitespace size", size: " 1024X1024 ", steps: ptr.To(int64(50)), want: 53},
+		{name: "zero steps and images use defaults", size: "1024x1024", steps: ptr.To(int64(0)), n: ptr.To(int64(0)), want: 53},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
