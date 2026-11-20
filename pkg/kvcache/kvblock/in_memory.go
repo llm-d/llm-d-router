@@ -565,6 +565,9 @@ func (m *InMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) 
 	if !found || len(rks) == 0 {
 		return EmptyBlockHash, fmt.Errorf("engine key not found: %s", engineKey.String())
 	}
+	if rks[len(rks)-1] == EmptyBlockHash {
+		return EmptyBlockHash, fmt.Errorf("engine key %s ends inside a canonical block", engineKey.String())
+	}
 	return rks[len(rks)-1], nil
 }
 

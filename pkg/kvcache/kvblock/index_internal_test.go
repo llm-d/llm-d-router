@@ -44,11 +44,14 @@ func TestEngineToRequestMapping_ManyToOne(t *testing.T) {
 	mappings := engineToRequestMapping(engineKeys, requestKeys)
 
 	require.Len(t, mappings, 4)
-	for _, ek := range engineKeys {
+	// Only the last engine key ends the canonical block; the others end inside it.
+	for _, ek := range engineKeys[:3] {
 		rks, ok := mappings[ek]
 		require.True(t, ok, "engine key %d should be present", ek)
-		assert.Equal(t, []BlockHash{9000}, rks, "each engine key should map to the single request key")
+		assert.Equal(t, []BlockHash{9000, EmptyBlockHash}, rks,
+			"engine key %d ends inside the canonical block", ek)
 	}
+	assert.Equal(t, []BlockHash{9000}, mappings[engineKeys[3]])
 }
 
 func TestEngineToRequestMapping_OneToMany(t *testing.T) {

@@ -384,6 +384,9 @@ func (r *RedisIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (Bl
 	if err != nil {
 		return EmptyBlockHash, fmt.Errorf("invalid hash format: %s", vals[0])
 	}
+	if BlockHash(hash) == EmptyBlockHash {
+		return EmptyBlockHash, fmt.Errorf("engine key %s ends inside a canonical block", engineKey.String())
+	}
 	return BlockHash(hash), nil
 }
 
