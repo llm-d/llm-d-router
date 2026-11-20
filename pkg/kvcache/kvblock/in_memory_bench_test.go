@@ -19,11 +19,13 @@ package kvblock_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock/workload"
 )
 
 // populateIndex fills an in-memory index with numKeys request keys, each held
@@ -186,6 +188,112 @@ func BenchmarkInMemoryIndexWalkKeys(b *testing.B) {
 					b.Fatalf("visited %d entries, want %d", seen, numKeys*numPods)
 				}
 			}
+		})
+	}
+}
+
+// BenchmarkInMemoryIndexGetRequestKey isolates the engine-key map's read
+// path (parent-hash resolution) over a million 1:1 mappings.
+func BenchmarkInMemoryIndexGetRequestKey(b *testing.B) {
+	idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: 1 << 21, PodCacheSize: 8})
+	if err != nil {
+		b.Fatal(err)
+	}
+	const (
+		numKeys   = 1 << 20
+		batchSize = 64
+	)
+	entries := []kvblock.PodEntry{{PodIdentifier: workload.PodName(0), DeviceTier: "gpu"}}
+	keys := make([]kvblock.BlockHash, batchSize)
+	ctx := context.Background()
+	for base := uint64(1); base <= uint64(numKeys); base += batchSize {
+		for j := range keys {
+			keys[j] = kvblock.BlockHash(base + uint64(j))
+		}
+		if err := idx.Add(ctx, keys, keys, entries); err != nil {
+			b.Fatal(err)
+		}
+	}
+	allKeys := make([]kvblock.BlockHash, numKeys)
+	for i := range allKeys {
+		allKeys[i] = kvblock.BlockHash(uint64(i) + 1)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := idx.GetRequestKey(ctx, allKeys[i%numKeys]); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkInMemoryIndexAddNoEngineKeys is BenchmarkInMemoryIndexAdd without
+// the engine-key mapping writes, isolating the main store's write cost.
+func BenchmarkInMemoryIndexAddNoEngineKeys(b *testing.B) {
+	idx, _ := populateIndex(b, 1<<16, 4)
+	entries := []kvblock.PodEntry{{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}}
+	requestKeys := make([]kvblock.BlockHash, 64)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		base := uint64(i)*64 + 1
+		for j := range requestKeys {
+			requestKeys[j] = kvblock.BlockHash(base + uint64(j))
+		}
+		if err := idx.Add(ctx, nil, requestKeys, entries); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkInMemoryResidencyAttribution reports the main-store and
+// engine-map shares of steady-state residency: live heap after populating
+// with engine mappings, minus the same population without them. Runs only
+// under KVINDEXER_SCALE_BENCH=1.
+func BenchmarkInMemoryResidencyAttribution(b *testing.B) {
+	if os.Getenv("KVINDEXER_SCALE_BENCH") != "1" {
+		b.Skip("set KVINDEXER_SCALE_BENCH=1 to run the operating-point benches")
+	}
+	const numKeys = 1 << 20
+	entries := []kvblock.PodEntry{{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}}
+	const batchSize = 64
+	keys := make([]kvblock.BlockHash, batchSize)
+
+	for _, tc := range []struct {
+		name       string
+		engineKeys bool
+		reportAs   string
+	}{{
+		name:       "with-engine-keys",
+		engineKeys: true,
+		reportAs:   "total-B/key",
+	}, {
+		name:       "request-keys-only",
+		engineKeys: false,
+		reportAs:   "mainstore-B/key",
+	}} {
+		b.Run(tc.name, func(b *testing.B) {
+			before := workload.ReadHeap()
+			idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: numKeys * 2, PodCacheSize: 8})
+			if err != nil {
+				b.Fatal(err)
+			}
+			ctx := context.Background()
+			var eng []kvblock.BlockHash
+			if tc.engineKeys {
+				eng = keys
+			}
+			for base := uint64(1); base <= uint64(numKeys); base += batchSize {
+				for j := range keys {
+					keys[j] = kvblock.BlockHash(base + uint64(j))
+				}
+				if err := idx.Add(ctx, eng, keys, entries); err != nil {
+					b.Fatal(err)
+				}
+			}
+			after := workload.ReadHeap()
+			b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc)/float64(numKeys), tc.reportAs)
 		})
 	}
 }
