@@ -20,7 +20,6 @@ package vllmgrpc
 import (
 	"context"
 	"encoding/binary"
-	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -754,13 +753,13 @@ type capturedLog struct {
 	fields map[string]any
 }
 
-// logCaptureSink is a logr.LogSink that records every Info and Error call.
+// logCaptureSink records Info calls through DEBUG.
 type logCaptureSink struct {
 	infos []capturedLog
 }
 
 func (s *logCaptureSink) Init(logr.RuntimeInfo)       {}
-func (s *logCaptureSink) Enabled(int) bool            { return true }
+func (s *logCaptureSink) Enabled(level int) bool      { return level <= logging.DEBUG }
 func (s *logCaptureSink) Error(error, string, ...any) {}
 func (s *logCaptureSink) Info(level int, msg string, kvs ...any) {
 	fields := make(map[string]any, len(kvs)/2)
@@ -774,112 +773,83 @@ func (s *logCaptureSink) Info(level int, msg string, kvs ...any) {
 func (s *logCaptureSink) WithValues(...any) logr.LogSink { return s }
 func (s *logCaptureSink) WithName(string) logr.LogSink   { return s }
 
-// TestVllmGRPCParser_MultimodalHashLogging verifies that missing and
-// mismatched multimodal hashes log at DEBUG with structured counts/indexes,
-// so the degraded cache-key quality is visible (issue #4155).
 func TestVllmGRPCParser_MultimodalHashLogging(t *testing.T) {
-	sink := &logCaptureSink{}
-	ctx := log.IntoContext(context.Background(), logr.New(sink))
-
-	reqMsg := &pb.GenerateRequest{
-		Input: &pb.GenerateRequest_Tokenized{
-			Tokenized: &pb.TokenizedInput{
-				OriginalText: "Two images",
-				InputIds:     []uint32{201, 202, 203, 204},
-			},
-		},
-		MmInputs: &pb.MultimodalInputs{
-			MmPlaceholders: []*pb.PlaceholderRange{
-				{Offset: 0, Length: 1},
-				{Offset: 2, Length: 2},
-			},
-			MmHashes: []string{"hash-a"},
-		},
+	placeholders := []*pb.PlaceholderRange{{Length: 1}, {Offset: 1, Length: 1}, {Offset: 2, Length: 1}}
+	hashlessLog := func(total int, indices ...int) capturedLog {
+		return capturedLog{
+			level:  logging.DEBUG,
+			msg:    "multimodal placeholders without hashes are excluded from cache keys",
+			fields: map[string]any{"count": len(indices), "indices": indices, "totalFeatures": total},
+		}
 	}
 	parser := NewVllmGRPCParser()
-	_, err := parser.ParseRequest(ctx, createGrpcPayload(t, reqMsg),
-		map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"})
-	require.NoError(t, err)
-
-	var mismatch, hashless bool
-	for _, entry := range sink.infos {
-		switch {
-		case strings.Contains(entry.msg, "lengths differ"):
-			mismatch = true
-			assert.Equal(t, logging.DEBUG, entry.level, "mismatch logs at DEBUG")
-			assert.Equal(t, 1, entry.fields["hashes"])
-			assert.Equal(t, 2, entry.fields["placeholders"])
-		case strings.Contains(entry.msg, "without hash"):
-			hashless = true
-			assert.Equal(t, logging.DEBUG, entry.level, "hashless item logs at DEBUG")
-		}
-	}
-	assert.True(t, mismatch, "the length mismatch is logged")
-	assert.True(t, hashless, "every hashless placeholder is logged")
-	indexes := map[int]bool{}
-	for _, entry := range sink.infos {
-		if strings.Contains(entry.msg, "without hash") {
-			indexes[entry.fields["index"].(int)] = true
-		}
-	}
-	assert.Equal(t, map[int]bool{0: true, 1: true}, indexes,
-		"no hash is paired on a mismatch, so both placeholders log as hashless")
-
-	hashlessIndexes := func(mm *pb.MultimodalInputs) map[int]bool {
-		sink.infos = nil
-		reqMsg = &pb.GenerateRequest{
-			Input: &pb.GenerateRequest_Tokenized{
-				Tokenized: &pb.TokenizedInput{InputIds: []uint32{1, 2, 3, 4, 5, 6}},
+	for _, tt := range []struct {
+		name         string
+		placeholders []*pb.PlaceholderRange
+		hashes       []string
+		want         []capturedLog
+	}{
+		{
+			name:         "nonconsecutive empty hashes",
+			placeholders: placeholders,
+			hashes:       []string{"", "hash-b", ""},
+			want:         []capturedLog{hashlessLog(3, 0, 2)},
+		},
+		{
+			name:         "one empty hash",
+			placeholders: placeholders,
+			hashes:       []string{"hash-a", "", "hash-c"},
+			want:         []capturedLog{hashlessLog(3, 1)},
+		},
+		{
+			name:         "absent hashes",
+			placeholders: placeholders[:2],
+			want:         []capturedLog{hashlessLog(2, 0, 1)},
+		},
+		{
+			name:         "mismatched lengths",
+			placeholders: placeholders[:2],
+			hashes:       []string{"hash-a"},
+			want: []capturedLog{
+				{
+					level:  logging.DEBUG,
+					msg:    "mm_hashes and mm_placeholders lengths differ; no hash is paired",
+					fields: map[string]any{"hashes": 1, "placeholders": 2},
+				},
+				hashlessLog(2, 0, 1),
 			},
-			MmInputs: mm,
-		}
-		_, err := parser.ParseRequest(ctx, createGrpcPayload(t, reqMsg),
-			map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"})
-		require.NoError(t, err)
-		indexes := map[int]bool{}
-		for _, entry := range sink.infos {
-			if strings.Contains(entry.msg, "without hash") {
-				assert.Equal(t, logging.DEBUG, entry.level)
-				indexes[entry.fields["index"].(int)] = true
+		},
+		{
+			name:         "all hashes present",
+			placeholders: placeholders[:2],
+			hashes:       []string{"hash-a", "hash-b"},
+		},
+		{
+			name:   "orphan hashes",
+			hashes: []string{"orphan"},
+			want: []capturedLog{
+				{
+					level:  logging.DEBUG,
+					msg:    "mm_hashes without mm_placeholders; dropping multimodal hashes",
+					fields: map[string]any{"hashes": 1},
+				},
+			},
+		},
+		{name: "no features or hashes"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &logCaptureSink{}
+			ctx := log.IntoContext(context.Background(), logr.New(sink))
+			req := &pb.GenerateRequest{
+				Input: &pb.GenerateRequest_Tokenized{
+					Tokenized: &pb.TokenizedInput{InputIds: []uint32{1, 2, 3}},
+				},
+				MmInputs: &pb.MultimodalInputs{MmPlaceholders: tt.placeholders, MmHashes: tt.hashes},
 			}
-		}
-		return indexes
+			_, err := parser.ParseRequest(ctx, createGrpcPayload(t, req),
+				map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"})
+			require.NoError(t, err)
+			assert.ElementsMatch(t, tt.want, sink.infos)
+		})
 	}
-
-	// Equal-length lists log only the hashless item; without hashes, every
-	// placeholder is logged.
-	assert.Equal(t, map[int]bool{1: true}, hashlessIndexes(&pb.MultimodalInputs{
-		MmPlaceholders: []*pb.PlaceholderRange{
-			{Offset: 0, Length: 1}, {Offset: 2, Length: 1}, {Offset: 4, Length: 1},
-		},
-		MmHashes: []string{"hash-a", "", "hash-c"},
-	}))
-	assert.Equal(t, map[int]bool{0: true, 1: true}, hashlessIndexes(&pb.MultimodalInputs{
-		MmPlaceholders: []*pb.PlaceholderRange{
-			{Offset: 0, Length: 1}, {Offset: 2, Length: 2},
-		},
-	}))
-
-	sink.infos = nil
-	reqMsg = &pb.GenerateRequest{
-		Input: &pb.GenerateRequest_Tokenized{
-			Tokenized: &pb.TokenizedInput{InputIds: []uint32{1, 2, 3}},
-		},
-		MmInputs: &pb.MultimodalInputs{
-			MmHashes: []string{"orphan"},
-		},
-	}
-	_, err = parser.ParseRequest(ctx, createGrpcPayload(t, reqMsg),
-		map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"})
-	require.NoError(t, err)
-
-	var orphan []capturedLog
-	for _, entry := range sink.infos {
-		if strings.Contains(entry.msg, "without mm_placeholders") {
-			orphan = append(orphan, entry)
-		}
-	}
-	require.Len(t, orphan, 1, "the orphan-hashes case logs exactly once")
-	assert.Equal(t, logging.DEBUG, orphan[0].level)
-	assert.Equal(t, 1, orphan[0].fields["hashes"])
 }

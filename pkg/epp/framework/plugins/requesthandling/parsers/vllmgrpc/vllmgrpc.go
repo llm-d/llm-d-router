@@ -257,27 +257,30 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs, logger logr.Logger
 
 	placeholders := mmInputs.GetMmPlaceholders()
 	hashes := mmInputs.GetMmHashes()
+	debugLogger := logger.V(logutil.DEBUG)
 	if len(placeholders) == 0 {
 		if len(hashes) > 0 {
-			logger.V(logutil.DEBUG).Info("mm_hashes without mm_placeholders; dropping multimodal hashes",
+			debugLogger.Info("mm_hashes without mm_placeholders; dropping multimodal hashes",
 				"hashes", len(hashes))
 		}
 		return nil
 	}
 	pairHashes := len(hashes) == len(placeholders)
 	if len(hashes) > 0 && !pairHashes {
-		logger.V(logutil.DEBUG).Info("mm_hashes and mm_placeholders lengths differ; no hash is paired",
+		debugLogger.Info("mm_hashes and mm_placeholders lengths differ; no hash is paired",
 			"hashes", len(hashes), "placeholders", len(placeholders))
 	}
 
 	features := make([]fwkrequest.MultiModalFeature, 0, len(placeholders))
+	debugEnabled := debugLogger.Enabled()
+	var hashlessIndices []int
 	for i, placeholder := range placeholders {
 		hash := ""
 		if pairHashes {
 			hash = hashes[i]
 		}
-		if hash == "" {
-			logger.V(logutil.DEBUG).Info("multimodal placeholder without hash; excluded from cache keys", "index", i)
+		if debugEnabled && hash == "" {
+			hashlessIndices = append(hashlessIndices, i)
 		}
 
 		feature := fwkrequest.MultiModalFeature{
@@ -290,6 +293,10 @@ func convertMultiModalFeatures(mmInputs *pb.MultimodalInputs, logger logr.Logger
 		}
 
 		features = append(features, feature)
+	}
+	if len(hashlessIndices) > 0 {
+		debugLogger.Info("multimodal placeholders without hashes are excluded from cache keys",
+			"count", len(hashlessIndices), "indices", hashlessIndices, "totalFeatures", len(features))
 	}
 
 	return features
