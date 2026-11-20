@@ -28,7 +28,7 @@ The canonical producer pairing is the `attributes-producer` extractor, which sur
 | `headerName` | Request header the value is written to, pseudo-headers such as `:path` included. EPP-owned names (stripped on the way out) and internal routing headers (`x-llm-d-prefiller-host-port` and siblings) are rejected at startup. |
 | `mode` | `set` (default) overwrites the header — a client-supplied value can never pick the endpoint. `prepend` prefixes the existing value after normalizing the attribute to a single leading slash. |
 
-Multiple stamps are applied in order. An endpoint missing a stamp's attribute is skipped for that stamp only.
+Multiple stamps are applied in order. When the endpoint lacks a stamp's attribute, a `prepend` stamp leaves the header unchanged and a `set` stamp removes the header from the forwarded request, so a client-supplied value is not forwarded. A `set` stamp on a pseudo-header such as `:authority` keeps the client value, because pseudo-headers cannot be removed.
 
 ## Stamping `:path`
 
