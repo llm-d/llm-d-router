@@ -30,6 +30,8 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/vllm/gen/vllmpb"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -815,6 +817,10 @@ func TestHandler_PD_PathWithoutPDRoute(t *testing.T) {
 		{path: reqcommon.PathMessages, wantPrefill: true},
 		{path: reqcommon.PathVLLMGenerate, wantPrefill: true},
 		{path: reqcommon.PathSGLangGenerate, wantPrefill: true},
+		{path: vllmpb.Inference_Generate_FullMethodName, wantPrefill: true},
+		{path: vllmpb.Inference_GenerateStream_FullMethodName, wantPrefill: true},
+		{path: sglangapiv1.SglangService_Generate_FullMethodName, wantPrefill: true},
+		{path: sglangapiv1.SglangService_HealthCheck_FullMethodName},
 		// GetRequestPath reads a request without a path as /v1/completions.
 		{path: "", wantPrefill: true},
 	}

@@ -488,12 +488,10 @@ func (h *Handler) pickPrefillFirst(ctx context.Context, span trace.Span, request
 	return map[string]scheduling.SchedulerProfile{h.decodeProfile: decodeProfile}
 }
 
-// hasPDRoute reports whether the request's path is one the sidecar runs P/D
-// on. The sidecar forwards every other path to its decoder without reading
-// the prefill header.
+// hasPDRoute reports whether the sidecar serves the request's path with
+// disaggregated prefill.
 func hasPDRoute(request *scheduling.InferenceRequest) bool {
-	_, ok := reqcommon.MatchAPIType(fwkrequest.GetRequestPath(request.Headers))
-	return ok
+	return routing.HasPDRoute(fwkrequest.GetRequestPath(request.Headers))
 }
 
 // prefillRequiredButFailed reports whether the prefill profile was picked to
