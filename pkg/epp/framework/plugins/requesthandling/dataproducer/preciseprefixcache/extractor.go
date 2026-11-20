@@ -62,13 +62,31 @@ func (p *Producer) Extract(ctx context.Context, event fwkdl.EndpointEvent) error
 
 // ensureSubscriber idempotently installs a KV-events subscriber for the given
 // endpoint, dialing SocketPort + RankIndex to match standard inference-engine port offsetting
-// (one ZMQ PUB socket per DP rank on the same pod IP).
+// (one ZMQ PUB socket per DP rank on the same pod IP). With GrpcBasePort set,
+// the rank's GetServerInfo server is asked for its global DP rank and the
+// dial port becomes SocketPort + that rank, so engines whose DP-rank
+// numbering restarts per node reach the right publisher; a rank reporting
+// no KV-event source gets no subscriber.
 func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMetadata) error {
 	if meta == nil || meta.Address == "" {
 		return nil
 	}
 	endpointKey := meta.ID.String()
+	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	port := p.kvEventsConfig.PodDiscoveryConfig.SocketPort + meta.GetRankIndex()
+	if grpcBase := p.kvEventsConfig.PodDiscoveryConfig.GrpcBasePort; grpcBase > 0 {
+		dpRank, publishes, err := p.queryRankServer(ctx, meta)
+		switch {
+		case err != nil:
+			logger.Error(err, "GetServerInfo failed, using rank-index port", "endpoint", endpointKey)
+		case !publishes:
+			logger.V(logging.DEBUG).Info("Rank publishes no KV events, skipping subscriber",
+				"endpoint", endpointKey, "dpRank", dpRank)
+			return nil
+		default:
+			port = p.kvEventsConfig.PodDiscoveryConfig.SocketPort + int(dpRank)
+		}
+	}
 	zmqEndpoint := "tcp://" + net.JoinHostPort(meta.Address, strconv.Itoa(port))
 	replayEndpoint := ""
 	if replayPort := p.kvEventsConfig.PodDiscoveryConfig.EffectiveReplayPort(); replayPort > 0 {
@@ -80,7 +98,6 @@ func (p *Producer) ensureSubscriber(ctx context.Context, meta *fwkdl.EndpointMet
 	}
 	sourceEndpoint := fmt.Sprintf("%s:%s", meta.Address, meta.Port)
 
-	logger := log.FromContext(ctx).WithName(p.typedName.String())
 	// subscriberCtx is plugin-lifetime; caller ctx would tear subscribers
 	// down on request completion.
 	if err := p.subscribersManager.EnsureSubscriber(p.subscriberCtx, endpointKey,

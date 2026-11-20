@@ -187,6 +187,12 @@ type PodDiscoveryConfig struct {
 	// offset by rank like SocketPort. A subscriber loads the snapshot in place
 	// of a full replay. Disabled when not set (0 or negative).
 	SnapshotSocketPort int `json:"snapshotSocketPort,omitempty"`
+	// GrpcBasePort is the base port of the engine's per-rank GetServerInfo
+	// gRPC servers, offset by rank index like SocketPort. When set, the
+	// KV-events subscriber asks each rank for its global DP rank and dials
+	// SocketPort + that rank, so rank numbering that restarts per node still
+	// reaches the right publisher. Zero keeps the rank-index behavior.
+	GrpcBasePort int `json:"grpcBasePort,omitempty"`
 }
 
 // EffectiveReplayPort returns the replay socket port.
