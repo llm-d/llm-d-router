@@ -17,6 +17,7 @@ limitations under the License.
 package preciseprefixcache
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -35,8 +36,10 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -1585,6 +1588,28 @@ func TestPreRequest_PrefillProfile_EngineBlockPerTarget(t *testing.T) {
 		"10.0.0.1:8080": {keyRange(1, 4)},
 		"10.0.0.2:8080": {keys},
 	}, cached.Value().perPodKeys)
+}
+
+// The per-target trace log shows how many speculative keys the engine block
+// cut, so a target with every key dropped is distinguishable from speculative
+// indexing being off.
+func TestPreRequest_LogsSpeculativeKeysDroppedAtEngineBlock(t *testing.T) {
+	var buf bytes.Buffer
+	ctx := log.IntoContext(t.Context(), logging.NewTestLoggerWithWriter(&buf))
+	p := newProducerForPreRequest(ctx, true, &fakeKVBlockIndex{})
+	endpoint := endpointWithMetrics("pod-a", "10.0.0.1", &datalayer.Metrics{CacheBlockSize: 4 * testBlockSize})
+	req := &scheduling.InferenceRequest{RequestID: "req-engine-block-log"}
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
+		perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: {keyRange(1, 6), keyRange(10, 3)}},
+	})
+
+	require.NoError(t, p.PreRequest(ctx, req, primaryOnly("default", endpoint)))
+
+	out := buf.String()
+	assert.Contains(t, out, `"pod": "10.0.0.1:8080"`)
+	assert.Contains(t, out, `"engineBlockSize": 64`)
+	assert.Contains(t, out, `"keptKeys": 4`)
+	assert.Contains(t, out, `"droppedKeys": 5`)
 }
 
 // A repeat of a routed prompt matches only the tokens the engine can reuse:

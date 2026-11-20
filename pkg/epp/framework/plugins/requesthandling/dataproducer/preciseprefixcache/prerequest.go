@@ -436,12 +436,22 @@ func (p *Producer) PreRequest(ctx context.Context,
 			engineBlockSize = metrics.CacheBlockSize
 		}
 		var prompts [][]kvblock.BlockHash
+		kept, dropped := 0, 0
 		for _, promptKeys := range state.perFormatKeys[format] {
-			promptKeys = promptKeys[:engineReusableKeys(len(promptKeys), format.BlockSize, engineBlockSize)]
-			if len(promptKeys) > 0 {
-				prompts = append(prompts, promptKeys)
+			n := engineReusableKeys(len(promptKeys), format.BlockSize, engineBlockSize)
+			kept += n
+			dropped += len(promptKeys) - n
+			if n > 0 {
+				prompts = append(prompts, promptKeys[:n])
 			}
 		}
+		logger.V(logging.TRACE).Info("Speculative keys within whole engine blocks",
+			"requestID", request.RequestID,
+			"pod", podID,
+			"blockSize", format.BlockSize,
+			"engineBlockSize", engineBlockSize,
+			"keptKeys", kept,
+			"droppedKeys", dropped)
 		if len(prompts) > 0 {
 			perPodKeys[podID] = prompts
 			podIDs = append(podIDs, podID)
