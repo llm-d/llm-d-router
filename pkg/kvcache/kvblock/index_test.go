@@ -825,12 +825,14 @@ func testAddMappingManyToOne(t *testing.T, ctx context.Context, index Index) {
 	err := index.Add(ctx, engineKeys, requestKeys, pod)
 	require.NoError(t, err)
 
-	// Every engine key should resolve to the single request key
-	for _, ek := range engineKeys {
-		rk, err := index.GetRequestKey(ctx, ek)
-		require.NoError(t, err)
-		assert.Equal(t, requestKeys[0], rk, "engine key %d should resolve to %d", ek, requestKeys[0])
+	// Only the last engine key ends the canonical block; the others end inside it.
+	for _, ek := range engineKeys[:3] {
+		_, err := index.GetRequestKey(ctx, ek)
+		assert.Error(t, err, "engine key %d ends inside the canonical block", ek)
 	}
+	rk, err := index.GetRequestKey(ctx, engineKeys[3])
+	require.NoError(t, err)
+	assert.Equal(t, requestKeys[0], rk)
 
 	// The request key should have the pod
 	result, err := index.Lookup(ctx, requestKeys, nil)
@@ -838,7 +840,8 @@ func testAddMappingManyToOne(t *testing.T, ctx context.Context, index Index) {
 	require.Len(t, result[requestKeys[0]], 1)
 	assert.Equal(t, "pod-many1", result[requestKeys[0]][0].PodIdentifier)
 
-	// Evicting one engine key should remove pods from R0
+	// Evicting an engine key that ends inside the canonical block still removes
+	// pods from R0.
 	err = index.Evict(ctx, EngineKey, []BlockHash{engineKeys[0]}, pod)
 	require.NoError(t, err)
 
@@ -985,7 +988,10 @@ func testEvictEngineKeysManyToOne(t *testing.T, ctx context.Context, index Index
 		assert.Error(t, err, "evicted engine key %d should not resolve", ek)
 	}
 	_, err = index.GetRequestKey(ctx, engineKeys[2])
-	assert.NoError(t, err, "non-evicted engine key mapping must be untouched")
+	assert.Error(t, err, "an engine key ending inside the canonical block names no request key")
+	rk, err := index.GetRequestKey(ctx, engineKeys[3])
+	require.NoError(t, err, "non-evicted engine key mapping must be untouched")
+	assert.Equal(t, requestKeys[0], rk)
 }
 
 // testEvictEmptyInput verifies the error contract shared with Add:

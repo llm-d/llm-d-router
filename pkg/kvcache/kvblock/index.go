@@ -131,6 +131,11 @@ type Index interface {
 	//   1:1   (engine=64, canonical=64)  -> 4 eng, 4 req  -> E0->R0, E1->R1, ...
 	//   many:1 (engine=16, canonical=64) -> 16 eng, 4 req -> E0..E3->R0, E4..E7->R1, ...
 	//   1:many (engine=128, canonical=64) -> 2 eng, 4 req -> E0->[R0,R1], E1->[R2,R3]
+	//
+	// In the many:1 case only an engine key that ends a canonical block names one.
+	// The others end inside it, so their mapping holds the request key followed by
+	// EmptyBlockHash and GetRequestKey rejects them: a child chained on such a key
+	// would be hashed from that block's offset.
 	Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error
 	// Evict removes keys and their associated pod entries from the index backend.
 	// keyType indicates whether the keys are EngineKeys (each resolved
@@ -138,7 +143,8 @@ type Index interface {
 	// The interface does not define whether a failed call leaves the index untouched
 	// or partially evicted; each implementation documents its own failure semantics.
 	Evict(ctx context.Context, keyType KeyType, keys []BlockHash, entries []PodEntry) error
-	// GetRequestKey returns the requestKey associated with the given engineKey.
+	// GetRequestKey returns the requestKey associated with the given engineKey. An
+	// engineKey that ends inside a canonical block names none and returns an error.
 	GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error)
 	// Clear removes all index entries for the given pod, across every device tier.
 	// It backs the AllBlocksCleared KV-event (a vLLM prefix-cache reset, e.g. after
@@ -213,6 +219,19 @@ func engineToRequestMapping(engineKeys, requestKeys []BlockHash) map[BlockHash][
 		ek := engineKeys[i*len(engineKeys)/n]
 		rk := requestKeys[i*len(requestKeys)/n]
 		mappings[ek] = append(mappings[ek], rk)
+	}
+	// A many:1 engine block whose successor starts the next request key ends
+	// inside its own, so it names no request key: a child chained on it would be
+	// hashed from that block's offset. Mark it for GetRequestKey; the request key
+	// it maps to stays in the slice so eviction still reaches it.
+	if len(engineKeys) > len(requestKeys) {
+		for i := 0; i < len(engineKeys)-1; i++ {
+			if i*len(requestKeys)/len(engineKeys) != (i+1)*len(requestKeys)/len(engineKeys) {
+				continue
+			}
+			ek := engineKeys[i]
+			mappings[ek] = append(mappings[ek], EmptyBlockHash)
+		}
 	}
 	return mappings
 }
