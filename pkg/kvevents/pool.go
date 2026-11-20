@@ -275,6 +275,10 @@ type Pool struct {
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
 	queueDepth atomic.Int64
+
+	// loggedUnknownTags holds the tag label values already logged, so each
+	// is logged once per pool.
+	loggedUnknownTags sync.Map
 }
 
 // NewPool creates a Pool with a sharded worker setup.
@@ -512,6 +516,15 @@ func (p *Pool) processRawMessage(ctx context.Context, msg *RawMessage) {
 			semconv.LLMDKVCacheEventsPodID(podID),
 			semconv.LLMDKVCacheEventsEventCount(len(batch.Events)),
 		)
+	}
+
+	for _, tag := range batch.SkippedTags {
+		label := metrics.RecordUnknownTagSkipped(tag)
+		_, inMap := p.loggedUnknownTags.LoadOrStore(label, struct{}{})
+		if !inMap {
+			logger.Info("Skipping KV events with an unknown tag",
+				"tag", label, "podIdentifier", podID, "modelName", modelName)
+		}
 	}
 
 	if p.consumer != nil {
