@@ -32,6 +32,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/coordinator/config"
@@ -203,20 +204,24 @@ func TestPassthrough_DropsClientEndpointPin(t *testing.T) {
 }
 
 func TestPassthrough_StripsClientSuppliedInternalHeaders(t *testing.T) {
-	// Peer topology and revision decision id are set by the coordinator alone;
-	// a client copy must not reach EPP through the passthrough any more than
-	// through handleInference.
+	// Client-supplied internal routing headers must not reach EPP.
 	upstream, cap := newCapturingUpstream(t, http.StatusOK, "")
 	srv := newTestServerWithGateway(nil, upstream.URL)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{}`))
 	req.Header.Set(reqcommon.PeerTopologyHeaderKey, "host=attacker,zone=evil")
 	req.Header.Set(reqcommon.RevisionDecisionIDHeaderKey, "shared-by-everyone")
+	req.Header.Add(reqcommon.DisaggregatedRevisionHeaderKey, "revision-a")
+	req.Header.Add(reqcommon.DisaggregatedRevisionHeaderKey, "revision-b")
 	req.Header.Set("X-Keep", "kept")
 	doPassthrough(t, srv, req)
 
 	_, _, _, headers, _ := cap.get()
-	for _, name := range []string{reqcommon.PeerTopologyHeaderKey, reqcommon.RevisionDecisionIDHeaderKey} {
+	for _, name := range []string{
+		reqcommon.PeerTopologyHeaderKey,
+		reqcommon.RevisionDecisionIDHeaderKey,
+		reqcommon.DisaggregatedRevisionHeaderKey,
+	} {
 		if got := headers.Values(name); len(got) != 0 {
 			t.Fatalf("client %s reached the gateway: %q", name, got)
 		}
@@ -232,6 +237,7 @@ func TestPassthrough_StripsUpstreamSuppliedInternalHeaders(t *testing.T) {
 	// not reach the client, as on the decode proxy.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(reqcommon.PeerTopologyHeaderKey, "host=node12,rack=r7")
+		w.Header().Set(reqcommon.DisaggregatedRevisionHeaderKey, "revision-a")
 		w.Header().Set("X-Keep", "kept")
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -246,6 +252,9 @@ func TestPassthrough_StripsUpstreamSuppliedInternalHeaders(t *testing.T) {
 	}
 	if got := rec.Header().Values(reqcommon.PeerTopologyHeaderKey); len(got) != 0 {
 		t.Fatalf("upstream %s reached the client: %q", reqcommon.PeerTopologyHeaderKey, got)
+	}
+	if got := rec.Header().Get(reqcommon.DisaggregatedRevisionHeaderKey); got != "revision-a" {
+		t.Fatalf("upstream revision: got %q want %q", got, "revision-a")
 	}
 	if got := rec.Header().Get("X-Keep"); got != "kept" {
 		t.Fatalf("X-Keep: got %q want %q, other response headers must still be forwarded", got, "kept")
@@ -286,6 +295,9 @@ func TestPassthrough_ProxyErrorResponses(t *testing.T) {
 		{path: reqcommon.PathAudioSpeech, openAI: true},
 		{path: reqcommon.PathImagesGenerations, openAI: true},
 		{path: reqcommon.PathImagesEdits, openAI: true},
+		{path: reqcommon.PathAudioGenerate, openAI: true},
+		{path: reqcommon.PathVideos, openAI: true},
+		{path: reqcommon.PathVideosSync, openAI: true},
 		{path: reqcommon.PathMessages},
 		{path: reqcommon.PathVLLMGenerate},
 		{path: reqcommon.PathSGLangGenerate},
@@ -342,6 +354,40 @@ func TestPassthrough_ProxyErrorResponses(t *testing.T) {
 					require.JSONEq(t, failure.wantBody, rec.Body.String())
 				})
 			}
+		})
+	}
+}
+
+func TestPassthrough_GRPCProxyErrorResponses(t *testing.T) {
+	gwURL, err := url.Parse("http://gw:80")
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name           string
+		err            error
+		wantGRPCStatus string
+	}{
+		{
+			name:           "connection failure",
+			err:            errors.New("connection refused"),
+			wantGRPCStatus: "14",
+		},
+		{
+			name:           "body too large",
+			err:            &http.MaxBytesError{Limit: config.BytesPerMB},
+			wantGRPCStatus: "8",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := newPassthroughProxy(logr.Discard(), gwURL, http.DefaultTransport, "req-1")
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sglang.api.v1.SglangService/HealthCheck", nil)
+			req.Header.Set(reqcommon.HeaderContentType, grpcframe.MediaType)
+
+			proxy.ErrorHandler(rec, req, tc.err)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, grpcframe.MediaType, rec.Header().Get(reqcommon.HeaderContentType))
+			require.Equal(t, tc.wantGRPCStatus, rec.Header().Get(grpcframe.HeaderStatus))
 		})
 	}
 }

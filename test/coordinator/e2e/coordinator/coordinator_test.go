@@ -79,6 +79,19 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 		})
 	}))
 
+	ginkgo.When("the render step omits the tensors and OpenAI passthrough is disabled", ginkgo.Ordered, testWrapper(func() {
+		// The render step asks for no tensors (mm_payload: none). Encode sends the
+		// media as content_parts, and prefill sends features with mm_metadata
+		// rebuilt from the encode response's EC descriptor.
+		ginkgo.It("sends content_parts on encode and mm_metadata features on prefill", func() {
+			logs := runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
+				modelName, inlineImageDataURI,
+			)), allSteps, 1, tokenLimits{}, coordinatorConfigNIXLGenerateMMPayload)
+			verifyMMPayloadNonePath(logs)
+		})
+	}))
+
 	ginkgo.When("the request carries one remote image", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("routes a multimodal image chat completion end-to-end", func() {
 			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
@@ -101,6 +114,15 @@ var _ = ginkgo.Describe("Coordinator pipeline", func() {
 		ginkgo.It("routes a multimodal chat completion with an inline base64 image end-to-end", func() {
 			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
 				`{"model":%q,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":%q},"uuid":"image-0"},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
+				modelName, inlineImageDataURI,
+			)), allSteps, 1, tokenLimits{})
+		})
+	}))
+
+	ginkgo.When("the request carries an inline image without a type", ginkgo.Ordered, testWrapper(func() {
+		ginkgo.It("routes an untyped image through the full pipeline", func() {
+			runCoordinatorPipeline(reqcommon.PathChatCompletions, []byte(fmt.Sprintf(
+				`{"model":%q,"messages":[{"role":"user","content":[{"image_url":{"url":%q}},{"type":"text","text":"Describe what you see."}]}],"max_tokens":150}`,
 				modelName, inlineImageDataURI,
 			)), allSteps, 1, tokenLimits{})
 		})
@@ -197,7 +219,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 	// verifyCoordinatorSteps only substring-matches the prefill body and would
 	// still pass with the params nested, so this parses the structured http_body
 	// to pin the field's location.
-	if path == reqcommon.PathVLLMGenerate || cfg == coordinatorConfigNIXLGenerate {
+	if path == reqcommon.PathVLLMGenerate || cfg == coordinatorConfigNIXLGenerate || cfg == coordinatorConfigNIXLGenerateMMPayload {
 		verifyToplevelTransferParams(logs)
 	}
 	if threeEPP {
@@ -212,7 +234,7 @@ func runCoordinatorPipeline(path string, body []byte, expectedSteps []string, ex
 		}
 		// Mirrors resolveFormat: the pipeline sends generate for a native generate
 		// request and for a chat request with passthrough disabled, chat otherwise.
-		requestsSpeakChat := path != reqcommon.PathVLLMGenerate && cfg != coordinatorConfigNIXLGenerate
+		requestsSpeakChat := path != reqcommon.PathVLLMGenerate && cfg != coordinatorConfigNIXLGenerate && cfg != coordinatorConfigNIXLGenerateMMPayload
 		verifyTokenLimits(logs, limits, requestsSpeakChat, capSteps)
 	}
 
@@ -535,6 +557,40 @@ func verifyEncodeSkipped(logs string) {
 	ginkgo.By("Verifying encode was skipped for the generate request")
 	gomega.Expect(logHasLine(logs, `"body":"skipping encode for generate request"`)).To(gomega.BeTrue(),
 		"coordinator logs missing 'skipping encode for generate request'")
+}
+
+// verifyMMPayloadNonePath asserts that, with the render tensors omitted,
+// generate-format encode requests carry the media as content_parts and the
+// prefill request carries features with mm_metadata in place of kwargs_data.
+func verifyMMPayloadNonePath(logs string) {
+	ginkgo.By("Verifying encode requests carry content_parts and no kwargs_data")
+	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"encode"`, `"content_parts"`)).To(gomega.BeTrue(),
+		"coordinator logs have no encode request body carrying content_parts")
+	gomega.Expect(logHasLine(logs, `"body":"request body"`, `"x-llm-d-epp-profile":"encode"`, `"kwargs_data"`)).To(gomega.BeFalse(),
+		"encode request body must not carry kwargs_data when render omitted the tensors")
+
+	ginkgo.By("Verifying the prefill request carries mm_metadata features and no content_parts")
+	body := parsePrefillGenerateBody(logs)
+	gomega.Expect(body).NotTo(gomega.HaveKey("content_parts"), "generate prefill body must not carry content_parts: %v", body)
+	features, ok := body["features"].(map[string]any)
+	gomega.Expect(ok).To(gomega.BeTrue(), "generate prefill body has no features object: %v", body)
+	gomega.Expect(features).To(gomega.HaveKeyWithValue("kwargs_data", gomega.HaveKeyWithValue("image", gomega.Equal([]any{nil}))),
+		"generate prefill features must carry null kwargs_data: %v", features)
+	gomega.Expect(features).To(gomega.HaveKeyWithValue("mm_metadata", gomega.HaveKeyWithValue("image", gomega.ConsistOf(gomega.Not(gomega.BeNil())))),
+		"generate prefill features must carry mm_metadata: %v", features)
+
+	ginkgo.By("Verifying the prefill mm_metadata was rebuilt from the encode EC descriptor")
+	// The log redacts the encoded mm_metadata value, so the check pins its
+	// source: render returned none, and the image's descriptor carries the
+	// field the rebuild encodes.
+	gomega.Expect(logHasLine(logs, `"logger":"handler.render"`, `"body":"response"`, `"mm_metadata_len":0`)).To(gomega.BeTrue(),
+		"render response must carry no mm_metadata")
+	hashes, _ := features["mm_hashes"].(map[string]any)
+	imageHashes, _ := hashes["image"].([]any)
+	gomega.Expect(imageHashes).To(gomega.HaveLen(1), "generate prefill features must carry one image mm_hash: %v", features)
+	gomega.Expect(body).To(gomega.HaveKeyWithValue("ec_transfer_params",
+		gomega.HaveKeyWithValue(imageHashes[0], gomega.HaveKeyWithValue("metadata", gomega.HaveKey("image_grid_thw")))),
+		"generate prefill ec_transfer_params must carry image_grid_thw for the image: %v", body)
 }
 
 // logHasLine reports whether any single line in logs contains all of substrs.

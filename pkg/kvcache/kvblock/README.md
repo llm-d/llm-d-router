@@ -11,7 +11,8 @@ subscriber writes.
   turns a token sequence into KV-block keys: it chunks tokens into fixed-size
   blocks and hashes each block, chaining the previous block's hash so a key
   encodes its full prefix. `ComputeBlockExtraFeatures` folds multimodal
-  metadata into per-block `BlockExtraFeatures` that taint the hash.
+  metadata into per-block `BlockExtraFeatures` that taint the hash. The first
+  block's features can also carry the request's cache salt.
 - **Block index.** `Index` maps each block key to the set of pods (`PodEntry`,
   carrying a pod identifier and device tier) that currently hold it. Producers
   `Add` and `Evict` entries; the indexer's `Lookup` reads them.
@@ -52,7 +53,7 @@ still references it.
 | `TokenProcessor` | Tokens -> block keys; exposes `BlockSize`. |
 | `BlockHash` | A single block key. |
 | `PodEntry` | A pod holding a block, with its device tier. |
-| `BlockExtraFeatures` / `ComputeBlockExtraFeatures` | Per-block multimodal metadata folded into the hash. |
+| `BlockExtraFeatures` / `ComputeBlockExtraFeatures` | Per-block multimodal metadata and cache salt folded into the hash. |
 | `PlaceholderRange` | Placeholder-token range for a multimodal item. |
 
 ## Related Documentation

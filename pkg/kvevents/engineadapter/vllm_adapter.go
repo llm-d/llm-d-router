@@ -32,7 +32,7 @@ var vllmWireSchema = eventWireSchema{
 	storedFields:         vllmBlockStoredFieldDecoders,
 	removedFields:        vllmBlockRemovedFieldDecoders,
 	storedEvent:          (*typedEventFields).blockStoredEvent,
-	unknownTagPrefix:     "unknown vLLM event tag",
+	skipUnknownTags:      true,
 }
 
 // VLLMAdapter parses vLLM KV-cache events.
@@ -43,6 +43,10 @@ func NewVLLMAdapter() *VLLMAdapter {
 	return &VLLMAdapter{}
 }
 
+func init() {
+	Register(EngineTypeVLLM, func() kvevents.EngineAdapter { return NewVLLMAdapter() })
+}
+
 // ShardingKey extracts the pod ID from a vLLM message topic.
 func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 	podID, _ := parseTopic(msg.Topic)
@@ -51,7 +55,7 @@ func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 
 // ParseMessage decodes one vLLM event batch.
 func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
-	podID, modelName := parseTopic(msg.Topic)
+	podID, modelName := topicIdentity(msg)
 
 	vllmBatch := msgpackTypedEventBatch{schema: &vllmWireSchema}
 	if err := msgpack.Unmarshal(msg.Payload, &vllmBatch); err != nil {

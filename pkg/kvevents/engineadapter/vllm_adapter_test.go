@@ -37,16 +37,87 @@ func TestVLLMShardingKey(t *testing.T) {
 	assert.Equal(t, "fallback", adapter.ShardingKey(&kvevents.RawMessage{Topic: "fallback"}))
 }
 
+func TestVLLMSessionEventFields(t *testing.T) {
+	for _, encoding := range []string{"array", "map tag first", "map tag last"} {
+		for _, sessionID := range []any{nil, "", "request-42"} {
+			t.Run(fmt.Sprintf("%s/session=%v", encoding, sessionID), func(t *testing.T) {
+				stored := []any{"BlockStored", []uint64{10, 20}, uint64(5), []uint32{1, 2}, 16,
+					nil, "gpu", nil, nil, 2, "full_attention", nil, "LOCAL", "", sessionID,
+					[]any{[]uint32{3}}, // Unrecognized lookahead field follows the session fields.
+				}
+				removed := []any{"BlockRemoved", []uint64{20}, "cpu", 2, "REMOTE", "offloader"}
+				var events []any
+				if encoding == "array" {
+					events = []any{stored, removed}
+				} else {
+					for i, fields := range [][]any{stored, removed} {
+						names := []string{"block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium", "lora_name", "extra_keys", "group_idx", "kv_cache_spec_kind", "kv_cache_spec_sliding_window", "locality", "ownership", "session_id", "lookahead_token_ids"}
+						if i == 1 {
+							names = []string{"block_hashes", "medium", "group_idx", "locality", "ownership"}
+						}
+						var buf bytes.Buffer
+						enc := msgpack.NewEncoder(&buf)
+						require.NoError(t, enc.EncodeMapLen(len(fields)))
+						if encoding == "map tag first" {
+							require.NoError(t, enc.EncodeMulti("type", fields[0]))
+						}
+						for j, name := range names {
+							require.NoError(t, enc.EncodeMulti(name, fields[j+1]))
+						}
+						if encoding == "map tag last" {
+							require.NoError(t, enc.EncodeMulti("type", fields[0]))
+						}
+						events = append(events, msgpack.RawMessage(buf.Bytes()))
+					}
+				}
+				payload, err := msgpack.Marshal([]any{0.0, events, 3})
+				require.NoError(t, err)
+				_, _, batch, err := NewVLLMAdapter().ParseMessage(&kvevents.RawMessage{Payload: payload})
+				require.NoError(t, err)
+				require.Len(t, batch.Events, 2)
+				store := batch.Events[0].(*kvevents.BlockStoredEvent)
+				if sessionID == nil {
+					require.Nil(t, store.SessionID)
+				} else {
+					require.NotNil(t, store.SessionID)
+					require.Equal(t, sessionID, *store.SessionID)
+				}
+				require.Equal(t, "LOCAL", store.Locality)
+				require.Empty(t, store.Ownership)
+				require.Equal(t, []uint64{10, 20}, store.BlockHashes)
+				removal := batch.Events[1].(*kvevents.BlockRemovedEvent)
+				require.Equal(t, "REMOTE", removal.Locality)
+				require.Equal(t, "offloader", removal.Ownership)
+				require.Equal(t, []uint64{20}, removal.BlockHashes)
+			})
+		}
+	}
+}
+
+func TestVLLMSessionEventFieldsRejectNonStrings(t *testing.T) {
+	for _, name := range []string{"session_id", "locality", "ownership"} {
+		t.Run(name, func(t *testing.T) {
+			payload, err := msgpack.Marshal(map[string]any{
+				"type": "BlockStored", "block_hashes": []uint64{1}, "token_ids": []uint32{1}, "block_size": 1, name: 42,
+			})
+			require.NoError(t, err)
+			_, err = decodeVLLMEvent(payload)
+			require.ErrorContains(t, err, name)
+		})
+	}
+}
+
 func TestVLLMClampsOutOfRangeTokenIDs(t *testing.T) {
 	for name, tc := range map[string]struct {
 		token any
 		want  uint32
 	}{
-		"negative":       {int64(-1), 0},
-		"minimum signed": {int64(math.MinInt64), 0},
-		"overflow":       {uint64(math.MaxUint32) + 1, math.MaxUint32},
-		"maximum uint32": {uint64(math.MaxUint32), math.MaxUint32},
-		"maximum signed": {int64(math.MaxInt64), math.MaxUint32},
+		"negative":         {int64(-1), 0},
+		"minimum signed":   {int64(math.MinInt64), 0},
+		"overflow":         {uint64(math.MaxUint32) + 1, math.MaxUint32},
+		"maximum uint32":   {uint64(math.MaxUint32), math.MaxUint32},
+		"maximum signed":   {int64(math.MaxInt64), math.MaxUint32},
+		"maximum unsigned": {uint64(math.MaxUint64), math.MaxUint32},
 	} {
 		for _, encoding := range []string{"array", "map tag first", "map tag last"} {
 			t.Run(name+"/"+encoding, func(t *testing.T) {
@@ -130,6 +201,25 @@ func TestVLLMParseMessage_Valid(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, []uint64{100, 101}, blockStored.BlockHashes)
 	assert.Equal(t, uint64(99), blockStored.ParentHash)
+}
+
+// TestVLLMParseMessage_ModelOnlyTopic tests a per-pod subscription whose
+// topic names the model alone.
+func TestVLLMParseMessage_ModelOnlyTopic(t *testing.T) {
+	payload, err := msgpack.Marshal([]any{
+		1234567890.0,
+		[]any{[]any{"BlockStored", []any{uint64(100)}, uint64(99), []uint32{1, 2, 3}, 16, nil, "gpu", nil, nil}},
+	})
+	require.NoError(t, err)
+
+	podID, modelName, _, err := NewVLLMAdapter().ParseMessage(&kvevents.RawMessage{
+		Topic:          "kv@llama-2-7b",
+		SourceEndpoint: "10.0.0.5:5556",
+		Payload:        payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "10.0.0.5:5556", podID)
+	assert.Equal(t, "llama-2-7b", modelName)
 }
 
 // TestVLLMParseMessage_BatchExtraTrailingFields tests a batch from a publisher
@@ -390,7 +480,10 @@ func TestDecodeVLLMEvent_BlockStoredExtraTrailingFields(t *testing.T) {
 		uint64(0),                     // [9] group_idx
 		"full_attention",              // [10] kv_cache_spec_kind
 		nil,                           // [11] kv_cache_spec_sliding_window
-		"completely-unknown-field",    // [12] future unknown — silently ignored
+		nil,                           // [12] locality
+		nil,                           // [13] ownership
+		nil,                           // [14] session_id
+		"completely-unknown-field",    // [15] future unknown field
 	}
 
 	rawBytes, err := msgpack.Marshal(vllmEvent)
@@ -424,7 +517,9 @@ func TestDecodeVLLMEvent_BlockRemovedExtraTrailingFields(t *testing.T) {
 		[]any{uint64(500)},
 		"cpu",
 		uint64(1),        // [3] group_idx
-		"future-field-1", // [4] future unknown — silently ignored
+		nil,              // [4] locality
+		nil,              // [5] ownership
+		"future-field-1", // [6] future unknown field
 	}
 
 	rawBytes, err := msgpack.Marshal(vllmEvent)
@@ -635,7 +730,7 @@ func TestVLLMUnknownTag(t *testing.T) {
 	event, err := adapter.decodeVLLMEvent(rawBytes)
 	assert.Error(t, err)
 	assert.Nil(t, event)
-	assert.Contains(t, err.Error(), "unknown vLLM event tag")
+	assert.ErrorIs(t, err, errUnknownTypedEventTag)
 }
 
 // TestVLLMMalformedPayload tests error handling for malformed msgpack data.
@@ -807,10 +902,6 @@ func TestVLLMParseMessage_MapEncodedErrors(t *testing.T) {
 		event   any
 		wantErr string
 	}{
-		"unknown tag": {
-			event:   map[string]any{"type": "SomethingNew"},
-			wantErr: "unknown vLLM event tag: SomethingNew",
-		},
 		"missing tag": {
 			event:   map[string]any{"block_hashes": []any{uint64(1)}},
 			wantErr: `missing the "type" tag`,
@@ -828,6 +919,74 @@ func TestVLLMParseMessage_MapEncodedErrors(t *testing.T) {
 		})
 		require.ErrorContains(t, err, tc.wantErr, name)
 	}
+}
+
+func TestVLLMParseMessage_SkipsUnknownEventTags(t *testing.T) {
+	adapter := NewVLLMAdapter()
+
+	stored := []any{"BlockStored", []any{uint64(7)}, nil, []uint32{9}, 1, nil, "GPU", nil, nil}
+	removed := map[string]any{"type": "BlockRemoved", "block_hashes": []any{uint64(5)}, "medium": "GPU"}
+	unknownMap := map[string]any{
+		"type":         "SomethingNew",
+		"block_hashes": []any{uint64(7)},
+		"nested":       map[string]any{"a": []any{1, 2}},
+	}
+	unknownArray := []any{"SomethingNew", []any{uint64(7)}, map[string]any{"a": []any{1, 2}}}
+	unknownTagOnly := []any{"SomethingNew"}
+
+	for name, tc := range map[string]struct {
+		events []any
+		want   []kvevents.EventType
+	}{
+		"map-encoded between known events": {
+			events: []any{stored, unknownMap, removed},
+			want:   []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+		},
+		"array-encoded between known events": {
+			events: []any{stored, unknownArray, removed},
+			want:   []kvevents.EventType{kvevents.EventTypeBlockStored, kvevents.EventTypeBlockRemoved},
+		},
+		"array-encoded with tag only": {
+			events: []any{unknownTagOnly, removed},
+			want:   []kvevents.EventType{kvevents.EventTypeBlockRemoved},
+		},
+		"first and last": {
+			events: []any{unknownArray, stored, unknownMap},
+			want:   []kvevents.EventType{kvevents.EventTypeBlockStored},
+		},
+		"only unknown": {
+			events: []any{unknownMap, unknownArray},
+			want:   []kvevents.EventType{},
+		},
+	} {
+		payload, err := msgpack.Marshal([]any{1.0, tc.events, nil})
+		require.NoError(t, err, name)
+
+		_, _, batch, err := adapter.ParseMessage(&kvevents.RawMessage{Topic: "kv@pod-1@m", Payload: payload})
+		require.NoError(t, err, name)
+
+		got := make([]kvevents.EventType, 0, len(batch.Events))
+		for _, ev := range batch.Events {
+			got = append(got, ev.Type())
+		}
+		assert.Equal(t, tc.want, got, name)
+	}
+}
+
+func TestVLLMParseMessage_TruncatedUnknownEventRejectsBatch(t *testing.T) {
+	var payload bytes.Buffer
+	encoder := msgpack.NewEncoder(&payload)
+	require.NoError(t, encoder.EncodeArrayLen(2))
+	require.NoError(t, encoder.EncodeFloat64(123.0))
+	require.NoError(t, encoder.EncodeArrayLen(1))
+	require.NoError(t, encoder.EncodeArrayLen(3))
+	require.NoError(t, encoder.EncodeString("SomethingNew"))
+
+	_, _, _, err := NewVLLMAdapter().ParseMessage(&kvevents.RawMessage{
+		Topic:   "kv@pod-1@m",
+		Payload: payload.Bytes(),
+	})
+	assert.Error(t, err)
 }
 
 func TestVLLMParseMessage_StreamAlignment(t *testing.T) {

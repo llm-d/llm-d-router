@@ -25,12 +25,16 @@ import (
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace/noop"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
@@ -42,7 +46,7 @@ type apiSurfaceDirector struct {
 	rewritePath string
 }
 
-func (d *apiSurfaceDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrh.InferenceRequestBody) (*RequestContext, error) {
+func (d *apiSurfaceDirector) HandleRequest(_ context.Context, reqCtx *RequestContext, _ *fwkrequest.InferenceRequestBody) (*RequestContext, error) {
 	reqCtx.IncomingModelName = "m"
 	reqCtx.TargetModelName = "m"
 	if d.rewritePath != "" {
@@ -163,6 +167,63 @@ func TestProcessCountsModelServerErrorFromResponseStatus(t *testing.T) {
 			require.NoError(t, NewStreamingServer(nil, &mockDirector{}, registry, 0).Process(srv))
 
 			require.Equal(t, tt.wantCount, requestErrorCount(t, errcommon.ModelServerError))
+		})
+	}
+}
+
+// A 5xx is a model server error, a 4xx a client error, and any other status
+// completes the request.
+func TestProcessClassifiesModelServerStatus(t *testing.T) {
+	tests := []struct {
+		status   string
+		wantCode string
+	}{
+		{status: "200"},
+		{status: "201"},
+		{status: "202"},
+		{status: "400", wantCode: errcommon.ModelServerClientError},
+		{status: "404", wantCode: errcommon.ModelServerClientError},
+		{status: "429", wantCode: errcommon.ModelServerClientError},
+		{status: "500", wantCode: errcommon.ModelServerError},
+		{status: "503", wantCode: errcommon.ModelServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			eppmetrics.Register()
+			eppmetrics.Reset()
+			t.Cleanup(eppmetrics.Reset)
+			recorder := tracetest.NewSpanRecorder()
+			useTracerProvider(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+
+			srv := &replayProcessServer{
+				ctx:  logutil.NewTestLoggerIntoContext(context.Background()),
+				reqs: append(outcomeRequest("/v1/completions", outcomeTestBody), outcomeResponse(tt.status)...),
+			}
+			registry := NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard())
+
+			require.NoError(t, NewStreamingServer(nil, &mockDirector{}, registry, 0).Process(srv))
+
+			wantOutcome, wantSpanStatus := "completed", otelcodes.Unset
+			if tt.wantCode != "" {
+				wantOutcome, wantSpanStatus = "failed", otelcodes.Error
+			}
+			require.Equal(t, map[[2]string]float64{{wantOutcome, tt.wantCode}: 1}, requestOutcomes(t))
+			for _, code := range []string{errcommon.ModelServerError, errcommon.ModelServerClientError} {
+				want := 0.0
+				if code == tt.wantCode {
+					want = 1
+				}
+				require.Equal(t, want, requestErrorCount(t, code), code)
+			}
+			var requestSpans []sdktrace.ReadOnlySpan
+			for _, span := range recorder.Ended() {
+				if span.Name() == "request" {
+					requestSpans = append(requestSpans, span)
+				}
+			}
+			require.Len(t, requestSpans, 1)
+			require.Equal(t, wantSpanStatus, requestSpans[0].Status().Code)
 		})
 	}
 }

@@ -26,8 +26,8 @@ import (
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/approximateprefix/constants"
-	p2psourceconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/p2psource/constants"
+	approxprefixconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/approximateprefix/constants"
+	p2psourceconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/p2psource/constants"
 )
 
 var PrefixCacheMatchInfoDataKey = plugin.NewDataKey("PrefixCacheMatchInfoDataKey", approxprefixconstants.ApproxPrefixCachePluginType)
@@ -106,6 +106,18 @@ var ReusablePrefixTokensDataKey = plugin.NewDataKey("ReusablePrefixTokensDataKey
 // can reuse either from confirmed local cache or by pulling confirmed CPU-tier
 // blocks from the sampled source.
 type ReusablePrefixTokens int
+
+// P2PSourceDecisionDataKey identifies the decision a p2p-source-producer
+// instance reached for the request in PreRequest.
+var P2PSourceDecisionDataKey = plugin.NewDataKey("P2PSourceDecisionDataKey", p2psourceconstants.P2PSourcePluginType)
+
+// P2PSourceDecision is a p2p-source-producer's decision for one request: the
+// outcome and endpoint_role it recorded in
+// llm_d_epp_p2p_source_decisions_total.
+type P2PSourceDecision struct {
+	Outcome      string
+	EndpointRole string
+}
 
 // SpeculativeTierKey is the CachedBlocksByTier key for speculative index
 // entries, which carry no engine-reported device tier.

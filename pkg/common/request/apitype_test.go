@@ -29,6 +29,7 @@ func TestAPIType_StringAndPath(t *testing.T) {
 		APITypeVLLMGenerate:    {"vllm_generate", PathVLLMGenerate},
 		APITypeSGLangGenerate:  {"sglang_generate", PathSGLangGenerate},
 		APITypeMessages:        {"messages", PathMessages},
+		APITypeAudioSpeech:     {"audio_speech", PathAudioSpeech},
 		APIType(7):             {"APIType(7)", PathChatCompletions},
 	}
 	for apiType, want := range cases {
@@ -53,6 +54,7 @@ func TestDetectAPIType(t *testing.T) {
 		{name: "messages", path: PathMessages, want: APITypeMessages},
 		{name: "generate", path: PathVLLMGenerate, want: APITypeVLLMGenerate},
 		{name: "sglang generate", path: PathSGLangGenerate, want: APITypeSGLangGenerate},
+		{name: "audio speech", path: PathAudioSpeech, want: APITypeAudioSpeech},
 		{name: "prefixed chat completions", path: "/prefix" + PathChatCompletions, want: APITypeChatCompletions},
 		{name: "prefixed completions", path: "/prefix" + PathCompletions, want: APITypeCompletions},
 		{name: "prefixed responses", path: "/prefix" + PathResponses, want: APITypeResponses},
@@ -90,6 +92,9 @@ func TestDetectAPISurface(t *testing.T) {
 		{"prefixed vllm generate", "/provider/model" + PathVLLMGenerate, "vllm_generate"},
 		{"sglang generate", PathSGLangGenerate, "sglang_generate"},
 		{"prefixed sglang generate", "/provider/model" + PathSGLangGenerate, "sglang_generate"},
+		{"audio generate", PathAudioGenerate, "unknown"},
+		{"audio generate trailing slash", PathAudioGenerate + "/", "unknown"},
+		{"audio speech", PathAudioSpeech, "audio_speech"},
 		{"provider prefix", "/provider/model" + PathMessages, "messages"},
 		{"unversioned provider route", "/provider/messages", "messages"},
 		{"trailing slash and query", PathMessages + "/?beta=true", "messages"},
@@ -144,12 +149,13 @@ func TestAPISurfaceString(t *testing.T) {
 
 func TestAPIType_tokenLimitFields(t *testing.T) {
 	cases := map[APIType][]string{
-		APITypeChatCompletions: {FieldMaxTokens, FieldMaxCompletionTokens},
+		APITypeChatCompletions: {FieldMaxCompletionTokens, FieldMaxTokens},
 		APITypeCompletions:     {FieldMaxTokens},
 		APITypeResponses:       {FieldMaxOutputTokens},
 		APITypeVLLMGenerate:    {FieldMaxTokens},
 		APITypeMessages:        {FieldMaxTokens},
-		APIType(7):             {FieldMaxTokens, FieldMaxCompletionTokens},
+		APITypeAudioSpeech:     {FieldMaxNewTokens},
+		APIType(7):             {FieldMaxCompletionTokens, FieldMaxTokens},
 	}
 	for apiType, want := range cases {
 		if got := apiType.tokenLimitFields(); !reflect.DeepEqual(got, want) {

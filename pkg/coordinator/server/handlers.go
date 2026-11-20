@@ -17,7 +17,6 @@ limitations under the License.
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -129,12 +128,22 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	// kv_transfer_params tells a model server which pod to pull KV from, so
+	// only the KV connector and the EPP may write it, but not every step
+	// rebuilds the body, so a client copy is dropped once here.
+	_, clientKVTransferParams := parsed[reqcommon.FieldKVTransferParams]
+	delete(parsed, reqcommon.FieldKVTransferParams)
 	parseDuration = time.Since(parseStart)
 	parseDone = true
 
-	stream, _ = parsed[reqcommon.FieldStream].(bool)
 	if m, ok := parsed["model"].(string); ok && m != "" {
 		model = m
+	}
+	stream, err = reqcommon.StreamRequested(parsed)
+	if err != nil {
+		coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+		rejectInference(serverLog, cw, apiType, http.StatusBadRequest, err.Error())
+		return
 	}
 	if model != inflightModel {
 		coordmetrics.DecRequestRunning(inflightModel)
@@ -144,9 +153,8 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 
 	// DetectAPIType gates this so the check follows the same classification
 	// every pipeline step uses. Any other path it reads as Responses reaches
-	// the passthrough catch-all, which never parses a body. Which paths and
-	// methods each API serves is settled in
-	// https://github.com/llm-d/llm-d-router/issues/3091.
+	// the passthrough catch-all, which never parses a body.
+	// docs/api-routing.md lists the paths and methods each API serves.
 	if apiType == reqcommon.APITypeResponses {
 		// The router serves only stateless Responses requests, disaggregated
 		// or not; the rest is resolved upstream of it. err names a field from
@@ -182,6 +190,27 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		ParseDuration:    parseDuration,
 	}
 
+	if apiType == reqcommon.APITypeVLLMGenerate && s.workerProtocol == config.WorkerProtocolGRPC {
+		converted, convErr := prepareVLLMGenerateFromHTTP(parsed, requestID)
+		if convErr != nil {
+			coordmetrics.IncRequestErrorTotal(model, coordmetrics.ErrorCodeBadRequest)
+			rejectInference(serverLog, cw, apiType, http.StatusBadRequest, convErr.Error())
+			return
+		}
+		if converted.droppedTransferParams {
+			clientKVTransferParams = true
+		}
+		reqCtx.GRPC = &pipeline.VLLMGRPCRequest{
+			Req: converted.req,
+			HTTP: &pipeline.HTTPGenerateReply{
+				IncludeUsage:    converted.includeUsage,
+				ReturnTokenIDs:  converted.returnTokenIDs,
+				OutputMode:      converted.outputMode,
+				ClientRequestID: converted.clientRequestID,
+			},
+		}
+	}
+
 	logger := ctrl.Log.WithName("handler").WithValues(reqcommon.RequestIDHeaderKey, reqCtx.RequestID)
 	ctx := log.IntoContext(r.Context(), logger)
 	ctx = tracing.LoggerWithSpanContext(ctx, trace.SpanFromContext(ctx))
@@ -191,18 +220,12 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 		// attacker-controlled content into the log.
 		logger.V(logutil.DEFAULT).Info("replaced invalid client request ID", "rejectedLength", len(clientRequestID))
 	}
+	if clientKVTransferParams {
+		// Presence only: the value carries a host, a port and a request id.
+		logger.V(logutil.DEFAULT).Info("dropped client-supplied kv_transfer_params")
+	}
 
 	logger.V(logutil.DEFAULT).Info("received request", "path", r.URL.Path, "model", model, "stream", stream)
-
-	if stream {
-		// A streaming completion can outlast the server WriteTimeout, which
-		// would cut the response mid-stream with a TCP reset and no app-layer
-		// error. Clear the write deadline for streaming only; non-streaming
-		// requests keep it as a slow-client guard.
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-			logger.V(logutil.DEFAULT).Info("could not clear write deadline for streaming response", "error", err)
-		}
-	}
 
 	if err := s.pipeline.Execute(ctx, reqCtx); err != nil {
 		if pipeline.IsClientCancellation(ctx, err) {
@@ -227,6 +250,9 @@ func (s *Server) handleInference(w http.ResponseWriter, r *http.Request) {
 // inferenceRoute maps an inbound path onto the bounded route label used by
 // orchestration_overhead_seconds.
 func inferenceRoute(path string) string {
+	if gr, ok := lookupGRPCRoute(path); ok {
+		return gr.route
+	}
 	switch path {
 	case reqcommon.PathChatCompletions:
 		return coordmetrics.RouteChatCompletions
@@ -244,12 +270,9 @@ func inferenceRoute(path string) string {
 }
 
 // inspectedRequestFields lists the top-level request fields the handler and
-// the pipeline steps read as Go values. decodeRequestBody decodes only these;
-// every other field stays a json.RawMessage so its bytes are forwarded
-// unchanged. encoding/json sorts map keys at every depth on Marshal, which
-// would reorder free-form content such as tools[].function.parameters that
-// chat templates render into the prompt verbatim. The steps that read messages
-// or input decode them on use (promptItems).
+// the pipeline steps read as Go values; see reqcommon.DecodeRequestBody for why
+// every other field stays raw. The steps that read messages or input decode
+// them on use (promptItems).
 var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldModel:          {},
 	reqcommon.FieldStream:         {},
@@ -261,26 +284,7 @@ var inspectedRequestFields = map[string]struct{}{
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, err
-	}
-	if fields == nil {
-		return nil, errors.New("request body is not a JSON object")
-	}
-	parsed := make(map[string]any, len(fields))
-	for k, v := range fields {
-		if _, ok := inspectedRequestFields[k]; !ok {
-			parsed[k] = v
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		parsed[k] = decoded
-	}
-	return parsed, nil
+	return reqcommon.DecodeRequestBody(raw, inspectedRequestFields)
 }
 
 // classifyPipelineError maps a pipeline error to a client-facing status and
@@ -296,12 +300,21 @@ func classifyPipelineError(err error, requestID string) (int, string) {
 	if errors.As(err, &upstream) && upstream.StatusCode >= http.StatusBadRequest && upstream.StatusCode < http.StatusInternalServerError {
 		return upstream.StatusCode, fmt.Sprintf("%s rejected the request: HTTP %d (request_id: %s)", upstream.Step, upstream.StatusCode, requestID)
 	}
-	return http.StatusBadGateway, fmt.Sprintf("internal error (request_id: %s)", requestID)
+	return http.StatusBadGateway, reqcommon.InternalErrorMessage(requestID)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if s.draining.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("draining"))
+		return
+	}
+	s.handleHealth(w, r)
 }
 
 // rejectInference answers a rejected inference request with the error envelope

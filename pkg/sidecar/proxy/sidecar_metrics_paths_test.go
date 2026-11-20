@@ -291,7 +291,7 @@ func TestHandleNIXLV2ChunkedDecodeMetrics(t *testing.T) {
 
 			before := snapshotStageMetrics(t)
 			rw := httptest.NewRecorder()
-			s.handleNIXLV2(rw, chatRequest(t, body), prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+			s.handleNIXLV2(rw, chatRequest(t, body), prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 
 			assert.Equal(t, tt.wantCode, rw.Code)
 			assert.Equal(t, int32(2), chunks.Load(), "request must take the chunked decode path")

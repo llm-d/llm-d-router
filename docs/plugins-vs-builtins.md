@@ -84,7 +84,7 @@ pkg/epp/
 │   └── plugins/            # Plugin implementations (user-selectable)
 │       ├── scheduling/     #   Filters, scorers
 │       ├── flowcontrol/    #   Eviction policies (ordering, filtering)
-│       └── requestcontrol/ #   Request data producers, etc.
+│       └── requesthandling/ #   Parsers, request data producers, etc.
 ├── flowcontrol/            # Builtin flow-control infrastructure
 │   └── eviction/           #   RequestEvictor (builtin), queue, registry
 ├── requestcontrol/         # Builtin request-control infrastructure

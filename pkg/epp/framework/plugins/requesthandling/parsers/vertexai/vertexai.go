@@ -25,12 +25,13 @@ import (
 	"strings"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
-	grpcutil "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/util"
 	"google.golang.org/genproto/googleapis/api/httpbody"
 	"google.golang.org/protobuf/proto"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -124,8 +125,8 @@ func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers 
 
 	default:
 		return &fwkrh.ParseResult{
-			Body: &fwkrh.InferenceRequestBody{
-				Payload: fwkrh.RawPayload(body),
+			Body: &fwkrequest.InferenceRequestBody{
+				Payload: fwkrequest.RawPayload(body),
 			},
 			SkipResponseProcessing: true,
 		}, nil
@@ -145,7 +146,7 @@ func (p *VertexAIParser) ParseResponse(ctx context.Context, body []byte, headers
 	}
 
 	var errs []error
-	payloads, err := grpcutil.ParseGrpcPayloads(body)
+	payloads, err := grpcframe.ParsePayloads(body)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("parsing gRPC response payload: %w", err))
 	}
@@ -195,7 +196,7 @@ type httpBodyMessage interface {
 
 // parseVertexRequest is a generic helper to parse Vertex AI gRPC requests that wrap an HttpBody payload.
 func (p *VertexAIParser) parseVertexRequest(ctx context.Context, body []byte, headers map[string]string, req httpBodyMessage, typeName string, targetPath string) (*fwkrh.ParseResult, error) {
-	parsedPayload, err := grpcutil.ParseGrpcPayload(body)
+	parsedPayload, err := grpcframe.ParsePayload(body)
 	if err != nil {
 		return nil, fmt.Errorf("invalid or unsupported gRPC payload: %w", err)
 	}
@@ -220,6 +221,6 @@ func (p *VertexAIParser) parseVertexRequest(ctx context.Context, body []byte, he
 	}
 
 	inferenceRequestBody := parseResult.Body
-	inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
+	inferenceRequestBody.Payload = fwkrequest.PayloadProto{Message: req}
 	return &fwkrh.ParseResult{Body: inferenceRequestBody, SkipResponseProcessing: parseResult.SkipResponseProcessing}, nil
 }

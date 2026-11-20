@@ -58,10 +58,17 @@ func registerMetrics(registerer prometheus.Registerer) error {
 	return nil
 }
 
+// boundModelName caps the model_name label. Tests swap it for a small limiter so
+// they don't fill the shared cap other tests in the binary depend on.
+var boundModelName = eppmetrics.BoundModelName
+
 // RecordDisaggDecision increments the counter for a disaggregation routing decision.
 // The decisionType must be one of the metricsutil.DisaggPath* constants.
 // The model parameter should be the target model name; if empty, "unknown" is used.
+// The target model falls back to the model in the request body, so it goes through
+// the EPP model label cap and folds to "other" once that cap is full.
 func RecordDisaggDecision(pluginName, pluginType, modelName, decisionType string) {
+	modelName = boundModelName(modelName)
 	if modelName == "" {
 		modelName = "unknown"
 	}

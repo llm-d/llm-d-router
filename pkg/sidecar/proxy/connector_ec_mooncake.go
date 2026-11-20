@@ -36,10 +36,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
-	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 // ec_transfer_params fields of vLLM's ECMooncakeConnector.
@@ -48,11 +49,7 @@ const (
 	ecMooncakeFieldItems       = "ec_items"
 	ecMooncakeFieldTransferID  = "transfer_id"
 	ecMooncakeFieldMMHash      = "mm_hash"
-	ecMooncakeFieldMetadata    = "metadata"
 )
-
-// partFieldUUID is the content part field vLLM keys a multimodal item's hash on.
-const partFieldUUID = "uuid"
 
 // ecMooncakeEmbedsTypes maps each chat media part type to the metadata-only
 // embeds part it is rewritten to once the encoder has pushed its embedding.
@@ -78,7 +75,7 @@ type ecMooncakeItem struct {
 }
 
 func (it *ecMooncakeItem) metadata() map[string]any {
-	md, _ := it.reported[ecMooncakeFieldMetadata].(map[string]any)
+	md, _ := it.reported[reqcommon.FieldECDescriptorMetadata].(map[string]any)
 	return md
 }
 
@@ -121,9 +118,10 @@ func (s *Server) fanoutEncoderMooncake(
 	apiType reqcommon.APIType,
 	prefillEndPoint string,
 ) ([]ecMooncakeItem, error) {
-	parts := s.mmItemsForFanout(originalRequest, requestID, apiType)
+	logger := log.FromContext(ctx)
+	parts := s.mmItemsForFanout(ctx, originalRequest, requestID, apiType)
 	if len(parts) == 0 {
-		s.logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
+		logger.V(logging.DEBUG).Info("no multimodal items, skipping encoder", "requestID", requestID)
 		return nil, nil
 	}
 
@@ -131,7 +129,7 @@ func (s *Server) fanoutEncoderMooncake(
 	if err != nil {
 		return nil, err
 	}
-	s.logger.V(logging.DEBUG).Info("ec-mooncake consumer", "requestID", requestID, "consumer", consumerZMQ)
+	logger.V(logging.DEBUG).Info("ec-mooncake consumer", "requestID", requestID, "consumer", consumerZMQ)
 
 	items := make([]ecMooncakeItem, len(parts))
 	for idx, part := range parts {
@@ -141,10 +139,10 @@ func (s *Server) fanoutEncoderMooncake(
 		if _, ok := ecMooncakeEmbedsTypes[partType]; !ok || apiType != reqcommon.APITypeChatCompletions {
 			continue
 		}
-		id, _ := part[partFieldUUID].(string)
+		id, _ := part[reqcommon.FieldUUID].(string)
 		if id == "" {
 			id = ecMooncakeContentUUID(part)
-			part[partFieldUUID] = id
+			part[reqcommon.FieldUUID] = id
 		}
 		items[idx].uuid = id
 	}
@@ -170,7 +168,7 @@ func (s *Server) fanoutEncoderMooncake(
 		}
 		params := resp.ECTransferParams
 		if len(params) == 0 {
-			s.logger.V(logging.DEBUG).Info("encoder response carries no ec_transfer_params",
+			logger.V(logging.DEBUG).Info("encoder response carries no ec_transfer_params",
 				"item", idx, "requestID", requestID)
 			return nil
 		}
@@ -292,7 +290,7 @@ func rewriteECMooncakeMessages(body map[string]any, items []ecMooncakeItem) ([]m
 					continue
 				}
 				if rawAudio {
-					partMap[partFieldUUID] = it.uuid
+					partMap[reqcommon.FieldUUID] = it.uuid
 					transferItems = append(transferItems, it.transferItem())
 					turnChanged = true
 					continue
@@ -305,7 +303,7 @@ func rewriteECMooncakeMessages(body map[string]any, items []ecMooncakeItem) ([]m
 				array.Parts[j] = map[string]any{
 					reqcommon.FieldType: embedsType,
 					embedsType:          flattenECMetadata(md),
-					partFieldUUID:       it.uuid,
+					reqcommon.FieldUUID: it.uuid,
 				}
 				transferItems = append(transferItems, it.transferItem())
 				rewritten++
@@ -330,10 +328,7 @@ func rewriteECMooncakeMessages(body map[string]any, items []ecMooncakeItem) ([]m
 // isFanoutMediaPart applies extractMMItems' chat-completions rule for which
 // parts become encoder items.
 func isFanoutMediaPart(part map[string]any) bool {
-	partType, ok := part[reqcommon.FieldType].(string)
-	if !ok {
-		return false
-	}
+	partType := reqcommon.NormalizeChatPart(part)
 	if _, isMedia := reqcommon.PartModality(partType); !isMedia {
 		return false
 	}
@@ -366,8 +361,13 @@ func flattenECMetadata(md map[string]any) map[string]any {
 // handleECMooncake fans out per-item encoder requests that push embeddings to
 // the consumer over Mooncake, rewrites the request to reference them, and
 // hands off to the configured P/D connector.
-func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
-	s.logger.V(logging.DEBUG).Info("running EC-Mooncake protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
+func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, p2p p2pRouting, apiType reqcommon.APIType) {
+	if isVLLMGRPCRequest(r) {
+		s.handleECMooncakeVLLMGRPC(w, r, prefillEndPoint, encodeEndPoints, p2p)
+		return
+	}
+	logger := log.FromContext(r.Context())
+	logger.V(logging.DEBUG).Info("running EC-Mooncake protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, body, ok := s.readJSONBody(r, w)
 	if !ok {
@@ -376,8 +376,9 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 
 	reqUUID, err := uuid.NewUUID()
 	if err != nil {
-		if err := errorBadGateway(err, w); err != nil {
-			s.logger.Error(err, "failed to send error response to client")
+		logger.Error(err, "failed to generate request ID")
+		if err := errorBadGateway(w, r); err != nil {
+			logger.Error(err, "failed to send error response to client")
 		}
 		return
 	}
@@ -385,10 +386,10 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 
 	if len(encodeEndPoints) > 0 {
 		fail := func(err error) {
-			metrics.RecordError(metrics.StageEncode)
-			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
-			if err := errorBadGateway(err, w); err != nil {
-				s.logger.Error(err, "failed to send error response to client")
+			observeStageError(r.Context(), routing.StageEncode)
+			logger.Error(err, "encoder processing failed", "requestID", requestID)
+			if err := errorBadGateway(w, r); err != nil {
+				logger.Error(err, "failed to send error response to client")
 			}
 		}
 
@@ -400,21 +401,21 @@ func (s *Server) handleECMooncake(w http.ResponseWriter, r *http.Request, prefil
 		}
 		// No items means there was no multimodal input, so no encoder ran.
 		if len(items) > 0 {
-			metrics.RecordEncodeDuration(time.Since(encodeStart))
+			observeStageDuration(r.Context(), routing.StageEncode, time.Since(encodeStart))
 			rewritten, transfers, err := applyECMooncakeItems(body, items, apiType)
 			if err != nil {
 				fail(fmt.Errorf("failed to rewrite request after encoder: %w", err))
 				return
 			}
 			if transfers < len(items) {
-				s.logger.Info("warning: some multimodal items have no ec-mooncake transfer; the consumer processes them itself",
+				logger.Info("warning: some multimodal items have no ec-mooncake transfer; the consumer processes them itself",
 					"requestID", requestID, "transfers", transfers, "items", len(items))
 			}
-			s.logger.V(logging.DEBUG).Info("ec-mooncake encoder stage complete",
+			logger.V(logging.DEBUG).Info("ec-mooncake encoder stage complete",
 				"requestID", requestID, "items", len(items),
 				"rewritten", rewritten, "transfers", transfers)
 		}
 	}
 
-	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, apiType)
+	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, p2p, apiType)
 }

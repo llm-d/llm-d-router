@@ -54,7 +54,7 @@ func WithAttributionHandoff(next http.Handler) http.Handler {
 		r.Header.Del(FairnessSourceHandoffHeader)
 
 		switch source {
-		case AttributionSourceHeader, AttributionSourceAgentIdentity:
+		case AttributionSourceHeader, AttributionSourceAgentIdentity, AttributionSourceDerivedRoot:
 		default:
 			id = ""
 		}

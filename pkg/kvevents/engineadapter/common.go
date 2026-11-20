@@ -16,7 +16,16 @@ limitations under the License.
 
 package engineadapter
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/vmihailenco/msgpack/v5"
+	"github.com/vmihailenco/msgpack/v5/msgpcode"
+
+	"github.com/llm-d/llm-d-router/pkg/common/clamp"
+	"github.com/llm-d/llm-d-router/pkg/kvevents"
+)
 
 const (
 	// Common event type tags shared across engine adapters.
@@ -32,4 +41,45 @@ func parseTopic(topic string) (string, string) {
 		return topicParts[1], topicParts[2]
 	}
 	return topic, ""
+}
+
+// topicIdentity returns the pod ID and model name for a message. A subscriber
+// that dialed the pod already knows it, so with per-pod subscriptions the topic
+// may name the model alone ("kv@<model-name>"), which lets every replica of a
+// model server publish under the same topic.
+func topicIdentity(msg *kvevents.RawMessage) (string, string) {
+	if msg.SourceEndpoint != "" {
+		if _, model, ok := strings.Cut(msg.Topic, "@"); ok && model != "" && !strings.Contains(model, "@") {
+			return msg.SourceEndpoint, model
+		}
+	}
+	return parseTopic(msg.Topic)
+}
+
+func decodeTokenID(dec *msgpack.Decoder) (uint32, error) {
+	code, err := dec.PeekCode()
+	if err != nil {
+		return 0, err
+	}
+	if !isIntegerCode(code) {
+		return 0, fmt.Errorf("unsupported numeric type: MessagePack code %#x", code)
+	}
+	if code >= msgpcode.NegFixedNumLow || code == msgpcode.Int8 || code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64 {
+		value, err := dec.DecodeInt64()
+		if err != nil {
+			return 0, err
+		}
+		return clamp.Uint32(value), nil
+	}
+	value, err := dec.DecodeUint64()
+	if err != nil {
+		return 0, err
+	}
+	return clamp.Uint32(clamp.Int64(value)), nil
+}
+
+func isIntegerCode(code byte) bool {
+	return msgpcode.IsFixedNum(code) || code == msgpcode.Uint8 || code == msgpcode.Uint16 ||
+		code == msgpcode.Uint32 || code == msgpcode.Uint64 || code == msgpcode.Int8 ||
+		code == msgpcode.Int16 || code == msgpcode.Int32 || code == msgpcode.Int64
 }

@@ -27,6 +27,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 	"google.golang.org/protobuf/proto"
 	"k8s.io/utils/ptr"
 
@@ -293,18 +295,6 @@ func TestBuiltinAtomEngine(t *testing.T) {
 		"atom:requests_waiting":     gauge(7),
 		"atom:requests_running":     gauge(3),
 		"atom:kv_cache_usage_ratio": gauge(0.25),
-		"atom:cache_config_info": {
-			Type: dto.MetricType_GAUGE.Enum(),
-			Metric: []*dto.Metric{
-				{
-					Label: []*dto.LabelPair{
-						{Name: proto.String("block_size"), Value: proto.String("16")},
-						{Name: proto.String("num_gpu_blocks"), Value: proto.String("138302")},
-					},
-					Gauge: &dto.Gauge{Value: ptr.To(1.0)},
-				},
-			},
-		},
 	}
 
 	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
@@ -327,12 +317,6 @@ func TestBuiltinAtomEngine(t *testing.T) {
 	}
 	if metrics.KVCacheUsagePercent != 0.25 {
 		t.Errorf("KVCacheUsagePercent = %v, want 0.25", metrics.KVCacheUsagePercent)
-	}
-	if metrics.CacheBlockSize != 16 {
-		t.Errorf("CacheBlockSize = %v, want 16", metrics.CacheBlockSize)
-	}
-	if metrics.CacheNumBlocks != 138302 {
-		t.Errorf("CacheNumBlocks = %v, want 138302", metrics.CacheNumBlocks)
 	}
 }
 
@@ -435,6 +419,9 @@ func TestExtractorReadsEveryEngineOfDataParallelPod(t *testing.T) {
 			if got.KVCacheUsagePercent != tt.wantKV {
 				t.Errorf("KVCacheUsagePercent: want %v, got %v", tt.wantKV, got.KVCacheUsagePercent)
 			}
+			assertScalarMetric(t, ep, WaitingQueueSizeKey, float64(tt.wantWaiting))
+			assertScalarMetric(t, ep, RunningRequestsSizeKey, float64(tt.wantRunning))
+			assertScalarMetric(t, ep, KVCacheUsagePercentKey, tt.wantKV)
 		})
 	}
 }
@@ -780,6 +767,42 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 			errContains: `customMetrics entry attributeKey "shared.key" is duplicated`,
 		},
 		{
+			name: "attributeKey reject if it uses the scalar sample key prefix",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "ScalarSample:WaitingQueueSize",
+								"metricSpec":   "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: `customMetrics entry attributeKey "ScalarSample:WaitingQueueSize" uses a prefix reserved for scalar sample keys`,
+		},
+		{
+			name: "attributeKey reject if it uses the custom scalar sample key prefix",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "CustomScalarSample:depth",
+								"metricSpec":   "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: `customMetrics entry attributeKey "CustomScalarSample:depth" uses a prefix reserved for scalar sample keys`,
+		},
+		{
 			name: "custom engineConfigs auto-appends vllm sglang trtllm-serve and triton-tensorrt-llm",
 			params: map[string]any{
 				"engineConfigs": []map[string]any{
@@ -998,6 +1021,7 @@ func TestExtractorMetricFamiliesCoverEveryEngineSpec(t *testing.T) {
 		raws := []string{
 			engine.QueuedRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec, engine.LoRASpec,
 			engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+			engine.CacheTotalTokensSpec, engine.CacheOffloadDetectionSpec,
 		}
 		for _, custom := range engine.CustomMetrics {
 			raws = append(raws, custom.MetricSpec)
@@ -1128,6 +1152,9 @@ func TestExtractorRejectsNonFiniteMetrics(t *testing.T) {
 	if diff := cmp.Diff(baseline, ep.GetMetrics()); diff != "" {
 		t.Errorf("expected baseline metrics to be preserved when all samples are non-finite (-want +got):\n%s", diff)
 	}
+	assertScalarMetric(t, ep, WaitingQueueSizeKey, 4.0)
+	assertScalarMetric(t, ep, RunningRequestsSizeKey, 2.0)
+	assertScalarMetric(t, ep, KVCacheUsagePercentKey, 0.35)
 
 	// Partial scrape: valid queue depth updates, while NaN KV cache usage preserves previous KV usage and returns error.
 	partialData := sourcemetrics.PrometheusMetricMap{
@@ -1154,6 +1181,9 @@ func TestExtractorRejectsNonFiniteMetrics(t *testing.T) {
 	if afterPartial.KVCacheUsagePercent != 0.35 {
 		t.Errorf("KVCacheUsagePercent = %v, want 0.35", afterPartial.KVCacheUsagePercent)
 	}
+	assertScalarMetric(t, ep, WaitingQueueSizeKey, 7.0)
+	assertScalarMetric(t, ep, RunningRequestsSizeKey, 2.0)
+	assertScalarMetric(t, ep, KVCacheUsagePercentKey, 0.35)
 }
 
 func TestTieredOffloadingExtraction(t *testing.T) {
@@ -1285,5 +1315,235 @@ func assertNoScalarMetric(t *testing.T, ep fwkdl.Endpoint, key string) {
 	t.Helper()
 	if _, ok := attrmetrics.ReadScalarMetricValue(ep.GetAttributes(), attrmetrics.ScalarMetricDataKey(key)); ok {
 		t.Errorf("expected attribute %q to not be set", key)
+	}
+}
+
+func TestExtractorProducesBuiltinScalarAttributes(t *testing.T) {
+	ext, err := newCoreMetricsExtractorPlugin(t.Context(), "core", nil)
+	if err != nil {
+		t.Fatalf("newCoreMetricsExtractorPlugin() unexpected error: %v", err)
+	}
+	produced := ext.Produces()
+	for _, key := range []string{WaitingQueueSizeKey, RunningRequestsSizeKey, KVCacheUsagePercentKey} {
+		dk := attrmetrics.ScalarMetricDataKey(key)
+		got, ok := produced[dk]
+		if !ok {
+			t.Fatalf("Produces() does not declare built-in scalar attribute %q", key)
+		}
+		if _, ok := got.(attrmetrics.ScalarMetricValue); !ok {
+			t.Errorf("Produces()[%v] has type %T, want attrmetrics.ScalarMetricValue", dk, got)
+		}
+	}
+}
+
+func TestExtractorPublishesBuiltinScalarAttributes(t *testing.T) {
+	t.Run("unconfigured_spec_leaves_attribute_unset", func(t *testing.T) {
+		registry := NewMappingRegistry()
+		mapping, err := NewMapping(defaultTotalQueuedRequestsMetric, defaultTotalRunningRequestsMetric, "", "", "")
+		if err != nil {
+			t.Fatalf("NewMapping() unexpected error: %v", err)
+		}
+		if err := registry.Register(DefaultEngineType, mapping); err != nil {
+			t.Fatalf("Register() unexpected error: %v", err)
+		}
+		extractor, err := NewCoreMetricsExtractor(registry, "")
+		if err != nil {
+			t.Fatalf("NewCoreMetricsExtractor() unexpected error: %v", err)
+		}
+
+		ep := fwkdl.NewEndpoint(nil, nil)
+		data := sourcemetrics.PrometheusMetricMap{
+			defaultTotalQueuedRequestsMetric:  gaugeFamily(3),
+			defaultTotalRunningRequestsMetric: gaugeFamily(1),
+		}
+		if err := extractor.Extract(t.Context(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: data, Endpoint: ep}); err != nil {
+			t.Fatalf("Extract() unexpected error: %v", err)
+		}
+		assertScalarMetric(t, ep, WaitingQueueSizeKey, 3.0)
+		assertScalarMetric(t, ep, RunningRequestsSizeKey, 1.0)
+		assertNoScalarMetric(t, ep, KVCacheUsagePercentKey)
+	})
+
+	t.Run("customMetrics_with_same_attributeKey_exclusively_owns_attribute", func(t *testing.T) {
+		registry := NewMappingRegistry()
+		mapping, err := NewMappingFromConfig(MappingConfig{
+			Queue:   defaultTotalQueuedRequestsMetric,
+			Running: defaultTotalRunningRequestsMetric,
+			KVUsage: defaultKvCacheUsagePercentageMetric,
+			CustomMetrics: []CustomMetric{
+				{AttributeKey: WaitingQueueSizeKey, Spec: mustSpec(t, "custom:override_queue")},
+				{AttributeKey: RunningRequestsSizeKey, Spec: mustSpec(t, "custom:override_running"), Optional: true},
+				{AttributeKey: KVCacheUsagePercentKey, Spec: mustSpec(t, "custom:override_kv")},
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewMappingFromConfig() unexpected error: %v", err)
+		}
+		if err := registry.Register(DefaultEngineType, mapping); err != nil {
+			t.Fatalf("Register() unexpected error: %v", err)
+		}
+		extractor, err := NewCoreMetricsExtractor(registry, "")
+		if err != nil {
+			t.Fatalf("NewCoreMetricsExtractor() unexpected error: %v", err)
+		}
+
+		ep := fwkdl.NewEndpoint(nil, nil)
+
+		// Scrape 0: built-in metrics succeed while custom metrics are absent.
+		// Legacy Metrics must update, while attributes stay unset because customMetrics owns them.
+		initialMissingCustom := sourcemetrics.PrometheusMetricMap{
+			defaultTotalQueuedRequestsMetric:    gaugeFamily(2),
+			defaultTotalRunningRequestsMetric:   gaugeFamily(1),
+			defaultKvCacheUsagePercentageMetric: gaugeFamily(0.15),
+		}
+		if err := extractor.Extract(t.Context(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: initialMissingCustom, Endpoint: ep}); err == nil {
+			t.Fatal("Extract() expected error when required custom metrics are missing, got nil")
+		}
+		if got := ep.GetMetrics(); got.WaitingQueueSize != 2 || got.RunningRequestsSize != 1 || got.KVCacheUsagePercent != 0.15 {
+			t.Errorf("GetMetrics() after scrape 0 = (%d, %d, %v), want (2, 1, 0.15)",
+				got.WaitingQueueSize, got.RunningRequestsSize, got.KVCacheUsagePercent)
+		}
+		assertNoScalarMetric(t, ep, WaitingQueueSizeKey)
+		assertNoScalarMetric(t, ep, RunningRequestsSizeKey)
+		assertNoScalarMetric(t, ep, KVCacheUsagePercentKey)
+
+		// Scrape 1: both built-in metrics and overriding custom metrics succeed.
+		bothPresent := sourcemetrics.PrometheusMetricMap{
+			defaultTotalQueuedRequestsMetric:    gaugeFamily(3),
+			defaultTotalRunningRequestsMetric:   gaugeFamily(2),
+			defaultKvCacheUsagePercentageMetric: gaugeFamily(0.25),
+			"custom:override_queue":             gaugeFamily(9),
+			"custom:override_running":           gaugeFamily(7),
+			"custom:override_kv":                gaugeFamily(0.85),
+		}
+		if err := extractor.Extract(t.Context(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: bothPresent, Endpoint: ep}); err != nil {
+			t.Fatalf("Extract() unexpected error on scrape 1: %v", err)
+		}
+		if got := ep.GetMetrics(); got.WaitingQueueSize != 3 || got.RunningRequestsSize != 2 || got.KVCacheUsagePercent != 0.25 {
+			t.Errorf("GetMetrics() after scrape 1 = (%d, %d, %v), want (3, 2, 0.25)",
+				got.WaitingQueueSize, got.RunningRequestsSize, got.KVCacheUsagePercent)
+		}
+		assertScalarMetric(t, ep, WaitingQueueSizeKey, 9.0)
+		assertScalarMetric(t, ep, RunningRequestsSizeKey, 7.0)
+		assertScalarMetric(t, ep, KVCacheUsagePercentKey, 0.85)
+
+		// Scrape 2: built-in metrics advance while custom metrics fail (missing required,
+		// missing optional, and non-finite NaN). Legacy Metrics must advance to the new
+		// built-in values, while attributes retain the last-known custom values.
+		customFailed := sourcemetrics.PrometheusMetricMap{
+			defaultTotalQueuedRequestsMetric:    gaugeFamily(5),
+			defaultTotalRunningRequestsMetric:   gaugeFamily(4),
+			defaultKvCacheUsagePercentageMetric: gaugeFamily(0.50),
+			"custom:override_kv":                gaugeFamily(math.NaN()),
+		}
+		if err := extractor.Extract(t.Context(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: customFailed, Endpoint: ep}); err == nil {
+			t.Fatal("Extract() expected error when required custom metrics fail on scrape 2, got nil")
+		}
+		if got := ep.GetMetrics(); got.WaitingQueueSize != 5 || got.RunningRequestsSize != 4 || got.KVCacheUsagePercent != 0.50 {
+			t.Errorf("GetMetrics() after scrape 2 = (%d, %d, %v), want (5, 4, 0.50)",
+				got.WaitingQueueSize, got.RunningRequestsSize, got.KVCacheUsagePercent)
+		}
+		assertScalarMetric(t, ep, WaitingQueueSizeKey, 9.0)
+		assertScalarMetric(t, ep, RunningRequestsSizeKey, 7.0)
+		assertScalarMetric(t, ep, KVCacheUsagePercentKey, 0.85)
+	})
+}
+
+// A customMetrics entry that lists a histogram's _sum series by its own name
+// receives it as an untyped family (see extractValue).
+func TestCustomMetricReadsUntypedSample(t *testing.T) {
+	registry := NewMappingRegistry()
+	mapping, err := NewMappingFromConfig(MappingConfig{
+		Queue:   defaultTotalQueuedRequestsMetric,
+		Running: defaultTotalRunningRequestsMetric,
+		KVUsage: defaultKvCacheUsagePercentageMetric,
+		CustomMetrics: []CustomMetric{
+			{AttributeKey: "prefill_time_sum", Spec: mustSpec(t, "vllm:request_prefill_time_seconds_sum")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewMappingFromConfig() unexpected error: %v", err)
+	}
+	if err := registry.Register(DefaultEngineType, mapping); err != nil {
+		t.Fatalf("Register() unexpected error: %v", err)
+	}
+	extractor, err := NewCoreMetricsExtractor(registry, "")
+	if err != nil {
+		t.Fatalf("NewCoreMetricsExtractor() unexpected error: %v", err)
+	}
+
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	families, err := parser.TextToMetricFamilies(strings.NewReader("vllm:request_prefill_time_seconds_sum{model_name=\"m\"} 12.5\n"))
+	if err != nil {
+		t.Fatalf("TextToMetricFamilies() unexpected error: %v", err)
+	}
+	if got := families["vllm:request_prefill_time_seconds_sum"].GetType(); got != dto.MetricType_UNTYPED {
+		t.Fatalf("parsed family type = %v, want %v", got, dto.MetricType_UNTYPED)
+	}
+	families[defaultTotalQueuedRequestsMetric] = gaugeFamily(2)
+	families[defaultTotalRunningRequestsMetric] = gaugeFamily(1)
+	families[defaultKvCacheUsagePercentageMetric] = gaugeFamily(0.5)
+
+	ep := fwkdl.NewEndpoint(nil, nil)
+	if err := extractor.Extract(t.Context(), fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: families, Endpoint: ep}); err != nil {
+		t.Fatalf("Extract() unexpected error: %v", err)
+	}
+	assertScalarMetric(t, ep, "prefill_time_sum", 12.5)
+}
+
+func TestCustomMetricRejectsNonScalarFamilies(t *testing.T) {
+	for _, metricType := range []dto.MetricType{dto.MetricType_HISTOGRAM, dto.MetricType_SUMMARY} {
+		for _, aggregation := range []metricAggregation{"", metricAggregationSum} {
+			for _, optional := range []bool{false, true} {
+				t.Run(metricType.String()+"/aggregation="+string(aggregation)+"/optional="+strconv.FormatBool(optional), func(t *testing.T) {
+					registry := NewMappingRegistry()
+					mapping, err := NewMappingFromConfig(MappingConfig{
+						CustomMetrics: []CustomMetric{{
+							AttributeKey: "latency",
+							Spec:         mustSpec(t, "latency"),
+							Aggregation:  aggregation,
+							Optional:     optional,
+						}},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := registry.Register(DefaultEngineType, mapping); err != nil {
+						t.Fatal(err)
+					}
+					extractor, err := NewCoreMetricsExtractor(registry, "")
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					parser := expfmt.NewTextParser(model.LegacyValidation)
+					families, err := parser.TextToMetricFamilies(strings.NewReader(
+						"# TYPE latency " + strings.ToLower(metricType.String()) + "\nlatency_sum 12.5\nlatency_count 2\n"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					ep := fwkdl.NewEndpoint(nil, nil)
+					input := fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: families, Endpoint: ep}
+					for _, seeded := range []bool{false, true} {
+						if seeded {
+							ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey("latency"), attrmetrics.ScalarMetricValue(7))
+						}
+						err := extractor.Extract(t.Context(), input)
+						if optional {
+							if err != nil {
+								t.Fatalf("optional metric: %v", err)
+							}
+						} else if err == nil || !strings.Contains(err.Error(), "unsupported metric type "+metricType.String()+" for \"latency\"") {
+							t.Errorf("expected unsupported metric type error, got %v", err)
+						}
+						if seeded {
+							assertScalarMetric(t, ep, "latency", 7)
+						} else {
+							assertNoScalarMetric(t, ep, "latency")
+						}
+					}
+				})
+			}
+		}
 	}
 }

@@ -1,0 +1,16 @@
+whitespace_control:
+  trim_blocks: true
+  lstrip_blocks: true
+  keep_trailing_newline: true
+templates:
+  - template: attributes.go.j2
+    filter: '.groups[] | select(.id == "registry.llm_d")'
+    application_mode: each
+    file_name: pkg/common/observability/semconv/llm_d.go
+  - template: spans.go.j2
+    filter: '.groups | map(select(.type == "span")) | sort_by(.id)'
+    application_mode: single
+    file_name: pkg/common/observability/semconv/spans.go
+  - template: telemetry.md.j2
+    application_mode: single
+    file_name: docs/telemetry.md

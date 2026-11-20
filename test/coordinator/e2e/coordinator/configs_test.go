@@ -16,24 +16,26 @@ limitations under the License.
 
 package coordinate2e
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // coordinatorConfigNIXL is the coordinator pipeline config for the e-p-d-pools topology.
-// ${NAMESPACE}, ${RENDER_NAMESPACE}, and ${VLLM_RENDER_PORT} are substituted by
-// createCoordinator before the ConfigMap is built.
+// ${NAMESPACE}, ${RENDER_NAMESPACE}, ${VLLM_RENDER_PORT}, and ${GATEWAY_SERVICE} are
+// substituted by createCoordinator before the ConfigMap is built.
 const coordinatorConfigNIXL = `log_level: 5
 server:
   listen_addr: ":8080"
   read_timeout: 30s
-  write_timeout: 120s
-  # Recreated per spec behind a group-lived Envoy; drain fast so a deleted
+  # Recreated per spec behind a group-lived gateway; drain fast so a deleted
   # coordinator stops serving immediately instead of lingering on a stale
   # endpoint the gateway may still route to. 0s is avoided: it makes the
   # server Shutdown context expire instantly and the process exit non-zero.
   shutdown_timeout: 1s
 
 gateway:
-  address: "http://envoy.${NAMESPACE}.svc:8081"
+  address: "http://${GATEWAY_SERVICE}.${NAMESPACE}.svc:8081"
   max_idle_conns_per_host: 100
   idle_conn_timeout: 90s
   timeout: 60s
@@ -63,8 +65,24 @@ pipeline:
 // the native generate wire format on the encode and prefill steps, which build a
 // fresh sampling_params carrying only max_tokens: 1. This exercises a different
 // min_tokens-stripping path than the OpenAI clone-and-cap path.
-var coordinatorConfigNIXLGenerate = strings.Replace(
-	coordinatorConfigNIXL, "use_openai_format: true", "use_openai_format: false", 1)
+var coordinatorConfigNIXLGenerate = mustReplace(
+	coordinatorConfigNIXL, "use_openai_format: true", "use_openai_format: false")
+
+// coordinatorConfigNIXLGenerateMMPayload is coordinatorConfigNIXLGenerate with
+// the render step asking the renderer for no tensors (mm_payload: none).
+var coordinatorConfigNIXLGenerateMMPayload = mustReplace(
+	coordinatorConfigNIXLGenerate, "timeout: 60s\n    - type: encode",
+	"timeout: 60s\n        mm_payload: none\n    - type: encode")
+
+// mustReplace is strings.Replace that fails at initialization when old is
+// absent from s, so a base-config edit cannot silently turn a derived config
+// into the base and leave a spec exercising the wrong pipeline.
+func mustReplace(s, old, new string) string {
+	if !strings.Contains(s, old) {
+		panic(fmt.Sprintf("coordinator config: base no longer contains %q", old))
+	}
+	return strings.Replace(s, old, new, 1)
+}
 
 // eppConfig is the scheduling config for the single EPP that serves all three
 // phases. Each request runs exactly one scheduling profile, named by its

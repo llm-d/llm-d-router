@@ -19,10 +19,10 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"path/filepath"
-
-	"k8s.io/component-base/cli/flag"
+	"slices"
 
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
@@ -40,19 +40,23 @@ type tlsProfile struct {
 // An empty suite list uses the crypto/tls default.
 func parseTLSProfile(minVersion string, cipherSuites []string) (tlsProfile, error) {
 	profile := tlsProfile{minVersion: tls.VersionTLS12}
-	if minVersion != "" {
-		version, err := flag.TLSVersion(minVersion)
-		if err != nil {
-			return tlsProfile{}, fmt.Errorf("invalid tls-min-version %q: unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", minVersion, minVersion)
-		}
-		if version < tls.VersionTLS12 {
-			return tlsProfile{}, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", minVersion)
-		}
+	version, err := tlsutil.ParseTLSVersion(minVersion)
+	if err != nil {
+		return tlsProfile{}, err
+	}
+	if version != 0 {
 		profile.minVersion = version
 	}
-	suites, err := flag.TLSCipherSuites(cipherSuites)
+	suites, err := tlsutil.ParseCipherSuites(cipherSuites)
 	if err != nil {
-		return tlsProfile{}, fmt.Errorf("invalid tls-cipher-suites: %w", err)
+		return tlsProfile{}, err
+	}
+	// net/http's HTTP/2 server refuses to start without one of these when
+	// TLS 1.2 is allowed, so reject the list here instead of at Serve.
+	if len(suites) > 0 && profile.minVersion < tls.VersionTLS13 &&
+		!slices.Contains(suites, tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256) &&
+		!slices.Contains(suites, tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256) {
+		return tlsProfile{}, errors.New("invalid tls-cipher-suites: HTTP/2 requires TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 or TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256")
 	}
 	profile.cipherSuites = suites
 	return profile, nil

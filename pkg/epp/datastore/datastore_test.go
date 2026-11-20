@@ -46,7 +46,8 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/mocks"
 	poolutil "github.com/llm-d/llm-d-router/pkg/epp/util/pool"
-	testutil "github.com/llm-d/llm-d-router/pkg/epp/util/testing"
+	fwkapix "github.com/llm-d/llm-d-router/test/framework/apix"
+	fwkgaie "github.com/llm-d/llm-d-router/test/framework/gaie"
 	fwkk8s "github.com/llm-d/llm-d-router/test/framework/k8s"
 )
 
@@ -122,7 +123,7 @@ func TestPoolGet_NoDeadlockWithConcurrentWrite(t *testing.T) {
 
 func TestPool(t *testing.T) {
 	pool1Selector := map[string]string{"app": "vllm_v1"}
-	pool1 := testutil.MakeInferencePool("pool1").
+	pool1 := fwkgaie.MakeInferencePool("pool1").
 		Namespace("default").
 		Selector(pool1Selector).ObjRef()
 	tests := []struct {
@@ -198,14 +199,14 @@ func TestPool(t *testing.T) {
 func TestObjective(t *testing.T) {
 	chatModel := "chat"
 	tsModel := "food-review"
-	model1ts := testutil.MakeV1InferenceObjective("model1").ObjRef()
+	model1ts := fwkapix.MakeV1InferenceObjective("model1").ObjRef()
 	// Same model name as model1ts, different object name.
-	model2ts := testutil.MakeV1InferenceObjective("model2").ObjRef()
+	model2ts := fwkapix.MakeV1InferenceObjective("model2").ObjRef()
 	// Same model name as model1ts, newer timestamp
-	model1tsCritical := testutil.MakeV1InferenceObjective("model1").
+	model1tsCritical := fwkapix.MakeV1InferenceObjective("model1").
 		Priority(2).ObjRef()
 	// Same object name as model2ts, different model name.
-	model2chat := testutil.MakeV1InferenceObjective(model2ts.Name).ObjRef()
+	model2chat := fwkapix.MakeV1InferenceObjective(model2ts.Name).ObjRef()
 
 	tests := []struct {
 		name           string
@@ -599,7 +600,7 @@ func TestTargetPortsChange(t *testing.T) {
 				ds := NewDatastore(ctx, epf)
 
 				// Set initial pool with multiple target ports
-				initialPool := testutil.MakeInferencePool("test-pool").
+				initialPool := fwkgaie.MakeInferencePool("test-pool").
 					Namespace("default").
 					Selector(map[string]string{"app": "vllm"}).ObjRef()
 				initialPool.Spec.TargetPorts = test.initialTargetPorts
@@ -615,7 +616,7 @@ func TestTargetPortsChange(t *testing.T) {
 				}
 
 				// Update pool with different target ports
-				updatedPool := testutil.MakeInferencePool("test-pool").
+				updatedPool := fwkgaie.MakeInferencePool("test-pool").
 					Namespace("default").
 					Selector(map[string]string{"app": "vllm"}).ObjRef()
 				updatedPool.Spec.TargetPorts = test.updatedTargetPorts
@@ -1184,7 +1185,7 @@ func TestPodUpdateOrAddIfNotExist_ConcurrentPoolSet(t *testing.T) {
 			ds := NewDatastore(ctx, epf)
 
 			pool := poolutil.InferencePoolToEndpointPool(
-				testutil.MakeInferencePool("pool1").
+				fwkgaie.MakeInferencePool("pool1").
 					Namespace("default").
 					Selector(map[string]string{"app": "vllm"}).
 					TargetPorts(8000).ObjRef(),

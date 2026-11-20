@@ -57,6 +57,33 @@ var (
 		append(append([]string{}, requestLabelsWithAPISurface...), "error_code"),
 	)
 
+	llmdFairnessIDResolvedCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "fairness_id_resolved_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of requests by resolved fairness ID and where the ID came from.", compbasemetrics.ALPHA),
+		},
+		[]string{"fairness_id", "source", "inference_pool"},
+	)
+
+	llmdFairnessIDOverflowCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "fairness_id_overflow_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of requests whose fairness ID was folded into the overflow label value because the label cap was full.", compbasemetrics.ALPHA),
+		},
+		[]string{"source", "inference_pool"},
+	)
+
+	llmdRequestOutcomeCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "request_outcome_total",
+			Help:      metricsutil.HelpMsgWithStability("Total number of requests by how they ended.", compbasemetrics.ALPHA),
+		},
+		append(append([]string{}, requestLabelsWithAPISurface...), "outcome", "reason"),
+	)
+
 	llmdRequestLatencies = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,
@@ -321,7 +348,7 @@ var llmdInferenceExtensionInfo = prometheus.NewGaugeVec(
 		Name:      "info",
 		Help:      metricsutil.HelpMsgWithStability("General information of the current build of Inference Extension.", compbasemetrics.ALPHA),
 	},
-	[]string{"commit", "build_ref"},
+	[]string{metricsutil.BuildInfoLabelCommit, metricsutil.BuildInfoLabelBuildRef},
 )
 
 // --- llm-d Flow Control Metrics ---
@@ -569,6 +596,67 @@ var (
 			Help:      metricsutil.HelpMsgWithStability("Extract errors per source/extractor type.", compbasemetrics.ALPHA),
 		},
 		[]string{"source_type", "extractor_type"},
+	)
+
+	// LlmdDataLayerPollsTotal records data-source polls per source type and outcome.
+	LlmdDataLayerPollsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_polls_total",
+			Help:      metricsutil.HelpMsgWithStability("Data-source polls per source type and outcome.", compbasemetrics.ALPHA),
+		},
+		[]string{"source_type", "outcome"},
+	)
+
+	// LlmdDataLayerPollDuration records data-source poll duration per source type.
+	// The ladder resolves sub-millisecond polls and ends past the 1s per-poll
+	// deadline, so a timed-out poll lands in the last finite bucket.
+	LlmdDataLayerPollDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "datalayer_poll_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Data-source poll duration per source type.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+		},
+		[]string{"source_type"},
+	)
+
+	// LlmdCrossReplicaPublishesTotal records per-endpoint cross-replica
+	// publishes per state key and outcome.
+	LlmdCrossReplicaPublishesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cross_replica_publishes_total",
+			Help:      metricsutil.HelpMsgWithStability("Per-endpoint cross-replica state publishes per state key and outcome.", compbasemetrics.ALPHA),
+		},
+		[]string{"state_key", "outcome"},
+	)
+
+	// LlmdCrossReplicaLastPublishTimestamp records when a state key last
+	// completed a clean publish cycle (every attempted endpoint published), so
+	// time() minus it bounds how old this replica's shared state can be for
+	// its peers.
+	LlmdCrossReplicaLastPublishTimestamp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cross_replica_last_publish_timestamp_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Unix time of the last cross-replica publish cycle in which every attempted endpoint published, per state key.", compbasemetrics.ALPHA),
+		},
+		[]string{"state_key"},
+	)
+
+	// LlmdCrossReplicaPublishCycleDuration records how long one publish cycle
+	// over every registered endpoint takes. The ladder starts below the 200ms
+	// default sync interval and ends past it, since a cycle slower than the
+	// interval delays the next one.
+	LlmdCrossReplicaPublishCycleDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "cross_replica_publish_cycle_duration_seconds",
+			Help:      metricsutil.HelpMsgWithStability("Duration of one cross-replica publish cycle over all registered endpoints.", compbasemetrics.ALPHA),
+			Buckets:   []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2.5},
+		},
+		[]string{},
 	)
 )
 

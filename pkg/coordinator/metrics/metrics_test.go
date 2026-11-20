@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +122,15 @@ llm_d_coordinator_request_size_bytes_count{model_name="m1"} 1
 	require.NoError(t, promtestutil.CollectAndCompare(requestSize, strings.NewReader(expected), "llm_d_coordinator_request_size_bytes"))
 }
 
+func TestRecordBuildInfo(t *testing.T) {
+	buildInfo.Reset()
+
+	RecordBuildInfo("abc123", "v1.2.3")
+
+	require.InDelta(t, 1.0, promtestutil.ToFloat64(buildInfo.WithLabelValues("abc123", "v1.2.3")), 1e-9)
+	require.Equal(t, 1, promtestutil.CollectAndCount(buildInfo, "llm_d_coordinator_info"))
+}
+
 func TestReset_ClearsAllVectors(t *testing.T) {
 	IncRequestTotal("m2")
 	require.InDelta(t, 1.0, promtestutil.ToFloat64(requestTotal.WithLabelValues("m2")), 1e-9)
@@ -135,7 +145,7 @@ func TestStepFamily_Records(t *testing.T) {
 	DecStepRunning("render")
 	require.InDelta(t, 0.0, promtestutil.ToFloat64(stepRunning.WithLabelValues("render")), 1e-9)
 
-	RecordStepDuration("render", 50*time.Millisecond)
+	RecordStepDuration(context.Background(), "render", 50*time.Millisecond)
 	IncStepErrorTotal("prefill", ErrorCodeUpstream5xx)
 
 	require.InDelta(t, 1.0,

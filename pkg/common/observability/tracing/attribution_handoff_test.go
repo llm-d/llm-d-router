@@ -47,6 +47,11 @@ func TestWithAttributionHandoff(t *testing.T) {
 			wantID:  "agent-7", wantSource: AttributionSourceAgentIdentity,
 		},
 		{
+			name:    "derived root resolved by EPP",
+			headers: map[string]string{FairnessIDHandoffHeader: "root-9", FairnessSourceHandoffHeader: AttributionSourceDerivedRoot},
+			wantID:  "root-9", wantSource: AttributionSourceDerivedRoot,
+		},
+		{
 			name:    "header identity resolved by EPP",
 			headers: map[string]string{FairnessIDHandoffHeader: "team-a", FairnessSourceHandoffHeader: AttributionSourceHeader},
 			wantID:  "team-a", wantSource: AttributionSourceHeader,

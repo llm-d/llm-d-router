@@ -58,12 +58,13 @@ type realFlowControlHarness struct {
 
 // realFlowControlOpts selects the knobs each outcome needs: a fixed saturation level (1.0 keeps
 // requests queued), the candidate pool (empty vs. non-empty steers capacity-rejection
-// classification), the controller-default request TTL, and an optional per-band request cap.
+// classification), the controller-default request TTL, and optional per-band and per-flow request caps.
 type realFlowControlOpts struct {
 	saturation      float64
 	candidates      []fwkdl.Endpoint
 	requestTTL      time.Duration // Defaults to one minute (effectively "never" for these tests).
 	bandMaxRequests uint64        // Zero means unbounded.
+	flowMaxRequests uint64        // Zero means unbounded.
 }
 
 func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlowControlHarness {
@@ -84,6 +85,9 @@ func newRealFlowControlHarness(t *testing.T, opts realFlowControlOpts) *realFlow
 	bandOpts := []fcregistry.PriorityBandConfigOption{fcregistry.WithBandMaxBytes(10_000_000)}
 	if opts.bandMaxRequests > 0 {
 		bandOpts = append(bandOpts, fcregistry.WithBandMaxRequests(opts.bandMaxRequests))
+	}
+	if opts.flowMaxRequests > 0 {
+		bandOpts = append(bandOpts, fcregistry.WithBandMaxRequestsPerFlow(opts.flowMaxRequests))
 	}
 	band, err := fcregistry.NewPriorityBandConfig(0, defaults, bandOpts...)
 	require.NoError(t, err)
@@ -208,6 +212,27 @@ func TestFlowControlAdmissionController_RealControllerSeam(t *testing.T) {
 		requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonSaturated)
 
 		// Shut the controller down and drain the filler so the goroutine ends inside the test.
+		h.cancel()
+		require.Error(t, waitAdmit(t, filler), "queued filler should be evicted on shutdown")
+	})
+
+	t.Run("rejected_flow_limit_returns_429_flow_limit", func(t *testing.T) {
+		t.Parallel()
+		// The band has room, but the flow's only slot (flowMaxRequests=1) holds the filler, so the
+		// next request from the same fairness ID is refused by its own per-flow limit.
+		h := newRealFlowControlHarness(t, realFlowControlOpts{
+			saturation:      1.0,
+			candidates:      nonEmptyEndpoints(),
+			flowMaxRequests: 1,
+		})
+
+		filler := admitAsync(ctx, h.ac, "filler-req")
+		require.Eventually(t, func() bool { return h.reg.Stats().Global.Len == 1 },
+			time.Second, time.Millisecond, "filler request should be queued before the overflow request")
+
+		err := waitAdmit(t, admitAsync(ctx, h.ac, "overflow-req"))
+		requireDropped(t, err, errcommon.ResourceExhausted, errcommon.RequestDroppedReasonFlowLimit)
+
 		h.cancel()
 		require.Error(t, waitAdmit(t, filler), "queued filler should be evicted on shutdown")
 	})

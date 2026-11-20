@@ -88,24 +88,28 @@ func (ext *Extractor) TypedName() fwkplugin.TypedName {
 
 var _ fwkplugin.ProducerPlugin = &Extractor{}
 
-// Produces declares the custom scalar metric attributes, whose names come from
-// the per-engine mappings in configuration, plus the per-pod metric fields this
-// extractor writes into the endpoint's Metrics struct that a scorer or filter
-// declares as a Consumes() dependency. Declaring both lets the data-attribute
-// registry and the DAG builder validate the scorers and filters that read them.
-// The Metrics field types mirror the fwkdl.Metrics struct (float64, int, map
-// of model name to count).
+// Produces declares the built-in and custom scalar metric attributes stored in
+// the endpoint's AttributeMap as ScalarMetricValue, plus the LoRA adapter maps
+// and the scalar samples written into the endpoint's Metrics struct that
+// scorers declare as Consumes() dependencies. Declaring all of them lets the
+// data-attribute registry and the DAG builder validate the scorers and filters
+// that read them.
 func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
 	produced := map[fwkplugin.DataKey]any{
-		fwkplugin.NewDataKey(KVCacheUsagePercentKey, MetricsExtractorType): float64(0),
-		fwkplugin.NewDataKey(WaitingQueueSizeKey, MetricsExtractorType):    int(0),
-		fwkplugin.NewDataKey(RunningRequestsSizeKey, MetricsExtractorType): int(0),
-		fwkplugin.NewDataKey(ActiveModelsKey, MetricsExtractorType):        map[string]int{},
-		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType):       map[string]int{},
+		attrmetrics.ScalarMetricDataKey(KVCacheUsagePercentKey):      attrmetrics.ScalarMetricValue(0),
+		attrmetrics.ScalarMetricDataKey(WaitingQueueSizeKey):         attrmetrics.ScalarMetricValue(0),
+		attrmetrics.ScalarMetricDataKey(RunningRequestsSizeKey):      attrmetrics.ScalarMetricValue(0),
+		fwkplugin.NewDataKey(ActiveModelsKey, MetricsExtractorType):  map[string]int{},
+		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType): map[string]int{},
+
+		attrmetrics.ScalarSampleDataKey(fwkdl.ScalarFieldWaitingQueueSize):    fwkdl.ScalarSample{},
+		attrmetrics.ScalarSampleDataKey(fwkdl.ScalarFieldRunningRequestsSize): fwkdl.ScalarSample{},
+		attrmetrics.ScalarSampleDataKey(fwkdl.ScalarFieldKVCacheUsagePercent): fwkdl.ScalarSample{},
 	}
 	for _, mapping := range ext.registry.Mappings() {
 		for _, custom := range mapping.CustomMetrics {
 			produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
+			produced[attrmetrics.CustomScalarSampleDataKey(custom.AttributeKey)] = fwkdl.ScalarSample{}
 		}
 	}
 	return produced
@@ -119,7 +123,7 @@ func (ext *Extractor) MetricFamilies() []string {
 	var names []string
 	for _, mapping := range ext.registry.Mappings() {
 		names = append(names, mapping.MetricNames()...)
-		for _, spec := range []*Spec{mapping.CacheBlockSize, mapping.CacheNumBlocks} {
+		for _, spec := range []*Spec{mapping.CacheBlockSize, mapping.CacheNumBlocks, mapping.CacheTotalTokens, mapping.CacheOffloadDetection} {
 			if spec != nil {
 				names = append(names, spec.Name)
 			}
@@ -143,12 +147,17 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 	current := ep.GetMetrics()
 	clone := current.Clone()
 	updated := false
+	// UpdateTime and every sample this scrape observes share one timestamp.
+	scrapeTime := time.Now()
+	samples := fwkdl.NewScalarSampleUpdate(clone.ScalarSamples, mapping, scrapeTime, len(mapping.CustomMetrics))
 
 	if spec := mapping.TotalQueuedRequests; spec != nil { // extract queued requests
 		if value, err := spec.aggregateMetric(families, aggregateSum); err != nil {
 			errs = append(errs, err)
 		} else {
 			clone.WaitingQueueSize = int(value)
+			putBuiltinScalarAttribute(ep, mapping, WaitingQueueSizeKey, value)
+			samples.Observe(fwkdl.ScalarFieldWaitingQueueSize, value)
 			updated = true
 		}
 	}
@@ -158,6 +167,8 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, err)
 		} else {
 			clone.RunningRequestsSize = int(value)
+			putBuiltinScalarAttribute(ep, mapping, RunningRequestsSizeKey, value)
+			samples.Observe(fwkdl.ScalarFieldRunningRequestsSize, value)
 			updated = true
 		}
 	}
@@ -167,6 +178,8 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			errs = append(errs, err)
 		} else {
 			clone.KVCacheUsagePercent = value
+			putBuiltinScalarAttribute(ep, mapping, KVCacheUsagePercentKey, value)
+			samples.Observe(fwkdl.ScalarFieldKVCacheUsagePercent, value)
 			updated = true
 		}
 	}
@@ -214,6 +227,25 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		}
 	}
 
+	// The offload tier's capacity and the offload signal are optional: an engine
+	// reports them only when offloading is configured, and some only after the
+	// first request, so an absent family is neither an error nor a reset.
+	if spec := mapping.CacheTotalTokens; spec != nil {
+		if tokens, ok := spec.maxValue(families, mapping.CacheTotalTokensLabel); ok {
+			clone.KvCacheMaxTokenCapacity = tokens
+			updated = true
+		}
+	}
+
+	if spec := mapping.CacheOffloadDetection; spec != nil {
+		// A positive value rather than the family's presence: vLLM registers its
+		// transfer counters at zero on startup, before the capacity label exists.
+		if detected, ok := spec.hasPositiveValue(families); ok && detected != clone.KvCacheOffloadDetected {
+			clone.KvCacheOffloadDetected = detected
+			updated = true
+		}
+	}
+
 	trace := log.FromContext(ctx).V(logutil.TRACE)
 	for _, custom := range mapping.CustomMetrics {
 		var value float64
@@ -236,11 +268,15 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 			continue
 		}
 		ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(custom.AttributeKey), attrmetrics.ScalarMetricValue(value))
+		samples.ObserveCustom(custom.AttributeKey, value)
 		updated = true
 	}
 
+	// A mapping change discards the samples even when the scrape observed
+	// nothing, so they never describe the metrics of another mapping.
+	clone.ScalarSamples = samples.Result()
 	if updated {
-		clone.UpdateTime = time.Now()
+		clone.UpdateTime = scrapeTime
 		// Guarded: this runs per endpoint per scrape tick, and the logger
 		// construction, MetricNames slice, and boxed args all allocate even
 		// when TRACE is off.
@@ -251,6 +287,8 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 				"updated", clone,
 			)
 		}
+	}
+	if updated || clone.ScalarSamples != current.ScalarSamples {
 		ep.UpdateMetrics(clone)
 	}
 
@@ -258,6 +296,17 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// putBuiltinScalarAttribute writes a built-in scalar metric to the endpoint's
+// attribute map unless a customMetrics entry owns that attributeKey. Skipping
+// the built-in write keeps a failed custom scrape from falling back to the
+// built-in value and overwriting the custom metric's last-known value.
+func putBuiltinScalarAttribute(ep fwkdl.Endpoint, mapping *Mapping, key string, value float64) {
+	if mapping.hasCustomMetric(key) {
+		return
+	}
+	ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey(key), attrmetrics.ScalarMetricValue(value))
 }
 
 // getEngineTypeFromEndpoint extracts the engine type from endpoint metadata labels.

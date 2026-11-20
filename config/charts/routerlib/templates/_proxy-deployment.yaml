@@ -1,8 +1,7 @@
 {{- define "llm-d-epp.proxy-deployment" -}}
 {{- $proxy := include "llm-d-router.proxy" . | fromYaml | default dict -}}
 {{- $proxyType := include "llm-d-router.proxyType" . | trim -}}
-{{- $proxyConfigMap := index $proxy "configMap" | default dict -}}
-{{- $proxyConfigMapName := index $proxyConfigMap "name" | default "" -}}
+{{- $proxyConfigMapName := include "llm-d-router.proxyConfigMapName" . -}}
 {{- if and $proxy.enabled (eq (include "llm-d-router.proxyMode" .) "service") -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -17,6 +16,19 @@ spec:
   {{- if not $autoscaling.enabled }}
   replicas: {{ .Values.router.proxy.replicas | default 2 }}
   {{- end }}
+  {{- $proxyMinReadySeconds := $proxy.minReadySeconds }}
+  {{- /* "invalid" = unset or explicit null, the two forms that mean "keep the
+       Kubernetes default"; every other value, however falsy, is validated. */ -}}
+  {{- if not (kindIs "invalid" $proxyMinReadySeconds) }}
+  {{- if not (regexMatch "^(0|[1-9][0-9]?|[1-5][0-9]{2})$" (toString $proxyMinReadySeconds)) }}
+  {{- fail "router.proxy.minReadySeconds must be a whole number from 0 to 599: the Deployment's progressDeadlineSeconds (the Kubernetes default of 600; the chart does not set it) has to exceed it, and the API server rejects anything else" }}
+  {{- end }}
+  minReadySeconds: {{ $proxyMinReadySeconds }}
+  {{- end }}
+  {{- with $proxy.deploymentStrategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "llm-d-router.proxySelectorLabels" . | nindent 6 }}
@@ -25,12 +37,25 @@ spec:
       labels:
         {{- include "llm-d-router.labels" . | nindent 8 }}
         {{- include "llm-d-router.proxySelectorLabels" . | nindent 8 }}
+        {{- with $proxy.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         checksum/config: {{ include "llm-d-router.proxyConfigMapData" . | sha256sum }}
+        {{- with $proxy.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      {{- with $proxy.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.router.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.router.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.priorityClassName }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       terminationGracePeriodSeconds: {{ dig "terminationGracePeriodSeconds" 70 .Values.router.proxy }}
       containers:
@@ -67,7 +92,10 @@ spec:
           startupProbe:
           {{- toYaml . | nindent 12 }}
         {{- end }}
-        {{- if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
+        {{- if kindIs "map" $proxy.lifecycle }}
+          lifecycle:
+          {{- toYaml $proxy.lifecycle | nindent 12 }}
+        {{- else if semverCompare ">=1.30-0" .Capabilities.KubeVersion.Version }}
           # Give endpoint removal time to propagate before SIGTERM.
           # Kubelet performs the delay without a shell in the distroless Envoy image.
           lifecycle:
@@ -107,6 +135,22 @@ spec:
       {{- with $proxy.volumes }}
       {{- tpl (toYaml .) $ | nindent 8 }}
       {{- end }}
+      {{- end }}
+      {{- with $proxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $proxy.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
 ---
 {{- end -}}

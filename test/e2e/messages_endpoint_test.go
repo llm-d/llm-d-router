@@ -347,7 +347,10 @@ var _ = ginkgo.Describe("Messages API", ginkgo.Ordered, testWrapper(func() {
 								g.Expect(after[surface]["request_input_tokens_sum"] - before[surface]["request_input_tokens_sum"]).To(gomega.Equal(float64(input)))
 								g.Expect(after[surface]["request_output_tokens_sum"] - before[surface]["request_output_tokens_sum"]).To(gomega.Equal(float64(usage["output_tokens"])))
 								cachedObservations := float64(0)
-								if usage["cache_read_input_tokens"] > 0 {
+								// The parser reports the cached-token detail whenever the
+								// response carries cache_read_input_tokens, including an
+								// explicit zero, so a miss still records one observation.
+								if _, ok := usage["cache_read_input_tokens"]; ok {
 									cachedObservations = 1
 								}
 								g.Expect(after[surface]["request_cached_tokens_count"] - before[surface]["request_cached_tokens_count"]).To(gomega.Equal(cachedObservations))

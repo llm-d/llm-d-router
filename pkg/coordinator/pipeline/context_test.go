@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 )
 
 func TestForwardedHeaders_NormalizesKeysToLowercase(t *testing.T) {
@@ -96,17 +97,18 @@ func TestForwardedHeaders_ExcludesHopByHopAndContentHeaders(t *testing.T) {
 func TestForwardedHeaders_ExcludesInternalRoutingHeaders(t *testing.T) {
 	rc := &RequestContext{
 		OriginalHeaders: http.Header{
-			"X-Llm-D-Epp-Profile":   {"decode"},
-			"X-Llm-D-Pin-Host-Port": {"10.0.3.7:8000"},
-			"Prefer":                {"if-available"},
-			"X-Request-Id":          {"abc-123"},
-			"Authorization":         {"Bearer token"},
+			"X-Llm-D-Epp-Profile":                    {"decode"},
+			"X-Llm-D-Pin-Host-Port":                  {"10.0.3.7:8000"},
+			"Prefer":                                 {"if-available"},
+			"X-Llm-D-Kv-Cache-Prefill-P2p-Host-Port": {"10.0.0.9:7777"},
+			"X-Request-Id":                           {"abc-123"},
+			"Authorization":                          {"Bearer token"},
 		},
 	}
 
 	out := rc.ForwardedHeaders()
 
-	for _, name := range []string{"x-llm-d-epp-profile", "x-llm-d-pin-host-port", "prefer"} {
+	for _, name := range []string{"x-llm-d-epp-profile", "x-llm-d-pin-host-port", "prefer", routing.KVCachePrefillHeader} {
 		if _, ok := out[name]; ok {
 			t.Fatalf("%s should not be forwarded: %v", name, out)
 		}
@@ -144,6 +146,25 @@ func TestForwardedHeaders_ExcludesClientSuppliedPeerTopology(t *testing.T) {
 
 	if _, ok := out["x-llm-d-peer-topology"]; ok {
 		t.Fatalf("x-llm-d-peer-topology should not be forwarded: %v", out)
+	}
+}
+
+func TestStripInternalHeaders(t *testing.T) {
+	headers := http.Header{
+		"X-Llm-D-Kv-Cache-Prefill-P2p-Host-Port": {"10.0.0.9:7777"},
+		"X-Llm-D-Peer-Topology":                  {"host=spoofed"},
+		"X-Request-Id":                           {"abc-123"},
+	}
+
+	StripInternalHeaders(headers)
+
+	for _, name := range []string{routing.KVCachePrefillHeader, reqcommon.PeerTopologyHeaderKey} {
+		if headers.Get(name) != "" {
+			t.Fatalf("%s should be stripped: %v", name, headers)
+		}
+	}
+	if got := headers.Get("x-request-id"); got != "abc-123" {
+		t.Errorf("x-request-id = %q, want %q", got, "abc-123")
 	}
 }
 

@@ -24,9 +24,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
@@ -128,7 +129,7 @@ func TestLAS_Pick_DoesNotCreateStateForEmptyEntries(t *testing.T) {
 func TestLAS_OnCompleted_AccumulatesWeightedCost(t *testing.T) {
 	s := &LASStrategy{}
 	req := &fwksched.InferenceRequest{FairnessID: "alpha"}
-	resp := &fwkrc.Response{EndOfStream: true}
+	resp := &fwkrh.Response{EndOfStream: true}
 	resp.Usage.PromptTokens = 100
 	resp.Usage.CompletionTokens = 50
 
@@ -138,9 +139,152 @@ func TestLAS_OnCompleted_AccumulatesWeightedCost(t *testing.T) {
 	assert.Equal(t, 200.0, s.getOrCreateState("alpha").Service(time.Now(), 0))
 }
 
+func TestLAS_OnCompleted_StreamedEventsFallback(t *testing.T) {
+	tests := []struct {
+		name             string
+		promptTokens     int
+		completionTokens int
+		streamedEvents   int
+		wantService      float64
+	}{
+		{
+			name:             "falls back to StreamedEvents when CompletionTokens is zero",
+			promptTokens:     0,
+			completionTokens: 0,
+			streamedEvents:   35,
+			wantService:      70.0, // 1*0 + 2*35
+		},
+		{
+			name:             "combines PromptTokens with StreamedEvents fallback",
+			promptTokens:     100,
+			completionTokens: 0,
+			streamedEvents:   25,
+			wantService:      150.0, // 1*100 + 2*25
+		},
+		{
+			name:             "reported CompletionTokens takes precedence over StreamedEvents",
+			promptTokens:     100,
+			completionTokens: 40,
+			streamedEvents:   45,
+			wantService:      180.0, // 1*100 + 2*40
+		},
+		{
+			name:             "zero CompletionTokens and zero StreamedEvents charges only prompt",
+			promptTokens:     100,
+			completionTokens: 0,
+			streamedEvents:   0,
+			wantService:      100.0, // 1*100 + 2*0
+		},
+		{
+			name:             "negative StreamedEvents is ignored",
+			promptTokens:     100,
+			completionTokens: 0,
+			streamedEvents:   -5,
+			wantService:      100.0, // 1*100 + 2*0
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &LASStrategy{}
+			req := &fwksched.InferenceRequest{FairnessID: "alpha"}
+			resp := &fwkrh.Response{
+				EndOfStream:    true,
+				StreamedEvents: tc.streamedEvents,
+			}
+			resp.Usage.PromptTokens = tc.promptTokens
+			resp.Usage.CompletionTokens = tc.completionTokens
+
+			s.OnCompleted(nil, req, resp)
+
+			assert.Equal(t, tc.wantService, s.getOrCreateState("alpha").Service(time.Now(), 0))
+		})
+	}
+}
+
+// tokenizedBody is a request body whose token producer counted n prompt tokens.
+func tokenizedBody(n int) *fwkrequest.InferenceRequestBody {
+	return &fwkrequest.InferenceRequestBody{
+		TokenizedRequest: fwkrequest.NewTokenizedRequest([][]uint32{make([]uint32, n)}),
+	}
+}
+
+// A stream without usage is charged its prompt from the token producer's count.
+func TestLAS_OnCompleted_TokenizedPromptFallback(t *testing.T) {
+	for name, tc := range map[string]struct {
+		prompt, completion, events int
+		body                       *fwkrequest.InferenceRequestBody
+		want                       float64
+	}{
+		"missing usage":                      {0, 0, 35, tokenizedBody(100), 170},
+		"reported prompt takes precedence":   {100, 0, 25, tokenizedBody(80), 150},
+		"reported completion skips fallback": {0, 40, 45, tokenizedBody(100), 80},
+		"no streamed events":                 {0, 0, 0, tokenizedBody(100), 0},
+		"no token producer":                  {0, 0, 35, &fwkrequest.InferenceRequestBody{}, 70},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &LASStrategy{}
+			req := &fwksched.InferenceRequest{FairnessID: "alpha", Body: tc.body}
+			resp := &fwkrh.Response{EndOfStream: true, StreamedEvents: tc.events}
+			resp.Usage.PromptTokens = tc.prompt
+			resp.Usage.CompletionTokens = tc.completion
+
+			s.OnCompleted(nil, req, resp)
+			assert.Equal(t, tc.want, s.getOrCreateState("alpha").Service(time.Now(), 0))
+		})
+	}
+}
+
+// A program whose streams report no usage accrues the same attained service as one that reports
+// it, given the same prompt and output sizes, so leaving out stream_options.include_usage does not
+// move it ahead in LAS order.
+func TestLAS_OnCompleted_MissingUsageChargedLikeReportedUsage(t *testing.T) {
+	const promptTokens, completionTokens, requests = 285, 20, 5
+	s := &LASStrategy{}
+	for range requests {
+		reported := &fwkrh.Response{EndOfStream: true}
+		reported.Usage.PromptTokens = promptTokens
+		reported.Usage.CompletionTokens = completionTokens
+		s.OnCompleted(nil, &fwksched.InferenceRequest{FairnessID: "honest", Body: tokenizedBody(promptTokens)}, reported)
+
+		s.OnCompleted(nil, &fwksched.InferenceRequest{FairnessID: "no-usage", Body: tokenizedBody(promptTokens)},
+			&fwkrh.Response{EndOfStream: true, StreamedEvents: completionTokens})
+	}
+
+	now := time.Now()
+	assert.Equal(t, float64(requests*(promptTokens+2*completionTokens)), s.getOrCreateState("honest").Service(now, 0))
+	assert.Equal(t, s.getOrCreateState("honest").Service(now, 0), s.getOrCreateState("no-usage").Service(now, 0))
+}
+
+func TestLAS_Pick_DeprioritizesProgramAfterTruncatedStreamWithEvents(t *testing.T) {
+	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0}
+	now := time.Now()
+
+	// alpha disconnects mid-stream after 500 streamed events (no Usage block);
+	// beta completes a small request with reported usage (10 prompt + 5 completion = 20 cost).
+	s.OnCompleted(nil, &fwksched.InferenceRequest{FairnessID: "alpha"}, &fwkrh.Response{
+		EndOfStream:      true,
+		StreamedEvents:   500,
+		TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+	})
+	betaResp := &fwkrh.Response{EndOfStream: true}
+	betaResp.Usage.PromptTokens = 10
+	betaResp.Usage.CompletionTokens = 5
+	s.OnCompleted(nil, &fwksched.InferenceRequest{FairnessID: "beta"}, betaResp)
+
+	idA, qA := makeInfo("alpha", now)
+	idB, qB := makeInfo("beta", now)
+	queues := map[string]QueueInfo{idA: qA, idB: qB}
+
+	got := s.Pick(0, queues)
+	require.NotNil(t, got)
+	assert.Equal(t, "beta", got.FlowKey().ID,
+		"alpha accrued 2*500=1000 service from StreamedEvents and must rank behind beta (20)")
+}
+
 func TestLAS_OnCompleted_NilSafe(t *testing.T) {
 	s := &LASStrategy{}
-	s.OnCompleted(nil, nil, &fwkrc.Response{EndOfStream: true})
+	s.OnCompleted(nil, nil, &fwkrh.Response{EndOfStream: true})
 	s.OnCompleted(nil, &fwksched.InferenceRequest{}, nil)
 }
 

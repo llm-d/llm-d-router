@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -35,6 +34,7 @@ import (
 	"github.com/spf13/pflag"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -63,8 +63,8 @@ const (
 	mooncakeBootstrapPortFlag = "mooncake-bootstrap-port"
 	ecMooncakePortFlag        = "ec-mooncake-port"
 	ecMooncakePodIPFlag       = "ec-mooncake-pod-ip"
-	p2pConnectorPortFlag      = "p2p-connector-port"
 	enableP2PPull             = "enable-p2p-pull"
+	forwardPromptTokenIDs     = "forward-prompt-token-ids"
 	enableSSRFProtection      = "enable-ssrf-protection"
 	enablePrefillerSampling   = "enable-prefiller-sampling"
 	enableTLS                 = "enable-tls"
@@ -92,7 +92,6 @@ const (
 	envEnablePrefillerSampling = "ENABLE_PREFILLER_SAMPLING"
 	envMooncakeBootstrapPort   = "MOONCAKE_BOOTSTRAP_PORT"
 	envECMooncakePort          = "EC_MOONCAKE_PORT"
-	envP2PConnectorPort        = "P2P_CONNECTOR_PORT"
 
 	// Defaults
 	defaultPort                  = "8000"
@@ -100,8 +99,7 @@ const (
 	defaultDataParallelSize      = 1
 	defaultMooncakeBootstrapPort = 8998
 	// defaultECMooncakePort matches the ec_port default of vLLM's ECTransferConfig.
-	defaultECMooncakePort   = 14579
-	defaultP2PConnectorPort = 7777
+	defaultECMooncakePort = 14579
 
 	// defaultMoRIIOParallelDecodeWaitTimeout backstops the parallel WRITE
 	// dispatch: it bounds how long the decode request waits on the prefill outcome
@@ -123,13 +121,13 @@ type yamlConfiguration struct {
 	MooncakeBootstrapPort      int      `json:"mooncake-bootstrap-port,omitempty"`
 	ECMooncakePort             int      `json:"ec-mooncake-port,omitempty"`
 	ECMooncakePodIP            string   `json:"ec-mooncake-pod-ip,omitempty"`
-	P2PConnectorPort           int      `json:"p2p-connector-port,omitempty"`
 	DataParallelSize           int      `json:"data-parallel-size,omitempty"`
 	KVConnector                string   `json:"kv-connector,omitempty"`
 	ECConnector                string   `json:"ec-connector,omitempty"`
 	EnableSSRFProtection       *bool    `json:"enable-ssrf-protection,omitempty"`
 	EnablePrefillerSampling    *bool    `json:"enable-prefiller-sampling,omitempty"`
 	EnableP2PPull              *bool    `json:"enable-p2p-pull,omitempty"`
+	ForwardPromptTokenIDs      *bool    `json:"forward-prompt-token-ids,omitempty"`
 	SecureServing              *bool    `json:"secure-serving,omitempty"`
 	SecureProxy                *bool    `json:"secure-proxy,omitempty"`
 	CertPath                   string   `json:"cert-path,omitempty"`
@@ -226,13 +224,6 @@ func NewOptions() *Options {
 		}
 	}
 
-	p2pConnectorPort := defaultP2PConnectorPort
-	if portStr := os.Getenv(envP2PConnectorPort); portStr != "" {
-		if port, err := strconv.Atoi(portStr); err == nil {
-			p2pConnectorPort = port
-		}
-	}
-
 	return &Options{
 		Config: Config{
 			Port:                    defaultPort,
@@ -246,7 +237,6 @@ func NewOptions() *Options {
 			MooncakeBootstrapPort:   mooncakeBootstrapPort,
 			ECMooncakePort:          ecMooncakePort,
 			ECMooncakePodIP:         os.Getenv("POD_IP"),
-			P2PConnectorPort:        p2pConnectorPort,
 			PoolGroup:               routing.InferencePoolAPIGroup,
 			DecodeChunkSize:         0,
 			Tracing:                 false,
@@ -298,8 +288,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"the ec_port the EC consumer (prefiller, or the local decoder without a prefiller) listens on for Mooncake EC control (only used with --ec-connector=ec-mooncake)")
 	fs.StringVar(&opts.ECMooncakePodIP, ecMooncakePodIPFlag, opts.ECMooncakePodIP,
 		"the local decoder's address reachable from encoder pods, named to encoders as the EC consumer when a request has no prefiller. Defaults to the POD_IP env var (only used with --ec-connector=ec-mooncake)")
-	fs.IntVar(&opts.P2PConnectorPort, p2pConnectorPortFlag, opts.P2PConnectorPort,
-		"the prefiller's OffloadingConnector P2P tier listening port, injected as remote_port on the decode request; with --data-parallel-size > 1 this is the rank-0 port and rank r uses port+r (used with --kv-connector=offloading or --enable-p2p-pull)")
+	fs.BoolVar(&opts.ForwardPromptTokenIDs, forwardPromptTokenIDs, opts.ForwardPromptTokenIDs,
+		"Carry kv_transfer_params.prompt_token_ids onto prefill and decode requests. Only enable behind a gateway running the forward-prompt-token-ids EPP plugin.")
 	fs.BoolVar(&opts.EnableP2PPull, enableP2PPull, opts.EnableP2PPull,
 		"declare the OffloadingConnector P2P tier available for cached-prefix pulls when the PD connector is NIXL, i.e. engines run MultiConnector(NixlConnector + OffloadingConnector). Rejected with any other --kv-connector; offloading provides the tier natively without this flag.")
 	fs.BoolVar(&opts.SecureServing, secureServing, opts.SecureServing, "Serve the listener over TLS.")
@@ -391,45 +381,6 @@ func validateStages(stages []string, supportedStages map[string]struct{}, flagNa
 	return nil
 }
 
-var tlsVersions = map[string]uint16{
-	"VersionTLS10": tls.VersionTLS10,
-	"VersionTLS11": tls.VersionTLS11,
-	"VersionTLS12": tls.VersionTLS12,
-	"VersionTLS13": tls.VersionTLS13,
-}
-
-func parseTLSVersion(version string) (uint16, error) {
-	value, ok := tlsVersions[version]
-	if !ok {
-		return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", version)
-	}
-	if value < tls.VersionTLS12 {
-		return 0, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", version)
-	}
-	return value, nil
-}
-
-func parseCipherSuites(names []string) ([]uint16, error) {
-	byName := make(map[string]uint16)
-	for _, cipherSuite := range tls.CipherSuites() {
-		byName[cipherSuite.Name] = cipherSuite.ID
-	}
-
-	values := make([]uint16, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		value, ok := byName[name]
-		if !ok {
-			return nil, fmt.Errorf("unknown cipher suite %q", name)
-		}
-		values = append(values, value)
-	}
-	return values, nil
-}
-
 // Complete performs post-processing of parsed command-line arguments.
 // It extracts YAML configuration (if provided), handles migration from deprecated flags,
 // parses the InferencePool field, computes boolean TLS fields, and builds Config.DecoderURL.
@@ -458,27 +409,22 @@ func (opts *Options) Complete() error {
 	opts.InsecureSkipVerifyForPrefiller = slices.Contains(opts.tlsInsecureSkipVerify, prefillStage)
 	opts.InsecureSkipVerifyForEncoder = slices.Contains(opts.tlsInsecureSkipVerify, encodeStage)
 	opts.InsecureSkipVerifyForDecoder = slices.Contains(opts.tlsInsecureSkipVerify, decodeStage)
-	if opts.tlsMinVersion != "" {
-		version, err := parseTLSVersion(opts.tlsMinVersion)
-		if err != nil {
-			return fmt.Errorf("invalid %s %q: %w", tlsMinVersion, opts.tlsMinVersion, err)
-		}
-		opts.TLSMinVersion = version
+	version, err := tlsutil.ParseTLSVersion(opts.tlsMinVersion)
+	if err != nil {
+		return err
 	}
-	if len(opts.tlsCipherSuites) > 0 {
-		suites, err := parseCipherSuites(opts.tlsCipherSuites)
-		if err != nil {
-			return fmt.Errorf("invalid %s: %w", tlsCipherSuites, err)
-		}
-		opts.TLSCipherSuites = suites
+	opts.TLSMinVersion = version
+	suites, err := tlsutil.ParseCipherSuites(opts.tlsCipherSuites)
+	if err != nil {
+		return err
 	}
+	opts.TLSCipherSuites = suites
 
 	// Compute Config.DecoderURL from modelServerPort and decoder TLS setting
 	scheme := "http"
 	if opts.UseTLSForDecoder {
 		scheme = schemeHTTPS
 	}
-	var err error
 	opts.DecoderURL, err = url.Parse(scheme + "://localhost:" + opts.modelServerPort)
 	if err != nil {
 		return fmt.Errorf("failed to parse target URL: %w", err)
@@ -738,17 +684,6 @@ func (opts *Options) Validate() error {
 		}
 	}
 
-	// Validate P2P connector port
-	if opts.P2PConnectorPort < 1 || opts.P2PConnectorPort > 65535 {
-		return fmt.Errorf("--p2p-connector-port must be between 1 and 65535, got %d", opts.P2PConnectorPort)
-	}
-	// The injected port is offset by the target's DP rank, so the highest
-	// rank's port must stay in range too.
-	if opts.DataParallelSize > 1 && opts.P2PConnectorPort+opts.DataParallelSize-1 > 65535 {
-		return fmt.Errorf("--p2p-connector-port %d plus data-parallel rank %d exceeds 65535",
-			opts.P2PConnectorPort, opts.DataParallelSize-1)
-	}
-
 	// --enable-p2p-pull composes the OffloadingConnector P2P tier alongside NIXL
 	// via MultiConnector; it is only meaningful with the NIXLv2 PD connector.
 	// offloading already provides the tier natively and needs no flag.
@@ -846,9 +781,6 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	if cfg.ECMooncakePodIP != "" && !opts.isFlagSet(ecMooncakePodIPFlag) {
 		opts.ECMooncakePodIP = cfg.ECMooncakePodIP
 	}
-	if cfg.P2PConnectorPort != 0 && !opts.isFlagSet(p2pConnectorPortFlag) {
-		opts.P2PConnectorPort = cfg.P2PConnectorPort
-	}
 	if cfg.DataParallelSize != 0 && !opts.isFlagSet(dataParallelSize) {
 		opts.DataParallelSize = cfg.DataParallelSize
 	}
@@ -871,6 +803,9 @@ func (opts *Options) mergeYAMLConfiguration(cfg yamlConfiguration) {
 	}
 	if cfg.EnableP2PPull != nil && !opts.isFlagSet(enableP2PPull) {
 		opts.EnableP2PPull = *cfg.EnableP2PPull
+	}
+	if cfg.ForwardPromptTokenIDs != nil && !opts.isFlagSet(forwardPromptTokenIDs) {
+		opts.ForwardPromptTokenIDs = *cfg.ForwardPromptTokenIDs
 	}
 
 	if !opts.isSecureServingFlagSet() {

@@ -27,6 +27,13 @@ type KVCacheBackendConfig struct {
 	Name string `json:"name"`
 	// Weight is the scoring weight for blocks stored on this medium
 	Weight float64 `json:"weight"`
+	// TailOnly scores this medium's blocks only at positions past the
+	// longest chain, from the first block, that any candidate pod holds in
+	// a configured medium without TailOnly or speculatively. Set it on media
+	// that are slower to load from than memory, such as storage, so they
+	// steer requests no pod holds in memory without drawing requests away
+	// from pods that do.
+	TailOnly bool `json:"tailOnly,omitempty"`
 }
 
 // DefaultKVCacheBackendConfig returns the default backend weights, tunable
@@ -43,12 +50,26 @@ func DefaultKVCacheBackendConfig() []*KVCacheBackendConfig {
 	}
 }
 
-// tierWeightsFromBackends maps each configured backend's device tier to its
-// scoring weight.
-func tierWeightsFromBackends(backends []*KVCacheBackendConfig) map[string]float64 {
-	weights := make(map[string]float64, len(backends))
+// tierScoring is the matcher's per-tier configuration.
+type tierScoring struct {
+	// weights maps each configured device tier to its scoring weight.
+	weights map[string]float64
+	// tailOnly holds the configured tiers with TailOnly set.
+	tailOnly map[string]bool
+}
+
+// tierScoringFromBackends resolves each configured backend's device tier.
+func tierScoringFromBackends(backends []*KVCacheBackendConfig) tierScoring {
+	ts := tierScoring{weights: make(map[string]float64, len(backends))}
 	for _, medium := range backends {
-		weights[strings.ToLower(medium.Name)] = medium.Weight
+		tier := strings.ToLower(medium.Name)
+		ts.weights[tier] = medium.Weight
+		if medium.TailOnly {
+			if ts.tailOnly == nil {
+				ts.tailOnly = map[string]bool{}
+			}
+			ts.tailOnly[tier] = true
+		}
 	}
-	return weights
+	return ts
 }

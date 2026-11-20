@@ -18,6 +18,7 @@ the negative tier (the filter is effectively a no-op).
 - When only one tier exists: keep that tier
 - When no predictions: keep all endpoints
 - Endpoints without predictions are placed in the negative tier
+- Endpoints whose metrics have never been scraped are treated as having no prediction
 
 The 1% exploration ensures endpoints recovering from overload receive occasional traffic
 so their state is re-evaluated.

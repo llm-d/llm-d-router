@@ -25,8 +25,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +35,8 @@ import (
 	"golang.org/x/sync/errgroup"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
+	sglangapiv1 "github.com/llm-d/llm-d-router/pkg/common/grpc/sglang/gen/apiv1"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -49,9 +49,6 @@ const (
 
 	// tracerScope is the OTel instrumentation scope for the sidecar proxy.
 	tracerScope = "llm-d-router/pkg/sidecar/proxy"
-
-	responseFieldChoices      = "choices"
-	responseFieldFinishReason = "finish_reason"
 )
 
 // Config represents the complete runtime configuration for the proxy server.
@@ -132,13 +129,6 @@ type Config struct {
 	// it, named as the Mooncake EC consumer when a request has no prefiller.
 	ECMooncakePodIP string
 
-	// P2PConnectorPort is the prefiller's OffloadingConnector P2P tier listening port,
-	// injected as remote_port on the decode request so the decoder can pull KV from it.
-	// With data parallelism it is the rank-0 port: rank r's tier listens on
-	// P2PConnectorPort+r and the injected port is offset by the target's rank.
-	// Meaningful with --kv-connector=offloading or --enable-p2p-pull.
-	P2PConnectorPort int
-
 	// EnableP2PPull declares that the OffloadingConnector P2P tier is available
 	// for cached-prefix pulls even when the PD connector is not offloading, i.e.
 	// the engines run MultiConnector(NixlConnector + OffloadingConnector). It has
@@ -147,6 +137,16 @@ type Config struct {
 
 	// EnableSSRFProtection enables SSRF protection using InferencePool allowlisting.
 	EnableSSRFProtection bool
+
+	// ForwardPromptTokenIDs carries a client-supplied
+	// kv_transfer_params.prompt_token_ids onto the prefill and decode
+	// requests. It must only be enabled when the gateway in front runs the
+	// forward-prompt-token-ids EPP plugin (or a trusted coordinator): vLLM
+	// serves those IDs instead of rendering messages, so a caller that
+	// supplies its own list bypasses every messages-level gateway policy
+	// (injected system prompts, guardrails, prompt-token limits). Defaults
+	// to false, which drops the field exactly as the connectors did before.
+	ForwardPromptTokenIDs bool
 	// InferencePoolNamespace is the Kubernetes namespace of the InferencePool to watch.
 	InferencePoolNamespace string
 	// InferencePoolName is the name of the InferencePool to watch.
@@ -249,19 +249,23 @@ func (c Config) String() string {
 	return string(b)
 }
 
-// pdConnectorHandler handles a P/D KV connector request. kvCacheSource is the
-// validated x-llm-d-kv-cache-source-host-port peer to pull cached prefix from ("" when
-// absent); the APIType selects the fields that cap the prefill request.
-type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, string, reqcommon.APIType)
+// pdConnectorHandler handles a P/D KV connector request. p2pRouting carries
+// the prefill pod's P2P tier address and the validated peer to pull cached
+// prefix from; the APIType selects the fields that cap the prefill request.
+type pdConnectorHandler func(http.ResponseWriter, *http.Request, string, p2pRouting, reqcommon.APIType)
 
-type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, reqcommon.APIType)
+// ecConnectorHandler handles an encoder disaggregation request. p2pRouting
+// carries the prefill pod's P2P tier address and the pull source for the
+// stage that follows the encoder stage; the encoder stage rebuilds the body,
+// so the body fields are not forwarded.
+type ecConnectorHandler func(http.ResponseWriter, *http.Request, string, []string, p2pRouting, reqcommon.APIType)
 
 // Server is the reverse proxy server
 type Server struct {
 	logger             logr.Logger
 	addr               net.Addr      // the proxy TCP address
 	readyCh            chan struct{} // closed once addr is set and server is listening
-	handler            http.Handler  // the handler function. either a Mux or a proxy
+	handler            http.Handler  // the routes built by createRoutes
 	allowlistValidator *AllowlistValidator
 	handlePDConnector  pdConnectorHandler // handles the Prefiller-Decoder connector request
 	handleECConnector  ecConnectorHandler // handles the Encoder disaggregation connector request.
@@ -277,11 +281,6 @@ type Server struct {
 
 	prefillSamplerFn func(n int) int        // allow test override
 	nixlRequestIDFn  func() (string, error) // allow test override
-
-	// dpBasePort is the rank-0 proxy port. Rank clones override config.Port
-	// (data_parallel.go), so rank derivation from a routed endpoint's port
-	// needs the pre-clone base. 0 disables derivation.
-	dpBasePort int
 
 	// hostResolver re-resolves MoRI-IO peer DNS specs to IPs on a short TTL so
 	// peer pod restarts are picked up on the request path. Lazily initialized
@@ -390,9 +389,6 @@ func NewProxy(config Config) *Server {
 		prefillSamplerFn:    rand.IntN,
 		nixlRequestIDFn:     newNIXLV2RequestID,
 	}
-	if basePort, err := strconv.Atoi(config.Port); err == nil {
-		server.dpBasePort = basePort
-	}
 
 	server.setKVConnector()
 	if config.UseTLSForPrefiller {
@@ -427,18 +423,17 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
+	// The server logs this so it appears once: every data parallel rank starts the shared validator.
 	if s.allowlistValidator.enabled {
 		defer s.allowlistValidator.Stop()
 		if err := s.allowlistValidator.Start(ctx); err != nil {
 			return err
 		}
 	} else {
-		s.logger.Info("warning: SSRF protection is disabled; targets taken from request headers are not checked against the InferencePool",
+		s.logger.Info("warning: SSRF protection is disabled; targets taken from the request are not checked against the InferencePool",
 			"flag", "--"+enableSSRFProtection,
-			"headers", slices.Concat(
-				routing.HeaderNames(routing.PrefillEndpointHeader),
-				routing.HeaderNames(routing.EncoderEndpointsHeader),
-				routing.HeaderNames(routing.KVCacheSourceHeader)))
+			"headers", routing.HeaderNames(routing.PrefillEndpointHeader, routing.EncoderEndpointsHeader),
+			"bodyField", reqcommon.FieldKVTransferParams+"."+reqcommon.FieldRemoteKVSource)
 	}
 
 	// Configure handlers
@@ -476,7 +471,6 @@ func (s *Server) Clone() *Server {
 		forwardDataParallel: s.forwardDataParallel,
 		prefillSamplerFn:    s.prefillSamplerFn,
 		nixlRequestIDFn:     s.nixlRequestIDFn,
-		dpBasePort:          s.dpBasePort,
 		config:              s.config,
 	}
 }
@@ -509,36 +503,71 @@ func (s *Server) newProxyTransport(scheme string, insecureSkipVerify bool) http.
 				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 			},
 		}
+		return otelhttp.NewTransport(t)
 	}
-	return otelhttp.NewTransport(t)
+	h2c := t.Clone()
+	h2cProtocols := new(http.Protocols)
+	h2cProtocols.SetUnencryptedHTTP2(true)
+	h2c.Protocols = h2cProtocols
+	return otelhttp.NewTransport(&h2cAwareTransport{http1: t, h2c: h2c})
+}
+
+// h2cAwareTransport dispatches plaintext gRPC requests over unencrypted HTTP/2
+// while keeping HTTP/1.1 for standard HTTP backends.
+type h2cAwareTransport struct {
+	http1 http.RoundTripper
+	h2c   http.RoundTripper
+}
+
+func (rt *h2cAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if grpcframe.IsContentType(req.Header.Get(reqcommon.HeaderContentType)) {
+		return rt.h2c.RoundTrip(req)
+	}
+	return rt.http1.RoundTrip(req)
 }
 
 func (s *Server) setKVConnector() {
 
 	switch s.config.KVConnector {
 	case constants.KVConnectorSharedStorage:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, apiType reqcommon.APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, p2p p2pRouting, apiType reqcommon.APIType) {
+			if isVLLMGRPCRequest(r) {
+				s.handleSharedStorageVLLMGRPC(w, r, host, p2p)
+				return
+			}
 			s.handleSharedStorage(w, r, host, apiType)
 		}
 	case constants.KVConnectorSGLang:
 		// SGLang sends the same body to the prefill and decode requests and caps no
 		// output tokens, so it does not use the API type.
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, _ reqcommon.APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ p2pRouting, _ reqcommon.APIType) {
 			s.handleSGLang(w, r, host)
 		}
 	case constants.KVConnectorMooncake:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, _ string, apiType reqcommon.APIType) {
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, p2p p2pRouting, apiType reqcommon.APIType) {
+			if isVLLMGRPCRequest(r) {
+				s.handleMooncakeVLLMGRPC(w, r, host, p2p)
+				return
+			}
 			s.handleMooncake(w, r, host, apiType)
 		}
 	case constants.KVConnectorOffloading:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType reqcommon.APIType) {
-			s.handleP2P(w, r, host, kvCacheSource, apiType)
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, p2p p2pRouting, apiType reqcommon.APIType) {
+			if isVLLMGRPCRequest(r) {
+				s.handleP2PVLLMGRPC(w, r, host, p2p)
+				return
+			}
+			s.handleP2P(w, r, host, p2p, apiType)
 		}
 	case constants.KVConnectorNIXLV2:
 		fallthrough
 	default:
-		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, kvCacheSource string, apiType reqcommon.APIType) {
-			s.handleNIXLV2(w, r, host, kvCacheSource, apiType)
+		s.handlePDConnector = func(w http.ResponseWriter, r *http.Request, host string, p2p p2pRouting, apiType reqcommon.APIType) {
+			if isVLLMGRPCRequest(r) {
+				s.handleNIXLV2VLLMGRPC(w, r, host, p2p)
+				return
+			}
+			s.handleNIXLV2(w, r, host, p2p, apiType)
 		}
 	}
 }
@@ -568,7 +597,7 @@ func (s *Server) setECConnector() {
 	}
 }
 
-func (s *Server) createRoutes() *http.ServeMux {
+func (s *Server) createRoutes() http.Handler {
 	// Configure handlers
 	mux := http.NewServeMux()
 
@@ -576,24 +605,40 @@ func (s *Server) createRoutes() *http.ServeMux {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	// DetectAPIType owns the path-to-API mapping; deriving it here keeps the
-	// served routes from drifting away from it.
-	for _, path := range []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate} {
-		handler := s.disaggregatedPrefillHandler(reqcommon.DetectAPIType(path))
-		mux.HandleFunc("POST "+path, handler)
-		mux.HandleFunc("POST "+path+"/{$}", func(w http.ResponseWriter, r *http.Request) {
+	registerInferenceRoute := func(routePath string, apiType reqcommon.APIType) {
+		handler := s.disaggregatedPrefillHandler(apiType)
+		mux.HandleFunc("POST "+routePath, handler)
+		mux.HandleFunc("POST "+routePath+"/{$}", func(w http.ResponseWriter, r *http.Request) {
 			r = r.Clone(r.Context())
-			r.URL.Path = path
+			r.URL.Path = routePath
 			r.URL.RawPath = ""
 			handler(w, r)
 		})
+	}
+	// DetectAPIType owns the HTTP path-to-API mapping; deriving it here keeps
+	// the HTTP routes from drifting away from it.
+	httpPaths := []string{reqcommon.PathChatCompletions, reqcommon.PathCompletions, reqcommon.PathMessages, reqcommon.PathResponses, reqcommon.PathVLLMGenerate, reqcommon.PathSGLangGenerate}
+	for _, path := range httpPaths {
+		registerInferenceRoute(path, reqcommon.DetectAPIType(path))
+	}
+	grpcPaths := make([]string, 0, len(grpcMethodRoutes)+1)
+	for grpcMethod, apiType := range grpcMethodRoutes {
+		grpcPaths = append(grpcPaths, grpcMethod)
+		registerInferenceRoute(grpcMethod, apiType)
+	}
+	// Only the sglang connector reads an SGLang protobuf body. With any other
+	// connector the path stays on the decoder catch-all below, which forwards
+	// the call decode-only as before.
+	if s.config.KVConnector == constants.KVConnectorSGLang {
+		grpcPaths = append(grpcPaths, sglangapiv1.SglangService_Generate_FullMethodName)
+		registerInferenceRoute(sglangapiv1.SglangService_Generate_FullMethodName, reqcommon.APITypeSGLangGenerate)
 	}
 
 	s.decoderProxy = s.createDecoderProxyHandler(s.config.DecoderURL, s.config.InsecureSkipVerifyForDecoder)
 
 	mux.Handle("/", s.decoderProxy)
 
-	return mux
+	return redirectEncodedInferencePath(mux, httpPaths, grpcPaths)
 }
 
 // createProxyHandler creates a reverse proxy handler for the given host:port.
@@ -624,6 +669,18 @@ func (s *Server) createProxyHandler(
 
 	newProxy := httputil.NewSingleHostReverseProxy(u)
 	newProxy.Transport = s.newProxyTransport(u.Scheme, insecureSkipVerify)
+	// The default handler answers with an empty 502, which the connectors relay
+	// to the client as the prefill response.
+	newProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		logger, ctxErr := logr.FromContext(r.Context())
+		if ctxErr != nil {
+			logger = s.logger
+		}
+		logger.Error(err, "http: proxy error", "target", u.String())
+		if writeErr := errorBadGateway(w, r); writeErr != nil {
+			logger.Error(writeErr, "failed to send error response to client")
+		}
+	}
 	cache.Add(hostPort, newProxy)
 
 	return newProxy, nil

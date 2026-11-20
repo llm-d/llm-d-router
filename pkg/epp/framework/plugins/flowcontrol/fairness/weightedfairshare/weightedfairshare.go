@@ -36,7 +36,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
@@ -102,7 +102,7 @@ func (c Config) validate() error {
 
 var (
 	_ flowcontrol.FairnessPolicy  = &weightedFairShare{}
-	_ fwkrc.ResponseBodyProcessor = &weightedFairShare{}
+	_ fwkrh.ResponseBodyProcessor = &weightedFairShare{}
 )
 
 type weightedFairShare struct {
@@ -199,7 +199,7 @@ func (p *weightedFairShare) Pick(
 		key := queue.FlowKey()
 		vs, raised := p.stateFor(key).catchUp(minVS.virtualService, now)
 		if raised {
-			p.vserviceGauge.WithLabelValues(key.ID, strconv.Itoa(key.Priority)).Set(vs)
+			setFlowGauge(p.vserviceGauge, key, vs)
 		}
 
 		wait := now.Sub(head.EnqueueTime())
@@ -216,25 +216,35 @@ func (p *weightedFairShare) Pick(
 	return best, nil
 }
 
-// ResponseBody charges the flow for a completed request, using the final chunk's usage.
+// ResponseBody charges the flow for a completed request.
 func (p *weightedFairShare) ResponseBody(
 	_ context.Context,
 	request *fwksched.InferenceRequest,
-	response *fwkrc.Response,
+	response *fwkrh.Response,
 	_ *datalayer.EndpointMetadata,
 ) {
 	if request == nil || response == nil || !response.EndOfStream {
 		return
 	}
+	promptTokens := response.Usage.PromptTokens
+	completionTokens := response.Usage.CompletionTokens
+	if completionTokens <= 0 && response.StreamedEvents > 0 {
+		completionTokens = response.StreamedEvents
+		// The token producer runs after flow control, so the policy cannot declare
+		// TokenizedPrompt as a dependency. At end of stream the body carries its count when one ran.
+		if promptTokens <= 0 && request.Body != nil {
+			promptTokens = request.Body.TokenizedRequest.TokenCount()
+		}
+	}
 	cost := p.cfg.CostPerRequest +
-		p.cfg.CostPerInputToken*float64(response.Usage.PromptTokens) +
-		p.cfg.CostPerOutputToken*float64(response.Usage.CompletionTokens)
+		p.cfg.CostPerInputToken*float64(promptTokens) +
+		p.cfg.CostPerOutputToken*float64(completionTokens)
 	if cost == 0 {
 		return
 	}
 	key := flowcontrol.FlowKey{ID: fairnessIDFor(request), Priority: request.Objectives.Priority}
 	vs := p.stateFor(key).charge(cost/p.weightFor(key), time.Now())
-	p.vserviceGauge.WithLabelValues(key.ID, strconv.Itoa(key.Priority)).Set(vs)
+	setFlowGauge(p.vserviceGauge, key, vs)
 }
 
 // flowState is one flow's virtual service; lastSeen drives idle pruning.
@@ -285,9 +295,8 @@ func (p *weightedFairShare) stateFor(key flowcontrol.FlowKey) *flowState {
 	}
 	if !loaded {
 		// The weight is fixed for the policy's lifetime, so it is published once per flow.
-		priority := strconv.Itoa(key.Priority)
-		p.weightGauge.WithLabelValues(key.ID, priority).Set(p.weightFor(key))
-		p.vserviceGauge.WithLabelValues(key.ID, priority).Set(0)
+		setFlowGauge(p.weightGauge, key, p.weightFor(key))
+		setFlowGauge(p.vserviceGauge, key, 0)
 	}
 	return st
 }
@@ -337,6 +346,14 @@ func (p *weightedFairShare) prune(now time.Time) {
 		}
 		return true
 	})
+}
+
+// setFlowGauge sets a per-flow gauge under the shared fairness-ID label cap. Flows past the cap
+// are skipped: one overflow series would only hold whichever flow wrote last.
+func setFlowGauge(vec *prometheus.GaugeVec, key flowcontrol.FlowKey, v float64) {
+	if label, overflow := metricsutil.BoundFairnessIDWithOverflow(key.ID); !overflow {
+		vec.WithLabelValues(label, strconv.Itoa(key.Priority)).Set(v)
+	}
 }
 
 func fairnessIDFor(req *fwksched.InferenceRequest) string {

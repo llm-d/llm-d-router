@@ -22,13 +22,19 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/testing/protocmp"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	pb "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc/api/gen"
@@ -92,7 +98,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 		malformedData              []byte
 		wantErr                    bool
 		wantSkipResponseProcessing bool
-		want                       *fwkrh.InferenceRequestBody
+		want                       *fwkrequest.InferenceRequestBody
 	}{
 		{
 			name: "Valid Text Request",
@@ -102,11 +108,11 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{Raw: "Hello world"},
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{Raw: "Hello world"},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Text{
 							Text: "Hello world",
@@ -126,13 +132,13 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{
 						TokenIDs: [][]uint32{{11, 12, 13}},
 					},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Tokenized{
 							Tokenized: &pb.TokenizedInput{
@@ -141,8 +147,8 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 							},
 						},
 					}},
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{TokenIDs: []uint32{11, 12, 13}}},
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{TokenIDs: []uint32{11, 12, 13}}},
 				},
 			},
 		},
@@ -164,11 +170,11 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{101, 102, 103, 104, 105}}},
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{101, 102, 103, 104, 105}}},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Tokenized{
 							Tokenized: &pb.TokenizedInput{
@@ -185,10 +191,10 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 						},
 					},
 				},
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{
 						TokenIDs: []uint32{101, 102, 103, 104, 105},
-						MultiModalFeatures: []fwkrh.MultiModalFeature{
+						MultiModalFeatures: []fwkrequest.MultiModalFeature{
 							{Modality: reqcommon.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
 							{Modality: reqcommon.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
 						},
@@ -197,7 +203,7 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "Valid Tokenized Request Pads Missing Multimodal Hashes",
+			name: "Multimodal Hash Length Mismatch Empties All Hashes",
 			reqMsg: &pb.GenerateRequest{
 				Input: &pb.GenerateRequest_Tokenized{
 					Tokenized: &pb.TokenizedInput{
@@ -214,11 +220,11 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{TokenIDs: [][]uint32{{201, 202, 203, 204}}},
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{201, 202, 203, 204}}},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Tokenized{
 							Tokenized: &pb.TokenizedInput{
@@ -235,12 +241,162 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 						},
 					},
 				},
-				TokenizedRequest: &fwkrh.TokenizedRequest{
-					Prompts: []fwkrh.PromptTokens{{
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{
 						TokenIDs: []uint32{201, 202, 203, 204},
-						MultiModalFeatures: []fwkrh.MultiModalFeature{
-							{Modality: reqcommon.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
+						// Positional pairing is ambiguous on a length mismatch,
+						// so no hash is paired; spans stay for media detection.
+						MultiModalFeatures: []fwkrequest.MultiModalFeature{
+							{Modality: reqcommon.ModalityImage, Hash: "", Offset: 0, Length: 1},
 							{Modality: reqcommon.ModalityImage, Hash: "", Offset: 2, Length: 2},
+						},
+					}},
+				},
+			},
+		},
+		{
+			name: "Multimodal Hash Surplus Empties All Hashes",
+			reqMsg: &pb.GenerateRequest{
+				Input: &pb.GenerateRequest_Tokenized{
+					Tokenized: &pb.TokenizedInput{
+						OriginalText: "One image",
+						InputIds:     []uint32{201, 202, 203},
+					},
+				},
+				MmInputs: &pb.MultimodalInputs{
+					MmPlaceholders: []*pb.PlaceholderRange{
+						{Offset: 1, Length: 1},
+					},
+					MmHashes: []string{"hash-a", "hash-b"},
+				},
+			},
+			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{201, 202, 203}}},
+				},
+				Payload: fwkrequest.PayloadProto{
+					Message: &pb.GenerateRequest{
+						Input: &pb.GenerateRequest_Tokenized{
+							Tokenized: &pb.TokenizedInput{
+								OriginalText: "One image",
+								InputIds:     []uint32{201, 202, 203},
+							},
+						},
+						MmInputs: &pb.MultimodalInputs{
+							MmPlaceholders: []*pb.PlaceholderRange{
+								{Offset: 1, Length: 1},
+							},
+							MmHashes: []string{"hash-a", "hash-b"},
+						},
+					},
+				},
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{
+						TokenIDs: []uint32{201, 202, 203},
+						MultiModalFeatures: []fwkrequest.MultiModalFeature{
+							{Modality: reqcommon.ModalityImage, Hash: "", Offset: 1, Length: 1},
+						},
+					}},
+				},
+			},
+		},
+		{
+			name: "Multimodal Empty Hash Keeps Position For Later Items",
+			reqMsg: &pb.GenerateRequest{
+				Input: &pb.GenerateRequest_Tokenized{
+					Tokenized: &pb.TokenizedInput{
+						OriginalText: "Three images",
+						InputIds:     []uint32{201, 202, 203, 204, 205, 206},
+					},
+				},
+				MmInputs: &pb.MultimodalInputs{
+					MmPlaceholders: []*pb.PlaceholderRange{
+						{Offset: 0, Length: 1},
+						{Offset: 2, Length: 1},
+						{Offset: 4, Length: 1},
+					},
+					MmHashes: []string{"hash-a", "", "hash-c"},
+				},
+			},
+			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{201, 202, 203, 204, 205, 206}}},
+				},
+				Payload: fwkrequest.PayloadProto{
+					Message: &pb.GenerateRequest{
+						Input: &pb.GenerateRequest_Tokenized{
+							Tokenized: &pb.TokenizedInput{
+								OriginalText: "Three images",
+								InputIds:     []uint32{201, 202, 203, 204, 205, 206},
+							},
+						},
+						MmInputs: &pb.MultimodalInputs{
+							MmPlaceholders: []*pb.PlaceholderRange{
+								{Offset: 0, Length: 1},
+								{Offset: 2, Length: 1},
+								{Offset: 4, Length: 1},
+							},
+							MmHashes: []string{"hash-a", "", "hash-c"},
+						},
+					},
+				},
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{
+						TokenIDs: []uint32{201, 202, 203, 204, 205, 206},
+						MultiModalFeatures: []fwkrequest.MultiModalFeature{
+							{Modality: reqcommon.ModalityImage, Hash: "hash-a", Offset: 0, Length: 1},
+							{Modality: reqcommon.ModalityImage, Hash: "", Offset: 2, Length: 1},
+							{Modality: reqcommon.ModalityImage, Hash: "hash-c", Offset: 4, Length: 1},
+						},
+					}},
+				},
+			},
+		},
+		{
+			name: "Multimodal Inputs Without Hashes Keep Featureless Features",
+			reqMsg: &pb.GenerateRequest{
+				Input: &pb.GenerateRequest_Tokenized{
+					Tokenized: &pb.TokenizedInput{
+						OriginalText: "One image",
+						InputIds:     []uint32{201, 202, 203},
+					},
+				},
+				MmInputs: &pb.MultimodalInputs{
+					MmPlaceholders: []*pb.PlaceholderRange{
+						{Offset: 1, Length: 1},
+					},
+				},
+			},
+			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
+			want: &fwkrequest.InferenceRequestBody{
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{201, 202, 203}}},
+				},
+				Payload: fwkrequest.PayloadProto{
+					Message: &pb.GenerateRequest{
+						Input: &pb.GenerateRequest_Tokenized{
+							Tokenized: &pb.TokenizedInput{
+								OriginalText: "One image",
+								InputIds:     []uint32{201, 202, 203},
+							},
+						},
+						MmInputs: &pb.MultimodalInputs{
+							MmPlaceholders: []*pb.PlaceholderRange{
+								{Offset: 1, Length: 1},
+							},
+						},
+					},
+				},
+				TokenizedRequest: &fwkrequest.TokenizedRequest{
+					Prompts: []fwkrequest.PromptTokens{{
+						TokenIDs: []uint32{201, 202, 203},
+						// Media detection (the E/P/D encode decider) counts these
+						// features even without hashes; the cache-key conversion
+						// excludes them from block hashing.
+						MultiModalFeatures: []fwkrequest.MultiModalFeature{
+							{Modality: reqcommon.ModalityImage, Hash: "", Offset: 1, Length: 1},
 						},
 					}},
 				},
@@ -273,12 +429,12 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				Stream: true,
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
-			want: &fwkrh.InferenceRequestBody{
+			want: &fwkrequest.InferenceRequestBody{
 				Stream: true,
-				Completions: &fwkrh.CompletionsRequest{
-					Prompt: fwkrh.Prompt{Raw: "Hello world"},
+				Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{Raw: "Hello world"},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.GenerateRequest{
 						Input: &pb.GenerateRequest_Text{
 							Text: "Hello world",
@@ -296,13 +452,13 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 				},
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Embed"},
-			want: &fwkrh.InferenceRequestBody{
-				Embeddings: &fwkrh.EmbeddingsRequest{
-					Input: fwkrh.EmbeddingsInput{
+			want: &fwkrequest.InferenceRequestBody{
+				Embeddings: &fwkrequest.EmbeddingsRequest{
+					Input: fwkrequest.EmbeddingsInput{
 						TokenIDs: [][]uint32{{4, 5, 6}},
 					},
 				},
-				Payload: fwkrh.PayloadProto{
+				Payload: fwkrequest.PayloadProto{
 					Message: &pb.EmbedRequest{
 						Tokenized: &pb.TokenizedInput{
 							OriginalText: "Embed this",
@@ -352,8 +508,8 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			}
 
 			if tt.wantSkipResponseProcessing && tt.want == nil {
-				tt.want = &fwkrh.InferenceRequestBody{
-					Payload: fwkrh.RawPayload(payload),
+				tt.want = &fwkrequest.InferenceRequestBody{
+					Payload: fwkrequest.RawPayload(payload),
 				}
 			}
 
@@ -446,11 +602,11 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				},
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     10,
 					CompletionTokens: 5,
 					TotalTokens:      15,
-					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+					PromptTokenDetails: &fwkrequest.PromptTokenDetails{
 						CachedTokens: 2,
 					},
 				},
@@ -470,11 +626,11 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				},
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     20,
 					CompletionTokens: 15,
 					TotalTokens:      35,
-					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+					PromptTokenDetails: &fwkrequest.PromptTokenDetails{
 						CachedTokens: 5,
 					},
 				},
@@ -507,7 +663,7 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				EmbeddingDim: 2,
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     10,
 					CompletionTokens: 0,
 					TotalTokens:      10,
@@ -522,7 +678,7 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				EmbeddingDim: 2,
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     10,
 					CompletionTokens: 0,
 					TotalTokens:      10,
@@ -540,11 +696,11 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 				},
 			},
 			want: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{
+				Usage: &fwkrequest.Usage{
 					PromptTokens:     20,
 					CompletionTokens: 15,
 					TotalTokens:      35,
-					PromptTokenDetails: &fwkrh.PromptTokenDetails{
+					PromptTokenDetails: &fwkrequest.PromptTokenDetails{
 						CachedTokens: 0,
 					},
 				},
@@ -587,5 +743,113 @@ func TestVllmGRPCParser_Claims(t *testing.T) {
 
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// capturedLog records one Info call's level, message, and structured fields.
+type capturedLog struct {
+	level  int
+	msg    string
+	fields map[string]any
+}
+
+// logCaptureSink records Info calls through DEBUG.
+type logCaptureSink struct {
+	infos []capturedLog
+}
+
+func (s *logCaptureSink) Init(logr.RuntimeInfo)       {}
+func (s *logCaptureSink) Enabled(level int) bool      { return level <= logging.DEBUG }
+func (s *logCaptureSink) Error(error, string, ...any) {}
+func (s *logCaptureSink) Info(level int, msg string, kvs ...any) {
+	fields := make(map[string]any, len(kvs)/2)
+	for i := 0; i+1 < len(kvs); i += 2 {
+		if k, ok := kvs[i].(string); ok {
+			fields[k] = kvs[i+1]
+		}
+	}
+	s.infos = append(s.infos, capturedLog{level: level, msg: msg, fields: fields})
+}
+func (s *logCaptureSink) WithValues(...any) logr.LogSink { return s }
+func (s *logCaptureSink) WithName(string) logr.LogSink   { return s }
+
+func TestVllmGRPCParser_MultimodalHashLogging(t *testing.T) {
+	placeholders := []*pb.PlaceholderRange{{Length: 1}, {Offset: 1, Length: 1}, {Offset: 2, Length: 1}}
+	hashlessLog := func(total int, indices ...int) capturedLog {
+		return capturedLog{
+			level:  logging.DEBUG,
+			msg:    "multimodal placeholders without hashes are excluded from cache keys",
+			fields: map[string]any{"count": len(indices), "indices": indices, "totalFeatures": total},
+		}
+	}
+	parser := NewVllmGRPCParser()
+	for _, tt := range []struct {
+		name         string
+		placeholders []*pb.PlaceholderRange
+		hashes       []string
+		want         []capturedLog
+	}{
+		{
+			name:         "nonconsecutive empty hashes",
+			placeholders: placeholders,
+			hashes:       []string{"", "hash-b", ""},
+			want:         []capturedLog{hashlessLog(3, 0, 2)},
+		},
+		{
+			name:         "one empty hash",
+			placeholders: placeholders,
+			hashes:       []string{"hash-a", "", "hash-c"},
+			want:         []capturedLog{hashlessLog(3, 1)},
+		},
+		{
+			name:         "absent hashes",
+			placeholders: placeholders[:2],
+			want:         []capturedLog{hashlessLog(2, 0, 1)},
+		},
+		{
+			name:         "mismatched lengths",
+			placeholders: placeholders[:2],
+			hashes:       []string{"hash-a"},
+			want: []capturedLog{
+				{
+					level:  logging.DEBUG,
+					msg:    "mm_hashes and mm_placeholders lengths differ; no hash is paired",
+					fields: map[string]any{"hashes": 1, "placeholders": 2},
+				},
+				hashlessLog(2, 0, 1),
+			},
+		},
+		{
+			name:         "all hashes present",
+			placeholders: placeholders[:2],
+			hashes:       []string{"hash-a", "hash-b"},
+		},
+		{
+			name:   "orphan hashes",
+			hashes: []string{"orphan"},
+			want: []capturedLog{
+				{
+					level:  logging.DEBUG,
+					msg:    "mm_hashes without mm_placeholders; dropping multimodal hashes",
+					fields: map[string]any{"hashes": 1},
+				},
+			},
+		},
+		{name: "no features or hashes"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &logCaptureSink{}
+			ctx := log.IntoContext(context.Background(), logr.New(sink))
+			req := &pb.GenerateRequest{
+				Input: &pb.GenerateRequest_Tokenized{
+					Tokenized: &pb.TokenizedInput{InputIds: []uint32{1, 2, 3}},
+				},
+				MmInputs: &pb.MultimodalInputs{MmPlaceholders: tt.placeholders, MmHashes: tt.hashes},
+			}
+			_, err := parser.ParseRequest(ctx, createGrpcPayload(t, req),
+				map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"})
+			require.NoError(t, err)
+			assert.ElementsMatch(t, tt.want, sink.infos)
+		})
 	}
 }

@@ -18,6 +18,7 @@ package datalayer
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -52,6 +53,25 @@ type CrossReplicaSyncer interface {
 	// The bool reports whether the returned value already existed. Implementations
 	// must provide linearizable behavior across every EPP replica sharing the syncer.
 	GetOrSet(ctx context.Context, key StateKey, id string, candidate any) (actual any, existed bool, err error)
+}
+
+// ErrCoordinationUnsupported is returned by GetOrSet from a CrossReplicaSyncer
+// that cannot provide linearizable request-level state across replicas.
+var ErrCoordinationUnsupported = errors.New("the cross-replica syncer does not support GetOrSet")
+
+// CoordinationChecker is an optional interface for a CrossReplicaSyncer whose
+// GetOrSet fails on every call. CheckCoordination returns that error, which
+// wraps ErrCoordinationUnsupported, or nil when GetOrSet is supported.
+type CoordinationChecker interface {
+	CheckCoordination() error
+}
+
+// CoordinationConsumer is an optional interface for a plugin that calls
+// GetOrSet on the configured CrossReplicaSyncer. Configuration fails when
+// RequiresCoordination returns true and the syncer's CheckCoordination returns
+// an error.
+type CoordinationConsumer interface {
+	RequiresCoordination() bool
 }
 
 // CrossReplicaBatchSyncer is an optional interface for a CrossReplicaSyncer

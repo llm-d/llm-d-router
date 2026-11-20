@@ -18,6 +18,7 @@ package request
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -88,6 +89,31 @@ func AnthropicErrorType(status int) string {
 	}
 }
 
+// anthropicErrorStatuses holds one HTTP status for each error type
+// AnthropicErrorType returns, so AnthropicErrorStatus inverts that mapping
+// rather than keeping a second table.
+var anthropicErrorStatuses = []int{
+	http.StatusBadRequest,
+	http.StatusUnauthorized,
+	http.StatusForbidden,
+	http.StatusNotFound,
+	http.StatusRequestEntityTooLarge,
+	http.StatusTooManyRequests,
+	http.StatusServiceUnavailable,
+	http.StatusInternalServerError,
+}
+
+// AnthropicErrorStatus returns the HTTP status of an Anthropic error type, the
+// inverse of AnthropicErrorType. An unknown type is a server error.
+func AnthropicErrorStatus(errType string) int {
+	for _, status := range anthropicErrorStatuses {
+		if AnthropicErrorType(status) == errType {
+			return status
+		}
+	}
+	return http.StatusInternalServerError
+}
+
 // ErrorEnvelope returns the error envelope of the API a request was sent to:
 // the Anthropic envelope for Messages, the OpenAI envelope for every other API.
 func ErrorEnvelope(apiType APIType, status int, msg string) any {
@@ -108,4 +134,14 @@ func WriteAPIError(w http.ResponseWriter, apiType APIType, status int, msg strin
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	return enc.Encode(ErrorEnvelope(apiType, status, msg))
+}
+
+// InternalErrorMessage is the client answer the coordinator and the sidecar
+// give for an internal error that hides upstream detail, carrying the request
+// ID for correlation. The ID is omitted when there is none.
+func InternalErrorMessage(requestID string) string {
+	if requestID == "" {
+		return "internal error"
+	}
+	return fmt.Sprintf("internal error (request_id: %s)", requestID)
 }

@@ -24,6 +24,7 @@ import (
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	attrmetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/metrics"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 )
 
@@ -65,12 +66,12 @@ func (s *RunningRequestsSizeScorer) Category() fwksched.ScorerCategory {
 	return fwksched.Distribution
 }
 
-// Consumes declares the scorer reads the running requests size from the
-// endpoint's Metrics struct, published by the core-metrics-extractor.
+// Consumes declares the scorer reads the running requests size published by
+// the core-metrics-extractor.
 func (s *RunningRequestsSizeScorer) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{
 		Required: map[fwkplugin.DataKey]any{
-			fwkplugin.NewDataKey(metrics.RunningRequestsSizeKey, metrics.MetricsExtractorType): int(0),
+			attrmetrics.ScalarMetricDataKey(metrics.RunningRequestsSizeKey): attrmetrics.ScalarMetricValue(0),
 		},
 	}
 }

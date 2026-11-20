@@ -42,11 +42,13 @@ type SGLangAdapter struct{}
 var sglangBlockStoredFieldDecoders = []eventFieldDecoder{
 	{"block_hashes", decodeHashesField},
 	{"parent_block_hash", decodeParentHashField},
-	{"token_ids", decodeTokensField},
+	{"token_ids", decodeSGLangTokensField},
 	{"block_size", decodeBlockSizeField},
 	{"lora_id", decodeLoraID},
 	{"medium", decodeMedium},
 	{"cache_salt", decodeSGLangCacheSalt},
+	{"session_id", func(dec *msgpack.Decoder, _ *typedEventFields) error { return skipValue(dec) }},
+	{"lora_name", decodeLoraName},
 }
 
 var sglangBlockRemovedFieldDecoders = []eventFieldDecoder{
@@ -57,6 +59,10 @@ var sglangBlockRemovedFieldDecoders = []eventFieldDecoder{
 // NewSGLangAdapter creates a SGLang adapter.
 func NewSGLangAdapter() *SGLangAdapter {
 	return &SGLangAdapter{}
+}
+
+func init() {
+	Register(EngineTypeSGLang, func() kvevents.EngineAdapter { return NewSGLangAdapter() })
 }
 
 // ShardingKey extracts the pod-id segment from a SGLang raw message topic.
@@ -70,7 +76,7 @@ func (s *SGLangAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 // It extracts pod identity and model name from the topic,
 // and decodes the msgpack payload into an EventBatch.
 func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
-	podID, modelName := parseTopic(msg.Topic)
+	podID, modelName := topicIdentity(msg)
 
 	batch := msgpackTypedEventBatch{schema: &sglangWireSchema}
 	if err := msgpack.Unmarshal(msg.Payload, &batch); err != nil {
@@ -83,6 +89,66 @@ func (s *SGLangAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, 
 	}
 
 	return podID, modelName, eventBatch, nil
+}
+
+func decodeSGLangTokensField(dec *msgpack.Decoder, fields *typedEventFields) error {
+	tokens, lookahead, err := decodeSGLangTokenIDs(dec)
+	if err != nil {
+		return err
+	}
+	fields.tokens = tokens
+	fields.lookaheadToken = lookahead
+	fields.hasTokens = true
+	return nil
+}
+
+func decodeSGLangTokenIDs(dec *msgpack.Decoder) ([]uint32, *uint32, error) {
+	count, err := dec.DecodeArrayLen()
+	if err != nil {
+		return nil, nil, fmt.Errorf("token_ids is not an array: %w", err)
+	}
+	if count < 0 {
+		return nil, nil, fmt.Errorf("token_ids is not an array: <nil>")
+	}
+	tokens := make([]uint32, 0, min(count, maxDecodePreallocate))
+	if count == 0 {
+		return tokens, nil, nil
+	}
+	code, err := dec.PeekCode()
+	if err != nil {
+		return nil, nil, fmt.Errorf("token_ids[0]: %w", err)
+	}
+	bigrams := msgpcode.IsFixedArray(code) || code == msgpcode.Array16 || code == msgpcode.Array32
+	var nextToken uint32
+	for i := range count {
+		if bigrams {
+			pairSize, err := dec.DecodeArrayLen()
+			if err != nil {
+				return nil, nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+			}
+			if pairSize != 2 {
+				return nil, nil, fmt.Errorf("token_ids[%d]: expected pair of length 2, got %d", i, pairSize)
+			}
+		}
+		token, err := decodeTokenID(dec)
+		if err != nil {
+			return nil, nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+		}
+		if bigrams {
+			if i > 0 && token != nextToken {
+				return nil, nil, fmt.Errorf("token_ids[%d]: bigram does not overlap the preceding pair", i)
+			}
+			nextToken, err = decodeTokenID(dec)
+			if err != nil {
+				return nil, nil, fmt.Errorf("token_ids[%d]: %w", i, err)
+			}
+		}
+		tokens = append(tokens, token)
+	}
+	if bigrams {
+		return tokens, &nextToken, nil
+	}
+	return tokens, nil, nil
 }
 
 func decodeSGLangCacheSalt(dec *msgpack.Decoder, fields *typedEventFields) error {
@@ -105,6 +171,7 @@ func decodeSGLangCacheSalt(dec *msgpack.Decoder, fields *typedEventFields) error
 
 func (f *typedEventFields) sglangBlockStoredEvent() *kvevents.BlockStoredEvent {
 	event := f.blockStoredEvent()
+	event.LookaheadToken = f.lookaheadToken
 	// Child blocks inherit the salt through the parent's request key.
 	if f.cacheSalt != "" && f.parentHash == 0 && len(f.blockHashes) > 0 {
 		event.ExtraKeys = make([][]any, len(f.blockHashes))

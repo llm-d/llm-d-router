@@ -27,6 +27,7 @@ import (
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
+	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"google.golang.org/genproto/googleapis/api/httpbody"
 	"google.golang.org/protobuf/proto"
@@ -89,14 +90,14 @@ func TestParseRequest(t *testing.T) {
 				"content-type": "application/grpc",
 			},
 			wantResult: &fwkrh.ParseResult{
-				Body: &fwkrh.InferenceRequestBody{
-					ChatCompletions: &fwkrh.ChatCompletionsRequest{
-						Messages: []fwkrh.Message{
-							{Role: "user", Content: fwkrh.Content{Raw: "Hello"}},
+				Body: &fwkrequest.InferenceRequestBody{
+					ChatCompletions: &fwkrequest.ChatCompletionsRequest{
+						Messages: []fwkrequest.Message{
+							{Role: "user", Content: fwkrequest.Content{Raw: "Hello"}},
 						},
 					},
 					Stream:  true,
-					Payload: fwkrh.PayloadProto{Message: reqMsg},
+					Payload: fwkrequest.PayloadProto{Message: reqMsg},
 					RawBody: reqMsg.GetHttpBody().GetData(),
 				},
 				SkipResponseProcessing: false,
@@ -110,11 +111,11 @@ func TestParseRequest(t *testing.T) {
 				"content-type": "application/grpc",
 			},
 			wantResult: &fwkrh.ParseResult{
-				Body: &fwkrh.InferenceRequestBody{
-					Responses: &fwkrh.ResponsesRequest{
+				Body: &fwkrequest.InferenceRequestBody{
+					Responses: &fwkrequest.ResponsesRequest{
 						Input: "Hello from stream raw predict",
 					},
-					Payload: fwkrh.PayloadProto{Message: streamRawPredictReqMsg},
+					Payload: fwkrequest.PayloadProto{Message: streamRawPredictReqMsg},
 					RawBody: streamRawPredictReqMsg.GetHttpBody().GetData(),
 				},
 				SkipResponseProcessing: false,
@@ -128,11 +129,11 @@ func TestParseRequest(t *testing.T) {
 				"content-type": "application/grpc",
 			},
 			wantResult: &fwkrh.ParseResult{
-				Body: &fwkrh.InferenceRequestBody{
-					Responses: &fwkrh.ResponsesRequest{
+				Body: &fwkrequest.InferenceRequestBody{
+					Responses: &fwkrequest.ResponsesRequest{
 						Input: "Hello from raw predict",
 					},
-					Payload: fwkrh.PayloadProto{Message: rawPredictReqMsg},
+					Payload: fwkrequest.PayloadProto{Message: rawPredictReqMsg},
 					RawBody: rawPredictReqMsg.GetHttpBody().GetData(),
 				},
 				SkipResponseProcessing: false,
@@ -143,8 +144,8 @@ func TestParseRequest(t *testing.T) {
 			body:    []byte{},
 			headers: map[string]string{":path": "/unsupported/path", "content-type": "application/grpc"},
 			wantResult: &fwkrh.ParseResult{
-				Body: &fwkrh.InferenceRequestBody{
-					Payload: fwkrh.RawPayload([]byte{}),
+				Body: &fwkrequest.InferenceRequestBody{
+					Payload: fwkrequest.RawPayload([]byte{}),
 				},
 				SkipResponseProcessing: true,
 			},
@@ -264,7 +265,7 @@ func TestParseResponse(t *testing.T) {
 			body:    validBody,
 			headers: map[string]string{"content-type": "application/grpc"},
 			wantResult: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+				Usage: &fwkrequest.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
 			},
 		},
 		{
@@ -272,7 +273,7 @@ func TestParseResponse(t *testing.T) {
 			body:    twoFrameBody,
 			headers: map[string]string{"content-type": "application/grpc"},
 			wantResult: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+				Usage: &fwkrequest.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
 			},
 		},
 		{
@@ -280,7 +281,7 @@ func TestParseResponse(t *testing.T) {
 			body:    eventStreamBody,
 			headers: map[string]string{"content-type": "application/grpc"},
 			wantResult: &fwkrh.ParsedResponse{
-				Usage:          &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+				Usage:          &fwkrequest.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
 				StreamedEvents: 2,
 			},
 		},
@@ -290,7 +291,7 @@ func TestParseResponse(t *testing.T) {
 			headers: map[string]string{"content-type": "application/grpc"},
 			wantErr: "unmarshaling HttpBody response",
 			wantResult: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+				Usage: &fwkrequest.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
 			},
 		},
 		{
@@ -299,7 +300,7 @@ func TestParseResponse(t *testing.T) {
 			headers: map[string]string{"content-type": "application/grpc"},
 			wantErr: "incomplete gRPC payload",
 			wantResult: &fwkrh.ParsedResponse{
-				Usage: &fwkrh.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+				Usage: &fwkrequest.Usage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
 			},
 		},
 		{

@@ -158,7 +158,7 @@ func TestNIXLV2StagesAreSiblingSpans(t *testing.T) {
 
 	req, forward := requestWithForwardSpan(t, reqcommon.PathChatCompletions, []byte(chatCompletionsRequestBody))
 	rec := httptest.NewRecorder()
-	s.handleNIXLV2(rec, req, prefillURL.Host, "", reqcommon.APITypeChatCompletions)
+	s.handleNIXLV2(rec, req, prefillURL.Host, p2pRouting{}, reqcommon.APITypeChatCompletions)
 	forward.End()
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -207,4 +207,65 @@ func TestConcurrentPDStagesAreSiblingSpans(t *testing.T) {
 	tree := newSpanTree(t, sr.Ended())
 	assertSiblingStages(t, tree)
 	require.True(t, hasAttribute(tree.span(t, "decode"), "llm_d.pd_proxy.true_ttft_ms"), "decode span missing true_ttft_ms")
+}
+
+// The prefill span of the shared concurrent P/D path names the request it belongs to, so a consumer of the
+// span (which cannot see the prefill response) can tie it to the request it routed.
+func TestConcurrentPDPrefillSpanCarriesRequestID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		requestID string
+		want      bool
+	}{
+		{name: "request id header set", requestID: "req-123", want: true},
+		{name: "no request id header", requestID: "", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sr := recordSpans(t)
+			ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.WriteHeader(http.StatusOK)
+			})
+			prefillURL := tracedBackend(t, "prefill-backend", ok)
+			decodeURL := tracedBackend(t, "decode-backend", ok)
+			s := NewProxy(Config{Port: "0", DecoderURL: decodeURL})
+			s.decoderProxy = s.createDecoderProxyHandler(decodeURL, false)
+
+			body := []byte(`{"input_ids":[1]}`)
+			req, forward := requestWithForwardSpan(t, reqcommon.PathSGLangGenerate, body)
+			if tc.requestID != "" {
+				req.Header.Set(reqcommon.RequestIDHeaderKey, tc.requestID)
+			}
+			s.runConcurrentPD(httptest.NewRecorder(), req, body, body, prefillURL.Host, constants.KVConnectorSGLang, nil, nil)
+			forward.End()
+
+			require.Eventually(t, func() bool {
+				for _, sp := range sr.Ended() {
+					if sp.Name() == "prefill" {
+						return true
+					}
+				}
+				return false
+			}, 2*time.Second, 10*time.Millisecond)
+
+			var prefill sdktrace.ReadOnlySpan
+			for _, sp := range sr.Ended() {
+				if sp.Name() == "prefill" {
+					prefill = sp
+				}
+			}
+			require.NotNil(t, prefill)
+			if !tc.want {
+				require.False(t, hasAttribute(prefill, "llm_d.pd_proxy.request_id"), "no header, so no attribute")
+				return
+			}
+			var got string
+			for _, kv := range prefill.Attributes() {
+				if string(kv.Key) == "llm_d.pd_proxy.request_id" {
+					got = kv.Value.AsString()
+				}
+			}
+			require.Equal(t, tc.requestID, got)
+		})
+	}
 }

@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 // wellKnownConfigs are configs in the llm-d well-lit path guides.
@@ -402,7 +403,7 @@ schedulingProfiles:
 func TestWellKnownConfigs(t *testing.T) {
 	for name, tc := range wellKnownConfigs {
 		t.Run(name, func(t *testing.T) {
-			runner := NewTestHarness(t.Context(), t, WithConfigText(tc.yaml)).Runner
+			runner := eppharness.NewTestHarness(t.Context(), t, eppharness.WithConfigText(tc.yaml)).Runner
 
 			t.Logf("All plugins: %v", runner.PluginHandle.GetAllPluginsWithNames())
 			// Validate that the expected plugins exist in runner.PluginHandle.
@@ -438,8 +439,8 @@ func TestMockMetricsSourceConfigsOptOut(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read %s: %v", path, err)
 		}
-		if strings.Contains(string(data), mockDataSourceType) && !strings.Contains(string(data), "injectDefaults: false") {
-			t.Errorf("%s configures %s without dataLayer.injectDefaults: false", path, mockDataSourceType)
+		if strings.Contains(string(data), eppharness.MockDataSourceType) && !strings.Contains(string(data), "injectDefaults: false") {
+			t.Errorf("%s configures %s without dataLayer.injectDefaults: false", path, eppharness.MockDataSourceType)
 		}
 	}
 }

@@ -24,17 +24,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common"
@@ -77,6 +82,12 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		IdleTimeout:       300 * time.Second, // 5 minutes for keep-alive connections
 		ReadHeaderTimeout: 30 * time.Second,  // Reasonable for headers only
 		MaxHeaderBytes:    1 << 20,           // 1 MB for headers is sufficient
+	}
+	if !s.config.SecureServing {
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		server.Protocols = protocols
 	}
 
 	var cert *tls.Certificate
@@ -128,8 +139,11 @@ func (s *Server) startHTTP(ctx context.Context) error {
 	}
 	s.logger.Info("server TLS", "tls", s.config.SecureServing, "cert_path", s.config.CertPath)
 
-	// Setup graceful termination (not strictly needed for sidecars)
+	// Serve returns as soon as Shutdown starts, so startHTTP waits on
+	// shutdownDone to keep the process alive while in-flight requests finish.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		s.logger.Info("shutting down")
 
@@ -153,6 +167,7 @@ func (s *Server) startHTTP(ctx context.Context) error {
 		}
 	}
 
+	<-shutdownDone
 	return nil
 }
 
@@ -160,25 +175,44 @@ func (s *Server) startHTTP(ctx context.Context) error {
 func (s *Server) createDecoderProxyHandler(decoderURL *url.URL, decoderInsecureSkipVerify bool) *httputil.ReverseProxy {
 	decoderProxy := httputil.NewSingleHostReverseProxy(decoderURL)
 	decoderProxy.Transport = s.newProxyTransport(decoderURL.Scheme, decoderInsecureSkipVerify)
-	decoderProxy.ErrorHandler = func(res http.ResponseWriter, _ *http.Request, err error) {
+	decoderProxy.ErrorHandler = func(res http.ResponseWriter, r *http.Request, err error) {
 
 		// Log errors from the decoder proxy
+		logger, ctxErr := logr.FromContext(r.Context())
+		if ctxErr != nil {
+			// Requests on the catch-all route skip the handler that seeds one.
+			logger = s.logger
+		}
 		var writeError error
+		var prefillErr *prefillFailedError
 		switch {
+		case errors.As(context.Cause(r.Context()), &prefillErr):
+			logger.Info("concurrent-dispatch prefill failed; returning prefill error",
+				"status", prefillErr.response.statusCode, logBodyBytesKey, prefillErr.response.buffer.Len())
+			if isVLLMGRPCRequest(r) {
+				s.relayVLLMPrefillFailure(res, r, prefillErr.response, vllmPrefillOutcome{relayError: true})
+				break
+			}
+			// A key with http.TrailerPrefix is sent as a trailer whether it is
+			// set before or after WriteHeader, so a buffered gRPC status relays
+			// as the HTTP/2 trailer the backend sent.
+			maps.Copy(res.Header(), prefillErr.response.headers)
+			res.WriteHeader(prefillErr.response.statusCode)
+			_, writeError = res.Write(prefillErr.response.bodyBytes())
+
 		case errors.Is(err, syscall.ECONNREFUSED):
-			s.logger.Error(err, "failed to connect to vLLM decoder",
+			logger.Error(err, "failed to connect to vLLM decoder",
 				"decoderURL", s.config.DecoderURL.String())
-			res.Header().Set("Content-Type", "application/json")
-			res.WriteHeader(http.StatusServiceUnavailable)
-			_, writeError = res.Write(decoderServiceUnavailableResponseJSON)
+			writeError = sendError(res, r, http.StatusServiceUnavailable,
+				"The decode node is not ready. Please check that the vLLM service is running and the port configuration is correct.")
 
 		default:
-			s.logger.Error(err, "http: proxy error",
+			logger.Error(err, "http: proxy error",
 				"decoderURL", s.config.DecoderURL.String())
-			writeError = errorBadGateway(err, res)
+			writeError = errorBadGateway(res, r)
 		}
 		if writeError != nil {
-			s.logger.Error(err, "failed to send error response to client")
+			logger.Error(writeError, "failed to send error response to client")
 		}
 	}
 	return decoderProxy
@@ -198,13 +232,13 @@ func bodyAsJSON(r *http.Request) ([]byte, map[string]any, error) {
 }
 
 // inspectedRequestFields lists the top-level request fields the sidecar reads
-// as Go values. decodeRequestBody decodes only these; every other field stays
-// a json.RawMessage so its bytes are forwarded unchanged. encoding/json sorts
-// map keys at every depth on Marshal, which would reorder free-form content
-// such as tools[].function.parameters that chat templates render into the
-// prompt verbatim.
+// as Go values; see reqcommon.DecodeRequestBody for why every other field stays
+// raw.
 var inspectedRequestFields = map[string]struct{}{
-	reqcommon.FieldKVTransferParams:     {},
+	// kv_transfer_params is deliberately NOT decoded as Go values: the only
+	// reader, clientPromptTokenIDs, handles the raw json.RawMessage form, and
+	// decoding it would materialize a long prompt_token_ids array (one boxed
+	// value per token) only to serialize it right back.
 	reqcommon.FieldECTransferParams:     {},
 	reqcommon.FieldMaxTokens:            {},
 	reqcommon.FieldMaxCompletionTokens:  {},
@@ -214,7 +248,7 @@ var inspectedRequestFields = map[string]struct{}{
 	reqcommon.FieldStream:               {},
 	reqcommon.FieldStreamOptions:        {},
 	reqcommon.FieldEcho:                 {},
-	requestFieldN:                       {},
+	reqcommon.FieldN:                    {},
 	reqcommon.FieldCacheHitThreshold:    {},
 	reqcommon.FieldContinueFinalMessage: {},
 	reqcommon.FieldAddGenerationPrompt:  {},
@@ -243,34 +277,23 @@ func requestMessages(req map[string]any) ([]json.RawMessage, error) {
 
 // decodeRequestBody parses a JSON object body, applying inspectedRequestFields.
 func decodeRequestBody(raw []byte) (map[string]any, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, err
-	}
-	if fields == nil {
-		return nil, errors.New("request body is not a JSON object")
-	}
-	parsed := make(map[string]any, len(fields))
-	for k, v := range fields {
-		if _, ok := inspectedRequestFields[k]; !ok {
-			parsed[k] = v
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		parsed[k] = decoded
-	}
-	return parsed, nil
+	return reqcommon.DecodeRequestBody(raw, inspectedRequestFields)
 }
 
 func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, map[string]any, bool) {
+	logger := log.FromContext(r.Context())
 	raw, parsed, err := bodyAsJSON(r)
 	if err != nil {
-		s.logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
-		if writeErr := errorJSONInvalid(err, w); writeErr != nil {
-			s.logger.Error(writeErr, "failed to send error response to client")
+		logger.V(logging.DEBUG).Info("invalid request body", "error", jsonErrorForLog(err))
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+			logger.Error(writeErr, "failed to send error response to client")
+		}
+		return nil, nil, false
+	}
+	if _, err := reqcommon.StreamRequested(parsed); err != nil {
+		logger.V(logging.DEBUG).Info("invalid request body", "error", err)
+		if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+			logger.Error(writeErr, "failed to send error response to client")
 		}
 		return nil, nil, false
 	}
@@ -280,9 +303,9 @@ func (s *Server) readJSONBody(r *http.Request, w http.ResponseWriter) ([]byte, m
 	// bodies, so those requests bypass this guard.
 	if reqcommon.DetectAPIType(r.URL.Path) == reqcommon.APITypeResponses {
 		if err := reqcommon.RejectStatefulResponsesFields(parsed); err != nil {
-			s.logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
-			if writeErr := errorJSONInvalid(err, w); writeErr != nil {
-				s.logger.Error(writeErr, "failed to send error response to client")
+			logger.Info("rejecting unsupported responses field", "error", err, "path", r.URL.Path)
+			if writeErr := errorJSONInvalid(w, r, err); writeErr != nil {
+				logger.Error(writeErr, "failed to send error response to client")
 			}
 			return nil, nil, false
 		}
@@ -310,13 +333,6 @@ func extractHost(hostWithPort string) string {
 	return host
 }
 
-// isHostPort reports whether s parses as host:port with a non-empty host.
-// net.SplitHostPort accepts ":8000" (empty host), which is not a usable target.
-func isHostPort(s string) bool {
-	host, _, err := net.SplitHostPort(s)
-	return err == nil && host != ""
-}
-
 func newUUID() string {
 	return uuid.New().String()
 }
@@ -340,4 +356,26 @@ func isRetryableStatus(statusCode int) bool {
 // headers and status, so there is no recovery action for a write failure.
 func WriteAll(w io.Writer, b []byte) {
 	_, _ = w.Write(b)
+}
+
+// redirectEncodedInferencePath answers a POST whose percent-encoded path
+// decodes to an inference API path with a 307 to the decoded path. EPP picks its
+// request parser from the encoded path and ServeMux matches it segment by
+// segment, so the two can classify such a request differently. The redirect
+// brings the client back through EPP with the clean path, as ServeMux does for
+// repeated slashes and dot segments. Only POST is served on these paths, so
+// other methods pass through. httpPaths and grpcPaths list the paths the
+// sidecar serves as inference routes; a path it forwards to the decoder
+// catch-all is not redirected.
+func redirectEncodedInferencePath(next http.Handler, httpPaths, grpcPaths []string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.RawPath != "" {
+			if c := path.Clean(r.URL.Path); slices.Contains(httpPaths, c) || slices.Contains(grpcPaths, c) {
+				target := url.URL{Path: c, RawQuery: r.URL.RawQuery}
+				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

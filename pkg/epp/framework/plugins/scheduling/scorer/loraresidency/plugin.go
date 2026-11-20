@@ -40,7 +40,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
@@ -55,9 +55,9 @@ const Type = "lora-residency-scorer"
 var (
 	_ fwksched.Scorer               = &Plugin{}
 	_ fwkplugin.ConsumerPlugin      = &Plugin{}
-	_ fwkrc.PreRequest              = &Plugin{}
-	_ fwkrc.ResponseHeaderProcessor = &Plugin{}
-	_ fwkrc.ResponseBodyProcessor   = &Plugin{}
+	_ fwkrh.PreRequest              = &Plugin{}
+	_ fwkrh.ResponseHeaderProcessor = &Plugin{}
+	_ fwkrh.ResponseBodyProcessor   = &Plugin{}
 	_ fwkdl.EndpointExtractor       = &Plugin{}
 	_ fwkdl.Registrant              = &Plugin{}
 )
@@ -282,7 +282,7 @@ func (s *Plugin) PreRequest(ctx context.Context, req *fwksched.InferenceRequest,
 // evidence that the adapter executed. The EPP copies Envoy's header keys
 // verbatim, and Envoy sends the status as the ":status" pseudo-header; a plain
 // "status" key is also accepted, as the EPP's own check does.
-func (s *Plugin) ResponseHeader(_ context.Context, req *fwksched.InferenceRequest, resp *fwkrc.Response, _ *fwkdl.EndpointMetadata) {
+func (s *Plugin) ResponseHeader(_ context.Context, req *fwksched.InferenceRequest, resp *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
 	if req == nil || resp == nil {
 		return
 	}
@@ -304,7 +304,7 @@ func (s *Plugin) ResponseHeader(_ context.Context, req *fwksched.InferenceReques
 // response or the server's cleanup for a request that exited before any body,
 // which carries a non-natural TerminationCause. Only the first ends naturally,
 // so only it counts as execution.
-func (s *Plugin) ResponseBody(ctx context.Context, req *fwksched.InferenceRequest, resp *fwkrc.Response, _ *fwkdl.EndpointMetadata) {
+func (s *Plugin) ResponseBody(ctx context.Context, req *fwksched.InferenceRequest, resp *fwkrh.Response, _ *fwkdl.EndpointMetadata) {
 	if req == nil || resp == nil {
 		return
 	}
@@ -317,7 +317,7 @@ func (s *Plugin) ResponseBody(ctx context.Context, req *fwksched.InferenceReques
 	logger := log.FromContext(ctx).V(logging.TRACE)
 	now := s.now()
 	firstChunk := resp.StartOfStream &&
-		(!resp.EndOfStream || resp.TerminationCause == fwkrc.TerminationCauseNatural)
+		(!resp.EndOfStream || resp.TerminationCause == fwkrh.TerminationCauseNatural)
 	if firstChunk && !r.started && !r.errorStatus {
 		r.started = true
 		s.pod(r.pod).Started(r.adapter, now)

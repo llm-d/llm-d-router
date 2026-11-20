@@ -33,7 +33,7 @@ The scorer returns category `Distribution`, helping spread requests away from en
 
 The plugin consumes:
 
-- `metrics.WaitingQueueSizeKey` (`int`)
+- `metrics.WaitingQueueSizeKey` (`ScalarMetricValue`)
 
 ## Configuration
 
