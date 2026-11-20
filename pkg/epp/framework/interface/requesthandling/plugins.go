@@ -41,6 +41,9 @@ const (
 // DataProducerPhaseRequestHandling.
 const RequestHandlingDataProducerExtensionPoint = "RequestHandlingDataProducer"
 
+// AdmissionDataProducerExtensionPoint names side-effect-free queued preparation.
+const AdmissionDataProducerExtensionPoint = "AdmissionDataProducer"
+
 // ConditionalDecodeHandledAttributeKey is the request-attribute key a
 // PreRequest plugin sets when it has evaluated the "Prefer: if-available"
 // preference for a request. The director consults this after PreRequest
@@ -116,6 +119,23 @@ type ResponseBodyProcessor interface {
 type DataProducer interface {
 	plugin.ProducerPlugin
 	Produce(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error
+}
+
+// AdmissionDataProducer prepares request costs while a request remains queued.
+// Calls may repeat on independent snapshots. Implementations may only write
+// those snapshots; they must not register requests, change PluginState, or
+// account for in-flight work. Produce runs once before scheduling except for
+// failed or unfinished preparations, whose admitted cost must stay unchanged.
+type AdmissionDataProducer interface {
+	DataProducer
+	PrepareForAdmission(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error
+}
+
+// AdmissionCostProducer can compute a conservative cost without cached-prefix
+// discounts when a prefix snapshot is unavailable or expired.
+type AdmissionCostProducer interface {
+	AdmissionDataProducer
+	PrepareWithoutPrefix(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error
 }
 
 // DataProducerPhase selects when the director runs a DataProducer.

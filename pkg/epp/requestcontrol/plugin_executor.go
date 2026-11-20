@@ -94,6 +94,11 @@ func producerTimeout(p fwkrh.DataProducer) time.Duration {
 // extensionPoint names the phase in latency metrics and scope violations.
 func dataProducerPluginsWithTimeout(ctx context.Context, extensionPoint string, timeout time.Duration, plugins []fwkrh.DataProducer,
 	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	return dataProducerPluginsWithCompletion(ctx, extensionPoint, timeout, plugins, request, endpoints, nil)
+}
+
+func dataProducerPluginsWithCompletion(ctx context.Context, extensionPoint string, timeout time.Duration, plugins []fwkrh.DataProducer,
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint, finished chan<- struct{}) error {
 	// The timeout path does not join the producer goroutine. Allocate the
 	// sync.Map before launching it so any cancellation-aware producer finishing
 	// a write cannot race with scheduling over lazy store initialization.
@@ -104,7 +109,11 @@ func dataProducerPluginsWithTimeout(ctx context.Context, extensionPoint string, 
 	invocations := scopeProducers(ctx, extensionPoint, plugins, request, endpoints)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runProducers(ctx, extensionPoint, invocations)
+		err := runProducers(ctx, extensionPoint, invocations)
+		if finished != nil {
+			close(finished)
+		}
+		errCh <- err
 	}()
 
 	select {

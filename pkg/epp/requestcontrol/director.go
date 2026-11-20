@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"net"
 	"strings"
@@ -339,8 +340,21 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	metrics.RecordFairnessIDResolution(d.poolName, reqCtx.SchedulingRequest.FairnessID, source)
 
 	admitting = true
-	// Admit may block until flow control admits the request.
-	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
+	// Admit may block until flow control admits the request. Producers in
+	// the request-handling phase may have side effects and may supply
+	// inputs to screeners, so leave those configurations on the ordinary
+	// path until they can supply a separate pre-screen preparation.
+	var prepared *contracts.PreparedRequest
+	if fc, ok := d.admissionController.(*FlowControlAdmissionController); ok {
+		var prepare contracts.PrepareRequest
+		if _, ok := fc.flowController.(preparingFlowController); ok && len(d.requestControlPlugins.requestHandlingDataProducers) == 0 {
+			prepare = d.queuedPreparation(reqCtx.SchedulingRequest, reqCtx.Request.Metadata)
+		}
+		prepared, err = fc.admitPrepared(ctx, reqCtx, priority, prepare)
+	} else {
+		err = d.admissionController.Admit(ctx, reqCtx, priority)
+	}
+	if err != nil {
 		return reqCtx, err
 	}
 	// IsRecording guards keep the tracing-disabled path allocation-free.
@@ -359,35 +373,67 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		}()
 	}
 
-	endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
-	if len(endpointCandidates) == 0 {
-		return reqCtx, errcommon.Error{
-			Code:    errcommon.ServiceUnavailable,
-			Msg:     "failed to find endpoint candidates for serving the request",
-			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+	var snapshotOfCandidatePods []fwksched.Endpoint
+	missingKeys := map[string]struct{}{}
+	if prepared != nil {
+		if prepared.Err != nil {
+			return reqCtx, prepared.Err
+		}
+		if prepared.Request.Body != nil {
+			inferenceRequestBody.TokenizedRequest = prepared.Request.Body.TokenizedRequest
+		}
+		if reqCtx.Request.Headers == nil {
+			reqCtx.Request.Headers = make(map[string]string)
+		}
+		for key, value := range prepared.Request.Headers {
+			reqCtx.Request.Headers[key] = value
+		}
+		reqCtx.SchedulingRequest = prepared.Request
+		reqCtx.SchedulingRequest.Headers = reqCtx.Request.Headers
+		reqCtx.SchedulingRequest.Body = inferenceRequestBody
+		snapshotOfCandidatePods = prepared.Endpoints
+	} else {
+		endpointCandidates := d.endpointCandidates.Locate(ctx, reqCtx.Request.Metadata)
+		if len(endpointCandidates) == 0 {
+			return reqCtx, errcommon.Error{
+				Code:    errcommon.ServiceUnavailable,
+				Msg:     "failed to find endpoint candidates for serving the request",
+				Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+			}
+		}
+
+		snapshotOfCandidatePods = d.toSchedulerEndpoints(endpointCandidates)
+		// A failed request-handling producer also leaves its required keys
+		// unavailable to later scheduling producers.
+		if err := d.runDataProducers(ctx, fwkrh.RequestHandlingDataProducerExtensionPoint, d.requestControlPlugins.requestHandlingDataProducers,
+			reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys, nil); err != nil {
+			logger.Error(err, "failed to prepare request handling data")
+		}
+		snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+		if len(snapshotOfCandidatePods) == 0 {
+			return reqCtx, errcommon.Error{
+				Code:    errcommon.ServiceUnavailable,
+				Msg:     "screeners eliminated all endpoint candidates",
+				Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+			}
 		}
 	}
-
-	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
-	// A producer whose RequestHandling run fails leaves its keys missing for the
-	// Scheduling phase too, so producers requiring them are skipped there.
-	missingKeys := map[string]struct{}{}
-	if err := d.runDataProducers(ctx, fwkrh.RequestHandlingDataProducerExtensionPoint, d.requestControlPlugins.requestHandlingDataProducers,
-		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
-		// Don't fail the request if DataProducer plugins fail.
-		logger.Error(err, "failed to prepare request handling data")
-	}
-	snapshotOfCandidatePods = d.runScreeners(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
-	if len(snapshotOfCandidatePods) == 0 {
-		return reqCtx, errcommon.Error{
-			Code:    errcommon.ServiceUnavailable,
-			Msg:     "screeners eliminated all endpoint candidates",
-			Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonNoEndpoints)},
+	// Ordinary producer hooks retain their scheduling-time lifecycle.
+	var preparationErrors map[fwkplugin.TypedName]error
+	if prepared != nil {
+		preparationErrors = maps.Clone(prepared.ProducerErrors)
+		if prepared.SealPreparation != nil {
+			for name, err := range prepared.SealPreparation() {
+				if preparationErrors == nil {
+					preparationErrors = make(map[fwkplugin.TypedName]error)
+				}
+				preparationErrors[name] = err
+			}
 		}
 	}
 	// Prepare per request data by running DataProducer plugins.
 	if err := d.runDataProducers(ctx, fwkrh.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
-		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys); err != nil {
+		reqCtx.SchedulingRequest, snapshotOfCandidatePods, missingKeys, preparationErrors); err != nil {
 		// Don't fail the request if DataProducer plugins fail.
 		logger.Error(err, "failed to prepare per request data")
 	}
@@ -411,7 +457,15 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		span.SetAttributes(semconv.LLMDEPPAdmissionDecision("admitted"))
 	}
 
-	result, err := d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+	var result *fwksched.SchedulingResult
+	if scheduler, ok := d.scheduler.(interface {
+		ScheduleWithAdmission(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint,
+			map[string][]fwksched.Endpoint) (*fwksched.SchedulingResult, error)
+	}); ok && prepared != nil {
+		result, err = scheduler.ScheduleWithAdmission(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods, prepared.ProfileEndpoints)
+	} else {
+		result, err = d.scheduler.Schedule(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+	}
 	if err != nil {
 		// Preserve typed errcommon.Error from the scheduler so its status code
 		// (e.g. PreconditionFailed) reaches Envoy intact, even if the error
@@ -903,7 +957,7 @@ func (d *Director) runRequestHeaderProcessors(ctx context.Context, request *fwks
 // runDataProducers runs one phase's producers. missing holds the keys of
 // producers that failed or were skipped, across phases.
 func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, plugins []fwkrh.DataProducer,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint, missing map[string]struct{}) error {
+	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint, missing map[string]struct{}, preparationErrors map[fwkplugin.TypedName]error) error {
 	if len(plugins) == 0 {
 		return nil
 	}
@@ -922,6 +976,11 @@ func (d *Director) runDataProducers(ctx context.Context, extensionPoint string, 
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
 			break
+		}
+		if err := preparationErrors[p.TypedName()]; err != nil {
+			errs = append(errs, err)
+			markMissing(p)
+			continue
 		}
 		if key, ok := missingRequiredInput(p, missing); ok {
 			errs = append(errs, fmt.Errorf("DataProducer %q skipped: required input %s was not produced", p.TypedName().String(), key))

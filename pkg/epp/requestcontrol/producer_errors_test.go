@@ -93,7 +93,7 @@ func newDirectorWithProducers(producers ...*chainProducer) *Director {
 // runSchedulingProducers runs d's Scheduling-phase producers on an empty request.
 func runSchedulingProducers(ctx context.Context, d *Director) error {
 	return d.runDataProducers(ctx, fwkrh.DataProducerExtensionPoint, d.requestControlPlugins.dataProducerPlugins,
-		&fwksched.InferenceRequest{}, nil, map[string]struct{}{})
+		&fwksched.InferenceRequest{}, nil, map[string]struct{}{}, nil)
 }
 
 // A failing producer skips only the producers that require its output, directly
