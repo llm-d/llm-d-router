@@ -103,7 +103,7 @@ func eppPodReady(oldPodName string, nsName string, selector map[string]string) f
 // completionRoutedToNamespace sends one completion and reports an error on any
 // failure or namespace-header mismatch, for use inside Eventually blocks.
 func completionRoutedToNamespace(nsName string) error {
-	nsHdr, _, err := tryCompletion(simplePrompt, simModelName)
+	nsHdr, _, err := tryCompletion()
 	if err != nil {
 		return err
 	}
@@ -139,7 +139,7 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 
 			ginkgo.By("Verifying new requests eventually route to a pod other than the killed one")
 			gomega.Eventually(func() error {
-				nsHdr, podHdr, err := tryCompletion(simplePrompt, simModelName)
+				nsHdr, podHdr, err := tryCompletion()
 				if err != nil {
 					return err
 				}
@@ -259,6 +259,46 @@ var _ = ginkgo.Describe("Disruption tests", func() {
 			}, eppRecoveryTimeout, 2*time.Second).Should(gomega.Equal(nsName))
 		})
 	}))
+
+	ginkgo.When("Decode or required Prefill endpoints disappear while an aggregated worker remains",
+		ginkgo.Ordered, ginkgo.Label("decode-fallback"), testWrapper(func() {
+			ginkgo.It("should use fallback and return to P/D after recovery", func() {
+				nsName := getNamespace()
+
+				createModelServersPDAggregatedFallback()
+				standalone.Create(standaloneConfig(), aggregatedFallbackConfig, 1, 8000)
+
+				expectCompletionOn := func(selector map[string]string) {
+					gomega.Eventually(func(g gomega.Gomega) {
+						ns, pod, err := tryCompletion()
+						g.Expect(err).NotTo(gomega.HaveOccurred())
+						g.Expect(ns).To(gomega.Equal(nsName))
+						g.Expect(pod).To(gomega.BeElementOf(k8s.GetPodNames(testConfig, selector, nsName)))
+					}, eppRecoveryTimeout, time.Second).Should(gomega.Succeed())
+				}
+				expectCompletionOn(decodeSelector)
+				for _, stage := range []struct {
+					deployment string
+					selector   map[string]string
+				}{
+					{"Deployment/vllm-p", prefillSelector},
+					{"Deployment/vllm-d", decodeSelector},
+				} {
+					deployment := []string{stage.deployment}
+					ginkgo.By("Scaling " + stage.deployment + " to zero")
+					k8s.ScaleDeployment(testConfig, nsName, deployment, -1)
+					gomega.Eventually(func() []string {
+						return k8s.GetPodNames(testConfig, stage.selector, nsName)
+					}, podRemovalTimeout, time.Second).Should(gomega.BeEmpty())
+					expectCompletionOn(prefillDecodeSelector)
+
+					ginkgo.By("Restoring " + stage.deployment)
+					k8s.ScaleDeployment(testConfig, nsName, deployment, 1)
+					k8s.PodsInDeploymentsReady(testConfig, nsName, deployment)
+					expectCompletionOn(decodeSelector)
+				}
+			})
+		}))
 
 	ginkgo.When("The EPP is killed while requests are in flight", ginkgo.Ordered, testWrapper(func() {
 		ginkgo.It("should recover and resume routing after restart", func() {

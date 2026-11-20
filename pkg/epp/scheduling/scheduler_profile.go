@@ -136,6 +136,31 @@ func (p *SchedulerProfile) String() string {
 	)
 }
 
+// HasPoolSelector implements fwksched.PoolAwareSchedulerProfile.
+func (p *SchedulerProfile) HasPoolSelector() bool {
+	for _, filter := range p.filters {
+		if matcher, ok := filter.(fwksched.EndpointPoolMatcher); ok && matcher.RestrictsPool() {
+			return true
+		}
+	}
+	return false
+}
+
+// HasReadyPoolEndpoints implements fwksched.PoolAwareSchedulerProfile.
+func (p *SchedulerProfile) HasReadyPoolEndpoints(endpoints []fwksched.Endpoint) bool {
+candidate:
+	for _, endpoint := range endpoints {
+		labels := endpoint.GetMetadata().Labels
+		for _, filter := range p.filters {
+			if matcher, ok := filter.(fwksched.EndpointPoolMatcher); ok && !matcher.MatchesPoolLabels(labels) {
+				continue candidate
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // Run runs a SchedulerProfile. It invokes all the SchedulerProfile plugins for the given request in this
 // order - Filters, Scorers, Picker. After completing all, it returns the result.
 func (p *SchedulerProfile) Run(ctx context.Context, request *fwksched.InferenceRequest, candidateEndpoints []fwksched.Endpoint) (*fwksched.ProfileRunResult, error) {
