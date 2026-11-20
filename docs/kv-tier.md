@@ -19,7 +19,7 @@ Together they carry out router hints such as "pull this prefix from node X".
 How the tier relates to other projects:
 
 - **On GPU, the tier moves the data itself.** It uses TCP everywhere, and RDMA where the nodes have RDMA NICs.
-- **On TPU, TPU Sync moves the data by default.** Our tier supplies the hint protocol. It also runs hints that TPU Sync does not support yet.
+- **On TPU, TPU Sync moves the data by default.** Our tier supplies the hint protocol. A proof-of-concept connector already runs `kv.fetch` and `kv.prefetch` on TPU Sync. Our tier also runs hints that TPU Sync does not support yet.
 - **Mooncake Store is an alternative on GPU.** An engine runs one or the other. Customers already on Mooncake Store should stay on it.
 
 The code works. It is checked in on branches of a fork of [llm-d-router](https://github.com/llm-d/llm-d-router). No PR is open yet. The TPU shim is an experimental prototype, so open TPU questions do not block the GPU work.
@@ -159,7 +159,15 @@ TPU Sync's data path is faster than ours on TPU:
 - Its copies between TPU memory and host memory run at about 200 GB/s per host.
 - Its transfers between hosts reach about 350 Gbit/s with two NICs. We measured about 110 Gbit/s over TCP.
 
-We do not want a second host pool beside it. We would like two things from TPU Sync: a way to drive its transfers from router hints, and hooks for new actions.
+We do not want a second host pool beside it. We wanted two things from TPU Sync: a way to drive its transfers from router hints, and hooks for new actions.
+
+The first one works today. A proof-of-concept connector (`llmd_kv_tiering.tpusync_connector`) runs router hints on TPU Sync's store API, with no daemon on the node. A `kv.fetch` hint reads a peer's blocks into TPU memory. A `kv.prefetch` hint offers a finished request's blocks to a peer. See [On TPU Sync](#on-tpu-sync) for the numbers.
+
+TPU Sync sets three limits on the hints:
+
+- It has no caller-driven eviction. `kv.move` and `kv.evict_on_fetch` therefore copy the blocks but leave the source copy.
+- A push lands only in free blocks. A peer whose store is full refuses it.
+- Each store's host pool is private. Two engines on one host do not share blocks through it.
 
 ### Mooncake
 
@@ -260,18 +268,36 @@ A second run sent the same hint straight to A's daemon, with no request to A's e
 - **Killing the source daemon during a run of pulls caused no errors.** The request in flight recomputed. Both engines stayed up.
 - **Killing the destination daemon in the middle of a fetch failed cleanly.** That request recomputed, and so did requests during the downtime. After the daemon came back, 16 of 16 pulls were full hits.
 
+### On TPU Sync
+
+This is the first run of the proof-of-concept connector. Two Qwen3-8B replicas ran on TPU7x, one host each, with TPU Sync and no daemon. Each prompt is about 30k tokens, of which 29,952 tokens (117 blocks, 4.4 GB) are cacheable. Times are time to first token. Each row is a few single runs, not a benchmark.
+
+| Request on B | Time to first token | Blocks loaded |
+| --- | --- | --- |
+| Recompute, no hint | 0.53 s | 0 |
+| `kv.fetch` hint naming A | 0.46 to 0.50 s | 117 from A in 0.34 to 0.42 s |
+| No hint, after A's `kv.prefetch` naming B | 0.12 s | 117 from B's host memory in 0.02 s |
+| A's own HBM prefix-cache hit, for reference | 0.09 to 0.14 s | 0 |
+
+- **The pull saves little on this model.** Qwen3-8B prefills 30k tokens in about half a second on this hardware, and the pull takes about 0.4 s.
+- **Outputs were correct.** Each prompt starts with a random code and ends by asking for it. All 6 requests served from pulled or pushed blocks returned the right code. In 3 of 3 cases, B's output from pulled blocks was identical to A's output from its own prefix cache.
+- **Without a hint, B did not read from A.** The connector reads a peer only when a `kv.fetch` hint names it.
+- **The store evicts by itself.** 1,872 blocks were saved into a 1,500-block store, and no save was refused.
+
+Not tested yet: a push to a peer whose store is full, a failure during a load, concurrent traffic, and replicas that span several hosts. The image also needed changes to run the TPU Sync wheel: jax 0.11.2, flax 0.12.12, and a one-line fix in tpu-inference's batched attention kernel.
+
 ## Risks and open questions
 
-The biggest open question is how the TPU path should work with TPU Sync. Open questions on composing with TPU Sync:
+The biggest open question was how the TPU path should work with TPU Sync. Three of the six questions are now answered:
 
-1. **Hints in.** Can an engine connector ask TPU Sync to pull given blocks from a given peer, for example from a `kv.fetch` hint? Or does the controller decide all cross-host moves?
-2. **Connector version.** The `RaidenOffloadConnector` in vllm-tpu v0.27.0 imports `tpu_raiden`. It logs remote chunks without fetching them. The current wheel (`tpu_sync_jax-0.0.2.dev20261119`) ships `tpu_sync`, and its `KVCacheStore` requires a `RaidenController`. Which tpu-inference version pairs with it?
-3. **Sharing.** Can several engines on one host share a TPU Sync host pool?
-4. **Events.** Does TPU Sync publish block stored and removed events that a router could index?
+1. ✅ **Hints in.** Can an engine connector ask TPU Sync to pull given blocks from a given peer, for example from a `kv.fetch` hint? Yes. The proof-of-concept connector does it, and it also pushes on `kv.prefetch`.
+2. ✅ **Connector version.** Which tpu-inference version pairs with the current TPU Sync wheel? We found none. The `RaidenOffloadConnector` on tpu-inference `main` still imports `tpu_raiden`, and it logs remote chunks without fetching them. We wrote our own connector against the current `KVCacheStore` API.
+3. ✅ **Sharing.** Can several engines on one host share a TPU Sync host pool? No. Each store's pool is private, and two engines get separate memory segments.
+4. **Events.** Does TPU Sync publish block stored and removed events that a router could index? Its global registry answers lookups by hash. We have not found an event stream.
 5. **Secondary backend.** Is it pluggable from outside, for example for this daemon or Mooncake Store?
 6. **Extension hooks.** Can outside code add transforms on host blocks, such as compression, or new hint actions?
 
-If "Hints in" and "Extension hooks" are both possible, our TPU shim shrinks to a thin adapter onto TPU Sync.
+The TPU path can now be a thin adapter onto TPU Sync for fetch and prefetch. The daemon-based shim stays for what TPU Sync cannot do yet: deleting the source copy on a move, and sharing one pool between engines on a host.
 
 Other risks:
 
@@ -291,7 +317,7 @@ The code targets [llm-d-router](https://github.com/llm-d/llm-d-router):
 - its packages in `pkg/kvtier`
 - the engine shims in `kv_connectors/llmd_kv_tiering`
 
-It is split into five stacked branches on a fork. Each branch is one commit that passes `make lint` and its tests. No PR is open yet. Each will open after the one before it is reviewed.
+It is split into six stacked branches on a fork. Each branch is one commit that passes `make lint` and its tests. No PR is open yet. Each will open after the one before it is reviewed.
 
 | # | Branch | Contents |
 | --- | --- | --- |
@@ -300,10 +326,13 @@ It is split into five stacked branches on a fork. Each branch is one commit that
 | 3 | [`kvtier-3-tpu`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-3-tpu) | TPU shim: a reference path and a place to try new hints |
 | 4 | [`kvtier-4-rdma`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-4-rdma) | RDMA through a NIXL helper. It pushes into the pool, or into vLLM's CPU tier on GPU. |
 | 5 | [`kvtier-5-direct-prefetch`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-5-direct-prefetch) | Direct router-to-daemon call for prefetch and move, guarded by a token |
+| 6 | [`kvtier-6-tpusync`](https://github.com/kaushikmitr/llm-d-inference-scheduler/tree/kvtier-6-tpusync) | Proof-of-concept TPU connector that runs fetch and prefetch on TPU Sync |
 
 Next steps:
 
-- [ ] Resolve the TPU Sync questions above. Then build the TPU adapter onto TPU Sync, or keep the shim for hints TPU Sync cannot run.
+- [x] Show that router hints can drive TPU Sync, and build a proof-of-concept adapter (`kvtier-6-tpusync`).
+- [ ] Resolve the remaining TPU Sync questions above: events, secondary backend, extension hooks.
+- [ ] Test the TPU Sync adapter under concurrent traffic, with failures during a load, and on a larger model.
 - [ ] Agree names for new hint actions with the vLLM hint RFC authors.
 - [ ] Add authentication to the rest of the daemon's peer port. Add a router plugin that sends prefetch and move through the direct call.
 - [ ] Compare against Mooncake Store on larger clusters and under load from many sessions.
