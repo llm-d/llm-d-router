@@ -257,12 +257,15 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 }
 
 // syncedHashBudget converts MaxSyncedTokens into a hash-count cap for the
-// recent window. Unset MaxSyncedTokens uses defaultMaxSyncedTokens.
+// recent window. Unset MaxSyncedTokens uses defaultMaxSyncedTokens. The block
+// size is raised to minBlockSizeTokens, as GetBlockSize does when prompts are
+// hashed, so each hash in the budget covers the tokens it is hashed over.
 func syncedHashBudget(cfg config) int {
 	blockSize := cfg.BlockSizeTokens
 	if blockSize <= 0 {
 		blockSize = defaultBlockSizeTokens
 	}
+	blockSize = max(blockSize, minBlockSizeTokens)
 	tokens := cfg.MaxSyncedTokens
 	if tokens <= 0 {
 		tokens = defaultMaxSyncedTokens
