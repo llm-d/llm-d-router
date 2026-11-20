@@ -864,6 +864,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 		wantRawBodyUnchanged    bool   // If true, assert reqCtx.Request.RawBody is byte-identical to the marshaled reqBodyMap.
 		propagatePriority       bool   // If true, enable requestHandler.propagatePriority on the director.
 		composeFairnessIDs      bool   // If true, enable requestHandler.composeFairnessIDs on the director.
+		requestStreamUsage      bool   // If true, enable requestHandler.requestStreamUsage on the director.
+		wantUsageRequested      bool   // Asserted against returnedReqCtx.StreamUsageRequested.
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
 		wantSpanFairnessID      string // If non-empty, asserted against request_orchestration span fairness ID.
@@ -953,6 +955,119 @@ func TestDirector_HandleRequest(t *testing.T) {
 				},
 				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
 			},
+			wantRawBodyUnchanged:   true,
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "streamed chat request asks for usage when requestStreamUsage is enabled",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+				"stream":   true,
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			requestStreamUsage: true,
+			wantUsageRequested: true,
+			wantMutatedBody: map[string]any{
+				"model":          model,
+				"messages":       []any{map[string]any{"role": "user", "content": "hello"}},
+				"stream":         true,
+				"stream_options": map[string]any{"include_usage": true},
+			},
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "streamed chat request is forwarded unchanged when requestStreamUsage is disabled",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+				"stream":   true,
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			wantRawBodyUnchanged:   true,
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "non-streaming chat request is forwarded unchanged with requestStreamUsage",
+			reqBodyMap: map[string]any{
+				"model":    model,
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			requestStreamUsage:     true,
+			wantRawBodyUnchanged:   true,
+			inferenceObjectiveName: objectiveName,
+		},
+		{
+			name: "streamed chat request that asks for usage is forwarded unchanged with requestStreamUsage",
+			reqBodyMap: map[string]any{
+				"model":          model,
+				"messages":       []any{map[string]any{"role": "user", "content": "hello"}},
+				"stream":         true,
+				"stream_options": map[string]any{"include_usage": true},
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			schedulerMockSetup: func(m *mockScheduler) {
+				m.scheduleResults = defaultSuccessfulScheduleResults
+			},
+			initialTargetModelName: model,
+			wantReqCtx: &handlers.RequestContext{
+				ObjectiveKey:    objectiveName,
+				TargetModelName: model,
+				TargetPod: &fwkdl.EndpointMetadata{
+					ID:          types.NamespacedName{Namespace: "default", Name: "pod1"},
+					Address:     "192.168.1.100",
+					Port:        "8000",
+					MetricsHost: "192.168.1.100:8000",
+				},
+				TargetEndpoint: "192.168.1.100:8000,192.168.2.100:8000,192.168.4.100:8000",
+			},
+			requestStreamUsage:     true,
 			wantRawBodyUnchanged:   true,
 			inferenceObjectiveName: objectiveName,
 		},
@@ -2067,6 +2182,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 				if test.composeFairnessIDs {
 					config = config.WithComposeFairnessIDs(true)
 				}
+				if test.requestStreamUsage {
+					config = config.WithRequestStreamUsage(true)
+				}
 
 				endpointCandidates := NewDatastoreEndpointCandidates(ds)
 				director := NewDirectorWithConfig(ds, mockSched, test.mockAdmissionController, endpointCandidates, config, "")
@@ -2178,6 +2296,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 					assert.Equal(t, test.wantReqCtx.TargetEndpoint, returnedReqCtx.TargetEndpoint, "reqCtx.TargetEndpoint mismatch")
 					assert.Equal(t, test.wantReqCtx.TargetEndpointScores, returnedReqCtx.TargetEndpointScores, "reqCtx.TargetEndpointScores mismatch")
 				}
+
+				assert.Equal(t, test.wantUsageRequested, returnedReqCtx.StreamUsageRequested, "reqCtx.StreamUsageRequested mismatch")
 
 				if test.wantFairnessID != "" {
 					require.NotNil(t, returnedReqCtx.SchedulingRequest, "SchedulingRequest should be populated")

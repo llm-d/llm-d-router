@@ -96,6 +96,18 @@ type PriorityRewriter interface {
 	RewritePriority(ctx PriorityRewriteContext, payload fwkrequest.MarshalablePayload, priority int) (fwkrequest.MarshalablePayload, bool, error)
 }
 
+// StreamUsageRequester is implemented by parsers whose API reports token usage
+// in a streamed response only when the request asks for it.
+type StreamUsageRequester interface {
+	// RequestStreamUsage asks the model server to report usage in the streamed
+	// response of a request whose client did not ask for it. requestPath is the
+	// request path without its query string. Taking and returning a
+	// MarshalablePayload guarantees the result is repackageable. The returned
+	// bool reports whether the payload was changed; the EPP then removes the
+	// usage-only frame the server adds before the response reaches the client.
+	RequestStreamUsage(requestPath string, payload fwkrequest.MarshalablePayload) (fwkrequest.MarshalablePayload, bool)
+}
+
 // Claims defines the matching criteria for a parser.
 type Claims struct {
 	Paths     []string         // path patterns this parser claims (e.g., "chat/completions")

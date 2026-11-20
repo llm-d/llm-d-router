@@ -241,6 +241,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	if err := d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody); err != nil {
 		return reqCtx, err
 	}
+	// Before any DataProducer runs, so the payload is not written while a
+	// timed-out producer can still read it.
+	d.streamUsageRequestIfNeeded(reqCtx, inferenceRequestBody)
 
 	infObjective := d.getInferenceObjective(ctx, reqCtx)
 	priority := int(*infObjective.Spec.Priority)
@@ -492,6 +495,30 @@ func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.Re
 	inferenceRequestBody.Payload = rewritten
 	inferenceRequestBody.Mutated = true
 	return nil
+}
+
+// streamUsageRequestIfNeeded asks for usage in a streamed response whose client
+// did not ask for it, when requestHandler.requestStreamUsage is enabled, and
+// marks the request so the usage-only frame is removed from the response.
+func (d *Director) streamUsageRequestIfNeeded(reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) {
+	if !d.requestControlPlugins.requestStreamUsage {
+		return
+	}
+	requester, ok := reqCtx.Parser.(fwkrh.StreamUsageRequester)
+	if !ok {
+		return
+	}
+	payload, ok := inferenceRequestBody.Payload.(fwkrequest.MarshalablePayload)
+	if !ok {
+		return
+	}
+	requested, changed := requester.RequestStreamUsage(fwkrequest.GetRequestPath(reqCtx.Request.Headers), payload)
+	if !changed {
+		return
+	}
+	inferenceRequestBody.Payload = requested
+	inferenceRequestBody.Mutated = true
+	reqCtx.StreamUsageRequested = true
 }
 
 func (d *Director) priorityRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrequest.InferenceRequestBody) error {
