@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
 	"github.com/llm-d/llm-d-router/pkg/common/clamp"
@@ -492,11 +493,14 @@ func (fr *FlowRegistry) gcFlows() {
 
 		// Prune the flows' metric series. Fairness IDs come from client input, so without pruning the
 		// per-flow metric vectors grow monotonically with every fairness ID ever observed. Done after
-		// cleanupFlowResources and outside fr.mu: DeletePartialMatch scans whole metric vectors, which
-		// must not run under the registry write lock.
-		for _, key := range keysToClean {
-			metrics.DeleteFlowControlFlowSeries(key.ID, strconv.Itoa(key.Priority))
-		}
+		// cleanupFlowResources, on a separate goroutine: DeletePartialMatch scans whole metric vectors,
+		// which must not run under the registry write lock or on the Processor loop that runs GC.
+		go func() {
+			defer utilruntime.HandleCrashWithLogger(fr.logger)
+			for _, key := range keysToClean {
+				metrics.DeleteFlowControlFlowSeries(key.ID, strconv.Itoa(key.Priority))
+			}
+		}()
 	}
 }
 
