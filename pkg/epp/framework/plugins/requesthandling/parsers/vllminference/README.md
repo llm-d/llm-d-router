@@ -17,3 +17,4 @@
 * The parser extracts `kv.cache_salt`, `stopping.max_new_tokens`, `PreprocessedMediaFeatures` (`identifier`, `mm_hash`, `offset`, `length`, `modality`), and raw `MediaItem.uuid` values for cache scoring.
 * A request with `lora_name` set is routed and scored by the adapter name. A model rewrite targets `lora_name` and leaves `GenerateRequest.model` as the base model. A rewrite to the base model clears `lora_name`.
 * A body with bytes after the single gRPC frame returns `400`.
+* The parser drops a client-supplied `kv_hints` (`GenerateRequest` field 17). A hint names a peer the engine connects to, so only the EPP may set it after scheduling ([#4194](https://github.com/llm-d/llm-d-router/issues/4194)).

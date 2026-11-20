@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/testing/protocmp"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
@@ -602,6 +603,66 @@ func TestVllmInferenceParser_RewritePriority(t *testing.T) {
 
 		_, _, err = parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrequest.PayloadBytes(grpctest.FramePayload(t, []byte{0x12, 0x05, 'a'})), 4)
 		require.ErrorIs(t, err, vllmwire.ErrMalformed)
+	})
+}
+
+func TestVllmInferenceParser_ClientKVHints(t *testing.T) {
+	parser := NewVllmInferenceParser()
+	headers := map[string]string{":path": vllmpb.Inference_GenerateStream_FullMethodName}
+	base := &vllmpb.GenerateRequest{
+		Model:  "llama",
+		Prompt: &vllmpb.GenerateRequest_Text{Text: "hello"},
+	}
+	withClientHints := proto.Clone(base).(*vllmpb.GenerateRequest)
+	withClientHints.KvHints = &vllmpb.KVHintsEnvelope{
+		MessageId: "client",
+		Actions:   []*vllmpb.KVHintAction{{ActionType: "kv.fetch"}},
+	}
+
+	t.Run("dropped from the forwarded body", func(t *testing.T) {
+		res, err := parser.ParseRequest(context.Background(), grpctest.Frame(t, withClientHints), headers)
+		require.NoError(t, err)
+		require.True(t, res.Body.Mutated)
+		wire, ok := res.Body.WirePayload().(fwkrequest.PayloadBytes)
+		require.True(t, ok)
+		var forwarded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, wire, &forwarded)
+		if diff := cmp.Diff(base, &forwarded, protocmp.Transform()); diff != "" {
+			t.Fatalf("forwarded request mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("request without hints is forwarded as received", func(t *testing.T) {
+		in := grpctest.Frame(t, base)
+		res, err := parser.ParseRequest(context.Background(), in, headers)
+		require.NoError(t, err)
+		require.False(t, res.Body.Mutated)
+		out, ok := res.Body.Payload.(fwkrequest.PayloadBytes)
+		require.True(t, ok)
+		require.Same(t, &in[0], &out[0])
+	})
+
+	t.Run("hint written after scheduling survives the priority rewrite", func(t *testing.T) {
+		res, err := parser.ParseRequest(context.Background(), grpctest.Frame(t, withClientHints), headers)
+		require.NoError(t, err)
+		eppHints := &vllmpb.KVHintsEnvelope{
+			MessageId: "epp",
+			Actions:   []*vllmpb.KVHintAction{{ActionType: "kv.fetch", ActionId: "fetch-0"}},
+		}
+		hinted, err := vllmwire.RewriteKVHints(res.Body.Payload.(fwkrequest.PayloadBytes), mustMarshal(t, eppHints))
+		require.NoError(t, err)
+		got, mutated, err := parser.RewritePriority(fwkrh.PriorityRewriteContext{}, fwkrequest.PayloadBytes(hinted), 3)
+		require.NoError(t, err)
+		require.True(t, mutated)
+
+		want := proto.Clone(base).(*vllmpb.GenerateRequest)
+		want.KvHints = eppHints
+		want.Priority = -3
+		var forwarded vllmpb.GenerateRequest
+		grpctest.Unmarshal(t, got.(fwkrequest.PayloadBytes), &forwarded)
+		if diff := cmp.Diff(want, &forwarded, protocmp.Transform()); diff != "" {
+			t.Fatalf("forwarded request mismatch (-want +got):\n%s", diff)
+		}
 	})
 }
 
