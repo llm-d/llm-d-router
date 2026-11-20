@@ -232,6 +232,29 @@ func TestPinFairnessIDSkipsOverflowValue(t *testing.T) {
 	require.True(t, overflow)
 }
 
+// PinFairnessID records only IDs the cap can emit as their own label value.
+func TestPinFairnessIDIgnoresUnemittableIDs(t *testing.T) {
+	resetFairnessPins(t)
+
+	SetFairnessIDLabelLimit(1)
+	long := strings.Repeat("a", MaxLabelValueLength+1)
+	for _, id := range []string{"", OverflowValue, long, "bad-\xff"} {
+		PinFairnessID(id)
+	}
+	require.Equal(t, 0, PinnedFairnessIDCount())
+	require.Equal(t, OverflowValue, BoundFairnessID(long))
+}
+
+// PinnedFairnessIDCount counts each pinned ID once.
+func TestPinnedFairnessIDCountCountsDistinctIDs(t *testing.T) {
+	resetFairnessPins(t)
+
+	PinFairnessID("a")
+	PinFairnessID("a")
+	PinFairnessID("b")
+	require.Equal(t, 2, PinnedFairnessIDCount())
+}
+
 // resetFairnessPins drops the pins a test made, which otherwise last for the
 // rest of the test binary.
 func resetFairnessPins(t *testing.T) {

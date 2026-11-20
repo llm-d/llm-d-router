@@ -82,7 +82,7 @@ func (b *BoundedLabel) BoundWithOverflow(v string) (string, bool) {
 	if v == "" {
 		return v, false
 	}
-	if len(v) > MaxLabelValueLength || !utf8.ValidString(v) {
+	if !validLabelValue(v) {
 		return OverflowValue, true
 	}
 	b.mu.RLock()
@@ -107,6 +107,11 @@ func (b *BoundedLabel) BoundWithOverflow(v string) (string, bool) {
 	}
 	b.seen[v] = struct{}{}
 	return v, false
+}
+
+// validLabelValue reports whether v fits Prometheus and the length cap.
+func validLabelValue(v string) bool {
+	return len(v) <= MaxLabelValueLength && utf8.ValidString(v)
 }
 
 // Pin marks v as always admitted without consuming a cap slot. Pins are never
@@ -177,10 +182,10 @@ func BoundFairnessIDWithOverflow(fairnessID string) (string, bool) {
 // PinFairnessID keeps an operator-configured fairness ID on its own label value
 // after the cap fills, unless the limit is 0. An ID pinned before it is first
 // seen takes no cap slot. The pin lasts for the life of the process.
-// OverflowValue is never pinned, so an ID with that name still counts as
-// overflow once the cap is full.
+// It ignores "", OverflowValue, and IDs longer than MaxLabelValueLength or not
+// valid UTF-8, since the cap never emits those as their own label value.
 func PinFairnessID(fairnessID string) {
-	if fairnessID == OverflowValue {
+	if fairnessID == "" || fairnessID == OverflowValue || !validLabelValue(fairnessID) {
 		return
 	}
 	fairnessPinsMu.Lock()
@@ -189,4 +194,11 @@ func PinFairnessID(fairnessID string) {
 	if limiter := fairnessLimiter.Load(); limiter.limit > 0 {
 		limiter.Pin(fairnessID)
 	}
+}
+
+// PinnedFairnessIDCount returns the number of distinct IDs recorded by PinFairnessID.
+func PinnedFairnessIDCount() int {
+	fairnessPinsMu.Lock()
+	defer fairnessPinsMu.Unlock()
+	return len(fairnessPins)
 }

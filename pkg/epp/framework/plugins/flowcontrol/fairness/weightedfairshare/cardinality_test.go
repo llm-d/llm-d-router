@@ -45,19 +45,20 @@ func TestFlowGauges_RespectFairnessIDLabelLimit(t *testing.T) {
 
 // An ID the operator gave a weight keeps its series when client-chosen IDs
 // have already filled the cap. The limit is set after the policy is built, as
-// at startup. The pin outlives the test, so cap tests here use unweighted IDs.
+// at startup. The pin outlives the test, so cap tests here use unweighted IDs,
+// and no other test pins weighted-past-cap.
 func TestFlowGauges_WeightedIDsKeepSeriesPastLimit(t *testing.T) {
 	t.Cleanup(func() { metricsutil.SetFairnessIDLabelLimit(metricsutil.DefaultFairnessIDLabelLimit) })
 
-	p := newPolicy(t, `{"flowWeights":{"team-a":7}}`)
+	p := newPolicy(t, `{"flowWeights":{"weighted-past-cap":7}}`)
 	metricsutil.SetFairnessIDLabelLimit(1)
-	for _, id := range []string{"first", "second", "team-a"} {
+	for _, id := range []string{"first", "second", "weighted-past-cap"} {
 		complete(p, id, 0, 100, 0)
 	}
 
-	assert.Equal(t, 2, testutil.CollectAndCount(p.vserviceGauge), "first and team-a; second is past the cap")
+	assert.Equal(t, 2, testutil.CollectAndCount(p.vserviceGauge), "first and weighted-past-cap; second is past the cap")
 	assert.Equal(t, 2, testutil.CollectAndCount(p.weightGauge))
-	assert.Equal(t, 7.0, testutil.ToFloat64(p.weightGauge.WithLabelValues("team-a", "0")))
+	assert.Equal(t, 7.0, testutil.ToFloat64(p.weightGauge.WithLabelValues("weighted-past-cap", "0")))
 }
 
 // A limit of 0 turns per-ID series off, weighted IDs included.
