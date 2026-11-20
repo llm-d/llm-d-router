@@ -24,7 +24,6 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
@@ -76,13 +75,6 @@ var (
 	_ plugin.ProducerPlugin   = &PrefixBasedPDDecider{}
 	_ prefixMatchInfoConsumer = &PrefixBasedPDDecider{}
 )
-
-// errCondDecodeCacheMiss is the 412 returned by the conditional-decode gate
-// when the chosen decoder cannot satisfy the request from its KV cache.
-var errCondDecodeCacheMiss = errcommon.Error{
-	Code: errcommon.PreconditionFailed,
-	Msg:  "no decode worker has the requested KV cache",
-}
 
 // remotePrefillDecisionAttributeKey memoizes the needsRemotePrefill outcome on
 // the request so PreRequest can reuse the decision that disaggregate computed
@@ -160,12 +152,13 @@ func (d *PrefixBasedPDDecider) WithName(name string) *PrefixBasedPDDecider {
 }
 
 // Produces declares the request attributes the plugin writes: the
-// conditional-decode ownership marker the director reads to decide whether the
-// "Prefer: if-available" header was evaluated, and the memoized remote-prefill
-// outcome this plugin reads back in PreRequest.
+// conditional-decode decision the director reads to decide whether the
+// "Prefer: if-available" header was evaluated and whether to answer a cache
+// miss with 204, and the memoized remote-prefill outcome this plugin reads
+// back in PreRequest.
 func (d *PrefixBasedPDDecider) Produces() map[plugin.DataKey]any {
 	return map[plugin.DataKey]any{
-		fwkrh.ConditionalDecodeHandledAttributeKey: false,
+		fwkrh.ConditionalDecodeHandledAttributeKey: fwkrh.ConditionalDecodeForward,
 		remotePrefillDecisionAttributeKey:          remotePrefillDecision{},
 	}
 }
@@ -184,43 +177,47 @@ func (d *PrefixBasedPDDecider) Consumes() plugin.DataDependencies {
 	}
 }
 
-// PreRequest gates requests carrying "Prefer: if-available". It returns HTTP
-// 412 only when the gate legitimately fires — the chosen decode endpoint's
-// non-cached suffix meets NonCachedTokens — or when the scheduling result
-// has no primary decode endpoint (defensive). Any error evaluating the gate
-// (missing tokenization, missing/wrong-typed cache attribute) is logged and
-// the request is forwarded, matching disaggregate's soft-fail.
-// Requests without the header are a no-op.
+// PreRequest gates requests carrying "Prefer: if-available". It claims the
+// header for the director's default-deny check with the gate decision, even
+// when that decision is to forward. Requests without the header are a no-op.
 func (d *PrefixBasedPDDecider) PreRequest(ctx context.Context, request *scheduling.InferenceRequest,
 	schedulingResult *scheduling.SchedulingResult) error {
 	if request == nil || !routing.IsConditionalDecode(request.Headers) {
 		return nil
 	}
-	// Claim ownership of the header for the director's default-deny check:
-	// this plugin evaluated the preference, even if its own decision is to
-	// forward (below).
-	request.PutAttribute(fwkrh.ConditionalDecodeHandledAttributeKey, true)
+	request.PutAttribute(fwkrh.ConditionalDecodeHandledAttributeKey, d.conditionalDecodeDecision(ctx, request, schedulingResult))
+	return nil
+}
+
+// conditionalDecodeDecision reports a cache miss, which the director answers
+// with HTTP 204, only when the gate legitimately fires (the chosen decode
+// endpoint's non-cached suffix meets NonCachedTokens) or when the scheduling
+// result has no primary decode endpoint (defensive). Any error evaluating the
+// gate (missing tokenization, missing/wrong-typed cache attribute) is logged
+// and the request is forwarded, matching disaggregate's soft-fail.
+func (d *PrefixBasedPDDecider) conditionalDecodeDecision(ctx context.Context, request *scheduling.InferenceRequest,
+	schedulingResult *scheduling.SchedulingResult) fwkrh.ConditionalDecodeDecision {
 	if d.config.NonCachedTokens == 0 {
-		return nil
+		return fwkrh.ConditionalDecodeForward
 	}
 	logger := log.FromContext(ctx)
 	debugLogger := logger.V(logging.DEBUG)
 	endpoint := schedulingResult.PrimaryEndpoint()
 	if endpoint == nil {
-		debugLogger.Info("conditional-decode: no primary decode endpoint, rejecting")
-		return errCondDecodeCacheMiss
+		debugLogger.Info("conditional-decode: no primary decode endpoint, not forwarding")
+		return fwkrh.ConditionalDecodeMiss
 	}
 	needs, err := d.needsRemotePrefill(ctx, request, endpoint)
 	if err != nil {
 		logger.Error(err, "conditional-decode: error evaluating gate, forwarding")
-		return nil
+		return fwkrh.ConditionalDecodeForward
 	}
 	if needs {
-		debugLogger.Info("conditional-decode: non-cached suffix at or above threshold, rejecting")
-		return errCondDecodeCacheMiss
+		debugLogger.Info("conditional-decode: non-cached suffix at or above threshold, not forwarding")
+		return fwkrh.ConditionalDecodeMiss
 	}
 	debugLogger.Info("conditional-decode: forwarding")
-	return nil
+	return fwkrh.ConditionalDecodeForward
 }
 
 // disaggregate reports whether remote prefill should run for this request.

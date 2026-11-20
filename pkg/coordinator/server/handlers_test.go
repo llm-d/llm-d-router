@@ -657,7 +657,7 @@ func TestHandleInference_StripsClientSuppliedInternalHeaders(t *testing.T) {
 	// alone injects (copied from the prefill response, set to select a profile,
 	// or set on the conditional-decode probe); a client-supplied value must
 	// never survive into OriginalHeaders, since a later step trusts it as
-	// coordinator-generated and EPP answers a client Prefer: if-available with 412.
+	// coordinator-generated and EPP can answer a client Prefer: if-available without forwarding it.
 	step := &capturingStep{}
 	p := pipeline.New([]pipeline.Step{step})
 	srv, err := New(config.ServerConfig{}, p, gateway.NewWithTransport(&http.Transport{}, stubGatewayURL))

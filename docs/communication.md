@@ -49,7 +49,7 @@ Client Request (/v1/chat/completions, /v1/responses, /v1/messages, /v1/completio
     |         (skipped for /v1/completions with token array prompt)
     v
 [conditional-decode] - Attempts decode with token_ids;
-    |                     if 412, continues pipeline; otherwise returns response
+    |                     if 204, continues pipeline; otherwise returns response
     |
     |--- /v1/completions, or /v1/chat/completions, /v1/responses, or /v1/messages without multi media content --> skip encode, go to [prefill]
     |
@@ -496,9 +496,9 @@ Identical to [2.A](#2a-v1chatcompletionsrender).
 
 The coordinator attempts an early decode immediately after rendering. This allows the decode worker to serve the request directly if it already has the KV cache available (e.g., from a previous prefill), skipping the encode and prefill stages entirely.
 
-The coordinator adds the `Prefer: if-available` HTTP header to signal that the decode worker should only proceed if the KV cache is already available. If it responds with 412 Precondition Failed, the pipeline continues as normal.
+The coordinator adds the `Prefer: if-available` HTTP header to signal that the decode worker should only proceed if the KV cache is already available. If the router answers 204 No Content, the pipeline continues as normal.
 
-The `prefix-based-pd-decider` plugin enforces the 412 when configured; deployments without a claiming gate plugin still get 412 by default (see [disaggregation.md](disaggregation.md#prefix-based-pd-decider)).
+The `prefix-based-pd-decider` plugin answers the 204 when configured; deployments without a claiming gate plugin get 412 Precondition Failed by default, which the coordinator also treats as a cache miss (see [disaggregation.md](disaggregation.md#prefix-based-pd-decider)).
 
 ### Request (/v1/completions)
 
@@ -594,12 +594,13 @@ Like chat completions, the body is sent unchanged:
 
 | Status Code | Action |
 |-------------|--------|
-| 412 Precondition Failed | KV cache not available. Pipeline continues with encode/prefill/decode as normal. |
-| 2xx (success) | Response is propagated directly to the client. Pipeline processing stops. |
+| 204 No Content | KV cache not available. Pipeline continues with encode/prefill/decode as normal. |
+| 412 Precondition Failed | No conditional-decode gate plugin is configured on the router. Handled as a cache miss. |
+| Other 2xx (success) | Response is propagated directly to the client. Pipeline processing stops. |
 | Any other error | Generic error response is propagated to the client. Pipeline processing stops. |
 
 > [!NOTE]
-> The coordinator captures the 412 response headers listed in `forward_response_headers` and sends them on the later phases. Hints in the 412 body are not consumed.
+> The coordinator captures the cache-miss response headers listed in `forward_response_headers` and sends them on the later phases. A 204 has no body, and the 412 body is not consumed.
 
 ---
 

@@ -69,7 +69,7 @@ The `error_code` label on `request_error_total` and `step_errors_total` uses six
 - **`prompt_token_mismatch`**: Recorded on `step_errors_total` only, by the decode and conditional-decode steps with `prompt_token_parity: error`, when the worker's prompt token count differed from the rendered one. The request itself succeeds; see `prompt_token_mismatch_total`.
 
 **Key behaviors:**
-- The conditional-decode probe's HTTP 412 (the worker declined to serve it) is handled internally and is **not** an error. It is tracked separately by [`conditional_decode_probes_total`](#conditional_decode_probes_total-counter).
+- The conditional-decode probe's cache-miss answer (HTTP 204, or HTTP 412 from a router without a gate plugin) is handled internally and is **not** an error. It is tracked separately by [`conditional_decode_probes_total`](#conditional_decode_probes_total-counter).
 - A client disconnect is not counted in `request_error_total` or `step_errors_total`. A step error that does not derive from the disconnect, such as an upstream status received before the client left, keeps its own `error_code`.
 - An error response that a pipeline step writes to the client itself counts in `request_error_total` and `step_errors_total`. The `async-broker` step does this for its validation 400s (`bad_request`), a failed enqueue (503, `upstream_transport`), the hold deadline (504, `upstream_5xx`), and every error status it relays from a stored result (`upstream_4xx` / `upstream_5xx` by band, including the 499 it writes for a cancelled result).
 - `upstream_4xx`, `upstream_5xx` and `upstream_transport` are recorded for every step that calls out, including `decode` and `conditional-decode`: their reverse proxy captures the upstream status in `ModifyResponse` and transport failures in `ErrorHandler`, and both steps translate a 4xx/5xx or transport error into an `UpstreamStreamedError` before any bytes are forwarded. A transport failure carries no status code, so it classifies as `upstream_transport` instead of by status band. What stays uncountable is a failure that surfaces after streaming has begun, since the 200 and a partial body are already on the wire.
@@ -137,13 +137,13 @@ Recorded by every step that calls out: render to the renderer service, replace-m
 
 #### `execution_path_total` (Counter)
 *   **Labels:** `model_name`, `path` (`decode-only`, `prefill-decode`, `encode-prefill-decode`)
-*   **Description:** Records which set of disaggregation phases actually ran for a client request. `encode-decode` is intentionally unreachable because encode implies prefill in the coordinator. A conditional-decode probe counts as the decode phase unless the worker answers 412 or the client abandons the probe before the worker answers; in those cases a path is recorded only once the decode step starts.
+*   **Description:** Records which set of disaggregation phases actually ran for a client request. `encode-decode` is intentionally unreachable because encode implies prefill in the coordinator. A conditional-decode probe counts as the decode phase unless the probe is a cache miss or the client abandons the probe before the worker answers; in those cases a path is recorded only once the decode step starts.
 
 #### `conditional_decode_probes_total` (Counter)
 *   **Labels:** `result` (`served`, `deferred`, `error`, or `transport_error`)
-*   **Description:** Counts conditional-decode probes by the worker's answer. The coordinator sees the status code, not the reason behind it.
+*   **Description:** Counts conditional-decode probes by the answer to the probe. The coordinator sees the status code, not the reason behind it.
     *   `served`: The worker handled the request itself, whether because the prompt was cached or too short to disaggregate. The pipeline stops early (`decode-only`).
-    *   `deferred`: The worker returned HTTP 412. The pipeline continues to encode/prefill/decode.
+    *   `deferred`: The router answered HTTP 204, or HTTP 412 when it has no conditional-decode gate plugin. The pipeline continues to encode/prefill/decode.
     *   `error`: Any other 4xx/5xx status. The step returns an `UpstreamStreamedError` carrying that status, and the request is classified as `upstream_4xx` or `upstream_5xx`.
     *   `transport_error`: No response arrived (connection refused, timeout, TCP reset). The step returns an `UpstreamStreamedError` with no status code, and the request is classified as `upstream_transport`.
 *   A probe the client abandons before the worker answers records no result.

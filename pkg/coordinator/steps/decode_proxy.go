@@ -40,7 +40,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/coordinator/pipeline"
 )
 
-// errCacheMiss signals that the conditional-decode cache probe returned 412.
+// errCacheMiss signals that the conditional-decode cache probe was a miss.
 // It flows from the proxy's ModifyResponse to its ErrorHandler, which swallows
 // it so the miss can fall through to the rest of the pipeline.
 var errCacheMiss = errors.New("cache miss")
@@ -111,7 +111,7 @@ type decodeOutcome struct {
 // newDecodeProxy builds the streaming reverse proxy for a decode-phase request
 // and a decodeOutcome the caller reads after ServeHTTP returns. modifyResponse,
 // when non-nil, inspects each upstream response (the conditional cache probe
-// uses it to detect a 412) and runs after the outcome captures the status.
+// uses it to detect a miss) and runs after the outcome captures the status.
 // Transport errors are logged and answered 502, except errCacheMiss, which is
 // swallowed so the miss falls through. A round trip ended by the client's
 // request context is recorded on the outcome and answered with nothing.

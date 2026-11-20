@@ -42,12 +42,25 @@ const (
 const RequestHandlingDataProducerExtensionPoint = "RequestHandlingDataProducer"
 
 // ConditionalDecodeHandledAttributeKey is the request-attribute key a
-// PreRequest plugin sets when it has evaluated the "Prefer: if-available"
-// preference for a request. The director consults this after PreRequest
-// plugins run: a conditional-decode request that no plugin claimed is
-// rejected with 412 so misconfigurations (gate plugin forgotten) surface as a
-// fast fallback rather than a silent forward.
+// PreRequest plugin sets, to a ConditionalDecodeDecision, when it has
+// evaluated the "Prefer: if-available" preference for a request. The director
+// consults this after PreRequest plugins run: a conditional-decode request
+// that no plugin claimed is rejected with 412 so misconfigurations (gate
+// plugin forgotten) surface as a fast fallback rather than a silent forward.
+// A claimed request is forwarded unless the value is ConditionalDecodeMiss.
 var ConditionalDecodeHandledAttributeKey = plugin.NewDataKey("conditional-decode.handled", "")
+
+// ConditionalDecodeDecision is the value of ConditionalDecodeHandledAttributeKey.
+type ConditionalDecodeDecision string
+
+const (
+	// ConditionalDecodeForward forwards the request to the chosen decode worker.
+	ConditionalDecodeForward ConditionalDecodeDecision = "forward"
+	// ConditionalDecodeMiss reports that no decode worker can serve the request
+	// from its KV cache. The director answers the caller with 204 and forwards
+	// nothing.
+	ConditionalDecodeMiss ConditionalDecodeDecision = "miss"
+)
 
 // Screener performs preliminary filtering of located endpoints after
 // DataProducerPhaseRequestHandling producers and before DataProducerPhaseScheduling
