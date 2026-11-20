@@ -308,8 +308,8 @@ func (h *Handler) Consumes() plugin.DataDependencies {
 	}
 	deciders := []deciderPlugin{h.pdDecider, h.encodeDecider}
 	for _, decider := range deciders {
-		if consumer, ok := decider.(plugin.ConsumerPlugin); ok {
-			for key, witness := range consumer.Consumes().Required {
+		if deps, ok := deciderConsumes(decider); ok {
+			for key, witness := range deps.Required {
 				consumed.Required[key] = witness
 			}
 		}
@@ -317,8 +317,8 @@ func (h *Handler) Consumes() plugin.DataDependencies {
 	// A key one decider requires stays required when the other lists it as
 	// optional.
 	for _, decider := range deciders {
-		if consumer, ok := decider.(plugin.ConsumerPlugin); ok {
-			for key, witness := range consumer.Consumes().Optional {
+		if deps, ok := deciderConsumes(decider); ok {
+			for key, witness := range deps.Optional {
 				if _, required := consumed.Required[key]; !required {
 					consumed.Optional[key] = witness
 				}
