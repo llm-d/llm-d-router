@@ -96,9 +96,10 @@ const (
 
 // compile-time type validation
 var (
-	_ fwkrh.Parser            = &OpenAIParser{}
-	_ fwkrh.ModelNameRewriter = &OpenAIParser{}
-	_ fwkrh.PriorityRewriter  = &OpenAIParser{}
+	_ fwkrh.Parser               = &OpenAIParser{}
+	_ fwkrh.ModelNameRewriter    = &OpenAIParser{}
+	_ fwkrh.PriorityRewriter     = &OpenAIParser{}
+	_ fwkrh.StreamUsageRequester = &OpenAIParser{}
 )
 
 // OpenAIParser implements the fwkrh.Parser interface for OpenAI API
@@ -247,6 +248,29 @@ func (p *OpenAIParser) RewriteModelName(payload request.MarshalablePayload, mode
 	}
 	m[reqcommon.FieldModel] = model
 	return m, nil
+}
+
+// RequestStreamUsage sets stream_options.include_usage on a streamed chat
+// completions or completions request that does not ask for usage. The director
+// only calls this when requestHandler.requestStreamUsage is enabled.
+func (p *OpenAIParser) RequestStreamUsage(requestPath string, payload request.MarshalablePayload) (request.MarshalablePayload, bool) {
+	m, ok := payload.(request.PayloadMap)
+	if !ok || request.MatchPathSuffix(requestPath, chatCompletionsAPI+"/render") ||
+		request.MatchPathSuffix(requestPath, completionsAPI+"/render") {
+		return payload, false
+	}
+	var apiType reqcommon.APIType
+	api := determineAPITypeFromPath(requestPath)
+	switch api {
+	case chatCompletionsAPI:
+		apiType = reqcommon.APITypeChatCompletions
+	case completionsAPI:
+		apiType = reqcommon.APITypeCompletions
+	default:
+		return payload, false
+	}
+	injected, _ := reqcommon.InjectIncludeUsage(m, isStreamingRequest(api, m), apiType)
+	return m, injected
 }
 
 // RewritePriority removes any client-supplied priority from the

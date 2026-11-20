@@ -35,6 +35,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	"github.com/llm-d/llm-d-router/pkg/common/usage"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -221,6 +222,96 @@ func dropSSELine(ctx context.Context, reqCtx *RequestContext, endOfStream bool) 
 
 func logSSELineDrop(ctx context.Context) {
 	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized SSE line from response parsing", "limit", maxSSELineBytes)
+}
+
+// maxUsageFrameBytes caps the partial line held back while a requested usage
+// frame is removed. A usage-only frame is a few hundred bytes, so a longer line
+// is forwarded as it arrives rather than when its end does.
+const maxUsageFrameBytes = 64 << 10
+
+// dropRequestedUsageFrame returns the part of a streamed response chunk the
+// client receives. When the director requested usage the client did not ask
+// for, the usage-only frame the model server adds is removed.
+func (r *RequestContext) dropRequestedUsageFrame(chunk []byte, endOfStream bool) []byte {
+	if !r.StreamUsageRequested || !isEventStream(r.Response.Headers[reqcommon.HeaderContentType]) {
+		return chunk
+	}
+	return r.usageFrames.filter(chunk, endOfStream)
+}
+
+// usageFrameFilter removes the usage-only frame from a chat or completions
+// event stream, together with the blank line that ends its event. ext_proc
+// chunks split SSE lines at any byte, so a partial last line is held until the
+// rest of it arrives.
+type usageFrameFilter struct {
+	// carry is the partial last line of the previous chunk, not yet forwarded.
+	carry []byte
+	// passing is set while the rest of a line forwarded without a check arrives.
+	passing bool
+	// dropBlank is set after a dropped frame until the next line.
+	dropBlank bool
+}
+
+// filter returns the bytes of chunk to forward. It copies only when a line is
+// dropped; otherwise the result is a prefix of chunk, or of the held line
+// followed by chunk.
+func (f *usageFrameFilter) filter(chunk []byte, endOfStream bool) []byte {
+	data := chunk
+	if len(f.carry) > 0 {
+		data = append(f.carry, data...)
+		f.carry = nil
+	}
+	var kept []byte
+	dropped := false
+	pos := 0
+	for pos < len(data) {
+		rest := data[pos:]
+		n := bytes.IndexByte(rest, '\n') + 1
+		whole := n > 0
+		if !whole {
+			if !endOfStream && !f.passing && len(rest) <= maxUsageFrameBytes {
+				f.carry = bytes.Clone(rest)
+				break
+			}
+			n = len(rest)
+		}
+		line := rest[:n]
+		drop := f.drop(line)
+		if !whole {
+			f.passing = !endOfStream
+		}
+		if drop && !dropped {
+			kept = append(make([]byte, 0, len(data)), data[:pos]...)
+			dropped = true
+		} else if !drop && dropped {
+			kept = append(kept, line...)
+		}
+		pos += n
+	}
+	if dropped {
+		return kept
+	}
+	return data[:pos]
+}
+
+// drop reports whether line is removed: the usage-only frame, or the blank
+// line right after one.
+func (f *usageFrameFilter) drop(line []byte) bool {
+	if f.passing {
+		f.passing = false
+		return false
+	}
+	if f.dropBlank {
+		f.dropBlank = false
+		if len(bytes.TrimRight(line, "\r\n")) == 0 {
+			return true
+		}
+	}
+	if usage.UsageOnlyFrame(line) {
+		f.dropBlank = true
+		return true
+	}
+	return false
 }
 
 // maxGRPCFrameBytes caps one buffered gRPC message payload during response parsing.

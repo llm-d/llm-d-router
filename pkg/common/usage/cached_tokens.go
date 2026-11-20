@@ -538,6 +538,25 @@ func hasEmptyChoices(response map[string]json.RawMessage) bool {
 	return json.Unmarshal(raw, &choices) == nil && len(choices) == 0
 }
 
+// UsageOnlyFrame reports whether an SSE line is the trailing usage frame of a
+// chat or completions stream: a data line with a top-level usage block beside
+// an empty choices list. A trailing line ending is ignored.
+func UsageOnlyFrame(line []byte) bool {
+	data, ok := bytes.CutPrefix(bytes.TrimRight(line, "\r\n"), []byte(reqcommon.SSEDataPrefix))
+	if !ok || !bytes.Contains(data, usageKey) {
+		return false
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(data, &response); err != nil {
+		return false
+	}
+	var block map[string]any
+	if err := json.Unmarshal(response[reqcommon.FieldUsage], &block); err != nil || block == nil {
+		return false
+	}
+	return hasEmptyChoices(response)
+}
+
 func setCachedTokens(block map[string]any, cachedTokens int) bool {
 	if block == nil {
 		return false

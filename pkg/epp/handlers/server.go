@@ -162,6 +162,10 @@ type RequestContext struct {
 	StreamedEvents           int
 	// Completion is set at end of stream from a response with a 200 status.
 	Completion *fwkrh.Completion
+	// StreamUsageRequested is set when the director asked the model server for
+	// usage the client did not ask for; the usage-only frame is then removed
+	// from the streamed response before it reaches the client.
+	StreamUsageRequested bool
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool
 	Request             *Request
@@ -200,6 +204,9 @@ type RequestContext struct {
 	// sseLineCarry is the partial last SSE line of the previous response chunk.
 	sseLineCarry      []byte
 	sseLineDiscarding bool
+
+	// usageFrames removes the usage-only frame when StreamUsageRequested is set.
+	usageFrames usageFrameFilter
 
 	// grpcFrameCarry holds trailing bytes of an incomplete gRPC frame across response chunks.
 	grpcFrameCarry         []byte
@@ -895,8 +902,9 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 				reqCtx.observeToolCallingResponse(upstreamChunk, endOfStream, false, span)
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
+				chunk = reqCtx.dropRequestedUsageFrame(upstreamChunk, endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
-				chunk, _ = rewriteModelName(upstreamChunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+				chunk, _ = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
@@ -915,6 +923,14 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.TerminationCause = cause
 			}
 			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false, span)
+			// Trailers end a stream whose last body chunk had no end of stream, so
+			// the line dropRequestedUsageFrame still holds is forwarded here.
+			if reqCtx.modelServerStreaming {
+				if held := reqCtx.dropRequestedUsageFrame(nil, true); len(held) > 0 {
+					held, _ = rewriteModelName(held, reqCtx.TargetModelName, reqCtx.IncomingModelName)
+					reqCtx.respBodyResp = generateResponseBodyResponses(held, false, reqCtx.Response.DynamicMetadata)
+				}
+			}
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
 					ResponseTrailers: &extProcPb.TrailersResponse{},
