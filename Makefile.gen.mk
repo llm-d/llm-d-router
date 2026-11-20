@@ -4,7 +4,7 @@
 GIE_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api-inference-extension)
 GATEWAY_API_VERSION ?= $(shell go list -m -f '{{.Version}}' sigs.k8s.io/gateway-api)
 # Pinned vllm-project/vllm ref (tag or commit SHA) for upstream vLLM .proto schemas (rust/proto).
-VLLM_REF ?= 2fb5111bbac7a2e31c0c19c1eb0aa01df5ecb664
+VLLM_REF ?= e67fb98ad39a728a0dcccb1ed59dee3712baa943
 # Pinned sgl-project/sglang ref (tag or commit SHA) for SGLang .proto schemas.
 SGLANG_REF ?= 93a936d007ada66544cb5ac855de540a596c2ca4
 
