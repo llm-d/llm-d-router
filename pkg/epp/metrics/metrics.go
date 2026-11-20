@@ -115,6 +115,7 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(llmdFlowControlQueueSize)
 		metrics.Registry.MustRegister(llmdFlowControlQueueBytes)
 		metrics.Registry.MustRegister(llmdFlowControlPoolSaturation)
+		metrics.Registry.MustRegister(llmdFlowControlPeerQueuedRequests)
 		// No deprecated inference_extension twin: new flow control metrics are emitted under the
 		// llm_d_epp prefix only.
 		metrics.Registry.MustRegister(llmdFlowControlStaleEndpoints)
@@ -184,6 +185,7 @@ func Reset() {
 	llmdFlowControlQueueSize.Reset()
 	llmdFlowControlQueueBytes.Reset()
 	llmdFlowControlPoolSaturation.Reset()
+	llmdFlowControlPeerQueuedRequests.Reset()
 	llmdFlowControlStaleEndpoints.Reset()
 	llmdFlowControlDetectorSaturation.Reset()
 	llmdFlowControlCapacityUtilizationRequests.Reset()
@@ -599,6 +601,11 @@ func SubFlowControlQueueBytes(fairnessID, priority, inferencePool, modelName, ta
 // partitioned by pipeline stage ("prefill", "decode", or "effective").
 func RecordFlowControlPoolSaturation(inferencePool, stage string, saturation float64) {
 	llmdFlowControlPoolSaturation.WithLabelValues(inferencePool, stage).Set(saturation)
+}
+
+// RecordFlowControlPeerQueuedRequests records the requests queued in a priority band on peer replicas.
+func RecordFlowControlPeerQueuedRequests(priority, inferencePool string, queued float64) {
+	llmdFlowControlPeerQueuedRequests.WithLabelValues(priority, inferencePool).Set(queued)
 }
 
 // DeleteFlowControlPoolSaturation removes the saturation gauge series for a pool/stage pair.

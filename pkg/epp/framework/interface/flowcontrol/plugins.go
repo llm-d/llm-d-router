@@ -221,6 +221,23 @@ type UsageLimitPolicy interface {
 	ComputeLimit(ctx context.Context, saturation float64, priorities []int, ceilings []float64)
 }
 
+// PeerDemand reports the requests queued per priority band on the other EPP replicas of the pool.
+//
+// Conformance: Implementations MUST be goroutine-safe and MUST NOT block: QueuedRequests is called from the
+// dispatch cycle.
+type PeerDemand interface {
+	// QueuedRequests returns the requests queued in the priority band across peer replicas. ok is false when no
+	// current view of the peers exists, in which case the caller acts on local state alone.
+	QueuedRequests(priority int) (queued uint64, ok bool)
+}
+
+// PeerDemandConsumer is an optional interface for a UsageLimitPolicy that reads PeerDemand. When
+// flowControl.crossReplica publishes band demand, the FlowController calls SetPeerDemand once, before the first
+// dispatch cycle.
+type PeerDemandConsumer interface {
+	SetPeerDemand(PeerDemand)
+}
+
 // BandSelectionParameters carries the inputs of a single Rank call.
 //
 // Every field is owned by the framework and valid only for the duration of the call: implementations MUST NOT
