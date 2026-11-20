@@ -98,6 +98,24 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 			logger.Error(err, "parsing response")
 		}
 	}
+	reqCtx.InferenceActivity = nil
+	if parser != nil && reqCtx.SchedulingRequest != nil {
+		if enabled, _ := reqCtx.SchedulingRequest.GetAttribute(fwkrh.ResponseActivityTrackingKey); enabled == true {
+			if reqCtx.responseActivityTracker == nil {
+				if provider, ok := parser.(fwkrh.ResponseActivityParser); ok {
+					reqCtx.responseActivityTracker = provider.NewResponseActivityTracker()
+				}
+			}
+			if reqCtx.responseActivityTracker != nil {
+				if model := reqCtx.responseActivityTracker.Observe(responseBytes, reqCtx.Response.Headers, endOfStream); model != "" {
+					reqCtx.InferenceActivity = &fwkrh.InferenceActivity{Model: model, ObservedAt: time.Now()}
+				}
+			}
+		}
+	}
+	if endOfStream {
+		reqCtx.responseActivityTracker = nil
+	}
 	if parsedResp != nil {
 		reqCtx.StreamedEvents += parsedResp.StreamedEvents
 	}

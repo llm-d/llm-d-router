@@ -19,6 +19,7 @@ package requesthandling
 
 import (
 	"context"
+	"time"
 
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
@@ -144,4 +145,27 @@ type DisjointInputTokens struct {
 	Uncached      int
 	CacheRead     int
 	CacheCreation int
+}
+
+// MaxActivityResponseBytes bounds one JSON response or SSE event used as execution evidence.
+const MaxActivityResponseBytes = 1 << 20
+
+// ResponseActivityTrackingKey opts a request into protocol-level activity observation.
+var ResponseActivityTrackingKey = fwkplugin.NewDataKey("ResponseActivityTracking", "")
+
+// InferenceActivity identifies verified model output, not request arrival or HTTP success.
+type InferenceActivity struct {
+	Model      string
+	ObservedAt time.Time
+}
+
+// ResponseActivityTracker retains bounded framing state for one response.
+type ResponseActivityTracker interface {
+	// Observe returns the model when this chunk contains valid inference output.
+	Observe(body []byte, headers map[string]string, endOfStream bool) string
+}
+
+// ResponseActivityParser is an optional parser capability used only for opted-in requests.
+type ResponseActivityParser interface {
+	NewResponseActivityTracker() ResponseActivityTracker
 }
