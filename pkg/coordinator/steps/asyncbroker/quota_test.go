@@ -59,6 +59,20 @@ func (c *dropScriptReplyConn) Read(b []byte) (int, error) {
 	return c.Conn.Read(b)
 }
 
+// failOnErrorSink fails the test on every error log.
+type failOnErrorSink struct {
+	t *testing.T
+}
+
+func (s failOnErrorSink) Init(_ logr.RuntimeInfo) {}
+func (s failOnErrorSink) Enabled(_ int) bool      { return false }
+func (s failOnErrorSink) Info(_ int, _ string, _ ...any) {}
+func (s failOnErrorSink) Error(err error, msg string, _ ...any) {
+	s.t.Errorf("unexpected error log %q: %v", msg, err)
+}
+func (s failOnErrorSink) WithValues(_ ...any) logr.LogSink { return s }
+func (s failOnErrorSink) WithName(_ string) logr.LogSink   { return s }
+
 // newLosingReplyClassifier returns a classifier for team-a with the given
 // limit. The reply to the next script run after armed is set is lost. The
 // scripts are loaded up front so Script.Run executes them through EVALSHA
@@ -86,7 +100,7 @@ func newLosingReplyClassifier(t *testing.T, limit int) (*asyncQuotaClassifier, *
 			Prefix: "quota:", Attribute: "userid",
 			Limits: map[string]int{"team-a": limit}, WindowSeconds: 60,
 		},
-		logger: logr.Discard(),
+		logger: logr.New(failOnErrorSink{t: t}),
 	}, mr, armed
 }
 

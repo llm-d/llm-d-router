@@ -86,7 +86,7 @@ return 1
 //nolint:dupword // Each Lua "end" closes its own nested block.
 var quotaReleaseScript = redis.NewScript(`
 if not redis.call("SET", KEYS[2], "1", "NX", "PX", ARGV[2]) then
-	return
+	return 0
 end
 local current = redis.call("GET", KEYS[1])
 if current and tonumber(current) > 0 then
@@ -95,6 +95,7 @@ if current and tonumber(current) > 0 then
 		redis.call("EXPIRE", KEYS[1], ARGV[1])
 	end
 end
+return 1
 `)
 
 // classify returns the tenant's classification and, for reserved
