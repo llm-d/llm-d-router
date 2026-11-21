@@ -171,6 +171,12 @@ type Config struct {
 	// per-pod subscriber management. When enabled, the reconciler watches
 	// Kubernetes pods and creates/removes ZMQ subscribers dynamically.
 	DiscoverPods bool `json:"discoverPods"`
+	// EventRecordingPath enables wire-event recording when set: every event
+	// message the subscribers hand to the pool is appended to this file as a
+	// length-delimited record, capturing the stream Pool.ReplayFile feeds
+	// back. Recording adds one buffered write per event; leave it unset
+	// outside a capture or replay session.
+	EventRecordingPath string `json:"eventRecordingPath,omitempty"`
 	// PodDiscoveryConfig holds the configuration for pod discovery.
 	// Only used when DiscoverPods is true.
 	PodDiscoveryConfig *PodDiscoveryConfig `json:"podDiscoveryConfig,omitempty"`
@@ -270,7 +276,10 @@ type Pool struct {
 	// Nil when Config.Tracing is unset, which is what startSpan tests to skip
 	// span construction on the default path.
 	tracer trace.Tracer
-	wg     sync.WaitGroup
+	// recorder appends every received wire event to a file sink when event
+	// recording is configured; nil otherwise.
+	recorder *eventRecorder
+	wg       sync.WaitGroup
 	// queueDepth mirrors the number of tasks queued across all shards. It is
 	// tracked incrementally rather than by summing queue.Len() so that the
 	// depth gauge stays O(1) on the enqueue/dequeue hot path.
@@ -313,6 +322,13 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		cacheFormats:   kvblock.NewCacheFormatCatalog(),
 		dedup:          newEventDedupFilter(),
 		tracer:         newEventTracer(cfg.Tracing),
+	}
+	if cfg.EventRecordingPath != "" {
+		recorder, err := newEventRecorder(cfg.EventRecordingPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open event recording sink: %w", err)
+		}
+		p.recorder = recorder
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -399,6 +415,12 @@ func (p *Pool) Shutdown(ctx context.Context) {
 
 	p.wg.Wait()
 
+	if p.recorder != nil {
+		if err := p.recorder.Close(); err != nil {
+			logger.Error(err, "Failed to flush the event recording sink")
+		}
+	}
+
 	// Tasks still queued at shutdown are dropped with the queues, so reset the
 	// depth rather than leaving the gauge pinned at the undrained count.
 	p.queueDepth.Store(0)
@@ -408,9 +430,18 @@ func (p *Pool) Shutdown(ctx context.Context) {
 }
 
 // AddTask is called by the subscriber to add a message to the processing queue.
-// It hashes the sharding key to select a queue, ensuring messages for the
-// same source endpoint always go to the same worker (ordered queue).
+// It records the message when event recording is configured, then dispatches
+// it to a queue.
 func (p *Pool) AddTask(task *RawMessage) {
+	if p.recorder != nil {
+		p.recorder.record(task)
+	}
+	p.dispatch(task)
+}
+
+// dispatch hashes the sharding key to select a queue, ensuring messages for
+// the same source endpoint always go to the same worker (ordered queue).
+func (p *Pool) dispatch(task *RawMessage) {
 	key := task.SourceEndpoint
 	if key == "" {
 		key = p.adapter.ShardingKey(task)
