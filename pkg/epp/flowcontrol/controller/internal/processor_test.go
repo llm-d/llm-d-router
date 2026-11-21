@@ -1248,6 +1248,76 @@ func TestProcessor(t *testing.T) {
 					assert.Empty(t, policy.dispatched, "a cycle that dispatches nothing must not record one")
 				})
 
+				t.Run("should not record a dispatch for an already-finalized item", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					qHigh := h.addQueue(keyHigh)
+					zombie := h.newTestItem("zombie", keyHigh, testTTL)
+					require.NoError(t, qHigh.Add(zombie))
+					zombie.Finalize(context.Canceled)
+
+					policy := &fakeBandSelectionPolicy{}
+					h.processor.bandSelectionPolicy = policy
+
+					require.False(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Empty(t, policy.dispatched, "a cycle that only removes a finalized item must not record a dispatch")
+					assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load(),
+						"removing an already-finalized item during dispatch must record its drop")
+				})
+
+				t.Run("should advance to the next band when the selected item is already finalized", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					qHigh := h.addQueue(keyHigh)
+					qLow := h.addQueue(keyLow)
+
+					zombieHigh := h.newTestItem("zombie-high", keyHigh, testTTL)
+					liveLow := h.newTestItem("live-low", keyLow, testTTL)
+					require.NoError(t, qHigh.Add(zombieHigh))
+					require.NoError(t, qLow.Add(liveLow))
+					zombieHigh.Finalize(context.Canceled)
+
+					policy := &fakeBandSelectionPolicy{}
+					h.processor.bandSelectionPolicy = policy
+
+					require.True(t, h.processor.dispatchCycle(context.Background()))
+
+					require.NotNil(t, liveLow.FinalState())
+					assert.Equal(t, types.QueueOutcomeDispatched, liveLow.FinalState().Outcome,
+						"a live item in a lower-ranked band should dispatch when a higher band only had a finalized item")
+					assert.Equal(t, []int{keyLow.Priority}, policy.dispatched,
+						"RecordDispatch should charge only the band that actually dispatched")
+					assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load())
+				})
+
+				t.Run("should not record a dispatch when the item is finalized during reserve", func(t *testing.T) {
+					t.Parallel()
+					h := newTestHarness(t, testCleanupTick)
+					qHigh := h.addQueue(keyHigh)
+					item := h.newTestItem("raced", keyHigh, testTTL)
+					require.NoError(t, qHigh.Add(item))
+
+					h.saturationDetector.ReserveDispatchFunc = func(string) bool {
+						item.Finalize(context.Canceled)
+						return true
+					}
+					var released []string
+					h.saturationDetector.ReleaseDispatchFunc = func(requestID string) bool {
+						released = append(released, requestID)
+						return true
+					}
+
+					policy := &fakeBandSelectionPolicy{}
+					h.processor.bandSelectionPolicy = policy
+
+					require.False(t, h.processor.dispatchCycle(context.Background()))
+
+					assert.Empty(t, policy.dispatched, "a lost dispatch race must not record a dispatch")
+					assert.Equal(t, []string{"raced"}, released)
+					assert.Equal(t, uint64(1), h.processor.dropCounts[types.QueueOutcomeEvictedContextCancelled].Load())
+				})
+
 				t.Run("should skip a gated band wherever it is ranked", func(t *testing.T) {
 					t.Parallel()
 					h := newTestHarness(t, testCleanupTick)
@@ -1624,8 +1694,9 @@ func TestProcessor(t *testing.T) {
 						h := newTestHarness(t, testCleanupTick)
 						tc.setupMocks(h)
 						item := h.newTestItem("req-dispatch-fail", testFlow, testTTL)
-						err := h.processor.dispatchItem(item)
+						dispatched, err := h.processor.dispatchItem(item)
 						require.Error(t, err, "dispatchItem should return an error")
+						assert.False(t, dispatched)
 						assert.ErrorIs(t, err, tc.expectedErr, "The underlying registry error should be preserved")
 					})
 				}
@@ -1647,10 +1718,11 @@ func TestProcessor(t *testing.T) {
 				}
 
 				// --- ACT ---
-				err := h.processor.dispatchItem(item)
+				dispatched, err := h.processor.dispatchItem(item)
 
 				// --- ASSERT ---
 				require.NoError(t, err, "dispatchItem should return no error for an already finalized item")
+				assert.False(t, dispatched, "dispatchItem should report non-dispatch for an already finalized item")
 
 				// Check the final state of the item itself - it should not have changed.
 				finalState := item.FinalState()
@@ -1676,7 +1748,9 @@ func TestProcessor(t *testing.T) {
 					return true
 				}
 
-				require.NoError(t, h.processor.dispatchItem(item))
+				dispatched, err := h.processor.dispatchItem(item)
+				require.NoError(t, err)
+				require.True(t, dispatched)
 				require.True(t, reserved)
 				require.Equal(t, types.QueueOutcomeDispatched, item.FinalState().Outcome)
 			})
@@ -1698,7 +1772,9 @@ func TestProcessor(t *testing.T) {
 					return true
 				}
 
-				require.NoError(t, h.processor.dispatchItem(item))
+				dispatched, err := h.processor.dispatchItem(item)
+				require.NoError(t, err)
+				assert.False(t, dispatched)
 				assert.Equal(t, types.QueueOutcomeRejectedOther, item.FinalState().Outcome,
 					"The outcome set during reserve should be preserved")
 				assert.Equal(t, []string{"req-finalized-during-reserve"}, released,
