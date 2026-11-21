@@ -45,10 +45,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller/internal"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/crossreplica"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/bandselection"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -1279,6 +1281,31 @@ func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T
 	assert.Equal(t, "batch", capturedKey.ID, "fallback must preserve the flow ID")
 }
 
+func TestFlowController_EnqueueAndWait_CountsDispatchingUntilReleased(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	processor := &mockProcessor{
+		SubmitFunc: func(item *internal.FlowItem) error {
+			go item.FinalizeWithError(nil)
+			return nil
+		},
+	}
+	registry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+	h := newUnitHarness(ctx, t, &Config{DefaultRequestTTL: time.Minute}, registry, processor)
+	h.fc.dispatching = crossreplica.NewDispatching()
+
+	req := newTestRequest(flowcontrol.FlowKey{ID: "chat", Priority: 60})
+	outcome, err := h.fc.EnqueueAndWait(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, types.QueueOutcomeDispatched, outcome)
+	assert.Equal(t, uint64(1), h.fc.dispatching.Count(60), "a dispatched request is band demand until it is placed")
+
+	h.fc.ReleaseDispatchReservation(req.ID())
+	assert.Zero(t, h.fc.dispatching.Count(60))
+}
+
 // TestFlowController_EnqueueAndWait_QueueDurationCarriesTraceExemplar checks that the queue duration exemplar links
 // to the trace of the request passed to EnqueueAndWait, although the item is finalized on another goroutine.
 func TestFlowController_EnqueueAndWait_QueueDurationCarriesTraceExemplar(t *testing.T) {
@@ -1386,4 +1413,122 @@ func queueDurationHistogram(t *testing.T, flowID string) *dto.Histogram {
 	}
 	require.FailNow(t, "no queue duration series recorded", "fairness_id %q", flowID)
 	return nil
+}
+
+// setRecordingSyncer reports each published state key and ID. Only TypedName and Set are implemented.
+type setRecordingSyncer struct {
+	datalayer.CrossReplicaSyncer
+	sets chan string
+}
+
+func (s *setRecordingSyncer) TypedName() plugin.TypedName {
+	return plugin.TypedName{Type: "set-recording-syncer", Name: "set-recording-syncer"}
+}
+
+func (s *setRecordingSyncer) Set(_ context.Context, spec datalayer.CrossReplicaSpec, id string) error {
+	select {
+	case s.sets <- string(spec.StateKey) + ":" + id:
+	default:
+	}
+	return nil
+}
+
+func TestNewFlowController_PublishesBandDemandWithCrossReplicaSyncer(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	registry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{
+		AllOrderedPriorityLevelsFunc: func() []int { return []int{5} },
+	}}
+	syncer := &setRecordingSyncer{sets: make(chan string, 1)}
+	NewFlowController(ctx, "test-pool", &Config{DefaultRequestTTL: time.Minute}, Deps{
+		Registry:            registry,
+		SaturationDetector:  &mockSaturationDetector{},
+		EndpointCandidates:  &mocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    usagelimits.DefaultPolicy(),
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		ProcessorFactory:    (&mockProcessorFactory{processor: &mockProcessor{}}).new,
+		CrossReplica:        CrossReplicaConfig{Syncer: syncer, SyncInterval: time.Millisecond},
+	})
+
+	select {
+	case key := <-syncer.sets:
+		assert.Equal(t, "flowcontrol-priorityband-demand:test-pool:5", key)
+	case <-time.After(time.Second):
+		t.Fatal("band demand was not published")
+	}
+}
+
+// getSyncer answers Get with the live local value alone, as a syncer with no peers does.
+type getSyncer struct {
+	setRecordingSyncer
+}
+
+func (s *getSyncer) Get(_ context.Context, spec datalayer.CrossReplicaSpec, id string) (any, bool, error) {
+	return spec.Read(id), true, nil
+}
+
+// peerDemandRecordingPolicy is a usage limit policy that reads peer demand.
+type peerDemandRecordingPolicy struct {
+	flowcontrol.UsageLimitPolicy
+	got chan flowcontrol.PeerDemand
+}
+
+func (p *peerDemandRecordingPolicy) SetPeerDemand(d flowcontrol.PeerDemand) { p.got <- d }
+
+func TestNewFlowController_GivesPeerDemandToAConsumingPolicy(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	registry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{
+		AllOrderedPriorityLevelsFunc: func() []int { return []int{5} },
+	}}
+	policy := &peerDemandRecordingPolicy{UsageLimitPolicy: usagelimits.DefaultPolicy(), got: make(chan flowcontrol.PeerDemand, 1)}
+	NewFlowController(ctx, "test-pool", &Config{DefaultRequestTTL: time.Minute}, Deps{
+		Registry:            registry,
+		SaturationDetector:  &mockSaturationDetector{},
+		EndpointCandidates:  &mocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    policy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		ProcessorFactory:    (&mockProcessorFactory{processor: &mockProcessor{}}).new,
+		CrossReplica: CrossReplicaConfig{
+			Syncer:       &getSyncer{setRecordingSyncer{sets: make(chan string, 1)}},
+			SyncInterval: time.Millisecond,
+		},
+	})
+
+	var peers flowcontrol.PeerDemand
+	select {
+	case peers = <-policy.got:
+	case <-time.After(time.Second):
+		t.Fatal("the policy was not given peer demand")
+	}
+	require.Eventually(t, func() bool {
+		queued, ok := peers.QueuedRequests(5)
+		return ok && queued == 0
+	}, time.Second, time.Millisecond, "the publisher refreshes the view")
+}
+
+func TestNewFlowController_NoPeerDemandWithoutCrossReplica(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	policy := &peerDemandRecordingPolicy{UsageLimitPolicy: usagelimits.DefaultPolicy(), got: make(chan flowcontrol.PeerDemand, 1)}
+	NewFlowController(ctx, "test-pool", &Config{DefaultRequestTTL: time.Minute}, Deps{
+		Registry:            &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}},
+		SaturationDetector:  &mockSaturationDetector{},
+		EndpointCandidates:  &mocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    policy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		ProcessorFactory:    (&mockProcessorFactory{processor: &mockProcessor{}}).new,
+	})
+
+	select {
+	case <-policy.got:
+		t.Fatal("peer demand given without a syncer")
+	case <-time.After(50 * time.Millisecond):
+	}
 }

@@ -407,6 +407,19 @@ var (
 		append([]string{"fairness_id", "priority", "inference_pool"}, modelLabels...),
 	)
 
+	llmdFlowControlPeerQueuedRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: LLMDRouterEndpointPickerSubsystem,
+			Name:      "flow_control_peer_queued_requests",
+			Help: metricsutil.HelpMsgWithStability(
+				"Requests queued per priority band on the other EPP replicas of the pool, including requests "+
+					"dispatched and not yet on an endpoint, as last read from the cross-replica syncer. Reported only "+
+					"when flowControl.crossReplica is set and the usage limit policy reads peer demand.",
+				compbasemetrics.ALPHA),
+		},
+		[]string{"priority", "inference_pool"},
+	)
+
 	llmdFlowControlPoolSaturation = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Subsystem: LLMDRouterEndpointPickerSubsystem,

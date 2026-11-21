@@ -20,6 +20,7 @@ package flowcontrol
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -219,6 +220,25 @@ type UsageLimitPolicy interface {
 	//     - 1.0 = no gating (can dispatch until fully saturated)
 	//     - Values between 0.0 and 1.0 reserve capacity headroom
 	ComputeLimit(ctx context.Context, saturation float64, priorities []int, ceilings []float64)
+}
+
+// PeerDemand reports the requests queued per priority band on the other EPP replicas of the pool.
+//
+// Conformance: Implementations MUST be goroutine-safe and MUST NOT block: QueuedRequests is called from the
+// dispatch cycle.
+type PeerDemand interface {
+	// QueuedRequests returns the requests queued in the priority band across peer replicas. ok is false when no
+	// current view of the peers exists, in which case the caller acts on local state alone.
+	QueuedRequests(priority int) (queued uint64, ok bool)
+	// SyncInterval returns how often the view is refreshed from the peers.
+	SyncInterval() time.Duration
+}
+
+// PeerDemandConsumer is an optional interface for a UsageLimitPolicy that reads PeerDemand. When
+// flowControl.crossReplica publishes band demand, the FlowController calls SetPeerDemand once, before the first
+// dispatch cycle.
+type PeerDemandConsumer interface {
+	SetPeerDemand(PeerDemand)
 }
 
 // BandSelectionParameters carries the inputs of a single Rank call.

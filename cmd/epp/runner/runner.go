@@ -102,6 +102,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/concurrency"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/saturationdetector/utilization"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/peerdemand"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/priorityholdback"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits/softreflectiveceiling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/admitter/latencyslo"
@@ -802,6 +803,8 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(evictordering.PriorityThenTimeOrderingType, fwkplugin.StabilityAlpha, evictordering.PriorityThenTimeOrderingFactory)
 	fwkplugin.Register(weightedfairshare.WeightedFairShareFairnessPolicyType, fwkplugin.StabilityAlpha, weightedfairshare.WeightedFairShareFairnessPolicyFactory)
 	fwkplugin.Register(softreflectiveceiling.PolicyType, fwkplugin.StabilityAlpha, softreflectiveceiling.Factory)
+	fwkplugin.RegisterWithPluginDependencies(peerdemand.PolicyType, fwkplugin.StabilityAlpha,
+		peerdemand.PolicyFactory, peerdemand.PolicyConfigParser)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
 	// Beta
@@ -1234,6 +1237,7 @@ func (r *Runner) initAdmissionControl(
 		EndpointCandidates:  endpointCandidates,
 		UsageLimitPolicy:    eppConfig.FlowControlConfig.UsageLimitPolicy,
 		BandSelectionPolicy: eppConfig.FlowControlConfig.BandSelectionPolicy,
+		CrossReplica:        eppConfig.FlowControlConfig.CrossReplica,
 	}
 
 	var requestEvictor *fceviction.RequestEvictor

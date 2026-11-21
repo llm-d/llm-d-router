@@ -31,6 +31,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller/internal"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/crossreplica"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -88,6 +89,9 @@ type FlowController struct {
 	logger              logr.Logger
 	processorFactory    processorFactory
 	processor           processor
+	// dispatching is set when the band demand publisher runs, so peers count a dispatched request as band demand
+	// until ReleaseDispatchReservation.
+	dispatching *crossreplica.Dispatching
 
 	// --- Lifecycle state ---
 
@@ -110,6 +114,9 @@ type Deps struct {
 	// Satisfied by *eviction.RequestEvictor. The FlowController registers the reclamation
 	// controller's Confirm as the evictor's eviction-terminated listener.
 	InFlightEvictor internal.InFlightEvictor
+
+	// CrossReplica enables publishing this replica's queued work per priority band when its Syncer is set.
+	CrossReplica CrossReplicaConfig
 }
 
 // NewFlowController creates and starts a new FlowController instance.
@@ -218,6 +225,22 @@ func NewFlowController(
 		reclamation,
 	)
 
+	if cr := deps.CrossReplica; cr.Syncer != nil {
+		publisher := crossreplica.NewPublisher(cr.Syncer, fc.flowRegistry, poolName,
+			cr.SyncInterval, cr.PublishTimeout, fc.clock)
+		fc.dispatching = publisher.Dispatching()
+		consumer, readsPeers := fc.usageLimitPolicy.(flowcontrol.PeerDemandConsumer)
+		if readsPeers {
+			consumer.SetPeerDemand(publisher.PeerDemand())
+		}
+		fc.logger.V(logutil.DEFAULT).Info("Starting the cross-replica band demand publisher.",
+			"syncer", cr.Syncer.TypedName(), "scope", poolName, "peerDemandConsumer", readsPeers)
+		go publisher.Run(fc.parentCtx)
+	} else if _, ok := fc.usageLimitPolicy.(flowcontrol.PeerDemandConsumer); ok {
+		fc.logger.Info("The usage limit policy reads peer demand, but flowControl.crossReplica is not set; "+
+			"it acts on local state alone.", "policy", fc.usageLimitPolicy.TypedName())
+	}
+
 	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")
 
 	go fc.processor.Run(fc.parentCtx)
@@ -274,7 +297,9 @@ func (fc *FlowController) EnqueueAndWait(
 
 	// 2. Acquire a lease for the Flow.
 	// We hold this lease for the entire duration of the request (Distribution + Queueing).
+	dispatchedPriority := flowKey.Priority
 	err := fc.withConnectionWithFallback(req, func(conn contracts.ActiveFlowConnection, effectiveReq flowcontrol.FlowControlRequest) error {
+		dispatchedPriority = effectiveReq.FlowKey().Priority
 		bandDefaultRequestTTL, bandDefaultRequestTTLSet := conn.DefaultRequestTTL()
 		reqCtx, cancel, saturationTTL := fc.createRequestContext(
 			ctx, effectiveReq, bandDefaultRequestTTL, bandDefaultRequestTTLSet, enqueueTime,
@@ -311,6 +336,9 @@ func (fc *FlowController) EnqueueAndWait(
 		err = fmt.Errorf("%w: %w", types.ErrRejected, err)
 	}
 
+	if finalOutcome == types.QueueOutcomeDispatched && fc.dispatching != nil {
+		fc.dispatching.Add(req.ID(), dispatchedPriority)
+	}
 	if finalOutcome != types.QueueOutcomeDispatched {
 		fc.logger.V(logutil.VERBOSE).Info("Request dropped",
 			"requestID", req.ID(), "flowKey", flowKey, "outcome", finalOutcome, "err", err)
@@ -324,6 +352,9 @@ func (fc *FlowController) EnqueueAndWait(
 // ReleaseDispatchReservation marks the end of the gap between flow-control dispatch and
 // publication by request lifecycle hooks.
 func (fc *FlowController) ReleaseDispatchReservation(requestID string) {
+	if fc.dispatching != nil {
+		fc.dispatching.Remove(requestID)
+	}
 	if tracker, ok := fc.saturationDetector.(flowcontrol.DispatchReservationTracker); ok {
 		tracker.ReleaseDispatch(requestID)
 	}

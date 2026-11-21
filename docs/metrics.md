@@ -994,6 +994,7 @@ These metrics are owned by the EPP Flow Control layer.
 | `llm_d_epp_flow_control_request_enqueue_duration_seconds` | Histogram | `fairness_id`, `priority`, `outcome` | Time spent admitting a request to the queue. |
 | `llm_d_epp_flow_control_queue_size` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Requests currently held in the queue. |
 | `llm_d_epp_flow_control_queue_bytes` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Bytes currently held in the queue. |
+| `llm_d_epp_flow_control_peer_queued_requests` | Gauge | `priority`, `inference_pool` | Requests queued per priority band on peer EPP replicas, including dispatched ones not yet on an endpoint, as last read. |
 | `llm_d_epp_flow_control_pool_saturation` | Gauge | `inference_pool`, `stage` | Saturation signal used to gate dispatch. |
 | `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector`, `stage` | Candidate endpoints with missing or stale metrics. |
 | `llm_d_epp_flow_control_detector_saturation` | Gauge | `detector`, `stage` | Saturation reported by each child of a `max-saturation-detector`, from its most recent evaluation. `stage` is `prefill`, `decode`, or empty when the pool has no endpoints. |
@@ -1048,6 +1049,16 @@ These metrics are owned by the EPP Flow Control layer.
 *   **Description:** Current total size in bytes of requests actively held in the Flow Control queue.
 *   **Usage:** Tracks memory pressure from queued requests. Compare against the configured `maxBytes`
     capacity to gauge how close a band is to rejecting new requests.
+
+#### `llm_d_epp_flow_control_peer_queued_requests`
+
+*   **Type:** Gauge
+*   **Labels:** `priority`, `inference_pool`
+*   **Description:** Requests queued per priority band on the other EPP replicas of the pool,
+    including requests dispatched and not yet on an endpoint, as last read from the cross-replica syncer. Reported only when `flowControl.crossReplica` is set
+    and the usage limit policy reads peer demand (`peer-demand-holdback-policy`).
+*   **Usage:** Shows which peer bands hold this replica's lower bands. Compare against
+    `llm_d_epp_flow_control_queue_size` on the peer.
 
 #### `llm_d_epp_flow_control_pool_saturation`
 
