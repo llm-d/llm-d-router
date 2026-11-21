@@ -18,10 +18,12 @@ subscriber writes.
   `Add` and `Evict` entries; the indexer's `Lookup` reads them.
 - **Ordered walk.** `KeyWalker` is an optional capability for callers that
   fold entries in key order: it visits the requested keys in sequence,
-  reporting misses, and lends each key's entries as `EntryRef` values that
-  carry the index's pod and tier ordinals. The in-memory backend has it and
-  the decorators keep it; the [`kvcache`](../README.md) prefix matcher walks
-  when it can and falls back to `Lookup`.
+  reporting misses, and lends each key's entries as `WalkEntry` values that
+  carry the index's pod and tier ordinals (one per pod and tier pair, group
+  duplicates folded). Entries are borrowed for the visit call only. The
+  in-memory backend has the capability and the decorators keep it; the
+  [`kvcache`](../README.md) prefix matcher walks when it can and falls back
+  to `Lookup`.
 
 ## Backends
 
@@ -49,7 +51,8 @@ still references it.
 | Symbol | Role |
 |--------|------|
 | `Index` | Block-key -> pods mapping (`Add` / `Lookup` / `Evict`). |
-| `KeyWalker` / `EntryRef` | Optional ordered walk over requested keys; entries with pod and tier ordinals. |
+| `KeyWalker` / `WalkEntry` | Optional ordered walk over requested keys; borrowed entries with pod and tier ordinals. |
+| `OrdinalResolver` | Name-to-ordinal assignment for pod identifiers and device tiers; every `KeyWalker` also implements it. |
 | `TokenProcessor` | Tokens -> block keys; exposes `BlockSize`. |
 | `BlockHash` | A single block key. |
 | `PodEntry` | A pod holding a block, with its device tier. |

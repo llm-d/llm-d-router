@@ -178,7 +178,7 @@ func BenchmarkInMemoryIndexWalkKeys(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				seen := 0
-				err := idx.WalkKeys(ctx, keys, func(_ int, _ bool, entries []kvblock.EntryRef) bool {
+				err := idx.WalkKeys(ctx, keys, func(_ int, _ bool, entries []kvblock.WalkEntry) bool {
 					seen += len(entries)
 					return true
 				})

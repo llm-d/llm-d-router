@@ -151,6 +151,30 @@ func (m *InMemoryIndex) onKeyEvicted(pc *PodCache) {
 
 var _ Index = &InMemoryIndex{}
 
+var _ OrdinalResolver = &InMemoryIndex{}
+
+// PodOrdinal returns the ordinal assigned to the pod identifier, and whether
+// the index has interned it.
+func (m *InMemoryIndex) PodOrdinal(name string) (uint32, bool) {
+	return m.pods.ordinalOf(name)
+}
+
+// PodName returns the pod identifier assigned to ordinal, and whether one is.
+func (m *InMemoryIndex) PodName(ordinal uint32) (string, bool) {
+	return m.pods.nameOf(ordinal)
+}
+
+// TierOrdinal returns the ordinal assigned to the device tier, and whether
+// the index has interned it.
+func (m *InMemoryIndex) TierOrdinal(name string) (uint32, bool) {
+	return m.tiers.ordinalOf(name)
+}
+
+// TierName returns the device tier assigned to ordinal, and whether one is.
+func (m *InMemoryIndex) TierName(ordinal uint32) (string, bool) {
+	return m.tiers.nameOf(ordinal)
+}
+
 // PodCache holds one request key's pod entries in LRU order (least recent
 // first), bounded by the index's podCacheSize. At per-key pod counts the
 // linear slice operations are cheaper than a map-backed LRU, and iteration
@@ -163,6 +187,12 @@ type PodCache struct {
 	// capacity bounds len(entries); adding beyond it evicts the least
 	// recent entry.
 	capacity int
+	// grouped reports whether entries may hold a duplicate (pod, tier)
+	// pair under different group fields; groupedKnown caches the scan's
+	// validity across visits. Both are guarded by mu and invalidated by
+	// every mutation.
+	grouped      bool
+	groupedKnown bool
 }
 
 // addAll inserts records with LRU semantics: an existing entry refreshes its
@@ -172,6 +202,7 @@ type PodCache struct {
 func (pc *PodCache) addAll(recs []EntryRef) (delta, truncated int) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	pc.groupedKnown = false
 	for _, rec := range recs {
 		found := false
 		for i := range pc.entries {
@@ -202,6 +233,7 @@ func (pc *PodCache) addAll(recs []EntryRef) (delta, truncated int) {
 func (pc *PodCache) removeAll(entries []PodEntry) (removed int, empty bool) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	pc.groupedKnown = false
 	for _, entry := range entries {
 		for i := range pc.entries {
 			if pc.entries[i].PodEntry == entry {
