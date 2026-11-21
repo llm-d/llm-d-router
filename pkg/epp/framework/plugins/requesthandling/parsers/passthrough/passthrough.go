@@ -78,6 +78,7 @@ func (p *PassthroughParser) ParseRequest(ctx context.Context, body []byte, heade
 			Payload: fwkrequest.RawPayload(body),
 		},
 		SkipResponseProcessing: false,
+		OpaqueResponse:         true,
 	}, nil
 }
 

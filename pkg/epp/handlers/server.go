@@ -215,7 +215,7 @@ type RequestContext struct {
 	toolCallingResponseRecorded    bool
 
 	// responseProcessingDuration is the EPP cost of handling the response. For a
-	// streamed response it is the sum of the per-chunk handler slices, since the
+	// streamed or opaque response it is the sum of the per-chunk handler slices, since the
 	// gaps between chunks are model server generation time. For a non-streaming
 	// response it is the single interval from responseHeadersReceivedAt onward,
 	// during which the response is entirely in EPP's hands.
@@ -226,6 +226,8 @@ type RequestContext struct {
 	requestState         streamRequestState
 	requestDroppedReason errcommon.RequestDroppedReason
 	modelServerStreaming bool
+	// opaqueResponse is set when the parser declared ParseResult.OpaqueResponse.
+	opaqueResponse bool
 
 	reqHeaderResp *extProcPb.ProcessingResponse
 	reqBodyResp   []*extProcPb.ProcessingResponse
@@ -829,6 +831,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				if reqCtx.SchedulingRequest != nil && reqCtx.SchedulingRequest.Body != nil {
 					reqCtx.modelServerStreaming = reqCtx.SchedulingRequest.Body.Stream
 				}
+				reqCtx.opaqueResponse = parseResult.OpaqueResponse
 
 				reqCtx.reqHeaderResp = s.generateRequestHeaderResponse(ctx, reqCtx)
 				reqCtx.reqBodyResp = envoy.GenerateRequestBodyResponses(reqCtx.Request.RawBody, !trailers)
@@ -884,7 +887,8 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			endOfStream := v.ResponseBody.EndOfStream
 			chunk := v.ResponseBody.Body
 
-			if reqCtx.modelServerStreaming {
+			switch {
+			case reqCtx.modelServerStreaming:
 				upstreamChunk := chunk
 				respBodyStart := time.Now()
 				if endOfStream {
@@ -898,7 +902,21 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				// For streaming response, we send response chunk back to envoy every time we received it.
 				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
 				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
-			} else {
+			case reqCtx.opaqueResponse:
+				respBodyStart := time.Now()
+				reqCtx.responseSize += len(chunk)
+				if reqCtx.firstTokenTimestamp.IsZero() && len(chunk) > 0 {
+					reqCtx.firstTokenTimestamp = respBodyStart
+				}
+				reqCtx.observeToolCallingResponse(chunk, endOfStream, false, span)
+				if endOfStream {
+					reqCtx.responseComplete = true
+					reqCtx.responseCompleteTimestamp = respBodyStart
+					s.HandleResponseBody(ctx, reqCtx, nil, true)
+				}
+				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
+				reqCtx.responseProcessingDuration += time.Since(respBodyStart)
+			default:
 				respBody = append(respBody, chunk...)
 				if endOfStream {
 					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true, span)
@@ -989,7 +1007,7 @@ func (s *StreamingServer) finishResponse(ctx context.Context, reqCtx *RequestCon
 		// For non-streaming response, we send response back to envoy after receiving all the response body.
 		reqCtx.respBodyResp = generateResponseBodyResponses(body, setEos, reqCtx.Response.DynamicMetadata)
 	}
-	if modelStreaming || reqCtx.responseHeadersReceivedAt.IsZero() {
+	if modelStreaming || reqCtx.opaqueResponse || reqCtx.responseHeadersReceivedAt.IsZero() {
 		reqCtx.responseProcessingDuration += time.Since(start)
 	} else {
 		// Supersedes the header slice already accumulated: the interval since the

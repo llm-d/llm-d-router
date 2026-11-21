@@ -65,6 +65,9 @@ func TestPassthroughParser_ParseRequest(t *testing.T) {
 			if got.SkipResponseProcessing != false {
 				t.Errorf("got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
 			}
+			if !got.OpaqueResponse {
+				t.Error("got.OpaqueResponse = false, want true")
+			}
 			if diff := cmp.Diff(tt.wantBody, got.Body); diff != "" {
 				t.Errorf("Unexpected body (-want +got):\n%s", diff)
 			}
