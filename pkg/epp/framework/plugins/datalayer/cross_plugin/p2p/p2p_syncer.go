@@ -815,7 +815,7 @@ func (s *P2PSyncer) stream(ctx context.Context, link *peerLink) error {
 	link.downSince.Store(0)
 	s.resendAll()
 	ctrl.LoggerFrom(s.ctx).Info("p2p-syncer: peer link connected", "peer", link.id.String())
-	defer link.downSince.Store(time.Now().UnixNano())
+	defer func() { link.downSince.Store(time.Now().UnixNano()) }()
 	for {
 		select {
 		case <-ctx.Done():

@@ -929,6 +929,32 @@ func TestPeerSetChurnLeaksNoGoroutines(t *testing.T) {
 		"goroutines after 20 link closes: %d, baseline %d", runtime.NumGoroutine(), baseline)
 }
 
+func TestDownSinceRecordedWhenStreamEnds(t *testing.T) {
+	a := newReplica(t, "a", 30*time.Second, 10*time.Second)
+	b := newReplica(t, "b", 30*time.Second, 10*time.Second)
+	mesh(a, b)
+	require.Eventually(t, func() bool {
+		l := a.link("b")
+		return l != nil && l.downSince.Load() == 0
+	}, eventually, tick)
+
+	time.Sleep(25 * time.Millisecond)
+	beforeDrop := time.Now().UnixNano()
+	b.syncer.close()
+
+	var downSince int64
+	require.Eventually(t, func() bool {
+		l := a.link("b")
+		if l == nil {
+			return false
+		}
+		downSince = l.downSince.Load()
+		return downSince != 0
+	}, eventually, tick)
+	assert.GreaterOrEqual(t, downSince, beforeDrop,
+		"downSince must be recorded when the stream ends, not when it opened")
+}
+
 // BenchmarkSetToPeerGet measures the time from a changed value's SetBatch on
 // one replica to Get returning it on another, over loopback TCP.
 func BenchmarkSetToPeerGet(b *testing.B) {
