@@ -35,6 +35,8 @@ type bandOccupancy interface {
 type bandDemand struct {
 	Requests uint64
 	Bytes    uint64
+	// Dispatching counts the band's requests that left the queue and are not on an endpoint yet.
+	Dispatching uint64
 }
 
 func (d *bandDemand) Clone() fwkdl.Cloneable {
@@ -45,7 +47,7 @@ func (d *bandDemand) Clone() fwkdl.Cloneable {
 // newPriorityBandDemandSource shares the queued requests and bytes of every priority band, including
 // idle ones so a drained backlog is visible to peers on the next cycle. Bands are identified by
 // priority value, so the scope must identify one EPP deployment.
-func newPriorityBandDemandSource(registry bandOccupancy, scope string) *crossReplicaSource {
+func newPriorityBandDemandSource(registry bandOccupancy, scope string, dispatching *Dispatching) *crossReplicaSource {
 	return &crossReplicaSource{
 		spec: fwkdl.CrossReplicaSpec{
 			StateKey: fwkdl.StateKey(priorityBandDemandStateKeyPrefix + scope),
@@ -58,7 +60,8 @@ func newPriorityBandDemandSource(registry bandOccupancy, scope string) *crossRep
 				if err != nil {
 					return &bandDemand{}
 				}
-				return &bandDemand{Requests: snapshot.Band.Len, Bytes: snapshot.Band.ByteSize}
+				return &bandDemand{Requests: snapshot.Band.Len, Bytes: snapshot.Band.ByteSize,
+					Dispatching: dispatching.Count(priority)}
 			},
 			Aggregate: aggregateBandDemand,
 		},
@@ -79,6 +82,7 @@ func aggregateBandDemand(values []any) any {
 		if d, ok := v.(*bandDemand); ok {
 			total.Requests += d.Requests
 			total.Bytes += d.Bytes
+			total.Dispatching += d.Dispatching
 		}
 	}
 	return total

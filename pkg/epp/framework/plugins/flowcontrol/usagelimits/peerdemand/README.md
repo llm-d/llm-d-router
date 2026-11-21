@@ -15,10 +15,10 @@ Without `flowControl.crossReplica` the policy returns the delegate's ceilings.
 The highest band with peer demand keeps its delegate ceiling, so the pool's highest queued band always
 progresses.
 
-A peer publishes its queue and its in-flight load per endpoint as separate updates. When a peer dispatches its
-last queued request, its queue can read empty here while the slot that request took still reads free, so a
-released lower band would take a slot that is already in use. The policy keeps the gate for `releaseDelay` after
-the peer band empties, which lets the in-flight update arrive first.
+A peer counts a request it dispatched as band demand until the request's endpoint load is recorded. It publishes
+its band demand and its in-flight load per endpoint as separate updates, so its band can read empty here while
+the slot its last request took still reads free. The policy keeps the gate for `releaseDelay` after the peer band
+empties, which lets the in-flight update arrive first.
 
 ## Configuration
 
@@ -43,12 +43,12 @@ flowControl:
 | Parameter | Description |
 | --- | --- |
 | `delegate` | Usage limit policy whose ceilings this policy tightens. Optional: without it every band starts at 1.0. |
-| `releaseDelay` | How long the lower bands stay gated after the peers' higher band empties. Optional: two `flowControl.crossReplica` sync intervals. Keep it above the `dataLayer.crossReplica` sync interval plus the time a request takes from dispatch to endpoint pick. `0s` releases at once. |
+| `releaseDelay` | How long the lower bands stay gated after the peers' higher band empties. Optional: two `flowControl.crossReplica` sync intervals. Keep it above the `dataLayer.crossReplica` sync interval. `0s` releases at once. |
 
 ## Metrics
 
 `llm_d_epp_flow_control_peer_queued_requests{priority, inference_pool}` reports the peer
-requests queued per band, as last read.
+requests queued per band, including the ones dispatched and not yet on an endpoint, as last read.
 
 ## Limits
 

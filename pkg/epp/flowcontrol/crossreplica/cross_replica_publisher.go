@@ -55,10 +55,11 @@ type Publisher struct {
 	failureLog     rate.Sometimes
 
 	// bandSource, registry and scope build the peer demand view on request.
-	bandSource *crossReplicaSource
-	registry   bandOccupancy
-	scope      string
-	view       *peerDemandView
+	bandSource  *crossReplicaSource
+	registry    bandOccupancy
+	scope       string
+	view        *peerDemandView
+	dispatching *Dispatching
 }
 
 // NewPublisher returns a publisher of the queued work per priority band. Values are
@@ -70,10 +71,16 @@ func NewPublisher(
 	interval, publishTimeout time.Duration,
 	clk clock.WithTicker,
 ) *Publisher {
-	source := newPriorityBandDemandSource(registry, scope)
+	dispatching := NewDispatching()
+	source := newPriorityBandDemandSource(registry, scope, dispatching)
 	p := newPublisher(syncer, []*crossReplicaSource{source}, interval, publishTimeout, clk)
-	p.bandSource, p.registry, p.scope = source, registry, scope
+	p.bandSource, p.registry, p.scope, p.dispatching = source, registry, scope, dispatching
 	return p
+}
+
+// Dispatching returns the counter of dispatched requests not yet on an endpoint, published with each band.
+func (p *Publisher) Dispatching() *Dispatching {
+	return p.dispatching
 }
 
 // PeerDemand returns a view of the requests queued per priority band on peer replicas, refreshed after each

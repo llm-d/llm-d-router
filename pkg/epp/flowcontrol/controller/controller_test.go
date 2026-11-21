@@ -45,6 +45,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts/mocks"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller/internal"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/crossreplica"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
@@ -1409,6 +1410,31 @@ func TestFlowController_EnqueueAndWait_FallbackConnectionFailureUsesFallbackPrio
 	}
 	assert.Equal(t, map[string]float64{"0": 1}, priorities,
 		"RequestsTotal must be recorded only under fallback priority 0")
+}
+
+func TestFlowController_EnqueueAndWait_CountsDispatchingUntilReleased(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	processor := &mockProcessor{
+		SubmitFunc: func(item *internal.FlowItem) error {
+			go item.FinalizeWithError(nil)
+			return nil
+		},
+	}
+	registry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+	h := newUnitHarness(ctx, t, &Config{DefaultRequestTTL: time.Minute}, registry, processor)
+	h.fc.dispatching = crossreplica.NewDispatching()
+
+	req := newTestRequest(flowcontrol.FlowKey{ID: "chat", Priority: 60})
+	outcome, err := h.fc.EnqueueAndWait(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, types.QueueOutcomeDispatched, outcome)
+	assert.Equal(t, uint64(1), h.fc.dispatching.Count(60), "a dispatched request is band demand until it is placed")
+
+	h.fc.ReleaseDispatchReservation(req.ID())
+	assert.Zero(t, h.fc.dispatching.Count(60))
 }
 
 // TestFlowController_EnqueueAndWait_QueueDurationCarriesTraceExemplar checks that the queue duration exemplar links
