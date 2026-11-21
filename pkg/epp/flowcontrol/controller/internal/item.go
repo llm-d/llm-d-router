@@ -59,6 +59,8 @@ type FlowItem struct {
 	effectiveTTL    time.Duration
 	originalRequest flowcontrol.FlowControlRequest
 	logger          logr.Logger
+	// clock measures the queue duration at finalization.
+	clock clock.PassiveClock
 	// span is the request's trace span, kept for the queue duration exemplar because finalization can run on a
 	// goroutine that has no request context.
 	span trace.Span
@@ -71,9 +73,6 @@ type FlowItem struct {
 	// Distinguishing between pre-admission (Rejection) and post-admission (Eviction) during asynchronous finalization
 	// relies on whether this handle is nil or non-nil.
 	handle atomic.Pointer[flowcontrol.QueueItemHandle]
-
-	// clock stores the optional PassiveClock used to measure queue duration on finalization.
-	clock atomic.Pointer[clock.PassiveClock]
 
 	// finalState holds the result of the finalization. Stored atomically once.
 	// Use FinalState() for safe access.
@@ -92,18 +91,24 @@ type FlowItem struct {
 var _ flowcontrol.QueueItemAccessor = &FlowItem{}
 
 // NewItem allocates and initializes a new FlowItem for a request lifecycle. Only the trace span is kept from ctx.
+// A nil clk defaults to the real clock.
 func NewItem(
 	ctx context.Context,
 	req flowcontrol.FlowControlRequest,
 	effectiveTTL time.Duration,
 	enqueueTime time.Time,
+	clk clock.PassiveClock,
 	logger logr.Logger,
 ) *FlowItem {
+	if clk == nil {
+		clk = clock.RealClock{}
+	}
 	return &FlowItem{
 		enqueueTime:     enqueueTime,
 		effectiveTTL:    effectiveTTL,
 		originalRequest: req,
 		logger:          logger,
+		clock:           clk,
 		span:            trace.SpanFromContext(ctx),
 		done:            make(chan *FinalState, 1),
 	}
@@ -138,16 +143,6 @@ func (fi *FlowItem) Handle() flowcontrol.QueueItemHandle {
 // SetHandle associates a QueueItemHandle with this item. Called by the queue implementation (via Processor).
 // Safe for concurrent access.
 func (fi *FlowItem) SetHandle(handle flowcontrol.QueueItemHandle) { fi.handle.Store(&handle) }
-
-// SetClock sets the clock used to compute queue duration upon finalization.
-// Safe for concurrent access.
-func (fi *FlowItem) SetClock(c clock.PassiveClock) {
-	if c == nil {
-		fi.clock.Store(nil)
-		return
-	}
-	fi.clock.Store(&c)
-}
 
 // Finalize determines the item's terminal state based on the provided cause (e.g., Context error) and the item's
 // current admission status (queued or not).
@@ -192,10 +187,7 @@ func (fi *FlowItem) finalizeInternal(err error) {
 	// Atomically store the pointer. This is the critical memory barrier that publishes the state safely.
 	fi.finalState.Store(finalState)
 
-	duration := time.Since(fi.enqueueTime)
-	if c := fi.clock.Load(); c != nil && *c != nil {
-		duration = (*c).Since(fi.enqueueTime)
-	}
+	duration := fi.clock.Since(fi.enqueueTime)
 	flowKey := fi.originalRequest.FlowKey()
 	metrics.RecordFlowControlRequestQueueDuration(
 		trace.ContextWithSpan(context.Background(), fi.span),

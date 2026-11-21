@@ -470,7 +470,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
-			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
+			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), nil, logr.Discard())
 
 			result := make(chan error, 1)
 			go func() {
@@ -494,7 +494,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
 			reqCtx, reqCancel := context.WithCancel(context.Background())
-			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
+			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), nil, logr.Discard())
 
 			reqCancel()
 			cancel()
@@ -510,7 +510,7 @@ func TestFlowController_EnqueueAndWait(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			h := newUnitHarness(ctx, t, &Config{}, nil, nil)
-			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), logr.Discard())
+			item := internal.NewItem(context.Background(), newTestRequest(defaultFlowKey), 0, time.Now(), nil, logr.Discard())
 			item.SetHandle(&fwkfcmocks.MockQueueItemHandle{})
 
 			cancel()
@@ -1358,6 +1358,56 @@ func TestFlowController_EnqueueAndWait_FallbackRewritesItemPriority(t *testing.T
 
 	_, hasOrphanedTotal := counterValue("100")
 	assert.False(t, hasOrphanedTotal, "RequestsTotal must not record a series at unprovisioned priority 100")
+}
+
+// TestFlowController_EnqueueAndWait_FallbackConnectionFailureUsesFallbackPriority verifies that a request whose
+// fallback connection fails before the callback runs is still counted under priority 0.
+func TestFlowController_EnqueueAndWait_FallbackConnectionFailureUsesFallbackPriority(t *testing.T) {
+	t.Parallel()
+	metrics.Register()
+
+	const (
+		poolName         = "fallback-conn-failure-pool"
+		originalPriority = 100
+	)
+
+	registry := &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}}
+	registry.WithConnectionFunc = func(key flowcontrol.FlowKey, _ func(conn contracts.ActiveFlowConnection) error) error {
+		if key.Priority != 0 {
+			return fmt.Errorf("band %d: %w", key.Priority, contracts.ErrPriorityBandNotFound)
+		}
+		return errors.New("fallback connection failed")
+	}
+
+	h := newUnitHarness(t.Context(), t, &Config{DefaultRequestTTL: time.Minute}, registry, &mockProcessor{})
+
+	req := newTestRequest(flowcontrol.FlowKey{ID: "batch", Priority: originalPriority})
+	req.InferencePoolNameV = poolName
+	outcome, err := h.fc.EnqueueAndWait(t.Context(), req)
+
+	require.ErrorIs(t, err, types.ErrRejected)
+	assert.Equal(t, types.QueueOutcomeRejectedOther, outcome)
+
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	priorities := map[string]float64{}
+	for _, mf := range families {
+		if mf.GetName() != "llm_d_epp_flow_control_requests_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			if !hasLabels(m, map[string]string{"inference_pool": poolName}) {
+				continue
+			}
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "priority" {
+					priorities[lp.GetValue()] += m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	assert.Equal(t, map[string]float64{"0": 1}, priorities,
+		"RequestsTotal must be recorded only under fallback priority 0")
 }
 
 // TestFlowController_EnqueueAndWait_QueueDurationCarriesTraceExemplar checks that the queue duration exemplar links

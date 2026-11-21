@@ -289,7 +289,6 @@ func (p *Processor) Run(ctx context.Context) {
 // enqueue processes an item received from the enqueueChan.
 // It handles capacity checks, checks for external finalization, and either admits the item to a queue or rejects it.
 func (p *Processor) enqueue(item *FlowItem) {
-	item.SetClock(p.clock)
 
 	req := item.OriginalRequest()
 	key := req.FlowKey()
