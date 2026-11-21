@@ -32,6 +32,11 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
+type cancelEntry struct {
+	seq  uint64
+	stop func() bool
+}
+
 // RequestEvictor tracks in-flight requests via RequestControl hooks and provides eviction capability.
 // It is a builtin component wired directly by the EPP, not a user-configurable plugin.
 type RequestEvictor struct {
@@ -41,6 +46,11 @@ type RequestEvictor struct {
 
 	// mu guards the fields below.
 	mu sync.Mutex
+	// nextSeq assigns monotonically increasing registration tokens to cancelFuncs entries so a
+	// late context.AfterFunc callback cannot untrack a subsequent request sharing the same ID.
+	nextSeq uint64
+	// cancelFuncs holds the context.AfterFunc stop callbacks keyed by request ID.
+	cancelFuncs map[string]cancelEntry
 	// pendingEvictions holds the IDs of requests whose eviction has been issued but whose stream has
 	// not yet terminated. Populated by EvictN before the eviction signal is sent; consumed exactly
 	// once by cleanupRequest when the stream terminates.
@@ -65,6 +75,7 @@ func NewRequestEvictor(
 		queue:            NewEvictionQueue(ordering, filter),
 		evictor:          evictor,
 		evictionRegistry: registry,
+		cancelFuncs:      make(map[string]cancelEntry),
 		pendingEvictions: make(map[string]struct{}),
 	}
 }
@@ -133,11 +144,19 @@ func (p *RequestEvictor) PreRequest(
 
 	// Bind untrack to the request context's lifetime as a safety net.
 	// If the client disconnects and ResponseBody(EndOfStream) never fires,
-	// ctx.Done() ensures the request is still cleaned up. Untrack is idempotent.
-	go func() {
-		<-ctx.Done()
-		p.cleanupRequest(requestID)
-	}()
+	// ctx.Done() ensures the request is still cleaned up.
+	p.mu.Lock()
+	p.nextSeq++
+	seq := p.nextSeq
+	prev, hadPrev := p.cancelFuncs[requestID]
+	stop := context.AfterFunc(ctx, func() {
+		p.cleanupRequestOnCancel(requestID, seq)
+	})
+	p.cancelFuncs[requestID] = cancelEntry{seq: seq, stop: stop}
+	p.mu.Unlock()
+	if hadPrev {
+		prev.stop()
+	}
 
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Tracked in-flight request",
 		"requestID", requestID,
@@ -226,11 +245,38 @@ func (p *RequestEvictor) Stats() (inFlight int, evictable int) {
 	return p.queue.InFlightLen(), p.queue.EvictableLen()
 }
 
-// cleanupRequest removes a request from all tracking structures.
-// If the evictor supports cleanup (e.g., ImmediateResponseEvictor), it also
-// cleans up evictor-internal state to prevent unbounded map growth.
-// If the request had been evicted, the eviction-terminated listener is notified exactly once.
+// cleanupRequest unregisters the request's context cancellation callback and removes the request
+// from all tracking structures.
 func (p *RequestEvictor) cleanupRequest(requestID string) {
+	p.mu.Lock()
+	entry, ok := p.cancelFuncs[requestID]
+	if ok {
+		delete(p.cancelFuncs, requestID)
+	}
+	p.mu.Unlock()
+	if ok {
+		entry.stop()
+	}
+	p.untrackAndNotify(requestID)
+}
+
+// cleanupRequestOnCancel runs from a context.AfterFunc callback and cleans up the request only if
+// its registration token still matches the active entry for requestID.
+func (p *RequestEvictor) cleanupRequestOnCancel(requestID string, seq uint64) {
+	p.mu.Lock()
+	entry, ok := p.cancelFuncs[requestID]
+	if !ok || entry.seq != seq {
+		p.mu.Unlock()
+		return
+	}
+	delete(p.cancelFuncs, requestID)
+	p.mu.Unlock()
+	p.untrackAndNotify(requestID)
+}
+
+// untrackAndNotify removes a request from the queue, registry, and evictor state, and notifies
+// the eviction-terminated listener at most once if the request had been evicted.
+func (p *RequestEvictor) untrackAndNotify(requestID string) {
 	p.queue.Untrack(requestID)
 	p.evictionRegistry.Deregister(requestID)
 	if c, ok := p.evictor.(EvictorWithCleanup); ok {
