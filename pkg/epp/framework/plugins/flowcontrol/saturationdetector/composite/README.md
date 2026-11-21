@@ -10,7 +10,7 @@ The plugin implements the `SaturationDetector` interface by delegating to a conf
 
 Each child's signal is also exported through the `flow_control_detector_saturation` gauge, labeled by the detector reference name and the pipeline stage (`prefill` or `decode`), so operators can tell which signal is driving `flow_control_pool_saturation` in each stage.
 
-The plugin also implements `DispatchReservationTracker` and forwards each dispatch reservation and release to every child that tracks reservations. Flow control finds the tracker on the configured detector, so forwarding keeps `concurrency-detector` children counting dispatched requests. Forwarding ignores `stages`: the destination is unknown at dispatch, so every tracking child counts the reservation until it is released.
+The plugin also implements `DispatchReservationTracker` and forwards each dispatch reservation and release to every child that tracks reservations. Flow control finds the tracker on the configured detector, so forwarding keeps `concurrency-detector` children counting dispatched requests. Forwarding ignores `stages`: the destination is unknown at dispatch, so every tracking child counts the reservation until it is released. It forwards the peer demand view to every child that reads it in the same way.
 
 Beyond these two interfaces:
 

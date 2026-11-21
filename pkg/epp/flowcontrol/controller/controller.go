@@ -233,6 +233,9 @@ func NewFlowController(
 		if readsPeers {
 			consumer.SetPeerDemand(publisher.PeerDemand())
 		}
+		if detector, ok := fc.saturationDetector.(flowcontrol.PeerDemandConsumer); ok {
+			detector.SetPeerDemand(publisher.PeerDemand())
+		}
 		fc.logger.V(logutil.DEFAULT).Info("Starting the cross-replica band demand publisher.",
 			"syncer", cr.Syncer.TypedName(), "scope", poolName, "peerDemandConsumer", readsPeers)
 		go publisher.Run(fc.parentCtx)

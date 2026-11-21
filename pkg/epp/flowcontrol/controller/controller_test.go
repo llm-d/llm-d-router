@@ -1652,6 +1652,48 @@ func TestNewFlowController_GivesPeerDemandToAConsumingPolicy(t *testing.T) {
 	}, time.Second, time.Millisecond, "the publisher refreshes the view")
 }
 
+// peerDemandRecordingDetector is a saturation detector that reads peer demand.
+type peerDemandRecordingDetector struct {
+	flowcontrol.SaturationDetector
+	got chan flowcontrol.PeerDemand
+}
+
+func (d *peerDemandRecordingDetector) SetPeerDemand(p flowcontrol.PeerDemand) { d.got <- p }
+
+func TestNewFlowController_GivesPeerDemandToAConsumingDetector(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	detector := &peerDemandRecordingDetector{SaturationDetector: &mockSaturationDetector{}, got: make(chan flowcontrol.PeerDemand, 1)}
+	policy := &peerDemandRecordingPolicy{UsageLimitPolicy: usagelimits.DefaultPolicy(), got: make(chan flowcontrol.PeerDemand, 1)}
+	NewFlowController(ctx, "test-pool", &Config{DefaultRequestTTL: time.Minute}, Deps{
+		Registry:            &mockRegistryClient{FlowRegistryDataPlane: &mocks.MockRegistryDataPlane{}},
+		SaturationDetector:  detector,
+		EndpointCandidates:  &mocks.MockEndpointCandidates{},
+		UsageLimitPolicy:    policy,
+		BandSelectionPolicy: bandselection.DefaultPolicy(),
+		ProcessorFactory:    (&mockProcessorFactory{processor: &mockProcessor{}}).new,
+		CrossReplica: CrossReplicaConfig{
+			Syncer:       &getSyncer{setRecordingSyncer{sets: make(chan string, 1)}},
+			SyncInterval: time.Millisecond,
+		},
+	})
+
+	var fromDetector, fromPolicy flowcontrol.PeerDemand
+	select {
+	case fromDetector = <-detector.got:
+	case <-time.After(time.Second):
+		t.Fatal("the detector was not given peer demand")
+	}
+	select {
+	case fromPolicy = <-policy.got:
+	case <-time.After(time.Second):
+		t.Fatal("the policy was not given peer demand")
+	}
+	require.Same(t, fromPolicy, fromDetector, "the policy and the detector read one view")
+}
+
 func TestNewFlowController_NoPeerDemandWithoutCrossReplica(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())

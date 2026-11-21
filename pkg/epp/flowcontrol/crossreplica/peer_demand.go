@@ -48,8 +48,9 @@ type peerDemandView struct {
 }
 
 type peerDemandSnapshot struct {
-	at     time.Time
-	queued map[int]uint64
+	at          time.Time
+	queued      map[int]uint64
+	dispatching uint64
 }
 
 var _ flowcontrol.PeerDemand = &peerDemandView{}
@@ -79,6 +80,7 @@ func newPeerDemandView(
 func (v *peerDemandView) refresh(ctx context.Context) error {
 	priorities := v.registry.AllOrderedPriorityLevels()
 	queued := make(map[int]uint64, len(priorities))
+	var dispatching uint64
 	for _, priority := range priorities {
 		value, ok, err := v.syncer.Get(ctx, v.spec, strconv.Itoa(priority))
 		if err != nil {
@@ -86,9 +88,10 @@ func (v *peerDemandView) refresh(ctx context.Context) error {
 		}
 		if d, isDemand := value.(*bandDemand); ok && isDemand {
 			queued[priority] = d.Requests + d.Dispatching
+			dispatching += d.Dispatching
 		}
 	}
-	v.current.Store(&peerDemandSnapshot{at: v.clock.Now(), queued: queued})
+	v.current.Store(&peerDemandSnapshot{at: v.clock.Now(), queued: queued, dispatching: dispatching})
 	for priority, n := range queued {
 		metrics.RecordFlowControlPeerQueuedRequests(strconv.Itoa(priority), v.scope, float64(n))
 	}
@@ -102,6 +105,15 @@ func (v *peerDemandView) QueuedRequests(priority int) (uint64, bool) {
 		return 0, false
 	}
 	return s.queued[priority], true
+}
+
+// DispatchingRequests implements flowcontrol.PeerDemand.
+func (v *peerDemandView) DispatchingRequests() (uint64, bool) {
+	s := v.current.Load()
+	if s == nil || v.clock.Since(s.at) > v.maxAge {
+		return 0, false
+	}
+	return s.dispatching, true
 }
 
 // SyncInterval implements flowcontrol.PeerDemand.

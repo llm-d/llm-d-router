@@ -20,8 +20,10 @@ package concurrency
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
@@ -359,6 +361,59 @@ func TestDetector_DispatchReservations(t *testing.T) {
 
 		detector.ReserveDispatch("token-only")
 		require.InDelta(t, 0.0, detector.Saturation(ctx, []datalayer.Endpoint{endpoint}), 1e-6)
+	})
+}
+
+type fakePeers struct {
+	dispatching uint64
+	current     bool
+}
+
+func (f *fakePeers) QueuedRequests(int) (uint64, bool)   { return 0, f.current }
+func (f *fakePeers) DispatchingRequests() (uint64, bool) { return f.dispatching, f.current }
+func (f *fakePeers) SyncInterval() time.Duration         { return 20 * time.Millisecond }
+
+var _ flowcontrol.PeerDemand = &fakePeers{}
+
+func TestDetector_PeerDispatches(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	endpoint := newFakeEndpoint(newLocalRegistry(), "endpoint-a")
+	newWithLocalReservations := func() *detector {
+		d := newDetector("test", config{mode: modeRequests, maxConcurrency: 8}, logr.Discard())
+		d.ReserveDispatch("local-1")
+		d.ReserveDispatch("local-2")
+		return d
+	}
+
+	t.Run("peer dispatches count as pending", func(t *testing.T) {
+		t.Parallel()
+		d := newWithLocalReservations()
+		d.SetPeerDemand(&fakePeers{dispatching: 3, current: true})
+		require.InDelta(t, 5.0/8, d.Saturation(ctx, []datalayer.Endpoint{endpoint}), 1e-6)
+	})
+
+	t.Run("a stale peer view is ignored", func(t *testing.T) {
+		t.Parallel()
+		d := newWithLocalReservations()
+		d.SetPeerDemand(&fakePeers{dispatching: 3})
+		require.InDelta(t, 2.0/8, d.Saturation(ctx, []datalayer.Endpoint{endpoint}), 1e-6)
+	})
+
+	t.Run("a peer count above capacity saturates without overflowing", func(t *testing.T) {
+		t.Parallel()
+		d := newWithLocalReservations()
+		d.SetPeerDemand(&fakePeers{dispatching: math.MaxUint64, current: true})
+		require.InDelta(t, 10.0/8, d.Saturation(ctx, []datalayer.Endpoint{endpoint}), 1e-6)
+	})
+
+	t.Run("a nil view clears the peers", func(t *testing.T) {
+		t.Parallel()
+		d := newWithLocalReservations()
+		d.SetPeerDemand(&fakePeers{dispatching: 3, current: true})
+		d.SetPeerDemand(nil)
+		require.InDelta(t, 2.0/8, d.Saturation(ctx, []datalayer.Endpoint{endpoint}), 1e-6)
 	})
 }
 

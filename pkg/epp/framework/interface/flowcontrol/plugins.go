@@ -230,13 +230,16 @@ type PeerDemand interface {
 	// QueuedRequests returns the requests queued in the priority band across peer replicas. ok is false when no
 	// current view of the peers exists, in which case the caller acts on local state alone.
 	QueuedRequests(priority int) (queued uint64, ok bool)
+	// DispatchingRequests returns the requests peer replicas released from their queues, in any band, that are not
+	// on an endpoint yet. ok is false when no current view of the peers exists.
+	DispatchingRequests() (dispatching uint64, ok bool)
 	// SyncInterval returns how often the view is refreshed from the peers.
 	SyncInterval() time.Duration
 }
 
-// PeerDemandConsumer is an optional interface for a UsageLimitPolicy that reads PeerDemand. When
-// flowControl.crossReplica publishes band demand, the FlowController calls SetPeerDemand once, before the first
-// dispatch cycle.
+// PeerDemandConsumer is an optional interface for a UsageLimitPolicy or SaturationDetector that reads
+// PeerDemand. When flowControl.crossReplica publishes band demand, the FlowController calls SetPeerDemand once,
+// before the first dispatch cycle.
 type PeerDemandConsumer interface {
 	SetPeerDemand(PeerDemand)
 }

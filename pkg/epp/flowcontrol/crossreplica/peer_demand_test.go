@@ -77,6 +77,27 @@ func TestPeerDemand_ReportsPeersOnly(t *testing.T) {
 	assert.Zero(t, queued)
 }
 
+func TestPeerDemand_DispatchingRequestsSumsPeerBands(t *testing.T) {
+	t.Parallel()
+	p, syncer, clk := newPeerTestPublisher(t)
+	syncer.peer["100"] = &bandDemand{Requests: 5, Dispatching: 2}
+	syncer.peer["0"] = &bandDemand{Dispatching: 4}
+	p.Dispatching().Add("local", 100)
+	view := p.PeerDemand()
+
+	_, ok := view.DispatchingRequests()
+	assert.False(t, ok, "no view before the first refresh")
+
+	require.NoError(t, p.view.refresh(context.Background()))
+	dispatching, ok := view.DispatchingRequests()
+	assert.True(t, ok)
+	assert.Equal(t, uint64(6), dispatching, "the local dispatch is not peer demand")
+
+	clk.Step(peerDemandMaxAgeIntervals*20*time.Millisecond + time.Millisecond)
+	_, ok = view.DispatchingRequests()
+	assert.False(t, ok, "older than the max age")
+}
+
 func TestPeerDemand_AgesOutWithoutRefresh(t *testing.T) {
 	t.Parallel()
 	p, syncer, clk := newPeerTestPublisher(t)

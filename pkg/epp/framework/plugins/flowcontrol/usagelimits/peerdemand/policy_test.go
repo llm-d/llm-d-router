@@ -43,6 +43,10 @@ func (f *fakePeers) QueuedRequests(priority int) (uint64, bool) {
 	return f.queued[priority], true
 }
 
+func (f *fakePeers) DispatchingRequests() (uint64, bool) {
+	return 0, !f.stale
+}
+
 func (f *fakePeers) SyncInterval() time.Duration {
 	return f.interval
 }

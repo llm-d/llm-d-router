@@ -68,6 +68,7 @@ var (
 	_ fwksched.Filter                        = &detector{}
 	_ flowcontrol.SaturationDetector         = &detector{}
 	_ flowcontrol.DispatchReservationTracker = &detector{}
+	_ flowcontrol.PeerDemandConsumer         = &detector{}
 )
 
 // detector implements a saturation detector and scheduling filter based on active request concurrency.
@@ -78,7 +79,10 @@ type detector struct {
 	uncachedRequestTokensDataKey fwkplugin.DataKey
 	dispatchReservations         sync.Map
 	pendingDispatches            atomic.Int64
+	peers                        atomic.Pointer[peerSource]
 }
+
+type peerSource struct{ flowcontrol.PeerDemand }
 
 // newDetector creates a new instance of the Concurrency Detector.
 func newDetector(name string, cfg config, logger logr.Logger) *detector {
@@ -173,6 +177,16 @@ func (d *detector) ReserveDispatch(requestID string) bool {
 	return true
 }
 
+// SetPeerDemand implements flowcontrol.PeerDemandConsumer. Requests a peer replica released from its queue and
+// has not placed yet count as pending dispatches, since no endpoint shows them until the peer places them.
+func (d *detector) SetPeerDemand(peers flowcontrol.PeerDemand) {
+	if peers == nil {
+		d.peers.Store(nil)
+		return
+	}
+	d.peers.Store(&peerSource{peers})
+}
+
 // ReleaseDispatch removes a dispatch reservation. Duplicate and unknown releases are no-ops.
 func (d *detector) ReleaseDispatch(requestID string) bool {
 	if requestID == "" {
@@ -246,6 +260,12 @@ func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoin
 	}
 	d.recordCapacity(stage, reqCapacity, tokCapacity)
 	pendingDispatches := d.pendingDispatches.Load()
+	if peers := d.peers.Load(); peers != nil {
+		if dispatching, ok := peers.DispatchingRequests(); ok {
+			// Any count at or above capacity saturates the pool, so the bound changes no decision.
+			pendingDispatches += int64(min(dispatching, uint64(reqCapacity))) //#nosec G115 -- reqCapacity is a non-negative sum and bounds the value
+		}
+	}
 
 	switch d.config.mode {
 	case modeTokens:
