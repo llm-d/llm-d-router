@@ -1264,11 +1264,11 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_events_snapshot_load_duration_seconds` | Histogram | - | Successful snapshot loads, from the request until the batches are queued for indexing. Failed and unavailable snapshots are counted in `llm_d_epp_kv_cache_events_zmq_errors_total` with `operation="snapshot"`. |
 | `llm_d_epp_kv_cache_events_pool_queue_depth` | Gauge | - | Messages queued across event-pool workers. |
 | `llm_d_epp_kv_cache_events_pool_capacity` | Gauge | - | Event-pool worker capacity. |
-| `llm_d_epp_kv_cache_index_evictions_by_cause_total` | Counter | `reason` | Index keys and engine mappings removed by the memory backend's own eviction paths: `capacity` (main-store LRU bound), `clear` (a cleared pod's emptied keys), `empty` (delete-on-empty after an eviction). |
+| `llm_d_epp_kv_cache_index_evictions_by_cause_total` | Counter | `reason` | Index keys and engine mappings removed by the memory backends' own eviction paths: `capacity` (in-memory main-store LRU bound), `clear` (a cleared pod's emptied keys), `empty` (delete-on-empty after an eviction), `budget` (dense byte-budget sweep), `dead` (a cleared pod's storage freed by the sweep). |
 | `llm_d_epp_kv_cache_index_truncated_entries_total` | Counter | - | Pods dropped by the index's per-key pod cap. |
 | `llm_d_epp_kv_cache_index_clear_duration_seconds` | Histogram | - | Index Clear call duration. |
-| `llm_d_epp_kv_cache_index_resident_keys` | Gauge | - | Request keys resident in the index; refreshed at the end of each mutating call. |
-| `llm_d_epp_kv_cache_index_resident_bytes` | Gauge | - | Estimated bytes resident in the index's structures; refreshed at the end of each mutating call. |
+| `llm_d_epp_kv_cache_index_resident_keys` | Gauge | - | Request keys resident in the index; the in-memory backend refreshes at the end of each mutating call, the dense backend when its byte-budget sweep runs. |
+| `llm_d_epp_kv_cache_index_resident_bytes` | Gauge | - | Estimated bytes resident in the index's structures; the in-memory backend refreshes at the end of each mutating call, the dense backend when its byte-budget sweep runs. |
 
 A vLLM release can publish an event type that the router's vLLM adapter does not know. The adapter
 skips such an event and applies the other events in the same message to the index.

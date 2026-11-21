@@ -65,6 +65,21 @@ func (in *interner) internLocked(s string) uint32 {
 	return id
 }
 
+// assignLocked returns s's ordinal, assigning the next one when s has none
+// or when fresh is set. A fresh assignment re-points the name at a new
+// ordinal while the ordinal-to-name table stays append-only, so the old
+// ordinal keeps resolving to s. Called with mu held for writing; the caller
+// has checked the interner's limit against len(in.names).
+func (in *interner) assignLocked(s string, fresh bool) uint32 {
+	if id, ok := in.ids[s]; ok && !fresh {
+		return id
+	}
+	id := uint32(len(in.names)) //#nosec G115 -- the caller caps len(in.names) at the interner limit
+	in.ids[s] = id
+	in.names = append(in.names, s)
+	return id
+}
+
 // ordinalOf returns the ordinal assigned to s, and whether it has one.
 func (in *interner) ordinalOf(s string) (uint32, bool) {
 	in.mu.RLock()

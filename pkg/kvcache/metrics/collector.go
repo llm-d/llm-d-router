@@ -206,9 +206,10 @@ var (
 	})
 
 	// IndexEvictions counts index keys and engine mappings removed by the
-	// memory backend's own eviction paths, labeled by cause: "capacity" (the
-	// main-store LRU bound), "clear" (a cleared pod's emptied keys), "empty"
-	// (delete-on-empty after eviction).
+	// memory backends' own eviction paths, labeled by cause: "capacity" (the
+	// in-memory main-store LRU bound), "clear" (a cleared pod's emptied keys),
+	// "empty" (delete-on-empty after eviction), "budget" (the dense
+	// byte-budget sweep), "dead" (a cleared pod's slots freed by the sweep).
 	IndexEvictions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Subsystem: routerSubsystem, Name: "kv_cache_index_evictions_by_cause_total",
 		Help: metricsutil.HelpMsgWithStability(
@@ -231,8 +232,9 @@ var (
 			compbasemetrics.ALPHA),
 		Buckets: prometheus.DefBuckets,
 	})
-	// IndexResidentKeys and IndexResidentBytes report the memory backend's
-	// residency, refreshed at the end of each mutating call.
+	// IndexResidentKeys and IndexResidentBytes report the memory backends'
+	// residency; the in-memory backend refreshes them at the end of each
+	// mutating call, the dense backend when its byte-budget sweep runs.
 	IndexResidentKeys = prometheus.NewGauge(prometheus.GaugeOpts{
 		Subsystem: routerSubsystem, Name: "kv_cache_index_resident_keys",
 		Help: metricsutil.HelpMsgWithStability(

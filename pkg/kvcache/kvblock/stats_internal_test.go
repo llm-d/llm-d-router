@@ -79,13 +79,14 @@ func TestInMemoryStatsLifecycle(t *testing.T) {
 	t.Run("per-key cap truncation counts dropped pods", func(t *testing.T) {
 		idx := newStatsTestIndex(t, 100, 2)
 		require.NoError(t, idx.Add(ctx, []BlockHash{10}, []BlockHash{1}, []PodEntry{podA, podB}))
+		truncatedBefore := testutil.ToFloat64(metrics.IndexTruncatedEntries)
 		require.NoError(t, idx.Add(ctx, []BlockHash{10}, []BlockHash{1}, []PodEntry{podC}))
 
 		stats := idx.Stats()
 		require.Equal(t, 1, stats.ResidentKeys)
 		require.Equal(t, 2, int(idx.entries.Load()))
 		require.Equal(t, int64(1), stats.TruncatedEntries)
-		require.Equal(t, 1.0, testutil.ToFloat64(metrics.IndexTruncatedEntries))
+		require.Equal(t, truncatedBefore+1, testutil.ToFloat64(metrics.IndexTruncatedEntries))
 	})
 
 	t.Run("Clear removes matching entries and observes duration", func(t *testing.T) {

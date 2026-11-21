@@ -36,6 +36,8 @@ type IndexConfig struct {
 	RedisConfig *RedisIndexConfig `json:"redisConfig"`
 	// CostAwareMemoryConfig holds the configuration for the cost-aware memory index.
 	CostAwareMemoryConfig *CostAwareMemoryIndexConfig `json:"costAwareMemoryConfig"`
+	// DenseMemoryConfig holds the configuration for the dense memory index.
+	DenseMemoryConfig *DenseMemoryIndexConfig `json:"denseMemoryConfig"`
 
 	// EnableMetrics toggles whether admissions/evictions/hits/misses are
 	// recorded.
@@ -68,6 +70,11 @@ func NewIndex(ctx context.Context, cfg *IndexConfig) (Index, error) {
 		idx, err = NewCostAwareMemoryIndex(cfg.CostAwareMemoryConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create cost-aware memory index: %w", err)
+		}
+	case cfg.DenseMemoryConfig != nil:
+		idx, err = NewDenseMemoryIndex(cfg.DenseMemoryConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create dense memory index: %w", err)
 		}
 	case cfg.RedisConfig != nil:
 		//nolint:contextcheck // NewRedisIndex does not accept context parameter

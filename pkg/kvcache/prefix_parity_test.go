@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -50,6 +51,34 @@ func newParityRunner(t *testing.T, cfg *kvblock.InMemoryIndexConfig) *parityRunn
 	t.Helper()
 	raw, err := kvblock.NewInMemoryIndex(cfg)
 	require.NoError(t, err)
+	return newRunnerForIndex(t, raw)
+}
+
+// newDenseParityRunner mirrors an in-memory scenario configuration on the
+// dense backend: the same byte budget, with the pod cap clamped to the dense
+// maximum. Parity is within one backend, so the clamp and the different
+// eviction policy do not affect the comparison.
+func newDenseParityRunner(t *testing.T, cfg *kvblock.InMemoryIndexConfig) *parityRunner {
+	t.Helper()
+	raw, err := kvblock.NewDenseMemoryIndex(&kvblock.DenseMemoryIndexConfig{
+		Size:         strconv.Itoa(cfg.Size),
+		PodCacheSize: min(cfg.PodCacheSize, 15),
+	})
+	require.NoError(t, err)
+	return newRunnerForIndex(t, raw)
+}
+
+// parityBackends pairs each backend's runner factory with its name.
+var parityBackends = []struct {
+	name string
+	new  func(*testing.T, *kvblock.InMemoryIndexConfig) *parityRunner
+}{
+	{"in-memory", newParityRunner},
+	{"dense", newDenseParityRunner},
+}
+
+func newRunnerForIndex(t *testing.T, raw kvblock.Index) *parityRunner {
+	t.Helper()
 	wrapped := kvblock.NewTracedIndex(kvblock.NewInstrumentedIndex(raw))
 	backends := kvcache.DefaultKVCacheBackendConfig()
 	return &parityRunner{
@@ -121,22 +150,25 @@ func TestPrefixParityGeneratorStreams(t *testing.T) {
 	specs.SpecChance = 0.8
 	profiles = append(profiles, specs)
 
+	streamCfg := &kvblock.InMemoryIndexConfig{Size: 1 << 16, PodCacheSize: 256}
 	for _, p := range profiles {
 		for seed := int64(1); seed <= 5; seed++ {
 			p.Seed = seed
-			t.Run(fmt.Sprintf("%s/seed=%d", p.Name, seed), func(t *testing.T) {
-				r := newParityRunner(t, &kvblock.InMemoryIndexConfig{Size: 1 << 16, PodCacheSize: 256})
-				var ops []workload.Op
-				g := workload.New(p)
-				for {
-					op, ok := g.Next()
-					if !ok {
-						break
+			for _, b := range parityBackends {
+				t.Run(fmt.Sprintf("%s/seed=%d/%s", p.Name, seed, b.name), func(t *testing.T) {
+					r := b.new(t, streamCfg)
+					var ops []workload.Op
+					g := workload.New(p)
+					for {
+						op, ok := g.Next()
+						if !ok {
+							break
+						}
+						ops = append(ops, op)
 					}
-					ops = append(ops, op)
-				}
-				r.replay(t, ops)
-			})
+					r.replay(t, ops)
+				})
+			}
 		}
 	}
 }
@@ -340,9 +372,11 @@ func TestPrefixParityScenarios(t *testing.T) {
 	}
 
 	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			newParityRunner(t, sc.cfg).replay(t, sc.ops())
-		})
+		for _, b := range parityBackends {
+			t.Run(sc.name+"/"+b.name, func(t *testing.T) {
+				b.new(t, sc.cfg).replay(t, sc.ops())
+			})
+		}
 	}
 }
 
@@ -418,7 +452,9 @@ func TestPrefixParityFuzz(t *testing.T) {
 					ops = append(ops, matchOp(q...))
 				}
 			}
-			newParityRunner(t, &kvblock.InMemoryIndexConfig{Size: 1 << 12, PodCacheSize: 3}).replay(t, ops)
+			for _, b := range parityBackends {
+				b.new(t, &kvblock.InMemoryIndexConfig{Size: 1 << 12, PodCacheSize: 3}).replay(t, ops)
+			}
 		})
 	}
 }
