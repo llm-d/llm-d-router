@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	lru "github.com/hashicorp/golang-lru/v2"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -78,13 +77,8 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 		podCacheSize = defaultPodsPerKey
 	}
 
-	engineToRequestKeys, err := lru.New[BlockHash, []BlockHash](cfg.Size)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize in-memory engine key map: %w", err)
-	}
-
 	m := &InMemoryIndex{
-		engineToRequestKeys: engineToRequestKeys,
+		engineToRequestKeys: newEngineKeyMap(cfg.Size),
 		podCacheSize:        podCacheSize,
 		pods:                newInterner(maxInternedPods),
 		tiers:               newInterner(maxInternedTiers),
@@ -115,13 +109,15 @@ var errIndexCardinality = errors.New("index cardinality limit reached")
 type InMemoryIndex struct {
 	// mu orders Add's engine key mapping writes and pod entry inserts against the
 	// removal of an emptied request key and of an engine key mapping whose request
-	// keys are all empty. Add takes it also when engineKeys is nil. Lookup does not
-	// take it.
+	// keys are all empty. It also guards the lock-free engineToRequestKeys
+	// structure, so Add (also when engineKeys is nil), Evict, and GetRequestKey
+	// take it. Lookup does not take it.
 	mu sync.Mutex
 	// data holds the mapping of requestKeys to sets of pod identifiers.
 	data *lruStore
 	// engineToRequestKeys holds the mapping of engineKeys to requestKeys.
-	engineToRequestKeys *lru.Cache[BlockHash, []BlockHash]
+	// It is lock-free; m.mu guards it.
+	engineToRequestKeys *engineKeyMap
 	// podCacheSize is the maximum number of pod entries per key.
 	podCacheSize int
 	// pods and tiers assign the ordinals EntryRef carries. Neither is
@@ -397,7 +393,7 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	if engineKeys != nil {
 		mappings := engineToRequestMapping(engineKeys, requestKeys)
 		for ek, rks := range mappings {
-			m.engineToRequestKeys.Add(ek, rks)
+			m.engineToRequestKeys.set(ek, rks)
 		}
 	}
 
@@ -453,18 +449,22 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 
 	switch keyType {
 	case EngineKey:
-		// Resolve each engine key's request keys and evict the pod entries.
-		// Do not hold mu here: evictPodsFromRequestKey takes it to remove an
-		// emptied request key.
+		// Resolve every engine key's request keys under one lock hold, then
+		// evict the pod entries. The evictions release the lock per key: they
+		// take it themselves to remove an emptied request key.
 		groups := make([][]BlockHash, len(keys))
+		m.mu.Lock()
 		for i, key := range keys {
-			rks, found := m.engineToRequestKeys.Peek(key)
+			rks, found := m.engineToRequestKeys.peek(key)
 			if !found {
 				traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
 				continue
 			}
 			groups[i] = rks
-			for _, rk := range rks {
+		}
+		m.mu.Unlock()
+		for i, key := range keys {
+			for _, rk := range groups[i] {
 				m.evictPodsFromRequestKey(rk, key, entries, traceLogger)
 			}
 		}
@@ -484,7 +484,7 @@ func (m *InMemoryIndex) Evict(ctx context.Context, keyType KeyType, keys []Block
 				}
 			}
 			if allEmpty {
-				m.engineToRequestKeys.Remove(key)
+				m.engineToRequestKeys.remove(key)
 			}
 		}
 		m.mu.Unlock()
@@ -616,11 +616,13 @@ func (m *InMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
 // This is what Pool uses for parent hash resolution.
 // Returns an error if the engineKey mapping is missing (e.g., already evicted).
 func (m *InMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
-	rks, found := m.engineToRequestKeys.Get(engineKey)
-	if !found || len(rks) == 0 {
+	m.mu.Lock()
+	rk, found := m.engineToRequestKeys.get(engineKey)
+	m.mu.Unlock()
+	if !found {
 		return EmptyBlockHash, fmt.Errorf("engine key not found: %s", engineKey.String())
 	}
-	return rks[len(rks)-1], nil
+	return rk, nil
 }
 
 // podsPerKeyPrintHelper formats a map of keys to pod names for printing.

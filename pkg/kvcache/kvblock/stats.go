@@ -58,7 +58,7 @@ func (m *InMemoryIndex) Stats() MemoryIndexStats {
 	return MemoryIndexStats{
 		ResidentKeys:     m.data.Len(),
 		ResidentBytes:    m.residentBytes(),
-		EngineMappings:   m.engineToRequestKeys.Len(),
+		EngineMappings:   m.engineToRequestKeys.len(),
 		TruncatedEntries: m.truncated.Load(),
 	}
 }
@@ -68,7 +68,7 @@ func (m *InMemoryIndex) Stats() MemoryIndexStats {
 func (m *InMemoryIndex) residentBytes() int64 {
 	bytes := int64(m.data.Len()) * inMemoryBytesPerKey
 	bytes += m.entries.Load() * inMemoryBytesPerEntry
-	bytes += int64(m.engineToRequestKeys.Len()) * inMemoryBytesPerEngine
+	bytes += int64(m.engineToRequestKeys.len()) * inMemoryBytesPerEngine
 	return bytes
 }
 
