@@ -10,7 +10,7 @@ The Metrics Data Source is a data layer plugin that polls a Prometheus-compatibl
 ## What it does
 
 1.  Periodically (or when triggered) performs an HTTP GET request to a configured metrics endpoint (e.g., `http://<endpoint-ip>:8080/metrics`).
-2.  Parses the Prometheus text format response into a `PrometheusMetricMap`. The parser reads at most 8 MiB of a response. This applies to the pod source and the multi-cluster source.
+2.  Parses the Prometheus text format response into a `PrometheusMetricMap`. The parser reads at most 8 MiB of a response. This applies to the pod source and the multi-cluster source. A family with a sample of 16 or more labels, such as `vllm:cache_config_info`, is parsed once and reused while its lines in the response stay the same.
 3.  Provides the parsed metrics to any registered extractors (like the `core-metrics-extractor`).
 
 ## Outputs produced

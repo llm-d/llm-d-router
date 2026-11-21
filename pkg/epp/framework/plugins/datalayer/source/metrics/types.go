@@ -22,4 +22,5 @@ import (
 )
 
 // PrometheusMetricMap is the parsed metric-families map produced by parseMetrics.
+// Its families can be shared across scrapes and endpoints, so readers must not modify them.
 type PrometheusMetricMap = map[string]*dto.MetricFamily
