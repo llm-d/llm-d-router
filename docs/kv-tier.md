@@ -293,7 +293,7 @@ The biggest open question was how the TPU path should work with TPU Sync. Three 
 1. ✅ **Hints in.** Can an engine connector ask TPU Sync to pull given blocks from a given peer, for example from a `kv.fetch` hint? Yes. The proof-of-concept connector does it, and it also pushes on `kv.prefetch`.
 2. ✅ **Connector version.** Which tpu-inference version pairs with the current TPU Sync wheel? We found none. The `RaidenOffloadConnector` on tpu-inference `main` still imports `tpu_raiden`, and it logs remote chunks without fetching them. We wrote our own connector against the current `KVCacheStore` API.
 3. ✅ **Sharing.** Can several engines on one host share a TPU Sync host pool? No. Each store's pool is private, and two engines get separate memory segments.
-4. **Events.** Does TPU Sync publish block stored and removed events that a router could index? Its global registry answers lookups by hash. We have not found an event stream.
+4. **Events.** Does TPU Sync publish block stored and removed events that a router could index? We have not found an event stream. Its global registry answers lookups by hash, one at a time. The router therefore cannot see which blocks a pod holds in host memory. A hint can name a peer that has already evicted the blocks, and that request recomputes. A prefetch also cannot name blocks by hash. It must ride on a request to the source that carries the real prompt.
 5. **Secondary backend.** Is it pluggable from outside, for example for this daemon or Mooncake Store?
 6. **Extension hooks.** Can outside code add transforms on host blocks, such as compression, or new hint actions?
 
