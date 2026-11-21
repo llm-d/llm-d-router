@@ -41,6 +41,7 @@ type peerDemandView struct {
 	registry bandOccupancy
 	scope    string
 	clock    clock.PassiveClock
+	interval time.Duration
 	maxAge   time.Duration
 	current  atomic.Pointer[peerDemandSnapshot]
 }
@@ -68,6 +69,7 @@ func newPeerDemandView(
 		registry: registry,
 		scope:    scope,
 		clock:    clk,
+		interval: interval,
 		maxAge:   peerDemandMaxAgeIntervals * interval,
 	}
 }
@@ -99,4 +101,9 @@ func (v *peerDemandView) QueuedRequests(priority int) (uint64, bool) {
 		return 0, false
 	}
 	return s.queued[priority], true
+}
+
+// SyncInterval implements flowcontrol.PeerDemand.
+func (v *peerDemandView) SyncInterval() time.Duration {
+	return v.interval
 }
