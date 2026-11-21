@@ -194,7 +194,7 @@ func New(p Profile) *Generator {
 	if len(p.Tiers) == 0 {
 		p.Tiers = []string{"gpu"}
 	}
-	return &Generator{p: p, rng: rand.New(rand.NewSource(p.Seed))}
+	return &Generator{p: p, rng: rand.New(rand.NewSource(p.Seed))} //#nosec G404 -- determinism is the workload contract
 }
 
 // PodName returns the i-th pod identifier, shared by every consumer so
@@ -206,7 +206,7 @@ func PodName(i int) string {
 // blockKey derives a non-zero block hash from the seed, conversation, and
 // position, so identical inputs replay identically.
 func blockKey(seed int64, conv, idx uint64) kvblock.BlockHash {
-	x := uint64(seed)*0x9e3779b97f4a7c15 ^ (conv+1)*0xbf58476d1ce4e5b9 ^ (idx+1)*0x94d049bb133111eb
+	x := uint64(seed)*0x9e3779b97f4a7c15 ^ (conv+1)*0xbf58476d1ce4e5b9 ^ (idx+1)*0x94d049bb133111eb //#nosec G115 -- seed is a workload-chosen int64
 	x ^= x >> 30
 	x *= 0xbf58476d1ce4e5b9
 	x ^= x >> 27
@@ -225,7 +225,7 @@ func engineKey(seed int64, conv, idx, j uint64) kvblock.BlockHash {
 func (g *Generator) Next() (Op, bool) {
 	p := g.p
 	if g.keys == nil {
-		if g.conv >= uint64(p.Conversations) {
+		if g.conv >= uint64(p.Conversations) { //#nosec G115 -- profile counts are positive
 			return Op{}, false
 		}
 		g.keys = make([]kvblock.BlockHash, 0, p.Depth+p.Turns*p.Grow)
@@ -307,7 +307,7 @@ func (g *Generator) addOp(start, end int) Op {
 		eng = make([]kvblock.BlockHash, len(req)*p.EngineRatio)
 		for i := range req {
 			for j := 0; j < p.EngineRatio; j++ {
-				eng[i*p.EngineRatio+j] = engineKey(p.Seed, g.conv, uint64(start+i), uint64(j))
+				eng[i*p.EngineRatio+j] = engineKey(p.Seed, g.conv, uint64(start+i), uint64(j)) //#nosec G115 -- loop indices
 			}
 		}
 	}
@@ -343,9 +343,9 @@ func (g *Generator) entries(from int) []kvblock.PodEntry {
 	for i := range entries {
 		// Rotate the pod set per position so prefixes overlap across pods
 		// without every key holding an identical set.
-		pod := (uint64(from)*31 + uint64(i) + g.conv*7) % uint64(p.Pods)
+		pod := (uint64(from)*31 + uint64(i) + g.conv*7) % uint64(p.Pods) //#nosec G115 -- positions and profile counts are non-negative
 		e := kvblock.PodEntry{
-			PodIdentifier: PodName(int(pod)),
+			PodIdentifier: PodName(int(pod)), //#nosec G115 -- pod is a modulus remainder
 			DeviceTier:    p.Tiers[g.rng.Intn(len(p.Tiers))],
 		}
 		if p.GroupChance > 0 && g.rng.Float64() < p.GroupChance {

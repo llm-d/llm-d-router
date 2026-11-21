@@ -41,7 +41,7 @@ func ReadHeap() HeapSnapshot {
 	runtime.ReadMemStats(&ms)
 	return HeapSnapshot{
 		HeapAlloc:  ms.HeapAlloc,
-		PauseTotal: time.Duration(ms.PauseTotalNs),
+		PauseTotal: time.Duration(ms.PauseTotalNs), //#nosec G115 -- nanoseconds of pause, far inside int64
 		NumGC:      ms.NumGC,
 	}
 }
@@ -61,5 +61,5 @@ func RSSBytes() uint64 {
 	if err != nil {
 		return 0
 	}
-	return pages * uint64(os.Getpagesize())
+	return pages * uint64(os.Getpagesize()) //#nosec G115 -- Getpagesize is positive
 }
