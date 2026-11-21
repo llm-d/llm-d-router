@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -715,6 +716,7 @@ func makeSchedulingResult(endpointName string) *fwksched.SchedulingResult {
 type stubSchedulingEndpoint struct {
 	fwksched.Endpoint
 	metadata *datalayer.EndpointMetadata
+	metrics  *datalayer.Metrics
 	attr     datalayer.AttributeMap
 }
 
@@ -727,7 +729,7 @@ func newStubSchedulingEndpoint(name string) *stubSchedulingEndpoint {
 
 func (f *stubSchedulingEndpoint) GetMetadata() *datalayer.EndpointMetadata   { return f.metadata }
 func (f *stubSchedulingEndpoint) UpdateMetadata(*datalayer.EndpointMetadata) {}
-func (f *stubSchedulingEndpoint) GetMetrics() *datalayer.Metrics             { return nil }
+func (f *stubSchedulingEndpoint) GetMetrics() *datalayer.Metrics             { return f.metrics }
 func (f *stubSchedulingEndpoint) UpdateMetrics(*datalayer.Metrics)           {}
 func (f *stubSchedulingEndpoint) GetAttributes() datalayer.AttributeMap      { return f.attr }
 func (f *stubSchedulingEndpoint) String() string                             { return "" }
@@ -1710,4 +1712,407 @@ func TestInFlightLoadProducer_WarnsOnceOnMissingOutlenBucket(t *testing.T) {
 	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w3", 4), res))
 
 	require.Equal(t, 1, warnings, "missing-outlen-bucket warning must fire exactly once")
+}
+
+func newKVGrowthProducer(t testing.TB, projection *KVGrowthProjectionConfig) (*InFlightLoadProducer, error) {
+	raw, err := json.Marshal(Config{KVGrowthProjection: projection})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p, err := InFlightLoadProducerFactory("inflight-load-producer",
+		json.NewDecoder(bytes.NewReader(raw)), testutils.NewTestHandle(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return p.(*InFlightLoadProducer), nil
+}
+
+// kvGrowthTokens reads the projection the producer publishes on the endpoint, with the endpoint's
+// KV cache usage scraped twice after every response chunk so far, so that it shows their prompts.
+func kvGrowthTokens(t *testing.T, p *InFlightLoadProducer, endpointName string) int64 {
+	t.Helper()
+	var tokens int64
+	for range 3 {
+		// Later than every scrape of an earlier call.
+		scrapedAt := time.Now().Add(time.Duration(kvGrowthTestScrapes.Add(1)) * time.Hour)
+		tokens = kvGrowthTokensScrapedAt(t, p, endpointName, scrapedAt, scrapedAt)
+	}
+	return tokens
+}
+
+var kvGrowthTestScrapes atomic.Int64
+
+// kvGrowthTokensScrapedAt reads the projection for an endpoint scraped at scrapedAt, whose KV
+// cache usage was last read by the scrape at usageAt. The projection is recomputed, as it is
+// after the refresh interval.
+func kvGrowthTokensScrapedAt(t *testing.T, p *InFlightLoadProducer, endpointName string, scrapedAt, usageAt time.Time) int64 {
+	t.Helper()
+	if p.kvGrowth != nil {
+		p.kvGrowth.mu.Lock()
+		clear(p.kvGrowth.projections)
+		p.kvGrowth.mu.Unlock()
+	}
+	samples := datalayer.NewScalarSampleUpdate(nil, "test", usageAt, 0)
+	samples.Observe(datalayer.ScalarFieldKVCacheUsagePercent, 0)
+	endpoint := newStubSchedulingEndpoint(endpointName)
+	endpoint.metrics = &datalayer.Metrics{UpdateTime: scrapedAt, ScalarSamples: samples.Result()}
+	require.NoError(t, p.Extract(context.Background(), datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: endpoint}))
+	val, ok := endpoint.Get(p.dk)
+	require.True(t, ok)
+	return val.(*attrconcurrency.InFlightLoad).KVGrowthTokens
+}
+
+// The expected values assume a 4-token output cap and no completed request, so every request is
+// reserved its remaining output up to the cap and the next request its 8-token prompt plus 4. A
+// request also reserves its 8-token prompt until its first response chunk.
+func TestInFlightLoadProducer_KVGrowthProjection(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const endpointName = "growth-endpoint"
+
+	t.Run("follows the requests running on the endpoint", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		res := makeSchedulingResult(endpointName)
+		require.Zero(t, kvGrowthTokens(t, p, endpointName))
+
+		first := makeTokenRequest("first", 8)
+		first.SchedulingResult = res
+		require.NoError(t, p.PreRequest(ctx, first, res))
+		require.Equal(t, int64(8+4+12), kvGrowthTokens(t, p, endpointName))
+
+		// The first request has one token left after three stream events; the second can still
+		// emit four. The peak is one token ahead: 1 + 1 + 9, plus the second request's prompt.
+		p.ResponseBody(ctx, first, &fwkrh.Response{StartOfStream: true, StreamedEvents: 3}, nil)
+		second := makeTokenRequest("second", 8)
+		second.SchedulingResult = res
+		require.NoError(t, p.PreRequest(ctx, second, res))
+		require.Equal(t, int64(8+11), kvGrowthTokens(t, p, endpointName))
+
+		p.ResponseBody(ctx, first, &fwkrh.Response{
+			EndOfStream: true, StreamedEvents: 4, Usage: fwkrequest.Usage{CompletionTokens: 4},
+			TerminationCause: fwkrh.TerminationCauseNatural,
+		}, nil)
+		require.Equal(t, int64(8+4+12), kvGrowthTokens(t, p, endpointName))
+
+		// A request reaped without an end of stream stops being projected.
+		p.PluginState.Delete(second.RequestID)
+		require.Zero(t, kvGrowthTokens(t, p, endpointName))
+	})
+
+	t.Run("keeps the prompt reserved until the second scrape of the usage after the first response chunk", func(t *testing.T) {
+		t.Parallel()
+		for name, tc := range map[string]struct {
+			scrapes []time.Duration // when the KV cache usage is scraped, counted from the chunk
+			want    int64
+		}{
+			"scraped twice before the chunk":        {scrapes: []time.Duration{-2 * time.Second, -time.Second}, want: 8 + 4 + 12},
+			"scraped once after the chunk":          {scrapes: []time.Duration{-time.Second, time.Second}, want: 8 + 4 + 12},
+			"the scrape after the chunk read twice": {scrapes: []time.Duration{time.Second, time.Second}, want: 8 + 4 + 12},
+			"scraped twice after the chunk":         {scrapes: []time.Duration{time.Second, 2 * time.Second}, want: 4 + 12},
+		} {
+			p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+			require.NoError(t, err)
+			res := makeSchedulingResult(endpointName)
+			req := makeTokenRequest("started", 8)
+			req.SchedulingResult = res
+			require.NoError(t, p.PreRequest(ctx, req, res))
+			p.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
+			chunk := time.Now()
+			var got int64
+			for _, scrape := range tc.scrapes {
+				got = kvGrowthTokensScrapedAt(t, p, endpointName, chunk.Add(scrape), chunk.Add(scrape))
+			}
+			require.Equal(t, tc.want, got, name)
+		}
+	})
+
+	t.Run("keeps the prompt reserved while the scrapes get no valid KV cache usage", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		res := makeSchedulingResult(endpointName)
+		req := makeTokenRequest("started", 8)
+		req.SchedulingResult = res
+		require.NoError(t, p.PreRequest(ctx, req, res))
+		usageAt := time.Now()
+		p.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true}, nil)
+		// The two scrapes after the chunk update other metrics of the endpoint.
+		chunk := time.Now()
+		kvGrowthTokensScrapedAt(t, p, endpointName, chunk.Add(time.Second), usageAt)
+		require.Equal(t, int64(8+4+12), kvGrowthTokensScrapedAt(t, p, endpointName, chunk.Add(2*time.Second), usageAt))
+	})
+
+	t.Run("takes the completion tokens a chunk reports as progress", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		res := makeSchedulingResult(endpointName)
+		req := makeTokenRequest("usage-progress", 8)
+		req.SchedulingResult = res
+		require.NoError(t, p.PreRequest(ctx, req, res))
+		// A stream without counted events, such as vLLM gRPC, that reports three tokens so far.
+		p.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true, Usage: fwkrequest.Usage{CompletionTokens: 3}}, nil)
+		// One token is left for the request, and one token ahead the next request holds 8 + 1.
+		require.Equal(t, int64(1+9), kvGrowthTokens(t, p, endpointName))
+	})
+
+	t.Run("records the reported completion tokens", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		p.kvGrowth.minPrior = 0 // the one completion is the whole sample
+		res := makeSchedulingResult(endpointName)
+		first := makeTokenRequest("first", 8)
+		first.SchedulingResult = res
+		require.NoError(t, p.PreRequest(ctx, first, res))
+		// Four stream events, three completion tokens in the usage block.
+		p.ResponseBody(ctx, first, &fwkrh.Response{
+			StartOfStream: true, EndOfStream: true, StreamedEvents: 4, Usage: fwkrequest.Usage{CompletionTokens: 3},
+			TerminationCause: fwkrh.TerminationCauseNatural,
+		}, nil)
+		require.NoError(t, p.PreRequest(ctx, makeTokenRequest("second", 8), res))
+		// Requests run three tokens: 8 + 3 for the new request plus 8 + 3 for the next one.
+		require.Equal(t, int64(22), kvGrowthTokens(t, p, endpointName))
+	})
+
+	t.Run("does not learn a length from a stream that was cut short", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		// The two streams are the whole sample, and the mean alone shows what was learned from them.
+		p.kvGrowth.minPrior, p.kvGrowth.z = 0, 0
+		res := makeSchedulingResult(endpointName)
+		disconnected := makeTokenRequest("disconnected", 8)
+		disconnected.SchedulingResult = res
+		require.NoError(t, p.PreRequest(ctx, disconnected, res))
+		p.ResponseBody(ctx, disconnected, &fwkrh.Response{StartOfStream: true, StreamedEvents: 1}, nil)
+		p.ResponseBody(ctx, disconnected, &fwkrh.Response{
+			EndOfStream: true, StreamedEvents: 1, TerminationCause: fwkrh.TerminationCauseClientDisconnect,
+		}, nil)
+		reaped := makeTokenRequest("reaped", 8)
+		reaped.SchedulingResult = res
+		require.NoError(t, p.PreRequest(ctx, reaped, res))
+		p.ResponseBody(ctx, reaped, &fwkrh.Response{StartOfStream: true, StreamedEvents: 1}, nil)
+		p.PluginState.Delete(reaped.RequestID)
+
+		require.NoError(t, p.PreRequest(ctx, makeTokenRequest("next", 8), res))
+		// Neither stream is known to have stopped at one token, so the new request is reserved
+		// its whole output: 8 + 4, plus 8 + 4 for the request after it.
+		require.Equal(t, int64(24), kvGrowthTokens(t, p, endpointName))
+	})
+
+	t.Run("uses the request's own output limit", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		req := makeTokenRequest("capped", 8)
+		req.Body.MaxOutputTokens = ptr.To(int64(1))
+		require.NoError(t, p.PreRequest(ctx, req, makeSchedulingResult(endpointName)))
+		// 8 + 1 for the capped request plus 8 + 1 for the next request.
+		require.Equal(t, int64(18), kvGrowthTokens(t, p, endpointName))
+	})
+
+	t.Run("reserves the output of every sequence the request generates", func(t *testing.T) {
+		t.Parallel()
+		twoChoices := fwkrequest.PayloadMap{"n": float64(2)}
+		twoPrompts := &fwkrequest.CompletionsRequest{Prompt: fwkrequest.Prompt{Strings: []string{"first", "second"}}}
+		for name, tc := range map[string]struct {
+			body *fwkrequest.InferenceRequestBody
+			want int64
+		}{
+			// A copy of the 8-token prompt and an output for each choice, and the same for the next
+			// request.
+			"n": {body: &fwkrequest.InferenceRequestBody{Payload: twoChoices}, want: 2*(8+4) + 2*(8+4)},
+			"n in the sampling parameters of a generate request": {
+				body: &fwkrequest.InferenceRequestBody{
+					Generate: &fwkrequest.GenerateRequest{},
+					Payload:  fwkrequest.PayloadMap{"sampling_params": map[string]any{"n": float64(2)}},
+				},
+				want: 2*(8+4) + 2*(8+4),
+			},
+			// The prompts have 8 tokens in total, and each gets an output.
+			"several prompts": {body: &fwkrequest.InferenceRequestBody{Completions: twoPrompts}, want: 8 + 2*4 + 8 + 2*4},
+			"several prompts as token IDs": {
+				body: &fwkrequest.InferenceRequestBody{Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{1, 2, 3, 4, 5}, {6, 7, 8}}},
+				}},
+				want: 8 + 2*4 + 8 + 2*4,
+			},
+			"one prompt as token IDs": {
+				body: &fwkrequest.InferenceRequestBody{Completions: &fwkrequest.CompletionsRequest{
+					Prompt: fwkrequest.Prompt{TokenIDs: [][]uint32{{1, 2, 3, 4, 5, 6, 7, 8}}},
+				}},
+				want: 8 + 4 + 8 + 4,
+			},
+			// Two choices for each of the two prompts.
+			"n for several prompts": {
+				body: &fwkrequest.InferenceRequestBody{Completions: twoPrompts, Payload: twoChoices},
+				want: 2*8 + 4*4 + 2*8 + 4*4,
+			},
+		} {
+			p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+			require.NoError(t, err)
+			req := makeTokenRequest("several-sequences", 8)
+			tc.body.TokenizedRequest = req.Body.TokenizedRequest
+			req.Body = tc.body
+			require.NoError(t, p.PreRequest(ctx, req, makeSchedulingResult(endpointName)))
+			require.Equal(t, tc.want, kvGrowthTokens(t, p, endpointName), name)
+		}
+	})
+
+	t.Run("is not charged for a request that generates no tokens", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		req := makeTokenRequest("embedding", 8)
+		req.Body.Embeddings = &fwkrequest.EmbeddingsRequest{}
+		require.NoError(t, p.PreRequest(ctx, req, makeSchedulingResult(endpointName)))
+		require.Zero(t, kvGrowthTokens(t, p, endpointName))
+	})
+
+	t.Run("is charged to the primary profile's endpoint", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		res := &fwksched.SchedulingResult{
+			PrimaryProfileName: "decode",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"prefill": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("prefill-pod")}},
+				"decode":  {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpoint("decode-pod")}},
+			},
+		}
+		// Several requests, so the outcome does not depend on the order the profiles are visited in.
+		const requests = 16
+		for i := range requests {
+			require.NoError(t, p.PreRequest(ctx, makeTokenRequest(fmt.Sprintf("pd-%d", i), 8), res))
+		}
+		require.Zero(t, kvGrowthTokens(t, p, "prefill-pod"))
+		require.Equal(t, int64(requests*(8+4)+12), kvGrowthTokens(t, p, "decode-pod"))
+	})
+
+	t.Run("is charged to an endpoint only when its role decodes", func(t *testing.T) {
+		t.Parallel()
+		for role, want := range map[string]int64{
+			bylabel.RolePrefill: 0, bylabel.RoleEncode: 0, bylabel.RoleEncodePrefill: 0,
+			bylabel.RoleDecode: 8 + 4 + 12, bylabel.RolePrefillDecode: 8 + 4 + 12, bylabel.RoleEncodePrefillDecode: 8 + 4 + 12,
+		} {
+			p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+			require.NoError(t, err)
+			res := &fwksched.SchedulingResult{
+				PrimaryProfileName: "stage",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"stage": {TargetEndpoints: []fwksched.Endpoint{newStubSchedulingEndpointWithRole("pod", role)}},
+				},
+			}
+			require.NoError(t, p.PreRequest(ctx, makeTokenRequest("stage-call", 8), res))
+			require.Equal(t, want, kvGrowthTokens(t, p, "pod"), role)
+		}
+	})
+
+	t.Run("is kept when the endpoint leaves the pool and returns while its requests run", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		require.NoError(t, p.PreRequest(ctx, makeTokenRequest("running", 8), makeSchedulingResult(endpointName)))
+		// A pod that fails its readiness probe is removed from the pool and added back, with its
+		// requests still running on it.
+		endpoint := newStubSchedulingEndpoint(endpointName)
+		require.NoError(t, p.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventAddOrUpdate, Endpoint: endpoint}))
+		require.NoError(t, p.Extract(ctx, datalayer.EndpointEvent{Type: datalayer.EventDelete, Endpoint: endpoint}))
+		require.Zero(t, p.GetRequests(fullEndpointName(endpointName)))
+		require.Equal(t, int64(8+4+12), kvGrowthTokens(t, p, endpointName))
+	})
+
+	t.Run("is shown in the debug state", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		require.NoError(t, p.PreRequest(ctx, makeTokenRequest("shown", 8), makeSchedulingResult(endpointName)))
+		require.Equal(t, int64(8+4+12), p.snapshotState().Endpoints[0].KVGrowthTokens)
+	})
+
+	t.Run("reserves the whole prompt and frees the part the endpoint had not cached", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		// One of the two 4-token prompt blocks is cached on the endpoint.
+		endpoint := newStubSchedulingEndpoint(endpointName)
+		endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
+		res := &fwksched.SchedulingResult{
+			PrimaryProfileName: "default",
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+			},
+		}
+		require.NoError(t, p.PreRequest(ctx, makeTokenRequest("cached-prefix", 8), res))
+		require.Equal(t, int64(8+4+12), kvGrowthTokens(t, p, endpointName))
+		require.InDelta(t, 4.0, p.kvGrowth.requests["cached-prefix"].uncached, 0)
+	})
+
+	t.Run("is summed across replicas", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		require.NoError(t, p.PreRequest(ctx, makeTokenRequest("local", 8), makeSchedulingResult(endpointName)))
+		spec := p.CrossReplicaState()
+		local := spec.Read(fullEndpointName(endpointName))
+		require.Equal(t, int64(8+4+12), local.(*attrconcurrency.InFlightLoad).KVGrowthTokens)
+		total := spec.Aggregate([]any{local, &attrconcurrency.InFlightLoad{KVGrowthTokens: 5}})
+		require.Equal(t, int64(8+4+12+5), total.(*attrconcurrency.InFlightLoad).KVGrowthTokens)
+	})
+
+	t.Run("is released by every request under concurrency", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4})
+		require.NoError(t, err)
+		res := makeSchedulingResult(endpointName)
+		var wg sync.WaitGroup
+		for g := range 20 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := range 50 {
+					req := makeTokenRequest(fmt.Sprintf("req-%d-%d", g, j), 8)
+					req.SchedulingResult = res
+					_ = p.PreRequest(ctx, req, res)
+					p.ResponseBody(ctx, req, &fwkrh.Response{StartOfStream: true, StreamedEvents: 1}, nil)
+					_ = p.kvGrowthTokens(fullEndpointName(endpointName))
+					p.ResponseBody(ctx, req, &fwkrh.Response{EndOfStream: true, StreamedEvents: 2}, nil)
+				}
+			}()
+		}
+		wg.Wait()
+		require.Zero(t, kvGrowthTokens(t, p, endpointName))
+		require.Empty(t, p.kvGrowth.requests)
+	})
+
+	t.Run("is not published unless configured", func(t *testing.T) {
+		t.Parallel()
+		p, err := newKVGrowthProducer(t, nil)
+		require.NoError(t, err)
+		require.NoError(t, p.PreRequest(ctx, makeTokenRequest("off", 8), makeSchedulingResult(endpointName)))
+		require.Zero(t, kvGrowthTokens(t, p, endpointName))
+	})
+}
+
+func TestInFlightLoadProducerFactory_KVGrowthProjection(t *testing.T) {
+	t.Parallel()
+
+	p, err := newKVGrowthProducer(t, &KVGrowthProjectionConfig{MaxOutputTokens: 4096})
+	require.NoError(t, err)
+	require.NotNil(t, p.kvGrowth)
+	require.InDelta(t, 3.0, p.kvGrowth.z, 0, "z defaults to 3")
+
+	p, err = newKVGrowthProducer(t, &KVGrowthProjectionConfig{Z: ptr.To(0.0), MaxOutputTokens: 4096})
+	require.NoError(t, err)
+	require.NotNil(t, p.kvGrowth)
+	require.Zero(t, p.kvGrowth.z, "an explicit zero is kept")
+
+	_, err = newKVGrowthProducer(t, &KVGrowthProjectionConfig{})
+	require.ErrorContains(t, err, "maxOutputTokens")
+
+	_, err = newKVGrowthProducer(t, &KVGrowthProjectionConfig{Z: ptr.To(-1.0), MaxOutputTokens: 4096})
+	require.ErrorContains(t, err, "kvGrowthProjection.z")
 }

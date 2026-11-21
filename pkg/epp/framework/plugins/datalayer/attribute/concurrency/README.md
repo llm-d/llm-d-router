@@ -10,6 +10,7 @@ Captures the current real-time load of an endpoint as tracked by the EPP.
 - **Fields**:
   - `Tokens`: Number of tokens currently in-flight.
   - `Requests`: Number of requests currently in-flight.
+  - `KVGrowthTokens`: Projected peak of the KV cache tokens the endpoint will need beyond its scraped usage. Zero unless the producer's `kvGrowthProjection` is configured.
 
 ## Producers
 

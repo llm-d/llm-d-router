@@ -113,8 +113,8 @@ queue up to N times each limit.
 A replica dispatches queued requests while pool saturation, as reported by the saturation detector,
 is below the band's usage limit. `utilization-detector` reads model-server metrics, which count
 requests from every replica but lag by the scrape interval. Its
-[scrape-lag compensation](../framework/plugins/flowcontrol/saturationdetector/utilization/README.md)
-counts other replicas' requests only through a synced in-flight load producer.
+[scrape-lag compensation and projected KV cache growth](../framework/plugins/flowcontrol/saturationdetector/utilization/README.md)
+count other replicas' requests only through a synced in-flight load producer.
 `concurrency-detector` reads the in-flight load tracked by the producer named in its
 `inFlightLoadProducerName`:
 

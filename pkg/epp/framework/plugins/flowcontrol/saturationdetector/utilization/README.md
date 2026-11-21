@@ -16,7 +16,7 @@ The detector implements the `SaturationDetector` interface to provide a utilizat
 
 It relies on a "roofline model", evaluating both the queue depth and the KV cache utilization to find the most constrained resource for a given endpoint:
 
-    EndpointScore = max(QueueDepth / QueueThreshold, KVCacheUsage / KVCacheThreshold)
+    EndpointScore = max(QueueDepth / QueueThreshold, KVCacheUsage / KVCacheThreshold, ProjectedKVCacheUsage)
 
 The global pool saturation is the average of the endpoint scores:
 
@@ -56,13 +56,26 @@ The correction rests on these assumptions:
 - **`RunningRequestsSize` must be populated.** The subtraction of running requests is only sound when the metrics mapping defines `runningRequestsSpec` (defaults exist for vLLM and SGLang). A custom mapping without it leaves `RunningRequestsSize` at 0, and the credit over-counts by the running count.
 - **In-flight view across EPP replicas.** `WaitingQueueSize + RunningRequestsSize` is engine-global. When a cross-replica syncer is configured and the producer's `syncCrossReplicaState` is true (the default), `InFlightRequests` is the sum over all EPP replicas, so the correction holds with multiple replicas. Without a syncer, or with `syncCrossReplicaState: false`, each replica sees only its own requests, the credit floors at 0, and the compensation is lost.
 
+**Projected KV cache growth:** `KVCacheUsage` is the usage at the time of the scrape, and a running sequence keeps allocating blocks while it decodes. Requests dispatched while the cache reads low can fill it later, and the engine then preempts running sequences. When the `inflight-load-producer` is configured with `kvGrowthProjection`, the score also covers what the endpoint is projected to need:
+
+    ProjectedKVCacheUsage = KVCacheUsage + KVGrowthTokens / KVCacheCapacity
+
+- `KVGrowthTokens` is the [producer's projection](../../../requesthandling/dataproducer/inflightload/README.md) of the tokens the endpoint will need beyond its scraped usage.
+- `KVCacheCapacity` is the scraped block count times the block size (`cacheInfoSpec`, or `cacheBlockSizeSpec` and `cacheNumBlocksSpec`, in the metrics mapping). For a pod that runs several engines, the usage is that of its fullest engine and the capacity that of one engine, so the pod's whole projected growth counts against one engine.
+
+The term is compared with the full capacity: it reaches 1.0 when the projected need equals the cache size, whatever `kvCacheUtilThreshold` is. It is zero for an endpoint with no running request, without the projection, or without a scraped cache capacity. A rate-limited detector log reports a projection published for an endpoint whose cache capacity is not scraped.
+
+A request counts toward the projection once `PreRequest` has run. Between its release from the flow-control queue and `PreRequest`, it is covered only by the one request each endpoint's projection reserves for.
+
+With multiple EPP replicas, `KVGrowthTokens` covers the other replicas' requests only when a cross-replica syncer shares the producer's state. Without one, each replica reserves for the requests it dispatched itself.
+
 ### Role in Scheduling (The Traffic Shaper)
 The detector implements the `Filter` interface to protect individual endpoints. It removes endpoints from candidate lists if their telemetry is stale, or if they exceed specific safety limits:
 
     MaxQueueLimit = QueueThreshold * (1 + Headroom)
     MaxKVCacheLimit = min(1.0, KVCacheThreshold * (1 + Headroom))
 
-The queue depth compared against `MaxQueueLimit` includes the scrape-lag credit.
+The queue depth compared against `MaxQueueLimit` includes the scrape-lag credit. An endpoint whose `ProjectedKVCacheUsage` reaches 1.0 is also removed; `Headroom` does not apply to it.
 
 This approach allows the Flow Controller to manage average pool load, while the Scheduler retains the flexibility to burst above ideal targets (the "Headroom") to satisfy affinity or scoring objectives.
 
@@ -74,9 +87,10 @@ The plugin consumes standard metrics from endpoints:
 - `WaitingQueueSize` (Queue depth metric).
 - `RunningRequestsSize` (Running requests metric, used by the scrape-lag credit).
 - `KVCacheUsagePercent` (KV cache utilization metric).
+- `CacheBlockSize` and `CacheNumBlocks` (KV cache capacity, used by the projected KV cache growth).
 - `UpdateTime` (Timestamp used to calculate metric staleness).
 
-It optionally consumes the `InFlightLoad` endpoint attribute of an `inflight-load-producer` for the scrape-lag credit.
+It optionally consumes the `InFlightLoad` endpoint attribute of an `inflight-load-producer` for the scrape-lag credit and the projected KV cache growth.
 
 ## Configuration
 
@@ -87,11 +101,11 @@ The plugin accepts JSON parameters decoding to the following fields:
 - `metricsStalenessThreshold` (`string` / duration): Maximum age of metrics before an endpoint is considered stale. How stale endpoints are scored is controlled by `stalenessPolicy`. Must be > 0. (Default: `"200ms"`)
 - `stalenessPolicy` (`string`): How endpoints with missing or stale metrics contribute to pool saturation: `"saturated"` scores them as fully saturated; `"ignore"` excludes them from the saturation average. (Default: `"saturated"`)
 - `headroom` (`float64`): Allowed burst capacity above the ideal thresholds, expressed as a fraction (e.g., `0.2` for 20%). Must be >= 0.0. (Default: `0.0`)
-- `inFlightLoadProducerName` (`string`): Name of the `inflight-load-producer` whose `InFlightLoad` attribute supplies the scrape-lag credit. Empty selects the default producer. (Default: `""`)
+- `inFlightLoadProducerName` (`string`): Name of the `inflight-load-producer` whose `InFlightLoad` attribute supplies the scrape-lag credit and the projected KV cache growth. Empty selects the default producer. (Default: `""`)
 
 ## Trade-offs
 
 Unlike the Concurrency Detector, this approach operates as a closed-loop controller. It is immune to estimation divergence and reflects the actual performance limits of the continuous batching engine's memory manager. However, it suffers from two fundamental flaws of reactive systems:
 
 1. **Telemetry Staleness (The Thundering Herd)**: Because it relies on asynchronous polling, the view of the endpoint state is perpetually delayed. A sudden burst of traffic can create a severe "thundering herd" condition, where the scheduler routes massive request volumes to a seemingly healthy endpoint before the next metric interval reveals it is completely saturated.
-2. **Reactive Backpressure**: By definition, this detector only signals saturation after the inference engine is already under physical duress. It cannot preemptively shield an endpoint from an initial queue buildup; it can only throttle traffic after the physical limits have been breached and latency (TTFT/TPOT) has already degraded.
+2. **Reactive Backpressure**: By definition, this detector only signals saturation after the inference engine is already under physical duress. It cannot preemptively shield an endpoint from an initial queue buildup; it can only throttle traffic after the physical limits have been breached and latency (TTFT/TPOT) has already degraded. The projected KV cache growth is the exception for the memory term: with it the detector counts what the running requests have yet to allocate.

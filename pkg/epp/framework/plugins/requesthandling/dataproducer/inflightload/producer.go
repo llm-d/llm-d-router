@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -52,6 +53,9 @@ const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
+	defaultKVGrowthZ         = 3.0
+	// kvGrowthStateKey is the PluginState key of a request's kvGrowthRelease.
+	kvGrowthStateKey fwkplugin.StateKey = "kv-growth"
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
@@ -84,6 +88,21 @@ type Config struct {
 	// blocks in disaggregated serving, the computing engine otherwise. The
 	// first response byte remains the fallback release.
 	KVEventsSourceRef string `json:"kvEventsSourceRef,omitempty" pluginRef:""`
+	// KVGrowthProjection enables the KV cache growth projection published as
+	// InFlightLoad.KVGrowthTokens. Unset disables it.
+	KVGrowthProjection *KVGrowthProjectionConfig `json:"kvGrowthProjection,omitempty"`
+}
+
+// KVGrowthProjectionConfig configures the projection of how much more KV cache
+// the requests running on an endpoint will need.
+type KVGrowthProjectionConfig struct {
+	// Z is the number of standard deviations added to the projected mean. Must
+	// be non-negative. Unset defaults to 3.
+	Z *float64 `json:"z,omitempty"`
+	// MaxOutputTokens is the output length a request is assumed to stop at when
+	// it sets no smaller limit of its own. Set it to the longest output the
+	// model server generates. Required, must be positive.
+	MaxOutputTokens int64 `json:"maxOutputTokens"`
 }
 
 func defaultConfig() Config {
@@ -129,6 +148,21 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		return nil, fmt.Errorf("maxEstimatedOutputTokens must be non-negative, got %v", *cfg.MaxEstimatedOutputTokens)
 	}
 
+	var growth *kvGrowth
+	if projection := cfg.KVGrowthProjection; projection != nil {
+		z := defaultKVGrowthZ
+		if projection.Z != nil {
+			z = *projection.Z
+		}
+		if z < 0 {
+			return nil, fmt.Errorf("kvGrowthProjection.z must be non-negative, got %v", z)
+		}
+		if projection.MaxOutputTokens <= 0 {
+			return nil, fmt.Errorf("kvGrowthProjection.maxOutputTokens must be positive, got %v", projection.MaxOutputTokens)
+		}
+		growth = newKVGrowth(z, projection.MaxOutputTokens)
+	}
+
 	syncCrossReplicaState := true
 	if cfg.SyncCrossReplicaState != nil {
 		syncCrossReplicaState = *cfg.SyncCrossReplicaState
@@ -152,6 +186,7 @@ func InFlightLoadProducerFactory(name string, decoder *json.Decoder, handle fwkp
 		PluginState:               fwkplugin.NewPluginState(ctx),
 		prefillFromKVEvents:       source != nil,
 		watch:                     newPrefillWatch(prefillPending.WithLabelValues(name)),
+		kvGrowth:                  growth,
 	}
 	if source != nil {
 		if err := source.AddConsumer(p.TypedName(), p); err != nil {
@@ -194,6 +229,8 @@ type InFlightLoadProducer struct {
 	outlenBucketMissingWarn sync.Once
 	prefillFromKVEvents     bool
 	watch                   *prefillWatch
+	// kvGrowth is nil unless kvGrowthProjection is configured.
+	kvGrowth *kvGrowth
 }
 
 // addedTokensEntry tracks a request's contribution to the global token and
@@ -265,9 +302,10 @@ type inFlightLoadState struct {
 }
 
 type endpointInFlightLoadState struct {
-	Endpoint string `json:"endpoint"`
-	Requests int64  `json:"requests"`
-	Tokens   int64  `json:"tokens"`
+	Endpoint       string `json:"endpoint"`
+	Requests       int64  `json:"requests"`
+	Tokens         int64  `json:"tokens"`
+	KVGrowthTokens int64  `json:"kvGrowthTokens,omitempty"`
 }
 
 func (p *InFlightLoadProducer) TypedName() fwkplugin.TypedName {
@@ -275,7 +313,8 @@ func (p *InFlightLoadProducer) TypedName() fwkplugin.TypedName {
 }
 
 // DumpState implements [fwkplugin.StateDumper] and exposes per-endpoint
-// in-flight request and token counts for the /debug/plugins/state endpoint.
+// in-flight request and token counts, and the KV cache growth projection when
+// it is configured, for the /debug/plugins/state endpoint.
 //
 // The request and token tracker maps are snapshotted under separate read
 // locks, so the returned per-endpoint Requests and Tokens values are not
@@ -323,9 +362,10 @@ func (p *InFlightLoadProducer) snapshotState() inFlightLoadState {
 	}
 	for _, endpointID := range endpointIDs {
 		state.Endpoints = append(state.Endpoints, endpointInFlightLoadState{
-			Endpoint: endpointID,
-			Requests: requestCounts[endpointID],
-			Tokens:   tokenCounts[endpointID],
+			Endpoint:       endpointID,
+			Requests:       requestCounts[endpointID],
+			Tokens:         tokenCounts[endpointID],
+			KVGrowthTokens: p.kvGrowthTokens(endpointID),
 		})
 	}
 
@@ -364,8 +404,9 @@ func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 		SyncDisabled: !p.syncCrossReplicaState,
 		Read: func(endpointID string) datalayer.Cloneable {
 			return &attrconcurrency.InFlightLoad{
-				Requests: p.requestTracker.get(endpointID),
-				Tokens:   p.tokenTracker.get(endpointID),
+				Requests:       p.requestTracker.get(endpointID),
+				Tokens:         p.tokenTracker.get(endpointID),
+				KVGrowthTokens: p.kvGrowthTokens(endpointID),
 			}
 		},
 		Aggregate: func(values []any) any {
@@ -374,6 +415,7 @@ func (p *InFlightLoadProducer) CrossReplicaState() datalayer.CrossReplicaSpec {
 				if ifl, ok := v.(*attrconcurrency.InFlightLoad); ok {
 					total.Requests += ifl.Requests
 					total.Tokens += ifl.Tokens
+					total.KVGrowthTokens += ifl.KVGrowthTokens
 				}
 			}
 			return total
@@ -415,8 +457,9 @@ func (p *InFlightLoadProducer) Extract(ctx context.Context, event datalayer.Endp
 		event.Endpoint.GetAttributes().Put(p.dk, &datalayer.DynamicAttribute{
 			Get: func() datalayer.Cloneable {
 				return &attrconcurrency.InFlightLoad{
-					Tokens:   p.GetTokens(id),
-					Requests: p.GetRequests(id),
+					Tokens:         p.GetTokens(id),
+					Requests:       p.GetRequests(id),
+					KVGrowthTokens: p.kvGrowthTokens(id),
 				}
 			},
 		})
@@ -515,6 +558,10 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		name, namespace := splitNamespacedName(eid)
 
 		requestCounter := p.requestTracker.inc(eid)
+		if p.kvGrowth != nil && profileName == result.PrimaryProfileName && endpointDecodes(endpoint) &&
+			(request.Body == nil || request.Body.Embeddings == nil) {
+			p.trackKVGrowth(request, eid, inputTokens, uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK))
+		}
 
 		// Compute the uncached prompt portion this endpoint must actually compute.
 		// Prefer the prefix producer's view (real tokens) when available so the
@@ -600,6 +647,16 @@ func endpointHasPrefillOnlyRole(endpoint fwksched.Endpoint) bool {
 	return role == bylabel.RolePrefill || role == bylabel.RoleEncodePrefill
 }
 
+// endpointDecodes reports whether the endpoint generates output. Only the
+// roles without a decode stage (prefill, encode, encode-prefill) do not.
+func endpointDecodes(endpoint fwksched.Endpoint) bool {
+	switch endpoint.GetMetadata().Labels[bylabel.RoleLabel] {
+	case bylabel.RolePrefill, bylabel.RoleEncode, bylabel.RoleEncodePrefill:
+		return false
+	}
+	return true
+}
+
 // endpointHasDecodeOnlyRole reports whether the endpoint is labeled as a
 // decode-only worker. Combined-role endpoints (prefill-decode, both) return
 // false -- they also do prefill work.
@@ -637,6 +694,11 @@ func (p *InFlightLoadProducer) ResponseBody(
 		return
 	}
 
+	if p.kvGrowth != nil {
+		// A parser that counts no stream events can still report the tokens generated so far.
+		p.kvGrowth.progress(request.RequestID, max(resp.StreamedEvents, resp.Usage.CompletionTokens), time.Now())
+	}
+
 	// The first response byte means the prefill worker has finished and handed
 	// off. It is the fallback completion signal; with KVEventsSourceRef
 	// the engine's store events usually report completion before it.
@@ -662,6 +724,9 @@ func (p *InFlightLoadProducer) ResponseBody(
 					"actualCompletionTokens", resp.Usage.CompletionTokens,
 				)
 			}
+		}
+		if p.kvGrowth != nil {
+			p.kvGrowth.finish(request.RequestID, int64(resp.Usage.CompletionTokens), resp.TerminationCause == fwkrh.TerminationCauseNatural)
 		}
 		p.PluginState.Delete(request.RequestID)
 	} else {
@@ -835,6 +900,48 @@ func (p *InFlightLoadProducer) GetTokens(eid string) int64 {
 
 func (p *InFlightLoadProducer) GetRequests(eid string) int64 {
 	return p.requestTracker.get(eid)
+}
+
+func (p *InFlightLoadProducer) kvGrowthTokens(eid string) int64 {
+	if p.kvGrowth == nil {
+		return 0
+	}
+	// The projection is relative to the endpoint's scraped KV cache usage, so it needs the time of
+	// the scrape that read it: a prompt stays reserved until a scrape shows it.
+	var scrapedAt time.Time
+	if endpoint, ok := p.registeredEndpoints.Load(eid); ok {
+		usage, _ := endpoint.(datalayer.Endpoint).GetMetrics().ScalarSample(datalayer.ScalarFieldKVCacheUsagePercent)
+		scrapedAt = usage.ScrapeTime
+	}
+	return p.kvGrowth.projected(eid, time.Now(), scrapedAt)
+}
+
+// trackKVGrowth starts projecting the KV cache growth of a request on the
+// endpoint that generates its output. uncachedTokens is the part of the prompt
+// the endpoint has not cached. The state entry ends the projection when the
+// request is released by any path, including a stream that never reports its
+// end.
+func (p *InFlightLoadProducer) trackKVGrowth(request *fwksched.InferenceRequest, endpointID string, promptTokens, uncachedTokens int64) {
+	var outputCap int64
+	// The model server generates one sequence for each choice of each prompt.
+	prompts, choices := 1, 1
+	if body := request.Body; body != nil {
+		if body.MaxOutputTokens != nil {
+			outputCap = *body.MaxOutputTokens
+		}
+		if completions := body.Completions; completions != nil {
+			prompts = max(len(completions.Prompt.Strings), len(completions.Prompt.TokenIDs))
+		}
+		if payload, ok := body.Payload.(fwkrequest.PayloadMap); ok {
+			apiType := reqcommon.APITypeChatCompletions
+			if body.Generate != nil {
+				apiType = reqcommon.APITypeVLLMGenerate
+			}
+			choices = reqcommon.OutputChoiceCount(payload, apiType)
+		}
+	}
+	p.kvGrowth.add(endpointID, request.RequestID, promptTokens, uncachedTokens, outputCap, int64(prompts), int64(choices))
+	p.PluginState.Write(request.RequestID, kvGrowthStateKey, kvGrowthRelease{p.kvGrowth})
 }
 
 // concurrencyTracker manages thread-safe counters for inflight requests.
