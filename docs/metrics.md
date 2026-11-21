@@ -1269,6 +1269,9 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_index_clear_duration_seconds` | Histogram | - | Index Clear call duration. |
 | `llm_d_epp_kv_cache_index_resident_keys` | Gauge | - | Request keys resident in the index; the in-memory backend refreshes at the end of each mutating call, the dense backend when its byte-budget sweep runs. |
 | `llm_d_epp_kv_cache_index_resident_bytes` | Gauge | - | Estimated bytes resident in the index's structures; the in-memory backend refreshes at the end of each mutating call, the dense backend when its byte-budget sweep runs. |
+| `llm_d_epp_kv_cache_index_shadow_compared_total` | Counter | - | Keys whose entry sets the shadow compare examined. Shadow index only. |
+| `llm_d_epp_kv_cache_index_shadow_divergent_total` | Counter | - | Keys whose entry sets differed between the primary and shadow index backends. Acceptance is a rate budget on divergent over compared. Shadow index only. |
+| `llm_d_epp_kv_cache_index_shadow_errors_total` | Counter | - | Shadow index write and compare failures. Shadow index only. |
 
 A vLLM release can publish an event type that the router's vLLM adapter does not know. The adapter
 skips such an event and applies the other events in the same message to the index.

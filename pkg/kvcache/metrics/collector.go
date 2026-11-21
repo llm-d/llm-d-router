@@ -247,6 +247,31 @@ var (
 			"Estimated bytes resident in the index's structures",
 			compbasemetrics.ALPHA),
 	})
+	// IndexShadowCompared and IndexShadowDivergent count the keys the shadow
+	// compare examined and the keys whose entry sets differed between the
+	// primary and shadow backends. Acceptance is a rate budget on divergent
+	// over compared: concurrent writes fanned to one backend but not yet the
+	// other, and each backend's own budget eviction, legally diverge the
+	// views. IndexShadowErrors counts shadow write and compare failures,
+	// which leave the shadow behind the primary.
+	IndexShadowCompared = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_shadow_compared_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Keys whose entry sets the shadow compare examined",
+			compbasemetrics.ALPHA),
+	})
+	IndexShadowDivergent = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_shadow_divergent_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Keys whose entry sets differed between the primary and shadow index backends",
+			compbasemetrics.ALPHA),
+	})
+	IndexShadowErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Subsystem: routerSubsystem, Name: "kv_cache_index_shadow_errors_total",
+		Help: metricsutil.HelpMsgWithStability(
+			"Shadow index write and compare failures",
+			compbasemetrics.ALPHA),
+	})
 )
 
 // Collectors returns a slice of all registered Prometheus collectors.
@@ -261,6 +286,7 @@ func Collectors() []prometheus.Collector {
 		PoolQueueDepth, PoolCapacity,
 		IndexEvictions, IndexTruncatedEntries, IndexClearDuration,
 		IndexResidentKeys, IndexResidentBytes,
+		IndexShadowCompared, IndexShadowDivergent, IndexShadowErrors,
 	}
 }
 
