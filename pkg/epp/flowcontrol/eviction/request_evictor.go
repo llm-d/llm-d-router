@@ -176,9 +176,9 @@ func (p *RequestEvictor) ResponseBody(
 
 // EvictN attempts to evict up to n requests from the eviction queue, in victim-policy order,
 // stopping at the first victim whose priority is not strictly below priorityBound. The bound
-// enforces strict priority dominance across a whole multi-revocation decision: the victim top
+// enforces strict priority dominance across a whole multi-revocation decision: the victim head
 // check alone does not cover later victims, which come off the heap at priorities at or above the
-// top's. Each request is only removed from tracking after a successful eviction. If the eviction
+// head's. Each request is only removed from tracking after a successful eviction. If the eviction
 // fails, the request remains in the queue for a future eviction attempt.
 // Returns the request IDs that were successfully evicted.
 func (p *RequestEvictor) EvictN(ctx context.Context, n int, priorityBound int) ([]string, error) {
@@ -198,8 +198,9 @@ func (p *RequestEvictor) EvictN(ctx context.Context, n int, priorityBound int) (
 			logger.Error(err, "Failed to evict request, re-tracking", "requestID", item.RequestID, "targetURL", item.TargetURL)
 			p.unmarkPendingEviction(item.RequestID)
 			// Re-tracking races a concurrent completion: if cleanupRequest ran between PopIfBelow and
-			// this Track, the entry is re-inserted dead until a future decision evicts it. The window
-			// only opens on failed evictions and is sub-microsecond, so it is tolerated.
+			// this Track, the entry is re-inserted dead and survives until a future decision evicts it,
+			// which then stalls the pacing gate for one ConfirmationTimeout. The window opens only when
+			// Evict fails and lasts for the Evict call, so it is tolerated.
 			p.queue.Track(item)
 			continue
 		}

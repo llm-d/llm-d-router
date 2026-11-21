@@ -109,9 +109,10 @@ func (q *EvictionQueue) PopN(n int) []*flowcontrol.EvictionItem {
 	return result
 }
 
-// PopIfBelow removes and returns the next item for eviction only if its priority
-// is strictly below priorityBound. If the heap is empty or the top item has
-// Priority >= priorityBound, it returns nil without modifying the queue.
+// PopIfBelow removes and returns the next item for eviction only if its priority is strictly below
+// priorityBound. If the heap is empty or the top item has Priority >= priorityBound, it returns nil
+// without modifying the queue. Only the top item is checked, so the ordering policy must place the
+// lowest priority first.
 func (q *EvictionQueue) PopIfBelow(priorityBound int) *flowcontrol.EvictionItem {
 	q.mu.Lock()
 	defer q.mu.Unlock()
