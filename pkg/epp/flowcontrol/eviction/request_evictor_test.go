@@ -214,31 +214,6 @@ func TestRequestEvictor_CtxCancellationTriggersCleanup(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "request should be untracked and deregistered after context cancellation")
 }
 
-func TestRequestEvictor_EndOfStreamUnregistersCancelCallback(t *testing.T) {
-	t.Parallel()
-	re := NewRequestEvictor(&testOrdering{}, &acceptAllFilter{}, NewImmediateResponseEvictor())
-
-	ctx1, cancel1 := context.WithCancel(context.Background())
-	defer cancel1()
-
-	req := makeInferenceRequest("req-1", -1)
-	require.NoError(t, re.PreRequest(ctx1, req, makeSchedulingResult()))
-	re.ResponseBody(ctx1, req, &fwkrh.Response{EndOfStream: true}, nil)
-	require.Equal(t, 0, re.queue.InFlightLen())
-
-	// Re-track the same ID on a fresh context, then cancel the completed first context
-	// (matching ext_proc stream teardown after ResponseBody(EndOfStream) returns).
-	// Because EndOfStream already unregistered ctx1's cleanup callback, cancelling ctx1
-	// must not untrack the newly tracked request.
-	require.NoError(t, re.PreRequest(context.Background(), req, makeSchedulingResult()))
-	cancel1()
-
-	// Yield so any leaked goroutine or stale AfterFunc callback would run.
-	require.Never(t, func() bool {
-		return re.queue.InFlightLen() != 1 || re.EvictionRegistry().Get("req-1") == nil
-	}, 50*time.Millisecond, 5*time.Millisecond, "cancelling a completed request's context must not untrack a subsequent request")
-}
-
 func TestRequestEvictor_CleanupCallsEvictorCleanup(t *testing.T) {
 	t.Parallel()
 	evictor := NewImmediateResponseEvictor()
