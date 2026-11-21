@@ -58,7 +58,7 @@ type eventRecorder struct {
 }
 
 func newEventRecorder(path string) (*eventRecorder, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //#nosec G304 -- operator-configured recording path
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +140,7 @@ func forEachRecord(r io.Reader, fn func(*RawMessage) error) error {
 		msg := &RawMessage{}
 		rest := buf
 		topicLen, n := binary.Uvarint(rest)
-		if n <= 0 || uint64(len(rest)-n) < topicLen {
+		if n <= 0 || uint64(len(rest)-n) < topicLen { //#nosec G115 -- n <= len(rest) by Uvarint
 			return fmt.Errorf("malformed record topic")
 		}
 		rest = rest[n:]
@@ -152,7 +152,7 @@ func forEachRecord(r io.Reader, fn func(*RawMessage) error) error {
 		msg.Sequence = binary.BigEndian.Uint64(rest[:8])
 		rest = rest[8:]
 		srcLen, n := binary.Uvarint(rest)
-		if n <= 0 || uint64(len(rest)-n) < srcLen {
+		if n <= 0 || uint64(len(rest)-n) < srcLen { //#nosec G115 -- n <= len(rest) by Uvarint
 			return fmt.Errorf("malformed record source")
 		}
 		rest = rest[n:]
@@ -171,7 +171,7 @@ func forEachRecord(r io.Reader, fn func(*RawMessage) error) error {
 // ordering; workers must be running (Start) for the events to process.
 // Replayed messages are not re-recorded.
 func (p *Pool) ReplayFile(path string) error {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //#nosec G304 -- caller-provided recording file
 	if err != nil {
 		return err
 	}
