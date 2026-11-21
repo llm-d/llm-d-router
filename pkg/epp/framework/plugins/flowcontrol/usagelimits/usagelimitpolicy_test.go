@@ -100,3 +100,11 @@ func TestDefaultPolicy(t *testing.T) {
 		t.Errorf("TypedName.Type = %q, want %q", tn.Type, StaticUsageLimitPolicyType)
 	}
 }
+
+func TestNewPolicyFuncTypeIsNotStatic(t *testing.T) {
+	t.Parallel()
+	p := NewPolicyFunc("custom-func", func(context.Context, float64, []int, []float64) {})
+	if tn := p.TypedName(); tn.Type == StaticUsageLimitPolicyType {
+		t.Errorf("TypedName.Type = %q, a func policy must not report the static policy type", tn.Type)
+	}
+}
