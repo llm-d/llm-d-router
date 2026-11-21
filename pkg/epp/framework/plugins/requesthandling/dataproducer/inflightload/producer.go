@@ -49,7 +49,6 @@ import (
 
 const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
-	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
 )
 

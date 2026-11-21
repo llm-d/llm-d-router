@@ -71,7 +71,7 @@ available.
 
 - `prefixMatchInfoProducerName` (string, optional): Name of the prefix-cache producer instance that supplies `PrefixCacheMatchInfo`. Empty selects the default unnamed producer.
 - `minCachedTokenDelta` (int, optional, default: `1`): Minimum cached-token advantage required to write the source. Must be `>= 1`. Higher values avoid transfers for prefixes that are cheap to recompute.
-- `prefillProfileName` (string, optional, default: `prefill`): P/D disaggregation prefill profile containing the endpoint that computes the prefix. If the profile has no target, the primary profile target is used. See [Prefill profile name](#prefill-profile-name).
+- `prefillProfileName` (string, optional): P/D disaggregation prefill profile containing the endpoint that computes the prefix. Unset follows the prefill profile name in the scheduling result, then `prefill`. If the profile has no target, the primary profile target is used. See [Prefill profile name](#prefill-profile-name).
 - `p2pConnectorPort` (int, optional, default: `7777`): `OffloadingConnector` P2P tier port of data parallel rank 0 on every endpoint; rank `r` listens on `p2pConnectorPort + r`, which must stay within 1-65535: an endpoint beyond that is skipped as a source, and a request to a prefill endpoint beyond it fails. Must match the P2P tier's configured port.
 - `costModel` (object, optional): When set, the source is written only when the pull's gain exceeds its cost, evaluated after the `minCachedTokenDelta` floor. Omitted, the fixed-delta decision applies. See [Cost model](#cost-model).
 - `ttftByDecision` (bool, optional, default: `false`): Records the TTFT of each streaming request whose stream ends naturally in `llm_d_epp_p2p_source_request_ttft_seconds`, labelled with this producer's decision. Adds a response-body hook to the producer.
@@ -167,12 +167,15 @@ dataLayer:
 
 ### Prefill profile name
 
-`prefillProfileName` must equal the name of the scheduling profile that picks the prefill
-pod. Both names default to `prefill`, so a config that leaves them unset works. When you
-rename the prefill profile, change `prefillProfileName` to the same name. If the names
-differ, the plugin writes no `x-llm-d-kv-cache-prefill-p2p-host-port`, and every
-disaggregated request fails: the sidecar `offloading` connector returns HTTP 500, and the
-coordinator `kv-offloading` connector fails the request before decode is sent.
+`prefillProfileName` names the scheduling profile that picks the prefill pod. Unset, it
+follows the prefill profile name in the scheduling result, which the profile handler fills
+with its configured prefill profile; when the result names none, it is `prefill`. Set it
+only to pin a name the result does not carry.
+
+If the resolved name has no profile result with a target, the plugin writes no
+`x-llm-d-kv-cache-prefill-p2p-host-port`, and every disaggregated request fails: the
+sidecar `offloading` connector returns HTTP 500, and the coordinator `kv-offloading`
+connector fails the request before decode is sent.
 
 Behind the routing sidecar, the name comes from the `disagg-profile-handler`:
 
@@ -185,7 +188,7 @@ plugins:
         decode: decode
   - type: p2p-source-producer
     parameters:
-      prefillProfileName: prefill-h200   # must be the same name
+      prefillProfileName: prefill-h200   # optional: the result names it too
 schedulingProfiles:
   - name: prefill-h200
     plugins: [...]
@@ -195,15 +198,15 @@ schedulingProfiles:
 
 Behind the coordinator, `header-profile-handler` runs the profile named by
 `x-llm-d-epp-profile`, which the coordinator always sets to `prefill` on the prefill
-request; with a single configured profile it runs that one whatever its name. Name the
-prefill profile `prefill` and leave `prefillProfileName` unset:
+request; with a single configured profile it runs that one whatever its name. That name
+lands in the scheduling result, so leaving `prefillProfileName` unset follows it:
 
 ```yaml
 plugins:
   - type: header-profile-handler
-  - type: p2p-source-producer       # prefillProfileName unset: prefill
+  - type: p2p-source-producer       # prefillProfileName unset: follows the result
 schedulingProfiles:
-  - name: prefill                   # equals prefillProfileName
+  - name: prefill
     plugins: [...]
   - name: decode
     plugins: [...]

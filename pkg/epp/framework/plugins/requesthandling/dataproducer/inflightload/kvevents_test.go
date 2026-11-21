@@ -117,9 +117,10 @@ func newEventEndpoint(name, role, address string) *stubSchedulingEndpoint {
 func pdResult(prefill, decode fwksched.Endpoint) *fwksched.SchedulingResult {
 	return &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			profilePrefill: {TargetEndpoints: []fwksched.Endpoint{prefill}},
-			"decode":       {TargetEndpoints: []fwksched.Endpoint{decode}},
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefill}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{decode}},
 		},
 	}
 }
@@ -429,6 +430,29 @@ func TestKVEventPrefillCompletion_EndOfStreamDropsWatch(t *testing.T) {
 	require.Equal(t, float64(0), pendingWatch(name))
 	require.Equal(t, float64(0), completions(name, signalKVEvent))
 	require.Equal(t, float64(0), completions(name, signalFirstByte))
+}
+
+func TestKVEventPrefillCompletion_RenamedPrefillProfileIsNotWatched(t *testing.T) {
+	t.Parallel()
+	const name = "kv-renamed-prefill"
+	producer := newKVEventsProducer(t, name)
+	ctx := context.Background()
+	prefill := newEventEndpoint("prefill-0", bylabel.RolePrefill, prefillAddress)
+	decode := newEventEndpoint("decode-0", bylabel.RoleDecode, decodeAddress)
+
+	req := newStampedRequest("req-10", seq(0, 200))
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		PrefillProfileName: "prefill-h200",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill-h200": {TargetEndpoints: []fwksched.Endpoint{prefill}},
+			"decode":       {TargetEndpoints: []fwksched.Endpoint{decode}},
+		},
+	}
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	require.NotNil(t, producer.watch.lookup(decodeSource, "req-10"))
+	require.Nil(t, producer.watch.lookup(prefillSource, "req-10"),
+		"the prefill profile the result names is not watched whatever it is called")
 }
 
 func TestKVEventPrefillCompletion_MultiPrompt(t *testing.T) {

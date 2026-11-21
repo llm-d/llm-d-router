@@ -125,7 +125,28 @@ func TestFactory_NoParameters(t *testing.T) {
 	require.NoError(t, err)
 	p := got.(*Plugin)
 	assert.Equal(t, "all", p.bucket(50000))
-	assert.Equal(t, disagg.DefaultPrefillProfile, p.prefillProfile)
+	assert.Equal(t, "", p.prefillProfile)
+}
+
+// An unset prefillProfileName follows the profile the scheduling result names; an
+// explicit one still wins.
+func TestPath_PrefillProfileNameResolution(t *testing.T) {
+	result := func(prefill string) *fwksched.SchedulingResult {
+		return &fwksched.SchedulingResult{
+			PrefillProfileName: prefill,
+			ProfileResults: map[string]*fwksched.ProfileRunResult{
+				"decode":       {TargetEndpoints: []fwksched.Endpoint{nil}},
+				"prefill-h200": {TargetEndpoints: []fwksched.Endpoint{nil}},
+			},
+		}
+	}
+
+	following := newTestPlugin(t, testConfig)
+	assert.Equal(t, pathRemote, following.path(&fwksched.InferenceRequest{SchedulingResult: result("prefill-h200")}))
+	assert.Equal(t, pathLocal, following.path(&fwksched.InferenceRequest{SchedulingResult: result("")}))
+
+	pinned := newTestPlugin(t, `{"prefillProfileName": "decode"}`)
+	assert.Equal(t, pathRemote, pinned.path(&fwksched.InferenceRequest{SchedulingResult: result("prefill-h200")}))
 }
 
 func TestBucketLabels(t *testing.T) {

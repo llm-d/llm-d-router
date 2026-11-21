@@ -579,8 +579,8 @@ match data but is not instrumented here. Requests that reach no endpoint are not
 | `llm_d_epp_prefix_mm_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Multimodal prompt tokens the multimodal prediction was measured against. |
 
 For a request disaggregated into prefill and decode stages, the prediction is recorded for the
-`prefill` profile's endpoint and `endpoint_role` is `prefill`, since the sidecar's default `nixlv2`
-KV connector returns the prefiller's cached-token count. For every other request it is recorded for
+endpoint of the prefill profile the scheduling result names, and `endpoint_role` is `prefill`,
+since the sidecar's default `nixlv2` KV connector returns the prefiller's cached-token count. For every other request it is recorded for
 the primary profile's endpoint, and `endpoint_role` is `decode`.
 
 The `modality` label holds the modalities the request carries as a comma-joined sorted list (`none`
@@ -654,7 +654,7 @@ pod's count while the prediction describes the prefill pod. Under those connecto
 the ratios is not index accuracy.
 
 The two maxima are scoped differently from each other for a disaggregated request.
-`llm_d_epp_prefix_best_predicted_cached_tokens` covers the `prefill` profile's scored candidates,
+`llm_d_epp_prefix_best_predicted_cached_tokens` covers the prefill profile's scored candidates,
 while `llm_d_epp_prefix_best_available_cached_tokens` is taken before the role filters run and so
 spans prefill and decode pods together. A decode pod holding the prefix raises the available maximum
 while being unreachable by the prefill decision. Read the ratio between the two maxima as a filtering
@@ -696,14 +696,12 @@ A request records the first outcome in this table that applies to it.
 | `unparsed-body` | The body was kept as raw bytes and cannot carry the source. |
 | `pulled` | The request carries `kv_transfer_params.remote_kv_source` and the source header. |
 
-`endpoint_role` follows the prefix cache prediction metrics: `prefill` for a request with a target in
-the profile named `prefill`, `decode` otherwise when the primary profile has a target, and empty when
-neither has one. The role does not read `prefillProfileName`. On a P/D deployment whose prefill
-profile has another name, both metric families label its requests `decode`, where the P2P metrics
-describe the prefill endpoint and the prefix cache prediction metrics the decode endpoint.
+`endpoint_role` follows the prefix cache prediction metrics: `prefill` for a request whose
+scheduling result names a prefill profile with a target, `decode` otherwise when the primary profile
+has a target, and empty when neither has one. The name comes from the profile handler that ran the
+prefill profile, so a renamed prefill profile is still labelled `prefill`.
 
-On an aggregated deployment, or a P/D deployment whose prefill profile is named `prefill`, the share
-of prompt tokens the router sent to pull is `llm_d_epp_p2p_source_predicted_pulled_tokens_sum`
+The share of prompt tokens the router sent to pull is `llm_d_epp_p2p_source_predicted_pulled_tokens_sum`
 divided by `llm_d_epp_prefix_prompt_tokens_sum` of the prefix producer named in
 `prefixMatchInfoProducerName`, matched on `endpoint_role`. The share vLLM served from a peer is
 `vllm:prompt_tokens_cached_by_source_total{source="p2p"}` divided by `vllm:prompt_tokens_total` on the

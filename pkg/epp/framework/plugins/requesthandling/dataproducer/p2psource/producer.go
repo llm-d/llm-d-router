@@ -50,17 +50,6 @@ const (
 	// PluginType is the registered type name of the p2p-source-producer.
 	PluginType = p2psourceconstants.P2PSourcePluginType
 
-	// defaultPrefillProfile is the disaggregation prefill profile name; when
-	// that profile's result carries an endpoint, that endpoint computes the
-	// prefix. Operators who rename it (disagg-profile-handler profiles.prefill)
-	// must set prefillProfileName to match.
-	defaultPrefillProfile = "prefill"
-
-	// prefixMetricsPrefillProfile is the prefill profile name the prefix-cache
-	// prediction metrics read. endpoint_role uses it, not prefillProfileName, so
-	// both metric families give a request the same role.
-	prefixMetricsPrefillProfile = "prefill"
-
 	defaultMinCachedTokenDelta = 1
 
 	// defaultP2PConnectorPort is the port of the vLLM OffloadingConnector P2P
@@ -78,8 +67,8 @@ type Config struct {
 	// to be set. Must be >= 1; defaults to 1.
 	MinCachedTokenDelta int `json:"minCachedTokenDelta,omitempty"`
 	// PrefillProfileName is the disaggregation prefill profile name, matching
-	// the disagg-profile-handler's profiles.prefill. Empty defaults to
-	// "prefill".
+	// the disagg-profile-handler's profiles.prefill. Empty follows the prefill
+	// profile name in the scheduling result, then "prefill".
 	PrefillProfileName string `json:"prefillProfileName,omitempty"`
 	// P2PConnectorPort is the OffloadingConnector P2P tier port of data
 	// parallel rank 0 on every endpoint; rank r listens on P2PConnectorPort+r.
@@ -310,10 +299,6 @@ func PluginFactory(name string, rawParameters *json.Decoder, handle plugin.Handl
 // New constructs a p2p-source-producer bound to the configured
 // PrefixCacheMatchInfo producer name.
 func New(name string, cfg Config) *Producer {
-	prefillProfile := cfg.PrefillProfileName
-	if prefillProfile == "" {
-		prefillProfile = defaultPrefillProfile
-	}
 	minCachedTokenDelta := cfg.MinCachedTokenDelta
 	if minCachedTokenDelta < 1 {
 		minCachedTokenDelta = defaultMinCachedTokenDelta
@@ -334,7 +319,7 @@ func New(name string, cfg Config) *Producer {
 		reusablePrefixTokensDataKey: attrprefix.ReusablePrefixTokensDataKey.WithNonEmptyProducerName(name),
 		decisionDataKey:             attrprefix.P2PSourceDecisionDataKey.WithNonEmptyProducerName(name),
 		minCachedTokenDelta:         minCachedTokenDelta,
-		prefillProfile:              prefillProfile,
+		prefillProfile:              cfg.PrefillProfileName,
 		p2pConnectorPort:            p2pConnectorPort,
 		attrKeyValue:                plugin.NewDataKey("best-match", PluginType).WithNonEmptyProducerName(name),
 		costModel:                   costModel,
@@ -579,7 +564,7 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	if logDecision {
 		kv = []any{"requestID", request.RequestID}
 	}
-	_, role := prefixmetrics.PredictionTarget(schedulingResult, prefixMetricsPrefillProfile)
+	_, role := prefixmetrics.PredictionTarget(schedulingResult)
 	defer func() {
 		recordDecision(p.typedName.Name, role, outcome)
 		request.PutAttribute(p.decisionDataKey, attrprefix.P2PSourceDecision{Outcome: outcome, EndpointRole: role})
@@ -596,14 +581,22 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 		}
 	}()
 
+	prefillProfile := p.prefillProfile
+	if prefillProfile == "" {
+		prefillProfile = schedulingResult.PrefillProfileName
+	}
+	if prefillProfile == "" {
+		prefillProfile = scheduling.DefaultPrefillProfile
+	}
 	computing := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
-	pr, exists := schedulingResult.ProfileResults[p.prefillProfile]
+	pr, exists := schedulingResult.ProfileResults[prefillProfile]
 	prefillPicked := exists && pr != nil && len(pr.TargetEndpoints) > 0
 	if logDecision {
-		// On a disaggregated request, false means prefillProfileName does not
-		// match the profile handler's prefill profile, and the sidecar
-		// offloading connector fails the request for the missing header.
-		kv = append(kv, "prefillProfile", p.prefillProfile, "prefillEndpoint", prefillPicked)
+		// On a disaggregated request, false means neither prefillProfileName nor
+		// the scheduling result names a profile carrying a prefill endpoint, and
+		// the sidecar offloading connector fails the request for the missing
+		// header.
+		kv = append(kv, "prefillProfile", prefillProfile, "prefillEndpoint", prefillPicked)
 	}
 	if prefillPicked {
 		computing = pr
