@@ -32,8 +32,9 @@ import (
 // peerDemandMaxAgeIntervals is how many publish intervals a view stays current without a refresh.
 const peerDemandMaxAgeIntervals = 5
 
-// peerDemandView caches the requests queued per priority band on peer replicas. The publisher refreshes it after
-// each publish, so the dispatch cycle reads it without calling the syncer.
+// peerDemandView caches the requests queued per priority band on peer replicas, counting the ones dispatched and
+// not yet on an endpoint as queued. The publisher refreshes it after each publish, so the dispatch cycle reads it
+// without calling the syncer.
 type peerDemandView struct {
 	syncer fwkdl.CrossReplicaSyncer
 	// spec is the band demand spec with a zero local value, so Get returns the peer aggregate alone.
@@ -84,7 +85,7 @@ func (v *peerDemandView) refresh(ctx context.Context) error {
 			return err
 		}
 		if d, isDemand := value.(*bandDemand); ok && isDemand {
-			queued[priority] = d.Requests
+			queued[priority] = d.Requests + d.Dispatching
 		}
 	}
 	v.current.Store(&peerDemandSnapshot{at: v.clock.Now(), queued: queued})

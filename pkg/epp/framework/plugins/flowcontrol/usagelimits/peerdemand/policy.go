@@ -51,9 +51,9 @@ type apiConfig struct {
 // Policy gates every band below the highest band with requests queued on a peer replica, on top of the ceilings
 // its delegate computes. Without a current peer view it returns the delegate's ceilings unchanged.
 //
-// A peer sends its queue and its in-flight load per endpoint as separate updates, so its queue can read empty
-// while this replica's view still shows free the slot the peer's last dispatch took. The policy keeps the gate
-// for releaseDelay after the peer band empties, so that in-flight update lands first.
+// A peer sends its band demand and its in-flight load per endpoint as separate updates, so its band can read
+// empty while this replica's view still shows free the slot the peer's last dispatch took. The policy keeps the
+// gate for releaseDelay after the peer band empties, so that in-flight update lands first.
 type Policy struct {
 	name         string
 	delegate     flowcontrol.UsageLimitPolicy

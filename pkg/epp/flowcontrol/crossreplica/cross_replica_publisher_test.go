@@ -187,7 +187,7 @@ func TestPublisher_PublishesEverySource(t *testing.T) {
 		},
 		ids: func() []string { return []string{"a", "b"} },
 	}
-	p := newPublisher(syncer, []*crossReplicaSource{newPriorityBandDemandSource(twoBands(), "ns/pool"), other},
+	p := newPublisher(syncer, []*crossReplicaSource{newPriorityBandDemandSource(twoBands(), "ns/pool", nil), other},
 		time.Hour, time.Second, clock.RealClock{})
 
 	p.publishAll(context.Background())
@@ -205,7 +205,8 @@ func TestPublisher_NonPositiveDurationsUseDefaults(t *testing.T) {
 
 func TestPublisher_AggregateSumsReplicas(t *testing.T) {
 	t.Parallel()
-	got := aggregateBandDemand([]any{&bandDemand{Requests: 3, Bytes: 300}, &bandDemand{Requests: 5, Bytes: 500}, "ignored"})
+	got := aggregateBandDemand([]any{&bandDemand{Requests: 3, Bytes: 300, Dispatching: 1},
+		&bandDemand{Requests: 5, Bytes: 500, Dispatching: 2}, "ignored"})
 
-	assert.Equal(t, &bandDemand{Requests: 8, Bytes: 800}, got)
+	assert.Equal(t, &bandDemand{Requests: 8, Bytes: 800, Dispatching: 3}, got)
 }

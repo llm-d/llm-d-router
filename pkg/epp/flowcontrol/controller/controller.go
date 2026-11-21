@@ -89,6 +89,9 @@ type FlowController struct {
 	logger              logr.Logger
 	processorFactory    processorFactory
 	processor           processor
+	// dispatching is set when the band demand publisher runs, so peers count a dispatched request as band demand
+	// until ReleaseDispatchReservation.
+	dispatching *crossreplica.Dispatching
 
 	// --- Lifecycle state ---
 
@@ -225,6 +228,7 @@ func NewFlowController(
 	if cr := deps.CrossReplica; cr.Syncer != nil {
 		publisher := crossreplica.NewPublisher(cr.Syncer, fc.flowRegistry, poolName,
 			cr.SyncInterval, cr.PublishTimeout, fc.clock)
+		fc.dispatching = publisher.Dispatching()
 		consumer, readsPeers := fc.usageLimitPolicy.(flowcontrol.PeerDemandConsumer)
 		if readsPeers {
 			consumer.SetPeerDemand(publisher.PeerDemand())
@@ -293,7 +297,9 @@ func (fc *FlowController) EnqueueAndWait(
 
 	// 2. Acquire a lease for the Flow.
 	// We hold this lease for the entire duration of the request (Distribution + Queueing).
+	dispatchedPriority := flowKey.Priority
 	err := fc.withConnectionWithFallback(req, func(conn contracts.ActiveFlowConnection, effectiveReq flowcontrol.FlowControlRequest) error {
+		dispatchedPriority = effectiveReq.FlowKey().Priority
 		bandDefaultRequestTTL, bandDefaultRequestTTLSet := conn.DefaultRequestTTL()
 		reqCtx, cancel, saturationTTL := fc.createRequestContext(
 			ctx, effectiveReq, bandDefaultRequestTTL, bandDefaultRequestTTLSet, enqueueTime,
@@ -330,6 +336,9 @@ func (fc *FlowController) EnqueueAndWait(
 		err = fmt.Errorf("%w: %w", types.ErrRejected, err)
 	}
 
+	if finalOutcome == types.QueueOutcomeDispatched && fc.dispatching != nil {
+		fc.dispatching.Add(req.ID(), dispatchedPriority)
+	}
 	if finalOutcome != types.QueueOutcomeDispatched {
 		fc.logger.V(logutil.VERBOSE).Info("Request dropped",
 			"requestID", req.ID(), "flowKey", flowKey, "outcome", finalOutcome, "err", err)
@@ -343,6 +352,9 @@ func (fc *FlowController) EnqueueAndWait(
 // ReleaseDispatchReservation marks the end of the gap between flow-control dispatch and
 // publication by request lifecycle hooks.
 func (fc *FlowController) ReleaseDispatchReservation(requestID string) {
+	if fc.dispatching != nil {
+		fc.dispatching.Remove(requestID)
+	}
 	if tracker, ok := fc.saturationDetector.(flowcontrol.DispatchReservationTracker); ok {
 		tracker.ReleaseDispatch(requestID)
 	}
