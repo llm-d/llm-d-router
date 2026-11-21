@@ -77,28 +77,30 @@ func TestConditionalDecodeStep_PromptTokenParity_HitMismatchCounts(t *testing.T)
 	}
 }
 
-// A 412 writes nothing, so there is no usage to compare and the pipeline goes
+// A miss writes nothing, so there is no usage to compare and the pipeline goes
 // on; the decode step then sees the client's body without any injection.
 func TestConditionalDecodeStep_PromptTokenParity_MissIsSilent(t *testing.T) {
-	reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusPreconditionFailed)
-	}))
-	defer server.Close()
+	forEachMissStatus(t, func(t *testing.T, status int) {
+		reg := metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		defer server.Close()
 
-	step, reqCtx, recorder := conditionalParityRequest(t, server, nil, true)
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("a miss must continue the pipeline, got %v", err)
-	}
-	if recorder.Body.Len() != 0 {
-		t.Fatalf("a miss must write nothing, got %q", recorder.Body.String())
-	}
-	if got := counterValue(t, reg, parityMetric, nil); got != 0 {
-		t.Fatalf("mismatch counter = %v, want 0", got)
-	}
-	if _, injected := reqCtx.Body["stream_options"]; injected {
-		t.Fatal("the probe's include_usage injection must not leak into reqCtx.Body")
-	}
+		step, reqCtx, recorder := conditionalParityRequest(t, server, nil, true)
+		if err := step.Execute(context.Background(), reqCtx); err != nil {
+			t.Fatalf("a miss must continue the pipeline, got %v", err)
+		}
+		if recorder.Body.Len() != 0 {
+			t.Fatalf("a miss must write nothing, got %q", recorder.Body.String())
+		}
+		if got := counterValue(t, reg, parityMetric, nil); got != 0 {
+			t.Fatalf("mismatch counter = %v, want 0", got)
+		}
+		if _, injected := reqCtx.Body["stream_options"]; injected {
+			t.Fatal("the probe's include_usage injection must not leak into reqCtx.Body")
+		}
+	})
 }
 
 // A streamed hit is asked for the usage frame, which is dropped again before
@@ -168,24 +170,26 @@ func TestConditionalDecodeStep_PromptTokenParity_OffAndErrorModes(t *testing.T) 
 // The probe's include_usage must not reach the decode step through the
 // client's own stream_options object, which the step's shallow clone shares.
 func TestConditionalDecodeStep_PromptTokenParity_MissKeepsClientStreamOptions(t *testing.T) {
-	metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusPreconditionFailed)
-	}))
-	defer server.Close()
+	forEachMissStatus(t, func(t *testing.T, status int) {
+		metricstest.NewRegistry(t, coordmetrics.Register, coordmetrics.Reset)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		defer server.Close()
 
-	step, reqCtx, _ := conditionalParityRequest(t, server, nil, true)
-	client := map[string]any{"include_obfuscation": false}
-	reqCtx.Body["stream_options"] = client
-	if err := step.Execute(context.Background(), reqCtx); err != nil {
-		t.Fatalf("a miss must continue the pipeline, got %v", err)
-	}
-	if _, leaked := client["include_usage"]; leaked {
-		t.Fatal("the probe's include_usage leaked into the client's stream_options")
-	}
-	if got, _ := reqCtx.Body["stream_options"].(map[string]any); got["include_usage"] != nil {
-		t.Fatalf("reqCtx.Body stream_options = %v, want the client's object unchanged", got)
-	}
+		step, reqCtx, _ := conditionalParityRequest(t, server, nil, true)
+		client := map[string]any{"include_obfuscation": false}
+		reqCtx.Body["stream_options"] = client
+		if err := step.Execute(context.Background(), reqCtx); err != nil {
+			t.Fatalf("a miss must continue the pipeline, got %v", err)
+		}
+		if _, leaked := client["include_usage"]; leaked {
+			t.Fatal("the probe's include_usage leaked into the client's stream_options")
+		}
+		if got, _ := reqCtx.Body["stream_options"].(map[string]any); got["include_usage"] != nil {
+			t.Fatalf("reqCtx.Body stream_options = %v, want the client's object unchanged", got)
+		}
+	})
 }
 
 // A worker error on a streamed probe with the check on is held by the usage

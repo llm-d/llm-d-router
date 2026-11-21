@@ -68,8 +68,8 @@ const (
 
 	// PreferIfAvailable is the preference token the coordinator sets to mark a
 	// request as a speculative early-decode attempt: route to a decode worker
-	// only if its KV cache already covers the prompt (at least partially); otherwise EPP surfaces
-	// 412 Precondition Failed so the coordinator restarts the pipeline.
+	// only if its KV cache already covers the prompt (at least partially); otherwise EPP answers
+	// 204 No Content so the coordinator continues the pipeline.
 	PreferIfAvailable = "if-available"
 
 	// EndpointPinHeader carries the worker <ip:port> a request must be scheduled

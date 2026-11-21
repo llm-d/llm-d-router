@@ -41,8 +41,8 @@ var hopByHopHeaders = map[string]bool{
 // or stamped by EPP or the gateway and read by the coordinator from a phase
 // response; a client copy is dropped, and so is a value of
 // forward_response_headers under these names. EPP routes on epp-profile and
-// x-llm-d-pin-host-port, and answers Prefer: if-available, the
-// conditional-decode probe's signal, with 412 on any other leg. The prefill
+// x-llm-d-pin-host-port, and can answer Prefer: if-available, the
+// conditional-decode probe's signal, without forwarding the request on any leg. The prefill
 // P2P address and prefill endpoint headers name the prefill pod a decode
 // request pulls from, so a client cannot choose them.
 var internalForwardingHeaders = map[string]bool{

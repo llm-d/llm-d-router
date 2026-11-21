@@ -329,15 +329,15 @@ func TestExecute_AbortedRequestAccounting(t *testing.T) {
 	}
 }
 
-// After a 412 the decode phase is the decode step: the path is recorded once
+// After a miss the decode phase is the decode step: the path is recorded once
 // it starts, whichever step the client leaves during.
 func TestExecute_DeferredProbePath(t *testing.T) {
 	cases := []struct {
 		name     string
-		cancelIn string // step that observes the client leaving; the probe itself for right after the 412
+		cancelIn string // step that observes the client leaving; the probe itself for right after the miss
 		wantPath string // "" records no path
 	}{
-		{name: "client leaves right after the 412", cancelIn: "conditional-decode"},
+		{name: "client leaves right after the miss", cancelIn: "conditional-decode"},
 		{name: "client leaves during prefill", cancelIn: "prefill"},
 		{name: "client leaves during decode", cancelIn: "decode", wantPath: metricsutil.DisaggPathPrefillDecode},
 	}
@@ -353,7 +353,7 @@ func TestExecute_DeferredProbePath(t *testing.T) {
 					}
 					cancel()
 					if name == "conditional-decode" {
-						return nil // the 412 arrived; the proxy swallows it before looking at the context
+						return nil // the miss arrived; the proxy swallows it before looking at the context
 					}
 					return ctx.Err()
 				}

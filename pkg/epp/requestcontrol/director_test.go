@@ -35,6 +35,7 @@ import (
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -3532,8 +3533,8 @@ func TestDirector_HandleResponseBody_TerminationCauseOnlyAtEndOfStream(t *testin
 // TestPrepareRequest_ConditionalDecodeDefaultDeny pins the director's
 // default-deny for "Prefer: if-available" requests: after PreRequest plugins
 // run, if no plugin marked ConditionalDecodeHandledAttributeKey, the request
-// is rejected with 412. Requests either without the header or where a plugin
-// claimed the header pass through.
+// is rejected with 412. A claimed request that a plugin marked as a cache miss
+// is answered with 204. Other requests pass through.
 func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
 
@@ -3562,12 +3563,39 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 		produces: map[fwkplugin.DataKey]any{fwkrh.ConditionalDecodeHandledAttributeKey: false},
 	}
 
+	gatePlugin := func(decision fwkrh.ConditionalDecodeDecision) *mockPreRequestPlugin {
+		return &mockPreRequestPlugin{
+			name: "gate",
+			modifyFn: func(r *fwksched.InferenceRequest) {
+				r.PutAttribute(fwkrh.ConditionalDecodeHandledAttributeKey, decision)
+			},
+			produces: map[fwkplugin.DataKey]any{fwkrh.ConditionalDecodeHandledAttributeKey: fwkrh.ConditionalDecodeForward},
+		}
+	}
+
 	tests := []struct {
 		name        string
 		headers     map[string]string
 		plugins     []fwkrh.PreRequest
 		wantErrCode string
+		wantAnswer  bool
 	}{
+		{
+			name:       "conditional-decode with a plugin that reports a miss → 204 answer",
+			headers:    map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins:    []fwkrh.PreRequest{gatePlugin(fwkrh.ConditionalDecodeMiss)},
+			wantAnswer: true,
+		},
+		{
+			name:    "conditional-decode with a plugin that decides to forward → forward",
+			headers: map[string]string{routing.PreferHeader: routing.PreferIfAvailable},
+			plugins: []fwkrh.PreRequest{gatePlugin(fwkrh.ConditionalDecodeForward)},
+		},
+		{
+			name:    "a miss decision without the Prefer header is ignored",
+			headers: map[string]string{},
+			plugins: []fwkrh.PreRequest{gatePlugin(fwkrh.ConditionalDecodeMiss)},
+		},
 		{
 			name:    "no Prefer header is unaffected",
 			headers: map[string]string{},
@@ -3607,7 +3635,13 @@ func TestPrepareRequest_ConditionalDecodeDefaultDeny(t *testing.T) {
 			_, err := dir.prepareRequest(ctx, reqCtx, scheduleResult)
 
 			if tt.wantErrCode == "" {
-				assert.NoError(t, err)
+				require.NoError(t, err)
+				wantStatus, wantReason := envoyTypePb.StatusCode_Empty, ""
+				if tt.wantAnswer {
+					wantStatus, wantReason = envoyTypePb.StatusCode_NoContent, handlers.AnswerReasonCacheMiss
+				}
+				assert.Equal(t, wantStatus, reqCtx.AnswerStatus)
+				assert.Equal(t, wantReason, reqCtx.AnswerReason)
 				return
 			}
 			var e errcommon.Error

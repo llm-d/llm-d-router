@@ -244,6 +244,7 @@ whose body reached the EPP and whose ending the EPP observes.
 | `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated` or `rejected-flow-limit`. |
 | `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
 | `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
+| `deferred` | The EPP answered 204 without forwarding the request. The conditional-decode gate does this on a cache miss. Not counted in `llm_d_epp_request_error_total`. | Why the EPP answered: `cache_miss` for the conditional-decode gate. |
 | `failed` | Any other error, before or after dispatch, including a 4xx or 5xx response status or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
 
 When more than one applies, `evicted` wins over the error that ends the stream, and an error or a

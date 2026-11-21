@@ -139,7 +139,7 @@ phase via the [Endpoint Picker protocol](https://github.com/kubernetes-sigs/gate
 (`ext_proc`). `conditional-decode` tries decode first, optimistically, before running
 encode or prefill at all: if the chosen decode pod already has what it needs (e.g. the
 prompt is already cached), it serves the request directly and the full pipeline never
-runs. Only if decode responds `412 Precondition Failed` does the Coordinator fall back
+runs. Only if the router answers `204 No Content` does the Coordinator fall back
 to the full `encode → prefill → decode` cascade — which is also how a request with
 multiple multimedia entries fans encode out in parallel, one call per entry.
 
@@ -173,16 +173,16 @@ sequenceDiagram
     Note over Coordinator,Decode: conditional-decode — try decode alone first
     Coordinator->>Gateway: Call (x-llm-d-epp-profile: decode)
     Gateway->>EPP: ext_proc: pick pod (profile=decode)
-    EPP-->>Gateway: Chosen decode pod
-    Gateway->>Decode: Forward request
 
     alt Decode can serve the request
+        EPP-->>Gateway: Chosen decode pod
+        Gateway->>Decode: Forward request
         Decode-->>Gateway: 200 OK (tokens)
         Gateway-->>Coordinator: Response
         Coordinator-->>Client: Final response
     else Decode cannot serve it (e.g. no KV cache for this prompt)
-        Decode-->>Gateway: 412 Precondition Failed
-        Gateway-->>Coordinator: 412
+        EPP-->>Gateway: 204 No Content, request not forwarded
+        Gateway-->>Coordinator: 204
         Note over Coordinator: Fall back to the full pipeline
 
         opt request has multimodal entries
@@ -288,8 +288,8 @@ request. Client-provided values of the coordinator-owned headers are discarded: 
 routes on `x-llm-d-epp-profile`, `x-llm-d-revision-decision-id`,
 `x-llm-d-peer-topology`, and `x-llm-d-pin-host-port`
 (see [endpoint-pin-screener](../pkg/epp/framework/plugins/requesthandling/screener/endpointpin/README.md)),
-and answers `Prefer: if-available`, the `conditional-decode` step's signal, with 412 on
-any other leg. The same headers are removed from the upstream response before it
+and can answer `Prefer: if-available`, the `conditional-decode` step's signal, without
+forwarding the request on any leg. The same headers are removed from the upstream response before it
 reaches the client. Both apply on the pipeline and on the passthrough.
 A client-provided `kv_transfer_params` body field is dropped on the inference routes,
 which parse the body, because it names the pod a model server pulls KV from and
@@ -403,24 +403,32 @@ decode serve this directly" question. The step sends the decode request with the
 
 - The decode worker serves the request directly when it can (cache available). The
   response (SSE or JSON) is streamed back to the client and the pipeline stops.
-- When it cannot, the worker returns `412 Precondition Failed`. The coordinator treats
-  the 412 as a cache miss, swallows it, and continues the pipeline to encode, prefill,
-  and decode.
+- When it cannot, the router answers `204 No Content` and forwards nothing. The
+  coordinator treats the 204 as a cache miss, swallows it, and continues the pipeline to
+  encode, prefill, and decode.
 
-The coordinator captures the 412 response headers listed in `forward_response_headers`
-and sends them on the later phases, as it does for encode and prefill responses. Hints in
-the 412 body are not consumed.
+The coordinator captures the 204 response headers listed in `forward_response_headers`
+and sends them on the later phases, as it does for encode and prefill responses.
 
-The 412 is enforced router-side by the `prefix-based-pd-decider` plugin's conditional-decode
-gate when configured. When no gate plugin is configured, the router still returns 412 by
-default for any `Prefer: if-available` request so a missing gate surfaces as the coordinator's
-cache-miss fallback rather than a silent forward. See
+The 204 is answered router-side by the `prefix-based-pd-decider` plugin's conditional-decode
+gate when configured. The router does not count it as an error: the request ends with
+`outcome="deferred"`, `reason="cache_miss"` in `llm_d_epp_request_outcome_total`, stays out of
+`llm_d_epp_request_error_total`, and its span status is not set to Error.
+
+When no gate plugin is configured, the router returns `412 Precondition Failed` for any
+`Prefer: if-available` request and counts it as an error, because the configuration is
+wrong. The coordinator also treats that 412 as a cache miss, so the request runs the full
+pipeline instead of a silent forward, and it logs a warning for each such probe. See
 [disaggregation.md](disaggregation.md#prefix-based-pd-decider) for configuration.
+
+**Upgrade the coordinator before the router.** A coordinator whose `conditional-decode`
+step accepts only 412 as a cache miss handles the 204 as a served response: it returns an
+empty response to the client and does not run the full pipeline.
 
 `conditional-decode` is not supported with `kv-sglang`. The step sends the decode
 request without bootstrap fields, and an SGLang decode server rejects such a request
 with HTTP 400 instead of serving it. When the router forwards the request (the gate
-does not answer 412), the client gets that error. The coordinator does not reject the
+does not answer 204), the client gets that error. The coordinator does not reject the
 combination at startup. When `kv_connector` is `kv-sglang`, leave the step out and keep
 the `prefill` step. Every request then runs remote prefill and a KV transfer, including
 short or already-cached prompts.
@@ -920,7 +928,7 @@ upstream gRPC methods regardless of `worker_protocol`.
 | `async-broker` | Optional, first when enabled. Bridge to the [llm-d-async](https://github.com/llm-d/llm-d-async) broker: requests carrying the mode header are labeled and passed through (`passthrough`) or queued (`enqueue`, `wait`); requests without it are untouched. Also registers `GET/DELETE /v1/requests/{id}` on the listener. Full doc: [coordinator_async_broker.md](coordinator_async_broker.md). | `redis_url` (required), `routes`, `objectives`, `quota`, `wait_cap_seconds` |
 | `replace-media-urls` | Download `image_url`, `audio_url`, and `video_url` references (chat completions) or `input_image` references (Responses) and accept inline `input_audio`, inline each as a base64 `data:` URI, seed one `MultimodalEntries` item per part tagged with its modality. | `download_timeout`, `max_concurrent_downloads`, `max_multimodal_entries`, `max_download_size`, `max_image_download_size`, `max_audio_download_size`, `max_video_download_size`, `allowed_image_content_types`, `allowed_audio_content_types`, `allowed_video_content_types`, `allow_private_networks`, `allowed_domains` |
 | `render` | Tokenize via the render service; populate `TokenIDs` and each entry's hash/placeholder/kwargs from the per-modality `mm_hashes` / `mm_placeholders` / `kwargs_data` maps. | `address` (required), `timeout`, `max_total_tokens`, `max_total_placeholder_tokens`, `mm_payload` |
-| `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 412 continue, otherwise stream the response and stop. A served hit runs the same prompt-token parity check as `decode`. Optionally sends the rendered token IDs, as on `decode` (`forward_prompt_token_ids`). | `prompt_token_parity`, `forward_prompt_token_ids` |
+| `conditional-decode` | Optional fast path: attempt decode with `Prefer: if-available`; on 204 continue, otherwise stream the response and stop. A served hit runs the same prompt-token parity check as `decode`. Optionally sends the rendered token IDs, as on `decode` (`forward_prompt_token_ids`). | `prompt_token_parity`, `forward_prompt_token_ids` |
 | `encode` | Parallel fan-out, one request per multimodal entry; merge EC descriptors. | `max_parallel`, `use_openai_format`, `ec_connector` |
 | `prefill` | Single prefill call with tokens + EC/KV hints; capture `kv_transfer_params`. | `use_openai_format`, `kv_connector`, `ec_connector` |
 | `decode` | Stream the final completion to the client. Checks that the worker's prompt token count matches the rendered one (`prompt_token_parity`). Optionally sends the rendered token IDs in `kv_transfer_params.prompt_token_ids` so the worker skips tokenization (`forward_prompt_token_ids`). | `kv_connector`, `prompt_token_parity`, `forward_prompt_token_ids` |

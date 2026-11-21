@@ -25,11 +25,12 @@ import (
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 )
 
-// TerminationCause labels how a dispatched request's response stream ended. Observers that learn
-// from response records need it to tell a complete observation from a truncated one: a stream cut
+// TerminationCause labels how a request that reached PreRequest ended. Observers that learn from
+// response records need it to tell a complete observation from a truncated one: a stream cut
 // short by a disconnect or an eviction reports only the tokens emitted before the cut. Requests
 // whose response processing is skipped never observe completion, so their records always carry
-// TerminationCauseNotObserved.
+// TerminationCauseNotObserved. A request the EPP answered itself was not dispatched, so its
+// record carries TerminationCauseAnswered and no response data.
 type TerminationCause string
 
 const (
@@ -48,6 +49,9 @@ const (
 	// classified: a half-close that reaches the EPP before its cancellation propagates, or an
 	// EPP-side failure.
 	TerminationCauseError TerminationCause = "error"
+	// TerminationCauseAnswered is a request the EPP answered itself without forwarding it to a
+	// model server, such as a conditional-decode cache miss.
+	TerminationCauseAnswered TerminationCause = "answered"
 	// TerminationCauseNotObserved is a request whose route skips response processing: the EPP
 	// stops processing the stream after routing and never sees the response.
 	TerminationCauseNotObserved TerminationCause = "not-observed"
