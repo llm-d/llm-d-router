@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -293,6 +294,10 @@ func BenchmarkInMemoryResidencyAttribution(b *testing.B) {
 				}
 			}
 			after := workload.ReadHeap()
+			// Keep the index live across the snapshot's GC: without a later
+			// use it is unreachable there and the collector frees it before
+			// HeapAlloc is read.
+			runtime.KeepAlive(idx)
 			b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc)/float64(numKeys), tc.reportAs)
 		})
 	}
