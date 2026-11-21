@@ -378,6 +378,70 @@ func TestProcessPassthroughTrailersOnlyResponse(t *testing.T) {
 	require.Zero(t, runningRequests(t))
 }
 
+// TestProcessPassthroughKeepsResponseMetadata checks that an opaque response's status, binary metadata and grpc-message reach the client unchanged.
+// The proxy applies only the mutations the EPP returns, so an upstream header is unchanged when no mutation removes it or sets it to another value.
+func TestProcessPassthroughKeepsResponseMetadata(t *testing.T) {
+	binValue := []byte("AAECA/8")
+	for _, tc := range []struct {
+		name, status, contentType string
+		reqHeaders                map[string]string
+		trailers                  []*configPb.HeaderValue
+	}{
+		{name: "gRPC", status: "200", contentType: "application/grpc",
+			reqHeaders: map[string]string{":path": grpcMethodPath, "content-type": "application/grpc"},
+			trailers: []*configPb.HeaderValue{{Key: "grpc-status", RawValue: []byte("3")},
+				{Key: "grpc-message", RawValue: []byte("bad%20arg")}, {Key: "x-trace-bin", RawValue: binValue}}},
+		{name: "HTTP", status: "404", contentType: "application/json", reqHeaders: map[string]string{":path": "/v1/raw"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eppmetrics.Register()
+			eppmetrics.Reset()
+			t.Cleanup(eppmetrics.Reset)
+			ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
+			defer cancel()
+
+			srv := newPacedProcessServer(ctx)
+			done := make(chan error, 1)
+			go func() {
+				done <- NewStreamingServer(nil, &lifecycleDirector{incomingModel: "m", targetModel: "m"}, passthroughRegistry(), 0).Process(srv)
+			}()
+			srv.feed(t, newRequestHeaders(tc.reqHeaders))
+			srv.feed(t, requestBodyMsg([]byte("request")))
+			srv.next(t, "the request header response")
+			srv.next(t, "the request body response")
+			upstream := map[string][]byte{":status": []byte(tc.status), "content-type": []byte(tc.contentType), "x-meta-bin": binValue}
+			headers := &configPb.HeaderMap{}
+			for key, value := range upstream {
+				headers.Headers = append(headers.Headers, &configPb.HeaderValue{Key: key, RawValue: value})
+			}
+			srv.feed(t, &extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_ResponseHeaders{
+				ResponseHeaders: &extProcPb.HttpHeaders{Headers: headers},
+			}})
+			mutation := srv.next(t, "the response header response").GetResponseHeaders().GetResponse().GetHeaderMutation()
+			for _, set := range mutation.GetSetHeaders() {
+				if want, ok := upstream[set.GetHeader().GetKey()]; ok {
+					require.Equal(t, string(want), string(set.GetHeader().GetRawValue()), "header %s", set.GetHeader().GetKey())
+				}
+			}
+			for key := range upstream {
+				require.NotContains(t, mutation.GetRemoveHeaders(), key)
+			}
+
+			srv.feed(t, responseBodyMsg([]byte("body"), tc.trailers == nil))
+			require.Equal(t, "body", string(streamedBody(srv.next(t, "the body")).GetBody()))
+			if tc.trailers != nil {
+				srv.feed(t, &extProcPb.ProcessingRequest{Request: &extProcPb.ProcessingRequest_ResponseTrailers{
+					ResponseTrailers: &extProcPb.HttpTrailers{Trailers: &configPb.HeaderMap{Headers: tc.trailers}},
+				}})
+				srv.next(t, "the final body response")
+				require.Nil(t, srv.next(t, "the trailers").GetResponseTrailers().GetHeaderMutation(), "trailers pass through without a mutation")
+			}
+			close(srv.in)
+			require.NoError(t, <-done)
+		})
+	}
+}
+
 // TestProcessPassthroughDisconnectAfterFirstMessage checks cleanup when the client leaves mid-stream.
 func TestProcessPassthroughDisconnectAfterFirstMessage(t *testing.T) {
 	eppmetrics.Register()
