@@ -19,18 +19,21 @@ package peerdemand
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	testclock "k8s.io/utils/clock/testing"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 )
 
 type fakePeers struct {
-	queued map[int]uint64
-	stale  bool
+	queued   map[int]uint64
+	stale    bool
+	interval time.Duration
 }
 
 func (f *fakePeers) QueuedRequests(priority int) (uint64, bool) {
@@ -38,6 +41,10 @@ func (f *fakePeers) QueuedRequests(priority int) (uint64, bool) {
 		return 0, false
 	}
 	return f.queued[priority], true
+}
+
+func (f *fakePeers) SyncInterval() time.Duration {
+	return f.interval
 }
 
 // ladder is a delegate with distinct ceilings per band, counting its calls.
@@ -113,6 +120,60 @@ func TestSetPeerDemandNilClearsTheView(t *testing.T) {
 	assert.Equal(t, []float64{1, 1, 1, 1}, compute(p))
 }
 
+func TestComputeLimitHoldsAfterPeerDemandClears(t *testing.T) {
+	t.Parallel()
+	start := time.Unix(1000, 0)
+	tests := []struct {
+		name         string
+		releaseDelay *time.Duration
+		heldFor      time.Duration
+	}{
+		{name: "default is two sync intervals", heldFor: 40 * time.Millisecond},
+		{name: "configured delay", releaseDelay: ptr(150 * time.Millisecond), heldFor: 150 * time.Millisecond},
+		{name: "zero releases at once", releaseDelay: ptr(time.Duration(0))},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clk := testclock.NewFakePassiveClock(start)
+			peers := &fakePeers{queued: map[int]uint64{60: 3}, interval: 20 * time.Millisecond}
+			p := New("", &ladder{})
+			p.clock = clk
+			p.releaseDelay = tc.releaseDelay
+			p.SetPeerDemand(peers)
+			require.Equal(t, []float64{1.0, 0.9, 0, 0}, compute(p))
+
+			peers.queued = map[int]uint64{}
+			if tc.heldFor > 0 {
+				clk.SetTime(start.Add(tc.heldFor - time.Millisecond))
+				assert.Equal(t, []float64{1.0, 0.9, 0, 0}, compute(p), "held while the peer's in-flight update may be in transit")
+			}
+			clk.SetTime(start.Add(tc.heldFor))
+			assert.Equal(t, []float64{1.0, 0.9, 0.8, 0.7}, compute(p))
+		})
+	}
+}
+
+func TestComputeLimitHoldTracksTheHighestPeerBand(t *testing.T) {
+	t.Parallel()
+	start := time.Unix(1000, 0)
+	clk := testclock.NewFakePassiveClock(start)
+	peers := &fakePeers{queued: map[int]uint64{40: 2}, interval: 20 * time.Millisecond}
+	p := New("", &ladder{})
+	p.clock = clk
+	p.SetPeerDemand(peers)
+	require.Equal(t, []float64{1.0, 0.9, 0.8, 0}, compute(p))
+
+	peers.queued = map[int]uint64{80: 1}
+	require.Equal(t, []float64{1.0, 0, 0, 0}, compute(p))
+
+	peers.queued = map[int]uint64{}
+	clk.SetTime(start.Add(30 * time.Millisecond))
+	assert.Equal(t, []float64{1.0, 0, 0, 0}, compute(p), "the hold covers the bands below the last peer band seen")
+}
+
+func ptr[T any](v T) *T { return &v }
+
 func newHandle() fwkplugin.Handle {
 	return fwkplugin.NewEppHandle(context.Background(), nil, fwkplugin.WithMetricsRecorder(prometheus.NewRegistry()))
 }
@@ -134,6 +195,11 @@ func TestPolicyFactory(t *testing.T) {
 	assert.ErrorContains(t, err, "delegate plugin not found: missing")
 	_, err = PolicyFactory("held", fwkplugin.StrictDecoder([]byte(`{"delegate":"not-a-policy"}`)), handle)
 	assert.ErrorContains(t, err, "does not implement flowcontrol.UsageLimitPolicy")
+	p, err = PolicyFactory("delayed", fwkplugin.StrictDecoder([]byte(`{"delegate":"static","releaseDelay":"150ms"}`)), handle)
+	require.NoError(t, err)
+	assert.Equal(t, ptr(150*time.Millisecond), p.(*Policy).releaseDelay)
+	_, err = PolicyFactory("held", fwkplugin.StrictDecoder([]byte(`{"releaseDelay":"-1s"}`)), handle)
+	assert.ErrorContains(t, err, "releaseDelay must not be negative")
 	_, err = PolicyFactory("held", fwkplugin.StrictDecoder([]byte(`{"delegat":"static"}`)), handle)
 	assert.Error(t, err, "unknown fields are rejected")
 

@@ -20,6 +20,7 @@ package flowcontrol
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -229,6 +230,8 @@ type PeerDemand interface {
 	// QueuedRequests returns the requests queued in the priority band across peer replicas. ok is false when no
 	// current view of the peers exists, in which case the caller acts on local state alone.
 	QueuedRequests(priority int) (queued uint64, ok bool)
+	// SyncInterval returns how often the view is refreshed from the peers.
+	SyncInterval() time.Duration
 }
 
 // PeerDemandConsumer is an optional interface for a UsageLimitPolicy that reads PeerDemand. When
