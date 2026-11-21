@@ -131,13 +131,10 @@ func (p *RequestEvictor) PreRequest(
 	p.queue.Track(item)
 	p.evictionRegistry.Register(requestID, evictCh)
 
-	// Bind untrack to the request context's lifetime as a safety net.
-	// If the client disconnects and ResponseBody(EndOfStream) never fires,
-	// ctx.Done() ensures the request is still cleaned up. Untrack is idempotent.
-	go func() {
-		<-ctx.Done()
-		p.cleanupRequest(requestID)
-	}()
+	// Bind untrack to the request context's lifetime as a safety net. If the client disconnects and
+	// ResponseBody(EndOfStream) never fires, the callback still cleans up the request. It also runs
+	// after a normal completion, which is safe because cleanupRequest is idempotent.
+	context.AfterFunc(ctx, func() { p.cleanupRequest(requestID) })
 
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Tracked in-flight request",
 		"requestID", requestID,
