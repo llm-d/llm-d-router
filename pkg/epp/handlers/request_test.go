@@ -43,6 +43,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 	grpcmetadata "google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
@@ -59,6 +60,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
+	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
 
 func TestExtractTraceContext(t *testing.T) {
@@ -320,6 +322,80 @@ func TestGenerateHeaders_ForwardsTraceContextWhenTracingDisabled(t *testing.T) {
 	}
 	assert.Equal(t, clientTraceparent, got["traceparent"])
 	assert.Equal(t, "vendor=abc", got["tracestate"])
+}
+
+// Envoy keeps a client header unless the mutation removes it, so a trace header
+// the propagator does not re-inject must be removed.
+func TestGenerateRequestHeaderResponse_RemovesUninjectedTraceHeaders(t *testing.T) {
+	const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0c9902b7-01"
+
+	tests := []struct {
+		name    string
+		client  map[string]string
+		wantSet map[string]string
+	}{
+		{
+			name:    "valid headers are set from the propagator",
+			client:  map[string]string{"traceparent": traceparent, "tracestate": "vendor=abc", "baggage": "k=v"},
+			wantSet: map[string]string{"traceparent": traceparent, "tracestate": "vendor=abc", "baggage": "k=v"},
+		},
+		{
+			name:   "tracestate without traceparent",
+			client: map[string]string{"tracestate": "vendor=abc"},
+		},
+		{
+			name:    "malformed tracestate",
+			client:  map[string]string{"traceparent": traceparent, "tracestate": "vendor"},
+			wantSet: map[string]string{"traceparent": traceparent},
+		},
+		{
+			name:    "malformed baggage",
+			client:  map[string]string{"traceparent": traceparent, "baggage": "=;;=bad"},
+			wantSet: map[string]string{"traceparent": traceparent},
+		},
+		{
+			name:   "invalid traceparent",
+			client: map[string]string{"traceparent": "garbage", "tracestate": "vendor=abc"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			useTracerProvider(t, noop.NewTracerProvider())
+			tracing.InitTextMapPropagator()
+
+			clientHeaders := make([]*configPb.HeaderValue, 0, len(tc.client))
+			for k, v := range tc.client {
+				clientHeaders = append(clientHeaders, &configPb.HeaderValue{Key: k, RawValue: []byte(v)})
+			}
+			ctx := extractTraceContext(context.Background(), &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{Headers: &configPb.HeaderMap{Headers: clientHeaders}},
+			})
+			ctx, span := tracing.Tracer("test").Start(ctx, "request", trace.WithSpanKind(trace.SpanKindServer))
+			defer span.End()
+
+			reqCtx := &RequestContext{
+				TargetEndpoint: "1.2.3.4:8080",
+				Request:        &Request{Headers: tc.client},
+				Response:       &Response{},
+			}
+			mutation := (&StreamingServer{}).generateRequestHeaderResponse(ctx, reqCtx).
+				GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+			gotSet := make(map[string]string)
+			for _, h := range mutation.GetSetHeaders() {
+				gotSet[strings.ToLower(h.Header.Key)] = string(h.Header.RawValue)
+			}
+			for _, name := range []string{"traceparent", "tracestate", "baggage"} {
+				if want, ok := tc.wantSet[name]; ok {
+					assert.Equal(t, want, gotSet[name], name)
+					assert.NotContains(t, mutation.GetRemoveHeaders(), name)
+					continue
+				}
+				assert.NotContains(t, gotSet, name)
+				assert.Contains(t, mutation.GetRemoveHeaders(), name)
+			}
+		})
+	}
 }
 
 func TestGenerateHeaders_Sanitization(t *testing.T) {
@@ -631,9 +707,134 @@ func TestGenerateRequestHeaderResponse_RemovesUnsetRoutingHeaders(t *testing.T) 
 			for k, v := range tc.wantSet {
 				assert.Equal(t, v, gotSet[k])
 			}
-			// The context is unsampled, so client copies of the attribution handoff are removed too.
-			wantRemoved := slices.Concat(tc.wantRemoved, []string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader})
+			// The context carries no trace, so client copies of the attribution
+			// handoff and the trace headers are removed too.
+			wantRemoved := slices.Concat(tc.wantRemoved, clientControlHeaders,
+				[]string{tracing.FairnessIDHandoffHeader, tracing.FairnessSourceHandoffHeader},
+				sets.List(request.TracePropagationHeaders))
 			assert.ElementsMatch(t, wantRemoved, mutation.GetRemoveHeaders())
+		})
+	}
+}
+
+// clientControlHeaders are the input control and output injection names,
+// aliases included, that generateHeaders leaves unset on an unsampled request.
+var clientControlHeaders = sets.List(request.InputControlHeaders.
+	Union(request.OutputInjectionHeaders).
+	Difference(sets.New(
+		metadata.DestinationEndpointKey,
+		tracing.FairnessIDHandoffHeader,
+		tracing.FairnessSourceHandoffHeader,
+	)))
+
+// Envoy keeps a client header unless the mutation removes it, so a client copy
+// of a control or injection name reaches the model server unless it is listed
+// in RemoveHeaders.
+func TestGenerateRequestHeaderResponse_RemovesClientControlHeaders(t *testing.T) {
+	t.Parallel()
+
+	headers := map[string]string{metadata.DestinationEndpointKey: "9.9.9.9:1"}
+	for _, h := range clientControlHeaders {
+		headers[h] = "client-value"
+	}
+	reqCtx := &RequestContext{
+		TargetEndpoint: "1.2.3.4:8080",
+		Request:        &Request{Headers: headers},
+		Response:       &Response{},
+	}
+
+	mutation := (&StreamingServer{}).generateRequestHeaderResponse(context.Background(), reqCtx).
+		GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+	gotSet := make(map[string]string)
+	for _, h := range mutation.GetSetHeaders() {
+		gotSet[h.Header.Key] = string(h.Header.RawValue)
+	}
+	for _, h := range clientControlHeaders {
+		assert.Contains(t, mutation.GetRemoveHeaders(), h)
+		assert.NotContains(t, gotSet, h)
+	}
+	// EPP replaces the client's destination, so the name is set and not removed.
+	assert.Equal(t, "1.2.3.4:8080", gotSet[metadata.DestinationEndpointKey])
+	assert.NotContains(t, mutation.GetRemoveHeaders(), metadata.DestinationEndpointKey)
+}
+
+// Envoy forwards a client header unless remove_headers lists it, so a header a
+// plugin deletes from the request must be listed there.
+func TestGenerateRequestHeaderResponse_RemovesDeletedClientHeaders(t *testing.T) {
+	t.Parallel()
+
+	// The context is unsampled and no plugin set a routing header.
+	baseRemoved := sets.List(eppOwnedHeaders.Difference(sets.New(metadata.DestinationEndpointKey)))
+
+	tests := []struct {
+		name        string
+		deleted     []string
+		wantRemoved []string
+	}{
+		{
+			name:        "no header deleted",
+			wantRemoved: baseRemoved,
+		},
+		{
+			name:        "a deleted client header is removed",
+			deleted:     []string{"x-llm-d-lane"},
+			wantRemoved: slices.Concat(baseRemoved, []string{"x-llm-d-lane"}),
+		},
+		{
+			// EPP sets the destination; only the system-owned guard keeps
+			// content-length out.
+			name:        "deleted system-owned headers are not added to remove_headers",
+			deleted:     []string{metadata.DestinationEndpointKey, "content-length"},
+			wantRemoved: baseRemoved,
+		},
+		{
+			name:        "a deleted pseudo-header or host is not removed",
+			deleted:     []string{":authority", "host"},
+			wantRemoved: baseRemoved,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &StreamingServer{}
+			reqCtx := &RequestContext{
+				Request:  &Request{Headers: make(map[string]string)},
+				Response: &Response{},
+			}
+			req := &extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{
+					Headers: &configPb.HeaderMap{Headers: []*configPb.HeaderValue{
+						{Key: "X-LLM-D-Lane", Value: "client-chosen-lane"},
+						{Key: "x-keep", Value: "kept"},
+						{Key: metadata.DestinationEndpointKey, Value: "9.9.9.9:1"},
+						{Key: "content-length", Value: "42"},
+						{Key: ":authority", Value: "gw.example.com"},
+						{Key: "host", Value: "gw.example.com"},
+					}},
+				},
+			}
+			require.NoError(t, server.HandleRequestHeaders(context.Background(), reqCtx, req))
+			for _, h := range tc.deleted {
+				delete(reqCtx.Request.Headers, h)
+			}
+			reqCtx.TargetEndpoint = "1.2.3.4:8080"
+
+			mutation := server.generateRequestHeaderResponse(context.Background(), reqCtx).
+				GetRequestHeaders().GetResponse().GetHeaderMutation()
+
+			gotSet := make(map[string]string)
+			for _, h := range mutation.GetSetHeaders() {
+				gotSet[h.Header.Key] = string(h.Header.RawValue)
+			}
+			assert.Equal(t, "kept", gotSet["x-keep"])
+			assert.Equal(t, "1.2.3.4:8080", gotSet[metadata.DestinationEndpointKey])
+			for _, h := range tc.deleted {
+				if h != metadata.DestinationEndpointKey {
+					assert.NotContains(t, gotSet, h)
+				}
+			}
+			assert.ElementsMatch(t, tc.wantRemoved, mutation.GetRemoveHeaders())
 		})
 	}
 }
@@ -1353,7 +1554,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 			name: "chat invalid tools type rejects only tools", path: reqcommon.PathChatCompletions,
 			body:             `{"model":"m","messages":[{"role":"user","content":"hello"}],"tools":"private_tool_value","tool_choice":"required","parallel_tool_calls":true}`,
 			wantErrorStatus:  envoyTypePb.StatusCode_BadRequest,
-			wantErrorMessage: "error extracting request body: invalid chat completions request: must have valid messages field",
+			wantErrorMessage: "error extracting request body: invalid chat completions request: tools: cannot unmarshal string into array",
 			wantSurface:      "chat_completions", wantChoice: "required",
 			wantFields: map[string]string{"tools": "rejected"},
 		},
@@ -1361,7 +1562,7 @@ func TestProcessRequestToolCallingIntegrity(t *testing.T) {
 			name: "chat invalid message role does not reject tools", path: reqcommon.PathChatCompletions,
 			body:             `{"model":"m","messages":[{"role":123,"content":"hello"}],"tools":[],"tool_choice":"required"}`,
 			wantErrorStatus:  envoyTypePb.StatusCode_BadRequest,
-			wantErrorMessage: "error extracting request body: invalid chat completions request: must have valid messages field",
+			wantErrorMessage: "error extracting request body: invalid chat completions request: messages.0.role: cannot unmarshal number into string",
 			wantSurface:      "chat_completions", wantChoice: "required",
 		},
 		{

@@ -217,9 +217,9 @@ func TestPreRequest_EmptyBlockKeys_NoAdd(t *testing.T) {
 	assert.Nil(t, p.speculativeCache.Get(req.RequestID))
 }
 
-// P/D prefill profile: index.Add called twice (primary + prefill), and the
-// cache entry tracks both pod identifiers.
-func TestPreRequest_PrefillProfile_SeedsBoth(t *testing.T) {
+// seedDecodeWhenDisaggregated: index.Add called twice (primary + prefill), and
+// the cache entry tracks both pod identifiers.
+func TestPreRequest_PrefillProfile_SeedDecode_SeedsBoth(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	var calls []addCall
@@ -230,6 +230,7 @@ func TestPreRequest_PrefillProfile_SeedsBoth(t *testing.T) {
 		},
 	}
 	p := newProducerForPreRequest(ctx, true, idx)
+	p.seedDecode = true
 
 	blockKeys := []kvblock.BlockHash{0xCC}
 	req := &scheduling.InferenceRequest{RequestID: "req-pre-pd"}
@@ -255,6 +256,53 @@ func TestPreRequest_PrefillProfile_SeedsBoth(t *testing.T) {
 	require.Len(t, cached.Value().perPodKeys, 2)
 	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.1:8080"])
 	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.2:8080"])
+}
+
+// By default a disaggregated request seeds the prefill endpoint only.
+func TestPreRequest_PrefillProfile_SeedsPrefillOnly(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+
+	var calls []addCall
+	idx := &fakeKVBlockIndex{
+		addFn: func(_ context.Context, _ []kvblock.BlockHash, keys []kvblock.BlockHash, entries []kvblock.PodEntry) error {
+			calls = append(calls, addCall{keys: keys, entries: entries})
+			return nil
+		},
+	}
+	p := newProducerForPreRequest(ctx, true, idx)
+
+	blockKeys := []kvblock.BlockHash{0xCC}
+	req := &scheduling.InferenceRequest{RequestID: "req-pre-pd-prefill-only"}
+	p.pluginState.Write(req.RequestID, blockKeysStateKey, &blockKeysState{
+		perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: {blockKeys}},
+	})
+
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode":                   {TargetEndpoints: []scheduling.Endpoint{testEndpoints[0]}},
+			experimentalPrefillProfile: {TargetEndpoints: []scheduling.Endpoint{testEndpoints[1]}},
+		},
+	}
+	_ = p.PreRequest(ctx, req, result)
+
+	require.Len(t, calls, 1)
+	assert.Equal(t, "10.0.0.2:8080", calls[0].entries[0].PodIdentifier)
+
+	cached := p.speculativeCache.Get(req.RequestID)
+	require.NotNil(t, cached)
+	require.Len(t, cached.Value().perPodKeys, 1)
+	assert.Equal(t, [][]kvblock.BlockHash{blockKeys}, cached.Value().perPodKeys["10.0.0.2:8080"])
+
+	// A decode-only request still seeds its decode endpoint.
+	calls = nil
+	decodeOnly := &scheduling.InferenceRequest{RequestID: "req-pre-decode-only"}
+	p.pluginState.Write(decodeOnly.RequestID, blockKeysStateKey, &blockKeysState{
+		perFormatKeys: map[kvblock.CacheFormat][][]kvblock.BlockHash{{BlockSize: testBlockSize}: {blockKeys}},
+	})
+	_ = p.PreRequest(ctx, decodeOnly, primaryOnly("decode", testEndpoints[0]))
+	require.Len(t, calls, 1)
+	assert.Equal(t, "10.0.0.1:8080", calls[0].entries[0].PodIdentifier)
 }
 
 // speculativeEnabled=false: early return — no index writes, no cache entry,

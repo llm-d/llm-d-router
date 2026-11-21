@@ -313,6 +313,12 @@ func TestParseTLSProfile_AcceptsECDSAHTTP2Suite(t *testing.T) {
 	require.Equal(t, []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256}, profile.cipherSuites)
 }
 
+func TestParseTLSProfile_SkipsBlankSuiteNames(t *testing.T) {
+	profile, err := parseTLSProfile("", []string{" TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 ", ""})
+	require.NoError(t, err)
+	require.Equal(t, []uint16{tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256}, profile.cipherSuites)
+}
+
 func TestParseTLSProfile_RejectsBelowFloor(t *testing.T) {
 	tests := []struct {
 		name            string

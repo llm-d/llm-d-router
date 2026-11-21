@@ -318,6 +318,7 @@ func (m *sessionManager) removeEndpoint(id string) {
 	}
 	for _, s := range p.sessions {
 		s.endpoint = nil
+		s.paused = false
 	}
 	delete(m.endpoints, id)
 }

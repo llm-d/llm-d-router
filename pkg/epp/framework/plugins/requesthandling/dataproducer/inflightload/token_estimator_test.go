@@ -18,6 +18,7 @@ limitations under the License.
 package inflightload
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,20 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/requestheader/outlenbucket"
 )
+
+// ttsRequest builds a request whose body carries a text-to-speech payload.
+func ttsRequest(input, instructions, refText string, maxOut *int64) *fwksched.InferenceRequest {
+	return &fwksched.InferenceRequest{
+		Body: &fwkrequest.InferenceRequestBody{
+			TextToSpeech: &fwkrequest.TextToSpeechRequest{
+				Input:        input,
+				Instructions: instructions,
+				RefText:      refText,
+			},
+			MaxOutputTokens: maxOut,
+		},
+	}
+}
 
 // tokenizedRequest builds a request whose body carries a tokenized prompt of n tokens.
 func tokenizedRequest(n int) *fwksched.InferenceRequest {
@@ -216,5 +231,36 @@ func TestEstimateOutputFromRequest_UnknownRunningAverage(t *testing.T) {
 			e.ObserveOutput(outlenbucket.Unknown, 2000)
 		}
 		require.Greater(t, e.EstimateOutputFromRequest(unknown), int64(1100))
+	})
+}
+
+func TestEstimateOutputFromRequest_TTS(t *testing.T) {
+	e := NewSimpleTokenEstimator(nil)
+
+	t.Run("scales with spoken text", func(t *testing.T) {
+		require.Equal(t, int64(5), e.EstimateOutputFromRequest(ttsRequest("Hello", "", "", nil)))
+		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(ttsRequest(strings.Repeat("a", 1000), "", "", nil)))
+	})
+
+	t.Run("instructions and reference transcript do not extend output", func(t *testing.T) {
+		short := e.EstimateOutputFromRequest(ttsRequest("Hello", "", "", nil))
+		padded := e.EstimateOutputFromRequest(ttsRequest("Hello", strings.Repeat("style ", 100), strings.Repeat("ref ", 100), nil))
+		require.Equal(t, short, padded)
+	})
+
+	t.Run("max_new_tokens caps the estimate", func(t *testing.T) {
+		require.Equal(t, int64(2), e.EstimateOutputFromRequest(ttsRequest(strings.Repeat("a", 1000), "", "", ptr.To(int64(2)))))
+	})
+
+	t.Run("max_new_tokens above the estimate does not raise it", func(t *testing.T) {
+		require.Equal(t, int64(5), e.EstimateOutputFromRequest(ttsRequest("Hello", "", "", ptr.To(int64(100)))))
+	})
+
+	t.Run("empty input still carries one frame", func(t *testing.T) {
+		require.Equal(t, int64(1), e.EstimateOutputFromRequest(ttsRequest("", "", "", nil)))
+	})
+
+	t.Run("clamped to the audio frame ceiling", func(t *testing.T) {
+		require.Equal(t, int64(4096), e.EstimateOutputFromRequest(ttsRequest(strings.Repeat("a", 5000), "", "", nil)))
 	})
 }

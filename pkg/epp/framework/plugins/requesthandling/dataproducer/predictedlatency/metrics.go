@@ -245,7 +245,8 @@ func recordRequestPredictedTPOT(ctx context.Context, pluginName, pluginType, mod
 		return false
 	}
 	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
-	llmdRequestPredictedTPOT.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel).Observe(predictedTPOT)
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		llmdRequestPredictedTPOT.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel), predictedTPOT)
 	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typePredictedTPOT, overflow, predictedTPOT)
 	return true
 }
@@ -257,7 +258,8 @@ func recordRequestTPOTPredictionDuration(ctx context.Context, pluginName, plugin
 		return false
 	}
 	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
-	llmdRequestTPOTPredictionDuration.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel).Observe(duration)
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		llmdRequestTPOTPredictionDuration.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel), duration)
 	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTPOTPredictionDuration, overflow, duration)
 	return true
 }
@@ -300,7 +302,8 @@ func recordRequestPredictedTTFT(ctx context.Context, pluginName, pluginType, mod
 		return false
 	}
 	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
-	llmdRequestPredictedTTFT.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel).Observe(predictedTTFT)
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		llmdRequestPredictedTTFT.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel), predictedTTFT)
 	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typePredictedTTFT, overflow, predictedTTFT)
 	return true
 }
@@ -312,7 +315,8 @@ func recordRequestTTFTPredictionDuration(ctx context.Context, pluginName, plugin
 		return false
 	}
 	modelLabel, targetLabel, overflow := boundModels(modelName, targetModelName)
-	llmdRequestTTFTPredictionDuration.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel).Observe(duration)
+	metricsutil.ObserveWithTraceExemplar(ctx,
+		llmdRequestTTFTPredictionDuration.WithLabelValues(pluginName, pluginType, modelLabel, targetLabel), duration)
 	setInferenceGauge(pluginName, pluginType, modelLabel, targetLabel, typeTTFTPredictionDuration, overflow, duration)
 	return true
 }

@@ -26,8 +26,14 @@ import (
 // hashes across prompts so cross-replica publish payloads stay small.
 type recentWindow struct {
 	mu      sync.Mutex
-	pending map[string][][]blockHash
+	pending map[string]*endpointWindow
 	max     int
+}
+
+type endpointWindow struct {
+	prompts [][]blockHash
+	start   int
+	total   int
 }
 
 func newRecentWindow(max int) *recentWindow {
@@ -35,7 +41,7 @@ func newRecentWindow(max int) *recentWindow {
 		max = defaultLRUCapacityPerServer
 	}
 	return &recentWindow{
-		pending: make(map[string][][]blockHash),
+		pending: make(map[string]*endpointWindow),
 		max:     max,
 	}
 }
@@ -58,8 +64,24 @@ func (w *recentWindow) record(endpointID string, hashes []blockHash) {
 	copy(cp, prompt)
 
 	buf := w.pending[endpointID]
-	buf = append(buf, cp)
-	w.pending[endpointID] = trimPromptHashes(buf, w.max)
+	if buf == nil {
+		buf = &endpointWindow{}
+		w.pending[endpointID] = buf
+	}
+	for buf.total > w.max-len(cp) {
+		buf.total -= len(buf.prompts[buf.start])
+		buf.prompts[buf.start] = nil
+		buf.start++
+	}
+	// Compact only after enough evictions to amortize copying the retained records.
+	if buf.start > 0 && buf.start >= len(buf.prompts)-buf.start {
+		n := copy(buf.prompts, buf.prompts[buf.start:])
+		clear(buf.prompts[n:])
+		buf.prompts = buf.prompts[:n]
+		buf.start = 0
+	}
+	buf.prompts = append(buf.prompts, cp)
+	buf.total += len(cp)
 }
 
 // snapshot returns a deep copy of pending prompts for endpointID without clearing.
@@ -68,7 +90,11 @@ func (w *recentWindow) record(endpointID string, hashes []blockHash) {
 func (w *recentWindow) snapshot(endpointID string) [][]blockHash {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return copyPromptHashes(w.pending[endpointID])
+	buf := w.pending[endpointID]
+	if buf == nil {
+		return nil
+	}
+	return copyPromptHashes(buf.prompts[buf.start:])
 }
 
 // forget drops the buffer for endpointID when the endpoint leaves the pool.
@@ -78,34 +104,35 @@ func (w *recentWindow) forget(endpointID string) {
 	delete(w.pending, endpointID)
 }
 
-// trimPromptHashes drops oldest whole prompts until total hashes <= max.
-// If one prompt still exceeds max, it is head-capped.
-func trimPromptHashes(prompts [][]blockHash, max int) [][]blockHash {
-	if max <= 0 || len(prompts) == 0 {
-		return prompts
+// removePrompt drops one prompt's hashes from endpointID's buffer so a request
+// that failed stops being published to peers. hashes are normalized with the
+// same head-cap record applies, so a recording that was capped is still
+// matched. A prompt already trimmed out by a later record is a no-op.
+func (w *recentWindow) removePrompt(endpointID string, hashes []blockHash) {
+	if len(hashes) == 0 {
+		return
 	}
-	total := promptHashCount(prompts)
-	for total > max && len(prompts) > 1 {
-		total -= len(prompts[0])
-		prompts = prompts[1:]
+	prompt := hashes
+	if len(prompt) > w.max {
+		prompt = prompt[:w.max]
 	}
-	if total > max {
-		head := make([]blockHash, max)
-		copy(head, prompts[0][:max])
-		return [][]blockHash{head}
+	key := promptKey(prompt)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	buf := w.pending[endpointID]
+	if buf == nil {
+		return
 	}
-	// Own the slice so a later append cannot overwrite retained prompts.
-	out := make([][]blockHash, len(prompts))
-	copy(out, prompts)
-	return out
-}
-
-func promptHashCount(prompts [][]blockHash) int {
-	n := 0
-	for _, p := range prompts {
-		n += len(p)
+	out := make([][]blockHash, 0, len(buf.prompts)-buf.start)
+	for _, p := range buf.prompts[buf.start:] {
+		if promptKey(p) != key {
+			out = append(out, p)
+		} else {
+			buf.total -= len(p)
+		}
 	}
-	return n
+	buf.prompts = out
+	buf.start = 0
 }
 
 func copyPromptHashes(prompts [][]blockHash) [][]blockHash {

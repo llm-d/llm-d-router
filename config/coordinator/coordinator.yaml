@@ -158,6 +158,15 @@ pipeline:
   # env: COORDINATOR_PIPELINE_USE_OPENAI_FORMAT
   use_openai_format: true
 
+  # worker_protocol selects the upstream protocol for HTTP /inference/v1/generate.
+  #   http (default) - forward HTTP JSON to /inference/v1/generate on workers.
+  #   grpc           - translate HTTP /inference/v1/generate to vllm.Inference gRPC.
+  # With grpc, the coordinator accepts use_openai_format: false without a render
+  # step because callers supply token IDs or text directly.
+  # Native gRPC paths always use gRPC upstream regardless of this setting.
+  # env: COORDINATOR_PIPELINE_WORKER_PROTOCOL
+  # worker_protocol: http
+
   # Carries selected response headers from each upstream phase into every
   # later phase. Only listed headers are forwarded. This allows EPP-stamped
   # scheduling metadata to constrain later roles in a disaggregated pipeline.

@@ -21,6 +21,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strconv"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -76,6 +78,8 @@ const (
 	ServiceUnavailable = "ServiceUnavailable"
 	ModelServerError   = "ModelServerError"
 	ResourceExhausted  = "ResourceExhausted"
+	// ModelServerClientError is a 4xx response from a model server. ModelServerError is a 5xx.
+	ModelServerClientError = "ModelServerClientError"
 )
 
 // Error returns a string version of the error.
@@ -90,6 +94,21 @@ func CanonicalCode(err error) string {
 		return e.Code
 	}
 	return Unknown
+}
+
+// ModelServerStatusCode returns the error code for a model server response
+// status, or "" when the status is not an error. A status that is not a number
+// is a server error.
+func ModelServerStatusCode(status string) string {
+	code, err := strconv.Atoi(status)
+	switch {
+	case err != nil || code >= http.StatusInternalServerError:
+		return ModelServerError
+	case code >= http.StatusBadRequest:
+		return ModelServerClientError
+	default:
+		return ""
+	}
 }
 
 // httpCodes maps a canonical code to the HTTP status it is answered with. The

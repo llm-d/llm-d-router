@@ -189,6 +189,8 @@ func referencePromptUnmarshal(data []byte) (Prompt, error) {
 		return Prompt{}, err
 	}
 	switch v := raw.(type) {
+	case nil:
+		return Prompt{}, nil
 	case string:
 		return Prompt{Raw: v}, nil
 	case []any:

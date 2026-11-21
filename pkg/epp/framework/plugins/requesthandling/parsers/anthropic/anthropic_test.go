@@ -1123,6 +1123,11 @@ func TestAnthropicParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 			want: ptr.To(int64(1024)),
 		},
 		{
+			name: "max_tokens written as a decimal float",
+			body: map[string]any{"model": "claude-sonnet-4-6", "max_tokens": json.Number("1000.0"), "messages": msgs},
+			want: ptr.To(int64(1000)),
+		},
+		{
 			name: "max_tokens absent",
 			body: map[string]any{"model": "claude-sonnet-4-6", "messages": msgs},
 			want: nil,

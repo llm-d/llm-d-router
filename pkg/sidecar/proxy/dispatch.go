@@ -29,6 +29,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-router/pkg/common/grpc/grpcframe"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
@@ -111,7 +112,15 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			route.path = metricsutil.DisaggPathPrefillDecode
 			route.prefiller = prefillHostPort
 		}
-		defer func() { summary.log(logger, route, status, time.Since(requestStart)) }()
+		defer func() {
+			// A gRPC error is an HTTP 200 with a grpc-status header or
+			// trailer, so the HTTP status alone does not show it.
+			grpcStatus, _ := grpcframe.Status(w.Header())
+			if grpcStatus != "" && grpcStatus != grpcframe.StatusOK {
+				span.SetStatus(codes.Error, "grpc-status "+grpcStatus)
+			}
+			summary.log(logger, route, status, grpcStatus, time.Since(requestStart))
+		}()
 
 		if len(prefillHostPort) == 0 {
 			logger.V(logging.DEBUG).Info("skip disaggregated prefill", "api", apiType.String())
@@ -157,6 +166,12 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 			// pool whose sidecar cannot pull, so the feature is off here.
 			logger.Info("warning: ignoring KV cache source: connector does not support P2P pulls",
 				"connector", s.config.KVConnector, "source", kvCacheSource)
+		case isVLLMGRPCRequest(r):
+			var ok bool
+			p2p, ok = s.prepareVLLMGRPCP2PSource(w, r, logger, p2p)
+			if !ok {
+				return
+			}
 		default:
 			raw, parsed, ok := s.readJSONBody(r, w)
 			if !ok {
@@ -205,23 +220,29 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 		}
 
 		if len(allowedEncoders) > 0 && s.handleECConnector != nil {
-			logger.V(logging.DEBUG).Info("encoder headers detected, using EC connector",
-				"encoderCount", len(allowedEncoders),
-				"encoderCandidates", len(encoderHostPorts),
-				"hasPrefiller", len(prefillHostPort) > 0)
-			span.SetAttributes(
-				semconv.LLMDECProxyEncodeDisaggregationUsed(true),
-				semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
-				semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
-			)
-			route.path = metricsutil.DisaggPathEncodeDecode
-			if len(prefillHostPort) > 0 {
-				route.path = metricsutil.DisaggPathEncodePrefillDecode
+			if grpcframe.IsContentType(r.Header.Get(reqcommon.HeaderContentType)) && !isVLLMGRPCRequest(r) {
+				// SGLang gRPC does not support EC disaggregation and falls back to P/D
+				// or decode-only, where the prefiller or decoder encodes the media.
+				logger.V(logging.DEBUG).Info("skipping EC connector for a gRPC request", "encoderCount", len(allowedEncoders))
+			} else {
+				logger.V(logging.DEBUG).Info("encoder headers detected, using EC connector",
+					"encoderCount", len(allowedEncoders),
+					"encoderCandidates", len(encoderHostPorts),
+					"hasPrefiller", len(prefillHostPort) > 0)
+				span.SetAttributes(
+					semconv.LLMDECProxyEncodeDisaggregationUsed(true),
+					semconv.LLMDECProxyEncoderCount(len(allowedEncoders)),
+					semconv.LLMDECProxyEncoderCandidates(len(encoderHostPorts)),
+				)
+				route.path = metricsutil.DisaggPathEncodeDecode
+				if len(prefillHostPort) > 0 {
+					route.path = metricsutil.DisaggPathEncodePrefillDecode
+				}
+				route.encoders = len(allowedEncoders)
+				metrics.RecordDisagg(route.path)
+				s.handleECConnector(w, r, prefillHostPort, allowedEncoders, p2p, apiType)
+				return
 			}
-			route.encoders = len(allowedEncoders)
-			metrics.RecordDisagg(route.path)
-			s.handleECConnector(w, r, prefillHostPort, allowedEncoders, p2p, apiType)
-			return
 		}
 
 		if len(encoderHostPorts) > 0 && len(allowedEncoders) == 0 {
@@ -250,6 +271,17 @@ func (s *Server) disaggregatedPrefillHandler(apiType reqcommon.APIType) http.Han
 				return
 			}
 			r = cloneRequestWithBody(r.Context(), r, raw)
+		}
+		if p2p.grpcReq != nil {
+			if p2p.source != nil {
+				s.decodeWithP2PSourceVLLMGRPC(w, r, p2p)
+				return
+			}
+			var ok bool
+			r, ok = s.rebuildSanitizedVLLMGRPCRequest(w, r, p2p.grpcReq)
+			if !ok {
+				return
+			}
 		}
 		if !s.forwardDataParallel || !s.dataParallelHandler(w, r, func() {
 			observeToolCallingPassthrough(r, apiType)

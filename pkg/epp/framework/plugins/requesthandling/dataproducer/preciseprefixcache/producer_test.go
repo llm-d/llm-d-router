@@ -397,8 +397,7 @@ func TestProduce_MixedCacheFormats(t *testing.T) {
 	}))
 	cached := p.speculativeCache.Get(request.RequestID)
 	require.NotNil(t, cached)
-	require.Len(t, cached.Value().perPodKeys, 2)
-	require.Len(t, cached.Value().perPodKeys["10.0.0.2:8080"][0], 1)
+	require.Len(t, cached.Value().perPodKeys, 1)
 	require.Len(t, cached.Value().perPodKeys["10.0.0.3:8080"][0], 4)
 }
 
@@ -1387,6 +1386,29 @@ func TestPluginFactory_RejectsNonPositiveKVEventsConcurrency(t *testing.T) {
 	}
 }
 
+// Strict decoding rejects a non-loopback global ZMQ socket unless the config
+// sets kvEventsConfig.allowUntrustedPublishers.
+func TestPluginFactory_GlobalZMQEndpointGuard(t *testing.T) {
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+	handle := plugin.NewEppHandle(ctx, nil)
+
+	_, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(
+		`{"kvEventsConfig":{"zmqEndpoint":"tcp://0.0.0.0:5557"}}`,
+	)), handle)
+	require.ErrorContains(t, err, "allowUntrustedPublishers")
+
+	result, err := PluginFactory("test", plugin.StrictDecoder(json.RawMessage(
+		`{"kvEventsConfig":{"zmqEndpoint":"tcp://0.0.0.0:0","allowUntrustedPublishers":true}}`,
+	)), handle)
+	require.NoError(t, err)
+	p := result.(*Producer)
+	defer p.subscribersManager.Shutdown(ctx)
+
+	require.Equal(t, "tcp://0.0.0.0:0", p.kvEventsConfig.ZMQEndpoint)
+	require.True(t, p.kvEventsConfig.AllowUntrustedPublishers)
+}
+
 // Key built from string literals so an upstream rename trips the test.
 func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 	p := &Producer{
@@ -1479,6 +1501,28 @@ func TestNewRejectsUnsupportedKVEventEngineType(t *testing.T) {
 		KVEventsConfig: kvEventsCfg,
 	})
 	require.ErrorContains(t, err, `unsupported engine type: "unsupported"`)
+}
+
+func TestNewAcceptsRegisteredKVEventEngineType(t *testing.T) {
+	built := 0
+	engineadapter.Register("test-own-format", func() kvevents.EngineAdapter {
+		built++
+		return engineadapter.NewVLLMAdapter()
+	})
+	ctx, cancel := context.WithCancel(utils.NewTestContext(t))
+	t.Cleanup(cancel)
+
+	idxCfg, err := kvcache.NewDefaultConfig()
+	require.NoError(t, err)
+	kvEventsCfg := kvevents.DefaultConfig()
+	kvEventsCfg.EngineType = "test-own-format"
+
+	_, err = New(ctx, "own-format-engine", PluginConfig{
+		IndexerConfig:  idxCfg,
+		KVEventsConfig: kvEventsCfg,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, built, "New builds the pool's adapter from the registry")
 }
 
 type fakeSubscriberManager struct {

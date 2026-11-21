@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"strconv"
 	"strings"
 
@@ -242,6 +241,13 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 			MultiModalFeatures: features,
 		}}}, nil
 	}
+	if body.Transcriptions != nil {
+		raw, features := b.transcriptionsBytes(body.Transcriptions, mmMetadataFromContext(ctx))
+		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+			TokenIDs:           packBytes(raw),
+			MultiModalFeatures: features,
+		}}}, nil
+	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
 		return estimateMultiStringCompletions(body.Completions)
@@ -281,7 +287,7 @@ func estimateBytes(body *fwkrequest.InferenceRequestBody) ([]byte, error) {
 	case body.TextToSpeech != nil:
 		return []byte(ttsText(body.TextToSpeech)), nil
 	default:
-		return nil, errors.New("unsupported request body type, skipping estimation")
+		return nil, errUnsupportedBody
 	}
 }
 
@@ -297,18 +303,22 @@ func imageGenerationText(r *fwkrequest.ImagesGenerationsRequest) string {
 	return r.Prompt + "\n" + r.NegativePrompt
 }
 
-// imagesBytes flattens an images request's conditioning text and, for an edits
-// request's uploaded image, its placeholder tokens into the byte stream with an
-// image feature, mirroring the chat multimodal representation so downstream
-// consumers treat both alike. A request without an image part (generations)
-// carries the text alone.
+// imagesBytes flattens an images request's conditioning text and, for each of
+// an edits request's uploaded images, its placeholder tokens into the byte
+// stream with an image feature, mirroring the chat multimodal representation so
+// downstream consumers treat both alike. A request without an image part
+// (generations) carries the text alone.
 func (b estimateBackend) imagesBytes(images *fwkrequest.ImagesGenerationsRequest) ([]byte, []fwkrequest.MultiModalFeature) {
 	out := []byte(imageGenerationText(images))
-	if images.Image.SizeBytes == 0 {
-		return out, nil
+	var features []fwkrequest.MultiModalFeature
+	for _, img := range images.InputImages {
+		if img.SizeBytes == 0 {
+			continue
+		}
+		out, features = appendMMAssetHash(out, features, reqcommon.ModalityImage, img.Hash,
+			b.img.placeholderCountFromHead(img.Head))
 	}
-	return appendMMAssetHash(out, nil, reqcommon.ModalityImage, images.Image.Hash,
-		b.img.placeholderCountFromHead(images.Image.Head))
+	return out, features
 }
 
 // audioGenerateText joins an audio-generate request's prompt with its
@@ -335,6 +345,15 @@ func ttsText(r *fwkrequest.TextToSpeechRequest) string {
 		text += "\n" + r.RefText
 	}
 	return text
+}
+
+// transcriptionsBytes flattens a transcription request's conditioning text and
+// uploaded audio into pseudo-token bytes with one audio feature, mirroring the
+// chat multimodal representation so downstream consumers treat both alike.
+func (b estimateBackend) transcriptionsBytes(tr *fwkrequest.TranscriptionRequest, meta mmMetadata) ([]byte, []fwkrequest.MultiModalFeature) {
+	out := []byte(tr.Prompt)
+	return appendMMAssetHash(out, nil, reqcommon.ModalityAudio, tr.Audio.Hash,
+		b.aud.placeholderCountUploaded(tr.Audio.Head, tr.Audio.SizeBytes, meta.audio))
 }
 
 // chatCompletionsBytes flattens roles + text into pseudo-token bytes, folding

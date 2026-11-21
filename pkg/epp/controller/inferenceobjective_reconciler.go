@@ -230,9 +230,9 @@ func (c *InferenceObjectiveReconciler) SetupWithManager(mgr ctrl.Manager) error 
 }
 
 // poolEventPredicate passes pool create events and label changes. Status
-// writes carry no label signal, and pool deletion does not requeue: the pool
-// reconciler clears the datastore, and recreation is covered by the create
-// event.
+// writes carry no label signal, and pool deletion does not requeue: entries
+// stay in the datastore, and the create event re-evaluates them when the
+// pool is recreated.
 var poolEventPredicate = predicate.Funcs{
 	CreateFunc:  func(event.CreateEvent) bool { return true },
 	UpdateFunc:  func(e event.UpdateEvent) bool { return !maps.Equal(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()) },

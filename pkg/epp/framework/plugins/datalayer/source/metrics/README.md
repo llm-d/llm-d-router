@@ -26,6 +26,11 @@ The plugin config supports:
 -   `insecureSkipVerify` (default true): Whether to skip TLS certificate verification when using the "https" scheme.
 -   `caCertPath`: PEM CA bundle to verify the target's server cert. Setting it enables verification regardless of `insecureSkipVerify`.
 -   `clientCertPath` / `clientKeyPath`: client certificate for mTLS. Set both together.
+-   `proxyURL` (string, optional): HTTP proxy (`http://` or `https://`) that every scrape is
+    sent to instead of dialing the endpoint, for model servers reachable only through a proxy,
+    such as a local sidecar that adds mTLS. The request still names the endpoint, so the proxy
+    reads the target from it. With the `https` scheme the proxy must accept `CONNECT`. Omit to
+    dial endpoints directly.
 -   `interval` (string, optional): Scrape period (e.g. `"1s"`). Rounded to the nearest
     multiple of `--refresh-metrics-interval` (default 50ms). Omit to scrape every
     base tick.

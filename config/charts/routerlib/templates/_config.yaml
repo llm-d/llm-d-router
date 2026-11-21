@@ -18,10 +18,11 @@
     {{- $modelServerProtocol := $modelServers.protocol | default "http" }}
     {{- $modelServerType := $modelServers.type | default "vllm" }}
     {{- $parsers := list }}
-    {{- if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
-      {{- $parsers = append $parsers "vllmgrpc-parser" }}
-    {{- else if .Values.router.epp.parsers }}
+    {{- if .Values.router.epp.parsers }}
       {{- $parsers = .Values.router.epp.parsers }}
+    {{- else if and (eq (lower $modelServerType) "vllm") (eq (lower $modelServerProtocol) "grpc") }}
+      {{- /* passthrough-parser claims no paths and terminates registration. Keep it last. */}}
+      {{- $parsers = list "vllminference-parser" "vllmgrpc-parser" "passthrough-parser" }}
     {{- else if eq (lower $modelServerType) "triton" }}
       {{- $parsers = append $parsers "passthrough-parser" }}
     {{- end }}
@@ -33,10 +34,22 @@
     - type: prefix-cache-scorer
     - type: metrics-data-source
       parameters:
-        scheme: {{ .Values.router.epp.metricsDataSource.scheme | default "http" | quote }}
-        path: {{ .Values.router.epp.metricsDataSource.path | default "/metrics" | quote }}
+        {{- $metricsDataSource := .Values.router.epp.metricsDataSource | default dict }}
+        scheme: {{ $metricsDataSource.scheme | default "http" | quote }}
+        path: {{ $metricsDataSource.path | default "/metrics" | quote }}
+        {{- if and (hasKey $metricsDataSource "port") (not (kindIs "invalid" $metricsDataSource.port)) }}
+        {{- $metricsPortStr := trim (toString $metricsDataSource.port) }}
+        {{- if not (regexMatch "^[0-9]+$" $metricsPortStr) }}
+        {{- fail (printf ".Values.router.epp.metricsDataSource.port must be numeric, got %q" $metricsPortStr) }}
+        {{- end }}
+        {{- $metricsPort := int $metricsPortStr }}
+        {{- if or (lt $metricsPort 1) (gt $metricsPort 65535) }}
+        {{- fail (printf ".Values.router.epp.metricsDataSource.port must be between 1 and 65535, got %d" $metricsPort) }}
+        {{- end }}
+        port: {{ $metricsPort }}
+        {{- end }}
         {{- /* default treats false as empty, so hasKey keeps an explicit false. */}}
-        insecureSkipVerify: {{ ternary .Values.router.epp.metricsDataSource.insecureSkipVerify true (hasKey .Values.router.epp.metricsDataSource "insecureSkipVerify") }}
+        insecureSkipVerify: {{ ternary $metricsDataSource.insecureSkipVerify true (hasKey $metricsDataSource "insecureSkipVerify") }}
     - type: core-metrics-extractor
       {{- if ne $modelServerType "vllm" }}
       parameters:

@@ -438,7 +438,24 @@ kubectl kustomize --enable-helm ${KUSTOMIZE_DIR} \
   ${SIDECAR_IMAGE} ${VLLM_RENDER_IMAGE} ${VLLM_RENDER_PORT} ${VLLM_RENDER_URL} ${TARGET_PORTS} ${NAMESPACE} \
   ${VLLM_REPLICA_COUNT_E} ${VLLM_REPLICA_COUNT_P} ${VLLM_REPLICA_COUNT_D} ${VLLM_DATA_PARALLEL_SIZE} \
   ${KV_CONNECTOR_TYPE} ${EC_CONNECTOR_TYPE} ${CONNECTOR_TYPE} ${KV_CACHE_ENABLED} ${HF_TOKEN} ${VLLM_SIM_MODE} \
-  ${DECODE_ROLE} ${VLLM_EXTRA_ARGS_E} ${VLLM_EXTRA_ARGS_P} ${VLLM_EXTRA_ARGS_D}' \
+  ${DECODE_ROLE}' \
+  | awk '
+    # kustomize drops the quotes around the "${VLLM_EXTRA_ARGS_*}" items, so a plain multi-flag value
+    # is split here; any other value is substituted unchanged, as envsubst would.
+    /^[[:space:]]*-[[:space:]]+"?[$][{]VLLM_EXTRA_ARGS_[EPD][}]"?[[:space:]]*$/ {
+      match($0, /VLLM_EXTRA_ARGS_[EPD]/); name = substr($0, RSTART, RLENGTH); v = ENVIRON[name]
+      tok = "--[A-Za-z0-9_=.,/:+@%-]+"
+      if (v ~ ("^[[:blank:]]*" tok "([[:blank:]]+" tok ")+[[:blank:]]*$") && v !~ /:[[:blank:]]/) {
+        match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
+        n = split(v, flags, /[[:blank:]]+/)
+        for (i = 1; i <= n; i++) if (flags[i] != "") print indent "- \"" flags[i] "\""
+        next
+      }
+      i = index($0, "${" name "}")
+      $0 = substr($0, 1, i - 1) v substr($0, i + length(name) + 3)
+    }
+    { print }
+  ' \
   | awk '
     /^[[:space:]]*-[[:space:]]+".*"[[:space:]]*$/ {
       match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)

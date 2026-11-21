@@ -58,8 +58,8 @@ func Factory(name string, rawParameters *json.Decoder, handle plugin.Handle) (pl
 // NewLoadAware creates a new load based scorer
 func NewLoadAware(ctx context.Context, queueThreshold int) *LoadAware {
 	if queueThreshold <= 0 {
-		queueThreshold = QueueThresholdDefault
 		log.FromContext(ctx).V(logutil.DEFAULT).Info(fmt.Sprintf("queueThreshold %d should be positive, using default queue threshold %d", queueThreshold, QueueThresholdDefault))
+		queueThreshold = QueueThresholdDefault
 	}
 
 	return &LoadAware{

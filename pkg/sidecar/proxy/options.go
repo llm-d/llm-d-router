@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -35,6 +34,7 @@ import (
 	"github.com/spf13/pflag"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
@@ -381,45 +381,6 @@ func validateStages(stages []string, supportedStages map[string]struct{}, flagNa
 	return nil
 }
 
-var tlsVersions = map[string]uint16{
-	"VersionTLS10": tls.VersionTLS10,
-	"VersionTLS11": tls.VersionTLS11,
-	"VersionTLS12": tls.VersionTLS12,
-	"VersionTLS13": tls.VersionTLS13,
-}
-
-func parseTLSVersion(version string) (uint16, error) {
-	value, ok := tlsVersions[version]
-	if !ok {
-		return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", version)
-	}
-	if value < tls.VersionTLS12 {
-		return 0, fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", version)
-	}
-	return value, nil
-}
-
-func parseCipherSuites(names []string) ([]uint16, error) {
-	byName := make(map[string]uint16)
-	for _, cipherSuite := range tls.CipherSuites() {
-		byName[cipherSuite.Name] = cipherSuite.ID
-	}
-
-	values := make([]uint16, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		value, ok := byName[name]
-		if !ok {
-			return nil, fmt.Errorf("unknown cipher suite %q", name)
-		}
-		values = append(values, value)
-	}
-	return values, nil
-}
-
 // Complete performs post-processing of parsed command-line arguments.
 // It extracts YAML configuration (if provided), handles migration from deprecated flags,
 // parses the InferencePool field, computes boolean TLS fields, and builds Config.DecoderURL.
@@ -448,27 +409,22 @@ func (opts *Options) Complete() error {
 	opts.InsecureSkipVerifyForPrefiller = slices.Contains(opts.tlsInsecureSkipVerify, prefillStage)
 	opts.InsecureSkipVerifyForEncoder = slices.Contains(opts.tlsInsecureSkipVerify, encodeStage)
 	opts.InsecureSkipVerifyForDecoder = slices.Contains(opts.tlsInsecureSkipVerify, decodeStage)
-	if opts.tlsMinVersion != "" {
-		version, err := parseTLSVersion(opts.tlsMinVersion)
-		if err != nil {
-			return fmt.Errorf("invalid %s %q: %w", tlsMinVersion, opts.tlsMinVersion, err)
-		}
-		opts.TLSMinVersion = version
+	version, err := tlsutil.ParseTLSVersion(opts.tlsMinVersion)
+	if err != nil {
+		return err
 	}
-	if len(opts.tlsCipherSuites) > 0 {
-		suites, err := parseCipherSuites(opts.tlsCipherSuites)
-		if err != nil {
-			return fmt.Errorf("invalid %s: %w", tlsCipherSuites, err)
-		}
-		opts.TLSCipherSuites = suites
+	opts.TLSMinVersion = version
+	suites, err := tlsutil.ParseCipherSuites(opts.tlsCipherSuites)
+	if err != nil {
+		return err
 	}
+	opts.TLSCipherSuites = suites
 
 	// Compute Config.DecoderURL from modelServerPort and decoder TLS setting
 	scheme := "http"
 	if opts.UseTLSForDecoder {
 		scheme = schemeHTTPS
 	}
-	var err error
 	opts.DecoderURL, err = url.Parse(scheme + "://localhost:" + opts.modelServerPort)
 	if err != nil {
 		return fmt.Errorf("failed to parse target URL: %w", err)

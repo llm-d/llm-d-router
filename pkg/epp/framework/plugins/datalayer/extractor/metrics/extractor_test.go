@@ -767,6 +767,42 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 			errContains: `customMetrics entry attributeKey "shared.key" is duplicated`,
 		},
 		{
+			name: "attributeKey reject if it uses the scalar sample key prefix",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "ScalarSample:WaitingQueueSize",
+								"metricSpec":   "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: `customMetrics entry attributeKey "ScalarSample:WaitingQueueSize" uses a prefix reserved for scalar sample keys`,
+		},
+		{
+			name: "attributeKey reject if it uses the custom scalar sample key prefix",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "CustomScalarSample:depth",
+								"metricSpec":   "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: `customMetrics entry attributeKey "CustomScalarSample:depth" uses a prefix reserved for scalar sample keys`,
+		},
+		{
 			name: "custom engineConfigs auto-appends vllm sglang trtllm-serve and triton-tensorrt-llm",
 			params: map[string]any{
 				"engineConfigs": []map[string]any{
@@ -985,6 +1021,7 @@ func TestExtractorMetricFamiliesCoverEveryEngineSpec(t *testing.T) {
 		raws := []string{
 			engine.QueuedRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec, engine.LoRASpec,
 			engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+			engine.CacheTotalTokensSpec, engine.CacheOffloadDetectionSpec,
 		}
 		for _, custom := range engine.CustomMetrics {
 			raws = append(raws, custom.MetricSpec)
