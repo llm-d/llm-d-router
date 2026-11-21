@@ -173,6 +173,44 @@ func BenchmarkIndexAddThroughput(b *testing.B) {
 	}
 }
 
+// BenchmarkIndexEvictThroughput is the eviction gate: engine keys evicted
+// per second, over a batch that is re-added between evictions so every
+// eviction removes live entries. Only the Evict call is timed.
+func BenchmarkIndexEvictThroughput(b *testing.B) {
+	for _, backend := range benchBackends {
+		b.Run(backend.name, func(b *testing.B) {
+			idx, err := backend.new()
+			if err != nil {
+				b.Fatal(err)
+			}
+			ctx := context.Background()
+			entries := []kvblock.PodEntry{
+				{PodIdentifier: workload.PodName(0), DeviceTier: "gpu"},
+				{PodIdentifier: workload.PodName(1), DeviceTier: "gpu"},
+			}
+			const batchSize = 64
+			keys := make([]kvblock.BlockHash, batchSize)
+			for j := range keys {
+				keys[j] = kvblock.BlockHash(j + 1)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				if err := idx.Add(ctx, keys, keys, entries); err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+				if err := idx.Evict(ctx, kvblock.EngineKey, keys, entries); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(b.N*batchSize)/b.Elapsed().Seconds(), "keys/s")
+		})
+	}
+}
+
 // BenchmarkContentionMatrixBackends is the dense-versus-in-memory
 // read-under-write gate: MatchBlockKeys latency while concurrent writers
 // ingest events, with parallel readers.

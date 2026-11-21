@@ -64,10 +64,11 @@ func entrySameIdentity(w, v uint32) bool {
 	return w&(entrySpecBit|entryGroupedBit|^entryTierMask) == v&(entrySpecBit|entryGroupedBit|^entryTierMask)
 }
 
-// keySlot is one request key's map value: three inline entry words, a handle
-// into the shared overflow arena for the rest, and the key's last-visit stamp
-// for sampled eviction. The slot is a map value with no pointers: it is
-// copied out, mutated, and stored back under the table lock.
+// keySlot is one request key's stored value: three inline entry words, a
+// handle into the shared overflow arena for the rest, and the key's
+// last-visit stamp for sampled eviction. The slot has no pointers and is
+// addressed in place inside the dense table's slot array, mutated under the
+// index's write lock.
 type keySlot struct {
 	entries [3]uint32
 	// chain addresses the first arena chunk; 0 ends the list.

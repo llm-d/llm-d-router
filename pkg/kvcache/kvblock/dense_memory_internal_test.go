@@ -297,7 +297,12 @@ func TestDenseIndexSweepFreesDeadSlots(t *testing.T) {
 	index.mu.RLock()
 	var deadWords []uint32
 	survivors := 0
-	for key, slot := range index.table {
+	for i := range index.tbl.slots {
+		if index.tbl.empty(i) {
+			continue
+		}
+		key := index.tbl.slots[i].key
+		slot := index.tbl.slots[i].slot
 		forEachSlotWord(&slot, &index.arena, func(w uint32) bool {
 			if index.isDead(entryPod(w)) {
 				deadWords = append(deadWords, uint32(key))
