@@ -24,6 +24,9 @@ import (
 	"fmt"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/duration"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -35,15 +38,28 @@ import (
 const (
 	defaultEvictionTTL           = time.Hour
 	defaultEvictionSweepInterval = 5 * time.Minute
+	// defaultMaxSessions holds about 65 MiB of session state when every
+	// identity is defaultMaxIdentityBytes long.
+	defaultMaxSessions = 100000
+	// defaultMaxIdentityBytes is several times the length of the session IDs
+	// the built-in agent headers carry.
+	defaultMaxIdentityBytes = 256
 )
 
-// Parameters configures idle session eviction.
+// Parameters configures idle session eviction and the bounds on tracked state.
 type Parameters struct {
 	// EvictionTTLSeconds is the maximum idle time before session state is removed.
 	// Zero disables eviction.
 	EvictionTTLSeconds float64 `json:"evictionTtlSeconds,omitempty"`
 	// EvictionSweepSeconds is how often idle session state is scanned.
 	EvictionSweepSeconds float64 `json:"evictionSweepSeconds,omitempty"`
+	// MaxSessions bounds the number of tracked sessions; the least recently
+	// active idle session is evicted when the bound is reached. Zero disables
+	// the bound.
+	MaxSessions int `json:"maxSessions,omitempty"`
+	// MaxIdentityBytes is the longest agent identity tracked; requests with a
+	// longer identity get no session state. Zero disables the limit.
+	MaxIdentityBytes int `json:"maxIdentityBytes,omitempty"`
 }
 
 func (p Parameters) validate() error {
@@ -55,7 +71,16 @@ func (p Parameters) validate() error {
 			return err
 		}
 	}
-	return duration.ValidateSeconds("evictionSweepSeconds", p.EvictionSweepSeconds)
+	if err := duration.ValidateSeconds("evictionSweepSeconds", p.EvictionSweepSeconds); err != nil {
+		return err
+	}
+	if p.MaxSessions < 0 {
+		return fmt.Errorf("maxSessions must be >= 0, got %d", p.MaxSessions)
+	}
+	if p.MaxIdentityBytes < 0 {
+		return fmt.Errorf("maxIdentityBytes must be >= 0, got %d", p.MaxIdentityBytes)
+	}
+	return nil
 }
 
 var (
@@ -76,6 +101,7 @@ type Producer struct {
 
 	evictionTTL           time.Duration
 	evictionSweepInterval time.Duration
+	maxIdentityBytes      int
 }
 
 // Factory builds a session-state producer.
@@ -83,6 +109,8 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 	params := Parameters{
 		EvictionTTLSeconds:   defaultEvictionTTL.Seconds(),
 		EvictionSweepSeconds: defaultEvictionSweepInterval.Seconds(),
+		MaxSessions:          defaultMaxSessions,
+		MaxIdentityBytes:     defaultMaxIdentityBytes,
 	}
 	if rawParameters != nil {
 		if err := rawParameters.Decode(&params); err != nil {
@@ -98,7 +126,9 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		dk:                    SessionStateDataKey.WithNonEmptyProducerName(name),
 		evictionTTL:           time.Duration(params.EvictionTTLSeconds * float64(time.Second)),
 		evictionSweepInterval: time.Duration(params.EvictionSweepSeconds * float64(time.Second)),
+		maxIdentityBytes:      params.MaxIdentityBytes,
 	}
+	p.registry.maxSessions = params.MaxSessions
 	if handle != nil && p.evictionTTL > 0 {
 		go p.runEviction(handle.Context())
 	}
@@ -128,9 +158,13 @@ func (p *Producer) Consumes() fwkplugin.DataDependencies {
 // control. The attribute resolves on every read, so a request waiting in a
 // queue observes turns and responses recorded for the session in the meantime.
 // The session is not evicted while the request is pending.
-func (p *Producer) RequestHeader(_ context.Context, request *fwksched.InferenceRequest) error {
-	identity, ok := readAgentIdentity(request)
-	if !ok {
+func (p *Producer) RequestHeader(ctx context.Context, request *fwksched.InferenceRequest) error {
+	identity, tracked := p.readAgentIdentity(request)
+	if !tracked {
+		if identity != "" {
+			log.FromContext(ctx).V(logging.DEBUG).Info("Agent identity exceeds maxIdentityBytes, session state is not tracked",
+				"identityBytes", len(identity), "maxIdentityBytes", p.maxIdentityBytes)
+		}
 		return nil
 	}
 	obs := p.registry.observe(identity, request.RequestID)
@@ -155,7 +189,7 @@ func (p *Producer) RequestAbandoned(_ context.Context, request *fwksched.Inferen
 // PreRequest records one dispatched turn. A request counts once even when
 // several profiles run.
 func (p *Producer) PreRequest(_ context.Context, request *fwksched.InferenceRequest, _ *fwksched.SchedulingResult) error {
-	identity, ok := readAgentIdentity(request)
+	identity, ok := p.readAgentIdentity(request)
 	if !ok {
 		return nil
 	}
@@ -175,7 +209,7 @@ func (p *Producer) ResponseBody(
 	if response == nil || !response.EndOfStream {
 		return
 	}
-	identity, ok := readAgentIdentity(request)
+	identity, ok := p.readAgentIdentity(request)
 	if !ok {
 		return
 	}
@@ -195,12 +229,14 @@ func (p *Producer) ResponseBody(
 	)
 }
 
-func readAgentIdentity(request *fwksched.InferenceRequest) (string, bool) {
+// readAgentIdentity returns the agent identity of the request and whether its
+// session is tracked. An identity longer than maxIdentityBytes is not.
+func (p *Producer) readAgentIdentity(request *fwksched.InferenceRequest) (identity string, tracked bool) {
 	if request == nil {
 		return "", false
 	}
-	identity, ok := fwksched.ReadRequestAttribute[string](request, agentidentity.AgentIdentityKey)
-	return identity, ok && identity != ""
+	identity, _ = fwksched.ReadRequestAttribute[string](request, agentidentity.AgentIdentityKey)
+	return identity, identity != "" && (p.maxIdentityBytes == 0 || len(identity) <= p.maxIdentityBytes)
 }
 
 func (p *Producer) runEviction(ctx context.Context) {
