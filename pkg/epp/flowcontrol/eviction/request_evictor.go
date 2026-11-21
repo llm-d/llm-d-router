@@ -186,19 +186,8 @@ func (p *RequestEvictor) EvictN(ctx context.Context, n int, priorityBound int) (
 	evicted := make([]string, 0, n)
 
 	for range n {
-		items := p.queue.PopN(1)
-		if len(items) == 0 {
-			break
-		}
-		item := items[0]
-
-		if item.Priority >= priorityBound {
-			// The heap orders victims lowest-priority first, so no remaining victim can be below the
-			// bound either. Re-tracking races a concurrent completion: if cleanupRequest ran between
-			// the pop and this Track, the entry is re-inserted dead and survives until a future
-			// decision evicts it, which then stalls the pacing gate for one ConfirmationTimeout. The
-			// window is sub-microsecond and the cost is bounded, so it is tolerated.
-			p.queue.Track(item)
+		item := p.queue.PopIfBelow(priorityBound)
+		if item == nil {
 			break
 		}
 
@@ -208,7 +197,10 @@ func (p *RequestEvictor) EvictN(ctx context.Context, n int, priorityBound int) (
 		if err := p.evictor.Evict(ctx, item); err != nil {
 			logger.Error(err, "Failed to evict request, re-tracking", "requestID", item.RequestID, "targetURL", item.TargetURL)
 			p.unmarkPendingEviction(item.RequestID)
-			// Same tolerated re-track-vs-completion window as the bound branch above.
+			// Re-tracking races a concurrent completion: if cleanupRequest ran between PopIfBelow and
+			// this Track, the entry is re-inserted dead and survives until a future decision evicts it,
+			// which then stalls the pacing gate for one ConfirmationTimeout. The window opens only when
+			// Evict fails and lasts for the Evict call, so it is tolerated.
 			p.queue.Track(item)
 			continue
 		}
