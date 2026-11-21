@@ -248,6 +248,82 @@ func BenchmarkInMemoryIndexAddNoEngineKeys(b *testing.B) {
 	}
 }
 
+// BenchmarkInMemoryIndexGetRequestKeyContention measures parent-hash
+// resolution (GetRequestKey) under concurrent writers, across read:write
+// mixes with parallel readers: the path the engine-key map's caller-held
+// mutex serializes against Add's critical section.
+func BenchmarkInMemoryIndexGetRequestKeyContention(b *testing.B) {
+	const numKeys = 1 << 20
+	idx, err := kvblock.NewInMemoryIndex(&kvblock.InMemoryIndexConfig{Size: numKeys * 2, PodCacheSize: 8})
+	if err != nil {
+		b.Fatal(err)
+	}
+	const batchSize = 64
+	entries := []kvblock.PodEntry{{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}}
+	keys := make([]kvblock.BlockHash, batchSize)
+	ctx := context.Background()
+	for base := uint64(1); base <= uint64(numKeys); base += batchSize {
+		for j := range keys {
+			keys[j] = kvblock.BlockHash(base + uint64(j))
+		}
+		if err := idx.Add(ctx, keys, keys, entries); err != nil {
+			b.Fatal(err)
+		}
+	}
+	allKeys := make([]kvblock.BlockHash, numKeys)
+	for i := range allKeys {
+		allKeys[i] = kvblock.BlockHash(uint64(i) + 1)
+	}
+
+	for _, writers := range []int{0, 1, 4} {
+		name := fmt.Sprintf("writers=%d", writers)
+		if writers == 0 {
+			name = "pure-read"
+		}
+		b.Run(name, func(b *testing.B) {
+			stop := make(chan struct{})
+			defer close(stop)
+			for w := 0; w < writers; w++ {
+				go func(w int) {
+					writerEntries := []kvblock.PodEntry{{PodIdentifier: fmt.Sprintf("10.1.0.%d:8000", w), DeviceTier: "gpu"}}
+					engineKeys := make([]kvblock.BlockHash, 64)
+					requestKeys := make([]kvblock.BlockHash, 64)
+					// One fixed range per writer, re-added: unbounded fresh
+					// keys would reach the engine map's count cap and evict
+					// the readers' mappings mid-bench. The re-add still pays
+					// the full Add critical section the readers contend with.
+					base := uint64(w)<<40 + 1 //#nosec G115 -- test data, w is a small worker index
+					for j := range engineKeys {
+						engineKeys[j] = kvblock.BlockHash(base + uint64(j))
+						requestKeys[j] = kvblock.BlockHash(base + uint64(j))
+					}
+					for {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						_ = idx.Add(ctx, engineKeys, requestKeys, writerEntries)
+					}
+				}(w)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				n := 0
+				for pb.Next() {
+					if _, err := idx.GetRequestKey(ctx, allKeys[n%numKeys]); err != nil {
+						b.Error(err)
+						return
+					}
+					n++
+				}
+			})
+		})
+	}
+}
+
 // BenchmarkInMemoryResidencyAttribution reports the main-store and
 // engine-map shares of steady-state residency: live heap after populating
 // with engine mappings, minus the same population without them. Runs only
