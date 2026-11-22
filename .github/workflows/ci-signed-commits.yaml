@@ -96,7 +96,9 @@ jobs:
             while IFS= read -r line; do
               [ -z "$line" ] && continue
               trailer_email=""
-              if [[ "$line" =~ ([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+) ]]; then
+              # Brackets are in the local-part class because GitHub bot accounts
+              # use <id>+<name>[bot]@users.noreply.github.com.
+              if [[ "$line" =~ ([][A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+) ]]; then
                 trailer_email="${BASH_REMATCH[1]}"
               fi
               trailer_email_lc="${trailer_email,,}"
