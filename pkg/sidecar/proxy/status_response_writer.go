@@ -239,6 +239,8 @@ func (w *deferredCommitWriter) WriteHeader(statusCode int) {
 	if w.aborted {
 		return
 	}
+	// Informational 1xx statuses precede the final status. Recording them would
+	// freeze initial headers early and mark the response failed via isHTTPError.
 	if statusCode >= http.StatusContinue && statusCode < http.StatusOK && statusCode != http.StatusSwitchingProtocols {
 		return
 	}
@@ -379,6 +381,8 @@ func (w *deferredCommitWriter) abort() {
 // failed reports whether decode's response carried an error status or could
 // not be relayed to the client. A status of 0 means decode wrote nothing, or
 // the writer was aborted before decode emitted a header; both count as failed.
+// Call only after the decode goroutine exits because this reads header maps
+// that decode mutates through Header() without holding w.mu.
 func (w *deferredCommitWriter) failed() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
