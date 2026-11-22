@@ -1346,6 +1346,11 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_events_missed_total` | Counter | `pod_identifier` | Missed KV-event sequence numbers inferred from detected gaps. |
 | `llm_d_epp_kv_cache_events_dropped_total` | Counter | `pod_identifier`, `reason` | KV-event messages dropped before indexing (`malformed_frame`, `replay_cooldown`, `decode_error`). Decode failures without a subscriber-bound `PodIdentifier` report `pod_identifier="unknown"`. |
 | `llm_d_epp_kv_cache_events_processing_lag_seconds` | Histogram | - | Elapsed time from the engine batch timestamp (`EventBatch.Timestamp > 0`) to event-pool processing for live batches, clamped at zero under clock skew. Replayed and snapshot rebuild batches are excluded. |
+| `llm_d_epp_kv_cache_index_evictions_by_cause_total` | Counter | `reason` | Index keys and engine mappings removed by the memory backend's own eviction paths: `capacity` (main-store LRU bound), `clear` (a cleared pod's emptied keys), `empty` (delete-on-empty after an eviction). |
+| `llm_d_epp_kv_cache_index_truncated_entries_total` | Counter | - | Pods dropped by the index's per-key pod cap. |
+| `llm_d_epp_kv_cache_index_clear_duration_seconds` | Histogram | - | Index Clear call duration. |
+| `llm_d_epp_kv_cache_index_resident_keys` | Gauge | - | Request keys resident in the index; refreshed at the end of each mutating call. |
+| `llm_d_epp_kv_cache_index_resident_bytes` | Gauge | - | Estimated bytes resident in the index's structures; refreshed at the end of each mutating call. |
 
 A vLLM release can publish an event type that the router's vLLM adapter does not know. The adapter
 skips such an event and applies the other events in the same message to the index.
