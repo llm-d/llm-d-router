@@ -19,6 +19,7 @@ package asyncbroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -135,36 +136,60 @@ func TestAsyncBrokerConcurrentWaitsReceiveResult(t *testing.T) {
 }
 
 func TestAsyncBrokerWaitDeadlineResultIsRetained(t *testing.T) {
-	step, rdb := newAsyncTestStep(t, nil)
-	t.Cleanup(func() { _ = step.rdb.Close() })
-	req, rec := asyncReqCtx(t, `{"model":"test-model"}`, nil)
-	key := resultKey("team-a", req.RequestID)
-	result, err := json.Marshal(api.ResultMessage{StatusCode: http.StatusOK, Payload: `{"answer":"boundary"}`})
-	require.NoError(t, err)
-	firstRead := true
-	step.rdb.AddHook(waitResultReadHook(func(ctx context.Context) error {
-		if firstRead {
-			firstRead = false
-			// Hold the initial Redis read until the wait deadline, then publish
-			// before the final lookup runs with its independent context.
-			<-ctx.Done()
-			_, err = rdb.TxPipelined(t.Context(), func(pipe redis.Pipeliner) error {
-				pipe.LPush(t.Context(), key, result)
-				pipe.Expire(t.Context(), key, 5*time.Minute)
+	tests := []struct {
+		name     string
+		res      api.ResultMessage
+		wantDone bool
+		wantTTL  time.Duration
+	}{
+		{
+			name:     "success keeps the grace",
+			res:      api.ResultMessage{StatusCode: http.StatusOK, Payload: `{"answer":"boundary"}`},
+			wantDone: true,
+			wantTTL:  resultFetchGraceTTL,
+		},
+		{
+			name:    "error keeps the floor",
+			res:     api.ResultMessage{StatusCode: http.StatusServiceUnavailable, Payload: `{"error":"overloaded"}`},
+			wantTTL: 5 * time.Second,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			step, rdb := newAsyncTestStep(t, nil)
+			t.Cleanup(func() { _ = step.rdb.Close() })
+			req, rec := asyncReqCtx(t, `{"model":"test-model"}`, nil)
+			key := resultKey("team-a", req.RequestID)
+			result, err := json.Marshal(tc.res)
+			require.NoError(t, err)
+			firstRead := true
+			step.rdb.AddHook(waitResultReadHook(func(ctx context.Context) error {
+				if firstRead {
+					firstRead = false
+					// Hold the initial Redis read until the wait deadline, then publish
+					// before the final lookup runs with its independent context. The
+					// stored TTL lies between the wait floor and the grace.
+					<-ctx.Done()
+					_, err = rdb.TxPipelined(t.Context(), func(pipe redis.Pipeliner) error {
+						pipe.LPush(t.Context(), key, result)
+						pipe.Expire(t.Context(), key, 30*time.Second)
+						return nil
+					})
+					return ctx.Err()
+				}
 				return nil
-			})
-			return ctx.Err()
-		}
-		return nil
-	}))
+			}))
 
-	require.ErrorIs(t, step.waitForResult(t.Context(), req, "team-a", 10*time.Millisecond), pipeline.ErrPipelineDone)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.JSONEq(t, `{"answer":"boundary"}`, rec.Body.String())
-	ttl, err := rdb.TTL(t.Context(), key).Result()
-	require.NoError(t, err)
-	require.Equal(t, resultFetchGraceTTL, ttl, "final-deadline delivery must keep the result for the grace window")
+			got := step.waitForResult(t.Context(), req, "team-a", 10*time.Millisecond)
+			require.NoError(t, err)
+			require.Equal(t, tc.wantDone, errors.Is(got, pipeline.ErrPipelineDone), "pipeline result: %v", got)
+			require.Equal(t, tc.res.StatusCode, rec.Code)
+			require.JSONEq(t, tc.res.Payload, rec.Body.String())
+			ttl, err := rdb.TTL(t.Context(), key).Result()
+			require.NoError(t, err)
+			require.Equal(t, tc.wantTTL, ttl, "final-deadline delivery must bound the result")
+		})
+	}
 }
 
 func TestAsyncBrokerWaitResultLifecycle(t *testing.T) {
@@ -225,6 +250,44 @@ func TestAsyncBrokerWaitResultLifecycle(t *testing.T) {
 			require.Equal(t, int64(1), n, "a reclaimed result must allow a fresh submission with the same id")
 		})
 	}
+}
+
+func TestAsyncBrokerWaitErrorExpiresAfterFloor(t *testing.T) {
+	mr := miniredis.RunT(t)
+	built, err := New(nil, map[string]any{
+		"redis_url": "redis://" + mr.Addr(), "wakeup_mode": "poll",
+		"default_queue": "team-default-queue",
+	})
+	require.NoError(t, err)
+	step := built.(*Step)
+	rdb := step.rdb
+	t.Cleanup(func() { _ = rdb.Close() })
+	result, err := json.Marshal(api.ResultMessage{StatusCode: http.StatusServiceUnavailable, Payload: `{"error":"overloaded"}`})
+	require.NoError(t, err)
+	require.NoError(t, rdb.LPush(t.Context(), resultKey("team-a", "req-test-1"), result).Err())
+	headers := map[string]string{
+		defaultModeHeader: "wait", defaultTenantHeader: "team-a",
+		reqcommon.RequestIDHeaderKey: "req-test-1", defaultTimeoutHeader: "1",
+	}
+	// A client retrying every 2s reads the stored error at 0s, 2s and 4s. The
+	// floor runs from the first delivery, so the retry at 6s is enqueued.
+	for range 3 {
+		req, rec := asyncReqCtx(t, `{"model":"test-model"}`, headers)
+		require.NotErrorIs(t, step.Execute(t.Context(), req), pipeline.ErrPipelineDone)
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		mr.FastForward(2 * time.Second)
+	}
+	n, err := rdb.ZCard(t.Context(), "team-default-queue").Result()
+	require.NoError(t, err)
+	require.Zero(t, n, "reading the stored error must not submit work")
+
+	headers[defaultModeHeader] = "enqueue"
+	req, rec := asyncReqCtx(t, `{"model":"test-model"}`, headers)
+	require.ErrorIs(t, step.Execute(t.Context(), req), pipeline.ErrPipelineDone)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	n, err = rdb.ZCard(t.Context(), "team-default-queue").Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n, "a retry past the floor must be enqueued again")
 }
 
 func TestAsyncBrokerWaitZeroFetchGraceKeepsResultForAttachedWaiters(t *testing.T) {

@@ -607,6 +607,11 @@ func TestAsyncBrokerWaitDeliversStoredError(t *testing.T) {
 			assert.Equal(t, tc.wantCode, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 			assert.Equal(t, tc.wantStatus, rec.Code)
 			assert.Contains(t, rec.Body.String(), tc.wantBody)
+
+			// The first delivery of an error leaves it the wait floor.
+			ttl, err := rdb.TTL(t.Context(), resultKey("team-a", "req-test-1")).Result()
+			require.NoError(t, err)
+			assert.Equal(t, 5*time.Second, ttl)
 		})
 	}
 }
@@ -954,6 +959,10 @@ func TestAsyncBrokerUndeliveredErrorResultIsRetained(t *testing.T) {
 		assert.Equal(t, coordmetrics.ErrorCodeUpstream4xx, coordmetrics.ClassifyErrorCode(err, pipeline.ClassifyOpts))
 		assert.Equal(t, http.StatusTooManyRequests, w.status)
 		assertRetained(t, rdb, key)
+		// An undelivered result keeps its full TTL.
+		ttl, err := rdb.TTL(t.Context(), key).Result()
+		require.NoError(t, err)
+		assert.Equal(t, time.Hour, ttl)
 	})
 
 	t.Run("fetch with zero grace", func(t *testing.T) {

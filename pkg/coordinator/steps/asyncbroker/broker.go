@@ -69,7 +69,7 @@ const waitPollInterval = 200 * time.Millisecond
 // recovered on the next backup tick rather than never.
 const waitBackupPollInterval = 2 * time.Second
 
-// waitGraceFloor is the shortest mailbox TTL left after a wait delivery. It
+// waitGraceFloor is the shortest mailbox TTL a wait delivery sets. It
 // exceeds waitBackupPollInterval, so a waiter attached to the same id that
 // missed the wake-up still reads the result on its next poll.
 const waitGraceFloor = 5 * time.Second
@@ -416,6 +416,22 @@ func (s *Step) reattachRetry(ctx context.Context, reqCtx *pipeline.RequestContex
 	return s.waitForResult(ctx, reqCtx, tenant, timeout)
 }
 
+// expireDelivered bounds the mailbox after a wait delivery. A success keeps
+// the wait grace, restarted by every delivery as on fetch. An error keeps at
+// most waitGraceFloor from its first delivery, so a client retrying by id
+// faster than the floor is still enqueued again once it has passed. EXPIRE
+// with LT would cap the TTL in one command but needs Redis 7.0.
+func (s *Step) expireDelivered(ctx context.Context, key string, pipelineResult error) error {
+	if errors.Is(pipelineResult, pipeline.ErrPipelineDone) {
+		return s.rdb.Expire(ctx, key, s.cfg.waitGrace()).Err()
+	}
+	ttl, err := s.rdb.PTTL(ctx, key).Result()
+	if err == nil && ttl >= 0 && ttl <= waitGraceFloor {
+		return nil
+	}
+	return errors.Join(err, s.rdb.Expire(ctx, key, waitGraceFloor).Err())
+}
+
 func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContext, tenant string, timeout time.Duration) error {
 	logger := log.FromContext(ctx).WithName(StepName)
 	w := reqCtx.ResponseWriter
@@ -471,14 +487,14 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 			if writeErr != nil {
 				logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
 			} else {
-				// Delivery confirmed: shrink the mailbox to the grace window
+				// Delivery confirmed: bound the mailbox (see expireDelivered)
 				// instead of letting it sit out the full result TTL. Deleting
 				// outright would take the result from other waiters attached
 				// to the same id. On write failure the key stays, as the
 				// client may still fetch by id.
 				graceCtx, graceCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer graceCancel()
-				if err := s.rdb.Expire(graceCtx, resultKey(tenant, id), s.cfg.waitGrace()).Err(); err != nil {
+				if err := s.expireDelivered(graceCtx, resultKey(tenant, id), pipelineResult); err != nil {
 					logger.Error(err, "failed to shrink result ttl after wait delivery", "id", id)
 				}
 			}
@@ -504,7 +520,7 @@ func (s *Step) waitForResult(ctx context.Context, reqCtx *pipeline.RequestContex
 					pipelineResult, writeErr := writeResult(w, res)
 					if writeErr != nil {
 						logger.Error(writeErr, "failed to deliver result, retaining mailbox", "id", id)
-					} else if err := s.rdb.Expire(finalCtx, resultKey(tenant, id), s.cfg.waitGrace()).Err(); err != nil {
+					} else if err := s.expireDelivered(finalCtx, resultKey(tenant, id), pipelineResult); err != nil {
 						logger.Error(err, "failed to shrink result ttl after wait delivery", "id", id)
 					}
 					return pipelineResult

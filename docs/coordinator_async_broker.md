@@ -51,7 +51,7 @@ If the client disconnects before the 202, the step cancels the request pre-dispa
 
 After a successful fetch delivery the result's TTL is shrunk to a grace window (`fetch_grace_seconds`), so a client that lost the response can re-fetch while unfetched results do not linger past the grace period.
 
-**Wait** returns the model's response on the original connection with the upstream status mirrored, exactly as if the model server had answered directly. Delivery shrinks the result's TTL to the same grace window as a fetch, never below 5s, so other waiters attached to the same id and lost-response retries read the same result. Wake-up is a Redis keyspace notification on the result key, with a polling fallback when notifications are unavailable. The hold runs to the request deadline and answers 504 there, or ends early at `wait_cap_seconds` with the 202 response, leaving the request fetchable. If the client disconnects, the step cancels the request pre-dispatch.
+**Wait** returns the model's response on the original connection with the upstream status mirrored, exactly as if the model server had answered directly. Delivery shrinks the result's TTL to the same grace window as a fetch, never below 5s, so other waiters attached to the same id and lost-response retries read the same result. An error result is kept for only 5s from its first wait delivery, so a client retrying by id is enqueued again after that. Wake-up is a Redis keyspace notification on the result key, with a polling fallback when notifications are unavailable. The hold runs to the request deadline and answers 504 there, or ends early at `wait_cap_seconds` with the 202 response, leaving the request fetchable. If the client disconnects, the step cancels the request pre-dispatch.
 
 **Passthrough** classifies and stamps, then lets the pipeline continue, so streaming and upstream errors behave exactly as they do without the step.
 
@@ -132,7 +132,7 @@ All params and their defaults are documented in `pkg/coordinator/steps/asyncbrok
 | Result TTL | result written to Redis → first delivery, expiry, or DELETE | none | AP queue config `result_ttl_seconds` | result deleted + fetch returns 410 Gone |
 | Post-delivery grace | first delivered fetch or wait → grace expiry or DELETE | 60s | step param `fetch_grace_seconds` | result deleted + fetch returns 410 Gone |
 
-The three lifecycle clocks hand off without overlap: the deadline ends where the result TTL begins (result written), and the result TTL ends where the grace begins (first delivered fetch or wait). Each later delivery restarts the grace, and DELETE reclaims the result immediately. Raw producers supply a deadline per message, and their results go to the shared belt, which is drained destructively, so the TTL and grace rows do not apply there.
+The three lifecycle clocks hand off without overlap: the deadline ends where the result TTL begins (result written), and the result TTL ends where the grace begins (first delivered fetch or wait). Each later delivery restarts the grace, except a wait delivery of an error, and DELETE reclaims the result immediately. Raw producers supply a deadline per message, and their results go to the shared belt, which is drained destructively, so the TTL and grace rows do not apply there.
 
 ## Deployment notes
 
