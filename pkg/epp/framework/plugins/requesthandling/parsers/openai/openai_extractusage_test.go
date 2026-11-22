@@ -65,13 +65,47 @@ func TestExtractUsage_MalformedFields_NoPanic(t *testing.T) {
 }
 
 // Some non-conforming providers emit numeric usage fields as JSON strings;
-// toInt coerces these rather than panicking.
+// usage.Count coerces these rather than panicking.
 func TestExtractUsage_StringCoercion(t *testing.T) {
 	body := `{"object":"chat.completion","usage":{"prompt_tokens":"1024","completion_tokens":"7","total_tokens":"1031"}}`
 	u, err := extractUsage([]byte(body))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if u == nil {
+		t.Fatal("usage is nil")
+	}
+	if u.PromptTokens != 1024 {
+		t.Errorf("PromptTokens = %d, want 1024", u.PromptTokens)
+	}
+	if u.CompletionTokens != 7 {
+		t.Errorf("CompletionTokens = %d, want 7", u.CompletionTokens)
+	}
+	if u.TotalTokens != 1031 {
+		t.Errorf("TotalTokens = %d, want 1031", u.TotalTokens)
+	}
+}
+
+// The details object's cached count takes the same string form.
+func TestExtractUsage_StringCachedTokens(t *testing.T) {
+	body := `{"object":"chat.completion","usage":{"prompt_tokens":1024,"prompt_tokens_details":{"cached_tokens":"512"}}}`
+	u, err := extractUsage([]byte(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u == nil || u.PromptTokenDetails == nil {
+		t.Fatal("usage or prompt token details is nil")
+	}
+	if u.PromptTokenDetails.CachedTokens != 512 {
+		t.Errorf("CachedTokens = %d, want 512", u.PromptTokenDetails.CachedTokens)
+	}
+}
+
+// A chat completion stream chunk reports usage in the same string form a
+// non-streaming response does; both paths read it through usage.Count.
+func TestExtractUsageStreaming_StringCoercion(t *testing.T) {
+	body := "data: {\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":\"1024\",\"completion_tokens\":\"7\",\"total_tokens\":\"1031\"}}\n\n"
+	u := extractUsageStreaming([]byte(body))
 	if u == nil {
 		t.Fatal("usage is nil")
 	}

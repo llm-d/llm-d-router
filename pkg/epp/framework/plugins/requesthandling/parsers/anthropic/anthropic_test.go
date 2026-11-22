@@ -92,6 +92,17 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 		wantErr bool
 	}{
 		{
+			name:    "stream flag that is not a boolean is rejected",
+			headers: map[string]string{":path": "/v1/messages"},
+			body: map[string]any{
+				"model":      "claude-sonnet-4-6",
+				"max_tokens": float64(1024),
+				"messages":   []any{map[string]any{"role": "user", "content": "Hello"}},
+				"stream":     "true",
+			},
+			wantErr: true,
+		},
+		{
 			name:    "simple text messages",
 			headers: map[string]string{":path": "/v1/messages"},
 			body: map[string]any{
@@ -581,6 +592,54 @@ func TestAnthropicParser_ParseResponse(t *testing.T) {
 			},
 		},
 		{
+			name: "usage reported as strings by a non-conforming provider",
+			body: []byte(`{
+				"id": "msg_123",
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "text", "text": "Hello"}],
+				"usage": {
+					"input_tokens": "100",
+					"output_tokens": "50",
+					"cache_read_input_tokens": "80"
+				}
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
+					PromptTokens:     180,
+					CompletionTokens: 50,
+					TotalTokens:      230,
+					PromptTokenDetails: &request.PromptTokenDetails{
+						CachedTokens: 80,
+					},
+				},
+			},
+		},
+		{
+			name: "cache read reported as a string zero records a miss",
+			body: []byte(`{
+				"id": "msg_123",
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "text", "text": "Hello"}],
+				"usage": {
+					"input_tokens": 25,
+					"output_tokens": 15,
+					"cache_read_input_tokens": "0"
+				}
+			}`),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
+					PromptTokens:     25,
+					CompletionTokens: 15,
+					TotalTokens:      40,
+					PromptTokenDetails: &request.PromptTokenDetails{
+						CachedTokens: 0,
+					},
+				},
+			},
+		},
+		{
 			name: "usage with cache read and cache creation tokens",
 			body: []byte(`{
 				"id": "msg_123",
@@ -709,6 +768,18 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					TotalTokens:      15,
 				},
 				DisjointInputTokens: &fwkrh.DisjointInputTokens{},
+				StreamedEvents:      1,
+			},
+		},
+		{
+			name:  "message_start with string input tokens",
+			chunk: []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"usage\":{\"input_tokens\":\"25\"}}}"),
+			want: &fwkrh.ParsedResponse{
+				Usage: &request.Usage{
+					PromptTokens: 25,
+					TotalTokens:  25,
+				},
+				DisjointInputTokens: &fwkrh.DisjointInputTokens{Uncached: 25},
 				StreamedEvents:      1,
 			},
 		},

@@ -544,3 +544,26 @@ func BenchmarkResponseWriterChunkedJSON(b *testing.B) {
 		})
 	}
 }
+
+// A server that reports cached_tokens as a string still reads.
+func TestCachedTokens_StringCount(t *testing.T) {
+	got, ok := CachedTokens(map[string]any{"prompt_tokens_details": map[string]any{"cached_tokens": "49"}})
+	if !ok || got != 49 {
+		t.Errorf("CachedTokens() = (%d, %t), want (49, true)", got, ok)
+	}
+}
+
+// A matching string count is left in place: the rewrite injects the tracked
+// count only when the reported one differs or cannot be read.
+func TestSetCachedTokens_MatchingStringCountStays(t *testing.T) {
+	block := map[string]any{
+		reqcommon.FieldPromptTokens:        float64(64),
+		reqcommon.FieldPromptTokensDetails: map[string]any{reqcommon.FieldCachedTokens: "49"},
+	}
+	if setCachedTokens(block, 49) {
+		t.Error("setCachedTokens rewrote a count that already matches")
+	}
+	if got := block[reqcommon.FieldPromptTokensDetails].(map[string]any)[reqcommon.FieldCachedTokens]; got != "49" {
+		t.Errorf("cached_tokens = %v, want the server's original string \"49\"", got)
+	}
+}

@@ -308,7 +308,7 @@ func CachedTokens(block any) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	return intValue(details[reqcommon.FieldCachedTokens])
+	return Count(details[reqcommon.FieldCachedTokens])
 }
 
 // tokenDetails returns the object a usage block carries its cached-token count
@@ -325,17 +325,6 @@ func tokenDetails(block map[string]any) (map[string]any, bool) {
 		}
 	}
 	return nil, false
-}
-
-func intValue(value any) (int, bool) {
-	switch v := value.(type) {
-	case float64:
-		return int(v), true
-	case int:
-		return v, true
-	default:
-		return 0, false
-	}
 }
 
 // The replaceCachedTokens* functions are the cached-token rewrite alone, with
@@ -553,7 +542,7 @@ func setCachedTokens(block map[string]any, cachedTokens int) bool {
 		block[reqcommon.FieldPromptTokensDetails] = map[string]any{reqcommon.FieldCachedTokens: cachedTokens}
 		return true
 	}
-	if current, ok := intValue(details[reqcommon.FieldCachedTokens]); !ok || current != cachedTokens {
+	if current, ok := Count(details[reqcommon.FieldCachedTokens]); !ok || current != cachedTokens {
 		details[reqcommon.FieldCachedTokens] = cachedTokens
 		return true
 	}

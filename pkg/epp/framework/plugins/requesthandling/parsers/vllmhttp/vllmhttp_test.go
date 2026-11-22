@@ -223,6 +223,15 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 			},
 		},
 		{
+			name:    "stream flag that is not a boolean is rejected",
+			headers: map[string]string{":path": "/inference/v1/generate"},
+			body: map[string]any{
+				"token_ids": []any{10, 20, 30},
+				"stream":    "true",
+			},
+			wantErr: true,
+		},
+		{
 			name:    "generate request with token_ids and cache_salt",
 			headers: map[string]string{":path": "/inference/v1/generate"},
 			body: map[string]any{
