@@ -468,6 +468,7 @@ func TestFlowControlAdmissionController_StampsQueueDuration(t *testing.T) {
 		require.NoError(t, ac.Admit(ctx, reqCtx, 0))
 		assert.True(t, reqCtx.FlowControlAdmitted)
 		assert.GreaterOrEqual(t, reqCtx.FlowControlQueueDuration, 5*time.Millisecond)
+		assert.Equal(t, reqCtx.FlowControlQueueDuration, reqCtx.SchedulingRequest.FlowControlQueueDuration)
 	})
 
 	t.Run("flow control leaves fields unset on rejection", func(t *testing.T) {

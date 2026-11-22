@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -55,6 +56,9 @@ type InferenceRequest struct {
 	FairnessID string
 	// RequestSizeBytes is the size of the raw request body in bytes when available.
 	RequestSizeBytes int
+	// FlowControlQueueDuration is how long flow control held the request before dispatching it.
+	// Zero when flow control is disabled.
+	FlowControlQueueDuration time.Duration
 	// SchedulingResult captures the scheduling decisions made during the cycle.
 	SchedulingResult *SchedulingResult
 

@@ -416,6 +416,9 @@ type predictedLatencyCtx struct {
 
 	ttftSLO    float64
 	avgTPOTSLO float64
+	// queueWaitMs is the time the request spent in flow control, which counts
+	// against its TTFT SLO.
+	queueWaitMs float64
 
 	predictionsForScheduling map[string]endpointPredictionResult
 
@@ -442,6 +445,7 @@ func newPredictedLatencyContext(request *fwksched.InferenceRequest) *predictedLa
 		encoderMatchedSizeForEndpoints: make(map[string]int),
 		inFlightLoadForEndpoints:       make(map[string]inFlightLoadSnapshot),
 		predictionsForScheduling:       make(map[string]endpointPredictionResult),
+		queueWaitMs:                    float64(request.FlowControlQueueDuration) / float64(time.Millisecond),
 	}
 }
 

@@ -12,6 +12,7 @@ DataProducer, PreRequest, ResponseHeader, ResponseBody, ProducerPlugin, Consumer
 
 - Bulk predictions during `Produce` (writes `LatencyPredictionInfo` to endpoint attributes; endpoints whose metrics have never been scraped get none)
 - SLO headroom calculation per endpoint: `headroom = SLO - predicted_latency` (used by downstream scorer and admission plugins)
+  - TTFT headroom also subtracts the time the request waited in flow control
 - TTFT training data collection on first token / EOS
 - TPOT training data collection at EOS (streaming mode)
 - Per-endpoint running request queue tracking (TPOT SLO priority queue)

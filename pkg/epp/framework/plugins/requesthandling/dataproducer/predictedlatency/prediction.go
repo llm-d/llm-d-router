@@ -170,8 +170,8 @@ func (pl *PredictedLatency) validatePrediction(
 	podMinTPOTSLO float64,
 ) (ttftOk, tpotOk, isValid bool, headroom float64, ttftHeadroom float64) {
 
-	ttftOk = pred.TTFT < predictedLatencyCtx.ttftSLO
-	ttftHeadroom = predictedLatencyCtx.ttftSLO - pred.TTFT
+	ttftHeadroom = predictedLatencyCtx.ttftSLO - predictedLatencyCtx.queueWaitMs - pred.TTFT
+	ttftOk = ttftHeadroom > 0
 
 	tpotOk = true
 	headroom = 0.0

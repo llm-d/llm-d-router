@@ -204,6 +204,7 @@ func (fcac *FlowControlAdmissionController) Admit(
 	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
 	if outcome == types.QueueOutcomeDispatched {
 		reqCtx.FlowControlQueueDuration = time.Since(start)
+		reqCtx.SchedulingRequest.FlowControlQueueDuration = reqCtx.FlowControlQueueDuration
 		reqCtx.FlowControlAdmitted = true
 	}
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
