@@ -444,6 +444,7 @@ func TestKVGrowth_CompletionWithoutUsageCountsStreamedTokens(t *testing.T) {
 	k.progress("no-usage", 2, chunkTime)
 	k.progress("no-usage", 1, chunkTime)
 	k.finish("no-usage", 0, true)
+	k.progress("no-usage", 4, chunkTime) // a chunk after the end of the request is not recorded
 	k.add("a", "running", 8, 8, 4, 1, 1)
 	k.progress("running", 0, chunkTime)
 
@@ -589,4 +590,28 @@ func TestKVGrowth_StreamedTokensStayReservedUntilTheScrapedUsageIncludesThem(t *
 		read = read.Add(kvGrowthRefreshInterval)
 		require.Equal(t, tc.want, k.projected("a", read, tc.scrapedAt), tc.name)
 	}
+}
+
+// Response chunks are recorded while a projection is being computed: every chunk of every stream
+// reports its progress, so progress does not wait for the lock the projections hold.
+func TestKVGrowth_ProgressDoesNotWaitForAProjection(t *testing.T) {
+	k := newKVGrowth(3, 4)
+	k.add("a", "r", 8, 8, 4, 1, 1)
+
+	k.mu.Lock()
+	recorded := make(chan struct{})
+	go func() {
+		k.progress("r", 2, chunkTime) // the first chunk
+		k.progress("r", 3, chunkTime)
+		close(recorded)
+	}()
+	select {
+	case <-recorded:
+	case <-time.After(time.Second):
+		t.Error("progress waited for the projections' lock")
+	}
+	k.mu.Unlock()
+	<-recorded
+	// The request has one token left, and one token ahead the next request holds 8 + 1.
+	require.Equal(t, int64(1+9), projectedAfterScrapes(k, "a"))
 }

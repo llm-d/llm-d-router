@@ -20,6 +20,7 @@ import (
 	"math"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
@@ -67,10 +68,10 @@ type kvGrowthRequest struct {
 	sequences float64
 	outputCap float64
 	// output is the tokens streamed so far over all sequences, or the tokens the request ended at.
-	output float64
-	// startedAt is when the first response chunk arrived, zero before it. The engine has taken
+	output atomic.Int64
+	// startedAt is when the first response chunk arrived, nil before it. The engine has taken
 	// the prompt by then.
-	startedAt time.Time
+	startedAt atomic.Pointer[time.Time]
 	// scrapedAt is the first scrape seen to complete after startedAt, zero before one.
 	scrapedAt time.Time
 	// sampledAt is the latest scrape seen. seenOutput is output when that scrape and the one seen
@@ -112,7 +113,12 @@ type kvGrowth struct {
 	// minWindow and minPrior are kvGrowthMinWindow and kvGrowthMinPrior; tests use smaller samples.
 	minWindow, minPrior int
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// index guards requests for progress, which reads it without mu so that a response chunk
+	// does not wait for a projection. progress stores output and startedAt while it holds the
+	// read lock, and finish removes the request under the write lock before it settles the
+	// request's length, so it reads the last store. Writers hold mu as well.
+	index    sync.RWMutex
 	requests map[string]*kvGrowthRequest            // running, by request ID
 	running  map[string]map[string]*kvGrowthRequest // running, by endpoint ID then request ID
 	cohort   []*kvGrowthRequest                     // the sampled requests, oldest first
@@ -186,7 +192,9 @@ func (k *kvGrowth) add(endpointID, requestID string, promptTokens, uncachedToken
 	if outputCap > 0 && float64(outputCap) < k.maxOutputTokens {
 		r.outputCap = float64(outputCap)
 	}
+	k.index.Lock()
 	k.requests[requestID] = r
+	k.index.Unlock()
 	if k.running[endpointID] == nil {
 		k.running[endpointID] = map[string]*kvGrowthRequest{}
 	}
@@ -200,24 +208,31 @@ func (k *kvGrowth) add(endpointID, requestID string, promptTokens, uncachedToken
 }
 
 // progress records a response chunk of a running request and the tokens it has generated so far.
+// The director reports the chunks of a request one at a time, so the calls for a request do not
+// overlap.
 func (k *kvGrowth) progress(requestID string, tokens int, now time.Time) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
+	k.index.RLock()
+	defer k.index.RUnlock()
 	r := k.requests[requestID]
 	if r == nil {
 		return
 	}
-	if r.startedAt.IsZero() {
-		r.startedAt = now
+	if r.startedAt.Load() == nil {
+		// A copy, so that only a first chunk allocates.
+		startedAt := now
+		r.startedAt.Store(&startedAt)
 	}
-	r.output = max(r.output, float64(tokens))
+	if output := int64(tokens); output > r.output.Load() {
+		r.output.Store(output)
+	}
 }
 
 // promptScraped reports whether the usage scraped at scrapedAt includes the request's prompt. A
 // scrape that completes after the first response chunk may have read the usage before the chunk.
 // Scrapes of an endpoint run one after another, so the one after it began after the chunk.
 func (r *kvGrowthRequest) promptScraped(scrapedAt time.Time) bool {
-	if r.startedAt.IsZero() || !scrapedAt.After(r.startedAt) {
+	startedAt := r.startedAt.Load()
+	if startedAt == nil || !scrapedAt.After(*startedAt) {
 		return false
 	}
 	if r.scrapedAt.IsZero() {
@@ -229,10 +244,10 @@ func (r *kvGrowthRequest) promptScraped(scrapedAt time.Time) bool {
 // outputScraped returns how many of the request's streamed tokens the usage scraped at scrapedAt
 // includes. A scrape may have read the usage before the tokens streamed by the time it is first
 // seen, and the scrape after the next one began after that.
-func (r *kvGrowthRequest) outputScraped(scrapedAt time.Time) float64 {
+func (r *kvGrowthRequest) outputScraped(scrapedAt time.Time, streamed float64) float64 {
 	if scrapedAt.After(r.sampledAt) {
 		r.sampledAt = scrapedAt
-		r.scrapedOutput, r.seenOutput[0], r.seenOutput[1] = r.seenOutput[0], r.seenOutput[1], r.output
+		r.scrapedOutput, r.seenOutput[0], r.seenOutput[1] = r.seenOutput[0], r.seenOutput[1], streamed
 	}
 	return r.scrapedOutput
 }
@@ -247,20 +262,23 @@ func (k *kvGrowth) finish(requestID string, completionTokens int64, completed bo
 	if r == nil {
 		return
 	}
+	k.index.Lock()
+	delete(k.requests, requestID)
+	k.index.Unlock()
 	if completionTokens > 0 {
-		r.output = float64(completionTokens)
+		r.output.Store(completionTokens)
 	}
+	output := float64(r.output.Load())
 	// A request cut off by its own cap would have run longer under a larger one. The sequences of
 	// a request end at different lengths, and only their total is reported.
-	r.observed = completed && r.sequences == 1 && (r.output < r.outputCap || r.outputCap >= k.maxOutputTokens)
-	if r.output == 0 {
+	r.observed = completed && r.sequences == 1 && (output < r.outputCap || r.outputCap >= k.maxOutputTokens)
+	if output == 0 {
 		// A request that ends without output carries no length: an error status, a route whose
 		// response is not processed, a stream cut before its first token. It leaves the sample.
 		if i := slices.Index(k.cohort, r); i >= 0 {
 			k.cohort = slices.Delete(k.cohort, i, i+1)
 		}
 	}
-	delete(k.requests, requestID)
 	delete(k.running[r.endpoint], requestID)
 	if len(k.running[r.endpoint]) == 0 {
 		delete(k.running, r.endpoint)
@@ -294,15 +312,16 @@ func (k *kvGrowth) projected(endpointID string, now, scrapedAt time.Time) int64 
 		if !r.promptScraped(scrapedAt) {
 			unscraped += r.prompt
 		}
-		unscraped += r.output - r.outputScraped(scrapedAt)
+		streamed := float64(r.output.Load())
+		unscraped += streamed - r.outputScraped(scrapedAt, streamed)
 		// The sequences of a request are taken to have generated the same number of tokens.
-		output := r.output / r.sequences
+		output := streamed / r.sequences
 		if output >= k.maxOutputTokens {
 			// The model server does not stop requests at the configured cap after all: the request
 			// is taken to keep its tokens.
 			continue
 		}
-		footprint := r.uncached + r.output
+		footprint := r.uncached + streamed
 		remaining := max(0, r.outputCap-output)
 		growthLeft += r.sequences * remaining
 		age := int(output / k.stepTokens)
@@ -354,7 +373,7 @@ func (k *kvGrowth) refreshSurvival(now time.Time) {
 		sequences += r.sequences
 		// The first point at or past the length of the request's sequences. A length that reaches
 		// the last point never leaves the table.
-		i := int(math.Ceil(r.output / r.sequences / k.unitTokens))
+		i := int(math.Ceil(float64(r.output.Load()) / r.sequences / k.unitTokens))
 		switch {
 		case i >= len(k.survival):
 		case r.observed:
