@@ -292,6 +292,40 @@ func TestEvictionQueue_Peek(t *testing.T) {
 	assert.Equal(t, -1, peeked2.Priority, "Mutating Peek result should not affect the heap")
 }
 
+func TestEvictionQueue_PopIfBelow(t *testing.T) {
+	t.Parallel()
+	q := NewEvictionQueue(&testOrdering{}, &acceptAllFilter{})
+
+	assert.Nil(t, q.PopIfBelow(0), "PopIfBelow on empty queue should return nil")
+
+	q.Track(newItem("req-low", -5, 0))
+	q.Track(newItem("req-mid", -1, 0))
+	q.Track(newItem("req-high", 0, 0))
+
+	// Bound at or below the top item's priority (-5) must return nil without mutating state.
+	assert.Nil(t, q.PopIfBelow(-5), "PopIfBelow should return nil when top item priority == priorityBound")
+	assert.Nil(t, q.PopIfBelow(-10), "PopIfBelow should return nil when top item priority > priorityBound")
+	assert.Equal(t, 3, q.InFlightLen(), "InFlightLen must be unchanged when PopIfBelow returns nil")
+	assert.Equal(t, 3, q.EvictableLen(), "EvictableLen must be unchanged when PopIfBelow returns nil")
+
+	// Bound strictly above -5 pops req-low.
+	popped := q.PopIfBelow(-1)
+	require.NotNil(t, popped)
+	assert.Equal(t, "req-low", popped.RequestID)
+	assert.Equal(t, 2, q.InFlightLen())
+	assert.Equal(t, 2, q.EvictableLen())
+
+	// Next top item is req-mid (priority -1); bound -1 must return nil and leave req-mid tracked.
+	assert.Nil(t, q.PopIfBelow(-1))
+	assert.Equal(t, 2, q.InFlightLen())
+	assert.Equal(t, 2, q.EvictableLen())
+
+	// Untracking req-mid must remove it from both allInFlight and the heap.
+	q.Untrack("req-mid")
+	assert.Equal(t, 1, q.InFlightLen())
+	assert.Equal(t, 1, q.EvictableLen())
+}
+
 func TestEvictionQueue_Concurrency(t *testing.T) {
 	t.Parallel()
 	q := NewEvictionQueue(&testOrdering{}, &acceptAllFilter{})
