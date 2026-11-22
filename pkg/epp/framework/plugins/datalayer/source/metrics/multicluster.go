@@ -18,6 +18,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"errors"
 
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/http"
@@ -28,10 +29,6 @@ const (
 	// lets a config pair it with the multicluster extractor, separate from the pod pipeline.
 	MultiClusterMetricsDataSourceType = "multicluster-metrics-data-source"
 
-	// maxResponseBytes caps the metrics payload read from a peer cluster, so a hostile or
-	// broken peer across the cross-cluster boundary cannot exhaust memory in the parser.
-	maxResponseBytes = 8 << 20 // 8 MiB
-
 	// defaultMultiClusterScheme is https, not the pod source's http: a cross-cluster scrape
 	// crosses a trust boundary, so it is encrypted and verified by default.
 	defaultMultiClusterScheme = "https"
@@ -40,7 +37,7 @@ const (
 // NewHTTPMultiClusterMetricsDataSource constructs the source with the given scheme and path.
 // Use directly in tests to bypass JSON parameter marshaling.
 func NewHTTPMultiClusterMetricsDataSource(scheme, path, name string) (*http.HTTPDataSource[PrometheusMetricMap], error) {
-	parser, observer := newMetricsParser(nil, maxResponseBytes)
+	parser, observer := newMetricsParser(nil)
 	return http.NewHTTPDataSource(scheme, path, http.TLSOptions{},
 		MultiClusterMetricsDataSourceType, name, parser, observer)
 }
@@ -58,11 +55,17 @@ func MultiClusterMetricsDataSourceFactory(name string, parameters *json.Decoder,
 		}
 	}
 
+	// The port override would replace a peer's metricsAddress host with its routable address.
+	if cfg.Port != nil {
+		return nil, errors.New("port is not supported by " + MultiClusterMetricsDataSourceType +
+			"; set metricsAddress and metricsPort labels on the discovered endpoint instead")
+	}
+
 	intervalOpt, err := http.ParseIntervalOption(cfg.Interval)
 	if err != nil {
 		return nil, err
 	}
-	parser, observer := newMetricsParser(cfg.Families, maxResponseBytes)
+	parser, observer := newMetricsParser(cfg.Families)
 
 	return http.NewHTTPDataSource(cfg.Scheme, cfg.Path,
 		http.TLSOptions{

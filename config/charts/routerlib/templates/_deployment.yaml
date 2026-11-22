@@ -8,6 +8,10 @@
       {{- if and (eq $proxyType "agentgateway") (not (hasKey $eppFlags "secure-serving")) }}
         {{- $_ := set $eppFlags "secure-serving" false }}
       {{- end }}
+      {{- /* Outlast Envoy's health-check ejection of a draining EPP: 3 failed checks at 10s by default. */}}
+      {{- if and (include "llm-d-router.proxy.eppHealthPortCheck" .) (not (hasKey $eppFlags "drain-timeout")) }}
+        {{- $_ := set $eppFlags "drain-timeout" "45s" }}
+      {{- end }}
       serviceAccountName: {{ include "llm-d-router.name" . }}
       {{- with .Values.router.epp.priorityClassName }}
       priorityClassName: {{ . | quote }}
@@ -426,6 +430,15 @@ spec:
     type: Recreate
     {{- end }}
     {{- end }}
+  {{- $eppMinReadySeconds := .Values.router.epp.minReadySeconds }}
+  {{- /* "invalid" = unset or explicit null, the two forms that mean "keep the
+       Kubernetes default"; every other value, however falsy, is validated. */ -}}
+  {{- if not (kindIs "invalid" $eppMinReadySeconds) }}
+  {{- if not (regexMatch "^(0|[1-9][0-9]?|[1-5][0-9]{2})$" (toString $eppMinReadySeconds)) }}
+  {{- fail "router.epp.minReadySeconds must be a whole number from 0 to 599: the Deployment's progressDeadlineSeconds (the Kubernetes default of 600; the chart does not set it) has to exceed it, and the API server rejects anything else" }}
+  {{- end }}
+  minReadySeconds: {{ $eppMinReadySeconds }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "llm-d-router.selectorLabels" . | nindent 6 }}

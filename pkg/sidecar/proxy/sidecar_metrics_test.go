@@ -817,7 +817,7 @@ func TestJSONErrorForLog(t *testing.T) {
 func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 	const numberSecret = "987654321098765432109876543210e999" // notsecret
 	const textSecret = "private_diagnostic_schema_fixture"    // notsecret
-	for _, stage := range []string{"request", "shared", "chunks", "encoder", "bootstrap", "threshold string", "threshold object"} {
+	for _, stage := range []string{"request", "shared", "chunks", "encoder", "bootstrap", "parallel", "threshold string", "threshold object"} {
 		for _, verbosity := range []int{logging.DEBUG, logging.TRACE} {
 			t.Run(fmt.Sprintf("%s/verbosity=%d", stage, verbosity), func(t *testing.T) {
 				badResponse := fmt.Sprintf(`{"0":{"engine_id":"engine","argument":%s}}`, numberSecret)
@@ -874,6 +874,12 @@ func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 					if strings.HasPrefix(stage, "threshold") {
 						wantCode = http.StatusOK
 					}
+				case "parallel":
+					s.decoderProxy = statusHandler(http.StatusOK, chatResponse("ok", "stop", 1, 1))
+					parsed, err := decodeRequestBody([]byte(body))
+					require.NoError(t, err)
+					s.runNIXLProtocolV2WriteParallel(rw, r, []byte(body), parsed, "request-id", "transfer-id", upstreamURL.Host, nil, reqcommon.APITypeChatCompletions)
+					wantCode = http.StatusOK
 				case "chunks":
 					s.runChunkedDecode(rw, r)
 				case "encoder":
@@ -885,7 +891,7 @@ func TestSidecarJSONErrorLogPrivacy(t *testing.T) {
 				}
 				require.Equal(t, wantCode, rw.Code, rw.Body.String())
 				switch {
-				case strings.HasPrefix(stage, "threshold"):
+				case strings.HasPrefix(stage, "threshold"), stage == "parallel":
 				case stage == "encoder" || stage == "bootstrap":
 					// A 502 answers a failed upstream call with a fixed message;
 					// the parser error stays in the log.
@@ -2437,7 +2443,7 @@ func TestP2PDispatchedToolCallingMetrics(t *testing.T) {
 					before := toolFieldCounters(t)
 					r := httptest.NewRequest(http.MethodPost, api.Path(), strings.NewReader(original))
 					rw := httptest.NewRecorder()
-					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields)
+					s.handleP2PSequentialRequests(rw, r, []byte(tt.prefill), []byte(tt.decode), prefillURL.Host, toolFields, false)
 					require.Equal(t, code, rw.Code)
 					require.Equal(t, tt.prefillStatus == 0, decodeCount == 1)
 					delta := toolFieldDelta(before, toolFieldCounters(t))

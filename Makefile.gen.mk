@@ -91,6 +91,8 @@ generate-proto-vllm-engine: protoc-gen-go protoc-gen-go-grpc ## Generate Go bind
 generate-proto-vllm-upstream: buf protoc-gen-go protoc-gen-go-grpc ## Generate upstream vLLM Go bindings from vllm-project/vllm@$(VLLM_REF).
 	PATH="$(LOCALBIN):$$PATH" $(BUF) generate \
 		--template $(VLLM_GRPC_DIR)/buf.gen.yaml \
+		--path inference.proto \
+		--path control.proto \
 		"https://github.com/vllm-project/vllm.git#ref=$(VLLM_REF),subdir=rust/proto,depth=1"
 
 .PHONY: verify-vllm-proto

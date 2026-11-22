@@ -20,14 +20,21 @@ package runner
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr/funcr"
 	"github.com/go-logr/logr/testr"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials/insecure"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -455,5 +462,48 @@ func TestHealthServer_StandbyLogging(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// Envoy health-checks on a reused connection and sends keepalive pings every 15s with no
+// active stream, so the server must accept pings that frequent without sending GOAWAY.
+func TestHealthServerKeepsIdleConnectionAtEnvoyKeepaliveInterval(t *testing.T) {
+	t.Parallel()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var isLeader atomic.Bool
+	isLeader.Store(true)
+	srv := newHealthGRPCServer(testr.New(t), &mockDatastore{}, &isLeader, nil, false, nil, nil)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	// Envoy's interval; a 10s client interval would sit on the server's 10s MinTime and could strike.
+	conn, err := grpc.NewClient(lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 15 * time.Second, Timeout: 3 * time.Second, PermitWithoutStream: true}))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer checkCancel()
+	if _, err := healthPb.NewHealthClient(conn).Check(checkCtx, &healthPb.HealthCheckRequest{}, grpc.WaitForReady(true)); err != nil {
+		t.Fatalf("Check failed: %v (code %v)", err, status.Code(err))
+	}
+	if state := conn.GetState(); state != connectivity.Ready {
+		t.Fatalf("connection state after Check = %v, want Ready", state)
+	}
+
+	// With the default enforcement policy the server sends GOAWAY after the third ping (about 45s).
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 70*time.Second)
+	defer waitCancel()
+	start := time.Now()
+	if conn.WaitForStateChange(waitCtx, connectivity.Ready) {
+		t.Fatalf("idle connection left Ready after %v (state %v): server rejected 15s keepalive pings with GOAWAY too_many_pings",
+			time.Since(start).Round(time.Second), conn.GetState())
 	}
 }

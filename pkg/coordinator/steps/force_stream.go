@@ -28,7 +28,6 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/go-logr/logr"
@@ -308,8 +307,6 @@ func responsesEchoBytes(shape sseShape, bodyBytes []byte) int64 {
 // releases reserved, the whole reservation, on every exit; generated is the part
 // of it bounding the generated reply, which the per-request ceiling enforces.
 //
-// It clears the server write deadline, as the handler does for a streaming
-// request, since a stream is not bounded by the gateway's response-header timeout.
 // Nothing reaches the client until the whole response is buffered, so every error
 // before the reply is written leaves the client uncommitted. A transport failure
 // returns a plain error and the server answers a clean 5xx; an upstream 4xx/5xx,
@@ -321,15 +318,6 @@ func responsesEchoBytes(shape sseShape, bodyBytes []byte) int64 {
 // not a forced success (see writeForcedResponse).
 func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, bodyBytes []byte, generated, reserved int64, parity *parityCheck) error {
 	defer s.budget.release(reserved)
-
-	// The client asked for a non-streaming reply, so the handler kept the server
-	// WriteTimeout, but the forced request reads a stream: its headers arrive at
-	// once, so the gateway's response-header timeout no longer bounds the
-	// generation. Clear the write deadline as the handler does for a streaming
-	// request, so a generation that outlasts WriteTimeout still reaches the client.
-	if err := http.NewResponseController(reqCtx.ResponseWriter).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		logger.V(logutil.DEFAULT).Info("could not clear write deadline for force-stream", "error", err)
-	}
 
 	headers := forceStreamHeaders(reqCtx)
 

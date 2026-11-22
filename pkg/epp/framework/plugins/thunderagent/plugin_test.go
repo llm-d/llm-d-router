@@ -19,7 +19,6 @@ package thunderagent
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -47,25 +46,83 @@ func TestAgentIdentityIsARequiredDependency(t *testing.T) {
 	require.ErrorContains(t, err, agentidentity.AgentIdentityKey.String())
 }
 
-// Factory starts the idle session sweep for the handle's lifetime.
-func TestFactoryStartsSweep(t *testing.T) {
+// Factory applies defaults, accepts duration strings, and rejects unknown or
+// invalid parameters.
+func TestFactoryParameters(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	params := json.NewDecoder(strings.NewReader(`{"evictionTtlSeconds": 0.01, "evictionSweepSeconds": 0.01, "headWaitStarvationMs": 0}`))
-	p, err := Factory("thunder", params, utils.NewTestHandle(ctx))
+
+	p, err := Factory(ThunderAgentPluginType, nil, utils.NewTestHandle(ctx))
+	require.NoError(t, err)
+	a := p.(*ThunderAgent)
+	require.Equal(t, float64(4194304), a.fallbackCapacityTokens)
+	require.Equal(t, 1.0, a.usableCapacityRatio)
+	require.Equal(t, 5*time.Minute, a.forceAdmitTimeout)
+	require.Equal(t, 30*time.Second, a.mgr.idleGracePeriod)
+	require.Equal(t, 10*time.Minute, a.mgr.ttl)
+
+	raw := []byte(`{"fallbackCapacityTokens": 2048, "usableCapacityRatio": 0.5, "idleGracePeriod": "0s", "forceAdmitTimeout": "45m"}`)
+	p, err = Factory(ThunderAgentPluginType, fwkplugin.StrictDecoder(raw), nil)
+	require.NoError(t, err)
+	a = p.(*ThunderAgent)
+	require.Equal(t, float64(2048), a.fallbackCapacityTokens)
+	require.Equal(t, 0.5, a.usableCapacityRatio)
+	require.Zero(t, a.mgr.idleGracePeriod)
+	require.Equal(t, 45*time.Minute, a.forceAdmitTimeout)
+	require.Equal(t, 90*time.Minute, a.mgr.ttl)
+
+	partial := []byte(`{"forceAdmitTimeout": "30m"}`)
+	p, err = Factory(ThunderAgentPluginType, fwkplugin.StrictDecoder(partial), nil)
+	require.NoError(t, err)
+	a = p.(*ThunderAgent)
+	require.Equal(t, float64(4194304), a.fallbackCapacityTokens)
+	require.Equal(t, 1.0, a.usableCapacityRatio)
+	require.Equal(t, 30*time.Second, a.mgr.idleGracePeriod)
+	require.Equal(t, 30*time.Minute, a.forceAdmitTimeout)
+	require.Equal(t, time.Hour, a.mgr.ttl)
+
+	for name, body := range map[string]string{
+		"removed capacityTokens":       `{"capacityTokens": 1000}`,
+		"removed utilThreshold":        `{"utilThreshold": 0.8}`,
+		"removed idleLeaseSeconds":     `{"idleLeaseSeconds": 30}`,
+		"removed headWaitStarvationMs": `{"headWaitStarvationMs": 1000}`,
+		"removed evictionTtlSeconds":   `{"evictionTtlSeconds": 3600}`,
+		"removed evictionSweepSeconds": `{"evictionSweepSeconds": 10}`,
+		"invalid duration string":      `{"forceAdmitTimeout": "soon"}`,
+		"null duration":                `{"idleGracePeriod": null}`,
+		"negative duration":            `{"idleGracePeriod": "-1s"}`,
+		"zero ratio":                   `{"usableCapacityRatio": 0}`,
+		"zero capacity":                `{"fallbackCapacityTokens": 0}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Factory(ThunderAgentPluginType, fwkplugin.StrictDecoder([]byte(body)), nil)
+			require.Error(t, err)
+		})
+	}
+}
+
+// Factory starts the idle session sweep for the handle's lifetime.
+func TestFactoryStartsSweep(t *testing.T) {
+	origInterval := sweepInterval
+	sweepInterval = 10 * time.Millisecond
+	t.Cleanup(func() { sweepInterval = origInterval })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p, err := Factory(ThunderAgentPluginType, nil, utils.NewTestHandle(ctx))
 	require.NoError(t, err)
 	a := p.(*ThunderAgent)
 
 	runTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
+	a.mgr.mu.Lock()
+	a.mgr.sessions["s1"].lastActivity = time.Now().Add(-2 * a.mgr.ttl)
+	a.mgr.mu.Unlock()
+
 	require.Eventually(t, func() bool {
 		_, ok := sessionOf(a, "s1")
 		return !ok
 	}, 5*time.Second, 10*time.Millisecond)
-}
-
-func TestFactoryRejectsInvalidSweepInterval(t *testing.T) {
-	_, err := Factory("thunder", json.NewDecoder(strings.NewReader(`{"evictionSweepSeconds": 0}`)), nil)
-	require.ErrorContains(t, err, "evictionSweepSeconds")
 }
 
 // DumpState reports counts and per-endpoint totals but no session ids.

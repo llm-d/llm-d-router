@@ -299,7 +299,7 @@ func TestCrossReplicaPublisher_PublishesForEndpoint(t *testing.T) {
 	endpointID := types.NamespacedName{Namespace: "ns", Name: "ep-a"}
 	require.True(t, pub.registerEndpoint(endpointID))
 
-	pub.publish(context.Background(), endpointID)
+	pub.publish(context.Background(), endpointID, nil)
 
 	require.Len(t, syncer.sets, 1)
 	assert.Equal(t, fwkdl.StateKey("inflight:test"), syncer.sets[0].key)
@@ -322,12 +322,12 @@ func TestCrossReplicaPublisher_RateLimitsVisiblePublishFailures(t *testing.T) {
 	}, funcr.Options{})
 	ctx := log.IntoContext(context.Background(), logger)
 
-	pub.publish(ctx, endpointID)
-	pub.publish(ctx, endpointID)
+	pub.publish(ctx, endpointID, nil)
+	pub.publish(ctx, endpointID, nil)
 	require.Equal(t, int64(1), failures.Load())
 
 	pub.publishFailureLog.Interval = time.Nanosecond
-	pub.publish(ctx, endpointID)
+	pub.publish(ctx, endpointID, nil)
 	require.Equal(t, int64(2), failures.Load())
 }
 
@@ -473,7 +473,7 @@ func TestCrossReplicaPublisher_PublishesContributorsConcurrently(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pub.publish(context.Background(), endpointID)
+		pub.publish(context.Background(), endpointID, nil)
 	}()
 
 	started := map[fwkdl.StateKey]bool{}
@@ -510,7 +510,7 @@ func TestCrossReplicaPublisher_SkipsEndpointDeletedAfterSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, removed)
 
-	pub.publish(context.Background(), snapshot[0])
+	pub.publish(context.Background(), snapshot[0], nil)
 	assert.Empty(t, syncer.sets)
 }
 

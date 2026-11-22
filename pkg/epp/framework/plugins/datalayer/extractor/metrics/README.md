@@ -18,6 +18,7 @@ The Core Metrics Extractor is a data layer plugin responsible for extracting mod
     -   **KV Cache Usage**: Percentage of KV cache currently utilized.
     -   **LoRA Adapters**: Information about active and waiting LoRA adapters.
     -   **Cache Configuration**: Block size and total number of GPU blocks.
+    -   **Offload-extended KV cache capacity** (optional): The token capacity of a host-memory KV cache tier (`cacheTotalTokensSpec`, read from a label when `cacheTotalTokensLabelName` is set) and whether the engine has offloaded KV cache at all (`cacheOffloadDetectionSpec`, true while the metric is above zero). The built-in configs read SGLang's `sglang:hicache_host_total_tokens` and vLLM's `cpu_kv_cache_size_tokens` label on `vllm:kv_offload_config_info`, and detect vLLM offloading from `vllm:kv_offload_total_bytes_total`. A scrape without these families is not an extraction error. See [TotalKVCacheTokens](../../../../../../../docs/plugin-metric-protocol.md#totalkvcachetokens-optional).
     -   **Tiered Offloading** (optional): vLLM KV cache tiering metrics (`kv_offload_tiering_*`, vLLM 0.28.0 or later) when vLLM is configured with `TieringOffloadingSpec`. Skipped without an extraction error on non-tiering deployments.
 5.  Stores these values as attributes on the endpoint, making them available to scheduling plugins.
 
@@ -27,6 +28,7 @@ A model server that runs several engines in one Pod exposes one series per engin
 
 -   `WaitingQueueSize` and `RunningRequestsSize` are the sum over the matching series, so both count requests for the whole Pod. The utilization detector's scrape-lag credit compares their sum with the Pod's in-flight request count, and queue-depth thresholds apply to the Pod total.
 -   `KVCacheUsagePercent` is the maximum over the matching series: the engine closest to its limit describes the Pod, and the value stays a fraction.
+-   `KvCacheMaxTokenCapacity` is the maximum over the matching series, in line with the block count, which is read from one series: each engine's offload tier is sized for that engine, and the prefix cache index is sized per engine's cache.
 -   The tiered offloading attributes are the sum over the matching series, so they cover every engine rank of the Pod. Series of the primary tier (`tier="0:primary"`) are never included.
 
 A family with a single matching series yields that series' value. A NaN or infinite value on any matching series fails the extraction of that attribute, which keeps its previous value. LoRA, cache configuration, and `customMetrics` entries without `aggregation` read one series. A `customMetrics` entry with `aggregation: sum` adds every matching series.
@@ -44,6 +46,15 @@ The plugin populates several standard fields on the endpoint's `Metrics` struct:
 -   `UpdateTime` (time.Time)
 
 The three scalar load and utilization metrics (`WaitingQueueSize`, `RunningRequestsSize`, and `KVCacheUsagePercent`) are also published to the endpoint's attribute map (`ep.GetAttributes()`) as `ScalarMetricValue` under `ScalarMetricDataKey`, so `endpoint-attribute-scorer` and `endpoint-attribute-filter` can consume them directly without duplicating them in `customMetrics`. When a `customMetrics` entry uses one of those built-in keys as its `attributeKey`, that entry exclusively owns the attribute on `ep.GetAttributes()` while the built-in spec continues to populate `Metrics`.
+
+### Scalar samples
+
+`Metrics` fields and scalar attributes keep their last valid value when a later scrape lacks the metric, and `UpdateTime` advances when a scrape extracts any metric. A consumer that needs to know whether one metric is current reads its `ScalarSample`, which holds the last valid value and the time of the scrape that observed it:
+
+-   `GetMetrics().ScalarSample(field)` for `WaitingQueueSize`, `RunningRequestsSize`, and `KVCacheUsagePercent`, declared in `Consumes()` as `ScalarSampleDataKey(field)`.
+-   `GetMetrics().CustomScalarSample(attributeKey)` for each `customMetrics` entry, declared as `CustomScalarSampleDataKey(attributeKey)`.
+
+A scrape that observes a valid value records it with the same time it writes to `UpdateTime`. A missing metric, a NaN or infinite value, and a failed poll leave the sample unchanged, so `ScalarSample.FreshWithin(maxAge)` turns false once `maxAge` passes. A `ScrapeTime` older than `UpdateTime` shows that a later scrape extracted other metrics without this one. When the endpoint resolves to a different engine mapping, its samples are discarded. The `Metrics` fields and the scalar attributes are not reset: they keep the previous mapping's values until the new mapping observes each metric, so a consumer that must not act on them reads the sample instead.
 
 The built-in `vllm` config also stores the NIXL KV transfer failure counters as scalar attributes. vLLM reports them only when it runs with the NixlConnector, and an endpoint that has never reported them carries none of these attributes.
 
@@ -77,6 +88,10 @@ The plugin config supports:
 -   `engineConfigs`: A list of engine-specific metric specifications.
     Each engineConfig can include `customMetrics` entries.
     Each entry maps a scalar metric selector to an endpoint attribute key.
+    Gauge, counter, and untyped samples are supported. Histogram and summary
+    families are extraction errors; select a scalar series such as `_sum` or
+    `_count` instead. An unsupported type keeps the attribute's previous value,
+    or leaves it unset if no value has been extracted.
     A source metric missing from the scrape is an extraction error unless its
     `customMetrics` entry sets `optional: true`, which skips that entry for
     the scrape.
@@ -167,6 +182,9 @@ parameters:
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
       cacheInfoSpec: "vllm:cache_config_info"
+      cacheTotalTokensSpec: "vllm:kv_offload_config_info"
+      cacheTotalTokensLabelName: "cpu_kv_cache_size_tokens"
+      cacheOffloadDetectionSpec: "vllm:kv_offload_total_bytes_total"
       # Per-tier offloading specs
       customMetrics:
         - attributeKey: "tiering_chunk_hits_fs"
@@ -204,6 +222,9 @@ parameters:
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
       cacheInfoSpec: "vllm:cache_config_info"
+      cacheTotalTokensSpec: "vllm:kv_offload_config_info"
+      cacheTotalTokensLabelName: "cpu_kv_cache_size_tokens"
+      cacheOffloadDetectionSpec: "vllm:kv_offload_total_bytes_total"
       customMetrics:
         - attributeKey: "cpu_offload_usage"
           metricSpec: "vllm:kv_offload_cpu_cache_usage_perc"

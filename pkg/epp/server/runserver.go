@@ -20,6 +20,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -69,6 +70,7 @@ type ExtProcServerRunner struct {
 	EnableCertReload                 bool
 	TLSMinVersion                    uint16
 	TLSCipherSuites                  []uint16
+	ClientCAs                        *x509.CertPool
 	RefreshPrometheusMetricsInterval time.Duration
 	MetricsStalenessThreshold        time.Duration
 	Director                         *requestcontrol.Director
@@ -124,6 +126,7 @@ func NewExtProcServerRunner(
 		EnableCertReload:                 opts.EnableCertReload,
 		TLSMinVersion:                    opts.TLSMinVersionValue(),
 		TLSCipherSuites:                  opts.TLSCipherSuiteValues(),
+		ClientCAs:                        opts.ClientCAPool(),
 		RefreshPrometheusMetricsInterval: opts.RefreshPrometheusMetricsInterval,
 		MetricsStalenessThreshold:        opts.MetricsStalenessThreshold,
 		Director:                         director,
@@ -226,12 +229,17 @@ const (
 func keepaliveServerOptions(pingAfter, ackTimeout time.Duration) []grpc.ServerOption {
 	return []grpc.ServerOption{
 		grpc.KeepaliveParams(keepalive.ServerParameters{Time: pingAfter, Timeout: ackTimeout}),
-		// The default policy drops clients that ping more often than every 5 minutes.
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             grpcKeepaliveMinTime,
-			PermitWithoutStream: true,
-		}),
+		KeepaliveEnforcementPolicy(),
 	}
+}
+
+// KeepaliveEnforcementPolicy accepts the proxy's HTTP/2 keepalive pings, including on idle
+// connections. The default policy drops clients that ping more often than every 5 minutes.
+func KeepaliveEnforcementPolicy() grpc.ServerOption {
+	return grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+		MinTime:             grpcKeepaliveMinTime,
+		PermitWithoutStream: true,
+	})
 }
 
 // AsRunnable returns a Runnable that can be used to start the ext-proc gRPC server.
@@ -281,7 +289,7 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 			}
 		}
 
-		logger.Info("server TLS", "tls", r.SecureServing, "cert_path", r.CertPath)
+		logger.Info("server TLS", "tls", r.SecureServing, "cert_path", r.CertPath, "client_ca", r.ClientCAs != nil)
 
 		var grpcOpts []grpc.ServerOption
 		if creds != nil {
@@ -334,9 +342,9 @@ func (r *ExtProcServerRunner) AsRunnable(logger logr.Logger) manager.Runnable {
 	}))
 }
 
-// applyTLSOverrides sets MinVersion and CipherSuites on cfg. MinVersion is a
-// literal so gosec/CodeQL can resolve it statically; the configured value
-// applies only as an upgrade.
+// applyTLSOverrides sets MinVersion, CipherSuites and client certificate
+// verification on cfg. MinVersion is a literal so gosec/CodeQL can resolve it
+// statically; the configured value applies only as an upgrade.
 func (r *ExtProcServerRunner) applyTLSOverrides(cfg *tls.Config) {
 	cfg.MinVersion = tls.VersionTLS12
 	if r.TLSMinVersion > tls.VersionTLS12 {
@@ -344,5 +352,9 @@ func (r *ExtProcServerRunner) applyTLSOverrides(cfg *tls.Config) {
 	}
 	if len(r.TLSCipherSuites) > 0 {
 		cfg.CipherSuites = r.TLSCipherSuites
+	}
+	if r.ClientCAs != nil {
+		cfg.ClientCAs = r.ClientCAs
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 }

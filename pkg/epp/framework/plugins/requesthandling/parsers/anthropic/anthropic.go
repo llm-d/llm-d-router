@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/utils/ptr"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
@@ -96,9 +97,11 @@ func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers m
 	}
 
 	result := &request.InferenceRequestBody{
-		Payload:         request.PayloadMap(bodyMap),
-		RawBody:         body,
-		MaxOutputTokens: request.MaxOutputTokensFromPayload(bodyMap, "max_tokens"),
+		Payload: request.PayloadMap(bodyMap),
+		RawBody: body,
+	}
+	if n, ok := reqcommon.OutputTokenLimit(bodyMap, reqcommon.APITypeMessages); ok {
+		result.MaxOutputTokens = ptr.To(int64(n))
 	}
 	if model, ok := bodyMap["model"].(string); ok {
 		result.Model = model

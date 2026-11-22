@@ -126,7 +126,7 @@ lifecycle handled by the router.
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_request_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Requests processed after successful parsing and scheduling. |
-| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_error_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `error_code` | Errored requests, including early rejections. A request evicted after dispatch is counted with `error_code="ResourceExhausted"`. A model server response with a 5xx status is counted with `error_code="ModelServerError"`, and one with a 4xx status with `error_code="ModelServerClientError"`. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_outcome_total` | Counter | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface`, `outcome`, `reason` | Requests by how they ended. See [Request outcomes](#request-outcomes). |
 | `llm_d_epp_request_duration_seconds` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | End-to-end request latency on response completion. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_size_bytes` | Histogram | `model_name`, `target_model_name`, `fairness_id`, `priority`, `api_surface` | Request body size. |
@@ -167,6 +167,18 @@ Messages streaming events. Input tokens include uncached and cached prompt token
 `request_cached_tokens` records the cache-read subset reported by the model server.
 Interrupted streams contribute no completed-request token observations. The running-request
 gauge releases each request when it completes or its ext_proc stream closes.
+
+`llm_d_epp_request_input_tokens`, `llm_d_epp_request_output_tokens`,
+`llm_d_epp_request_cached_tokens`, `llm_d_epp_request_ntpot_seconds`,
+`llm_d_epp_request_streaming_tpot_seconds` and the `latency-reporter` plugin's
+`llm_d_epp_latency_tpot_seconds` take their token counts from the `usage` block of the response.
+vLLM includes `usage` in a chat completions or completions stream only when the request sets
+`stream_options.include_usage` or the server runs with `--enable-force-include-usage`. A stream
+without it adds no observation to these metrics, but `llm_d_epp_request_total` and
+`llm_d_epp_request_ttft_seconds` still count it. Run vLLM with `--enable-force-include-usage`
+when these metrics must cover every stream. Clients then receive `usage` in every chat
+completions and completions stream, including a final chunk with an empty `choices` list.
+Messages and Responses streams carry `usage` without either setting.
 
 Per-surface p95 latency uses the histogram buckets:
 
@@ -228,14 +240,14 @@ whose body reached the EPP and whose ending the EPP observes.
 
 | `outcome` | Meaning | `reason` |
 |---|---|---|
-| `completed` | The model server answered with status 200 and the response finished. | empty |
+| `completed` | The model server answered with a status below 400 and the response finished. | empty |
 | `rejected` | Dropped before it reached a model server. | The `x-llm-d-request-dropped-reason` value sent to the client, for example `rejected-saturated` or `rejected-flow-limit`. |
 | `evicted` | Dispatched, then evicted to free capacity. | The dropped-reason value, for example `evicted`. |
 | `cancelled` | The stream was torn down before the response finished, usually because the client disconnected, either while queued or after dispatch. | `rejected-context-cancelled` if the client left while queued, otherwise empty. |
-| `failed` | Any other error, before or after dispatch, including a response status other than 200 or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
+| `failed` | Any other error, before or after dispatch, including a 4xx or 5xx response status or a gRPC error status in the trailers. | The `error_code` value used by `llm_d_epp_request_error_total`. |
 
 When more than one applies, `evicted` wins over the error that ends the stream, and an error or a
-non-200 status wins over `cancelled`, unless the error only says the client left while queued.
+4xx or 5xx status wins over `cancelled`, unless the error only says the client left while queued.
 
 Routes that skip response processing, such as `/render`, are not counted because the EPP stops
 observing them once they are routed. `llm_d_epp_request_total` still counts them, but it does not
@@ -285,13 +297,18 @@ in the error rate, can be opened as the trace behind it.
 | `trace_id` | The request's trace is sampled. |
 | `span_id` | The observing component's tracing is on. With it off, only `trace_id` is attached. |
 
+On the P/D sidecar's stage durations, `span_id` names the sidecar's `forward_request` span,
+the parent of its `prefill` and `decode` spans, since not every connector opens a span per
+stage. A Mooncake or SGLang prefill that finishes after `forward_request` has ended carries
+only `trace_id`.
+
 Two things are needed to see them:
 
 - **Prometheus must store exemplars.** They are dropped unless it runs with
   `--enable-feature=exemplar-storage`.
 - **The scrape must use OpenMetrics.** Exemplars have no representation in the classic
-  text format. Prometheus requests OpenMetrics by default, so its scrapes of the EPP
-  switch to OpenMetrics with no scrape config change. No series is renamed, since every
+  text format. Prometheus requests OpenMetrics by default, so its scrapes switch to
+  OpenMetrics with no scrape config change. No series is renamed, since every
   counter already ends in `_total`. On Prometheus 2.x, whole-number histogram bounds are
   ingested as `le="1.0"` rather than `le="1"` (Prometheus 3 normalizes both to `1.0`),
   which only matters to queries matching `le` exactly. Scrapers that do not ask for
@@ -439,14 +456,86 @@ decisions.
 | `llm_d_epp_info` | Gauge | `commit`, `build_ref` | Build info. |
 | `llm_d_epp_model_rewrite_decisions_total` | Counter | `model_rewrite_name`, `model_name`, `target_model` | Model-rewrite decisions. |
 
-### Data layer errors
+### Data layer
 
-These metrics are owned by the EPP data-layer runtime.
+These metrics are owned by the EPP data-layer runtime. `source_type` is the data-source plugin
+type; no endpoint, pod or plugin-instance labels are emitted.
 
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
-| `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Data-source poll failures. |
+| `llm_d_epp_datalayer_polls_total` | Counter | `source_type`, `outcome` | Polls the collector ran, by outcome. `outcome` is `success`, `error` or `timeout`. |
+| `llm_d_epp_datalayer_poll_duration_seconds` | Histogram | `source_type` | Wall-clock time of each `Dispatch` call, from the call to its return. The histogram uses cumulative buckets with finite upper bounds from 0.5 ms to 2.5 s. The per-poll deadline is 1 s. |
+| `llm_d_epp_datalayer_poll_errors_total` | Counter | `source_type` | Polls whose `Dispatch` returned an error. |
 | `llm_d_epp_datalayer_extract_errors_total` | Counter | `source_type`, `extractor_type` | Extractor failures. |
+
+A poll is one `Dispatch` call on a polling source for one endpoint. Ticks a source skips because
+of its configured interval are not polls and are not counted. A poll interrupted by collector
+shutdown (the parent context is cancelled) is dropped from `polls_total` and
+`poll_duration_seconds` and leaves `poll_errors_total` and the endpoint's `PollStatus` untouched.
+
+`outcome` is decided after `Dispatch` returns:
+
+- `timeout`: the per-poll deadline expired, whatever `Dispatch` returned. A source that returns
+  nil after its context expired (for example, a source that stops running extractors once the
+  context is done) counts here.
+- `error`: the deadline did not expire and `Dispatch` returned a non-nil error, including a
+  `context.Canceled` the source produced itself.
+- `success`: the deadline did not expire and `Dispatch` returned nil. Extractors run inside
+  `Dispatch` may still have failed; those failures are in `extract_errors_total`.
+
+`poll_errors_total` and `PollStatus` follow the returned error alone: a `timeout` with a nil
+return increments `polls_total` but not `poll_errors_total`, and does not start a failure run.
+`poll_errors_total` is therefore not `error` plus `timeout` in general. For poll-level failures
+(the source could not produce data, or ran past its deadline) alert on
+`polls_total{outcome!="success"}`. A poll whose extractors failed still counts as `success`,
+because `Dispatch` returned nil; those refresh failures are visible only in `extract_errors_total`.
+
+All three `outcome` series and the duration histogram are created at zero when a collector
+starts for a source type, so a first `error` or `timeout` after a healthy run is a 0 to 1
+increment that `rate()` and `increase()` can see, not a series that first appears at `1`.
+
+### Cross-replica state sync
+
+These metrics are emitted only when a cross-replica syncer is configured and at least one
+plugin shares state through it. They describe what this replica publishes to its peers.
+`state_key` is the key a plugin shares state under (for example the in-flight load of one
+`inflight-load-producer` instance); no endpoint or pod labels are emitted.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_cross_replica_publishes_total` | Counter | `state_key`, `outcome` | Endpoint values handed to the syncer, by outcome. `outcome` is `success`, `error` (the syncer refused the write), or `timeout` (the publish deadline expired, including endpoints left unattempted). One publish cycle adds one count per attempted endpoint and state key; an endpoint removed during the cycle is not attempted. |
+| `llm_d_epp_cross_replica_last_publish_timestamp_seconds` | Gauge | `state_key` | Unix time of the last clean publish cycle: at least one endpoint published and none failed. A cycle with any failure leaves it unchanged. Absent until the first clean cycle. |
+| `llm_d_epp_cross_replica_publish_cycle_duration_seconds` | Histogram | none | Wall-clock time of one publish cycle over every registered endpoint. Buckets run from 0.5 ms to 2.5 s. |
+
+The publish failure log is rate limited to one line every 30 seconds, so during a syncer outage
+these counters are the complete record. Every `outcome` series is created at zero when the
+publisher starts. A cycle cut short by shutdown is not recorded.
+
+Peers keep using the last value this replica published until the syncer's `stateTTL` expires
+it, so the age of the last clean cycle bounds how stale this replica's load can look to them.
+Because one failing endpoint stops the clock, this also catches an endpoint that never
+publishes while the others do:
+
+```promql
+time() - llm_d_epp_cross_replica_last_publish_timestamp_seconds
+```
+
+To alert on a syncer that is failing for this replica (`timeout` points at a slow syncer,
+`error` at one refusing writes):
+
+```promql
+sum by (pod, state_key) (rate(llm_d_epp_cross_replica_publishes_total{outcome=~"error|timeout"}[5m])) > 0
+```
+
+A publish cycle that takes longer than `crossReplicaSyncInterval` delays the next one, so
+peers see older state than the interval suggests. Compare the cycle duration with the interval:
+
+```promql
+histogram_quantile(0.99, sum by (le) (rate(llm_d_epp_cross_replica_publish_cycle_duration_seconds_bucket[5m])))
+```
+
+These metrics cover the publish side only. How old the peer values a replica reads are depends
+on the syncer and is not reported.
 
 ### Endpoint health
 
@@ -485,6 +574,7 @@ match data but is not instrumented here. Requests that reach no endpoint are not
 | `llm_d_epp_prefix_best_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the endpoints the scheduler selected from. |
 | `llm_d_epp_prefix_best_available_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Highest such prediction among the request's candidate endpoints before filtering. |
 | `llm_d_epp_prefix_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role`, `modality` | Prompt tokens the predictions were measured against. |
+| `llm_d_epp_prefix_gpu_miss_tokens_total` | Counter | `plugin_name`, `plugin_type`, `endpoint_role`, `reason` | Prompt tokens the chosen endpoint does not hold in GPU memory, by where the index holds them. Precise prefix-cache producer only. |
 | `llm_d_epp_prefix_mm_predicted_cached_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Multimodal prompt tokens predicted to hit the chosen endpoint's prefix cache. |
 | `llm_d_epp_prefix_mm_prompt_tokens` | Histogram | `plugin_name`, `plugin_type`, `endpoint_role` | Multimodal prompt tokens the multimodal prediction was measured against. |
 
@@ -537,6 +627,17 @@ filter may be right to reduce when it is shedding load away from a saturated end
 prefix. A profile that reports no scored candidates leaves only the chosen endpoint to go on, so both
 maxima fall back to the prediction for it and the ratios read as 1.
 
+`llm_d_epp_prefix_gpu_miss_tokens_total` splits the prompt tokens the chosen endpoint lacks in GPU
+memory by where the index holds them, so the reasons of a request sum to its prompt minus its GPU
+hit. `filtered` tokens were in the GPU memory of an endpoint a filter removed, and `not_picked` tokens
+were in the GPU memory of an endpoint that reached the picker and was not chosen. These two are
+placement. `lower_tier` tokens were in no endpoint's GPU memory and in a lower tier of the chosen
+endpoint, which is eviction the engine restores from. `peer_lower_tier` tokens were only in a lower
+tier of another endpoint, and `uncached` tokens were confirmed nowhere, which covers the new part of
+a prompt and prefixes every tier has evicted. Read `filtered` only for a producer whose index covers
+one role, because a decode pod holding the prefix in a shared index counts as removed by the role
+filter.
+
 Comparing these ratios is what the prediction metrics are for, subject to the limits below.
 
 The request cohorts differ. A prediction is recorded before the request is forwarded, while the
@@ -544,10 +645,13 @@ request token metrics come from the model server's response, so a request that f
 usage is counted in the predicted rate and absent from the delivered rate. Do not divide across the
 two pairs.
 
-The `prefill` attribution matches only the `nixlv2` KV connector. The `shared-storage`, `sglang`,
-`mooncake`, and `offloading` connectors return the decoder's usage unchanged, so for a disaggregated
-request `llm_d_epp_request_cached_tokens` carries the decode pod's count while the prediction
-describes the prefill pod. Under those connectors the gap between the ratios is not index accuracy.
+The `prefill` attribution matches the `nixlv2` and `offloading` KV connectors when the prefill
+response carries a usage block; without one, the decode pod's count is returned. Under
+`offloading`, a decode pod that fails to pull the prefill blocks and recomputes the prompt still
+reports the prefill pod's count. The `shared-storage`, `sglang`, and `mooncake` connectors return the decoder's
+usage unchanged, so for a disaggregated request `llm_d_epp_request_cached_tokens` carries the decode
+pod's count while the prediction describes the prefill pod. Under those connectors the gap between
+the ratios is not index accuracy.
 
 The two maxima are scoped differently from each other for a disaggregated request.
 `llm_d_epp_prefix_best_predicted_cached_tokens` covers the `prefill` profile's scored candidates,
@@ -715,10 +819,10 @@ included. Requests that fail earlier, such as a body that cannot be parsed, are 
 pool metrics. Flow Control metrics leave `inference_pool` empty when the EPP runs without
 `--pool-name`, so the two do not join in that case.
 
-The current header name is read first. If it is present, even with an empty value, the deprecated
-name is ignored, and an empty value falls back to agent identity or `default-flow`. A gateway in
-front of the EPP should set the fairness ID itself and overwrite any client-supplied value under
-both header names.
+The current header name is read first. An empty value is skipped, so an empty current name falls back
+to the deprecated name, and a request with no non-empty value under either name falls back to agent
+identity or `default-flow`. A gateway in front of the EPP should set the fairness ID itself and
+overwrite any client-supplied value under both header names.
 
 When `requestHandler.composeFairnessIDs` is enabled, a request carrying both the header and an
 agent identity is recorded under the composed `<tenant>/<session>` ID with `source="header"`. The
@@ -810,10 +914,10 @@ only when that plugin is configured and records the related prediction, observat
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `llm_d_epp_inference_request_metric` | Gauge | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | Observed request metric. |
-| `llm_d_epp_request_predicted_ttft_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time to first token. |
-| `llm_d_epp_request_ttft_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TTFT prediction. |
-| `llm_d_epp_request_predicted_tpot_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time per output token. |
-| `llm_d_epp_request_tpot_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TPOT prediction. |
+| `llm_d_epp_request_predicted_ttft_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time to first token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_ttft_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TTFT prediction. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_predicted_tpot_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Predicted time per output token. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_epp_request_tpot_prediction_duration_seconds` | Histogram | `plugin_name`, `plugin_type`, `model_name`, `target_model_name` | Time spent computing the TPOT prediction. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_request_slo_violation_total` | Counter | `plugin_name`, `plugin_type`, `model_name`, `target_model_name`, `type` | SLO violations. |
 | `llm_d_epp_request_prediction_failures_total` | Counter | `plugin_name`, `plugin_type`, `reason` | Failed latency prediction attempts (`request_error`, `nil_response`, `length_mismatch`, `predictor_unavailable`). |
 
@@ -1141,7 +1245,7 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_index_lookup_requests_total` | Counter | - | Index lookups performed. |
 | `llm_d_epp_kv_cache_index_lookup_hits_total` | Counter | - | Contiguous prefix blocks matched by the best pod per lookup. |
 | `llm_d_epp_kv_cache_index_max_pod_hit_count_total` | Counter | - | Longest contiguous per-pod prefix chain observed per lookup. |
-| `llm_d_epp_kv_cache_index_lookup_latency_seconds` | Histogram | - | Index lookup latency. |
+| `llm_d_epp_kv_cache_index_lookup_latency_seconds` | Histogram | - | Index lookup latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_epp_kv_cache_events_dedup_removed_hashes_suppressed_total` | Counter | - | Deduplicated removal hashes suppressed. |
 | `llm_d_epp_kv_cache_events_dedup_removed_hashes_forwarded_total` | Counter | - | Deduplicated removal hashes forwarded. |
 | `llm_d_epp_kv_cache_events_stores_skipped_total` | Counter | `cache_kind`, `reason` | KV store events skipped before prefix indexing. |
@@ -1150,6 +1254,8 @@ use the labels shown below.
 | `llm_d_epp_kv_cache_events_subscriber_reconnections_total` | Counter | `pod_identifier` | ZMQ subscriber reconnection attempts. |
 | `llm_d_epp_kv_cache_events_messages_received_total` | Counter | `pod_identifier` | Messages received from ZMQ subscribers. |
 | `llm_d_epp_kv_cache_events_zmq_errors_total` | Counter | `pod_identifier`, `operation` | ZMQ subscriber errors. |
+| `llm_d_epp_kv_cache_events_live_only_subscribers` | Gauge | - | ZMQ subscribers indexing from live events only after a failed snapshot or replay load, until they follow a complete event sequence again or are removed. The failed load is logged with the pod identifier. |
+| `llm_d_epp_kv_cache_events_snapshot_load_duration_seconds` | Histogram | - | Successful snapshot loads, from the request until the batches are queued for indexing. Failed and unavailable snapshots are counted in `llm_d_epp_kv_cache_events_zmq_errors_total` with `operation="snapshot"`. |
 | `llm_d_epp_kv_cache_events_pool_queue_depth` | Gauge | - | Messages queued across event-pool workers. |
 | `llm_d_epp_kv_cache_events_pool_capacity` | Gauge | - | Event-pool worker capacity. |
 
@@ -1163,9 +1269,9 @@ enablement and TLS.
 | `llm_d_disagg_sidecar_info` | Gauge | `commit`, `build_ref` | Build info. Always `1`. |
 | `llm_d_disagg_sidecar_requests_total` | Counter | `api_type` | Requests on the intercepted inference API paths. `api_type` is `chat_completions`, `completions`, `messages`, `responses`, `vllm_generate`, or `sglang_generate`. |
 | `llm_d_disagg_sidecar_disagg_requests_total` | Counter | `disagg_type` | Requests routed through disaggregation. `disagg_type` is `prefill-decode`, `encode-decode`, or `encode-prefill-decode`. |
-| `llm_d_disagg_sidecar_encode_duration_seconds` | Histogram | - | Encode stage latency. |
-| `llm_d_disagg_sidecar_prefill_duration_seconds` | Histogram | - | Prefill stage latency. |
-| `llm_d_disagg_sidecar_decode_duration_seconds` | Histogram | - | Decode stage latency. Not sampled when prefill returns an error status, since decode is then not run or its output is discarded. |
+| `llm_d_disagg_sidecar_encode_duration_seconds` | Histogram | - | Encode stage latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_disagg_sidecar_prefill_duration_seconds` | Histogram | - | Prefill stage latency. Carries a trace exemplar; see [Exemplars](#exemplars). |
+| `llm_d_disagg_sidecar_decode_duration_seconds` | Histogram | - | Decode stage latency. Not sampled when prefill returns an error status, since decode is then not run or its output is discarded. Carries a trace exemplar; see [Exemplars](#exemplars). |
 | `llm_d_disagg_sidecar_request_errors_total` | Counter | `stage` | Stage errors. `stage` is `encode`, `prefill`, or `decode`. |
 | `llm_d_disagg_sidecar_tool_calling_field_status_total` | Counter | `component`, `direction`, `field`, `status` | Observed request-field outcomes, once per field and client request. |
 

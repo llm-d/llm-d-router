@@ -34,11 +34,11 @@ import (
 )
 
 // testConfig uses round numbers so tests can assert exact values: 1000-token
-// fallback capacity, byte estimates at 4 bytes per token, the default 30 s
-// idle lease.
+// fallback capacity, byte estimates at 4 bytes per token, and the default 30 s
+// idleGracePeriod.
 func testConfig() Config {
 	cfg := defaultConfig()
-	cfg.CapacityTokens = 1000
+	cfg.FallbackCapacityTokens = 1000
 	return cfg
 }
 

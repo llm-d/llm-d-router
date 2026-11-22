@@ -22,13 +22,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	mmobs "github.com/llm-d/llm-d-router/pkg/epp/framework/common/observability/multimodal"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -60,11 +63,17 @@ var minBlockSizeTokens = 64
 var (
 	_ fwkrh.DataProducer                = &dataProducer{}
 	_ fwkrh.PreRequest                  = &dataProducer{}
+	_ fwkrh.ResponseBodyProcessor       = &dataProducer{}
 	_ plugin.StateDumper                = &dataProducer{}
 	_ datalayer.EndpointExtractor       = (*dataProducer)(nil)
 	_ datalayer.Registrant              = &dataProducer{}
 	_ datalayer.CrossReplicaContributor = (*dataProducer)(nil)
 )
+
+// indexUpdateStateKey identifies the per-request record of indexer entries
+// PreRequest added. The record lives until the response arrives so a failed
+// response can remove the entries.
+const indexUpdateStateKey plugin.StateKey = "indexUpdate"
 
 // dataProducer is a plugin that produces data consumed by approx prefix cache aware scheduling.
 type dataProducer struct {
@@ -193,6 +202,11 @@ func newDataProducer(ctx context.Context, name string, config config, handle plu
 	}
 	if config.MaxPrefixBlocksToMatch < 0 {
 		return nil, fmt.Errorf("invalid configuration: MaxPrefixBlocksToMatch must be >= 0 (current value: %d)", config.MaxPrefixBlocksToMatch)
+	}
+	for _, tier := range config.CapacityTiers {
+		if tier != capacityTierHBM && tier != capacityTierCPU {
+			return nil, fmt.Errorf("invalid configuration: CapacityTiers entries must be %q or %q (current value: %q)", capacityTierHBM, capacityTierCPU, tier)
+		}
 	}
 	if handle == nil {
 		return nil, errors.New("plugin handle is required")
@@ -512,9 +526,13 @@ func (p *dataProducer) forgetPeerMerged(endpointID string) {
 
 // PreRequest records in the shared indexer the result of the scheduling selection.
 // It updates the indexer with the prefix hashes for the selected endpoint(s).
+// The entries are optimistic: ResponseBody removes them when the response
+// reports the request never ran, so a retry is not routed as cached.
+// See https://github.com/llm-d/llm-d-router/issues/3919.
 func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
-	// Delete the state to avoid memory leak.
-	defer p.pluginState.Delete(request.RequestID)
+	// Release the scheduling state; the index-update record written below is
+	// kept until the response arrives.
+	defer p.pluginState.DeleteKey(request.RequestID, plugin.StateKey(p.typedName.Name))
 	primaryProfileResult := schedulingResult.ProfileResults[schedulingResult.PrimaryProfileName]
 	if len(primaryProfileResult.TargetEndpoints) == 0 {
 		return nil
@@ -539,11 +557,25 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		return nil
 	}
 
-	// Update indexer asynchronously to avoid blocking the request path.
+	record := &indexUpdateRecord{
+		servers:         servers,
+		perPromptHashes: state.PerPromptHashes,
+		inserted:        make(map[ServerID][][]blockHash, len(servers)),
+		cell:            &updateCell{},
+	}
+	p.pluginState.Write(request.RequestID, indexUpdateStateKey, record)
+
+	// Update indexer asynchronously to avoid blocking the request path. The
+	// cell guards against a rollback that lands before this goroutine runs.
 	p.wg.Go(func() {
+		record.cell.mu.Lock()
+		defer record.cell.mu.Unlock()
+		if record.cell.rolledBack {
+			return
+		}
 		for _, s := range servers {
 			for _, hashes := range state.PerPromptHashes {
-				p.indexerInst.Add(hashes, s)
+				record.inserted[s.ServerID] = append(record.inserted[s.ServerID], p.indexerInst.Add(hashes, s))
 				if p.syncerActive() {
 					p.recent.record(s.String(), hashes)
 				}
@@ -580,6 +612,69 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 		})
 	}
 	return nil
+}
+
+// ResponseBody releases the index-update record when the response stream ends,
+// removing the entries PreRequest added when the response reports the request
+// never ran on the model server. A prompt whose request failed must not look
+// cached: neither endpoint computed it, and a retry routed on the stale
+// entries would skip prefill.
+func (p *dataProducer) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrh.Response, _ *datalayer.EndpointMetadata) {
+	if request == nil || response == nil || !response.EndOfStream {
+		return
+	}
+	record, err := plugin.ReadPluginStateKey[*indexUpdateRecord](p.pluginState, request.RequestID, indexUpdateStateKey)
+	if err != nil {
+		// PreRequest never ran, or the staleness janitor already reaped the record.
+		return
+	}
+	p.pluginState.Delete(request.RequestID)
+	if !responseFailed(response) {
+		return
+	}
+
+	record.cell.mu.Lock()
+	defer record.cell.mu.Unlock()
+	if record.cell.rolledBack {
+		return
+	}
+	record.cell.rolledBack = true
+	for _, s := range record.servers {
+		// The indexer keeps only what this request's Add newly inserted; a
+		// shared block an earlier request contributed stays indexed.
+		for _, hashes := range record.inserted[s.ServerID] {
+			p.indexerInst.Remove(hashes, s.ServerID)
+		}
+		// The recent window publishes whole prompts, so the withdrawal is the
+		// request's full prompts, not the inserted subset.
+		if p.syncerActive() {
+			for _, hashes := range record.perPromptHashes {
+				p.recent.removePrompt(s.String(), hashes)
+			}
+		}
+	}
+	log.FromContext(ctx).V(logutil.DEFAULT).Info("Removed prefix index entries for failed request",
+		"requestID", request.RequestID, "terminationCause", response.TerminationCause)
+}
+
+// responseFailed reports whether the response says the request did not run to
+// completion on the model server. A non-natural termination counts only when
+// the stream ended before the model server produced a chunk: the director sets
+// StartOfStream on the final call only when no body chunk preceded it, and
+// once output exists the pod keeps the prefilled blocks, so the entries stay.
+// A response delivered in full can still carry an error status, which
+// TerminationCauseNatural does not distinguish, so the status header is read
+// as well.
+func responseFailed(response *fwkrh.Response) bool {
+	if response.TerminationCause != "" && response.TerminationCause != fwkrh.TerminationCauseNatural {
+		return response.StartOfStream
+	}
+	status := response.Headers[reqcommon.PseudoHeaderStatus]
+	if status == "" {
+		status = response.Headers[reqcommon.HeaderStatus]
+	}
+	code, err := strconv.Atoi(status)
+	return err == nil && code >= 400
 }
 
 // bestAmongScored returns the highest prediction the picker could have chosen.
@@ -684,25 +779,53 @@ func (p *dataProducer) Extract(ctx context.Context, event datalayer.EndpointEven
 	return nil
 }
 
+// coversTier reports whether the auto-tuned capacity covers tier. An empty
+// CapacityTiers covers every tier.
+func (p *dataProducer) coversTier(tier string) bool {
+	return len(p.config.CapacityTiers) == 0 || slices.Contains(p.config.CapacityTiers, tier)
+}
+
+// makeserver sizes the pod's prefix index. With AutoTune, the capacity is the
+// largest tier in CapacityTiers that the endpoint reports, in router blocks:
+// the HBM tier from CacheNumBlocks and the offload-extended tier from
+// KvCacheMaxTokenCapacity. An offload tier holds a copy of what the HBM tier
+// holds (SGLang HiCache, vLLM CPU offloading), so the tiers are compared
+// rather than added. Without metrics the configured capacity applies.
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
-	gpuBlocks := defaultLRUCapacityPerServer
+	capacity := defaultLRUCapacityPerServer
 	fromMetrics := false
-	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
-		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
-		// CacheNumBlocks counts engine blocks, but each LRU entry is one router
-		// block, which minBlockSizeTokens can make larger. Size the LRU to the
-		// engine's token capacity so it does not outlive the engine's cache.
-		if engineBlockSize := targetEndpoint.GetMetrics().CacheBlockSize; engineBlockSize > 0 {
-			gpuBlocks = max(1, gpuBlocks*engineBlockSize/p.GetBlockSize([]fwksched.Endpoint{targetEndpoint}))
+	offloadCapacityUnknown := false
+	if m := targetEndpoint.GetMetrics(); p.config.AutoTune && m != nil {
+		// Each LRU entry is one router block, which minBlockSizeTokens can make
+		// larger than the engine's block, so capacities convert through tokens
+		// and the index does not outlive the engine's cache.
+		routerBlockSize := p.GetBlockSize([]fwksched.Endpoint{targetEndpoint})
+		if p.coversTier(capacityTierHBM) && m.CacheNumBlocks > 0 {
+			capacity = m.CacheNumBlocks
+			if engineBlockSize := m.CacheBlockSize; engineBlockSize > 0 {
+				capacity = max(1, capacity*engineBlockSize/routerBlockSize)
+			}
+			fromMetrics = true
 		}
-		fromMetrics = true
-	} else if p.config.LRUCapacityPerServer > 0 {
-		gpuBlocks = p.config.LRUCapacityPerServer
+		if p.coversTier(capacityTierCPU) {
+			if m.KvCacheMaxTokenCapacity > 0 {
+				if blocks := max(1, m.KvCacheMaxTokenCapacity/routerBlockSize); blocks > capacity || !fromMetrics {
+					capacity = blocks
+				}
+				fromMetrics = true
+			} else if m.KvCacheOffloadDetected && fromMetrics {
+				offloadCapacityUnknown = true
+			}
+		}
+	}
+	if !fromMetrics && p.config.LRUCapacityPerServer > 0 {
+		capacity = p.config.LRUCapacityPerServer
 	}
 	return server{
-		ServerID:            ServerID(targetEndpoint.GetMetadata().ID),
-		NumOfGPUBlocks:      gpuBlocks,
-		CapacityFromMetrics: fromMetrics,
+		ServerID:               ServerID(targetEndpoint.GetMetadata().ID),
+		NumOfGPUBlocks:         capacity,
+		CapacityFromMetrics:    fromMetrics,
+		OffloadCapacityUnknown: offloadCapacityUnknown,
 	}
 }
 

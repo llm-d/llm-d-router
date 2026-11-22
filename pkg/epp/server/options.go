@@ -36,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	tlsutil "github.com/llm-d/llm-d-router/internal/tls"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
@@ -134,8 +135,11 @@ type Options struct {
 	tlsCipherSuiteValues       []uint16 // Parsed TLS cipher suite values.
 	MetricsEndpointAuth        bool     // Enables authentication and authorization of the metrics endpoint.
 	MetricsClientCAFile        string   // PEM CA that requires a verified client cert on the metrics endpoint.
+	ClientCAFile               string   // PEM CA that requires a verified client cert on the serving listener.
 	MetricsCertDir             string   // Directory with the metrics server certificates that enables metrics TLS.
 	EnableGRPCStreamMetrics    bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
+	// clientCAs is the CA pool parsed from ClientCAFile.
+	clientCAs *x509.CertPool
 	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
 	// beyond the cap collapse to a single overflow series, and 0 collapses all of them. default-flow does not count
 	// against the cap. Bounds metric cardinality in deployments with many distinct fairness IDs.
@@ -149,6 +153,7 @@ type Options struct {
 	FeatureGates   []string // Feature gates applied on top of the configuration's featureGates.
 
 	AllowExperimentalPlugins bool // Allows loading of experimental Alpha plugins.
+	ValidateConfig           bool // Validates the configuration and exits without starting the EPP.
 
 	// internal
 	fs                  *pflag.FlagSet // FlagSet used in AddFlags() and consulted in Validate()
@@ -285,6 +290,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 		"Enables authentication and authorization of the metrics endpoint.")
 	fs.StringVar(&opts.MetricsClientCAFile, "metrics-client-ca-file", opts.MetricsClientCAFile,
 		"PEM CA for metrics mTLS: require verified client certs.")
+	fs.StringVar(&opts.ClientCAFile, "client-ca-file", opts.ClientCAFile,
+		"PEM CA for mTLS on the serving listener: require a verified client certificate from the gateway. Requires --secure-serving.")
 	fs.StringVar(&opts.MetricsCertDir, "metrics-cert-dir", opts.MetricsCertDir,
 		"Directory with tls.crt and tls.key for the metrics endpoint. Empty serves metrics over plain HTTP. Independent of --secure-serving and --cert-path, which apply to the serving listener.")
 	fs.StringVar(&opts.ConfigFile, "config-file", opts.ConfigFile, "The path to the configuration file.")
@@ -297,6 +304,8 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 			"configuration's featureGates list, so these override entries set there.")
 	fs.BoolVar(&opts.AllowExperimentalPlugins, "allow-experimental-plugins", opts.AllowExperimentalPlugins,
 		"Allows loading of experimental Alpha plugins.")
+	fs.BoolVar(&opts.ValidateConfig, "validate-config", opts.ValidateConfig,
+		"Validate the configuration and exit, without connecting to Kubernetes or starting any server.")
 }
 
 func (opts *Options) Complete() error {
@@ -379,23 +388,28 @@ func (opts *Options) Complete() error {
 		}
 	}
 
-	if opts.TLSMinVersion != "" {
-		v, err := parseTLSVersion(opts.TLSMinVersion)
+	if opts.ClientCAFile != "" {
+		caPEM, err := os.ReadFile(opts.ClientCAFile)
 		if err != nil {
-			return fmt.Errorf("invalid tls-min-version %q: %w", opts.TLSMinVersion, err)
+			return fmt.Errorf("%w %s: %v", errReadClientCA, opts.ClientCAFile, err)
 		}
-		if v < tls.VersionTLS12 {
-			return fmt.Errorf("tls-min-version %q is below the TLS 1.2 minimum; supported values: VersionTLS12, VersionTLS13", opts.TLSMinVersion)
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return fmt.Errorf("%w: %s", errNoValidClientCA, opts.ClientCAFile)
 		}
-		opts.tlsMinVersionValue = v
+		opts.clientCAs = pool
 	}
-	if len(opts.TLSCipherSuites) > 0 {
-		suites, err := parseCipherSuites(opts.TLSCipherSuites)
-		if err != nil {
-			return fmt.Errorf("invalid tls-cipher-suites: %w", err)
-		}
-		opts.tlsCipherSuiteValues = suites
+
+	v, err := tlsutil.ParseTLSVersion(opts.TLSMinVersion)
+	if err != nil {
+		return err
 	}
+	opts.tlsMinVersionValue = v
+	suites, err := tlsutil.ParseCipherSuites(opts.TLSCipherSuites)
+	if err != nil {
+		return err
+	}
+	opts.tlsCipherSuiteValues = suites
 
 	// Complete logging options.
 	return opts.LoggingOptions.Complete()
@@ -407,6 +421,9 @@ var (
 	errMetricsCertUnreadable          = errors.New("metrics TLS: cert file unreadable")
 	errReadMetricsClientCA            = errors.New("reading metrics client CA")
 	errNoValidMetricsCA               = errors.New("no valid CA certs in metrics client CA file")
+	errClientCARequiresSecureServing  = errors.New(`"client-ca-file" requires "secure-serving"`)
+	errReadClientCA                   = errors.New("reading client CA")
+	errNoValidClientCA                = errors.New("no valid CA certs in client CA file")
 )
 
 // ConfigureMetricsTLS enables TLS, and optional client mTLS, on the metrics server.
@@ -462,6 +479,9 @@ func (opts *Options) Validate() error {
 	}
 	if opts.MetricsCertDir != "" && opts.MetricsClientCAFile == "" && !opts.MetricsEndpointAuth {
 		return errMetricsTLSWithoutAuth
+	}
+	if opts.ClientCAFile != "" && !opts.SecureServing {
+		return errClientCARequiresSecureServing
 	}
 
 	if opts.RefreshMetricsInterval < MinRefreshMetricsInterval {
@@ -551,38 +571,10 @@ func (opts *Options) TLSCipherSuiteValues() []uint16 {
 	return opts.tlsCipherSuiteValues
 }
 
-var tlsVersions = map[string]uint16{
-	"VersionTLS10": tls.VersionTLS10,
-	"VersionTLS11": tls.VersionTLS11,
-	"VersionTLS12": tls.VersionTLS12,
-	"VersionTLS13": tls.VersionTLS13,
-}
-
-func parseTLSVersion(s string) (uint16, error) {
-	if v, ok := tlsVersions[s]; ok {
-		return v, nil
-	}
-	return 0, fmt.Errorf("unknown TLS version %q; supported values: VersionTLS12, VersionTLS13", s)
-}
-
-func parseCipherSuites(names []string) ([]uint16, error) {
-	byName := make(map[string]uint16)
-	for _, cs := range tls.CipherSuites() {
-		byName[cs.Name] = cs.ID
-	}
-	ids := make([]uint16, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		id, ok := byName[name]
-		if !ok {
-			return nil, fmt.Errorf("unknown cipher suite %q", name)
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
+// ClientCAPool returns the CA pool parsed from ClientCAFile, or nil when the
+// serving listener does not require client certificates.
+func (opts *Options) ClientCAPool() *x509.CertPool {
+	return opts.clientCAs
 }
 
 // LeaderElectionOverride returns a controller manager option override that applies the lease

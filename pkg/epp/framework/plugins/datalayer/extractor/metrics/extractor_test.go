@@ -767,6 +767,42 @@ func TestCoreMetricsExtractorFactoryDefaultEngine(t *testing.T) {
 			errContains: `customMetrics entry attributeKey "shared.key" is duplicated`,
 		},
 		{
+			name: "attributeKey reject if it uses the scalar sample key prefix",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "ScalarSample:WaitingQueueSize",
+								"metricSpec":   "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: `customMetrics entry attributeKey "ScalarSample:WaitingQueueSize" uses a prefix reserved for scalar sample keys`,
+		},
+		{
+			name: "attributeKey reject if it uses the custom scalar sample key prefix",
+			params: map[string]any{
+				"engineConfigs": []map[string]any{
+					{
+						"name": "custom",
+						customMetricsConfigKey: []map[string]any{
+							{
+								"attributeKey": "CustomScalarSample:depth",
+								"metricSpec":   "custom_queue_depth",
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: `customMetrics entry attributeKey "CustomScalarSample:depth" uses a prefix reserved for scalar sample keys`,
+		},
+		{
 			name: "custom engineConfigs auto-appends vllm sglang trtllm-serve and triton-tensorrt-llm",
 			params: map[string]any{
 				"engineConfigs": []map[string]any{
@@ -985,6 +1021,7 @@ func TestExtractorMetricFamiliesCoverEveryEngineSpec(t *testing.T) {
 		raws := []string{
 			engine.QueuedRequestsSpec, engine.RunningRequestsSpec, engine.KVUsageSpec, engine.LoRASpec,
 			engine.CacheInfoSpec, engine.CacheBlockSizeSpec, engine.CacheNumBlocksSpec,
+			engine.CacheTotalTokensSpec, engine.CacheOffloadDetectionSpec,
 		}
 		for _, custom := range engine.CustomMetrics {
 			raws = append(raws, custom.MetricSpec)
@@ -1452,4 +1489,61 @@ func TestCustomMetricReadsUntypedSample(t *testing.T) {
 		t.Fatalf("Extract() unexpected error: %v", err)
 	}
 	assertScalarMetric(t, ep, "prefill_time_sum", 12.5)
+}
+
+func TestCustomMetricRejectsNonScalarFamilies(t *testing.T) {
+	for _, metricType := range []dto.MetricType{dto.MetricType_HISTOGRAM, dto.MetricType_SUMMARY} {
+		for _, aggregation := range []metricAggregation{"", metricAggregationSum} {
+			for _, optional := range []bool{false, true} {
+				t.Run(metricType.String()+"/aggregation="+string(aggregation)+"/optional="+strconv.FormatBool(optional), func(t *testing.T) {
+					registry := NewMappingRegistry()
+					mapping, err := NewMappingFromConfig(MappingConfig{
+						CustomMetrics: []CustomMetric{{
+							AttributeKey: "latency",
+							Spec:         mustSpec(t, "latency"),
+							Aggregation:  aggregation,
+							Optional:     optional,
+						}},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := registry.Register(DefaultEngineType, mapping); err != nil {
+						t.Fatal(err)
+					}
+					extractor, err := NewCoreMetricsExtractor(registry, "")
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					parser := expfmt.NewTextParser(model.LegacyValidation)
+					families, err := parser.TextToMetricFamilies(strings.NewReader(
+						"# TYPE latency " + strings.ToLower(metricType.String()) + "\nlatency_sum 12.5\nlatency_count 2\n"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					ep := fwkdl.NewEndpoint(nil, nil)
+					input := fwkdl.PollInput[sourcemetrics.PrometheusMetricMap]{Payload: families, Endpoint: ep}
+					for _, seeded := range []bool{false, true} {
+						if seeded {
+							ep.GetAttributes().Put(attrmetrics.ScalarMetricDataKey("latency"), attrmetrics.ScalarMetricValue(7))
+						}
+						err := extractor.Extract(t.Context(), input)
+						if optional {
+							if err != nil {
+								t.Fatalf("optional metric: %v", err)
+							}
+						} else if err == nil || !strings.Contains(err.Error(), "unsupported metric type "+metricType.String()+" for \"latency\"") {
+							t.Errorf("expected unsupported metric type error, got %v", err)
+						}
+						if seeded {
+							assertScalarMetric(t, ep, "latency", 7)
+						} else {
+							assertNoScalarMetric(t, ep, "latency")
+						}
+					}
+				})
+			}
+		}
+	}
 }

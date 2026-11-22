@@ -92,7 +92,8 @@ type Config struct {
 	// TTFTByDecision records the TTFT of each streaming request whose stream
 	// ends naturally in p2p_source_request_ttft_seconds, labelled with this
 	// producer's decision.
-	// It adds a response-body hook, so it is off by default.
+	// It adds a response-body hook, so it is off by default. Only
+	// PluginFactory applies it; New ignores it.
 	TTFTByDecision bool `json:"ttftByDecision,omitempty"`
 }
 

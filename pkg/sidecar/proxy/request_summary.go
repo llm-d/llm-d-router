@@ -52,15 +52,15 @@ func requestSummaryFrom(ctx context.Context) *requestSummary {
 }
 
 // observeStageDuration records how long a stage took in that stage's duration
-// histogram and in the request's summary.
+// histogram, with ctx's trace as the exemplar, and in the request's summary.
 func observeStageDuration(ctx context.Context, stage string, d time.Duration) {
 	switch stage {
 	case routing.StageEncode:
-		metrics.RecordEncodeDuration(d)
+		metrics.RecordEncodeDuration(ctx, d)
 	case routing.StagePrefill:
-		metrics.RecordPrefillDuration(d)
+		metrics.RecordPrefillDuration(ctx, d)
 	case routing.StageDecode:
-		metrics.RecordDecodeDuration(d)
+		metrics.RecordDecodeDuration(ctx, d)
 	}
 	if summary := requestSummaryFrom(ctx); summary != nil {
 		summary.mu.Lock()
@@ -111,11 +111,15 @@ type requestRoute struct {
 // log writes the request's summary line at the default level, so a request can
 // be found by its trace_id without raising the sidecar's verbosity. Stages that
 // did not run are left out.
-func (s *requestSummary) log(logger logr.Logger, route requestRoute, status *responseStatus, elapsed time.Duration) {
+// grpcStatus is the response grpc-status, or "" for a non-gRPC response.
+func (s *requestSummary) log(logger logr.Logger, route requestRoute, status *responseStatus, grpcStatus string, elapsed time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	keysAndValues := []any{"path", route.path, "status", status.statusCode, "duration", elapsed, "decoder", route.decoder}
+	if grpcStatus != "" {
+		keysAndValues = append(keysAndValues, "grpcStatus", grpcStatus)
+	}
 	if route.prefiller != "" {
 		keysAndValues = append(keysAndValues, "prefiller", route.prefiller)
 	}

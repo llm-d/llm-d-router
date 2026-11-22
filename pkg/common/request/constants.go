@@ -72,6 +72,7 @@ const (
 	FieldMaxTokens            = "max_tokens"
 	FieldMaxCompletionTokens  = "max_completion_tokens"
 	FieldMaxOutputTokens      = "max_output_tokens" // Used by Responses API
+	FieldMaxNewTokens         = "max_new_tokens"    // Used by vLLM-Omni audio/speech
 	FieldMinTokens            = "min_tokens"
 	FieldPrompt               = "prompt"
 	FieldStream               = "stream"
@@ -85,6 +86,8 @@ const (
 	FieldResponseFormat       = "response_format"
 	FieldSamplingParams       = "sampling_params"
 	FieldN                    = "n"
+	FieldCacheSalt            = "cache_salt"
+	FieldPriority             = "priority"
 	FieldDoRemotePrefill      = "do_remote_prefill"
 	FieldDoRemoteDecode       = "do_remote_decode"
 	FieldRemoteBlockIDs       = "remote_block_ids"

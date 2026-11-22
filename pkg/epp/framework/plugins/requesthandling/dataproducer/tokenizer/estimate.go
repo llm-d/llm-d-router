@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"strconv"
 	"strings"
 
@@ -235,6 +234,20 @@ func (b estimateBackend) produce(ctx context.Context, body *fwkrequest.Inference
 			MultiModalFeatures: features,
 		}}}, nil
 	}
+	if body.Images != nil {
+		raw, features := b.imagesBytes(body.Images)
+		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+			TokenIDs:           packBytes(raw),
+			MultiModalFeatures: features,
+		}}}, nil
+	}
+	if body.Transcriptions != nil {
+		raw, features := b.transcriptionsBytes(body.Transcriptions, mmMetadataFromContext(ctx))
+		return &fwkrequest.TokenizedRequest{Prompts: []fwkrequest.PromptTokens{{
+			TokenIDs:           packBytes(raw),
+			MultiModalFeatures: features,
+		}}}, nil
+	}
 
 	if body.Completions != nil && len(body.Completions.Prompt.Strings) > 1 {
 		return estimateMultiStringCompletions(body.Completions)
@@ -269,14 +282,12 @@ func estimateBytes(body *fwkrequest.InferenceRequestBody) ([]byte, error) {
 		return []byte(body.Embeddings.Input.PlainText()), nil
 	case body.Generate != nil && body.Generate.Text != "":
 		return []byte(body.Generate.Text), nil
-	case body.Images != nil:
-		return []byte(imageGenerationText(body.Images)), nil
 	case body.AudioGenerate != nil:
 		return []byte(audioGenerateText(body.AudioGenerate)), nil
 	case body.TextToSpeech != nil:
 		return []byte(ttsText(body.TextToSpeech)), nil
 	default:
-		return nil, errors.New("unsupported request body type, skipping estimation")
+		return nil, errUnsupportedBody
 	}
 }
 
@@ -290,6 +301,24 @@ func imageGenerationText(r *fwkrequest.ImagesGenerationsRequest) string {
 		return r.Prompt
 	}
 	return r.Prompt + "\n" + r.NegativePrompt
+}
+
+// imagesBytes flattens an images request's conditioning text and, for each of
+// an edits request's uploaded images, its placeholder tokens into the byte
+// stream with an image feature, mirroring the chat multimodal representation so
+// downstream consumers treat both alike. A request without an image part
+// (generations) carries the text alone.
+func (b estimateBackend) imagesBytes(images *fwkrequest.ImagesGenerationsRequest) ([]byte, []fwkrequest.MultiModalFeature) {
+	out := []byte(imageGenerationText(images))
+	var features []fwkrequest.MultiModalFeature
+	for _, img := range images.InputImages {
+		if img.SizeBytes == 0 {
+			continue
+		}
+		out, features = appendMMAssetHash(out, features, reqcommon.ModalityImage, img.Hash,
+			b.img.placeholderCountFromHead(img.Head))
+	}
+	return out, features
 }
 
 // audioGenerateText joins an audio-generate request's prompt with its
@@ -316,6 +345,15 @@ func ttsText(r *fwkrequest.TextToSpeechRequest) string {
 		text += "\n" + r.RefText
 	}
 	return text
+}
+
+// transcriptionsBytes flattens a transcription request's conditioning text and
+// uploaded audio into pseudo-token bytes with one audio feature, mirroring the
+// chat multimodal representation so downstream consumers treat both alike.
+func (b estimateBackend) transcriptionsBytes(tr *fwkrequest.TranscriptionRequest, meta mmMetadata) ([]byte, []fwkrequest.MultiModalFeature) {
+	out := []byte(tr.Prompt)
+	return appendMMAssetHash(out, nil, reqcommon.ModalityAudio, tr.Audio.Hash,
+		b.aud.placeholderCountUploaded(tr.Audio.Head, tr.Audio.SizeBytes, meta.audio))
 }
 
 // chatCompletionsBytes flattens roles + text into pseudo-token bytes, folding
@@ -600,11 +638,17 @@ const maxEstimatedPromptTokens = 1 << 20
 // clamped so the stream stays within maxEstimatedPromptTokens, but every asset
 // keeps at least one placeholder so it still carries weight.
 func appendMMAsset(out []byte, features []fwkrequest.MultiModalFeature, modality reqcommon.Modality, content string, count int) ([]byte, []fwkrequest.MultiModalFeature) {
+	return appendMMAssetHash(out, features, modality, xxhash.Sum64String(content), count)
+}
+
+// appendMMAssetHash appends count placeholder tokens (a precomputed content
+// hash repeated count times) so the asset carries weight in the stream, and
+// reports it as a MultiModalFeature with its token offset and span.
+func appendMMAssetHash(out []byte, features []fwkrequest.MultiModalFeature, modality reqcommon.Modality, sum uint64, count int) ([]byte, []fwkrequest.MultiModalFeature) {
 	out = align(out)
 	offset := len(out) / fwkrequest.BytesPerToken
 	count = max(min(count, maxEstimatedPromptTokens-offset), 1)
 
-	sum := xxhash.Sum64String(content)
 	token := make([]byte, fwkrequest.BytesPerToken)
 	binary.LittleEndian.PutUint32(token, uint32(sum)) //#nosec G115 -- intentional hash truncation to build a placeholder token, not an overflow
 	for i := 0; i < count; i++ {

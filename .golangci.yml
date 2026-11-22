@@ -110,6 +110,8 @@ linters:
           alias: fwkapix
         - pkg: github.com/llm-d/llm-d-router/test/framework/epp
           alias: fwkepp
+        - pkg: github.com/llm-d/llm-d-router/test/framework/epp/harness
+          alias: eppharness
     nolintlint:
       require-specific: true
     revive: # see https://github.com/mgechev/revive#available-rules for all options

@@ -49,10 +49,12 @@ The EPP's scaling behavior and effectiveness are highly dependent on the configu
   | 3 | 2.7x |
   | 4 | 3.5x |
 
-  - **Note (Flow Control)**: Flow control queues and fairness accounting are per replica.
-    In Active-Active mode, priority and fairness are enforced
-    only within each replica's share of the traffic, and per-band capacity limits apply per
-    replica, so the fleet-wide queued volume scales with the replica count.
+  - **Note (Flow Control)**: Flow control queues and fairness accounting are per replica. In
+    Active-Active mode, priority and fairness are enforced only within each replica's share of the
+    traffic, and the queue capacity limits apply per replica, so the fleet-wide queued volume scales
+    with the replica count. Whether the dispatch limit covers all replicas depends on the saturation
+    detector and the cross-replica syncer; see
+    [Multiple active replicas](../pkg/epp/flowcontrol/README.md#multiple-active-replicas).
   - **Plugin Compatibility**: EPP replicas do not share routing state by default. Active-Active mode works with stateless schedulers (`random-picker`), session affinity (`session-affinity-filter`), or plugins that read metrics from backend model servers. The optional Redis syncer shares in-flight load. Approximate prefix routing (`approx-prefix-cache-producer`) is supported in Active-Active when a `CrossReplicaSyncer` (for example `redis-syncer`) is configured and `syncCrossReplicaState` is left enabled (the default); without that sync path, each replica only learns prefixes from traffic it routed, so approximate hit rate drops under Active-Active.
   - For more technical details and context on EPP replica state sync and scaling limitations, see [Issue #1290](https://github.com/llm-d/llm-d-router/issues/1290).
 
@@ -299,9 +301,9 @@ Priority Routing is the recommended Active-Passive configuration in standalone s
 #### Architecture and Failover Mechanics
 
 1. **Deterministic Endpoint Discovery**: EPP pods run as a StatefulSet with a headless Service (`publishNotReadyAddresses: true`). Envoy targets individual pod DNS entries (`<release>-epp-0`, `<release>-epp-1`, etc.) mapped to distinct priority levels.
-2. **Active Health Probing**: Envoy actively probes EPP Port 9002 via gRPC health check (`grpc.health.v1.Health`).
+2. **Active Health Probing**: Envoy actively probes each EPP pod's gRPC health port (`router.epp.grpcHealthPort`, 9003 by default) via gRPC health check (`grpc.health.v1.Health`), in plaintext even when ext_proc uses TLS. Unlike the ext_proc port 9002, this port reports `NOT_SERVING` while EPP drains and until its datastore is synced. The same applies in sidecar mode and in all-active service mode; ClusterIP service mode (single-EPP or leader-elected) keeps probing port 9002 because the EPP Service exposes only that port. There the Kubernetes readiness probe only stops new connections to a draining pod; Envoy's existing HTTP/2 connection stays on it until EPP exits.
 3. **Outlier Detection Failover**: When priority routing is enabled, if a primary pod fails or crashes, Envoy's passive Outlier Detection (`connectTimeout: 0.250s`, `consecutive_local_origin_failure: 2`) detects TCP connection failure and ejects the primary host, shifting traffic to warm Priority 1 standbys in **sub-second time** (`< 1s`, `0.00s–0.08s` fail window in `1P1S` benchmarks) without lease expiration delays.
-4. **Graceful Pod Termination**: EPP pods include a native `lifecycle.preStop.sleep` hook (5 seconds) during planned deletion or rollout on Kubernetes 1.30+ with `PodLifecycleSleepAction` enabled. This gives Envoy active health checks time to detect pod shutdown and redirect new traffic to standby endpoints before SIGTERM, allowing in-flight gRPC streams to drain.
+4. **Graceful Pod Termination**: EPP pods include a native `lifecycle.preStop.sleep` hook (5 seconds) during planned deletion or rollout on Kubernetes 1.30+ with `PodLifecycleSleepAction` enabled. EPP starts draining at SIGTERM: its gRPC health port reports `NOT_SERVING` while ext_proc keeps serving for `--drain-timeout`. That drain window is what Envoy uses to detect the drain and move new streams to standby endpoints, which takes up to `healthCheckInterval` x `healthCheckUnhealthyThreshold` (30s by default). Wherever Envoy health-checks the gRPC health port, the chart sets `--drain-timeout=45s` unless `router.epp.flags.drain-timeout` is set; raise it if you raise those health check values.
 5. **Safe Failback**: When a replacement primary pod is rescheduled, the health check `healthy_threshold` requires consecutive passing health probes before Envoy restores traffic to Priority 0, ensuring the new EPP pod has finished syncing model server state and inference pools.
 
 #### Helm Configuration
@@ -329,6 +331,7 @@ router:
 | `router.proxy.healthCheckTimeout` | `2s` | Health check probe timeout. |
 | `router.proxy.healthCheckUnhealthyThreshold` | `3` | Number of failed probes before marking an endpoint unhealthy. |
 | `router.proxy.healthCheckHealthyThreshold` | `2` | Number of passing probes required before admitting recreated pods. |
+| `router.proxy.healthCheckNoTrafficInterval` | `healthCheckInterval` | Probe interval while the `ext_proc` cluster has not carried traffic, such as after an EPP pod starts. |
 | `router.epp.terminationGracePeriodSeconds` | `130` | Grace period (seconds) before SIGKILL on pod teardown. |
 
 ### GKE Preferred Backends (Gateway Mode)

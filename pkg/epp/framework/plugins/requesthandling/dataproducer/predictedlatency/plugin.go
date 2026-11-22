@@ -71,9 +71,15 @@ const (
 // Scoring, picking, and admission are handled by separate sub-plugins:
 // LatencyScorer, AffinityWeightedPicker, and LatencyAdmission.
 type PredictedLatency struct {
-	typedName                    plugin.TypedName
-	latencypredictor             latencypredictor.PredictorInterface
-	runningRequestLists          sync.Map                                      // Key: types.NamespacedName, Value: *requestPriorityQueue
+	typedName        plugin.TypedName
+	latencypredictor latencypredictor.PredictorInterface
+	// runningRequestLists uses sync.Map because the scheduling path reads it lock-free
+	// while writes are serialized by runningRequestsMu.
+	runningRequestLists sync.Map // Key: types.NamespacedName, Value: *requestPriorityQueue
+	// runningRequestsMu serializes writers of runningRequestLists. Reads stay lock-free,
+	// but add (get-or-create + Add) and remove (Remove + delete-if-empty) are compound
+	// operations: unserialized, a request added to a queue that is being deleted is lost.
+	runningRequestsMu            sync.Mutex
 	sloContextStore              *ttlcache.Cache[string, *predictedLatencyCtx] // TTL cache for request contexts
 	config                       Config
 	prefixMatchDataKey           plugin.DataKey
@@ -233,11 +239,13 @@ type Config struct {
 	// the value is accepted for config compatibility and ignored.
 	SamplingMean float64 `json:"samplingMean,omitempty"`
 	// Deprecated: no longer used. Accepted for config compatibility and ignored.
-	MaxDecodeTokenSamplesForPrediction int           `json:"maxDecodeTokenSamplesForPrediction,omitempty"`
-	SLOBufferFactor                    float64       `json:"sloBufferFactor,omitempty"`
-	ContextTTL                         time.Duration `json:"contextTTL,omitempty"`
-	StreamingMode                      bool          `json:"streamingMode,omitempty"`
-	EndpointRoleLabel                  string        `json:"endpointRoleLabel,omitempty"`
+	MaxDecodeTokenSamplesForPrediction int     `json:"maxDecodeTokenSamplesForPrediction,omitempty"`
+	SLOBufferFactor                    float64 `json:"sloBufferFactor,omitempty"`
+	// ContextTTL accepts a duration string such as "5m" or an integer number
+	// of nanoseconds.
+	ContextTTL        Duration `json:"contextTTL,omitempty"`
+	StreamingMode     bool     `json:"streamingMode,omitempty"`
+	EndpointRoleLabel string   `json:"endpointRoleLabel,omitempty"`
 	// PredictInProduce controls whether bulk predictions are generated during
 	// Produce. Set to false to disable predictions (training-only mode).
 	// When false, the predictor still collects training data but does not call the
@@ -264,7 +272,7 @@ var DefaultConfig = Config{
 	SamplingMean:                       1000,
 	MaxDecodeTokenSamplesForPrediction: 0,
 	SLOBufferFactor:                    1,
-	ContextTTL:                         5 * time.Minute,
+	ContextTTL:                         Duration{Duration: 5 * time.Minute},
 	StreamingMode:                      false,
 	PredictInProduce:                   true,
 }
@@ -325,7 +333,7 @@ func NewPredictedLatency(name string, config Config, predictor latencypredictor.
 	}
 
 	predictedLatency.sloContextStore = ttlcache.New(
-		ttlcache.WithTTL[string, *predictedLatencyCtx](config.ContextTTL),
+		ttlcache.WithTTL[string, *predictedLatencyCtx](config.ContextTTL.Duration),
 	)
 
 	predictedLatency.sloContextStore.OnEviction(func(ctx context.Context, reason ttlcache.EvictionReason, item *ttlcache.Item[string, *predictedLatencyCtx]) {
@@ -516,7 +524,22 @@ func (pl *PredictedLatency) getRunningRequestList(endpointName types.NamespacedN
 	return nil
 }
 
+// addRequestToEndpoint adds the request to the endpoint's running queue, creating
+// the queue if needed. It returns false if the request was already queued.
+func (pl *PredictedLatency) addRequestToEndpoint(endpointName types.NamespacedName, requestID string, tpot float64) bool {
+	pl.runningRequestsMu.Lock()
+	defer pl.runningRequestsMu.Unlock()
+	queue := pl.getRunningRequestList(endpointName)
+	if queue == nil {
+		queue = newRequestPriorityQueue()
+		pl.runningRequestLists.Store(endpointName, queue)
+	}
+	return queue.Add(requestID, tpot)
+}
+
 func (pl *PredictedLatency) removeRequestFromEndpoint(endpointName types.NamespacedName, requestID string) {
+	pl.runningRequestsMu.Lock()
+	defer pl.runningRequestsMu.Unlock()
 	if queue := pl.getRunningRequestList(endpointName); queue != nil {
 		queue.Remove(requestID)
 		if queue.GetSize() == 0 {

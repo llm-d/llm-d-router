@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-router/pkg/common/routing"
+	eppharness "github.com/llm-d/llm-d-router/test/framework/epp/harness"
 )
 
 // headerCopyConfigBase is a PD config whose disagg-profile-handler sets the
@@ -106,7 +107,7 @@ func TestRequestHeaderCopyHandler_DoesNotEchoClientValue(t *testing.T) {
 // sendRequestGetResponseHeaders drives one full request/response transaction
 // with the given extra request headers and returns the response headers
 // mutation's set-headers list.
-func sendRequestGetResponseHeaders(t *testing.T, h *TestHarness, extraHeaders map[string]string) []*configPb.HeaderValueOption {
+func sendRequestGetResponseHeaders(t *testing.T, h *eppharness.TestHarness, extraHeaders map[string]string) []*configPb.HeaderValueOption {
 	t.Helper()
 
 	requests := append(newRoutedRequest(extraHeaders), ReqResponseOnly(

@@ -28,7 +28,7 @@ import (
 func TestCapSingleToken_LeavesTheCallersNestedMapIntact(t *testing.T) {
 	client := map[string]any{
 		"token_ids":         []any{1, 2, 3},
-		FieldSamplingParams: map[string]any{FieldMaxTokens: 200, FieldMinTokens: 10},
+		FieldSamplingParams: map[string]any{FieldMaxTokens: 200, FieldMinTokens: 10, FieldN: 3},
 	}
 
 	prefill := maps.Clone(client)
@@ -41,6 +41,9 @@ func TestCapSingleToken_LeavesTheCallersNestedMapIntact(t *testing.T) {
 	if got, ok := decodeLimits[FieldMinTokens]; !ok || got != 10 {
 		t.Errorf("decode request min_tokens = %v (present %v), want the client's 10", got, ok)
 	}
+	if got := decodeLimits[FieldN]; got != 3 {
+		t.Errorf("decode request n = %v, want the client's 3", got)
+	}
 
 	prefillLimits := prefill[FieldSamplingParams].(map[string]any)
 	if got := prefillLimits[FieldMaxTokens]; got != 1 {
@@ -48,6 +51,9 @@ func TestCapSingleToken_LeavesTheCallersNestedMapIntact(t *testing.T) {
 	}
 	if _, ok := prefillLimits[FieldMinTokens]; ok {
 		t.Error("prefill request kept min_tokens")
+	}
+	if _, ok := prefillLimits[FieldN]; ok {
+		t.Error("prefill request kept n")
 	}
 }
 
@@ -110,6 +116,17 @@ func TestCapSingleToken(t *testing.T) {
 				"stream":                true,
 				"stream_options":        map[string]any{"include_usage": true},
 			},
+			want: map[string]any{
+				"model":                 "m",
+				"max_tokens":            1,
+				"max_completion_tokens": 1,
+				"stream":                false,
+			},
+		},
+		{
+			name:    "chat completions strips n",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"model": "m", "n": 4},
 			want: map[string]any{
 				"model":                 "m",
 				"max_tokens":            1,
@@ -229,6 +246,19 @@ func TestCapSingleToken(t *testing.T) {
 			},
 		},
 		{
+			name:    "generate strips n inside sampling_params",
+			apiType: APITypeVLLMGenerate,
+			body: map[string]any{
+				"model":           "m",
+				"sampling_params": map[string]any{"max_tokens": 100, "n": 4},
+			},
+			want: map[string]any{
+				"model":           "m",
+				"sampling_params": map[string]any{"max_tokens": 1},
+				"stream":          false,
+			},
+		},
+		{
 			name:    "generate synthesizes sampling_params when absent",
 			apiType: APITypeVLLMGenerate,
 			body:    map[string]any{"model": "m"},
@@ -306,6 +336,12 @@ func TestCapSingleToken(t *testing.T) {
 			want:    map[string]any{"model": "m", "max_tokens": 100, "max_output_tokens": 1, "stream": false, "store": false},
 		},
 		{
+			name:    "audio speech caps max_new_tokens",
+			apiType: APITypeAudioSpeech,
+			body:    map[string]any{"model": "m", "max_new_tokens": 800, "stream": true},
+			want:    map[string]any{"model": "m", "max_new_tokens": 1, "stream": false},
+		},
+		{
 			name:    "generate preserves other sampling_params entries",
 			apiType: APITypeVLLMGenerate,
 			body: map[string]any{
@@ -377,6 +413,13 @@ func TestOutputTokenLimit(t *testing.T) {
 			wantOK:  true,
 		},
 		{
+			name:    "audio speech reads max_new_tokens",
+			apiType: APITypeAudioSpeech,
+			body:    map[string]any{"max_new_tokens": float64(128)},
+			want:    128,
+			wantOK:  true,
+		},
+		{
 			name:    "generate reads max_tokens from sampling_params",
 			apiType: APITypeVLLMGenerate,
 			body:    map[string]any{"sampling_params": map[string]any{"max_tokens": float64(50)}},
@@ -445,6 +488,39 @@ func TestOutputTokenLimit(t *testing.T) {
 			apiType: APITypeChatCompletions,
 			body:    map[string]any{"max_tokens": 77},
 			want:    77,
+			wantOK:  true,
+		},
+		{
+			name:    "json.Number decimal form is read",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": json.Number("64.0")},
+			want:    64,
+			wantOK:  true,
+		},
+		{
+			name:    "wrong type has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": "64"},
+			wantOK:  false,
+		},
+		{
+			name:    "out-of-range value has no limit",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_tokens": float64(1e300)},
+			wantOK:  false,
+		},
+		{
+			name:    "falls back when the primary field is negative",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_completion_tokens": float64(-1), "max_tokens": float64(50)},
+			want:    50,
+			wantOK:  true,
+		},
+		{
+			name:    "falls back when the primary field is the wrong type",
+			apiType: APITypeChatCompletions,
+			body:    map[string]any{"max_completion_tokens": "bad", "max_tokens": float64(50)},
+			want:    50,
 			wantOK:  true,
 		},
 	}
@@ -538,6 +614,8 @@ func TestNonNegativeInt(t *testing.T) {
 		{"float64", float64(3), 3, true},
 		{"zero", float64(0), 0, true},
 		{"json.Number", json.Number("7"), 7, true},
+		{"json.Number decimal point", json.Number("100.0"), 100, true},
+		{"json.Number exponent", json.Number("1e3"), 1000, true},
 		{"int", 5, 5, true},
 		{"int64", int64(9), 9, true},
 		{"negative float64", float64(-1), 0, false},

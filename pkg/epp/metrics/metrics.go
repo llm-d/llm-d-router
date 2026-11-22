@@ -133,6 +133,11 @@ func RegisterWithOptions(opts RegisterOptions, customCollectors ...prometheus.Co
 		metrics.Registry.MustRegister(llmdInferenceModelRewriteDecisionsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerPollErrorsTotal)
 		metrics.Registry.MustRegister(LlmdDataLayerExtractErrorsTotal)
+		metrics.Registry.MustRegister(LlmdDataLayerPollsTotal)
+		metrics.Registry.MustRegister(LlmdDataLayerPollDuration)
+		metrics.Registry.MustRegister(LlmdCrossReplicaPublishesTotal)
+		metrics.Registry.MustRegister(LlmdCrossReplicaLastPublishTimestamp)
+		metrics.Registry.MustRegister(LlmdCrossReplicaPublishCycleDuration)
 		metrics.Registry.MustRegister(llmdToolCallingFieldStatusTotal)
 		for _, collector := range customCollectors {
 			metrics.Registry.MustRegister(collector)
@@ -196,6 +201,11 @@ func Reset() {
 	llmdInferenceModelRewriteDecisionsTotal.Reset()
 	LlmdDataLayerPollErrorsTotal.Reset()
 	LlmdDataLayerExtractErrorsTotal.Reset()
+	LlmdDataLayerPollsTotal.Reset()
+	LlmdDataLayerPollDuration.Reset()
+	LlmdCrossReplicaPublishesTotal.Reset()
+	LlmdCrossReplicaLastPublishTimestamp.Reset()
+	LlmdCrossReplicaPublishCycleDuration.Reset()
 	llmdToolCallingFieldStatusTotal.Reset()
 }
 
@@ -724,6 +734,87 @@ func RecordDataLayerPollError(sourceType string) {
 // RecordDataLayerExtractError increments the extract error counter for a source/extractor type.
 func RecordDataLayerExtractError(sourceType, extractorType string) {
 	LlmdDataLayerExtractErrorsTotal.WithLabelValues(sourceType, extractorType).Inc()
+}
+
+// Outcome label values of LlmdDataLayerPollsTotal.
+const (
+	// DataLayerPollOutcomeSuccess: Dispatch returned nil before its deadline.
+	DataLayerPollOutcomeSuccess = "success"
+	// DataLayerPollOutcomeError: Dispatch returned an error before its deadline.
+	DataLayerPollOutcomeError = "error"
+	// DataLayerPollOutcomeTimeout: the poll deadline expired, whatever Dispatch returned.
+	DataLayerPollOutcomeTimeout = "timeout"
+)
+
+// InitDataLayerPollMetrics creates the three outcome series and the duration
+// histogram for a source type at zero, so the first non-success poll is an
+// increment on an existing series instead of the birth of a new one, which
+// rate() and increase() would not see. Safe to call repeatedly.
+func InitDataLayerPollMetrics(sourceType string) {
+	for _, outcome := range []string{DataLayerPollOutcomeSuccess, DataLayerPollOutcomeError, DataLayerPollOutcomeTimeout} {
+		LlmdDataLayerPollsTotal.WithLabelValues(sourceType, outcome)
+	}
+	LlmdDataLayerPollDuration.WithLabelValues(sourceType)
+}
+
+// RecordDataLayerPoll counts one poll under its outcome and observes its
+// duration for a source type.
+func RecordDataLayerPoll(sourceType, outcome string, duration time.Duration) {
+	LlmdDataLayerPollsTotal.WithLabelValues(sourceType, outcome).Inc()
+	LlmdDataLayerPollDuration.WithLabelValues(sourceType).Observe(duration.Seconds())
+}
+
+// Outcome label values of LlmdCrossReplicaPublishesTotal.
+const (
+	// CrossReplicaPublishOutcomeSuccess: the syncer accepted the endpoint's value.
+	CrossReplicaPublishOutcomeSuccess = "success"
+	// CrossReplicaPublishOutcomeError: the syncer returned an error other than
+	// an expired deadline for the endpoint.
+	CrossReplicaPublishOutcomeError = "error"
+	// CrossReplicaPublishOutcomeTimeout: the publish deadline expired before
+	// the syncer accepted the endpoint's value, including an endpoint left
+	// unattempted because the deadline ran out. A slow syncer shows here; a
+	// syncer that refuses writes shows under error.
+	CrossReplicaPublishOutcomeTimeout = "timeout"
+)
+
+// InitCrossReplicaPublishMetrics creates every outcome series for a state key at
+// zero, so the first failed publish is an increment on an existing series that
+// rate() and increase() can see, and exposes the cycle-duration histogram with
+// zero observations. It does not create the last-publish timestamp series:
+// before the first successful publish that series must be absent, not 0.
+// Safe to call repeatedly.
+func InitCrossReplicaPublishMetrics(stateKey string) {
+	for _, outcome := range []string{CrossReplicaPublishOutcomeSuccess, CrossReplicaPublishOutcomeError, CrossReplicaPublishOutcomeTimeout} {
+		LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, outcome)
+	}
+	LlmdCrossReplicaPublishCycleDuration.WithLabelValues()
+}
+
+// RecordCrossReplicaCycleOutcome records one publish cycle for a state key: it
+// counts the endpoints published, failed with an error, and timed out, and
+// stamps the last-publish time only when the cycle was clean, that is, it
+// published at least one endpoint and none errored or timed out. A partial
+// failure therefore stops the clock just like an outage, so a staleness alert
+// also catches an endpoint that never publishes.
+func RecordCrossReplicaCycleOutcome(stateKey string, succeeded, errored, timedOut int, now time.Time) {
+	for outcome, n := range map[string]int{
+		CrossReplicaPublishOutcomeSuccess: succeeded,
+		CrossReplicaPublishOutcomeError:   errored,
+		CrossReplicaPublishOutcomeTimeout: timedOut,
+	} {
+		if n > 0 {
+			LlmdCrossReplicaPublishesTotal.WithLabelValues(stateKey, outcome).Add(float64(n))
+		}
+	}
+	if succeeded > 0 && errored == 0 && timedOut == 0 {
+		LlmdCrossReplicaLastPublishTimestamp.WithLabelValues(stateKey).Set(float64(now.UnixNano()) / float64(time.Second))
+	}
+}
+
+// RecordCrossReplicaPublishCycle observes the duration of one publish cycle.
+func RecordCrossReplicaPublishCycle(duration time.Duration) {
+	LlmdCrossReplicaPublishCycleDuration.WithLabelValues().Observe(duration.Seconds())
 }
 
 // RecordToolCallingFieldStatuses records outcomes only for fields present on at

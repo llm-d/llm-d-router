@@ -17,10 +17,13 @@ limitations under the License.
 package tokenizer
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"image"
+	"image/png"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,6 +36,8 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkrequest "github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/dataproducer/prefixhash"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 )
 
@@ -53,6 +58,16 @@ func TestPackBytes_KeyPreserving(t *testing.T) {
 	tokens := packBytes(raw)
 	require.Len(t, tokens, len(raw)/fwkrequest.BytesPerToken)
 	assert.Equal(t, xxhash.Sum64(raw), hashTokens(tokens), "packed-token hash != raw-byte hash; estimate path is not key-preserving")
+}
+
+// TestEstimateBackend_UnsupportedBody asserts a body the backend cannot read
+// is reported as unsupported rather than estimated as an empty prompt.
+func TestEstimateBackend_UnsupportedBody(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Payload: fwkrequest.RawPayload(`{"prompt":"hi"}`),
+	})
+	require.ErrorIs(t, err, errUnsupportedBody)
+	assert.Nil(t, tp)
 }
 
 // TestEstimateBackend_GeneratePassthrough asserts pre-tokenized input is kept
@@ -114,6 +129,115 @@ func TestEstimateBackend_ImagesIgnoresWhitespaceOnlyNegativePrompt(t *testing.T)
 	})
 	require.NoError(t, err)
 	require.Len(t, tp.Prompts, 1)
+	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
+}
+
+// pngBytes encodes a width x height PNG so a captured image head carries a
+// decodable dimension header.
+func pngBytes(t *testing.T, width, height int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
+}
+
+// imageTokens is the expected placeholder count for pixel dimensions under the
+// built-in defaults, spelled out so each case states its own resolution.
+func imageTokens(w, h int) int {
+	n := (w * h) / imageTokenFactor
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// TestImagesEstimator_CapturedImageDimensionTokens asserts an edits request's
+// uploaded image is estimated from its decoded dimensions: a 128x64 PNG yields
+// 128*64/factor placeholder tokens, reported as an image feature behind the
+// conditioning text and counted in the request's tokens.
+func TestImagesEstimator_CapturedImageDimensionTokens(t *testing.T) {
+	png := pngBytes(t, 128, 64)
+	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: int64(len(png)), Head: png, Hash: xxhash.Sum64(png)}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: []fwkrequest.UploadedMedia{media}},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, reqcommon.ModalityImage, features[0].Modality)
+	assert.Equal(t, imageTokens(128, 64), features[0].Length)
+	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
+	assert.Equal(t, len(packBytes([]byte("add a hat"))), features[0].Offset)
+	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
+}
+
+// TestImagesEstimator_MultipleImagesSumTokens asserts a multi-image edit
+// reports one image feature per uploaded image, in order and back to back, and
+// its token count is the text plus the placeholders of every image.
+func TestImagesEstimator_MultipleImagesSumTokens(t *testing.T) {
+	first, second := pngBytes(t, 128, 64), pngBytes(t, 256, 128)
+	images := []fwkrequest.UploadedMedia{
+		{ContentType: "image/png", SizeBytes: int64(len(first)), Head: first, Hash: xxhash.Sum64(first)},
+		{ContentType: "image/png", SizeBytes: int64(len(second)), Head: second, Hash: xxhash.Sum64(second)},
+	}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: images},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 2)
+	textTokens := len(packBytes([]byte("add a hat")))
+	assert.Equal(t, textTokens, features[0].Offset)
+	assert.Equal(t, imageTokens(128, 64), features[0].Length)
+	assert.Equal(t, strconv.FormatUint(images[0].Hash, 16), features[0].Hash)
+	assert.Equal(t, features[0].Offset+features[0].Length, features[1].Offset)
+	assert.Equal(t, imageTokens(256, 128), features[1].Length)
+	assert.Equal(t, strconv.FormatUint(images[1].Hash, 16), features[1].Hash)
+	assert.Equal(t, textTokens+imageTokens(128, 64)+imageTokens(256, 128), tp.TokenCount())
+}
+
+// TestImagesEstimator_UndecodableHeadUsesDefaultResolution asserts an image
+// head that carries no readable dimension header falls back to the default
+// resolution, so the request still carries image weight.
+func TestImagesEstimator_UndecodableHeadUsesDefaultResolution(t *testing.T) {
+	media := fwkrequest.UploadedMedia{ContentType: "image/png", SizeBytes: 4096, Head: []byte("not an image header")}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: []fwkrequest.UploadedMedia{media}},
+	})
+	require.NoError(t, err)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, imageTokens(defaultImageWidth, defaultImageHeight), features[0].Length)
+}
+
+// TestImagesEstimator_WebPHeadDimensions asserts a WebP upload resolves to its
+// real dimensions the way chat webp content does, by hand-peeking the header
+// no Go decoder is registered for.
+func TestImagesEstimator_WebPHeadDimensions(t *testing.T) {
+	head := webpHeader("VP8L", 512, 256)
+	media := fwkrequest.UploadedMedia{ContentType: "image/webp", SizeBytes: int64(len(head)), Head: head, Hash: xxhash.Sum64(head)}
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "add a hat", InputImages: []fwkrequest.UploadedMedia{media}},
+	})
+	require.NoError(t, err)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, imageTokens(512, 256), features[0].Length)
+}
+
+// TestImagesEstimator_GenerationsCarriesNoFeature asserts a request without an
+// uploaded image (images-generations shares the typed body) estimates the text
+// alone and reports no features.
+func TestImagesEstimator_GenerationsCarriesNoFeature(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{
+		Images: &fwkrequest.ImagesGenerationsRequest{Prompt: "a cat wearing a hat"},
+	})
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	assert.Empty(t, tp.Prompts[0].MultiModalFeatures)
 	assert.Equal(t, packBytes([]byte("a cat wearing a hat")), tp.Prompts[0].TokenIDs)
 }
 
@@ -1154,6 +1278,73 @@ func TestAudioEstimator_Qwen3OmniAndGemma4(t *testing.T) {
 	assert.Equal(t, 3*13+2, tp.Prompts[0].MultiModalFeatures[0].Length, "qwen3omni-shaped audio length")
 }
 
+// transcriptionsBody builds a request body carrying an uploaded audio file part,
+// the shape the openai parser produces for /v1/audio/transcriptions.
+func transcriptionsBody(prompt string, media fwkrequest.UploadedMedia) *fwkrequest.InferenceRequestBody {
+	return &fwkrequest.InferenceRequestBody{Transcriptions: &fwkrequest.TranscriptionRequest{
+		Prompt: prompt,
+		Audio:  media,
+	}}
+}
+
+// uploadedWAV returns the UploadedMedia the parser captures for a WAV file
+// part. Head carries the same leading bytes the parser retains.
+func uploadedWAV(t *testing.T, sampleRate, channels, dataLen int) fwkrequest.UploadedMedia {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(wavBase64(sampleRate, channels, dataLen))
+	require.NoError(t, err)
+	head := raw
+	if len(head) > fwkrequest.UploadedMediaHeadBytes {
+		head = head[:fwkrequest.UploadedMediaHeadBytes]
+	}
+	return fwkrequest.UploadedMedia{ContentType: "audio/wav", SizeBytes: int64(len(raw)), Head: head, Hash: xxhash.Sum64(raw)}
+}
+
+// TestTranscriptionsEstimator_WAVDuration asserts an uploaded WAV file part
+// resolves to its exact duration: 48000 data bytes at 32000 B/s is 1.5s. The
+// feature mirrors the chat audio representation: hash, offset behind the
+// conditioning text, and placeholder span counted in the request's tokens.
+func TestTranscriptionsEstimator_WAVDuration(t *testing.T) {
+	media := uploadedWAV(t, 16000, 1, 48000)
+	tp, err := estimateBackend{}.produce(context.Background(), transcriptionsBody("hint", media))
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts, 1)
+	features := tp.Prompts[0].MultiModalFeatures
+	require.Len(t, features, 1)
+	assert.Equal(t, reqcommon.ModalityAudio, features[0].Modality)
+	assert.Equal(t, audioTokens(1.5), features[0].Length)
+	assert.Equal(t, strconv.FormatUint(media.Hash, 16), features[0].Hash)
+	assert.Equal(t, len(packBytes([]byte("hint"))), features[0].Offset)
+	assert.Equal(t, features[0].Offset+features[0].Length, tp.TokenCount())
+}
+
+// TestTranscriptionsEstimator_NonWAVUsesByteRate asserts an uploaded file that
+// is not a WAV converts through the byte rate: 48000 bytes at the default
+// 16000 B/s is 3s.
+func TestTranscriptionsEstimator_NonWAVUsesByteRate(t *testing.T) {
+	media := fwkrequest.UploadedMedia{ContentType: "audio/mpeg", SizeBytes: 48000, Head: []byte("ID3 not a riff header")}
+	tp, err := estimateBackend{}.produce(context.Background(), transcriptionsBody("", media))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(3), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestTranscriptionsEstimator_DurationHeaderWins asserts a header-declared
+// duration beats the payload-derived one.
+func TestTranscriptionsEstimator_DurationHeaderWins(t *testing.T) {
+	media := fwkrequest.UploadedMedia{ContentType: "audio/mpeg", SizeBytes: 480000}
+	tp, err := estimateBackend{}.produce(audioCtx(audioMetadata{duration: 5}), transcriptionsBody("", media))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(5), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
+// TestTranscriptionsEstimator_NoFilePart asserts a form without a file part
+// still carries the default-duration weight rather than zero.
+func TestTranscriptionsEstimator_NoFilePart(t *testing.T) {
+	tp, err := estimateBackend{}.produce(context.Background(), transcriptionsBody("", fwkrequest.UploadedMedia{}))
+	require.NoError(t, err)
+	assert.Equal(t, audioTokens(defaultAudioDuration), tp.Prompts[0].MultiModalFeatures[0].Length)
+}
+
 // TestEstimateBackend_ChatAudioWeightingDistinct asserts two clips of different
 // length produce different token streams, so audio weighting reaches the
 // locality keys instead of collapsing to one placeholder.
@@ -1475,4 +1666,168 @@ func TestEstimateBackend_ChatToolCallsAffectPrefix(t *testing.T) {
 
 	long := chatEstimate(t, turn("write_file", strings.Repeat("x", 4000)))
 	assert.Greater(t, len(long), len(noCall)+900, "tool call arguments must count toward the estimate")
+}
+
+// A payload that cannot decode as standard base64 -- URL-safe alphabet, for
+// example -- still has a length, so the byte-rate estimate applies. Falling
+// back to the default duration here would weigh such clips at 10 s regardless
+// of size.
+func TestAudioEstimator_UndecodableBase64UsesByteRate(t *testing.T) {
+	// 64,000 URL-safe characters: no standard-base64 decode, but
+	// Base64DecodedLen still yields 48,000 bytes, 3 s at the default rate.
+	payload := strings.Repeat("_-", 32000)
+	tp, err := estimateBackend{}.produce(context.Background(), chatInputAudioBody(payload, "wav"))
+	require.NoError(t, err)
+	require.Len(t, tp.Prompts[0].MultiModalFeatures, 1)
+	assert.Equal(t, audioTokens(3), tp.Prompts[0].MultiModalFeatures[0].Length)
+	assert.NotEqual(t, audioTokens(defaultAudioDuration), tp.Prompts[0].MultiModalFeatures[0].Length,
+		"an undecodable payload must not fall back to the default duration")
+}
+
+// speechPrefixHashes estimates a speech body and returns its prefix block
+// hashes, applying the cache salt the way Plugin.Produce does.
+func speechPrefixHashes(t *testing.T, speech *fwkrequest.TextToSpeechRequest) [][]prefixhash.BlockHash {
+	t.Helper()
+	body := &fwkrequest.InferenceRequestBody{TextToSpeech: speech}
+	tp, err := estimateBackend{}.produce(context.Background(), body)
+	require.NoError(t, err)
+	body.TokenizedRequest = tp
+	tp.CacheSalt = CacheSaltFromBody(body)
+	return prefixhash.GetBlockHashes(context.Background(), &fwksched.InferenceRequest{
+		TargetModel: "qwen3-tts",
+		Body:        body,
+	}, 16, 2048)
+}
+
+// The engine salts a speech request's prefix cache on its full conditioning,
+// so the router's fingerprint must separate requests that differ only in
+// conditioning: the estimate carries the spoken text alone, and without the
+// salt two voices over the same text would fingerprint identically and the
+// prefix-cache-affinity-filter would stick them to an endpoint holding no
+// shared prefix.
+func TestSpeechPrefixFingerprint_SeparatesConditioning(t *testing.T) {
+	base := func() *fwkrequest.TextToSpeechRequest {
+		return &fwkrequest.TextToSpeechRequest{Input: "hello there", Instructions: "cheerfully"}
+	}
+
+	vivian := speechPrefixHashes(t, base())
+	ryan := base()
+	ryan.Voice = "ryan"
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, ryan), "a different voice must change the fingerprint")
+
+	french := base()
+	french.Language = "fr"
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, french), "a different language must change the fingerprint")
+
+	clone := base()
+	clone.RefAudio = json.RawMessage(`"https://example.com/voice.wav"`)
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, clone), "reference-audio conditioning must change the fingerprint")
+
+	secondSpeaker := base()
+	secondSpeaker.RefAudio2 = json.RawMessage(`"https://example.com/second-voice.wav"`)
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, secondSpeaker), "second-speaker reference-audio conditioning must change the fingerprint")
+
+	references := base()
+	references.References = json.RawMessage(`[{"audio_path": "https://example.com/voice.wav", "text": "hello there"}]`)
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, references), "the references alias must change the fingerprint")
+
+	assert.Equal(t, vivian, speechPrefixHashes(t, base()), "the same conditioning must fingerprint stably")
+
+	salted := base()
+	salted.CacheSalt = "tenant-a"
+	assert.NotEqual(t, vivian, speechPrefixHashes(t, salted), "a client salt must compose into the fingerprint")
+}
+
+// The engine hashes the full input into its conditioning salt over placeholder
+// token IDs, so requests sharing a text prefix but differing in suffix share no
+// prompt block. The salt must separate them at block 0, not just at the block
+// where the suffixes diverge.
+func TestSpeechPrefixFingerprint_SharedTextPrefixDoesNotMatch(t *testing.T) {
+	prefix := strings.Repeat("welcome to customer support ", 8)
+	first := speechPrefixHashes(t, &fwkrequest.TextToSpeechRequest{Input: prefix + "alpha", Voice: "vivian"})
+	second := speechPrefixHashes(t, &fwkrequest.TextToSpeechRequest{Input: prefix + "bravo", Voice: "vivian"})
+	require.Greater(t, len(first[0]), 1)
+	assert.NotEqual(t, first[0][0], second[0][0], "a shared text prefix with a different suffix must not match block 0")
+}
+
+// A decoded JSON string can contain a literal NUL; length-prefixing each field
+// keeps a value from shifting into the next field.
+func TestSpeechCacheSalt_EmbeddedNULDoesNotCollide(t *testing.T) {
+	first := &fwkrequest.TextToSpeechRequest{Input: "a\x00b", Instructions: "c"}
+	second := &fwkrequest.TextToSpeechRequest{Input: "a", Instructions: "b\x00c"}
+	assert.NotEqual(t,
+		CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: first}),
+		CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: second}),
+		"a NUL inside a field must not merge it with the next field")
+}
+
+// The conditioning salt composes with a client-supplied one rather than
+// replacing it, mirroring the engine's composition.
+func TestSpeechCacheSalt_ComposesClientSalt(t *testing.T) {
+	base := &fwkrequest.TextToSpeechRequest{Input: "hello", Voice: "vivian"}
+	salted := *base
+	salted.CacheSalt = "tenant-a"
+
+	derived := CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: base})
+	composed := CacheSaltFromBody(&fwkrequest.InferenceRequestBody{TextToSpeech: &salted})
+	assert.Equal(t, "tenant-a:"+derived, composed)
+	assert.NotEqual(t, derived, composed)
+}
+
+// Conditioning changes the fingerprint but not the input weight: the salt
+// seeds block hashes only, so the token estimate stays the spoken text.
+func TestSpeechPrefixFingerprint_ConditioningLeavesWeightUnchanged(t *testing.T) {
+	plain := &fwkrequest.TextToSpeechRequest{Input: "hello there"}
+	voiced := &fwkrequest.TextToSpeechRequest{Input: "hello there", Voice: "ryan", Language: "en", TaskType: "CustomVoice"}
+
+	plainTP, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{TextToSpeech: plain})
+	require.NoError(t, err)
+	voicedTP, err := estimateBackend{}.produce(context.Background(), &fwkrequest.InferenceRequestBody{TextToSpeech: voiced})
+	require.NoError(t, err)
+
+	assert.Equal(t, plainTP.Prompts[0].TokenIDs, voicedTP.Prompts[0].TokenIDs)
+	assert.Equal(t, plainTP.TokenCount(), voicedTP.TokenCount())
+}
+
+// The adapter-folded conditioning fields separate fingerprints the way the
+// engine's per-adapter salts do: fish omni's pre-computed reference codes and
+// indextts2's extra-params emotion settings.
+func TestSpeechPrefixFingerprint_AdapterConditioning(t *testing.T) {
+	base := func() *fwkrequest.TextToSpeechRequest {
+		return &fwkrequest.TextToSpeechRequest{Input: "hello there", Voice: "vivian"}
+	}
+	plain := speechPrefixHashes(t, base())
+
+	codes := base()
+	codes.RefAudioCodes = json.RawMessage(`[[1,2,3],[4,5,6]]`)
+	assert.NotEqual(t, plain, speechPrefixHashes(t, codes), "different reference codes must change the fingerprint")
+
+	emotion := base()
+	emotion.ExtraParams = json.RawMessage(`{"emo_alpha": 0.8, "use_emo_text": true}`)
+	assert.NotEqual(t, plain, speechPrefixHashes(t, emotion), "emotion conditioning must change the fingerprint")
+
+	assert.Equal(t, plain, speechPrefixHashes(t, base()), "the same conditioning must fingerprint stably")
+}
+
+// Randomized conditioning (indextts2's use_random) salts every engine request
+// freshly, so two identical requests must not fingerprint alike: the router
+// would otherwise predict a shared prefix the engine never holds.
+func TestSpeechPrefixFingerprint_UseRandomIsolatesRequests(t *testing.T) {
+	body := func() *fwkrequest.TextToSpeechRequest {
+		return &fwkrequest.TextToSpeechRequest{
+			Input:       "hello there",
+			Voice:       "vivian",
+			ExtraParams: json.RawMessage(`{"use_random": true}`),
+		}
+	}
+	first := speechPrefixHashes(t, body())
+	second := speechPrefixHashes(t, body())
+	assert.NotEqual(t, first, second, "two use_random requests must not share a fingerprint")
+
+	stable := &fwkrequest.TextToSpeechRequest{
+		Input:       "hello there",
+		Voice:       "vivian",
+		ExtraParams: json.RawMessage(`{"use_random": false}`),
+	}
+	assert.Equal(t, speechPrefixHashes(t, stable), speechPrefixHashes(t, stable), "use_random false must fingerprint stably")
 }
