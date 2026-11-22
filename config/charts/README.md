@@ -434,7 +434,7 @@ Configuration for the backend model servers that EPP routes traffic to. These se
 | `router.modelServers.protocol` | Protocol used by model servers. Options: `[http, grpc]`. | `http` |
 | `router.modelServers.targetPorts` | Port(s) EPP routes traffic to on the model servers. | `[{number: 8000}]` |
 | `router.modelServers.targetPortNumber` | Legacy fallback port number for GKE health check policies. | `8000` |
-| `router.modelServers.grpcServiceName` | Service name passed to `grpc.health.v1.Health/Check` in GKE `HealthCheckPolicy` when `type=vllm` and `protocol=grpc`. Set `""` for overall server health or `"vllm.grpc.engine.VllmEngine"` for legacy `VllmEngine` servers. | `vllm.Inference` |
+| `router.modelServers.grpcServiceName` | Optional service name passed to `grpc.health.v1.Health/Check` in GKE `HealthCheckPolicy` when `protocol=grpc`. Empty omits `grpcServiceName` to query overall server health. | `""` |
 
 #### Complete Model Server Example
 

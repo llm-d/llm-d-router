@@ -127,8 +127,8 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
       echo "Validation failed: h2c appProtocol not found in InferencePool for test: ${key}"
       exit 1
     fi
-    if ! grep -q 'grpcServiceName: "vllm.Inference"' "${gke_yaml}"; then
-      echo "Validation failed: vLLM gRPC HealthCheckPolicy not found in rendered output for test: ${key}"
+    if ! grep -q "type: GRPC" "${gke_yaml}" || grep -q "grpcServiceName:" "${gke_yaml}"; then
+      echo "Validation failed: default vLLM gRPC HealthCheckPolicy did not omit grpcServiceName for test: ${key}"
       exit 1
     fi
   fi
@@ -169,8 +169,8 @@ for key in "${!test_cases_llm_d_router_gateway[@]}"; do
       echo "Validation failed: h2c appProtocol not found in InferencePool for test: ${key}"
       exit 1
     fi
-    if ! grep -q 'grpcServiceName: "/sglang.api.v1.SglangService/HealthCheck"' "${gke_yaml}"; then
-      echo "Validation failed: SGLang gRPC HealthCheckPolicy not found in rendered output for test: ${key}"
+    if ! grep -q "type: GRPC" "${gke_yaml}" || grep -q "grpcServiceName:" "${gke_yaml}"; then
+      echo "Validation failed: default SGLang gRPC HealthCheckPolicy did not omit grpcServiceName for test: ${key}"
       exit 1
     fi
   fi
