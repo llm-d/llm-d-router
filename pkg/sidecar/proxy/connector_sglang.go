@@ -89,7 +89,7 @@ func (s *Server) handleSGLang(w http.ResponseWriter, r *http.Request, prefillPod
 	}
 
 	// Send concurrent prefill and decode requests
-	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, toolFields)
+	s.runConcurrentPD(w, r, body, body, prefillPodHostPort, constants.KVConnectorSGLang, nil, toolFields)
 }
 
 func (s *Server) handleSGLangGRPC(w http.ResponseWriter, r *http.Request, prefillPodHostPort string) {

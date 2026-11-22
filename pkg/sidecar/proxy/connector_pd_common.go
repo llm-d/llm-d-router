@@ -49,25 +49,25 @@ const (
 // successful decode returns. A variable so tests can shorten it.
 var concurrentPrefillGrace = 30 * time.Second
 
-// prefillCachedTokens holds the prompt-cache hit count a prefill response
+// prefillCachedTokenCount holds the prompt-cache hit count a prefill response
 // reported. The decode response may be written before prefill completes, so
 // readers get false until it is known.
-type prefillCachedTokens struct {
+type prefillCachedTokenCount struct {
 	// value is the count plus one, so the zero value means unknown and a
 	// measured zero stays distinguishable.
 	value atomic.Int64
 }
 
-func (p *prefillCachedTokens) set(count int) { p.value.Store(int64(count) + 1) }
+func (p *prefillCachedTokenCount) set(count int) { p.value.Store(int64(count) + 1) }
 
-func (p *prefillCachedTokens) get() (int, bool) {
+func (p *prefillCachedTokenCount) get() (int, bool) {
 	v := p.value.Load()
 	return int(v - 1), v != 0
 }
 
 // record stores the cached-token count of a completed prefill response, if it
 // carries one.
-func (p *prefillCachedTokens) record(resp *bufferedResponseWriter) {
+func (p *prefillCachedTokenCount) record(resp *bufferedResponseWriter) {
 	if isHTTPError(resp.statusCode) {
 		return
 	}
@@ -103,9 +103,10 @@ func (s *Server) runConcurrentPD(
 	r *http.Request,
 	prefillBody, decodeBody []byte,
 	prefillHost, connector string,
+	prepareRequests func(prefillReq, decodeReq *http.Request),
 	toolFields *toolCallingRequest,
 ) {
-	s.runConcurrentPDWithUsage(w, r, prefillBody, decodeBody, prefillHost, connector, nil, toolFields, false)
+	s.runConcurrentPDWithUsage(w, r, prefillBody, decodeBody, prefillHost, connector, prepareRequests, toolFields, false)
 }
 
 // runConcurrentPDWithUsage is runConcurrentPD with an option to report the
@@ -159,7 +160,7 @@ func (s *Server) runConcurrentPDWithUsage(
 		prefillSpan.SetAttributes(semconv.LLMDPDProxyRequestID(requestID))
 	}
 	prefillStart := time.Now()
-	var prefillCached prefillCachedTokens
+	var prefillCached prefillCachedTokenCount
 
 	prefillHandler, err := s.prefillerProxyHandler(prefillHost)
 	if err != nil {
