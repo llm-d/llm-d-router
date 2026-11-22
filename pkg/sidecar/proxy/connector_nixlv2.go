@@ -1068,10 +1068,7 @@ func (s *Server) buildNIXLV2ParallelKVParams(
 	}
 	addP2PPullToPrefill(prefillKV, source)
 
-	prefillHost, _, splitErr := net.SplitHostPort(prefillPodHostPort)
-	if splitErr != nil {
-		prefillHost = prefillPodHostPort
-	}
+	prefillHost := routing.ExtractHost(prefillPodHostPort)
 	remoteHosts := s.currentRemoteHosts(ctx)
 
 	decodeKV = map[string]any{
