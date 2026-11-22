@@ -1419,10 +1419,12 @@ func (r *Runner) runWithFileDiscovery(ctx context.Context, opts *runserver.Optio
 	}
 
 	if err := r.dlRuntime.Configure(eppConfig.DataConfig, setupLog); err != nil {
+		setupLog.Error(err, "Failed to configure datalayer")
 		return fmt.Errorf("failed to configure datalayer: %w", err)
 	}
 
 	if r.schedulerConfig == nil {
+		setupLog.Error(errSchedulerConfigMissing, "Failed to create scheduler")
 		return errSchedulerConfigMissing
 	}
 	setupLog.Info("parsed config", "scheduler-config", r.schedulerConfig)

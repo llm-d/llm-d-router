@@ -408,6 +408,72 @@ dataLayer:
 	}
 }
 
+// TestRunWithFileDiscovery_LogsDataLayerError is a regression test for
+// https://github.com/llm-d/llm-d-router/issues/4395: a data layer that fails
+// to configure made the EPP exit with status 1 and no log line naming the
+// error, because runWithFileDiscovery returned the error without logging it.
+func TestRunWithFileDiscovery_LogsDataLayerError(t *testing.T) {
+	dir := t.TempDir()
+	endpointsPath := filepath.Join(dir, "endpoints.yaml")
+	require.NoError(t, os.WriteFile(endpointsPath, []byte("endpoints: []\n"), 0o644))
+
+	// injectDefaults: false with no sources makes dlRuntime.Configure fail
+	// with "data layer enabled but no data sources configured".
+	configText := fmt.Sprintf(`apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+  - name: file-discovery
+    type: file-discovery
+    parameters:
+      path: %q
+      watchFile: false
+  - name: random-picker
+    type: random-picker
+  - name: single-profile-handler
+    type: single-profile-handler
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: random-picker
+dataLayer:
+  injectDefaults: false
+  discovery:
+    endpoints:
+      pluginRef: file-discovery
+`, endpointsPath)
+
+	var mu sync.Mutex
+	var logged strings.Builder
+	previous := setupLog
+	setupLog = funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged.WriteString(prefix + " " + args + "\n")
+	}, funcr.Options{})
+	t.Cleanup(func() { setupLog = previous })
+
+	opts := runserver.NewOptions()
+	opts.MetricsPort = 0
+	opts.SecureServing = false
+	opts.PoolName = testPoolName
+	opts.PoolNamespace = "test-ns"
+	opts.ConfigText = configText
+
+	r := NewRunner()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	err = r.runWithFileDiscovery(ctx, opts, rawConfig)
+	require.ErrorContains(t, err, "data layer enabled but no data sources configured")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, logged.String(), "data layer enabled but no data sources configured")
+}
+
 // TestRunWithFileDiscovery_LogsRunnableError is a regression test for
 // https://github.com/llm-d/llm-d-router/issues/4045: a server that failed to
 // start made the EPP exit with status 1 and no log line naming the error,
