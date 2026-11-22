@@ -325,8 +325,23 @@ func (s *Server) prefill(w http.ResponseWriter, r *http.Request, prefillPodHostP
 	pw := &bufferedResponseWriter{}
 	prefillStart := time.Now()
 	_, _ = toolFields.compareValidatedDispatched(pbody)
-	prefillHandler.ServeHTTP(pw, preq)
+	prefillErr := servePrefill(prefillHandler, pw, preq)
 	observeStageDuration(r.Context(), routing.StagePrefill, time.Since(prefillStart))
+
+	if prefillErr != nil {
+		// The reverse proxy also aborts the prefill body copy when the client
+		// disconnects, which is not a prefill failure.
+		if preq.Context().Err() != nil {
+			logger.V(logging.DEFAULT).Info("client disconnected during prefill")
+			return prefillErr
+		}
+		observeStageError(r.Context(), routing.StagePrefill)
+		logger.Error(prefillErr, "prefill request failed", "status", pw.statusCode)
+		if err := errorBadGateway(w, r); err != nil {
+			logger.Error(err, "failed to send Bad Gateway error response to client")
+		}
+		return prefillErr
+	}
 
 	if isHTTPError(pw.statusCode) {
 		observeStageError(r.Context(), routing.StagePrefill)
