@@ -47,6 +47,8 @@ The plugin populates several standard fields on the endpoint's `Metrics` struct:
 
 The three scalar load and utilization metrics (`WaitingQueueSize`, `RunningRequestsSize`, and `KVCacheUsagePercent`) are also published to the endpoint's attribute map (`ep.GetAttributes()`) as `ScalarMetricValue` under `ScalarMetricDataKey`, so `endpoint-attribute-scorer` and `endpoint-attribute-filter` can consume them directly without duplicating them in `customMetrics`. When a `customMetrics` entry uses one of those built-in keys as its `attributeKey`, that entry exclusively owns the attribute on `ep.GetAttributes()` while the built-in spec continues to populate `Metrics`.
 
+An engine config may name a `deferredRequestsSpec`: the queued requests that wait on a KV transfer in progress. The extractor publishes it as the `DeferredQueueSize` scalar attribute, 0 on a scrape without the series or with a non-finite one, and leaves `WaitingQueueSize` as the queue total. The `utilization-detector` subtracts `DeferredQueueSize` from its queue-depth term. The built-in `vllm` config reads `vllm:num_requests_kv_fetch_by_stage{stage="in_progress"}`, which vLLM publishes from v0.32.0 on engines with a KV consumer role (`kv_consumer` or `kv_both`); on other vLLM engines the attribute is 0. Requests whose transfer has not started or has finished, and requests that wait on a LoRA slot or a grammar compile, are not counted and stay in the queue-depth term. An `engineConfigs` entry named `vllm` replaces the built-in config, so set `deferredRequestsSpec` there to keep the attribute.
+
 ### Scalar samples
 
 `Metrics` fields and scalar attributes keep their last valid value when a later scrape lacks the metric, and `UpdateTime` advances when a scrape extracts any metric. A consumer that needs to know whether one metric is current reads its `ScalarSample`, which holds the last valid value and the time of the scrape that observed it:
@@ -178,6 +180,7 @@ parameters:
     - name: "vllm"
       # Standard specs (required, since overriding replaces the built-in config)
       queuedRequestsSpec: "vllm:num_requests_waiting"
+      deferredRequestsSpec: 'vllm:num_requests_kv_fetch_by_stage{stage="in_progress"}'
       runningRequestsSpec: "vllm:num_requests_running"
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
@@ -218,6 +221,7 @@ parameters:
     - name: "vllm"
       # Standard specs (required, overriding replaces the built-in config)
       queuedRequestsSpec: "vllm:num_requests_waiting"
+      deferredRequestsSpec: 'vllm:num_requests_kv_fetch_by_stage{stage="in_progress"}'
       runningRequestsSpec: "vllm:num_requests_running"
       kvUsageSpec: "vllm:kv_cache_usage_perc"
       loraSpec: "vllm:lora_requests_info"
