@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -33,7 +34,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
+	"github.com/llm-d/llm-d-router/pkg/common/routing"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/constants"
 	"github.com/llm-d/llm-d-router/test/sidecar/mock"
 )
@@ -266,6 +269,44 @@ func TestConcurrentPDPrefillSpanCarriesRequestID(t *testing.T) {
 				}
 			}
 			require.Equal(t, tc.requestID, got)
+		})
+	}
+}
+
+// The sidecar's request span carries the same request ID attribute as the EPP's
+// request span, so one ID quoted in a report finds the trace across both
+// components. The EPP resolves the ID, so the sidecar attributes only what it
+// was sent.
+func TestForwardRequestSpanCarriesRequestID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		requestID string
+		want      bool
+	}{
+		{name: "request id header set", requestID: "req-456", want: true},
+		{name: "no request id header", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sr := recordSpans(t)
+
+			s := NewProxy(Config{Port: "8000"})
+			s.logger = logr.Discard()
+			s.allowlistValidator = &AllowlistValidator{}
+			s.dataParallelProxies = make(map[string]http.Handler)
+			s.handlePDConnector = func(http.ResponseWriter, *http.Request, string, p2pRouting, reqcommon.APIType) {}
+
+			req := httptest.NewRequest(http.MethodPost, reqcommon.PathChatCompletions, http.NoBody)
+			req.Header.Set(routing.PrefillEndpointHeader, "prefill-pod:8000")
+			if tc.requestID != "" {
+				req.Header.Set(reqcommon.RequestIDHeaderKey, tc.requestID)
+			}
+			s.disaggregatedPrefillHandler(reqcommon.APITypeChatCompletions)(httptest.NewRecorder(), req)
+
+			forward := newSpanTree(t, sr.Ended()).span(t, "forward_request")
+			require.Equal(t, tc.want, hasAttribute(forward, string(semconv.GenAIRequestIDKey)))
+			if tc.want {
+				require.Contains(t, forward.Attributes(), semconv.GenAIRequestID(tc.requestID))
+			}
 		})
 	}
 }

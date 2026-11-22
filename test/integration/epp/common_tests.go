@@ -339,6 +339,10 @@ func ExpectBufferResp(body string, contentType string) []*extProcPb.ProcessingRe
 			Key:      "content-type",
 			RawValue: []byte(contentType),
 		}},
+		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+			Key:      reqcommon.RequestIDHeaderKey,
+			RawValue: []byte("test-request-id"),
+		}},
 	)
 }
 
@@ -358,6 +362,10 @@ func ExpectStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 			RawValue: []byte("text/event-stream"),
 		}},
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{Key: "status", RawValue: []byte("200")}},
+		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+			Key:      reqcommon.RequestIDHeaderKey,
+			RawValue: []byte("test-request-id"),
+		}},
 	))
 
 	// 2. The Body Chunk Frames
@@ -378,6 +386,10 @@ func ExpectGRPCStreamResp(chunks ...string) []*extProcPb.ProcessingResponse {
 		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
 			Key:      "content-type",
 			RawValue: []byte("application/grpc"),
+		}},
+		&envoyCorev3.HeaderValueOption{Header: &envoyCorev3.HeaderValue{
+			Key:      reqcommon.RequestIDHeaderKey,
+			RawValue: []byte("test-request-id"),
 		}},
 	))
 

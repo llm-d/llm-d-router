@@ -138,6 +138,11 @@ type Options struct {
 	ClientCAFile               string   // PEM CA that requires a verified client cert on the serving listener.
 	MetricsCertDir             string   // Directory with the metrics server certificates that enables metrics TLS.
 	EnableGRPCStreamMetrics    bool     // Enables ext_proc gRPC stream metrics (in-flight gauge, hold duration, completions counter by code).
+	// EnableRequestIDResponseHeader returns the resolved request ID to the client.
+	EnableRequestIDResponseHeader bool
+	// EnableTraceparentResponseHeader returns the request span's W3C trace context to
+	// the client, which exposes trace IDs outside the cluster.
+	EnableTraceparentResponseHeader bool
 	// clientCAs is the CA pool parsed from ClientCAFile.
 	clientCAs *x509.CertPool
 	// FairnessIDMetricLabelLimit caps the number of distinct fairness_id label values recorded on metrics; values
@@ -183,6 +188,7 @@ func NewOptions() *Options {
 		PluginStateStalenessThreshold:    fwkplugin.DefaultStalenessThreshold,
 		LoggingOptions:                   *logging.NewOptions(),
 		Tracing:                          true,
+		EnableRequestIDResponseHeader:    true,
 		MetricsPort:                      9090,
 		FairnessIDMetricLabelLimit:       metricsutil.DefaultFairnessIDLabelLimit,
 		GRPCHealthPort:                   9003,
@@ -265,6 +271,10 @@ func (opts *Options) AddFlags(fs *pflag.FlagSet) {
 
 	fs.BoolVar(&opts.Tracing, "tracing", opts.Tracing, "Enables emitting traces.")
 	fs.BoolVar(&opts.EnableToolCallingTelemetry, "enable-tool-calling-telemetry", opts.EnableToolCallingTelemetry, "Enable tool-calling request and response telemetry.")
+	fs.BoolVar(&opts.EnableRequestIDResponseHeader, "enable-request-id-response-header", opts.EnableRequestIDResponseHeader,
+		"Return the resolved x-request-id to the client, so a reported request can be found in the EPP logs and traces.")
+	fs.BoolVar(&opts.EnableTraceparentResponseHeader, "enable-traceparent-response-header", opts.EnableTraceparentResponseHeader,
+		"Return the request span's W3C traceparent to the client. This exposes trace IDs outside the cluster.")
 	fs.BoolVar(&opts.HealthChecking, "health-checking", opts.HealthChecking, "Enables health checking.")
 	fs.Uint16Var(&opts.MetricsPort, "metrics-port", opts.MetricsPort, "The metrics port exposed by EPP.")
 	fs.Uint16Var(&opts.GRPCHealthPort, "grpc-health-port", opts.GRPCHealthPort,

@@ -27,6 +27,8 @@ import (
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/protobuf/types/known/structpb"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -384,8 +386,8 @@ func (s *StreamingServer) HandleResponseHeaders(ctx context.Context, reqCtx *Req
 // response plugins ran. The failed-stage marker the plugins read is left out,
 // and removed from the upstream set when the response carried one, so the
 // client never sees it.
-func (s *StreamingServer) generateResponseHeaderResponse(reqCtx *RequestContext) *extProcPb.ProcessingResponse {
-	mutation := &extProcPb.HeaderMutation{SetHeaders: s.generateResponseHeaders(reqCtx)}
+func (s *StreamingServer) generateResponseHeaderResponse(ctx context.Context, reqCtx *RequestContext) *extProcPb.ProcessingResponse {
+	mutation := &extProcPb.HeaderMutation{SetHeaders: s.generateResponseHeaders(ctx, reqCtx)}
 	if _, ok := reqCtx.Response.Headers[routing.FailedStageHeader]; ok {
 		mutation.RemoveHeaders = []string{routing.FailedStageHeader}
 	}
@@ -421,7 +423,7 @@ func generateResponseBodyResponses(responseBodyBytes []byte, setEoS bool, dynami
 	return responses
 }
 
-func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*configPb.HeaderValueOption {
+func (s *StreamingServer) generateResponseHeaders(ctx context.Context, reqCtx *RequestContext) []*configPb.HeaderValueOption {
 	// can likely refactor these two bespoke headers to be updated in PostDispatch, to centralize logic.
 	headers := []*configPb.HeaderValueOption{
 		{
@@ -431,6 +433,28 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 				RawValue: []byte("true"),
 			},
 		},
+	}
+
+	// Return the IDs the client needs to quote in a bug report: the request ID
+	// that EPP's logs and spans carry, and the trace the operator then opens.
+	returnsRequestID := s.requestIDResponseHeader && reqCtx.resolvedRequestID != ""
+	if returnsRequestID {
+		headers = append(headers, &configPb.HeaderValueOption{
+			Header: &configPb.HeaderValue{
+				Key:      reqcommon.RequestIDHeaderKey,
+				RawValue: []byte(reqCtx.resolvedRequestID),
+			},
+		})
+	}
+	if s.traceparentResponseHeader {
+		if traceparent := injectedTraceparent(ctx); traceparent != "" {
+			headers = append(headers, &configPb.HeaderValueOption{
+				Header: &configPb.HeaderValue{
+					Key:      reqcommon.TraceparentHeaderKey,
+					RawValue: []byte(traceparent),
+				},
+			})
+		}
 	}
 
 	// Stamp the flow control queue duration ahead of the streamed body so it reaches the client before the
@@ -446,9 +470,13 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 	}
 
 	// Include any non-system-owned headers. The failed-stage marker is
-	// internal; generateResponseHeaderResponse removes it.
+	// internal; generateResponseHeaderResponse removes it. A request ID the model
+	// server set is dropped once EPP returns its own, so the client gets one value.
 	for key, value := range reqCtx.Response.Headers {
 		if request.IsSystemOwnedHeader(key) || key == routing.FailedStageHeader {
+			continue
+		}
+		if returnsRequestID && strings.EqualFold(key, reqcommon.RequestIDHeaderKey) {
 			continue
 		}
 		headers = append(headers, &configPb.HeaderValueOption{
@@ -459,4 +487,14 @@ func (s *StreamingServer) generateResponseHeaders(reqCtx *RequestContext) []*con
 		})
 	}
 	return headers
+}
+
+// injectedTraceparent returns the W3C traceparent for the span active in ctx, or
+// an empty string when the span context is not valid (tracing disabled). Only
+// traceparent is taken from the propagator: baggage and tracestate may carry
+// internal values, which do not belong in a client response.
+func injectedTraceparent(ctx context.Context) string {
+	carrier := make(propagation.MapCarrier, 3)
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	return carrier.Get(reqcommon.TraceparentHeaderKey)
 }

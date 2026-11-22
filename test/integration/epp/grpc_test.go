@@ -386,6 +386,10 @@ func TestFullDuplexStreamed_GRPC_KubeInferenceObjectiveRequest(t *testing.T) {
 						Key:      "content-type",
 						RawValue: []byte("application/grpc"),
 					}},
+					&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+						Key:      reqcommon.RequestIDHeaderKey,
+						RawValue: []byte("test-request-id"),
+					}},
 				)
 
 				// Expect Streaming body frame responses
@@ -585,6 +589,10 @@ func TestFullDuplexStreamed_SGLangGRPC(t *testing.T) {
 				&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
 					Key:      reqcommon.HeaderContentType,
 					RawValue: []byte(grpcframe.MediaType),
+				}},
+				&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+					Key:      reqcommon.RequestIDHeaderKey,
+					RawValue: []byte("test-request-id"),
 				}},
 			),
 			fwkepp.NewResponseStreamChunk(string(combinedResp[:splitIdx]), false),
@@ -844,6 +852,10 @@ func TestFullDuplexStreamed_VllmInference(t *testing.T) {
 				&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
 					Key:      reqcommon.HeaderContentType,
 					RawValue: []byte(grpcframe.MediaType),
+				}},
+				&configPb.HeaderValueOption{Header: &configPb.HeaderValue{
+					Key:      reqcommon.RequestIDHeaderKey,
+					RawValue: []byte("test-request-id"),
 				}},
 			),
 			fwkepp.NewResponseStreamChunk(string(combinedResp[:splitIdx]), false),

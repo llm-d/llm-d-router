@@ -86,7 +86,7 @@ var (
 	// generateHeaders sets them from the propagator, and EPP removes a client
 	// copy that the propagator does not re-inject.
 	TracePropagationHeaders = sets.New(
-		"traceparent",
+		reqcommon.TraceparentHeaderKey,
 		"tracestate",
 		"baggage",
 	)
